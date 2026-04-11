@@ -4,6 +4,7 @@ package consensus
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -106,5 +107,67 @@ func TestDefaultRuntimeSuiteRegistry_IsCanonicalDefaultLiveManifest(t *testing.T
 	reg := defaultRuntimeSuiteRegistry()
 	if !reg.IsCanonicalDefaultLiveManifest() {
 		t.Fatalf("default runtime registry must stay pinned to the canonical live ML-DSA-87 manifest")
+	}
+}
+
+// The next three tests pin the identifying context that was added to the
+// legacy verify/resolve error paths (see rubin-protocol#1131, finding 3).
+// They do not encode wire contract — the strings are not present in any
+// conformance/fixtures/*.json — but they keep the richer diagnostic text
+// stable so log correlation tooling can rely on the substrings.
+
+func TestVerifySig_UnsupportedSuiteIDMessageCarriesSuiteID(t *testing.T) {
+	var d [32]byte
+	_, err := verifySig(0x7b, []byte{0x01}, []byte{0x02}, d)
+	if err == nil {
+		t.Fatalf("expected error from unsupported suite_id")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "verify_sig: unsupported suite_id=0x7b") {
+		t.Fatalf("error should name suite_id=0x7b, got %q", msg)
+	}
+}
+
+func TestResolveSuiteVerifierBinding_UnknownCarriesAlgAndLens(t *testing.T) {
+	_, err := resolveSuiteVerifierBinding("FAKE-ALG", 7, 9)
+	if err == nil {
+		t.Fatalf("expected error for unknown binding")
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"resolveSuiteVerifierBinding",
+		"alg=\"FAKE-ALG\"",
+		"pubkey_len=7",
+		"sig_len=9",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("resolveSuiteVerifierBinding error missing %q, got %q", needle, msg)
+		}
+	}
+}
+
+func TestVerifySigWithBinding_UnknownKindCarriesContext(t *testing.T) {
+	// Construct a binding with an unknown kind sentinel and matching lengths
+	// so the length guard passes and the switch falls through to default.
+	const unknownKind suiteVerifierBindingKind = 0xFE
+	binding := suiteVerifierBinding{
+		kind:       unknownKind,
+		opensslAlg: "SENTINEL-ALG",
+		pubkeyLen:  3,
+		sigLen:     5,
+	}
+	_, err := verifySigWithBinding(binding, []byte{0, 0, 0}, []byte{0, 0, 0, 0, 0}, [32]byte{})
+	if err == nil {
+		t.Fatalf("expected error for unknown binding kind")
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"verifySigWithBinding",
+		"kind=254",
+		"alg=\"SENTINEL-ALG\"",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("verifySigWithBinding error missing %q, got %q", needle, msg)
+		}
 	}
 }

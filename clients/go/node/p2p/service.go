@@ -44,7 +44,26 @@ type Service struct {
 
 	peersMu sync.RWMutex
 	peers   map[string]*peer
-	loopWG  sync.WaitGroup
+	// closed is set to true by Close. A Service instance is single-use: once
+	// Close has returned, Start refuses to restart the same Service and the
+	// accept/reconnect loops must not be revived. Guarded by peersMu.
+	closed bool
+	// boundAddr caches listener.Addr().String() captured when Start
+	// successfully publishes the listener. Addr() returns it so that
+	// wildcard/ephemeral binds (e.g. ":0") still surface the concrete
+	// resolved port after Close, without needing to call Addr() on a
+	// closed net.Listener. Guarded by peersMu.
+	boundAddr string
+	loopWG    sync.WaitGroup
+	// startWG counts in-progress Start invocations. Start increments on
+	// entry and decrements via defer on exit. Close waits on this before
+	// snapshotting s.listener so that a Close that races with a Start call
+	// which has already returned from net.Listen but not yet published the
+	// listener into s.listener cannot return while the freshly created
+	// listener is still bound. Start observes s.closed in its write-lock
+	// re-check and closes the local listener on its own, but Close must
+	// wait for that cleanup before declaring the port free.
+	startWG sync.WaitGroup
 
 	dialMu       sync.Mutex
 	inFlightDial map[string]struct{}
