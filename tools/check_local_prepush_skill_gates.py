@@ -371,6 +371,14 @@ def build_plan(
         )
         add_check("workflow_shell_target_integrity", ["python3", "tools/list_workflow_shell_targets.py"])
 
+    if ".github/workflows/models-security-review.yml" in changed or (
+        "tools/check_models_security_review_workflow.py" in changed
+    ):
+        add_check(
+            "models_security_review_workflow_contract",
+            ["python3", "tools/check_models_security_review_workflow.py"],
+        )
+
     conformance_hygiene_related = fixture_json_changed or any(
         matches_any(
             path,
