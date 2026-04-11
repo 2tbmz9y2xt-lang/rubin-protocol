@@ -456,7 +456,7 @@ jobs:
             // Parse model-specific anti-hallucination rules
             let antiHallucinationRules = [];
             try {
-              antiHallucinationRules = JSON.parse('${{ inputs.anti_hallucination_rules }}');
+              antiHallucinationRules = JSON.parse(${{ toJSON(inputs.anti_hallucination_rules) }});
             } catch {}
 
             const systemPrompt = [
@@ -629,17 +629,17 @@ jobs:
             let acknowledged = [];
             try {
               const content = execSync(
-                `git show ${baseSha}:.github/security-review-acknowledged.json 2>/dev/null || echo "[]"`,
+                `git show ${baseSha}:.github/security-acknowledged.json 2>/dev/null || echo "{}"`,
                 { encoding: 'utf8' }
               );
-              acknowledged = JSON.parse(content);
+              const parsed_ack = JSON.parse(content);
+              acknowledged = parsed_ack.acknowledged || [];
             } catch {}
 
             const isAcknowledged = (f) => acknowledged.some(ack => {
-              if (ack.file && ack.file !== f.file) return false;
-              if (ack.title_contains && !f.title?.includes(ack.title_contains)) return false;
-              if (ack.title_regex && !new RegExp(ack.title_regex).test(f.title || '')) return false;
-              return true;
+              if (ack.file_pattern && !f.file?.includes(ack.file_pattern)) return false;
+              if (ack.title_pattern && !f.title?.toLowerCase().includes(ack.title_pattern.toLowerCase())) return false;
+              return ack.title_pattern || ack.file_pattern;
             });
 
             const dominated = new Set();
