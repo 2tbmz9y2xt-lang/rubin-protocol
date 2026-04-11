@@ -8,37 +8,23 @@ This machine's sanctioned `rubin-protocol` push path is:
 4. let the hook run deterministic local gates plus isolated local `codex exec`
 5. allow the network push only if there are no blocking findings
 
-## Runtime contract
+## Public repo boundary
 
 - Entry command: `cl push ...`
 - Hook: `$(git rev-parse --git-path hooks-disabled/pre-push)`
-- Review contract: `tools/prepush_review_contract.json`
-- Prompt builder: `tools/prepush_prompt_pack.py`
-- Skill-gate planner: `tools/check_local_prepush_skill_gates.py`
-
-The hook launches `codex exec` in an isolated ephemeral `CODEX_HOME`, with a
-read-only sandbox and JSON-schema output. The model/reasoning profile is picked
-from `prepush_review_contract.json`; it is not a hardcoded one-size-fits-all
-prompt.
-
-## Runtime profiles
-
-- `consensus_critical` -> `gpt-5.4` `xhigh`
-- `formal_lean` -> `gpt-5.4` `xhigh`
-- `code_noncritical` -> `gpt-5.4-mini` `xhigh`
-- `diff_only` -> `gpt-5.4-mini` `xhigh`
-
-The hook may clamp `diff_only` reasoning down when needed to avoid local stall
-loops, but that clamp is current hook-implementation behavior rather than part
-of the tracked `tools/prepush_review_contract.json` or
-`tools/check_local_prepush_skill_gates.py` contract. The sanctioned path
-remains the same: `cl push` -> `pre-push` -> `codex exec` review.
-
-If a local run hits a `no-json stall`, the current hook implementation may
-retry inside the same sanctioned path with reduced reasoning for the affected
-review unit before it gives up and blocks the push. That retry behavior is not
-specified by the JSON contract and may change independently of the tracked
-contract/tools.
+- Public repo contract stops here on purpose.
+- This repository keeps only this README as the repo-facing pointer for the
+  local push contract.
+- The actual machine-local runtime assets live in the private orchestration
+  repository:
+  `/Users/gpt/Documents/rubin-orchestration-private/inbox/operational/local_push_gate/protocol/`
+- That private path owns:
+  - review contract JSON
+  - prompt builder
+  - skill-gate planner
+  - summary validator
+  - reusable preflight receipt helper
+- `rubin-protocol` does not track those local push scripts/tests anymore.
 
 ## Blocking policy
 
@@ -51,7 +37,7 @@ push.
 
 ## Evidence files
 
-The tracked `pre-pr` receipt is written under the current git common-dir state
+The local `pre-pr` receipt is written under the current git common-dir state
 directory:
 
 - `$(git rev-parse --git-common-dir)/local-security-review/pre-pr-receipt.json`
@@ -68,5 +54,6 @@ state directory:
 - `last-result-raw.json`
 - `last-result.json`
 
-There is no separate sanctioned helper script in the
-current path. The review is part of the hook itself.
+The review still runs as part of the hook itself. The difference is location:
+the runtime helpers now live in private orchestration state instead of this
+public repository.
