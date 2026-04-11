@@ -47,6 +47,11 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # models: read is required for the DeepSeek caller that targets
+  # https://models.github.ai. Reusable workflows do not inherit caller
+  # permissions — any scope not listed here is set to `none` for GITHUB_TOKEN,
+  # so this must be declared explicitly even though only one caller uses it.
+  models: read
 
 jobs:
   get-diff:
@@ -272,6 +277,11 @@ jobs:
                 }
               }
 
+              // Only accept concrete Rust identifiers; glob imports like
+              // `use crate::foo::*` or `use crate::bar::{*, baz};` must be
+              // filtered so `*` never reaches the RegExp below (which would
+              // throw "Nothing to repeat" and abort the review step).
+              const isRustIdent = (s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s);
               const modImports = new Map();
               for (const stmt of useStatements) {
                 const m = stmt.match(/use\s+crate::([^;]+);/);
@@ -283,11 +293,14 @@ jobs:
                   const modPath = raw.slice(0, braceIdx).replace(/:+$/, '');
                   const items = raw.slice(braceIdx + 1, raw.lastIndexOf('}')).split(',').map(s => s.trim()).filter(Boolean);
                   if (!modImports.has(modPath)) modImports.set(modPath, new Set());
-                  items.forEach(i => modImports.get(modPath).add(i));
+                  for (const item of items) {
+                    if (isRustIdent(item)) modImports.get(modPath).add(item);
+                  }
                 } else {
                   const parts = raw.split('::');
                   const symbol = parts.pop();
                   const modPath = parts.join('::');
+                  if (!isRustIdent(symbol)) continue;
                   if (!modImports.has(modPath)) modImports.set(modPath, new Set());
                   modImports.get(modPath).add(symbol);
                 }
@@ -637,9 +650,14 @@ jobs:
             } catch {}
 
             const isAcknowledged = (f) => acknowledged.some(ack => {
+              // title_pattern is REQUIRED. Without this guard, an entry with only
+              // file_pattern (e.g., { file_pattern: "consensus" }) would suppress
+              // ALL findings in matching files — including future CRITICAL ones —
+              // because the truthy file_pattern alone would satisfy the return.
+              if (!ack.title_pattern) return false;
+              if (!f.title?.toLowerCase().includes(ack.title_pattern.toLowerCase())) return false;
               if (ack.file_pattern && !f.file?.includes(ack.file_pattern)) return false;
-              if (ack.title_pattern && !f.title?.toLowerCase().includes(ack.title_pattern.toLowerCase())) return false;
-              return ack.title_pattern || ack.file_pattern;
+              return true;
             });
 
             const sevOrder = ['CRITICAL','HIGH','MEDIUM','LOW','INFO','PERF'];
