@@ -559,9 +559,20 @@ jobs:
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt }
               ],
-              temperature: 0.2,
-              top_p: 0.9
+              temperature: 0.2
             };
+            if (usesGitHubModels) {
+              // GitHub Models (DeepSeek-R1): nucleus sampling tuned for the
+              // non-CoT chat endpoint.
+              requestBody.top_p = 0.9;
+            } else {
+              // OpenRouter Qwen 3.6 Plus has always-on chain-of-thought.
+              // Cap the thinking budget so the model leaves room for the
+              // structured JSON answer; without this the entire max_tokens
+              // budget can be consumed by `<think>` tokens, leaving an empty
+              // post-strip content.
+              requestBody.reasoning = { max_tokens: 50000 };
+            }
             if (${{ inputs.max_tokens }} > 0) requestBody.max_tokens = ${{ inputs.max_tokens }};
             if (${{ inputs.needs_json_mode }}) requestBody.response_format = { type: 'json_object' };
 
