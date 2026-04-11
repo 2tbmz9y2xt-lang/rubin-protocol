@@ -576,9 +576,20 @@ jobs:
 
             // Strip <think> reasoning blocks
             let result = rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-            // Extract JSON from markdown code blocks if present
+            // Extract JSON: first try a fenced code block, then fall back to
+            // the first '{' .. last '}' span. The fallback handles models
+            // (notably DeepSeek with needs_json_mode=false) that emit prose
+            // like "Here is my review:\n{...}" without backticks.
             const jsonMatch = result.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (jsonMatch) result = jsonMatch[1].trim();
+            if (jsonMatch) {
+              result = jsonMatch[1].trim();
+            } else {
+              const firstBrace = result.indexOf('{');
+              const lastBrace = result.lastIndexOf('}');
+              if (firstBrace !== -1 && lastBrace > firstBrace) {
+                result = result.slice(firstBrace, lastBrace + 1).trim();
+              }
+            }
 
             // Validate JSON, repair if needed
             try {
@@ -662,18 +673,28 @@ jobs:
               acknowledged = parsed_ack.acknowledged || [];
             } catch {}
 
-            const isAcknowledged = (f) => acknowledged.some(ack => {
-              // title_pattern is REQUIRED. Without this guard, an entry with only
-              // file_pattern (e.g., { file_pattern: "consensus" }) would suppress
-              // ALL findings in matching files — including future CRITICAL ones —
-              // because the truthy file_pattern alone would satisfy the return.
-              if (!ack.title_pattern) return false;
-              if (!f.title?.toLowerCase().includes(ack.title_pattern.toLowerCase())) return false;
-              // file_pattern is matched case-insensitively to honor the schema
-              // contract documented in .github/security-acknowledged.json.
-              if (ack.file_pattern && !f.file?.toLowerCase().includes(ack.file_pattern.toLowerCase())) return false;
-              return true;
-            });
+            // Coerce finding fields to strings up-front. Models occasionally
+            // return numbers/objects/null in `title`/`file`; calling
+            // `.toLowerCase()` on those would throw `TypeError: ... is not a
+            // function` and crash the merge gate with no actionable signal.
+            const isAcknowledged = (f) => {
+              const findingTitle = String((f && f.title) || '').toLowerCase();
+              const findingFile = String((f && f.file) || '').toLowerCase();
+              return acknowledged.some(ack => {
+                // title_pattern is REQUIRED. Without this guard, an entry with only
+                // file_pattern (e.g., { file_pattern: "consensus" }) would suppress
+                // ALL findings in matching files — including future CRITICAL ones —
+                // because the truthy file_pattern alone would satisfy the return.
+                const ackTitle = String(ack.title_pattern || '').toLowerCase();
+                if (!ackTitle) return false;
+                if (!findingTitle.includes(ackTitle)) return false;
+                // file_pattern is matched case-insensitively to honor the schema
+                // contract documented in .github/security-acknowledged.json.
+                const ackFile = String(ack.file_pattern || '').toLowerCase();
+                if (ackFile && !findingFile.includes(ackFile)) return false;
+                return true;
+              });
+            };
 
             const sevOrder = ['CRITICAL','HIGH','MEDIUM','LOW','INFO','PERF'];
             const getSevIdx = (s) => {
@@ -681,8 +702,17 @@ jobs:
               return idx === -1 ? sevOrder.length : idx; // unknown = lowest priority
             };
 
+            // Guard against malformed top-level JSON: a model that returns
+            // `null`, an array, or a primitive must fail-closed with a
+            // contract-violation message rather than crash on `.findings`.
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              const parsedKind = parsed === null ? 'null' : Array.isArray(parsed) ? 'array' : typeof parsed;
+              core.setFailed(`Review JSON contract violation: expected object with 'findings' array, got ${parsedKind}`);
+              return;
+            }
+
             const dominated = new Set();
-            const findings = parsed.findings || [];
+            const findings = Array.isArray(parsed.findings) ? parsed.findings : [];
             for (let i = 0; i < findings.length; i++) {
               for (let j = 0; j < findings.length; j++) {
                 if (i === j) continue;
@@ -693,8 +723,10 @@ jobs:
               }
             }
 
-            const dominated_arr = [...dominated];
-            const dominated_filtered = findings.filter((_, i) => !dominated_arr.includes(i));
+            // Use Set.has() for O(1) membership; .includes() on a converted
+            // array would be O(n) per call (the contract checker bans this
+            // exact anti-pattern via BANNED_SUBSTRINGS).
+            const dominated_filtered = findings.filter((_, i) => !dominated.has(i));
             const dominated_unacked = dominated_filtered.filter(f => !isAcknowledged(f));
             const normSev = (s) => String(s || '').toUpperCase().trim();
             const dominated_unacked_blocking = dominated_unacked.filter(f => {
