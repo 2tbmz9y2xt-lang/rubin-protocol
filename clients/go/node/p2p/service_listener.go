@@ -21,6 +21,12 @@ const (
 	acceptErrorBackoffCap  = 5 * time.Second
 )
 
+// serviceStartPostListenHook is a test-only hook. When non-nil, Start invokes
+// it after net.Listen succeeds and before the authoritative closed/started
+// re-check under peersMu. Tests must install it only in single-threaded
+// scenarios and restore it before returning.
+var serviceStartPostListenHook func(*Service, net.Listener)
+
 // nextAcceptErrorBackoff doubles current, capped at acceptErrorBackoffCap.
 // A non-positive current resets to acceptErrorBackoffInit. The helper is
 // pure so tests can exhaustively verify the progression without touching a
@@ -89,6 +95,9 @@ func (s *Service) Start(ctx context.Context) error {
 	listener, err := net.Listen("tcp", s.cfg.BindAddr)
 	if err != nil {
 		return err
+	}
+	if hook := serviceStartPostListenHook; hook != nil {
+		hook(s, listener)
 	}
 
 	// Authoritative transition. Re-check closed/started under the write

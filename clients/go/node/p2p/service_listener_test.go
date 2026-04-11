@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
+
+var serviceStartPostListenHookMu sync.Mutex
 
 func TestNextAcceptErrorBackoff(t *testing.T) {
 	cases := []struct {
@@ -121,10 +124,48 @@ func TestSleepOrStopNilReceiver(t *testing.T) {
 	}
 }
 
+func reserveTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("reserve close: %v", err)
+	}
+	return addr
+}
+
+func waitForAddrBindState(t *testing.T, addr string, wantBusy bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ln, err := net.Listen("tcp", addr)
+		switch {
+		case wantBusy && err != nil:
+			return
+		case !wantBusy && err == nil:
+			_ = ln.Close()
+			return
+		case err == nil:
+			_ = ln.Close()
+		}
+		if time.Now().After(deadline) {
+			state := "free"
+			if wantBusy {
+				state = "busy"
+			}
+			t.Fatalf("timed out waiting for %s to become %s", addr, state)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // Service lifecycle tests: the single-use contract. Start must refuse to
 // restart a Service whose closed flag is set, Close must set the flag, and
-// Addr must fall back to the configured bind address once the Service is
-// closed (the stale listener reference is no longer a valid endpoint).
+// Addr must preserve the resolved bound address across Close instead of
+// regressing to the configured wildcard bind address.
 
 func TestService_StartAfterClose_ReturnsAlreadyClosed(t *testing.T) {
 	// Simulate the post-Close state directly: the closed flag is set. Start
@@ -156,6 +197,61 @@ func TestService_StartAlreadyStarted_ReturnsAlreadyStarted(t *testing.T) {
 	}
 	if err.Error() != "service already started" {
 		t.Fatalf("Start() on running Service: err=%q want %q", err.Error(), "service already started")
+	}
+}
+
+func TestService_StartPostListenClosedRace_ReturnsAlreadyClosed(t *testing.T) {
+	addr := reserveTCPAddr(t)
+	s := &Service{cfg: ServiceConfig{BindAddr: addr}}
+	serviceStartPostListenHookMu.Lock()
+	defer serviceStartPostListenHookMu.Unlock()
+	prevHook := serviceStartPostListenHook
+	serviceStartPostListenHook = func(s *Service, _ net.Listener) {
+		s.peersMu.Lock()
+		s.closed = true
+		s.peersMu.Unlock()
+	}
+	defer func() { serviceStartPostListenHook = prevHook }()
+
+	err := s.Start(context.Background())
+	if err == nil || err.Error() != "service already closed" {
+		t.Fatalf("Start() post-listen closed race: err=%v want %q", err, "service already closed")
+	}
+	waitForAddrBindState(t, addr, false)
+	if got := s.boundAddr; got != "" {
+		t.Fatalf("boundAddr published on closed race: got %q want empty", got)
+	}
+	if got := s.listener; got != nil {
+		t.Fatalf("listener published on closed race: got %v want nil", got)
+	}
+}
+
+func TestService_StartPostListenStartedRace_ReturnsAlreadyStarted(t *testing.T) {
+	addr := reserveTCPAddr(t)
+	existing, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("existing listen: %v", err)
+	}
+	defer func() { _ = existing.Close() }()
+
+	s := &Service{cfg: ServiceConfig{BindAddr: addr}}
+	serviceStartPostListenHookMu.Lock()
+	defer serviceStartPostListenHookMu.Unlock()
+	prevHook := serviceStartPostListenHook
+	serviceStartPostListenHook = func(s *Service, _ net.Listener) {
+		s.peersMu.Lock()
+		s.listener = existing
+		s.peersMu.Unlock()
+	}
+	defer func() { serviceStartPostListenHook = prevHook }()
+
+	err = s.Start(context.Background())
+	if err == nil || err.Error() != "service already started" {
+		t.Fatalf("Start() post-listen started race: err=%v want %q", err, "service already started")
+	}
+	waitForAddrBindState(t, addr, false)
+	if got := s.listener; got != existing {
+		t.Fatalf("existing listener overwritten on started race: got %v want %v", got, existing)
 	}
 }
 
