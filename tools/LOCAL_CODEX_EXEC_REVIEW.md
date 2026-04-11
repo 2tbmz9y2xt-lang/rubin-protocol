@@ -16,8 +16,7 @@ This machine's sanctioned `rubin-protocol` push path is:
 - This repository keeps only this README as the repo-facing pointer for the
   local push contract.
 - The actual machine-local runtime assets live in the private orchestration
-  repository:
-  `/Users/gpt/Documents/rubin-orchestration-private/inbox/operational/local_push_gate/protocol/`
+  repository under `inbox/operational/local_push_gate/protocol/`.
 - That private path owns:
   - review contract JSON
   - prompt builder
@@ -25,6 +24,9 @@ This machine's sanctioned `rubin-protocol` push path is:
   - summary validator
   - reusable preflight receipt helper
 - `rubin-protocol` does not track those local push scripts/tests anymore.
+- A clone without the private orchestration layer is intentionally unsupported
+  for the sanctioned local push path and must fail closed before any network
+  push.
 
 ## Blocking policy
 
