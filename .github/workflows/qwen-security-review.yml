@@ -56,10 +56,22 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v4
         with:
           name: qwen-pr-diff
+      - name: Check API key availability
+        id: check-key
+        run: |
+          if [ -z "${{ secrets.OPENROUTER_API_KEY_QWEN }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::OPENROUTER_API_KEY_QWEN not available (fork PR or missing secret). Skipping Qwen review."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install jsonrepair
+        if: steps.check-key.outputs.skip != 'true'
         run: npm install jsonrepair@3.12.0
 
       - name: Run security review
+        if: steps.check-key.outputs.skip != 'true'
         id: review
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
@@ -699,6 +711,11 @@ jobs:
             try { parsed = JSON.parse(review); } catch(e) { parsed = null; }
             const verdict = parsed && parsed.verdict ? parsed.verdict : 'UNKNOWN';
             const emoji = verdict === 'PASS' ? '\u2705' : verdict === 'WARN' ? '\u26a0\ufe0f' : '\ud83d\uded1';
+            // Truncate review JSON to fit GitHub comment body limit (65535 chars)
+            const header = `### ${emoji} Security Review: ${verdict}\n_Model: qwen/qwen3.6-plus (OpenRouter)_\n\n\`\`\`json\n`;
+            const footer = '\n```';
+            const maxReviewLen = 65000 - header.length - footer.length;
+            const truncatedReview = review.length > maxReviewLen ? review.slice(0, maxReviewLen) + '\n... [truncated]' : review;
             // Post as PR review (not issue comment) so bot-review-gate can track it.
             // Always COMMENT event — the separate "Block on critical/high" step handles fail logic.
             await github.rest.pulls.createReview({
@@ -706,7 +723,7 @@ jobs:
               repo: context.repo.repo,
               pull_number: context.issue.number,
               event: 'COMMENT',
-              body: `### ${emoji} Security Review: ${verdict}\n_Model: qwen/qwen3.6-plus (OpenRouter)_\n\n\`\`\`json\n${review}\n\`\`\``
+              body: header + truncatedReview + footer
             });
 
       - name: Block on critical/high findings (with acknowledged-list filter)
