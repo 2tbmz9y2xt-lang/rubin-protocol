@@ -10,11 +10,11 @@ This machine's sanctioned `rubin-protocol` push path is:
 
 ## Runtime contract
 
-- Entry command: `/Users/gpt/bin/cl push ...`
-- Hook: `/Users/gpt/Documents/rubin-protocol/.git/hooks-disabled/pre-push`
-- Review contract: `/Users/gpt/Documents/rubin-protocol/tools/prepush_review_contract.json`
-- Prompt builder: `/Users/gpt/Documents/rubin-protocol/tools/prepush_prompt_pack.py`
-- Skill-gate planner: `/Users/gpt/Documents/rubin-protocol/tools/check_local_prepush_skill_gates.py`
+- Entry command: `cl push ...`
+- Hook: `$(git rev-parse --git-path hooks-disabled/pre-push)`
+- Review contract: `tools/prepush_review_contract.json`
+- Prompt builder: `tools/prepush_prompt_pack.py`
+- Skill-gate planner: `tools/check_local_prepush_skill_gates.py`
 
 The hook launches `codex exec` in an isolated ephemeral `CODEX_HOME`, with a
 read-only sandbox and JSON-schema output. The model/reasoning profile is picked
