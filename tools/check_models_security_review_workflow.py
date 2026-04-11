@@ -81,19 +81,21 @@ def main() -> int:
                 )
 
     # Qwen authenticates via OpenRouter and the shared workflow gates the
-    # review step on a non-empty API_KEY env var. If the Qwen caller stops
-    # mapping its OpenRouter secret into the reusable workflow's API_KEY
-    # input, the check-key step will skip Qwen reviews on every PR
-    # silently. Verify the mapping is present.
+    # review step on a non-empty API_KEY env var. The Qwen caller must
+    # wire its repository secret into the reusable workflow's API_KEY
+    # input, otherwise the check-key step will silently skip every Qwen
+    # review on every PR. Verify both halves of the mapping.
     if QWEN_CALLER.is_file():
         qwen_text = QWEN_CALLER.read_text(encoding="utf-8")
         if "API_KEY:" not in qwen_text:
             errors.append(
-                f"caller {QWEN_CALLER.name} must map secrets.API_KEY into the shared workflow"
+                f"caller {QWEN_CALLER.name} must declare an `API_KEY:` entry under "
+                f"`secrets:` to populate the reusable workflow's API_KEY input"
             )
         if "OPENROUTER_API_KEY_QWEN" not in qwen_text:
             errors.append(
-                f"caller {QWEN_CALLER.name} must reference secrets.OPENROUTER_API_KEY_QWEN"
+                f"caller {QWEN_CALLER.name} must wire ${{{{ secrets.OPENROUTER_API_KEY_QWEN }}}} "
+                f"into the shared workflow's API_KEY input"
             )
 
     text = SHARED_WORKFLOW.read_text(encoding="utf-8")
