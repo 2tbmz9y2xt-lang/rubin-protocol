@@ -164,18 +164,20 @@ jobs:
                 ...allIssueComments.map(c => ({ body: c.body, user: c.user, date: c.created_at || '' })),
               ].sort((a, b) => a.date.localeCompare(b.date));
 
-              // Match by the FULL model_id (e.g. "qwen/qwen3.6-plus"), not
-              // the provider prefix ("qwen"). Otherwise a DeepSeek review
-              // that mentions a Qwen filename like
-              // ".github/workflows/qwen-security-review.yml" would be
-              // ingested as a Qwen previous review and falsely deduped.
-              const modelId = '${{ inputs.model_id }}';
-              const modelIdLower = modelId.toLowerCase();
+              // Match by the model_display_name actually written into the
+              // posted comment header (`_Model: <display_name>_`), not by
+              // model_id. Filtering on model_id silently broke dedup when
+              // a caller used a display_name that didn't substring-match
+              // the model_id (e.g. "qwen/qwen3.6-plus (OpenRouter)" vs
+              // "qwen/qwen3.6-plus"). The display_name is the only marker
+              // that is guaranteed present in our own posted body.
+              const modelDisplayName = '${{ inputs.model_display_name }}';
+              const modelDisplayLower = modelDisplayName.toLowerCase();
               const reviewComments = allComments
                 .filter(c => c.body
                   && TRUSTED_AUTHORS.has(c.user?.login ?? '')
                   && c.body.includes('Security Review:')
-                  && c.body.toLowerCase().includes(modelIdLower))
+                  && c.body.toLowerCase().includes(modelDisplayLower))
                 .slice(-3);
               if (reviewComments.length > 0) {
                 const titles = [];
