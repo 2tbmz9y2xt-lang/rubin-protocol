@@ -502,7 +502,7 @@ jobs:
               changedFilePayload,
               dependencyContext,
               parityContext
-            ].join('\n');
+            ].join('\n').slice(0, 300000); // Cap to avoid context limit errors
 
             // Build request based on API type
             const usesGitHubModels = ${{ inputs.uses_github_models }};
@@ -642,6 +642,12 @@ jobs:
               return ack.title_pattern || ack.file_pattern;
             });
 
+            const sevOrder = ['CRITICAL','HIGH','MEDIUM','LOW','INFO','PERF'];
+            const getSevIdx = (s) => {
+              const idx = sevOrder.indexOf(String(s || '').toUpperCase().trim());
+              return idx === -1 ? sevOrder.length : idx; // unknown = lowest priority
+            };
+
             const dominated = new Set();
             const findings = parsed.findings || [];
             for (let i = 0; i < findings.length; i++) {
@@ -649,8 +655,7 @@ jobs:
                 if (i === j) continue;
                 const a = findings[i], b = findings[j];
                 if (a.file === b.file && a.title === b.title) {
-                  const sevOrder = ['CRITICAL','HIGH','MEDIUM','LOW','INFO','PERF'];
-                  if (sevOrder.indexOf(a.severity) < sevOrder.indexOf(b.severity)) dominated.add(j);
+                  if (getSevIdx(a.severity) < getSevIdx(b.severity)) dominated.add(j);
                 }
               }
             }
