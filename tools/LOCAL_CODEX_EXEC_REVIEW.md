@@ -29,12 +29,16 @@ prompt.
 - `diff_only` -> `gpt-5.4-mini` `xhigh`
 
 The hook may clamp `diff_only` reasoning down when needed to avoid local stall
-loops, but the sanctioned path remains the same: `cl push` -> `pre-push` ->
-`codex exec` review.
+loops, but that clamp is current hook-implementation behavior rather than part
+of the tracked `tools/prepush_review_contract.json` or
+`tools/check_local_prepush_skill_gates.py` contract. The sanctioned path
+remains the same: `cl push` -> `pre-push` -> `codex exec` review.
 
-If a local run hits a `no-json stall`, the hook may retry inside the same
-sanctioned path with reduced reasoning for the affected review unit before it
-gives up and blocks the push.
+If a local run hits a `no-json stall`, the current hook implementation may
+retry inside the same sanctioned path with reduced reasoning for the affected
+review unit before it gives up and blocks the push. That retry behavior is not
+specified by the JSON contract and may change independently of the tracked
+contract/tools.
 
 ## Blocking policy
 
@@ -46,6 +50,11 @@ advisory findings or no findings, the wrapper may continue to the real network
 push.
 
 ## Evidence files
+
+The tracked `pre-pr` receipt is written under the current git common-dir state
+directory:
+
+- `$(git rev-parse --git-common-dir)/local-security-review/pre-pr-receipt.json`
 
 The live worktree-local review artifacts are written under the current git-dir
 state directory:
