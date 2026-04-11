@@ -183,6 +183,19 @@ import (
 	"unsafe"
 )
 
+// Package-level OpenSSL function pointers. The *Fn variants are test hooks
+// that tests can swap to substitute mock implementations of the CGO-backed
+// verify/bootstrap/init entry points.
+//
+// These hooks are DELIBERATELY not guarded by a mutex. Tests that reassign
+// them MUST NOT run with t.Parallel(), because concurrent assignment and
+// read is a data race under the Go memory model. Production code only reads
+// the hooks from within ensureOpenSSL* wrappers that are serialized by the
+// paired sync.Once values below, so production behaviour is unaffected —
+// the race window only exists inside the test harness, and only if a future
+// test both swaps a hook and calls t.Parallel(). If that ever becomes
+// necessary, convert each hook to sync/atomic.Pointer at the same time so
+// all existing call sites migrate together.
 var (
 	opensslBootstrapOnce       sync.Once
 	opensslBootstrapErr        error
@@ -347,6 +360,13 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 	}
 }
 
+// verifySig is the legacy single-suite dispatcher kept alongside the
+// registry-aware verifySigWithRegistry. It is retained because both the test
+// suite and the in-package SigCheckQueue fast path still call it directly
+// for the hardcoded ML-DSA-87 case; production block validation always goes
+// through verifySigWithRegistry. Do not use this function from new code that
+// can see a SuiteRegistry — prefer verifySigWithRegistry for rotation-aware
+// verification.
 func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
 	switch suiteID {
 	case SUITE_ID_ML_DSA_87:
@@ -359,7 +379,8 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 		}
 		return verifySigWithBinding(binding, pubkey, signature, digest32)
 	default:
-		return false, txerr(TX_ERR_SIG_ALG_INVALID, "verify_sig: unsupported suite_id")
+		return false, txerr(TX_ERR_SIG_ALG_INVALID,
+			fmt.Sprintf("verify_sig: unsupported suite_id=0x%02x", suiteID))
 	}
 }
 
@@ -388,7 +409,9 @@ func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (sui
 			sigLen:     ML_DSA_87_SIG_BYTES,
 		}, nil
 	}
-	return suiteVerifierBinding{}, txerr(TX_ERR_SIG_ALG_INVALID, "unsupported suite verifier binding")
+	return suiteVerifierBinding{}, txerr(TX_ERR_SIG_ALG_INVALID,
+		fmt.Sprintf("resolveSuiteVerifierBinding: unsupported alg=%q pubkey_len=%d sig_len=%d",
+			algName, pubkeyLen, sigLen))
 }
 
 func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
@@ -403,7 +426,9 @@ func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature
 		}
 		return ok, nil
 	default:
-		return false, txerr(TX_ERR_SIG_ALG_INVALID, "unsupported suite verifier binding")
+		return false, txerr(TX_ERR_SIG_ALG_INVALID,
+			fmt.Sprintf("verifySigWithBinding: unsupported binding kind=%d alg=%q",
+				binding.kind, binding.opensslAlg))
 	}
 }
 

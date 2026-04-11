@@ -120,3 +120,121 @@ func TestSleepOrStopNilReceiver(t *testing.T) {
 		t.Fatalf("sleepOrStop(2ms) on nil service returned too early: %s", elapsed)
 	}
 }
+
+// Service lifecycle tests: the single-use contract. Start must refuse to
+// restart a Service whose closed flag is set, Close must set the flag, and
+// Addr must fall back to the configured bind address once the Service is
+// closed (the stale listener reference is no longer a valid endpoint).
+
+func TestService_StartAfterClose_ReturnsAlreadyClosed(t *testing.T) {
+	// Simulate the post-Close state directly: the closed flag is set. Start
+	// must reject the restart with "service already closed" before touching
+	// net.Listen, so no real bind is needed.
+	s := &Service{closed: true}
+	err := s.Start(context.Background())
+	if err == nil {
+		t.Fatalf("Start() on closed Service must return error, got nil")
+	}
+	if err.Error() != "service already closed" {
+		t.Fatalf("Start() on closed Service: err=%q want %q", err.Error(), "service already closed")
+	}
+}
+
+func TestService_StartAlreadyStarted_ReturnsAlreadyStarted(t *testing.T) {
+	// A live listener (closed=false) should still produce the original
+	// "service already started" error to preserve the previous contract for
+	// this distinct case.
+	ln, lerr := net.Listen("tcp", "127.0.0.1:0")
+	if lerr != nil {
+		t.Fatalf("net.Listen: %v", lerr)
+	}
+	defer func() { _ = ln.Close() }()
+	s := &Service{listener: ln}
+	err := s.Start(context.Background())
+	if err == nil {
+		t.Fatalf("Start() on running Service must return error, got nil")
+	}
+	if err.Error() != "service already started" {
+		t.Fatalf("Start() on running Service: err=%q want %q", err.Error(), "service already started")
+	}
+}
+
+func TestService_StartNilReceiver(t *testing.T) {
+	var s *Service
+	err := s.Start(context.Background())
+	if err == nil || err.Error() != "nil service" {
+		t.Fatalf("Start() on nil receiver: err=%v want %q", err, "nil service")
+	}
+}
+
+func TestService_CloseSetsClosedFlag(t *testing.T) {
+	// Zero-value Service has no goroutines, no listener, no cancel — Close
+	// completes immediately and must leave closed=true so a subsequent Start
+	// is rejected. This isolates the flag transition from the full shutdown
+	// path that requires a running accept loop.
+	s := &Service{}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() on zero-value Service: %v", err)
+	}
+	s.peersMu.RLock()
+	closed := s.closed
+	s.peersMu.RUnlock()
+	if !closed {
+		t.Fatalf("Close() did not set closed=true")
+	}
+	// Verify the flag transition blocks Start.
+	if err := s.Start(context.Background()); err == nil || err.Error() != "service already closed" {
+		t.Fatalf("Start() after Close(): err=%v want %q", err, "service already closed")
+	}
+}
+
+func TestService_CloseNilReceiverIsNoOp(t *testing.T) {
+	var s *Service
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() on nil receiver: %v", err)
+	}
+}
+
+func TestService_AddrReturnsCachedBoundAddrWhenRunning(t *testing.T) {
+	cfg := ServiceConfig{BindAddr: "ignored:9999"}
+	// Simulate a successful Start that cached the resolved listener
+	// endpoint in boundAddr. Addr must prefer the cached value over the
+	// configured bind address so the caller sees the concrete port.
+	s := &Service{cfg: cfg, boundAddr: "127.0.0.1:43219"}
+	if got, want := s.Addr(), "127.0.0.1:43219"; got != want {
+		t.Fatalf("Addr() running: %q want %q", got, want)
+	}
+}
+
+func TestService_AddrReturnsCachedBoundAddrAfterClose(t *testing.T) {
+	// Post-Close: the listener net.Listener itself has been closed and
+	// may be nil'd by a future cleanup, but boundAddr cache is retained
+	// from Start. Addr must still return the resolved concrete port — not
+	// the raw configured bind address — so log/metric tags stay stable
+	// across the whole lifecycle. This is the LOW fix from #1131 codex
+	// exec review: wildcard / ":0" binds used to lose the resolved port
+	// once the Service flipped to closed=true.
+	cfg := ServiceConfig{BindAddr: ":0"}
+	s := &Service{cfg: cfg, boundAddr: "127.0.0.1:43219", closed: true}
+	if got, want := s.Addr(), "127.0.0.1:43219"; got != want {
+		t.Fatalf("Addr() after Close: %q want %q", got, want)
+	}
+}
+
+func TestService_AddrNoBoundAddrFallsBackToConfigBindAddr(t *testing.T) {
+	// Pre-Start (or after a failed Start that never published the
+	// listener): boundAddr is the zero value. Addr must fall back to the
+	// configured bind address.
+	cfg := ServiceConfig{BindAddr: "pending:2222"}
+	s := &Service{cfg: cfg}
+	if got, want := s.Addr(), "pending:2222"; got != want {
+		t.Fatalf("Addr() pre-Start: %q want %q", got, want)
+	}
+}
+
+func TestService_AddrNilReceiverReturnsEmpty(t *testing.T) {
+	var s *Service
+	if got := s.Addr(); got != "" {
+		t.Fatalf("Addr() on nil receiver: %q want %q", got, "")
+	}
+}

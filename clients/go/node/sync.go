@@ -540,11 +540,17 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	return summary, nil
 }
 
+// txErrCode extracts the consensus.TxError code string from err for
+// telemetry and event labelling. It uses errors.As so that a wrapped
+// *consensus.TxError (e.g. produced by fmt.Errorf("...: %w", inner)) is
+// still classified correctly instead of falling through to "ERR". A nil
+// error reports "OK"; any non-TxError reports "ERR".
 func txErrCode(err error) string {
 	if err == nil {
 		return "OK"
 	}
-	if te, ok := err.(*consensus.TxError); ok {
+	var te *consensus.TxError
+	if errors.As(err, &te) {
 		return string(te.Code)
 	}
 	return "ERR"

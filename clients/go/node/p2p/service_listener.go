@@ -49,6 +49,22 @@ func isAcceptLoopTerminal(ctx context.Context, err error) bool {
 	return false
 }
 
+// Start begins accepting inbound P2P connections and launches the accept /
+// reconnect goroutines. A Service instance is single-use: after Close has
+// returned, Start must NOT be called again on the same Service — it will
+// return "service already closed" rather than silently creating a second
+// listener or reviving the shut-down goroutines. Construct a fresh Service
+// for a fresh lifecycle.
+//
+// Lifecycle transitions (dormant → running → closed) are linearized under
+// peersMu. A fast-path read-lock rejects the obvious cases without paying
+// for net.Listen; the authoritative decision re-checks the flags under the
+// write lock AFTER net.Listen returns, so a concurrent Close that lands
+// between the fast-path check and the listener publish still wins the race
+// and the freshly created listener is closed immediately. This guarantees
+// that an observed successful Start return implies the Service is running,
+// and no acceptLoop/reconnectLoop goroutine is ever started on a Service
+// that was already marked closed.
 func (s *Service) Start(ctx context.Context) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -56,24 +72,55 @@ func (s *Service) Start(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	// Fast-path rejection: snapshot the dormant/started state. This may be
+	// racy — the authoritative check happens under the write lock below.
 	s.peersMu.RLock()
+	closed := s.closed
 	started := s.listener != nil
 	s.peersMu.RUnlock()
+	if closed {
+		return errors.New("service already closed")
+	}
 	if started {
 		return errors.New("service already started")
 	}
+
 	listener, err := net.Listen("tcp", s.cfg.BindAddr)
 	if err != nil {
 		return err
 	}
-	s.peersMu.Lock()
-	s.listener = listener
-	s.peersMu.Unlock()
-	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	s.loopWG.Add(1)
+	// Authoritative transition. Re-check closed/started under the write
+	// lock so that a concurrent Close that ran while net.Listen was still
+	// executing is linearized ahead of the listener publish: if Close won
+	// the race, drop the freshly created listener and surface the same
+	// dormant error as the fast path. loopWG.Add runs under the lock and
+	// BEFORE the goroutines are spawned so a concurrent Close's
+	// loopWG.Wait sees the counter even if scheduling delays acceptLoop
+	// or reconnectLoop past the unlock.
+	newCtx, cancel := context.WithCancel(ctx)
+	s.peersMu.Lock()
+	if s.closed {
+		s.peersMu.Unlock()
+		cancel()
+		_ = listener.Close()
+		return errors.New("service already closed")
+	}
+	if s.listener != nil {
+		s.peersMu.Unlock()
+		cancel()
+		_ = listener.Close()
+		return errors.New("service already started")
+	}
+	s.listener = listener
+	s.boundAddr = listener.Addr().String()
+	s.ctx = newCtx
+	s.cancel = cancel
+	s.loopWG.Add(2)
+	s.peersMu.Unlock()
+
 	go s.acceptLoop()
-	s.loopWG.Add(1)
 	go s.reconnectLoop(s.ctx)
 	for _, peerAddr := range s.outboundAddrs {
 		peerAddr = strings.TrimSpace(peerAddr)
@@ -85,15 +132,33 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
+// Close cancels the service context, closes the listener, tears down every
+// tracked peer connection, waits for all background goroutines to exit, and
+// marks the Service as closed. The Service is dormant after Close returns:
+// any subsequent Start call will return "service already closed". Close is
+// idempotent on a nil receiver. The boundAddr cache is retained so that
+// post-close Addr() calls still surface the last resolved listener address
+// for diagnostics/metrics.
 func (s *Service) Close() error {
 	if s == nil {
 		return nil
 	}
-	if s.cancel != nil {
-		s.cancel()
+	// Mark closed first and snapshot the cancel/listener references under
+	// the write lock so we operate on stable local copies below. This also
+	// linearizes with the Start re-check above: a Start that sees closed
+	// under its write-lock re-check will drop its freshly created listener
+	// instead of publishing it and racing the acceptLoop spawn.
+	s.peersMu.Lock()
+	s.closed = true
+	cancel := s.cancel
+	listener := s.listener
+	s.peersMu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
-	if s.listener != nil {
-		_ = s.listener.Close()
+	if listener != nil {
+		_ = listener.Close()
 	}
 	s.peersMu.RLock()
 	peers := make([]*peer, 0, len(s.peers))
@@ -108,15 +173,24 @@ func (s *Service) Close() error {
 	return nil
 }
 
+// Addr returns the effective bound address of the Service. While Start has
+// successfully published a listener (whether the Service is still running
+// or has since been Close'd), Addr returns the cached boundAddr captured at
+// listener publish time — this preserves the resolved concrete port for
+// wildcard/ephemeral binds such as ":0" even after the listener has been
+// closed and becomes a valid log/metric tag across the whole lifecycle.
+// Before Start (or if Start failed before publishing), Addr falls back to
+// the configured ServiceConfig.BindAddr. Callers must not dial or Accept
+// on the returned address after Close.
 func (s *Service) Addr() string {
 	if s == nil {
 		return ""
 	}
 	s.peersMu.RLock()
-	ln := s.listener
+	bound := s.boundAddr
 	s.peersMu.RUnlock()
-	if ln != nil {
-		return ln.Addr().String()
+	if bound != "" {
+		return bound
 	}
 	return s.cfg.BindAddr
 }

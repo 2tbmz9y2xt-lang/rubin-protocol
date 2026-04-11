@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -923,6 +925,48 @@ func TestSyncEngine_isInIBDUnchecked(t *testing.T) {
 		engine.cfg.IBDLagSeconds = 100
 		if !engine.isInIBDUnchecked() {
 			t.Fatal("expected IBD when tip is very old")
+		}
+	})
+}
+
+// TestTxErrCode exercises the four branches of txErrCode: nil → "OK", a
+// direct *consensus.TxError pointer → its Code, a wrapped *consensus.TxError
+// (via fmt.Errorf + %w) → still the Code thanks to errors.As, and a plain
+// non-TxError → "ERR". The wrapped case is the reason for using errors.As
+// instead of a direct type assertion.
+func TestTxErrCode(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		if got := txErrCode(nil); got != "OK" {
+			t.Fatalf("txErrCode(nil)=%q want %q", got, "OK")
+		}
+	})
+
+	t.Run("direct_tx_error", func(t *testing.T) {
+		err := &consensus.TxError{Code: consensus.TX_ERR_SIG_INVALID, Msg: "bad sig"}
+		if got := txErrCode(err); got != string(consensus.TX_ERR_SIG_INVALID) {
+			t.Fatalf("txErrCode(direct)=%q want %q", got, consensus.TX_ERR_SIG_INVALID)
+		}
+	})
+
+	t.Run("wrapped_tx_error_classified_via_errors_as", func(t *testing.T) {
+		inner := &consensus.TxError{Code: consensus.TX_ERR_VALUE_CONSERVATION, Msg: "v"}
+		wrapped := fmt.Errorf("apply_block: tx 7: %w", inner)
+		if got := txErrCode(wrapped); got != string(consensus.TX_ERR_VALUE_CONSERVATION) {
+			t.Fatalf("txErrCode(wrapped)=%q want %q", got, consensus.TX_ERR_VALUE_CONSERVATION)
+		}
+	})
+
+	t.Run("doubly_wrapped_tx_error_still_classified", func(t *testing.T) {
+		inner := &consensus.TxError{Code: consensus.TX_ERR_NONCE_REPLAY, Msg: "replay"}
+		wrapped := fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", inner))
+		if got := txErrCode(wrapped); got != string(consensus.TX_ERR_NONCE_REPLAY) {
+			t.Fatalf("txErrCode(double-wrapped)=%q want %q", got, consensus.TX_ERR_NONCE_REPLAY)
+		}
+	})
+
+	t.Run("non_tx_error", func(t *testing.T) {
+		if got := txErrCode(errors.New("io: broken pipe")); got != "ERR" {
+			t.Fatalf("txErrCode(non-TxError)=%q want %q", got, "ERR")
 		}
 	})
 }
