@@ -41,8 +41,8 @@ on:
         default: false
     secrets:
       API_KEY:
-        description: "API key for the model provider"
-        required: true
+        description: "API key for the model provider (not needed if uses_github_models: true)"
+        required: false
 
 permissions:
   contents: read
@@ -95,7 +95,10 @@ jobs:
       - name: Check API key availability
         id: check-key
         run: |
-          if [ -z "$API_KEY" ]; then
+          # GitHub Models uses GITHUB_TOKEN which is always available
+          if [ "$USES_GITHUB_MODELS" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$API_KEY" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::API key not available (fork PR or missing secret). Skipping review."
           else
@@ -103,6 +106,7 @@ jobs:
           fi
         env:
           API_KEY: ${{ secrets.API_KEY }}
+          USES_GITHUB_MODELS: ${{ inputs.uses_github_models }}
       - name: Download diff artifact
         if: steps.check-key.outputs.skip != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v4
@@ -503,10 +507,11 @@ jobs:
             // Build request based on API type
             const usesGitHubModels = ${{ inputs.uses_github_models }};
             const apiUrl = '${{ inputs.api_base_url }}';
+            const apiKey = usesGitHubModels ? process.env.GITHUB_TOKEN : process.env.API_KEY;
             const headers = usesGitHubModels
-              ? { 'Authorization': `Bearer ${process.env.API_KEY}`, 'Content-Type': 'application/json' }
+              ? { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
               : {
-                  'Authorization': `Bearer ${process.env.API_KEY}`,
+                  'Authorization': `Bearer ${apiKey}`,
                   'Content-Type': 'application/json',
                   'HTTP-Referer': `https://github.com/${context.repo.owner}/${context.repo.repo}`,
                   'X-Title': 'RUBIN Protocol Security Review'

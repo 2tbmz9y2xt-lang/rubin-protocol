@@ -16,5 +16,4 @@ jobs:
       needs_json_mode: false
       uses_github_models: true
       anti_hallucination_rules: "[]"
-    secrets:
-      API_KEY: ${{ secrets.GITHUB_TOKEN }}
+    secrets: inherit
