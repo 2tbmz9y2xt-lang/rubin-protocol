@@ -658,10 +658,14 @@ jobs:
             const dominated_arr = [...dominated];
             const dominated_filtered = findings.filter((_, i) => !dominated_arr.includes(i));
             const dominated_unacked = dominated_filtered.filter(f => !isAcknowledged(f));
-            const dominated_unacked_blocking = dominated_unacked.filter(f => f.severity === 'CRITICAL' || f.severity === 'HIGH');
+            const normSev = (s) => String(s || '').toUpperCase().trim();
+            const dominated_unacked_blocking = dominated_unacked.filter(f => {
+              const sev = normSev(f.severity);
+              return sev === 'CRITICAL' || sev === 'HIGH';
+            });
 
             if (dominated_unacked_blocking.length > 0) {
-              const summary = dominated_unacked_blocking.map(f => `[${f.severity}] ${f.file}: ${f.title}`).join('\n');
+              const summary = dominated_unacked_blocking.map(f => `[${normSev(f.severity)}] ${f.file}: ${f.title}`).join('\n');
               core.setFailed(`Blocking findings:\n${summary}`);
             }
 
