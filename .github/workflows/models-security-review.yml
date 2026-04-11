@@ -21,4 +21,8 @@ jobs:
       needs_json_mode: false
       uses_github_models: true
       anti_hallucination_rules: "[]"
-    secrets: inherit
+    # No `secrets: inherit` — this caller authenticates GitHub Models with
+    # GITHUB_TOKEN (uses_github_models: true), so passing all repository
+    # secrets to the called workflow would unnecessarily widen the blast
+    # radius (e.g. exposing OPENROUTER_API_KEY_QWEN to npm install steps).
+    # The shared workflow declares API_KEY as `required: false`.

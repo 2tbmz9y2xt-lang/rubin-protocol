@@ -54,10 +54,31 @@ def main() -> int:
         _fail(f"missing shared workflow: {SHARED_WORKFLOW}")
         return 1
 
-    # Check callers exist
+    # Check callers exist AND actually invoke the shared reusable workflow
+    # with the inputs the shared workflow requires. Existence alone is not
+    # enough — a caller could drift away from `uses:` or drop a required
+    # input and the gate would still pass.
+    shared_workflow_ref = "uses: ./.github/workflows/security-review-shared.yml"
+    required_caller_inputs = (
+        "model_id:",
+        "api_base_url:",
+        "model_display_name:",
+        "artifact_prefix:",
+    )
     for caller in [DEEPSEEK_CALLER, QWEN_CALLER]:
         if not caller.is_file():
             errors.append(f"missing caller workflow: {caller}")
+            continue
+        caller_text = caller.read_text(encoding="utf-8")
+        if shared_workflow_ref not in caller_text:
+            errors.append(
+                f"caller {caller.name} no longer invokes security-review-shared.yml"
+            )
+        for required_input in required_caller_inputs:
+            if required_input not in caller_text:
+                errors.append(
+                    f"caller {caller.name} missing required input: {required_input}"
+                )
 
     text = SHARED_WORKFLOW.read_text(encoding="utf-8")
 

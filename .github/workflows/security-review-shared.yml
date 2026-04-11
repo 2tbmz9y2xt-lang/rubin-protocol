@@ -132,7 +132,13 @@ jobs:
             const path = require('path');
             const { execSync } = require('child_process');
             const { jsonrepair } = require('./node_modules/jsonrepair');
-            const diff = fs.readFileSync('pr-diff.txt', 'utf8').slice(0, 128000);
+            // Truncation note tells the model to downgrade confidence on
+            // missing tail content rather than treat omissions as "unchanged".
+            const DIFF_CAP = 128000;
+            const diffRaw = fs.readFileSync('pr-diff.txt', 'utf8');
+            const diff = diffRaw.length > DIFF_CAP
+              ? diffRaw.slice(0, DIFF_CAP) + `\n\n[TRUNCATED — diff exceeded ${DIFF_CAP} bytes; tail omitted]`
+              : diffRaw;
 
             // Fetch previous security review findings to avoid re-reporting.
             const TRUSTED_AUTHORS = new Set(['github-actions[bot]']);
@@ -522,13 +528,17 @@ jobs:
               previousFindings
             ].join('\n');
 
-            const userPrompt = [
+            const USER_PROMPT_CAP = 300000;
+            const userPromptRaw = [
               'Review this PR diff for security issues:\n',
               diff,
               changedFilePayload,
               dependencyContext,
               parityContext
-            ].join('\n').slice(0, 300000); // Cap to avoid context limit errors
+            ].join('\n');
+            const userPrompt = userPromptRaw.length > USER_PROMPT_CAP
+              ? userPromptRaw.slice(0, USER_PROMPT_CAP) + `\n\n[TRUNCATED — user prompt exceeded ${USER_PROMPT_CAP} bytes; later sections may be missing, do not treat omissions as "unchanged"]`
+              : userPromptRaw;
 
             // Build request based on API type
             const usesGitHubModels = ${{ inputs.uses_github_models }};
