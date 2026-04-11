@@ -171,7 +171,10 @@ jobs:
               // the model_id (e.g. "qwen/qwen3.6-plus (OpenRouter)" vs
               // "qwen/qwen3.6-plus"). The display_name is the only marker
               // that is guaranteed present in our own posted body.
-              const modelDisplayName = '${{ inputs.model_display_name }}';
+              // toJSON wraps the input as a JS literal so quotes/newlines
+              // in a future display_name cannot break the script or
+              // enable injection.
+              const modelDisplayName = ${{ toJSON(inputs.model_display_name) }};
               const modelDisplayLower = modelDisplayName.toLowerCase();
               const reviewComments = allComments
                 .filter(c => c.body
@@ -548,9 +551,14 @@ jobs:
               ? userPromptRaw.slice(0, USER_PROMPT_CAP) + `\n\n[TRUNCATED — user prompt exceeded ${USER_PROMPT_CAP} bytes; later sections may be missing, do not treat omissions as "unchanged"]`
               : userPromptRaw;
 
-            // Build request based on API type
+            // Build request based on API type. All workflow_call inputs
+            // that get embedded into JS are routed through toJSON so a
+            // future caller value containing quotes/backslashes/newlines
+            // cannot break the script or enable expression-substitution
+            // injection.
             const usesGitHubModels = ${{ inputs.uses_github_models }};
-            const apiUrl = '${{ inputs.api_base_url }}';
+            const apiUrl = ${{ toJSON(inputs.api_base_url) }};
+            const modelId = ${{ toJSON(inputs.model_id) }};
             const apiKey = usesGitHubModels ? process.env.GITHUB_TOKEN : process.env.API_KEY;
             const headers = usesGitHubModels
               ? { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
@@ -563,7 +571,7 @@ jobs:
 
             // Common generation params for both providers.
             const requestBody = {
-              model: '${{ inputs.model_id }}',
+              model: modelId,
               messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt }
@@ -571,13 +579,13 @@ jobs:
               temperature: 0.2,
               top_p: 0.9
             };
-            if (!usesGitHubModels) {
-              // OpenRouter Qwen 3.6 Plus has always-on chain-of-thought.
-              // Cap the thinking budget so the model leaves room for the
-              // structured JSON answer; without this the entire max_tokens
-              // budget can be consumed by `<think>` tokens, leaving an empty
-              // post-strip content. 50000 leaves ~15k of the 65k total for
-              // the structured JSON answer.
+            // Gate the reasoning budget on the model family rather than
+            // the auth flag (`!usesGitHubModels` would also fire for any
+            // future non-Qwen OpenRouter caller whose API rejects the
+            // `reasoning` field). Qwen 3.6 Plus has always-on chain-of-
+            // thought; capping the thinking budget at 50000 leaves ~15k
+            // of the 65k total for the structured JSON answer.
+            if (modelId.toLowerCase().startsWith('qwen/')) {
               requestBody.reasoning = { max_tokens: 50000 };
             }
             if (${{ inputs.max_tokens }} > 0) requestBody.max_tokens = ${{ inputs.max_tokens }};
