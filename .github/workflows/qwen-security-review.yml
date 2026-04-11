@@ -59,12 +59,14 @@ jobs:
       - name: Check API key availability
         id: check-key
         run: |
-          if [ -z "${{ secrets.OPENROUTER_API_KEY_QWEN }}" ]; then
+          if [ -z "$OPENROUTER_API_KEY_QWEN" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::OPENROUTER_API_KEY_QWEN not available (fork PR or missing secret). Skipping Qwen review."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+        env:
+          OPENROUTER_API_KEY_QWEN: ${{ secrets.OPENROUTER_API_KEY_QWEN }}
 
       - name: Install jsonrepair
         if: steps.check-key.outputs.skip != 'true'
@@ -666,7 +668,7 @@ jobs:
               return;
             }
 
-            // Strip R1 <think> reasoning blocks
+            // Strip <think> reasoning blocks (Qwen CoT output)
             result = result.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 
             // Strip markdown fences if present: find first '{' and last '}'
@@ -687,7 +689,9 @@ jobs:
               }
             }
 
-            core.setOutput('review', result);
+            // Write result to file to avoid step output size limits
+            fs.writeFileSync('review-output.json', result);
+            core.setOutput('review_file', 'review-output.json');
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENROUTER_API_KEY_QWEN: ${{ secrets.OPENROUTER_API_KEY_QWEN }}
@@ -701,12 +705,14 @@ jobs:
           retention-days: 3
 
       - name: Post review
-        if: steps.review.outputs.review
+        if: steps.review.outputs.review_file
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
-            const review = ${{ toJSON(steps.review.outputs.review) }};
-            if (!review) return;
+            const fs = require('fs');
+            const reviewFile = '${{ steps.review.outputs.review_file }}';
+            if (!reviewFile || !fs.existsSync(reviewFile)) return;
+            const review = fs.readFileSync(reviewFile, 'utf8');
             let parsed;
             try { parsed = JSON.parse(review); } catch(e) { parsed = null; }
             const verdict = parsed && parsed.verdict ? parsed.verdict : 'UNKNOWN';
@@ -727,13 +733,14 @@ jobs:
             });
 
       - name: Block on critical/high findings (with acknowledged-list filter)
-        if: steps.review.outputs.review
+        if: steps.review.outputs.review_file
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         with:
           script: |
             const fs = require('fs');
-            const raw = ${{ toJSON(steps.review.outputs.review) }};
-            if (!raw) return;
+            const reviewFile = '${{ steps.review.outputs.review_file }}';
+            if (!reviewFile || !fs.existsSync(reviewFile)) return;
+            const raw = fs.readFileSync(reviewFile, 'utf8');
             let parsed;
             try {
               parsed = JSON.parse(raw);
