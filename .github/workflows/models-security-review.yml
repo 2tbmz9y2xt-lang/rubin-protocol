@@ -394,6 +394,8 @@ jobs:
               ['clients/go/node/p2p/mempool.go', 'clients/rust/crates/rubin-node/src/txpool.rs'],
               ['clients/go/node/p2p/tx_metadata.go', 'clients/rust/crates/rubin-node/src/txpool.rs'],
             ];
+            const parityIntro =
+              '\n\n---\nPARITY CONTEXT (counterpart files from the other client — use to verify cross-client consistency BEFORE reporting divergence):\n\n';
             const parityEntries = [];
             let parityUsed = 0;
             const parityCounterpartsSeen = new Set();
@@ -410,19 +412,20 @@ jobs:
                 if (!content) continue;
                 const header = `PARITY FILE: ${counterpart} (counterpart of changed ${file})\n`;
                 const separatorOverhead = parityEntries.length > 0 ? SEPARATOR.length : 0;
+                const introOverhead = parityEntries.length === 0 ? parityIntro.length : 0;
                 const cap = Math.min(
-                  PARITY_BUDGET - parityUsed - separatorOverhead - header.length,
+                  PARITY_BUDGET - parityUsed - separatorOverhead - introOverhead - header.length,
                   PER_FILE_CAP
                 );
                 if (cap < 200) continue;
                 const entry = header + content.slice(0, cap);
                 parityCounterpartsSeen.add(counterpart);
                 parityEntries.push(entry);
-                parityUsed += separatorOverhead + entry.length;
+                parityUsed += separatorOverhead + introOverhead + entry.length;
               }
             }
             const parityContext = parityEntries.length > 0
-              ? '\n\n---\nPARITY CONTEXT (counterpart files from the other client — use to verify cross-client consistency BEFORE reporting divergence):\n\n' + parityEntries.join(SEPARATOR)
+              ? parityIntro + parityEntries.join(SEPARATOR)
               : '';
 
             const systemPrompt = [
@@ -565,17 +568,20 @@ jobs:
                 let overflow = userContent.length - maxUserCharsBeforeNotice;
                 core.warning(
                   `User message length ${userContent.length} exceeds cap ${MAX_USER_CHARS}; ` +
-                  'truncating lower-priority sections from the tail first, then appending explicit notice'
+                  'truncating supplementary context first (parity, dependency, full files, dedup list), ' +
+                  'then diff only as last resort; then preamble if still over cap; then appending explicit notice'
                 );
 
-                for (const sectionName of ['changedFiles', 'diff', 'parityContext', 'dependencyContext']) {
+                for (const sectionName of [
+                  'parityContext',
+                  'dependencyContext',
+                  'changedFiles',
+                  'previousFindings',
+                  'diff',
+                ]) {
                   if (overflow <= 0) break;
                   const section = sections.find((c) => c.name === sectionName);
                   overflow -= shrinkSectionToFit(section, overflow);
-                }
-                if (overflow > 0) {
-                  const prevSec = sections.find((c) => c.name === 'previousFindings');
-                  overflow -= shrinkSectionToFit(prevSec, overflow);
                 }
                 if (overflow > 0) {
                   const pre = sections.find((c) => c.name === 'preamble');

@@ -298,6 +298,25 @@ class LocalPrepushSkillGateTests(unittest.TestCase):
         self.assertTrue(any("Workflow hygiene parity" in focus for focus in focuses))
         self.assertTrue(any("Server-only required checks" in focus for focus in focuses))
 
+    def test_build_plan_adds_models_security_review_contract_for_workflow_edit(self):
+        changed = {".github/workflows/models-security-review.yml"}
+
+        checks, _focuses, _lenses, profile = m.build_plan(changed)
+        check_names = {name for name, _cmd in checks}
+
+        self.assertEqual(profile.name, "diff_only")
+        self.assertIn("workflow_yaml_syntax", check_names)
+        self.assertIn("models_security_review_workflow_contract", check_names)
+
+    def test_build_plan_adds_models_contract_when_checker_script_changes(self):
+        changed = {"tools/check_models_security_review_workflow.py"}
+
+        checks, _focuses, _lenses, profile = m.build_plan(changed)
+        check_names = {name for name, _cmd in checks}
+
+        self.assertEqual(profile.name, "diff_only")
+        self.assertIn("models_security_review_workflow_contract", check_names)
+
     def test_build_plan_adds_kani_server_only_focus_for_rust_surfaces(self):
         changed = {"clients/rust/crates/rubin-consensus/src/tx.rs"}
 
