@@ -439,7 +439,7 @@ func wrapResolveSuiteVerifierBindingError(suiteID uint8, err error) error {
 	if errors.As(err, &txErr) {
 		return txerr(
 			txErr.Code,
-			fmt.Sprintf("resolveSuiteVerifierBinding: suite_id=0x%02x %s", suiteID, txErr.Msg),
+			fmt.Sprintf("suite_id=0x%02x %s", suiteID, txErr.Msg),
 		)
 	}
 	return txerr(

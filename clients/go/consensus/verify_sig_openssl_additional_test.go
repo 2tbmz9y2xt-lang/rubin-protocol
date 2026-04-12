@@ -198,6 +198,9 @@ func TestWrapResolveSuiteVerifierBindingError_PreservesTxErrorCodeAndSuiteID(t *
 			t.Fatalf("wrapped error missing %q, got %q", needle, msg)
 		}
 	}
+	if strings.Count(msg, "resolveSuiteVerifierBinding:") != 1 {
+		t.Fatalf("wrapped error should keep a single resolveSuiteVerifierBinding prefix, got %q", msg)
+	}
 }
 
 func TestResolveSuiteVerifierBinding_InvalidPolicyReturnsTxError(t *testing.T) {
