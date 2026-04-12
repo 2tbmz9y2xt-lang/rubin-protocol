@@ -129,14 +129,12 @@ func TestVerifySig_UnsupportedSuiteIDMessageCarriesSuiteID(t *testing.T) {
 }
 
 func TestResolveSuiteVerifierBinding_UnknownCarriesAlgAndLens(t *testing.T) {
-	_, err := resolveSuiteVerifierBinding(0x7b, "FAKE-ALG", 7, 9)
+	_, err := resolveSuiteVerifierBinding("FAKE-ALG", 7, 9)
 	if err == nil {
 		t.Fatalf("expected error for unknown binding")
 	}
 	msg := err.Error()
 	for _, needle := range []string{
-		"resolveSuiteVerifierBinding",
-		"suite_id=0x7b",
 		"alg=\"FAKE-ALG\"",
 		"pubkey_len=7",
 		"sig_len=9",
