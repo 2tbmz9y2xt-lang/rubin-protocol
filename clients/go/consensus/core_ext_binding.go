@@ -39,14 +39,30 @@ func NormalizeCoreExtBindingName(binding string) (string, error) {
 // bindings remain non-live helper surfaces and must not reach runtime loaders.
 func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
 	binding = strings.TrimSpace(binding)
-	entry, err := liveBindingPolicyCoreExtEntry(binding)
+	entry, err := supportedLiveCoreExtPolicyEntry(binding)
 	if err != nil {
 		return "", err
 	}
-	if entry == nil {
-		return "", unsupportedCoreExtBindingError(binding)
-	}
 	return entry.CoreExtLiveBindingName, nil
+}
+
+// supportedLiveCoreExtPolicyEntry keeps live binding normalization and live
+// parser dispatch on the exact same acceptance set. Any future policy entry
+// must be admitted here before either path starts accepting it.
+func supportedLiveCoreExtPolicyEntry(binding string) (*liveBindingPolicyEntry, error) {
+	entry, err := liveBindingPolicyCoreExtEntry(binding)
+	if err != nil {
+		return nil, err
+	}
+	if entry == nil {
+		return nil, unsupportedCoreExtBindingError(binding)
+	}
+	switch entry.RuntimeBinding {
+	case liveBindingPolicyRuntimeOpenSSLDigest32:
+		return entry, nil
+	default:
+		return nil, unsupportedCoreExtBindingError(binding)
+	}
 }
 
 func parseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
@@ -83,12 +99,9 @@ func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor
 // NormalizeLiveCoreExtBindingName and enforces the live manifest requirement
 // that verify_sig_ext OpenSSL bindings carry a non-empty ext_payload_schema.
 func ParseNormalizedLiveCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
-	entry, err := liveBindingPolicyCoreExtEntry(binding)
+	entry, err := supportedLiveCoreExtPolicyEntry(binding)
 	if err != nil {
 		return nil, err
-	}
-	if entry == nil {
-		return nil, unsupportedCoreExtBindingError(binding)
 	}
 	switch entry.RuntimeBinding {
 	case liveBindingPolicyRuntimeOpenSSLDigest32:

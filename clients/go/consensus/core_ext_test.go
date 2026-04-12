@@ -1467,6 +1467,30 @@ func TestParseLiveCoreExtVerifySigExtBinding(t *testing.T) {
 	}
 }
 
+func TestLiveCoreExtNormalizationAndParserShareAcceptanceSet(t *testing.T) {
+	descriptor, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("descriptor bytes: %v", err)
+	}
+
+	for _, binding := range []string{
+		CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+		"",
+		"native_verify_sig",
+		"unsupported",
+	} {
+		normalized, normErr := NormalizeLiveCoreExtBindingName(binding)
+		_, parseErr := ParseLiveCoreExtVerifySigExtBinding(binding, descriptor, []byte{0xb2})
+
+		if normErr == nil && parseErr != nil {
+			t.Fatalf("binding %q normalized to %q but parser rejected it: %v", binding, normalized, parseErr)
+		}
+		if normErr != nil && parseErr == nil {
+			t.Fatalf("binding %q failed normalization but parser accepted it", binding)
+		}
+	}
+}
+
 func TestCoreExtOpenSSLDigest32BindingDescriptorErrors(t *testing.T) {
 	if _, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("bad", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES); err == nil {
 		t.Fatalf("unsupported alg must fail")
