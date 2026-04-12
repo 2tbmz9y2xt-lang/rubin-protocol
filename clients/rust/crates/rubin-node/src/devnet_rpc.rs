@@ -964,10 +964,6 @@ mod tests {
         status_text, HttpRequest,
     };
 
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
-        unique_temp_path(prefix)
-    }
-
     fn build_state(with_genesis: bool) -> (super::DevnetRPCState, PathBuf) {
         let dir = unique_temp_path("rubin-devnet-rpc");
         fs::create_dir_all(&dir).expect("mkdir");
@@ -2010,7 +2006,7 @@ mod tests {
 
     #[test]
     fn concurrent_connections_are_handled() {
-        let dir = unique_temp_dir("rubin-concurrent-rpc");
+        let dir = unique_temp_path("rubin-concurrent-rpc");
         fs::create_dir_all(&dir).expect("mkdir");
         let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
         let mut engine = SyncEngine::new(
@@ -2057,7 +2053,7 @@ mod tests {
 
     #[test]
     fn excess_connections_are_dropped_at_capacity() {
-        let dir = unique_temp_dir("rubin-capacity-rpc");
+        let dir = unique_temp_path("rubin-capacity-rpc");
         fs::create_dir_all(&dir).expect("mkdir");
         let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
         let mut engine = SyncEngine::new(

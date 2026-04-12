@@ -102,8 +102,10 @@ pub struct NativeSuiteSet {
 }
 
 impl NativeSuiteSet {
-    /// Internal helper for already-validated phase builders.
-    pub(crate) fn new(ids: &[u8]) -> Self {
+    /// Legacy infallible constructor for external callers. Panics only if the
+    /// deduplicated set exceeds the live/native v1 cap of two suites, which
+    /// indicates a programming bug at the call site.
+    pub fn new(ids: &[u8]) -> Self {
         Self::try_new(ids).expect("native suite set cardinality must stay <= 2")
     }
 
