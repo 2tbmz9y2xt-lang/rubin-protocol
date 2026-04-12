@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -1488,6 +1489,55 @@ func TestLiveCoreExtNormalizationAndParserShareAcceptanceSet(t *testing.T) {
 		if normErr != nil && parseErr == nil {
 			t.Fatalf("binding %q failed normalization but parser accepted it", binding)
 		}
+	}
+}
+
+func forceLiveBindingPolicyStateForTest(
+	t *testing.T,
+	manifest *liveBindingPolicyManifest,
+	err error,
+) {
+	t.Helper()
+	defaultLiveBindingPolicyCached = manifest
+	defaultLiveBindingPolicyErr = err
+	defaultLiveBindingPolicyOnce = sync.Once{}
+	defaultLiveBindingPolicyOnce.Do(func() {})
+	t.Cleanup(func() {
+		defaultLiveBindingPolicyCached = nil
+		defaultLiveBindingPolicyErr = nil
+		defaultLiveBindingPolicyOnce = sync.Once{}
+	})
+}
+
+func TestSupportedLiveCoreExtPolicyEntry_PropagatesManifestError(t *testing.T) {
+	forcedErr := errors.New("forced live binding policy failure")
+	forceLiveBindingPolicyStateForTest(t, nil, forcedErr)
+
+	_, err := supportedLiveCoreExtPolicyEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	if !errors.Is(err, forcedErr) {
+		t.Fatalf("err=%v, want forced error", err)
+	}
+}
+
+func TestSupportedLiveCoreExtPolicyEntry_RejectsUnsupportedRuntimeBinding(t *testing.T) {
+	forceLiveBindingPolicyStateForTest(t, &liveBindingPolicyManifest{
+		Version: liveBindingPolicyVersion,
+		Entries: []liveBindingPolicyEntry{{
+			AlgName:                "ML-DSA-87",
+			PubkeyLen:              ML_DSA_87_PUBKEY_BYTES,
+			SigLen:                 ML_DSA_87_SIG_BYTES,
+			RuntimeBinding:         "unsupported_runtime_v1",
+			OpenSSLAlg:             "ML-DSA-87",
+			CoreExtLiveBindingName: CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+		}},
+	}, nil)
+
+	_, err := supportedLiveCoreExtPolicyEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	if err == nil {
+		t.Fatal("expected unsupported runtime binding rejection")
+	}
+	if got, want := err.Error(), unsupportedCoreExtBindingError(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1).Error(); got != want {
+		t.Fatalf("err=%q, want %q", got, want)
 	}
 }
 

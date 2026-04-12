@@ -420,3 +420,85 @@ func TestLiveBindingPolicyLookupHelpers(t *testing.T) {
 		t.Fatalf("core_ext miss err=%q, want %q (entry=%+v)", got, want, coreExtMiss)
 	}
 }
+
+func TestLoadLiveBindingPolicyRejectsMalformedAndTrailingJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "syntax_error_after_array_open",
+			raw:  `{"version":[}`,
+			want: `live_binding_policy: parse embedded artifact: invalid character '}' looking for beginning of value`,
+		},
+		{
+			name: "incomplete_json_value",
+			raw:  `{"version": 1,`,
+			want: `live_binding_policy: parse embedded artifact: incomplete JSON value`,
+		},
+		{
+			name: "unknown_field",
+			raw: `{
+				"version": 1,
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"pubkey_len": 2592,
+					"sig_len": 4627,
+					"runtime_binding": "openssl_digest32_v1",
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}],
+				"bogus": 7
+			}`,
+			want: `live_binding_policy: parse embedded artifact: json: unknown field "bogus"`,
+		},
+		{
+			name: "trailing_tokens",
+			raw: `{
+				"version": 1,
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"pubkey_len": 2592,
+					"sig_len": 4627,
+					"runtime_binding": "openssl_digest32_v1",
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}]
+			} 42`,
+			want: `live_binding_policy: parse embedded artifact: trailing JSON tokens`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadLiveBindingPolicyFromJSON([]byte(tc.raw))
+			if err == nil {
+				t.Fatal("expected rejection")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("err=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadLiveBindingPolicyRejectsUnsupportedRuntimeBinding(t *testing.T) {
+	_, err := loadLiveBindingPolicyFromJSON([]byte(`{
+		"version": 1,
+		"entries": [{
+			"alg_name": "ML-DSA-87",
+			"pubkey_len": 2592,
+			"sig_len": 4627,
+			"runtime_binding": "unsupported_runtime_v1",
+			"openssl_alg": "ML-DSA-87",
+			"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+		}]
+	}`))
+	if err == nil {
+		t.Fatal("expected unsupported runtime binding rejection")
+	}
+	if got, want := err.Error(), `live_binding_policy: entries[0]: unsupported runtime_binding "unsupported_runtime_v1"`; got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
+}
