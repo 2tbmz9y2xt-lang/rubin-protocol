@@ -7,6 +7,8 @@ unsafe file reads, O(n) membership in hot loops, and payload budget mistakes.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,23 +16,37 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SHARED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-review-shared.yml"
 DEEPSEEK_CALLER = REPO_ROOT / ".github" / "workflows" / "models-security-review.yml"
 QWEN_CALLER = REPO_ROOT / ".github" / "workflows" / "qwen-security-review.yml"
+SECURITY_REVIEW_RUNNER = REPO_ROOT / ".github" / "scripts" / "security-review-runner.js"
 
 PAIR_RE = re.compile(r"\['([^']+)',\s*'([^']+)'\]")
 
-REQUIRED_SUBSTRINGS = [
-    "readChangedFile(modRel)",
+REQUIRED_WORKFLOW_SUBSTRINGS = [
+    "require('./.github/scripts/security-review-runner.js')",
+    "REVIEW_USES_GITHUB_MODELS:",
+    "REVIEW_API_URL:",
+    "REVIEW_MODEL_ID:",
+    "REVIEW_MODEL_DISPLAY_NAME:",
+    "REVIEW_ANTI_HALLUCINATION_RULES:",
+    "REVIEW_MAX_TOKENS:",
+    "REVIEW_NEEDS_JSON_MODE:",
+    "REVIEW_BASE_SHA:",
+    "REVIEW_HEAD_SHA:",
+]
+
+REQUIRED_RUNNER_SUBSTRINGS = [
+    "readChangedFile(repoRoot, repoRootReal, modRel)",
     "separatorOverhead",
     "introOverhead",
     "changedFilesSet",
     "slice(0,",  # payload cap
-    "getSevIdx",  # severity normalization
-    "normSev",    # severity normalization
+    "jsonrepair(",
+    "fromJSONEnv('REVIEW_MODEL_ID'",
 ]
 
-BANNED_SUBSTRINGS = [
+BANNED_RUNNER_SUBSTRINGS = [
     "fs.readFileSync(modFile",
     "changedFiles.includes(",
-    "sevOrder.indexOf(a.severity)",  # raw indexOf without normalization
+    "execSync(",
 ]
 
 
@@ -52,6 +68,9 @@ def main() -> int:
     # Check shared workflow exists
     if not SHARED_WORKFLOW.is_file():
         _fail(f"missing shared workflow: {SHARED_WORKFLOW}")
+        return 1
+    if not SECURITY_REVIEW_RUNNER.is_file():
+        _fail(f"missing extracted runner script: {SECURITY_REVIEW_RUNNER}")
         return 1
 
     # Check callers exist AND actually invoke the shared reusable workflow
@@ -99,6 +118,7 @@ def main() -> int:
             )
 
     text = SHARED_WORKFLOW.read_text(encoding="utf-8")
+    runner_text = SECURITY_REVIEW_RUNNER.read_text(encoding="utf-8")
 
     yaml = load_yaml_module()
     if yaml is not None:
@@ -107,14 +127,17 @@ def main() -> int:
         except yaml.YAMLError as exc:
             errors.append(f"invalid YAML in shared workflow: {exc}")
 
-    for s in REQUIRED_SUBSTRINGS:
+    for s in REQUIRED_WORKFLOW_SUBSTRINGS:
         if s not in text:
             errors.append(f"missing required invariant substring {s!r}")
-    for s in BANNED_SUBSTRINGS:
-        if s in text:
+    for s in REQUIRED_RUNNER_SUBSTRINGS:
+        if s not in runner_text:
+            errors.append(f"missing required runner invariant substring {s!r}")
+    for s in BANNED_RUNNER_SUBSTRINGS:
+        if s in runner_text:
             errors.append(f"banned regression substring present: {s!r}")
 
-    pairs = PAIR_RE.findall(text)
+    pairs = PAIR_RE.findall(runner_text)
     if len(pairs) < 10:
         errors.append(f"expected parityMap-style pairs, got only {len(pairs)}")
 
@@ -129,12 +152,29 @@ def main() -> int:
         extra = f" (+{len(missing_files) - 25} more)" if len(missing_files) > 25 else ""
         errors.append(f"parityMap references missing files: {preview}{extra}")
 
+    node = shutil.which("node")
+    if node is None:
+        errors.append("node not found; cannot syntax-check extracted review runner")
+    else:
+        proc = subprocess.run(
+            [node, "--check", str(SECURITY_REVIEW_RUNNER)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or proc.stdout.strip() or "node --check failed"
+            errors.append(f"invalid JS in extracted runner: {detail}")
+
     if errors:
         for e in errors:
             _fail(e)
         return 1
 
-    print(f"OK: security-review-shared.yml contract ({len(pairs)} parity pairs)")
+    print(
+        "OK: security-review-shared.yml contract "
+        f"({len(pairs)} parity pairs, extracted runner syntax checked)"
+    )
     return 0
 
 
