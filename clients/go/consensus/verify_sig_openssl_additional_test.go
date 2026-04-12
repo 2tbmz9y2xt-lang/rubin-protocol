@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -166,6 +167,9 @@ func TestResolveSuiteVerifierBinding_UnknownCarriesAlgAndLens(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for unknown binding")
 	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
 	msg := err.Error()
 	for _, needle := range []string{
 		"alg=\"FAKE-ALG\"",
@@ -174,6 +178,49 @@ func TestResolveSuiteVerifierBinding_UnknownCarriesAlgAndLens(t *testing.T) {
 	} {
 		if !strings.Contains(msg, needle) {
 			t.Fatalf("resolveSuiteVerifierBinding error missing %q, got %q", needle, msg)
+		}
+	}
+}
+
+func TestWrapResolveSuiteVerifierBindingError_PreservesTxErrorCodeAndSuiteID(t *testing.T) {
+	err := wrapResolveSuiteVerifierBindingError(0x2a, resolveSuiteVerifierBindingUnsupportedError("FAKE-ALG", 7, 9))
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"suite_id=0x2a",
+		"alg=\"FAKE-ALG\"",
+		"pubkey_len=7",
+		"sig_len=9",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("wrapped error missing %q, got %q", needle, msg)
+		}
+	}
+}
+
+func TestResolveSuiteVerifierBinding_InvalidPolicyReturnsTxError(t *testing.T) {
+	forcedErr := errors.New("forced live binding policy failure")
+	forceLiveBindingPolicyStateForTest(t, nil, forcedErr)
+
+	_, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err == nil {
+		t.Fatal("expected invalid policy error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"live binding policy invalid",
+		"alg=\"ML-DSA-87\"",
+		fmt.Sprintf("pubkey_len=%d", ML_DSA_87_PUBKEY_BYTES),
+		fmt.Sprintf("sig_len=%d", ML_DSA_87_SIG_BYTES),
+		"forced live binding policy failure",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("invalid policy error missing %q, got %q", needle, msg)
 		}
 	}
 }

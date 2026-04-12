@@ -278,14 +278,24 @@ impl LiveBindingPolicyEntry {
     }
 }
 
-pub(crate) fn default_live_binding_policy() -> Result<&'static LiveBindingPolicyManifest, String> {
-    static DEFAULT: OnceLock<LiveBindingPolicyManifest> = OnceLock::new();
-    if let Some(manifest) = DEFAULT.get() {
-        return Ok(manifest);
+fn cached_live_binding_policy<F>(
+    cache: &OnceLock<Result<LiveBindingPolicyManifest, String>>,
+    loader: F,
+) -> Result<&LiveBindingPolicyManifest, String>
+where
+    F: FnOnce() -> Result<LiveBindingPolicyManifest, String>,
+{
+    match cache.get_or_init(loader) {
+        Ok(manifest) => Ok(manifest),
+        Err(err) => Err(err.clone()),
     }
-    let manifest = load_live_binding_policy_from_json(LIVE_BINDING_POLICY_V1_JSON)?;
-    let _ = DEFAULT.set(manifest);
-    Ok(DEFAULT.get().expect("live binding policy cached"))
+}
+
+pub(crate) fn default_live_binding_policy() -> Result<&'static LiveBindingPolicyManifest, String> {
+    static DEFAULT: OnceLock<Result<LiveBindingPolicyManifest, String>> = OnceLock::new();
+    cached_live_binding_policy(&DEFAULT, || {
+        load_live_binding_policy_from_json(LIVE_BINDING_POLICY_V1_JSON)
+    })
 }
 
 pub(crate) fn live_binding_policy_runtime_entry(
@@ -325,13 +335,16 @@ pub(crate) fn live_binding_policy_core_ext_entry(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_live_binding_policy, live_binding_policy_core_ext_entry,
-        live_binding_policy_core_ext_entry_not_found_error, live_binding_policy_runtime_entry,
-        live_binding_policy_runtime_entry_not_found_error, load_live_binding_policy_from_json,
-        LiveBindingPolicyLookupError, LIVE_BINDING_POLICY_V1_JSON, LIVE_BINDING_POLICY_VERSION,
+        cached_live_binding_policy, default_live_binding_policy,
+        live_binding_policy_core_ext_entry, live_binding_policy_core_ext_entry_not_found_error,
+        live_binding_policy_runtime_entry, live_binding_policy_runtime_entry_not_found_error,
+        load_live_binding_policy_from_json, LiveBindingPolicyLookupError,
+        LIVE_BINDING_POLICY_V1_JSON, LIVE_BINDING_POLICY_VERSION,
     };
+    use std::cell::Cell;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::OnceLock;
 
     fn live_binding_policy_repo_path(parts: &[&str]) -> PathBuf {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -811,6 +824,27 @@ mod tests {
             ),
             "err={err:?}"
         );
+    }
+
+    #[test]
+    fn cached_live_binding_policy_latches_first_error() {
+        let cache = OnceLock::new();
+        let calls = Cell::new(0);
+
+        let first = cached_live_binding_policy(&cache, || {
+            calls.set(calls.get() + 1);
+            Err("boom".to_string())
+        })
+        .expect_err("first load must fail");
+        let second = cached_live_binding_policy(&cache, || {
+            calls.set(calls.get() + 1);
+            load_live_binding_policy_from_json(LIVE_BINDING_POLICY_V1_JSON)
+        })
+        .expect_err("cached error must latch");
+
+        assert_eq!(calls.get(), 1, "loader should run exactly once");
+        assert_eq!(first, "boom");
+        assert_eq!(second, "boom");
     }
 
     #[test]

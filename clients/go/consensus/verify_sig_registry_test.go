@@ -387,6 +387,9 @@ func TestVerifySigWithRegistry_CustomSuite_UnsupportedBindingRejected(t *testing
 	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
 	}
+	if got := err.Error(); !strings.Contains(got, "suite_id=0x02") {
+		t.Fatalf("err=%q, want suite_id context", got)
+	}
 }
 
 func TestValidateP2PKSpendAtHeight_NilProviders_UseDefaultProviders(t *testing.T) {

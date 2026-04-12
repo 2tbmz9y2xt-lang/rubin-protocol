@@ -176,6 +176,7 @@ static int rubin_verify_sig_oneshot(
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -386,10 +387,7 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 			ML_DSA_87_SIG_BYTES,
 		)
 		if err != nil {
-			return false, txerr(
-				TX_ERR_SIG_ALG_INVALID,
-				fmt.Sprintf("resolveSuiteVerifierBinding: suite_id=0x%02x %v", suiteID, err),
-			)
+			return false, wrapResolveSuiteVerifierBindingError(suiteID, err)
 		}
 		return verifySigWithBinding(binding, pubkey, signature, digest32)
 	default:
@@ -411,6 +409,45 @@ type suiteVerifierBinding struct {
 	sigLen     int
 }
 
+func resolveSuiteVerifierBindingUnsupportedError(algName string, pubkeyLen int, sigLen int) error {
+	return txerr(
+		TX_ERR_SIG_ALG_INVALID,
+		fmt.Sprintf(
+			"resolveSuiteVerifierBinding: unsupported alg=%q pubkey_len=%d sig_len=%d",
+			algName,
+			pubkeyLen,
+			sigLen,
+		),
+	)
+}
+
+func resolveSuiteVerifierBindingPolicyInvalidError(algName string, pubkeyLen int, sigLen int, err error) error {
+	return txerr(
+		TX_ERR_SIG_ALG_INVALID,
+		fmt.Sprintf(
+			"resolveSuiteVerifierBinding: live binding policy invalid alg=%q pubkey_len=%d sig_len=%d: %v",
+			algName,
+			pubkeyLen,
+			sigLen,
+			err,
+		),
+	)
+}
+
+func wrapResolveSuiteVerifierBindingError(suiteID uint8, err error) error {
+	var txErr *TxError
+	if errors.As(err, &txErr) {
+		return txerr(
+			txErr.Code,
+			fmt.Sprintf("resolveSuiteVerifierBinding: suite_id=0x%02x %s", suiteID, txErr.Msg),
+		)
+	}
+	return txerr(
+		TX_ERR_SIG_ALG_INVALID,
+		fmt.Sprintf("resolveSuiteVerifierBinding: suite_id=0x%02x %v", suiteID, err),
+	)
+}
+
 // v1 keeps the current live verifier contract pinned to the canonical
 // ML-DSA-87/OpenSSL-digest32 tuple from the shared live binding artifact.
 // Suite admission happens before this helper via verifySig's legacy switch or
@@ -421,7 +458,11 @@ type suiteVerifierBinding struct {
 func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (suiteVerifierBinding, error) {
 	entry, err := liveBindingPolicyRuntimeEntry(algName, pubkeyLen, sigLen)
 	if err != nil {
-		return suiteVerifierBinding{}, err
+		var miss liveBindingPolicyRuntimeEntryNotFoundError
+		if errors.As(err, &miss) {
+			return suiteVerifierBinding{}, resolveSuiteVerifierBindingUnsupportedError(algName, pubkeyLen, sigLen)
+		}
+		return suiteVerifierBinding{}, resolveSuiteVerifierBindingPolicyInvalidError(algName, pubkeyLen, sigLen, err)
 	}
 	switch entry.RuntimeBinding {
 	case liveBindingPolicyRuntimeOpenSSLDigest32:
@@ -429,12 +470,7 @@ func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (sui
 			entry.OpenSSLAlg != "ML-DSA-87" ||
 			entry.PubkeyLen != ML_DSA_87_PUBKEY_BYTES ||
 			entry.SigLen != ML_DSA_87_SIG_BYTES {
-			return suiteVerifierBinding{}, fmt.Errorf(
-				"unsupported alg=%q pubkey_len=%d sig_len=%d",
-				algName,
-				pubkeyLen,
-				sigLen,
-			)
+			return suiteVerifierBinding{}, resolveSuiteVerifierBindingUnsupportedError(algName, pubkeyLen, sigLen)
 		}
 		return suiteVerifierBinding{
 			kind:       suiteVerifierBindingOpenSSLDigest32V1,
@@ -443,12 +479,7 @@ func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (sui
 			sigLen:     ML_DSA_87_SIG_BYTES,
 		}, nil
 	}
-	return suiteVerifierBinding{}, fmt.Errorf(
-		"unsupported alg=%q pubkey_len=%d sig_len=%d",
-		algName,
-		pubkeyLen,
-		sigLen,
-	)
+	return suiteVerifierBinding{}, resolveSuiteVerifierBindingUnsupportedError(algName, pubkeyLen, sigLen)
 }
 
 func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
@@ -514,10 +545,7 @@ func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, diges
 	}
 	binding, err := resolveSuiteVerifierBinding(params.AlgName, params.PubkeyLen, params.SigLen)
 	if err != nil {
-		return false, txerr(
-			TX_ERR_SIG_ALG_INVALID,
-			fmt.Sprintf("resolveSuiteVerifierBinding: suite_id=0x%02x %v", suiteID, err),
-		)
+		return false, wrapResolveSuiteVerifierBindingError(suiteID, err)
 	}
 	return verifySigWithBinding(binding, pubkey, signature, digest32)
 }
