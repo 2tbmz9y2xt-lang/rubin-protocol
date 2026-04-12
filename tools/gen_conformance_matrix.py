@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = REPO_ROOT / "conformance" / "fixtures"
+PROTOCOL_FIXTURES_DIR = FIXTURES_DIR / "protocol"
 RUNNER_PATH = REPO_ROOT / "conformance" / "runner" / "run_cv_bundle.py"
 OUT_PATH = REPO_ROOT / "conformance" / "MATRIX.md"
 EXPECTED_GATES = frozenset(
@@ -76,6 +77,33 @@ class GateRow:
     executable_ops: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ProtocolArtifactRow:
+    path: str
+    purpose: str
+    coverage: str
+
+
+PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
+    "legacy_exposure_hook_vectors.json": (
+        "Operational protocol artifact",
+        "legacy exposure scanner / hook-driven verification receipts",
+    ),
+    "legacy_exposure_report_v1_example.json": (
+        "Operational protocol artifact",
+        "example report shape for legacy exposure scanner consumers",
+    ),
+    "live_binding_policy_v1.json": (
+        "Canonical live binding policy artifact",
+        "Go/Rust consensus embedded copies, loader drift checks, and live binding/runtime parity tests",
+    ),
+    "production_rotation_schedule_v1.json": (
+        "Canonical production rotation schedule artifact",
+        "Go node / Rust node embedded schedule loaders and production activation checks",
+    ),
+}
+
+
 def load_local_ops() -> set[str]:
     spec = importlib.util.spec_from_file_location("rubin_run_cv_bundle", str(RUNNER_PATH))
     if spec is None or spec.loader is None:
@@ -92,6 +120,12 @@ def iter_fixtures() -> Iterable[Path]:
     if not FIXTURES_DIR.exists():
         raise RuntimeError(f"missing fixtures dir: {FIXTURES_DIR}")
     return sorted(FIXTURES_DIR.glob("CV-*.json"))
+
+
+def iter_protocol_artifacts() -> Iterable[Path]:
+    if not PROTOCOL_FIXTURES_DIR.exists():
+        return []
+    return sorted(PROTOCOL_FIXTURES_DIR.glob("*.json"))
 
 
 def validate_fixture_schema(data: Any, path: Path) -> tuple[str, list[dict[str, Any]]]:
@@ -158,6 +192,26 @@ def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
     return rows
 
 
+def load_protocol_artifact_rows() -> list[ProtocolArtifactRow]:
+    rows: list[ProtocolArtifactRow] = []
+    for path in iter_protocol_artifacts():
+        purpose, coverage = PROTOCOL_ARTIFACT_META.get(
+            path.name,
+            (
+                "Shared protocol artifact",
+                "shared protocol consumers and companion tests",
+            ),
+        )
+        rows.append(
+            ProtocolArtifactRow(
+                path=path.relative_to(FIXTURES_DIR).as_posix(),
+                purpose=purpose,
+                coverage=coverage,
+            )
+        )
+    return rows
+
+
 def validate_expected_gates(rows: list[GateRow]) -> None:
     actual_gates = {row.gate for row in rows}
     missing = sorted(EXPECTED_GATES - actual_gates)
@@ -174,7 +228,7 @@ def validate_expected_gates(rows: list[GateRow]) -> None:
     raise RuntimeError(f"fixture completeness check failed: {'; '.join(problems)}")
 
 
-def render(rows: list[GateRow], local_ops: set[str]) -> str:
+def render(rows: list[GateRow], local_ops: set[str], protocol_rows: list[ProtocolArtifactRow]) -> str:
     total_vectors = sum(r.vectors for r in rows)
     total_gates = len(rows)
     all_ops = sorted({o for r in rows for o in r.ops})
@@ -196,6 +250,7 @@ def render(rows: list[GateRow], local_ops: set[str]) -> str:
     lines.append(f"- Unique ops: **{len(all_ops)}**")
     lines.append(f"- Executable ops (Go↔Rust parity): **{len(all_exec_ops)}**")
     lines.append(f"- Local-only ops (runner-defined): **{len(all_local_ops)}**")
+    lines.append(f"- Shared protocol artifacts: **{len(protocol_rows)}**")
     lines.append("")
     lines.append("## Gates")
     lines.append("")
@@ -211,6 +266,13 @@ def render(rows: list[GateRow], local_ops: set[str]) -> str:
     for op in sorted(local_ops):
         lines.append(f"- `{op}`")
     lines.append("")
+    lines.append("## Shared Protocol Artifacts")
+    lines.append("")
+    lines.append("| Artifact | Purpose | Coverage path |")
+    lines.append("| --- | --- | --- |")
+    for row in protocol_rows:
+        lines.append(f"| `{row.path}` | {row.purpose} | {row.coverage} |")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -221,8 +283,9 @@ def main() -> int:
 
     local_ops = load_local_ops()
     rows = load_gate_rows(local_ops)
+    protocol_rows = load_protocol_artifact_rows()
     validate_expected_gates(rows)
-    content = render(rows, local_ops)
+    content = render(rows, local_ops, protocol_rows)
 
     if args.check:
         if not OUT_PATH.exists():

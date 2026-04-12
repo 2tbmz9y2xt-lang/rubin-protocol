@@ -476,7 +476,17 @@ fn resolve_suite_verifier_binding(
         })?;
     match entry.runtime_binding.as_str() {
         LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => {
-            let alg = openssl_alg_name_cstr(entry.openssl_alg.as_str()).ok_or_else(|| {
+            if entry.alg_name != "ML-DSA-87"
+                || entry.openssl_alg != "ML-DSA-87"
+                || entry.pubkey_len != ML_DSA_87_PUBKEY_BYTES
+                || entry.sig_len != ML_DSA_87_SIG_BYTES
+            {
+                return Err(TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "resolve_suite_verifier_binding: unsupported suite verifier binding",
+                ));
+            }
+            let alg = openssl_alg_name_cstr("ML-DSA-87").ok_or_else(|| {
                 TxError::new(
                     ErrorCode::TxErrSigAlgInvalid,
                     "resolve_suite_verifier_binding: unsupported OpenSSL alg",
@@ -484,8 +494,8 @@ fn resolve_suite_verifier_binding(
             })?;
             return Ok(SuiteVerifierBinding::OpenSslDigest32V1 {
                 alg,
-                pubkey_len: entry.pubkey_len,
-                sig_len: entry.sig_len,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
             });
         }
         _ => {}

@@ -425,11 +425,22 @@ func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (sui
 	}
 	switch entry.RuntimeBinding {
 	case liveBindingPolicyRuntimeOpenSSLDigest32:
+		if entry.AlgName != "ML-DSA-87" ||
+			entry.OpenSSLAlg != "ML-DSA-87" ||
+			entry.PubkeyLen != ML_DSA_87_PUBKEY_BYTES ||
+			entry.SigLen != ML_DSA_87_SIG_BYTES {
+			return suiteVerifierBinding{}, fmt.Errorf(
+				"unsupported alg=%q pubkey_len=%d sig_len=%d",
+				algName,
+				pubkeyLen,
+				sigLen,
+			)
+		}
 		return suiteVerifierBinding{
 			kind:       suiteVerifierBindingOpenSSLDigest32V1,
-			opensslAlg: entry.OpenSSLAlg,
-			pubkeyLen:  entry.PubkeyLen,
-			sigLen:     entry.SigLen,
+			opensslAlg: "ML-DSA-87",
+			pubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
+			sigLen:     ML_DSA_87_SIG_BYTES,
 		}, nil
 	}
 	return suiteVerifierBinding{}, fmt.Errorf(
