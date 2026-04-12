@@ -189,7 +189,6 @@ mod tests {
         live_binding_policy_runtime_entry, load_live_binding_policy_from_json,
         LIVE_BINDING_POLICY_V1_JSON, LIVE_BINDING_POLICY_VERSION,
     };
-    use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
 
@@ -202,11 +201,6 @@ mod tests {
         path
     }
 
-    fn compact_json_bytes(raw: &str) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::from_str::<Value>(raw).expect("compact json"))
-            .expect("serialize compact json")
-    }
-
     #[test]
     fn embedded_live_binding_policy_matches_canonical_fixture() {
         let path = live_binding_policy_repo_path(&[
@@ -215,10 +209,10 @@ mod tests {
             "protocol",
             "live_binding_policy_v1.json",
         ]);
-        let raw = fs::read_to_string(&path).expect("read canonical live binding policy fixture");
+        let raw = fs::read(&path).expect("read canonical live binding policy fixture");
         assert_eq!(
-            compact_json_bytes(&raw),
-            compact_json_bytes(LIVE_BINDING_POLICY_V1_JSON),
+            raw,
+            LIVE_BINDING_POLICY_V1_JSON.as_bytes(),
             "embedded live binding policy drifted from canonical fixture"
         );
     }
@@ -506,6 +500,150 @@ mod tests {
         for (name, raw, want) in cases {
             let err = load_live_binding_policy_from_json(raw).expect_err("must reject");
             assert_eq!(err, want, "{name}");
+        }
+    }
+
+    #[test]
+    fn live_binding_policy_rejects_missing_and_unknown_fields() {
+        let cases = [
+            (
+                "manifest_missing_version",
+                r#"{
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "pubkey_len": 2592,
+                        "sig_len": 4627,
+                        "runtime_binding": "openssl_digest32_v1",
+                        "openssl_alg": "ML-DSA-87",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    }]
+                }"#,
+                "missing field `version`",
+            ),
+            (
+                "manifest_unknown_field",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "pubkey_len": 2592,
+                        "sig_len": 4627,
+                        "runtime_binding": "openssl_digest32_v1",
+                        "openssl_alg": "ML-DSA-87",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    }],
+                    "unexpected": true
+                }"#,
+                "unknown field `unexpected`",
+            ),
+            (
+                "entry_missing_alg_name",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "pubkey_len": 2592,
+                        "sig_len": 4627,
+                        "runtime_binding": "openssl_digest32_v1",
+                        "openssl_alg": "ML-DSA-87",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    }]
+                }"#,
+                "missing field `alg_name`",
+            ),
+            (
+                "entry_missing_pubkey_len",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "sig_len": 4627,
+                        "runtime_binding": "openssl_digest32_v1",
+                        "openssl_alg": "ML-DSA-87",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    }]
+                }"#,
+                "missing field `pubkey_len`",
+            ),
+            (
+                "entry_missing_sig_len",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "pubkey_len": 2592,
+                        "runtime_binding": "openssl_digest32_v1",
+                        "openssl_alg": "ML-DSA-87",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    }]
+                }"#,
+                "missing field `sig_len`",
+            ),
+            (
+                "entry_missing_runtime_binding",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "pubkey_len": 2592,
+                        "sig_len": 4627,
+                        "openssl_alg": "ML-DSA-87",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    }]
+                }"#,
+                "missing field `runtime_binding`",
+            ),
+            (
+                "entry_missing_openssl_alg",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "pubkey_len": 2592,
+                        "sig_len": 4627,
+                        "runtime_binding": "openssl_digest32_v1",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    }]
+                }"#,
+                "missing field `openssl_alg`",
+            ),
+            (
+                "entry_missing_core_ext_live_binding_name",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "pubkey_len": 2592,
+                        "sig_len": 4627,
+                        "runtime_binding": "openssl_digest32_v1",
+                        "openssl_alg": "ML-DSA-87"
+                    }]
+                }"#,
+                "missing field `core_ext_live_binding_name`",
+            ),
+            (
+                "entry_unknown_field",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "pubkey_len": 2592,
+                        "sig_len": 4627,
+                        "runtime_binding": "openssl_digest32_v1",
+                        "openssl_alg": "ML-DSA-87",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1",
+                        "unexpected": true
+                    }]
+                }"#,
+                "unknown field `unexpected`",
+            ),
+        ];
+
+        for (name, raw, needle) in cases {
+            let err = load_live_binding_policy_from_json(raw).expect_err("must reject");
+            assert!(
+                err.contains(needle),
+                "{name}: err={err:?} missing substring {needle:?}"
+            );
         }
     }
 
