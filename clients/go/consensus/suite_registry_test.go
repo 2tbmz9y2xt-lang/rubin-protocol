@@ -103,7 +103,7 @@ func TestNewSuiteRegistryFromParams_BuildsIndependentRegistry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNativeSuiteSet_Contains(t *testing.T) {
-	s := NewNativeSuiteSet(SUITE_ID_ML_DSA_87)
+	s := mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87)
 	if !s.Contains(SUITE_ID_ML_DSA_87) {
 		t.Error("set should contain ML-DSA-87")
 	}
@@ -116,14 +116,14 @@ func TestNativeSuiteSet_Contains(t *testing.T) {
 }
 
 func TestNativeSuiteSet_Len(t *testing.T) {
-	s := NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02)
+	s := mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02)
 	if s.Len() != 2 {
 		t.Errorf("Len = %d, want 2", s.Len())
 	}
 }
 
 func TestNativeSuiteSet_SuiteIDs_Sorted(t *testing.T) {
-	s := NewNativeSuiteSet(0x02, SUITE_ID_ML_DSA_87)
+	s := mustNewNativeSuiteSet(0x02, SUITE_ID_ML_DSA_87)
 	ids := s.SuiteIDs()
 	if len(ids) != 2 {
 		t.Fatalf("len = %d, want 2", len(ids))
@@ -134,7 +134,7 @@ func TestNativeSuiteSet_SuiteIDs_Sorted(t *testing.T) {
 }
 
 func TestNativeSuiteSet_Empty(t *testing.T) {
-	s := NewNativeSuiteSet()
+	s := mustNewNativeSuiteSet()
 	if s.Contains(SUITE_ID_ML_DSA_87) {
 		t.Error("empty set should not contain anything")
 	}
@@ -160,7 +160,7 @@ func TestNativeSuiteSet_NilSafe(t *testing.T) {
 }
 
 func TestNativeSuiteSet_Dedup(t *testing.T) {
-	s := NewNativeSuiteSet(SUITE_ID_ML_DSA_87, SUITE_ID_ML_DSA_87, SUITE_ID_ML_DSA_87)
+	s := mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87, SUITE_ID_ML_DSA_87, SUITE_ID_ML_DSA_87)
 	if s.Len() != 1 {
 		t.Errorf("Len = %d, want 1 (dedup)", s.Len())
 	}
@@ -176,25 +176,18 @@ func TestTryNewNativeSuiteSet_RejectsMoreThanTwoUniqueSuites(t *testing.T) {
 	}
 }
 
-func TestNewNativeSuiteSet_PanicsOnMoreThanTwoUniqueSuites(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic")
-		}
-		msg, ok := r.(error)
-		if !ok {
-			t.Fatalf("panic=%T, want error", r)
-		}
-		if got, want := msg.Error(), "native suite set cardinality 3 exceeds max 2"; got != want {
-			t.Fatalf("panic err=%q, want %q", got, want)
-		}
-	}()
-	_ = NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02, 0x03)
+func TestNewNativeSuiteSet_RejectsMoreThanTwoUniqueSuites(t *testing.T) {
+	_, err := NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02, 0x03)
+	if err == nil {
+		t.Fatal("expected cardinality rejection")
+	}
+	if got, want := err.Error(), "native suite set cardinality 3 exceeds max 2"; got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
 }
 
 func TestNativeSuiteSet_Clone(t *testing.T) {
-	orig := NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02)
+	orig := mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02)
 	cloned := orig.Clone()
 	if cloned.Len() != orig.Len() {
 		t.Fatalf("Clone Len = %d, want %d", cloned.Len(), orig.Len())
@@ -271,14 +264,14 @@ type mockRotationProvider struct {
 }
 
 func (m *mockRotationProvider) NativeCreateSuites(height uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(SUITE_ID_ML_DSA_87)
+	return mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87)
 }
 
 func (m *mockRotationProvider) NativeSpendSuites(height uint64) *NativeSuiteSet {
 	if height >= m.h2 {
-		return NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02)
+		return mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02)
 	}
-	return NewNativeSuiteSet(SUITE_ID_ML_DSA_87)
+	return mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87)
 }
 
 func TestMockRotationProvider_TransitionAtH2(t *testing.T) {

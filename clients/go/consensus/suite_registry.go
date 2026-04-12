@@ -149,9 +149,17 @@ func TryNewNativeSuiteSet(ids ...uint8) (*NativeSuiteSet, error) {
 	return &NativeSuiteSet{suites: m}, nil
 }
 
-// NewNativeSuiteSet constructs a NativeSuiteSet from a list of suite IDs.
-func NewNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
-	s, err := TryNewNativeSuiteSet(ids...)
+// NewNativeSuiteSet constructs a NativeSuiteSet from a list of suite IDs and
+// fail-closes if the deduplicated live/native cardinality exceeds the v1
+// mainnet cap of two suites.
+func NewNativeSuiteSet(ids ...uint8) (*NativeSuiteSet, error) {
+	return TryNewNativeSuiteSet(ids...)
+}
+
+// mustNewNativeSuiteSet is reserved for trusted static initialization or code
+// paths that already validated the suite-set cardinality invariant.
+func mustNewNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
+	s, err := NewNativeSuiteSet(ids...)
 	if err != nil {
 		panic(err)
 	}
@@ -191,7 +199,7 @@ type RotationProvider interface {
 // This is the pre-rotation behavior.
 type DefaultRotationProvider struct{}
 
-var defaultNativeSuiteSet = NewNativeSuiteSet(SUITE_ID_ML_DSA_87)
+var defaultNativeSuiteSet = mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87)
 
 // NativeCreateSuites implements RotationProvider.
 func (DefaultRotationProvider) NativeCreateSuites(_ uint64) *NativeSuiteSet {

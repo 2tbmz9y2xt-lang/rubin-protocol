@@ -17,21 +17,21 @@ func (m staticCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (Cor
 type nativeRotationProvider struct{}
 
 func (nativeRotationProvider) NativeCreateSuites(uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(0x02)
+	return mustNewNativeSuiteSet(0x02)
 }
 
 func (nativeRotationProvider) NativeSpendSuites(uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(0x02)
+	return mustNewNativeSuiteSet(0x02)
 }
 
 type sunsetNativeRotationProvider struct{}
 
 func (sunsetNativeRotationProvider) NativeCreateSuites(uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(0x02)
+	return mustNewNativeSuiteSet(0x02)
 }
 
 func (sunsetNativeRotationProvider) NativeSpendSuites(uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet()
+	return mustNewNativeSuiteSet()
 }
 
 func coreExtCovenantData(extID uint16, payload []byte) []byte {

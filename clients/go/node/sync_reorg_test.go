@@ -547,13 +547,21 @@ type countingRotationProvider struct {
 	spendCalls int
 }
 
+func mustConsensusNativeSuiteSet(ids ...uint8) *consensus.NativeSuiteSet {
+	s, err := consensus.NewNativeSuiteSet(ids...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
 func (p *countingRotationProvider) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {
-	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87, p.suiteID)
+	return mustConsensusNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87, p.suiteID)
 }
 
 func (p *countingRotationProvider) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
 	p.spendCalls++
-	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87, p.suiteID)
+	return mustConsensusNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87, p.suiteID)
 }
 
 func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {

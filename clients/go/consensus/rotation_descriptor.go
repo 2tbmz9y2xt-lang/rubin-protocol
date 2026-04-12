@@ -106,12 +106,12 @@ type DescriptorRotationProvider struct {
 func (p DescriptorRotationProvider) NativeCreateSuites(height uint64) *NativeSuiteSet {
 	d := p.Descriptor
 	if height < d.CreateHeight { // H1
-		return NewNativeSuiteSet(d.OldSuiteID)
+		return mustNewNativeSuiteSet(d.OldSuiteID)
 	}
 	if height < d.SpendHeight { // H2
-		return NewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
+		return mustNewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
 	}
-	return NewNativeSuiteSet(d.NewSuiteID)
+	return mustNewNativeSuiteSet(d.NewSuiteID)
 }
 
 // NativeSpendSuites implements RotationProvider.
@@ -122,10 +122,10 @@ func (p DescriptorRotationProvider) NativeCreateSuites(height uint64) *NativeSui
 func (p DescriptorRotationProvider) NativeSpendSuites(height uint64) *NativeSuiteSet {
 	d := p.Descriptor
 	if height < d.CreateHeight { // H1
-		return NewNativeSuiteSet(d.OldSuiteID)
+		return mustNewNativeSuiteSet(d.OldSuiteID)
 	}
 	if d.SunsetHeight != 0 && height >= d.SunsetHeight { // H4
-		return NewNativeSuiteSet(d.NewSuiteID)
+		return mustNewNativeSuiteSet(d.NewSuiteID)
 	}
-	return NewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
+	return mustNewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
 }
