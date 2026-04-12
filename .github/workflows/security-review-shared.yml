@@ -67,7 +67,7 @@ jobs:
         id: diff
         run: |
           FILES=$(gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --name-only)
-          RELEVANT=$(printf '%s\n' "$FILES" | grep -E '(\.go$|\.rs$|\.lean$|^\.github/workflows/|^scripts/security/|^tools/.*\.(py|sh|json)$)' || true)
+          RELEVANT=$(printf '%s\n' "$FILES" | grep -E '(\.go$|\.rs$|\.lean$|^\.github/workflows/|^\.github/security-acknowledged\.json$|^scripts/security/|^tools/.*\.(py|sh|json)$)' || true)
           if [ -z "$RELEVANT" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "SKIP: no enforcement-sensitive code/workflow/tooling changes for hostile review"
@@ -105,14 +105,14 @@ jobs:
           # For external providers (OpenRouter etc.) API_KEY MUST be set
           # for same-repo PRs — silently skipping would remove a security
           # reviewer from the merge gate without warning. Only fork PRs
-          # are allowed to skip, because GitHub deliberately withholds
-          # repository secrets from forked PRs.
+          # and Dependabot PRs are allowed to skip, because GitHub
+          # deliberately withholds repository secrets from both contexts.
           if [ "$USES_GITHUB_MODELS" = "true" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
           elif [ -z "$API_KEY" ]; then
-            if [ "$IS_FORK_PR" = "true" ]; then
+            if [ "$IS_FORK_PR" = "true" ] || [ "$IS_DEPENDABOT" = "true" ]; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
-              echo "::notice::API key not available (fork PR). Skipping review."
+              echo "::notice::API key not available (fork PR or Dependabot). Skipping review."
             else
               echo "::error::API key missing for same-repo PR — set the OpenRouter secret on the workflow caller."
               exit 1
@@ -124,6 +124,7 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
           USES_GITHUB_MODELS: ${{ inputs.uses_github_models }}
           IS_FORK_PR: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          IS_DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
       - name: Download diff artifact
         if: steps.check-key.outputs.skip != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v4
@@ -159,10 +160,14 @@ jobs:
 
             // Truncation note tells the model to downgrade confidence on
             // missing tail content rather than treat omissions as "unchanged".
+            // The slice subtracts the note length so the final string never
+            // exceeds the cap (which would defeat the cap and risk hitting
+            // provider request limits).
             const DIFF_CAP = 128000;
             const diffRaw = fs.readFileSync('pr-diff.txt', 'utf8');
+            const diffTruncationNote = `\n\n[TRUNCATED — diff exceeded ${DIFF_CAP} bytes; tail omitted]`;
             const diff = diffRaw.length > DIFF_CAP
-              ? diffRaw.slice(0, DIFF_CAP) + `\n\n[TRUNCATED — diff exceeded ${DIFF_CAP} bytes; tail omitted]`
+              ? diffRaw.slice(0, Math.max(0, DIFF_CAP - diffTruncationNote.length)) + diffTruncationNote
               : diffRaw;
 
             // Fetch previous security review findings to avoid re-reporting.
@@ -247,6 +252,7 @@ jobs:
               || file.endsWith('.rs')
               || file.endsWith('.lean')
               || file.startsWith('.github/workflows/')
+              || file === '.github/security-acknowledged.json'
               || file.startsWith('scripts/security/')
               || /^tools\/.*\.(py|sh|json)$/.test(file)
             );
@@ -570,8 +576,11 @@ jobs:
               dependencyContext,
               parityContext
             ].join('\n');
+            // Same slice-minus-note-length pattern as the diff truncation
+            // so the final user prompt is strictly bounded by the cap.
+            const userPromptTruncationNote = `\n\n[TRUNCATED — user prompt exceeded ${USER_PROMPT_CAP} bytes; later sections may be missing, do not treat omissions as "unchanged"]`;
             const userPrompt = userPromptRaw.length > USER_PROMPT_CAP
-              ? userPromptRaw.slice(0, USER_PROMPT_CAP) + `\n\n[TRUNCATED — user prompt exceeded ${USER_PROMPT_CAP} bytes; later sections may be missing, do not treat omissions as "unchanged"]`
+              ? userPromptRaw.slice(0, Math.max(0, USER_PROMPT_CAP - userPromptTruncationNote.length)) + userPromptTruncationNote
               : userPromptRaw;
 
             // Build request based on API type. usesGitHubModels, apiUrl,
@@ -684,6 +693,14 @@ jobs:
           name: ${{ inputs.artifact_prefix }}-raw-output
           path: raw-review-output.txt
           retention-days: 3
+
+      - name: Upload review JSON artifact
+        if: always() && hashFiles('review-output.json') != ''
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+        with:
+          name: ${{ inputs.artifact_prefix }}-review-output
+          path: review-output.json
+          retention-days: 7
 
       - name: Post review
         if: steps.review.outputs.review_file
