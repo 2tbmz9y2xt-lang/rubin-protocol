@@ -378,35 +378,45 @@ func TestLiveBindingPolicyLookupHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("liveBindingPolicyRuntimeEntry(valid): %v", err)
 	}
-	if runtimeEntry == nil {
-		t.Fatal("expected runtime entry")
-	}
 	if runtimeEntry.OpenSSLAlg != "ML-DSA-87" {
 		t.Fatalf("openssl_alg=%q, want %q", runtimeEntry.OpenSSLAlg, "ML-DSA-87")
 	}
-	runtimeMiss, err := liveBindingPolicyRuntimeEntry("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES-1)
+	runtimeEntry.OpenSSLAlg = "MUTATED"
+	runtimeEntryAgain, err := liveBindingPolicyRuntimeEntry("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
 	if err != nil {
-		t.Fatalf("liveBindingPolicyRuntimeEntry(miss): %v", err)
+		t.Fatalf("liveBindingPolicyRuntimeEntry(reload): %v", err)
 	}
-	if runtimeMiss != nil {
-		t.Fatalf("runtime miss=%+v, want nil", runtimeMiss)
+	if runtimeEntryAgain.OpenSSLAlg != "ML-DSA-87" {
+		t.Fatalf("lookup must return copy, got openssl_alg=%q", runtimeEntryAgain.OpenSSLAlg)
+	}
+	runtimeMiss, err := liveBindingPolicyRuntimeEntry("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES-1)
+	if err == nil {
+		t.Fatal("expected runtime miss rejection")
+	}
+	if got, want := err.Error(), `live_binding_policy: runtime tuple not found alg="ML-DSA-87" pubkey_len=2592 sig_len=4626`; got != want {
+		t.Fatalf("runtime miss err=%q, want %q (entry=%+v)", got, want, runtimeMiss)
 	}
 
 	coreExtEntry, err := liveBindingPolicyCoreExtEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	if err != nil {
 		t.Fatalf("liveBindingPolicyCoreExtEntry(valid): %v", err)
 	}
-	if coreExtEntry == nil {
-		t.Fatal("expected core_ext entry")
-	}
 	if coreExtEntry.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
 		t.Fatalf("runtime_binding=%q, want %q", coreExtEntry.RuntimeBinding, liveBindingPolicyRuntimeOpenSSLDigest32)
 	}
-	coreExtMiss, err := liveBindingPolicyCoreExtEntry("verify_sig_ext_unknown")
+	coreExtEntry.RuntimeBinding = "MUTATED"
+	coreExtEntryAgain, err := liveBindingPolicyCoreExtEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
 	if err != nil {
-		t.Fatalf("liveBindingPolicyCoreExtEntry(miss): %v", err)
+		t.Fatalf("liveBindingPolicyCoreExtEntry(reload): %v", err)
 	}
-	if coreExtMiss != nil {
-		t.Fatalf("core_ext miss=%+v, want nil", coreExtMiss)
+	if coreExtEntryAgain.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
+		t.Fatalf("lookup must return copy, got runtime_binding=%q", coreExtEntryAgain.RuntimeBinding)
+	}
+	coreExtMiss, err := liveBindingPolicyCoreExtEntry("verify_sig_ext_unknown")
+	if err == nil {
+		t.Fatal("expected core_ext miss rejection")
+	}
+	if got, want := err.Error(), `live_binding_policy: core_ext_live_binding_name not found "verify_sig_ext_unknown"`; got != want {
+		t.Fatalf("core_ext miss err=%q, want %q (entry=%+v)", got, want, coreExtMiss)
 	}
 }

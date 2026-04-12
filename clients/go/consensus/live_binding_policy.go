@@ -46,6 +46,34 @@ func liveBindingPolicyError(format string, args ...any) error {
 	return fmt.Errorf(liveBindingPolicyErrStem+": "+format, args...)
 }
 
+type liveBindingPolicyRuntimeEntryNotFoundError struct {
+	algName   string
+	pubkeyLen int
+	sigLen    int
+}
+
+func (e liveBindingPolicyRuntimeEntryNotFoundError) Error() string {
+	return fmt.Sprintf(
+		"%s: runtime tuple not found alg=%q pubkey_len=%d sig_len=%d",
+		liveBindingPolicyErrStem,
+		e.algName,
+		e.pubkeyLen,
+		e.sigLen,
+	)
+}
+
+type liveBindingPolicyCoreExtEntryNotFoundError struct {
+	binding string
+}
+
+func (e liveBindingPolicyCoreExtEntryNotFoundError) Error() string {
+	return fmt.Sprintf(
+		"%s: core_ext_live_binding_name not found %q",
+		liveBindingPolicyErrStem,
+		e.binding,
+	)
+}
+
 func liveBindingPolicyRuntimeTupleKey(algName string, pubkeyLen int, sigLen int) string {
 	return fmt.Sprintf("%s|%d|%d", algName, pubkeyLen, sigLen)
 }
@@ -269,32 +297,38 @@ func liveBindingPolicyRuntimeEntry(
 	algName string,
 	pubkeyLen int,
 	sigLen int,
-) (*liveBindingPolicyEntry, error) {
+) (liveBindingPolicyEntry, error) {
 	manifest, err := defaultLiveBindingPolicy()
 	if err != nil {
-		return nil, err
+		return liveBindingPolicyEntry{}, err
 	}
 	for i := range manifest.Entries {
 		entry := &manifest.Entries[i]
 		if entry.AlgName == algName &&
 			entry.PubkeyLen == pubkeyLen &&
 			entry.SigLen == sigLen {
-			return entry, nil
+			return *entry, nil
 		}
 	}
-	return nil, nil
+	return liveBindingPolicyEntry{}, liveBindingPolicyRuntimeEntryNotFoundError{
+		algName:   algName,
+		pubkeyLen: pubkeyLen,
+		sigLen:    sigLen,
+	}
 }
 
-func liveBindingPolicyCoreExtEntry(binding string) (*liveBindingPolicyEntry, error) {
+func liveBindingPolicyCoreExtEntry(binding string) (liveBindingPolicyEntry, error) {
 	manifest, err := defaultLiveBindingPolicy()
 	if err != nil {
-		return nil, err
+		return liveBindingPolicyEntry{}, err
 	}
 	for i := range manifest.Entries {
 		entry := &manifest.Entries[i]
 		if entry.CoreExtLiveBindingName == binding {
-			return entry, nil
+			return *entry, nil
 		}
 	}
-	return nil, nil
+	return liveBindingPolicyEntry{}, liveBindingPolicyCoreExtEntryNotFoundError{
+		binding: binding,
+	}
 }

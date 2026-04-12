@@ -30,6 +30,22 @@ fn live_binding_policy_error(message: impl Into<String>) -> String {
     format!("{LIVE_BINDING_POLICY_ERR_STEM}: {}", message.into())
 }
 
+pub(crate) fn live_binding_policy_runtime_entry_not_found_error(
+    alg_name: &str,
+    pubkey_len: u64,
+    sig_len: u64,
+) -> String {
+    live_binding_policy_error(format!(
+        "runtime tuple not found alg={alg_name:?} pubkey_len={pubkey_len} sig_len={sig_len}"
+    ))
+}
+
+pub(crate) fn live_binding_policy_core_ext_entry_not_found_error(binding_name: &str) -> String {
+    live_binding_policy_error(format!(
+        "core_ext_live_binding_name not found {binding_name:?}"
+    ))
+}
+
 fn live_binding_policy_runtime_tuple_key(alg_name: &str, pubkey_len: u64, sig_len: u64) -> String {
     format!("{alg_name}|{pubkey_len}|{sig_len}")
 }
@@ -165,28 +181,36 @@ pub(crate) fn live_binding_policy_runtime_entry(
     alg_name: &str,
     pubkey_len: u64,
     sig_len: u64,
-) -> Result<Option<&'static LiveBindingPolicyEntry>, String> {
+) -> Result<&'static LiveBindingPolicyEntry, String> {
     let manifest = default_live_binding_policy()?;
-    Ok(manifest.entries.iter().find(|entry| {
-        entry.alg_name == alg_name && entry.pubkey_len == pubkey_len && entry.sig_len == sig_len
-    }))
+    manifest
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.alg_name == alg_name && entry.pubkey_len == pubkey_len && entry.sig_len == sig_len
+        })
+        .ok_or_else(|| {
+            live_binding_policy_runtime_entry_not_found_error(alg_name, pubkey_len, sig_len)
+        })
 }
 
 pub(crate) fn live_binding_policy_core_ext_entry(
     binding_name: &str,
-) -> Result<Option<&'static LiveBindingPolicyEntry>, String> {
+) -> Result<&'static LiveBindingPolicyEntry, String> {
     let manifest = default_live_binding_policy()?;
-    Ok(manifest
+    manifest
         .entries
         .iter()
-        .find(|entry| entry.core_ext_live_binding_name == binding_name))
+        .find(|entry| entry.core_ext_live_binding_name == binding_name)
+        .ok_or_else(|| live_binding_policy_core_ext_entry_not_found_error(binding_name))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         default_live_binding_policy, live_binding_policy_core_ext_entry,
-        live_binding_policy_runtime_entry, load_live_binding_policy_from_json,
+        live_binding_policy_core_ext_entry_not_found_error, live_binding_policy_runtime_entry,
+        live_binding_policy_runtime_entry_not_found_error, load_live_binding_policy_from_json,
         LIVE_BINDING_POLICY_V1_JSON, LIVE_BINDING_POLICY_VERSION,
     };
     use std::fs;
@@ -650,22 +674,26 @@ mod tests {
     #[test]
     fn live_binding_policy_lookup_helpers_match_embedded_manifest() {
         let runtime_entry = live_binding_policy_runtime_entry("ML-DSA-87", 2592, 4627)
-            .expect("lookup runtime entry")
-            .expect("runtime entry");
+            .expect("lookup runtime entry");
         assert_eq!(runtime_entry.openssl_alg, "ML-DSA-87");
 
         let runtime_miss = live_binding_policy_runtime_entry("ML-DSA-87", 2592, 4626)
-            .expect("lookup runtime miss");
-        assert!(runtime_miss.is_none());
+            .expect_err("lookup runtime miss");
+        assert_eq!(
+            runtime_miss,
+            live_binding_policy_runtime_entry_not_found_error("ML-DSA-87", 2592, 4626)
+        );
 
         let core_ext_entry =
             live_binding_policy_core_ext_entry("verify_sig_ext_openssl_digest32_v1")
-                .expect("lookup core_ext entry")
-                .expect("core_ext entry");
+                .expect("lookup core_ext entry");
         assert_eq!(core_ext_entry.runtime_binding, "openssl_digest32_v1");
 
         let core_ext_miss = live_binding_policy_core_ext_entry("verify_sig_ext_unknown")
-            .expect("lookup core_ext miss");
-        assert!(core_ext_miss.is_none());
+            .expect_err("lookup core_ext miss");
+        assert_eq!(
+            core_ext_miss,
+            live_binding_policy_core_ext_entry_not_found_error("verify_sig_ext_unknown")
+        );
     }
 }

@@ -229,13 +229,13 @@ impl RotationProvider for DescriptorRotationProvider {
         let d = &self.descriptor;
         if height < d.create_height {
             // Phase 0: before H1
-            NativeSuiteSet::new(&[d.old_suite_id])
+            descriptor_native_suite_set(&[d.old_suite_id])
         } else if height < d.spend_height {
             // Phase 1: [H1, H2)
-            NativeSuiteSet::new(&[d.old_suite_id, d.new_suite_id])
+            descriptor_native_suite_set(&[d.old_suite_id, d.new_suite_id])
         } else {
             // Phase 2+: H2 onwards — create cutoff
-            NativeSuiteSet::new(&[d.new_suite_id])
+            descriptor_native_suite_set(&[d.new_suite_id])
         }
     }
 
@@ -244,13 +244,27 @@ impl RotationProvider for DescriptorRotationProvider {
         let d = &self.descriptor;
         if height < d.create_height {
             // Phase 0: before H1
-            NativeSuiteSet::new(&[d.old_suite_id])
+            descriptor_native_suite_set(&[d.old_suite_id])
         } else if d.sunset_height != 0 && height >= d.sunset_height {
             // Phase 4: H4 sunset
-            NativeSuiteSet::new(&[d.new_suite_id])
+            descriptor_native_suite_set(&[d.new_suite_id])
         } else {
             // Phase 1-3: [H1, H4) or [H1, ∞)
-            NativeSuiteSet::new(&[d.old_suite_id, d.new_suite_id])
+            descriptor_native_suite_set(&[d.old_suite_id, d.new_suite_id])
+        }
+    }
+}
+
+fn descriptor_native_suite_set(ids: &[u8]) -> NativeSuiteSet {
+    match NativeSuiteSet::try_new(ids) {
+        Ok(set) => set,
+        Err(_) => {
+            // Descriptor-driven selectors only emit {old}, {new}, or {old,new}.
+            // If a future edit violates that bounded invariant, fail closed
+            // instead of panicking on a consensus path.
+            NativeSuiteSet {
+                suites: BTreeSet::new(),
+            }
         }
     }
 }
@@ -1049,6 +1063,13 @@ mod tests {
     fn test_native_suite_set_rejects_more_than_two_unique_suites() {
         let err = NativeSuiteSet::try_new(&[0x01, 0x02, 0x03]).expect_err("must reject");
         assert_eq!(err, "native suite set cardinality 3 exceeds max 2");
+    }
+
+    #[test]
+    fn test_descriptor_native_suite_set_fails_closed_on_impossible_cardinality() {
+        let s = descriptor_native_suite_set(&[0x01, 0x02, 0x03]);
+        assert!(s.is_empty());
+        assert_eq!(s.len(), 0);
     }
 
     #[test]

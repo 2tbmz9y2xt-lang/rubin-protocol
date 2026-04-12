@@ -1,7 +1,8 @@
 use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87};
 use crate::error::{ErrorCode, TxError};
 use crate::live_binding_policy::{
-    live_binding_policy_runtime_entry, LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1,
+    live_binding_policy_runtime_entry, live_binding_policy_runtime_entry_not_found_error,
+    LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1,
 };
 use crate::tx_helpers::DigestSigner;
 use core::ffi::CStr;
@@ -458,29 +459,36 @@ fn resolve_suite_verifier_binding(
     sig_len: u64,
 ) -> Result<SuiteVerifierBinding, TxError> {
     let _ = suite_id;
-    let entry = live_binding_policy_runtime_entry(alg_name, pubkey_len, sig_len).map_err(|_| {
-        TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "resolve_suite_verifier_binding: live binding policy invalid",
-        )
-    })?;
-    if let Some(entry) = entry {
-        match entry.runtime_binding.as_str() {
-            LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => {
-                let alg = openssl_alg_name_cstr(entry.openssl_alg.as_str()).ok_or_else(|| {
-                    TxError::new(
-                        ErrorCode::TxErrSigAlgInvalid,
-                        "resolve_suite_verifier_binding: unsupported OpenSSL alg",
-                    )
-                })?;
-                return Ok(SuiteVerifierBinding::OpenSslDigest32V1 {
-                    alg,
-                    pubkey_len: entry.pubkey_len,
-                    sig_len: entry.sig_len,
-                });
+    let entry =
+        live_binding_policy_runtime_entry(alg_name, pubkey_len, sig_len).map_err(|err| {
+            if err
+                == live_binding_policy_runtime_entry_not_found_error(alg_name, pubkey_len, sig_len)
+            {
+                return TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "resolve_suite_verifier_binding: unsupported suite verifier binding",
+                );
             }
-            _ => {}
+            TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "resolve_suite_verifier_binding: live binding policy invalid",
+            )
+        })?;
+    match entry.runtime_binding.as_str() {
+        LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => {
+            let alg = openssl_alg_name_cstr(entry.openssl_alg.as_str()).ok_or_else(|| {
+                TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    "resolve_suite_verifier_binding: unsupported OpenSSL alg",
+                )
+            })?;
+            return Ok(SuiteVerifierBinding::OpenSslDigest32V1 {
+                alg,
+                pubkey_len: entry.pubkey_len,
+                sig_len: entry.sig_len,
+            });
         }
+        _ => {}
     }
     Err(TxError::new(
         ErrorCode::TxErrSigAlgInvalid,

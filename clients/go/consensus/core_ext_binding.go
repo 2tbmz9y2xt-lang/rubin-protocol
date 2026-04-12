@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -49,19 +50,20 @@ func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
 // supportedLiveCoreExtPolicyEntry keeps live binding normalization and live
 // parser dispatch on the exact same acceptance set. Any future policy entry
 // must be admitted here before either path starts accepting it.
-func supportedLiveCoreExtPolicyEntry(binding string) (*liveBindingPolicyEntry, error) {
+func supportedLiveCoreExtPolicyEntry(binding string) (liveBindingPolicyEntry, error) {
 	entry, err := liveBindingPolicyCoreExtEntry(binding)
 	if err != nil {
-		return nil, err
-	}
-	if entry == nil {
-		return nil, unsupportedCoreExtBindingError(binding)
+		var miss liveBindingPolicyCoreExtEntryNotFoundError
+		if errors.As(err, &miss) {
+			return liveBindingPolicyEntry{}, unsupportedCoreExtBindingError(binding)
+		}
+		return liveBindingPolicyEntry{}, err
 	}
 	switch entry.RuntimeBinding {
 	case liveBindingPolicyRuntimeOpenSSLDigest32:
 		return entry, nil
 	default:
-		return nil, unsupportedCoreExtBindingError(binding)
+		return liveBindingPolicyEntry{}, unsupportedCoreExtBindingError(binding)
 	}
 }
 

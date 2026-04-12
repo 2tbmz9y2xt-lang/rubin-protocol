@@ -422,16 +422,14 @@ func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (sui
 	if err != nil {
 		return suiteVerifierBinding{}, err
 	}
-	if entry != nil {
-		switch entry.RuntimeBinding {
-		case liveBindingPolicyRuntimeOpenSSLDigest32:
-			return suiteVerifierBinding{
-				kind:       suiteVerifierBindingOpenSSLDigest32V1,
-				opensslAlg: entry.OpenSSLAlg,
-				pubkeyLen:  entry.PubkeyLen,
-				sigLen:     entry.SigLen,
-			}, nil
-		}
+	switch entry.RuntimeBinding {
+	case liveBindingPolicyRuntimeOpenSSLDigest32:
+		return suiteVerifierBinding{
+			kind:       suiteVerifierBindingOpenSSLDigest32V1,
+			opensslAlg: entry.OpenSSLAlg,
+			pubkeyLen:  entry.PubkeyLen,
+			sigLen:     entry.SigLen,
+		}, nil
 	}
 	return suiteVerifierBinding{}, fmt.Errorf(
 		"unsupported alg=%q pubkey_len=%d sig_len=%d",
