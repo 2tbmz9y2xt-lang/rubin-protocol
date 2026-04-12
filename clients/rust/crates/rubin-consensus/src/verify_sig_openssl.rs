@@ -443,15 +443,15 @@ enum SuiteVerifierBinding {
     },
 }
 
-// v1 keeps the legacy ML-DSA-87 verifier on the explicit OpenSSL
-// archival/runtime path. Runtime dispatch must resolve a concrete binding
-// instead of treating registry.alg_name as an implicit backend switch.
+// v1 keeps the current live verifier contract pinned to the canonical
+// ML-DSA-87/OpenSSL-digest32 tuple from the shared live binding artifact.
+// Runtime dispatch must resolve a concrete binding instead of treating
+// registry.alg_name as an implicit backend switch.
 //
 // `suite_id` is admitted earlier by `runtime_suite_params_for_verification`.
-// Binding resolution intentionally remains keyed by the canonical
-// `(alg_name, pubkey_len, sig_len)` tuple so registry-approved custom suites
-// that explicitly reuse the ML-DSA-87 v1 live descriptor keep the same
-// archival/runtime verifier path as Go.
+// This helper intentionally does not restore a second hardcoded live-policy
+// switch: the artifact stays authoritative, and only callers that advertise
+// the exact canonical tuple can reuse the legacy v1 verifier path as in Go.
 fn resolve_suite_verifier_binding(
     suite_id: u8,
     alg_name: &str,
@@ -1211,6 +1211,41 @@ mod tests {
                 assert_eq!(alg.to_str().expect("alg utf8"), parsed.openssl_alg);
                 assert_eq!(pubkey_len, parsed.pubkey_len);
                 assert_eq!(sig_len, parsed.sig_len);
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_suite_verifier_binding_live_policy_pins_canonical_legacy_v1_binding() {
+        let entry = crate::live_binding_policy::live_binding_policy_runtime_entry(
+            "ML-DSA-87",
+            crate::constants::ML_DSA_87_PUBKEY_BYTES,
+            crate::constants::ML_DSA_87_SIG_BYTES,
+        )
+        .expect("live binding entry");
+        assert_eq!(
+            entry.runtime_binding,
+            crate::live_binding_policy::LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1
+        );
+        assert_eq!(entry.alg_name, "ML-DSA-87");
+        assert_eq!(entry.openssl_alg, "ML-DSA-87");
+
+        let binding = super::resolve_suite_verifier_binding(
+            crate::constants::SUITE_ID_ML_DSA_87,
+            "ML-DSA-87",
+            crate::constants::ML_DSA_87_PUBKEY_BYTES,
+            crate::constants::ML_DSA_87_SIG_BYTES,
+        )
+        .expect("binding");
+        match binding {
+            super::SuiteVerifierBinding::OpenSslDigest32V1 {
+                alg,
+                pubkey_len,
+                sig_len,
+            } => {
+                assert_eq!(alg.to_str().expect("alg utf8"), "ML-DSA-87");
+                assert_eq!(pubkey_len, crate::constants::ML_DSA_87_PUBKEY_BYTES);
+                assert_eq!(sig_len, crate::constants::ML_DSA_87_SIG_BYTES);
             }
         }
     }

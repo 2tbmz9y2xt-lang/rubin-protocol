@@ -411,12 +411,13 @@ type suiteVerifierBinding struct {
 	sigLen     int
 }
 
-// v1 keeps the legacy ML-DSA-87 verifier on the OpenSSL archival/runtime path.
+// v1 keeps the current live verifier contract pinned to the canonical
+// ML-DSA-87/OpenSSL-digest32 tuple from the shared live binding artifact.
 // Suite admission happens before this helper via verifySig's legacy switch or
-// runtimeSuiteParamsForVerification. Binding resolution intentionally remains
-// keyed by the canonical (alg_name, pubkey_len, sig_len) tuple so
-// registry-approved custom suites that explicitly reuse the ML-DSA-87 v1 live
-// descriptor stay on the same runtime binding path as Go/Rust.
+// runtimeSuiteParamsForVerification. This helper intentionally does not bring
+// back a second hardcoded live-policy switch: the artifact remains the live
+// authority, and only callers that advertise the exact canonical tuple can
+// reuse the legacy v1 verifier path.
 func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (suiteVerifierBinding, error) {
 	entry, err := liveBindingPolicyRuntimeEntry(algName, pubkeyLen, sigLen)
 	if err != nil {
