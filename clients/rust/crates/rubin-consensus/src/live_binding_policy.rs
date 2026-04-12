@@ -205,6 +205,11 @@ impl LiveBindingPolicyEntry {
                 "entries[{index}]: sig_len must be > 0"
             )));
         }
+        if self.runtime_binding.is_empty() {
+            return Err(live_binding_policy_error(format!(
+                "entries[{index}]: runtime_binding missing"
+            )));
+        }
         if self.openssl_alg.is_empty() {
             return Err(live_binding_policy_error(format!(
                 "entries[{index}]: openssl_alg missing"
@@ -558,6 +563,21 @@ mod tests {
                     }]
                 }"#,
                 "live_binding_policy: entries[0]: openssl_alg missing",
+            ),
+            (
+                "runtime_binding_missing",
+                r#"{
+                    "version": 1,
+                    "entries": [{
+                        "alg_name": "ML-DSA-87",
+                        "pubkey_len": 2592,
+                        "sig_len": 4627,
+                        "runtime_binding": "",
+                        "openssl_alg": "ML-DSA-87",
+                        "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                    }]
+                }"#,
+                "live_binding_policy: entries[0]: runtime_binding missing",
             ),
             (
                 "core_ext_binding_missing",

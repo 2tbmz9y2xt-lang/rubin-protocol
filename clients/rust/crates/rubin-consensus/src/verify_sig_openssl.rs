@@ -426,12 +426,8 @@ pub fn verify_sig(
         ));
     }
     ensure_openssl_consensus_init()?;
-    let binding = resolve_suite_verifier_binding(
-        SUITE_ID_ML_DSA_87,
-        "ML-DSA-87",
-        ML_DSA_87_PUBKEY_BYTES,
-        ML_DSA_87_SIG_BYTES,
-    )?;
+    let binding =
+        resolve_suite_verifier_binding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)?;
     verify_sig_with_binding(&binding, pubkey, signature, digest32)
 }
 
@@ -448,17 +444,11 @@ enum SuiteVerifierBinding {
 // Runtime dispatch must resolve a concrete binding instead of treating
 // registry.alg_name as an implicit backend switch.
 //
-// `suite_id` is admitted earlier by `runtime_suite_params_for_verification`.
-// This helper intentionally does not restore a second hardcoded live-policy
-// switch: the artifact stays authoritative, and only callers that advertise
-// the exact canonical tuple can reuse the legacy v1 verifier path as in Go.
 fn resolve_suite_verifier_binding(
-    suite_id: u8,
     alg_name: &str,
     pubkey_len: u64,
     sig_len: u64,
 ) -> Result<SuiteVerifierBinding, TxError> {
-    let _ = suite_id;
     let entry = live_binding_policy_runtime_entry(alg_name, pubkey_len, sig_len).map_err(
         |err| match err {
             LiveBindingPolicyLookupError::NotFound(_) => TxError::new(
@@ -593,12 +583,8 @@ pub fn verify_sig_with_registry(
 ) -> Result<bool, TxError> {
     let params = runtime_suite_params_for_verification(suite_id, registry)?;
     ensure_openssl_consensus_init()?;
-    let binding = resolve_suite_verifier_binding(
-        suite_id,
-        params.alg_name,
-        params.pubkey_len,
-        params.sig_len,
-    )?;
+    let binding =
+        resolve_suite_verifier_binding(params.alg_name, params.pubkey_len, params.sig_len)?;
     verify_sig_with_binding(&binding, pubkey, signature, digest32)
 }
 
@@ -1192,7 +1178,6 @@ mod tests {
     fn resolve_suite_verifier_binding_matches_core_ext_descriptor() {
         let params = canonical_default_suite_params();
         let binding = super::resolve_suite_verifier_binding(
-            params.suite_id,
             params.alg_name,
             params.pubkey_len,
             params.sig_len,
@@ -1235,7 +1220,6 @@ mod tests {
         assert_eq!(entry.openssl_alg, "ML-DSA-87");
 
         let binding = super::resolve_suite_verifier_binding(
-            crate::constants::SUITE_ID_ML_DSA_87,
             "ML-DSA-87",
             crate::constants::ML_DSA_87_PUBKEY_BYTES,
             crate::constants::ML_DSA_87_SIG_BYTES,
