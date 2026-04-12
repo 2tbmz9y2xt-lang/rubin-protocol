@@ -24,7 +24,11 @@ class TestCheckModelsSecurityReviewWorkflow(unittest.TestCase):
 
     def test_main_skips_node_syntax_check_when_node_missing(self) -> None:
         with mock.patch.object(m.shutil, "which", return_value=None):
-            with mock.patch.dict("os.environ", {}, clear=False):
+            with mock.patch.dict(
+                "os.environ",
+                {"ALLOW_MISSING_NODE_SYNTAX_CHECK": "1"},
+                clear=False,
+            ):
                 self.assertEqual(m.main(), 0)
 
 

@@ -37,7 +37,8 @@ REQUIRED_WORKFLOW_SUBSTRINGS = [
 ]
 
 REQUIRED_RUNNER_SUBSTRINGS = [
-    "readChangedFile(repoRoot, repoRootReal, modRel, PER_FILE_CAP)",
+    "DEP_SCAN_FILE_CAP",
+    "readChangedFileWithMetadata(repoRoot, repoRootReal, modRel, DEP_SCAN_FILE_CAP)",
     "separatorOverhead",
     "introOverhead",
     "changedFilesSet",
@@ -46,6 +47,7 @@ REQUIRED_RUNNER_SUBSTRINGS = [
     "fromJSONEnv('REVIEW_MODEL_ID'",
     "--name-only', '-z'",
     "Missing required security-review environment contract:",
+    "TRUNCATED TO ${DEP_SCAN_FILE_CAP} BYTES FOR DEPENDENCY SCAN",
 ]
 
 BANNED_RUNNER_SUBSTRINGS = [
@@ -169,13 +171,13 @@ def main() -> int:
         errors.append(f"parityMap references missing files: {preview}{extra}")
 
     node = shutil.which("node")
-    require_node_syntax_check = os.environ.get("REQUIRE_NODE_SYNTAX_CHECK") == "1"
+    allow_missing_node = os.environ.get("ALLOW_MISSING_NODE_SYNTAX_CHECK") == "1"
     if node is None:
-        msg = "node not found; skipping extracted review runner syntax check"
-        if require_node_syntax_check:
-            errors.append(msg)
+        msg = "node not found; cannot syntax-check extracted review runner"
+        if allow_missing_node:
+            _warn(f"{msg} (override active)")
         else:
-            _warn(msg)
+            errors.append(msg)
     else:
         proc = subprocess.run(
             [node, "--check", str(SECURITY_REVIEW_RUNNER)],
@@ -194,7 +196,7 @@ def main() -> int:
 
     syntax_check_status = (
         "extracted runner syntax checked" if node is not None
-        else "extracted runner syntax check skipped (node missing)"
+        else "extracted runner syntax check skipped via override (node missing)"
     )
     print(
         "OK: security-review-shared.yml contract "

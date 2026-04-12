@@ -10,6 +10,7 @@ const TOTAL_FILE_BUDGET = 100000;
 const DEP_BUDGET = 20000;
 const PARITY_BUDGET = 60000;
 const PER_FILE_CAP = 30000;
+const DEP_SCAN_FILE_CAP = 120000;
 const USER_PROMPT_CAP = 300000;
 const SEPARATOR = '\n\n---\n\n';
 const TRUSTED_AUTHORS = new Set(['github-actions[bot]']);
@@ -118,7 +119,7 @@ function isReviewRelevantFile(file) {
     || /^tools\/.*\.(py|sh|json)$/.test(file);
 }
 
-function readChangedFile(repoRoot, repoRootReal, file, maxBytes = null) {
+function readChangedFileWithMetadata(repoRoot, repoRootReal, file, maxBytes = null) {
   const fullPath = path.resolve(repoRoot, file);
   const rel = path.relative(repoRoot, fullPath);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -134,19 +135,23 @@ function readChangedFile(repoRoot, repoRootReal, file, maxBytes = null) {
       return null;
     }
     if (!Number.isFinite(maxBytes) || maxBytes <= 0 || st.size <= maxBytes) {
-      return fs.readFileSync(realPath, 'utf8');
+      return { content: fs.readFileSync(realPath, 'utf8'), truncated: false };
     }
     const fd = fs.openSync(realPath, 'r');
     try {
       const buffer = Buffer.alloc(maxBytes);
       const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
-      return buffer.subarray(0, bytesRead).toString('utf8');
+      return { content: buffer.subarray(0, bytesRead).toString('utf8'), truncated: true };
     } finally {
       fs.closeSync(fd);
     }
   } catch {
     return null;
   }
+}
+
+function readChangedFile(repoRoot, repoRootReal, file, maxBytes = null) {
+  return readChangedFileWithMetadata(repoRoot, repoRootReal, file, maxBytes)?.content ?? null;
 }
 
 function buildChangedFilePayload(changedFiles, repoRoot, repoRootReal) {
@@ -174,15 +179,17 @@ function buildChangedFilePayload(changedFiles, repoRoot, repoRootReal) {
 function buildDependencyContext(changedFiles, changedFilesSet, repoRoot, repoRootReal) {
   const depEntries = [];
   let depUsed = 0;
+  const depTruncationNotesSeen = new Set();
 
   for (const file of changedFiles) {
     if (!file.endsWith('.rs')) {
       continue;
     }
-    const content = readChangedFile(repoRoot, repoRootReal, file, PER_FILE_CAP);
-    if (!content) {
+    const contentInfo = readChangedFileWithMetadata(repoRoot, repoRootReal, file, DEP_SCAN_FILE_CAP);
+    if (!contentInfo) {
       continue;
     }
+    const content = contentInfo.content;
 
     const srcMatch = file.match(/^(.*\/src)\//);
     if (!srcMatch) {
@@ -274,9 +281,18 @@ function buildDependencyContext(changedFiles, changedFilesSet, repoRoot, repoRoo
         continue;
       }
 
-      const modContent = readChangedFile(repoRoot, repoRootReal, modRel, PER_FILE_CAP);
-      if (!modContent) {
+      const modContentInfo = readChangedFileWithMetadata(repoRoot, repoRootReal, modRel, DEP_SCAN_FILE_CAP);
+      if (!modContentInfo) {
         continue;
+      }
+      const modContent = modContentInfo.content;
+      if (modContentInfo.truncated && !depTruncationNotesSeen.has(modRel)) {
+        const truncationEntry = `### ${modRel}\n[TRUNCATED TO ${DEP_SCAN_FILE_CAP} BYTES FOR DEPENDENCY SCAN; later public items may be omitted]\n`;
+        if (depUsed + truncationEntry.length <= DEP_BUDGET) {
+          depEntries.push(truncationEntry);
+          depUsed += truncationEntry.length;
+          depTruncationNotesSeen.add(modRel);
+        }
       }
 
       for (const sym of symbols) {
