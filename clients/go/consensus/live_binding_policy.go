@@ -27,6 +27,11 @@ type liveBindingPolicyManifest struct {
 	Entries []liveBindingPolicyEntry `json:"entries"`
 }
 
+type liveBindingPolicyManifestJSON struct {
+	Version *uint64                       `json:"version"`
+	Entries *[]liveBindingPolicyEntryJSON `json:"entries"`
+}
+
 type liveBindingPolicyEntry struct {
 	AlgName                string `json:"alg_name"`
 	PubkeyLen              int    `json:"pubkey_len"`
@@ -34,6 +39,15 @@ type liveBindingPolicyEntry struct {
 	RuntimeBinding         string `json:"runtime_binding"`
 	OpenSSLAlg             string `json:"openssl_alg"`
 	CoreExtLiveBindingName string `json:"core_ext_live_binding_name"`
+}
+
+type liveBindingPolicyEntryJSON struct {
+	AlgName                *string `json:"alg_name"`
+	PubkeyLen              *int    `json:"pubkey_len"`
+	SigLen                 *int    `json:"sig_len"`
+	RuntimeBinding         *string `json:"runtime_binding"`
+	OpenSSLAlg             *string `json:"openssl_alg"`
+	CoreExtLiveBindingName *string `json:"core_ext_live_binding_name"`
 }
 
 var (
@@ -170,10 +184,64 @@ func decodeSingleLiveBindingPolicyJSONValue(data []byte, dest any) error {
 	return nil
 }
 
+func (manifest liveBindingPolicyManifestJSON) materialize() (*liveBindingPolicyManifest, error) {
+	if manifest.Version == nil {
+		return nil, liveBindingPolicyError("version missing")
+	}
+	if manifest.Entries == nil || len(*manifest.Entries) == 0 {
+		return nil, liveBindingPolicyError("entries missing")
+	}
+	entries := make([]liveBindingPolicyEntry, len(*manifest.Entries))
+	for i, rawEntry := range *manifest.Entries {
+		entry, err := rawEntry.materialize(i)
+		if err != nil {
+			return nil, err
+		}
+		entries[i] = entry
+	}
+	return &liveBindingPolicyManifest{
+		Version: *manifest.Version,
+		Entries: entries,
+	}, nil
+}
+
+func (entry liveBindingPolicyEntryJSON) materialize(index int) (liveBindingPolicyEntry, error) {
+	if entry.AlgName == nil || *entry.AlgName == "" {
+		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: alg_name missing", index)
+	}
+	if entry.PubkeyLen == nil {
+		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: pubkey_len missing", index)
+	}
+	if entry.SigLen == nil {
+		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: sig_len missing", index)
+	}
+	if entry.RuntimeBinding == nil {
+		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: runtime_binding missing", index)
+	}
+	if entry.OpenSSLAlg == nil || *entry.OpenSSLAlg == "" {
+		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: openssl_alg missing", index)
+	}
+	if entry.CoreExtLiveBindingName == nil || *entry.CoreExtLiveBindingName == "" {
+		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: core_ext_live_binding_name missing", index)
+	}
+	return liveBindingPolicyEntry{
+		AlgName:                *entry.AlgName,
+		PubkeyLen:              *entry.PubkeyLen,
+		SigLen:                 *entry.SigLen,
+		RuntimeBinding:         *entry.RuntimeBinding,
+		OpenSSLAlg:             *entry.OpenSSLAlg,
+		CoreExtLiveBindingName: *entry.CoreExtLiveBindingName,
+	}, nil
+}
+
 func loadLiveBindingPolicyFromJSON(raw []byte) (*liveBindingPolicyManifest, error) {
-	var manifest liveBindingPolicyManifest
-	if err := decodeSingleLiveBindingPolicyJSONValue(raw, &manifest); err != nil {
+	var manifestJSON liveBindingPolicyManifestJSON
+	if err := decodeSingleLiveBindingPolicyJSONValue(raw, &manifestJSON); err != nil {
 		return nil, liveBindingPolicyError("parse embedded artifact: %w", err)
+	}
+	manifest, err := manifestJSON.materialize()
+	if err != nil {
+		return nil, err
 	}
 	if manifest.Version != liveBindingPolicyVersion {
 		return nil, liveBindingPolicyError(
@@ -192,7 +260,7 @@ func loadLiveBindingPolicyFromJSON(raw []byte) (*liveBindingPolicyManifest, erro
 			return nil, err
 		}
 	}
-	return &manifest, nil
+	return manifest, nil
 }
 
 func (entry liveBindingPolicyEntry) validate(

@@ -149,6 +149,69 @@ func TestLoadLiveBindingPolicyRejectsMissingEntries(t *testing.T) {
 	}
 }
 
+func TestLoadLiveBindingPolicyRejectsMissingRequiredFields(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: `version`,
+			raw: `{
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"pubkey_len": 2592,
+					"sig_len": 4627,
+					"runtime_binding": "openssl_digest32_v1",
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}]
+			}`,
+			want: "live_binding_policy: version missing",
+		},
+		{
+			name: `entry_pubkey_len`,
+			raw: `{
+				"version": 1,
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"sig_len": 4627,
+					"runtime_binding": "openssl_digest32_v1",
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}]
+			}`,
+			want: "live_binding_policy: entries[0]: pubkey_len missing",
+		},
+		{
+			name: `entry_runtime_binding`,
+			raw: `{
+				"version": 1,
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"pubkey_len": 2592,
+					"sig_len": 4627,
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}]
+			}`,
+			want: "live_binding_policy: entries[0]: runtime_binding missing",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadLiveBindingPolicyFromJSON([]byte(tc.raw))
+			if err == nil {
+				t.Fatal("expected rejection")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("err=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadLiveBindingPolicyRejectsDuplicateJSONKeys(t *testing.T) {
 	tests := []struct {
 		name string
