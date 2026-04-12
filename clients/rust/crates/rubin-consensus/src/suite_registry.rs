@@ -102,12 +102,13 @@ pub struct NativeSuiteSet {
 }
 
 impl NativeSuiteSet {
-    /// Constructs a set from a list of suite IDs and fail-closes if the
-    /// deduplicated live/native cardinality exceeds the v1 cap of two suites.
-    pub fn new(ids: &[u8]) -> Self {
+    /// Internal helper for already-validated phase builders.
+    pub(crate) fn new(ids: &[u8]) -> Self {
         Self::try_new(ids).expect("native suite set cardinality must stay <= 2")
     }
 
+    /// Constructs a set from a list of suite IDs and fail-closes if the
+    /// deduplicated live/native cardinality exceeds the v1 cap of two suites.
     pub fn try_new(ids: &[u8]) -> Result<Self, String> {
         let suites: BTreeSet<u8> = ids.iter().copied().collect();
         if suites.len() > MAX_LIVE_NATIVE_SUITE_SET_CARDINALITY {
