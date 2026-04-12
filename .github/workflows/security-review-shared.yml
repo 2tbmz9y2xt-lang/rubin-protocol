@@ -66,19 +66,22 @@ jobs:
       - name: Get PR diff
         id: diff
         run: |
-          FILES=$(gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --name-only)
-          RELEVANT=$(printf '%s\n' "$FILES" | grep -E '(\.go$|\.rs$|\.lean$|^\.github/workflows/|^\.github/security-acknowledged\.json$|^scripts/security/|^tools/.*\.(py|sh|json)$)' || true)
-          if [ -z "$RELEVANT" ]; then
+          # Stream both the name list and the full diff straight to files
+          # so neither passes through a shell variable. Capturing huge
+          # diffs into `$(...)` and re-emitting via `echo` is fragile for
+          # multi-MB diffs and relies on shell quoting of arbitrary
+          # content; redirecting to a file avoids both edge cases.
+          gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --name-only > pr-diff-names.txt
+          if ! grep -qE '(\.go$|\.rs$|\.lean$|^\.github/workflows/|^\.github/security-acknowledged\.json$|^scripts/security/|^tools/.*\.(py|sh|json)$)' pr-diff-names.txt; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "SKIP: no enforcement-sensitive code/workflow/tooling changes for hostile review"
             exit 0
           fi
-          DIFF=$(gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}")
-          if [ -z "$DIFF" ]; then
+          gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" > pr-diff.txt
+          if [ ! -s pr-diff.txt ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "$DIFF" > pr-diff.txt
           fi
         env:
           GH_TOKEN: ${{ github.token }}
@@ -194,21 +197,20 @@ jobs:
                 ...allIssueComments.map(c => ({ body: c.body, user: c.user, date: c.created_at || '' })),
               ].sort((a, b) => a.date.localeCompare(b.date));
 
-              // Match by the model_display_name actually written into the
-              // posted comment header (`_Model: <display_name>_`), not by
-              // model_id. Filtering on model_id silently broke dedup when
-              // a caller used a display_name that didn't substring-match
-              // the model_id (e.g. "qwen/qwen3.6-plus (OpenRouter)" vs
-              // "qwen/qwen3.6-plus"). The display_name is the only marker
-              // that is guaranteed present in our own posted body.
-              // modelDisplayName is hoisted to the top of the script
-              // (after the require block) via toJSON.
-              const modelDisplayLower = modelDisplayName.toLowerCase();
+              // Match by the EXACT marker we emit in the post header
+              // (`_Model: <display_name>_`). Substring-matching on the
+              // display name alone misclassifies a different model's
+              // review as ours whenever its JSON body happens to mention
+              // the same display name (e.g., a Qwen review quoting
+              // `model_id: "deepseek/DeepSeek-R1-0528"` from a changed
+              // workflow file). The marker only appears verbatim in the
+              // header of our own posted body.
+              const modelMarker = `_Model: ${modelDisplayName}_`;
               const reviewComments = allComments
                 .filter(c => c.body
                   && TRUSTED_AUTHORS.has(c.user?.login ?? '')
                   && c.body.includes('Security Review:')
-                  && c.body.toLowerCase().includes(modelDisplayLower))
+                  && c.body.includes(modelMarker))
                 .slice(-3);
               if (reviewComments.length > 0) {
                 const titles = [];
@@ -561,6 +563,7 @@ jobs:
               '- Never reference files not provided in context.',
               '- If PARITY CONTEXT shows matching implementations, do NOT report divergence.',
               '- If unsure, mark severity as INFO with "NEEDS VERIFICATION".',
+              '- DEDUPLICATION: a "PREVIOUSLY REPORTED" section may appear in the user message. Do NOT re-report findings already in that list — they are already tracked by an earlier review.',
               ...antiHallucinationRules,
               '',
               'OUTPUT FORMAT (JSON only):',
@@ -570,8 +573,7 @@ jobs:
               '  "verdict": "PASS|WARN|BLOCK",',
               '  "findings": [{"severity":"...","file":"...","line":N,"title":"...","details":"...","suggestion":"..."}]',
               '}',
-              '```',
-              previousFindings
+              '```'
             ].join('\n');
 
             const USER_PROMPT_CAP = 300000;
@@ -580,7 +582,8 @@ jobs:
               diff,
               changedFilePayload,
               dependencyContext,
-              parityContext
+              parityContext,
+              previousFindings
             ].join('\n');
             // Same slice-minus-note-length pattern as the diff truncation
             // so the final user prompt is strictly bounded by the cap.
@@ -737,11 +740,18 @@ jobs:
             // if we slice raw bytes, the parser silently drops dedup data
             // for that comment. Reducing the findings array preserves
             // parseability while still fitting under GitHub's size cap.
+            // GitHub PR-comment cap is in BYTES (UTF-8). Header and notice
+            // contain emoji that take 3-4 bytes each, so JS string `.length`
+            // (UTF-16 code units) would undercount and risk going over the
+            // cap. Use Buffer.byteLength for every length comparison.
             const truncationNotice = '\n\n> ⚠️ Review body was shortened to fit the GitHub PR-comment size cap. The JSON above is a parseable subset; the full review lives in the workflow artifacts and is what the merge gate consumes.';
             const safetyMargin = 64;
-            const maxJsonLen = 65000 - header.length - footer.length - truncationNotice.length - safetyMargin;
+            const headerByteLen = Buffer.byteLength(header, 'utf8');
+            const footerByteLen = Buffer.byteLength(footer, 'utf8');
+            const noticeByteLen = Buffer.byteLength(truncationNotice, 'utf8');
+            const maxJsonByteLen = 65000 - headerByteLen - footerByteLen - noticeByteLen - safetyMargin;
             let body;
-            if (review.length <= maxJsonLen) {
+            if (Buffer.byteLength(review, 'utf8') <= maxJsonByteLen) {
               body = header + review + footer;
             } else {
               let shortenedStr = null;
@@ -757,7 +767,7 @@ jobs:
                       _original_findings_count: parsedFull.findings.length,
                     };
                     const candidateStr = JSON.stringify(candidate, null, 2);
-                    if (candidateStr.length <= maxJsonLen) {
+                    if (Buffer.byteLength(candidateStr, 'utf8') <= maxJsonByteLen) {
                       shortenedStr = candidateStr;
                       break;
                     }
@@ -777,7 +787,7 @@ jobs:
                 // The on-disk review file should be valid JSON by this point
                 // (validated above), but be defensive: byte-slice as a last
                 // resort and let the truncation notice explain.
-                shortenedStr = review.slice(0, maxJsonLen);
+                shortenedStr = Buffer.from(review, 'utf8').slice(0, maxJsonByteLen).toString('utf8');
               }
               body = header + shortenedStr + footer + truncationNotice;
             }
