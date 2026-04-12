@@ -445,12 +445,19 @@ enum SuiteVerifierBinding {
 // v1 keeps the legacy ML-DSA-87 verifier on the explicit OpenSSL
 // archival/runtime path. Runtime dispatch must resolve a concrete binding
 // instead of treating registry.alg_name as an implicit backend switch.
+//
+// `suite_id` is admitted earlier by `runtime_suite_params_for_verification`.
+// Binding resolution intentionally remains keyed by the canonical
+// `(alg_name, pubkey_len, sig_len)` tuple so registry-approved custom suites
+// that explicitly reuse the ML-DSA-87 v1 live descriptor keep the same
+// archival/runtime verifier path as Go.
 fn resolve_suite_verifier_binding(
-    _suite_id: u8,
+    suite_id: u8,
     alg_name: &str,
     pubkey_len: u64,
     sig_len: u64,
 ) -> Result<SuiteVerifierBinding, TxError> {
+    let _ = suite_id;
     let entry = live_binding_policy_runtime_entry(alg_name, pubkey_len, sig_len).map_err(|_| {
         TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
@@ -1205,6 +1212,35 @@ mod tests {
         let err = super::verify_sig_with_registry(0xFF, &[0u8; 32], &[0u8; 32], &[0u8; 32], None)
             .expect_err("bad suite");
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn verify_sig_with_registry_custom_suite_exact_v1_binding_allowed() {
+        let Some(kp) = generate_or_skip() else { return };
+        let digest = [0x68; 32];
+        let sig = kp.sign_digest32(digest).expect("sign");
+        let mut suites = std::collections::BTreeMap::new();
+        suites.insert(
+            0x02,
+            crate::suite_registry::SuiteParams {
+                suite_id: 0x02,
+                pubkey_len: crate::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: crate::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: crate::constants::VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-87",
+            },
+        );
+        let registry = crate::suite_registry::SuiteRegistry::with_suites(suites);
+
+        let ok = super::verify_sig_with_registry(
+            0x02,
+            &kp.pubkey_bytes(),
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect("custom suite should reuse canonical v1 binding");
+        assert!(ok, "custom suite entry should verify");
     }
 
     #[test]
