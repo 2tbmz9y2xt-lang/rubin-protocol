@@ -16,12 +16,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SHARED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-review-shared.yml"
 DEEPSEEK_CALLER = REPO_ROOT / ".github" / "workflows" / "models-security-review.yml"
 QWEN_CALLER = REPO_ROOT / ".github" / "workflows" / "qwen-security-review.yml"
-SECURITY_REVIEW_RUNNER = REPO_ROOT / ".github" / "scripts" / "security-review-runner.js"
+SECURITY_REVIEW_RUNNER = REPO_ROOT / ".github" / "workflows" / "security-review-runner.js"
 
 PAIR_RE = re.compile(r"\['([^']+)',\s*'([^']+)'\]")
 
 REQUIRED_WORKFLOW_SUBSTRINGS = [
-    "require('./.github/scripts/security-review-runner.js')",
+    "require('./.github/workflows/security-review-runner.js')",
     "REVIEW_USES_GITHUB_MODELS:",
     "REVIEW_API_URL:",
     "REVIEW_MODEL_ID:",
