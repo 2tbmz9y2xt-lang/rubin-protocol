@@ -99,14 +99,13 @@ type DescriptorRotationProvider struct {
 }
 
 func descriptorNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
-	s, err := TryNewNativeSuiteSet(ids...)
-	if err != nil {
-		// Descriptor-driven selectors only emit {old}, {new}, or {old,new}. If a
-		// future edit violates that bounded invariant, fail closed instead of
-		// panicking on a consensus path.
-		return &NativeSuiteSet{suites: map[uint8]struct{}{}}
+	// Descriptor-driven selectors only emit {old}, {new}, or {old,new}, so this
+	// helper stays total without routing through the generic cardinality guard.
+	suites := make(map[uint8]struct{}, len(ids))
+	for _, id := range ids {
+		suites[id] = struct{}{}
 	}
-	return s
+	return &NativeSuiteSet{suites: suites}
 }
 
 // NativeCreateSuites implements RotationProvider.

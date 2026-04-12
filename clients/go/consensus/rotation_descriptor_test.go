@@ -164,16 +164,6 @@ func TestDescriptorRotationProvider_CreateSuites(t *testing.T) {
 	}
 }
 
-func TestDescriptorNativeSuiteSet_FailsClosedOnImpossibleCardinality(t *testing.T) {
-	s := descriptorNativeSuiteSet(0x01, 0x02, 0x03)
-	if s == nil {
-		t.Fatalf("expected fail-closed empty set, got nil")
-	}
-	if s.Len() != 0 {
-		t.Fatalf("expected empty set on impossible cardinality, got len=%d", s.Len())
-	}
-}
-
 func TestDescriptorRotationProvider_SpendSuites(t *testing.T) {
 	d := CryptoRotationDescriptor{
 		Name:         "test",

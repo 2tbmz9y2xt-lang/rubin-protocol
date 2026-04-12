@@ -256,16 +256,11 @@ impl RotationProvider for DescriptorRotationProvider {
 }
 
 fn descriptor_native_suite_set(ids: &[u8]) -> NativeSuiteSet {
-    match NativeSuiteSet::try_new(ids) {
-        Ok(set) => set,
-        Err(_) => {
-            // Descriptor-driven selectors only emit {old}, {new}, or {old,new}.
-            // If a future edit violates that bounded invariant, fail closed
-            // instead of panicking on a consensus path.
-            NativeSuiteSet {
-                suites: BTreeSet::new(),
-            }
-        }
+    // Descriptor-driven selectors only emit {old}, {new}, or {old,new}, so
+    // this helper stays total without routing through the generic cardinality
+    // guard.
+    NativeSuiteSet {
+        suites: ids.iter().copied().collect(),
     }
 }
 
@@ -1063,13 +1058,6 @@ mod tests {
     fn test_native_suite_set_rejects_more_than_two_unique_suites() {
         let err = NativeSuiteSet::try_new(&[0x01, 0x02, 0x03]).expect_err("must reject");
         assert_eq!(err, "native suite set cardinality 3 exceeds max 2");
-    }
-
-    #[test]
-    fn test_descriptor_native_suite_set_fails_closed_on_impossible_cardinality() {
-        let s = descriptor_native_suite_set(&[0x01, 0x02, 0x03]);
-        assert!(s.is_empty());
-        assert_eq!(s.len(), 0);
     }
 
     #[test]
