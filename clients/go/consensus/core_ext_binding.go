@@ -105,6 +105,9 @@ func ParseNormalizedLiveCoreExtVerifySigExtBinding(binding string, bindingDescri
 	if err != nil {
 		return nil, err
 	}
+	if binding != entry.CoreExtLiveBindingName {
+		return nil, unsupportedCoreExtBindingError(binding)
+	}
 	switch entry.RuntimeBinding {
 	case liveBindingPolicyRuntimeOpenSSLDigest32:
 		return parseNormalizedCoreExtVerifySigExtBinding(entry.CoreExtLiveBindingName, bindingDescriptor, extPayloadSchema)

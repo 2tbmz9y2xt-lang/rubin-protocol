@@ -503,6 +503,9 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
         }
         Err(err) => return Err(err),
     };
+    if binding_name != entry.core_ext_live_binding_name.as_str() {
+        return Err(unsupported_core_ext_binding_error(binding_name));
+    }
     match entry.runtime_binding.as_str() {
         LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => {
             core_ext_verification_binding_from_normalized_name_and_descriptor(
