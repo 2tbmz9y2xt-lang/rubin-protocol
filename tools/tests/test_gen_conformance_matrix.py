@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import sys
 import tempfile
 import unittest
@@ -83,6 +84,44 @@ class GenConformanceMatrixTests(unittest.TestCase):
                     ):
                         with self.assertRaisesRegex(RuntimeError, expected):
                             m.load_protocol_artifact_rows()
+
+    def test_load_protocol_artifact_rows_rejects_non_utf8_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = Path(tmpdir) / "live_binding_policy_v1.json"
+            artifact.write_bytes(b'{"version": 1, "entries": []}\xff')
+            with (
+                mock.patch.object(m, "EXPECTED_PROTOCOL_ARTIFACTS", frozenset({artifact.name})),
+                mock.patch.object(
+                    m,
+                    "PROTOCOL_ARTIFACT_META",
+                    {artifact.name: ("Canonical live binding policy artifact", "tests")},
+                ),
+                mock.patch.object(m, "iter_protocol_artifacts", return_value=[artifact]),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "invalid JSON artifact"):
+                    m.load_protocol_artifact_rows()
+
+    def test_load_protocol_artifact_rows_rejects_unreadable_json(self) -> None:
+        artifact = Path("/tmp") / "live_binding_policy_v1.json"
+        with (
+            mock.patch.object(m, "EXPECTED_PROTOCOL_ARTIFACTS", frozenset({artifact.name})),
+            mock.patch.object(
+                m,
+                "PROTOCOL_ARTIFACT_META",
+                {artifact.name: ("Canonical live binding policy artifact", "tests")},
+            ),
+            mock.patch.object(m, "iter_protocol_artifacts", return_value=[artifact]),
+            mock.patch.object(
+                Path,
+                "read_text",
+                side_effect=PermissionError(errno.EACCES, "Permission denied", str(artifact)),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"^cannot read JSON artifact live_binding_policy_v1\.json: Permission denied$",
+            ):
+                m.load_protocol_artifact_rows()
 
 
 if __name__ == "__main__":

@@ -197,6 +197,21 @@ func TestLoadLiveBindingPolicyRejectsMissingRequiredFields(t *testing.T) {
 			}`,
 			want: "live_binding_policy: entries[0]: runtime_binding missing",
 		},
+		{
+			name: `entry_runtime_binding_empty`,
+			raw: `{
+				"version": 1,
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"pubkey_len": 2592,
+					"sig_len": 4627,
+					"runtime_binding": "",
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}]
+			}`,
+			want: "live_binding_policy: entries[0]: runtime_binding missing",
+		},
 	}
 
 	for _, tc := range tests {

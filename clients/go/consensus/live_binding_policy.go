@@ -215,7 +215,7 @@ func (entry liveBindingPolicyEntryJSON) materialize(index int) (liveBindingPolic
 	if entry.SigLen == nil {
 		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: sig_len missing", index)
 	}
-	if entry.RuntimeBinding == nil {
+	if entry.RuntimeBinding == nil || *entry.RuntimeBinding == "" {
 		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: runtime_binding missing", index)
 	}
 	if entry.OpenSSLAlg == nil || *entry.OpenSSLAlg == "" {
