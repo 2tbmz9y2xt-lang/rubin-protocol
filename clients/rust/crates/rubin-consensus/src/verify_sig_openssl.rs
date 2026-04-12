@@ -472,7 +472,7 @@ fn resolve_suite_verifier_binding(
                 "resolve_suite_verifier_binding: unsupported suite verifier binding",
             ));
         }
-        let alg = openssl_alg_name_cstr("ML-DSA-87").ok_or_else(|| {
+        let alg = openssl_alg_name_cstr(entry.openssl_alg.as_str()).ok_or_else(|| {
             TxError::new(
                 ErrorCode::TxErrSigAlgInvalid,
                 "resolve_suite_verifier_binding: unsupported OpenSSL alg",
