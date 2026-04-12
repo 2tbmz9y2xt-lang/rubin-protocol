@@ -1,5 +1,7 @@
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::OnceLock;
 
 pub(crate) const LIVE_BINDING_POLICY_VERSION: u64 = 1;
@@ -50,9 +52,104 @@ fn live_binding_policy_runtime_tuple_key(alg_name: &str, pubkey_len: u64, sig_le
     format!("{alg_name}|{pubkey_len}|{sig_len}")
 }
 
+struct DuplicateKeySeed;
+
+impl<'de> DeserializeSeed<'de> for DuplicateKeySeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateKeyVisitor)
+    }
+}
+
+struct DuplicateKeyVisitor;
+
+impl<'de> Visitor<'de> for DuplicateKeyVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a valid JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _: String) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        DuplicateKeySeed.deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while let Some(()) = seq.next_element_seed(DuplicateKeySeed)? {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key.clone()) {
+                return Err(de::Error::custom(format!("duplicate JSON key {:?}", key)));
+            }
+            map.next_value_seed(DuplicateKeySeed)?;
+        }
+        Ok(())
+    }
+}
+
+fn reject_duplicate_live_binding_policy_json_keys(raw: &str) -> Result<(), String> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw);
+    DuplicateKeySeed
+        .deserialize(&mut deserializer)
+        .map_err(|err| err.to_string())?;
+    deserializer.end().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 pub(crate) fn load_live_binding_policy_from_json(
     raw: &str,
 ) -> Result<LiveBindingPolicyManifest, String> {
+    reject_duplicate_live_binding_policy_json_keys(raw)
+        .map_err(|err| live_binding_policy_error(format!("parse embedded artifact: {err}")))?;
     let manifest: LiveBindingPolicyManifest = serde_json::from_str(raw)
         .map_err(|err| live_binding_policy_error(format!("parse embedded artifact: {err}")))?;
     if manifest.version != LIVE_BINDING_POLICY_VERSION {
@@ -669,6 +766,31 @@ mod tests {
                 "{name}: err={err:?} missing substring {needle:?}"
             );
         }
+    }
+
+    #[test]
+    fn live_binding_policy_rejects_duplicate_json_keys() {
+        let err = load_live_binding_policy_from_json(
+            r#"{
+                "version": 1,
+                "version": 2,
+                "entries": [{
+                    "alg_name": "ML-DSA-87",
+                    "pubkey_len": 2592,
+                    "sig_len": 4627,
+                    "runtime_binding": "openssl_digest32_v1",
+                    "openssl_alg": "ML-DSA-87",
+                    "core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+                }]
+            }"#,
+        )
+        .expect_err("must reject duplicate JSON keys");
+        assert!(
+            err.contains(
+                r#"live_binding_policy: parse embedded artifact: duplicate JSON key "version""#
+            ),
+            "err={err:?}"
+        );
     }
 
     #[test]
