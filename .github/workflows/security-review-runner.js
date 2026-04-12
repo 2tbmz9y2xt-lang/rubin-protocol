@@ -180,6 +180,7 @@ function buildDependencyContext(changedFiles, changedFilesSet, repoRoot, repoRoo
   const depEntries = [];
   let depUsed = 0;
   const depTruncationNotesSeen = new Set();
+  let dependencyContextIncomplete = false;
 
   for (const file of changedFiles) {
     if (!file.endsWith('.rs')) {
@@ -190,6 +191,9 @@ function buildDependencyContext(changedFiles, changedFilesSet, repoRoot, repoRoo
       continue;
     }
     const content = contentInfo.content;
+    if (contentInfo.truncated) {
+      dependencyContextIncomplete = true;
+    }
 
     const srcMatch = file.match(/^(.*\/src)\//);
     if (!srcMatch) {
@@ -287,6 +291,7 @@ function buildDependencyContext(changedFiles, changedFilesSet, repoRoot, repoRoo
       }
       const modContent = modContentInfo.content;
       if (modContentInfo.truncated && !depTruncationNotesSeen.has(modRel)) {
+        dependencyContextIncomplete = true;
         const truncationEntry = `### ${modRel}\n[TRUNCATED TO ${DEP_SCAN_FILE_CAP} BYTES FOR DEPENDENCY SCAN; later public items may be omitted]\n`;
         if (depUsed + truncationEntry.length <= DEP_BUDGET) {
           depEntries.push(truncationEntry);
@@ -328,10 +333,14 @@ function buildDependencyContext(changedFiles, changedFilesSet, repoRoot, repoRoo
     }
   }
 
-  if (depEntries.length === 0) {
+  if (depEntries.length === 0 && !dependencyContextIncomplete) {
     return '';
   }
+  const incompleteNote = dependencyContextIncomplete
+    ? `[DEPENDENCY CONTEXT INCOMPLETE: at least one Rust file exceeded ${DEP_SCAN_FILE_CAP} bytes during dependency extraction, so later imports or public items may be omitted]\n\n`
+    : '';
   return '\n\n---\nDEPENDENCY CONTRACTS (doc-comments and signatures of functions imported by changed files):\n\n'
+    + incompleteNote
     + depEntries.join('\n');
 }
 

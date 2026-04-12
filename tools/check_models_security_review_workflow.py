@@ -6,7 +6,6 @@ unsafe file reads, O(n) membership in hot loops, and payload budget mistakes.
 """
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -77,7 +76,7 @@ def load_yaml_module():
     return yaml
 
 
-def main() -> int:
+def main(*, allow_missing_node: bool = False) -> int:
     errors: list[str] = []
 
     # Check shared workflow exists
@@ -171,11 +170,10 @@ def main() -> int:
         errors.append(f"parityMap references missing files: {preview}{extra}")
 
     node = shutil.which("node")
-    allow_missing_node = os.environ.get("ALLOW_MISSING_NODE_SYNTAX_CHECK") == "1"
     if node is None:
         msg = "node not found; cannot syntax-check extracted review runner"
         if allow_missing_node:
-            _warn(f"{msg} (override active)")
+            _warn(f"{msg} (test-only override active)")
         else:
             errors.append(msg)
     else:
