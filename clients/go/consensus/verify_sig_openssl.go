@@ -388,7 +388,7 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 		if err != nil {
 			return false, txerr(
 				TX_ERR_SIG_ALG_INVALID,
-				fmt.Sprintf("resolveSuiteVerifierBinding: suite_id=0x%02x %v", SUITE_ID_ML_DSA_87, err),
+				fmt.Sprintf("resolveSuiteVerifierBinding: suite_id=0x%02x %v", suiteID, err),
 			)
 		}
 		return verifySigWithBinding(binding, pubkey, signature, digest32)
