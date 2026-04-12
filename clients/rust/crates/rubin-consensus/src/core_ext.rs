@@ -516,7 +516,7 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
 }
 
 pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
-    let binding_name = binding_name.trim();
+    let binding_name = normalize_core_ext_binding_name(binding_name)?;
     let entry = match live_binding_policy_core_ext_entry(binding_name) {
         Ok(entry) => entry,
         Err(err) if err == live_binding_policy_core_ext_entry_not_found_error(binding_name) => {
