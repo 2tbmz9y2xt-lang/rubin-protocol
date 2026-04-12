@@ -14,6 +14,14 @@ FIXTURES_DIR = REPO_ROOT / "conformance" / "fixtures"
 PROTOCOL_FIXTURES_DIR = FIXTURES_DIR / "protocol"
 RUNNER_PATH = REPO_ROOT / "conformance" / "runner" / "run_cv_bundle.py"
 OUT_PATH = REPO_ROOT / "conformance" / "MATRIX.md"
+EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
+    {
+        "legacy_exposure_hook_vectors.json",
+        "legacy_exposure_report_v1_example.json",
+        "live_binding_policy_v1.json",
+        "production_rotation_schedule_v1.json",
+    }
+)
 EXPECTED_GATES = frozenset(
     {
         "CV-BLOCK-BASIC",
@@ -124,7 +132,7 @@ def iter_fixtures() -> Iterable[Path]:
 
 def iter_protocol_artifacts() -> Iterable[Path]:
     if not PROTOCOL_FIXTURES_DIR.exists():
-        return []
+        raise RuntimeError(f"missing protocol fixtures dir: {PROTOCOL_FIXTURES_DIR}")
     return sorted(PROTOCOL_FIXTURES_DIR.glob("*.json"))
 
 
@@ -193,15 +201,37 @@ def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
 
 
 def load_protocol_artifact_rows() -> list[ProtocolArtifactRow]:
-    rows: list[ProtocolArtifactRow] = []
-    for path in iter_protocol_artifacts():
-        purpose, coverage = PROTOCOL_ARTIFACT_META.get(
-            path.name,
-            (
-                "Shared protocol artifact",
-                "shared protocol consumers and companion tests",
-            ),
+    if set(PROTOCOL_ARTIFACT_META) != EXPECTED_PROTOCOL_ARTIFACTS:
+        missing_meta = sorted(EXPECTED_PROTOCOL_ARTIFACTS - set(PROTOCOL_ARTIFACT_META))
+        unexpected_meta = sorted(set(PROTOCOL_ARTIFACT_META) - EXPECTED_PROTOCOL_ARTIFACTS)
+        problems: list[str] = []
+        if missing_meta:
+            problems.append(f"missing protocol artifact metadata: {', '.join(missing_meta)}")
+        if unexpected_meta:
+            problems.append(
+                f"unexpected protocol artifact metadata: {', '.join(unexpected_meta)}"
+            )
+        raise RuntimeError(
+            f"protocol artifact metadata completeness check failed: {'; '.join(problems)}"
         )
+
+    protocol_paths = list(iter_protocol_artifacts())
+    actual_names = {path.name for path in protocol_paths}
+    missing = sorted(EXPECTED_PROTOCOL_ARTIFACTS - actual_names)
+    unexpected = sorted(actual_names - EXPECTED_PROTOCOL_ARTIFACTS)
+    if missing or unexpected:
+        problems: list[str] = []
+        if missing:
+            problems.append(f"missing protocol artifacts: {', '.join(missing)}")
+        if unexpected:
+            problems.append(f"unexpected protocol artifacts: {', '.join(unexpected)}")
+        raise RuntimeError(
+            f"protocol artifact completeness check failed: {'; '.join(problems)}"
+        )
+
+    rows: list[ProtocolArtifactRow] = []
+    for path in protocol_paths:
+        purpose, coverage = PROTOCOL_ARTIFACT_META[path.name]
         rows.append(
             ProtocolArtifactRow(
                 path=path.relative_to(FIXTURES_DIR).as_posix(),
