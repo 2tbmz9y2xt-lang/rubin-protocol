@@ -951,6 +951,7 @@ mod tests {
     use rubin_consensus::{parse_tx, Outpoint, UtxoEntry};
     use serde_json::Value;
 
+    use crate::io_utils::unique_temp_path;
     use crate::{
         block_store_path, default_peer_runtime_config, default_sync_config,
         devnet_genesis_block_bytes, devnet_genesis_chain_id, BlockStore, ChainState, PeerManager,
@@ -964,17 +965,11 @@ mod tests {
     };
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "{prefix}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ))
+        unique_temp_path(prefix)
     }
 
     fn build_state(with_genesis: bool) -> (super::DevnetRPCState, PathBuf) {
-        let dir = unique_temp_dir("rubin-devnet-rpc");
+        let dir = unique_temp_path("rubin-devnet-rpc");
         fs::create_dir_all(&dir).expect("mkdir");
         let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
         let mut engine = SyncEngine::new(
