@@ -118,7 +118,7 @@ function isReviewRelevantFile(file) {
     || /^tools\/.*\.(py|sh|json)$/.test(file);
 }
 
-function readChangedFile(repoRoot, repoRootReal, file) {
+function readChangedFile(repoRoot, repoRootReal, file, maxBytes = null) {
   const fullPath = path.resolve(repoRoot, file);
   const rel = path.relative(repoRoot, fullPath);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -133,7 +133,17 @@ function readChangedFile(repoRoot, repoRootReal, file) {
     if (!(realPath === repoRootReal || realPath.startsWith(`${repoRootReal}${path.sep}`))) {
       return null;
     }
-    return fs.readFileSync(realPath, 'utf8');
+    if (!Number.isFinite(maxBytes) || maxBytes <= 0 || st.size <= maxBytes) {
+      return fs.readFileSync(realPath, 'utf8');
+    }
+    const fd = fs.openSync(realPath, 'r');
+    try {
+      const buffer = Buffer.alloc(maxBytes);
+      const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+      return buffer.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     return null;
   }
@@ -143,10 +153,6 @@ function buildChangedFilePayload(changedFiles, repoRoot, repoRootReal) {
   const entries = [];
   let usedBytes = 0;
   for (const file of changedFiles) {
-    const content = readChangedFile(repoRoot, repoRootReal, file);
-    if (!content) {
-      continue;
-    }
     const header = `FILE: ${file}\n`;
     const frameSize = header.length + (entries.length > 0 ? SEPARATOR.length : 0);
     if (usedBytes + frameSize + 200 > TOTAL_FILE_BUDGET) {
@@ -154,6 +160,10 @@ function buildChangedFilePayload(changedFiles, repoRoot, repoRootReal) {
     }
     const remainingBudget = TOTAL_FILE_BUDGET - usedBytes - frameSize;
     const contentBudget = Math.min(PER_FILE_CAP, remainingBudget);
+    const content = readChangedFile(repoRoot, repoRootReal, file, contentBudget);
+    if (!content) {
+      continue;
+    }
     const entry = header + content.slice(0, contentBudget);
     entries.push(entry);
     usedBytes += entry.length + (entries.length > 1 ? SEPARATOR.length : 0);
@@ -169,7 +179,7 @@ function buildDependencyContext(changedFiles, changedFilesSet, repoRoot, repoRoo
     if (!file.endsWith('.rs')) {
       continue;
     }
-    const content = readChangedFile(repoRoot, repoRootReal, file);
+    const content = readChangedFile(repoRoot, repoRootReal, file, PER_FILE_CAP);
     if (!content) {
       continue;
     }
@@ -264,7 +274,7 @@ function buildDependencyContext(changedFiles, changedFilesSet, repoRoot, repoRoo
         continue;
       }
 
-      const modContent = readChangedFile(repoRoot, repoRootReal, modRel);
+      const modContent = readChangedFile(repoRoot, repoRootReal, modRel, PER_FILE_CAP);
       if (!modContent) {
         continue;
       }
@@ -329,10 +339,6 @@ function buildParityContext(changedFiles, changedFilesSet, repoRoot, repoRootRea
       if (!counterpart || parityCounterpartsSeen.has(counterpart)) {
         continue;
       }
-      const content = readChangedFile(repoRoot, repoRootReal, counterpart);
-      if (!content) {
-        continue;
-      }
       const header = `PARITY FILE: ${counterpart} (counterpart of changed ${file})\n`;
       const separatorOverhead = parityEntries.length > 0 ? SEPARATOR.length : 0;
       const introOverhead = parityEntries.length === 0 ? parityIntro.length : 0;
@@ -341,6 +347,10 @@ function buildParityContext(changedFiles, changedFilesSet, repoRoot, repoRootRea
         PER_FILE_CAP,
       );
       if (cap < 200) {
+        continue;
+      }
+      const content = readChangedFile(repoRoot, repoRootReal, counterpart, cap);
+      if (!content) {
         continue;
       }
       const entry = header + content.slice(0, cap);
@@ -469,8 +479,24 @@ module.exports = async function runSecurityReview({ github, context, core }) {
   const baseSha = process.env.REVIEW_BASE_SHA || '';
   const headSha = process.env.REVIEW_HEAD_SHA || '';
 
-  if (!apiUrl || !modelId || !modelDisplayName || !baseSha || !headSha) {
-    core.setFailed('Missing required security-review environment contract');
+  const requiredEnvironmentContract = [
+    ['apiUrl', apiUrl],
+    ['modelId', modelId],
+    ['modelDisplayName', modelDisplayName],
+    ['baseSha', baseSha],
+    ['headSha', headSha],
+  ];
+  const missingEnvironmentKeys = requiredEnvironmentContract
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+
+  if (missingEnvironmentKeys.length > 0) {
+    const environmentDiagnostics = requiredEnvironmentContract
+      .map(([key, value]) => `${key}=${value ? `present(len=${String(value).length})` : 'missing/empty'}`)
+      .join(', ');
+    core.setFailed(
+      `Missing required security-review environment contract: ${missingEnvironmentKeys.join(', ')}. ${environmentDiagnostics}`,
+    );
     return;
   }
 
@@ -484,9 +510,9 @@ module.exports = async function runSecurityReview({ github, context, core }) {
   const repoRootReal = fs.realpathSync(repoRoot);
   const changedFiles = execFileSync(
     'git',
-    ['diff', '--diff-filter=ACMR', '--name-only', baseSha, headSha],
+    ['diff', '--diff-filter=ACMR', '--name-only', '-z', baseSha, headSha],
     { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 },
-  ).split('\n').map((s) => s.trim()).filter(isReviewRelevantFile);
+  ).split('\0').filter(Boolean).filter(isReviewRelevantFile);
   const changedFilesSet = new Set(changedFiles);
 
   let antiHallucinationRules = [];

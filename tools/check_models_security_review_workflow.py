@@ -6,6 +6,7 @@ unsafe file reads, O(n) membership in hot loops, and payload budget mistakes.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -31,16 +32,20 @@ REQUIRED_WORKFLOW_SUBSTRINGS = [
     "REVIEW_NEEDS_JSON_MODE:",
     "REVIEW_BASE_SHA:",
     "REVIEW_HEAD_SHA:",
+    "getSevIdx",
+    "normSev",
 ]
 
 REQUIRED_RUNNER_SUBSTRINGS = [
-    "readChangedFile(repoRoot, repoRootReal, modRel)",
+    "readChangedFile(repoRoot, repoRootReal, modRel, PER_FILE_CAP)",
     "separatorOverhead",
     "introOverhead",
     "changedFilesSet",
     "slice(0,",  # payload cap
     "jsonrepair(",
     "fromJSONEnv('REVIEW_MODEL_ID'",
+    "--name-only', '-z'",
+    "Missing required security-review environment contract:",
 ]
 
 BANNED_RUNNER_SUBSTRINGS = [
@@ -49,9 +54,17 @@ BANNED_RUNNER_SUBSTRINGS = [
     "execSync(",
 ]
 
+BANNED_WORKFLOW_SUBSTRINGS = [
+    "sevOrder.indexOf(a.severity)",
+]
+
 
 def _fail(msg: str) -> None:
     print(f"FAIL: {msg}", file=sys.stderr)
+
+
+def _warn(msg: str) -> None:
+    print(f"WARN: {msg}", file=sys.stderr)
 
 
 def load_yaml_module():
@@ -136,6 +149,9 @@ def main() -> int:
     for s in BANNED_RUNNER_SUBSTRINGS:
         if s in runner_text:
             errors.append(f"banned regression substring present: {s!r}")
+    for s in BANNED_WORKFLOW_SUBSTRINGS:
+        if s in text:
+            errors.append(f"banned workflow regression substring present: {s!r}")
 
     pairs = PAIR_RE.findall(runner_text)
     if len(pairs) < 10:
@@ -153,8 +169,13 @@ def main() -> int:
         errors.append(f"parityMap references missing files: {preview}{extra}")
 
     node = shutil.which("node")
+    require_node_syntax_check = os.environ.get("REQUIRE_NODE_SYNTAX_CHECK") == "1"
     if node is None:
-        errors.append("node not found; cannot syntax-check extracted review runner")
+        msg = "node not found; skipping extracted review runner syntax check"
+        if require_node_syntax_check:
+            errors.append(msg)
+        else:
+            _warn(msg)
     else:
         proc = subprocess.run(
             [node, "--check", str(SECURITY_REVIEW_RUNNER)],
@@ -171,9 +192,13 @@ def main() -> int:
             _fail(e)
         return 1
 
+    syntax_check_status = (
+        "extracted runner syntax checked" if node is not None
+        else "extracted runner syntax check skipped (node missing)"
+    )
     print(
         "OK: security-review-shared.yml contract "
-        f"({len(pairs)} parity pairs, extracted runner syntax checked)"
+        f"({len(pairs)} parity pairs, {syntax_check_status})"
     )
     return 0
 
