@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Fail-closed contract checks for `.github/workflows/models-security-review.yml`.
+"""Fail-closed contract checks for security review workflows.
 
-Catches regressions that tend to produce noisy automated PR review threads:
-stale parity paths, unsafe file reads, O(n) membership in hot loops, and
-payload budget mistakes.
+Checks the shared reusable workflow for regressions: stale parity paths,
+unsafe file reads, O(n) membership in hot loops, and payload budget mistakes.
 """
 from __future__ import annotations
 
@@ -12,7 +11,9 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "models-security-review.yml"
+SHARED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-review-shared.yml"
+DEEPSEEK_CALLER = REPO_ROOT / ".github" / "workflows" / "models-security-review.yml"
+QWEN_CALLER = REPO_ROOT / ".github" / "workflows" / "qwen-security-review.yml"
 
 PAIR_RE = re.compile(r"\['([^']+)',\s*'([^']+)'\]")
 
@@ -20,15 +21,16 @@ REQUIRED_SUBSTRINGS = [
     "readChangedFile(modRel)",
     "separatorOverhead",
     "introOverhead",
-    "shrinkSectionToFit",
     "changedFilesSet",
-    "maxUserCharsBeforeNotice",
-    "security-review final user message length",
+    "slice(0,",  # payload cap
+    "getSevIdx",  # severity normalization
+    "normSev",    # severity normalization
 ]
 
 BANNED_SUBSTRINGS = [
     "fs.readFileSync(modFile",
     "changedFiles.includes(",
+    "sevOrder.indexOf(a.severity)",  # raw indexOf without normalization
 ]
 
 
@@ -45,19 +47,65 @@ def load_yaml_module():
 
 
 def main() -> int:
-    if not WORKFLOW.is_file():
-        _fail(f"missing workflow file: {WORKFLOW}")
+    errors: list[str] = []
+
+    # Check shared workflow exists
+    if not SHARED_WORKFLOW.is_file():
+        _fail(f"missing shared workflow: {SHARED_WORKFLOW}")
         return 1
 
-    text = WORKFLOW.read_text(encoding="utf-8")
-    errors: list[str] = []
+    # Check callers exist AND actually invoke the shared reusable workflow
+    # with the inputs the shared workflow requires. Existence alone is not
+    # enough — a caller could drift away from `uses:` or drop a required
+    # input and the gate would still pass.
+    shared_workflow_ref = "uses: ./.github/workflows/security-review-shared.yml"
+    required_caller_inputs = (
+        "model_id:",
+        "api_base_url:",
+        "model_display_name:",
+        "artifact_prefix:",
+    )
+    for caller in [DEEPSEEK_CALLER, QWEN_CALLER]:
+        if not caller.is_file():
+            errors.append(f"missing caller workflow: {caller}")
+            continue
+        caller_text = caller.read_text(encoding="utf-8")
+        if shared_workflow_ref not in caller_text:
+            errors.append(
+                f"caller {caller.name} no longer invokes security-review-shared.yml"
+            )
+        for required_input in required_caller_inputs:
+            if required_input not in caller_text:
+                errors.append(
+                    f"caller {caller.name} missing required input: {required_input}"
+                )
+
+    # Qwen authenticates via OpenRouter and the shared workflow gates the
+    # review step on a non-empty API_KEY env var. The Qwen caller must
+    # wire its repository secret into the reusable workflow's API_KEY
+    # input, otherwise the check-key step will silently skip every Qwen
+    # review on every PR. Verify both halves of the mapping.
+    if QWEN_CALLER.is_file():
+        qwen_text = QWEN_CALLER.read_text(encoding="utf-8")
+        if "API_KEY:" not in qwen_text:
+            errors.append(
+                f"caller {QWEN_CALLER.name} must declare an `API_KEY:` entry under "
+                f"`secrets:` to populate the reusable workflow's API_KEY input"
+            )
+        if "OPENROUTER_API_KEY_QWEN" not in qwen_text:
+            errors.append(
+                f"caller {QWEN_CALLER.name} must wire ${{{{ secrets.OPENROUTER_API_KEY_QWEN }}}} "
+                f"into the shared workflow's API_KEY input"
+            )
+
+    text = SHARED_WORKFLOW.read_text(encoding="utf-8")
 
     yaml = load_yaml_module()
     if yaml is not None:
         try:
             yaml.safe_load(text)
-        except yaml.YAMLError as exc:  # type: ignore[attr-defined]
-            errors.append(f"invalid YAML: {exc}")
+        except yaml.YAMLError as exc:
+            errors.append(f"invalid YAML in shared workflow: {exc}")
 
     for s in REQUIRED_SUBSTRINGS:
         if s not in text:
@@ -86,7 +134,7 @@ def main() -> int:
             _fail(e)
         return 1
 
-    print(f"OK: models-security-review.yml contract ({len(pairs)} parity pairs)")
+    print(f"OK: security-review-shared.yml contract ({len(pairs)} parity pairs)")
     return 0
 
 

@@ -14,7 +14,11 @@ import check_models_security_review_workflow as m
 
 class TestCheckModelsSecurityReviewWorkflow(unittest.TestCase):
     def test_main_passes_on_repo_workflow(self) -> None:
-        self.assertTrue(m.WORKFLOW.is_file(), f"missing {m.WORKFLOW}")
+        # The contract checker was refactored from a single WORKFLOW constant
+        # into one constant per file (shared reusable + two callers).
+        self.assertTrue(m.SHARED_WORKFLOW.is_file(), f"missing {m.SHARED_WORKFLOW}")
+        self.assertTrue(m.DEEPSEEK_CALLER.is_file(), f"missing {m.DEEPSEEK_CALLER}")
+        self.assertTrue(m.QWEN_CALLER.is_file(), f"missing {m.QWEN_CALLER}")
         self.assertEqual(m.main(), 0)
 
 

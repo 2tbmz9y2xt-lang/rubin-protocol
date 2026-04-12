@@ -1,0 +1,918 @@
+name: "Shared Security Review"
+
+on:
+  workflow_call:
+    inputs:
+      model_id:
+        description: "Model identifier (e.g., deepseek/DeepSeek-R1-0528, qwen/qwen3.6-plus)"
+        required: true
+        type: string
+      api_base_url:
+        description: "API endpoint base URL"
+        required: true
+        type: string
+      model_display_name:
+        description: "Display name for PR comments (e.g., deepseek/DeepSeek-R1-0528)"
+        required: true
+        type: string
+      artifact_prefix:
+        description: "Prefix for artifact names to avoid collisions"
+        required: true
+        type: string
+      anti_hallucination_rules:
+        description: "Model-specific anti-hallucination rules (JSON array of strings)"
+        required: false
+        type: string
+        default: "[]"
+      uses_github_models:
+        description: "Whether to use GitHub Models API (affects auth headers)"
+        required: false
+        type: boolean
+        default: false
+      max_tokens:
+        description: "Max tokens for model response"
+        required: false
+        type: number
+        default: 16000
+      needs_json_mode:
+        description: "Whether to request JSON response format"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      API_KEY:
+        description: "API key for the model provider (not needed if uses_github_models: true)"
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  # models: read is required for the DeepSeek caller that targets
+  # https://models.github.ai. Reusable workflows receive the caller's
+  # GITHUB_TOKEN permissions and can only further restrict them, and any
+  # scope not listed here is set to `none` for this workflow, so declare
+  # models: read explicitly even though only one caller uses it.
+  models: read
+
+jobs:
+  get-diff:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: "${{ steps.diff.outputs.skip }}"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+      - name: Get PR diff
+        id: diff
+        run: |
+          # Stream both the name list and the full diff straight to files
+          # so neither passes through a shell variable. Capturing huge
+          # diffs into `$(...)` and re-emitting via `echo` is fragile for
+          # multi-MB diffs and relies on shell quoting of arbitrary
+          # content; redirecting to a file avoids both edge cases.
+          gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --name-only > pr-diff-names.txt
+          if ! grep -qE '(\.go$|\.rs$|\.lean$|^\.github/workflows/|^\.github/security-acknowledged\.json$|^scripts/security/|^tools/.*\.(py|sh|json)$)' pr-diff-names.txt; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "SKIP: no enforcement-sensitive code/workflow/tooling changes for hostile review"
+            exit 0
+          fi
+          gh pr diff "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" > pr-diff.txt
+          if [ ! -s pr-diff.txt ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Upload diff artifact
+        if: steps.diff.outputs.skip != 'true'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+        with:
+          name: ${{ inputs.artifact_prefix }}-pr-diff
+          path: pr-diff.txt
+          retention-days: 1
+
+  security-review:
+    needs: get-diff
+    if: needs.get-diff.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+      - name: Check API key availability
+        id: check-key
+        run: |
+          # GitHub Models uses GITHUB_TOKEN which is always available.
+          # For external providers (OpenRouter etc.) API_KEY MUST be set
+          # for same-repo PRs — silently skipping would remove a security
+          # reviewer from the merge gate without warning. Only fork PRs
+          # and Dependabot PRs are allowed to skip, because GitHub
+          # deliberately withholds repository secrets from both contexts.
+          if [ "$USES_GITHUB_MODELS" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$API_KEY" ]; then
+            if [ "$IS_FORK_PR" = "true" ] || [ "$IS_DEPENDABOT" = "true" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::API key not available (fork PR or Dependabot). Skipping review."
+            else
+              echo "::error::API key missing for same-repo PR — set the OpenRouter secret on the workflow caller."
+              exit 1
+            fi
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          USES_GITHUB_MODELS: ${{ inputs.uses_github_models }}
+          IS_FORK_PR: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          IS_DEPENDABOT: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+      - name: Download diff artifact
+        if: steps.check-key.outputs.skip != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v4
+        with:
+          name: ${{ inputs.artifact_prefix }}-pr-diff
+      - name: Install jsonrepair
+        if: steps.check-key.outputs.skip != 'true'
+        run: npm install jsonrepair@3.12.0
+
+      - name: Run security review
+        if: steps.check-key.outputs.skip != 'true'
+        id: review
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
+            const { jsonrepair } = require('./node_modules/jsonrepair');
+
+            // Hoist ALL workflow_call inputs through toJSON at the very
+            // top of the script so every downstream consumer (system
+            // prompt, dedup filter, request body, headers) references
+            // safe const variables instead of raw expression-substitution
+            // syntax. Round-11's step-local hoisting put modelId AFTER
+            // the systemPrompt that referenced it, causing a temporal-
+            // dead-zone ReferenceError. Top-of-script ensures every
+            // block sees an initialized const.
+            const usesGitHubModels = ${{ inputs.uses_github_models }};
+            const apiUrl = ${{ toJSON(inputs.api_base_url) }};
+            const modelId = ${{ toJSON(inputs.model_id) }};
+            const modelDisplayName = ${{ toJSON(inputs.model_display_name) }};
+
+            // Truncation note tells the model to downgrade confidence on
+            // missing tail content rather than treat omissions as "unchanged".
+            // The slice subtracts the note length so the final string never
+            // exceeds the cap (which would defeat the cap and risk hitting
+            // provider request limits).
+            const DIFF_CAP = 128000;
+            const diffRaw = fs.readFileSync('pr-diff.txt', 'utf8');
+            const diffTruncationNote = `\n\n[TRUNCATED — diff exceeded ${DIFF_CAP} bytes; tail omitted]`;
+            const diff = diffRaw.length > DIFF_CAP
+              ? diffRaw.slice(0, Math.max(0, DIFF_CAP - diffTruncationNote.length)) + diffTruncationNote
+              : diffRaw;
+
+            // Fetch previous security review findings to avoid re-reporting.
+            const TRUSTED_AUTHORS = new Set(['github-actions[bot]']);
+            let previousFindings = '';
+            try {
+              const allReviews = await github.paginate(
+                github.rest.pulls.listReviews, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                }
+              );
+              const allIssueComments = await github.paginate(
+                github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  per_page: 100,
+                }
+              );
+              const allComments = [
+                ...allReviews.map(r => ({ body: r.body, user: r.user, date: r.submitted_at || '' })),
+                ...allIssueComments.map(c => ({ body: c.body, user: c.user, date: c.created_at || '' })),
+              ].sort((a, b) => a.date.localeCompare(b.date));
+
+              // Match by the EXACT marker we emit in the post header
+              // (`_Model: <display_name>_`). Substring-matching on the
+              // display name alone misclassifies a different model's
+              // review as ours whenever its JSON body happens to mention
+              // the same display name (e.g., a Qwen review quoting
+              // `model_id: "deepseek/DeepSeek-R1-0528"` from a changed
+              // workflow file). The marker only appears verbatim in the
+              // header of our own posted body.
+              const modelMarker = `_Model: ${modelDisplayName}_`;
+              const reviewComments = allComments
+                .filter(c => c.body
+                  && TRUSTED_AUTHORS.has(c.user?.login ?? '')
+                  && c.body.includes('Security Review:')
+                  && c.body.includes(modelMarker))
+                .slice(-3);
+              if (reviewComments.length > 0) {
+                const titles = [];
+                for (const c of reviewComments) {
+                  const jsonMatch = c.body.match(/```json\n([\s\S]*?)```/);
+                  if (jsonMatch) {
+                    try {
+                      const parsed = JSON.parse(jsonMatch[1]);
+                      for (const f of (parsed.findings || [])) {
+                        const sev = String(f.severity || '').replace(/[^A-Z]/g, '').slice(0, 10);
+                        const title = String(f.title || '')
+                          .replace(/[\r\n]+/g, ' ')
+                          .replace(/[^\x20-\x7E]/g, '')
+                          .slice(0, 120);
+                        const file = String(f.file || '')
+                          .replace(/[^\x20-\x7E]/g, '')
+                          .slice(0, 200);
+                        if (sev && title) {
+                          titles.push(`[${sev}] ${title}` + (file ? ` (in ${file})` : ''));
+                        }
+                      }
+                    } catch {}
+                  }
+                }
+                if (titles.length > 0) {
+                  previousFindings = '\n\nPREVIOUSLY REPORTED (do NOT re-report these — they are already tracked):\n' +
+                    [...new Set(titles)].join('\n');
+                }
+              }
+            } catch (err) {
+              core.warning(`Could not fetch previous reviews: ${err.message}`);
+            }
+
+            // Read full changed files for context
+            const repoRoot = process.cwd();
+            const repoRootReal = fs.realpathSync(repoRoot);
+            const baseSha = '${{ github.event.pull_request.base.sha }}';
+            const headSha = '${{ github.event.pull_request.head.sha }}';
+            const isReviewRelevantFile = (file) => (
+              file.endsWith('.go')
+              || file.endsWith('.rs')
+              || file.endsWith('.lean')
+              || file.startsWith('.github/workflows/')
+              || file === '.github/security-acknowledged.json'
+              || file.startsWith('scripts/security/')
+              || /^tools\/.*\.(py|sh|json)$/.test(file)
+            );
+
+            const changedFiles = execSync(
+              `git diff --diff-filter=ACMR --name-only ${baseSha} ${headSha}`,
+              { maxBuffer: 20 * 1024 * 1024 }
+            ).toString().split('\n').map(s => s.trim()).filter(isReviewRelevantFile);
+            const changedFilesSet = new Set(changedFiles);
+
+            const readChangedFile = (file) => {
+              const fullPath = path.resolve(repoRoot, file);
+              const rel = path.relative(repoRoot, fullPath);
+              if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+              try {
+                const st = fs.lstatSync(fullPath);
+                if (st.isSymbolicLink() || !st.isFile()) return null;
+                const realPath = fs.realpathSync(fullPath);
+                if (!(realPath === repoRootReal || realPath.startsWith(`${repoRootReal}${path.sep}`))) return null;
+                return fs.readFileSync(realPath, 'utf8');
+              } catch { return null; }
+            };
+
+            // Streaming budget: add files one-by-one until TOTAL_FILE_BUDGET is reached.
+            const TOTAL_FILE_BUDGET = 100000;
+            const SEPARATOR = '\n\n---\n\n';
+            const PER_FILE_CAP = 30000;
+            const entries = [];
+            let usedBytes = 0;
+            for (const file of changedFiles) {
+              const content = readChangedFile(file);
+              if (!content) continue;
+              const header = `FILE: ${file}\n`;
+              const frameSize = header.length + (entries.length > 0 ? SEPARATOR.length : 0);
+              if (usedBytes + frameSize + 200 > TOTAL_FILE_BUDGET) continue;
+              const remainingBudget = TOTAL_FILE_BUDGET - usedBytes - frameSize;
+              const contentBudget = Math.min(PER_FILE_CAP, remainingBudget);
+              const entry = header + content.slice(0, contentBudget);
+              entries.push(entry);
+              usedBytes += entry.length + (entries.length > 1 ? SEPARATOR.length : 0);
+            }
+            const changedFilePayload = entries.join(SEPARATOR);
+
+            // Dependency context extraction for Rust files
+            const DEP_BUDGET = 20000;
+            const depEntries = [];
+            let depUsed = 0;
+
+            for (const file of changedFiles) {
+              if (!file.endsWith('.rs')) continue;
+              const content = readChangedFile(file);
+              if (!content) continue;
+
+              const srcMatch = file.match(/^(.*\/src)\//);
+              if (!srcMatch) continue;
+              const crateRoot = srcMatch[1];
+
+              const fileLines = content.split('\n');
+              const useStatements = [];
+              let inUse = false, useAccum = '';
+              for (const ln of fileLines) {
+                if (/^\s*use\s+crate::/.test(ln) && !ln.includes(';')) {
+                  inUse = true; useAccum = ln;
+                } else if (inUse) {
+                  useAccum += ' ' + ln.trim();
+                  if (ln.includes(';')) { useStatements.push(useAccum); inUse = false; useAccum = ''; }
+                } else if (/^\s*use\s+crate::/.test(ln) && ln.includes(';')) {
+                  useStatements.push(ln);
+                }
+              }
+
+              // Only accept concrete Rust identifiers; glob imports like
+              // `use crate::foo::*` or `use crate::bar::{*, baz};` must be
+              // filtered so `*` never reaches the RegExp below (which would
+              // throw "Nothing to repeat" and abort the review step).
+              const isRustIdent = (s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s);
+              const modImports = new Map();
+              for (const stmt of useStatements) {
+                const m = stmt.match(/use\s+crate::([^;]+);/);
+                if (!m) continue;
+                let raw = m[1].replace(/\s+/g, '');
+                raw = raw.replace(/::\{self(?:,\s*)?\}/, '');
+                const braceIdx = raw.indexOf('{');
+                if (braceIdx !== -1) {
+                  const modPath = raw.slice(0, braceIdx).replace(/:+$/, '');
+                  const items = raw.slice(braceIdx + 1, raw.lastIndexOf('}')).split(',').map(s => s.trim()).filter(Boolean);
+                  if (!modImports.has(modPath)) modImports.set(modPath, new Set());
+                  for (const item of items) {
+                    if (isRustIdent(item)) modImports.get(modPath).add(item);
+                  }
+                } else {
+                  const parts = raw.split('::');
+                  const symbol = parts.pop();
+                  const modPath = parts.join('::');
+                  if (!isRustIdent(symbol)) continue;
+                  if (!modImports.has(modPath)) modImports.set(modPath, new Set());
+                  modImports.get(modPath).add(symbol);
+                }
+              }
+
+              for (const [modPath, symbols] of modImports) {
+                const parts = modPath.split('::');
+                let modFile = null;
+                const candidates = [
+                  path.join(repoRoot, crateRoot, ...parts) + '.rs',
+                  path.join(repoRoot, crateRoot, ...parts, 'mod.rs'),
+                ];
+                if (parts.length > 1) {
+                  candidates.push(path.join(repoRoot, crateRoot, ...parts.slice(0, -1)) + '.rs');
+                }
+                for (const cand of candidates) {
+                  try { if (fs.statSync(cand).isFile()) { modFile = cand; break; } } catch {}
+                }
+                if (!modFile) continue;
+                const modRel = path.relative(repoRoot, modFile);
+                if (!modRel || path.isAbsolute(modRel) || modRel.startsWith('..')) continue;
+                if (changedFilesSet.has(modRel)) continue;
+
+                const modContent = readChangedFile(modRel);
+                if (!modContent) continue;
+
+                for (const sym of symbols) {
+                  if (depUsed >= DEP_BUDGET) break;
+                  const sigRe = new RegExp(
+                    '((?:^[ \\t]*///[^\\n]*\\n)*)' +
+                    '(?:^[ \\t]*#\\[[^\\]]*\\]\\s*\\n)*' +
+                    '^[ \\t]*pub(?:\\([^)]*\\))?\\s+(?:fn|struct|enum|const|type|trait)\\s+' +
+                    sym + '\\b[^\\n]*',
+                    'gm'
+                  );
+                  const hit = sigRe.exec(modContent);
+                  if (!hit) continue;
+                  const docLines = (hit[1] || '').split('\n')
+                    .filter(l => l.trim().startsWith('///'))
+                    .map(l => l.trim()).join('\n');
+                  const sigLine = hit[0].replace(hit[1] || '', '').split('\n')[0].trim();
+                  if (!sigLine) continue;
+                  const entry = `### ${sym} (${modRel})\n${docLines ? docLines + '\n' : ''}${sigLine}\n`;
+                  if (depUsed + entry.length > DEP_BUDGET) continue;
+                  depEntries.push(entry);
+                  depUsed += entry.length;
+                }
+              }
+            }
+
+            const dependencyContext = depEntries.length > 0
+              ? '\n\n---\nDEPENDENCY CONTRACTS (doc-comments and signatures of functions imported by changed files):\n\n' + depEntries.join('\n')
+              : '';
+
+            // Cross-language parity context
+            const PARITY_BUDGET = 60000;
+            const parityMap = [
+              ['clients/go/consensus/wire_read.go', 'clients/rust/crates/rubin-consensus/src/wire_read.rs'],
+              ['clients/go/consensus/tx_helpers.go', 'clients/rust/crates/rubin-consensus/src/tx_helpers.rs'],
+              ['clients/go/consensus/block_parse.go', 'clients/rust/crates/rubin-consensus/src/block.rs'],
+              ['clients/go/consensus/constants.go', 'clients/rust/crates/rubin-consensus/src/constants.rs'],
+              ['clients/go/consensus/connect_block_inmem.go', 'clients/rust/crates/rubin-consensus/src/connect_block_inmem.rs'],
+              ['clients/go/consensus/suite_registry.go', 'clients/rust/crates/rubin-consensus/src/suite_registry.rs'],
+              ['clients/go/consensus/sighash.go', 'clients/rust/crates/rubin-consensus/src/sighash.rs'],
+              ['clients/go/consensus/core_ext.go', 'clients/rust/crates/rubin-consensus/src/core_ext.rs'],
+              ['clients/go/consensus/fork_choice.go', 'clients/rust/crates/rubin-consensus/src/fork_choice.rs'],
+              ['clients/go/consensus/spend_verify.go', 'clients/rust/crates/rubin-consensus/src/spend_verify.rs'],
+              ['clients/go/consensus/pow.go', 'clients/rust/crates/rubin-consensus/src/pow.rs'],
+              ['clients/go/consensus/merkle.go', 'clients/rust/crates/rubin-consensus/src/merkle.rs'],
+              ['clients/go/consensus/subsidy.go', 'clients/rust/crates/rubin-consensus/src/subsidy.rs'],
+              ['clients/go/consensus/utxo_basic.go', 'clients/rust/crates/rubin-consensus/src/utxo_basic.rs'],
+              ['clients/go/consensus/block_basic.go', 'clients/rust/crates/rubin-consensus/src/block_basic.rs'],
+              ['clients/go/consensus/rotation_descriptor.go', 'clients/rust/crates/rubin-consensus/src/suite_registry.rs'],
+              ['clients/go/consensus/rotation_production.go', 'clients/rust/crates/rubin-consensus/src/suite_registry.rs'],
+              ['clients/go/consensus/featurebits.go', 'clients/rust/crates/rubin-consensus/src/featurebits.rs'],
+              ['clients/go/consensus/flagday.go', 'clients/rust/crates/rubin-consensus/src/flagday.rs'],
+              ['clients/go/consensus/htlc.go', 'clients/rust/crates/rubin-consensus/src/htlc.rs'],
+              ['clients/go/consensus/vault.go', 'clients/rust/crates/rubin-consensus/src/vault.rs'],
+              ['clients/go/consensus/tx_parse.go', 'clients/rust/crates/rubin-consensus/src/tx.rs'],
+              ['clients/go/consensus/tx_marshal.go', 'clients/rust/crates/rubin-consensus/src/tx.rs'],
+              ['clients/go/consensus/hash.go', 'clients/rust/crates/rubin-consensus/src/hash.rs'],
+              ['clients/go/consensus/compact_relay.go', 'clients/rust/crates/rubin-consensus/src/compact_relay.rs'],
+              ['clients/go/consensus/da_verify_parallel.go', 'clients/rust/crates/rubin-consensus/src/da_verify_parallel.rs'],
+              ['clients/go/consensus/verify_sig_openssl.go', 'clients/rust/crates/rubin-consensus/src/verify_sig_openssl.rs'],
+              ['clients/go/consensus/covenant_genesis.go', 'clients/rust/crates/rubin-consensus/src/covenant_genesis.rs'],
+              ['clients/go/consensus/txcontext.go', 'clients/rust/crates/rubin-consensus/src/txcontext.rs'],
+              ['clients/go/consensus/tx_dep_graph.go', 'clients/rust/crates/rubin-consensus/src/tx_dep_graph.rs'],
+              ['clients/go/consensus/core_ext_binding.go', 'clients/rust/crates/rubin-consensus/src/core_ext.rs'],
+              ['clients/go/consensus/stealth.go', 'clients/rust/crates/rubin-consensus/src/stealth.rs'],
+              ['clients/go/consensus/utxo_snapshot.go', 'clients/rust/crates/rubin-consensus/src/utxo_snapshot.rs'],
+              ['clients/go/consensus/compactsize.go', 'clients/rust/crates/rubin-consensus/src/compactsize.rs'],
+              ['clients/go/consensus/errors.go', 'clients/rust/crates/rubin-consensus/src/error.rs'],
+              ['clients/go/node/config.go', 'clients/rust/crates/rubin-node/src/genesis.rs'],
+              ['clients/go/node/config.go', 'clients/rust/crates/rubin-consensus/src/suite_registry.rs'],
+              ['clients/rust/crates/rubin-node/src/genesis.rs', 'clients/go/consensus/rotation_production.go'],
+              ['clients/go/node/chainstate.go', 'clients/rust/crates/rubin-node/src/chainstate.rs'],
+              ['clients/go/node/sync.go', 'clients/rust/crates/rubin-node/src/sync.rs'],
+              ['clients/go/node/undo.go', 'clients/rust/crates/rubin-node/src/undo.rs'],
+              ['clients/go/node/blockstore.go', 'clients/rust/crates/rubin-node/src/blockstore.rs'],
+              ['clients/go/node/miner.go', 'clients/rust/crates/rubin-node/src/miner.rs'],
+              ['clients/go/node/mempool.go', 'clients/rust/crates/rubin-node/src/txpool.rs'],
+              ['clients/go/node/sync_reorg.go', 'clients/rust/crates/rubin-node/src/sync_reorg.rs'],
+              ['clients/go/node/sync_disconnect.go', 'clients/rust/crates/rubin-node/src/sync_disconnect.rs'],
+              ['clients/go/node/chainstate_recovery.go', 'clients/rust/crates/rubin-node/src/chainstate.rs'],
+              ['clients/go/node/blockstore_p2p.go', 'clients/rust/crates/rubin-node/src/blockstore.rs'],
+              ['clients/go/node/sync_mempool.go', 'clients/rust/crates/rubin-node/src/txpool.rs'],
+              ['clients/go/node/policy_core_ext.go', 'clients/rust/crates/rubin-node/src/txpool.rs'],
+              ['clients/go/node/policy_core_ext.go', 'clients/rust/crates/rubin-node/src/miner.rs'],
+              ['clients/go/node/policy_da_anchor.go', 'clients/rust/crates/rubin-node/src/txpool.rs'],
+              ['clients/go/node/policy_da_anchor.go', 'clients/rust/crates/rubin-node/src/miner.rs'],
+              ['clients/rust/crates/rubin-node/src/main.rs', 'clients/go/cmd/rubin-node/main.go'],
+              ['clients/go/cmd/rubin-node/main.go', 'clients/rust/crates/rubin-node/src/genesis.rs'],
+              ['clients/go/cmd/rubin-node/http_rpc.go', 'clients/rust/crates/rubin-node/src/devnet_rpc.rs'],
+              ['clients/go/node/p2p/rust_interop_test.go', 'clients/rust/crates/rubin-node/src/interop/mod.rs'],
+              ['clients/go/node/mine_address.go', 'clients/rust/crates/rubin-node/src/coinbase.rs'],
+              ['clients/go/node/safeio.go', 'clients/rust/crates/rubin-node/src/io_utils.rs'],
+              ['clients/go/node/peer_manager.go', 'clients/rust/crates/rubin-node/src/p2p_runtime.rs'],
+              ['clients/go/node/p2p/service.go', 'clients/rust/crates/rubin-node/src/p2p_service.rs'],
+              ['clients/go/node/p2p/wire.go', 'clients/rust/crates/rubin-node/src/p2p_service.rs'],
+              ['clients/go/node/p2p/handlers_tx.go', 'clients/rust/crates/rubin-node/src/tx_relay.rs'],
+              ['clients/go/node/p2p/seen.go', 'clients/rust/crates/rubin-node/src/tx_seen.rs'],
+              ['clients/go/node/p2p/handlers_block.go', 'clients/rust/crates/rubin-node/src/p2p_service.rs'],
+              ['clients/go/node/p2p/handlers_inventory.go', 'clients/rust/crates/rubin-node/src/p2p_runtime.rs'],
+              ['clients/go/node/p2p/handshake.go', 'clients/rust/crates/rubin-node/src/p2p_service.rs'],
+              ['clients/go/node/p2p/reconnect.go', 'clients/rust/crates/rubin-node/src/p2p_runtime.rs'],
+              ['clients/go/node/p2p/peer_runtime.go', 'clients/rust/crates/rubin-node/src/p2p_runtime.rs'],
+              ['clients/go/node/p2p/service_peer_lifecycle.go', 'clients/rust/crates/rubin-node/src/p2p_service.rs'],
+              ['clients/go/node/p2p/service_listener.go', 'clients/rust/crates/rubin-node/src/p2p_service.rs'],
+              ['clients/go/node/p2p/service_sync.go', 'clients/rust/crates/rubin-node/src/sync.rs'],
+              ['clients/go/node/p2p/service_inventory.go', 'clients/rust/crates/rubin-node/src/p2p_runtime.rs'],
+              ['clients/go/node/p2p/addr_manager.go', 'clients/rust/crates/rubin-node/src/p2p_runtime.rs'],
+              ['clients/go/node/p2p/addr_discovery.go', 'clients/rust/crates/rubin-node/src/p2p_runtime.rs'],
+              ['clients/go/node/p2p/handlers_addr.go', 'clients/rust/crates/rubin-node/src/p2p_runtime.rs'],
+              ['clients/go/node/p2p/orphan_pool.go', 'clients/rust/crates/rubin-node/src/relay_pool.rs'],
+              ['clients/go/node/p2p/mempool.go', 'clients/rust/crates/rubin-node/src/txpool.rs'],
+              ['clients/go/node/p2p/tx_metadata.go', 'clients/rust/crates/rubin-node/src/txpool.rs'],
+            ];
+
+            const parityIntro = '\n\n---\nPARITY CONTEXT (counterpart files from the other client):\n\n';
+            const parityEntries = [];
+            let parityUsed = 0;
+            const parityCounterpartsSeen = new Set();
+            for (const file of changedFiles) {
+              if (parityUsed >= PARITY_BUDGET) break;
+              for (const [pathA, pathB] of parityMap) {
+                let counterpart = null;
+                if (file === pathA && !changedFilesSet.has(pathB)) counterpart = pathB;
+                else if (file === pathB && !changedFilesSet.has(pathA)) counterpart = pathA;
+                if (!counterpart) continue;
+                if (parityCounterpartsSeen.has(counterpart)) continue;
+                const content = readChangedFile(counterpart);
+                if (!content) continue;
+                const header = `PARITY FILE: ${counterpart} (counterpart of changed ${file})\n`;
+                const separatorOverhead = parityEntries.length > 0 ? SEPARATOR.length : 0;
+                const introOverhead = parityEntries.length === 0 ? parityIntro.length : 0;
+                const cap = Math.min(PARITY_BUDGET - parityUsed - separatorOverhead - introOverhead - header.length, PER_FILE_CAP);
+                if (cap < 200) continue;
+                const entry = header + content.slice(0, cap);
+                parityCounterpartsSeen.add(counterpart);
+                parityEntries.push(entry);
+                parityUsed += separatorOverhead + introOverhead + entry.length;
+              }
+            }
+            const parityContext = parityEntries.length > 0 ? parityIntro + parityEntries.join(SEPARATOR) : '';
+
+            // Parse model-specific anti-hallucination rules.
+            // toJSON(inputs.anti_hallucination_rules) emits a JS literal whose value
+            // is the workflow_call string. We must JSON.parse THAT string to get the
+            // intended array; spreading the raw string would leak per-character
+            // tokens into the system prompt.
+            const antiHallucinationRulesInput = ${{ toJSON(inputs.anti_hallucination_rules) }};
+            let antiHallucinationRules = [];
+            try {
+              const parsedAntiHallucinationRules = Array.isArray(antiHallucinationRulesInput)
+                ? antiHallucinationRulesInput
+                : typeof antiHallucinationRulesInput === 'string'
+                  ? JSON.parse(antiHallucinationRulesInput)
+                  : [];
+              antiHallucinationRules = Array.isArray(parsedAntiHallucinationRules)
+                ? parsedAntiHallucinationRules
+                : [];
+            } catch (parseErr) {
+              // Surface parse failures explicitly. Silently dropping the
+              // model-specific anti-hallucination guardrails would degrade
+              // review quality (Qwen 3.6 Plus has a documented 26.5%
+              // fabrication rate) without any visible signal in CI logs.
+              core.warning(`Failed to parse anti_hallucination_rules input as JSON: ${parseErr.message}. Continuing with empty rules — model-specific guardrails are NOT applied.`);
+            }
+
+            const systemPrompt = [
+              'You are a strict protocol security reviewer for the RUBIN blockchain protocol.',
+              '',
+              'PROTOCOL CONTEXT:',
+              '- Bitcoin-like UTXO chain with dual reference clients (Go + Rust) and Lean4 formal verification',
+              '- Cryptography: ML-DSA-87 (FIPS 204) as native signature scheme, post-quantum',
+              '- Covenant-typed system: P2PK, HTLC, anchor, DA-commit, CORE_EXT, vault, multisig',
+              '- Soft-fork deployment mechanism for protocol upgrades',
+              '- Canonical chain: RUBIN_L1_CANONICAL.md -> fixtures -> Go -> Rust -> conformance tests',
+              '',
+              'SEVERITY CLASSIFICATION:',
+              'CRITICAL: double-spend, inflation bug, signature bypass, fork-choice error, proven consensus divergence',
+              'HIGH: nonce reuse, weak entropy, PQ parameter misuse, missing signature validation',
+              'MEDIUM: integer overflow/underflow, slice bounds, unchecked casts, panic in consensus path',
+              'LOW: incorrect state transitions, undo record integrity, non-canonical serialization',
+              'INFO: spec/code/fixture drift, missing test coverage',
+              'PERF: unbounded allocations, O(n^2) in hot paths',
+              '',
+              'ANTI-HALLUCINATION RULES:',
+              '- CODE CITATION RULE: Every finding MUST cite file:line and quote the exact problematic code.',
+              '- Never claim divergence without showing the ACTUAL differing code from both clients.',
+              '- Never reference files not provided in context.',
+              '- If PARITY CONTEXT shows matching implementations, do NOT report divergence.',
+              '- If unsure, mark severity as INFO with "NEEDS VERIFICATION".',
+              '- DEDUPLICATION: a "PREVIOUSLY REPORTED" section may appear in the user message. Do NOT re-report findings already in that list — they are already tracked by an earlier review.',
+              ...antiHallucinationRules,
+              '',
+              'OUTPUT FORMAT (JSON only):',
+              '```',
+              '{',
+              `  "model": "${modelId}",`,
+              '  "verdict": "PASS|WARN|BLOCK",',
+              '  "findings": [{"severity":"...","file":"...","line":N,"title":"...","details":"...","suggestion":"..."}]',
+              '}',
+              '```'
+            ].join('\n');
+
+            const USER_PROMPT_CAP = 300000;
+            const userPromptRaw = [
+              'Review this PR diff for security issues:\n',
+              diff,
+              changedFilePayload,
+              dependencyContext,
+              parityContext,
+              previousFindings
+            ].join('\n');
+            // Same slice-minus-note-length pattern as the diff truncation
+            // so the final user prompt is strictly bounded by the cap.
+            const userPromptTruncationNote = `\n\n[TRUNCATED — user prompt exceeded ${USER_PROMPT_CAP} bytes; later sections may be missing, do not treat omissions as "unchanged"]`;
+            const userPrompt = userPromptRaw.length > USER_PROMPT_CAP
+              ? userPromptRaw.slice(0, Math.max(0, USER_PROMPT_CAP - userPromptTruncationNote.length)) + userPromptTruncationNote
+              : userPromptRaw;
+
+            // Build request based on API type. usesGitHubModels, apiUrl,
+            // and modelId are hoisted to the top of the script so the
+            // systemPrompt above can reference modelId without temporal-
+            // dead-zone errors.
+            const apiKey = usesGitHubModels ? process.env.GITHUB_TOKEN : process.env.API_KEY;
+            const headers = usesGitHubModels
+              ? { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
+              : {
+                  'Authorization': `Bearer ${apiKey}`,
+                  'Content-Type': 'application/json',
+                  'HTTP-Referer': `https://github.com/${context.repo.owner}/${context.repo.repo}`,
+                  'X-Title': 'RUBIN Protocol Security Review'
+                };
+
+            // Common generation params for both providers.
+            const requestBody = {
+              model: modelId,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt }
+              ],
+              temperature: 0.2,
+              top_p: 0.9
+            };
+            // Gate the reasoning budget on the model family rather than
+            // the auth flag (`!usesGitHubModels` would also fire for any
+            // future non-Qwen OpenRouter caller whose API rejects the
+            // `reasoning` field). Qwen 3.6 Plus has always-on chain-of-
+            // thought; capping the thinking budget at 50000 leaves ~15k
+            // of the 65k total for the structured JSON answer.
+            if (modelId.toLowerCase().startsWith('qwen/')) {
+              requestBody.reasoning = { max_tokens: 50000 };
+            }
+            if (${{ inputs.max_tokens }} > 0) requestBody.max_tokens = ${{ inputs.max_tokens }};
+            if (${{ inputs.needs_json_mode }}) requestBody.response_format = { type: 'json_object' };
+
+            const response = await fetch(apiUrl, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(requestBody)
+            });
+
+            if (!response.ok) {
+              const errText = await response.text();
+              core.setFailed(`API error ${response.status}: ${errText.slice(0, 500)}`);
+              return;
+            }
+
+            // Read body as text first so a non-JSON 2xx (proxy HTML, plain
+            // text error, etc.) fails closed with a useful preview instead
+            // of throwing an unguarded TypeError from response.json().
+            const responseText = await response.text();
+            let data;
+            try {
+              data = JSON.parse(responseText);
+            } catch (jsonErr) {
+              core.setFailed(`Provider returned 2xx but non-JSON body: ${jsonErr.message}. Body preview: ${responseText.slice(0, 500)}`);
+              return;
+            }
+            const rawContent = data.choices?.[0]?.message?.content || '';
+            if (!rawContent) {
+              core.setFailed('Empty response from model');
+              return;
+            }
+
+            // Strip <think> reasoning blocks
+            let result = rawContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+            // Extract JSON: first try a fenced code block, then fall back to
+            // the first '{' .. last '}' span. The fallback handles models
+            // (notably DeepSeek with needs_json_mode=false) that emit prose
+            // like "Here is my review:\n{...}" without backticks.
+            const jsonMatch = result.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) {
+              result = jsonMatch[1].trim();
+            } else {
+              const firstBrace = result.indexOf('{');
+              const lastBrace = result.lastIndexOf('}');
+              if (firstBrace !== -1 && lastBrace > firstBrace) {
+                result = result.slice(firstBrace, lastBrace + 1).trim();
+              }
+            }
+
+            // Validate JSON, repair if needed
+            try {
+              JSON.parse(result);
+            } catch (e) {
+              core.warning(`Malformed JSON: ${e.message}. Attempting jsonrepair...`);
+              try {
+                result = jsonrepair(result);
+                JSON.parse(result);
+              } catch (e2) {
+                fs.writeFileSync('raw-review-output.txt', rawContent);
+                core.setFailed(`jsonrepair failed: ${e2.message}`);
+                return;
+              }
+            }
+
+            fs.writeFileSync('review-output.json', result);
+            core.setOutput('review_file', 'review-output.json');
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_KEY: ${{ secrets.API_KEY }}
+
+      - name: Upload raw review output
+        if: always() && hashFiles('raw-review-output.txt') != ''
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+        with:
+          name: ${{ inputs.artifact_prefix }}-raw-output
+          path: raw-review-output.txt
+          retention-days: 3
+
+      - name: Upload review JSON artifact
+        if: always() && hashFiles('review-output.json') != ''
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
+        with:
+          name: ${{ inputs.artifact_prefix }}-review-output
+          path: review-output.json
+          retention-days: 7
+
+      - name: Post review
+        if: steps.review.outputs.review_file
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            // Hoist model_display_name through toJSON BEFORE building the
+            // template-literal header. Embedding a raw workflow_call input
+            // directly inside backticks is dangerous: any dollar-brace
+            // expression substring in a future caller's display name would
+            // be evaluated as a JS expression at template-literal
+            // interpolation time, which could leak process.env.GITHUB_TOKEN
+            // or other secrets into the posted PR comment.
+            const modelDisplayName = ${{ toJSON(inputs.model_display_name) }};
+            const reviewFile = '${{ steps.review.outputs.review_file }}';
+            if (!reviewFile || !fs.existsSync(reviewFile)) return;
+            const review = fs.readFileSync(reviewFile, 'utf8');
+            let parsed;
+            try { parsed = JSON.parse(review); } catch(e) { parsed = null; }
+            const verdict = parsed?.verdict || 'UNKNOWN';
+            const emoji = verdict === 'PASS' ? '✅' : verdict === 'WARN' ? '⚠️' : '🛑';
+            const header = `### ${emoji} Security Review: ${verdict}\n_Model: ${modelDisplayName}_\n\n\`\`\`json\n`;
+            const footer = '\n```';
+            // Produce a VALID shortened JSON when the body needs truncation,
+            // not a sliced byte buffer. The next run's dedup parser reads
+            // the fenced ```json block from past PR comments via JSON.parse;
+            // if we slice raw bytes, the parser silently drops dedup data
+            // for that comment. Reducing the findings array preserves
+            // parseability while still fitting under GitHub's size cap.
+            // GitHub PR-comment cap is in BYTES (UTF-8). Header and notice
+            // contain emoji that take 3-4 bytes each, so JS string `.length`
+            // (UTF-16 code units) would undercount and risk going over the
+            // cap. Use Buffer.byteLength for every length comparison.
+            const truncationNotice = '\n\n> ⚠️ Review body was shortened to fit the GitHub PR-comment size cap. The JSON above is a parseable subset; the full review lives in the workflow artifacts and is what the merge gate consumes.';
+            const safetyMargin = 64;
+            const headerByteLen = Buffer.byteLength(header, 'utf8');
+            const footerByteLen = Buffer.byteLength(footer, 'utf8');
+            const noticeByteLen = Buffer.byteLength(truncationNotice, 'utf8');
+            const maxJsonByteLen = 65000 - headerByteLen - footerByteLen - noticeByteLen - safetyMargin;
+            let body;
+            if (Buffer.byteLength(review, 'utf8') <= maxJsonByteLen) {
+              body = header + review + footer;
+            } else {
+              let shortenedStr = null;
+              try {
+                const parsedFull = JSON.parse(review);
+                if (Array.isArray(parsedFull.findings)) {
+                  let n = parsedFull.findings.length;
+                  while (n >= 0) {
+                    const candidate = {
+                      ...parsedFull,
+                      findings: parsedFull.findings.slice(0, n),
+                      _truncated: true,
+                      _original_findings_count: parsedFull.findings.length,
+                    };
+                    const candidateStr = JSON.stringify(candidate, null, 2);
+                    if (Buffer.byteLength(candidateStr, 'utf8') <= maxJsonByteLen) {
+                      shortenedStr = candidateStr;
+                      break;
+                    }
+                    n--;
+                  }
+                }
+                if (shortenedStr === null) {
+                  // Fall back to a minimal stub that is still valid JSON.
+                  shortenedStr = JSON.stringify({
+                    verdict: parsedFull.verdict || 'UNKNOWN',
+                    findings: [],
+                    _truncated: true,
+                    _note: 'Full review available in workflow artifacts; comment cap exceeded',
+                  }, null, 2);
+                }
+              } catch (parseErr) {
+                // The on-disk review file should be valid JSON by this point
+                // (validated above), but be defensive: byte-slice as a last
+                // resort and let the truncation notice explain.
+                shortenedStr = Buffer.from(review, 'utf8').slice(0, maxJsonByteLen).toString('utf8');
+              }
+              body = header + shortenedStr + footer + truncationNotice;
+            }
+            // pulls.createReview can fail with 403 on forked PRs because
+            // GITHUB_TOKEN is read-only on `pull_request` events from
+            // forks. Wrap the call so the merge-gating "Block on
+            // critical/high findings" step (which only needs the
+            // on-disk review file, not the posted comment) still runs.
+            try {
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                event: 'COMMENT',
+                body
+              });
+            } catch (postErr) {
+              core.warning(`Failed to post review comment (likely fork PR with read-only token): ${postErr.message}. The merge gate still runs against the on-disk review file.`);
+            }
+
+      - name: Block on critical/high findings
+        if: steps.review.outputs.review_file
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            const reviewFile = '${{ steps.review.outputs.review_file }}';
+            if (!reviewFile || !fs.existsSync(reviewFile)) return;
+            const raw = fs.readFileSync(reviewFile, 'utf8');
+            let parsed;
+            try { parsed = JSON.parse(raw); } catch (e) {
+              core.setFailed(`Unparseable review JSON: ${e.message}`);
+              return;
+            }
+
+            // Load acknowledged findings from BASE ref
+            const baseSha = '${{ github.event.pull_request.base.sha }}';
+            let acknowledged = [];
+            try {
+              const content = execSync(
+                `git show ${baseSha}:.github/security-acknowledged.json 2>/dev/null || echo "{}"`,
+                { encoding: 'utf8' }
+              );
+              const parsed_ack = JSON.parse(content);
+              acknowledged = parsed_ack.acknowledged || [];
+            } catch {}
+
+            // Coerce finding fields to strings up-front. Models occasionally
+            // return numbers/objects/null in `title`/`file`; calling
+            // `.toLowerCase()` on those would throw `TypeError: ... is not a
+            // function` and crash the merge gate with no actionable signal.
+            const isAcknowledged = (f) => {
+              const findingTitle = String((f && f.title) || '').toLowerCase();
+              const findingFile = String((f && f.file) || '').toLowerCase();
+              return acknowledged.some(ack => {
+                // title_pattern is REQUIRED. Without this guard, an entry with only
+                // file_pattern (e.g., { file_pattern: "consensus" }) would suppress
+                // ALL findings in matching files — including future CRITICAL ones —
+                // because the truthy file_pattern alone would satisfy the return.
+                const ackTitle = String(ack.title_pattern || '').toLowerCase();
+                if (!ackTitle) return false;
+                if (!findingTitle.includes(ackTitle)) return false;
+                // file_pattern is matched case-insensitively to honor the schema
+                // contract documented in .github/security-acknowledged.json.
+                const ackFile = String(ack.file_pattern || '').toLowerCase();
+                if (ackFile && !findingFile.includes(ackFile)) return false;
+                return true;
+              });
+            };
+
+            const sevOrder = ['CRITICAL','HIGH','MEDIUM','LOW','INFO','PERF'];
+            const getSevIdx = (s) => {
+              const idx = sevOrder.indexOf(String(s || '').toUpperCase().trim());
+              return idx === -1 ? sevOrder.length : idx; // unknown = lowest priority
+            };
+
+            // Guard against malformed top-level JSON: a model that returns
+            // `null`, an array, or a primitive must fail-closed with a
+            // contract-violation message rather than crash on `.findings`.
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              const parsedKind = parsed === null ? 'null' : Array.isArray(parsed) ? 'array' : typeof parsed;
+              core.setFailed(`Review JSON contract violation: expected object with 'findings' array, got ${parsedKind}`);
+              return;
+            }
+
+            // Strict findings validation: an absent `findings` key is a
+            // legitimate "nothing to report" review, but a present-but-
+            // non-array value (e.g., `{"findings": {"weird": true}}`)
+            // is a contract violation that must fail-closed. Silently
+            // coercing it to [] would let HIGH/CRITICAL content emitted
+            // in an unexpected shape bypass the merge gate.
+            let findings;
+            if (parsed.findings === undefined) {
+              findings = [];
+            } else if (Array.isArray(parsed.findings)) {
+              findings = parsed.findings;
+            } else {
+              core.setFailed(`Review JSON contract violation: 'findings' must be an array (or omitted), got ${typeof parsed.findings}`);
+              return;
+            }
+            const dominated = new Set();
+            for (let i = 0; i < findings.length; i++) {
+              for (let j = 0; j < findings.length; j++) {
+                if (i === j) continue;
+                const a = findings[i], b = findings[j];
+                if (a.file === b.file && a.title === b.title) {
+                  if (getSevIdx(a.severity) < getSevIdx(b.severity)) dominated.add(j);
+                }
+              }
+            }
+
+            // Use Set.has() for O(1) membership; .includes() on a converted
+            // array would be O(n) per call (the contract checker bans this
+            // exact anti-pattern via BANNED_SUBSTRINGS).
+            const dominated_filtered = findings.filter((_, i) => !dominated.has(i));
+            const dominated_unacked = dominated_filtered.filter(f => !isAcknowledged(f));
+            const normSev = (s) => String(s || '').toUpperCase().trim();
+            const dominated_unacked_blocking = dominated_unacked.filter(f => {
+              const sev = normSev(f.severity);
+              return sev === 'CRITICAL' || sev === 'HIGH';
+            });
+
+            if (dominated_unacked_blocking.length > 0) {
+              const summary = dominated_unacked_blocking.map(f => `[${normSev(f.severity)}] ${f.file}: ${f.title}`).join('\n');
+              core.setFailed(`Blocking findings:\n${summary}`);
+            }
+
