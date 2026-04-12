@@ -2,7 +2,6 @@ package consensus
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,15 +15,6 @@ func liveBindingPolicyRepoPath(parts ...string) string {
 	}
 	segments := append([]string{filepath.Dir(currentFile), "..", "..", ".."}, parts...)
 	return filepath.Clean(filepath.Join(segments...))
-}
-
-func compactLiveBindingPolicyJSONBytes(t *testing.T, raw []byte) []byte {
-	t.Helper()
-	var out bytes.Buffer
-	if err := json.Compact(&out, raw); err != nil {
-		t.Fatalf("json.Compact: %v", err)
-	}
-	return out.Bytes()
 }
 
 func TestEmbeddedLiveBindingPolicyMatchesCanonicalFixture(t *testing.T) {
@@ -41,10 +31,7 @@ func TestEmbeddedLiveBindingPolicyMatchesCanonicalFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", path, err)
 	}
-	if !bytes.Equal(
-		compactLiveBindingPolicyJSONBytes(t, raw),
-		compactLiveBindingPolicyJSONBytes(t, embeddedLiveBindingPolicyV1),
-	) {
+	if !bytes.Equal(raw, embeddedLiveBindingPolicyV1) {
 		t.Fatal("embedded live binding policy drifted from canonical fixture")
 	}
 }
@@ -159,6 +146,59 @@ func TestLoadLiveBindingPolicyRejectsMissingEntries(t *testing.T) {
 	}
 	if got, want := err.Error(), "live_binding_policy: entries missing"; got != want {
 		t.Fatalf("err=%q, want %q", got, want)
+	}
+}
+
+func TestLoadLiveBindingPolicyRejectsDuplicateJSONKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "top_level_version",
+			raw: `{
+				"version": 1,
+				"version": 2,
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"pubkey_len": 2592,
+					"sig_len": 4627,
+					"runtime_binding": "openssl_digest32_v1",
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}]
+			}`,
+			want: `live_binding_policy: parse embedded artifact: duplicate JSON key "version"`,
+		},
+		{
+			name: "entry_alg_name",
+			raw: `{
+				"version": 1,
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"alg_name": "FAKE",
+					"pubkey_len": 2592,
+					"sig_len": 4627,
+					"runtime_binding": "openssl_digest32_v1",
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}]
+			}`,
+			want: `live_binding_policy: parse embedded artifact: duplicate JSON key "alg_name"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadLiveBindingPolicyFromJSON([]byte(tc.raw))
+			if err == nil {
+				t.Fatal("expected rejection")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("err=%q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

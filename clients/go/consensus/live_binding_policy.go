@@ -50,7 +50,83 @@ func liveBindingPolicyRuntimeTupleKey(algName string, pubkeyLen int, sigLen int)
 	return fmt.Sprintf("%s|%d|%d", algName, pubkeyLen, sigLen)
 }
 
+type liveBindingPolicyJSONScope struct {
+	object       bool
+	keys         map[string]struct{}
+	expectingKey bool
+}
+
+func rejectDuplicateLiveBindingPolicyJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	stack := make([]liveBindingPolicyJSONScope, 0, 8)
+	markValueComplete := func() {
+		if len(stack) == 0 {
+			return
+		}
+		top := &stack[len(stack)-1]
+		if top.object && !top.expectingKey {
+			top.expectingKey = true
+		}
+	}
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		switch v := token.(type) {
+		case json.Delim:
+			switch v {
+			case '{':
+				stack = append(stack, liveBindingPolicyJSONScope{
+					object:       true,
+					keys:         make(map[string]struct{}),
+					expectingKey: true,
+				})
+			case '[':
+				stack = append(stack, liveBindingPolicyJSONScope{})
+			case '}':
+				if len(stack) == 0 || !stack[len(stack)-1].object {
+					return fmt.Errorf("unexpected json object close")
+				}
+				stack = stack[:len(stack)-1]
+				markValueComplete()
+			case ']':
+				if len(stack) == 0 || stack[len(stack)-1].object {
+					return fmt.Errorf("unexpected json array close")
+				}
+				stack = stack[:len(stack)-1]
+				markValueComplete()
+			}
+		case string:
+			if len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectingKey {
+				scope := &stack[len(stack)-1]
+				if _, ok := scope.keys[v]; ok {
+					return fmt.Errorf("duplicate JSON key %q", v)
+				}
+				scope.keys[v] = struct{}{}
+				scope.expectingKey = false
+				continue
+			}
+			markValueComplete()
+		default:
+			markValueComplete()
+		}
+	}
+
+	if len(stack) != 0 {
+		return fmt.Errorf("incomplete JSON value")
+	}
+	return nil
+}
+
 func decodeSingleLiveBindingPolicyJSONValue(data []byte, dest any) error {
+	if err := rejectDuplicateLiveBindingPolicyJSONKeys(data); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dest); err != nil {
