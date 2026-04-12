@@ -228,6 +228,8 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "openssl-sys",
+ "serde",
+ "serde_json",
  "sha3",
 ]
 

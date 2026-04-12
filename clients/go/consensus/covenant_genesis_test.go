@@ -324,10 +324,10 @@ type testRotationProvider struct {
 }
 
 func (p testRotationProvider) NativeCreateSuites(height uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(p.createSuiteID)
+	return mustNewNativeSuiteSet(p.createSuiteID)
 }
 func (p testRotationProvider) NativeSpendSuites(height uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(p.createSuiteID)
+	return mustNewNativeSuiteSet(p.createSuiteID)
 }
 
 func TestValidateTxCovenantsGenesis_RotationAware(t *testing.T) {

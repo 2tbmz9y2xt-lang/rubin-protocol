@@ -11,8 +11,17 @@ from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = REPO_ROOT / "conformance" / "fixtures"
+PROTOCOL_FIXTURES_DIR = FIXTURES_DIR / "protocol"
 RUNNER_PATH = REPO_ROOT / "conformance" / "runner" / "run_cv_bundle.py"
 OUT_PATH = REPO_ROOT / "conformance" / "MATRIX.md"
+EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
+    {
+        "legacy_exposure_hook_vectors.json",
+        "legacy_exposure_report_v1_example.json",
+        "live_binding_policy_v1.json",
+        "production_rotation_schedule_v1.json",
+    }
+)
 EXPECTED_GATES = frozenset(
     {
         "CV-BLOCK-BASIC",
@@ -76,6 +85,41 @@ class GateRow:
     executable_ops: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ProtocolArtifactRow:
+    path: str
+    purpose: str
+    coverage: str
+
+
+PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
+    "legacy_exposure_hook_vectors.json": (
+        "Operational protocol artifact",
+        "legacy exposure scanner / hook-driven verification receipts",
+    ),
+    "legacy_exposure_report_v1_example.json": (
+        "Operational protocol artifact",
+        "example report shape for legacy exposure scanner consumers",
+    ),
+    "live_binding_policy_v1.json": (
+        "Canonical live binding policy artifact",
+        "Go/Rust consensus embedded copies, loader drift checks, and live binding/runtime parity tests",
+    ),
+    "production_rotation_schedule_v1.json": (
+        "Canonical production rotation schedule artifact",
+        "Go node / Rust node embedded schedule loaders and production activation checks",
+    ),
+}
+
+
+class DuplicateJSONKeyError(ValueError):
+    pass
+
+
+def reject_nonstandard_json_constant(token: str) -> Any:
+    raise ValueError(f"invalid JSON constant {token!r}")
+
+
 def load_local_ops() -> set[str]:
     spec = importlib.util.spec_from_file_location("rubin_run_cv_bundle", str(RUNNER_PATH))
     if spec is None or spec.loader is None:
@@ -92,6 +136,44 @@ def iter_fixtures() -> Iterable[Path]:
     if not FIXTURES_DIR.exists():
         raise RuntimeError(f"missing fixtures dir: {FIXTURES_DIR}")
     return sorted(FIXTURES_DIR.glob("CV-*.json"))
+
+
+def iter_protocol_artifacts() -> Iterable[Path]:
+    if not PROTOCOL_FIXTURES_DIR.exists():
+        raise RuntimeError(f"missing protocol fixtures dir: {PROTOCOL_FIXTURES_DIR}")
+    return sorted(PROTOCOL_FIXTURES_DIR.glob("*.json"))
+
+
+def reject_duplicate_json_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in data:
+            raise DuplicateJSONKeyError(f'duplicate JSON key "{key}"')
+        data[key] = value
+    return data
+
+
+def load_json_fail_closed(path: Path) -> Any:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="strict")
+        return json.loads(
+            raw,
+            object_pairs_hook=reject_duplicate_json_object_pairs,
+            parse_constant=reject_nonstandard_json_constant,
+        )
+    except UnicodeDecodeError as err:
+        raise RuntimeError(f"invalid JSON artifact {path}: {err}") from err
+    except DuplicateJSONKeyError as err:
+        raise RuntimeError(f"invalid JSON artifact {path}: {err}") from err
+    except json.JSONDecodeError as err:
+        raise RuntimeError(
+            f"invalid JSON artifact {path}: {err.msg} (line {err.lineno}, column {err.colno})"
+        ) from err
+    except OSError as err:
+        reason = err.strerror or err.__class__.__name__
+        raise RuntimeError(f"cannot read JSON artifact {path.name}: {reason}") from err
+    except ValueError as err:
+        raise RuntimeError(f"invalid JSON artifact {path}: {err}") from err
 
 
 def validate_fixture_schema(data: Any, path: Path) -> tuple[str, list[dict[str, Any]]]:
@@ -158,6 +240,49 @@ def load_gate_rows(local_ops: set[str]) -> list[GateRow]:
     return rows
 
 
+def load_protocol_artifact_rows() -> list[ProtocolArtifactRow]:
+    if set(PROTOCOL_ARTIFACT_META) != EXPECTED_PROTOCOL_ARTIFACTS:
+        missing_meta = sorted(EXPECTED_PROTOCOL_ARTIFACTS - set(PROTOCOL_ARTIFACT_META))
+        unexpected_meta = sorted(set(PROTOCOL_ARTIFACT_META) - EXPECTED_PROTOCOL_ARTIFACTS)
+        problems: list[str] = []
+        if missing_meta:
+            problems.append(f"missing protocol artifact metadata: {', '.join(missing_meta)}")
+        if unexpected_meta:
+            problems.append(
+                f"unexpected protocol artifact metadata: {', '.join(unexpected_meta)}"
+            )
+        raise RuntimeError(
+            f"protocol artifact metadata completeness check failed: {'; '.join(problems)}"
+        )
+
+    protocol_paths = list(iter_protocol_artifacts())
+    actual_names = {path.name for path in protocol_paths}
+    missing = sorted(EXPECTED_PROTOCOL_ARTIFACTS - actual_names)
+    unexpected = sorted(actual_names - EXPECTED_PROTOCOL_ARTIFACTS)
+    if missing or unexpected:
+        problems: list[str] = []
+        if missing:
+            problems.append(f"missing protocol artifacts: {', '.join(missing)}")
+        if unexpected:
+            problems.append(f"unexpected protocol artifacts: {', '.join(unexpected)}")
+        raise RuntimeError(
+            f"protocol artifact completeness check failed: {'; '.join(problems)}"
+        )
+
+    rows: list[ProtocolArtifactRow] = []
+    for path in protocol_paths:
+        load_json_fail_closed(path)
+        purpose, coverage = PROTOCOL_ARTIFACT_META[path.name]
+        rows.append(
+            ProtocolArtifactRow(
+                path=path.relative_to(FIXTURES_DIR).as_posix(),
+                purpose=purpose,
+                coverage=coverage,
+            )
+        )
+    return rows
+
+
 def validate_expected_gates(rows: list[GateRow]) -> None:
     actual_gates = {row.gate for row in rows}
     missing = sorted(EXPECTED_GATES - actual_gates)
@@ -174,7 +299,7 @@ def validate_expected_gates(rows: list[GateRow]) -> None:
     raise RuntimeError(f"fixture completeness check failed: {'; '.join(problems)}")
 
 
-def render(rows: list[GateRow], local_ops: set[str]) -> str:
+def render(rows: list[GateRow], local_ops: set[str], protocol_rows: list[ProtocolArtifactRow]) -> str:
     total_vectors = sum(r.vectors for r in rows)
     total_gates = len(rows)
     all_ops = sorted({o for r in rows for o in r.ops})
@@ -196,6 +321,7 @@ def render(rows: list[GateRow], local_ops: set[str]) -> str:
     lines.append(f"- Unique ops: **{len(all_ops)}**")
     lines.append(f"- Executable ops (Go↔Rust parity): **{len(all_exec_ops)}**")
     lines.append(f"- Local-only ops (runner-defined): **{len(all_local_ops)}**")
+    lines.append(f"- Shared protocol artifacts: **{len(protocol_rows)}**")
     lines.append("")
     lines.append("## Gates")
     lines.append("")
@@ -211,6 +337,13 @@ def render(rows: list[GateRow], local_ops: set[str]) -> str:
     for op in sorted(local_ops):
         lines.append(f"- `{op}`")
     lines.append("")
+    lines.append("## Shared Protocol Artifacts")
+    lines.append("")
+    lines.append("| Artifact | Purpose | Coverage |")
+    lines.append("| --- | --- | --- |")
+    for row in protocol_rows:
+        lines.append(f"| `{row.path}` | {row.purpose} | {row.coverage} |")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -221,8 +354,9 @@ def main() -> int:
 
     local_ops = load_local_ops()
     rows = load_gate_rows(local_ops)
+    protocol_rows = load_protocol_artifact_rows()
     validate_expected_gates(rows)
-    content = render(rows, local_ops)
+    content = render(rows, local_ops, protocol_rows)
 
     if args.check:
         if not OUT_PATH.exists():

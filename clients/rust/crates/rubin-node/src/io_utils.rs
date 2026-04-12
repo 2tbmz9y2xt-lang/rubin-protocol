@@ -2,6 +2,8 @@ use std::fs;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
@@ -28,11 +30,14 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 pub fn unique_temp_path(prefix: &str) -> PathBuf {
+    static NEXT_UNIQUE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
     std::env::temp_dir().join(format!(
-        "{prefix}-{}",
+        "{prefix}-{}-{}-{}",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
-            .as_nanos()
+            .as_nanos(),
+        NEXT_UNIQUE_TEMP_ID.fetch_add(1, Ordering::Relaxed),
     ))
 }

@@ -1,5 +1,9 @@
 use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87};
 use crate::error::{ErrorCode, TxError};
+use crate::live_binding_policy::{
+    live_binding_policy_runtime_entry, LiveBindingPolicyLookupError,
+    LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1,
+};
 use crate::tx_helpers::DigestSigner;
 use core::ffi::CStr;
 use std::sync::OnceLock;
@@ -239,6 +243,13 @@ fn suite_alg_name(suite_id: u8) -> Result<&'static CStr, TxError> {
     }
 }
 
+fn openssl_alg_name_cstr(name: &str) -> Option<&'static CStr> {
+    match name {
+        "ML-DSA-87" => Some(c"ML-DSA-87"),
+        _ => None,
+    }
+}
+
 fn parse_openssl_fips_mode(raw: &str) -> Result<OpenSslFipsMode, TxError> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | "off" => Ok(OpenSslFipsMode::Off),
@@ -428,27 +439,54 @@ enum SuiteVerifierBinding {
     },
 }
 
-// v1 keeps the legacy ML-DSA-87 verifier on the explicit OpenSSL
-// archival/runtime path. Runtime dispatch must resolve a concrete binding
-// instead of treating registry.alg_name as an implicit backend switch.
+// v1 keeps the current live verifier contract pinned to the canonical
+// ML-DSA-87/OpenSSL-digest32 tuple from the shared live binding artifact.
+// Runtime dispatch must resolve a concrete binding instead of treating
+// registry.alg_name as an implicit backend switch.
+//
 fn resolve_suite_verifier_binding(
     alg_name: &str,
     pubkey_len: u64,
     sig_len: u64,
 ) -> Result<SuiteVerifierBinding, TxError> {
-    if alg_name == "ML-DSA-87"
-        && pubkey_len == ML_DSA_87_PUBKEY_BYTES
-        && sig_len == ML_DSA_87_SIG_BYTES
-    {
+    let entry = live_binding_policy_runtime_entry(alg_name, pubkey_len, sig_len).map_err(
+        |err| match err {
+            LiveBindingPolicyLookupError::NotFound(_) => TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "resolve_suite_verifier_binding: unsupported suite verifier binding",
+            ),
+            LiveBindingPolicyLookupError::Invalid(_) => TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "resolve_suite_verifier_binding: live binding policy invalid",
+            ),
+        },
+    )?;
+    if entry.runtime_binding.as_str() == LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 {
+        if entry.alg_name != "ML-DSA-87"
+            || entry.openssl_alg != "ML-DSA-87"
+            || entry.pubkey_len != ML_DSA_87_PUBKEY_BYTES
+            || entry.sig_len != ML_DSA_87_SIG_BYTES
+        {
+            return Err(TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "resolve_suite_verifier_binding: unsupported suite verifier binding",
+            ));
+        }
+        let alg = openssl_alg_name_cstr(entry.openssl_alg.as_str()).ok_or_else(|| {
+            TxError::new(
+                ErrorCode::TxErrSigAlgInvalid,
+                "resolve_suite_verifier_binding: unsupported OpenSSL alg",
+            )
+        })?;
         return Ok(SuiteVerifierBinding::OpenSslDigest32V1 {
-            alg: c"ML-DSA-87",
+            alg,
             pubkey_len: ML_DSA_87_PUBKEY_BYTES,
             sig_len: ML_DSA_87_SIG_BYTES,
         });
     }
     Err(TxError::new(
         ErrorCode::TxErrSigAlgInvalid,
-        "unsupported suite verifier binding",
+        "resolve_suite_verifier_binding: unsupported suite verifier binding",
     ))
 }
 
@@ -1167,10 +1205,73 @@ mod tests {
     }
 
     #[test]
+    fn resolve_suite_verifier_binding_live_policy_pins_canonical_legacy_v1_binding() {
+        let entry = crate::live_binding_policy::live_binding_policy_runtime_entry(
+            "ML-DSA-87",
+            crate::constants::ML_DSA_87_PUBKEY_BYTES,
+            crate::constants::ML_DSA_87_SIG_BYTES,
+        )
+        .expect("live binding entry");
+        assert_eq!(
+            entry.runtime_binding,
+            crate::live_binding_policy::LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1
+        );
+        assert_eq!(entry.alg_name, "ML-DSA-87");
+        assert_eq!(entry.openssl_alg, "ML-DSA-87");
+
+        let binding = super::resolve_suite_verifier_binding(
+            "ML-DSA-87",
+            crate::constants::ML_DSA_87_PUBKEY_BYTES,
+            crate::constants::ML_DSA_87_SIG_BYTES,
+        )
+        .expect("binding");
+        match binding {
+            super::SuiteVerifierBinding::OpenSslDigest32V1 {
+                alg,
+                pubkey_len,
+                sig_len,
+            } => {
+                assert_eq!(alg.to_str().expect("alg utf8"), "ML-DSA-87");
+                assert_eq!(pubkey_len, crate::constants::ML_DSA_87_PUBKEY_BYTES);
+                assert_eq!(sig_len, crate::constants::ML_DSA_87_SIG_BYTES);
+            }
+        }
+    }
+
+    #[test]
     fn verify_sig_with_registry_unknown_suite_errors() {
         let err = super::verify_sig_with_registry(0xFF, &[0u8; 32], &[0u8; 32], &[0u8; 32], None)
             .expect_err("bad suite");
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    }
+
+    #[test]
+    fn verify_sig_with_registry_custom_suite_exact_v1_binding_allowed() {
+        let Some(kp) = generate_or_skip() else { return };
+        let digest = [0x68; 32];
+        let sig = kp.sign_digest32(digest).expect("sign");
+        let mut suites = std::collections::BTreeMap::new();
+        suites.insert(
+            0x02,
+            crate::suite_registry::SuiteParams {
+                suite_id: 0x02,
+                pubkey_len: crate::constants::ML_DSA_87_PUBKEY_BYTES,
+                sig_len: crate::constants::ML_DSA_87_SIG_BYTES,
+                verify_cost: crate::constants::VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-87",
+            },
+        );
+        let registry = crate::suite_registry::SuiteRegistry::with_suites(suites);
+
+        let ok = super::verify_sig_with_registry(
+            0x02,
+            &kp.pubkey_bytes(),
+            &sig,
+            &digest,
+            Some(&registry),
+        )
+        .expect("custom suite should reuse canonical v1 binding");
+        assert!(ok, "custom suite entry should verify");
     }
 
     #[test]
