@@ -116,6 +116,10 @@ class DuplicateJSONKeyError(ValueError):
     pass
 
 
+def reject_nonstandard_json_constant(token: str) -> Any:
+    raise ValueError(f"invalid JSON constant {token!r}")
+
+
 def load_local_ops() -> set[str]:
     spec = importlib.util.spec_from_file_location("rubin_run_cv_bundle", str(RUNNER_PATH))
     if spec is None or spec.loader is None:
@@ -152,13 +156,19 @@ def reject_duplicate_json_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str
 def load_json_fail_closed(path: Path) -> Any:
     raw = path.read_text(encoding="utf-8", errors="strict")
     try:
-        return json.loads(raw, object_pairs_hook=reject_duplicate_json_object_pairs)
+        return json.loads(
+            raw,
+            object_pairs_hook=reject_duplicate_json_object_pairs,
+            parse_constant=reject_nonstandard_json_constant,
+        )
     except DuplicateJSONKeyError as err:
         raise RuntimeError(f"invalid JSON artifact {path}: {err}") from err
     except json.JSONDecodeError as err:
         raise RuntimeError(
             f"invalid JSON artifact {path}: {err.msg} (line {err.lineno}, column {err.colno})"
         ) from err
+    except ValueError as err:
+        raise RuntimeError(f"invalid JSON artifact {path}: {err}") from err
 
 
 def validate_fixture_schema(data: Any, path: Path) -> tuple[str, list[dict[str, Any]]]:

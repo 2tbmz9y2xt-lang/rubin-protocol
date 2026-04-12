@@ -59,6 +59,31 @@ class GenConformanceMatrixTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "invalid JSON artifact"):
                     m.load_protocol_artifact_rows()
 
+    def test_load_protocol_artifact_rows_rejects_nonstandard_json_numbers(self) -> None:
+        cases = (
+            ('{"version": NaN, "entries": []}', "invalid JSON constant 'NaN'"),
+            ('{"version": Infinity, "entries": []}', "invalid JSON constant 'Infinity'"),
+            ('{"version": -Infinity, "entries": []}', "invalid JSON constant '-Infinity'"),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    artifact = Path(tmpdir) / "live_binding_policy_v1.json"
+                    artifact.write_text(raw, encoding="utf-8")
+                    with (
+                        mock.patch.object(
+                            m, "EXPECTED_PROTOCOL_ARTIFACTS", frozenset({artifact.name})
+                        ),
+                        mock.patch.object(
+                            m,
+                            "PROTOCOL_ARTIFACT_META",
+                            {artifact.name: ("Canonical live binding policy artifact", "tests")},
+                        ),
+                        mock.patch.object(m, "iter_protocol_artifacts", return_value=[artifact]),
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, expected):
+                            m.load_protocol_artifact_rows()
+
 
 if __name__ == "__main__":
     unittest.main()
