@@ -149,17 +149,19 @@ func TryNewNativeSuiteSet(ids ...uint8) (*NativeSuiteSet, error) {
 	return &NativeSuiteSet{suites: m}, nil
 }
 
-// NewNativeSuiteSet constructs a NativeSuiteSet from a list of suite IDs and
-// fail-closes if the deduplicated live/native cardinality exceeds the v1
-// mainnet cap of two suites.
-func NewNativeSuiteSet(ids ...uint8) (*NativeSuiteSet, error) {
-	return TryNewNativeSuiteSet(ids...)
+// NewNativeSuiteSet constructs a NativeSuiteSet from a list of suite IDs.
+// It preserves the legacy infallible API for external callers while still
+// enforcing the live/native cardinality invariant. More than two unique suites
+// is a programming error; callers that need an error should use
+// TryNewNativeSuiteSet instead.
+func NewNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
+	return mustNewNativeSuiteSet(ids...)
 }
 
 // mustNewNativeSuiteSet is reserved for trusted static initialization or code
 // paths that already validated the suite-set cardinality invariant.
 func mustNewNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
-	s, err := NewNativeSuiteSet(ids...)
+	s, err := TryNewNativeSuiteSet(ids...)
 	if err != nil {
 		panic(err)
 	}

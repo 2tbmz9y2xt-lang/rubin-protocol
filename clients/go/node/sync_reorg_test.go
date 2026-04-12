@@ -548,11 +548,7 @@ type countingRotationProvider struct {
 }
 
 func mustConsensusNativeSuiteSet(ids ...uint8) *consensus.NativeSuiteSet {
-	s, err := consensus.NewNativeSuiteSet(ids...)
-	if err != nil {
-		panic(err)
-	}
-	return s
+	return consensus.NewNativeSuiteSet(ids...)
 }
 
 func (p *countingRotationProvider) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {

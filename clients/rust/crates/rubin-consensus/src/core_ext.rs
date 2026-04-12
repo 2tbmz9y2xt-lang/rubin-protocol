@@ -529,14 +529,9 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
 }
 
 pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
-    let binding_name = normalize_core_ext_binding_name(binding_name)?;
+    let binding_name = binding_name.trim();
     let entry = supported_live_core_ext_policy_entry(binding_name)?;
-    match entry.core_ext_live_binding_name.as_str() {
-        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
-            Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
-        }
-        _ => Err(unsupported_core_ext_binding_error(binding_name)),
-    }
+    Ok(entry.core_ext_live_binding_name.as_str())
 }
 
 pub fn live_core_ext_verification_binding_from_name_and_descriptor(
@@ -2461,6 +2456,15 @@ mod tests {
 
     #[test]
     fn live_core_ext_binding_helper_rejects_non_manifest_bindings() {
+        let normalized = normalize_live_core_ext_binding_name(&format!(
+            "  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"
+        ))
+        .expect("valid live binding");
+        assert_eq!(
+            normalized,
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+        );
+
         let err = normalize_live_core_ext_binding_name("").expect_err("empty must fail");
         assert!(err.contains("unsupported core_ext binding"));
 

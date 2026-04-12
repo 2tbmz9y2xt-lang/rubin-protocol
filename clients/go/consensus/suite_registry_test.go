@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -176,14 +177,17 @@ func TestTryNewNativeSuiteSet_RejectsMoreThanTwoUniqueSuites(t *testing.T) {
 	}
 }
 
-func TestNewNativeSuiteSet_RejectsMoreThanTwoUniqueSuites(t *testing.T) {
-	_, err := NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02, 0x03)
-	if err == nil {
-		t.Fatal("expected cardinality rejection")
-	}
-	if got, want := err.Error(), "native suite set cardinality 3 exceeds max 2"; got != want {
-		t.Fatalf("err=%q, want %q", got, want)
-	}
+func TestNewNativeSuiteSet_PanicsOnMoreThanTwoUniqueSuites(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic")
+		}
+		if got, want := fmt.Sprint(r), "native suite set cardinality 3 exceeds max 2"; got != want {
+			t.Fatalf("panic=%q, want %q", got, want)
+		}
+	}()
+	NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02, 0x03)
 }
 
 func TestNativeSuiteSet_Clone(t *testing.T) {
