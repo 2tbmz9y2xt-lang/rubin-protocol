@@ -5,8 +5,8 @@ use crate::constants::{
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
 use crate::live_binding_policy::{
-    live_binding_policy_core_ext_entry, live_binding_policy_core_ext_entry_not_found_error,
-    LiveBindingPolicyEntry, LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1,
+    live_binding_policy_core_ext_entry, LiveBindingPolicyEntry, LiveBindingPolicyLookupError,
+    LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1,
 };
 use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
@@ -446,14 +446,11 @@ fn supported_live_core_ext_policy_entry(
 ) -> Result<&'static LiveBindingPolicyEntry, String> {
     let entry = match live_binding_policy_core_ext_entry(binding_name) {
         Ok(entry) => entry,
-        Err(err) if err == live_binding_policy_core_ext_entry_not_found_error(binding_name) => {
+        Err(LiveBindingPolicyLookupError::NotFound(_)) => {
             return Err(unsupported_core_ext_binding_error(binding_name));
         }
-        Err(err) => return Err(err),
+        Err(LiveBindingPolicyLookupError::Invalid(err)) => return Err(err),
     };
-    if binding_name != entry.core_ext_live_binding_name.as_str() {
-        return Err(unsupported_core_ext_binding_error(binding_name));
-    }
     match entry.runtime_binding.as_str() {
         LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => Ok(entry),
         _ => Err(unsupported_core_ext_binding_error(binding_name)),

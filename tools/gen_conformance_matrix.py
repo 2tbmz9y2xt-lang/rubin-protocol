@@ -324,7 +324,7 @@ def render(rows: list[GateRow], local_ops: set[str], protocol_rows: list[Protoco
     lines.append("")
     lines.append("## Shared Protocol Artifacts")
     lines.append("")
-    lines.append("| Artifact | Purpose | Coverage path |")
+    lines.append("| Artifact | Purpose | Coverage |")
     lines.append("| --- | --- | --- |")
     for row in protocol_rows:
         lines.append(f"| `{row.path}` | {row.purpose} | {row.coverage} |")

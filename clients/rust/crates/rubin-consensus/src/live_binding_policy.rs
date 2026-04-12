@@ -48,6 +48,20 @@ pub(crate) fn live_binding_policy_core_ext_entry_not_found_error(binding_name: &
     ))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LiveBindingPolicyLookupError {
+    NotFound(String),
+    Invalid(String),
+}
+
+impl fmt::Display for LiveBindingPolicyLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::Invalid(message) => f.write_str(message),
+        }
+    }
+}
+
 fn live_binding_policy_runtime_tuple_key(alg_name: &str, pubkey_len: u64, sig_len: u64) -> String {
     format!("{alg_name}|{pubkey_len}|{sig_len}")
 }
@@ -278,8 +292,8 @@ pub(crate) fn live_binding_policy_runtime_entry(
     alg_name: &str,
     pubkey_len: u64,
     sig_len: u64,
-) -> Result<&'static LiveBindingPolicyEntry, String> {
-    let manifest = default_live_binding_policy()?;
+) -> Result<&'static LiveBindingPolicyEntry, LiveBindingPolicyLookupError> {
+    let manifest = default_live_binding_policy().map_err(LiveBindingPolicyLookupError::Invalid)?;
     manifest
         .entries
         .iter()
@@ -287,19 +301,25 @@ pub(crate) fn live_binding_policy_runtime_entry(
             entry.alg_name == alg_name && entry.pubkey_len == pubkey_len && entry.sig_len == sig_len
         })
         .ok_or_else(|| {
-            live_binding_policy_runtime_entry_not_found_error(alg_name, pubkey_len, sig_len)
+            LiveBindingPolicyLookupError::NotFound(
+                live_binding_policy_runtime_entry_not_found_error(alg_name, pubkey_len, sig_len),
+            )
         })
 }
 
 pub(crate) fn live_binding_policy_core_ext_entry(
     binding_name: &str,
-) -> Result<&'static LiveBindingPolicyEntry, String> {
-    let manifest = default_live_binding_policy()?;
+) -> Result<&'static LiveBindingPolicyEntry, LiveBindingPolicyLookupError> {
+    let manifest = default_live_binding_policy().map_err(LiveBindingPolicyLookupError::Invalid)?;
     manifest
         .entries
         .iter()
         .find(|entry| entry.core_ext_live_binding_name == binding_name)
-        .ok_or_else(|| live_binding_policy_core_ext_entry_not_found_error(binding_name))
+        .ok_or_else(|| {
+            LiveBindingPolicyLookupError::NotFound(
+                live_binding_policy_core_ext_entry_not_found_error(binding_name),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -308,7 +328,7 @@ mod tests {
         default_live_binding_policy, live_binding_policy_core_ext_entry,
         live_binding_policy_core_ext_entry_not_found_error, live_binding_policy_runtime_entry,
         live_binding_policy_runtime_entry_not_found_error, load_live_binding_policy_from_json,
-        LIVE_BINDING_POLICY_V1_JSON, LIVE_BINDING_POLICY_VERSION,
+        LiveBindingPolicyLookupError, LIVE_BINDING_POLICY_V1_JSON, LIVE_BINDING_POLICY_VERSION,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -801,8 +821,12 @@ mod tests {
 
         let runtime_miss = live_binding_policy_runtime_entry("ML-DSA-87", 2592, 4626)
             .expect_err("lookup runtime miss");
-        assert_eq!(
+        assert!(matches!(
             runtime_miss,
+            LiveBindingPolicyLookupError::NotFound(_)
+        ));
+        assert_eq!(
+            runtime_miss.to_string(),
             live_binding_policy_runtime_entry_not_found_error("ML-DSA-87", 2592, 4626)
         );
 
@@ -813,8 +837,12 @@ mod tests {
 
         let core_ext_miss = live_binding_policy_core_ext_entry("verify_sig_ext_unknown")
             .expect_err("lookup core_ext miss");
-        assert_eq!(
+        assert!(matches!(
             core_ext_miss,
+            LiveBindingPolicyLookupError::NotFound(_)
+        ));
+        assert_eq!(
+            core_ext_miss.to_string(),
             live_binding_policy_core_ext_entry_not_found_error("verify_sig_ext_unknown")
         );
     }
