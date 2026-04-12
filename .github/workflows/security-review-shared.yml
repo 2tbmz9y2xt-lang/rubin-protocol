@@ -529,7 +529,13 @@ jobs:
               antiHallucinationRules = Array.isArray(parsedAntiHallucinationRules)
                 ? parsedAntiHallucinationRules
                 : [];
-            } catch {}
+            } catch (parseErr) {
+              // Surface parse failures explicitly. Silently dropping the
+              // model-specific anti-hallucination guardrails would degrade
+              // review quality (Qwen 3.6 Plus has a documented 26.5%
+              // fabrication rate) without any visible signal in CI logs.
+              core.warning(`Failed to parse anti_hallucination_rules input as JSON: ${parseErr.message}. Continuing with empty rules — model-specific guardrails are NOT applied.`);
+            }
 
             const systemPrompt = [
               'You are a strict protocol security reviewer for the RUBIN blockchain protocol.',
