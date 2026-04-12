@@ -8,6 +8,7 @@ pub const ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM: &str =
     "rotation: v1 production profile allows at most one descriptor";
 pub const ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM: &str =
     "rotation: v1 production profile requires finite sunset_height (H4)";
+const MAX_LIVE_NATIVE_SUITE_SET_CARDINALITY: usize = 2;
 
 /// Consensus parameters for a single signature suite.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,11 +102,22 @@ pub struct NativeSuiteSet {
 }
 
 impl NativeSuiteSet {
-    /// Constructs a set from a list of suite IDs.
+    /// Constructs a set from a list of suite IDs and fail-closes if the
+    /// deduplicated live/native cardinality exceeds the v1 cap of two suites.
     pub fn new(ids: &[u8]) -> Self {
-        Self {
-            suites: ids.iter().copied().collect(),
+        Self::try_new(ids).expect("native suite set cardinality must stay <= 2")
+    }
+
+    pub fn try_new(ids: &[u8]) -> Result<Self, String> {
+        let suites: BTreeSet<u8> = ids.iter().copied().collect();
+        if suites.len() > MAX_LIVE_NATIVE_SUITE_SET_CARDINALITY {
+            return Err(format!(
+                "native suite set cardinality {} exceeds max {}",
+                suites.len(),
+                MAX_LIVE_NATIVE_SUITE_SET_CARDINALITY
+            ));
         }
+        Ok(Self { suites })
     }
 
     /// Returns true if the set contains the given suite ID.
@@ -1030,6 +1042,12 @@ mod tests {
         let s = NativeSuiteSet::new(&[0x01, 0x01, 0x01]);
         assert_eq!(s.len(), 1);
         assert!(s.contains(0x01));
+    }
+
+    #[test]
+    fn test_native_suite_set_rejects_more_than_two_unique_suites() {
+        let err = NativeSuiteSet::try_new(&[0x01, 0x02, 0x03]).expect_err("must reject");
+        assert_eq!(err, "native suite set cardinality 3 exceeds max 2");
     }
 
     #[test]

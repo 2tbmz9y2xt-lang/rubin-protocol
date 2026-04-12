@@ -247,7 +247,7 @@ func TestVerifySigWithRegistry_NilRegistry_VerifyCostDriftFailsClosed(t *testing
 
 func TestResolveSuiteVerifierBinding_MatchesCanonicalOpenSSLDescriptor(t *testing.T) {
 	params := canonicalDefaultRuntimeSuiteParams()
-	binding, err := resolveSuiteVerifierBinding(params.AlgName, params.PubkeyLen, params.SigLen)
+	binding, err := resolveSuiteVerifierBinding(params.SuiteID, params.AlgName, params.PubkeyLen, params.SigLen)
 	if err != nil {
 		t.Fatalf("resolveSuiteVerifierBinding: %v", err)
 	}

@@ -38,16 +38,15 @@ func NormalizeCoreExtBindingName(binding string) (string, error) {
 // verification is pinned to the OpenSSL digest32 binding; native/empty
 // bindings remain non-live helper surfaces and must not reach runtime loaders.
 func NormalizeLiveCoreExtBindingName(binding string) (string, error) {
-	binding, err := NormalizeCoreExtBindingName(binding)
+	binding = strings.TrimSpace(binding)
+	entry, err := liveBindingPolicyCoreExtEntry(binding)
 	if err != nil {
 		return "", err
 	}
-	switch binding {
-	case CoreExtBindingNameVerifySigExtOpenSSLDigest32V1:
-		return binding, nil
-	default:
+	if entry == nil {
 		return "", unsupportedCoreExtBindingError(binding)
 	}
+	return entry.CoreExtLiveBindingName, nil
 }
 
 func parseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
@@ -84,10 +83,19 @@ func ParseNormalizedCoreExtVerifySigExtBinding(binding string, bindingDescriptor
 // NormalizeLiveCoreExtBindingName and enforces the live manifest requirement
 // that verify_sig_ext OpenSSL bindings carry a non-empty ext_payload_schema.
 func ParseNormalizedLiveCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {
-	if binding != CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 {
+	entry, err := liveBindingPolicyCoreExtEntry(binding)
+	if err != nil {
+		return nil, err
+	}
+	if entry == nil {
 		return nil, unsupportedCoreExtBindingError(binding)
 	}
-	return parseNormalizedCoreExtVerifySigExtBinding(binding, bindingDescriptor, extPayloadSchema)
+	switch entry.RuntimeBinding {
+	case liveBindingPolicyRuntimeOpenSSLDigest32:
+		return parseNormalizedCoreExtVerifySigExtBinding(entry.CoreExtLiveBindingName, bindingDescriptor, extPayloadSchema)
+	default:
+		return nil, unsupportedCoreExtBindingError(binding)
+	}
 }
 
 func ParseCoreExtVerifySigExtBinding(binding string, bindingDescriptor []byte, extPayloadSchema []byte) (CoreExtVerifySigExtFunc, error) {

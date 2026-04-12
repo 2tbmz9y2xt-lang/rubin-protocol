@@ -380,7 +380,12 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 		if err := ensureOpenSSLConsensusInit(); err != nil {
 			return false, err
 		}
-		binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+		binding, err := resolveSuiteVerifierBinding(
+			SUITE_ID_ML_DSA_87,
+			"ML-DSA-87",
+			ML_DSA_87_PUBKEY_BYTES,
+			ML_DSA_87_SIG_BYTES,
+		)
 		if err != nil {
 			return false, err
 		}
@@ -407,18 +412,25 @@ type suiteVerifierBinding struct {
 // v1 keeps the legacy ML-DSA-87 verifier on the OpenSSL archival/runtime path.
 // Runtime dispatch must resolve an explicit binding instead of trusting a raw
 // registry AlgName string as an implicit backend switch.
-func resolveSuiteVerifierBinding(algName string, pubkeyLen int, sigLen int) (suiteVerifierBinding, error) {
-	if algName == "ML-DSA-87" && pubkeyLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES {
-		return suiteVerifierBinding{
-			kind:       suiteVerifierBindingOpenSSLDigest32V1,
-			opensslAlg: "ML-DSA-87",
-			pubkeyLen:  ML_DSA_87_PUBKEY_BYTES,
-			sigLen:     ML_DSA_87_SIG_BYTES,
-		}, nil
+func resolveSuiteVerifierBinding(suiteID uint8, algName string, pubkeyLen int, sigLen int) (suiteVerifierBinding, error) {
+	entry, err := liveBindingPolicyRuntimeEntry(algName, pubkeyLen, sigLen)
+	if err != nil {
+		return suiteVerifierBinding{}, txerr(TX_ERR_SIG_ALG_INVALID, err.Error())
+	}
+	if entry != nil {
+		switch entry.RuntimeBinding {
+		case liveBindingPolicyRuntimeOpenSSLDigest32:
+			return suiteVerifierBinding{
+				kind:       suiteVerifierBindingOpenSSLDigest32V1,
+				opensslAlg: entry.OpenSSLAlg,
+				pubkeyLen:  entry.PubkeyLen,
+				sigLen:     entry.SigLen,
+			}, nil
+		}
 	}
 	return suiteVerifierBinding{}, txerr(TX_ERR_SIG_ALG_INVALID,
-		fmt.Sprintf("resolveSuiteVerifierBinding: unsupported alg=%q pubkey_len=%d sig_len=%d",
-			algName, pubkeyLen, sigLen))
+		fmt.Sprintf("resolveSuiteVerifierBinding: unsupported suite_id=0x%02x alg=%q pubkey_len=%d sig_len=%d",
+			suiteID, algName, pubkeyLen, sigLen))
 }
 
 func verifySigWithBinding(binding suiteVerifierBinding, pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
@@ -482,7 +494,7 @@ func verifySigWithRegistry(suiteID uint8, pubkey []byte, signature []byte, diges
 	if err := ensureOpenSSLConsensusInit(); err != nil {
 		return false, err
 	}
-	binding, err := resolveSuiteVerifierBinding(params.AlgName, params.PubkeyLen, params.SigLen)
+	binding, err := resolveSuiteVerifierBinding(suiteID, params.AlgName, params.PubkeyLen, params.SigLen)
 	if err != nil {
 		return false, err
 	}

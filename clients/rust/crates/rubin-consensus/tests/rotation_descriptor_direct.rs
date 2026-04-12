@@ -112,9 +112,9 @@ fn native_suite_set_empty() {
 
 #[test]
 fn native_suite_set_dedup_and_sorted() {
-    let s = NativeSuiteSet::new(&[0x03, 0x01, 0x02, 0x01, 0x03]);
-    assert_eq!(s.len(), 3);
-    assert_eq!(s.suite_ids(), vec![0x01, 0x02, 0x03]); // sorted by BTreeSet
+    let s = NativeSuiteSet::new(&[0x02, 0x01, 0x02, 0x01]);
+    assert_eq!(s.len(), 2);
+    assert_eq!(s.suite_ids(), vec![0x01, 0x02]); // sorted by BTreeSet
 }
 
 #[test]
@@ -123,6 +123,12 @@ fn native_suite_set_single() {
     assert_eq!(s.len(), 1);
     assert!(s.contains(0x42));
     assert!(!s.contains(0x00));
+}
+
+#[test]
+fn native_suite_set_rejects_more_than_two_unique_suites() {
+    let err = NativeSuiteSet::try_new(&[0x01, 0x02, 0x03]).expect_err("must reject");
+    assert_eq!(err, "native suite set cardinality 3 exceeds max 2");
 }
 
 // =============================================================

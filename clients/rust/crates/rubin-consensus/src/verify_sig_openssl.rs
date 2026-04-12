@@ -1,5 +1,8 @@
 use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87};
 use crate::error::{ErrorCode, TxError};
+use crate::live_binding_policy::{
+    live_binding_policy_runtime_entry, LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1,
+};
 use crate::tx_helpers::DigestSigner;
 use core::ffi::CStr;
 use std::sync::OnceLock;
@@ -239,6 +242,13 @@ fn suite_alg_name(suite_id: u8) -> Result<&'static CStr, TxError> {
     }
 }
 
+fn openssl_alg_name_cstr(name: &str) -> Option<&'static CStr> {
+    match name {
+        "ML-DSA-87" => Some(c"ML-DSA-87"),
+        _ => None,
+    }
+}
+
 fn parse_openssl_fips_mode(raw: &str) -> Result<OpenSslFipsMode, TxError> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "" | "off" => Ok(OpenSslFipsMode::Off),
@@ -415,8 +425,12 @@ pub fn verify_sig(
         ));
     }
     ensure_openssl_consensus_init()?;
-    let binding =
-        resolve_suite_verifier_binding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)?;
+    let binding = resolve_suite_verifier_binding(
+        SUITE_ID_ML_DSA_87,
+        "ML-DSA-87",
+        ML_DSA_87_PUBKEY_BYTES,
+        ML_DSA_87_SIG_BYTES,
+    )?;
     verify_sig_with_binding(&binding, pubkey, signature, digest32)
 }
 
@@ -432,23 +446,38 @@ enum SuiteVerifierBinding {
 // archival/runtime path. Runtime dispatch must resolve a concrete binding
 // instead of treating registry.alg_name as an implicit backend switch.
 fn resolve_suite_verifier_binding(
+    _suite_id: u8,
     alg_name: &str,
     pubkey_len: u64,
     sig_len: u64,
 ) -> Result<SuiteVerifierBinding, TxError> {
-    if alg_name == "ML-DSA-87"
-        && pubkey_len == ML_DSA_87_PUBKEY_BYTES
-        && sig_len == ML_DSA_87_SIG_BYTES
-    {
-        return Ok(SuiteVerifierBinding::OpenSslDigest32V1 {
-            alg: c"ML-DSA-87",
-            pubkey_len: ML_DSA_87_PUBKEY_BYTES,
-            sig_len: ML_DSA_87_SIG_BYTES,
-        });
+    let entry = live_binding_policy_runtime_entry(alg_name, pubkey_len, sig_len).map_err(|_| {
+        TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "resolve_suite_verifier_binding: live binding policy invalid",
+        )
+    })?;
+    if let Some(entry) = entry {
+        match entry.runtime_binding.as_str() {
+            LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => {
+                let alg = openssl_alg_name_cstr(entry.openssl_alg.as_str()).ok_or_else(|| {
+                    TxError::new(
+                        ErrorCode::TxErrSigAlgInvalid,
+                        "resolve_suite_verifier_binding: unsupported OpenSSL alg",
+                    )
+                })?;
+                return Ok(SuiteVerifierBinding::OpenSslDigest32V1 {
+                    alg,
+                    pubkey_len: entry.pubkey_len,
+                    sig_len: entry.sig_len,
+                });
+            }
+            _ => {}
+        }
     }
     Err(TxError::new(
         ErrorCode::TxErrSigAlgInvalid,
-        "unsupported suite verifier binding",
+        "resolve_suite_verifier_binding: unsupported suite verifier binding",
     ))
 }
 
@@ -545,8 +574,12 @@ pub fn verify_sig_with_registry(
 ) -> Result<bool, TxError> {
     let params = runtime_suite_params_for_verification(suite_id, registry)?;
     ensure_openssl_consensus_init()?;
-    let binding =
-        resolve_suite_verifier_binding(params.alg_name, params.pubkey_len, params.sig_len)?;
+    let binding = resolve_suite_verifier_binding(
+        suite_id,
+        params.alg_name,
+        params.pubkey_len,
+        params.sig_len,
+    )?;
     verify_sig_with_binding(&binding, pubkey, signature, digest32)
 }
 
@@ -1140,6 +1173,7 @@ mod tests {
     fn resolve_suite_verifier_binding_matches_core_ext_descriptor() {
         let params = canonical_default_suite_params();
         let binding = super::resolve_suite_verifier_binding(
+            params.suite_id,
             params.alg_name,
             params.pubkey_len,
             params.sig_len,
