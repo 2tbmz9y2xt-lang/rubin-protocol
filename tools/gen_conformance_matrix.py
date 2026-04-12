@@ -112,6 +112,10 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
 }
 
 
+class DuplicateJSONKeyError(ValueError):
+    pass
+
+
 def load_local_ops() -> set[str]:
     spec = importlib.util.spec_from_file_location("rubin_run_cv_bundle", str(RUNNER_PATH))
     if spec is None or spec.loader is None:
@@ -134,6 +138,27 @@ def iter_protocol_artifacts() -> Iterable[Path]:
     if not PROTOCOL_FIXTURES_DIR.exists():
         raise RuntimeError(f"missing protocol fixtures dir: {PROTOCOL_FIXTURES_DIR}")
     return sorted(PROTOCOL_FIXTURES_DIR.glob("*.json"))
+
+
+def reject_duplicate_json_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in data:
+            raise DuplicateJSONKeyError(f'duplicate JSON key "{key}"')
+        data[key] = value
+    return data
+
+
+def load_json_fail_closed(path: Path) -> Any:
+    raw = path.read_text(encoding="utf-8", errors="strict")
+    try:
+        return json.loads(raw, object_pairs_hook=reject_duplicate_json_object_pairs)
+    except DuplicateJSONKeyError as err:
+        raise RuntimeError(f"invalid JSON artifact {path}: {err}") from err
+    except json.JSONDecodeError as err:
+        raise RuntimeError(
+            f"invalid JSON artifact {path}: {err.msg} (line {err.lineno}, column {err.colno})"
+        ) from err
 
 
 def validate_fixture_schema(data: Any, path: Path) -> tuple[str, list[dict[str, Any]]]:
@@ -231,6 +256,7 @@ def load_protocol_artifact_rows() -> list[ProtocolArtifactRow]:
 
     rows: list[ProtocolArtifactRow] = []
     for path in protocol_paths:
+        load_json_fail_closed(path)
         purpose, coverage = PROTOCOL_ARTIFACT_META[path.name]
         rows.append(
             ProtocolArtifactRow(
