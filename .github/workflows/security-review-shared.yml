@@ -132,6 +132,20 @@ jobs:
             const path = require('path');
             const { execSync } = require('child_process');
             const { jsonrepair } = require('./node_modules/jsonrepair');
+
+            // Hoist ALL workflow_call inputs through toJSON at the very
+            // top of the script so every downstream consumer (system
+            // prompt, dedup filter, request body, headers) references
+            // safe const variables instead of raw `${{ inputs.X }}`
+            // interpolation. Round-11's step-local hoisting put modelId
+            // AFTER the systemPrompt that referenced it, causing a
+            // temporal-dead-zone ReferenceError. Top-of-script ensures
+            // every block sees an initialized const.
+            const usesGitHubModels = ${{ inputs.uses_github_models }};
+            const apiUrl = ${{ toJSON(inputs.api_base_url) }};
+            const modelId = ${{ toJSON(inputs.model_id) }};
+            const modelDisplayName = ${{ toJSON(inputs.model_display_name) }};
+
             // Truncation note tells the model to downgrade confidence on
             // missing tail content rather than treat omissions as "unchanged".
             const DIFF_CAP = 128000;
@@ -171,10 +185,8 @@ jobs:
               // the model_id (e.g. "qwen/qwen3.6-plus (OpenRouter)" vs
               // "qwen/qwen3.6-plus"). The display_name is the only marker
               // that is guaranteed present in our own posted body.
-              // toJSON wraps the input as a JS literal so quotes/newlines
-              // in a future display_name cannot break the script or
-              // enable injection.
-              const modelDisplayName = ${{ toJSON(inputs.model_display_name) }};
+              // modelDisplayName is hoisted to the top of the script
+              // (after the require block) via toJSON.
               const modelDisplayLower = modelDisplayName.toLowerCase();
               const reviewComments = allComments
                 .filter(c => c.body
@@ -551,14 +563,10 @@ jobs:
               ? userPromptRaw.slice(0, USER_PROMPT_CAP) + `\n\n[TRUNCATED — user prompt exceeded ${USER_PROMPT_CAP} bytes; later sections may be missing, do not treat omissions as "unchanged"]`
               : userPromptRaw;
 
-            // Build request based on API type. All workflow_call inputs
-            // that get embedded into JS are routed through toJSON so a
-            // future caller value containing quotes/backslashes/newlines
-            // cannot break the script or enable expression-substitution
-            // injection.
-            const usesGitHubModels = ${{ inputs.uses_github_models }};
-            const apiUrl = ${{ toJSON(inputs.api_base_url) }};
-            const modelId = ${{ toJSON(inputs.model_id) }};
+            // Build request based on API type. usesGitHubModels, apiUrl,
+            // and modelId are hoisted to the top of the script so the
+            // systemPrompt above can reference modelId without temporal-
+            // dead-zone errors.
             const apiKey = usesGitHubModels ? process.env.GITHUB_TOKEN : process.env.API_KEY;
             const headers = usesGitHubModels
               ? { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
