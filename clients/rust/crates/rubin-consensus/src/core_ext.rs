@@ -4,6 +4,10 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
+use crate::live_binding_policy::{
+    live_binding_policy_core_ext_entry, LiveBindingPolicyEntry, LiveBindingPolicyLookupError,
+    LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1,
+};
 use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::spend_verify::extract_crypto_sig_and_sighash;
@@ -437,6 +441,22 @@ fn unsupported_core_ext_binding_error(binding_name: &str) -> String {
     format!("unsupported core_ext binding: {binding_name:?}")
 }
 
+fn supported_live_core_ext_policy_entry(
+    binding_name: &str,
+) -> Result<&'static LiveBindingPolicyEntry, String> {
+    let entry = match live_binding_policy_core_ext_entry(binding_name) {
+        Ok(entry) => entry,
+        Err(LiveBindingPolicyLookupError::NotFound(_)) => {
+            return Err(unsupported_core_ext_binding_error(binding_name));
+        }
+        Err(LiveBindingPolicyLookupError::Invalid(err)) => return Err(err),
+    };
+    match entry.runtime_binding.as_str() {
+        LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => Ok(entry),
+        _ => Err(unsupported_core_ext_binding_error(binding_name)),
+    }
+}
+
 pub fn normalize_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
     let binding_name = binding_name.trim();
     match binding_name {
@@ -492,10 +512,11 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
     binding_descriptor: &[u8],
     ext_payload_schema: &[u8],
 ) -> Result<CoreExtVerificationBinding, String> {
-    match binding_name {
-        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
+    let entry = supported_live_core_ext_policy_entry(binding_name)?;
+    match entry.runtime_binding.as_str() {
+        LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1 => {
             core_ext_verification_binding_from_normalized_name_and_descriptor(
-                binding_name,
+                entry.core_ext_live_binding_name.as_str(),
                 binding_descriptor,
                 ext_payload_schema,
             )
@@ -505,13 +526,9 @@ pub fn live_core_ext_verification_binding_from_normalized_name_and_descriptor(
 }
 
 pub fn normalize_live_core_ext_binding_name(binding_name: &str) -> Result<&'static str, String> {
-    let binding_name = normalize_core_ext_binding_name(binding_name)?;
-    match binding_name {
-        CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1 => {
-            Ok(CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1)
-        }
-        _ => Err(unsupported_core_ext_binding_error(binding_name)),
-    }
+    let binding_name = binding_name.trim();
+    let entry = supported_live_core_ext_policy_entry(binding_name)?;
+    Ok(entry.core_ext_live_binding_name.as_str())
 }
 
 pub fn live_core_ext_verification_binding_from_name_and_descriptor(
@@ -2436,6 +2453,15 @@ mod tests {
 
     #[test]
     fn live_core_ext_binding_helper_rejects_non_manifest_bindings() {
+        let normalized = normalize_live_core_ext_binding_name(&format!(
+            "  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"
+        ))
+        .expect("valid live binding");
+        assert_eq!(
+            normalized,
+            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+        );
+
         let err = normalize_live_core_ext_binding_name("").expect_err("empty must fail");
         assert!(err.contains("unsupported core_ext binding"));
 

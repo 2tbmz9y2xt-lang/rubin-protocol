@@ -98,6 +98,17 @@ type DescriptorRotationProvider struct {
 	Descriptor CryptoRotationDescriptor
 }
 
+func descriptorNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
+	suites, err := TryNewNativeSuiteSet(ids...)
+	if err == nil {
+		return suites
+	}
+	// Descriptor selectors are expected to emit only {old}, {new}, or {old,new}.
+	// If a future caller widens that set unexpectedly, fail closed instead of
+	// panicking or silently accepting a larger live/native suite-set surface.
+	return NewNativeSuiteSet()
+}
+
 // NativeCreateSuites implements RotationProvider.
 //
 //	Phase 0 (h < H1):       {old}
@@ -106,12 +117,12 @@ type DescriptorRotationProvider struct {
 func (p DescriptorRotationProvider) NativeCreateSuites(height uint64) *NativeSuiteSet {
 	d := p.Descriptor
 	if height < d.CreateHeight { // H1
-		return NewNativeSuiteSet(d.OldSuiteID)
+		return descriptorNativeSuiteSet(d.OldSuiteID)
 	}
 	if height < d.SpendHeight { // H2
-		return NewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
+		return descriptorNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
 	}
-	return NewNativeSuiteSet(d.NewSuiteID)
+	return descriptorNativeSuiteSet(d.NewSuiteID)
 }
 
 // NativeSpendSuites implements RotationProvider.
@@ -122,10 +133,10 @@ func (p DescriptorRotationProvider) NativeCreateSuites(height uint64) *NativeSui
 func (p DescriptorRotationProvider) NativeSpendSuites(height uint64) *NativeSuiteSet {
 	d := p.Descriptor
 	if height < d.CreateHeight { // H1
-		return NewNativeSuiteSet(d.OldSuiteID)
+		return descriptorNativeSuiteSet(d.OldSuiteID)
 	}
 	if d.SunsetHeight != 0 && height >= d.SunsetHeight { // H4
-		return NewNativeSuiteSet(d.NewSuiteID)
+		return descriptorNativeSuiteSet(d.NewSuiteID)
 	}
-	return NewNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
+	return descriptorNativeSuiteSet(d.OldSuiteID, d.NewSuiteID)
 }

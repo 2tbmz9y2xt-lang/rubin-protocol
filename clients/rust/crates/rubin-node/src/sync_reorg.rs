@@ -520,12 +520,14 @@ mod tests {
 
     impl RotationProvider for CountingRotationProvider {
         fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
-            NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, self.suite_id])
+            NativeSuiteSet::try_new(&[SUITE_ID_ML_DSA_87, self.suite_id])
+                .expect("counting rotation provider suite set must stay <= 2")
         }
 
         fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
             self.spend_calls.fetch_add(1, Ordering::SeqCst);
-            NativeSuiteSet::new(&[self.suite_id])
+            NativeSuiteSet::try_new(&[self.suite_id])
+                .expect("counting rotation provider suite set must stay <= 2")
         }
     }
 

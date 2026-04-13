@@ -11,6 +11,21 @@ Policy:
 
 ---
 
+## 2026-04-12 — Live binding policy artifact (Q-IMPL-ROTATION-SUITESET-BINDING-CLOSURE-01)
+
+Причина:
+- убрать split source of truth между native runtime verifier binding resolution и live `CORE_EXT` binding-name allowlist;
+- закрепить один versioned protocol artifact, который одновременно задаёт live runtime binding mapping и live `CORE_EXT` binding allowlist для текущего chain-instance semantics;
+- подготовить fail-closed drift checks для embedded Go/Rust runtime copies без изменения текущего `ML-DSA-87` / `verify_sig_ext_openssl_digest32_v1` поведения.
+
+Инструменты:
+- новый protocol fixture `conformance/fixtures/protocol/live_binding_policy_v1.json`,
+- Go/Rust consensus embed + compact-JSON drift tests,
+- проверка через `go test ./clients/go/consensus` и `cargo test -p rubin-consensus`.
+
+Изменённые fixtures:
+- `protocol/live_binding_policy_v1.json` (new)
+
 ## 2026-04-10 — Production activation schedule fixture (Q-IMPL-ROTATION-PRODUCTION-ACTIVATION-SCHEDULE-01)
 
 Причина:

@@ -13,6 +13,7 @@ pub mod flagday;
 mod fork_choice;
 mod hash;
 mod htlc;
+mod live_binding_policy;
 pub mod merkle;
 pub mod pow;
 pub mod precompute;
