@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -110,6 +111,39 @@ func TestDefaultRuntimeSuiteRegistry_IsCanonicalDefaultLiveManifest(t *testing.T
 	}
 }
 
+func TestResolveSuiteVerifierBinding_LivePolicyPinsCanonicalLegacyV1Binding(t *testing.T) {
+	entry, err := liveBindingPolicyRuntimeEntry("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("liveBindingPolicyRuntimeEntry: %v", err)
+	}
+	if entry.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
+		t.Fatalf("runtime_binding=%q, want %q", entry.RuntimeBinding, liveBindingPolicyRuntimeOpenSSLDigest32)
+	}
+	if entry.AlgName != "ML-DSA-87" {
+		t.Fatalf("alg_name=%q, want %q", entry.AlgName, "ML-DSA-87")
+	}
+	if entry.OpenSSLAlg != "ML-DSA-87" {
+		t.Fatalf("openssl_alg=%q, want %q", entry.OpenSSLAlg, "ML-DSA-87")
+	}
+
+	binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("resolveSuiteVerifierBinding: %v", err)
+	}
+	if binding.kind != suiteVerifierBindingOpenSSLDigest32V1 {
+		t.Fatalf("binding.kind=%v, want %v", binding.kind, suiteVerifierBindingOpenSSLDigest32V1)
+	}
+	if binding.opensslAlg != "ML-DSA-87" {
+		t.Fatalf("binding.opensslAlg=%q, want %q", binding.opensslAlg, "ML-DSA-87")
+	}
+	if binding.pubkeyLen != ML_DSA_87_PUBKEY_BYTES {
+		t.Fatalf("binding.pubkeyLen=%d, want %d", binding.pubkeyLen, ML_DSA_87_PUBKEY_BYTES)
+	}
+	if binding.sigLen != ML_DSA_87_SIG_BYTES {
+		t.Fatalf("binding.sigLen=%d, want %d", binding.sigLen, ML_DSA_87_SIG_BYTES)
+	}
+}
+
 // The next three tests pin the identifying context that was added to the
 // legacy verify/resolve error paths (see rubin-protocol#1131, finding 3).
 // They do not encode wire contract — the strings are not present in any
@@ -133,15 +167,63 @@ func TestResolveSuiteVerifierBinding_UnknownCarriesAlgAndLens(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for unknown binding")
 	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
 	msg := err.Error()
 	for _, needle := range []string{
-		"resolveSuiteVerifierBinding",
 		"alg=\"FAKE-ALG\"",
 		"pubkey_len=7",
 		"sig_len=9",
 	} {
 		if !strings.Contains(msg, needle) {
 			t.Fatalf("resolveSuiteVerifierBinding error missing %q, got %q", needle, msg)
+		}
+	}
+}
+
+func TestWrapResolveSuiteVerifierBindingError_PreservesTxErrorCodeAndSuiteID(t *testing.T) {
+	err := wrapResolveSuiteVerifierBindingError(0x2a, resolveSuiteVerifierBindingUnsupportedError("FAKE-ALG", 7, 9))
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"suite_id=0x2a",
+		"alg=\"FAKE-ALG\"",
+		"pubkey_len=7",
+		"sig_len=9",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("wrapped error missing %q, got %q", needle, msg)
+		}
+	}
+	if strings.Count(msg, "resolveSuiteVerifierBinding:") != 1 {
+		t.Fatalf("wrapped error should keep a single resolveSuiteVerifierBinding prefix, got %q", msg)
+	}
+}
+
+func TestResolveSuiteVerifierBinding_InvalidPolicyReturnsTxError(t *testing.T) {
+	forcedErr := errors.New("forced live binding policy failure")
+	forceLiveBindingPolicyStateForTest(t, nil, forcedErr)
+
+	_, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err == nil {
+		t.Fatal("expected invalid policy error")
+	}
+	if got := mustTxErrCode(t, err); got != TX_ERR_SIG_ALG_INVALID {
+		t.Fatalf("code=%s, want %s", got, TX_ERR_SIG_ALG_INVALID)
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"live binding policy invalid",
+		"alg=\"ML-DSA-87\"",
+		fmt.Sprintf("pubkey_len=%d", ML_DSA_87_PUBKEY_BYTES),
+		fmt.Sprintf("sig_len=%d", ML_DSA_87_SIG_BYTES),
+		"forced live binding policy failure",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("invalid policy error missing %q, got %q", needle, msg)
 		}
 	}
 }

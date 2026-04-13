@@ -6,3 +6,10 @@ members = [
 ]
 exclude = ["fuzz"]
 resolver = "2"
+
+[workspace.dependencies]
+# Exact pins keep serde/serde_json aligned across the shared workspace and the
+# reviewed local/CI runtime surface; lockfiles alone do not constrain fresh
+# dependency resolution for every consumer/workflow entrypoint here.
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.149" }

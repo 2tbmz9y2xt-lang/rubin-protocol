@@ -1,9 +1,19 @@
 package consensus
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func assertNativeSuiteIDs(t *testing.T, got *NativeSuiteSet, want []uint8) {
+	t.Helper()
+	gotIDs := got.SuiteIDs()
+	if !reflect.DeepEqual(gotIDs, want) {
+		t.Fatalf("suite IDs mismatch: got %v want %v", gotIDs, want)
+	}
+}
 
 func TestCryptoRotationDescriptor_Validate(t *testing.T) {
 	// Build a registry with two suites for testing.
@@ -228,6 +238,67 @@ func TestDescriptorRotationProvider_NoSunset(t *testing.T) {
 	if !s.Contains(0x01) || !s.Contains(0x02) {
 		t.Fatalf("no sunset: expected both suites for spend at high height")
 	}
+}
+
+func TestDescriptorRotationProvider_PhaseBoundaries(t *testing.T) {
+	d := CryptoRotationDescriptor{
+		Name:         "phase-boundaries",
+		OldSuiteID:   0x01,
+		NewSuiteID:   0x02,
+		CreateHeight: 100,
+		SpendHeight:  200,
+		SunsetHeight: 300,
+	}
+	p := DescriptorRotationProvider{Descriptor: d}
+
+	cases := []struct {
+		name       string
+		height     uint64
+		wantCreate []uint8
+		wantSpend  []uint8
+	}{
+		{name: "before_h1", height: 99, wantCreate: []uint8{0x01}, wantSpend: []uint8{0x01}},
+		{name: "at_h1", height: 100, wantCreate: []uint8{0x01, 0x02}, wantSpend: []uint8{0x01, 0x02}},
+		{name: "before_h2", height: 199, wantCreate: []uint8{0x01, 0x02}, wantSpend: []uint8{0x01, 0x02}},
+		{name: "at_h2", height: 200, wantCreate: []uint8{0x02}, wantSpend: []uint8{0x01, 0x02}},
+		{name: "before_h4", height: 299, wantCreate: []uint8{0x02}, wantSpend: []uint8{0x01, 0x02}},
+		{name: "at_h4", height: 300, wantCreate: []uint8{0x02}, wantSpend: []uint8{0x02}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertNativeSuiteIDs(t, p.NativeCreateSuites(tc.height), tc.wantCreate)
+			assertNativeSuiteIDs(t, p.NativeSpendSuites(tc.height), tc.wantSpend)
+		})
+	}
+}
+
+func TestDescriptorRotationProvider_DegenerateIdenticalSuitesDedup(t *testing.T) {
+	p := DescriptorRotationProvider{
+		Descriptor: CryptoRotationDescriptor{
+			Name:         "degenerate-identical",
+			OldSuiteID:   0x01,
+			NewSuiteID:   0x01,
+			CreateHeight: 100,
+			SpendHeight:  200,
+			SunsetHeight: 300,
+		},
+	}
+
+	for _, height := range []uint64{0, 100, 200, 300, 999} {
+		t.Run(fmt.Sprintf("height_%d", height), func(t *testing.T) {
+			assertNativeSuiteIDs(t, p.NativeCreateSuites(height), []uint8{0x01})
+			assertNativeSuiteIDs(t, p.NativeSpendSuites(height), []uint8{0x01})
+		})
+	}
+}
+
+func TestDescriptorNativeSuiteSet_FailsClosedOnUnexpectedCardinality(t *testing.T) {
+	s := descriptorNativeSuiteSet(0x01, 0x02, 0x03)
+	if s == nil {
+		t.Fatalf("unexpected nil set")
+	}
+	assertNativeSuiteIDs(t, s, nil)
 }
 
 func TestCryptoRotationDescriptor_NilRegistry(t *testing.T) {

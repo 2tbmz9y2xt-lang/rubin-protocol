@@ -1,5 +1,7 @@
 package consensus
 
+import "fmt"
+
 // SuiteParams holds the consensus parameters for a single signature suite.
 // These are used by verify_sig dispatch, weight calculation, and spend validators
 // to handle suite-specific logic without hardcoding constants.
@@ -92,6 +94,8 @@ type NativeSuiteSet struct {
 	suites map[uint8]struct{}
 }
 
+const maxLiveNativeSuiteSetCardinality = 2
+
 // Contains returns true if suiteID is in the set.
 func (s *NativeSuiteSet) Contains(suiteID uint8) bool {
 	if s == nil {
@@ -127,13 +131,41 @@ func (s *NativeSuiteSet) SuiteIDs() []uint8 {
 	return ids
 }
 
-// NewNativeSuiteSet constructs a NativeSuiteSet from a list of suite IDs.
-func NewNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
+// TryNewNativeSuiteSet constructs a NativeSuiteSet from a list of suite IDs
+// and fail-closes if the deduplicated live/native cardinality exceeds the v1
+// mainnet cap of two suites.
+func TryNewNativeSuiteSet(ids ...uint8) (*NativeSuiteSet, error) {
 	m := make(map[uint8]struct{}, len(ids))
 	for _, id := range ids {
 		m[id] = struct{}{}
 	}
-	return &NativeSuiteSet{suites: m}
+	if len(m) > maxLiveNativeSuiteSetCardinality {
+		return nil, fmt.Errorf(
+			"native suite set cardinality %d exceeds max %d",
+			len(m),
+			maxLiveNativeSuiteSetCardinality,
+		)
+	}
+	return &NativeSuiteSet{suites: m}, nil
+}
+
+// NewNativeSuiteSet constructs a NativeSuiteSet from a list of suite IDs.
+// It preserves the legacy infallible API for external callers while still
+// enforcing the live/native cardinality invariant. More than two unique suites
+// is a programming error; callers that need an error should use
+// TryNewNativeSuiteSet instead.
+func NewNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
+	return mustNewNativeSuiteSet(ids...)
+}
+
+// mustNewNativeSuiteSet is reserved for trusted static initialization or code
+// paths that already validated the suite-set cardinality invariant.
+func mustNewNativeSuiteSet(ids ...uint8) *NativeSuiteSet {
+	s, err := TryNewNativeSuiteSet(ids...)
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
 
 // Clone returns a deep copy of the suite set so callers cannot mutate shared state.
@@ -169,7 +201,7 @@ type RotationProvider interface {
 // This is the pre-rotation behavior.
 type DefaultRotationProvider struct{}
 
-var defaultNativeSuiteSet = NewNativeSuiteSet(SUITE_ID_ML_DSA_87)
+var defaultNativeSuiteSet = mustNewNativeSuiteSet(SUITE_ID_ML_DSA_87)
 
 // NativeCreateSuites implements RotationProvider.
 func (DefaultRotationProvider) NativeCreateSuites(_ uint64) *NativeSuiteSet {

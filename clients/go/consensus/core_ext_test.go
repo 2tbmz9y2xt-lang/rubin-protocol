@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -17,21 +18,21 @@ func (m staticCoreExtProfiles) LookupCoreExtProfile(extID uint16, _ uint64) (Cor
 type nativeRotationProvider struct{}
 
 func (nativeRotationProvider) NativeCreateSuites(uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(0x02)
+	return mustNewNativeSuiteSet(0x02)
 }
 
 func (nativeRotationProvider) NativeSpendSuites(uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(0x02)
+	return mustNewNativeSuiteSet(0x02)
 }
 
 type sunsetNativeRotationProvider struct{}
 
 func (sunsetNativeRotationProvider) NativeCreateSuites(uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet(0x02)
+	return mustNewNativeSuiteSet(0x02)
 }
 
 func (sunsetNativeRotationProvider) NativeSpendSuites(uint64) *NativeSuiteSet {
-	return NewNativeSuiteSet()
+	return mustNewNativeSuiteSet()
 }
 
 func coreExtCovenantData(extID uint16, payload []byte) []byte {
@@ -1463,6 +1464,79 @@ func TestParseLiveCoreExtVerifySigExtBinding(t *testing.T) {
 	if _, err := ParseNormalizedLiveCoreExtVerifySigExtBinding("native_verify_sig", descriptor, []byte{0xb2}); err == nil {
 		t.Fatalf("native normalized live binding must fail")
 	} else if got, want := err.Error(), unsupportedCoreExtBindingError("native_verify_sig").Error(); got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
+}
+
+func TestLiveCoreExtNormalizationAndParserShareAcceptanceSet(t *testing.T) {
+	descriptor, err := CoreExtOpenSSLDigest32BindingDescriptorBytes("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		t.Fatalf("descriptor bytes: %v", err)
+	}
+
+	for _, binding := range []string{
+		CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+		"",
+		"native_verify_sig",
+		"unsupported",
+	} {
+		normalized, normErr := NormalizeLiveCoreExtBindingName(binding)
+		_, parseErr := ParseLiveCoreExtVerifySigExtBinding(binding, descriptor, []byte{0xb2})
+
+		if normErr == nil && parseErr != nil {
+			t.Fatalf("binding %q normalized to %q but parser rejected it: %v", binding, normalized, parseErr)
+		}
+		if normErr != nil && parseErr == nil {
+			t.Fatalf("binding %q failed normalization but parser accepted it", binding)
+		}
+	}
+}
+
+func forceLiveBindingPolicyStateForTest(
+	t *testing.T,
+	manifest *liveBindingPolicyManifest,
+	err error,
+) {
+	t.Helper()
+	defaultLiveBindingPolicyCached = manifest
+	defaultLiveBindingPolicyErr = err
+	defaultLiveBindingPolicyOnce = sync.Once{}
+	defaultLiveBindingPolicyOnce.Do(func() {})
+	t.Cleanup(func() {
+		defaultLiveBindingPolicyCached = nil
+		defaultLiveBindingPolicyErr = nil
+		defaultLiveBindingPolicyOnce = sync.Once{}
+	})
+}
+
+func TestSupportedLiveCoreExtPolicyEntry_PropagatesManifestError(t *testing.T) {
+	forcedErr := errors.New("forced live binding policy failure")
+	forceLiveBindingPolicyStateForTest(t, nil, forcedErr)
+
+	_, err := supportedLiveCoreExtPolicyEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	if !errors.Is(err, forcedErr) {
+		t.Fatalf("err=%v, want forced error", err)
+	}
+}
+
+func TestSupportedLiveCoreExtPolicyEntry_RejectsUnsupportedRuntimeBinding(t *testing.T) {
+	forceLiveBindingPolicyStateForTest(t, &liveBindingPolicyManifest{
+		Version: liveBindingPolicyVersion,
+		Entries: []liveBindingPolicyEntry{{
+			AlgName:                "ML-DSA-87",
+			PubkeyLen:              ML_DSA_87_PUBKEY_BYTES,
+			SigLen:                 ML_DSA_87_SIG_BYTES,
+			RuntimeBinding:         "unsupported_runtime_v1",
+			OpenSSLAlg:             "ML-DSA-87",
+			CoreExtLiveBindingName: CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+		}},
+	}, nil)
+
+	_, err := supportedLiveCoreExtPolicyEntry(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1)
+	if err == nil {
+		t.Fatal("expected unsupported runtime binding rejection")
+	}
+	if got, want := err.Error(), unsupportedCoreExtBindingError(CoreExtBindingNameVerifySigExtOpenSSLDigest32V1).Error(); got != want {
 		t.Fatalf("err=%q, want %q", got, want)
 	}
 }
