@@ -869,19 +869,31 @@ mod tests {
 
     #[test]
     fn live_binding_policy_lookup_helpers_match_embedded_manifest() {
-        let runtime_entry = live_binding_policy_runtime_entry("ML-DSA-87", 2592, 4627)
-            .expect("lookup runtime entry");
+        let runtime_entry = live_binding_policy_runtime_entry(
+            "ML-DSA-87",
+            crate::constants::ML_DSA_87_PUBKEY_BYTES,
+            crate::constants::ML_DSA_87_SIG_BYTES,
+        )
+        .expect("lookup runtime entry");
         assert_eq!(runtime_entry.openssl_alg, "ML-DSA-87");
 
-        let runtime_miss = live_binding_policy_runtime_entry("ML-DSA-87", 2592, 4626)
-            .expect_err("lookup runtime miss");
+        let runtime_miss = live_binding_policy_runtime_entry(
+            "ML-DSA-87",
+            crate::constants::ML_DSA_87_PUBKEY_BYTES,
+            crate::constants::ML_DSA_87_SIG_BYTES - 1,
+        )
+        .expect_err("lookup runtime miss");
         assert!(matches!(
             runtime_miss,
             LiveBindingPolicyLookupError::NotFound(_)
         ));
         assert_eq!(
             runtime_miss.to_string(),
-            live_binding_policy_runtime_entry_not_found_error("ML-DSA-87", 2592, 4626)
+            live_binding_policy_runtime_entry_not_found_error(
+                "ML-DSA-87",
+                crate::constants::ML_DSA_87_PUBKEY_BYTES,
+                crate::constants::ML_DSA_87_SIG_BYTES - 1,
+            )
         );
 
         let core_ext_entry =
