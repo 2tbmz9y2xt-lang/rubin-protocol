@@ -49,7 +49,7 @@ jobs:
 
       - name: Crypto backend policy tooling tests
         run: |
-          python3 -m unittest tools.tests.test_check_crypto_backend_policy
+          python3 -m unittest discover -s tools/tests -p 'test_*.py'
 
       - name: Consensus OpenSSL isolation policy
         run: |
