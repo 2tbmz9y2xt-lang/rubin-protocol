@@ -277,6 +277,9 @@ func (entry liveBindingPolicyEntry) validate(
 	if entry.SigLen <= 0 {
 		return liveBindingPolicyError("entries[%d]: sig_len must be > 0", index)
 	}
+	if entry.RuntimeBinding == "" {
+		return liveBindingPolicyError("entries[%d]: runtime_binding missing", index)
+	}
 	if entry.OpenSSLAlg == "" {
 		return liveBindingPolicyError("entries[%d]: openssl_alg missing", index)
 	}

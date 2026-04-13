@@ -227,6 +227,24 @@ func TestLoadLiveBindingPolicyRejectsMissingRequiredFields(t *testing.T) {
 	}
 }
 
+func TestLiveBindingPolicyValidateRejectsEmptyRuntimeBinding(t *testing.T) {
+	entry := liveBindingPolicyEntry{
+		AlgName:                "ML-DSA-87",
+		PubkeyLen:              ML_DSA_87_PUBKEY_BYTES,
+		SigLen:                 ML_DSA_87_SIG_BYTES,
+		RuntimeBinding:         "",
+		OpenSSLAlg:             "ML-DSA-87",
+		CoreExtLiveBindingName: CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+	}
+	err := entry.validate(0, map[string]struct{}{}, map[string]struct{}{})
+	if err == nil {
+		t.Fatal("expected rejection")
+	}
+	if got, want := err.Error(), "live_binding_policy: entries[0]: runtime_binding missing"; got != want {
+		t.Fatalf("err=%q, want %q", got, want)
+	}
+}
+
 func TestLoadLiveBindingPolicyRejectsDuplicateJSONKeys(t *testing.T) {
 	tests := []struct {
 		name string
