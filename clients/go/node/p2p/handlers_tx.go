@@ -27,9 +27,7 @@ func (p *peer) handleTx(txBytes []byte) error {
 	if !p.service.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
 		return nil
 	}
-	if isNew {
-		_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_TX, Hash: txid}})
-	}
+	_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 	return nil
 }
 
