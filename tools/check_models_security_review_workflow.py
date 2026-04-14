@@ -15,7 +15,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHARED_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security-review-shared.yml"
 DEEPSEEK_CALLER = REPO_ROOT / ".github" / "workflows" / "models-security-review.yml"
-QWEN_CALLER = REPO_ROOT / ".github" / "workflows" / "qwen-security-review.yml"
 SECURITY_REVIEW_RUNNER = REPO_ROOT / ".github" / "workflows" / "security-review-runner.js"
 
 PAIR_RE = re.compile(r"\['([^']+)',\s*'([^']+)'\]")
@@ -98,7 +97,7 @@ def main(*, allow_missing_node: bool = False) -> int:
         "model_display_name:",
         "artifact_prefix:",
     )
-    for caller in [DEEPSEEK_CALLER, QWEN_CALLER]:
+    for caller in [DEEPSEEK_CALLER]:
         if not caller.is_file():
             errors.append(f"missing caller workflow: {caller}")
             continue
@@ -112,24 +111,6 @@ def main(*, allow_missing_node: bool = False) -> int:
                 errors.append(
                     f"caller {caller.name} missing required input: {required_input}"
                 )
-
-    # Qwen authenticates via OpenRouter and the shared workflow gates the
-    # review step on a non-empty API_KEY env var. The Qwen caller must
-    # wire its repository secret into the reusable workflow's API_KEY
-    # input, otherwise the check-key step will silently skip every Qwen
-    # review on every PR. Verify both halves of the mapping.
-    if QWEN_CALLER.is_file():
-        qwen_text = QWEN_CALLER.read_text(encoding="utf-8")
-        if "API_KEY:" not in qwen_text:
-            errors.append(
-                f"caller {QWEN_CALLER.name} must declare an `API_KEY:` entry under "
-                f"`secrets:` to populate the reusable workflow's API_KEY input"
-            )
-        if "OPENROUTER_API_KEY_QWEN" not in qwen_text:
-            errors.append(
-                f"caller {QWEN_CALLER.name} must wire ${{{{ secrets.OPENROUTER_API_KEY_QWEN }}}} "
-                f"into the shared workflow's API_KEY input"
-            )
 
     text = SHARED_WORKFLOW.read_text(encoding="utf-8")
     runner_text = SECURITY_REVIEW_RUNNER.read_text(encoding="utf-8")

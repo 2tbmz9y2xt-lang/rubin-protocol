@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       model_id:
-        description: "Model identifier (e.g., deepseek/DeepSeek-R1-0528, qwen/qwen3.6-plus)"
+        description: "Model identifier (e.g., deepseek/DeepSeek-R1-0528)"
         required: true
         type: string
       api_base_url:
@@ -105,7 +105,7 @@ jobs:
         id: check-key
         run: |
           # GitHub Models uses GITHUB_TOKEN which is always available.
-          # For external providers (OpenRouter etc.) API_KEY MUST be set
+          # For external providers API_KEY MUST be set
           # for same-repo PRs — silently skipping would remove a security
           # reviewer from the merge gate without warning. Only fork PRs
           # and Dependabot PRs are allowed to skip, because GitHub
@@ -117,7 +117,7 @@ jobs:
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "::notice::API key not available (fork PR or Dependabot). Skipping review."
             else
-              echo "::error::API key missing for same-repo PR — set the OpenRouter secret on the workflow caller."
+              echo "::error::API key missing for same-repo PR — set the provider secret on the workflow caller."
               exit 1
             fi
           else
