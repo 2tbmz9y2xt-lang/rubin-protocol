@@ -75,7 +75,7 @@ jobs:
       # so PR reruns do not rebuild/download them from scratch.
       - name: Cache Kani toolchain + CLI
         if: steps.scope.outputs.run == 'true'
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ~/.cargo/bin
@@ -89,7 +89,7 @@ jobs:
       # Cache Cargo build artifacts for faster recompilation.
       - name: Cache Cargo registry + target
         if: steps.scope.outputs.run == 'true'
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ~/.cargo/registry
