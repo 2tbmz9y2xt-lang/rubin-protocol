@@ -1,5 +1,5 @@
 {
-  "$schema_note": "Acknowledged security findings. DeepSeek workflow skips these when counting CRITICAL/HIGH blockers. Each entry has a title pattern (case-insensitive substring match) and explanation.",
+  "$schema_note": "Acknowledged security findings retained for reviewer continuity. No active CI workflow currently consumes this file. Each entry has a title pattern (case-insensitive substring match) and explanation.",
   "version": 3,
   "acknowledged": [
     {
