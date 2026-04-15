@@ -469,11 +469,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if mineAddrErr == nil {
 			minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 			var err error
-			if os.Getenv("RUBIN_TEST_FORCE_LIVE_MINER_INIT_ERROR") == "1" {
-				liveMiner, err = nil, fmt.Errorf("test miner init failed")
-			} else {
-				liveMiner, err = newMinerFn(chainState, blockStore, syncEngine, minerCfg)
-			}
+			liveMiner, err = newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 			if err != nil {
 				_, _ = fmt.Fprintf(stderr, "rpc: live mining disabled: %v\n", err)
 				liveMiner = nil

@@ -2052,6 +2052,10 @@ func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
 
 func TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr(t *testing.T) {
 	if os.Getenv("RUBIN_NODE_TEST_LIVE_MINER_INIT_ERR_CHILD") == "1" {
+		prev := newMinerFn
+		newMinerFn = func(*node.ChainState, *node.BlockStore, *node.SyncEngine, node.MinerConfig) (*node.Miner, error) {
+			return nil, errors.New("test miner init failed")
+		}
 		dir := t.TempDir()
 		go func() {
 			time.Sleep(200 * time.Millisecond)
@@ -2068,14 +2072,12 @@ func TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr(t *testing.T) {
 			io.Discard,
 			os.Stderr,
 		)
+		newMinerFn = prev
 		os.Exit(code)
 	}
 
 	cmd := exec.Command(os.Args[0], "-test.run=TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr")
-	cmd.Env = append(os.Environ(),
-		"RUBIN_NODE_TEST_LIVE_MINER_INIT_ERR_CHILD=1",
-		"RUBIN_TEST_FORCE_LIVE_MINER_INIT_ERROR=1",
-	)
+	cmd.Env = append(os.Environ(), "RUBIN_NODE_TEST_LIVE_MINER_INIT_ERR_CHILD=1")
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr
