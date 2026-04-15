@@ -977,6 +977,14 @@ fn percent_decode(s: &str) -> Option<String> {
 fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
     let mut txid_value: Option<String> = None;
     for pair in query.split('&') {
+        // Go 1.17+ (CVE-2021-44716): parseQuery rejects pairs containing
+        // an unescaped semicolon with "invalid semicolon separator in query"
+        // and `continue`s.  Match that behavior so e.g.
+        // `?txid=<64hex>;foo=1` is classified as "missing txid" on both
+        // clients (Codex thread PRRT_kwDORQ3qGs57PkNn).
+        if pair.contains(';') {
+            continue;
+        }
         // Treat a key without `=` as present-with-empty-value, matching
         // net/url's Values parsing (key alone → values=[""]).
         let (k_raw, v_raw) = pair.split_once('=').unwrap_or((pair, ""));
@@ -3356,6 +3364,32 @@ mod tests {
         assert!(
             err.contains("64 hex characters"),
             "expected length error, got: {err}"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_semicolon_in_pair_is_dropped_like_go() {
+        // Codex thread PRRT_kwDORQ3qGs57PkNn: Go parseQuery (1.17+,
+        // CVE-2021-44716) skips pairs containing `;`.  So
+        // `?txid=<64hex>;foo=1` → pair dropped → "missing txid".
+        let (state, dir) = build_state(true);
+        let valid_hex = "a".repeat(64);
+        let target = format!("/get_tx?txid={valid_hex};foo=1");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("missing"),
+            "pair with semicolon must be dropped (Go parity), got: {err}"
         );
         fs::remove_dir_all(dir).expect("cleanup");
     }
