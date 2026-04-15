@@ -106,6 +106,34 @@ struct MineNextResponse {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+struct GetMempoolResponse {
+    count: usize,
+    txids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GetTxResponse {
+    found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    txid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TxStatusResponse {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    txid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 /// True when the host in `host:port` is loopback-only (safe for devnet live mining RPC).
 /// Requires a non-empty, valid `u16` port (rejects `127.0.0.1:` and similar).
 pub fn rpc_bind_host_is_loopback(bind_addr: &str) -> bool {
@@ -333,6 +361,9 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
         "/get_block" => handle_get_block(state, &req.method, &query),
         "/submit_tx" => handle_submit_tx(state, &req.method, &req.body),
         "/mine_next" => handle_mine_next(state, &req.method, &req.body),
+        "/get_mempool" => handle_get_mempool(state, &req.method),
+        "/get_tx" => handle_get_tx(state, &req.method, &query),
+        "/tx_status" => handle_tx_status(state, &req.method, &query),
         "/metrics" => handle_metrics(state, &req.method),
         _ => json_response(
             state,
@@ -886,6 +917,319 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             },
         ),
     }
+}
+
+/// Percent-decode a query component to raw bytes.  Returns `None` only on
+/// malformed `%XX` escapes (truncated or non-hex digits), matching Go
+/// `net/url.QueryUnescape` error semantics.  Returns `Vec<u8>` (not
+/// `String`) because Go strings are arbitrary byte sequences and
+/// `QueryUnescape` never rejects on UTF-8 grounds — keeping raw bytes
+/// ensures `len()` matches Go's `len()` for the downstream length check
+/// in `parse_txid_query`.
+fn percent_decode(s: &str) -> Option<Vec<u8>> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                if i + 2 >= bytes.len() {
+                    return None;
+                }
+                let hi = (bytes[i + 1] as char).to_digit(16)?;
+                let lo = (bytes[i + 2] as char).to_digit(16)?;
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Decode a 64-hex-char "txid" query parameter to a [u8; 32]. Returns Err with
+/// an operator-facing message on missing, wrong length, or non-hex input.
+/// Parity contract with Go `r.URL.Query().Get("txid")`:
+///   - A key without `=` (e.g. `?txid`) or with empty value (e.g. `?txid=`)
+///     is classified as missing; Go's parseQuery stores `url.Values{"txid":
+///     [""]}` and `Get` returns `""`, which the Go parser maps to
+///     "missing required query parameter".
+///   - First-match semantic via `break` mirrors Go's `Values.Get` returning
+///     `values[0]`.
+///   - Both key and value are percent-decoded; pairs that fail to decode
+///     (malformed `%XX`) are silently skipped and the loop continues,
+///     matching Go's `parseQuery` which `continue`s on either
+///     `QueryUnescape` error and never stores the pair. This means
+///     `?txid=%ZZ&txid=<hex>` resolves to the valid second occurrence on
+///     BOTH clients, and `?%74%78%69%64=<hex>` (encoded "txid" key) is
+///     accepted on BOTH clients.
+fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
+    let mut txid_bytes: Option<Vec<u8>> = None;
+    for pair in query.split('&') {
+        // Go 1.17+ (CVE-2021-44716): parseQuery rejects pairs containing
+        // an unescaped semicolon.
+        if pair.contains(';') {
+            continue;
+        }
+        let (k_raw, v_raw) = pair.split_once('=').unwrap_or((pair, ""));
+        let Some(k) = percent_decode(k_raw) else {
+            continue;
+        };
+        // Key comparison on raw bytes — "txid" is ASCII so this is exact.
+        if k != b"txid" {
+            continue;
+        }
+        let Some(v) = percent_decode(v_raw) else {
+            continue;
+        };
+        txid_bytes = Some(v);
+        break;
+    }
+    let raw = txid_bytes
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required query parameter: txid".to_string())?;
+    // Length check on raw decoded bytes — matches Go's len(raw) which
+    // counts bytes, not UTF-8 characters.
+    if raw.len() != 64 {
+        return Err(format!(
+            "txid must be 64 hex characters (got {})",
+            raw.len()
+        ));
+    }
+    // Convert to UTF-8 string for hex::decode.  Valid hex is always ASCII,
+    // so non-UTF-8 bytes (e.g. %ff decoded to 0xFF) fail here with the
+    // same error class as Go's hex.DecodeString.
+    let raw_str = std::str::from_utf8(&raw)
+        .map_err(|_| "txid is not valid hex: contains non-ASCII decoded bytes".to_string())?;
+    let decoded = hex::decode(raw_str).map_err(|err| format!("txid is not valid hex: {err}"))?;
+    let mut txid = [0u8; 32];
+    txid.copy_from_slice(&decoded);
+    Ok(txid)
+}
+
+fn handle_get_mempool(state: &DevnetRPCState, method: &str) -> HttpResponse {
+    const ROUTE: &str = "/get_mempool";
+    if method != "GET" {
+        return json_response(
+            state,
+            ROUTE,
+            400,
+            &GetMempoolResponse {
+                count: 0,
+                txids: Vec::new(),
+                error: Some("GET required".to_string()),
+            },
+        );
+    }
+    let pool = match state.tx_pool.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &GetMempoolResponse {
+                    count: 0,
+                    txids: Vec::new(),
+                    error: Some("mempool unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let mut ids = pool.all_txids();
+    drop(pool);
+    // Sort for deterministic response ordering; HashMap iteration is not
+    // stable across calls.
+    ids.sort();
+    let txids: Vec<String> = ids.iter().map(hex::encode).collect();
+    json_response(
+        state,
+        ROUTE,
+        200,
+        &GetMempoolResponse {
+            count: txids.len(),
+            txids,
+            error: None,
+        },
+    )
+}
+
+fn handle_get_tx(state: &DevnetRPCState, method: &str, query: &str) -> HttpResponse {
+    const ROUTE: &str = "/get_tx";
+    if method != "GET" {
+        return json_response(
+            state,
+            ROUTE,
+            400,
+            &GetTxResponse {
+                found: false,
+                txid: None,
+                raw_hex: None,
+                error: Some("GET required".to_string()),
+            },
+        );
+    }
+    // Fail-closed on tx pool unavailability BEFORE parsing the query, so a
+    // poisoned pool + invalid/missing txid surfaces as 503 rather than 400.
+    // Mirrors the Go handleGetTx contract (nil-mempool check runs first).
+    if state.tx_pool.is_poisoned() {
+        return json_response(
+            state,
+            ROUTE,
+            503,
+            &GetTxResponse {
+                found: false,
+                txid: None,
+                raw_hex: None,
+                error: Some("mempool unavailable".to_string()),
+            },
+        );
+    }
+    let txid = match parse_txid_query(query) {
+        Ok(txid) => txid,
+        Err(err) => {
+            return json_response(
+                state,
+                ROUTE,
+                400,
+                &GetTxResponse {
+                    found: false,
+                    txid: None,
+                    raw_hex: None,
+                    error: Some(err),
+                },
+            );
+        }
+    };
+    let pool = match state.tx_pool.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            // Race: pool became poisoned between is_poisoned() and lock().
+            // Still fail-closed with 503.
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &GetTxResponse {
+                    found: false,
+                    txid: None,
+                    raw_hex: None,
+                    error: Some("mempool unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let raw = pool.tx_by_id(&txid);
+    drop(pool);
+    match raw {
+        Some(bytes) => json_response(
+            state,
+            ROUTE,
+            200,
+            &GetTxResponse {
+                found: true,
+                txid: Some(hex::encode(txid)),
+                raw_hex: Some(hex::encode(bytes)),
+                error: None,
+            },
+        ),
+        None => json_response(
+            state,
+            ROUTE,
+            200,
+            &GetTxResponse {
+                found: false,
+                txid: Some(hex::encode(txid)),
+                raw_hex: None,
+                error: None,
+            },
+        ),
+    }
+}
+
+fn handle_tx_status(state: &DevnetRPCState, method: &str, query: &str) -> HttpResponse {
+    const ROUTE: &str = "/tx_status";
+    if method != "GET" {
+        return json_response(
+            state,
+            ROUTE,
+            400,
+            &TxStatusResponse {
+                status: "missing".to_string(),
+                txid: None,
+                error: Some("GET required".to_string()),
+            },
+        );
+    }
+    // Fail-closed on tx pool unavailability BEFORE parsing the query
+    // (mirrors handle_get_tx and the Go handleTxStatus contract).
+    if state.tx_pool.is_poisoned() {
+        return json_response(
+            state,
+            ROUTE,
+            503,
+            &TxStatusResponse {
+                status: "missing".to_string(),
+                txid: None,
+                error: Some("mempool unavailable".to_string()),
+            },
+        );
+    }
+    let txid = match parse_txid_query(query) {
+        Ok(txid) => txid,
+        Err(err) => {
+            return json_response(
+                state,
+                ROUTE,
+                400,
+                &TxStatusResponse {
+                    status: "missing".to_string(),
+                    txid: None,
+                    error: Some(err),
+                },
+            );
+        }
+    };
+    let pool = match state.tx_pool.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            // Race: pool became poisoned between is_poisoned() and lock().
+            // Still fail-closed with 503.
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &TxStatusResponse {
+                    status: "missing".to_string(),
+                    txid: None,
+                    error: Some("mempool unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let status = if pool.contains(&txid) {
+        "pending"
+    } else {
+        "missing"
+    };
+    drop(pool);
+    json_response(
+        state,
+        ROUTE,
+        200,
+        &TxStatusResponse {
+            status: status.to_string(),
+            txid: Some(hex::encode(txid)),
+            error: None,
+        },
+    )
 }
 
 fn handle_metrics(state: &DevnetRPCState, method: &str) -> HttpResponse {
@@ -2584,5 +2928,586 @@ mod tests {
         }
         drop(server);
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_mempool_returns_empty_for_fresh_state() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_mempool".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["count"].as_u64(), Some(0));
+        assert!(body["txids"].is_array());
+        assert_eq!(body["txids"].as_array().unwrap().len(), 0);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_mempool_returns_sorted_txids() {
+        // Verify /get_mempool returns txids in lexicographic order
+        // regardless of HashMap iteration order.
+        let (state, dir) = build_state(true);
+        // Inject 3 txids in reverse-lex order to guarantee the sort
+        // in handle_get_mempool is exercised.
+        let mut ids: Vec<[u8; 32]> = vec![[0xcc; 32], [0xaa; 32], [0xbb; 32]];
+        {
+            let mut pool = state.tx_pool.lock().expect("pool lock");
+            for id in &ids {
+                pool.inject_test_entry(*id, vec![0x00]);
+            }
+        }
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_mempool".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["count"].as_u64(), Some(3));
+        let txids: Vec<String> = body["txids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        let expected: Vec<String> = ids.iter().map(hex::encode).collect();
+        assert_eq!(txids, expected, "txids must be lexicographically sorted");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_mempool_rejects_post() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/get_mempool".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("GET required")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_mempool_reports_unavailable_when_tx_pool_is_poisoned() {
+        let (state, dir) = build_state(true);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.tx_pool.lock().expect("tx_pool lock");
+            panic!("forced to poison tx_pool");
+        }));
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_mempool".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("mempool unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_rejects_missing_txid_param() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_rejects_invalid_length() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=deadbeef".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_rejects_non_hex() {
+        let (state, dir) = build_state(true);
+        let target = format!("/get_tx?txid={}", "z".repeat(64));
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_missing_returns_found_false_with_200() {
+        let (state, dir) = build_state(true);
+        let unknown = "11".repeat(32);
+        let target = format!("/get_tx?txid={unknown}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        assert_eq!(body["txid"].as_str(), Some(unknown.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_missing_returns_missing() {
+        let (state, dir) = build_state(true);
+        let unknown = "22".repeat(32);
+        let target = format!("/tx_status?txid={unknown}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["status"].as_str(), Some("missing"));
+        assert_eq!(body["txid"].as_str(), Some(unknown.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_rejects_invalid_txid() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/tx_status?txid=not-hex".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_rejects_post() {
+        let (state, dir) = build_state(true);
+        let target = format!("/tx_status?txid={}", "33".repeat(32));
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_empty_txid_value_is_classified_as_missing() {
+        // Go/Rust parity: ?txid= (present but empty value) must classify as
+        // missing parameter, not length=0, to match Go parseTxIDQuery which
+        // uses Query().Get returning "" for both absent and present-empty.
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_empty_txid_value_is_classified_as_missing() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/tx_status?txid=".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_valueless_txid_key_classified_as_missing() {
+        // ?txid (key without `=`) must classify as missing, matching Go's
+        // net/url which parses a valueless key into values=[""].
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_valueless_first_key_never_accepts_later_hex_duplicate() {
+        // First-match semantic (mirrors Go's Values.Get = values[0]):
+        // ?txid&txid=<valid hex> — first key is valueless → missing;
+        // Rust must NOT fall through to accept the later duplicate's hex.
+        let (state, dir) = build_state(true);
+        let valid_hex = "ab".repeat(32);
+        let target = format!("/get_tx?txid&txid={valid_hex}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 400,
+            "first-match semantic violated: accepted duplicate-key hex value"
+        );
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_accepts_percent_encoded_hex_value() {
+        // Go's Query().Get percent-decodes the value before returning it,
+        // so `?txid=%61b...` becomes `ab...` and validates as valid hex.
+        // Rust must match: percent-decode before length/hex checks. A
+        // missing-but-syntactically-valid txid returns
+        // 200 + found=false, which proves the parser accepted the
+        // percent-encoded input (the parse-reject paths would return 400).
+        let (state, dir) = build_state(true);
+
+        let encoded_prefix = "%61%62"; // == "ab"
+        let literal_rest = "cd".repeat(31); // 62 chars → total 64 after decode
+        let target = format!("/get_tx?txid={encoded_prefix}{literal_rest}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 200,
+            "percent-encoded valid hex must parse, got status={}",
+            response.status
+        );
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        // Echoed txid should be the decoded form (lower-case hex 'ab' + rest)
+        let expected = format!("ab{literal_rest}");
+        assert_eq!(body["txid"].as_str(), Some(expected.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_malformed_percent_escape_classified_as_missing() {
+        // Go's net/url.parseQuery `continue`s on percent-decode failure
+        // (key OR value) and never stores the pair. So `?txid=%ZZ` alone
+        // has no stored
+        // txid, and `Values.Get("txid")` returns "" → Go handler classifies
+        // that as "missing required query parameter". Rust must match:
+        // skip the malformed pair and report missing (NOT "malformed
+        // percent-escape", which was the prior divergent behavior).
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=%ZZ".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_malformed_first_pair_falls_through_to_valid_second() {
+        // Go parseQuery drops the first pair (value unescape fails on %ZZ)
+        // and stores the second (`txid=<hex>`). `Values.Get` then returns
+        // the valid hex. Rust must match.
+        let (state, dir) = build_state(true);
+        let valid_hex = "cd".repeat(32);
+        let target = format!("/get_tx?txid=%ZZ&txid={valid_hex}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 200,
+            "expected 200 found-false: malformed first pair should be skipped, second pair's valid hex should parse"
+        );
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        assert_eq!(body["txid"].as_str(), Some(valid_hex.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_percent_encoded_key_txid_is_accepted() {
+        // Go parseQuery percent-decodes BOTH keys and values before
+        // comparison/storage. So `?%74%78%69%64=<hex>` (the key "txid"
+        // percent-encoded) is stored as `Values{"txid": [<hex>]}`. Rust
+        // must match — percent-decode the key before comparing to "txid".
+        let (state, dir) = build_state(true);
+        let valid_hex = "ef".repeat(32);
+        // "%74%78%69%64" decodes to "txid"
+        let target = format!("/get_tx?%74%78%69%64={valid_hex}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 200,
+            "expected 200: percent-encoded 'txid' key should decode and match"
+        );
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        assert_eq!(body["txid"].as_str(), Some(valid_hex.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_non_utf8_percent_value_not_classified_as_missing() {
+        // %ff decodes to 1 raw byte (0xFF). Length check sees "got 1" —
+        // same as Go where len(raw) counts raw decoded bytes.
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=%ff".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            !err.contains("missing"),
+            "non-UTF-8 decoded value must not be classified as missing, got: {err}"
+        );
+        // Length error with raw byte count: "got 1" (matches Go).
+        assert!(
+            err.contains("(got 1)"),
+            "expected raw byte length 1, got: {err}"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_non_utf8_64_raw_bytes_reaches_hex_check() {
+        // 62 hex chars + %c3%28 = 64 raw decoded bytes.
+        // Go: len==64 → hex.DecodeString → hex error.
+        // Rust: len==64 → from_utf8 fails → hex-class error.
+        // Both: 400, hex-class error — NOT length error.
+        let (state, dir) = build_state(true);
+        let hex62 = "a".repeat(62);
+        let target = format!("/get_tx?txid={hex62}%c3%28");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("not valid hex"),
+            "64 raw bytes with non-UTF-8 must get hex error, got: {err}"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_semicolon_in_pair_is_dropped_like_go() {
+        // Go parseQuery (1.17+, CVE-2021-44716) skips pairs containing
+        // `;`.  `?txid=<64hex>;foo=1` → pair dropped → "missing txid".
+        let (state, dir) = build_state(true);
+        let valid_hex = "a".repeat(64);
+        let target = format!("/get_tx?txid={valid_hex};foo=1");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("missing"),
+            "pair with semicolon must be dropped (Go parity), got: {err}"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_reports_unavailable_when_tx_pool_is_poisoned_before_parse() {
+        // handle_get_tx must check tx_pool availability BEFORE
+        // parse_txid_query, so a poisoned pool + invalid/missing txid
+        // returns 503, not 400.  Parity with Go handleGetTx which
+        // checks state.mempool == nil first.
+        let (state, dir) = build_state(true);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.tx_pool.lock().expect("tx_pool lock");
+            panic!("forced to poison tx_pool");
+        }));
+        // Deliberately malformed txid — if the old order still ran, this
+        // would surface as 400 rather than the contract's 503.
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=not-hex-and-wrong-length".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("mempool unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_reports_unavailable_when_tx_pool_is_poisoned_before_parse() {
+        // Parity sibling of the handle_get_tx ordering fix:
+        // tx_pool availability check BEFORE parse.
+        let (state, dir) = build_state(true);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.tx_pool.lock().expect("tx_pool lock");
+            panic!("forced to poison tx_pool");
+        }));
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/tx_status?txid=not-hex".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("mempool unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn percent_decode_basic_cases() {
+        // Returns Vec<u8> — raw decoded bytes.
+        assert_eq!(super::percent_decode("abc"), Some(b"abc".to_vec()));
+        assert_eq!(super::percent_decode("%61"), Some(vec![0x61]));
+        assert_eq!(super::percent_decode("%41%42"), Some(vec![0x41, 0x42]));
+        assert_eq!(super::percent_decode("a+b"), Some(b"a b".to_vec()));
+        assert_eq!(super::percent_decode(""), Some(vec![]));
+        // Malformed — non-hex digit in escape
+        assert_eq!(super::percent_decode("%ZZ"), None);
+        // Malformed — incomplete escape at end
+        assert_eq!(super::percent_decode("%a"), None);
+        assert_eq!(super::percent_decode("%"), None);
+        // Non-UTF-8 decoded bytes — preserved as raw bytes (Go parity).
+        assert_eq!(super::percent_decode("%ff"), Some(vec![0xff]));
+        assert_eq!(super::percent_decode("%c3%28"), Some(vec![0xc3, 0x28]));
     }
 }

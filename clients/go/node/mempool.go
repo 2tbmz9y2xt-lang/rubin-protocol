@@ -169,6 +169,51 @@ func (m *Mempool) Len() int {
 	return len(m.txs)
 }
 
+// AllTxIDs returns the txids of every transaction currently in the mempool.
+// The slice ordering is not guaranteed to be stable between calls.
+func (m *Mempool) AllTxIDs() [][32]byte {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ids := make([][32]byte, 0, len(m.txs))
+	for txid := range m.txs {
+		ids = append(ids, txid)
+	}
+	return ids
+}
+
+// TxByID returns the raw transaction bytes of a mempool entry with the given
+// txid. The returned slice is a defensive copy and safe for the caller to
+// retain or mutate. Returns (nil, false) if no matching entry is present.
+func (m *Mempool) TxByID(txid [32]byte) ([]byte, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entry, ok := m.txs[txid]
+	if !ok {
+		return nil, false
+	}
+	raw := make([]byte, len(entry.raw))
+	copy(raw, entry.raw)
+	return raw, true
+}
+
+// Contains reports whether a transaction with the given txid is currently
+// present in the mempool.
+func (m *Mempool) Contains(txid [32]byte) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.txs[txid]
+	return ok
+}
+
 func (m *Mempool) AddTx(txBytes []byte) error {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
