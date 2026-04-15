@@ -146,6 +146,21 @@ impl TxPool {
         self.txs.get(txid).map(|entry| entry.raw.clone())
     }
 
+    /// Inject a raw entry for testing without full transaction validation.
+    #[cfg(test)]
+    pub fn inject_test_entry(&mut self, txid: [u8; 32], raw: Vec<u8>) {
+        self.insert_entry(
+            txid,
+            TxPoolEntry {
+                raw,
+                inputs: Vec::new(),
+                fee: 0,
+                weight: 0,
+                size: 0,
+            },
+        );
+    }
+
     /// Reports whether a transaction with the given txid is currently present
     /// in the pool.
     pub fn contains(&self, txid: &[u8; 32]) -> bool {

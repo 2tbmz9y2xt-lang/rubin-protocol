@@ -2962,6 +2962,44 @@ mod tests {
     }
 
     #[test]
+    fn get_mempool_returns_sorted_txids() {
+        // Copilot thread PRRT_kwDORQ3qGs57Qgs6/QgtE: verify that
+        // /get_mempool returns txids in lexicographic order regardless
+        // of HashMap iteration order.
+        let (state, dir) = build_state(true);
+        // Inject 3 txids in reverse-lex order to guarantee the sort
+        // in handle_get_mempool is exercised.
+        let mut ids: Vec<[u8; 32]> = vec![[0xcc; 32], [0xaa; 32], [0xbb; 32]];
+        {
+            let mut pool = state.tx_pool.lock().expect("pool lock");
+            for id in &ids {
+                pool.inject_test_entry(*id, vec![0x00]);
+            }
+        }
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_mempool".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["count"].as_u64(), Some(3));
+        let txids: Vec<String> = body["txids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        let expected: Vec<String> = ids.iter().map(hex::encode).collect();
+        assert_eq!(txids, expected, "txids must be lexicographically sorted");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
     fn get_mempool_rejects_post() {
         let (state, dir) = build_state(true);
         let response = route_request(

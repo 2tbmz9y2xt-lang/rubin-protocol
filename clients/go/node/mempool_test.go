@@ -3,9 +3,11 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1403,6 +1405,50 @@ func TestMempoolAllTxIDsReturnsEveryEntry(t *testing.T) {
 	for _, id := range got {
 		if _, ok := want[id]; !ok {
 			t.Fatalf("AllTxIDs returned unexpected txid %x", id)
+		}
+	}
+}
+
+func TestMempoolAllTxIDsSortedDeterministic(t *testing.T) {
+	// Copilot thread on PR #1199: verify that sorting AllTxIDs produces
+	// deterministic lexicographic order (handler sorts; this test proves
+	// the data is sortable and the result matches expectation).
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100, 100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	var ids [][32]byte
+	for i := 0; i < 3; i++ {
+		txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[i]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("AddTx[%d]: %v", i, err)
+		}
+		_, txid, _, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			t.Fatalf("ParseTx[%d]: %v", i, err)
+		}
+		ids = append(ids, txid)
+	}
+	got := mp.AllTxIDs()
+	if len(got) != 3 {
+		t.Fatalf("AllTxIDs len=%d, want 3", len(got))
+	}
+	// Replicate handler sort: lexicographic on hex-encoded txid.
+	sort.Slice(got, func(i, j int) bool {
+		return hex.EncodeToString(got[i][:]) < hex.EncodeToString(got[j][:])
+	})
+	sort.Slice(ids, func(i, j int) bool {
+		return hex.EncodeToString(ids[i][:]) < hex.EncodeToString(ids[j][:])
+	})
+	for i := range ids {
+		if got[i] != ids[i] {
+			t.Fatalf("sorted[%d]: got %x, want %x", i, got[i], ids[i])
 		}
 	}
 }
