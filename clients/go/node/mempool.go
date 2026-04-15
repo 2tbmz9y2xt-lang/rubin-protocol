@@ -214,19 +214,6 @@ func (m *Mempool) Contains(txid [32]byte) bool {
 	return ok
 }
 
-// InjectTestEntryRaw inserts a minimal entry into the mempool without
-// transaction validation.  Exported for cross-package handler tests that
-// need a populated pool without constructing valid signed transactions.
-func (m *Mempool) InjectTestEntryRaw(txid [32]byte, raw []byte) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.txs[txid] = &mempoolEntry{
-		raw:  append([]byte(nil), raw...),
-		txid: txid,
-		size: len(raw),
-	}
-}
-
 func (m *Mempool) AddTx(txBytes []byte) error {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")

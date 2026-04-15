@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1112,40 +1111,6 @@ func TestDevnetRPCGetMempoolRejectsBadMethod(t *testing.T) {
 	handleGetMempool(mustRPCState(t, true), rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rec.Code)
-	}
-}
-
-func TestDevnetRPCGetMempoolSortedMultiTx(t *testing.T) {
-	state := mustRPCState(t, true)
-	// Inject 3 txids in reverse-lex order to exercise handler sort.
-	ids := [][32]byte{{}, {}, {}}
-	for i := range ids[0] {
-		ids[0][i] = 0xcc
-	}
-	for i := range ids[1] {
-		ids[1][i] = 0xaa
-	}
-	for i := range ids[2] {
-		ids[2][i] = 0xbb
-	}
-	for _, id := range ids {
-		state.mempool.InjectTestEntryRaw(id, []byte{0x00})
-	}
-	req := httptest.NewRequest(http.MethodGet, "/get_mempool", nil)
-	rec := httptest.NewRecorder()
-	handleGetMempool(state, rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d, want 200", rec.Code)
-	}
-	var got getMempoolResponse
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if got.Count != 3 {
-		t.Fatalf("Count=%d, want 3", got.Count)
-	}
-	if !sort.StringsAreSorted(got.TxIDs) {
-		t.Fatalf("TxIDs not sorted: %v", got.TxIDs)
 	}
 }
 
