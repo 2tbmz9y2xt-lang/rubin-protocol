@@ -700,6 +700,11 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
             message: "tx pool unavailable".to_string(),
         }),
     };
+    // Release rpc_op_lock before announce: announce is p2p broadcast, not
+    // chain/tx-pool mutation, so holding the RPC op lock across a slow
+    // network callback would block concurrent /mine_next for no benefit.
+    // Matches the narrowed Go scope in handleSubmitTx (http_rpc.go).
+    drop(_rpc_op);
     match admit_result {
         Ok((txid, relay_meta)) => {
             // Relay tx to peers (fire-and-forget, matches Go behavior).

@@ -449,16 +449,20 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	state.rpcMut.Lock()
-	defer state.rpcMut.Unlock()
-	if err := state.mempool.AddTx(raw); err != nil {
-		status, result := classifySubmitErr(err)
+	admitErr := state.mempool.AddTx(raw)
+	state.rpcMut.Unlock()
+	if admitErr != nil {
+		status, result := classifySubmitErr(admitErr)
 		state.metrics.noteSubmit(result)
 		writeJSONResponse(state, route, w, status, submitTxResponse{
 			Accepted: false,
-			Error:    err.Error(),
+			Error:    admitErr.Error(),
 		})
 		return
 	}
+	// Announce runs outside rpcMut: it is p2p broadcast, not chain/mempool
+	// mutation, so serializing with /mine_next under the rpc op lock would
+	// block mine_next on a potentially slow network callback for no benefit.
 	if state.announceTx != nil {
 		if err := state.announceTx(raw); err != nil {
 			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-tx: %v\n", err)
