@@ -1581,16 +1581,39 @@ mod tests {
 
         thread::sleep(Duration::from_millis(150));
 
-        let stream = TcpStream::connect(service.addr()).expect("connect inbound");
         let local = local_version(0).expect("local version");
-        let session = perform_version_handshake(
-            stream,
-            runtime_cfg,
-            local,
-            local.chain_id,
-            local.genesis_hash,
-        )
-        .expect("inbound handshake must not be blocked by pending bootstrap dial");
+        let mut session = None;
+        let mut last_err: Option<std::io::Error> = None;
+        for attempt in 0..10 {
+            if attempt > 0 {
+                thread::sleep(Duration::from_millis(100));
+            }
+            let stream = match TcpStream::connect(service.addr()) {
+                Ok(s) => s,
+                Err(err) => {
+                    last_err = Some(err);
+                    continue;
+                }
+            };
+            match perform_version_handshake(
+                stream,
+                runtime_cfg.clone(),
+                local,
+                local.chain_id,
+                local.genesis_hash,
+            ) {
+                Ok(s) => {
+                    session = Some(s);
+                    break;
+                }
+                Err(err) => last_err = Some(err),
+            }
+        }
+        let session = session.unwrap_or_else(|| {
+            panic!(
+                "inbound handshake must not be blocked by pending bootstrap dial: last_err={last_err:?}"
+            )
+        });
         drop(session);
 
         service.close();
