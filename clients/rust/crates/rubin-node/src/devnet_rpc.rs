@@ -952,9 +952,9 @@ fn percent_decode(s: &str) -> Option<String> {
     }
     // Go strings are byte sequences — QueryUnescape never rejects valid %XX
     // on UTF-8 grounds.  Use lossy conversion so non-UTF-8 decoded bytes
-    // (e.g. %ff) survive as replacement chars and reach the length/hex check
-    // instead of being silently discarded (which would misclassify the error
-    // as "missing" rather than "wrong length" — Codex thread PRRT_kwDORQ3qGs57PGFx).
+    // (e.g. %ff) survive as replacement chars and reach the length check
+    // in parse_txid_query rather than being silently discarded and
+    // misclassified as "missing" (Codex thread PRRT_kwDORQ3qGs57PGFx).
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -1004,6 +1004,13 @@ fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
             "txid must be 64 hex characters (got {})",
             raw.len()
         ));
+    }
+    // After length check: non-ASCII means lossy-replaced non-UTF-8 bytes
+    // (e.g. %ff → U+FFFD).  Go's hex.DecodeString would also reject them.
+    // Guard here so the length error class matches Go for wrong-length
+    // non-ASCII input (reviewer finding on 6a58db7).
+    if !raw.is_ascii() {
+        return Err("txid is not valid hex: contains non-ASCII decoded bytes".to_string());
     }
     let decoded = hex::decode(&raw).map_err(|err| format!("txid is not valid hex: {err}"))?;
     let mut txid = [0u8; 32];
@@ -3321,12 +3328,13 @@ mod tests {
     }
 
     #[test]
-    fn get_tx_non_utf8_percent_value_reaches_length_check() {
+    fn get_tx_non_utf8_percent_value_not_classified_as_missing() {
         // Codex thread PRRT_kwDORQ3qGs57PGFx: %ff decodes to a non-UTF-8
         // byte.  percent_decode must NOT discard it (which would
-        // misclassify as "missing"); instead the decoded value reaches the
-        // length/hex check and returns 400 "wrong length" — parity with
-        // Go where QueryUnescape keeps the byte.
+        // misclassify as "missing").  The decoded lossy value (3 chars)
+        // reaches the length check first → "got 3" (Go: "got 1" on raw
+        // byte). Both are 400 + length-class error, matching the Go
+        // error class for wrong-length non-hex input.
         let (state, dir) = build_state(true);
         let response = route_request(
             &state,
@@ -3339,7 +3347,12 @@ mod tests {
         assert_eq!(response.status, 400);
         let body = response_json(&response);
         let err = body["error"].as_str().unwrap_or("");
-        // Must say "wrong length", NOT "missing required query parameter".
+        // Must NOT say "missing" — the value was decoded, not dropped.
+        assert!(
+            !err.contains("missing"),
+            "non-UTF-8 decoded value must not be classified as missing, got: {err}"
+        );
+        // Length-class error (same class as Go).
         assert!(
             err.contains("64 hex characters"),
             "expected length error, got: {err}"
