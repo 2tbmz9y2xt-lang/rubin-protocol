@@ -311,43 +311,42 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         }
     }
 
-    let live_mining_cfg =
-        if cfg.network == "devnet"
-            && !cfg.rpc_bind_addr.trim().is_empty()
-            && rpc_bind_host_is_loopback(&cfg.rpc_bind_addr)
-        {
-            let mut miner_cfg = MinerConfig {
-                core_ext_deployments: genesis_cfg.core_ext_deployments.clone(),
-                ..MinerConfig::default()
-            };
-            let mut addr_invalid = false;
-            if let Some(ref value) = cfg.mine_address {
-                match parse_mine_address_arg(value) {
-                    Ok(Some(addr)) => miner_cfg.mine_address = addr,
-                    Ok(None) => {}
-                    Err(err) => {
-                        let _ = writeln!(
-                            stderr,
-                            "rpc: live mining disabled (invalid --mine-address): {err}"
-                        );
-                        addr_invalid = true;
-                    }
-                }
-            }
-            if addr_invalid {
-                None
-            } else {
-                match Miner::new(&mut sync_engine, None, miner_cfg.clone()) {
-                    Ok(_) => Some(miner_cfg),
-                    Err(err) => {
-                        let _ = writeln!(stderr, "rpc: live mining disabled: {err}");
-                        None
-                    }
-                }
-            }
-        } else {
-            None
+    let live_mining_cfg = if cfg.network == "devnet"
+        && !cfg.rpc_bind_addr.trim().is_empty()
+        && rpc_bind_host_is_loopback(&cfg.rpc_bind_addr)
+    {
+        let mut miner_cfg = MinerConfig {
+            core_ext_deployments: genesis_cfg.core_ext_deployments.clone(),
+            ..MinerConfig::default()
         };
+        let mut addr_invalid = false;
+        if let Some(ref value) = cfg.mine_address {
+            match parse_mine_address_arg(value) {
+                Ok(Some(addr)) => miner_cfg.mine_address = addr,
+                Ok(None) => {}
+                Err(err) => {
+                    let _ = writeln!(
+                        stderr,
+                        "rpc: live mining disabled (invalid --mine-address): {err}"
+                    );
+                    addr_invalid = true;
+                }
+            }
+        }
+        if addr_invalid {
+            None
+        } else {
+            match Miner::new(&mut sync_engine, None, miner_cfg.clone()) {
+                Ok(_) => Some(miner_cfg),
+                Err(err) => {
+                    let _ = writeln!(stderr, "rpc: live mining disabled: {err}");
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     let genesis_hash = match runtime_genesis_hash(&genesis_cfg) {
         Ok(hash) => hash,

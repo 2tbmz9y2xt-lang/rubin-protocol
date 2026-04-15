@@ -130,8 +130,7 @@ pub fn rpc_bind_host_is_loopback(bind_addr: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    host
-        .parse::<std::net::IpAddr>()
+    host.parse::<std::net::IpAddr>()
         .ok()
         .is_some_and(|ip| ip.is_loopback())
 }
@@ -1230,10 +1229,7 @@ mod tests {
         let sync_engine = Arc::new(Mutex::new(engine));
         let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
         let live_cfg = MinerConfig {
-            core_ext_deployments: sync_engine
-                .lock()
-                .expect("lock")
-                .core_ext_deployments(),
+            core_ext_deployments: sync_engine.lock().expect("lock").core_ext_deployments(),
             ..MinerConfig::default()
         };
         let state = new_devnet_rpc_state_with_tx_pool(
@@ -1588,9 +1584,7 @@ mod tests {
             "nonce must be present for Go/Rust RPC parity"
         );
         assert!(
-            json["block_hash"]
-                .as_str()
-                .is_some_and(|s| s.len() == 64),
+            json["block_hash"].as_str().is_some_and(|s| s.len() == 64),
             "block_hash must be 32-byte hex"
         );
         assert!(
