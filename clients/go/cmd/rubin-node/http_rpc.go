@@ -449,9 +449,8 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	state.rpcMut.Lock()
-	err = state.mempool.AddTx(raw)
-	state.rpcMut.Unlock()
-	if err != nil {
+	defer state.rpcMut.Unlock()
+	if err := state.mempool.AddTx(raw); err != nil {
 		status, result := classifySubmitErr(err)
 		state.metrics.noteSubmit(result)
 		writeJSONResponse(state, route, w, status, submitTxResponse{
