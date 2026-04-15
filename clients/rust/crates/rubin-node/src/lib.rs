@@ -32,7 +32,7 @@ pub use coinbase::{
 };
 pub use devnet_rpc::{
     new_devnet_rpc_state, new_devnet_rpc_state_with_tx_pool, new_shared_runtime_tx_pool,
-    start_devnet_rpc_server, DevnetRPCState, RunningDevnetRPCServer,
+    rpc_bind_host_is_loopback, start_devnet_rpc_server, DevnetRPCState, RunningDevnetRPCServer,
 };
 pub use genesis::{
     devnet_genesis_block_bytes, devnet_genesis_chain_id, load_chain_id_from_genesis_file,

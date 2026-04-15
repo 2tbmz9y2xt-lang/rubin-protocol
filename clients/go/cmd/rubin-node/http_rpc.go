@@ -28,6 +28,10 @@ type devnetRPCState struct {
 	stderr      io.Writer
 	nowUnix     func() uint64
 	metrics     *rpcMetrics
+	// rpcMut serializes mutating devnet RPC work (mempool admits + live mining)
+	// so concurrent HTTP handlers cannot interleave chain/mempool updates.
+	rpcMut sync.Mutex
+	miner  *node.Miner // devnet live mining for POST /mine_next; nil disables the route
 }
 
 type runningDevnetRPCServer struct {
@@ -66,6 +70,16 @@ type submitTxResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
+type mineNextResponse struct {
+	Mined     bool    `json:"mined"`
+	Height    *uint64 `json:"height,omitempty"`
+	BlockHash *string `json:"block_hash,omitempty"`
+	Timestamp *uint64 `json:"timestamp,omitempty"`
+	Nonce     *uint64 `json:"nonce,omitempty"`
+	TxCount   *int    `json:"tx_count,omitempty"`
+	Error     string  `json:"error,omitempty"`
+}
+
 func newDevnetRPCState(
 	syncEngine *node.SyncEngine,
 	blockStore *node.BlockStore,
@@ -73,6 +87,7 @@ func newDevnetRPCState(
 	peerManager *node.PeerManager,
 	announceTx func([]byte) error,
 	stderr io.Writer,
+	liveMiner *node.Miner,
 ) *devnetRPCState {
 	if stderr == nil {
 		stderr = io.Discard
@@ -86,7 +101,24 @@ func newDevnetRPCState(
 		stderr:      stderr,
 		nowUnix:     nowUnixU64,
 		metrics:     newRPCMetrics(),
+		miner:       liveMiner,
 	}
+}
+
+// rpcBindHostIsLoopback reports whether the host part of host:port is suitable
+// for devnet-only live mining RPC (loopback only). Non-loopback binds disable
+// live mining even when network=devnet.
+func rpcBindHostIsLoopback(bindAddr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(bindAddr))
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func newRPCMetrics() *rpcMetrics {
@@ -188,6 +220,9 @@ func newDevnetRPCHandler(state *devnetRPCState) http.Handler {
 	})
 	mux.HandleFunc("/submit_tx", func(w http.ResponseWriter, r *http.Request) {
 		handleSubmitTx(state, w, r)
+	})
+	mux.HandleFunc("/mine_next", func(w http.ResponseWriter, r *http.Request) {
+		handleMineNext(state, w, r)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		handleMetrics(state, w, r)
@@ -406,6 +441,8 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
+	state.rpcMut.Lock()
+	defer state.rpcMut.Unlock()
 	if err := state.mempool.AddTx(raw); err != nil {
 		status, result := classifySubmitErr(err)
 		state.metrics.noteSubmit(result)
@@ -424,6 +461,54 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	writeJSONResponse(state, route, w, http.StatusOK, submitTxResponse{
 		Accepted: true,
 		TxID:     hex.EncodeToString(txid[:]),
+	})
+}
+
+func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
+	const route = "/mine_next"
+	if r.Method != http.MethodPost {
+		writeJSONResponse(state, route, w, http.StatusBadRequest, mineNextResponse{
+			Mined: false,
+			Error: "POST required",
+		})
+		return
+	}
+	if state == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
+			Mined: false,
+			Error: "rpc unavailable",
+		})
+		return
+	}
+	state.rpcMut.Lock()
+	defer state.rpcMut.Unlock()
+	if state.miner == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
+			Mined: false,
+			Error: "live mining unavailable",
+		})
+		return
+	}
+	mb, err := state.miner.MineOne(r.Context(), nil)
+	if err != nil {
+		writeJSONResponse(state, route, w, http.StatusUnprocessableEntity, mineNextResponse{
+			Mined: false,
+			Error: err.Error(),
+		})
+		return
+	}
+	height := mb.Height
+	ts := mb.Timestamp
+	nonce := mb.Nonce
+	txCount := mb.TxCount
+	hash := hex.EncodeToString(mb.Hash[:])
+	writeJSONResponse(state, route, w, http.StatusOK, mineNextResponse{
+		Mined:     true,
+		Height:    &height,
+		BlockHash: &hash,
+		Timestamp: &ts,
+		Nonce:     &nonce,
+		TxCount:   &txCount,
 	})
 }
 

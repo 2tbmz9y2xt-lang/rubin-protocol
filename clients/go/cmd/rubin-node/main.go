@@ -453,7 +453,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	defer p2pService.Close()
-	rpcState := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, stderr)
+	var liveMiner *node.Miner
+	if cfg.Network == "devnet" && strings.TrimSpace(cfg.RPCBindAddr) != "" && rpcBindHostIsLoopback(cfg.RPCBindAddr) {
+		minerCfg := node.DefaultMinerConfig()
+		var mineAddrErr error
+		if cfg.MineAddress != "" {
+			addrBytes, addrErr := node.ParseMineAddress(cfg.MineAddress)
+			if addrErr != nil {
+				mineAddrErr = addrErr
+				_, _ = fmt.Fprintf(stderr, "rpc: live mining disabled (invalid --mine-address): %v\n", addrErr)
+			} else {
+				minerCfg.MineAddress = addrBytes
+			}
+		}
+		if mineAddrErr == nil {
+			minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
+			var err error
+			liveMiner, err = newMinerFn(chainState, blockStore, syncEngine, minerCfg)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "rpc: live mining disabled: %v\n", err)
+				liveMiner = nil
+			}
+		}
+	}
+	rpcState := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, stderr, liveMiner)
 	rpcServer, err := startDevnetRPCServer(ctx, cfg.RPCBindAddr, rpcState, stdout, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "rpc start failed: %v\n", err)
