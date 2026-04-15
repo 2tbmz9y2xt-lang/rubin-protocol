@@ -923,7 +923,16 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
 /// None on malformed escapes (incomplete or non-hex digits). Mirrors Go's
 /// net/url.QueryUnescape used internally by Values.Get, which decodes the
 /// value before returning it to the handler.
-fn percent_decode(s: &str) -> Option<String> {
+/// Percent-decode a query component to raw bytes.  Returns `None` only on
+/// malformed `%XX` escapes (truncated or non-hex digits), matching the
+/// error-returns-continue semantics of Go `net/url.QueryUnescape`.
+///
+/// Returns `Vec<u8>` (not `String`) because Go strings are arbitrary byte
+/// sequences — `QueryUnescape` never rejects on UTF-8 grounds.  Keeping
+/// raw bytes ensures `len()` matches Go's `len()` for the downstream
+/// length check in `parse_txid_query` (Codex threads PRRT_kwDORQ3qGs57PGFx,
+/// PRRT_kwDORQ3qGs57RCc0).
+fn percent_decode(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -939,8 +948,6 @@ fn percent_decode(s: &str) -> Option<String> {
                 i += 3;
             }
             b'+' => {
-                // application/x-www-form-urlencoded: '+' decodes to space.
-                // Go's Query().Get treats '+' as space in values.
                 out.push(b' ');
                 i += 1;
             }
@@ -950,12 +957,7 @@ fn percent_decode(s: &str) -> Option<String> {
             }
         }
     }
-    // Go strings are byte sequences — QueryUnescape never rejects valid %XX
-    // on UTF-8 grounds.  Use lossy conversion so non-UTF-8 decoded bytes
-    // (e.g. %ff) survive as replacement chars and reach the length check
-    // in parse_txid_query rather than being silently discarded and
-    // misclassified as "missing" (Codex thread PRRT_kwDORQ3qGs57PGFx).
-    Some(String::from_utf8_lossy(&out).into_owned())
+    Some(out)
 }
 
 /// Decode a 64-hex-char "txid" query parameter to a [u8; 32]. Returns Err with
@@ -975,52 +977,44 @@ fn percent_decode(s: &str) -> Option<String> {
 ///     BOTH clients, and `?%74%78%69%64=<hex>` (encoded "txid" key) is
 ///     accepted on BOTH clients.
 fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
-    let mut txid_value: Option<String> = None;
+    let mut txid_bytes: Option<Vec<u8>> = None;
     for pair in query.split('&') {
         // Go 1.17+ (CVE-2021-44716): parseQuery rejects pairs containing
-        // an unescaped semicolon with "invalid semicolon separator in query"
-        // and `continue`s.  Match that behavior so e.g.
-        // `?txid=<64hex>;foo=1` is classified as "missing txid" on both
-        // clients (Codex thread PRRT_kwDORQ3qGs57PkNn).
+        // an unescaped semicolon.
         if pair.contains(';') {
             continue;
         }
-        // Treat a key without `=` as present-with-empty-value, matching
-        // net/url's Values parsing (key alone → values=[""]).
         let (k_raw, v_raw) = pair.split_once('=').unwrap_or((pair, ""));
-        // Go `parseQuery` calls `QueryUnescape` on BOTH the key and value
-        // and `continue`s on either failure (the pair never lands in the
-        // Values map). Replicate that: if either decode fails, skip the
-        // pair and keep scanning for a later valid `txid`.
         let Some(k) = percent_decode(k_raw) else {
             continue;
         };
-        if k != "txid" {
+        // Key comparison on raw bytes — "txid" is ASCII so this is exact.
+        if k != b"txid" {
             continue;
         }
         let Some(v) = percent_decode(v_raw) else {
             continue;
         };
-        txid_value = Some(v);
+        txid_bytes = Some(v);
         break;
     }
-    let raw = txid_value
+    let raw = txid_bytes
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing required query parameter: txid".to_string())?;
+    // Length check on raw decoded bytes — matches Go's len(raw) which
+    // counts bytes, not UTF-8 characters.
     if raw.len() != 64 {
         return Err(format!(
             "txid must be 64 hex characters (got {})",
             raw.len()
         ));
     }
-    // After length check: non-ASCII means lossy-replaced non-UTF-8 bytes
-    // (e.g. %ff → U+FFFD).  Go's hex.DecodeString would also reject them.
-    // Guard here so the length error class matches Go for wrong-length
-    // non-ASCII input (reviewer finding on 6a58db7).
-    if !raw.is_ascii() {
-        return Err("txid is not valid hex: contains non-ASCII decoded bytes".to_string());
-    }
-    let decoded = hex::decode(&raw).map_err(|err| format!("txid is not valid hex: {err}"))?;
+    // Convert to UTF-8 string for hex::decode.  Valid hex is always ASCII,
+    // so non-UTF-8 bytes (e.g. %ff decoded to 0xFF) fail here with the
+    // same error class as Go's hex.DecodeString.
+    let raw_str = std::str::from_utf8(&raw)
+        .map_err(|_| "txid is not valid hex: contains non-ASCII decoded bytes".to_string())?;
+    let decoded = hex::decode(raw_str).map_err(|err| format!("txid is not valid hex: {err}"))?;
     let mut txid = [0u8; 32];
     txid.copy_from_slice(&decoded);
     Ok(txid)
@@ -3375,12 +3369,9 @@ mod tests {
 
     #[test]
     fn get_tx_non_utf8_percent_value_not_classified_as_missing() {
-        // Codex thread PRRT_kwDORQ3qGs57PGFx: %ff decodes to a non-UTF-8
-        // byte.  percent_decode must NOT discard it (which would
-        // misclassify as "missing").  The decoded lossy value (3 chars)
-        // reaches the length check first → "got 3" (Go: "got 1" on raw
-        // byte). Both are 400 + length-class error, matching the Go
-        // error class for wrong-length non-hex input.
+        // Codex thread PRRT_kwDORQ3qGs57PGFx: %ff decodes to 1 raw byte.
+        // With Vec<u8> percent_decode, length check sees "got 1" — same as
+        // Go where len(raw) counts raw decoded bytes.
         let (state, dir) = build_state(true);
         let response = route_request(
             &state,
@@ -3393,15 +3384,41 @@ mod tests {
         assert_eq!(response.status, 400);
         let body = response_json(&response);
         let err = body["error"].as_str().unwrap_or("");
-        // Must NOT say "missing" — the value was decoded, not dropped.
         assert!(
             !err.contains("missing"),
             "non-UTF-8 decoded value must not be classified as missing, got: {err}"
         );
-        // Length-class error (same class as Go).
+        // Length error with raw byte count: "got 1" (matches Go).
         assert!(
-            err.contains("64 hex characters"),
-            "expected length error, got: {err}"
+            err.contains("(got 1)"),
+            "expected raw byte length 1, got: {err}"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_non_utf8_64_raw_bytes_reaches_hex_check() {
+        // Codex thread PRRT_kwDORQ3qGs57RCc0: 62 hex chars + %c3%28 = 64
+        // raw decoded bytes.  Go: len==64 → hex.DecodeString → hex error.
+        // Rust (with Vec<u8>): len==64 → from_utf8 → hex-class error.
+        // Both: 400, hex-class error.  NOT length error.
+        let (state, dir) = build_state(true);
+        let hex62 = "a".repeat(62);
+        let target = format!("/get_tx?txid={hex62}%c3%28");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        let err = body["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("not valid hex"),
+            "64 raw bytes with non-UTF-8 must get hex error, got: {err}"
         );
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -3488,21 +3505,19 @@ mod tests {
 
     #[test]
     fn percent_decode_basic_cases() {
-        // Unit coverage for the helper.
-        assert_eq!(super::percent_decode("abc"), Some("abc".to_string()));
-        assert_eq!(super::percent_decode("%61"), Some("a".to_string()));
-        assert_eq!(super::percent_decode("%41%42"), Some("AB".to_string()));
-        assert_eq!(super::percent_decode("a+b"), Some("a b".to_string()));
-        assert_eq!(super::percent_decode(""), Some(String::new()));
+        // Returns Vec<u8> — raw decoded bytes.
+        assert_eq!(super::percent_decode("abc"), Some(b"abc".to_vec()));
+        assert_eq!(super::percent_decode("%61"), Some(vec![0x61]));
+        assert_eq!(super::percent_decode("%41%42"), Some(vec![0x41, 0x42]));
+        assert_eq!(super::percent_decode("a+b"), Some(b"a b".to_vec()));
+        assert_eq!(super::percent_decode(""), Some(vec![]));
         // Malformed — non-hex digit in escape
         assert_eq!(super::percent_decode("%ZZ"), None);
         // Malformed — incomplete escape at end
         assert_eq!(super::percent_decode("%a"), None);
         assert_eq!(super::percent_decode("%"), None);
-        // Non-UTF-8 decoded byte — Go keeps it, Rust uses lossy replacement.
-        // Must return Some (not None!) so the value reaches the length/hex
-        // check rather than being silently dropped (Codex PRRT_kwDORQ3qGs57PGFx).
-        assert!(super::percent_decode("%ff").is_some());
-        assert!(super::percent_decode("%c3%28").is_some());
+        // Non-UTF-8 decoded bytes — preserved as raw bytes (Go parity).
+        assert_eq!(super::percent_decode("%ff"), Some(vec![0xff]));
+        assert_eq!(super::percent_decode("%c3%28"), Some(vec![0xc3, 0x28]));
     }
 }
