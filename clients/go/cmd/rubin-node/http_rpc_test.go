@@ -1382,3 +1382,35 @@ func TestDevnetRPCTxStatusEmptyTxIDValueIsClassifiedAsMissing(t *testing.T) {
 		t.Fatalf("Error=%q, want 'missing required query parameter' to match Rust parity", got.Error)
 	}
 }
+
+func TestDevnetRPCGetTxValuelessTxIDKeyClassifiedAsMissing(t *testing.T) {
+	// Go/Rust parity regression (Codex thread PRRT_kwDORQ3qGs57NpSB):
+	// ?txid (key without `=`) or ?txid&txid=<hex> — Go's net/url parses a
+	// key without `=` into url.Values{"txid":[""]}, so Query().Get returns
+	// "" (missing). Rust parser must match: treat key without `=` as
+	// present-with-empty, classify as missing, first-match semantic (never
+	// accept a later duplicate-key value).
+	validHex := strings.Repeat("ab", 32)
+	// Case 1: ?txid (no value, no duplicate)
+	req := httptest.NewRequest(http.MethodGet, "/get_tx?txid", nil)
+	rec := httptest.NewRecorder()
+	handleGetTx(mustRPCState(t, true), rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("case ?txid status=%d, want 400", rec.Code)
+	}
+	// Case 2: ?txid&txid=<valid hex> — first key is valueless, Rust must
+	// reject as missing (not accept the second key's hex).
+	req2 := httptest.NewRequest(http.MethodGet, "/get_tx?txid&txid="+validHex, nil)
+	rec2 := httptest.NewRecorder()
+	handleGetTx(mustRPCState(t, true), rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("case ?txid&txid=<hex> status=%d, want 400 (first-match semantic)", rec2.Code)
+	}
+	var got getTxResponse
+	if err := json.NewDecoder(rec2.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !strings.Contains(got.Error, "missing required query parameter") {
+		t.Fatalf("Error=%q, want 'missing required query parameter' (first-match semantic)", got.Error)
+	}
+}

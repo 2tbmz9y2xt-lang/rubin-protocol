@@ -921,18 +921,23 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
 
 /// Decode a 64-hex-char "txid" query parameter to a [u8; 32]. Returns Err with
 /// an operator-facing message on missing, wrong length, or non-hex input.
-/// An empty value (e.g. `?txid=`) is classified as missing to preserve parity
-/// with the Go `parseTxIDQuery` contract (Go's `r.URL.Query().Get("txid")`
-/// returns "" for both absent and present-but-empty, and the Go parser
-/// classifies that as "missing required query parameter").
+/// An empty value (e.g. `?txid=` or `?txid` without `=`) is classified as
+/// missing to preserve parity with the Go `parseTxIDQuery` contract. Go's
+/// `r.URL.Query()` parses both `?txid=` and `?txid` into `url.Values{"txid":
+/// [""]}`; `Query().Get("txid")` returns "" in both cases and the Go parser
+/// classifies that as "missing required query parameter". The first-match
+/// semantic is preserved via `break`: if multiple `txid` keys appear (e.g.
+/// `?txid&txid=<hex>`), only the first is considered, matching Go's
+/// `Values.Get` which returns `values[0]`.
 fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
     let mut txid_hex: Option<&str> = None;
     for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == "txid" {
-                txid_hex = Some(v);
-                break;
-            }
+        // Treat a key without `=` as present-with-empty-value, matching
+        // net/url's Values parsing (key alone → values=[""]).
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == "txid" {
+            txid_hex = Some(v);
+            break;
         }
     }
     let raw = txid_hex
@@ -3052,6 +3057,57 @@ mod tests {
             },
         );
         assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_valueless_txid_key_classified_as_missing() {
+        // Go/Rust parity regression (Codex thread PRRT_kwDORQ3qGs57NpSB):
+        // ?txid (key without `=`) must classify as missing, matching Go's
+        // net/url which parses a valueless key into values=[""].
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_valueless_first_key_never_accepts_later_hex_duplicate() {
+        // First-match semantic (mirrors Go's Values.Get = values[0]):
+        // ?txid&txid=<valid hex> — first key is valueless → missing;
+        // Rust must NOT fall through to accept the later duplicate's hex.
+        let (state, dir) = build_state(true);
+        let valid_hex = "ab".repeat(32);
+        let target = format!("/get_tx?txid&txid={valid_hex}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 400,
+            "first-match semantic violated: accepted duplicate-key hex value"
+        );
         let body = response_json(&response);
         assert!(body["error"]
             .as_str()
