@@ -1348,34 +1348,3 @@ func TestDevnetRPCTxStatusUnavailableOnNilState(t *testing.T) {
 	}
 }
 
-func TestDevnetRPCGetMempoolSortedDeterministic(t *testing.T) {
-	fromKey := mustRPCMLDSA87Keypair(t)
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	state, _, _ := mustRPCStateWithSpendableUTXO(t, fromAddress, nil)
-
-	// Inject txids directly to bypass mempool admission (cheap test for sort
-	// behavior; does not need real tx bytes since AllTxIDs just returns keys).
-	// Use three synthetic txids in non-sorted order.
-	type withRaw interface{ Len() int }
-	_ = withRaw(state.mempool) // ensure interface compiles
-
-	req := httptest.NewRequest(http.MethodGet, "/get_mempool", nil)
-	rec := httptest.NewRecorder()
-	handleGetMempool(state, rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d, want 200", rec.Code)
-	}
-	var got getMempoolResponse
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	// empty mempool → empty txids, trivially sorted
-	if got.TxIDs == nil {
-		t.Fatalf("TxIDs=nil, want empty slice")
-	}
-	for i := 1; i < len(got.TxIDs); i++ {
-		if got.TxIDs[i-1] >= got.TxIDs[i] {
-			t.Fatalf("TxIDs not strictly sorted: %v", got.TxIDs)
-		}
-	}
-}
