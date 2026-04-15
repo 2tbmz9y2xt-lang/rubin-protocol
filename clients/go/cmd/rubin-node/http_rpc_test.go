@@ -908,6 +908,80 @@ func TestRPCBindHostIsLoopback(t *testing.T) {
 	if rpcBindHostIsLoopback("example.com:19112") {
 		t.Fatal("expected non-loopback for example.com")
 	}
+	if rpcBindHostIsLoopback("127.0.0.1") {
+		t.Fatal("missing port must be rejected")
+	}
+	if rpcBindHostIsLoopback("not-a-host:19112") {
+		t.Fatal("invalid host:port must be rejected")
+	}
+}
+
+func TestHandleMineNextNilState(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil)
+	handleMineNext(nil, rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", rec.Code)
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Error != "rpc unavailable" {
+		t.Fatalf("error=%q want rpc unavailable", got.Error)
+	}
+}
+
+func TestDevnetRPCMineNextMineOneError(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	chainState := node.NewChainState()
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
+	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	syncEngine.SetMempool(mempool)
+	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
+	miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard, miner)
+	state.nowUnix = func() uint64 { return 0 }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handleMineNext(state, rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want 422", rec.Code)
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Mined || got.Error == "" {
+		t.Fatalf("unexpected response: %+v", got)
+	}
+	if !strings.Contains(got.Error, context.Canceled.Error()) {
+		t.Fatalf("error=%q want context canceled", got.Error)
+	}
 }
 
 func TestDevnetRPCMineNextRejectsGet(t *testing.T) {

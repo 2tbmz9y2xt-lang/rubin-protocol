@@ -1419,6 +1419,109 @@ mod tests {
         assert!(!super::rpc_bind_host_is_loopback("0.0.0.0:19112"));
         assert!(!super::rpc_bind_host_is_loopback("example.com:19112"));
         assert!(!super::rpc_bind_host_is_loopback(""));
+        assert!(!super::rpc_bind_host_is_loopback("[::1]"));
+        assert!(!super::rpc_bind_host_is_loopback("abcd::1:19112"));
+        assert!(!super::rpc_bind_host_is_loopback("127.0.0.1"));
+    }
+
+    #[test]
+    fn submit_tx_reports_unavailable_when_rpc_op_lock_is_poisoned() {
+        let (state, dir) = build_state(true);
+        let rpc_lock = Arc::clone(&state.rpc_op_lock);
+        let _ = std::thread::spawn(move || {
+            let _guard = rpc_lock.lock().expect("lock");
+            panic!("poison rpc op lock");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: br#"{"tx_hex":"00"}"#.to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("rpc unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_reports_unavailable_when_rpc_op_lock_is_poisoned() {
+        let (state, dir) = build_state_with_live_mining(true);
+        let rpc_lock = Arc::clone(&state.rpc_op_lock);
+        let _ = std::thread::spawn(move || {
+            let _guard = rpc_lock.lock().expect("lock");
+            panic!("poison rpc op lock");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("rpc unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_reports_unavailable_when_sync_engine_is_poisoned() {
+        let (state, dir) = build_state_with_live_mining(true);
+        let sync_engine = Arc::clone(&state.sync_engine);
+        let _ = std::thread::spawn(move || {
+            let _guard = sync_engine.lock().expect("lock");
+            panic!("poison sync engine");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("sync engine unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_reports_unavailable_when_tx_pool_is_poisoned() {
+        let (state, dir) = build_state_with_live_mining(true);
+        let tx_pool = Arc::clone(&state.tx_pool);
+        let _ = std::thread::spawn(move || {
+            let _guard = tx_pool.lock().expect("lock");
+            panic!("poison tx pool");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("tx pool unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
