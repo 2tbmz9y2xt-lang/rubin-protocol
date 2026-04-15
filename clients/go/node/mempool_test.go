@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1367,5 +1368,165 @@ func TestTxAdmitErrorMessage(t *testing.T) {
 	err := &TxAdmitError{Kind: TxAdmitConflict, Message: "tx already in mempool"}
 	if err.Error() != "tx already in mempool" {
 		t.Fatalf("Error()=%q, want %q", err.Error(), "tx already in mempool")
+	}
+}
+
+func TestMempoolAllTxIDsReturnsEveryEntry(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100, 100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	want := make(map[[32]byte]struct{})
+	for i := 0; i < 3; i++ {
+		txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[i]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+		if err := mp.AddTx(txBytes); err != nil {
+			t.Fatalf("AddTx[%d]: %v", i, err)
+		}
+		_, txid, _, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			t.Fatalf("ParseTx[%d]: %v", i, err)
+		}
+		want[txid] = struct{}{}
+	}
+
+	got := mp.AllTxIDs()
+	if len(got) != 3 {
+		t.Fatalf("AllTxIDs len=%d, want 3", len(got))
+	}
+	for _, id := range got {
+		if _, ok := want[id]; !ok {
+			t.Fatalf("AllTxIDs returned unexpected txid %x", id)
+		}
+	}
+}
+
+func TestMempoolAllTxIDsEmpty(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, _ := testSpendableChainState(fromAddress, []uint64{100})
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if got := mp.AllTxIDs(); len(got) != 0 {
+		t.Fatalf("AllTxIDs on empty mempool returned %d entries, want 0", len(got))
+	}
+}
+
+func TestMempoolAllTxIDsNilReceiver(t *testing.T) {
+	var mp *Mempool
+	if got := mp.AllTxIDs(); got != nil {
+		t.Fatalf("AllTxIDs on nil receiver=%v, want nil", got)
+	}
+}
+
+func TestMempoolTxByIDReturnsRawAndDefensiveCopy(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+	_, txid, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+
+	got, ok := mp.TxByID(txid)
+	if !ok {
+		t.Fatalf("TxByID ok=false, want true")
+	}
+	if !bytes.Equal(got, txBytes) {
+		t.Fatalf("TxByID raw mismatch")
+	}
+
+	// Defensive-copy invariant: mutate the returned slice and verify the
+	// mempool entry remains intact via a second TxByID call.
+	got[0] ^= 0xff
+	got2, ok2 := mp.TxByID(txid)
+	if !ok2 {
+		t.Fatalf("TxByID second call ok=false")
+	}
+	if !bytes.Equal(got2, txBytes) {
+		t.Fatalf("mempool entry mutated by caller — defensive copy broken")
+	}
+}
+
+func TestMempoolTxByIDMissing(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, _ := testSpendableChainState(fromAddress, []uint64{100})
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	var unknown [32]byte
+	raw, ok := mp.TxByID(unknown)
+	if ok || raw != nil {
+		t.Fatalf("TxByID on unknown txid returned raw=%v ok=%v, want nil,false", raw, ok)
+	}
+}
+
+func TestMempoolTxByIDNilReceiver(t *testing.T) {
+	var mp *Mempool
+	var id [32]byte
+	raw, ok := mp.TxByID(id)
+	if ok || raw != nil {
+		t.Fatalf("TxByID on nil receiver returned raw=%v ok=%v, want nil,false", raw, ok)
+	}
+}
+
+func TestMempoolContainsReflectsAdmission(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	_, txid, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+
+	if mp.Contains(txid) {
+		t.Fatalf("Contains before admit=true, want false")
+	}
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+	if !mp.Contains(txid) {
+		t.Fatalf("Contains after admit=false, want true")
+	}
+	var other [32]byte
+	if mp.Contains(other) {
+		t.Fatalf("Contains for unrelated txid=true, want false")
+	}
+}
+
+func TestMempoolContainsNilReceiver(t *testing.T) {
+	var mp *Mempool
+	var id [32]byte
+	if mp.Contains(id) {
+		t.Fatalf("Contains on nil receiver=true, want false")
 	}
 }
