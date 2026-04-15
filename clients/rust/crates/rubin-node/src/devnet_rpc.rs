@@ -955,36 +955,45 @@ fn percent_decode(s: &str) -> Option<String> {
 
 /// Decode a 64-hex-char "txid" query parameter to a [u8; 32]. Returns Err with
 /// an operator-facing message on missing, wrong length, or non-hex input.
-/// An empty value (e.g. `?txid=` or `?txid` without `=`) is classified as
-/// missing to preserve parity with the Go `parseTxIDQuery` contract. Go's
-/// `r.URL.Query()` parses both `?txid=` and `?txid` into `url.Values{"txid":
-/// [""]}`; `Query().Get("txid")` returns "" in both cases and the Go parser
-/// classifies that as "missing required query parameter". The first-match
-/// semantic is preserved via `break`: if multiple `txid` keys appear (e.g.
-/// `?txid&txid=<hex>`), only the first is considered, matching Go's
-/// `Values.Get` which returns `values[0]`.
-/// The value is percent-decoded before length/hex validation to match Go's
-/// net/url.QueryUnescape behavior (e.g. `?txid=%61b...` is decoded to
-/// `?txid=ab...` before hex-decode, so clients that percent-escape query
-/// values see identical accept/reject behavior across Go and Rust).
+/// Parity contract with Go `r.URL.Query().Get("txid")`:
+///   - A key without `=` (e.g. `?txid`) or with empty value (e.g. `?txid=`)
+///     is classified as missing; Go's parseQuery stores `url.Values{"txid":
+///     [""]}` and `Get` returns `""`, which the Go parser maps to
+///     "missing required query parameter".
+///   - First-match semantic via `break` mirrors Go's `Values.Get` returning
+///     `values[0]`.
+///   - Both key and value are percent-decoded; pairs that fail to decode
+///     (malformed `%XX`) are silently skipped and the loop continues,
+///     matching Go's `parseQuery` which `continue`s on either
+///     `QueryUnescape` error and never stores the pair. This means
+///     `?txid=%ZZ&txid=<hex>` resolves to the valid second occurrence on
+///     BOTH clients, and `?%74%78%69%64=<hex>` (encoded "txid" key) is
+///     accepted on BOTH clients.
 fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
-    let mut txid_hex: Option<&str> = None;
+    let mut txid_value: Option<String> = None;
     for pair in query.split('&') {
         // Treat a key without `=` as present-with-empty-value, matching
         // net/url's Values parsing (key alone → values=[""]).
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        if k == "txid" {
-            txid_hex = Some(v);
-            break;
+        let (k_raw, v_raw) = pair.split_once('=').unwrap_or((pair, ""));
+        // Go `parseQuery` calls `QueryUnescape` on BOTH the key and value
+        // and `continue`s on either failure (the pair never lands in the
+        // Values map). Replicate that: if either decode fails, skip the
+        // pair and keep scanning for a later valid `txid`.
+        let Some(k) = percent_decode(k_raw) else {
+            continue;
+        };
+        if k != "txid" {
+            continue;
         }
+        let Some(v) = percent_decode(v_raw) else {
+            continue;
+        };
+        txid_value = Some(v);
+        break;
     }
-    let raw_encoded = txid_hex
+    let raw = txid_value
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing required query parameter: txid".to_string())?;
-    // Percent-decode before length/hex validation so clients that encode
-    // legitimate hex characters (e.g. `%61` == 'a') still validate correctly.
-    let raw = percent_decode(raw_encoded)
-        .ok_or_else(|| "txid contains malformed percent-escape".to_string())?;
     if raw.len() != 64 {
         return Err(format!(
             "txid must be 64 hex characters (got {})",
@@ -1059,6 +1068,22 @@ fn handle_get_tx(state: &DevnetRPCState, method: &str, query: &str) -> HttpRespo
             },
         );
     }
+    // Fail-closed on tx pool unavailability BEFORE parsing the query, so a
+    // poisoned pool + invalid/missing txid surfaces as 503 rather than 400.
+    // Mirrors the Go handleGetTx contract (nil-mempool check runs first).
+    if state.tx_pool.is_poisoned() {
+        return json_response(
+            state,
+            ROUTE,
+            503,
+            &GetTxResponse {
+                found: false,
+                txid: None,
+                raw_hex: None,
+                error: Some("tx pool unavailable".to_string()),
+            },
+        );
+    }
     let txid = match parse_txid_query(query) {
         Ok(txid) => txid,
         Err(err) => {
@@ -1078,6 +1103,8 @@ fn handle_get_tx(state: &DevnetRPCState, method: &str, query: &str) -> HttpRespo
     let pool = match state.tx_pool.lock() {
         Ok(guard) => guard,
         Err(_) => {
+            // Race: pool became poisoned between is_poisoned() and lock().
+            // Still fail-closed with 503.
             return json_response(
                 state,
                 ROUTE,
@@ -1133,6 +1160,20 @@ fn handle_tx_status(state: &DevnetRPCState, method: &str, query: &str) -> HttpRe
             },
         );
     }
+    // Fail-closed on tx pool unavailability BEFORE parsing the query
+    // (mirrors handle_get_tx and the Go handleTxStatus contract).
+    if state.tx_pool.is_poisoned() {
+        return json_response(
+            state,
+            ROUTE,
+            503,
+            &TxStatusResponse {
+                status: "missing".to_string(),
+                txid: None,
+                error: Some("tx pool unavailable".to_string()),
+            },
+        );
+    }
     let txid = match parse_txid_query(query) {
         Ok(txid) => txid,
         Err(err) => {
@@ -1151,6 +1192,8 @@ fn handle_tx_status(state: &DevnetRPCState, method: &str, query: &str) -> HttpRe
     let pool = match state.tx_pool.lock() {
         Ok(guard) => guard,
         Err(_) => {
+            // Race: pool became poisoned between is_poisoned() and lock().
+            // Still fail-closed with 503.
             return json_response(
                 state,
                 ROUTE,
@@ -3192,9 +3235,14 @@ mod tests {
     }
 
     #[test]
-    fn get_tx_rejects_malformed_percent_escape() {
-        // `?txid=%XY` — `%` followed by non-hex digits — decoding MUST fail
-        // rather than silently pass raw bytes through.
+    fn get_tx_malformed_percent_escape_classified_as_missing() {
+        // Codex thread PRRT_kwDORQ3qGs57OTOf: Go's net/url.parseQuery
+        // `continue`s on percent-decode failure (key OR value) and NEVER
+        // stores the pair in `Values`. So `?txid=%ZZ` alone has no stored
+        // txid, and `Values.Get("txid")` returns "" → Go handler classifies
+        // that as "missing required query parameter". Rust must match:
+        // skip the malformed pair and report missing (NOT "malformed
+        // percent-escape", which was the prior divergent behavior).
         let (state, dir) = build_state(true);
         let response = route_request(
             &state,
@@ -3209,7 +3257,115 @@ mod tests {
         assert!(body["error"]
             .as_str()
             .unwrap_or_default()
-            .contains("malformed percent-escape"));
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_malformed_first_pair_falls_through_to_valid_second() {
+        // Go parseQuery drops the first pair (value unescape fails on %ZZ)
+        // and stores the second (`txid=<hex>`). `Values.Get` then returns
+        // the valid hex. Rust must match.
+        let (state, dir) = build_state(true);
+        let valid_hex = "cd".repeat(32);
+        let target = format!("/get_tx?txid=%ZZ&txid={valid_hex}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 200,
+            "expected 200 found-false: malformed first pair should be skipped, second pair's valid hex should parse"
+        );
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        assert_eq!(body["txid"].as_str(), Some(valid_hex.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_percent_encoded_key_txid_is_accepted() {
+        // Go parseQuery percent-decodes BOTH keys and values before
+        // comparison/storage. So `?%74%78%69%64=<hex>` (the key "txid"
+        // percent-encoded) is stored as `Values{"txid": [<hex>]}`. Rust
+        // must match — percent-decode the key before comparing to "txid".
+        let (state, dir) = build_state(true);
+        let valid_hex = "ef".repeat(32);
+        // "%74%78%69%64" decodes to "txid"
+        let target = format!("/get_tx?%74%78%69%64={valid_hex}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 200,
+            "expected 200: percent-encoded 'txid' key should decode and match"
+        );
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        assert_eq!(body["txid"].as_str(), Some(valid_hex.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_reports_unavailable_when_tx_pool_is_poisoned_before_parse() {
+        // Codex thread PRRT_kwDORQ3qGs57OTOW: handle_get_tx must check
+        // tx_pool availability BEFORE parse_txid_query, so a poisoned pool
+        // + invalid/missing txid returns 503, not 400. Parity with Go
+        // handleGetTx (which checks state.mempool == nil first).
+        let (state, dir) = build_state(true);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.tx_pool.lock().expect("tx_pool lock");
+            panic!("forced to poison tx_pool");
+        }));
+        // Deliberately malformed txid — if the old order still ran, this
+        // would surface as 400 rather than the contract's 503.
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=not-hex-and-wrong-length".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("tx pool unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_reports_unavailable_when_tx_pool_is_poisoned_before_parse() {
+        // Codex thread PRRT_kwDORQ3qGs57OTOb — parity sibling of the
+        // handle_get_tx ordering fix.
+        let (state, dir) = build_state(true);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.tx_pool.lock().expect("tx_pool lock");
+            panic!("forced to poison tx_pool");
+        }));
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/tx_status?txid=not-hex".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("tx pool unavailable")
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
