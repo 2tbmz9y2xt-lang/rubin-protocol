@@ -921,6 +921,10 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
 
 /// Decode a 64-hex-char "txid" query parameter to a [u8; 32]. Returns Err with
 /// an operator-facing message on missing, wrong length, or non-hex input.
+/// An empty value (e.g. `?txid=`) is classified as missing to preserve parity
+/// with the Go `parseTxIDQuery` contract (Go's `r.URL.Query().Get("txid")`
+/// returns "" for both absent and present-but-empty, and the Go parser
+/// classifies that as "missing required query parameter").
 fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
     let mut txid_hex: Option<&str> = None;
     for pair in query.split('&') {
@@ -931,7 +935,9 @@ fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
             }
         }
     }
-    let raw = txid_hex.ok_or_else(|| "missing required query parameter: txid".to_string())?;
+    let raw = txid_hex
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "missing required query parameter: txid".to_string())?;
     if raw.len() != 64 {
         return Err(format!(
             "txid must be 64 hex characters (got {})",
@@ -3008,6 +3014,49 @@ mod tests {
             },
         );
         assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_empty_txid_value_is_classified_as_missing() {
+        // Go/Rust parity: ?txid= (present but empty value) must classify as
+        // missing parameter, not length=0, to match Go parseTxIDQuery which
+        // uses Query().Get returning "" for both absent and present-empty.
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_empty_txid_value_is_classified_as_missing() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/tx_status?txid=".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }

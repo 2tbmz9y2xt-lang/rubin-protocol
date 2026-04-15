@@ -1348,3 +1348,38 @@ func TestDevnetRPCTxStatusUnavailableOnNilState(t *testing.T) {
 	}
 }
 
+
+func TestDevnetRPCGetTxEmptyTxIDValueIsClassifiedAsMissing(t *testing.T) {
+	// Go/Rust parity regression: ?txid= (present but empty value) must be
+	// classified as missing parameter in BOTH clients.
+	req := httptest.NewRequest(http.MethodGet, "/get_tx?txid=", nil)
+	rec := httptest.NewRecorder()
+	handleGetTx(mustRPCState(t, true), rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+	var got getTxResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !strings.Contains(got.Error, "missing required query parameter") {
+		t.Fatalf("Error=%q, want 'missing required query parameter' to match Rust parity", got.Error)
+	}
+}
+
+func TestDevnetRPCTxStatusEmptyTxIDValueIsClassifiedAsMissing(t *testing.T) {
+	// Parity sibling for tx_status.
+	req := httptest.NewRequest(http.MethodGet, "/tx_status?txid=", nil)
+	rec := httptest.NewRecorder()
+	handleTxStatus(mustRPCState(t, true), rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+	var got txStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !strings.Contains(got.Error, "missing required query parameter") {
+		t.Fatalf("Error=%q, want 'missing required query parameter' to match Rust parity", got.Error)
+	}
+}
