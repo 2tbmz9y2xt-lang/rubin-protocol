@@ -1030,7 +1030,7 @@ fn handle_get_mempool(state: &DevnetRPCState, method: &str) -> HttpResponse {
                 &GetMempoolResponse {
                     count: 0,
                     txids: Vec::new(),
-                    error: Some("tx pool unavailable".to_string()),
+                    error: Some("mempool unavailable".to_string()),
                 },
             );
         }
@@ -1080,7 +1080,7 @@ fn handle_get_tx(state: &DevnetRPCState, method: &str, query: &str) -> HttpRespo
                 found: false,
                 txid: None,
                 raw_hex: None,
-                error: Some("tx pool unavailable".to_string()),
+                error: Some("mempool unavailable".to_string()),
             },
         );
     }
@@ -1111,9 +1111,9 @@ fn handle_get_tx(state: &DevnetRPCState, method: &str, query: &str) -> HttpRespo
                 503,
                 &GetTxResponse {
                     found: false,
-                    txid: Some(hex::encode(txid)),
+                    txid: None,
                     raw_hex: None,
-                    error: Some("tx pool unavailable".to_string()),
+                    error: Some("mempool unavailable".to_string()),
                 },
             );
         }
@@ -1170,7 +1170,7 @@ fn handle_tx_status(state: &DevnetRPCState, method: &str, query: &str) -> HttpRe
             &TxStatusResponse {
                 status: "missing".to_string(),
                 txid: None,
-                error: Some("tx pool unavailable".to_string()),
+                error: Some("mempool unavailable".to_string()),
             },
         );
     }
@@ -1200,8 +1200,8 @@ fn handle_tx_status(state: &DevnetRPCState, method: &str, query: &str) -> HttpRe
                 503,
                 &TxStatusResponse {
                     status: "missing".to_string(),
-                    txid: Some(hex::encode(txid)),
-                    error: Some("tx pool unavailable".to_string()),
+                    txid: None,
+                    error: Some("mempool unavailable".to_string()),
                 },
             );
         }
@@ -2978,7 +2978,7 @@ mod tests {
         assert_eq!(response.status, 503);
         assert_eq!(
             response_json(&response)["error"].as_str(),
-            Some("tx pool unavailable")
+            Some("mempool unavailable")
         );
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -3339,7 +3339,7 @@ mod tests {
         assert_eq!(response.status, 503);
         assert_eq!(
             response_json(&response)["error"].as_str(),
-            Some("tx pool unavailable")
+            Some("mempool unavailable")
         );
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -3364,7 +3364,7 @@ mod tests {
         assert_eq!(response.status, 503);
         assert_eq!(
             response_json(&response)["error"].as_str(),
-            Some("tx pool unavailable")
+            Some("mempool unavailable")
         );
         fs::remove_dir_all(dir).expect("cleanup");
     }
