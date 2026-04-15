@@ -107,26 +107,42 @@ struct MineNextResponse {
 }
 
 /// True when the host in `host:port` is loopback-only (safe for devnet live mining RPC).
+/// Requires a non-empty, valid `u16` port (rejects `127.0.0.1:` and similar).
 pub fn rpc_bind_host_is_loopback(bind_addr: &str) -> bool {
     let addr = bind_addr.trim();
     if addr.is_empty() {
         return false;
     }
-    let host = if addr.starts_with('[') {
+    let (host, port) = if addr.starts_with('[') {
         let Some(bracket_end) = addr.find("]:") else {
             return false;
         };
-        &addr[1..bracket_end]
+        if bracket_end < 2 {
+            return false;
+        }
+        let port = &addr[bracket_end + 2..];
+        (&addr[1..bracket_end], port)
     } else if let Some(colon_pos) = addr.rfind(':') {
+        if colon_pos == 0 || colon_pos + 1 == addr.len() {
+            return false;
+        }
         let host = &addr[..colon_pos];
         if host.contains(':') {
             return false;
         }
-        host
+        let port = &addr[(colon_pos + 1)..];
+        (host, port)
     } else {
         return false;
     };
     let host = host.trim();
+    if host.is_empty() {
+        return false;
+    }
+    let port = port.trim();
+    if port.is_empty() || port.parse::<u16>().is_err() {
+        return false;
+    }
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
@@ -1418,6 +1434,11 @@ mod tests {
         assert!(!super::rpc_bind_host_is_loopback("[::1]"));
         assert!(!super::rpc_bind_host_is_loopback("abcd::1:19112"));
         assert!(!super::rpc_bind_host_is_loopback("127.0.0.1"));
+        assert!(!super::rpc_bind_host_is_loopback("127.0.0.1:"));
+        assert!(!super::rpc_bind_host_is_loopback("[::1]:"));
+        assert!(!super::rpc_bind_host_is_loopback("localhost:"));
+        assert!(!super::rpc_bind_host_is_loopback("127.0.0.1:99999"));
+        assert!(super::rpc_bind_host_is_loopback("127.0.0.1:0"));
     }
 
     #[test]

@@ -109,8 +109,15 @@ func newDevnetRPCState(
 // for devnet-only live mining RPC (loopback only). Non-loopback binds disable
 // live mining even when network=devnet.
 func rpcBindHostIsLoopback(bindAddr string) bool {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(bindAddr))
+	host, port, err := net.SplitHostPort(strings.TrimSpace(bindAddr))
 	if err != nil {
+		return false
+	}
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return false
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return false
 	}
 	host = strings.TrimSpace(host)
@@ -480,8 +487,6 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	state.rpcMut.Lock()
-	defer state.rpcMut.Unlock()
 	if state.miner == nil {
 		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, mineNextResponse{
 			Mined: false,
@@ -489,6 +494,8 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
+	state.rpcMut.Lock()
+	defer state.rpcMut.Unlock()
 	mb, err := state.miner.MineOne(r.Context(), nil)
 	if err != nil {
 		writeJSONResponse(state, route, w, http.StatusUnprocessableEntity, mineNextResponse{

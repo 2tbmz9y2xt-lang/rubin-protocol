@@ -914,6 +914,21 @@ func TestRPCBindHostIsLoopback(t *testing.T) {
 	if rpcBindHostIsLoopback("not-a-host:19112") {
 		t.Fatal("invalid host:port must be rejected")
 	}
+	if rpcBindHostIsLoopback("127.0.0.1:") {
+		t.Fatal("empty port must be rejected")
+	}
+	if rpcBindHostIsLoopback("localhost:") {
+		t.Fatal("empty port must be rejected for localhost")
+	}
+	if rpcBindHostIsLoopback("[::1]:") {
+		t.Fatal("empty port must be rejected for bracket IPv6")
+	}
+	if rpcBindHostIsLoopback("127.0.0.1:99999") {
+		t.Fatal("out-of-range port must be rejected")
+	}
+	if !rpcBindHostIsLoopback("127.0.0.1:0") {
+		t.Fatal("port 0 is valid for bind addresses")
+	}
 }
 
 func TestHandleMineNextNilState(t *testing.T) {
