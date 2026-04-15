@@ -613,19 +613,22 @@ func handleGetTx(state *devnetRPCState, w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
+	// Fail closed on mempool unavailability BEFORE parsing query parameters,
+	// so an invalid/missing txid on an unavailable mempool still surfaces as
+	// 503 (matching the contract shared by /get_block, /submit_tx, and other
+	// handlers). Parsing first would mask unavailability behind a 400.
+	if state == nil || state.mempool == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, getTxResponse{
+			Found: false,
+			Error: "mempool unavailable",
+		})
+		return
+	}
 	txid, err := parseTxIDQuery(r)
 	if err != nil {
 		writeJSONResponse(state, route, w, http.StatusBadRequest, getTxResponse{
 			Found: false,
 			Error: err.Error(),
-		})
-		return
-	}
-	if state == nil || state.mempool == nil {
-		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, getTxResponse{
-			Found: false,
-			TxID:  hex.EncodeToString(txid[:]),
-			Error: "mempool unavailable",
 		})
 		return
 	}
@@ -654,19 +657,20 @@ func handleTxStatus(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
+	// Fail closed on mempool unavailability BEFORE parsing query parameters
+	// (matches handleGetTx and the contract of /get_block, /submit_tx).
+	if state == nil || state.mempool == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, txStatusResponse{
+			Status: "missing",
+			Error:  "mempool unavailable",
+		})
+		return
+	}
 	txid, err := parseTxIDQuery(r)
 	if err != nil {
 		writeJSONResponse(state, route, w, http.StatusBadRequest, txStatusResponse{
 			Status: "missing",
 			Error:  err.Error(),
-		})
-		return
-	}
-	if state == nil || state.mempool == nil {
-		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, txStatusResponse{
-			Status: "missing",
-			TxID:   hex.EncodeToString(txid[:]),
-			Error:  "mempool unavailable",
 		})
 		return
 	}

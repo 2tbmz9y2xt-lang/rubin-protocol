@@ -1414,3 +1414,42 @@ func TestDevnetRPCGetTxValuelessTxIDKeyClassifiedAsMissing(t *testing.T) {
 		t.Fatalf("Error=%q, want 'missing required query parameter' (first-match semantic)", got.Error)
 	}
 }
+
+func TestDevnetRPCGetTxFailsClosedOn503BeforeParsingInvalidTxID(t *testing.T) {
+	// Contract: mempool unavailability is a 503 fail-closed regardless of
+	// query-string validity. A nil mempool + invalid txid MUST return 503
+	// (not 400). Previously handleGetTx parsed first and returned 400 on
+	// bad query, masking the unavailability. Copilot thread
+	// PRRT_kwDORQ3qGs57N-UC flagged this ordering bug.
+	req := httptest.NewRequest(http.MethodGet, "/get_tx?txid=invalid-not-hex", nil)
+	rec := httptest.NewRecorder()
+	handleGetTx(nil, rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503 (mempool unavailable fail-closed takes precedence over 400 parse-error)", rec.Code)
+	}
+	var got getTxResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !strings.Contains(got.Error, "mempool unavailable") {
+		t.Fatalf("Error=%q, want 'mempool unavailable'", got.Error)
+	}
+}
+
+func TestDevnetRPCTxStatusFailsClosedOn503BeforeParsingInvalidTxID(t *testing.T) {
+	// Parity sibling of the handleGetTx ordering fix. Copilot thread
+	// PRRT_kwDORQ3qGs57N-UX.
+	req := httptest.NewRequest(http.MethodGet, "/tx_status?txid=invalid-not-hex", nil)
+	rec := httptest.NewRecorder()
+	handleTxStatus(nil, rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", rec.Code)
+	}
+	var got txStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !strings.Contains(got.Error, "mempool unavailable") {
+		t.Fatalf("Error=%q, want 'mempool unavailable'", got.Error)
+	}
+}

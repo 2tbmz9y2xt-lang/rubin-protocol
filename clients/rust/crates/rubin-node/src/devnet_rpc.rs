@@ -919,6 +919,40 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
     }
 }
 
+/// Percent-decode a query-string fragment ("%XX" pairs → byte values). Returns
+/// None on malformed escapes (incomplete or non-hex digits). Mirrors Go's
+/// net/url.QueryUnescape used internally by Values.Get, which decodes the
+/// value before returning it to the handler.
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                if i + 2 >= bytes.len() {
+                    return None;
+                }
+                let hi = (bytes[i + 1] as char).to_digit(16)?;
+                let lo = (bytes[i + 2] as char).to_digit(16)?;
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+            }
+            b'+' => {
+                // application/x-www-form-urlencoded: '+' decodes to space.
+                // Go's Query().Get treats '+' as space in values.
+                out.push(b' ');
+                i += 1;
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// Decode a 64-hex-char "txid" query parameter to a [u8; 32]. Returns Err with
 /// an operator-facing message on missing, wrong length, or non-hex input.
 /// An empty value (e.g. `?txid=` or `?txid` without `=`) is classified as
@@ -929,6 +963,10 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
 /// semantic is preserved via `break`: if multiple `txid` keys appear (e.g.
 /// `?txid&txid=<hex>`), only the first is considered, matching Go's
 /// `Values.Get` which returns `values[0]`.
+/// The value is percent-decoded before length/hex validation to match Go's
+/// net/url.QueryUnescape behavior (e.g. `?txid=%61b...` is decoded to
+/// `?txid=ab...` before hex-decode, so clients that percent-escape query
+/// values see identical accept/reject behavior across Go and Rust).
 fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
     let mut txid_hex: Option<&str> = None;
     for pair in query.split('&') {
@@ -940,17 +978,20 @@ fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
             break;
         }
     }
-    let raw = txid_hex
+    let raw_encoded = txid_hex
         .filter(|v| !v.is_empty())
         .ok_or_else(|| "missing required query parameter: txid".to_string())?;
+    // Percent-decode before length/hex validation so clients that encode
+    // legitimate hex characters (e.g. `%61` == 'a') still validate correctly.
+    let raw = percent_decode(raw_encoded)
+        .ok_or_else(|| "txid contains malformed percent-escape".to_string())?;
     if raw.len() != 64 {
         return Err(format!(
             "txid must be 64 hex characters (got {})",
             raw.len()
         ));
     }
-    let decoded =
-        hex::decode(raw).map_err(|err| format!("txid is not valid hex: {err}"))?;
+    let decoded = hex::decode(&raw).map_err(|err| format!("txid is not valid hex: {err}"))?;
     let mut txid = [0u8; 32];
     txid.copy_from_slice(&decoded);
     Ok(txid)
@@ -3114,5 +3155,76 @@ mod tests {
             .unwrap_or_default()
             .contains("missing required query parameter"));
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_accepts_percent_encoded_hex_value() {
+        // Codex thread PRRT_kwDORQ3qGs57N_wu: Go's Query().Get percent-decodes
+        // the value before returning it, so `?txid=%61b...` becomes `ab...`
+        // and validates as valid hex. Rust must match: percent-decode before
+        // length/hex checks. A missing-but-syntactically-valid txid returns
+        // 200 + found=false, which proves the parser accepted the
+        // percent-encoded input (the parse-reject paths would return 400).
+        let (state, dir) = build_state(true);
+
+        let encoded_prefix = "%61%62"; // == "ab"
+        let literal_rest = "cd".repeat(31); // 62 chars → total 64 after decode
+        let target = format!("/get_tx?txid={encoded_prefix}{literal_rest}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 200,
+            "percent-encoded valid hex must parse, got status={}",
+            response.status
+        );
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        // Echoed txid should be the decoded form (lower-case hex 'ab' + rest)
+        let expected = format!("ab{literal_rest}");
+        assert_eq!(body["txid"].as_str(), Some(expected.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_rejects_malformed_percent_escape() {
+        // `?txid=%XY` — `%` followed by non-hex digits — decoding MUST fail
+        // rather than silently pass raw bytes through.
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=%ZZ".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("malformed percent-escape"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn percent_decode_basic_cases() {
+        // Unit coverage for the helper.
+        assert_eq!(super::percent_decode("abc"), Some("abc".to_string()));
+        assert_eq!(super::percent_decode("%61"), Some("a".to_string()));
+        assert_eq!(super::percent_decode("%41%42"), Some("AB".to_string()));
+        assert_eq!(super::percent_decode("a+b"), Some("a b".to_string()));
+        assert_eq!(super::percent_decode(""), Some(String::new()));
+        // Malformed — non-hex digit in escape
+        assert_eq!(super::percent_decode("%ZZ"), None);
+        // Malformed — incomplete escape at end
+        assert_eq!(super::percent_decode("%a"), None);
+        assert_eq!(super::percent_decode("%"), None);
     }
 }
