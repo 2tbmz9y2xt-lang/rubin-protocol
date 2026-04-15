@@ -133,6 +133,25 @@ impl TxPool {
         self.txs.is_empty()
     }
 
+    /// Returns the txids of every transaction currently in the pool.
+    /// The ordering of the returned vector is not guaranteed to be stable
+    /// between calls; callers that require a deterministic order must sort.
+    pub fn all_txids(&self) -> Vec<[u8; 32]> {
+        self.txs.keys().copied().collect()
+    }
+
+    /// Returns a defensive clone of the raw transaction bytes for a pool entry
+    /// with the given txid. Returns `None` if no matching entry is present.
+    pub fn tx_by_id(&self, txid: &[u8; 32]) -> Option<Vec<u8>> {
+        self.txs.get(txid).map(|entry| entry.raw.clone())
+    }
+
+    /// Reports whether a transaction with the given txid is currently present
+    /// in the pool.
+    pub fn contains(&self, txid: &[u8; 32]) -> bool {
+        self.txs.contains_key(txid)
+    }
+
     pub fn select_transactions(&self, max_count: usize, max_bytes: usize) -> Vec<Vec<u8>> {
         if max_count == 0 || max_bytes == 0 {
             return Vec::new();

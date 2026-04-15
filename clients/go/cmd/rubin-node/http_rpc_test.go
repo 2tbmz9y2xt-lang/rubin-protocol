@@ -1077,3 +1077,157 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 		t.Fatalf("want nonce field in JSON for Go/Rust RPC parity, got %+v", got)
 	}
 }
+
+func TestDevnetRPCGetMempoolEmpty(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/get_mempool")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	var got getMempoolResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Count != 0 {
+		t.Fatalf("Count=%d, want 0", got.Count)
+	}
+	if got.TxIDs == nil {
+		t.Fatalf("TxIDs=nil, want empty slice (must serialize as [] not null)")
+	}
+	if len(got.TxIDs) != 0 {
+		t.Fatalf("TxIDs=%v, want empty", got.TxIDs)
+	}
+}
+
+func TestDevnetRPCGetMempoolRejectsBadMethod(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/get_mempool", nil)
+	rec := httptest.NewRecorder()
+	handleGetMempool(mustRPCState(t, true), rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
+
+func TestDevnetRPCGetMempoolUnavailableOnNilState(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/get_mempool", nil)
+	rec := httptest.NewRecorder()
+	handleGetMempool(nil, rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", rec.Code)
+	}
+}
+
+func TestDevnetRPCGetTxRejectsMissingTxIDParam(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/get_tx")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+	var got getTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Found {
+		t.Fatalf("Found=true, want false for missing txid param")
+	}
+	if got.Error == "" {
+		t.Fatalf("Error empty, want missing-txid message")
+	}
+}
+
+func TestDevnetRPCGetTxRejectsInvalidLength(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/get_tx?txid=deadbeef")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestDevnetRPCGetTxRejectsNonHex(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	defer server.Close()
+
+	badTxid := strings.Repeat("z", 64)
+	resp, err := http.Get(server.URL + "/get_tx?txid=" + badTxid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", resp.StatusCode)
+	}
+}
+
+func TestDevnetRPCGetTxMissingReturnsFoundFalse(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	defer server.Close()
+
+	unknownTxid := strings.Repeat("11", 32)
+	resp, err := http.Get(server.URL + "/get_tx?txid=" + unknownTxid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	var got getTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Found {
+		t.Fatalf("Found=true, want false for unknown txid")
+	}
+	if got.TxID != unknownTxid {
+		t.Fatalf("TxID=%q, want echoed input", got.TxID)
+	}
+}
+
+func TestDevnetRPCTxStatusMissingReturnsMissing(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	defer server.Close()
+
+	unknownTxid := strings.Repeat("22", 32)
+	resp, err := http.Get(server.URL + "/tx_status?txid=" + unknownTxid)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	var got txStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Status != "missing" {
+		t.Fatalf("Status=%q, want missing", got.Status)
+	}
+}
+
+func TestDevnetRPCTxStatusRejectsInvalidTxID(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/tx_status?txid=not-hex", nil)
+	rec := httptest.NewRecorder()
+	handleTxStatus(mustRPCState(t, true), rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}

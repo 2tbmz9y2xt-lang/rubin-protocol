@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -78,6 +79,25 @@ type mineNextResponse struct {
 	Nonce     *uint64 `json:"nonce,omitempty"`
 	TxCount   *int    `json:"tx_count,omitempty"`
 	Error     string  `json:"error,omitempty"`
+}
+
+type getMempoolResponse struct {
+	Count int      `json:"count"`
+	TxIDs []string `json:"txids"`
+	Error string   `json:"error,omitempty"`
+}
+
+type getTxResponse struct {
+	Found  bool    `json:"found"`
+	TxID   string  `json:"txid,omitempty"`
+	RawHex *string `json:"raw_hex,omitempty"`
+	Error  string  `json:"error,omitempty"`
+}
+
+type txStatusResponse struct {
+	Status string `json:"status"`
+	TxID   string `json:"txid,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 func newDevnetRPCState(
@@ -230,6 +250,15 @@ func newDevnetRPCHandler(state *devnetRPCState) http.Handler {
 	})
 	mux.HandleFunc("/mine_next", func(w http.ResponseWriter, r *http.Request) {
 		handleMineNext(state, w, r)
+	})
+	mux.HandleFunc("/get_mempool", func(w http.ResponseWriter, r *http.Request) {
+		handleGetMempool(state, w, r)
+	})
+	mux.HandleFunc("/get_tx", func(w http.ResponseWriter, r *http.Request) {
+		handleGetTx(state, w, r)
+	})
+	mux.HandleFunc("/tx_status", func(w http.ResponseWriter, r *http.Request) {
+		handleTxStatus(state, w, r)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		handleMetrics(state, w, r)
@@ -520,6 +549,134 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		Timestamp: &ts,
 		Nonce:     &nonce,
 		TxCount:   &txCount,
+	})
+}
+
+// parseTxIDQuery decodes a 64-hex-char "txid" query parameter into a [32]byte.
+// Returns an error if the parameter is missing, has wrong length, or decodes
+// to non-hex bytes.
+func parseTxIDQuery(r *http.Request) ([32]byte, error) {
+	var txid [32]byte
+	raw := r.URL.Query().Get("txid")
+	if raw == "" {
+		return txid, fmt.Errorf("missing required query parameter: txid")
+	}
+	if len(raw) != 64 {
+		return txid, fmt.Errorf("txid must be 64 hex characters (got %d)", len(raw))
+	}
+	decoded, err := hex.DecodeString(raw)
+	if err != nil {
+		return txid, fmt.Errorf("txid is not valid hex: %w", err)
+	}
+	copy(txid[:], decoded)
+	return txid, nil
+}
+
+func handleGetMempool(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
+	const route = "/get_mempool"
+	if r.Method != http.MethodGet {
+		writeJSONResponse(state, route, w, http.StatusBadRequest, getMempoolResponse{
+			Count: 0,
+			TxIDs: []string{},
+			Error: "GET required",
+		})
+		return
+	}
+	if state == nil || state.mempool == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, getMempoolResponse{
+			Count: 0,
+			TxIDs: []string{},
+			Error: "mempool unavailable",
+		})
+		return
+	}
+	ids := state.mempool.AllTxIDs()
+	// Sort for deterministic response ordering (AllTxIDs order is not stable
+	// because the underlying map iteration is randomized).
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
+	txids := make([]string, 0, len(ids))
+	for _, id := range ids {
+		txids = append(txids, hex.EncodeToString(id[:]))
+	}
+	writeJSONResponse(state, route, w, http.StatusOK, getMempoolResponse{
+		Count: len(txids),
+		TxIDs: txids,
+	})
+}
+
+func handleGetTx(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
+	const route = "/get_tx"
+	if r.Method != http.MethodGet {
+		writeJSONResponse(state, route, w, http.StatusBadRequest, getTxResponse{
+			Found: false,
+			Error: "GET required",
+		})
+		return
+	}
+	txid, err := parseTxIDQuery(r)
+	if err != nil {
+		writeJSONResponse(state, route, w, http.StatusBadRequest, getTxResponse{
+			Found: false,
+			Error: err.Error(),
+		})
+		return
+	}
+	if state == nil || state.mempool == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, getTxResponse{
+			Found: false,
+			TxID:  hex.EncodeToString(txid[:]),
+			Error: "mempool unavailable",
+		})
+		return
+	}
+	raw, ok := state.mempool.TxByID(txid)
+	if !ok {
+		writeJSONResponse(state, route, w, http.StatusOK, getTxResponse{
+			Found: false,
+			TxID:  hex.EncodeToString(txid[:]),
+		})
+		return
+	}
+	rawHex := hex.EncodeToString(raw)
+	writeJSONResponse(state, route, w, http.StatusOK, getTxResponse{
+		Found:  true,
+		TxID:   hex.EncodeToString(txid[:]),
+		RawHex: &rawHex,
+	})
+}
+
+func handleTxStatus(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
+	const route = "/tx_status"
+	if r.Method != http.MethodGet {
+		writeJSONResponse(state, route, w, http.StatusBadRequest, txStatusResponse{
+			Status: "missing",
+			Error:  "GET required",
+		})
+		return
+	}
+	txid, err := parseTxIDQuery(r)
+	if err != nil {
+		writeJSONResponse(state, route, w, http.StatusBadRequest, txStatusResponse{
+			Status: "missing",
+			Error:  err.Error(),
+		})
+		return
+	}
+	if state == nil || state.mempool == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, txStatusResponse{
+			Status: "missing",
+			TxID:   hex.EncodeToString(txid[:]),
+			Error:  "mempool unavailable",
+		})
+		return
+	}
+	status := "missing"
+	if state.mempool.Contains(txid) {
+		status = "pending"
+	}
+	writeJSONResponse(state, route, w, http.StatusOK, txStatusResponse{
+		Status: status,
+		TxID:   hex.EncodeToString(txid[:]),
 	})
 }
 

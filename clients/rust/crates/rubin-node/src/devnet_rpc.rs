@@ -106,6 +106,34 @@ struct MineNextResponse {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+struct GetMempoolResponse {
+    count: usize,
+    txids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GetTxResponse {
+    found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    txid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TxStatusResponse {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    txid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 /// True when the host in `host:port` is loopback-only (safe for devnet live mining RPC).
 /// Requires a non-empty, valid `u16` port (rejects `127.0.0.1:` and similar).
 pub fn rpc_bind_host_is_loopback(bind_addr: &str) -> bool {
@@ -333,6 +361,9 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
         "/get_block" => handle_get_block(state, &req.method, &query),
         "/submit_tx" => handle_submit_tx(state, &req.method, &req.body),
         "/mine_next" => handle_mine_next(state, &req.method, &req.body),
+        "/get_mempool" => handle_get_mempool(state, &req.method),
+        "/get_tx" => handle_get_tx(state, &req.method, &query),
+        "/tx_status" => handle_tx_status(state, &req.method, &query),
         "/metrics" => handle_metrics(state, &req.method),
         _ => json_response(
             state,
@@ -886,6 +917,216 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             },
         ),
     }
+}
+
+/// Decode a 64-hex-char "txid" query parameter to a [u8; 32]. Returns Err with
+/// an operator-facing message on missing, wrong length, or non-hex input.
+fn parse_txid_query(query: &str) -> Result<[u8; 32], String> {
+    let mut txid_hex: Option<&str> = None;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "txid" {
+                txid_hex = Some(v);
+                break;
+            }
+        }
+    }
+    let raw = txid_hex.ok_or_else(|| "missing required query parameter: txid".to_string())?;
+    if raw.len() != 64 {
+        return Err(format!(
+            "txid must be 64 hex characters (got {})",
+            raw.len()
+        ));
+    }
+    let decoded =
+        hex::decode(raw).map_err(|err| format!("txid is not valid hex: {err}"))?;
+    let mut txid = [0u8; 32];
+    txid.copy_from_slice(&decoded);
+    Ok(txid)
+}
+
+fn handle_get_mempool(state: &DevnetRPCState, method: &str) -> HttpResponse {
+    const ROUTE: &str = "/get_mempool";
+    if method != "GET" {
+        return json_response(
+            state,
+            ROUTE,
+            400,
+            &GetMempoolResponse {
+                count: 0,
+                txids: Vec::new(),
+                error: Some("GET required".to_string()),
+            },
+        );
+    }
+    let pool = match state.tx_pool.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &GetMempoolResponse {
+                    count: 0,
+                    txids: Vec::new(),
+                    error: Some("tx pool unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let mut ids = pool.all_txids();
+    drop(pool);
+    // Sort for deterministic response ordering; HashMap iteration is not
+    // stable across calls.
+    ids.sort();
+    let txids: Vec<String> = ids.iter().map(hex::encode).collect();
+    json_response(
+        state,
+        ROUTE,
+        200,
+        &GetMempoolResponse {
+            count: txids.len(),
+            txids,
+            error: None,
+        },
+    )
+}
+
+fn handle_get_tx(state: &DevnetRPCState, method: &str, query: &str) -> HttpResponse {
+    const ROUTE: &str = "/get_tx";
+    if method != "GET" {
+        return json_response(
+            state,
+            ROUTE,
+            400,
+            &GetTxResponse {
+                found: false,
+                txid: None,
+                raw_hex: None,
+                error: Some("GET required".to_string()),
+            },
+        );
+    }
+    let txid = match parse_txid_query(query) {
+        Ok(txid) => txid,
+        Err(err) => {
+            return json_response(
+                state,
+                ROUTE,
+                400,
+                &GetTxResponse {
+                    found: false,
+                    txid: None,
+                    raw_hex: None,
+                    error: Some(err),
+                },
+            );
+        }
+    };
+    let pool = match state.tx_pool.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &GetTxResponse {
+                    found: false,
+                    txid: Some(hex::encode(txid)),
+                    raw_hex: None,
+                    error: Some("tx pool unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let raw = pool.tx_by_id(&txid);
+    drop(pool);
+    match raw {
+        Some(bytes) => json_response(
+            state,
+            ROUTE,
+            200,
+            &GetTxResponse {
+                found: true,
+                txid: Some(hex::encode(txid)),
+                raw_hex: Some(hex::encode(bytes)),
+                error: None,
+            },
+        ),
+        None => json_response(
+            state,
+            ROUTE,
+            200,
+            &GetTxResponse {
+                found: false,
+                txid: Some(hex::encode(txid)),
+                raw_hex: None,
+                error: None,
+            },
+        ),
+    }
+}
+
+fn handle_tx_status(state: &DevnetRPCState, method: &str, query: &str) -> HttpResponse {
+    const ROUTE: &str = "/tx_status";
+    if method != "GET" {
+        return json_response(
+            state,
+            ROUTE,
+            400,
+            &TxStatusResponse {
+                status: "missing".to_string(),
+                txid: None,
+                error: Some("GET required".to_string()),
+            },
+        );
+    }
+    let txid = match parse_txid_query(query) {
+        Ok(txid) => txid,
+        Err(err) => {
+            return json_response(
+                state,
+                ROUTE,
+                400,
+                &TxStatusResponse {
+                    status: "missing".to_string(),
+                    txid: None,
+                    error: Some(err),
+                },
+            );
+        }
+    };
+    let pool = match state.tx_pool.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &TxStatusResponse {
+                    status: "missing".to_string(),
+                    txid: Some(hex::encode(txid)),
+                    error: Some("tx pool unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let status = if pool.contains(&txid) {
+        "pending"
+    } else {
+        "missing"
+    };
+    drop(pool);
+    json_response(
+        state,
+        ROUTE,
+        200,
+        &TxStatusResponse {
+            status: status.to_string(),
+            txid: Some(hex::encode(txid)),
+            error: None,
+        },
+    )
 }
 
 fn handle_metrics(state: &DevnetRPCState, method: &str) -> HttpResponse {
@@ -2583,6 +2824,190 @@ mod tests {
             let _ = h.join();
         }
         drop(server);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_mempool_returns_empty_for_fresh_state() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_mempool".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["count"].as_u64(), Some(0));
+        assert!(body["txids"].is_array());
+        assert_eq!(body["txids"].as_array().unwrap().len(), 0);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_mempool_rejects_post() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/get_mempool".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("GET required")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_mempool_reports_unavailable_when_tx_pool_is_poisoned() {
+        let (state, dir) = build_state(true);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.tx_pool.lock().expect("tx_pool lock");
+            panic!("forced to poison tx_pool");
+        }));
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_mempool".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("tx pool unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_rejects_missing_txid_param() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing required query parameter"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_rejects_invalid_length() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=deadbeef".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_rejects_non_hex() {
+        let (state, dir) = build_state(true);
+        let target = format!("/get_tx?txid={}", "z".repeat(64));
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn get_tx_missing_returns_found_false_with_200() {
+        let (state, dir) = build_state(true);
+        let unknown = "11".repeat(32);
+        let target = format!("/get_tx?txid={unknown}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["found"].as_bool(), Some(false));
+        assert_eq!(body["txid"].as_str(), Some(unknown.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_missing_returns_missing() {
+        let (state, dir) = build_state(true);
+        let unknown = "22".repeat(32);
+        let target = format!("/tx_status?txid={unknown}");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["status"].as_str(), Some("missing"));
+        assert_eq!(body["txid"].as_str(), Some(unknown.as_str()));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_rejects_invalid_txid() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/tx_status?txid=not-hex".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn tx_status_rejects_post() {
+        let (state, dir) = build_state(true);
+        let target = format!("/tx_status?txid={}", "33".repeat(32));
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target,
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }
