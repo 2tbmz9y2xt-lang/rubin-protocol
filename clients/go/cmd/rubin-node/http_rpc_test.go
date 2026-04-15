@@ -1348,7 +1348,6 @@ func TestDevnetRPCTxStatusUnavailableOnNilState(t *testing.T) {
 	}
 }
 
-
 func TestDevnetRPCGetTxEmptyTxIDValueIsClassifiedAsMissing(t *testing.T) {
 	// Go/Rust parity regression: ?txid= (present but empty value) must be
 	// classified as missing parameter in BOTH clients.
