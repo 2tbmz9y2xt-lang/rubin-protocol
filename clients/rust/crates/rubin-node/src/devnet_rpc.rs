@@ -2951,9 +2951,8 @@ mod tests {
 
     #[test]
     fn get_mempool_returns_sorted_txids() {
-        // Copilot thread PRRT_kwDORQ3qGs57Qgs6/QgtE: verify that
-        // /get_mempool returns txids in lexicographic order regardless
-        // of HashMap iteration order.
+        // Verify /get_mempool returns txids in lexicographic order
+        // regardless of HashMap iteration order.
         let (state, dir) = build_state(true);
         // Inject 3 txids in reverse-lex order to guarantee the sort
         // in handle_get_mempool is exercised.
@@ -3197,7 +3196,6 @@ mod tests {
 
     #[test]
     fn get_tx_valueless_txid_key_classified_as_missing() {
-        // Go/Rust parity regression (Codex thread PRRT_kwDORQ3qGs57NpSB):
         // ?txid (key without `=`) must classify as missing, matching Go's
         // net/url which parses a valueless key into values=[""].
         let (state, dir) = build_state(true);
@@ -3248,10 +3246,10 @@ mod tests {
 
     #[test]
     fn get_tx_accepts_percent_encoded_hex_value() {
-        // Codex thread PRRT_kwDORQ3qGs57N_wu: Go's Query().Get percent-decodes
-        // the value before returning it, so `?txid=%61b...` becomes `ab...`
-        // and validates as valid hex. Rust must match: percent-decode before
-        // length/hex checks. A missing-but-syntactically-valid txid returns
+        // Go's Query().Get percent-decodes the value before returning it,
+        // so `?txid=%61b...` becomes `ab...` and validates as valid hex.
+        // Rust must match: percent-decode before length/hex checks. A
+        // missing-but-syntactically-valid txid returns
         // 200 + found=false, which proves the parser accepted the
         // percent-encoded input (the parse-reject paths would return 400).
         let (state, dir) = build_state(true);
@@ -3282,9 +3280,9 @@ mod tests {
 
     #[test]
     fn get_tx_malformed_percent_escape_classified_as_missing() {
-        // Codex thread PRRT_kwDORQ3qGs57OTOf: Go's net/url.parseQuery
-        // `continue`s on percent-decode failure (key OR value) and NEVER
-        // stores the pair in `Values`. So `?txid=%ZZ` alone has no stored
+        // Go's net/url.parseQuery `continue`s on percent-decode failure
+        // (key OR value) and never stores the pair. So `?txid=%ZZ` alone
+        // has no stored
         // txid, and `Values.Get("txid")` returns "" → Go handler classifies
         // that as "missing required query parameter". Rust must match:
         // skip the malformed pair and report missing (NOT "malformed
@@ -3363,9 +3361,8 @@ mod tests {
 
     #[test]
     fn get_tx_non_utf8_percent_value_not_classified_as_missing() {
-        // Codex thread PRRT_kwDORQ3qGs57PGFx: %ff decodes to 1 raw byte.
-        // With Vec<u8> percent_decode, length check sees "got 1" — same as
-        // Go where len(raw) counts raw decoded bytes.
+        // %ff decodes to 1 raw byte (0xFF). Length check sees "got 1" —
+        // same as Go where len(raw) counts raw decoded bytes.
         let (state, dir) = build_state(true);
         let response = route_request(
             &state,
@@ -3392,10 +3389,10 @@ mod tests {
 
     #[test]
     fn get_tx_non_utf8_64_raw_bytes_reaches_hex_check() {
-        // Codex thread PRRT_kwDORQ3qGs57RCc0: 62 hex chars + %c3%28 = 64
-        // raw decoded bytes.  Go: len==64 → hex.DecodeString → hex error.
-        // Rust (with Vec<u8>): len==64 → from_utf8 → hex-class error.
-        // Both: 400, hex-class error.  NOT length error.
+        // 62 hex chars + %c3%28 = 64 raw decoded bytes.
+        // Go: len==64 → hex.DecodeString → hex error.
+        // Rust: len==64 → from_utf8 fails → hex-class error.
+        // Both: 400, hex-class error — NOT length error.
         let (state, dir) = build_state(true);
         let hex62 = "a".repeat(62);
         let target = format!("/get_tx?txid={hex62}%c3%28");
@@ -3419,9 +3416,8 @@ mod tests {
 
     #[test]
     fn get_tx_semicolon_in_pair_is_dropped_like_go() {
-        // Codex thread PRRT_kwDORQ3qGs57PkNn: Go parseQuery (1.17+,
-        // CVE-2021-44716) skips pairs containing `;`.  So
-        // `?txid=<64hex>;foo=1` → pair dropped → "missing txid".
+        // Go parseQuery (1.17+, CVE-2021-44716) skips pairs containing
+        // `;`.  `?txid=<64hex>;foo=1` → pair dropped → "missing txid".
         let (state, dir) = build_state(true);
         let valid_hex = "a".repeat(64);
         let target = format!("/get_tx?txid={valid_hex};foo=1");
@@ -3445,10 +3441,10 @@ mod tests {
 
     #[test]
     fn get_tx_reports_unavailable_when_tx_pool_is_poisoned_before_parse() {
-        // Codex thread PRRT_kwDORQ3qGs57OTOW: handle_get_tx must check
-        // tx_pool availability BEFORE parse_txid_query, so a poisoned pool
-        // + invalid/missing txid returns 503, not 400. Parity with Go
-        // handleGetTx (which checks state.mempool == nil first).
+        // handle_get_tx must check tx_pool availability BEFORE
+        // parse_txid_query, so a poisoned pool + invalid/missing txid
+        // returns 503, not 400.  Parity with Go handleGetTx which
+        // checks state.mempool == nil first.
         let (state, dir) = build_state(true);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = state.tx_pool.lock().expect("tx_pool lock");
@@ -3474,8 +3470,8 @@ mod tests {
 
     #[test]
     fn tx_status_reports_unavailable_when_tx_pool_is_poisoned_before_parse() {
-        // Codex thread PRRT_kwDORQ3qGs57OTOb — parity sibling of the
-        // handle_get_tx ordering fix.
+        // Parity sibling of the handle_get_tx ordering fix:
+        // tx_pool availability check BEFORE parse.
         let (state, dir) = build_state(true);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = state.tx_pool.lock().expect("tx_pool lock");
