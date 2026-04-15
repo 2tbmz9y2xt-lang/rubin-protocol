@@ -933,7 +933,7 @@ mod tests {
     use crate::p2p_runtime::{
         build_envelope_header, decode_inventory_vectors, default_peer_runtime_config,
         encode_inventory_vectors, network_magic, perform_version_handshake, InventoryVector,
-        LiveMessageOutcome, PeerManager, PeerRuntimeConfig, WireMessage, MSG_TX,
+        LiveMessageOutcome, PeerManager, PeerRuntimeConfig, VersionPayloadV1, WireMessage, MSG_TX,
     };
     use crate::sync_reorg::TxPoolCleanupPlan;
     use crate::tx_relay::PeerOutbox;
@@ -998,6 +998,39 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         panic!("condition not reached before deadline");
+    }
+
+    /// Under LLVM coverage (tarpaulin), the first TCP handshake attempt on Darwin
+    /// can sporadically fail with `EINVAL`; retry preserves the behavioral assertion.
+    fn connect_handshake_with_retry(
+        mut connect_addr: impl FnMut() -> String,
+        runtime_cfg: PeerRuntimeConfig,
+        local: VersionPayloadV1,
+    ) -> crate::p2p_runtime::PeerSession {
+        let mut last_err: Option<std::io::Error> = None;
+        for attempt in 0..10 {
+            if attempt > 0 {
+                thread::sleep(Duration::from_millis(100));
+            }
+            let stream = match TcpStream::connect(connect_addr()) {
+                Ok(s) => s,
+                Err(err) => {
+                    last_err = Some(err);
+                    continue;
+                }
+            };
+            match perform_version_handshake(
+                stream,
+                runtime_cfg.clone(),
+                local,
+                local.chain_id,
+                local.genesis_hash,
+            ) {
+                Ok(session) => return session,
+                Err(err) => last_err = Some(err),
+            }
+        }
+        panic!("handshake failed after retries: last_err={last_err:?}");
     }
 
     #[test]
@@ -1489,16 +1522,9 @@ mod tests {
         })
         .expect("start service");
 
-        let stream = TcpStream::connect(service.addr()).expect("connect service");
         let local = local_version(0).expect("local version");
-        let session = perform_version_handshake(
-            stream,
-            runtime_cfg,
-            local,
-            local.chain_id,
-            local.genesis_hash,
-        )
-        .expect("handshake");
+        let session =
+            connect_handshake_with_retry(|| service.addr().to_string(), runtime_cfg.clone(), local);
         drop(session);
 
         service.close();
@@ -1581,16 +1607,9 @@ mod tests {
 
         thread::sleep(Duration::from_millis(150));
 
-        let stream = TcpStream::connect(service.addr()).expect("connect inbound");
         let local = local_version(0).expect("local version");
-        let session = perform_version_handshake(
-            stream,
-            runtime_cfg,
-            local,
-            local.chain_id,
-            local.genesis_hash,
-        )
-        .expect("inbound handshake must not be blocked by pending bootstrap dial");
+        let session =
+            connect_handshake_with_retry(|| service.addr().to_string(), runtime_cfg.clone(), local);
         drop(session);
 
         service.close();

@@ -2008,3 +2008,89 @@ func TestRunNonDryRunWithRPCBindExitsOnSignal(t *testing.T) {
 		t.Fatalf("stdout=%q, want stopped banner", stdout.String())
 	}
 }
+
+func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
+	if os.Getenv("RUBIN_NODE_TEST_INVALID_MINE_ADDR_CHILD") == "1" {
+		dir := t.TempDir()
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			p, _ := os.FindProcess(os.Getpid())
+			_ = p.Signal(syscall.SIGINT)
+		}()
+		badSuiteMineAddr := "00" + strings.Repeat("00", 32)
+		code := run(
+			[]string{
+				"--datadir", dir,
+				"--bind", "127.0.0.1:0",
+				"--rpc-bind", "127.0.0.1:0",
+				"--mine-address", badSuiteMineAddr,
+			},
+			io.Discard,
+			os.Stderr,
+		)
+		os.Exit(code)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr")
+	cmd.Env = append(os.Environ(), "RUBIN_NODE_TEST_INVALID_MINE_ADDR_CHILD=1")
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if ok {
+			t.Fatalf("exit code=%d, want 0 (stderr=%s)", ee.ExitCode(), stderr.String())
+		}
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s := stderr.String()
+	if !strings.Contains(s, "rpc: live mining disabled (invalid --mine-address)") {
+		t.Fatalf("stderr=%q, want invalid mine-address log", s)
+	}
+}
+
+func TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr(t *testing.T) {
+	if os.Getenv("RUBIN_NODE_TEST_LIVE_MINER_INIT_ERR_CHILD") == "1" {
+		prev := newMinerFn
+		newMinerFn = func(*node.ChainState, *node.BlockStore, *node.SyncEngine, node.MinerConfig) (*node.Miner, error) {
+			return nil, errors.New("test miner init failed")
+		}
+		dir := t.TempDir()
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			p, _ := os.FindProcess(os.Getpid())
+			_ = p.Signal(syscall.SIGINT)
+		}()
+		code := run(
+			[]string{
+				"--datadir", dir,
+				"--bind", "127.0.0.1:0",
+				"--rpc-bind", "127.0.0.1:0",
+				"--mine-address", strings.Repeat("11", 32),
+			},
+			io.Discard,
+			os.Stderr,
+		)
+		newMinerFn = prev
+		os.Exit(code)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr")
+	cmd.Env = append(os.Environ(), "RUBIN_NODE_TEST_LIVE_MINER_INIT_ERR_CHILD=1")
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if ok {
+			t.Fatalf("exit code=%d, want 0 (stderr=%s)", ee.ExitCode(), stderr.String())
+		}
+		t.Fatalf("unexpected error: %v", err)
+	}
+	s := stderr.String()
+	if !strings.Contains(s, "rpc: live mining disabled:") || !strings.Contains(s, "test miner init failed") {
+		t.Fatalf("stderr=%q, want live mining disabled + test miner init failed", s)
+	}
+}

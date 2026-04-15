@@ -51,8 +51,9 @@ func mustRPCStateAtDir(t *testing.T, dir string, withGenesis bool) *devnetRPCSta
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}
+	syncEngine.SetMempool(mempool)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard)
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard, nil)
 	state.nowUnix = func() uint64 { return 0 }
 	return state
 }
@@ -105,8 +106,9 @@ func mustRPCStateWithSpendableUTXO(
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}
+	syncEngine.SetMempool(mempool)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, io.Discard)
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, io.Discard, nil)
 	state.nowUnix = func() uint64 { return 0 }
 	return state, outpoint, chainState.Utxos
 }
@@ -884,8 +886,194 @@ func TestDevnetRPCSubmitTxLogsAnnounceTxError(t *testing.T) {
 }
 
 func TestNewDevnetRPCStateNilStderrFallsBackToDiscard(t *testing.T) {
-	state := newDevnetRPCState(nil, nil, nil, nil, nil, nil)
+	state := newDevnetRPCState(nil, nil, nil, nil, nil, nil, nil)
 	if state.stderr != io.Discard {
 		t.Fatal("expected io.Discard for nil stderr")
+	}
+}
+
+func TestRPCBindHostIsLoopback(t *testing.T) {
+	if !rpcBindHostIsLoopback("127.0.0.1:19112") {
+		t.Fatal("expected loopback for 127.0.0.1")
+	}
+	if !rpcBindHostIsLoopback("[::1]:19112") {
+		t.Fatal("expected loopback for ::1")
+	}
+	if !rpcBindHostIsLoopback("localhost:19112") {
+		t.Fatal("expected loopback for localhost")
+	}
+	if rpcBindHostIsLoopback("0.0.0.0:19112") {
+		t.Fatal("expected non-loopback for 0.0.0.0")
+	}
+	if rpcBindHostIsLoopback("example.com:19112") {
+		t.Fatal("expected non-loopback for example.com")
+	}
+	if rpcBindHostIsLoopback("127.0.0.1") {
+		t.Fatal("missing port must be rejected")
+	}
+	if rpcBindHostIsLoopback("not-a-host:19112") {
+		t.Fatal("invalid host:port must be rejected")
+	}
+	if rpcBindHostIsLoopback("127.0.0.1:") {
+		t.Fatal("empty port must be rejected")
+	}
+	if rpcBindHostIsLoopback("localhost:") {
+		t.Fatal("empty port must be rejected for localhost")
+	}
+	if rpcBindHostIsLoopback("[::1]:") {
+		t.Fatal("empty port must be rejected for bracket IPv6")
+	}
+	if rpcBindHostIsLoopback("127.0.0.1:99999") {
+		t.Fatal("out-of-range port must be rejected")
+	}
+	if !rpcBindHostIsLoopback("127.0.0.1:0") {
+		t.Fatal("port 0 is valid for bind addresses")
+	}
+}
+
+func TestHandleMineNextNilState(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil)
+	handleMineNext(nil, rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", rec.Code)
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Error != "rpc unavailable" {
+		t.Fatalf("error=%q want rpc unavailable", got.Error)
+	}
+}
+
+func TestDevnetRPCMineNextMineOneError(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	chainState := node.NewChainState()
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
+	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	syncEngine.SetMempool(mempool)
+	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
+	miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard, miner)
+	state.nowUnix = func() uint64 { return 0 }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handleMineNext(state, rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want 422", rec.Code)
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Mined || got.Error == "" {
+		t.Fatalf("unexpected response: %+v", got)
+	}
+	if !strings.Contains(got.Error, context.Canceled.Error()) {
+		t.Fatalf("error=%q want context canceled", got.Error)
+	}
+}
+
+func TestDevnetRPCMineNextRejectsGet(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	t.Cleanup(server.Close)
+	resp, err := http.Get(server.URL + "/mine_next")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", resp.StatusCode)
+	}
+}
+
+func TestDevnetRPCMineNextUnavailableWithoutMiner(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
+	t.Cleanup(server.Close)
+	resp, err := http.Post(server.URL+"/mine_next", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", resp.StatusCode)
+	}
+}
+
+func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	chainState := node.NewChainState()
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
+	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	syncEngine.SetMempool(mempool)
+	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
+	miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard, miner)
+	state.nowUnix = func() uint64 { return 0 }
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	t.Cleanup(server.Close)
+	resp, err := http.Post(server.URL+"/mine_next", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !got.Mined || got.Height == nil || *got.Height != 1 || got.TxCount == nil || *got.TxCount < 1 {
+		t.Fatalf("unexpected response: %+v", got)
+	}
+	if got.Nonce == nil {
+		t.Fatalf("want nonce field in JSON for Go/Rust RPC parity, got %+v", got)
 	}
 }

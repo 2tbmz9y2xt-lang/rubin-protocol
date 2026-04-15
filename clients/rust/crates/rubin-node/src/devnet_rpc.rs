@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::miner::{Miner, MinerConfig};
 use crate::p2p_runtime::PeerManager;
 use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 
@@ -27,6 +28,10 @@ pub struct DevnetRPCState {
     metrics: Arc<RpcMetrics>,
     now_unix: fn() -> u64,
     announce_tx: Option<AnnounceTxFn>,
+    /// Serializes mutating devnet RPC (submit_tx + mine_next).
+    rpc_op_lock: Arc<Mutex<()>>,
+    /// When set, POST `/mine_next` mines one block using this config (devnet + loopback RPC only).
+    live_mining_cfg: Option<MinerConfig>,
 }
 
 pub struct RunningDevnetRPCServer {
@@ -84,6 +89,68 @@ struct SubmitTxRequest {
     tx_hex: String,
 }
 
+#[derive(Serialize)]
+struct MineNextResponse {
+    mined: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// True when the host in `host:port` is loopback-only (safe for devnet live mining RPC).
+/// Requires a non-empty, valid `u16` port (rejects `127.0.0.1:` and similar).
+pub fn rpc_bind_host_is_loopback(bind_addr: &str) -> bool {
+    let addr = bind_addr.trim();
+    if addr.is_empty() {
+        return false;
+    }
+    let (host, port) = if addr.starts_with('[') {
+        let Some(bracket_end) = addr.find("]:") else {
+            return false;
+        };
+        if bracket_end < 2 {
+            return false;
+        }
+        let port = &addr[bracket_end + 2..];
+        (&addr[1..bracket_end], port)
+    } else if let Some(colon_pos) = addr.rfind(':') {
+        if colon_pos == 0 || colon_pos + 1 == addr.len() {
+            return false;
+        }
+        let host = &addr[..colon_pos];
+        if host.contains(':') {
+            return false;
+        }
+        let port = &addr[(colon_pos + 1)..];
+        (host, port)
+    } else {
+        return false;
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        return false;
+    }
+    let port = port.trim();
+    if port.is_empty() || port.parse::<u16>().is_err() {
+        return false;
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .ok()
+        .is_some_and(|ip| ip.is_loopback())
+}
+
 pub fn new_devnet_rpc_state(
     sync_engine: Arc<Mutex<SyncEngine>>,
     block_store: Option<BlockStore>,
@@ -91,7 +158,14 @@ pub fn new_devnet_rpc_state(
     announce_tx: Option<AnnounceTxFn>,
 ) -> DevnetRPCState {
     let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
-    new_devnet_rpc_state_with_tx_pool(sync_engine, block_store, tx_pool, peer_manager, announce_tx)
+    new_devnet_rpc_state_with_tx_pool(
+        sync_engine,
+        block_store,
+        tx_pool,
+        peer_manager,
+        announce_tx,
+        None,
+    )
 }
 
 pub fn new_devnet_rpc_state_with_tx_pool(
@@ -100,6 +174,7 @@ pub fn new_devnet_rpc_state_with_tx_pool(
     tx_pool: Arc<Mutex<TxPool>>,
     peer_manager: Arc<PeerManager>,
     announce_tx: Option<AnnounceTxFn>,
+    live_mining_cfg: Option<MinerConfig>,
 ) -> DevnetRPCState {
     DevnetRPCState {
         sync_engine,
@@ -109,6 +184,8 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         metrics: Arc::new(RpcMetrics::default()),
         now_unix: current_unix,
         announce_tx,
+        rpc_op_lock: Arc::new(Mutex::new(())),
+        live_mining_cfg,
     }
 }
 
@@ -255,6 +332,7 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
         "/get_tip" => handle_get_tip(state, &req.method),
         "/get_block" => handle_get_block(state, &req.method, &query),
         "/submit_tx" => handle_submit_tx(state, &req.method, &req.body),
+        "/mine_next" => handle_mine_next(state, &req.method, &req.body),
         "/metrics" => handle_metrics(state, &req.method),
         _ => json_response(
             state,
@@ -562,6 +640,22 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
             );
         }
     };
+    let _rpc_op = match state.rpc_op_lock.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            state.metrics.note_submit("unavailable");
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &SubmitTxResponse {
+                    accepted: false,
+                    txid: None,
+                    error: Some("rpc unavailable".to_string()),
+                },
+            );
+        }
+    };
     let (chain_state, chain_id) = match state.sync_engine.lock() {
         Ok(engine) => (engine.chain_state_snapshot(), engine.chain_id()),
         Err(_) => {
@@ -606,6 +700,11 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
             message: "tx pool unavailable".to_string(),
         }),
     };
+    // Release rpc_op_lock before announce: announce is p2p broadcast, not
+    // chain/tx-pool mutation, so holding the RPC op lock across a slow
+    // network callback would block concurrent /mine_next for no benefit.
+    // Matches the narrowed Go scope in handleSubmitTx (http_rpc.go).
+    drop(_rpc_op);
     match admit_result {
         Ok((txid, relay_meta)) => {
             // Relay tx to peers (fire-and-forget, matches Go behavior).
@@ -644,6 +743,148 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
                 },
             )
         }
+    }
+}
+
+fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpResponse {
+    const ROUTE: &str = "/mine_next";
+    if method != "POST" {
+        return json_response(
+            state,
+            ROUTE,
+            400,
+            &MineNextResponse {
+                mined: false,
+                height: None,
+                block_hash: None,
+                timestamp: None,
+                nonce: None,
+                tx_count: None,
+                error: Some("POST required".to_string()),
+            },
+        );
+    }
+    let Some(miner_cfg) = state.live_mining_cfg.as_ref() else {
+        return json_response(
+            state,
+            ROUTE,
+            503,
+            &MineNextResponse {
+                mined: false,
+                height: None,
+                block_hash: None,
+                timestamp: None,
+                nonce: None,
+                tx_count: None,
+                error: Some("live mining unavailable".to_string()),
+            },
+        );
+    };
+    let _rpc_op = match state.rpc_op_lock.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &MineNextResponse {
+                    mined: false,
+                    height: None,
+                    block_hash: None,
+                    timestamp: None,
+                    nonce: None,
+                    tx_count: None,
+                    error: Some("rpc unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let mut sync_engine = match state.sync_engine.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &MineNextResponse {
+                    mined: false,
+                    height: None,
+                    block_hash: None,
+                    timestamp: None,
+                    nonce: None,
+                    tx_count: None,
+                    error: Some("sync engine unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let mut pool = match state.tx_pool.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &MineNextResponse {
+                    mined: false,
+                    height: None,
+                    block_hash: None,
+                    timestamp: None,
+                    nonce: None,
+                    tx_count: None,
+                    error: Some("tx pool unavailable".to_string()),
+                },
+            );
+        }
+    };
+    let mut miner = match Miner::new(&mut sync_engine, Some(&mut pool), miner_cfg.clone()) {
+        Ok(m) => m,
+        Err(err) => {
+            return json_response(
+                state,
+                ROUTE,
+                503,
+                &MineNextResponse {
+                    mined: false,
+                    height: None,
+                    block_hash: None,
+                    timestamp: None,
+                    nonce: None,
+                    tx_count: None,
+                    error: Some(err),
+                },
+            );
+        }
+    };
+    match miner.mine_one(&[]) {
+        Ok(b) => json_response(
+            state,
+            ROUTE,
+            200,
+            &MineNextResponse {
+                mined: true,
+                height: Some(b.height),
+                block_hash: Some(hex::encode(b.hash)),
+                timestamp: Some(b.timestamp),
+                nonce: Some(b.nonce),
+                tx_count: Some(b.tx_count),
+                error: None,
+            },
+        ),
+        Err(err) => json_response(
+            state,
+            ROUTE,
+            422,
+            &MineNextResponse {
+                mined: false,
+                height: None,
+                block_hash: None,
+                timestamp: None,
+                nonce: None,
+                tx_count: None,
+                error: Some(err),
+            },
+        ),
     }
 }
 
@@ -954,12 +1195,13 @@ mod tests {
     use crate::io_utils::unique_temp_path;
     use crate::{
         block_store_path, default_peer_runtime_config, default_sync_config,
-        devnet_genesis_block_bytes, devnet_genesis_chain_id, BlockStore, ChainState, PeerManager,
-        SyncEngine, TxPool,
+        devnet_genesis_block_bytes, devnet_genesis_chain_id, BlockStore, ChainState, MinerConfig,
+        PeerManager, SyncEngine, TxPool,
     };
 
     use super::{
-        decode_hex_payload, new_devnet_rpc_state, parse_hex32, parse_query_map, read_http_request,
+        decode_hex_payload, new_devnet_rpc_state, new_devnet_rpc_state_with_tx_pool,
+        new_shared_runtime_tx_pool, parse_hex32, parse_query_map, read_http_request,
         render_prometheus_metrics, route_request, split_target, start_devnet_rpc_server,
         status_text, HttpRequest,
     };
@@ -985,6 +1227,39 @@ mod tests {
             Some(rpc_block_store),
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
             None,
+        );
+        (state, dir)
+    }
+
+    fn build_state_with_live_mining(with_genesis: bool) -> (super::DevnetRPCState, PathBuf) {
+        let dir = unique_temp_path("rubin-devnet-rpc-live");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let block_store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
+        let mut engine = SyncEngine::new(
+            ChainState::new(),
+            Some(block_store.clone()),
+            default_sync_config(None, devnet_genesis_chain_id(), None),
+        )
+        .expect("sync");
+        if with_genesis {
+            engine
+                .apply_block(&devnet_genesis_block_bytes(), None)
+                .expect("apply genesis");
+        }
+        let rpc_block_store = BlockStore::open(block_store_path(&dir)).expect("reopen blockstore");
+        let sync_engine = Arc::new(Mutex::new(engine));
+        let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
+        let live_cfg = MinerConfig {
+            core_ext_deployments: sync_engine.lock().expect("lock").core_ext_deployments(),
+            ..MinerConfig::default()
+        };
+        let state = new_devnet_rpc_state_with_tx_pool(
+            sync_engine,
+            Some(rpc_block_store),
+            tx_pool,
+            Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            None,
+            Some(live_cfg),
         );
         (state, dir)
     }
@@ -1111,6 +1386,8 @@ mod tests {
             metrics: Arc::new(super::RpcMetrics::default()),
             now_unix: super::current_unix,
             announce_tx: None,
+            rpc_op_lock: Arc::new(Mutex::new(())),
+            live_mining_cfg: None,
         }
     }
 
@@ -1148,6 +1425,198 @@ mod tests {
         assert_eq!(json["has_tip"].as_bool(), Some(true));
         assert_eq!(json["height"].as_u64(), Some(0));
         assert_eq!(json["tip_hash"].as_str().map(|s| s.len()), Some(64));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn rpc_bind_host_is_loopback_accepts_loopback_hosts_only() {
+        assert!(super::rpc_bind_host_is_loopback("127.0.0.1:19112"));
+        assert!(super::rpc_bind_host_is_loopback("[::1]:19112"));
+        assert!(super::rpc_bind_host_is_loopback("localhost:19112"));
+        assert!(!super::rpc_bind_host_is_loopback("0.0.0.0:19112"));
+        assert!(!super::rpc_bind_host_is_loopback("example.com:19112"));
+        assert!(!super::rpc_bind_host_is_loopback(""));
+        assert!(!super::rpc_bind_host_is_loopback("[::1]"));
+        assert!(!super::rpc_bind_host_is_loopback("abcd::1:19112"));
+        assert!(!super::rpc_bind_host_is_loopback("127.0.0.1"));
+        assert!(!super::rpc_bind_host_is_loopback("127.0.0.1:"));
+        assert!(!super::rpc_bind_host_is_loopback("[::1]:"));
+        assert!(!super::rpc_bind_host_is_loopback("localhost:"));
+        assert!(!super::rpc_bind_host_is_loopback("127.0.0.1:99999"));
+        assert!(super::rpc_bind_host_is_loopback("127.0.0.1:0"));
+    }
+
+    #[test]
+    fn submit_tx_reports_unavailable_when_rpc_op_lock_is_poisoned() {
+        let (state, dir) = build_state(true);
+        let rpc_lock = Arc::clone(&state.rpc_op_lock);
+        let _ = std::thread::spawn(move || {
+            let _guard = rpc_lock.lock().expect("lock");
+            panic!("poison rpc op lock");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: br#"{"tx_hex":"00"}"#.to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("rpc unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_reports_unavailable_when_rpc_op_lock_is_poisoned() {
+        let (state, dir) = build_state_with_live_mining(true);
+        let rpc_lock = Arc::clone(&state.rpc_op_lock);
+        let _ = std::thread::spawn(move || {
+            let _guard = rpc_lock.lock().expect("lock");
+            panic!("poison rpc op lock");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("rpc unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_reports_unavailable_when_sync_engine_is_poisoned() {
+        let (state, dir) = build_state_with_live_mining(true);
+        let sync_engine = Arc::clone(&state.sync_engine);
+        let _ = std::thread::spawn(move || {
+            let _guard = sync_engine.lock().expect("lock");
+            panic!("poison sync engine");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("sync engine unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_reports_unavailable_when_tx_pool_is_poisoned() {
+        let (state, dir) = build_state_with_live_mining(true);
+        let tx_pool = Arc::clone(&state.tx_pool);
+        let _ = std::thread::spawn(move || {
+            let _guard = tx_pool.lock().expect("lock");
+            panic!("poison tx pool");
+        })
+        .join();
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("tx pool unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_rejects_get() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/mine_next".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("POST required")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_unavailable_without_live_cfg() {
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            response_json(&response)["error"].as_str(),
+            Some("live mining unavailable")
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_mines_after_genesis() {
+        let (state, dir) = build_state_with_live_mining(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let json = response_json(&response);
+        assert_eq!(json["mined"].as_bool(), Some(true));
+        assert_eq!(json["height"].as_u64(), Some(1));
+        assert!(json["tx_count"].as_u64().is_some_and(|n| n >= 1));
+        assert!(
+            json["nonce"].as_u64().is_some(),
+            "nonce must be present for Go/Rust RPC parity"
+        );
+        assert!(
+            json["block_hash"].as_str().is_some_and(|s| s.len() == 64),
+            "block_hash must be 32-byte hex"
+        );
+        assert!(
+            json["timestamp"].as_u64().is_some(),
+            "timestamp must be present"
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -1783,6 +2252,8 @@ mod tests {
             metrics: Arc::new(super::RpcMetrics::default()),
             now_unix: || 0,
             announce_tx: None,
+            rpc_op_lock: Arc::new(Mutex::new(())),
+            live_mining_cfg: None,
         };
 
         let body = render_prometheus_metrics(&state);

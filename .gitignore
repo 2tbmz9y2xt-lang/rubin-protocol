@@ -13,6 +13,7 @@ output/
 tmp/
 .claude/
 .codex/
+.cursor/
 artifacts/
 .worktrees/
 
