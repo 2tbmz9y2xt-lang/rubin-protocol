@@ -950,7 +950,12 @@ fn percent_decode(s: &str) -> Option<String> {
             }
         }
     }
-    String::from_utf8(out).ok()
+    // Go strings are byte sequences — QueryUnescape never rejects valid %XX
+    // on UTF-8 grounds.  Use lossy conversion so non-UTF-8 decoded bytes
+    // (e.g. %ff) survive as replacement chars and reach the length/hex check
+    // instead of being silently discarded (which would misclassify the error
+    // as "missing" rather than "wrong length" — Codex thread PRRT_kwDORQ3qGs57PGFx).
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Decode a 64-hex-char "txid" query parameter to a [u8; 32]. Returns Err with
@@ -3316,6 +3321,33 @@ mod tests {
     }
 
     #[test]
+    fn get_tx_non_utf8_percent_value_reaches_length_check() {
+        // Codex thread PRRT_kwDORQ3qGs57PGFx: %ff decodes to a non-UTF-8
+        // byte.  percent_decode must NOT discard it (which would
+        // misclassify as "missing"); instead the decoded value reaches the
+        // length/hex check and returns 400 "wrong length" — parity with
+        // Go where QueryUnescape keeps the byte.
+        let (state, dir) = build_state(true);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/get_tx?txid=%ff".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 400);
+        let body = response_json(&response);
+        let err = body["error"].as_str().unwrap_or("");
+        // Must say "wrong length", NOT "missing required query parameter".
+        assert!(
+            err.contains("64 hex characters"),
+            "expected length error, got: {err}"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
     fn get_tx_reports_unavailable_when_tx_pool_is_poisoned_before_parse() {
         // Codex thread PRRT_kwDORQ3qGs57OTOW: handle_get_tx must check
         // tx_pool availability BEFORE parse_txid_query, so a poisoned pool
@@ -3382,5 +3414,10 @@ mod tests {
         // Malformed — incomplete escape at end
         assert_eq!(super::percent_decode("%a"), None);
         assert_eq!(super::percent_decode("%"), None);
+        // Non-UTF-8 decoded byte — Go keeps it, Rust uses lossy replacement.
+        // Must return Some (not None!) so the value reaches the length/hex
+        // check rather than being silently dropped (Codex PRRT_kwDORQ3qGs57PGFx).
+        assert!(super::percent_decode("%ff").is_some());
+        assert!(super::percent_decode("%c3%28").is_some());
     }
 }
