@@ -919,19 +919,13 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
     }
 }
 
-/// Percent-decode a query-string fragment ("%XX" pairs → byte values). Returns
-/// None on malformed escapes (incomplete or non-hex digits). Mirrors Go's
-/// net/url.QueryUnescape used internally by Values.Get, which decodes the
-/// value before returning it to the handler.
 /// Percent-decode a query component to raw bytes.  Returns `None` only on
-/// malformed `%XX` escapes (truncated or non-hex digits), matching the
-/// error-returns-continue semantics of Go `net/url.QueryUnescape`.
-///
-/// Returns `Vec<u8>` (not `String`) because Go strings are arbitrary byte
-/// sequences — `QueryUnescape` never rejects on UTF-8 grounds.  Keeping
-/// raw bytes ensures `len()` matches Go's `len()` for the downstream
-/// length check in `parse_txid_query` (Codex threads PRRT_kwDORQ3qGs57PGFx,
-/// PRRT_kwDORQ3qGs57RCc0).
+/// malformed `%XX` escapes (truncated or non-hex digits), matching Go
+/// `net/url.QueryUnescape` error semantics.  Returns `Vec<u8>` (not
+/// `String`) because Go strings are arbitrary byte sequences and
+/// `QueryUnescape` never rejects on UTF-8 grounds — keeping raw bytes
+/// ensures `len()` matches Go's `len()` for the downstream length check
+/// in `parse_txid_query`.
 fn percent_decode(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
