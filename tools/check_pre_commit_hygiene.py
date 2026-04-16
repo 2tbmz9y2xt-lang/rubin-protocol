@@ -13,7 +13,6 @@ Exit codes: 0 = clean, 1 = violations found, 2 = usage error or git failure.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
@@ -214,7 +213,6 @@ def check_rust_warnings(files: list[str]) -> list[str]:
         "-D",
         "warnings",
     ]
-    env = {**os.environ}
 
     dev_env = REPO_ROOT / "scripts" / "dev-env.sh"
     if dev_env.exists():
@@ -222,12 +220,13 @@ def check_rust_warnings(files: list[str]) -> list[str]:
     else:
         cmd = cargo_args
 
+    # Inherit caller env (no overrides needed; -D warnings is on the
+    # cargo arg list, not RUSTFLAGS).
     r = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         cwd=RUST_DIR,
-        env=env,
     )
     if r.returncode != 0:
         combined = (r.stdout or "") + (r.stderr or "")
