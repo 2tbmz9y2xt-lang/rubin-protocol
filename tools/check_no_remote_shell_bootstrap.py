@@ -17,7 +17,7 @@ SUDO_PREFIX_PATTERN = rf"{SUDO_COMMAND_PATTERN}(?:\s+{SUDO_OPTION_PATTERN})*\s+"
 ENV_ARGUMENT_PATTERN = rf"(?!{SHELL_EXECUTABLE_PATTERN}\b)\S+"
 ENV_PREFIX_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_ARGUMENT_PATTERN})*\s+"
 SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*{SHELL_EXECUTABLE_PATTERN}"
-DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:/(?:usr/)?bin/)?(?:curl|wget)\b"
+DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:/(?:usr/)?bin/)?(?:curl|wget)\b"
 SHELL_OPTION_PATTERN = r"(?:--[A-Za-z][\w-]*|-[A-Za-z]+)"
 SHELL_C_OPTION_PATTERN = r"(?:-c|-[A-Za-z]*c[A-Za-z]*|--command)"
 INLINE_PIPE_COMMENT_RE = re.compile(r"\|\s*#")
@@ -26,7 +26,7 @@ STEP_INLINE_RUN_RE = re.compile(r'^\s*-\s+["\']?run["\']?\s*:\s*(.*)$')
 RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
 BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
 STEP_FLOW_MAPPING_RE = re.compile(r"^\s*-\s*\{(.*)\}\s*$")
-STEPS_FLOW_SEQUENCE_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*\[(.*)\]\s*(?:#.*)?$')
+STEPS_FLOW_SEQUENCE_START_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*\[(.*)$')
 FLOW_RUN_VALUE_RE = re.compile(r'(?:^|,)\s*["\']?run["\']?\s*:\s*(.+?)(?=,\s*["\']?[A-Za-z0-9_-]+["\']?\s*:|$)')
 FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
 
@@ -179,6 +179,45 @@ def extract_flow_sequence_mappings(sequence_text: str) -> list[str]:
     return mappings
 
 
+def collect_flow_sequence(lines: list[str], start_idx: int, initial_text: str) -> tuple[str, int]:
+    parts: list[str] = []
+    depth = 1
+    quote: str | None = None
+    escape = False
+    idx = start_idx
+    text = initial_text
+    while True:
+        for pos, ch in enumerate(text):
+            if quote is not None:
+                parts.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in {"'", '"'}:
+                quote = ch
+                parts.append(ch)
+                continue
+            if ch == "[":
+                depth += 1
+                parts.append(ch)
+                continue
+            if ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return "".join(parts), idx + 1
+                parts.append(ch)
+                continue
+            parts.append(ch)
+        idx += 1
+        if idx >= len(lines):
+            return "".join(parts), idx
+        text = "\n" + lines[idx]
+
+
 def extract_step_run_entries(step_entries: list[tuple[int, str]], step_indent: int) -> list[list[tuple[int, str]]]:
     run_entries: list[list[tuple[int, str]]] = []
     first_line_no, first_raw = step_entries[0]
@@ -246,13 +285,14 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
         raw = lines[idx]
         stripped = raw.strip()
         indent = len(raw) - len(raw.lstrip())
-        flow_steps_match = STEPS_FLOW_SEQUENCE_RE.match(raw)
+        flow_steps_match = STEPS_FLOW_SEQUENCE_START_RE.match(raw)
         if flow_steps_match is not None:
-            for mapping_text in extract_flow_sequence_mappings(flow_steps_match.group(1)):
+            start_line_no = idx + 1
+            sequence_text, idx = collect_flow_sequence(lines, idx, flow_steps_match.group(1))
+            for mapping_text in extract_flow_sequence_mappings(sequence_text):
                 content = extract_flow_mapping_run(mapping_text)
                 if content:
-                    entries.append([(idx + 1, content)])
-            idx += 1
+                    entries.append([(start_line_no, content)])
             continue
         if not STEPS_KEY_RE.match(raw):
             idx += 1

@@ -391,6 +391,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("process substitution", violations[0])
 
+    def test_rejects_process_substitution_with_sudo_prefixed_curl(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  cov:\n    steps:\n      - run: bash <(sudo curl -fsSL https://coverage.codacy.com/get.sh) report\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("process substitution", violations[0])
+
     def test_rejects_process_substitution_via_stdin_redirection(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -538,6 +552,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                 repo_root,
                 "bad.yml",
                 'jobs:\n  install:\n    steps:\n      - run: bash -c "$(FOO=1 curl -fsSL https://example.com/install.sh)"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
+    def test_rejects_shell_c_command_substitution_with_sudo_prefixed_curl(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash -c "$(sudo curl -fsSL https://example.com/install.sh)"\n',
             )
 
             violations = m.find_violations(workflow)
@@ -742,6 +770,26 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                     "jobs:\n"
                     "  install:\n"
                     '    steps: [{ run: "curl -fsSL https://example.com/install.sh | bash ${FLAGS}" }]\n'
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_multiline_steps_flow_sequence(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps: [\n"
+                    "      { run: curl -fsSL https://example.com/install.sh | bash },\n"
+                    "    ]\n"
                 ),
             )
 
