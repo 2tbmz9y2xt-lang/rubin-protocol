@@ -43,26 +43,36 @@ impl SyncEngine {
 
         let summary = self.chain_state.disconnect_block(&block_bytes, &undo)?;
 
-        // Persist chain state BEFORE truncating canonical index so that a
-        // save failure can be rolled back without losing canonical entries.
-        //
-        // Crash-consistency note: a crash between `save` and `truncate_canonical`
-        // leaves persisted chain_state at the parent while the canonical index
-        // still references the old tip.  On restart the mismatch guard at the top
-        // of this function will reject the stale canonical tip, requiring an
-        // index rebuild.  True atomicity would need a write-ahead log.
-        if let Some(path) = self.cfg.chain_state_path.as_ref() {
-            if let Err(err) = self.chain_state.save(path) {
-                self.rollback_apply_block(rollback);
-                return Err(err);
-            }
+        // Truncate canonical index FIRST, then persist chain state — matching
+        // Go DisconnectTip ordering (B.7 fix, issue #1170).  A crash between
+        // truncate and save leaves the canonical index short while chainstate
+        // still has the old tip; the mismatch guard at the top of this
+        // function detects and rejects this on restart.
+        // block_store presence already checked at top of function.
+        let bs = self.block_store.as_mut().expect("blockstore checked above");
+        if let Err(err) = bs.truncate_canonical(rollback.canonical_len.saturating_sub(1)) {
+            return Err(SyncEngine::err_with_rollback(
+                err,
+                self.rollback_apply_block(rollback),
+            ));
         }
 
-        // Truncate canonical index (remove the tip entry).
-        if let Some(bs) = self.block_store.as_mut() {
-            if let Err(err) = bs.truncate_canonical(rollback.canonical_len.saturating_sub(1)) {
-                self.rollback_apply_block(rollback);
-                return Err(err);
+        if let Some(path) = self.cfg.chain_state_path.as_ref() {
+            if let Err(err) = self.chain_state.save(path) {
+                // Restore the truncated canonical entry so rollback_apply_block
+                // can succeed (truncate_canonical cannot extend).
+                if let Some(bs) = self.block_store.as_mut() {
+                    // Best-effort: if this also fails, err_with_rollback
+                    // will report the compound failure.
+                    let _ = bs.rollback_canonical(
+                        rollback.canonical_len.saturating_sub(1),
+                        vec![hex::encode(tip_hash)],
+                    );
+                }
+                return Err(SyncEngine::err_with_rollback(
+                    err,
+                    self.rollback_apply_block(rollback),
+                ));
             }
         }
 
@@ -242,6 +252,101 @@ mod tests {
         assert!(
             err.contains("does not match"),
             "expected mismatch error, got: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn disconnect_tip_truncate_error_propagates_with_rollback() {
+        let (mut engine, dir) = engine_with_store("rubin-disc-trunc-err");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine.apply_block(&genesis, None).expect("genesis");
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        engine.apply_block(&block1, None).expect("block 1");
+
+        // Inject forced truncate error.
+        engine.block_store.as_mut().unwrap().force_truncate_error = true;
+
+        let err = engine.disconnect_tip().unwrap_err();
+        assert!(
+            err.contains("forced truncate error"),
+            "expected forced truncate error, got: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn disconnect_tip_save_failure_restores_canonical() {
+        // Cover lines 69-71: save fails after truncate, rollback_canonical
+        // restores the truncated entry, rollback_apply_block runs.
+        let (mut engine, dir) = engine_with_store("rubin-disc-save-fail");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine.apply_block(&genesis, None).expect("genesis");
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        engine.apply_block(&block1, None).expect("block 1");
+
+        // Canonical index should have 2 entries (genesis + block1).
+        let tip_before = engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .tip()
+            .expect("tip")
+            .expect("some");
+        assert_eq!(tip_before.0, 1);
+
+        // Make chainstate dir read-only so save (atomic write) fails.
+        // Blockstore truncate_canonical operates on its own dir which
+        // remains writable, so truncate succeeds before save fails.
+        let cs_dir = dir.join("chainstate");
+        std::fs::create_dir_all(&cs_dir).ok();
+        // Move chainstate file into its own subdir
+        let cs_path = crate::chainstate::chain_state_path(&dir);
+        let cs_subdir_path = cs_dir.join("state.bin");
+        if cs_path.exists() {
+            std::fs::rename(&cs_path, &cs_subdir_path).expect("move chainstate");
+        }
+        // Point engine at the subdir path
+        engine.cfg.chain_state_path = Some(cs_subdir_path.clone());
+        // Reload from new path
+        engine.chain_state.save(&cs_subdir_path).expect("re-save");
+        // Now make subdir readonly — atomic write creates temp in same dir, fails
+        let mut perms = std::fs::metadata(&cs_dir).expect("meta").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&cs_dir, perms.clone()).expect("set readonly");
+
+        // disconnect_tip should fail (save error — platform-specific message).
+        let err = engine.disconnect_tip().unwrap_err();
+        assert!(!err.is_empty(), "expected save error, got empty string");
+
+        // Restore permissions for cleanup.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cs_dir, std::fs::Permissions::from_mode(0o755))
+                .expect("restore perms");
+        }
+        #[cfg(not(unix))]
+        {
+            perms.set_readonly(false);
+            std::fs::set_permissions(&cs_dir, perms).expect("restore perms");
+        }
+
+        // Canonical index should be restored — tip still at block1.
+        let tip_after = engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .tip()
+            .expect("tip")
+            .expect("some");
+        assert_eq!(
+            tip_after.0, tip_before.0,
+            "canonical index should be restored after save failure"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");

@@ -21,6 +21,9 @@ pub struct BlockStore {
     headers_dir: PathBuf,
     undo_dir: PathBuf,
     index: BlockStoreIndexDisk,
+    /// Test-only: force `truncate_canonical` to return an error.
+    #[cfg(test)]
+    pub force_truncate_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +59,8 @@ impl BlockStore {
             headers_dir,
             undo_dir,
             index,
+            #[cfg(test)]
+            force_truncate_error: false,
         })
     }
 
@@ -179,10 +184,7 @@ impl BlockStore {
         let mut out = Vec::with_capacity(limit);
         let mut step = 1u64;
         let mut appended = 0usize;
-        loop {
-            let Some(hash) = self.canonical_hash(tip_height)? else {
-                break;
-            };
+        while let Some(hash) = self.canonical_hash(tip_height)? {
             out.push(hash);
             appended += 1;
             if appended >= limit || tip_height == 0 {
@@ -346,6 +348,10 @@ impl BlockStore {
     /// Atomic: on disk-write failure the index is reloaded from disk
     /// (the atomic write guarantees the old version is still on disk).
     pub fn truncate_canonical(&mut self, new_len: usize) -> Result<(), String> {
+        #[cfg(test)]
+        if self.force_truncate_error {
+            return Err("forced truncate error (test inject)".into());
+        }
         if new_len > self.index.canonical.len() {
             return Err(format!(
                 "truncate_canonical new_len {} > current {}",
