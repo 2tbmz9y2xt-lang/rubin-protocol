@@ -152,12 +152,9 @@ impl SyncEngine {
             .as_ref()
             .ok_or("missing blockstore for side-chain block")?;
 
-        // Store the block on the side chain (no canonical update).
-        if !block_store.has_block(bh) {
-            block_store.store_block(bh, &parsed.header_bytes, block_bytes)?;
-        }
-
         // Collect branch from this block back to a common canonical ancestor.
+        // The incoming block is added directly from block_bytes (not read from
+        // store), so it does not need to be persisted yet.
         let (branch, common_ancestor_hash, common_ancestor_height) =
             self.collect_branch_to_canonical(bh, block_bytes)?;
 
@@ -166,7 +163,9 @@ impl SyncEngine {
             self.should_switch_to_branch(&branch, common_ancestor_hash)?;
 
         if !switch {
-            // Validate the block without switching chains.
+            // Validate the block BEFORE storing — matching Go's ordering so
+            // invalid side-chain blocks never reach the blockstore (B.2 fix,
+            // issue #1168).
             let derived_timestamps = if prev_timestamps.is_none() {
                 self.prev_timestamps_for_next_block().ok().flatten()
             } else {
@@ -182,7 +181,11 @@ impl SyncEngine {
             )
             .map_err(|e| e.to_string())?;
 
-            // Already stored above; return a synthetic summary.
+            // Validation passed — now persist the side-chain block.
+            if !block_store.has_block(bh) {
+                block_store.store_block(bh, &parsed.header_bytes, block_bytes)?;
+            }
+
             return Ok(ApplyBlockWithReorgOutcome {
                 summary: self.synthetic_side_chain_summary(candidate_height, bh),
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
