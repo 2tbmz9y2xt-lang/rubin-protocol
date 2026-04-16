@@ -131,6 +131,21 @@ def block_entries(entries: list[tuple[int, str]], start: int, run_indent: int) -
     return normalized, idx
 
 
+def inline_plain_scalar_entries(step_entries: list[tuple[int, str]], first_line_no: int, first_content: str) -> list[tuple[int, str]]:
+    entries: list[tuple[int, str]] = [(first_line_no, first_content)]
+    continuation = step_entries[1:]
+    nonempty_indents = [len(raw) - len(raw.lstrip()) for _, raw in continuation if raw.strip()]
+    if not nonempty_indents:
+        return entries
+    base_indent = min(nonempty_indents)
+    for line_no, raw in continuation:
+        if raw.strip():
+            entries.append((line_no, raw[base_indent:]))
+        else:
+            entries.append((line_no, ""))
+    return entries
+
+
 def extract_flow_mapping_run(mapping_text: str) -> str | None:
     entries: list[str] = []
     current: list[str] = []
@@ -313,7 +328,7 @@ def extract_step_run_entries(step_entries: list[tuple[int, str]], step_indent: i
             block, _ = block_entries(step_entries, 1, len(first_raw) - len(first_raw.lstrip()))
             run_entries.append(block)
         elif content:
-            run_entries.append([(first_line_no, content)])
+            run_entries.append(inline_plain_scalar_entries(step_entries, first_line_no, content))
         return run_entries
 
     child_indents = [
@@ -381,7 +396,7 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
             if not stripped:
                 idx += 1
                 continue
-            if indent > steps_indent and stripped.startswith("- "):
+            if indent > steps_indent and (stripped == "-" or stripped.startswith("- ")):
                 step_indent = indent
                 step_entries: list[tuple[int, str]] = [(idx + 1, raw)]
                 idx += 1
@@ -391,7 +406,7 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
                     next_indent = len(next_raw) - len(next_raw.lstrip())
                     if next_stripped and next_indent <= steps_indent:
                         break
-                    if next_stripped and next_indent == step_indent and next_stripped.startswith("- "):
+                    if next_stripped and next_indent == step_indent and (next_stripped == "-" or next_stripped.startswith("- ")):
                         break
                     step_entries.append((idx + 1, next_raw))
                     idx += 1
