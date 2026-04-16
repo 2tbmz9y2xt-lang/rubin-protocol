@@ -27,7 +27,6 @@ RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
 BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
 STEP_FLOW_MAPPING_RE = re.compile(r"^\s*-\s*\{(.*)\}\s*$")
 STEPS_FLOW_SEQUENCE_START_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*\[(.*)$')
-FLOW_RUN_VALUE_RE = re.compile(r'(?:^|,)\s*["\']?run["\']?\s*:\s*(.+?)(?=,\s*["\']?[A-Za-z0-9_-]+["\']?\s*:|$)')
 FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
 
 REMOTE_SHELL_PATTERNS = (
@@ -127,13 +126,74 @@ def block_entries(entries: list[tuple[int, str]], start: int, run_indent: int) -
 
 
 def extract_flow_mapping_run(mapping_text: str) -> str | None:
-    match = FLOW_RUN_VALUE_RE.search(mapping_text)
-    if match is None:
-        return None
-    value = match.group(1).strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        value = value[1:-1]
-    return value or None
+    entries: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escape = False
+    depth = 0
+    for ch in mapping_text:
+        if quote is not None:
+            current.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            current.append(ch)
+            continue
+        if ch in "{[(":
+            depth += 1
+            current.append(ch)
+            continue
+        if ch in "}])":
+            if depth > 0:
+                depth -= 1
+            current.append(ch)
+            continue
+        if ch == "," and depth == 0:
+            entries.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        entries.append("".join(current).strip())
+
+    for entry in entries:
+        quote = None
+        escape = False
+        depth = 0
+        for idx, ch in enumerate(entry):
+            if quote is not None:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in {"'", '"'}:
+                quote = ch
+                continue
+            if ch in "{[(":
+                depth += 1
+                continue
+            if ch in "}])":
+                if depth > 0:
+                    depth -= 1
+                continue
+            if ch == ":" and depth == 0:
+                key = entry[:idx].strip().strip("'\"")
+                if key != "run":
+                    break
+                value = entry[idx + 1 :].strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                    value = value[1:-1]
+                return value or None
+    return None
 
 
 def extract_flow_sequence_mappings(sequence_text: str) -> list[str]:

