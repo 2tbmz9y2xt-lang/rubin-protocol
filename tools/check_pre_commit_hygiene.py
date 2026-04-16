@@ -127,16 +127,27 @@ def check_test_helpers_in_production(files: list[str]) -> list[str]:
     return violations
 
 
-# ── Check 3: RUSTFLAGS=-D warnings ──────────────────────────────────
+# ── Check 3: cargo clippy --workspace --all-targets -- -D warnings ──
 
 def check_rust_warnings(files: list[str]) -> list[str]:
-    """CI uses -D warnings. Local clippy may miss what CI catches."""
+    """Mirror CI's clippy gate: cargo clippy --workspace --all-targets -- -D warnings.
+
+    Slower than `cargo check` but catches clippy lints CI catches.
+    """
     rs_files = [f for f in files if f.endswith(".rs")]
     if not rs_files:
         return []
 
-    cargo_args = ["cargo", "check", "-p", "rubin-node", "-p", "rubin-consensus"]
-    env = {**os.environ, "RUSTFLAGS": "-D warnings"}
+    cargo_args = [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+    ]
+    env = {**os.environ}
 
     dev_env = REPO_ROOT / "scripts" / "dev-env.sh"
     if dev_env.exists():
@@ -158,12 +169,12 @@ def check_rust_warnings(files: list[str]) -> list[str]:
         if errors:
             # Strip file paths from cargo output for cleaner messages.
             return [
-                f"RUSTFLAGS=-D warnings: {_sanitize_paths(re.sub(r' --> .*$', '', e.strip()))[:100]}"
+                f"clippy -D warnings: {_sanitize_paths(re.sub(r' --> .*$', '', e.strip()))[:100]}"
                 for e in errors[:5]
             ]
         raw = re.sub(r"^\s*-->.*$", "", combined, flags=re.MULTILINE).strip()
         raw = _sanitize_paths(raw)[:200]
-        return [f"RUSTFLAGS=-D warnings cargo check failed: {raw or '(no output)'}"]
+        return [f"clippy --workspace --all-targets -- -D warnings failed: {raw or '(no output)'}"]
     return []
 
 
@@ -193,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fix", action="store_true",
                         help="Reserved for future auto-fix (not yet implemented)")
     parser.add_argument("--skip-rust-warnings", action="store_true",
-                        help="Skip RUSTFLAGS=-D warnings check (slow)")
+                        help="Skip cargo clippy --workspace --all-targets check (slow)")
     args = parser.parse_args(argv)
 
     files = get_staged_files() if args.staged_only else get_changed_files()
@@ -229,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_rust_warnings:
         v = check_rust_warnings(files)
         if v:
-            print(f"\n❌ RUSTFLAGS=-D warnings failures ({len(v)}):")
+            print(f"\n❌ cargo clippy --workspace --all-targets -- -D warnings failures ({len(v)}):")
             for line in v:
                 print(f"  {line}")
             all_violations.extend(v)
