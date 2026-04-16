@@ -25,6 +25,10 @@ STEPS_KEY_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*(?:#.*)?$')
 STEP_INLINE_RUN_RE = re.compile(r'^\s*-\s+["\']?run["\']?\s*:\s*(.*)$')
 RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
 BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
+STEP_FLOW_MAPPING_RE = re.compile(r"^\s*-\s*\{(.*)\}\s*$")
+STEPS_FLOW_SEQUENCE_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*\[(.*)\]\s*(?:#.*)?$')
+FLOW_MAPPING_ENTRY_RE = re.compile(r"\{([^{}]*)\}")
+FLOW_RUN_VALUE_RE = re.compile(r'(?:^|,)\s*["\']?run["\']?\s*:\s*(.+?)(?=,\s*["\']?[A-Za-z0-9_-]+["\']?\s*:|$)')
 FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
 
 REMOTE_SHELL_PATTERNS = (
@@ -123,9 +127,25 @@ def block_entries(entries: list[tuple[int, str]], start: int, run_indent: int) -
     return normalized, idx
 
 
+def extract_flow_mapping_run(mapping_text: str) -> str | None:
+    match = FLOW_RUN_VALUE_RE.search(mapping_text)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return value or None
+
+
 def extract_step_run_entries(step_entries: list[tuple[int, str]], step_indent: int) -> list[list[tuple[int, str]]]:
     run_entries: list[list[tuple[int, str]]] = []
     first_line_no, first_raw = step_entries[0]
+    flow_step_match = STEP_FLOW_MAPPING_RE.match(first_raw)
+    if flow_step_match is not None:
+        content = extract_flow_mapping_run(flow_step_match.group(1))
+        if content:
+            run_entries.append([(first_line_no, content)])
+        return run_entries
     flow_style_match = FLOW_STYLE_STEP_RUN_RE.match(first_raw)
     if flow_style_match is not None:
         content = flow_style_match.group(1)
@@ -184,6 +204,14 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
         raw = lines[idx]
         stripped = raw.strip()
         indent = len(raw) - len(raw.lstrip())
+        flow_steps_match = STEPS_FLOW_SEQUENCE_RE.match(raw)
+        if flow_steps_match is not None:
+            for mapping_text in FLOW_MAPPING_ENTRY_RE.findall(flow_steps_match.group(1)):
+                content = extract_flow_mapping_run(mapping_text)
+                if content:
+                    entries.append([(idx + 1, content)])
+            idx += 1
+            continue
         if not STEPS_KEY_RE.match(raw):
             idx += 1
             continue
