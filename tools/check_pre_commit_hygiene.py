@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pre-commit hygiene checks for rubin-protocol.
 
-Catches the top bot-thread patterns BEFORE commit, reducing push→bot→fix cycles.
+Catches the top bot-thread patterns BEFORE commit, reducing push -> bot -> fix cycles.
 Based on 39 real threads from PR #1199 and PR #1203.
 
 Usage:
@@ -39,7 +39,7 @@ def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[
         detail = _sanitize_paths(str(exc)).strip()
         command = cmd[0] if cmd else "<unknown>"
         print(
-            f"⚠ failed to execute {command!r} — fail closed: {detail}",
+            f"[WARN] failed to execute {command!r} -- fail closed: {detail}",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -53,7 +53,7 @@ def get_staged_files() -> list[str]:
     if r.returncode != 0:
         detail = _sanitize_paths((r.stderr or "").strip())
         print(
-            f"⚠ git diff --cached failed — fail closed: {detail}",
+            f"[WARN] git diff --cached failed -- fail closed: {detail}",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -93,8 +93,8 @@ def get_changed_files() -> list[str]:
                 if r.returncode != 0:
                     detail = _sanitize_paths((r.stderr or "").strip())
                     print(
-                        f"⚠ git {' '.join(diff_args[1:])} failed (rc={r.returncode}) "
-                        f"— fail closed: {detail}",
+                        f"[WARN] git {' '.join(diff_args[1:])} failed (rc={r.returncode}) "
+                        f"-- fail closed: {detail}",
                         file=sys.stderr,
                     )
                     sys.exit(2)
@@ -106,7 +106,7 @@ def get_changed_files() -> list[str]:
             return files
         last_err = _sanitize_paths((base_result.stderr or "").strip())
     print(
-        f"⚠ no base ref found ({', '.join(_BASE_REF_CANDIDATES)}); "
+        f"[WARN] no base ref found ({', '.join(_BASE_REF_CANDIDATES)}); "
         f"falling back to staged files. Last git error: {last_err}",
         file=sys.stderr,
     )
@@ -261,7 +261,7 @@ def check_rust_warnings(files: list[str]) -> list[str]:
         detail = _sanitize_paths(str(exc)).strip()
         command = cmd[0] if cmd else "<unknown>"
         print(
-            f"⚠ failed to execute {command!r} — fail closed: {detail}",
+            f"[WARN] failed to execute {command!r} -- fail closed: {detail}",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -298,7 +298,7 @@ def check_amend_completeness(staged_only: bool) -> list[str]:
     if r.returncode != 0:
         detail = _sanitize_paths((r.stderr or "").strip())
         print(
-            f"⚠ git diff HEAD --stat failed (rc={r.returncode}) — fail closed: "
+            f"[WARN] git diff HEAD --stat failed (rc={r.returncode}) -- fail closed: "
             f"{detail}",
             file=sys.stderr,
         )
@@ -329,14 +329,14 @@ def main(argv: list[str] | None = None) -> int:
     # surfaced even if the file-set derivation came back empty.
     v = check_amend_completeness(args.staged_only)
     if v:
-        print(f"\n❌ Changes vs HEAD after amend ({len(v)}):")
+        print(f"\n[FAIL] Changes vs HEAD after amend ({len(v)}):")
         for line in v:
             print(f"  {line}")
         all_violations.extend(v)
 
     if not files:
         if all_violations:
-            print(f"\n🛑 {len(all_violations)} violation(s) found. Fix before commit.")
+            print(f"\n[STOP] {len(all_violations)} violation(s) found. Fix before commit.")
             return 1
         print("No changed files to check.")
         return 0
@@ -344,14 +344,14 @@ def main(argv: list[str] | None = None) -> int:
     # Fast checks
     v = check_bot_thread_ids(files)
     if v:
-        print(f"\n❌ Bot thread IDs in code ({len(v)}):")
+        print(f"\n[FAIL] Bot thread IDs in code ({len(v)}):")
         for line in v:
             print(f"  {line}")
         all_violations.extend(v)
 
     v = check_test_helpers_in_production(files)
     if v:
-        print(f"\n❌ Test helpers in production ({len(v)}):")
+        print(f"\n[FAIL] Test helpers in production ({len(v)}):")
         for line in v:
             print(f"  {line}")
         all_violations.extend(v)
@@ -360,16 +360,16 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_rust_warnings:
         v = check_rust_warnings(files)
         if v:
-            print(f"\n❌ cargo clippy --workspace --all-targets -- -D warnings failures ({len(v)}):")
+            print(f"\n[FAIL] cargo clippy --workspace --all-targets -- -D warnings failures ({len(v)}):")
             for line in v:
                 print(f"  {line}")
             all_violations.extend(v)
 
     if all_violations:
-        print(f"\n🛑 {len(all_violations)} violation(s) found. Fix before commit.")
+        print(f"\n[STOP] {len(all_violations)} violation(s) found. Fix before commit.")
         return 1
 
-    print("✅ Pre-commit hygiene: clean.")
+    print("[OK] Pre-commit hygiene: clean.")
     return 0
 
 
