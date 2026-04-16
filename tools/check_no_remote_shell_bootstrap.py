@@ -20,6 +20,13 @@ REMOTE_SHELL_PATTERNS = (
         re.compile(rf"(?:^|[^\w])(?:{SHELL_LAUNCHER_PATTERN}|source|\.)\s*<\(\s*(?:curl|wget)\b", re.IGNORECASE),
     ),
     (
+        "remote shell here-string command substitution",
+        re.compile(
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+<<<\s*[\"']?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "remote shell -c command substitution",
         re.compile(
             rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+-c\s+[\"']?[^\"'\n`]*?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)",

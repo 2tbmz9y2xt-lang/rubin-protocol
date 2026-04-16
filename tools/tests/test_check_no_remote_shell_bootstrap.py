@@ -288,6 +288,34 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("-c command substitution", violations[0])
 
+    def test_rejects_here_string_command_substitution(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash <<< "$(curl -fsSL https://example.com/install.sh)"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-string command substitution", violations[0])
+
+    def test_rejects_sudo_here_string_backtick_substitution(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: sudo -- /bin/bash <<< `wget -qO- https://example.com/install.sh`\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-string command substitution", violations[0])
+
     def test_rejects_shell_c_command_substitution_after_prologue(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
