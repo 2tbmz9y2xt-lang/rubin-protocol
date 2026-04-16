@@ -51,8 +51,9 @@ def get_staged_files() -> list[str]:
     # Individual check_* helpers skip paths that no longer exist on disk.
     r = run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD"])
     if r.returncode != 0:
+        detail = _sanitize_paths((r.stderr or "").strip())
         print(
-            f"⚠ git diff --cached failed — fail closed: {(r.stderr or '').strip()}",
+            f"⚠ git diff --cached failed — fail closed: {detail}",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -90,9 +91,10 @@ def get_changed_files() -> list[str]:
             ):
                 r = run(diff_args)
                 if r.returncode != 0:
+                    detail = _sanitize_paths((r.stderr or "").strip())
                     print(
                         f"⚠ git {' '.join(diff_args[1:])} failed (rc={r.returncode}) "
-                        f"— fail closed: {(r.stderr or '').strip()}",
+                        f"— fail closed: {detail}",
                         file=sys.stderr,
                     )
                     sys.exit(2)
@@ -102,7 +104,7 @@ def get_changed_files() -> list[str]:
                         seen.add(f)
                         files.append(f)
             return files
-        last_err = (base_result.stderr or "").strip()
+        last_err = _sanitize_paths((base_result.stderr or "").strip())
     print(
         f"⚠ no base ref found ({', '.join(_BASE_REF_CANDIDATES)}); "
         f"falling back to staged files. Last git error: {last_err}",
@@ -282,24 +284,28 @@ def check_rust_warnings(files: list[str]) -> list[str]:
 # ── Check 4: git diff HEAD after amend ───────────────────────────────
 
 def check_amend_completeness(staged_only: bool) -> list[str]:
-    """Check for unstaged modifications in tracked files (not staged vs HEAD).
+    """Check for any working-tree changes (staged + unstaged) vs HEAD.
 
-    In staged-only mode (pre-commit), skip this check — staged diff from
-    HEAD is intentional.  Only run after amend when we expect zero diff.
+    In staged-only mode (pre-commit), skip — staged diff from HEAD is
+    intentional.  Otherwise compare working tree against HEAD: catches
+    BOTH staged-but-not-amended fixes AND unstaged edits, so the
+    after-amend "zero diff" guard actually fires when fixes are still
+    sitting in the index.
     """
     if staged_only:
         return []
-    r = run(["git", "diff", "--stat"])  # unstaged only, not vs HEAD
+    r = run(["git", "diff", "HEAD", "--stat"])  # vs HEAD = staged + unstaged
     if r.returncode != 0:
+        detail = _sanitize_paths((r.stderr or "").strip())
         print(
-            f"⚠ git diff --stat failed (rc={r.returncode}) — fail closed: "
-            f"{(r.stderr or '').strip()}",
+            f"⚠ git diff HEAD --stat failed (rc={r.returncode}) — fail closed: "
+            f"{detail}",
             file=sys.stderr,
         )
         sys.exit(2)
     if r.stdout.strip():
         files = r.stdout.strip().splitlines()
-        return [f"unstaged changes in working tree: {f.strip()}" for f in files[:5]]
+        return [f"changes vs HEAD (staged or unstaged): {f.strip()}" for f in files[:5]]
     return []
 
 
@@ -323,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     # surfaced even if the file-set derivation came back empty.
     v = check_amend_completeness(args.staged_only)
     if v:
-        print(f"\n❌ Unstaged changes after amend ({len(v)}):")
+        print(f"\n❌ Changes vs HEAD after amend ({len(v)}):")
         for line in v:
             print(f"  {line}")
         all_violations.extend(v)
