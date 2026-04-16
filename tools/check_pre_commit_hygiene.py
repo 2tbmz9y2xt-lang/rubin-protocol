@@ -161,6 +161,14 @@ def check_test_helpers_in_production(files: list[str]) -> list[str]:
                         break  # found mod tests block
         for i, line in enumerate(lines[:prod_end], 1):
             if TEST_HELPER_RE.search(line):
+                # Skip if the previous non-blank line gates this with #[cfg(test)]
+                # (inline test-only function pattern, e.g. txpool.rs:150).
+                if f.endswith(".rs"):
+                    j = i - 2  # zero-based, line before this match
+                    while j >= 0 and not lines[j].strip():
+                        j -= 1
+                    if j >= 0 and "#[cfg(test)]" in lines[j]:
+                        continue
                 snippet = _sanitize_paths(line.strip())[:80]
                 violations.append(f"{f}:{i}: test helper in production: {snippet}")
     return violations
