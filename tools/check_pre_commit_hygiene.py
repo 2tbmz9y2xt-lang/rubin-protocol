@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RUST_DIR = REPO_ROOT / "clients" / "rust"
 
 _PATH_RE = re.compile(
-    r"/(?:Users|home|root|workspace|var/folders|tmp|opt/homebrew|private|runner/work)/[^\s\"']+"
+    r"/(?:Users|home|root|workspace|var/folders|tmp|opt|private|runner/work|nix|build|data|run|mnt|srv|proc|usr)/[^\s\"']+"
 )
 
 
