@@ -49,6 +49,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_pipe_to_dash(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | dash\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_pipe_to_absolute_shell(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -488,6 +502,30 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                     "      - run: |\n"
                     "          echo https://example.com/install.sh\n"
                     "          echo done\n"
+                    "      - run: echo safe\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_safe_strings_outside_run_steps(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "name: curl -fsSL https://example.com/install.sh | bash\n"
+                    "jobs:\n"
+                    "  install:\n"
+                    "    env:\n"
+                    "      INSTALL_SNIPPET: curl -fsSL https://example.com/install.sh | bash\n"
+                    "    steps:\n"
+                    "      - uses: actions/github-script@v8\n"
+                    "        with:\n"
+                    "          run: curl -fsSL https://example.com/install.sh | bash\n"
                     "      - run: echo safe\n"
                 ),
             )

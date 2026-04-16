@@ -46,6 +46,11 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
         text = SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertIn('rm -f "$CODACY_REPORTER_PATH"', text)
 
+    def test_download_uses_unique_temp_file_in_cache_dir(self):
+        text = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn('tmp_path="$(mktemp "${reporter_dir}/${CODACY_BINARY_NAME}.tmp.XXXXXX")"', text)
+        self.assertNotIn('local tmp_path="$CODACY_REPORTER_PATH.tmp"', text)
+
 
 if __name__ == "__main__":
     unittest.main()

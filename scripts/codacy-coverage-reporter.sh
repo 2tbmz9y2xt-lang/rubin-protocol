@@ -80,7 +80,7 @@ ensure_reporter() {
   local cache_root="${CODACY_REPORTER_TMP_FOLDER:-${HOME:-${TMPDIR:-/tmp}}/.cache/codacy/coverage-reporter}"
   local reporter_dir="$cache_root/$reporter_version"
   CODACY_REPORTER_PATH="$reporter_dir/$CODACY_BINARY_NAME"
-  local tmp_path="$CODACY_REPORTER_PATH.tmp"
+  local tmp_path
   local reporter_url="https://artifacts.codacy.com/bin/codacy-coverage-reporter/$reporter_version/$CODACY_BINARY_NAME"
   local verify_rc=0
 
@@ -98,7 +98,7 @@ ensure_reporter() {
     rm -f "$CODACY_REPORTER_PATH"
   fi
 
-  rm -f "$tmp_path"
+  tmp_path="$(mktemp "${reporter_dir}/${CODACY_BINARY_NAME}.tmp.XXXXXX")"
   download_file "$reporter_url" "$tmp_path"
   if verify_sha512 "$tmp_path" "$CODACY_SHA512"; then
     verify_rc=0
