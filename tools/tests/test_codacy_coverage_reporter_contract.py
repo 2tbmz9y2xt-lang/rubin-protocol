@@ -28,6 +28,10 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
         version = extract_var("PINNED_VERSION")
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")
 
+    def test_cache_root_falls_back_when_home_is_unset(self):
+        text = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn('${CODACY_REPORTER_TMP_FOLDER:-${HOME:-${TMPDIR:-/tmp}}/.cache/codacy/coverage-reporter}', text)
+
 
 if __name__ == "__main__":
     unittest.main()

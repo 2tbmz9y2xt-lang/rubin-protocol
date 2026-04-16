@@ -6,11 +6,16 @@ import re
 import sys
 from pathlib import Path
 
+SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|sh)"
+ENV_LAUNCHER_PATTERN = r"(?:/(?:usr/)?bin/)?env(?:\s+\S+)*\s+(?:bash|sh)"
+SHELL_LAUNCHER_PATTERN = rf"(?:sudo\s+)?(?:{ENV_LAUNCHER_PATTERN}|{SHELL_EXECUTABLE_PATTERN})"
+YAML_BOUNDARY_PATTERN = re.compile(r"^(?:-\s+|[A-Za-z0-9_-]+:(?:\s|$))")
+
 REMOTE_SHELL_PATTERNS = (
-    ("remote shell pipe", re.compile(r"\b(?:curl|wget)\b.*\|\s*(?:sudo\s+)?(?:env\s+)?(?:bash|sh)\b", re.IGNORECASE)),
+    ("remote shell pipe", re.compile(rf"\b(?:curl|wget)\b.*\|\s*{SHELL_LAUNCHER_PATTERN}\b", re.IGNORECASE)),
     (
         "remote shell process substitution",
-        re.compile(r"(?:^|[^\w])(?:bash|sh|source|\.)\s*<\(\s*(?:curl|wget)\b", re.IGNORECASE),
+        re.compile(rf"(?:^|[^\w])(?:{SHELL_LAUNCHER_PATTERN}|source|\.)\s*<\(\s*(?:curl|wget)\b", re.IGNORECASE),
     ),
     (
         "remote shell eval command substitution",
@@ -36,12 +41,25 @@ def render_path(path: Path, repo_root: Path | None = None) -> str:
 def command_windows(lines: list[str], start: int) -> list[tuple[int, str]]:
     windows: list[tuple[int, str]] = []
     parts: list[str] = []
-    for idx in range(start, min(len(lines), start + 4)):
-        stripped = lines[idx].strip()
-        if not stripped or stripped.startswith("#"):
+    boundary_indent: int | None = None
+    for idx in range(start, len(lines)):
+        raw = lines[idx]
+        stripped = raw.strip()
+        if not stripped:
             if parts:
+                if parts[-1].endswith("|"):
+                    continue
                 break
             continue
+        if stripped.startswith("#"):
+            if parts:
+                continue
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if boundary_indent is None:
+            boundary_indent = indent
+        elif indent <= boundary_indent and YAML_BOUNDARY_PATTERN.match(raw.lstrip()):
+            break
         parts.append(stripped.rstrip("\\").strip())
         windows.append((idx, " ".join(parts)))
     return windows
@@ -64,7 +82,7 @@ def find_violations(path: Path) -> list[str]:
         for end_idx, window in command_windows(lines, line_no):
             for label, pattern in REMOTE_SHELL_PATTERNS:
                 if pattern.search(window):
-                    violations.append(f"{rendered_path}:{line_no + 1}: {label}: {window}")
+                    violations.append(f"{rendered_path}:{end_idx + 1}: {label}: {window}")
                     matched_end = end_idx
                     break
             else:

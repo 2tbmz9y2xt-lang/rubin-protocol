@@ -74,7 +74,7 @@ ensure_reporter() {
 
   platform_config
 
-  local cache_root="${CODACY_REPORTER_TMP_FOLDER:-$HOME/.cache/codacy/coverage-reporter}"
+  local cache_root="${CODACY_REPORTER_TMP_FOLDER:-${HOME:-${TMPDIR:-/tmp}}/.cache/codacy/coverage-reporter}"
   local reporter_dir="$cache_root/$reporter_version"
   CODACY_REPORTER_PATH="$reporter_dir/$CODACY_BINARY_NAME"
   local tmp_path="$CODACY_REPORTER_PATH.tmp"
