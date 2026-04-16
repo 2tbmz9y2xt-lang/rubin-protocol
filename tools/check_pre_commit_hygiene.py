@@ -47,28 +47,36 @@ def get_staged_files() -> list[str]:
     return [f for f in r.stdout.splitlines() if f.strip()]
 
 
+_BASE_REF_CANDIDATES = ("origin/main", "upstream/main", "main", "master")
+
+
 def get_changed_files() -> list[str]:
-    """All modified/added files vs origin/main."""
-    base_result = run(["git", "merge-base", "origin/main", "HEAD"])
-    if base_result.returncode != 0:
-        print(
-            f"⚠ git merge-base failed (rc={base_result.returncode}) — fail closed: "
-            f"{(base_result.stderr or '').strip()}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    base = base_result.stdout.strip()
-    if not base:
-        print("⚠ git merge-base returned empty — fail closed", file=sys.stderr)
-        sys.exit(2)
-    r = run(["git", "diff", "--name-only", f"{base}...HEAD"])
-    if r.returncode != 0:
-        print(
-            f"⚠ git diff failed (rc={r.returncode}) — fail closed: {(r.stderr or '').strip()}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    return [f for f in r.stdout.splitlines() if f.strip()]
+    """All modified/added files vs the project's base branch.
+
+    Tries common base refs in order; falls back to staged-only mode (with
+    a loud warning) only when no candidate ref is available locally.
+    """
+    last_err = ""
+    for ref in _BASE_REF_CANDIDATES:
+        base_result = run(["git", "merge-base", ref, "HEAD"])
+        if base_result.returncode == 0 and base_result.stdout.strip():
+            base = base_result.stdout.strip()
+            r = run(["git", "diff", "--name-only", f"{base}...HEAD"])
+            if r.returncode != 0:
+                print(
+                    f"⚠ git diff failed (rc={r.returncode}) — fail closed: "
+                    f"{(r.stderr or '').strip()}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            return [f for f in r.stdout.splitlines() if f.strip()]
+        last_err = (base_result.stderr or "").strip()
+    print(
+        f"⚠ no base ref found ({', '.join(_BASE_REF_CANDIDATES)}); "
+        f"falling back to staged files. Last git error: {last_err}",
+        file=sys.stderr,
+    )
+    return get_staged_files()
 
 
 # ── Check 1: Bot thread IDs in code ──────────────────────────────────
