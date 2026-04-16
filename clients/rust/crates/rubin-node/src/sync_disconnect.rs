@@ -75,9 +75,17 @@ impl SyncEngine {
                 } else {
                     None
                 };
-                self.chain_state = rollback.chain_state;
-                self.tip_timestamp = rollback.tip_timestamp;
-                self.best_known_height = rollback.best_known_height;
+                // Only restore in-memory state if canonical rollback succeeded.
+                // If canonical is still truncated and we restore chain_state to
+                // the pre-disconnect tip, the next operation hits the
+                // mismatch guard at the top of disconnect_tip.  Leaving
+                // chain_state in its post-disconnect_block state keeps it
+                // aligned with the truncated canonical (both at parent tip).
+                if canonical_rb.is_none() {
+                    self.chain_state = rollback.chain_state;
+                    self.tip_timestamp = rollback.tip_timestamp;
+                    self.best_known_height = rollback.best_known_height;
+                }
                 return Err(SyncEngine::err_with_rollback(err, canonical_rb));
             }
         }
@@ -373,6 +381,65 @@ mod tests {
         assert_eq!(
             engine.chain_state.tip_hash, tip_before.1,
             "chain_state.tip_hash not restored after save failure"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn disconnect_tip_save_and_canonical_rollback_both_fail() {
+        // Double-failure case: save() fails AND rollback_canonical() fails.
+        // chain_state must NOT be restored to pre-disconnect tip — that would
+        // create a mismatch with the truncated canonical.  Engine remains in
+        // post-disconnect state (parent tip, canonical missing original tip).
+        let (mut engine, dir) = engine_with_store("rubin-disc-double-fail");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine.apply_block(&genesis, None).expect("genesis");
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        engine.apply_block(&block1, None).expect("block 1");
+
+        // Detach chain_state path so save() fails; arm rollback inject so
+        // canonical restore also fails after truncate succeeds.
+        engine.cfg.chain_state_path = Some(std::path::PathBuf::from("/nonexistent/dir/state.bin"));
+        engine.block_store.as_mut().unwrap().force_rollback_error = true;
+
+        let err = engine.disconnect_tip().unwrap_err();
+        // Composite error must mention both failures.
+        assert!(
+            err.contains("rollback failed"),
+            "expected rollback failure note, got: {err}"
+        );
+        assert!(
+            err.contains("canonical restore failed"),
+            "expected canonical restore failure note, got: {err}"
+        );
+
+        // Disarm so cleanup succeeds.
+        engine.block_store.as_mut().unwrap().force_rollback_error = false;
+
+        // Canonical was truncated and rollback failed — tip is now genesis.
+        let tip = engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .tip()
+            .expect("tip")
+            .expect("some");
+        assert_eq!(
+            tip.0, 0,
+            "canonical should be at genesis after failed rollback"
+        );
+        assert_eq!(tip.1, genesis_hash, "canonical tip should be genesis hash");
+
+        // chain_state must align with truncated canonical (not pre-disconnect).
+        assert_eq!(
+            engine.chain_state.height, 0,
+            "chain_state must NOT be restored when canonical rollback failed"
+        );
+        assert_eq!(
+            engine.chain_state.tip_hash, genesis_hash,
+            "chain_state tip must align with truncated canonical (genesis)"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");

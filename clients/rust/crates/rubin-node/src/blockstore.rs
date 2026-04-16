@@ -24,6 +24,9 @@ pub struct BlockStore {
     /// Test-only: force `truncate_canonical` to return an error.
     #[cfg(test)]
     pub force_truncate_error: bool,
+    /// Test-only: force `rollback_canonical` to return an error.
+    #[cfg(test)]
+    pub force_rollback_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +64,8 @@ impl BlockStore {
             index,
             #[cfg(test)]
             force_truncate_error: false,
+            #[cfg(test)]
+            force_rollback_error: false,
         })
     }
 
@@ -331,6 +336,10 @@ impl BlockStore {
         base_len: usize,
         suffix: Vec<String>,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        if self.force_rollback_error {
+            return Err("forced rollback error (test inject)".into());
+        }
         let mut restored = Vec::with_capacity(base_len + suffix.len());
         restored
             .extend_from_slice(&self.index.canonical[..base_len.min(self.index.canonical.len())]);
