@@ -756,7 +756,38 @@ impl SyncEngine {
         for offset in 0..window_len {
             let height = next_height - 1 - offset;
             let Some(hash) = block_store.canonical_hash(height)? else {
-                return Err("missing canonical header for timestamp context".to_string());
+                return Err(format!(
+                    "missing canonical hash at height {height} for timestamp context (next_height={next_height})"
+                ));
+            };
+            let header_bytes = block_store.get_header_by_hash(hash)?;
+            let header = parse_block_header_bytes(&header_bytes).map_err(|e| e.to_string())?;
+            out.push(header.timestamp);
+        }
+        Ok(Some(out))
+    }
+
+    /// Derive prev_timestamps for a given `next_height` from the blockstore.
+    /// Used by the reorg preview loop which needs timestamps at arbitrary
+    /// heights (not just `self.chain_state.height + 1`).
+    pub(crate) fn prev_timestamps_for_height(
+        &self,
+        next_height: u64,
+    ) -> Result<Option<Vec<u64>>, String> {
+        if next_height == 0 {
+            return Ok(None);
+        }
+        let Some(block_store) = self.block_store.as_ref() else {
+            return Err("sync engine missing blockstore for timestamp context".to_string());
+        };
+        let window_len = next_height.min(11);
+        let mut out = Vec::with_capacity(window_len as usize);
+        for offset in 0..window_len {
+            let height = next_height - 1 - offset;
+            let Some(hash) = block_store.canonical_hash(height)? else {
+                return Err(format!(
+                    "missing canonical hash at height {height} for timestamp context (next_height={next_height})"
+                ));
             };
             let header_bytes = block_store.get_header_by_hash(hash)?;
             let header = parse_block_header_bytes(&header_bytes).map_err(|e| e.to_string())?;
