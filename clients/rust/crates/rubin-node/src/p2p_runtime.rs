@@ -635,13 +635,12 @@ impl PeerSession {
         let mut requests = Vec::new();
         for vector in vectors {
             match vector.kind {
-                MSG_BLOCK => {
+                MSG_BLOCK
                     if !sync_engine
                         .has_block(vector.hash)
-                        .map_err(io::Error::other)?
-                    {
-                        requests.push(vector);
-                    }
+                        .map_err(io::Error::other)? =>
+                {
+                    requests.push(vector);
                 }
                 MSG_TX => {
                     if let Some(rs) = relay_state {

@@ -8,7 +8,9 @@ from pathlib import Path
 
 SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|sh)"
 ENV_LAUNCHER_PATTERN = r"(?:/(?:usr/)?bin/)?env(?:\s+\S+)*\s+(?:bash|sh)"
-SHELL_LAUNCHER_PATTERN = rf"(?:sudo\s+)?(?:{ENV_LAUNCHER_PATTERN}|{SHELL_EXECUTABLE_PATTERN})"
+SUDO_OPTION_PATTERN = r"(?:--?[A-Za-z][\w-]*(?:[= ]\S+)?)"
+SUDO_PREFIX_PATTERN = rf"(?:sudo(?:\s+{SUDO_OPTION_PATTERN})*\s+)?"
+SHELL_LAUNCHER_PATTERN = rf"{SUDO_PREFIX_PATTERN}(?:{ENV_LAUNCHER_PATTERN}|{SHELL_EXECUTABLE_PATTERN})"
 YAML_BOUNDARY_PATTERN = re.compile(r"^(?:-\s+|[A-Za-z0-9_-]+:(?:\s|$))")
 
 REMOTE_SHELL_PATTERNS = (
