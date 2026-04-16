@@ -22,6 +22,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUST_DIR = REPO_ROOT / "clients" / "rust"
 
+_PATH_RE = re.compile(
+    r"/(?:Users|home|root|workspace|var/folders|tmp|opt/homebrew|private|runner/work)/[^\s\"']+"
+)
+
+
+def _sanitize_paths(text: str) -> str:
+    """Replace absolute filesystem paths with <path> placeholder."""
+    return _PATH_RE.sub("<path>", text)
+
 
 def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd or REPO_ROOT)
@@ -38,11 +47,17 @@ def get_staged_files() -> list[str]:
 def get_changed_files() -> list[str]:
     """All modified/added files vs origin/main."""
     base_result = run(["git", "merge-base", "origin/main", "HEAD"])
+    if base_result.returncode != 0:
+        print(f"⚠ git merge-base failed (rc={base_result.returncode}) — fail closed", file=sys.stderr)
+        sys.exit(2)
     base = base_result.stdout.strip()
     if not base:
-        print("⚠ Could not determine merge-base with origin/main — falling back to staged files.", file=sys.stderr)
-        return get_staged_files()
+        print("⚠ git merge-base returned empty — fail closed", file=sys.stderr)
+        sys.exit(2)
     r = run(["git", "diff", "--name-only", f"{base}...HEAD"])
+    if r.returncode != 0:
+        print(f"⚠ git diff failed (rc={r.returncode}) — fail closed", file=sys.stderr)
+        sys.exit(2)
     return [f for f in r.stdout.splitlines() if f.strip()]
 
 
@@ -63,7 +78,8 @@ def check_bot_thread_ids(files: list[str]) -> list[str]:
             continue
         for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
             if BOT_THREAD_RE.search(line):
-                violations.append(f"{f}:{i}: bot thread ID in code: {line.strip()[:80]}")
+                snippet = _sanitize_paths(line.strip())[:80]
+                violations.append(f"{f}:{i}: bot thread ID in code: {snippet}")
     return violations
 
 
@@ -87,12 +103,17 @@ def check_test_helpers_in_production(files: list[str]) -> list[str]:
         content = path.read_text(errors="replace")
         lines = content.splitlines()
         # Rust: only check lines BEFORE the final `#[cfg(test)] mod tests`
-        # block.  Inline `#[cfg(test)]` on a single function is rare in
-        # this repo; the standard pattern is a trailing test module.
+        # block.  Standard pattern is a trailing test module; also handle
+        # `#[cfg(test)] mod tests {` on a single line.
         prod_end = len(lines)
         if f.endswith(".rs"):
             for idx in range(len(lines) - 1, -1, -1):
                 if "#[cfg(test)]" in lines[idx]:
+                    # Same line: `#[cfg(test)] mod tests {`
+                    if "mod tests" in lines[idx] or "mod test" in lines[idx]:
+                        prod_end = idx
+                        break
+                    # Within next 2 lines
                     for nxt in range(idx + 1, min(idx + 3, len(lines))):
                         if "mod tests" in lines[nxt] or "mod test" in lines[nxt]:
                             prod_end = idx
@@ -101,19 +122,12 @@ def check_test_helpers_in_production(files: list[str]) -> list[str]:
                         break  # found mod tests block
         for i, line in enumerate(lines[:prod_end], 1):
             if TEST_HELPER_RE.search(line):
-                violations.append(f"{f}:{i}: test helper in production: {line.strip()[:80]}")
+                snippet = _sanitize_paths(line.strip())[:80]
+                violations.append(f"{f}:{i}: test helper in production: {snippet}")
     return violations
 
 
 # ── Check 3: RUSTFLAGS=-D warnings ──────────────────────────────────
-
-_PATH_RE = re.compile(r"/(?:Users|home|var/folders|tmp|opt/homebrew|private)/[^\s\"']+")
-
-
-def _sanitize_paths(text: str) -> str:
-    """Replace absolute filesystem paths with <path> placeholder."""
-    return _PATH_RE.sub("<path>", text)
-
 
 def check_rust_warnings(files: list[str]) -> list[str]:
     """CI uses -D warnings. Local clippy may miss what CI catches."""
