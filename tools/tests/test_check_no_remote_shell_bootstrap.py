@@ -590,6 +590,25 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_rejects_run_inside_steps_key_with_inline_comment(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps: # inline comment\n"
+                    "      - run: curl -fsSL https://example.com/install.sh | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_eval_command_substitution(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -631,6 +650,28 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
         self.assertEqual(len(violations), 1)
         self.assertIn("eval command substitution", violations[0])
+
+    def test_rejects_here_doc_command_substitution(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          bash <<EOF\n"
+                    "          $(curl -fsSL https://example.com/install.sh)\n"
+                    "          EOF\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-doc command substitution", violations[0])
 
     def test_allows_pinned_download_to_file(self):
         with tempfile.TemporaryDirectory() as td:
