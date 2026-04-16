@@ -53,10 +53,17 @@ impl SyncEngine {
             .as_mut()
             .ok_or("sync engine has no blockstore")?;
         if let Err(err) = bs.truncate_canonical(rollback.canonical_len.saturating_sub(1)) {
-            return Err(SyncEngine::err_with_rollback(
-                err,
-                self.rollback_apply_block(rollback),
-            ));
+            // truncate_canonical failure is expected to leave the canonical
+            // index unchanged (atomic write + reload-on-failure in
+            // BlockStore::truncate_canonical), so restore the captured
+            // in-memory snapshot directly.  Going through rollback_apply_block
+            // would re-call truncate_canonical(rb.canonical_len) which can
+            // fail again under the same root cause and short-circuit before
+            // restoring chain_state, leaving the engine desynced.
+            self.chain_state = rollback.chain_state;
+            self.tip_timestamp = rollback.tip_timestamp;
+            self.best_known_height = rollback.best_known_height;
+            return Err(err);
         }
 
         // Test-only seam to exercise the otherwise-unreachable
@@ -302,11 +309,13 @@ mod tests {
 
     #[test]
     fn disconnect_tip_truncate_error_propagates_with_rollback() {
-        // Both the initial truncate AND the rollback_apply_block phase-1
-        // truncate fail (force_truncate_error stays armed for both calls),
-        // so the composite error reports both failures.  Engine state ends
-        // up at post-disconnect_block (chain_state.height=0) while canonical
-        // is still untouched ([genesis, block1]) — verified after disarm.
+        // truncate_canonical fails (force_truncate_error inject); per
+        // BlockStore::truncate_canonical's atomic-write-and-reload contract
+        // the canonical index stays unchanged on disk.  disconnect_tip
+        // restores the captured in-memory snapshot directly (without going
+        // through rollback_apply_block, whose phase-1 truncate would
+        // re-fail and short-circuit).  After the failure both canonical and
+        // in-memory state are at the pre-disconnect tip — engine usable.
         let (mut engine, dir) = engine_with_store("rubin-disc-trunc-err");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
@@ -331,19 +340,12 @@ mod tests {
             err.contains("forced truncate error"),
             "expected forced truncate error, got: {err}"
         );
-        // Composite error must surface BOTH the main error and the
-        // rollback-phase failure (rollback_apply_block also tried to
-        // truncate and got the same injected error).
-        assert!(
-            err.contains("rollback failed"),
-            "expected rollback failure note, got: {err}"
-        );
 
         // Disarm so cleanup succeeds.
         engine.block_store.as_mut().unwrap().force_truncate_error = false;
 
-        // Canonical never mutated — both truncate calls failed before write.
-        // Verify both height AND hash, not just length.
+        // Canonical never mutated — inject returns before the in-memory
+        // truncate happens.  Verify both height AND hash, not just length.
         let tip = engine
             .block_store
             .as_ref()
@@ -353,24 +355,26 @@ mod tests {
             .expect("some");
         assert_eq!(
             tip.0, tip_before.0,
-            "canonical height should be unchanged after both truncate failures"
+            "canonical height should be unchanged after truncate failure"
         );
         assert_eq!(
             tip.1, tip_before.1,
-            "canonical tip hash should be unchanged after both truncate failures"
+            "canonical tip hash should be unchanged after truncate failure"
         );
 
-        // chain_state was mutated by disconnect_block (height 1 → 0), and
-        // rollback_apply_block phase-1 truncate failed before phase-2 ran,
-        // so the in-memory state remains in the post-disconnect_block state.
-        // Document this asymmetry: canonical at block1, chain_state at genesis.
-        assert_eq!(
-            engine.chain_state.height, 0,
-            "chain_state.height should be 0 (rollback aborted at phase 1)"
+        // In-memory chain_state must be restored to the pre-disconnect tip
+        // so the engine stays consistent with the unchanged canonical index.
+        assert!(
+            engine.chain_state.has_tip,
+            "chain_state.has_tip should be restored after truncate failure"
         );
         assert_eq!(
-            engine.chain_state.tip_hash, genesis_hash,
-            "chain_state.tip_hash should be genesis (rollback aborted at phase 1)"
+            engine.chain_state.height, tip_before.0,
+            "chain_state.height should be restored to pre-disconnect tip"
+        );
+        assert_eq!(
+            engine.chain_state.tip_hash, tip_before.1,
+            "chain_state.tip_hash should be restored to pre-disconnect tip"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
