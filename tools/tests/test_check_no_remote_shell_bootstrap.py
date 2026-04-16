@@ -138,6 +138,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_pipe_to_sudo_shell_after_end_of_options(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | sudo -- bash\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_pipe_to_shell_across_lines(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -225,6 +239,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                     "    steps:\n"
                     "      - run: sudo --preserve-env /bin/bash <(curl -fsSL https://coverage.codacy.com/get.sh) report\n"
                 ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("process substitution", violations[0])
+
+    def test_rejects_process_substitution_with_sudo_end_of_options(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  cov:\n    steps:\n      - run: sudo -- bash <(curl -fsSL https://coverage.codacy.com/get.sh) report\n",
             )
 
             violations = m.find_violations(workflow)

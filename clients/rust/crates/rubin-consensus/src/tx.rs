@@ -332,14 +332,15 @@ pub(crate) fn parse_tx_without_hashes(b: &[u8]) -> Result<(Tx, usize, usize), Tx
                     ));
                 }
             }
-            SUITE_ID_ML_DSA_87
+            SUITE_ID_ML_DSA_87 => {
                 if !(pub_len_u64 == ML_DSA_87_PUBKEY_BYTES
-                    && sig_len_u64 == ML_DSA_87_SIG_BYTES + 1) =>
-            {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigNoncanonical,
-                    "non-canonical ML-DSA witness item lengths",
-                ));
+                    && sig_len_u64 == ML_DSA_87_SIG_BYTES + 1)
+                {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrSigNoncanonical,
+                        "non-canonical ML-DSA witness item lengths",
+                    ));
+                }
             }
             _ => {}
         }

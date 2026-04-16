@@ -179,7 +179,10 @@ impl BlockStore {
         let mut out = Vec::with_capacity(limit);
         let mut step = 1u64;
         let mut appended = 0usize;
-        while let Some(hash) = self.canonical_hash(tip_height)? {
+        loop {
+            let Some(hash) = self.canonical_hash(tip_height)? else {
+                break;
+            };
             out.push(hash);
             appended += 1;
             if appended >= limit || tip_height == 0 {
