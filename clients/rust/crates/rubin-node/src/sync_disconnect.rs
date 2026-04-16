@@ -285,6 +285,15 @@ mod tests {
         let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
         engine.apply_block(&block1, None).expect("block 1");
 
+        // Capture pre-disconnect state for post-error verification.
+        let tip_before = engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .tip()
+            .expect("tip")
+            .expect("some");
+
         // Inject forced truncate error.
         engine.block_store.as_mut().unwrap().force_truncate_error = true;
 
@@ -304,7 +313,8 @@ mod tests {
         // Disarm so cleanup succeeds.
         engine.block_store.as_mut().unwrap().force_truncate_error = false;
 
-        // Canonical never mutated (both truncate calls failed before write).
+        // Canonical never mutated — both truncate calls failed before write.
+        // Verify both height AND hash, not just length.
         let tip = engine
             .block_store
             .as_ref()
@@ -313,8 +323,25 @@ mod tests {
             .expect("tip")
             .expect("some");
         assert_eq!(
-            tip.0, 1,
-            "canonical should still have block1 after both truncate failures"
+            tip.0, tip_before.0,
+            "canonical height should be unchanged after both truncate failures"
+        );
+        assert_eq!(
+            tip.1, tip_before.1,
+            "canonical tip hash should be unchanged after both truncate failures"
+        );
+
+        // chain_state was mutated by disconnect_block (height 1 → 0), and
+        // rollback_apply_block phase-1 truncate failed before phase-2 ran,
+        // so the in-memory state remains in the post-disconnect_block state.
+        // Document this asymmetry: canonical at block1, chain_state at genesis.
+        assert_eq!(
+            engine.chain_state.height, 0,
+            "chain_state.height should be 0 (rollback aborted at phase 1)"
+        );
+        assert_eq!(
+            engine.chain_state.tip_hash, genesis_hash,
+            "chain_state.tip_hash should be genesis (rollback aborted at phase 1)"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
