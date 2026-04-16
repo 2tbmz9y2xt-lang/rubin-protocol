@@ -56,8 +56,13 @@ _BASE_REF_CANDIDATES = ("origin/main", "upstream/main", "main", "master")
 def get_changed_files() -> list[str]:
     """All changed (added/modified/deleted) files vs the project's base branch.
 
-    `git diff --name-only` includes deletions; downstream check_* helpers
-    individually skip files that no longer exist on disk.
+    Union of:
+      - committed diff `base...HEAD` (commit-to-commit, ignores index)
+      - staged diff (`--cached`, includes index)
+      - unstaged working-tree diff
+    so first-commit / pre-commit / amend workflows all surface their
+    changes.  `git diff --name-only` includes deletions; downstream
+    check_* helpers skip paths that no longer exist on disk.
 
     Tries common base refs in order; falls back to staged-only mode (with
     a loud warning) only when no candidate ref is available locally.
@@ -67,15 +72,27 @@ def get_changed_files() -> list[str]:
         base_result = run(["git", "merge-base", ref, "HEAD"])
         if base_result.returncode == 0 and base_result.stdout.strip():
             base = base_result.stdout.strip()
-            r = run(["git", "diff", "--name-only", f"{base}...HEAD"])
-            if r.returncode != 0:
-                print(
-                    f"⚠ git diff failed (rc={r.returncode}) — fail closed: "
-                    f"{(r.stderr or '').strip()}",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            return [f for f in r.stdout.splitlines() if f.strip()]
+            files: list[str] = []
+            seen: set[str] = set()
+            for diff_args in (
+                ["git", "diff", "--name-only", f"{base}...HEAD"],
+                ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD"],
+                ["git", "diff", "--name-only", "--diff-filter=ACMRD"],
+            ):
+                r = run(diff_args)
+                if r.returncode != 0:
+                    print(
+                        f"⚠ git {' '.join(diff_args[1:])} failed (rc={r.returncode}) "
+                        f"— fail closed: {(r.stderr or '').strip()}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                for line in r.stdout.splitlines():
+                    f = line.strip()
+                    if f and f not in seen:
+                        seen.add(f)
+                        files.append(f)
+            return files
         last_err = (base_result.stderr or "").strip()
     print(
         f"⚠ no base ref found ({', '.join(_BASE_REF_CANDIDATES)}); "
@@ -281,11 +298,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     files = get_staged_files() if args.staged_only else get_changed_files()
-    if not files:
-        print("No changed files to check.")
-        return 0
 
     all_violations: list[str] = []
+
+    # Run amend-completeness FIRST so unstaged working-tree changes are
+    # surfaced even if the file-set derivation came back empty.
+    v = check_amend_completeness(args.staged_only)
+    if v:
+        print(f"\n❌ Unstaged changes after amend ({len(v)}):")
+        for line in v:
+            print(f"  {line}")
+        all_violations.extend(v)
+
+    if not files:
+        if all_violations:
+            print(f"\n🛑 {len(all_violations)} violation(s) found. Fix before commit.")
+            return 1
+        print("No changed files to check.")
+        return 0
 
     # Fast checks
     v = check_bot_thread_ids(files)
@@ -298,13 +328,6 @@ def main(argv: list[str] | None = None) -> int:
     v = check_test_helpers_in_production(files)
     if v:
         print(f"\n❌ Test helpers in production ({len(v)}):")
-        for line in v:
-            print(f"  {line}")
-        all_violations.extend(v)
-
-    v = check_amend_completeness(args.staged_only)
-    if v:
-        print(f"\n❌ Unstaged changes after amend ({len(v)}):")
         for line in v:
             print(f"  {line}")
         all_violations.extend(v)
