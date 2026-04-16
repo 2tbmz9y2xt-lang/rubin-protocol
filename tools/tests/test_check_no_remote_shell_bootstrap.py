@@ -901,6 +901,27 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_reports_matching_line_for_multiline_steps_flow_sequence(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps: [\n"
+                    "      { name: Install },\n"
+                    "      { run: curl -fsSL https://example.com/install.sh | bash },\n"
+                    "    ]\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertTrue(violations[0].startswith(".github/workflows/bad.yml:5:"))
+
     def test_rejects_eval_command_substitution(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)

@@ -202,12 +202,14 @@ def extract_flow_mapping_run(mapping_text: str) -> str | None:
     return None
 
 
-def extract_flow_sequence_mappings(sequence_text: str) -> list[str]:
-    mappings: list[str] = []
+def extract_flow_sequence_mappings(sequence_text: str, start_line_no: int) -> list[tuple[int, str]]:
+    mappings: list[tuple[int, str]] = []
     current: list[str] = []
     depth = 0
     quote: str | None = None
     escape = False
+    line_no = start_line_no
+    mapping_line_no = start_line_no
     for ch in sequence_text:
         if quote is not None:
             current.append(ch)
@@ -217,6 +219,8 @@ def extract_flow_sequence_mappings(sequence_text: str) -> list[str]:
                 escape = True
             elif ch == quote:
                 quote = None
+            if ch == "\n":
+                line_no += 1
             continue
         if ch in {"'", '"'}:
             quote = ch
@@ -227,6 +231,7 @@ def extract_flow_sequence_mappings(sequence_text: str) -> list[str]:
             depth += 1
             if depth == 1:
                 current = []
+                mapping_line_no = line_no
             else:
                 current.append(ch)
             continue
@@ -235,13 +240,15 @@ def extract_flow_sequence_mappings(sequence_text: str) -> list[str]:
                 continue
             depth -= 1
             if depth == 0:
-                mappings.append("".join(current))
+                mappings.append((mapping_line_no, "".join(current)))
                 current = []
             else:
                 current.append(ch)
             continue
         if depth > 0:
             current.append(ch)
+        if ch == "\n":
+            line_no += 1
     return mappings
 
 
@@ -355,10 +362,10 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
         if flow_steps_match is not None:
             start_line_no = idx + 1
             sequence_text, idx = collect_flow_sequence(lines, idx, flow_steps_match.group(1))
-            for mapping_text in extract_flow_sequence_mappings(sequence_text):
+            for mapping_line_no, mapping_text in extract_flow_sequence_mappings(sequence_text, start_line_no):
                 content = extract_flow_mapping_run(mapping_text)
                 if content:
-                    entries.append([(start_line_no, content)])
+                    entries.append([(mapping_line_no, content)])
             continue
         if not STEPS_KEY_RE.match(raw):
             idx += 1
