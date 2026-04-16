@@ -42,6 +42,10 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
         self.assertIn('actual="$(compute_sha512 "$path")" || return 2', text)
         self.assertIn('if [[ $verify_rc -eq 2 ]]; then', text)
 
+    def test_mismatched_cached_binary_is_removed_before_redownload(self):
+        text = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn('rm -f "$CODACY_REPORTER_PATH"', text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,6 +95,7 @@ ensure_reporter() {
     if [[ $verify_rc -eq 2 ]]; then
       return 1
     fi
+    rm -f "$CODACY_REPORTER_PATH"
   fi
 
   rm -f "$tmp_path"
