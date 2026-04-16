@@ -12,6 +12,7 @@ Exit codes: 0 = clean, 1 = violations found, 2 = usage error.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -112,23 +113,30 @@ def check_rust_warnings(files: list[str]) -> list[str]:
     if not rs_files:
         return []
 
+    cargo_args = ["cargo", "check", "-p", "rubin-node", "-p", "rubin-consensus"]
+    env = {**os.environ, "RUSTFLAGS": "-D warnings"}
+
     dev_env = REPO_ROOT / "scripts" / "dev-env.sh"
     if dev_env.exists():
-        cmd = [str(dev_env), "--", "bash", "-c",
-               "cd clients/rust && RUSTFLAGS='-D warnings' cargo check -p rubin-node -p rubin-consensus 2>&1"]
+        cmd = [str(dev_env), "--", *cargo_args]
     else:
-        cmd = ["bash", "-c",
-               "cd clients/rust && RUSTFLAGS='-D warnings' cargo check -p rubin-node -p rubin-consensus 2>&1"]
+        cmd = cargo_args
 
-    r = run(cmd, cwd=REPO_ROOT)
+    r = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=RUST_DIR,
+        env=env,
+    )
     if r.returncode != 0:
-        # Extract error lines
-        errors = [line for line in r.stdout.splitlines()
+        combined = (r.stdout or "") + (r.stderr or "")
+        errors = [line for line in combined.splitlines()
                   if "error[" in line or "error:" in line.lower()]
         if errors:
             # Strip file paths from cargo output for cleaner messages.
             return [f"RUSTFLAGS=-D warnings: {re.sub(r' --> .*$', '', e.strip())[:100]}" for e in errors[:5]]
-        raw = re.sub(r"^\s*-->.*$", "", (r.stdout or r.stderr or ""), flags=re.MULTILINE).strip()[:200]
+        raw = re.sub(r"^\s*-->.*$", "", combined, flags=re.MULTILINE).strip()[:200]
         return [f"RUSTFLAGS=-D warnings cargo check failed: {raw or '(no output)'}"]
     return []
 

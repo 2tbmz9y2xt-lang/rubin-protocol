@@ -59,20 +59,26 @@ impl SyncEngine {
 
         if let Some(path) = self.cfg.chain_state_path.as_ref() {
             if let Err(err) = self.chain_state.save(path) {
-                // Restore the truncated canonical entry so rollback_apply_block
-                // can succeed (truncate_canonical cannot extend).
-                if let Some(bs) = self.block_store.as_mut() {
-                    // Best-effort: if this also fails, err_with_rollback
-                    // will report the compound failure.
-                    let _ = bs.rollback_canonical(
+                // Restore canonical tip directly, then restore in-memory
+                // state inline.  Going through rollback_apply_block here
+                // would trigger a second canonical write (light-rollback
+                // truncate_canonical(rb.canonical_len)) on an already
+                // restored index, which can fail independently and leave
+                // chain_state un-rolled-back.
+                let canonical_rb = if let Some(bs) = self.block_store.as_mut() {
+                    bs.rollback_canonical(
                         rollback.canonical_len.saturating_sub(1),
                         vec![hex::encode(tip_hash)],
-                    );
-                }
-                return Err(SyncEngine::err_with_rollback(
-                    err,
-                    self.rollback_apply_block(rollback),
-                ));
+                    )
+                    .err()
+                    .map(|e| format!("canonical restore failed: {e}"))
+                } else {
+                    None
+                };
+                self.chain_state = rollback.chain_state;
+                self.tip_timestamp = rollback.tip_timestamp;
+                self.best_known_height = rollback.best_known_height;
+                return Err(SyncEngine::err_with_rollback(err, canonical_rb));
             }
         }
 
@@ -347,6 +353,17 @@ mod tests {
         assert_eq!(
             tip_after.0, tip_before.0,
             "canonical index should be restored after save failure"
+        );
+
+        // In-memory chain_state must also be restored to pre-disconnect tip.
+        assert!(engine.chain_state.has_tip, "chain_state.has_tip not restored");
+        assert_eq!(
+            engine.chain_state.height, tip_before.0,
+            "chain_state.height not restored after save failure"
+        );
+        assert_eq!(
+            engine.chain_state.tip_hash, tip_before.1,
+            "chain_state.tip_hash not restored after save failure"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
