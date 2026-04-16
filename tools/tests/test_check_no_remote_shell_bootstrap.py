@@ -559,6 +559,42 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("here-string command substitution", violations[0])
 
+    def test_rejects_here_string_command_substitution_with_shell_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash -e <<< "$(curl -fsSL https://example.com/install.sh)"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-string command substitution", violations[0])
+
+    def test_rejects_here_doc_command_substitution_with_shell_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          bash -e <<EOF\n"
+                    "          $(curl -fsSL https://example.com/install.sh)\n"
+                    "          EOF\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-doc command substitution", violations[0])
+
     def test_rejects_shell_c_command_substitution_after_prologue(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -724,6 +760,32 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                     "          run: curl -fsSL https://example.com/install.sh | bash\n"
                     "      - run: echo safe\n"
                 ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_pipe_to_command_dash_v_probe(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                "jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | command -v bash\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_pipe_to_command_dash_v_probe_uppercase(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                "jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | command -V bash\n",
             )
 
             violations = m.find_violations(workflow)

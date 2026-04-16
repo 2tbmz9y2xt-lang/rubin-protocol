@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|dash|sh)"
-COMMAND_PREFIX_PATTERN = r"command(?:\s+(?:--|-[A-Za-z]+))*\s+"
+COMMAND_PREFIX_PATTERN = r"command(?:\s+(?:--|-p))*\s+"
 ENV_ASSIGNMENT_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*=\S+"
 ENV_ASSIGNMENT_PREFIX_PATTERN = rf"(?:{ENV_ASSIGNMENT_PATTERN}\s+)+"
 SUDO_COMMAND_PATTERN = r"(?:/(?:usr/)?bin/)?sudo"
@@ -47,14 +47,14 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell here-string command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+<<<\s*[\"']?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+<<<\s*[\"']?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
     (
         "remote shell here-doc command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+<<-?\s*\S+.*(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+<<-?\s*\S+.*(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -306,7 +306,7 @@ def collect_flow_sequence(lines: list[str], start_idx: int, initial_text: str) -
         text = "\n" + lines[idx]
 
 
-def extract_step_run_entries(step_entries: list[tuple[int, str]], step_indent: int) -> list[list[tuple[int, str]]]:
+def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
     run_entries: list[list[tuple[int, str]]] = []
     first_line_no, first_raw = step_entries[0]
     flow_step_match = STEP_FLOW_MAPPING_RE.match(first_raw)
@@ -410,7 +410,7 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
                         break
                     step_entries.append((idx + 1, next_raw))
                     idx += 1
-                entries.extend(extract_step_run_entries(step_entries, step_indent))
+                entries.extend(extract_step_run_entries(step_entries))
                 continue
             idx += 1
     return entries
