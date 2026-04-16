@@ -32,6 +32,11 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
         text = SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertIn('${CODACY_REPORTER_TMP_FOLDER:-${HOME:-${TMPDIR:-/tmp}}/.cache/codacy/coverage-reporter}', text)
 
+    def test_wget_download_failures_are_reported_explicitly(self):
+        text = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn('if ! wget -q "$url" -O "$out"; then', text)
+        self.assertIn('echo "ERROR: wget failed to download $url" >&2', text)
+
 
 if __name__ == "__main__":
     unittest.main()

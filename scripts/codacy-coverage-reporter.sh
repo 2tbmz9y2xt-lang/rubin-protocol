@@ -14,7 +14,10 @@ download_file() {
     return 0
   fi
   if command -v wget >/dev/null 2>&1; then
-    wget -q "$url" -O "$out"
+    if ! wget -q "$url" -O "$out"; then
+      echo "ERROR: wget failed to download $url" >&2
+      return 1
+    fi
     return 0
   fi
   echo "ERROR: curl or wget required to download Codacy reporter" >&2
