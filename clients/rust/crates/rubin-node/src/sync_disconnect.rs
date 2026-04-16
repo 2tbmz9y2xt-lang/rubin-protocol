@@ -376,42 +376,18 @@ mod tests {
             .expect("some");
         assert_eq!(tip_before.0, 1);
 
-        // Make chainstate dir read-only so save (atomic write) fails.
-        // Blockstore truncate_canonical operates on its own dir which
-        // remains writable, so truncate succeeds before save fails.
-        let cs_dir = dir.join("chainstate");
-        std::fs::create_dir_all(&cs_dir).ok();
-        // Move chainstate file into its own subdir
-        let cs_path = crate::chainstate::chain_state_path(&dir);
-        let cs_subdir_path = cs_dir.join("state.bin");
-        if cs_path.exists() {
-            std::fs::rename(&cs_path, &cs_subdir_path).expect("move chainstate");
-        }
-        // Point engine at the subdir path
-        engine.cfg.chain_state_path = Some(cs_subdir_path.clone());
-        // Reload from new path
-        engine.chain_state.save(&cs_subdir_path).expect("re-save");
-        // Now make subdir readonly — atomic write creates temp in same dir, fails
-        let mut perms = std::fs::metadata(&cs_dir).expect("meta").permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&cs_dir, perms.clone()).expect("set readonly");
+        // Point chain_state_path under a regular file so save() fails
+        // deterministically when atomic write tries to create the temp
+        // file in the parent directory.  Blockstore truncate_canonical
+        // operates on its own writable dir, so truncate succeeds before
+        // save fails — exercising the rollback_canonical recovery path.
+        let cs_parent_file = dir.join("chainstate-parent-file");
+        std::fs::write(&cs_parent_file, b"not a directory").expect("create parent file");
+        engine.cfg.chain_state_path = Some(cs_parent_file.join("state.bin"));
 
         // disconnect_tip should fail (save error — platform-specific message).
         let err = engine.disconnect_tip().unwrap_err();
         assert!(!err.is_empty(), "expected save error, got empty string");
-
-        // Restore permissions for cleanup.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&cs_dir, std::fs::Permissions::from_mode(0o755))
-                .expect("restore perms");
-        }
-        #[cfg(not(unix))]
-        {
-            perms.set_readonly(false);
-            std::fs::set_permissions(&cs_dir, perms).expect("restore perms");
-        }
 
         // Canonical index should be restored — tip still at block1.
         let tip_after = engine
