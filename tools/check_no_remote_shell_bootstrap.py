@@ -27,7 +27,6 @@ RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
 BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
 STEP_FLOW_MAPPING_RE = re.compile(r"^\s*-\s*\{(.*)\}\s*$")
 STEPS_FLOW_SEQUENCE_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*\[(.*)\]\s*(?:#.*)?$')
-FLOW_MAPPING_ENTRY_RE = re.compile(r"\{([^{}]*)\}")
 FLOW_RUN_VALUE_RE = re.compile(r'(?:^|,)\s*["\']?run["\']?\s*:\s*(.+?)(?=,\s*["\']?[A-Za-z0-9_-]+["\']?\s*:|$)')
 FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
 
@@ -137,6 +136,49 @@ def extract_flow_mapping_run(mapping_text: str) -> str | None:
     return value or None
 
 
+def extract_flow_sequence_mappings(sequence_text: str) -> list[str]:
+    mappings: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote: str | None = None
+    escape = False
+    for ch in sequence_text:
+        if quote is not None:
+            current.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            if depth > 0:
+                current.append(ch)
+            continue
+        if ch == "{":
+            depth += 1
+            if depth == 1:
+                current = []
+            else:
+                current.append(ch)
+            continue
+        if ch == "}":
+            if depth == 0:
+                continue
+            depth -= 1
+            if depth == 0:
+                mappings.append("".join(current))
+                current = []
+            else:
+                current.append(ch)
+            continue
+        if depth > 0:
+            current.append(ch)
+    return mappings
+
+
 def extract_step_run_entries(step_entries: list[tuple[int, str]], step_indent: int) -> list[list[tuple[int, str]]]:
     run_entries: list[list[tuple[int, str]]] = []
     first_line_no, first_raw = step_entries[0]
@@ -206,7 +248,7 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
         indent = len(raw) - len(raw.lstrip())
         flow_steps_match = STEPS_FLOW_SEQUENCE_RE.match(raw)
         if flow_steps_match is not None:
-            for mapping_text in FLOW_MAPPING_ENTRY_RE.findall(flow_steps_match.group(1)):
+            for mapping_text in extract_flow_sequence_mappings(flow_steps_match.group(1)):
                 content = extract_flow_mapping_run(mapping_text)
                 if content:
                     entries.append([(idx + 1, content)])
