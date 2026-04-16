@@ -37,6 +37,11 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
         self.assertIn('if ! wget -q "$url" -O "$out"; then', text)
         self.assertIn('echo "ERROR: wget failed to download $url" >&2', text)
 
+    def test_sha_tool_failures_do_not_fall_through_as_checksum_mismatch(self):
+        text = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn('actual="$(compute_sha512 "$path")" || return 2', text)
+        self.assertIn('if [[ $verify_rc -eq 2 ]]; then', text)
+
 
 if __name__ == "__main__":
     unittest.main()

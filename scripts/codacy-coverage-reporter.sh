@@ -44,7 +44,7 @@ verify_sha512() {
   local expected="$2"
   local actual
 
-  actual="$(compute_sha512 "$path")"
+  actual="$(compute_sha512 "$path")" || return 2
   [[ "$actual" == "$expected" ]]
 }
 
@@ -82,17 +82,33 @@ ensure_reporter() {
   CODACY_REPORTER_PATH="$reporter_dir/$CODACY_BINARY_NAME"
   local tmp_path="$CODACY_REPORTER_PATH.tmp"
   local reporter_url="https://artifacts.codacy.com/bin/codacy-coverage-reporter/$reporter_version/$CODACY_BINARY_NAME"
+  local verify_rc=0
 
   mkdir -p "$reporter_dir"
 
-  if [[ -x "$CODACY_REPORTER_PATH" ]] && verify_sha512 "$CODACY_REPORTER_PATH" "$CODACY_SHA512"; then
-    return 0
+  if [[ -x "$CODACY_REPORTER_PATH" ]]; then
+    if verify_sha512 "$CODACY_REPORTER_PATH" "$CODACY_SHA512"; then
+      return 0
+    else
+      verify_rc=$?
+    fi
+    if [[ $verify_rc -eq 2 ]]; then
+      return 1
+    fi
   fi
 
   rm -f "$tmp_path"
   download_file "$reporter_url" "$tmp_path"
-  if ! verify_sha512 "$tmp_path" "$CODACY_SHA512"; then
+  if verify_sha512 "$tmp_path" "$CODACY_SHA512"; then
+    verify_rc=0
+  else
+    verify_rc=$?
+  fi
+  if [[ $verify_rc -ne 0 ]]; then
     rm -f "$tmp_path"
+    if [[ $verify_rc -eq 2 ]]; then
+      return 1
+    fi
     echo "ERROR: Codacy reporter checksum mismatch for $reporter_url" >&2
     return 1
   fi

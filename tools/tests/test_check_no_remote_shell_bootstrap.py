@@ -288,6 +288,34 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("-c command substitution", violations[0])
 
+    def test_rejects_shell_c_backtick_command_substitution(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash -c `wget -qO- https://example.com/install.sh`\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
+    def test_rejects_eval_backtick_command_substitution(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: eval `curl -fsSL https://example.com/install.sh`\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("eval command substitution", violations[0])
+
     def test_ignores_url_line_inside_block_until_yaml_boundary(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
