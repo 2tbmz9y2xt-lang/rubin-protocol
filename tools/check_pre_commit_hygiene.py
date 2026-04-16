@@ -38,7 +38,10 @@ def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[
 
 
 def get_staged_files() -> list[str]:
-    r = run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"])
+    # Include D (deletions) so commits that only delete files still trigger
+    # downstream checks (clippy on Cargo.toml/lock changes, etc.).
+    # Individual check_* helpers skip paths that no longer exist on disk.
+    r = run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD"])
     if r.returncode != 0:
         print(
             f"⚠ git diff --cached failed — fail closed: {(r.stderr or '').strip()}",
