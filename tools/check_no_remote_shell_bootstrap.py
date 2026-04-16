@@ -24,6 +24,15 @@ def workflow_paths(repo_root: Path) -> list[Path]:
     return sorted(list(workflow_dir.glob("*.yml")) + list(workflow_dir.glob("*.yaml")))
 
 
+def render_path(path: Path, repo_root: Path | None = None) -> str:
+    if repo_root is None:
+        return path.as_posix()
+    try:
+        return path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def command_windows(lines: list[str], start: int) -> list[tuple[int, str]]:
     windows: list[tuple[int, str]] = []
     parts: list[str] = []
@@ -38,16 +47,24 @@ def command_windows(lines: list[str], start: int) -> list[tuple[int, str]]:
     return windows
 
 
+def infer_repo_root(path: Path) -> Path | None:
+    for parent in path.parents:
+        if parent.name == ".github" and parent.parent.name:
+            return parent.parent
+    return None
+
+
 def find_violations(path: Path) -> list[str]:
     violations: list[str] = []
     lines = path.read_text(encoding="utf-8").splitlines()
+    rendered_path = render_path(path, infer_repo_root(path))
     line_no = 0
     while line_no < len(lines):
         matched_end: int | None = None
         for end_idx, window in command_windows(lines, line_no):
             for label, pattern in REMOTE_SHELL_PATTERNS:
                 if pattern.search(window):
-                    violations.append(f"{path}:{line_no + 1}: {label}: {window}")
+                    violations.append(f"{rendered_path}:{line_no + 1}: {label}: {window}")
                     matched_end = end_idx
                     break
             else:
@@ -76,7 +93,7 @@ def main(argv: list[str]) -> int:
         bad.extend(find_violations(workflow))
 
     if bad:
-        print("ERROR: remote shell bootstrap is not allowed in workflow surface:", file=sys.stderr)
+        print("ERROR: remote shell bootstrap is not allowed in .github/workflows:", file=sys.stderr)
         for item in bad:
             print(f" - {item}", file=sys.stderr)
         print(file=sys.stderr)

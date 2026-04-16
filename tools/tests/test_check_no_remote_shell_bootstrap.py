@@ -33,6 +33,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
         self.assertEqual(len(violations), 1)
         self.assertIn("process substitution", violations[0])
+        self.assertTrue(violations[0].startswith(".github/workflows/bad.yml:"))
 
     def test_rejects_pipe_to_shell(self):
         with tempfile.TemporaryDirectory() as td:
@@ -88,6 +89,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
             violations = m.find_violations(workflow)
 
         self.assertEqual(violations, [])
+
+    def test_render_path_uses_repo_root_when_available(self):
+        path = Path("/tmp/repo/.github/workflows/bad.yml")
+
+        rendered = m.render_path(path, Path("/tmp/repo"))
+
+        self.assertEqual(rendered, ".github/workflows/bad.yml")
+
+    def test_render_path_falls_back_for_non_workflow_path(self):
+        path = Path("/tmp/check_no_remote_shell_bootstrap.py")
+
+        rendered = m.render_path(path)
+
+        self.assertEqual(rendered, "/tmp/check_no_remote_shell_bootstrap.py")
 
 
 if __name__ == "__main__":
