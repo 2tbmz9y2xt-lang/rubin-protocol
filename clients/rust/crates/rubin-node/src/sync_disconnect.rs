@@ -68,19 +68,30 @@ impl SyncEngine {
                 // restored index, which can fail independently and leave
                 // chain_state un-rolled-back.
                 //
-                // Blockstore presence is an invariant at this point — the
-                // function-top check (line 14) and the successful
-                // truncate_canonical above both prove block_store is Some.
-                let bs = self.block_store.as_mut().expect(
-                    "disconnect_tip rollback invariant: blockstore missing after canonical truncate",
-                );
-                let canonical_rb = bs
-                    .rollback_canonical(
-                        rollback.canonical_len.saturating_sub(1),
-                        vec![hex::encode(tip_hash)],
-                    )
-                    .err()
-                    .map(|e| format!("canonical restore failed: {e}"));
+                // Blockstore presence is an invariant at this point (it
+                // was Some at function entry and the successful truncate
+                // above proves it still is), but we propagate a normal
+                // error if it's somehow missing rather than panic in a
+                // sync hot path.
+                let canonical_rb = match self.block_store.as_mut() {
+                    Some(bs) => bs
+                        .rollback_canonical(
+                            rollback.canonical_len.saturating_sub(1),
+                            vec![hex::encode(tip_hash)],
+                        )
+                        .err()
+                        .map(|e| format!("canonical restore failed: {e}")),
+                    None => {
+                        // Canonical restore cannot be attempted; align the
+                        // in-memory tip with the disconnected parent and
+                        // surface both errors via err_with_rollback.
+                        self.tip_timestamp = new_tip_timestamp;
+                        return Err(SyncEngine::err_with_rollback(
+                            err,
+                            Some("blockstore missing after canonical truncate".into()),
+                        ));
+                    }
+                };
                 // Only restore in-memory state if canonical rollback succeeded.
                 // If canonical is still truncated and we restore chain_state to
                 // the pre-disconnect tip, the next operation hits the
