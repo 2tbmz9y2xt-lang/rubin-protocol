@@ -53,7 +53,7 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 		}
 		return s.syntheticSideChainSummary(candidateHeight, blockHash), nil
 	}
-	return s.applyHeavierBranch(branch, commonAncestorHeight, prevTimestamps)
+	return s.applyHeavierBranch(branch, commonAncestorHeight)
 }
 
 func (s *SyncEngine) applyDirectBlockIfPossible(
@@ -112,13 +112,12 @@ func (s *SyncEngine) shouldSwitchToBranch(
 func (s *SyncEngine) applyHeavierBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
-	prevTimestamps []uint64,
 ) (*ChainStateConnectSummary, error) {
 	rollbackState, err := s.captureRollbackState()
 	if err != nil {
 		return nil, err
 	}
-	disconnectedBlocks, reorgDepth, err := s.prepareHeavierBranch(branch, commonAncestorHeight, prevTimestamps, rollbackState)
+	disconnectedBlocks, reorgDepth, err := s.prepareHeavierBranch(branch, commonAncestorHeight, rollbackState)
 	if err != nil {
 		return nil, err
 	}
@@ -127,8 +126,17 @@ func (s *SyncEngine) applyHeavierBranch(
 	}
 
 	var summary *ChainStateConnectSummary
-	for _, item := range branch {
-		summary, err = s.applyCanonicalParsedBlock(item.parsed, item.blockBytes, prevTimestamps)
+	for i, item := range branch {
+		// Derive fresh timestamps from the (updated) canonical index for
+		// each block in the branch.  The stale caller prevTimestamps was
+		// computed for height commonAncestorHeight+1 and is wrong for
+		// blocks 2+ (finding B.9, issue #1166).
+		nextHeight := commonAncestorHeight + 1 + uint64(i)
+		freshTs, tsErr := prevTimestampsFromStore(s.blockStore, nextHeight)
+		if tsErr != nil {
+			return nil, s.rollbackApplyBlock(tsErr, rollbackState)
+		}
+		summary, err = s.applyCanonicalParsedBlock(item.parsed, item.blockBytes, freshTs)
 		if err != nil {
 			return nil, s.rollbackApplyBlock(err, rollbackState)
 		}
@@ -141,7 +149,6 @@ func (s *SyncEngine) applyHeavierBranch(
 func (s *SyncEngine) prepareHeavierBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
-	prevTimestamps []uint64,
 	rollbackState syncRollbackState,
 ) ([][]byte, uint64, error) {
 	previewState := cloneChainState(rollbackState.chainState)
@@ -153,11 +160,19 @@ func (s *SyncEngine) prepareHeavierBranch(
 	if err != nil {
 		return nil, 0, err
 	}
+	// Build a sliding MTP window: start from pre-fork timestamps, advance
+	// after each block.  The blockstore index is NOT updated during preview,
+	// so per-block advancement uses a sliding window instead of
+	// re-deriving from the store each iteration (B.9 fix).
+	slidingTs, err := prevTimestampsFromStore(s.blockStore, commonAncestorHeight+1)
+	if err != nil {
+		return nil, 0, err
+	}
 	for _, item := range branch {
 		if _, err := previewState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 			item.blockBytes,
 			s.cfg.ExpectedTarget,
-			prevTimestamps,
+			slidingTs,
 			s.cfg.ChainID,
 			s.cfg.CoreExtProfiles,
 			s.cfg.RotationProvider,
@@ -165,8 +180,24 @@ func (s *SyncEngine) prepareHeavierBranch(
 		); err != nil {
 			return nil, 0, err
 		}
+		slidingTs = advancePrevTimestamps(slidingTs, item.header.Timestamp)
 	}
 	return disconnectedBlocks, reorgDepth, nil
+}
+
+// advancePrevTimestamps prepends newTs to prev and keeps at most 11 entries,
+// sliding the MTP window forward by one block.
+func advancePrevTimestamps(prev []uint64, newTs uint64) []uint64 {
+	const maxWindow = 11
+	out := make([]uint64, 0, maxWindow)
+	out = append(out, newTs)
+	for _, ts := range prev {
+		if len(out) >= maxWindow {
+			break
+		}
+		out = append(out, ts)
+	}
+	return out
 }
 
 func (s *SyncEngine) collectBranchToCanonical(
