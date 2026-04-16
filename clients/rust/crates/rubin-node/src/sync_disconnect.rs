@@ -48,8 +48,10 @@ impl SyncEngine {
         // truncate and save leaves the canonical index short while chainstate
         // still has the old tip; the mismatch guard at the top of this
         // function detects and rejects this on restart.
-        // block_store presence already checked at top of function.
-        let bs = self.block_store.as_mut().expect("blockstore checked above");
+        let bs = self
+            .block_store
+            .as_mut()
+            .ok_or("sync engine has no blockstore")?;
         if let Err(err) = bs.truncate_canonical(rollback.canonical_len.saturating_sub(1)) {
             return Err(SyncEngine::err_with_rollback(
                 err,
