@@ -30,7 +30,13 @@ STEPS_FLOW_SEQUENCE_START_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*\[(.*)$'
 FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
 
 REMOTE_SHELL_PATTERNS = (
-    ("remote shell pipe", re.compile(rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|\s*{SHELL_LAUNCHER_PATTERN}\b", re.IGNORECASE)),
+    (
+        "remote shell pipe",
+        re.compile(
+            rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?{SHELL_LAUNCHER_PATTERN}\b",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "remote shell process substitution",
         re.compile(
