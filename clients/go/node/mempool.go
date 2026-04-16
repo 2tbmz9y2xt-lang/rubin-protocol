@@ -838,7 +838,7 @@ func prevTimestampsFromStore(store *BlockStore, nextHeight uint64) ([]uint64, er
 			return nil, err
 		}
 		if !ok {
-			return nil, errors.New("missing canonical header for timestamp context")
+			return nil, fmt.Errorf("missing canonical hash at height %d for timestamp context (next_height=%d)", height, nextHeight)
 		}
 		headerBytes, err := store.GetHeaderByHash(hash)
 		if err != nil {

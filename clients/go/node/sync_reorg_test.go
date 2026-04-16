@@ -12,11 +12,22 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+// reorgTestTimestamp returns a valid MTP-passing timestamp for reorg test
+// blocks.  Genesis timestamp is ~1772020800; adding n ensures each block
+// stays monotonic and above MTP median.
+func reorgTestTimestamp(n uint64) uint64 {
+	genesisParsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
+	if err != nil {
+		panic("ParseBlockBytes(genesis): " + err.Error())
+	}
+	return genesisParsed.Header.Timestamp + n
+}
+
 func TestReorgTwoMiners(t *testing.T) {
 	engine, store, target := newReorgTestEngine(t)
 
 	subsidy1 := consensus.BlockSubsidy(1, 0)
-	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	summaryA1, err := engine.ApplyBlock(blockA1, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlock(A1): %v", err)
@@ -25,7 +36,7 @@ func TestReorgTwoMiners(t *testing.T) {
 		t.Fatalf("A1 height=%d, want 1", summaryA1.BlockHeight)
 	}
 
-	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 3, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	summaryB1, err := engine.ApplyBlockWithReorg(blockB1, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
@@ -50,7 +61,7 @@ func TestReorgTwoMiners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockHash(B1): %v", err)
 	}
-	blockB2 := buildSingleTxBlock(t, blockB1Hash, target, 4, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	blockB2 := buildSingleTxBlock(t, blockB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
 	summaryB2, err := engine.ApplyBlockWithReorg(blockB2, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
@@ -88,7 +99,7 @@ func TestDeepReorg10(t *testing.T) {
 	mainAlreadyGenerated := uint64(0)
 	for height := uint64(1); height <= 10; height++ {
 		subsidy := consensus.BlockSubsidy(height, mainAlreadyGenerated)
-		block := buildSingleTxBlock(t, mainPrev, target, height+1, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy))
+		block := buildSingleTxBlock(t, mainPrev, target, reorgTestTimestamp(height), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy))
 		summary, err := engine.ApplyBlock(block, nil)
 		if err != nil {
 			t.Fatalf("ApplyBlock(A%d): %v", height, err)
@@ -103,7 +114,7 @@ func TestDeepReorg10(t *testing.T) {
 	var err error
 	for height := uint64(1); height <= 11; height++ {
 		subsidy := consensus.BlockSubsidy(height, sideAlreadyGenerated)
-		block := buildSingleTxBlock(t, sidePrev, target, 100+height, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy))
+		block := buildSingleTxBlock(t, sidePrev, target, reorgTestTimestamp(100+height), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy))
 		sideBlocks = append(sideBlocks, block)
 		sidePrev, err = consensus.BlockHash(blockHeaderBytes(t, block))
 		if err != nil {
@@ -643,7 +654,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		t,
 		devnetGenesisBlockHash,
 		target,
-		2,
+		reorgTestTimestamp(1),
 		reorgTestCoinbaseForWtxids(t, 1, subsidy1+50, sourceAddressA, [][32]byte{{}, blockASpendWtxid}),
 		blockASpend,
 	)
@@ -660,7 +671,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		t,
 		devnetGenesisBlockHash,
 		target,
-		3,
+		reorgTestTimestamp(2),
 		reorgTestCoinbaseForWtxids(t, 1, subsidy1+50, destAddressB, [][32]byte{{}, blockBSpendWtxid}),
 		blockBSpend,
 	)
@@ -677,7 +688,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		t,
 		blockB1Hash,
 		target,
-		4,
+		reorgTestTimestamp(3),
 		reorgTestCoinbaseForAddress(t, 2, subsidy2, destAddressB),
 	)
 	if _, err := engine.ApplyBlockWithReorg(blockB2, nil); err != nil {
@@ -1169,6 +1180,29 @@ func testRestoreChainState(dst *ChainState, snapshot chainStateDisk) error {
 	}
 	dst.replaceFrom(recovered)
 	return nil
+}
+
+func TestAdvancePrevTimestampsSliding(t *testing.T) {
+	// Empty input → single entry.
+	got := advancePrevTimestamps(nil, 100)
+	if len(got) != 1 || got[0] != 100 {
+		t.Fatalf("empty: got %v, want [100]", got)
+	}
+	// Partial window (5 entries) → prepend, len=6.
+	prev := []uint64{90, 80, 70, 60, 50}
+	got = advancePrevTimestamps(prev, 100)
+	if len(got) != 6 || got[0] != 100 || got[5] != 50 {
+		t.Fatalf("partial: got %v, want [100 90 80 70 60 50]", got)
+	}
+	// Full window (11 entries) → prepend, truncate, len=11.
+	full := make([]uint64, 11)
+	for i := range full {
+		full[i] = uint64(110 - i*10)
+	}
+	got = advancePrevTimestamps(full, 200)
+	if len(got) != 11 || got[0] != 200 || got[10] != 20 {
+		t.Fatalf("full: got %v, want [200 110 100 ... 20]", got)
+	}
 }
 
 func testParentTipTimestamp(store *BlockStore, tipHeight uint64, prevBlockHash [32]byte) (uint64, error) {

@@ -11,6 +11,20 @@ use crate::txpool::TxPool;
 
 pub(crate) const PARENT_BLOCK_NOT_FOUND_ERR: &str = "parent block not found";
 
+/// Slide the MTP window forward by one block: prepend `new_ts` and keep at
+/// most 11 entries.  Mirrors Go `advancePrevTimestamps`.
+fn advance_prev_timestamps(prev: Option<&[u64]>, new_ts: u64) -> Vec<u64> {
+    const MAX_WINDOW: usize = 11;
+    let mut out = Vec::with_capacity(MAX_WINDOW);
+    out.push(new_ts);
+    if let Some(prev) = prev {
+        for &ts in prev.iter().take(MAX_WINDOW - 1) {
+            out.push(ts);
+        }
+    }
+    out
+}
+
 /// A block on a candidate side-chain branch, collected while walking
 /// parent pointers back to a common ancestor on the canonical chain.
 struct ReorgBranchBlock {
@@ -18,6 +32,9 @@ struct ReorgBranchBlock {
     hash: [u8; 32],
     block_bytes: Vec<u8>,
     target: [u8; 32],
+    /// Header timestamp — used to advance the MTP sliding window during
+    /// preview validation (B.9 fix).
+    timestamp: u64,
     /// Cached txids from block parse — avoids re-parsing during mempool eviction.
     txids: Vec<[u8; 32]>,
 }
@@ -173,7 +190,7 @@ impl SyncEngine {
         }
 
         // Execute the reorg.
-        self.apply_heavier_branch(branch, common_ancestor_height, prev_timestamps)
+        self.apply_heavier_branch(branch, common_ancestor_height)
     }
 
     /// Fast path: apply the block directly if it extends the current tip
@@ -239,13 +256,11 @@ impl SyncEngine {
         &mut self,
         branch: Vec<ReorgBranchBlock>,
         common_ancestor_height: u64,
-        prev_timestamps: Option<&[u64]>,
     ) -> Result<ApplyBlockWithReorgOutcome, String> {
         let rollback = self.capture_reorg_rollback_state(common_ancestor_height);
 
         // Dry-run: preview the disconnect + reconnect on a cloned state.
-        let disconnected_blocks =
-            self.prepare_heavier_branch(&branch, common_ancestor_height, prev_timestamps)?;
+        let disconnected_blocks = self.prepare_heavier_branch(&branch, common_ancestor_height)?;
 
         // Disconnect canonical chain back to the common ancestor.
         if let Err(err) = self.disconnect_canonical_to_ancestor(common_ancestor_height) {
@@ -255,10 +270,12 @@ impl SyncEngine {
             ));
         }
 
-        // Connect the heavier branch.
+        // Connect the heavier branch.  Pass None so apply_block derives
+        // fresh timestamps from the (updated) canonical index for each block,
+        // instead of reusing the stale caller value (B.9 fix, issue #1166).
         let mut last_summary = None;
         for item in &branch {
-            match self.apply_block(&item.block_bytes, prev_timestamps) {
+            match self.apply_block(&item.block_bytes, None) {
                 Ok(summary) => last_summary = Some(summary),
                 Err(err) => {
                     return Err(Self::err_with_rollback(
@@ -298,25 +315,32 @@ impl SyncEngine {
         &self,
         branch: &[ReorgBranchBlock],
         common_ancestor_height: u64,
-        prev_timestamps: Option<&[u64]>,
     ) -> Result<Vec<Vec<u8>>, String> {
         let mut preview_state = self.chain_state.clone();
 
         let disconnected_blocks = self
             .preview_disconnect_canonical_to_ancestor(&mut preview_state, common_ancestor_height)?;
 
-        // Connect each branch block on the preview state.
+        // Build a sliding MTP window: start from pre-fork timestamps, advance
+        // after each block.  The blockstore index is NOT updated during preview,
+        // so per-block advancement uses a sliding window instead of
+        // re-deriving from the store each iteration (B.9 fix, issue #1166).
+        let mut sliding_ts = self.prev_timestamps_for_height(common_ancestor_height + 1)?;
         let (rotation, registry) = self.suite_context();
         for item in branch {
             preview_state.connect_block_with_core_ext_deployments_and_suite_context(
                 &item.block_bytes,
                 self.cfg.expected_target,
-                prev_timestamps,
+                sliding_ts.as_deref(),
                 self.cfg.chain_id,
                 &self.cfg.core_ext_deployments,
                 rotation,
                 registry,
             )?;
+            sliding_ts = Some(advance_prev_timestamps(
+                sliding_ts.as_deref(),
+                item.timestamp,
+            ));
         }
 
         Ok(disconnected_blocks)
@@ -340,6 +364,7 @@ impl SyncEngine {
             hash: block_hash_bytes,
             block_bytes: block_bytes.to_vec(),
             target: parsed.header.target,
+            timestamp: parsed.header.timestamp,
             txids: parsed.txids.clone(),
         }];
 
@@ -362,6 +387,7 @@ impl SyncEngine {
                 hash: parent_hash,
                 block_bytes: parent_bytes,
                 target: parent_parsed.header.target,
+                timestamp: parent_parsed.header.timestamp,
                 txids: parent_parsed.txids.clone(),
             });
 
@@ -1078,5 +1104,24 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn advance_prev_timestamps_sliding_window() {
+        // Empty input → single entry.
+        let got = super::advance_prev_timestamps(None, 100);
+        assert_eq!(got, vec![100]);
+
+        // Partial window (5 entries) → prepend, len=6.
+        let prev = vec![90, 80, 70, 60, 50];
+        let got = super::advance_prev_timestamps(Some(&prev), 100);
+        assert_eq!(got, vec![100, 90, 80, 70, 60, 50]);
+
+        // Full window (11 entries) → prepend + truncate, len=11.
+        let full: Vec<u64> = (0..11).map(|i| 110 - i * 10).collect();
+        let got = super::advance_prev_timestamps(Some(&full), 200);
+        assert_eq!(got.len(), 11);
+        assert_eq!(got[0], 200);
+        assert_eq!(got[10], 20);
     }
 }
