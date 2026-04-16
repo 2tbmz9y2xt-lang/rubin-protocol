@@ -7,20 +7,27 @@ import sys
 from pathlib import Path
 
 SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|sh)"
+COMMAND_PREFIX_PATTERN = r"command\s+"
 SUDO_COMMAND_PATTERN = r"(?:/(?:usr/)?bin/)?sudo"
 ENV_COMMAND_PATTERN = r"(?:/(?:usr/)?bin/)?env"
 SUDO_OPTION_PATTERN = r"(?:--|--?[A-Za-z][\w-]*(?:[= ]\S+)?)"
 SUDO_PREFIX_PATTERN = rf"{SUDO_COMMAND_PATTERN}(?:\s+{SUDO_OPTION_PATTERN})*\s+"
 ENV_ARGUMENT_PATTERN = rf"(?!{SHELL_EXECUTABLE_PATTERN}\b)\S+"
 ENV_PREFIX_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_ARGUMENT_PATTERN})*\s+"
-SHELL_LAUNCHER_PATTERN = rf"(?:(?:{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}))*{SHELL_EXECUTABLE_PATTERN}"
+SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}))*{SHELL_EXECUTABLE_PATTERN}"
+SHELL_OPTION_PATTERN = r"(?:--[A-Za-z][\w-]*|-[A-Za-z]+)"
+SHELL_C_OPTION_PATTERN = r"(?:-c|-[A-Za-z]*c[A-Za-z]*|--command)"
 YAML_BOUNDARY_PATTERN = re.compile(r"^(?:-\s+|[A-Za-z0-9_-]+:(?:\s|$))")
+INLINE_PIPE_COMMENT_RE = re.compile(r"\|\s*#")
 
 REMOTE_SHELL_PATTERNS = (
     ("remote shell pipe", re.compile(rf"\b(?:curl|wget)\b.*\|\s*{SHELL_LAUNCHER_PATTERN}\b", re.IGNORECASE)),
     (
         "remote shell process substitution",
-        re.compile(rf"(?:^|[^\w])(?:{SHELL_LAUNCHER_PATTERN}|source|\.)\s*<\(\s*(?:curl|wget)\b", re.IGNORECASE),
+        re.compile(
+            rf"(?:^|[^\w])(?:{SHELL_LAUNCHER_PATTERN}|source|\.)\s*(?:<\(|<\s*<\()\s*(?:curl|wget)\b",
+            re.IGNORECASE,
+        ),
     ),
     (
         "remote shell here-string command substitution",
@@ -32,7 +39,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell -c command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+-c\s+[\"']?[^\"'\n`]*?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[^\"'\n`]*?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)",
             re.IGNORECASE,
         ),
     ),
@@ -80,8 +87,9 @@ def command_windows(lines: list[str], start: int) -> list[tuple[int, str]]:
         elif indent <= boundary_indent and YAML_BOUNDARY_PATTERN.match(raw.lstrip()):
             break
         normalized = stripped.rstrip("\\").strip()
-        if "| #" in normalized:
-            normalized = normalized.split("| #", 1)[0].rstrip() + " |"
+        pipe_comment_match = INLINE_PIPE_COMMENT_RE.search(normalized)
+        if pipe_comment_match:
+            normalized = normalized[: pipe_comment_match.start()].rstrip() + " |"
         parts.append(normalized)
         windows.append((idx, " ".join(parts)))
     return windows
