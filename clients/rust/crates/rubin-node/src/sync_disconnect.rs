@@ -273,6 +273,11 @@ mod tests {
 
     #[test]
     fn disconnect_tip_truncate_error_propagates_with_rollback() {
+        // Both the initial truncate AND the rollback_apply_block phase-1
+        // truncate fail (force_truncate_error stays armed for both calls),
+        // so the composite error reports both failures.  Engine state ends
+        // up at post-disconnect_block (chain_state.height=0) while canonical
+        // is still untouched ([genesis, block1]) — verified after disarm.
         let (mut engine, dir) = engine_with_store("rubin-disc-trunc-err");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
@@ -288,6 +293,29 @@ mod tests {
             err.contains("forced truncate error"),
             "expected forced truncate error, got: {err}"
         );
+        // Composite error must surface BOTH the main error and the
+        // rollback-phase failure (rollback_apply_block also tried to
+        // truncate and got the same injected error).
+        assert!(
+            err.contains("rollback failed"),
+            "expected rollback failure note, got: {err}"
+        );
+
+        // Disarm so cleanup succeeds.
+        engine.block_store.as_mut().unwrap().force_truncate_error = false;
+
+        // Canonical never mutated (both truncate calls failed before write).
+        let tip = engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .tip()
+            .expect("tip")
+            .expect("some");
+        assert_eq!(
+            tip.0, 1,
+            "canonical should still have block1 after both truncate failures"
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -296,8 +324,9 @@ mod tests {
     fn disconnect_tip_save_failure_restores_canonical() {
         // Save fails after truncate: rollback_canonical re-appends tip_hash,
         // then in-memory chain_state is restored inline.  rollback_apply_block
-        // is NOT called here — that path is exercised only on truncate
-        // failure (see disconnect_tip_truncate_error_propagates_with_rollback).
+        // is NOT called in the save-failure branch (it is called only on
+        // truncate failure, but that path tests its own assertions in
+        // disconnect_tip_truncate_error_propagates_with_rollback).
         let (mut engine, dir) = engine_with_store("rubin-disc-save-fail");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
