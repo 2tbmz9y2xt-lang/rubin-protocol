@@ -21,10 +21,10 @@ DOWNLOADER_PATTERN = rf"(?:{COMMAND_PREFIX_PATTERN})?(?:/(?:usr/)?bin/)?(?:curl|
 SHELL_OPTION_PATTERN = r"(?:--[A-Za-z][\w-]*|-[A-Za-z]+)"
 SHELL_C_OPTION_PATTERN = r"(?:-c|-[A-Za-z]*c[A-Za-z]*|--command)"
 INLINE_PIPE_COMMENT_RE = re.compile(r"\|\s*#")
-STEPS_KEY_RE = re.compile(r"^\s*steps:\s*(?:#.*)?$")
-STEP_INLINE_RUN_RE = re.compile(r"^\s*-\s+run:\s*(.*)$")
-RUN_KEY_RE = re.compile(r"^\s*run:\s*(.*)$")
-BLOCK_SCALAR_RE = re.compile(r"^[>|][-+0-9]*$")
+STEPS_KEY_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*(?:#.*)?$')
+STEP_INLINE_RUN_RE = re.compile(r'^\s*-\s+["\']?run["\']?\s*:\s*(.*)$')
+RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
+BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
 
 REMOTE_SHELL_PATTERNS = (
     ("remote shell pipe", re.compile(rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|\s*{SHELL_LAUNCHER_PATTERN}\b", re.IGNORECASE)),
