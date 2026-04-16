@@ -7,14 +7,17 @@ import sys
 from pathlib import Path
 
 SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|dash|sh)"
-COMMAND_PREFIX_PATTERN = r"command\s+"
+COMMAND_PREFIX_PATTERN = r"command(?:\s+-[A-Za-z]+)*\s+"
+ENV_ASSIGNMENT_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*=\S+"
+ENV_ASSIGNMENT_PREFIX_PATTERN = rf"(?:{ENV_ASSIGNMENT_PATTERN}\s+)+"
 SUDO_COMMAND_PATTERN = r"(?:/(?:usr/)?bin/)?sudo"
 ENV_COMMAND_PATTERN = r"(?:/(?:usr/)?bin/)?env"
 SUDO_OPTION_PATTERN = r"(?:--|--?[A-Za-z][\w-]*(?:[= ]\S+)?)"
 SUDO_PREFIX_PATTERN = rf"{SUDO_COMMAND_PATTERN}(?:\s+{SUDO_OPTION_PATTERN})*\s+"
 ENV_ARGUMENT_PATTERN = rf"(?!{SHELL_EXECUTABLE_PATTERN}\b)\S+"
 ENV_PREFIX_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_ARGUMENT_PATTERN})*\s+"
-SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}))*{SHELL_EXECUTABLE_PATTERN}"
+SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*{SHELL_EXECUTABLE_PATTERN}"
+DOWNLOADER_PATTERN = rf"(?:{COMMAND_PREFIX_PATTERN})?(?:/(?:usr/)?bin/)?(?:curl|wget)\b"
 SHELL_OPTION_PATTERN = r"(?:--[A-Za-z][\w-]*|-[A-Za-z]+)"
 SHELL_C_OPTION_PATTERN = r"(?:-c|-[A-Za-z]*c[A-Za-z]*|--command)"
 INLINE_PIPE_COMMENT_RE = re.compile(r"\|\s*#")
@@ -24,31 +27,31 @@ RUN_KEY_RE = re.compile(r"^\s*run:\s*(.*)$")
 BLOCK_SCALAR_RE = re.compile(r"^[>|][-+0-9]*$")
 
 REMOTE_SHELL_PATTERNS = (
-    ("remote shell pipe", re.compile(rf"\b(?:curl|wget)\b.*\|\s*{SHELL_LAUNCHER_PATTERN}\b", re.IGNORECASE)),
+    ("remote shell pipe", re.compile(rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|\s*{SHELL_LAUNCHER_PATTERN}\b", re.IGNORECASE)),
     (
         "remote shell process substitution",
         re.compile(
-            rf"(?:^|[^\w])(?:{SHELL_LAUNCHER_PATTERN}|source|\.)\s*(?:<\(|<\s*<\()\s*(?:curl|wget)\b",
+            rf"(?:^|[^\w])(?:{SHELL_LAUNCHER_PATTERN}|source|\.)\s*(?:<\(|<\s*<\()\s*{DOWNLOADER_PATTERN}",
             re.IGNORECASE,
         ),
     ),
     (
         "remote shell here-string command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+<<<\s*[\"']?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+<<<\s*[\"']?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
     (
         "remote shell -c command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[^\n]*?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[^\n]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
     (
         "remote shell eval command substitution",
-        re.compile(r"\beval\b\s+[\"']?[^\n]*?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)", re.IGNORECASE),
+        re.compile(rf"\beval\b\s+[\"']?[^\n]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})", re.IGNORECASE),
     ),
 )
 
