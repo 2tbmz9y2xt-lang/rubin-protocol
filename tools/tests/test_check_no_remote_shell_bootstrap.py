@@ -208,6 +208,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_pipe_to_command_shell_after_end_of_options(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | command -- bash\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_pipe_to_absolute_sudo_shell(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -454,6 +468,34 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                 repo_root,
                 "bad.yml",
                 "jobs:\n  cov:\n    steps:\n      - run: bash < <(curl -fsSL https://coverage.codacy.com/get.sh) report\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("process substitution", violations[0])
+
+    def test_rejects_process_substitution_with_shell_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  cov:\n    steps:\n      - run: bash -e <(curl -fsSL https://coverage.codacy.com/get.sh) report\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("process substitution", violations[0])
+
+    def test_rejects_process_substitution_with_shell_flag_and_stdin_redirection(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  cov:\n    steps:\n      - run: bash -s < <(curl -fsSL https://coverage.codacy.com/get.sh)\n",
             )
 
             violations = m.find_violations(workflow)

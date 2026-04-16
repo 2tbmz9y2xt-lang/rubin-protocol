@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|dash|sh)"
-COMMAND_PREFIX_PATTERN = r"command(?:\s+-[A-Za-z]+)*\s+"
+COMMAND_PREFIX_PATTERN = r"command(?:\s+(?:--|-[A-Za-z]+))*\s+"
 ENV_ASSIGNMENT_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*=\S+"
 ENV_ASSIGNMENT_PREFIX_PATTERN = rf"(?:{ENV_ASSIGNMENT_PATTERN}\s+)+"
 SUDO_COMMAND_PATTERN = r"(?:/(?:usr/)?bin/)?sudo"
@@ -40,7 +40,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell process substitution",
         re.compile(
-            rf"(?:^|[^\w])(?:{SHELL_LAUNCHER_PATTERN}|source|\.)\s*(?:<\(|<\s*<\()\s*{DOWNLOADER_PATTERN}",
+            rf"(?:^|[^\w])(?:{SHELL_LAUNCHER_PATTERN}|source|\.)(?:\s+{SHELL_OPTION_PATTERN})*\s*(?:<\(|<\s*<\()\s*{DOWNLOADER_PATTERN}",
             re.IGNORECASE,
         ),
     ),
