@@ -25,6 +25,7 @@ STEPS_KEY_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*(?:#.*)?$')
 STEP_INLINE_RUN_RE = re.compile(r'^\s*-\s+["\']?run["\']?\s*:\s*(.*)$')
 RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
 BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
+FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
 
 REMOTE_SHELL_PATTERNS = (
     ("remote shell pipe", re.compile(rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|\s*{SHELL_LAUNCHER_PATTERN}\b", re.IGNORECASE)),
@@ -45,7 +46,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell here-doc command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+<<-?\s*\S+.*\$\(\s*{DOWNLOADER_PATTERN}",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+<<-?\s*\S+.*(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -125,6 +126,12 @@ def block_entries(entries: list[tuple[int, str]], start: int, run_indent: int) -
 def extract_step_run_entries(step_entries: list[tuple[int, str]], step_indent: int) -> list[list[tuple[int, str]]]:
     run_entries: list[list[tuple[int, str]]] = []
     first_line_no, first_raw = step_entries[0]
+    flow_style_match = FLOW_STYLE_STEP_RUN_RE.match(first_raw)
+    if flow_style_match is not None:
+        content = flow_style_match.group(1)
+        if content:
+            run_entries.append([(first_line_no, content)])
+        return run_entries
     inline_match = STEP_INLINE_RUN_RE.match(first_raw)
     if inline_match is not None:
         content = inline_match.group(1)
