@@ -107,6 +107,14 @@ def check_test_helpers_in_production(files: list[str]) -> list[str]:
 
 # ── Check 3: RUSTFLAGS=-D warnings ──────────────────────────────────
 
+_PATH_RE = re.compile(r"/(?:Users|home|var/folders|tmp|opt/homebrew|private)/[^\s\"']+")
+
+
+def _sanitize_paths(text: str) -> str:
+    """Replace absolute filesystem paths with <path> placeholder."""
+    return _PATH_RE.sub("<path>", text)
+
+
 def check_rust_warnings(files: list[str]) -> list[str]:
     """CI uses -D warnings. Local clippy may miss what CI catches."""
     rs_files = [f for f in files if f.endswith(".rs")]
@@ -135,8 +143,12 @@ def check_rust_warnings(files: list[str]) -> list[str]:
                   if "error[" in line or "error:" in line.lower()]
         if errors:
             # Strip file paths from cargo output for cleaner messages.
-            return [f"RUSTFLAGS=-D warnings: {re.sub(r' --> .*$', '', e.strip())[:100]}" for e in errors[:5]]
-        raw = re.sub(r"^\s*-->.*$", "", combined, flags=re.MULTILINE).strip()[:200]
+            return [
+                f"RUSTFLAGS=-D warnings: {_sanitize_paths(re.sub(r' --> .*$', '', e.strip()))[:100]}"
+                for e in errors[:5]
+            ]
+        raw = re.sub(r"^\s*-->.*$", "", combined, flags=re.MULTILINE).strip()
+        raw = _sanitize_paths(raw)[:200]
         return [f"RUSTFLAGS=-D warnings cargo check failed: {raw or '(no output)'}"]
     return []
 

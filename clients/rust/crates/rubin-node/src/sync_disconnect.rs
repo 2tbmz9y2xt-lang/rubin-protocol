@@ -286,8 +286,10 @@ mod tests {
 
     #[test]
     fn disconnect_tip_save_failure_restores_canonical() {
-        // Cover lines 69-71: save fails after truncate, rollback_canonical
-        // restores the truncated entry, rollback_apply_block runs.
+        // Save fails after truncate: rollback_canonical re-appends tip_hash,
+        // then in-memory chain_state is restored inline.  rollback_apply_block
+        // is NOT called here — that path is exercised only on truncate
+        // failure (see disconnect_tip_truncate_error_propagates_with_rollback).
         let (mut engine, dir) = engine_with_store("rubin-disc-save-fail");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
@@ -352,7 +354,11 @@ mod tests {
             .expect("some");
         assert_eq!(
             tip_after.0, tip_before.0,
-            "canonical index should be restored after save failure"
+            "canonical index height should be restored after save failure"
+        );
+        assert_eq!(
+            tip_after.1, tip_before.1,
+            "canonical tip hash should be restored after save failure"
         );
 
         // In-memory chain_state must also be restored to pre-disconnect tip.
