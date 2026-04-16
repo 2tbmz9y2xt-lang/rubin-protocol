@@ -22,13 +22,13 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell -c command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+-c\s+(?:[\"']?\$\(\s*(?:curl|wget)\b|[\"']?`[^`]*(?:curl|wget)\b)",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}\s+-c\s+[\"']?[^\"'\n`]*?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)",
             re.IGNORECASE,
         ),
     ),
     (
         "remote shell eval command substitution",
-        re.compile(r"\beval\b\s+(?:[\"']?\$\(\s*(?:curl|wget)\b|[\"']?`[^`]*(?:curl|wget)\b)", re.IGNORECASE),
+        re.compile(r"\beval\b\s+[\"']?[^\"'\n`]*?(?:\$\(\s*(?:curl|wget)\b|`[^`]*(?:curl|wget)\b)", re.IGNORECASE),
     ),
 )
 
@@ -69,7 +69,10 @@ def command_windows(lines: list[str], start: int) -> list[tuple[int, str]]:
             boundary_indent = indent
         elif indent <= boundary_indent and YAML_BOUNDARY_PATTERN.match(raw.lstrip()):
             break
-        parts.append(stripped.rstrip("\\").strip())
+        normalized = stripped.rstrip("\\").strip()
+        if "| #" in normalized:
+            normalized = normalized.split("| #", 1)[0].rstrip() + " |"
+        parts.append(normalized)
         windows.append((idx, " ".join(parts)))
     return windows
 

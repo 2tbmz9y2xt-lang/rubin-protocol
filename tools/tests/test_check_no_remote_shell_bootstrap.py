@@ -288,6 +288,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("-c command substitution", violations[0])
 
+    def test_rejects_shell_c_command_substitution_after_prologue(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash -c "echo ok; $(curl -fsSL https://example.com/install.sh)"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
     def test_rejects_shell_c_backtick_command_substitution(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -351,6 +365,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("eval command substitution", violations[0])
 
+    def test_rejects_eval_command_substitution_after_prologue(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: eval "echo ok; $(curl -fsSL https://example.com/install.sh)"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("eval command substitution", violations[0])
+
     def test_allows_pinned_download_to_file(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -384,6 +412,27 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
         self.assertEqual(len(violations), 1)
         self.assertTrue(violations[0].startswith(".github/workflows/bad.yml:6:"))
+
+    def test_rejects_pipe_to_shell_after_inline_comment(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          curl -fsSL https://example.com/install.sh | # inline comment\n"
+                    "          bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
 
     def test_render_path_uses_repo_root_when_available(self):
         path = Path("/tmp/repo/.github/workflows/bad.yml")
