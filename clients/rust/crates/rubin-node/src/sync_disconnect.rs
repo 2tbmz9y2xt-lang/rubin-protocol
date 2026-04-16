@@ -67,16 +67,20 @@ impl SyncEngine {
                 // truncate_canonical(rb.canonical_len)) on an already
                 // restored index, which can fail independently and leave
                 // chain_state un-rolled-back.
-                let canonical_rb = if let Some(bs) = self.block_store.as_mut() {
-                    bs.rollback_canonical(
+                //
+                // Blockstore presence is an invariant at this point — the
+                // function-top check (line 14) and the successful
+                // truncate_canonical above both prove block_store is Some.
+                let bs = self.block_store.as_mut().expect(
+                    "disconnect_tip rollback invariant: blockstore missing after canonical truncate",
+                );
+                let canonical_rb = bs
+                    .rollback_canonical(
                         rollback.canonical_len.saturating_sub(1),
                         vec![hex::encode(tip_hash)],
                     )
                     .err()
-                    .map(|e| format!("canonical restore failed: {e}"))
-                } else {
-                    None
-                };
+                    .map(|e| format!("canonical restore failed: {e}"));
                 // Only restore in-memory state if canonical rollback succeeded.
                 // If canonical is still truncated and we restore chain_state to
                 // the pre-disconnect tip, the next operation hits the

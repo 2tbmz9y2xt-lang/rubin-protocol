@@ -6,8 +6,9 @@ Based on 39 real threads from PR #1199 and PR #1203.
 
 Usage:
     python3 tools/check_pre_commit_hygiene.py [--fix] [--staged-only]
+                                              [--skip-rust-warnings]
 
-Exit codes: 0 = clean, 1 = violations found, 2 = usage error.
+Exit codes: 0 = clean, 1 = violations found, 2 = usage error or git failure.
 """
 from __future__ import annotations
 
@@ -51,7 +52,10 @@ _BASE_REF_CANDIDATES = ("origin/main", "upstream/main", "main", "master")
 
 
 def get_changed_files() -> list[str]:
-    """All modified/added files vs the project's base branch.
+    """All changed (added/modified/deleted) files vs the project's base branch.
+
+    `git diff --name-only` includes deletions; downstream check_* helpers
+    individually skip files that no longer exist on disk.
 
     Tries common base refs in order; falls back to staged-only mode (with
     a loud warning) only when no candidate ref is available locally.
@@ -180,9 +184,16 @@ def check_rust_warnings(files: list[str]) -> list[str]:
     """Mirror CI's clippy gate: cargo clippy --workspace --all-targets -- -D warnings.
 
     Slower than `cargo check` but catches clippy lints CI catches.
+    Fires on .rs changes AND on Cargo.toml/Cargo.lock changes (which
+    can change feature sets or dependency versions and break clippy).
     """
-    rs_files = [f for f in files if f.endswith(".rs")]
-    if not rs_files:
+    triggers = [
+        f for f in files
+        if f.endswith(".rs")
+        or f.endswith("Cargo.toml")
+        or f.endswith("Cargo.lock")
+    ]
+    if not triggers:
         return []
 
     cargo_args = [
@@ -236,6 +247,13 @@ def check_amend_completeness(staged_only: bool) -> list[str]:
     if staged_only:
         return []
     r = run(["git", "diff", "--stat"])  # unstaged only, not vs HEAD
+    if r.returncode != 0:
+        print(
+            f"⚠ git diff --stat failed (rc={r.returncode}) — fail closed: "
+            f"{(r.stderr or '').strip()}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if r.stdout.strip():
         files = r.stdout.strip().splitlines()
         return [f"unstaged changes in working tree: {f.strip()}" for f in files[:5]]
