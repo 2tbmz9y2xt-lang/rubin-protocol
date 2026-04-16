@@ -362,7 +362,10 @@ mod tests {
         );
 
         // In-memory chain_state must also be restored to pre-disconnect tip.
-        assert!(engine.chain_state.has_tip, "chain_state.has_tip not restored");
+        assert!(
+            engine.chain_state.has_tip,
+            "chain_state.has_tip not restored"
+        );
         assert_eq!(
             engine.chain_state.height, tip_before.0,
             "chain_state.height not restored after save failure"
