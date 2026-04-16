@@ -129,6 +129,9 @@ def check_bot_thread_ids(files: list[str]) -> list[str]:
 # ── Check 2: Exported test helpers in production ─────────────────────
 
 TEST_HELPER_RE = re.compile(r"InjectTestEntry|inject_test_entry")
+# Match the conventional trailing test module only: `mod tests`/`mod test`,
+# but NOT siblings like `mod test_helpers`, `mod testing`, etc.
+MOD_TESTS_RE = re.compile(r"\bmod\s+tests?\b")
 
 
 def check_test_helpers_in_production(files: list[str]) -> list[str]:
@@ -147,18 +150,21 @@ def check_test_helpers_in_production(files: list[str]) -> list[str]:
         lines = content.splitlines()
         # Rust: only check lines BEFORE the final `#[cfg(test)] mod tests`
         # block.  Standard pattern is a trailing test module; also handle
-        # `#[cfg(test)] mod tests {` on a single line.
+        # `#[cfg(test)] mod tests {` on a single line.  Match only the
+        # conventional `mod tests` / `mod test` module name with word
+        # boundaries — `mod test_helpers` is a real production module
+        # that must not be treated as the end-of-prod marker.
         prod_end = len(lines)
         if f.endswith(".rs"):
             for idx in range(len(lines) - 1, -1, -1):
                 if "#[cfg(test)]" in lines[idx]:
                     # Same line: `#[cfg(test)] mod tests {`
-                    if "mod tests" in lines[idx] or "mod test" in lines[idx]:
+                    if MOD_TESTS_RE.search(lines[idx]):
                         prod_end = idx
                         break
                     # Within next 2 lines
                     for nxt in range(idx + 1, min(idx + 3, len(lines))):
-                        if "mod tests" in lines[nxt] or "mod test" in lines[nxt]:
+                        if MOD_TESTS_RE.search(lines[nxt]):
                             prod_end = idx
                             break
                     if prod_end < len(lines):

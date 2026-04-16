@@ -59,6 +59,13 @@ impl SyncEngine {
             ));
         }
 
+        // Test-only seam to exercise the otherwise-unreachable
+        // blockstore-missing branch in the save-failure recovery below.
+        #[cfg(test)]
+        if self.drop_block_store_after_truncate {
+            self.block_store = None;
+        }
+
         if let Some(path) = self.cfg.chain_state_path.as_ref() {
             if let Err(err) = self.chain_state.save(path) {
                 // Restore canonical tip directly, then restore in-memory
@@ -504,6 +511,47 @@ mod tests {
         assert_eq!(
             engine.tip_timestamp, gen_ts,
             "tip_timestamp must be parent's (genesis) when canonical rollback failed"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn disconnect_tip_save_failure_with_blockstore_dropped_propagates_error() {
+        // Test-only seam: drop block_store between truncate and save so the
+        // save-failure recovery hits the otherwise-unreachable None branch.
+        // Verifies the branch propagates a normal error (no panic) and
+        // aligns tip_timestamp with the disconnected parent.
+        let (mut engine, dir) = engine_with_store("rubin-disc-bs-dropped");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine.apply_block(&genesis, None).expect("genesis");
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        engine.apply_block(&block1, None).expect("block 1");
+
+        // Force save() to fail deterministically (regular file as parent).
+        let cs_parent_file = dir.join("chainstate-parent-file");
+        std::fs::write(&cs_parent_file, b"not a directory").expect("create parent file");
+        engine.cfg.chain_state_path = Some(cs_parent_file.join("state.bin"));
+        // Arm the test seam: drop block_store after the first truncate so the
+        // save-failure recovery cannot re-borrow it.
+        engine.drop_block_store_after_truncate = true;
+
+        let err = engine.disconnect_tip().unwrap_err();
+        // Composite error must mention both the save error and the
+        // blockstore-missing rollback note.
+        assert!(
+            err.contains("rollback failed"),
+            "expected rollback failure note, got: {err}"
+        );
+        assert!(
+            err.contains("blockstore missing after canonical truncate"),
+            "expected blockstore-missing note, got: {err}"
+        );
+        // tip_timestamp must align with the disconnected parent (genesis).
+        assert_eq!(
+            engine.tip_timestamp, gen_ts,
+            "tip_timestamp must be parent's (genesis) on blockstore-missing branch"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
