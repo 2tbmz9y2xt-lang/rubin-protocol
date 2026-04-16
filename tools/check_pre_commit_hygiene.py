@@ -33,7 +33,16 @@ def _sanitize_paths(text: str) -> str:
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd or REPO_ROOT)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd or REPO_ROOT)
+    except FileNotFoundError as exc:
+        detail = _sanitize_paths(str(exc)).strip()
+        command = cmd[0] if cmd else "<unknown>"
+        print(
+            f"⚠ failed to execute {command!r} — fail closed: {detail}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def get_staged_files() -> list[str]:
@@ -239,12 +248,21 @@ def check_rust_warnings(files: list[str]) -> list[str]:
 
     # Inherit caller env (no overrides needed; -D warnings is on the
     # cargo arg list, not RUSTFLAGS).
-    r = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        cwd=RUST_DIR,
-    )
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=RUST_DIR,
+        )
+    except FileNotFoundError as exc:
+        detail = _sanitize_paths(str(exc)).strip()
+        command = cmd[0] if cmd else "<unknown>"
+        print(
+            f"⚠ failed to execute {command!r} — fail closed: {detail}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if r.returncode != 0:
         combined = (r.stdout or "") + (r.stderr or "")
         errors = [line for line in combined.splitlines()
