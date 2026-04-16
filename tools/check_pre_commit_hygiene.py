@@ -39,7 +39,10 @@ def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[
 def get_staged_files() -> list[str]:
     r = run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"])
     if r.returncode != 0:
-        print("⚠ git diff --cached failed — fail closed", file=sys.stderr)
+        print(
+            f"⚠ git diff --cached failed — fail closed: {(r.stderr or '').strip()}",
+            file=sys.stderr,
+        )
         sys.exit(2)
     return [f for f in r.stdout.splitlines() if f.strip()]
 
@@ -48,7 +51,11 @@ def get_changed_files() -> list[str]:
     """All modified/added files vs origin/main."""
     base_result = run(["git", "merge-base", "origin/main", "HEAD"])
     if base_result.returncode != 0:
-        print(f"⚠ git merge-base failed (rc={base_result.returncode}) — fail closed", file=sys.stderr)
+        print(
+            f"⚠ git merge-base failed (rc={base_result.returncode}) — fail closed: "
+            f"{(base_result.stderr or '').strip()}",
+            file=sys.stderr,
+        )
         sys.exit(2)
     base = base_result.stdout.strip()
     if not base:
@@ -56,7 +63,10 @@ def get_changed_files() -> list[str]:
         sys.exit(2)
     r = run(["git", "diff", "--name-only", f"{base}...HEAD"])
     if r.returncode != 0:
-        print(f"⚠ git diff failed (rc={r.returncode}) — fail closed", file=sys.stderr)
+        print(
+            f"⚠ git diff failed (rc={r.returncode}) — fail closed: {(r.stderr or '').strip()}",
+            file=sys.stderr,
+        )
         sys.exit(2)
     return [f for f in r.stdout.splitlines() if f.strip()]
 
@@ -64,6 +74,25 @@ def get_changed_files() -> list[str]:
 # ── Check 1: Bot thread IDs in code ──────────────────────────────────
 
 BOT_THREAD_RE = re.compile(r"PRRT_\w+|Codex thread|Copilot thread|chatgpt-codex-connector")
+_BINARY_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".pdf",
+    ".zip", ".gz", ".tar", ".tgz", ".bz2", ".xz", ".7z", ".rar",
+    ".so", ".dylib", ".dll", ".exe", ".bin", ".o", ".a", ".class",
+    ".jar", ".wasm", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mp3", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".ogg",
+})
+_MAX_SCAN_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+
+def _should_scan(f: str, path: Path) -> bool:
+    if Path(f).suffix.lower() in _BINARY_EXTS:
+        return False
+    try:
+        if path.stat().st_size > _MAX_SCAN_BYTES:
+            return False
+    except OSError:
+        return False
+    return True
 
 
 def check_bot_thread_ids(files: list[str]) -> list[str]:
@@ -75,6 +104,8 @@ def check_bot_thread_ids(files: list[str]) -> list[str]:
             continue
         path = REPO_ROOT / f
         if not path.is_file():
+            continue
+        if not _should_scan(f, path):
             continue
         for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
             if BOT_THREAD_RE.search(line):

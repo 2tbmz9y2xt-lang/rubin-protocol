@@ -85,6 +85,11 @@ impl SyncEngine {
                     self.chain_state = rollback.chain_state;
                     self.tip_timestamp = rollback.tip_timestamp;
                     self.best_known_height = rollback.best_known_height;
+                } else {
+                    // Canonical stays truncated; align tip_timestamp with the
+                    // disconnected parent so is_in_ibd() and other freshness
+                    // metadata don't keep reporting the old tip.
+                    self.tip_timestamp = new_tip_timestamp;
                 }
                 return Err(SyncEngine::err_with_rollback(err, canonical_rb));
             }
@@ -455,9 +460,13 @@ mod tests {
         let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
         engine.apply_block(&block1, None).expect("block 1");
 
-        // Detach chain_state path so save() fails; arm rollback inject so
-        // canonical restore also fails after truncate succeeds.
-        engine.cfg.chain_state_path = Some(std::path::PathBuf::from("/nonexistent/dir/state.bin"));
+        // Point chain_state_path at a child of a regular file so save() fails
+        // deterministically (parent is not a directory — works under any
+        // privileges).  Arm rollback inject so canonical restore also fails
+        // after truncate succeeds.
+        let invalid_parent = dir.join("not-a-dir");
+        std::fs::write(&invalid_parent, b"not a directory").expect("create invalid parent file");
+        engine.cfg.chain_state_path = Some(invalid_parent.join("state.bin"));
         engine.block_store.as_mut().unwrap().force_rollback_error = true;
 
         let err = engine.disconnect_tip().unwrap_err();
@@ -496,6 +505,12 @@ mod tests {
         assert_eq!(
             engine.chain_state.tip_hash, genesis_hash,
             "chain_state tip must align with truncated canonical (genesis)"
+        );
+        // tip_timestamp must also be aligned with the disconnected parent
+        // (genesis) so is_in_ibd() / freshness metadata stay coherent.
+        assert_eq!(
+            engine.tip_timestamp, gen_ts,
+            "tip_timestamp must be parent's (genesis) when canonical rollback failed"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");

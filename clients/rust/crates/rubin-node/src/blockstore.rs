@@ -23,10 +23,10 @@ pub struct BlockStore {
     index: BlockStoreIndexDisk,
     /// Test-only: force `truncate_canonical` to return an error.
     #[cfg(test)]
-    pub force_truncate_error: bool,
+    pub(crate) force_truncate_error: bool,
     /// Test-only: force `rollback_canonical` to return an error.
     #[cfg(test)]
-    pub force_rollback_error: bool,
+    pub(crate) force_rollback_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
