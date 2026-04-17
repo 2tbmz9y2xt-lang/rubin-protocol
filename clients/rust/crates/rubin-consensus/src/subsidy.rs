@@ -22,14 +22,17 @@ pub fn block_subsidy(height: u64, already_generated: u128) -> u64 {
     clamp_base_reward_to_u64(base_reward)
 }
 
-/// Narrow `base_reward` from the u128 subsidy arithmetic into `u64` with
-/// an explicit overflow guard — the Rust equivalent of Go's
-/// `baseReward.IsUint64()` check (clients/go/consensus/subsidy.go:43-47).
+/// Narrow `base_reward` from the u128 subsidy arithmetic into `u64`
+/// with an explicit overflow guard — the Rust equivalent of the
+/// `baseReward.IsUint64()` branch in `BlockSubsidyBig`
+/// (`clients/go/consensus/subsidy.go`).
 ///
-/// Unreachable for current constants (MINEABLE_CAP fits in u64 and the
-/// right shift by EMISSION_SPEED_FACTOR only reduces the value), but
-/// the guard preserves deterministic behavior for malformed caller
-/// state and prevents silent truncation via `as u64`.
+/// Unreachable with the current constants and control flow
+/// (`already_generated >= MINEABLE_CAP` returns early, and the right
+/// shift by `EMISSION_SPEED_FACTOR` only reduces the remaining
+/// amount), but the guard preserves explicit Go↔Rust parity,
+/// future-proofs this path if the cap or arithmetic widens later, and
+/// prevents silent truncation via `as u64`.
 fn clamp_base_reward_to_u64(base_reward: u128) -> u64 {
     match u64::try_from(base_reward) {
         Ok(v) => v,
