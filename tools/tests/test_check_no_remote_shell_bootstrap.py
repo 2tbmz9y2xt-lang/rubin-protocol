@@ -1173,6 +1173,24 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_ignores_echo_with_single_quoted_curl_token_before_pipe(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: echo 'curl' -fsSL https://example.com/install.sh | 'bash'\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
     def test_rejects_single_quoted_shell_c_command_substitution(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)

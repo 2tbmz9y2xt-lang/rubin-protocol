@@ -292,7 +292,22 @@ def mask_pipe_window(text: str) -> str:
                 continue
         if ch == quote:
             quoted_text = "".join(quoted)
-            if re.fullmatch(DOWNLOADER_EXECUTABLE_PATTERN, quoted_text) or re.fullmatch(SHELL_EXECUTABLE_PATTERN, quoted_text):
+            prefix_parts = parts[:-1] if parts and parts[-1] in {"'", '"'} else parts
+            prefix_text = "".join(prefix_parts).rstrip()
+            preserve_shell_word = (
+                not prefix_text
+                or prefix_text.endswith(("|", "|&", ";", "&", "&&", "||", "("))
+                or bool(
+                    re.search(
+                        rf"(?:^|\s)(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN})$",
+                        prefix_text,
+                    )
+                )
+            )
+            if (
+                re.fullmatch(DOWNLOADER_EXECUTABLE_PATTERN, quoted_text)
+                or re.fullmatch(SHELL_EXECUTABLE_PATTERN, quoted_text)
+            ) and preserve_shell_word:
                 parts.extend(quoted_text)
             else:
                 parts.extend(" " * len(quoted_text))
@@ -740,6 +755,8 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
         if not value:
             return
         line_no = key_node.start_mark.line + 1
+        if getattr(value_node, "style", None) in {"|", ">"}:
+            line_no += 1
         lines = value.splitlines()
         if not lines:
             entries.append([(line_no, value)])
