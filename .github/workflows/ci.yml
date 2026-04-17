@@ -49,6 +49,7 @@ jobs:
 
       - name: Crypto backend policy tooling tests
         run: |
+          python3 -m pip install --quiet 'PyYAML==6.0.3'
           python3 -m unittest discover -s tools/tests -p 'test_*.py'
 
       - name: Consensus OpenSSL isolation policy
