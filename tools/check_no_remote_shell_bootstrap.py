@@ -34,11 +34,11 @@ STEPS_KEY_RE = re.compile(
 STEP_INLINE_RUN_RE = re.compile(r'^\s*-\s+["\']?run["\']?\s*:\s*(.*)$')
 RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
 BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
-STEP_FLOW_MAPPING_RE = re.compile(r"^\s*-\s*\{(.*)\}\s*$")
+STEP_FLOW_MAPPING_RE = re.compile(r"^\s*-\s*\{(.*)\}\s*(?:#.*)?$")
 STEPS_FLOW_SEQUENCE_START_RE = re.compile(
     rf'^\s*["\']?steps["\']?\s*:\s*(?:{YAML_NODE_METADATA_TOKEN_PATTERN}\s*)*\[(.*)$'
 )
-FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
+FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*(?:#.*)?$')
 ENV_SPLIT_STRING_FALLBACK_RE = re.compile(r"(?:^|[^\w])(?:/(?:usr/)?bin/)?env\s+-S(?:\s|$)|--split-string", re.IGNORECASE)
 
 REMOTE_SHELL_PATTERNS = (
@@ -85,8 +85,22 @@ REMOTE_SHELL_PATTERNS = (
         ),
     ),
     (
+        "remote shell -c command substitution",
+        re.compile(
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"'][^\n]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "remote shell eval command substitution",
         re.compile(rf"\beval\b\s+[\"']?[^\n]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})", re.IGNORECASE),
+    ),
+    (
+        "remote shell eval command substitution",
+        re.compile(
+            rf"\beval\b\s+[\"'][^\n]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
+            re.IGNORECASE,
+        ),
     ),
 )
 
