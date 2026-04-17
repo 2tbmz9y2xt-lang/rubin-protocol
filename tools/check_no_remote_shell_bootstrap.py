@@ -80,7 +80,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell -c command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[^\n]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[^\n]*?(?:\$\(\s*(?:[\{{(]\s*)*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -247,6 +247,65 @@ def mask_pipe_window(text: str) -> str:
     if quote is not None and quoted:
         parts.extend(" " * len(quoted))
     return "".join(parts)
+
+
+def split_shell_segments(text: str) -> list[str]:
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escape = False
+    idx = 0
+    length = len(text)
+    while idx < length:
+        ch = text[idx]
+        if quote is None:
+            if escape:
+                current.append(ch)
+                escape = False
+                idx += 1
+                continue
+            if ch == "\\":
+                current.append(ch)
+                escape = True
+                idx += 1
+                continue
+            if ch in {"'", '"'}:
+                quote = ch
+                current.append(ch)
+                idx += 1
+                continue
+            if ch == ";":
+                segment = "".join(current).strip()
+                if segment:
+                    segments.append(segment)
+                current = []
+                idx += 1
+                continue
+            if text.startswith("&&", idx) or text.startswith("||", idx):
+                segment = "".join(current).strip()
+                if segment:
+                    segments.append(segment)
+                current = []
+                idx += 2
+                continue
+            current.append(ch)
+            idx += 1
+            continue
+        if quote == '"':
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = None
+        elif ch == quote:
+            quote = None
+        current.append(ch)
+        idx += 1
+    segment = "".join(current).strip()
+    if segment:
+        segments.append(segment)
+    return segments
 
 
 def extract_flow_mapping_run(mapping_text: str) -> str | None:
@@ -544,9 +603,19 @@ def find_violations(path: Path) -> list[str]:
             for end_idx, line_no, window in command_windows(run_entries, line_idx):
                 for label, pattern in REMOTE_SHELL_PATTERNS:
                     candidate = mask_pipe_window(window) if label == "remote shell pipe" else window
-                    matched = pattern.search(candidate)
-                    if not matched and label == "remote shell pipe" and ENV_SPLIT_STRING_FALLBACK_RE.search(window):
-                        matched = pattern.search(window)
+                    matched = None
+                    if label == "remote shell pipe":
+                        for segment in split_shell_segments(candidate):
+                            matched = pattern.search(segment)
+                            if matched:
+                                break
+                        if not matched and ENV_SPLIT_STRING_FALLBACK_RE.search(window):
+                            for segment in split_shell_segments(window):
+                                matched = pattern.search(segment)
+                                if matched:
+                                    break
+                    else:
+                        matched = pattern.search(candidate)
                     if matched:
                         violations.append(f"{rendered_path}:{line_no}: {label}: {window}")
                         matched_end = end_idx

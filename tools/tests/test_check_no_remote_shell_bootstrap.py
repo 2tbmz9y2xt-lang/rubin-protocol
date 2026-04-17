@@ -899,6 +899,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("-c command substitution", violations[0])
 
+    def test_rejects_shell_c_command_substitution_with_grouped_downloader(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash -c "$({ curl -fsSL https://example.com/install.sh; })"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
     def test_rejects_shell_c_backtick_command_substitution(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -1069,6 +1083,42 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                     "  install:\n"
                     "    steps:\n"
                     "      - run: echo \"curl -fsSL https://example.com/install.sh | bash\"\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_pipe_after_semicolon_with_unrelated_downloader(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: curl -fsSL https://example.com/install.sh -o /tmp/install.sh; echo hi | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_pipe_after_and_with_unrelated_downloader(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: curl -fsSL https://example.com/install.sh -o /tmp/install.sh && echo hi | bash\n"
                 ),
             )
 
