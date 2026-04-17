@@ -39,7 +39,10 @@ STEPS_FLOW_SEQUENCE_START_RE = re.compile(
     rf'^\s*["\']?steps["\']?\s*:\s*(?:{YAML_NODE_METADATA_TOKEN_PATTERN}\s*)*\[(.*)$'
 )
 FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*(?:#.*)?$')
-ENV_SPLIT_STRING_FALLBACK_RE = re.compile(r"(?:^|[^\w])(?:/(?:usr/)?bin/)?env\s+-S(?:\s|$)|--split-string", re.IGNORECASE)
+ENV_SPLIT_STRING_FALLBACK_RE = re.compile(
+    r"(?:^|[^\w])(?:/(?:usr/)?bin/)?env\s+(?:-S(?:\s|$)|--split-string(?:=|\s|$))",
+    re.IGNORECASE,
+)
 
 REMOTE_SHELL_PATTERNS = (
     (
@@ -529,6 +532,56 @@ def collect_flow_sequence(lines: list[str], start_idx: int, initial_text: str) -
         text = "\n" + lines[idx]
 
 
+def collect_step_flow_mapping_text(step_entries: list[tuple[int, str]]) -> str | None:
+    first_raw = step_entries[0][1]
+    match = re.match(r"^\s*-\s*\{(.*)$", first_raw)
+    if match is None:
+        return None
+
+    depth = 1
+    quote: str | None = None
+    escape = False
+    comment = False
+    parts: list[str] = []
+    segments = [match.group(1)] + [f"\n{raw.strip()}" for _, raw in step_entries[1:]]
+    for segment in segments:
+        for ch in segment:
+            if comment:
+                parts.append(ch)
+                if ch == "\n":
+                    comment = False
+                continue
+            if quote is not None:
+                parts.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in {"'", '"'}:
+                quote = ch
+                parts.append(ch)
+                continue
+            if ch == "#":
+                comment = True
+                parts.append(ch)
+                continue
+            if ch == "{":
+                depth += 1
+                parts.append(ch)
+                continue
+            if ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return "".join(parts)
+                parts.append(ch)
+                continue
+            parts.append(ch)
+    return None
+
+
 def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
     run_entries: list[list[tuple[int, str]]] = []
     first_line_no, first_raw = step_entries[0]
@@ -541,6 +594,12 @@ def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[t
     flow_style_match = FLOW_STYLE_STEP_RUN_RE.match(first_raw)
     if flow_style_match is not None:
         content = flow_style_match.group(1)
+        if content:
+            run_entries.append([(first_line_no, content)])
+        return run_entries
+    flow_mapping_text = collect_step_flow_mapping_text(step_entries)
+    if flow_mapping_text is not None:
+        content = extract_flow_mapping_run(flow_mapping_text)
         if content:
             run_entries.append([(first_line_no, content)])
         return run_entries
@@ -591,7 +650,10 @@ def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[t
             run_entries.append(block)
             continue
         if content:
-            run_entries.append([(line_no, content)])
+            entries = inline_plain_scalar_entries(step_entries[idx:], line_no, content, indent)
+            run_entries.append(entries)
+            idx += len(entries)
+            continue
         idx += 1
     return run_entries
 

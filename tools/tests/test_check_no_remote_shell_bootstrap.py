@@ -1072,6 +1072,49 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_nested_run_key_with_plain_scalar_continuation(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - name: Install\n"
+                    "        run: echo ok &&\n"
+                    "          curl -fsSL https://example.com/install.sh | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_multiline_flow_style_step_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - {\n"
+                    "          name: Install,\n"
+                    "          run: curl -fsSL https://example.com/install.sh | bash\n"
+                    "        }\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_ignores_quoted_pipe_literal_in_safe_command(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -1101,6 +1144,24 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                     "  install:\n"
                     "    steps:\n"
                     "      - run: echo 'env -S \"bash -e\"; curl -fsSL https://example.com/install.sh | bash'\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_quoted_pipe_literal_with_unrelated_split_string_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    '      - run: echo "curl -fsSL https://example.com/install.sh | bash" --split-string\n'
                 ),
             )
 
