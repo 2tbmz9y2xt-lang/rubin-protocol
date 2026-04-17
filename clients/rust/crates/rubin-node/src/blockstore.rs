@@ -145,11 +145,20 @@ impl BlockStore {
         //     canonical APPEND path; non-append canonical rewrites go
         //     through `rollback_canonical` / `truncate_canonical` /
         //     explicit reorg APIs. Without this guard a caller mistake
-        //     could pass a stale height and silently truncate live
+        //     could (a) pass a stale height and silently truncate live
         //     canonical entries inside `set_canonical_tip` (which allows
-        //     mid-chain rewrite when the hash differs). Idempotent retry
-        //     at the same `(height, hash)` stays accepted.
+        //     mid-chain rewrite when the hash differs), or (b) pass a
+        //     future-height gap and produce orphan block/header/undo
+        //     files before `set_canonical_tip` rejects the gap. Both
+        //     cases are rejected up front, before any disk write.
+        //     Idempotent retry at the same `(height, hash)` stays
+        //     accepted (same-hash path below returns Ok without mutation).
         let current_len = self.canonical_len() as u64;
+        if height > current_len {
+            return Err(format!(
+                "commit_canonical_block height gap: height={height} > canonical_len={current_len}"
+            ));
+        }
         if height < current_len {
             let existing = self.canonical_hash(height)?;
             if existing != Some(block_hash_bytes) {
@@ -930,6 +939,44 @@ mod tests {
         // is intact.
         assert_eq!(store.canonical_len(), 2);
         assert_eq!(store.canonical_hash(1).expect("h1"), Some([0x22; 32]));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `commit_canonical_block` rejects future-height gaps BEFORE any
+    /// disk write, so orphan block/header/undo files never accumulate
+    /// when a caller accidentally skips a height.
+    #[test]
+    fn commit_canonical_block_rejects_height_gap_without_orphan_files() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-commit-gap");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        // canonical_len starts at 0; passing height=5 is a gap.
+        let undo = BlockUndo {
+            block_height: 5,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        let err = store
+            .commit_canonical_block(5, hash, header, &genesis, &undo)
+            .unwrap_err();
+        assert!(
+            err.contains("height gap"),
+            "expected height-gap rejection, got {err:?}"
+        );
+
+        // No disk writes: block/header/undo files must NOT exist.
+        assert_eq!(store.canonical_len(), 0);
+        assert!(!store.has_block(hash));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
