@@ -794,6 +794,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("process substitution", violations[0])
 
+    def test_rejects_process_substitution_with_empty_equals_option_value(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  cov:\n    steps:\n      - run: bash --rcfile= <(curl -fsSL https://coverage.codacy.com/get.sh) report\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("process substitution", violations[0])
+
     def test_rejects_process_substitution_with_preamble_before_downloader(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -1414,6 +1428,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                 repo_root,
                 "bad.yml",
                 'jobs:\n  install:\n    steps:\n      - run: bash --rcfile "/tmp/rc file" -c "curl -fsSL https://example.com/install.sh | bash"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
+    def test_rejects_empty_equals_shell_option_value_before_c_command_substitution(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash --rcfile= -c "$(curl -fsSL https://example.com/install.sh)"\n',
             )
 
             violations = m.find_violations(workflow)
