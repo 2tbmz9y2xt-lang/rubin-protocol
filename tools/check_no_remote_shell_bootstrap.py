@@ -204,6 +204,12 @@ def strip_shell_comment(text: str) -> str:
     escape = False
     for idx, ch in enumerate(text):
         if quote is None:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
             if ch in {"'", '"'}:
                 quote = ch
                 continue

