@@ -22,7 +22,9 @@ ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN = rf"(?!-S(?:\s|$))(?!--split-string(?:=|\
 ENV_SPLIT_STRING_VALUE_PATTERN = rf"(?:\"{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\"|'{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*'|{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*)"
 ENV_SPLIT_STRING_LAUNCHER_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN})*\s+{ENV_SPLIT_STRING_OPTION_PATTERN}{ENV_SPLIT_STRING_VALUE_PATTERN}"
 SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SHELL_EXECUTABLE_PATTERN})"
-DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:/(?:usr/)?bin/)?(?:curl|wget)\b"
+DOWNLOADER_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:curl|wget)"
+DOWNLOADER_WORD_PATTERN = rf"(?:{DOWNLOADER_EXECUTABLE_PATTERN}\b|\"{DOWNLOADER_EXECUTABLE_PATTERN}\"|'{DOWNLOADER_EXECUTABLE_PATTERN}')"
+DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?{DOWNLOADER_WORD_PATTERN}"
 SHELL_C_OPTION_PATTERN = r"(?:-c|-[A-Za-z]*c[A-Za-z]*|--command)"
 INLINE_PIPE_COMMENT_RE = re.compile(r"\|&?\s*#")
 STEPS_KEY_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*(?:#.*)?$')
@@ -193,6 +195,10 @@ def strip_quoted_literals(text: str) -> str:
             continue
         parts.append(" ")
     return "".join(parts)
+
+
+def contains_quoted_downloader_word(text: str) -> bool:
+    return any(token in text for token in ('"curl"', "'curl'", '"wget"', "'wget'"))
 
 
 def extract_flow_mapping_run(mapping_text: str) -> str | None:
@@ -491,7 +497,11 @@ def find_violations(path: Path) -> list[str]:
                 for label, pattern in REMOTE_SHELL_PATTERNS:
                     candidate = strip_quoted_literals(window) if label == "remote shell pipe" else window
                     matched = pattern.search(candidate)
-                    if not matched and label == "remote shell pipe" and (" env -S " in window or "--split-string" in window):
+                    if not matched and label == "remote shell pipe" and (
+                        " env -S " in window
+                        or "--split-string" in window
+                        or contains_quoted_downloader_word(window)
+                    ):
                         matched = pattern.search(window)
                     if matched:
                         violations.append(f"{rendered_path}:{line_no}: {label}: {window}")

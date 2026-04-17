@@ -49,6 +49,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_pipe_with_quoted_curl_command_word(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  install:\n    steps:\n      - run: 'curl' -fsSL https://example.com/install.sh | bash\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_pipe_to_dash(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -794,6 +808,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                 repo_root,
                 "bad.yml",
                 'jobs:\n  install:\n    steps:\n      - run: bash -c "$(sudo curl -fsSL https://example.com/install.sh)"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
+    def test_rejects_shell_c_command_substitution_with_quoted_curl(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash -c "$(\'curl\' -fsSL https://example.com/install.sh)"\n',
             )
 
             violations = m.find_violations(workflow)
