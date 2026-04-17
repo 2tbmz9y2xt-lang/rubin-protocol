@@ -109,9 +109,18 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
     windows: list[tuple[int, int, str]] = []
     parts: list[str] = []
     join_without_space = False
+    active_heredoc: str | None = None
     for idx in range(start, len(entries)):
         line_no, raw = entries[idx]
         stripped = raw.strip()
+        if active_heredoc is not None:
+            parts.append(stripped if stripped else "")
+            windows.append((idx, line_no, "\n".join(parts)))
+            if stripped == active_heredoc:
+                active_heredoc = None
+                break
+            join_without_space = raw.rstrip().endswith("\\")
+            continue
         if not stripped:
             if parts:
                 if parts[-1].endswith("|") or parts[-1].endswith("|&"):
@@ -134,6 +143,9 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
         else:
             parts.append(normalized)
         join_without_space = raw.rstrip().endswith("\\")
+        heredoc_match = re.search(r"<<-?\s*(\S+)$", normalized)
+        if heredoc_match is not None:
+            active_heredoc = heredoc_match.group(1)
         windows.append((idx, line_no, "\n".join(parts)))
     return windows
 
@@ -179,6 +191,13 @@ def inline_plain_scalar_entries(
             base_indent = continuation_indent
         entries.append((line_no, raw[continuation_indent:]))
     return entries
+
+
+def strip_yaml_scalar_quotes(text: str) -> str:
+    trimmed = text.strip()
+    if len(trimmed) >= 2 and trimmed[0] == trimmed[-1] and trimmed[0] in {"'", '"'}:
+        return trimmed[1:-1]
+    return text
 
 
 def strip_shell_comment(text: str) -> str:
@@ -446,10 +465,16 @@ def collect_flow_sequence(lines: list[str], start_idx: int, initial_text: str) -
     depth = 1
     quote: str | None = None
     escape = False
+    comment = False
     idx = start_idx
     text = initial_text
     while True:
         for pos, ch in enumerate(text):
+            if comment:
+                parts.append(ch)
+                if ch == "\n":
+                    comment = False
+                continue
             if quote is not None:
                 parts.append(ch)
                 if escape:
@@ -461,6 +486,10 @@ def collect_flow_sequence(lines: list[str], start_idx: int, initial_text: str) -
                 continue
             if ch in {"'", '"'}:
                 quote = ch
+                parts.append(ch)
+                continue
+            if ch == "#":
+                comment = True
                 parts.append(ch)
                 continue
             if ch == "[":
@@ -497,7 +526,7 @@ def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[t
         return run_entries
     inline_match = STEP_INLINE_RUN_RE.match(first_raw)
     if inline_match is not None:
-        content = inline_match.group(1)
+        content = strip_yaml_scalar_quotes(inline_match.group(1))
         if content and BLOCK_SCALAR_RE.match(content.strip()):
             block, _ = block_entries(step_entries, 1, len(first_raw) - len(first_raw.lstrip()))
             run_entries.append(block)
@@ -536,7 +565,7 @@ def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[t
         if match is None:
             idx += 1
             continue
-        content = match.group(1)
+        content = strip_yaml_scalar_quotes(match.group(1))
         if content and BLOCK_SCALAR_RE.match(content.strip()):
             block, idx = block_entries(step_entries, idx + 1, indent)
             run_entries.append(block)

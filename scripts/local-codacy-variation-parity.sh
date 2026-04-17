@@ -241,7 +241,11 @@ if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
     echo "PASS: Codacy metadata unavailable; local merge-base fallback remains $merge_base"
     exit 0
   fi
-  python3 - "$codacy_status_json" "$merge_base" "$remote_pr_head" "$current_head" <<'PY'
+  local_head_ahead=0
+  if [[ -n "$remote_pr_head" ]] && git -C "$repo_root" merge-base --is-ancestor "$remote_pr_head" "$current_head" 2>/dev/null; then
+    local_head_ahead=1
+  fi
+  python3 - "$codacy_status_json" "$merge_base" "$remote_pr_head" "$current_head" "$local_head_ahead" <<'PY'
 import json
 import sys
 
@@ -249,6 +253,7 @@ data = json.loads(sys.argv[1])
 local_merge_base = sys.argv[2]
 remote_pr_head = sys.argv[3]
 local_head = sys.argv[4]
+local_head_ahead = sys.argv[5] == "1"
 ancestor = data["data"]["commonAncestorCommit"]
 head = data["data"]["headCommit"]
 ancestor_sha = ancestor.get("commitSha")
@@ -262,7 +267,7 @@ print(f"  codacy PR head:  {head_sha or 'missing'}")
 print(f"  ancestor reports processed: {sum(1 for r in ancestor_reports if r.get('status') == 'Processed')}")
 print(f"  head reports processed:     {sum(1 for r in head_reports if r.get('status') == 'Processed')}")
 
-if remote_pr_head and local_head and remote_pr_head != local_head:
+if remote_pr_head and local_head and remote_pr_head != local_head and local_head_ahead:
     print(
         f"PASS: local HEAD {local_head} is ahead of GitHub PR head {remote_pr_head}; "
         "Codacy ancestor still reflects the published head and will be revalidated after push"
