@@ -154,6 +154,8 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
             reporter_path.chmod(0o755)
             (fake_bin / "uname").write_text("#!/usr/bin/env bash\necho 'Darwin arm64'\n", encoding="utf-8")
             (fake_bin / "uname").chmod(0o755)
+            (fake_bin / "sha512sum").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            (fake_bin / "sha512sum").chmod(0o755)
             (fake_bin / "shasum").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
             (fake_bin / "shasum").chmod(0o755)
             env = {
@@ -168,7 +170,7 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
                 env=env,
             )
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("shasum failed", proc.stderr)
+        self.assertRegex(proc.stderr, r"(sha512sum|shasum) failed")
         self.assertNotIn("checksum mismatch", proc.stderr)
 
 
