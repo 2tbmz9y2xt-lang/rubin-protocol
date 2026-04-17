@@ -105,6 +105,11 @@ impl BlockStore {
     /// sequence in `sync.rs`, this API shrinks the failure surface: the
     /// tip never advances before undo durability, so no post-hoc
     /// `truncate_canonical` rewind is needed on undo-write failure.
+    /// Note: a subsequent `chain_state.save` failure AFTER a successful
+    /// `commit_canonical_block` still requires the caller to call
+    /// `truncate_canonical(canonical_len_before)` because the tip has
+    /// already advanced; that rewind is outside the atomic boundary of
+    /// this API (see `sync.rs` main commit callsite).
     ///
     /// **Orphan semantics on retry.** A failure at any step before the
     /// tip advance may leave block/header/undo files on disk without a
@@ -135,6 +140,24 @@ impl BlockStore {
                 "undo block_height mismatch: commit height={height}, undo.block_height={}",
                 undo.block_height
             ));
+        }
+        // 0a. Append-only invariant guard. `commit_canonical_block` is the
+        //     canonical APPEND path; non-append canonical rewrites go
+        //     through `rollback_canonical` / `truncate_canonical` /
+        //     explicit reorg APIs. Without this guard a caller mistake
+        //     could pass a stale height and silently truncate live
+        //     canonical entries inside `set_canonical_tip` (which allows
+        //     mid-chain rewrite when the hash differs). Idempotent retry
+        //     at the same `(height, hash)` stays accepted.
+        let current_len = self.canonical_len() as u64;
+        if height < current_len {
+            let existing = self.canonical_hash(height)?;
+            if existing != Some(block_hash_bytes) {
+                return Err(format!(
+                    "commit_canonical_block is append-only: height={height} < canonical_len={current_len} \
+                     with a different hash; use rollback/truncate for reorg commits"
+                ));
+            }
         }
         // 1. Persist block + header bytes (idempotent `write_file_if_absent`).
         self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
@@ -859,6 +882,54 @@ mod tests {
             !store.has_block(hash),
             "block/header files must not be written before the mismatch check"
         );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `commit_canonical_block` is append-only. A caller passing a height
+    /// below the current canonical length with a DIFFERENT hash must be
+    /// rejected before any disk write — otherwise `set_canonical_tip`
+    /// would silently truncate live canonical entries and destroy the
+    /// chain view whose undo records are still on disk. Reorg /
+    /// truncation paths must go through the dedicated
+    /// `rollback_canonical` / `truncate_canonical` APIs.
+    #[test]
+    fn commit_canonical_block_rejects_non_append_rewrite() {
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::BLOCK_HEADER_BYTES;
+
+        let dir = unique_temp_path("rubin-blockstore-commit-non-append");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        // Seed two canonical entries without going through the atomic
+        // commit (the test targets the guard, not the happy path).
+        store.set_canonical_tip(0, [0x11; 32]).expect("seed 0");
+        store.set_canonical_tip(1, [0x22; 32]).expect("seed 1");
+        assert_eq!(store.canonical_len(), 2);
+
+        // Different hash at an existing height must be rejected.
+        let different_hash = [0x33; 32];
+        let undo = BlockUndo {
+            block_height: 1,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+        // Header bytes / block bytes irrelevant here: the append guard
+        // fires before `persist_block_bytes` runs.
+        let fake_header = [0u8; BLOCK_HEADER_BYTES];
+        let err = store
+            .commit_canonical_block(1, different_hash, &fake_header, &fake_header, &undo)
+            .unwrap_err();
+        assert!(
+            err.contains("append-only"),
+            "expected append-only rejection, got {err:?}"
+        );
+
+        // Canonical length stays at 2 and the prior hash at height 1
+        // is intact.
+        assert_eq!(store.canonical_len(), 2);
+        assert_eq!(store.canonical_hash(1).expect("h1"), Some([0x22; 32]));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

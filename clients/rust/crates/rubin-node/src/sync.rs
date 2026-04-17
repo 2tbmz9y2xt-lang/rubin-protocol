@@ -614,9 +614,11 @@ impl SyncEngine {
         // `commit_canonical_block` itself returns `Err`, the tip has not
         // advanced (the tip write is the last step inside the atomic API;
         // an earlier failure leaves the prior tip in place, and a save
-        // failure inside `set_canonical_tip` triggers
-        // `reload_index_from_disk` which restores the on-disk length), so
-        // no rewind is needed on that path.
+        // failure inside `set_canonical_tip` best-effort reloads the
+        // on-disk length — a double failure there would leave the
+        // in-memory length ahead of disk and the blockstore would require
+        // repair), so no rewind is needed on that path in the happy
+        // save-failure case.
         let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
         if let Some(block_store) = self.block_store.as_mut() {
             // Atomic canonical commit — Go parity
