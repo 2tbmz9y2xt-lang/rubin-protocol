@@ -271,6 +271,10 @@ if not ancestor_sha:
     print("FAIL: Codacy did not return a common ancestor baseline", file=sys.stderr)
     raise SystemExit(1)
 
+if sum(1 for r in ancestor_reports if r.get('status') == 'Processed') == 0:
+    print("FAIL: Codacy ancestor reports are not yet processed", file=sys.stderr)
+    raise SystemExit(1)
+
 if remote_pr_head and local_head and remote_pr_head != local_head and local_head_ahead:
     if ancestor_sha != local_merge_base:
         print(

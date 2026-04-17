@@ -828,7 +828,9 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
     try:
         root = yaml.compose(content)
     except yaml.YAMLError as exc:
-        return []
+        if iter_run_entries(content.splitlines()):
+            return []
+        raise RuntimeError(f"PyYAML parse failed: {exc}") from exc
     if root is None:
         return []
 

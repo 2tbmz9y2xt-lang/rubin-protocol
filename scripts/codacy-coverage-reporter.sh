@@ -107,6 +107,7 @@ ensure_reporter() {
     if [[ $verify_rc -eq 2 ]]; then
       return 1
     fi
+    echo "WARN: cached Codacy reporter at $CODACY_REPORTER_PATH failed sha512 verification; redownloading" >&2
     rm -f "$CODACY_REPORTER_PATH"
   fi
 
