@@ -173,7 +173,7 @@ impl TxPool {
             return Vec::new();
         }
 
-        let mut entries: Vec<&TxPoolEntry> = self.txs.values().collect();
+        let mut entries: Vec<(&[u8; 32], &TxPoolEntry)> = self.txs.iter().collect();
         entries.sort_by(compare_entries_for_mining);
 
         let mut selected = Vec::with_capacity(entries.len().min(max_count));
@@ -182,11 +182,11 @@ impl TxPool {
             if selected.len() >= max_count {
                 break;
             }
-            if entry.size > max_bytes.saturating_sub(used_bytes) {
+            if entry.1.size > max_bytes.saturating_sub(used_bytes) {
                 continue;
             }
-            selected.push(entry.raw.clone());
-            used_bytes += entry.size;
+            selected.push(entry.1.raw.clone());
+            used_bytes += entry.1.size;
         }
         selected
     }
@@ -756,13 +756,26 @@ pub(crate) fn reject_core_ext_tx_pre_activation(
     Ok(())
 }
 
-fn compare_entries_for_mining(a: &&TxPoolEntry, b: &&TxPoolEntry) -> Ordering {
-    match compare_fee_rate(a, b) {
+fn compare_entries_for_mining(
+    a: &(&[u8; 32], &TxPoolEntry),
+    b: &(&[u8; 32], &TxPoolEntry),
+) -> Ordering {
+    let (a_txid, a_entry) = *a;
+    let (b_txid, b_entry) = *b;
+    match compare_fee_rate(a_entry, b_entry) {
         Ordering::Greater => Ordering::Less,
         Ordering::Less => Ordering::Greater,
-        Ordering::Equal => match b.fee.cmp(&a.fee) {
-            Ordering::Equal => match a.weight.cmp(&b.weight) {
-                Ordering::Equal => a.raw.cmp(&b.raw),
+        Ordering::Equal => match b_entry.fee.cmp(&a_entry.fee) {
+            Ordering::Equal => match a_entry.weight.cmp(&b_entry.weight) {
+                // Final tie-break matches Go parity
+                // (`clients/go/node/mempool.go`, `sortMempoolEntries`:
+                // `bytes.Compare(entries[i].txid[:], entries[j].txid[:])`)
+                // and the Rust-internal `compare_priority_values` admit
+                // comparator, both of which tie by TXID (lexicographic).
+                // Using raw serialized bytes here (prior behavior) caused
+                // deterministic ordering to drift between clients on
+                // equal-fee/weight/size transaction sets.
+                Ordering::Equal => a_txid.cmp(b_txid),
                 other => other,
             },
             other => other,
@@ -1655,8 +1668,10 @@ mod tests {
             compare_admit_priority([0x03; 32], &high_fee, [0x02; 32], &low_fee),
             Ordering::Greater
         );
+        let high_txid: [u8; 32] = [0x03; 32];
+        let low_txid: [u8; 32] = [0x02; 32];
         assert_eq!(
-            compare_entries_for_mining(&&high_fee, &&low_fee),
+            compare_entries_for_mining(&(&high_txid, &high_fee), &(&low_txid, &low_fee)),
             Ordering::Less
         );
 
@@ -1674,26 +1689,38 @@ mod tests {
             weight: 8,
             size: 10,
         };
+        let lighter_txid: [u8; 32] = [0x04; 32];
+        let heavier_txid: [u8; 32] = [0x05; 32];
         assert_eq!(
-            compare_entries_for_mining(&&lighter, &&heavier),
+            compare_entries_for_mining(&(&lighter_txid, &lighter), &(&heavier_txid, &heavier),),
             Ordering::Less
         );
 
-        let raw_a = TxPoolEntry {
-            raw: vec![0x01],
+        // Final tie-break is TXID (lexicographic), matching Go parity
+        // (`clients/go/node/mempool.go`, `sortMempoolEntries`) and the
+        // Rust admit-priority comparator. Same fee/size/weight, different
+        // TXIDs — lower TXID sorts first.
+        let equal_a = TxPoolEntry {
+            raw: vec![0xFF],
             inputs: Vec::new(),
             fee: 20,
             weight: 10,
             size: 10,
         };
-        let raw_b = TxPoolEntry {
-            raw: vec![0x02],
+        let equal_b = TxPoolEntry {
+            raw: vec![0xAA],
             inputs: Vec::new(),
             fee: 20,
             weight: 10,
             size: 10,
         };
-        assert_eq!(compare_entries_for_mining(&&raw_a, &&raw_b), Ordering::Less);
+        let lo_txid: [u8; 32] = [0x01; 32];
+        let hi_txid: [u8; 32] = [0x02; 32];
+        assert_eq!(
+            compare_entries_for_mining(&(&lo_txid, &equal_a), &(&hi_txid, &equal_b)),
+            Ordering::Less,
+            "lower txid must sort first regardless of raw bytes",
+        );
     }
 
     #[test]
