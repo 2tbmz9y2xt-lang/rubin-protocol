@@ -9,7 +9,7 @@ from pathlib import Path
 try:
     import yaml
     from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
-except Exception:  # pragma: no cover - optional dependency fallback
+except ImportError:  # pragma: no cover - optional dependency fallback
     yaml = None
     Node = object  # type: ignore[assignment]
     MappingNode = object  # type: ignore[assignment]
@@ -18,20 +18,22 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|dash|sh)"
 SHELL_WORD_PATTERN = rf"(?:{SHELL_EXECUTABLE_PATTERN}\b|\"{SHELL_EXECUTABLE_PATTERN}\"|'{SHELL_EXECUTABLE_PATTERN}')"
-COMMAND_PREFIX_PATTERN = r"command(?:\s+(?:--|-p))*\s+"
+COMMAND_WORD_PATTERN = r"(?:command|\"command\"|'command')"
+COMMAND_PREFIX_PATTERN = rf"{COMMAND_WORD_PATTERN}(?:\s+(?:--|-p))*\s+"
 ENV_ASSIGNMENT_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*=\S+"
 ENV_ASSIGNMENT_PREFIX_PATTERN = rf"(?:{ENV_ASSIGNMENT_PATTERN}\s+)+"
 SUDO_COMMAND_PATTERN = r"(?:/(?:usr/)?bin/)?sudo"
 ENV_COMMAND_PATTERN = r"(?:/(?:usr/)?bin/)?env"
+ENV_COMMAND_WORD_PATTERN = rf"(?:{ENV_COMMAND_PATTERN}|\"{ENV_COMMAND_PATTERN}\"|'{ENV_COMMAND_PATTERN}')"
 SUDO_OPTION_PATTERN = r"(?:--|--?[A-Za-z][\w-]*(?:[= ]\S+)?)"
 SUDO_PREFIX_PATTERN = rf"{SUDO_COMMAND_PATTERN}(?:\s+{SUDO_OPTION_PATTERN})*\s+"
 ENV_ARGUMENT_PATTERN = rf"(?!{SHELL_EXECUTABLE_PATTERN}\b)\S+"
-ENV_PREFIX_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_ARGUMENT_PATTERN})*\s+"
+ENV_PREFIX_PATTERN = rf"{ENV_COMMAND_WORD_PATTERN}(?:\s+{ENV_ARGUMENT_PATTERN})*\s+"
 SHELL_OPTION_PATTERN = r"(?:--[A-Za-z][\w-]*|-[A-Za-z]+)"
 ENV_SPLIT_STRING_OPTION_PATTERN = r"(?:-S|--split-string)(?:=|\s+)"
 ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN = rf"(?!-S(?:\s|$))(?!--split-string(?:=|\s|$)){ENV_ARGUMENT_PATTERN}"
 ENV_SPLIT_STRING_VALUE_PATTERN = rf"(?:\"{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\"|'{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*'|{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*)"
-ENV_SPLIT_STRING_LAUNCHER_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN})*\s+{ENV_SPLIT_STRING_OPTION_PATTERN}{ENV_SPLIT_STRING_VALUE_PATTERN}"
+ENV_SPLIT_STRING_LAUNCHER_PATTERN = rf"{ENV_COMMAND_WORD_PATTERN}(?:\s+{ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN})*\s+{ENV_SPLIT_STRING_OPTION_PATTERN}{ENV_SPLIT_STRING_VALUE_PATTERN}"
 SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SHELL_WORD_PATTERN})"
 DOWNLOADER_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:curl|wget)"
 DOWNLOADER_WORD_PATTERN = rf"(?:{DOWNLOADER_EXECUTABLE_PATTERN}\b|\"{DOWNLOADER_EXECUTABLE_PATTERN}\"|'{DOWNLOADER_EXECUTABLE_PATTERN}')"
@@ -54,7 +56,9 @@ ENV_SPLIT_STRING_FALLBACK_RE = re.compile(
     r"(?:^|[^\w])(?:/(?:usr/)?bin/)?env\s+(?:-S(?:\s|$)|--split-string(?:=|\s|$))",
     re.IGNORECASE,
 )
-SOURCE_STDIN_PATTERN = r"(?:source|\.)\s+/dev/stdin"
+WRAPPER_EXECUTABLE_PATTERN = rf"(?:{ENV_COMMAND_PATTERN}|command|source)"
+SOURCE_WORD_PATTERN = r"(?:source|\"source\"|'source')"
+SOURCE_STDIN_PATTERN = rf"(?:{SOURCE_WORD_PATTERN}|\.)\s+/dev/stdin"
 
 REMOTE_SHELL_PATTERNS = (
     (
@@ -109,7 +113,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell -c command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"'][^\n]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"'][^\n]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SOURCE_STDIN_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
             re.IGNORECASE,
         ),
     ),
@@ -120,7 +124,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell eval command substitution",
         re.compile(
-            rf"\beval\b\s+[\"'][^\n]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
+            rf"\beval\b\s+[\"'][^\n]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SOURCE_STDIN_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
             re.IGNORECASE,
         ),
     ),
@@ -315,6 +319,7 @@ def mask_pipe_window(text: str) -> str:
             if (
                 re.fullmatch(DOWNLOADER_EXECUTABLE_PATTERN, quoted_text)
                 or re.fullmatch(SHELL_EXECUTABLE_PATTERN, quoted_text)
+                or re.fullmatch(WRAPPER_EXECUTABLE_PATTERN, quoted_text)
             ) and preserve_shell_word:
                 parts.extend(quoted_text)
             else:
@@ -796,6 +801,10 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
     return entries
 
 
+def normalize_run_entries(entries: list[tuple[int, str]]) -> str:
+    return " ".join("\n".join(text for _, text in entries).split())
+
+
 def infer_repo_root(path: Path) -> Path | None:
     for parent in path.parents:
         if parent.name == ".github" and parent.parent.name:
@@ -809,10 +818,10 @@ def find_violations(path: Path) -> list[str]:
     lines = content.splitlines()
     rendered_path = render_path(path, infer_repo_root(path))
     run_entries_sets = iter_run_entries(lines)
-    seen_entries = {"\n".join(text for _, text in entries) for entries in run_entries_sets}
+    seen_entries = {normalize_run_entries(entries) for entries in run_entries_sets}
     seen_violations: set[tuple[str, str]] = set()
     for entries in yaml_run_entries(content):
-        key = "\n".join(text for _, text in entries)
+        key = normalize_run_entries(entries)
         if key in seen_entries:
             continue
         seen_entries.add(key)
@@ -838,7 +847,7 @@ def find_violations(path: Path) -> list[str]:
                     else:
                         matched = pattern.search(candidate)
                     if matched:
-                        violation_key = (label, " ".join(window.split()))
+                        violation_key = (label, line_no, " ".join(window.split()))
                         if violation_key not in seen_violations:
                             seen_violations.add(violation_key)
                             violations.append(f"{rendered_path}:{line_no}: {label}: {window}")
