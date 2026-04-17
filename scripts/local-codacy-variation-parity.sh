@@ -267,15 +267,23 @@ print(f"  codacy PR head:  {head_sha or 'missing'}")
 print(f"  ancestor reports processed: {sum(1 for r in ancestor_reports if r.get('status') == 'Processed')}")
 print(f"  head reports processed:     {sum(1 for r in head_reports if r.get('status') == 'Processed')}")
 
+if not ancestor_sha:
+    print("FAIL: Codacy did not return a common ancestor baseline", file=sys.stderr)
+    raise SystemExit(1)
+
 if remote_pr_head and local_head and remote_pr_head != local_head and local_head_ahead:
+    if ancestor_sha != local_merge_base:
+        print(
+            f"FAIL: local HEAD {local_head} is ahead of GitHub PR head {remote_pr_head}, "
+            f"but local merge-base {local_merge_base} differs from Codacy common ancestor {ancestor_sha}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     print(
         f"PASS: local HEAD {local_head} is ahead of GitHub PR head {remote_pr_head}; "
         "Codacy ancestor still reflects the published head and will be revalidated after push"
     )
     raise SystemExit(0)
-if not ancestor_sha:
-    print("FAIL: Codacy did not return a common ancestor baseline", file=sys.stderr)
-    raise SystemExit(1)
 if ancestor_sha != local_merge_base:
     print(
         f"FAIL: local merge-base {local_merge_base} differs from Codacy common ancestor {ancestor_sha}",

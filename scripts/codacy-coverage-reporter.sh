@@ -99,7 +99,10 @@ ensure_reporter() {
   fi
 
   tmp_path="$(mktemp "${reporter_dir}/${CODACY_BINARY_NAME}.tmp.XXXXXX")"
-  download_file "$reporter_url" "$tmp_path"
+  if ! download_file "$reporter_url" "$tmp_path"; then
+    rm -f "$tmp_path"
+    return 1
+  fi
   if verify_sha512 "$tmp_path" "$CODACY_SHA512"; then
     verify_rc=0
   else

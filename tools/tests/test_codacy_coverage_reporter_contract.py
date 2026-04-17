@@ -7,6 +7,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "codacy-coverage-reporter.sh"
+PARITY_SCRIPT_PATH = REPO_ROOT / "scripts" / "local-codacy-variation-parity.sh"
 
 
 def extract_var(name: str) -> str:
@@ -50,6 +51,18 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
         text = SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertIn('tmp_path="$(mktemp "${reporter_dir}/${CODACY_BINARY_NAME}.tmp.XXXXXX")"', text)
         self.assertNotIn('local tmp_path="$CODACY_REPORTER_PATH.tmp"', text)
+
+    def test_download_failures_cleanup_temp_file_before_return(self):
+        text = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn('if ! download_file "$reporter_url" "$tmp_path"; then', text)
+        self.assertIn('rm -f "$tmp_path"', text)
+
+    def test_local_head_ahead_short_circuit_still_requires_matching_ancestor(self):
+        text = PARITY_SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn('if not ancestor_sha:', text)
+        self.assertIn('if remote_pr_head and local_head and remote_pr_head != local_head and local_head_ahead:', text)
+        self.assertIn('if ancestor_sha != local_merge_base:', text)
+        self.assertIn('but local merge-base {local_merge_base} differs from Codacy common ancestor {ancestor_sha}', text)
 
 
 if __name__ == "__main__":
