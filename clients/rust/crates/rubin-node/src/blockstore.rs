@@ -179,18 +179,27 @@ impl BlockStore {
         if height < current_len {
             let existing = self.canonical_hash(height)?;
             if existing == Some(block_hash_bytes) {
-                // Idempotent same-hash replay: validate header, verify
-                // the undo file is actually on disk (guards against
-                // pre-E.4 state or corruption where a canonical entry
-                // lost its undo — silently accepting here would leave
-                // the node with a broken `disconnect_tip` path), then
-                // short-circuit with no disk writes.
+                // Idempotent same-hash replay. Two sub-cases:
+                //
+                //  (a) Undo file already on disk — pure no-op: don't
+                //      rewrite the historical undo (matches the
+                //      Copilot earlier-round concern that
+                //      `write_file_atomic` would clobber the historical
+                //      bytes even on a same-hash retry).
+                //
+                //  (b) Undo file missing — pre-E.4 / partial-commit
+                //      recovery case: crash between block persist and
+                //      undo write left a canonical entry with no undo.
+                //      Heal by writing the caller-supplied undo via
+                //      `put_undo`; this is the path that made
+                //      `SyncEngine::apply_block` replay able to repair
+                //      the node on restart before the atomic API
+                //      existed. Do NOT error here — the canonical
+                //      entry is already on disk, the undo is simply
+                //      being back-filled.
                 self.validate_header_matches_hash(header_bytes, block_hash_bytes)?;
                 if !self.has_undo(block_hash_bytes) {
-                    return Err(format!(
-                        "commit_canonical_block same-hash replay: undo file missing for canonical \
-                         entry at height={height}; blockstore requires repair"
-                    ));
+                    self.put_undo(block_hash_bytes, undo)?;
                 }
                 return Ok(());
             }
@@ -945,6 +954,59 @@ mod tests {
             !store.has_block(hash),
             "block/header files must not be written before the mismatch check"
         );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Same-hash replay heals a pre-E.4 partial-commit state: a
+    /// canonical entry present on disk but with its undo missing
+    /// (crash between block persist and undo write on the old
+    /// non-atomic path). `SyncEngine::apply_block` replays the block
+    /// on restart, and the replay must back-fill the undo so recovery
+    /// proceeds — not error out. If the undo IS on disk, the replay
+    /// stays a no-op (doesn't rewrite historical bytes).
+    #[test]
+    fn commit_canonical_block_same_hash_replay_back_fills_missing_undo() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-replay-backfill");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+
+        // Simulate pre-E.4 partial-commit state: block + canonical tip
+        // landed via the non-atomic `put_block`, but the undo file was
+        // never written (crash between the two steps in the old code).
+        store
+            .put_block(0, hash, header, &genesis)
+            .expect("put_block (seed)");
+        assert_eq!(store.canonical_len(), 1);
+        assert!(!store.has_undo(hash), "seeded state must have no undo");
+
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        // Replay the same block. Canonical entry already matches, undo
+        // is missing — API must heal by writing undo and returning Ok.
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("same-hash replay must back-fill missing undo");
+
+        // Canonical index unchanged; undo now present and matches.
+        assert_eq!(store.canonical_len(), 1);
+        assert!(
+            store.has_undo(hash),
+            "undo file must be written during healing"
+        );
+        assert_eq!(store.get_undo(hash).expect("get_undo"), undo);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
