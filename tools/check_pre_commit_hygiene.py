@@ -126,30 +126,50 @@ _BINARY_EXTS = frozenset({
 _MAX_SCAN_BYTES = 1 * 1024 * 1024  # 1 MiB
 
 
-def _should_scan(f: str, path: Path) -> bool:
+def _read_file_for_check(f: str, staged_only: bool) -> str | None:
+    """Return content of `f` for a check.
+
+    In `--staged-only` mode reads the staged blob (`git show :<f>`) so
+    partial-staging workflows (`git add -p` then unstaged edit) cannot
+    hide a violation by reverting it in the working tree only.
+
+    Otherwise reads the working-tree file.
+
+    Returns None if the file is binary by extension, missing, too large,
+    or — in staged_only mode — not present in the index.
+    """
     if Path(f).suffix.lower() in _BINARY_EXTS:
-        return False
+        return None
+    if staged_only:
+        # Read from the index; skip working-tree size check (the staged
+        # blob's size isn't trivially available, and pre-commit content
+        # is bounded by what the user actually staged).
+        r = run(["git", "show", f":{f}"])
+        if r.returncode != 0:
+            return None  # not in index (e.g. removed before staging)
+        return r.stdout
+    path = REPO_ROOT / f
+    if not path.is_file():
+        return None
     try:
         if path.stat().st_size > _MAX_SCAN_BYTES:
-            return False
+            return None
     except OSError:
-        return False
-    return True
+        return None
+    return path.read_text(errors="replace")
 
 
-def check_bot_thread_ids(files: list[str]) -> list[str]:
+def check_bot_thread_ids(files: list[str], staged_only: bool) -> list[str]:
     """Bot thread IDs are temporary PR artifacts, not permanent code."""
     violations = []
     for f in files:
         # Skip self — this file contains the pattern as a regex literal.
         if f.endswith("check_pre_commit_hygiene.py"):
             continue
-        path = REPO_ROOT / f
-        if not path.is_file():
+        content = _read_file_for_check(f, staged_only)
+        if content is None:
             continue
-        if not _should_scan(f, path):
-            continue
-        for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+        for i, line in enumerate(content.splitlines(), 1):
             if BOT_THREAD_RE.search(line):
                 snippet = _sanitize_paths(line.strip())[:80]
                 violations.append(f"{f}:{i}: bot thread ID in code: {snippet}")
@@ -164,7 +184,7 @@ TEST_HELPER_RE = re.compile(r"InjectTestEntry|inject_test_entry")
 MOD_TESTS_RE = re.compile(r"\bmod\s+tests?\b")
 
 
-def check_test_helpers_in_production(files: list[str]) -> list[str]:
+def check_test_helpers_in_production(files: list[str], staged_only: bool) -> list[str]:
     """Test-only helpers must not be exported in production code."""
     violations = []
     for f in files:
@@ -173,10 +193,9 @@ def check_test_helpers_in_production(files: list[str]) -> list[str]:
             continue
         if not (f.endswith(".go") or f.endswith(".rs")):
             continue
-        path = REPO_ROOT / f
-        if not path.is_file():
+        content = _read_file_for_check(f, staged_only)
+        if content is None:
             continue
-        content = path.read_text(errors="replace")
         lines = content.splitlines()
         # Rust: only check lines BEFORE the final `#[cfg(test)] mod tests`
         # block.  Standard pattern is a trailing test module; also handle
@@ -345,14 +364,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Fast checks
-    v = check_bot_thread_ids(files)
+    v = check_bot_thread_ids(files, args.staged_only)
     if v:
         print(f"\n[FAIL] Bot thread IDs in code ({len(v)}):")
         for line in v:
             print(f"  {line}")
         all_violations.extend(v)
 
-    v = check_test_helpers_in_production(files)
+    v = check_test_helpers_in_production(files, args.staged_only)
     if v:
         print(f"\n[FAIL] Test helpers in production ({len(v)}):")
         for line in v:
