@@ -53,12 +53,13 @@ impl SyncEngine {
             .as_mut()
             .ok_or("sync engine has no blockstore")?;
         if let Err(err) = bs.truncate_canonical(rollback.canonical_len.saturating_sub(1)) {
-            // truncate_canonical failure is expected to leave the canonical
-            // index unchanged (atomic write + reload-on-failure in
-            // BlockStore::truncate_canonical), so restore the captured
-            // in-memory snapshot directly.  Going through rollback_apply_block
-            // would re-call truncate_canonical(rb.canonical_len) which can
-            // fail again under the same root cause and short-circuit before
+            // truncate_canonical leaves the canonical index unchanged on
+            // failure because BlockStore::truncate_canonical updates its
+            // in-memory canonical only after the disk write succeeds.
+            // Restore the captured in-memory snapshot directly.  Going
+            // through rollback_apply_block would re-call
+            // truncate_canonical(rb.canonical_len), which can fail again
+            // under the same root cause and short-circuit before
             // restoring chain_state, leaving the engine desynced.
             self.chain_state = rollback.chain_state;
             self.tip_timestamp = rollback.tip_timestamp;
