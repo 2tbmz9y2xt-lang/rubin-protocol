@@ -150,19 +150,20 @@ impl BlockStore {
         //       accumulate in the "skipped future height" case.
         //
         //     - `height < canonical_len` with the SAME hash is an
-        //       idempotent replay (the crash-recovery path where
-        //       `commit_canonical_block` advanced the blockstore tip but
-        //       `chain_state.save` crashed; on restart
+        //       idempotent replay (crash-recovery path where
+        //       `commit_canonical_block` advanced the blockstore tip
+        //       but `chain_state.save` crashed; on restart
         //       `SyncEngine::apply_block` replays the already-persisted
-        //       block at its original height). Header bytes are still
-        //       validated so replay matches the append path's header/hash
-        //       consistency contract. If the block's undo is already
-        //       present, this is a no-op: return `Ok(())` with no
-        //       `persist_block_bytes`, no `put_undo`, and no tip
-        //       mutation. If the undo file is missing (the pre-E.4
-        //       recovery/backfill case), replay may call `put_undo` to
-        //       restore the missing undo data before returning `Ok(())`;
-        //       tip/canonical state still remain unchanged.
+        //       block at its original height). Replay ALWAYS calls
+        //       `persist_block_bytes` for symmetric self-healing of
+        //       block + header files (idempotent: `write_file_if_absent`
+        //       is a no-op when the file already exists and never
+        //       overwrites existing bytes; header hash is still
+        //       validated against `block_hash_bytes`). Undo is
+        //       conditionally back-filled via `put_undo` only when the
+        //       undo file is missing on disk (pre-E.4 partial-commit
+        //       case); an existing undo file is NOT rewritten. Tip /
+        //       canonical index remain unchanged on both sub-paths.
         //
         //     - `height < canonical_len` with a DIFFERENT hash is a real
         //       reorg on the canonical index (same parent, different
@@ -964,11 +965,17 @@ mod tests {
         );
 
         // Canonical state must be untouched — no files, no tip advance.
+        // Check block and header files explicitly (`has_block` only
+        // checks the header directory).
         assert_eq!(store.canonical_len(), 0);
         assert!(store.tip().expect("tip").is_none());
         assert!(
-            !store.has_block(hash),
-            "block/header files must not be written before the mismatch check"
+            store.get_header_by_hash(hash).is_err(),
+            "header file must not exist before the mismatch check"
+        );
+        assert!(
+            store.get_block_by_hash(hash).is_err(),
+            "block file must not exist before the mismatch check"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
@@ -1058,9 +1065,17 @@ mod tests {
             "expected height-gap rejection, got {err:?}"
         );
 
-        // No disk writes: block/header/undo files must NOT exist.
+        // No disk writes: block AND header files must NOT exist (check
+        // both explicitly — `has_block` only inspects the header dir).
         assert_eq!(store.canonical_len(), 0);
-        assert!(!store.has_block(hash));
+        assert!(
+            store.get_header_by_hash(hash).is_err(),
+            "header file must not exist on height-gap rejection"
+        );
+        assert!(
+            store.get_block_by_hash(hash).is_err(),
+            "block file must not exist on height-gap rejection"
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -1071,11 +1086,14 @@ mod tests {
     /// by one or more blocks. On restart `SyncEngine::apply_block`
     /// replays the already-persisted block at its original height and
     /// MUST succeed so recovery can proceed; it MUST NOT rewrite the
-    /// historical block/header/undo files because `put_undo` via
-    /// `write_file_atomic` would clobber the historical undo on disk.
-    /// The same-hash replay is therefore handled as a no-op: no disk
-    /// writes, no tip mutation, `Ok(())` returned (header bytes are
-    /// still validated for consistency with the append path).
+    /// historical undo file (`put_undo` via `write_file_atomic` would
+    /// otherwise clobber the historical bytes on disk). The same-hash
+    /// replay validates the header, runs the idempotent
+    /// `persist_block_bytes` (no-op when block/header already exist,
+    /// self-heals if missing), and only calls `put_undo` when the undo
+    /// file is absent; canonical index / tip stay unchanged.
+    /// This test covers the already-present-undo sub-case: byte
+    /// equality before/after replay proves no rewrite happened.
     #[test]
     fn commit_canonical_block_same_hash_replay_is_idempotent_noop() {
         use crate::genesis::devnet_genesis_block_bytes;
