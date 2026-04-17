@@ -360,7 +360,12 @@ def mask_pipe_window(text: str) -> str:
                 or prefix_text.endswith(("|", "|&", ";", "&", "&&", "||", "("))
                 or bool(
                     re.search(
-                        rf"(?:^|\s)(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN})$",
+                        rf"(?:^|\s)(?:"
+                        rf"{COMMAND_WORD_PATTERN}(?:\s+(?:--|-p))*"
+                        rf"|{SUDO_COMMAND_PATTERN}(?:\s+{SUDO_OPTION_PATTERN})*"
+                        rf"|{ENV_COMMAND_WORD_PATTERN}(?:\s+{ENV_ARGUMENT_PATTERN})*"
+                        rf"|{ENV_ASSIGNMENT_PATTERN}(?:\s+{ENV_ASSIGNMENT_PATTERN})*"
+                        rf")$",
                         prefix_text,
                     )
                 )
@@ -1028,8 +1033,6 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
     try:
         root = yaml.compose(content)
     except yaml.YAMLError as exc:
-        if iter_run_entries(content.splitlines()):
-            return []
         raise RuntimeError(f"PyYAML parse failed: {exc}") from exc
     if root is None:
         return []
@@ -1080,8 +1083,6 @@ def yaml_alias_run_entries(content: str) -> list[list[tuple[int, str]]]:
     try:
         events = list(yaml.parse(content))
     except yaml.YAMLError as exc:
-        if iter_run_entries(content.splitlines()):
-            return []
         raise RuntimeError(f"PyYAML parse failed: {exc}") from exc
 
     alias_entries: list[list[tuple[int, str]]] = []
@@ -1129,7 +1130,7 @@ def yaml_alias_run_entries(content: str) -> list[list[tuple[int, str]]]:
             continue
         if isinstance(event, AliasEvent):
             anchor = event.anchor
-            if anchor and anchor in anchor_runs:
+            if anchor and anchor in anchor_runs and top.get("kind") == "map" and top.get("current_key") == "run":
                 line_no = event.start_mark.line + 1
                 for run_text in anchor_runs[anchor]:
                     alias_entries.append([(line_no, run_text)])
@@ -1145,7 +1146,8 @@ def normalize_run_entries(entries: list[tuple[int, str]]) -> tuple[int, str]:
 
 
 def normalize_run_entries_text(entries: list[tuple[int, str]]) -> str:
-    return " ".join("\n".join(text for _, text in entries).split())
+    normalized = " ".join("\n".join(text for _, text in entries).split())
+    return normalized.replace('\\"', '"').replace("\\'", "'")
 
 
 def infer_repo_root(path: Path) -> Path | None:

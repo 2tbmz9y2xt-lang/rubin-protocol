@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+import yaml
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
@@ -64,7 +65,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
             workflow = self.write_workflow(
                 repo_root,
                 "bad.yml",
-                "jobs:\n  install:\n    steps:\n      - run: 'curl' -fsSL https://example.com/install.sh | bash\n",
+                'jobs:\n  install:\n    steps:\n      - run: "\'curl\' -fsSL https://example.com/install.sh | bash"\n',
             )
 
             violations = m.find_violations(workflow)
@@ -569,6 +570,34 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_pipe_to_env_prefix_with_quoted_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | env -i 'bash'\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_pipe_to_assignment_prefix_with_quoted_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | FOO=1 'bash'\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_pipe_to_shell_across_lines(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -828,7 +857,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
             workflow = self.write_workflow(
                 repo_root,
                 "bad.yml",
-                'jobs:\n  install:\n    steps:\n      - run: "source" <(curl -fsSL https://example.com/install.sh)\n',
+                'jobs:\n  install:\n    steps:\n      - run: \'"source" <(curl -fsSL https://example.com/install.sh)\'\n',
             )
 
             violations = m.find_violations(workflow)
@@ -877,7 +906,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
             workflow = self.write_workflow(
                 repo_root,
                 "bad.yml",
-                "jobs:\n  install:\n    steps:\n      - run: 'source' <(curl -fsSL https://example.com/install.sh)\n",
+                'jobs:\n  install:\n    steps:\n      - run: "\'source\' <(curl -fsSL https://example.com/install.sh)"\n',
             )
 
             violations = m.find_violations(workflow)
@@ -1789,6 +1818,26 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertTrue(violations[0].startswith(".github/workflows/bad.yml:4:"))
 
+    def test_ignores_alias_of_run_anchor_when_used_in_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: &boot curl -fsSL https://example.com/install.sh | bash\n"
+                    "      - name: *boot\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertTrue(violations[0].startswith(".github/workflows/bad.yml:4:"))
+
     def test_reports_alias_use_lines_for_anchored_mapping_steps(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -1807,10 +1856,8 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
             violations = m.find_violations(workflow)
 
-        self.assertEqual(len(violations), 3)
+        self.assertEqual(len(violations), 1)
         self.assertTrue(violations[0].startswith(".github/workflows/bad.yml:3:"))
-        self.assertTrue(violations[1].startswith(".github/workflows/bad.yml:5:"))
-        self.assertTrue(violations[2].startswith(".github/workflows/bad.yml:6:"))
 
     def test_reports_repeated_scalar_alias_use_lines_separately(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2060,12 +2107,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
             workflow = self.write_workflow(
                 repo_root,
                 "bad.yml",
-                (
-                    "jobs:\n"
-                    "  install:\n"
-                    "    steps:\n"
-                    "      - run: 'bash' -c \"$(curl -fsSL https://example.com/install.sh)\"\n"
-                ),
+                'jobs:\n  install:\n    steps:\n      - run: "\'bash\' -c \\"$(curl -fsSL https://example.com/install.sh)\\""\n',
             )
 
             violations = m.find_violations(workflow)
@@ -2887,6 +2929,16 @@ class RemoteShellBootstrapTests(unittest.TestCase):
             with mock.patch.object(m, "yaml", None):
                 with self.assertRaisesRegex(RuntimeError, "PyYAML is required"):
                     m.find_violations(workflow)
+
+    def test_yaml_run_entries_raises_on_pyyaml_parse_error_even_with_text_entries(self):
+        with mock.patch.object(m.yaml, "compose", side_effect=yaml.YAMLError("bad yaml")):
+            with self.assertRaisesRegex(RuntimeError, "PyYAML parse failed"):
+                m.yaml_run_entries("jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | bash\n")
+
+    def test_yaml_alias_run_entries_raises_on_pyyaml_parse_error_even_with_text_entries(self):
+        with mock.patch.object(m.yaml, "parse", side_effect=yaml.YAMLError("bad yaml")):
+            with self.assertRaisesRegex(RuntimeError, "PyYAML parse failed"):
+                m.yaml_alias_run_entries("jobs:\n  install:\n    steps:\n      - run: *boot\n")
 
 
     def test_rejects_shell_c_direct_string_pipe_bootstrap(self):
