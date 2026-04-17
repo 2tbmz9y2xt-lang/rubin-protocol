@@ -27,6 +27,10 @@ pub struct BlockStore {
     /// Test-only: force `rollback_canonical` to return an error.
     #[cfg(test)]
     pub(crate) force_rollback_error: bool,
+    /// Test-only: force `put_undo` to return an error. Used to exercise
+    /// the crash-style atomicity contract of `commit_canonical_block`.
+    #[cfg(test)]
+    pub(crate) force_undo_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +70,8 @@ impl BlockStore {
             force_truncate_error: false,
             #[cfg(test)]
             force_rollback_error: false,
+            #[cfg(test)]
+            force_undo_error: false,
         })
     }
 
@@ -80,6 +86,51 @@ impl BlockStore {
         header_bytes: &[u8],
         block_bytes: &[u8],
     ) -> Result<(), String> {
+        self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
+        self.set_canonical_tip(height, block_hash_bytes)
+    }
+
+    /// Atomic canonical block commit — Go parity
+    /// (`clients/go/node/blockstore.go`, `CommitCanonicalBlock`).
+    ///
+    /// Persists block bytes, header bytes, and the undo record BEFORE
+    /// advancing the canonical tip. The tip update is the explicit
+    /// commit point: if any earlier step (block/header/undo write) fails,
+    /// the canonical tip remains at its prior height, so a crash leaves
+    /// the chain with no orphaned canonical block missing its undo —
+    /// which would otherwise break `disconnect_tip` on the next reorg.
+    ///
+    /// Compared to the previous `put_block` + separate `put_undo`
+    /// sequence in `sync.rs`, this API shrinks the failure surface: the
+    /// tip never advances before undo durability, so no post-hoc
+    /// `truncate_canonical` rewind is needed on undo-write failure.
+    pub fn commit_canonical_block(
+        &mut self,
+        height: u64,
+        block_hash_bytes: [u8; 32],
+        header_bytes: &[u8],
+        block_bytes: &[u8],
+        undo: &BlockUndo,
+    ) -> Result<(), String> {
+        // 1. Persist block + header bytes (idempotent `write_file_if_absent`).
+        self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
+        // 2. Persist undo BEFORE any tip advance. Matches Go ordering in
+        //    `CommitCanonicalBlock` (StoreBlock → PutUndo → SetCanonicalTip).
+        self.put_undo(block_hash_bytes, undo)?;
+        // 3. Advance canonical tip LAST — this is the atomic commit point.
+        self.set_canonical_tip(height, block_hash_bytes)
+    }
+
+    /// Block/header persistence shared by `put_block` and
+    /// `commit_canonical_block`. Validates header length + hash, then
+    /// writes block and header files via `write_file_if_absent`
+    /// (idempotent across retries).
+    fn persist_block_bytes(
+        &self,
+        block_hash_bytes: [u8; 32],
+        header_bytes: &[u8],
+        block_bytes: &[u8],
+    ) -> Result<(), String> {
         if header_bytes.len() != BLOCK_HEADER_BYTES {
             return Err(format!("invalid header length: {}", header_bytes.len()));
         }
@@ -87,7 +138,6 @@ impl BlockStore {
         if computed_hash != block_hash_bytes {
             return Err("header hash mismatch".to_string());
         }
-
         let hash_hex = hex::encode(block_hash_bytes);
         write_file_if_absent(
             &self.blocks_dir.join(format!("{hash_hex}.bin")),
@@ -96,8 +146,7 @@ impl BlockStore {
         write_file_if_absent(
             &self.headers_dir.join(format!("{hash_hex}.bin")),
             header_bytes,
-        )?;
-        self.set_canonical_tip(height, block_hash_bytes)
+        )
     }
 
     /// Set or replace the canonical tip at `height`.
@@ -318,6 +367,10 @@ impl BlockStore {
     // ----- Undo storage -----
 
     pub fn put_undo(&self, block_hash_bytes: [u8; 32], undo: &BlockUndo) -> Result<(), String> {
+        #[cfg(test)]
+        if self.force_undo_error {
+            return Err("forced undo error (test)".to_string());
+        }
         let raw = marshal_block_undo(undo)?;
         let path = self
             .undo_dir
@@ -630,6 +683,88 @@ mod tests {
 
         let err = store.truncate_canonical(5).unwrap_err();
         assert!(err.contains("truncate_canonical"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Go parity / crash-safety for Q-IMPL-RUST-STORAGE-ATOMIC-CANONICAL-COMMIT-01:
+    /// `commit_canonical_block` persists block/header/undo BEFORE
+    /// advancing the canonical tip. The happy-path roundtrip confirms
+    /// all three pieces land and the tip moves to the new height.
+    #[test]
+    fn commit_canonical_block_happy_path_advances_tip_and_persists_undo() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-commit-happy");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("commit_canonical_block");
+
+        assert_eq!(store.canonical_len(), 1);
+        let tip = store.tip().expect("tip").expect("some");
+        assert_eq!(tip, (0, hash));
+        assert_eq!(store.get_undo(hash).expect("get_undo"), undo);
+        assert_eq!(store.get_block_by_hash(hash).expect("block"), genesis);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Crash-style atomicity evidence for E.4: if undo persistence fails
+    /// (simulated here via `force_undo_error`), the canonical tip MUST
+    /// remain at its prior height. Before this change the tip was
+    /// advanced by `put_block` before the undo write, so a crash at the
+    /// same point would leave a canonical block with no recoverable undo.
+    #[test]
+    fn commit_canonical_block_leaves_tip_unchanged_when_undo_fails() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-commit-undo-fail");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        let canonical_len_before = store.canonical_len();
+        store.force_undo_error = true;
+
+        let err = store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .unwrap_err();
+        assert!(
+            err.contains("forced undo error"),
+            "expected forced undo error, got {err:?}"
+        );
+
+        // Tip MUST NOT have advanced past the prior height.
+        assert_eq!(store.canonical_len(), canonical_len_before);
+        assert!(store.tip().expect("tip").is_none());
+        // Block/header files land before the undo step fires, which is
+        // safe because `write_file_if_absent` is idempotent on retry and
+        // no canonical entry references them until the tip advances.
+        assert!(store.has_block(hash));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
