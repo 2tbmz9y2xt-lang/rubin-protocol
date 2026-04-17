@@ -339,6 +339,7 @@ def split_shell_segments(text: str) -> list[str]:
     current: list[str] = []
     quote: str | None = None
     escape = False
+    depth = 0
     idx = 0
     length = len(text)
     while idx < length:
@@ -359,21 +360,32 @@ def split_shell_segments(text: str) -> list[str]:
                 current.append(ch)
                 idx += 1
                 continue
-            if ch == ";":
+            if ch in "({[":
+                depth += 1
+                current.append(ch)
+                idx += 1
+                continue
+            if ch in ")}]":
+                if depth > 0:
+                    depth -= 1
+                current.append(ch)
+                idx += 1
+                continue
+            if ch == ";" and depth == 0:
                 segment = "".join(current).strip()
                 if segment:
                     segments.append(segment)
                 current = []
                 idx += 1
                 continue
-            if ch == "&" and not text.startswith("&&", idx) and (idx == 0 or text[idx - 1] != "|"):
+            if ch == "&" and depth == 0 and not text.startswith("&&", idx) and (idx == 0 or text[idx - 1] != "|"):
                 segment = "".join(current).strip()
                 if segment:
                     segments.append(segment)
                 current = []
                 idx += 1
                 continue
-            if text.startswith("&&", idx) or text.startswith("||", idx):
+            if depth == 0 and (text.startswith("&&", idx) or text.startswith("||", idx)):
                 segment = "".join(current).strip()
                 if segment:
                     segments.append(segment)
@@ -398,6 +410,20 @@ def split_shell_segments(text: str) -> list[str]:
     if segment:
         segments.append(segment)
     return segments
+
+
+def is_command_position_prefix(text: str) -> bool:
+    prefix_text = text.rstrip()
+    return (
+        not prefix_text
+        or prefix_text.endswith(("|", "|&", ";", "&", "&&", "||", "("))
+        or bool(
+            re.search(
+                rf"(?:^|\s)(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN})$",
+                prefix_text,
+            )
+        )
+    )
 
 
 def extract_flow_mapping_run(mapping_text: str) -> str | None:
@@ -625,6 +651,50 @@ def collect_step_flow_mapping_text(step_entries: list[tuple[int, str]]) -> str |
     return None
 
 
+def search_unquoted(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
+    quote: str | None = None
+    escape = False
+    quoted_ranges: list[tuple[int, int]] = []
+    start_idx = -1
+    for idx, ch in enumerate(text):
+        if quote is None:
+            if ch in {"'", '"'}:
+                quote = ch
+                start_idx = idx
+            continue
+        if quote == '"':
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+        if ch == quote:
+            quoted_ranges.append((start_idx, idx))
+            quote = None
+            start_idx = -1
+    for match in pattern.finditer(text):
+        start = match.start()
+        blocked = False
+        for lo, hi in quoted_ranges:
+            if not (lo <= start <= hi):
+                continue
+            quoted_text = text[lo + 1 : hi]
+            if (
+                start == lo
+                and re.fullmatch(SHELL_EXECUTABLE_PATTERN, quoted_text)
+                and is_command_position_prefix(text[:lo])
+            ):
+                blocked = False
+                break
+            blocked = True
+            break
+        if blocked:
+            continue
+        return match
+    return None
+
+
 def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
     run_entries: list[list[tuple[int, str]]] = []
     first_line_no, first_raw = step_entries[0]
@@ -819,7 +889,7 @@ def find_violations(path: Path) -> list[str]:
     rendered_path = render_path(path, infer_repo_root(path))
     run_entries_sets = iter_run_entries(lines)
     seen_entries = {normalize_run_entries(entries) for entries in run_entries_sets}
-    seen_violations: set[tuple[str, str]] = set()
+    seen_violations: set[tuple[str, int, str]] = set()
     for entries in yaml_run_entries(content):
         key = normalize_run_entries(entries)
         if key in seen_entries:
@@ -845,7 +915,10 @@ def find_violations(path: Path) -> list[str]:
                                 if matched:
                                     break
                     else:
-                        matched = pattern.search(candidate)
+                        if label in {"remote shell -c command substitution", "remote shell eval command substitution"}:
+                            matched = search_unquoted(pattern, candidate)
+                        else:
+                            matched = pattern.search(candidate)
                     if matched:
                         violation_key = (label, line_no, " ".join(window.split()))
                         if violation_key not in seen_violations:
@@ -872,6 +945,10 @@ def main(argv: list[str]) -> int:
         help="Repository root containing .github/workflows",
     )
     args = parser.parse_args(argv[1:])
+
+    if yaml is None:
+        print("ERROR: PyYAML is required for fail-closed workflow bootstrap scanning.", file=sys.stderr)
+        return 1
 
     repo_root = args.repo_root.resolve()
     bad: list[str] = []
