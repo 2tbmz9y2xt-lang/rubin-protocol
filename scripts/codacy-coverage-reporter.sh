@@ -69,7 +69,7 @@ platform_config() {
       CODACY_BINARY_NAME="codacy-coverage-reporter-linux"
       CODACY_SHA512="$LINUX_SHA512"
       ;;
-    "Darwin arm64")
+    "Darwin arm64"|"Darwin x86_64")
       CODACY_BINARY_NAME="codacy-coverage-reporter-darwin"
       CODACY_SHA512="$DARWIN_ARM64_SHA512"
       ;;

@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - optional dependency fallback
     ScalarNode = object  # type: ignore[assignment]
     SequenceNode = object  # type: ignore[assignment]
 
-SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|dash|sh)"
+SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|dash|sh|zsh|ksh|ash)"
 SHELL_WORD_PATTERN = rf"(?:{SHELL_EXECUTABLE_PATTERN}\b|\"{SHELL_EXECUTABLE_PATTERN}\"|'{SHELL_EXECUTABLE_PATTERN}')"
 COMMAND_WORD_PATTERN = r"(?:command|\"command\"|'command')"
 COMMAND_PREFIX_PATTERN = rf"{COMMAND_WORD_PATTERN}(?:\s+(?:--|-p))*\s+"
@@ -838,7 +838,7 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
         value = value_node.value or ""
         if not value:
             return
-        if value_node.start_mark.line == key_node.start_mark.line:
+        if value_node.start_mark.line >= key_node.start_mark.line:
             return
         line_no = key_node.start_mark.line + 1
         if getattr(value_node, "style", None) in {"|", ">"}:
