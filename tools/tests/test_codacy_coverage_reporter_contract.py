@@ -92,6 +92,75 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
         self.assertIn("curl failed to download", proc.stderr)
         self.assertNotIn("checksum mismatch", proc.stderr)
 
+    def test_missing_downloader_reports_explicit_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake_bin = root / "bin"
+            cache_root = root / "cache"
+            fake_bin.mkdir()
+            (fake_bin / "uname").write_text("#!/bin/bash\necho 'Darwin arm64'\n", encoding="utf-8")
+            (fake_bin / "uname").chmod(0o755)
+            (fake_bin / "mkdir").write_text("#!/bin/bash\nexec /bin/mkdir \"$@\"\n", encoding="utf-8")
+            (fake_bin / "mkdir").chmod(0o755)
+            (fake_bin / "mktemp").write_text("#!/bin/bash\nexec /usr/bin/mktemp \"$@\"\n", encoding="utf-8")
+            (fake_bin / "mktemp").chmod(0o755)
+            (fake_bin / "rm").write_text("#!/bin/bash\nexec /bin/rm \"$@\"\n", encoding="utf-8")
+            (fake_bin / "rm").chmod(0o755)
+            env = {
+                "PATH": str(fake_bin),
+                "CODACY_REPORTER_TMP_FOLDER": str(cache_root),
+            }
+            proc = subprocess.run(
+                ["/bin/bash", str(SCRIPT_PATH), "download"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("curl or wget required", proc.stderr)
+
+    def test_rejects_unsupported_reporter_version_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "uname").write_text("#!/bin/bash\necho 'Darwin arm64'\n", encoding="utf-8")
+            (fake_bin / "uname").chmod(0o755)
+            env = {
+                "PATH": str(fake_bin),
+                "CODACY_REPORTER_VERSION": "999.0.0",
+            }
+            proc = subprocess.run(
+                ["/bin/bash", str(SCRIPT_PATH), "download"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("unsupported CODACY_REPORTER_VERSION=999.0.0", proc.stderr)
+
+    def test_rejects_unsupported_platform(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "uname").write_text("#!/bin/bash\necho 'Linux aarch64'\n", encoding="utf-8")
+            (fake_bin / "uname").chmod(0o755)
+            env = {
+                "PATH": str(fake_bin),
+            }
+            proc = subprocess.run(
+                ["/bin/bash", str(SCRIPT_PATH), "download"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("unsupported Codacy reporter platform: Linux aarch64", proc.stderr)
+
     def test_hash_tool_failure_is_not_reported_as_checksum_mismatch(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -103,7 +172,7 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
             reporter_path = reporter_dir / "codacy-coverage-reporter-darwin"
             reporter_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             reporter_path.chmod(0o755)
-            (fake_bin / "uname").write_text("#!/usr/bin/env bash\necho 'Darwin arm64'\n", encoding="utf-8")
+            (fake_bin / "uname").write_text("#!/bin/bash\necho 'Darwin arm64'\n", encoding="utf-8")
             (fake_bin / "uname").chmod(0o755)
             (fake_bin / "sha512sum").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
             (fake_bin / "sha512sum").chmod(0o755)
