@@ -183,25 +183,28 @@ impl BlockStore {
         if height < current_len {
             let existing = self.canonical_hash(height)?;
             if existing == Some(block_hash_bytes) {
-                // Idempotent same-hash replay. Two sub-cases:
+                // Idempotent same-hash replay with symmetric healing.
                 //
-                //  (a) Undo file already on disk — pure no-op: don't
-                //      rewrite the historical undo (matches the
-                //      Copilot earlier-round concern that
-                //      `write_file_atomic` would clobber the historical
-                //      bytes even on a same-hash retry).
+                //  - `persist_block_bytes` runs header validation and
+                //    then writes block + header via
+                //    `write_file_if_absent` (idempotent no-op if the
+                //    file already exists, same pre-existing behavior
+                //    as the non-atomic `put_block` path). A replay
+                //    after a pre-E.4 partial-commit crash can
+                //    re-create missing block/header files without
+                //    clobbering existing ones.
                 //
-                //  (b) Undo file missing — pre-E.4 / partial-commit
-                //      recovery case: crash between block persist and
-                //      undo write left a canonical entry with no undo.
-                //      Heal by writing the caller-supplied undo via
-                //      `put_undo`; this is the path that made
-                //      `SyncEngine::apply_block` replay able to repair
-                //      the node on restart before the atomic API
-                //      existed. Do NOT error here — the canonical
-                //      entry is already on disk, the undo is simply
-                //      being back-filled.
-                self.validate_header_matches_hash(header_bytes, block_hash_bytes)?;
+                //  - Undo is then conditionally back-filled only when
+                //    absent: if the undo file is already on disk the
+                //    historical bytes are NOT rewritten (matches the
+                //    earlier Copilot concern that `write_file_atomic`
+                //    would clobber the historical undo even on a
+                //    same-hash retry); if the undo file is missing
+                //    (pre-E.4 crash between block persist and undo
+                //    write), `put_undo` back-fills it.
+                //
+                //  Canonical index / tip remain unchanged regardless.
+                self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
                 if !self.has_undo(block_hash_bytes) {
                     self.put_undo(block_hash_bytes, undo)?;
                 }
