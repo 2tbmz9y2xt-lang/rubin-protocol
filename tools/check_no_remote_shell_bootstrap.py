@@ -38,7 +38,8 @@ SUDO_OPTION_PATTERN = r"(?:--|--?[A-Za-z][\w-]*(?:[= ]\S+)?)"
 SUDO_PREFIX_PATTERN = rf"{SUDO_COMMAND_PATTERN}(?:\s+{SUDO_OPTION_PATTERN})*\s+"
 ENV_ARGUMENT_PATTERN = rf"(?!{SHELL_EXECUTABLE_PATTERN}\b)\S+"
 ENV_PREFIX_PATTERN = rf"{ENV_COMMAND_WORD_PATTERN}(?:\s+{ENV_ARGUMENT_PATTERN})*\s+"
-SHELL_OPTION_PATTERN = r"(?:--(?:rcfile|init-file)(?:[= ]\S+)|-o(?:[= ]\S+)|--[A-Za-z][\w-]*|-[A-Za-z]+)"
+SHELL_OPTION_VALUE_PATTERN = r"(?:\"[^\"]+\"|'[^']+'|\S+)"
+SHELL_OPTION_PATTERN = rf"(?:--(?:rcfile|init-file)(?:[= ]{SHELL_OPTION_VALUE_PATTERN})|-o(?:[= ]{SHELL_OPTION_VALUE_PATTERN})|--[A-Za-z][\w-]*|-[A-Za-z]+)"
 ENV_SPLIT_STRING_OPTION_PATTERN = r"(?:-S|--split-string)(?:=|\s+)"
 ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN = rf"(?!-S(?:\s|$))(?!--split-string(?:=|\s|$)){ENV_ARGUMENT_PATTERN}"
 ENV_SPLIT_STRING_VALUE_PATTERN = rf"(?:\"{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\"|'{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*'|{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*)"
@@ -367,6 +368,9 @@ def mask_pipe_window(text: str) -> str:
                 re.fullmatch(r"/dev/(?:stdin|fd/0)", quoted_text)
                 and re.search(rf"(?:^|\s)(?:{SOURCE_WORD_PATTERN}|\.)$", prefix_text)
             )
+            preserve_shell_option_value = bool(
+                re.search(r"(?:^|\s)(?:-o|--rcfile|--init-file)$", prefix_text)
+            )
             if (
                 re.fullmatch(DOWNLOADER_EXECUTABLE_PATTERN, quoted_text)
                 or re.fullmatch(SHELL_EXECUTABLE_PATTERN, quoted_text)
@@ -374,6 +378,8 @@ def mask_pipe_window(text: str) -> str:
             ) and preserve_shell_word:
                 parts.extend(quoted_text)
             elif preserve_stdin_path:
+                parts.extend(quoted_text)
+            elif preserve_shell_option_value:
                 parts.extend(quoted_text)
             else:
                 parts.extend(" " * len(quoted_text))
