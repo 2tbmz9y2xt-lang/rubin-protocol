@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - optional dependency fallback
     ScalarNode = object  # type: ignore[assignment]
     SequenceNode = object  # type: ignore[assignment]
 
-SHELL_EXECUTABLE_PATTERN = r"(?:(?:/(?:usr/)?(?:local/)?bin/|/opt/homebrew/bin/)?(?:bash|dash|sh|zsh|ksh|ash)|mksh|yash|posh|fish)"
+SHELL_EXECUTABLE_PATTERN = r"(?:(?:/(?:usr/)?(?:local/)?bin/|/opt/homebrew/bin/)?(?:bash|dash|sh|zsh|ksh|ash|mksh|yash|posh|fish))"
 SHELL_WORD_PATTERN = rf"(?:{SHELL_EXECUTABLE_PATTERN}\b|\"{SHELL_EXECUTABLE_PATTERN}\"|'{SHELL_EXECUTABLE_PATTERN}')"
 COMMAND_WORD_PATTERN = r"(?:command|\"command\"|'command')"
 COMMAND_PREFIX_PATTERN = rf"{COMMAND_WORD_PATTERN}(?:\s+(?:--|-p))*\s+"
