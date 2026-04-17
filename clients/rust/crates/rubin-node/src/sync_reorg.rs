@@ -98,6 +98,24 @@ impl TxPoolCleanupPlan {
         })
     }
 
+    /// Build a cleanup plan from raw block bytes — high-level
+    /// constructor intended for callers that just finished a successful
+    /// `SyncEngine::apply_block` on the direct (non-reorg) path.
+    ///
+    /// Go parity (`clients/go/node/sync.go` calls
+    /// `s.mempool.EvictConfirmedParsed(pb)` after a successful apply);
+    /// in Rust the reorg path already builds this plan internally, but
+    /// the direct apply path (miner loop, test harnesses) had no
+    /// equivalent constructor. Callers can now run
+    /// `TxPoolCleanupPlan::from_block_bytes(block_bytes)?.apply(&mut
+    /// pool, &chain_state, block_store, chain_id)` to mirror the Go
+    /// post-apply cleanup shape: evict confirmed txids, drop
+    /// conflicting inputs.
+    pub fn from_block_bytes(block_bytes: &[u8]) -> Result<Self, String> {
+        let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
+        Self::from_validated_block(&parsed, block_bytes)
+    }
+
     #[cfg(test)]
     pub fn from_parts_for_test(
         confirmed_txids: Vec<[u8; 32]>,
@@ -526,6 +544,45 @@ mod tests {
         let genesis = crate::devnet_genesis_block_bytes();
         let txs = non_coinbase_tx_bytes(&genesis).expect("parse");
         assert!(txs.is_empty());
+    }
+
+    /// `TxPoolCleanupPlan::from_block_bytes` is the direct-apply-path
+    /// constructor introduced for Q-IMPL-NODE-CONFIRMED-TX-CLEANUP-PARITY-01.
+    /// After a successful `SyncEngine::apply_block`, a direct caller
+    /// (miner, test harness) can build the cleanup plan from the same
+    /// block bytes and call `plan.apply(...)` to evict the now-confirmed
+    /// txids from the pool. This mirrors Go's post-apply call shape
+    /// `s.mempool.EvictConfirmedParsed(pb)` (clients/go/node/sync.go).
+    ///
+    /// The plan's `confirmed_txids` must equal the block's parsed txids
+    /// (coinbase is included in `parsed.txids` just like Go passes the
+    /// whole `ParsedBlock` to `EvictConfirmedParsed`; the pool's
+    /// `evict_txids` is tolerant of non-member txids so the coinbase
+    /// entry is a no-op when absent from the pool).
+    #[test]
+    fn cleanup_plan_from_block_bytes_lists_parsed_txids() {
+        let genesis = crate::devnet_genesis_block_bytes();
+        let parsed =
+            rubin_consensus::parse_block_bytes(&genesis).expect("parse genesis for parity check");
+        let plan = TxPoolCleanupPlan::from_block_bytes(&genesis).expect("from_block_bytes");
+        assert_eq!(
+            plan.confirmed_txids, parsed.txids,
+            "confirmed_txids must mirror parsed block txids"
+        );
+        // Genesis is coinbase-only so there are no non-coinbase inputs to
+        // drop; still, the plan is well-formed (not `is_empty`, since
+        // the coinbase txid is present).
+        assert!(plan.conflicting_inputs.is_empty());
+        assert!(plan.requeue_block_hashes.is_empty());
+    }
+
+    #[test]
+    fn cleanup_plan_from_block_bytes_rejects_short_input() {
+        let err = TxPoolCleanupPlan::from_block_bytes(&[0u8; 10]).unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "short block must surface the underlying parse error"
+        );
     }
 
     #[test]
