@@ -3,7 +3,7 @@ set -euo pipefail
 
 PINNED_VERSION="14.1.3"
 LINUX_SHA512="73a6c93fc5db509fd0423d6e545759c3f61d8360ee12054e32a9277daab6add0da6c6639248f6ed6c0042366440293ebc0b6144325aef52c5d3d4b230d65eb17"
-DARWIN_ARM64_SHA512="bdd9403f0d9b54626b8494890cc8c4b212b694e7f5c49a90733608507cd4555f709d23b592dc81d571bef242ee93db0fe293aefa7e8720930886f39cf2b55d0b"
+DARWIN_SHA512="bdd9403f0d9b54626b8494890cc8c4b212b694e7f5c49a90733608507cd4555f709d23b592dc81d571bef242ee93db0fe293aefa7e8720930886f39cf2b55d0b"
 
 download_file() {
   local url="$1"
@@ -71,7 +71,7 @@ platform_config() {
       ;;
     "Darwin arm64"|"Darwin x86_64")
       CODACY_BINARY_NAME="codacy-coverage-reporter-darwin"
-      CODACY_SHA512="$DARWIN_ARM64_SHA512"
+      CODACY_SHA512="$DARWIN_SHA512"
       ;;
     *)
       echo "ERROR: unsupported Codacy reporter platform: $os_name_arch" >&2

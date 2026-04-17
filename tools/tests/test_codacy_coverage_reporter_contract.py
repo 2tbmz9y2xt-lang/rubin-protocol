@@ -30,7 +30,7 @@ def extract_parity_python_block() -> str:
 
 class CodacyCoverageReporterContractTests(unittest.TestCase):
     def test_sha512_constants_are_full_length_hex_digests(self):
-        for name in ("LINUX_SHA512", "DARWIN_ARM64_SHA512"):
+        for name in ("LINUX_SHA512", "DARWIN_SHA512"):
             digest = extract_var(name)
             self.assertEqual(len(digest), 128, name)
             self.assertRegex(digest, r"^[0-9a-f]{128}$", name)

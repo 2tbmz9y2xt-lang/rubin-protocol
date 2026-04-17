@@ -110,7 +110,7 @@ jobs:
 
       - name: Reject remote shell bootstrap in workflows
         if: steps.scope.outputs.skip != 'true'
-        run: python3 tools/check_no_remote_shell_bootstrap.py
+        run: python3 tools/check_no_remote_shell_bootstrap.py --repo-root "$GITHUB_WORKSPACE"
 
       - name: Lint workflow-referenced CI shell targets
         if: steps.scope.outputs.skip != 'true'

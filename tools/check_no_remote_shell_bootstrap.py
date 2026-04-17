@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - optional dependency fallback
     ScalarNode = object  # type: ignore[assignment]
     SequenceNode = object  # type: ignore[assignment]
 
-SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|dash|sh|zsh|ksh|ash)"
+SHELL_EXECUTABLE_PATTERN = r"(?:(?:/(?:usr/)?(?:local/)?bin/|/opt/homebrew/bin/)?(?:bash|dash|sh|zsh|ksh|ash)|mksh|yash|posh|fish)"
 SHELL_WORD_PATTERN = rf"(?:{SHELL_EXECUTABLE_PATTERN}\b|\"{SHELL_EXECUTABLE_PATTERN}\"|'{SHELL_EXECUTABLE_PATTERN}')"
 COMMAND_WORD_PATTERN = r"(?:command|\"command\"|'command')"
 COMMAND_PREFIX_PATTERN = rf"{COMMAND_WORD_PATTERN}(?:\s+(?:--|-p))*\s+"
@@ -827,7 +827,7 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
         return []
     try:
         root = yaml.compose(content)
-    except yaml.YAMLError:
+    except yaml.YAMLError as exc:
         return []
     if root is None:
         return []
@@ -954,9 +954,18 @@ def main(argv: list[str]) -> int:
         return 1
 
     repo_root = args.repo_root.resolve()
+    workflows = workflow_paths(repo_root)
+    if not workflows:
+        print(f"ERROR: no workflow files found under {repo_root}/.github/workflows", file=sys.stderr)
+        return 1
+
     bad: list[str] = []
-    for workflow in workflow_paths(repo_root):
-        bad.extend(find_violations(workflow))
+    for workflow in workflows:
+        try:
+            bad.extend(find_violations(workflow))
+        except RuntimeError as exc:
+            print(f"ERROR: {render_path(workflow, repo_root)}: {exc}", file=sys.stderr)
+            return 1
 
     if bad:
         print("ERROR: remote shell bootstrap is not allowed in .github/workflows:", file=sys.stderr)
