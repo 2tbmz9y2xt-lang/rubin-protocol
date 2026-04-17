@@ -58,7 +58,8 @@ ENV_SPLIT_STRING_FALLBACK_RE = re.compile(
 )
 WRAPPER_EXECUTABLE_PATTERN = rf"(?:{ENV_COMMAND_PATTERN}|command|source)"
 SOURCE_WORD_PATTERN = r"(?:source|\"source\"|'source')"
-SOURCE_STDIN_PATTERN = rf"(?:{SOURCE_WORD_PATTERN}|\.)\s+/dev/stdin"
+STDIN_PATH_PATTERN = r"(?:/dev/stdin|\"/dev/stdin\"|'/dev/stdin'|/dev/fd/0|\"/dev/fd/0\"|'/dev/fd/0')"
+SOURCE_STDIN_PATTERN = rf"(?:{SOURCE_WORD_PATTERN}|\.)\s+{STDIN_PATH_PATTERN}"
 
 REMOTE_SHELL_PATTERNS = (
     (
@@ -99,32 +100,32 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell here-doc command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s*<<-?\s*\S+[\s\S]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s*<<(?!<)-?\s*\S+[\s\S]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
     (
         "remote shell -c command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[^\n]*?(?:\$\(\s*(?:[\{{(]\s*)*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[\s\S]*?(?:\$\(\s*(?:[\{{(]\s*)*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
     (
         "remote shell -c command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"'][^\n]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SOURCE_STDIN_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"'][\s\S]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SOURCE_STDIN_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
             re.IGNORECASE,
         ),
     ),
     (
         "remote shell eval command substitution",
-        re.compile(rf"\beval\b\s+[\"']?[^\n]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})", re.IGNORECASE),
+        re.compile(rf"\beval\b\s+[\"']?[\s\S]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})", re.IGNORECASE),
     ),
     (
         "remote shell eval command substitution",
         re.compile(
-            rf"\beval\b\s+[\"'][^\n]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SOURCE_STDIN_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
+            rf"\beval\b\s+[\"'][\s\S]*?{DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SOURCE_STDIN_PATTERN}|(?<![\w./-]){SHELL_LAUNCHER_PATTERN})(?=\s|$|['\"]|\b)",
             re.IGNORECASE,
         ),
     ),
@@ -837,6 +838,8 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
         value = value_node.value or ""
         if not value:
             return
+        if value_node.start_mark.line == key_node.start_mark.line:
+            return
         line_no = key_node.start_mark.line + 1
         if getattr(value_node, "style", None) in {"|", ">"}:
             line_no += 1
@@ -871,8 +874,8 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
     return entries
 
 
-def normalize_run_entries(entries: list[tuple[int, str]]) -> str:
-    return " ".join("\n".join(text for _, text in entries).split())
+def normalize_run_entries(entries: list[tuple[int, str]]) -> tuple[int, str]:
+    return (entries[0][0], " ".join("\n".join(text for _, text in entries).split()))
 
 
 def infer_repo_root(path: Path) -> Path | None:

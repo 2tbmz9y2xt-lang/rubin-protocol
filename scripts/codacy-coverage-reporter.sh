@@ -8,17 +8,24 @@ DARWIN_ARM64_SHA512="bdd9403f0d9b54626b8494890cc8c4b212b694e7f5c49a90733608507cd
 download_file() {
   local url="$1"
   local out="$2"
+  local result=""
 
   if command -v curl >/dev/null 2>&1; then
-    curl --fail --silent --show-error --location "$url" -o "$out"
-    return 0
+    if curl --fail --silent --show-error --location "$url" -o "$out"; then
+      return 0
+    fi
+    result="curl"
   fi
   if command -v wget >/dev/null 2>&1; then
-    if ! wget -q "$url" -O "$out"; then
-      echo "ERROR: wget failed to download $url" >&2
-      return 1
+    if wget -q "$url" -O "$out"; then
+      return 0
     fi
-    return 0
+    echo "ERROR: wget failed to download $url" >&2
+    return 1
+  fi
+  if [[ -n "$result" ]]; then
+    echo "ERROR: curl failed to download $url" >&2
+    return 1
   fi
   echo "ERROR: curl or wget required to download Codacy reporter" >&2
   return 1
@@ -26,13 +33,22 @@ download_file() {
 
 compute_sha512() {
   local path="$1"
+  local output=""
 
   if command -v sha512sum >/dev/null 2>&1; then
-    sha512sum "$path" | awk '{print $1}'
+    output="$(sha512sum "$path")" || {
+      echo "ERROR: sha512sum failed for $path" >&2
+      return 1
+    }
+    printf '%s\n' "${output%% *}"
     return 0
   fi
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 512 "$path" | awk '{print $1}'
+    output="$(shasum -a 512 "$path")" || {
+      echo "ERROR: shasum failed for $path" >&2
+      return 1
+    }
+    printf '%s\n' "${output%% *}"
     return 0
   fi
   echo "ERROR: sha512 tool missing (need sha512sum or shasum -a 512)" >&2

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,6 +18,14 @@ def extract_var(name: str) -> str:
     if match is None:
         raise AssertionError(f"missing {name} in {SCRIPT_PATH}")
     return match.group(1)
+
+
+def extract_parity_python_block() -> str:
+    text = PARITY_SCRIPT_PATH.read_text(encoding="utf-8")
+    marker = "python3 - \"$codacy_status_json\" \"$merge_base\" \"$remote_pr_head\" \"$current_head\" \"$local_head_ahead\" <<'PY'\n"
+    start = text.index(marker) + len(marker)
+    end = text.index("\nPY\n", start)
+    return text[start:end]
 
 
 class CodacyCoverageReporterContractTests(unittest.TestCase):
@@ -35,7 +45,7 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
 
     def test_wget_download_failures_are_reported_explicitly(self):
         text = SCRIPT_PATH.read_text(encoding="utf-8")
-        self.assertIn('if ! wget -q "$url" -O "$out"; then', text)
+        self.assertIn('if wget -q "$url" -O "$out"; then', text)
         self.assertIn('echo "ERROR: wget failed to download $url" >&2', text)
 
     def test_sha_tool_failures_do_not_fall_through_as_checksum_mismatch(self):
@@ -63,6 +73,103 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
         self.assertIn('if remote_pr_head and local_head and remote_pr_head != local_head and local_head_ahead:', text)
         self.assertIn('if ancestor_sha != local_merge_base:', text)
         self.assertIn('but local merge-base {local_merge_base} differs from Codacy common ancestor {ancestor_sha}', text)
+
+    def test_local_head_ahead_python_branch_fails_closed_on_ancestor_drift(self):
+        code = extract_parity_python_block()
+        status_json = (
+            '{"data":{"commonAncestorCommit":{"commitSha":"OLD","reports":[{"status":"Processed"}]},'
+            '"headCommit":{"commitSha":"REMOTE","reports":[{"status":"Processed"}]}}}'
+        )
+        proc = subprocess.run(
+            ["python3", "-", status_json, "BASE", "REMOTE", "LOCAL", "1"],
+            input=code,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("differs from Codacy common ancestor", proc.stderr)
+
+    def test_local_head_ahead_python_branch_passes_when_ancestor_matches(self):
+        code = extract_parity_python_block()
+        status_json = (
+            '{"data":{"commonAncestorCommit":{"commitSha":"BASE","reports":[{"status":"Processed"}]},'
+            '"headCommit":{"commitSha":"REMOTE","reports":[{"status":"Processed"}]}}}'
+        )
+        proc = subprocess.run(
+            ["python3", "-", status_json, "BASE", "REMOTE", "LOCAL", "1"],
+            input=code,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("local HEAD LOCAL is ahead of GitHub PR head REMOTE", proc.stdout)
+
+    def test_download_failure_reports_transport_error_not_checksum_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                "out=''\n"
+                "while [[ $# -gt 0 ]]; do\n"
+                "  if [[ \"$1\" == '-o' ]]; then\n"
+                "    shift\n"
+                "    out=\"$1\"\n"
+                "  fi\n"
+                "  shift || break\n"
+                "done\n"
+                "printf 'partial' > \"$out\"\n"
+                "exit 22\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "curl").chmod(0o755)
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "CODACY_REPORTER_TMP_FOLDER": str(root / "cache"),
+            }
+            proc = subprocess.run(
+                ["bash", str(SCRIPT_PATH), "download"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("curl failed to download", proc.stderr)
+        self.assertNotIn("checksum mismatch", proc.stderr)
+
+    def test_hash_tool_failure_is_not_reported_as_checksum_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fake_bin = root / "bin"
+            cache_root = root / "cache"
+            fake_bin.mkdir()
+            reporter_dir = cache_root / extract_var("PINNED_VERSION")
+            reporter_dir.mkdir(parents=True)
+            reporter_path = reporter_dir / "codacy-coverage-reporter-darwin"
+            reporter_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            reporter_path.chmod(0o755)
+            (fake_bin / "uname").write_text("#!/usr/bin/env bash\necho 'Darwin arm64'\n", encoding="utf-8")
+            (fake_bin / "uname").chmod(0o755)
+            (fake_bin / "shasum").write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            (fake_bin / "shasum").chmod(0o755)
+            env = {
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "CODACY_REPORTER_TMP_FOLDER": str(cache_root),
+            }
+            proc = subprocess.run(
+                ["bash", str(SCRIPT_PATH), "download"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("shasum failed", proc.stderr)
+        self.assertNotIn("checksum mismatch", proc.stderr)
 
 
 if __name__ == "__main__":
