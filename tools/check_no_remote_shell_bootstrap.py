@@ -927,7 +927,8 @@ def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[t
         content = strip_yaml_scalar_quotes(inline_match.group(1))
         if content and BLOCK_SCALAR_RE.match(content.strip()):
             block, _ = block_entries(step_entries, 1, len(first_raw) - len(first_raw.lstrip()))
-            run_entries.append(block)
+            if block:
+                run_entries.append(block)
         elif content:
             run_entries.append(
                 inline_plain_scalar_entries(
@@ -966,7 +967,8 @@ def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[t
         content = strip_yaml_scalar_quotes(match.group(1))
         if content and BLOCK_SCALAR_RE.match(content.strip()):
             block, idx = block_entries(step_entries, idx + 1, indent)
-            run_entries.append(block)
+            if block:
+                run_entries.append(block)
             continue
         if content:
             entries = inline_plain_scalar_entries(step_entries[idx:], line_no, content, indent)
