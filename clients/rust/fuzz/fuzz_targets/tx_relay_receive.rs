@@ -134,7 +134,7 @@ fn run_twice_same_state(network: &str, peer_count: usize, tx_bytes: &[u8]) -> (R
         .collect();
     let first = ReceiveSnapshot {
         result: match first_result {
-            Ok(()) => "ok".to_string(),
+            Ok(outcome) => format!("ok:{outcome:?}"),
             Err(err) => format!("{:?}:{}", err.kind(), err),
         },
         tx_seen_len: relay.tx_seen.len(),
@@ -159,7 +159,7 @@ fn run_twice_same_state(network: &str, peer_count: usize, tx_bytes: &[u8]) -> (R
         .collect();
     let second = ReceiveSnapshot {
         result: match second_result {
-            Ok(()) => "ok".to_string(),
+            Ok(outcome) => format!("ok:{outcome:?}"),
             Err(err) => format!("{:?}:{}", err.kind(), err),
         },
         tx_seen_len: relay.tx_seen.len(),

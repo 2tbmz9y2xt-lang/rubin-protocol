@@ -575,7 +575,10 @@ func TestBlockBytesIOError(t *testing.T) {
 // ban-score bump, mirroring Rust's tx_relay::handle_received_tx oversize guard
 // (see clients/rust/crates/rubin-node/src/tx_relay.rs RelayTxOutcome::Oversized).
 //
-// Allocates ~96MB; skipped under -short.
+// Allocates ~96MB. Skipped under -short. Coverage of the new oversize ban
+// branch requires the real length check to fire, which needs the full
+// allocation; an env-var opt-in skip would drop Codacy diff-coverage below
+// the 85% gate, so the alloc is accepted on default CI.
 func TestHandleTxOversizeBumpsBan(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocates MAX_RELAY_MSG_BYTES+1 bytes; skipped in short mode")

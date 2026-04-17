@@ -1222,6 +1222,12 @@ mod tests {
         ));
         let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
 
+        // Coverage of the `Oversized` return branch requires the actual
+        // length check to fire, which needs `MAX_RELAY_MSG_BYTES + 1`
+        // bytes (~96 MB). Modern CI runners absorb this; an env-var
+        // skip would drop diff-coverage below the 85% gate, so the
+        // allocation is accepted as the lesser evil. The check itself
+        // never reads the payload, so zero-fill cost dominates.
         let oversize = vec![0u8; rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize + 1];
         let outcome = handle_received_tx(
             &oversize,
