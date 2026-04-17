@@ -438,7 +438,7 @@ def extract_flow_mapping_run(mapping_text: str) -> str | None:
             current.append(ch)
             if escape:
                 escape = False
-            elif ch == "\\":
+            elif quote == '"' and ch == "\\":
                 escape = True
             elif ch == quote:
                 quote = None
@@ -516,7 +516,7 @@ def extract_flow_sequence_mappings(sequence_text: str, start_line_no: int) -> li
             current.append(ch)
             if escape:
                 escape = False
-            elif ch == "\\":
+            elif quote == '"' and ch == "\\":
                 escape = True
             elif ch == quote:
                 quote = None
@@ -572,7 +572,7 @@ def collect_flow_sequence(lines: list[str], start_idx: int, initial_text: str) -
                 parts.append(ch)
                 if escape:
                     escape = False
-                elif ch == "\\":
+                elif quote == '"' and ch == "\\":
                     escape = True
                 elif ch == quote:
                     quote = None
@@ -625,7 +625,7 @@ def collect_step_flow_mapping_text(step_entries: list[tuple[int, str]]) -> str |
                 parts.append(ch)
                 if escape:
                     escape = False
-                elif ch == "\\":
+                elif quote == '"' and ch == "\\":
                     escape = True
                 elif ch == quote:
                     quote = None
