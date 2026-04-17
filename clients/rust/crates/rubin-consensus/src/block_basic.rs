@@ -293,6 +293,18 @@ fn validate_da_set_maps(
     commits: &HashMap<[u8; 32], DaCommitSet>,
     chunks: &HashMap<[u8; 32], HashMap<u16, Tx>>,
 ) -> Result<(), TxError> {
+    // Go parity (clients/go/consensus/block_basic.go, `validateDASetsInBlock`):
+    // the batch-count guard runs BEFORE the sortedDAIDs loops so a block that
+    // exceeds `MAX_DA_BATCHES_PER_BLOCK` surfaces as `BLOCK_ERR_DA_BATCH_EXCEEDED`,
+    // not as `BLOCK_ERR_DA_SET_INVALID` / `BLOCK_ERR_DA_INCOMPLETE` from a
+    // stray chunk or bad chunk_count inside the overflowing set.
+    if commits.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
+        return Err(TxError::new(
+            ErrorCode::BlockErrDaBatchExceeded,
+            "too many DA commits in block",
+        ));
+    }
+
     let commit_ids = sorted_da_ids(commits);
     let chunk_ids = sorted_da_ids(chunks);
 
@@ -325,13 +337,6 @@ fn validate_da_set_maps(
         }
     }
 
-    if commits.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
-        return Err(TxError::new(
-            ErrorCode::BlockErrDaBatchExceeded,
-            "too many DA commits in block",
-        ));
-    }
-
     for da_id in &commit_ids {
         let commit = da_commit_for_id(commits, da_id)?;
         let set = da_chunk_set_for_id(chunks, da_id)?;
@@ -349,9 +354,22 @@ fn validate_da_set_maps(
                 continue;
             }
             da_commit_outputs += 1;
-            if o.covenant_data.len() == 32 {
-                got_commitment.copy_from_slice(&o.covenant_data);
+            // Go parity (clients/go/consensus/block_basic.go,
+            // `validateDASetsInBlock` payload-commitment loop): a DA commit
+            // output whose covenant payload is not exactly 32 bytes is
+            // rejected as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID /
+            // "DA commitment output has invalid length"` BEFORE the
+            // missing/duplicated count check and BEFORE the commitment
+            // mismatch check. Silently zero-filling `got_commitment` would
+            // collapse this case into `payload commitment mismatch`, losing
+            // the dedicated length-classification surface.
+            if o.covenant_data.len() != 32 {
+                return Err(TxError::new(
+                    ErrorCode::BlockErrDaPayloadCommitInvalid,
+                    "DA commitment output has invalid length",
+                ));
             }
+            got_commitment.copy_from_slice(&o.covenant_data);
         }
         if da_commit_outputs != 1 {
             return Err(TxError::new(
@@ -545,12 +563,16 @@ mod internal_tests {
         da_chunk_set_for_id, da_chunk_tx_for_index, da_commit_for_id, validate_da_set_maps,
         DaCommitSet,
     };
-    use crate::constants::COV_TYPE_DA_COMMIT;
+    use crate::constants::{COV_TYPE_DA_COMMIT, MAX_DA_BATCHES_PER_BLOCK};
     use crate::error::ErrorCode;
     use crate::tx::{Tx, TxOutput};
     use std::collections::HashMap;
 
     fn dummy_da_commit_tx(payload_commitment: [u8; 32]) -> Tx {
+        dummy_da_commit_tx_with_covenant_data(payload_commitment.to_vec())
+    }
+
+    fn dummy_da_commit_tx_with_covenant_data(covenant_data: Vec<u8>) -> Tx {
         Tx {
             version: 1,
             tx_kind: 0x01,
@@ -559,7 +581,7 @@ mod internal_tests {
             outputs: vec![TxOutput {
                 value: 0,
                 covenant_type: COV_TYPE_DA_COMMIT,
-                covenant_data: payload_commitment.to_vec(),
+                covenant_data,
             }],
             locktime: 0,
             da_commit_core: None,
@@ -624,6 +646,76 @@ mod internal_tests {
 
         let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
         assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
+    }
+
+    /// Go parity for G.1: a DA commit output whose covenant payload is not
+    /// exactly 32 bytes is classified as
+    /// `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID / "DA commitment output has
+    /// invalid length"`, not collapsed into the generic
+    /// `"payload commitment mismatch"` surface.
+    #[test]
+    fn validate_da_set_maps_rejects_non_32_covenant_data_as_invalid_length() {
+        let da_id = [0x55; 32];
+        let payload = b"payload-short-covenant".to_vec();
+
+        let mut commits = HashMap::new();
+        // covenant_data deliberately 31 bytes (not 32).
+        let bad_covenant: Vec<u8> = (0..31).collect();
+        commits.insert(
+            da_id,
+            DaCommitSet {
+                tx: dummy_da_commit_tx_with_covenant_data(bad_covenant),
+                chunk_count: 1,
+            },
+        );
+
+        let mut set = HashMap::new();
+        set.insert(0, dummy_da_chunk_tx(&payload));
+        let mut chunks = HashMap::new();
+        chunks.insert(da_id, set);
+
+        let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BlockErrDaPayloadCommitInvalid);
+        assert!(
+            err.msg.contains("invalid length"),
+            "expected 'invalid length' surface, got {:?}",
+            err.msg
+        );
+    }
+
+    /// Go parity for G.2: the `MAX_DA_BATCHES_PER_BLOCK` guard runs BEFORE the
+    /// sortedDAIDs loops, so an oversize block whose excess sets also contain
+    /// structural problems (orphaned chunks, missing chunk index, chunk_count
+    /// OOB) surfaces as `BLOCK_ERR_DA_BATCH_EXCEEDED` rather than the
+    /// downstream `BLOCK_ERR_DA_SET_INVALID` / `BLOCK_ERR_DA_INCOMPLETE`
+    /// classification of an inner set.
+    #[test]
+    fn validate_da_set_maps_batch_exceeded_fires_before_set_invalid() {
+        let mut commits = HashMap::new();
+        for i in 0..=MAX_DA_BATCHES_PER_BLOCK as u16 {
+            // commit_count == MAX + 1 triggers the batch-exceeded guard.
+            let mut da_id = [0u8; 32];
+            da_id[0..2].copy_from_slice(&i.to_le_bytes());
+            commits.insert(
+                da_id,
+                DaCommitSet {
+                    tx: dummy_da_commit_tx([0xAA; 32]),
+                    chunk_count: 1,
+                },
+            );
+        }
+
+        // Seed chunk map with an orphaned DA set (no matching commit) —
+        // without the reorder, this would surface as `BlockErrDaSetInvalid`.
+        let mut orphan_set = HashMap::new();
+        orphan_set.insert(0, dummy_da_chunk_tx(b"orphan"));
+        let mut chunks = HashMap::new();
+        chunks.insert([0xFF; 32], orphan_set);
+
+        assert_eq!(commits.len(), MAX_DA_BATCHES_PER_BLOCK as usize + 1);
+
+        let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BlockErrDaBatchExceeded);
     }
 }
 
