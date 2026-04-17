@@ -17,9 +17,23 @@ pub fn block_subsidy(height: u64, already_generated: u128) -> u64 {
     let remaining = mineable_cap - already_generated;
     let base_reward = remaining >> EMISSION_SPEED_FACTOR;
     if base_reward < u128::from(TAIL_EMISSION_PER_BLOCK) {
-        TAIL_EMISSION_PER_BLOCK
-    } else {
-        base_reward as u64
+        return TAIL_EMISSION_PER_BLOCK;
+    }
+    clamp_base_reward_to_u64(base_reward)
+}
+
+/// Narrow `base_reward` from the u128 subsidy arithmetic into `u64` with
+/// an explicit overflow guard — the Rust equivalent of Go's
+/// `baseReward.IsUint64()` check (clients/go/consensus/subsidy.go:43-47).
+///
+/// Unreachable for current constants (MINEABLE_CAP fits in u64 and the
+/// right shift by EMISSION_SPEED_FACTOR only reduces the value), but
+/// the guard preserves deterministic behavior for malformed caller
+/// state and prevents silent truncation via `as u64`.
+fn clamp_base_reward_to_u64(base_reward: u128) -> u64 {
+    match u64::try_from(base_reward) {
+        Ok(v) => v,
+        Err(_) => TAIL_EMISSION_PER_BLOCK,
     }
 }
 
@@ -67,6 +81,31 @@ mod tests {
     }
 
     #[test]
+    fn clamp_base_reward_within_u64_passes_through() {
+        // Values that fit u64 go through unchanged.
+        assert_eq!(clamp_base_reward_to_u64(0), 0);
+        assert_eq!(clamp_base_reward_to_u64(1), 1);
+        assert_eq!(clamp_base_reward_to_u64(u128::from(u64::MAX)), u64::MAX);
+        assert_eq!(
+            clamp_base_reward_to_u64(u128::from(TAIL_EMISSION_PER_BLOCK)),
+            TAIL_EMISSION_PER_BLOCK
+        );
+    }
+
+    #[test]
+    fn clamp_base_reward_overflow_falls_back_to_tail() {
+        // Overflow branch matches Go `BlockSubsidyBig` `IsUint64()` behavior:
+        // deterministic fallback to TAIL_EMISSION_PER_BLOCK (not a silent
+        // truncation via `as u64`).  Unreachable for current constants but
+        // verifies the guard exists and fires.
+        assert_eq!(
+            clamp_base_reward_to_u64(u128::from(u64::MAX) + 1),
+            TAIL_EMISSION_PER_BLOCK
+        );
+        assert_eq!(clamp_base_reward_to_u64(u128::MAX), TAIL_EMISSION_PER_BLOCK);
+    }
+
+    #[test]
     fn block_subsidy_repeat_is_deterministic() {
         let height = 42;
         let already_generated = 123_456_789u128;
@@ -107,5 +146,22 @@ mod verification {
     fn verify_subsidy_genesis_zero() {
         let already_generated: u128 = kani::any();
         assert_eq!(block_subsidy(0, already_generated), 0);
+    }
+
+    /// `clamp_base_reward_to_u64` never panics, and its result is
+    /// either the input unchanged (when it fits u64) or the
+    /// deterministic `TAIL_EMISSION_PER_BLOCK` fallback (matching Go's
+    /// `IsUint64()` branch).  No silent truncation via `as u64`.
+    #[kani::proof]
+    fn verify_clamp_base_reward_no_overflow() {
+        let base_reward: u128 = kani::any();
+        let clamped = clamp_base_reward_to_u64(base_reward);
+        if base_reward <= u128::from(u64::MAX) {
+            // Fits u64 — identity.
+            assert_eq!(u128::from(clamped), base_reward);
+        } else {
+            // Overflow — deterministic tail fallback.
+            assert_eq!(clamped, TAIL_EMISSION_PER_BLOCK);
+        }
     }
 }
