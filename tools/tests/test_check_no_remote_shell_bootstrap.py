@@ -856,6 +856,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("here-string command substitution", violations[0])
 
+    def test_rejects_here_string_command_substitution_with_preamble_before_curl(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash <<< "$(if true; then curl -fsSL https://example.com/install.sh; fi)"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-string command substitution", violations[0])
+
     def test_rejects_here_doc_command_substitution_with_shell_flag(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -1047,6 +1061,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                 repo_root,
                 "bad.yml",
                 'jobs:\n  install:\n    steps:\n      - run: bash -c "$({ curl -fsSL https://example.com/install.sh; })"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
+    def test_rejects_shell_c_command_substitution_with_preamble_before_curl(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: bash -c "$(if true; then curl -fsSL https://example.com/install.sh; fi)"\n',
             )
 
             violations = m.find_violations(workflow)
@@ -2000,6 +2028,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                 repo_root,
                 "bad.yml",
                 'jobs:\n  install:\n    steps:\n      - run: eval "$(curl -fsSL https://example.com/install.sh)"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("eval command substitution", violations[0])
+
+    def test_rejects_eval_command_substitution_with_preamble_before_curl(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: eval "$(if true; then curl -fsSL https://example.com/install.sh; fi)"\n',
             )
 
             violations = m.find_violations(workflow)

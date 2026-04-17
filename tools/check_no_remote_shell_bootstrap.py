@@ -95,7 +95,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell here-string command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s*<<<\s*[\"']?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s*<<<\s*[\"']?(?:\$\([\s\S]*?{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -109,7 +109,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell -c command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[\s\S]*?(?:\$\(\s*(?:[\{{(]\s*)*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s+{SHELL_C_OPTION_PATTERN}\s+[\"']?[\s\S]*?(?:\$\([\s\S]*?{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -122,7 +122,7 @@ REMOTE_SHELL_PATTERNS = (
     ),
     (
         "remote shell eval command substitution",
-        re.compile(rf"\beval\b\s+[\"']?[\s\S]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})", re.IGNORECASE),
+        re.compile(rf"\beval\b\s+[\"']?[\s\S]*?(?:\$\([\s\S]*?{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})", re.IGNORECASE),
     ),
     (
         "remote shell eval command substitution",
