@@ -6,7 +6,18 @@ import re
 import sys
 from pathlib import Path
 
+try:
+    import yaml
+    from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+except Exception:  # pragma: no cover - optional dependency fallback
+    yaml = None
+    Node = object  # type: ignore[assignment]
+    MappingNode = object  # type: ignore[assignment]
+    ScalarNode = object  # type: ignore[assignment]
+    SequenceNode = object  # type: ignore[assignment]
+
 SHELL_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:bash|dash|sh)"
+SHELL_WORD_PATTERN = rf"(?:{SHELL_EXECUTABLE_PATTERN}\b|\"{SHELL_EXECUTABLE_PATTERN}\"|'{SHELL_EXECUTABLE_PATTERN}')"
 COMMAND_PREFIX_PATTERN = r"command(?:\s+(?:--|-p))*\s+"
 ENV_ASSIGNMENT_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*=\S+"
 ENV_ASSIGNMENT_PREFIX_PATTERN = rf"(?:{ENV_ASSIGNMENT_PATTERN}\s+)+"
@@ -21,7 +32,7 @@ ENV_SPLIT_STRING_OPTION_PATTERN = r"(?:-S|--split-string)(?:=|\s+)"
 ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN = rf"(?!-S(?:\s|$))(?!--split-string(?:=|\s|$)){ENV_ARGUMENT_PATTERN}"
 ENV_SPLIT_STRING_VALUE_PATTERN = rf"(?:\"{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\"|'{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*'|{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*)"
 ENV_SPLIT_STRING_LAUNCHER_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN})*\s+{ENV_SPLIT_STRING_OPTION_PATTERN}{ENV_SPLIT_STRING_VALUE_PATTERN}"
-SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SHELL_EXECUTABLE_PATTERN})"
+SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SHELL_WORD_PATTERN})"
 DOWNLOADER_EXECUTABLE_PATTERN = r"(?:/(?:usr/)?bin/)?(?:curl|wget)"
 DOWNLOADER_WORD_PATTERN = rf"(?:{DOWNLOADER_EXECUTABLE_PATTERN}\b|\"{DOWNLOADER_EXECUTABLE_PATTERN}\"|'{DOWNLOADER_EXECUTABLE_PATTERN}')"
 DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?{DOWNLOADER_WORD_PATTERN}"
@@ -281,7 +292,7 @@ def mask_pipe_window(text: str) -> str:
                 continue
         if ch == quote:
             quoted_text = "".join(quoted)
-            if re.fullmatch(DOWNLOADER_EXECUTABLE_PATTERN, quoted_text):
+            if re.fullmatch(DOWNLOADER_EXECUTABLE_PATTERN, quoted_text) or re.fullmatch(SHELL_EXECUTABLE_PATTERN, quoted_text):
                 parts.extend(quoted_text)
             else:
                 parts.extend(" " * len(quoted_text))
@@ -712,6 +723,54 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
     return entries
 
 
+def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
+    if yaml is None:
+        return []
+    try:
+        root = yaml.compose(content)
+    except Exception:
+        return []
+    if root is None:
+        return []
+
+    entries: list[list[tuple[int, str]]] = []
+
+    def emit_run(key_node: ScalarNode, value_node: ScalarNode) -> None:
+        value = value_node.value or ""
+        if not value:
+            return
+        line_no = key_node.start_mark.line + 1
+        lines = value.splitlines()
+        if not lines:
+            entries.append([(line_no, value)])
+            return
+        entries.append([(line_no + offset, line) for offset, line in enumerate(lines)])
+
+    def walk(node: Node) -> None:
+        if isinstance(node, MappingNode):
+            for key_node, value_node in node.value:
+                if isinstance(key_node, ScalarNode) and key_node.value == "steps" and isinstance(value_node, SequenceNode):
+                    for item in value_node.value:
+                        if isinstance(item, MappingNode):
+                            for step_key, step_value in item.value:
+                                if (
+                                    isinstance(step_key, ScalarNode)
+                                    and step_key.value == "run"
+                                    and isinstance(step_value, ScalarNode)
+                                ):
+                                    emit_run(step_key, step_value)
+                        walk(item)
+                    continue
+                walk(value_node)
+            return
+        if isinstance(node, SequenceNode):
+            for item in node.value:
+                walk(item)
+
+    walk(root)
+    return entries
+
+
 def infer_repo_root(path: Path) -> Path | None:
     for parent in path.parents:
         if parent.name == ".github" and parent.parent.name:
@@ -721,9 +780,19 @@ def infer_repo_root(path: Path) -> Path | None:
 
 def find_violations(path: Path) -> list[str]:
     violations: list[str] = []
-    lines = path.read_text(encoding="utf-8").splitlines()
+    content = path.read_text(encoding="utf-8")
+    lines = content.splitlines()
     rendered_path = render_path(path, infer_repo_root(path))
-    for run_entries in iter_run_entries(lines):
+    run_entries_sets = iter_run_entries(lines)
+    seen_entries = {"\n".join(text for _, text in entries) for entries in run_entries_sets}
+    seen_violations: set[tuple[str, str]] = set()
+    for entries in yaml_run_entries(content):
+        key = "\n".join(text for _, text in entries)
+        if key in seen_entries:
+            continue
+        seen_entries.add(key)
+        run_entries_sets.append(entries)
+    for run_entries in run_entries_sets:
         line_idx = 0
         while line_idx < len(run_entries):
             matched_end: int | None = None
@@ -744,7 +813,10 @@ def find_violations(path: Path) -> list[str]:
                     else:
                         matched = pattern.search(candidate)
                     if matched:
-                        violations.append(f"{rendered_path}:{line_no}: {label}: {window}")
+                        violation_key = (label, " ".join(window.split()))
+                        if violation_key not in seen_violations:
+                            seen_violations.add(violation_key)
+                            violations.append(f"{rendered_path}:{line_no}: {label}: {window}")
                         matched_end = end_idx
                         break
                 else:

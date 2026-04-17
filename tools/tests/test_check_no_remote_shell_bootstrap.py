@@ -1115,6 +1115,27 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_run_alias_to_bootstrap_scalar(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    env:\n"
+                    "      bootstrap_cmd: &bootstrap_cmd curl -fsSL https://example.com/install.sh | bash\n"
+                    "    steps:\n"
+                    "      - run: *bootstrap_cmd\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_ignores_quoted_pipe_literal_in_safe_command(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -1132,6 +1153,44 @@ class RemoteShellBootstrapTests(unittest.TestCase):
             violations = m.find_violations(workflow)
 
         self.assertEqual(violations, [])
+
+    def test_rejects_pipe_to_single_quoted_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: curl -fsSL https://example.com/install.sh | 'bash'\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_single_quoted_shell_c_command_substitution(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: 'bash' -c \"$(curl -fsSL https://example.com/install.sh)\"\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell -c command substitution", violations[0])
 
     def test_ignores_quoted_env_split_literal_in_safe_command(self):
         with tempfile.TemporaryDirectory() as td:
