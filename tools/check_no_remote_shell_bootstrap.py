@@ -840,8 +840,6 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
         value = value_node.value or ""
         if not value:
             return
-        if value_node.start_mark.line >= key_node.start_mark.line:
-            return
         line_no = key_node.start_mark.line + 1
         if getattr(value_node, "style", None) in {"|", ">"}:
             line_no += 1
@@ -880,6 +878,10 @@ def normalize_run_entries(entries: list[tuple[int, str]]) -> tuple[int, str]:
     return (entries[0][0], " ".join("\n".join(text for _, text in entries).split()))
 
 
+def normalize_run_entries_text(entries: list[tuple[int, str]]) -> str:
+    return " ".join("\n".join(text for _, text in entries).split())
+
+
 def infer_repo_root(path: Path) -> Path | None:
     for parent in path.parents:
         if parent.name == ".github" and parent.parent.name:
@@ -893,13 +895,12 @@ def find_violations(path: Path) -> list[str]:
     lines = content.splitlines()
     rendered_path = render_path(path, infer_repo_root(path))
     run_entries_sets = iter_run_entries(lines)
-    seen_entries = {normalize_run_entries(entries) for entries in run_entries_sets}
+    text_entry_payloads = {normalize_run_entries_text(entries) for entries in run_entries_sets}
     seen_violations: set[tuple[str, int, str]] = set()
     for entries in yaml_run_entries(content):
-        key = normalize_run_entries(entries)
-        if key in seen_entries:
+        key = normalize_run_entries_text(entries)
+        if key in text_entry_payloads:
             continue
-        seen_entries.add(key)
         run_entries_sets.append(entries)
     for run_entries in run_entries_sets:
         line_idx = 0
