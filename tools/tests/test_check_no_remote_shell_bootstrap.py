@@ -12,7 +12,9 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 import check_no_remote_shell_bootstrap as m
 
+HAS_PYYAML = m.yaml is not None
 
+@unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
 class RemoteShellBootstrapTests(unittest.TestCase):
     def write_workflow(self, root: Path, name: str, body: str) -> Path:
         workflow_dir = root / ".github" / "workflows"
