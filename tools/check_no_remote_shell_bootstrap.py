@@ -54,12 +54,20 @@ ENV_SPLIT_STRING_FALLBACK_RE = re.compile(
     r"(?:^|[^\w])(?:/(?:usr/)?bin/)?env\s+(?:-S(?:\s|$)|--split-string(?:=|\s|$))",
     re.IGNORECASE,
 )
+SOURCE_STDIN_PATTERN = r"(?:source|\.)\s+/dev/stdin"
 
 REMOTE_SHELL_PATTERNS = (
     (
         "remote shell pipe",
         re.compile(
             rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?{ENV_SPLIT_STRING_LAUNCHER_PATTERN}(?=\s|$|['\"])",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "remote shell pipe",
+        re.compile(
+            rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?{SOURCE_STDIN_PATTERN}(?=\s|$|['\"])",
             re.IGNORECASE,
         ),
     ),
