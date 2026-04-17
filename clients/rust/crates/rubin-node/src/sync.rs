@@ -262,6 +262,12 @@ pub struct SyncEngine {
     pv_shadow_mismatches: u64,
     pv_shadow_samples: Vec<String>,
     pv_telemetry: PVTelemetry,
+    /// Test-only: drop block_store after canonical truncate (between
+    /// truncate and save) to exercise the otherwise-unreachable
+    /// blockstore-missing branch in disconnect_tip's save-failure
+    /// recovery.
+    #[cfg(test)]
+    pub(crate) drop_block_store_after_truncate: bool,
 }
 
 /// Captured state for rollback on failure during reorg.
@@ -342,6 +348,8 @@ impl SyncEngine {
             pv_shadow_mismatches: 0,
             pv_shadow_samples: Vec::new(),
             pv_telemetry: PVTelemetry::new(pv_mode),
+            #[cfg(test)]
+            drop_block_store_after_truncate: false,
         })
     }
 

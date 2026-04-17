@@ -642,6 +642,7 @@ impl PeerSession {
                 {
                     requests.push(vector);
                 }
+                MSG_BLOCK => {}
                 MSG_TX => {
                     if let Some(rs) = relay_state {
                         if !rs.tx_seen.has(&vector.hash) && !rs.relay_pool.has(&vector.hash) {

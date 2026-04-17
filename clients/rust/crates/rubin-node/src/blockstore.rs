@@ -21,6 +21,12 @@ pub struct BlockStore {
     headers_dir: PathBuf,
     undo_dir: PathBuf,
     index: BlockStoreIndexDisk,
+    /// Test-only: force `truncate_canonical` to return an error.
+    #[cfg(test)]
+    pub(crate) force_truncate_error: bool,
+    /// Test-only: force `rollback_canonical` to return an error.
+    #[cfg(test)]
+    pub(crate) force_rollback_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +62,10 @@ impl BlockStore {
             headers_dir,
             undo_dir,
             index,
+            #[cfg(test)]
+            force_truncate_error: false,
+            #[cfg(test)]
+            force_rollback_error: false,
         })
     }
 
@@ -90,6 +100,13 @@ impl BlockStore {
         self.set_canonical_tip(height, block_hash_bytes)
     }
 
+    /// Set or replace the canonical tip at `height`.
+    ///
+    /// Hot path (called per connected block via `put_block`): mutate
+    /// in-memory then save; on save failure best-effort
+    /// `reload_index_from_disk` to restore in-memory consistency.
+    /// Avoids the O(chain_height) clone that out-of-place transactions
+    /// would cost on every block.
     pub fn set_canonical_tip(
         &mut self,
         height: u64,
@@ -102,15 +119,28 @@ impl BlockStore {
                 "height gap: got {height}, expected <= {current_len}"
             ));
         }
+        // No-op if in-memory already holds this exact hash at this height.
+        if height < current_len && self.index.canonical[height as usize] == hash_hex {
+            return Ok(());
+        }
         if height == current_len {
             self.index.canonical.push(hash_hex);
-        } else if self.index.canonical[height as usize] != hash_hex {
+        } else {
             self.index.canonical.truncate(height as usize);
             self.index.canonical.push(hash_hex);
         }
-        save_blockstore_index(&self.index_path, &self.index)
+        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
+            self.reload_index_from_disk();
+            return Err(e);
+        }
+        Ok(())
     }
 
+    /// Rewind canonical to (height + 1) entries.
+    ///
+    /// Same hot-path strategy as `set_canonical_tip`: mutate-then-save
+    /// with reload on failure (avoids per-call clone of the canonical
+    /// vector).
     pub fn rewind_to_height(&mut self, height: u64) -> Result<(), String> {
         if self.index.canonical.is_empty() {
             return Ok(());
@@ -119,7 +149,11 @@ impl BlockStore {
             return Err(format!("rewind height out of range: {height}"));
         }
         self.index.canonical.truncate(height as usize + 1);
-        save_blockstore_index(&self.index_path, &self.index)
+        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
+            self.reload_index_from_disk();
+            return Err(e);
+        }
+        Ok(())
     }
 
     pub fn canonical_hash(&self, height: u64) -> Result<Option<[u8; 32]>, String> {
@@ -319,56 +353,80 @@ impl BlockStore {
     /// `base_len` (removing entries added during reconnect), then
     /// re-append `suffix` (entries removed during disconnect).
     ///
-    /// Atomic: on disk-write failure the index is reloaded from disk
-    /// so in-memory state stays consistent (no temp buffer needed).
+    /// Atomic via out-of-place transaction: build the next index as a
+    /// clone, save to disk, then commit to in-memory only on success.
+    /// A failed call leaves the in-memory canonical exactly as it was
+    /// before, so callers can rely on `Err` meaning "no state change".
     pub fn rollback_canonical(
         &mut self,
         base_len: usize,
         suffix: Vec<String>,
     ) -> Result<(), String> {
-        let mut restored = Vec::with_capacity(base_len + suffix.len());
-        restored
-            .extend_from_slice(&self.index.canonical[..base_len.min(self.index.canonical.len())]);
-        restored.extend(suffix);
-        self.index.canonical = restored;
-        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
-            self.reload_index_from_disk();
-            return Err(e);
+        #[cfg(test)]
+        if self.force_rollback_error {
+            return Err("forced rollback error (test inject)".into());
         }
+        // Build the target canonical once (owning only `suffix` + a
+        // slice clone of `base_len` prefix entries).  No clone of the
+        // entries BEYOND `base_len`.
+        let clamped_base = base_len.min(self.index.canonical.len());
+        let mut next_canonical = Vec::with_capacity(clamped_base + suffix.len());
+        next_canonical.extend_from_slice(&self.index.canonical[..clamped_base]);
+        next_canonical.extend(suffix);
+        let view = BlockStoreIndexView {
+            version: self.index.version,
+            canonical: &next_canonical,
+        };
+        save_blockstore_index_serializable(&self.index_path, &view)?;
+        // Save succeeded — commit to in-memory.
+        self.index.canonical = next_canonical;
         Ok(())
     }
 
     /// Truncate canonical index to exactly `new_len` entries.
     ///
-    /// Atomic: on disk-write failure the index is reloaded from disk
-    /// (the atomic write guarantees the old version is still on disk).
+    /// Atomic: in-memory state is updated ONLY after the disk write
+    /// succeeds.  A failed call leaves the in-memory canonical exactly
+    /// as it was before, so callers can rely on `Err` meaning "no
+    /// state change".  Writes a borrowed slice-backed view of the
+    /// target prefix instead of cloning all canonical strings.
     pub fn truncate_canonical(&mut self, new_len: usize) -> Result<(), String> {
-        if new_len > self.index.canonical.len() {
+        #[cfg(test)]
+        if self.force_truncate_error {
+            return Err("forced truncate error (test inject)".into());
+        }
+        let current_len = self.index.canonical.len();
+        if new_len > current_len {
             return Err(format!(
-                "truncate_canonical new_len {} > current {}",
-                new_len,
-                self.index.canonical.len()
+                "truncate_canonical new_len {new_len} > current {current_len}"
             ));
         }
-        self.index.canonical.truncate(new_len);
-        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
-            self.reload_index_from_disk();
-            return Err(e);
+        // Fast-path: already at target length, skip the disk write.
+        if new_len == current_len {
+            return Ok(());
         }
+        let view = BlockStoreIndexView {
+            version: self.index.version,
+            canonical: &self.index.canonical[..new_len],
+        };
+        save_blockstore_index_serializable(&self.index_path, &view)?;
+        // Save succeeded — now apply O(1) in-memory truncate.
+        self.index.canonical.truncate(new_len);
         Ok(())
     }
 
-    /// Reload the blockstore index from disk to restore consistency
-    /// after a failed save.  Since `save_blockstore_index` uses
-    /// write-to-tmp + rename, the on-disk file is always a valid
-    /// previous version.
+    /// Reload the blockstore index from disk to restore in-memory
+    /// consistency after a failed save in a hot-path mutator
+    /// (`set_canonical_tip`, `rewind_to_height`).  Best-effort: if the
+    /// reload itself fails the in-memory state is stale, but we have
+    /// already returned the original error to the caller — the engine
+    /// is in an unrecoverable state and needs repair.  Not used by
+    /// `truncate_canonical` / `rollback_canonical`, which use the
+    /// out-of-place transaction pattern instead.
     fn reload_index_from_disk(&mut self) {
         if let Ok(disk) = load_blockstore_index(&self.index_path) {
             self.index = disk;
         }
-        // If reload also fails, in-memory state is stale but we
-        // already returned an error to the caller — the engine will
-        // be marked as needing repair.
     }
 }
 
@@ -402,10 +460,30 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
 }
 
 fn save_blockstore_index(path: &Path, index: &BlockStoreIndexDisk) -> Result<(), String> {
+    save_blockstore_index_serializable(path, index)
+}
+
+/// Generic save: accepts any `Serialize` value with the same on-disk
+/// shape as `BlockStoreIndexDisk`.  Lets `truncate_canonical` and
+/// `rollback_canonical` pass a borrowed slice-backed view without
+/// cloning all canonical strings.
+fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
+    path: &Path,
+    index: &S,
+) -> Result<(), String> {
     let mut raw =
         serde_json::to_vec_pretty(index).map_err(|e| format!("encode blockstore index: {e}"))?;
     raw.push(b'\n');
     write_file_atomic(path, &raw)
+}
+
+/// Borrowed view of `BlockStoreIndexDisk` that serializes identically
+/// but holds `&[String]` instead of owning the vector.  Used for
+/// out-of-place writes (truncate/rollback) on the rare disconnect path.
+#[derive(serde::Serialize)]
+struct BlockStoreIndexView<'a> {
+    version: u32,
+    canonical: &'a [String],
 }
 
 fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {

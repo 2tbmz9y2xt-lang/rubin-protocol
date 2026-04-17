@@ -378,7 +378,11 @@ pub(crate) fn utxo_set_hash(utxos: &HashMap<Outpoint, UtxoEntry>) -> [u8; 32] {
         key[32..].copy_from_slice(&outpoint.vout.to_le_bytes());
         items.push((key, entry));
     }
-    items.sort_by(|(a_key, _), (b_key, _)| a_key.as_slice().cmp(b_key.as_slice()));
+    // sort_unstable_by avoids decorate/sort/undecorate copies of the
+    // [u8; 36] key that sort_by_key/sort_unstable_by_key would do —
+    // important on the consensus digest path with large UTXO sets.
+    #[allow(clippy::unnecessary_sort_by)]
+    items.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
     let mut buf = Vec::with_capacity(UTXO_SET_HASH_DST.len() + 8 + items.len() * 64);
     buf.extend_from_slice(UTXO_SET_HASH_DST);

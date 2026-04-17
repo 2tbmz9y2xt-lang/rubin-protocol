@@ -341,6 +341,7 @@ pub(crate) fn parse_tx_without_hashes(b: &[u8]) -> Result<(Tx, usize, usize), Tx
                     "non-canonical ML-DSA witness item lengths",
                 ));
             }
+            SUITE_ID_ML_DSA_87 => {}
             _ => {}
         }
 
