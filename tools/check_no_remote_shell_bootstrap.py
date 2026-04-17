@@ -102,6 +102,7 @@ def render_path(path: Path, repo_root: Path | None = None) -> str:
 def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[int, int, str]]:
     windows: list[tuple[int, int, str]] = []
     parts: list[str] = []
+    join_without_space = False
     for idx in range(start, len(entries)):
         line_no, raw = entries[idx]
         stripped = raw.strip()
@@ -122,7 +123,11 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
             normalized = normalized[: pipe_comment_match.start()].rstrip() + f" {pipe_token}"
         else:
             normalized = strip_shell_comment(normalized)
-        parts.append(normalized)
+        if parts and join_without_space:
+            parts[-1] += normalized
+        else:
+            parts.append(normalized)
+        join_without_space = raw.rstrip().endswith("\\")
         windows.append((idx, line_no, " ".join(parts)))
     return windows
 
