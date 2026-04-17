@@ -154,11 +154,15 @@ impl BlockStore {
         //       `commit_canonical_block` advanced the blockstore tip but
         //       `chain_state.save` crashed; on restart
         //       `SyncEngine::apply_block` replays the already-persisted
-        //       block at its original height). Handle as a pure no-op:
-        //       return `Ok(())` with no `persist_block_bytes`, no
-        //       `put_undo`, no tip mutation. Header bytes are still
+        //       block at its original height). Header bytes are still
         //       validated so replay matches the append path's header/hash
-        //       consistency contract.
+        //       consistency contract. If the block's undo is already
+        //       present, this is a no-op: return `Ok(())` with no
+        //       `persist_block_bytes`, no `put_undo`, and no tip
+        //       mutation. If the undo file is missing (the pre-E.4
+        //       recovery/backfill case), replay may call `put_undo` to
+        //       restore the missing undo data before returning `Ok(())`;
+        //       tip/canonical state still remain unchanged.
         //
         //     - `height < canonical_len` with a DIFFERENT hash is a real
         //       reorg on the canonical index (same parent, different
@@ -895,10 +899,19 @@ mod tests {
         // Tip MUST NOT have advanced past the prior height.
         assert_eq!(store.canonical_len(), canonical_len_before);
         assert!(store.tip().expect("tip").is_none());
-        // Block/header files land before the undo step fires, which is
-        // safe because `write_file_if_absent` is idempotent on retry and
-        // no canonical entry references them until the tip advances.
-        assert!(store.has_block(hash));
+        // Block AND header files landed on disk before the undo step
+        // fired, which is safe because `write_file_if_absent` is
+        // idempotent on retry and no canonical entry references them
+        // until the tip advances. Assert both explicitly rather than
+        // relying on `has_block` (which only checks the header file).
+        assert_eq!(
+            store.get_header_by_hash(hash).expect("get_header_by_hash"),
+            header
+        );
+        assert_eq!(
+            store.get_block_by_hash(hash).expect("get_block_by_hash"),
+            genesis
+        );
 
         // Retry contract: once the transient undo failure clears, calling
         // commit_canonical_block again with the same arguments must
