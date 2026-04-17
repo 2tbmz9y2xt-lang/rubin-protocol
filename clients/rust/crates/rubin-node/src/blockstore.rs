@@ -366,14 +366,20 @@ impl BlockStore {
         if self.force_rollback_error {
             return Err("forced rollback error (test inject)".into());
         }
-        let mut next_canonical = Vec::with_capacity(base_len + suffix.len());
-        next_canonical
-            .extend_from_slice(&self.index.canonical[..base_len.min(self.index.canonical.len())]);
+        // Build the target canonical once (owning only `suffix` + a
+        // slice clone of `base_len` prefix entries).  No clone of the
+        // entries BEYOND `base_len`.
+        let clamped_base = base_len.min(self.index.canonical.len());
+        let mut next_canonical = Vec::with_capacity(clamped_base + suffix.len());
+        next_canonical.extend_from_slice(&self.index.canonical[..clamped_base]);
         next_canonical.extend(suffix);
-        let mut next_index = self.index.clone();
-        next_index.canonical = next_canonical;
-        save_blockstore_index(&self.index_path, &next_index)?;
-        self.index = next_index;
+        let view = BlockStoreIndexView {
+            version: self.index.version,
+            canonical: &next_canonical,
+        };
+        save_blockstore_index_serializable(&self.index_path, &view)?;
+        // Save succeeded — commit to in-memory.
+        self.index.canonical = next_canonical;
         Ok(())
     }
 
@@ -382,23 +388,30 @@ impl BlockStore {
     /// Atomic: in-memory state is updated ONLY after the disk write
     /// succeeds.  A failed call leaves the in-memory canonical exactly
     /// as it was before, so callers can rely on `Err` meaning "no
-    /// state change".
+    /// state change".  Writes a borrowed slice-backed view of the
+    /// target prefix instead of cloning all canonical strings.
     pub fn truncate_canonical(&mut self, new_len: usize) -> Result<(), String> {
         #[cfg(test)]
         if self.force_truncate_error {
             return Err("forced truncate error (test inject)".into());
         }
-        if new_len > self.index.canonical.len() {
+        let current_len = self.index.canonical.len();
+        if new_len > current_len {
             return Err(format!(
-                "truncate_canonical new_len {} > current {}",
-                new_len,
-                self.index.canonical.len()
+                "truncate_canonical new_len {new_len} > current {current_len}"
             ));
         }
-        let mut next_index = self.index.clone();
-        next_index.canonical.truncate(new_len);
-        save_blockstore_index(&self.index_path, &next_index)?;
-        self.index = next_index;
+        // Fast-path: already at target length, skip the disk write.
+        if new_len == current_len {
+            return Ok(());
+        }
+        let view = BlockStoreIndexView {
+            version: self.index.version,
+            canonical: &self.index.canonical[..new_len],
+        };
+        save_blockstore_index_serializable(&self.index_path, &view)?;
+        // Save succeeded — now apply O(1) in-memory truncate.
+        self.index.canonical.truncate(new_len);
         Ok(())
     }
 
@@ -447,10 +460,30 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
 }
 
 fn save_blockstore_index(path: &Path, index: &BlockStoreIndexDisk) -> Result<(), String> {
+    save_blockstore_index_serializable(path, index)
+}
+
+/// Generic save: accepts any `Serialize` value with the same on-disk
+/// shape as `BlockStoreIndexDisk`.  Lets `truncate_canonical` and
+/// `rollback_canonical` pass a borrowed slice-backed view without
+/// cloning all canonical strings.
+fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
+    path: &Path,
+    index: &S,
+) -> Result<(), String> {
     let mut raw =
         serde_json::to_vec_pretty(index).map_err(|e| format!("encode blockstore index: {e}"))?;
     raw.push(b'\n');
     write_file_atomic(path, &raw)
+}
+
+/// Borrowed view of `BlockStoreIndexDisk` that serializes identically
+/// but holds `&[String]` instead of owning the vector.  Used for
+/// out-of-place writes (truncate/rollback) on the rare disconnect path.
+#[derive(serde::Serialize)]
+struct BlockStoreIndexView<'a> {
+    version: u32,
+    canonical: &'a [String],
 }
 
 fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
