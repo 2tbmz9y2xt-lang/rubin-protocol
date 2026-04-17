@@ -143,11 +143,26 @@ def _read_file_for_check(f: str, staged_only: bool) -> str | None:
     if staged_only:
         # Read from the index; skip working-tree size check (the staged
         # blob's size isn't trivially available, and pre-commit content
-        # is bounded by what the user actually staged).
-        r = run(["git", "show", f":{f}"])
-        if r.returncode != 0:
+        # is bounded by what the user actually staged).  Read as bytes
+        # to avoid UnicodeDecodeError on non-UTF-8 blobs that slip past
+        # the extension filter, then decode with errors="replace" so
+        # binary/non-UTF-8 staged content doesn't crash the script.
+        try:
+            completed = subprocess.run(
+                ["git", "show", f":{f}"],
+                capture_output=True,
+                cwd=REPO_ROOT,
+            )
+        except FileNotFoundError as exc:
+            detail = _sanitize_paths(str(exc)).strip()
+            print(
+                f"[WARN] failed to execute 'git' -- fail closed: {detail}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if completed.returncode != 0:
             return None  # not in index (e.g. removed before staging)
-        return r.stdout
+        return completed.stdout.decode("utf-8", errors="replace")
     path = REPO_ROOT / f
     if not path.is_file():
         return None
