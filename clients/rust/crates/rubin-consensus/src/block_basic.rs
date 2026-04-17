@@ -676,11 +676,11 @@ mod internal_tests {
 
         let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
         assert_eq!(err.code, ErrorCode::BlockErrDaPayloadCommitInvalid);
-        assert!(
-            err.msg.contains("invalid length"),
-            "expected 'invalid length' surface, got {:?}",
-            err.msg
-        );
+        // Exact-message parity: the Go reference returns this exact string
+        // (`clients/go/consensus/block_basic.go`, `validateDASetIntegrity`).
+        // A substring check would mask future drift that still happens to
+        // contain "invalid length".
+        assert_eq!(err.msg, "DA commitment output has invalid length");
     }
 
     /// Go parity for G.2: the `MAX_DA_BATCHES_PER_BLOCK` guard runs BEFORE the
@@ -692,10 +692,15 @@ mod internal_tests {
     #[test]
     fn validate_da_set_maps_batch_exceeded_fires_before_set_invalid() {
         let mut commits = HashMap::new();
-        for i in 0..=MAX_DA_BATCHES_PER_BLOCK as u16 {
+        // `i` is u32 and we write 4 bytes of `da_id` so the counter stays
+        // injective even if `MAX_DA_BATCHES_PER_BLOCK` is ever raised past
+        // `u16::MAX`. `assert_eq!(commits.len(), MAX+1)` below is the
+        // fail-fast guard; the wider counter keeps that guard meaningful.
+        let limit: u32 = MAX_DA_BATCHES_PER_BLOCK as u32;
+        for i in 0..=limit {
             // commit_count == MAX + 1 triggers the batch-exceeded guard.
             let mut da_id = [0u8; 32];
-            da_id[0..2].copy_from_slice(&i.to_le_bytes());
+            da_id[0..4].copy_from_slice(&i.to_le_bytes());
             commits.insert(
                 da_id,
                 DaCommitSet {
