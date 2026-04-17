@@ -27,12 +27,17 @@ DOWNLOADER_WORD_PATTERN = rf"(?:{DOWNLOADER_EXECUTABLE_PATTERN}\b|\"{DOWNLOADER_
 DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?{DOWNLOADER_WORD_PATTERN}"
 SHELL_C_OPTION_PATTERN = r"(?:-c|-[A-Za-z]*c[A-Za-z]*|--command)"
 INLINE_PIPE_COMMENT_RE = re.compile(r"\|&?\s*#")
-STEPS_KEY_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*(?:#.*)?$')
+YAML_NODE_METADATA_TOKEN_PATTERN = r"(?:!!?[^\s#]+|[&*][^\s#]+)"
+STEPS_KEY_RE = re.compile(
+    rf'^\s*["\']?steps["\']?\s*:\s*(?:{YAML_NODE_METADATA_TOKEN_PATTERN}\s*)*(?:#.*)?$'
+)
 STEP_INLINE_RUN_RE = re.compile(r'^\s*-\s+["\']?run["\']?\s*:\s*(.*)$')
 RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
 BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
 STEP_FLOW_MAPPING_RE = re.compile(r"^\s*-\s*\{(.*)\}\s*$")
-STEPS_FLOW_SEQUENCE_START_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*\[(.*)$')
+STEPS_FLOW_SEQUENCE_START_RE = re.compile(
+    rf'^\s*["\']?steps["\']?\s*:\s*(?:{YAML_NODE_METADATA_TOKEN_PATTERN}\s*)*\[(.*)$'
+)
 FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
 ENV_SPLIT_STRING_FALLBACK_RE = re.compile(r"(?:^|[^\w])(?:/(?:usr/)?bin/)?env\s+-S(?:\s|$)|--split-string", re.IGNORECASE)
 
@@ -174,35 +179,6 @@ def inline_plain_scalar_entries(
             base_indent = continuation_indent
         entries.append((line_no, raw[continuation_indent:]))
     return entries
-
-
-def strip_quoted_literals(text: str) -> str:
-    parts: list[str] = []
-    quote: str | None = None
-    escape = False
-    for ch in text:
-        if quote is None:
-            if ch in {"'", '"'}:
-                quote = ch
-                parts.append(ch)
-            else:
-                parts.append(ch)
-            continue
-        if quote == '"':
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == quote:
-                quote = None
-                parts.append(ch)
-                continue
-        elif ch == quote:
-            quote = None
-            parts.append(ch)
-            continue
-        parts.append(" ")
-    return "".join(parts)
 
 
 def strip_shell_comment(text: str) -> str:
