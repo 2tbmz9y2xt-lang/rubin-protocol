@@ -119,7 +119,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
-    def test_rejects_pipe_to_quoted_env_shell(self):
+    def test_rejects_pipe_to_quoted_env_shell_2(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             workflow = self.write_workflow(
@@ -133,7 +133,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
-    def test_rejects_pipe_to_quoted_command_shell(self):
+    def test_rejects_pipe_to_quoted_command_shell_2(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             workflow = self.write_workflow(
@@ -857,7 +857,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("-c command substitution", violations[0])
 
-    def test_rejects_shell_c_pipe_to_source_dev_stdin(self):
+    def test_rejects_shell_c_pipe_to_source_dev_stdin_2(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             workflow = self.write_workflow(
@@ -1276,7 +1276,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
-    def test_rejects_pipe_to_quoted_source_dev_stdin(self):
+    def test_rejects_pipe_to_quoted_source_dev_stdin_2(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             workflow = self.write_workflow(
@@ -1396,7 +1396,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
-    def test_reports_repeated_remote_bootstrap_occurrences_separately(self):
+    def test_reports_repeated_remote_bootstrap_occurrences_separately_2(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             workflow = self.write_workflow(
@@ -1876,7 +1876,7 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("eval command substitution", violations[0])
 
-    def test_rejects_eval_pipe_to_source_dev_stdin(self):
+    def test_rejects_eval_pipe_to_source_dev_stdin_2(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
             workflow = self.write_workflow(

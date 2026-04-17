@@ -827,7 +827,7 @@ def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
         return []
     try:
         root = yaml.compose(content)
-    except Exception:
+    except yaml.YAMLError:
         return []
     if root is None:
         return []

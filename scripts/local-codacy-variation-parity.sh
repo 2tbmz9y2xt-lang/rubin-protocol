@@ -279,9 +279,15 @@ if remote_pr_head and local_head and remote_pr_head != local_head and local_head
             file=sys.stderr,
         )
         raise SystemExit(1)
+    if head_sha and remote_pr_head and head_sha != remote_pr_head:
+        print(
+            f"FAIL: Codacy head commit {head_sha} does not match GitHub PR head {remote_pr_head}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     print(
         f"PASS: local HEAD {local_head} is ahead of GitHub PR head {remote_pr_head}; "
-        "Codacy ancestor still reflects the published head and will be revalidated after push"
+        "Codacy ancestor matches the published merge-base and will be revalidated after push"
     )
     raise SystemExit(0)
 if ancestor_sha != local_merge_base:

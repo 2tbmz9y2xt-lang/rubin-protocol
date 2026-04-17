@@ -8,23 +8,19 @@ DARWIN_ARM64_SHA512="bdd9403f0d9b54626b8494890cc8c4b212b694e7f5c49a90733608507cd
 download_file() {
   local url="$1"
   local out="$2"
-  local result=""
 
   if command -v curl >/dev/null 2>&1; then
     if curl --fail --silent --show-error --location "$url" -o "$out"; then
       return 0
     fi
-    result="curl"
+    echo "ERROR: curl failed to download $url" >&2
+    return 1
   fi
   if command -v wget >/dev/null 2>&1; then
     if wget -q "$url" -O "$out"; then
       return 0
     fi
     echo "ERROR: wget failed to download $url" >&2
-    return 1
-  fi
-  if [[ -n "$result" ]]; then
-    echo "ERROR: curl failed to download $url" >&2
     return 1
   fi
   echo "ERROR: curl or wget required to download Codacy reporter" >&2

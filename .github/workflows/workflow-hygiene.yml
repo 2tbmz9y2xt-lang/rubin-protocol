@@ -32,7 +32,7 @@ jobs:
 
           workflow_shell_targets_raw="$(python3 tools/list_workflow_shell_targets.py)"
           mapfile -t workflow_shell_targets < <(printf '%s\n' "${workflow_shell_targets_raw}" | sed '/^$/d')
-          tracked_regex='^\.github/workflows/.*\.ya?ml$|^tools/list_workflow_shell_targets\.py$|^tools/tests/test_list_workflow_shell_targets\.py$|^tools/check_no_remote_shell_bootstrap\.py$|^tools/tests/test_check_no_remote_shell_bootstrap\.py$|^tools/tests/test_codacy_coverage_reporter_contract\.py$|^scripts/local-codacy-variation-parity\.sh$'
+          tracked_regex='^\.github/workflows/.*\.ya?ml$|^tools/list_workflow_shell_targets\.py$|^tools/tests/test_list_workflow_shell_targets\.py$|^tools/check_no_remote_shell_bootstrap\.py$|^tools/tests/test_check_no_remote_shell_bootstrap\.py$|^tools/tests/test_codacy_coverage_reporter_contract\.py$|^scripts/codacy-coverage-reporter\.sh$|^scripts/local-codacy-variation-parity\.sh$'
           for target in "${workflow_shell_targets[@]}"; do
             escaped_target="$(printf '%s' "${target}" | sed 's/[][\\^$.*+?(){}|]/\\&/g')"
             tracked_regex="${tracked_regex}|^${escaped_target}$"
