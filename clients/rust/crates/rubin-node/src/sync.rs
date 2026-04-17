@@ -644,12 +644,18 @@ impl SyncEngine {
 
         if let Some(chain_state_path) = self.cfg.chain_state_path.as_ref() {
             if let Err(err) = self.chain_state.save(chain_state_path) {
-                // Canonical commit already advanced the tip; unwind it so
-                // in-memory state and on-disk canonical index stay paired.
-                let rewind_err = self
-                    .block_store
-                    .as_mut()
-                    .and_then(|bs| bs.truncate_canonical(canonical_len_before).err());
+                // Canonical commit MAY have advanced the tip. The
+                // same-hash replay path returns Ok(()) as a pure no-op
+                // and leaves the tip unchanged, so only rewind when the
+                // canonical length actually grew past the pre-commit
+                // snapshot.
+                let rewind_err = self.block_store.as_mut().and_then(|bs| {
+                    if bs.canonical_len() > canonical_len_before {
+                        bs.truncate_canonical(canonical_len_before).err()
+                    } else {
+                        None
+                    }
+                });
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;

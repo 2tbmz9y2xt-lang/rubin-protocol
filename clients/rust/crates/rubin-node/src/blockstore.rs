@@ -179,9 +179,19 @@ impl BlockStore {
         if height < current_len {
             let existing = self.canonical_hash(height)?;
             if existing == Some(block_hash_bytes) {
-                // Idempotent same-hash replay: validate header, then
+                // Idempotent same-hash replay: validate header, verify
+                // the undo file is actually on disk (guards against
+                // pre-E.4 state or corruption where a canonical entry
+                // lost its undo — silently accepting here would leave
+                // the node with a broken `disconnect_tip` path), then
                 // short-circuit with no disk writes.
                 self.validate_header_matches_hash(header_bytes, block_hash_bytes)?;
+                if !self.has_undo(block_hash_bytes) {
+                    return Err(format!(
+                        "commit_canonical_block same-hash replay: undo file missing for canonical \
+                         entry at height={height}; blockstore requires repair"
+                    ));
+                }
                 return Ok(());
             }
             // Different hash at historical height: real reorg; fall
@@ -488,6 +498,17 @@ impl BlockStore {
             .join(format!("{}.json", hex::encode(block_hash_bytes)));
         let raw = fs::read(&path).map_err(|e| format!("read undo {}: {e}", path.display()))?;
         unmarshal_block_undo(&raw)
+    }
+
+    /// Cheap undo-presence check used by the same-hash replay branch of
+    /// `commit_canonical_block` to verify that a canonical entry
+    /// inherited from pre-E.4 disk state (or corrupted in some other
+    /// way) actually has its undo file on disk before accepting the
+    /// replay as a no-op.
+    fn has_undo(&self, block_hash_bytes: [u8; 32]) -> bool {
+        self.undo_dir
+            .join(format!("{}.json", hex::encode(block_hash_bytes)))
+            .is_file()
     }
 
     // ----- Canonical index helpers -----
@@ -1003,15 +1024,14 @@ mod tests {
         assert_eq!(store.canonical_len(), 1);
         assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
 
-        // Capture undo file mtime so we can assert the replay does NOT
-        // rewrite it.
+        // Capture undo file bytes so we can assert the replay does NOT
+        // rewrite them. Content comparison is more robust than mtime:
+        // filesystem timestamp resolution and update semantics vary by
+        // platform and may not change on a same-bytes rewrite.
         let undo_path = root
             .join("undo")
             .join(format!("{}.json", hex::encode(hash)));
-        let mtime_before = std::fs::metadata(&undo_path)
-            .expect("undo metadata")
-            .modified()
-            .expect("mtime");
+        let undo_bytes_before = std::fs::read(&undo_path).expect("undo bytes before");
 
         // Simulate a crash-recovery replay: same hash at height 0 after
         // blockstore already advanced to canonical_len == 1. Must succeed
@@ -1023,13 +1043,10 @@ mod tests {
         // Canonical index unchanged.
         assert_eq!(store.canonical_len(), 1);
         assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
-        // Undo file NOT rewritten — mtime stable.
-        let mtime_after = std::fs::metadata(&undo_path)
-            .expect("undo metadata after replay")
-            .modified()
-            .expect("mtime after");
+        // Undo file bytes unchanged — no rewrite happened.
+        let undo_bytes_after = std::fs::read(&undo_path).expect("undo bytes after");
         assert_eq!(
-            mtime_before, mtime_after,
+            undo_bytes_before, undo_bytes_after,
             "same-hash replay must not rewrite the historical undo file"
         );
 
