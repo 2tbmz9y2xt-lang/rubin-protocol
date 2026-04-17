@@ -224,10 +224,11 @@ impl BlockStore {
     }
 
     /// Cheap header consistency check — length + computed hash equals
-    /// the caller-supplied hash. Shared by `persist_block_bytes` (as the
-    /// precondition for any disk write) and by the same-hash no-op branch
-    /// of `commit_canonical_block` (so replay/no-op behavior matches the
-    /// append path's validation contract even when no write happens).
+    /// the caller-supplied hash. Called from `persist_block_bytes` as
+    /// the precondition for any block/header write; every canonical
+    /// entry point (`put_block`, `commit_canonical_block`,
+    /// `store_block`) reaches this check through that helper, so
+    /// header validation cannot drift between paths.
     fn validate_header_matches_hash(
         &self,
         header_bytes: &[u8],
@@ -243,10 +244,11 @@ impl BlockStore {
         Ok(())
     }
 
-    /// Block/header persistence shared by `put_block` and
-    /// `commit_canonical_block`. Validates header length + hash, then
-    /// writes block and header files via `write_file_if_absent`
-    /// (idempotent across retries).
+    /// Block/header persistence shared by `put_block`,
+    /// `commit_canonical_block`, and `store_block`. Validates header
+    /// length + hash, then writes block and header files via
+    /// `write_file_if_absent` (idempotent across retries — no-op when
+    /// the file already exists; errors if existing bytes differ).
     fn persist_block_bytes(
         &self,
         block_hash_bytes: [u8; 32],
@@ -439,22 +441,11 @@ impl BlockStore {
         header_bytes: &[u8],
         block_bytes: &[u8],
     ) -> Result<(), String> {
-        if header_bytes.len() != BLOCK_HEADER_BYTES {
-            return Err(format!("invalid header length: {}", header_bytes.len()));
-        }
-        let computed_hash = block_hash(header_bytes).map_err(|e| e.to_string())?;
-        if computed_hash != block_hash_bytes {
-            return Err("header hash mismatch".to_string());
-        }
-        let hash_hex = hex::encode(block_hash_bytes);
-        write_file_if_absent(
-            &self.blocks_dir.join(format!("{hash_hex}.bin")),
-            block_bytes,
-        )?;
-        write_file_if_absent(
-            &self.headers_dir.join(format!("{hash_hex}.bin")),
-            header_bytes,
-        )
+        // Delegate to the shared helper so header validation and
+        // block/header file writes stay in one place across all
+        // entry points (`put_block`, `commit_canonical_block`,
+        // `store_block`).
+        self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)
     }
 
     // ----- Chain work -----
