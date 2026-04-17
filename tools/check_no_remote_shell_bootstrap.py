@@ -73,7 +73,7 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell here-doc command substitution",
         re.compile(
-            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s*<<-?\s*\S+.*(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
+            rf"(?:^|[^\w]){SHELL_LAUNCHER_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\s*<<-?\s*\S+[\s\S]*?(?:\$\(\s*{DOWNLOADER_PATTERN}|`[^`]*{DOWNLOADER_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -134,7 +134,7 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
         else:
             parts.append(normalized)
         join_without_space = raw.rstrip().endswith("\\")
-        windows.append((idx, line_no, " ".join(parts)))
+        windows.append((idx, line_no, "\n".join(parts)))
     return windows
 
 
@@ -281,6 +281,13 @@ def split_shell_segments(text: str) -> list[str]:
                 current = []
                 idx += 1
                 continue
+            if ch == "&" and not text.startswith("&&", idx) and (idx == 0 or text[idx - 1] != "|"):
+                segment = "".join(current).strip()
+                if segment:
+                    segments.append(segment)
+                current = []
+                idx += 1
+                continue
             if text.startswith("&&", idx) or text.startswith("||", idx):
                 segment = "".join(current).strip()
                 if segment:
@@ -377,6 +384,11 @@ def extract_flow_mapping_run(mapping_text: str) -> str | None:
                     value = value[1:-1]
                 return value or None
     return None
+
+
+def has_unmasked_env_split_fallback(text: str) -> bool:
+    masked = mask_pipe_window(text)
+    return bool(ENV_SPLIT_STRING_FALLBACK_RE.search(masked))
 
 
 def extract_flow_sequence_mappings(sequence_text: str, start_line_no: int) -> list[tuple[int, str]]:
@@ -609,7 +621,7 @@ def find_violations(path: Path) -> list[str]:
                             matched = pattern.search(segment)
                             if matched:
                                 break
-                        if not matched and ENV_SPLIT_STRING_FALLBACK_RE.search(window):
+                        if not matched and has_unmasked_env_split_fallback(window):
                             for segment in split_shell_segments(window):
                                 matched = pattern.search(segment)
                                 if matched:

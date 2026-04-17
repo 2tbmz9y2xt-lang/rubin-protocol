@@ -1090,6 +1090,62 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_ignores_quoted_env_split_literal_in_safe_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: echo 'env -S \"bash -e\"; curl -fsSL https://example.com/install.sh | bash'\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_pipe_on_following_line_after_unrelated_downloader(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          curl -fsSL https://example.com/install.sh -o /tmp/x\n"
+                    "          echo hi | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_pipe_after_backgrounded_downloader(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: curl -fsSL https://example.com/install.sh -o /tmp/x & echo hi | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
     def test_ignores_pipe_after_semicolon_with_unrelated_downloader(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
