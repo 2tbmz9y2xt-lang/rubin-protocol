@@ -77,6 +77,8 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (fake_bin / "curl").chmod(0o755)
+            (fake_bin / "uname").write_text("#!/bin/bash\necho 'Darwin arm64'\n", encoding="utf-8")
+            (fake_bin / "uname").chmod(0o755)
             env = {
                 "PATH": f"{fake_bin}:/usr/bin:/bin",
                 "CODACY_REPORTER_TMP_FOLDER": str(root / "cache"),

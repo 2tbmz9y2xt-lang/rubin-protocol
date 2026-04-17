@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-import yaml
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
@@ -14,6 +13,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 import check_no_remote_shell_bootstrap as m
 
 HAS_PYYAML = m.yaml is not None
+PYYAML_ERROR = m.yaml.YAMLError if HAS_PYYAML else RuntimeError
 
 class RemoteShellBootstrapTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -2931,12 +2931,12 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                     m.find_violations(workflow)
 
     def test_yaml_run_entries_raises_on_pyyaml_parse_error_even_with_text_entries(self):
-        with mock.patch.object(m.yaml, "compose", side_effect=yaml.YAMLError("bad yaml")):
+        with mock.patch.object(m.yaml, "compose", side_effect=PYYAML_ERROR("bad yaml")):
             with self.assertRaisesRegex(RuntimeError, "PyYAML parse failed"):
                 m.yaml_run_entries("jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | bash\n")
 
     def test_yaml_alias_run_entries_raises_on_pyyaml_parse_error_even_with_text_entries(self):
-        with mock.patch.object(m.yaml, "parse", side_effect=yaml.YAMLError("bad yaml")):
+        with mock.patch.object(m.yaml, "parse", side_effect=PYYAML_ERROR("bad yaml")):
             with self.assertRaisesRegex(RuntimeError, "PyYAML parse failed"):
                 m.yaml_alias_run_entries("jobs:\n  install:\n    steps:\n      - run: *boot\n")
 
