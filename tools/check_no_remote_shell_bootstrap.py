@@ -34,6 +34,7 @@ BLOCK_SCALAR_RE = re.compile(r'^[>|][-+0-9]*(?:\s+#.*)?$')
 STEP_FLOW_MAPPING_RE = re.compile(r"^\s*-\s*\{(.*)\}\s*$")
 STEPS_FLOW_SEQUENCE_START_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*\[(.*)$')
 FLOW_STYLE_STEP_RUN_RE = re.compile(r'^\s*-\s*\{\s*["\']?run["\']?\s*:\s*(.*?)\s*\}\s*$')
+ENV_SPLIT_STRING_FALLBACK_RE = re.compile(r"(?:^|[^\w])(?:/(?:usr/)?bin/)?env\s+-S(?:\s|$)|--split-string", re.IGNORECASE)
 
 REMOTE_SHELL_PATTERNS = (
     (
@@ -568,9 +569,7 @@ def find_violations(path: Path) -> list[str]:
                 for label, pattern in REMOTE_SHELL_PATTERNS:
                     candidate = mask_pipe_window(window) if label == "remote shell pipe" else window
                     matched = pattern.search(candidate)
-                    if not matched and label == "remote shell pipe" and (
-                        " env -S " in window or "--split-string" in window
-                    ):
+                    if not matched and label == "remote shell pipe" and ENV_SPLIT_STRING_FALLBACK_RE.search(window):
                         matched = pattern.search(window)
                     if matched:
                         violations.append(f"{rendered_path}:{line_no}: {label}: {window}")
