@@ -100,6 +100,9 @@ impl BlockStore {
         self.set_canonical_tip(height, block_hash_bytes)
     }
 
+    /// Set or replace the canonical tip at `height`.  Atomic: in-memory
+    /// canonical is updated only after the disk write succeeds, so a
+    /// failed call leaves the in-memory state unchanged.
     pub fn set_canonical_tip(
         &mut self,
         height: u64,
@@ -112,15 +115,25 @@ impl BlockStore {
                 "height gap: got {height}, expected <= {current_len}"
             ));
         }
-        if height == current_len {
-            self.index.canonical.push(hash_hex);
-        } else if self.index.canonical[height as usize] != hash_hex {
-            self.index.canonical.truncate(height as usize);
-            self.index.canonical.push(hash_hex);
+        // Skip the disk write if the in-memory slot already holds the
+        // exact same hash.  Otherwise build the next index out-of-place.
+        if height < current_len && self.index.canonical[height as usize] == hash_hex {
+            return Ok(());
         }
-        save_blockstore_index(&self.index_path, &self.index)
+        let mut next_index = self.index.clone();
+        if height == current_len {
+            next_index.canonical.push(hash_hex);
+        } else {
+            next_index.canonical.truncate(height as usize);
+            next_index.canonical.push(hash_hex);
+        }
+        save_blockstore_index(&self.index_path, &next_index)?;
+        self.index = next_index;
+        Ok(())
     }
 
+    /// Rewind canonical to (height + 1) entries.  Atomic: in-memory
+    /// state is updated only after the disk write succeeds.
     pub fn rewind_to_height(&mut self, height: u64) -> Result<(), String> {
         if self.index.canonical.is_empty() {
             return Ok(());
@@ -128,8 +141,11 @@ impl BlockStore {
         if height >= self.index.canonical.len() as u64 {
             return Err(format!("rewind height out of range: {height}"));
         }
-        self.index.canonical.truncate(height as usize + 1);
-        save_blockstore_index(&self.index_path, &self.index)
+        let mut next_index = self.index.clone();
+        next_index.canonical.truncate(height as usize + 1);
+        save_blockstore_index(&self.index_path, &next_index)?;
+        self.index = next_index;
+        Ok(())
     }
 
     pub fn canonical_hash(&self, height: u64) -> Result<Option<[u8; 32]>, String> {
@@ -331,6 +347,11 @@ impl BlockStore {
     ///
     /// Atomic: on disk-write failure the index is reloaded from disk
     /// so in-memory state stays consistent (no temp buffer needed).
+    /// Restore canonical to `base_len` entries from current canonical
+    /// followed by `suffix`.  Atomic: in-memory state is updated ONLY
+    /// after the disk write succeeds, so a failed call leaves the
+    /// in-memory canonical exactly as it was before the call (callers
+    /// can rely on `Err` meaning "no state change").
     pub fn rollback_canonical(
         &mut self,
         base_len: usize,
@@ -340,22 +361,23 @@ impl BlockStore {
         if self.force_rollback_error {
             return Err("forced rollback error (test inject)".into());
         }
-        let mut restored = Vec::with_capacity(base_len + suffix.len());
-        restored
+        let mut next_canonical = Vec::with_capacity(base_len + suffix.len());
+        next_canonical
             .extend_from_slice(&self.index.canonical[..base_len.min(self.index.canonical.len())]);
-        restored.extend(suffix);
-        self.index.canonical = restored;
-        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
-            self.reload_index_from_disk();
-            return Err(e);
-        }
+        next_canonical.extend(suffix);
+        let mut next_index = self.index.clone();
+        next_index.canonical = next_canonical;
+        save_blockstore_index(&self.index_path, &next_index)?;
+        self.index = next_index;
         Ok(())
     }
 
     /// Truncate canonical index to exactly `new_len` entries.
     ///
-    /// Atomic: on disk-write failure the index is reloaded from disk
-    /// (the atomic write guarantees the old version is still on disk).
+    /// Atomic: in-memory state is updated ONLY after the disk write
+    /// succeeds.  A failed call leaves the in-memory canonical exactly
+    /// as it was before, so callers can rely on `Err` meaning "no
+    /// state change".
     pub fn truncate_canonical(&mut self, new_len: usize) -> Result<(), String> {
         #[cfg(test)]
         if self.force_truncate_error {
@@ -368,25 +390,11 @@ impl BlockStore {
                 self.index.canonical.len()
             ));
         }
-        self.index.canonical.truncate(new_len);
-        if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
-            self.reload_index_from_disk();
-            return Err(e);
-        }
+        let mut next_index = self.index.clone();
+        next_index.canonical.truncate(new_len);
+        save_blockstore_index(&self.index_path, &next_index)?;
+        self.index = next_index;
         Ok(())
-    }
-
-    /// Reload the blockstore index from disk to restore consistency
-    /// after a failed save.  Since `save_blockstore_index` uses
-    /// write-to-tmp + rename, the on-disk file is always a valid
-    /// previous version.
-    fn reload_index_from_disk(&mut self) {
-        if let Ok(disk) = load_blockstore_index(&self.index_path) {
-            self.index = disk;
-        }
-        // If reload also fails, in-memory state is stale but we
-        // already returned an error to the caller — the engine will
-        // be marked as needing repair.
     }
 }
 
