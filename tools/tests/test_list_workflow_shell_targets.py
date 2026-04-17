@@ -22,6 +22,7 @@ class WorkflowShellTargetTests(unittest.TestCase):
             [
                 "scripts/benchmarks/run_combined_load_benchmark.sh",
                 "scripts/ci/run_fuzz_stage2.sh",
+                "scripts/codacy-coverage-reporter.sh",
                 "scripts/crypto/openssl/build-openssl-bundle.sh",
                 "scripts/crypto/openssl/fips-preflight.sh",
                 "scripts/dev-env.sh",

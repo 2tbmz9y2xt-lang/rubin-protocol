@@ -151,7 +151,7 @@ jobs:
           # Upload Go and Rust coverage separately: Codacy auto-detects Go coverage.out as LCOV
           # unless we force the correct parser.
           set +e
-          bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
+          bash ./scripts/codacy-coverage-reporter.sh report \
             "${common_args[@]}" \
             -r clients/go/coverage.out \
             --force-coverage-parser go \
@@ -168,7 +168,7 @@ jobs:
           fi
 
           set +e
-          bash <(curl -Ls https://coverage.codacy.com/get.sh) report \
+          bash ./scripts/codacy-coverage-reporter.sh report \
             "${common_args[@]}" \
             -r clients/rust/lcov.info \
             --force-coverage-parser lcov \
@@ -185,7 +185,7 @@ jobs:
           fi
 
           set +e
-          bash <(curl -Ls https://coverage.codacy.com/get.sh) final \
+          bash ./scripts/codacy-coverage-reporter.sh final \
             "${common_args[@]}" 2>&1 | tee /tmp/codacy_final.log
           rc="${PIPESTATUS[0]}"
           set -e
