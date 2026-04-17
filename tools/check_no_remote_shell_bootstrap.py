@@ -16,9 +16,13 @@ SUDO_OPTION_PATTERN = r"(?:--|--?[A-Za-z][\w-]*(?:[= ]\S+)?)"
 SUDO_PREFIX_PATTERN = rf"{SUDO_COMMAND_PATTERN}(?:\s+{SUDO_OPTION_PATTERN})*\s+"
 ENV_ARGUMENT_PATTERN = rf"(?!{SHELL_EXECUTABLE_PATTERN}\b)\S+"
 ENV_PREFIX_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_ARGUMENT_PATTERN})*\s+"
-SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*{SHELL_EXECUTABLE_PATTERN}"
-DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:/(?:usr/)?bin/)?(?:curl|wget)\b"
 SHELL_OPTION_PATTERN = r"(?:--[A-Za-z][\w-]*|-[A-Za-z]+)"
+ENV_SPLIT_STRING_OPTION_PATTERN = r"(?:-S|--split-string)(?:=|\s+)"
+ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN = rf"(?!-S(?:\s|$))(?!--split-string(?:=|\s|$)){ENV_ARGUMENT_PATTERN}"
+ENV_SPLIT_STRING_VALUE_PATTERN = rf"(?:\"{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*\"|'{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*'|{SHELL_EXECUTABLE_PATTERN}(?:\s+{SHELL_OPTION_PATTERN})*)"
+ENV_SPLIT_STRING_LAUNCHER_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_SPLIT_STRING_PRE_ARGUMENT_PATTERN})*\s+{ENV_SPLIT_STRING_OPTION_PATTERN}{ENV_SPLIT_STRING_VALUE_PATTERN}"
+SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SHELL_EXECUTABLE_PATTERN})"
+DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:/(?:usr/)?bin/)?(?:curl|wget)\b"
 SHELL_C_OPTION_PATTERN = r"(?:-c|-[A-Za-z]*c[A-Za-z]*|--command)"
 INLINE_PIPE_COMMENT_RE = re.compile(r"\|\s*#")
 STEPS_KEY_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*(?:#.*)?$')
@@ -33,7 +37,14 @@ REMOTE_SHELL_PATTERNS = (
     (
         "remote shell pipe",
         re.compile(
-            rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?{SHELL_LAUNCHER_PATTERN}\b",
+            rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?{ENV_SPLIT_STRING_LAUNCHER_PATTERN}(?=\s|$|['\"])",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "remote shell pipe",
+        re.compile(
+            rf"(?:^|[^\w]){DOWNLOADER_PATTERN}.*\|&?\s*(?:\{{\s*|\(\s*)?(?<![\w./-]){SHELL_LAUNCHER_PATTERN}(?=\s|$|['\"]|\b)",
             re.IGNORECASE,
         ),
     ),
@@ -131,18 +142,25 @@ def block_entries(entries: list[tuple[int, str]], start: int, run_indent: int) -
     return normalized, idx
 
 
-def inline_plain_scalar_entries(step_entries: list[tuple[int, str]], first_line_no: int, first_content: str) -> list[tuple[int, str]]:
+def inline_plain_scalar_entries(
+    step_entries: list[tuple[int, str]],
+    first_line_no: int,
+    first_content: str,
+    run_indent: int,
+) -> list[tuple[int, str]]:
     entries: list[tuple[int, str]] = [(first_line_no, first_content)]
-    continuation = step_entries[1:]
-    nonempty_indents = [len(raw) - len(raw.lstrip()) for _, raw in continuation if raw.strip()]
-    if not nonempty_indents:
-        return entries
-    base_indent = min(nonempty_indents)
-    for line_no, raw in continuation:
-        if raw.strip():
-            entries.append((line_no, raw[base_indent:]))
-        else:
-            entries.append((line_no, ""))
+    base_indent: int | None = None
+    for line_no, raw in step_entries[1:]:
+        if not raw.strip():
+            if base_indent is not None:
+                entries.append((line_no, ""))
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent <= run_indent:
+            break
+        if base_indent is None:
+            base_indent = indent
+        entries.append((line_no, raw[base_indent:]))
     return entries
 
 
@@ -328,7 +346,14 @@ def extract_step_run_entries(step_entries: list[tuple[int, str]]) -> list[list[t
             block, _ = block_entries(step_entries, 1, len(first_raw) - len(first_raw.lstrip()))
             run_entries.append(block)
         elif content:
-            run_entries.append(inline_plain_scalar_entries(step_entries, first_line_no, content))
+            run_entries.append(
+                inline_plain_scalar_entries(
+                    step_entries,
+                    first_line_no,
+                    content,
+                    len(first_raw) - len(first_raw.lstrip()) + 2,
+                )
+            )
         return run_entries
 
     child_indents = [

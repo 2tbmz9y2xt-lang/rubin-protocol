@@ -133,6 +133,34 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_pipe_to_env_split_string_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | env -S "bash -e"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_pipe_to_env_split_string_long_option_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                'jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | env --split-string="bash -e"\n',
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_pipe_to_sudo_shell_with_flag(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -786,6 +814,26 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                 repo_root,
                 "ok.yml",
                 "jobs:\n  install:\n    steps:\n      - run: curl -fsSL https://example.com/install.sh | command -V bash\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_inline_run_sibling_env_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: echo safe\n"
+                    "        env:\n"
+                    "          INSTALL_SNIPPET: curl -fsSL https://example.com/install.sh | bash\n"
+                ),
             )
 
             violations = m.find_violations(workflow)
