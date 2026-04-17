@@ -90,7 +90,18 @@ impl TxPoolCleanupPlan {
         self
     }
 
-    fn from_validated_block(parsed: &ParsedBlock, block_bytes: &[u8]) -> Result<Self, String> {
+    /// Build a cleanup plan from an already-parsed block. Crate-private
+    /// for the reorg pipeline and hot-path callers that already hold a
+    /// `ParsedBlock` — avoids re-parsing the block bytes. External
+    /// callers use the `pub` [`Self::from_block_bytes`] wrapper.
+    ///
+    /// The caller must guarantee `parsed` was produced from
+    /// `block_bytes` (otherwise `parsed.txids` and
+    /// `non_coinbase_inputs(block_bytes)` would disagree).
+    pub(crate) fn from_validated_block(
+        parsed: &ParsedBlock,
+        block_bytes: &[u8],
+    ) -> Result<Self, String> {
         Ok(Self {
             confirmed_txids: parsed.txids.clone(),
             conflicting_inputs: non_coinbase_inputs(block_bytes)?,
@@ -106,11 +117,20 @@ impl TxPoolCleanupPlan {
     /// `s.mempool.EvictConfirmedParsed(pb)` after a successful apply);
     /// in Rust the reorg path already builds this plan internally, but
     /// the direct apply path (miner loop, test harnesses) had no
-    /// equivalent constructor. Callers can now run
-    /// `TxPoolCleanupPlan::from_block_bytes(block_bytes)?.apply(&mut
-    /// pool, &chain_state, block_store, chain_id)` to mirror the Go
-    /// post-apply cleanup shape: evict confirmed txids, drop
-    /// conflicting inputs.
+    /// equivalent constructor. Usage:
+    ///
+    /// ```ignore
+    /// TxPoolCleanupPlan::from_block_bytes(block_bytes)?
+    ///     .apply(&mut pool, &chain_state, block_store, chain_id);
+    /// ```
+    ///
+    /// Mirrors the Go post-apply cleanup shape: evict confirmed txids,
+    /// drop conflicting inputs.
+    ///
+    /// This constructor re-parses the block. Hot-path in-crate callers
+    /// that already hold a `ParsedBlock` (e.g., the reorg pipeline)
+    /// use the crate-private [`Self::from_validated_block`] directly to
+    /// avoid the second parse.
     pub fn from_block_bytes(block_bytes: &[u8]) -> Result<Self, String> {
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         Self::from_validated_block(&parsed, block_bytes)
