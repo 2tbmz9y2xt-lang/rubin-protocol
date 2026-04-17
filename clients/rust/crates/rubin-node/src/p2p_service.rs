@@ -73,6 +73,14 @@ struct SharedServiceState {
     /// serialized frames here; each peer's message loop drains its queue
     /// between reads, ensuring writes are serialized on the same TcpStream.
     peer_outboxes: Arc<Mutex<HashMap<String, PeerOutbox>>>,
+    /// Secondary peer-identity index: maps the *raw remote socket address*
+    /// observed on the TcpStream to the *primary* key used by `peer_manager`
+    /// (which is the outbound dial target when the peer was dialed outbound).
+    /// Mirrors Go `s.peers[alias] = p` in `registerPeer`
+    /// (clients/go/node/p2p/service_peer_lifecycle.go:75-77) so addr-gossip /
+    /// bootstrap reconnect dedup finds the peer under either the hostname the
+    /// dialer used or the concrete IP the remote end is reachable on.
+    peer_aliases: Arc<Mutex<HashMap<String, String>>>,
     local_addr: String,
 }
 
@@ -155,6 +163,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         genesis_hash: cfg.genesis_hash,
         relay_state,
         peer_outboxes: Arc::new(Mutex::new(HashMap::new())),
+        peer_aliases: Arc::new(Mutex::new(HashMap::new())),
         local_addr: addr.clone(),
     };
     let accept_shared = shared.clone();
@@ -290,6 +299,55 @@ fn is_connected(peer_manager: &PeerManager, addr: &str) -> bool {
     peer_manager.snapshot().iter().any(|peer| peer.addr == addr)
 }
 
+/// Peer-identity dedup check that mirrors Go `Service.isConnected`
+/// (clients/go/node/p2p/reconnect.go:171-179) backed by the composite
+/// `s.peers` map (primary addr + `alias = normalizeNetAddr(conn.RemoteAddr())`
+/// registered together in `registerPeer`). A candidate `addr` is considered
+/// already-connected when it matches either the primary key in
+/// `peer_manager` OR an alias recorded at handshake time. Without the
+/// alias branch, Rust would dial a duplicate whenever a peer was reached
+/// under one label (e.g. outbound hostname) and a later dial candidate
+/// carries the peer's concrete remote socket address.
+fn is_connected_with_alias(shared: &SharedServiceState, addr: &str) -> bool {
+    if is_connected(&shared.peer_manager, addr) {
+        return true;
+    }
+    // Matches the `.lock().unwrap()` convention used elsewhere in this
+    // module (`peer_outboxes.lock().unwrap()`); peer_aliases is never
+    // held across a panic-prone call, so a poisoned mutex would signal a
+    // prior bug and crashing fast is the documented behavior.
+    shared.peer_aliases.lock().unwrap().contains_key(addr)
+}
+
+/// Insert a `remote_raw_addr -> peer_addr` alias only when the observed
+/// remote socket address carries a distinct identity label vs the
+/// primary peer key. Empty / `<unknown>` / self-equal inputs are a
+/// no-op and return `None`, mirroring the Go `registerPeer` guard
+/// `alias != "" && alias != p.addr()` (see
+/// `clients/go/node/p2p/service_peer_lifecycle.go:75-77`).
+///
+/// The returned `PeerAliasGuard`, if any, must live until the peer
+/// worker exits so the alias entry is unregistered on drop.
+fn register_peer_alias(
+    shared: &SharedServiceState,
+    remote_raw_addr: &str,
+    peer_addr: &str,
+) -> Option<PeerAliasGuard> {
+    if remote_raw_addr.is_empty() || remote_raw_addr == "<unknown>" || remote_raw_addr == peer_addr
+    {
+        return None;
+    }
+    shared
+        .peer_aliases
+        .lock()
+        .unwrap()
+        .insert(remote_raw_addr.to_string(), peer_addr.to_string());
+    Some(PeerAliasGuard {
+        peer_aliases: Arc::clone(&shared.peer_aliases),
+        alias: remote_raw_addr.to_string(),
+    })
+}
+
 fn reconnect_missing_bootstrap_peers(shared: &SharedServiceState) {
     let n = shared.bootstrap_peers.len();
     if n == 0 {
@@ -301,7 +359,7 @@ fn reconnect_missing_bootstrap_peers(shared: &SharedServiceState) {
     let start = shared.bootstrap_rotate_idx.fetch_add(1, Ordering::Relaxed) % n;
     for i in 0..n {
         let addr = &shared.bootstrap_peers[(start + i) % n];
-        if !is_connected(&shared.peer_manager, addr) {
+        if !is_connected_with_alias(shared, addr) {
             start_outbound_peer(addr.clone(), shared.clone());
         }
     }
@@ -677,6 +735,15 @@ fn handle_peer(
     };
 
     let mut peer_state = session.state();
+    // `session.state().addr` is the raw TcpStream::peer_addr observed at
+    // session-construction time — the concrete remote socket address. For
+    // outbound peers we override with the dial target (hostname:port) so the
+    // primary peer_manager key matches what the dialer/reconnect layer uses.
+    // The raw remote addr is then recorded as a secondary alias, matching
+    // Go `registerPeer` (clients/go/node/p2p/service_peer_lifecycle.go:75-77)
+    // which inserts `s.peers[alias] = p` when the alias differs from
+    // `p.addr()`. See also `is_connected_with_alias`.
+    let remote_raw_addr = peer_state.addr.clone();
     if let Some(addr) = outbound_addr.as_ref() {
         peer_state.addr = addr.clone();
     }
@@ -690,10 +757,17 @@ fn handle_peer(
         addr: peer_addr.clone(),
     };
 
+    // Register alias only when the observed remote socket address differs
+    // from the primary key. Empty / "<unknown>" / duplicate aliases are a
+    // no-op, mirroring Go's `alias != "" && alias != p.addr()` guard.
+    let _alias_guard = register_peer_alias(&shared, &remote_raw_addr, &peer_addr);
+
     // Register outbox for this peer so relay broadcasts can enqueue frames.
-    if let Ok(mut outboxes) = shared.peer_outboxes.lock() {
-        outboxes.insert(peer_addr.clone(), PeerOutbox::default());
-    }
+    shared
+        .peer_outboxes
+        .lock()
+        .unwrap()
+        .insert(peer_addr.clone(), PeerOutbox::default());
     let _outbox_guard = PeerOutboxGuard {
         peer_outboxes: Arc::clone(&shared.peer_outboxes),
         addr: peer_addr.clone(),
@@ -898,6 +972,19 @@ impl Drop for PeerOutboxGuard {
     }
 }
 
+struct PeerAliasGuard {
+    peer_aliases: Arc<Mutex<HashMap<String, String>>>,
+    alias: String,
+}
+
+impl Drop for PeerAliasGuard {
+    fn drop(&mut self) {
+        if let Ok(mut aliases) = self.peer_aliases.lock() {
+            aliases.remove(&self.alias);
+        }
+    }
+}
+
 struct SessionSlotGuard {
     active_sessions: Arc<AtomicUsize>,
 }
@@ -923,10 +1010,10 @@ mod tests {
 
     use super::{
         apply_tx_pool_cleanup, connect_with_timeout, finalize_live_message_outcome,
-        flush_peer_outbox, join_all_service_workers, lock_in_flight_dials,
+        flush_peer_outbox, is_connected_with_alias, join_all_service_workers, lock_in_flight_dials,
         maybe_apply_tx_pool_cleanup, outbound_connect_timeout, reconnect_missing_bootstrap_peers,
-        should_skip_outbound_dial, start_node_p2p_service, wait_for_service_shutdown,
-        NodeP2PServiceConfig, SharedServiceState,
+        register_peer_alias, should_skip_outbound_dial, start_node_p2p_service,
+        wait_for_service_shutdown, NodeP2PServiceConfig, PeerAliasGuard, SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
@@ -986,6 +1073,7 @@ mod tests {
             genesis_hash: test_genesis_hash(),
             relay_state: Arc::new(TxRelayState::new()),
             peer_outboxes: Arc::new(Mutex::new(HashMap::new())),
+            peer_aliases: Arc::new(Mutex::new(HashMap::new())),
             local_addr: "127.0.0.1:0".to_string(),
         }
     }
@@ -1783,6 +1871,103 @@ mod tests {
 
         shared.stop.store(true, Ordering::SeqCst);
         server.join().expect("server join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn is_connected_with_alias_matches_secondary_identity() {
+        // Go parity: Go `registerPeer` inserts peer under p.addr() AND under
+        // alias = normalizeNetAddr(conn.RemoteAddr()) so
+        // `Service.isConnected(alias)` returns true after a hostname dial
+        // that resolved to a concrete IP. Rust must do the same via
+        // `peer_aliases` so bootstrap-reconnect / addr-gossip candidates do
+        // not trigger duplicate dials against an already-connected peer
+        // reached under a different label.
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-alias-identity");
+        let runtime_cfg = default_peer_runtime_config("devnet", 8);
+        let shared = test_shared_state(runtime_cfg.clone(), vec![], sync_engine);
+
+        let primary = "seed.example.com:19111".to_string();
+        let alias = "10.1.2.3:19111".to_string();
+        let unrelated = "10.9.9.9:19111".to_string();
+
+        // Before registration: neither primary nor alias is a dedup hit.
+        assert!(!is_connected_with_alias(&shared, &primary));
+        assert!(!is_connected_with_alias(&shared, &alias));
+
+        // Simulate `handle_peer`: peer_manager keyed by the dial target,
+        // alias index keyed by the observed remote socket addr.
+        shared
+            .peer_manager
+            .add_peer(crate::p2p_runtime::PeerState {
+                addr: primary.clone(),
+                ..Default::default()
+            })
+            .expect("register primary");
+        shared
+            .peer_aliases
+            .lock()
+            .expect("alias lock")
+            .insert(alias.clone(), primary.clone());
+        let guard = PeerAliasGuard {
+            peer_aliases: Arc::clone(&shared.peer_aliases),
+            alias: alias.clone(),
+        };
+
+        // Dedup succeeds via either the primary key or the alias.
+        assert!(is_connected_with_alias(&shared, &primary));
+        assert!(is_connected_with_alias(&shared, &alias));
+        // Unrelated addr is NOT a false positive.
+        assert!(!is_connected_with_alias(&shared, &unrelated));
+
+        // Drop releases the alias; only primary key remains.
+        drop(guard);
+        assert!(is_connected_with_alias(&shared, &primary));
+        assert!(!is_connected_with_alias(&shared, &alias));
+
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// Direct coverage for `register_peer_alias` — mirrors Go's
+    /// `registerPeer` guard `alias != "" && alias != p.addr()`
+    /// (clients/go/node/p2p/service_peer_lifecycle.go:75-77).
+    #[test]
+    fn register_peer_alias_inserts_only_when_labels_diverge() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-alias-helper");
+        let runtime_cfg = default_peer_runtime_config("devnet", 8);
+        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
+
+        let peer_addr = "10.1.2.3:19111";
+
+        // Empty alias -> no-op.
+        assert!(register_peer_alias(&shared, "", peer_addr).is_none());
+        // "<unknown>" sentinel -> no-op.
+        assert!(register_peer_alias(&shared, "<unknown>", peer_addr).is_none());
+        // Same label -> no-op (Go: alias != p.addr() guard).
+        assert!(register_peer_alias(&shared, peer_addr, peer_addr).is_none());
+        assert!(
+            shared.peer_aliases.lock().unwrap().is_empty(),
+            "no-op paths must not touch the alias index",
+        );
+
+        // Different label -> alias inserted; guard holds the registration.
+        let alias = "seed.example.com:19111";
+        let guard = register_peer_alias(&shared, alias, peer_addr)
+            .expect("diverging label must register an alias");
+        assert_eq!(
+            shared
+                .peer_aliases
+                .lock()
+                .unwrap()
+                .get(alias)
+                .map(String::as_str),
+            Some(peer_addr),
+        );
+
+        // Dropping the guard clears the alias back out.
+        drop(guard);
+        assert!(!shared.peer_aliases.lock().unwrap().contains_key(alias));
+
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
