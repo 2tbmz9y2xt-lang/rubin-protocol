@@ -124,6 +124,18 @@ impl BlockStore {
         block_bytes: &[u8],
         undo: &BlockUndo,
     ) -> Result<(), String> {
+        // 0. Reject mismatched undo up front. If `undo.block_height` does
+        //    not match the canonical height being committed, a later
+        //    `ChainState::disconnect_block` would trip its height invariant
+        //    and the tip would already have advanced — exactly the
+        //    non-atomic failure mode this API is closing. Rejecting before
+        //    any disk write keeps the canonical state untouched.
+        if undo.block_height != height {
+            return Err(format!(
+                "undo block_height mismatch: commit height={height}, undo.block_height={}",
+                undo.block_height
+            ));
+        }
         // 1. Persist block + header bytes (idempotent `write_file_if_absent`).
         self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
         // 2. Persist undo BEFORE any tip advance. Matches Go ordering in
@@ -378,12 +390,17 @@ impl BlockStore {
 
     // ----- Undo storage -----
 
-    /// Persist a single undo record. Crate-private so that all canonical
-    /// commit paths go through `commit_canonical_block`, which enforces
-    /// the `block -> header -> undo -> tip` ordering contract (see
-    /// `commit_canonical_block` docstring). A standalone `put_undo`
-    /// paired with `set_canonical_tip` in the opposite order would
-    /// reintroduce the E.4 atomicity gap this task is closing.
+    /// Persist a single undo record. Crate-private so that any in-crate
+    /// canonical-commit path that needs an undo goes through
+    /// `commit_canonical_block`, which enforces the
+    /// `block -> header -> undo -> tip` ordering contract (see that
+    /// docstring). `put_block` and `set_canonical_tip` remain `pub` for
+    /// the no-undo paths (genesis / interop bootstrap, rollback, index
+    /// truncate) where persisting an undo record is either unnecessary
+    /// or inverted; they are NOT part of the E.4 atomicity lane.
+    /// A standalone `put_undo` paired with `set_canonical_tip` in the
+    /// opposite order would reintroduce the E.4 atomicity gap this task
+    /// is closing.
     pub(crate) fn put_undo(
         &self,
         block_hash_bytes: [u8; 32],
@@ -799,6 +816,49 @@ mod tests {
         assert_eq!(store.canonical_len(), 1);
         assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
         assert_eq!(store.get_undo(hash).expect("get_undo"), undo);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `commit_canonical_block` must reject a mismatched undo before any
+    /// disk write, otherwise a later `disconnect_block` would trip its
+    /// height invariant while the canonical tip has already advanced —
+    /// exactly the non-atomic failure mode this API closes.
+    #[test]
+    fn commit_canonical_block_rejects_mismatched_undo_height() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-commit-undo-mismatch");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        // Deliberately mismatched undo: commit height 0 but undo claims height 7.
+        let bad_undo = BlockUndo {
+            block_height: 7,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        let err = store
+            .commit_canonical_block(0, hash, header, &genesis, &bad_undo)
+            .unwrap_err();
+        assert!(
+            err.contains("undo block_height mismatch"),
+            "expected mismatch error, got {err:?}"
+        );
+
+        // Canonical state must be untouched — no files, no tip advance.
+        assert_eq!(store.canonical_len(), 0);
+        assert!(store.tip().expect("tip").is_none());
+        assert!(
+            !store.has_block(hash),
+            "block/header files must not be written before the mismatch check"
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
