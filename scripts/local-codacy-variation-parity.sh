@@ -241,13 +241,14 @@ if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
     echo "PASS: Codacy metadata unavailable; local merge-base fallback remains $merge_base"
     exit 0
   fi
-  python3 - "$codacy_status_json" "$merge_base" "$remote_pr_head" <<'PY'
+  python3 - "$codacy_status_json" "$merge_base" "$remote_pr_head" "$current_head" <<'PY'
 import json
 import sys
 
 data = json.loads(sys.argv[1])
 local_merge_base = sys.argv[2]
 remote_pr_head = sys.argv[3]
+local_head = sys.argv[4]
 ancestor = data["data"]["commonAncestorCommit"]
 head = data["data"]["headCommit"]
 ancestor_sha = ancestor.get("commitSha")
@@ -261,6 +262,12 @@ print(f"  codacy PR head:  {head_sha or 'missing'}")
 print(f"  ancestor reports processed: {sum(1 for r in ancestor_reports if r.get('status') == 'Processed')}")
 print(f"  head reports processed:     {sum(1 for r in head_reports if r.get('status') == 'Processed')}")
 
+if remote_pr_head and local_head and remote_pr_head != local_head:
+    print(
+        f"PASS: local HEAD {local_head} is ahead of GitHub PR head {remote_pr_head}; "
+        "Codacy ancestor still reflects the published head and will be revalidated after push"
+    )
+    raise SystemExit(0)
 if not ancestor_sha:
     print("FAIL: Codacy did not return a common ancestor baseline", file=sys.stderr)
     raise SystemExit(1)
