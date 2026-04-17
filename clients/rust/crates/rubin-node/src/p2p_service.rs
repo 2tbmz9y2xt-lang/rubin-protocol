@@ -345,6 +345,7 @@ fn register_peer_alias(
     Some(PeerAliasGuard {
         peer_aliases: Arc::clone(&shared.peer_aliases),
         alias: remote_raw_addr.to_string(),
+        peer_addr: peer_addr.to_string(),
     })
 }
 
@@ -975,11 +976,26 @@ impl Drop for PeerOutboxGuard {
 struct PeerAliasGuard {
     peer_aliases: Arc<Mutex<HashMap<String, String>>>,
     alias: String,
+    /// Primary peer key this guard registered. Checked on drop so that
+    /// if two concurrent dials from the same remote label race
+    /// (`alias -> peerA` overwritten by `alias -> peerB`), dropping the
+    /// earlier guard does NOT delete the newer mapping and re-enable
+    /// duplicate dials against the still-connected peer.
+    peer_addr: String,
 }
 
 impl Drop for PeerAliasGuard {
     fn drop(&mut self) {
-        if let Ok(mut aliases) = self.peer_aliases.lock() {
+        let mut aliases = self.peer_aliases.lock().unwrap();
+        // Only remove when the alias still points at the peer that
+        // created this guard. If another dial overwrote the mapping
+        // while this peer was live, the newer owner's guard is
+        // responsible for cleanup on its own exit.
+        if aliases
+            .get(&self.alias)
+            .map(|owner| owner == &self.peer_addr)
+            .unwrap_or(false)
+        {
             aliases.remove(&self.alias);
         }
     }
@@ -1912,6 +1928,7 @@ mod tests {
         let guard = PeerAliasGuard {
             peer_aliases: Arc::clone(&shared.peer_aliases),
             alias: alias.clone(),
+            peer_addr: primary.clone(),
         };
 
         // Dedup succeeds via either the primary key or the alias.
@@ -1967,6 +1984,57 @@ mod tests {
         // Dropping the guard clears the alias back out.
         drop(guard);
         assert!(!shared.peer_aliases.lock().unwrap().contains_key(alias));
+
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// Race scenario flagged by Codex/Copilot P1: two concurrent dials
+    /// land on the same `remote_raw_addr` under different primary keys
+    /// (e.g. `seed.example.com:19111` vs `mirror.example.org:19111`
+    /// resolving to the same socket addr). The newer registration
+    /// overwrites the alias, but the OLDER guard's drop must NOT
+    /// remove the alias — otherwise the still-active newer connection
+    /// loses its dedup index and accepts a duplicate dial.
+    #[test]
+    fn peer_alias_guard_drop_preserves_newer_owner() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-alias-race");
+        let runtime_cfg = default_peer_runtime_config("devnet", 8);
+        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
+
+        let alias = "10.1.2.3:19111";
+        let primary_old = "seed.example.com:19111";
+        let primary_new = "mirror.example.org:19111";
+
+        // Older dial registers alias -> primary_old.
+        let guard_old =
+            register_peer_alias(&shared, alias, primary_old).expect("older dial registers alias");
+        // Newer dial overwrites alias -> primary_new.
+        let _guard_new =
+            register_peer_alias(&shared, alias, primary_new).expect("newer dial overwrites alias");
+        assert_eq!(
+            shared
+                .peer_aliases
+                .lock()
+                .unwrap()
+                .get(alias)
+                .map(String::as_str),
+            Some(primary_new),
+            "newer dial owns the alias entry",
+        );
+
+        // Older guard drops: alias must NOT be removed because it now
+        // points at the newer peer.
+        drop(guard_old);
+        assert_eq!(
+            shared
+                .peer_aliases
+                .lock()
+                .unwrap()
+                .get(alias)
+                .map(String::as_str),
+            Some(primary_new),
+            "older guard's drop must not delete the newer owner's alias",
+        );
 
         fs::remove_dir_all(dir).expect("cleanup");
     }
