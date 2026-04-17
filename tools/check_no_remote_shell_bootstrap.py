@@ -319,11 +319,17 @@ def mask_pipe_window(text: str) -> str:
                     )
                 )
             )
+            preserve_stdin_path = bool(
+                re.fullmatch(r"/dev/(?:stdin|fd/0)", quoted_text)
+                and re.search(r"(?:^|\s)(?:source|\.)$", prefix_text)
+            )
             if (
                 re.fullmatch(DOWNLOADER_EXECUTABLE_PATTERN, quoted_text)
                 or re.fullmatch(SHELL_EXECUTABLE_PATTERN, quoted_text)
                 or re.fullmatch(WRAPPER_EXECUTABLE_PATTERN, quoted_text)
             ) and preserve_shell_word:
+                parts.extend(quoted_text)
+            elif preserve_stdin_path:
                 parts.extend(quoted_text)
             else:
                 parts.extend(" " * len(quoted_text))
