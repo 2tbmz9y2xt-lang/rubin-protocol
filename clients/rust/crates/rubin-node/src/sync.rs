@@ -635,12 +635,18 @@ impl SyncEngine {
             if let Err(err) = self.chain_state.save(chain_state_path) {
                 // Canonical commit already advanced the tip; unwind it so
                 // in-memory state and on-disk canonical index stay paired.
-                if let Some(bs) = self.block_store.as_mut() {
-                    let _ = bs.truncate_canonical(canonical_len_before);
-                }
+                let rewind_err = self
+                    .block_store
+                    .as_mut()
+                    .and_then(|bs| bs.truncate_canonical(canonical_len_before).err());
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;
+                if let Some(rewind_err) = rewind_err {
+                    return Err(format!(
+                        "{err}; failed to rewind canonical index after chain_state save failure: {rewind_err}; blockstore may require repair"
+                    ));
+                }
                 return Err(err);
             }
         }

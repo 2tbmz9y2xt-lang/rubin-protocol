@@ -91,7 +91,8 @@ impl BlockStore {
     }
 
     /// Atomic canonical block commit — Go parity
-    /// (`clients/go/node/blockstore.go`, `CommitCanonicalBlock`).
+    /// (`clients/go/node/blockstore.go:100-114`, `CommitCanonicalBlock`:
+    /// `StoreBlock` -> `PutUndo` -> `SetCanonicalTip`).
     ///
     /// Persists block bytes, header bytes, and the undo record BEFORE
     /// advancing the canonical tip. The tip update is the explicit
@@ -104,6 +105,17 @@ impl BlockStore {
     /// sequence in `sync.rs`, this API shrinks the failure surface: the
     /// tip never advances before undo durability, so no post-hoc
     /// `truncate_canonical` rewind is needed on undo-write failure.
+    ///
+    /// **Orphan semantics on retry.** A failure at any step before the
+    /// tip advance may leave block/header/undo files on disk without a
+    /// canonical reference. These are safe and self-healing: block and
+    /// header files are written via `write_file_if_absent` (idempotent
+    /// no-op if the exact contents already exist on retry), and the
+    /// undo file is written via `write_file_atomic`, whose tmp+rename
+    /// idempotently overwrites at the same path on a subsequent retry
+    /// with the same block hash. No canonical entry references these
+    /// files until the tip advances, so they neither contaminate the
+    /// chain nor leak unboundedly across same-hash retries.
     pub fn commit_canonical_block(
         &mut self,
         height: u64,
@@ -366,7 +378,17 @@ impl BlockStore {
 
     // ----- Undo storage -----
 
-    pub fn put_undo(&self, block_hash_bytes: [u8; 32], undo: &BlockUndo) -> Result<(), String> {
+    /// Persist a single undo record. Crate-private so that all canonical
+    /// commit paths go through `commit_canonical_block`, which enforces
+    /// the `block -> header -> undo -> tip` ordering contract (see
+    /// `commit_canonical_block` docstring). A standalone `put_undo`
+    /// paired with `set_canonical_tip` in the opposite order would
+    /// reintroduce the E.4 atomicity gap this task is closing.
+    pub(crate) fn put_undo(
+        &self,
+        block_hash_bytes: [u8; 32],
+        undo: &BlockUndo,
+    ) -> Result<(), String> {
         #[cfg(test)]
         if self.force_undo_error {
             return Err("forced undo error (test)".to_string());
@@ -765,6 +787,18 @@ mod tests {
         // safe because `write_file_if_absent` is idempotent on retry and
         // no canonical entry references them until the tip advances.
         assert!(store.has_block(hash));
+
+        // Retry contract: once the transient undo failure clears, calling
+        // commit_canonical_block again with the same arguments must
+        // succeed (no "already exists" error from block/header writes,
+        // no stale-state corruption) and the tip must finally advance.
+        store.force_undo_error = false;
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("retry commit_canonical_block");
+        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
+        assert_eq!(store.get_undo(hash).expect("get_undo"), undo);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
