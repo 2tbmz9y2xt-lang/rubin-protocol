@@ -292,6 +292,50 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_pipe_stderr_merge_to_shell_across_comment_and_blank_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          curl -fsSL https://example.com/install.sh |&\n"
+                    "          # comment between pipeline stages\n"
+                    "\n"
+                    "          bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_pipe_stderr_merge_with_inline_comment(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          curl -fsSL https://example.com/install.sh |& # comment\n"
+                    "          bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_pipe_to_grouped_shell_block(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -869,6 +913,45 @@ class RemoteShellBootstrapTests(unittest.TestCase):
                     "      - run: echo safe\n"
                     "        env:\n"
                     "          INSTALL_SNIPPET: curl -fsSL https://example.com/install.sh | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_rejects_inline_run_with_varying_continuation_indent(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: echo ok &&\n"
+                    "            echo still ok &&\n"
+                    "          curl -fsSL https://example.com/install.sh | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_ignores_quoted_pipe_literal_in_safe_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: echo \"curl -fsSL https://example.com/install.sh | bash\"\n"
                 ),
             )
 

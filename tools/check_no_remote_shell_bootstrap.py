@@ -24,7 +24,7 @@ ENV_SPLIT_STRING_LAUNCHER_PATTERN = rf"{ENV_COMMAND_PATTERN}(?:\s+{ENV_SPLIT_STR
 SHELL_LAUNCHER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:{ENV_SPLIT_STRING_LAUNCHER_PATTERN}|{SHELL_EXECUTABLE_PATTERN})"
 DOWNLOADER_PATTERN = rf"(?:(?:{COMMAND_PREFIX_PATTERN}|{SUDO_PREFIX_PATTERN}|{ENV_PREFIX_PATTERN}|{ENV_ASSIGNMENT_PREFIX_PATTERN}))*?(?:/(?:usr/)?bin/)?(?:curl|wget)\b"
 SHELL_C_OPTION_PATTERN = r"(?:-c|-[A-Za-z]*c[A-Za-z]*|--command)"
-INLINE_PIPE_COMMENT_RE = re.compile(r"\|\s*#")
+INLINE_PIPE_COMMENT_RE = re.compile(r"\|&?\s*#")
 STEPS_KEY_RE = re.compile(r'^\s*["\']?steps["\']?\s*:\s*(?:#.*)?$')
 STEP_INLINE_RUN_RE = re.compile(r'^\s*-\s+["\']?run["\']?\s*:\s*(.*)$')
 RUN_KEY_RE = re.compile(r'^\s*["\']?run["\']?\s*:\s*(.*)$')
@@ -105,7 +105,7 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
         stripped = raw.strip()
         if not stripped:
             if parts:
-                if parts[-1].endswith("|"):
+                if parts[-1].endswith("|") or parts[-1].endswith("|&"):
                     continue
                 break
             continue
@@ -116,7 +116,8 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
         normalized = stripped.rstrip("\\").strip()
         pipe_comment_match = INLINE_PIPE_COMMENT_RE.search(normalized)
         if pipe_comment_match:
-            normalized = normalized[: pipe_comment_match.start()].rstrip() + " |"
+            pipe_token = pipe_comment_match.group(0).split("#", 1)[0].rstrip()
+            normalized = normalized[: pipe_comment_match.start()].rstrip() + f" {pipe_token}"
         parts.append(normalized)
         windows.append((idx, line_no, " ".join(parts)))
     return windows
@@ -158,10 +159,40 @@ def inline_plain_scalar_entries(
         indent = len(raw) - len(raw.lstrip())
         if indent <= run_indent:
             break
+        continuation_indent = run_indent + 1
         if base_indent is None:
-            base_indent = indent
-        entries.append((line_no, raw[base_indent:]))
+            base_indent = continuation_indent
+        entries.append((line_no, raw[continuation_indent:]))
     return entries
+
+
+def strip_quoted_literals(text: str) -> str:
+    parts: list[str] = []
+    quote: str | None = None
+    escape = False
+    for ch in text:
+        if quote is None:
+            if ch in {"'", '"'}:
+                quote = ch
+                parts.append(ch)
+            else:
+                parts.append(ch)
+            continue
+        if quote == '"':
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = None
+                parts.append(ch)
+                continue
+        elif ch == quote:
+            quote = None
+            parts.append(ch)
+            continue
+        parts.append(" ")
+    return "".join(parts)
 
 
 def extract_flow_mapping_run(mapping_text: str) -> str | None:
@@ -458,7 +489,11 @@ def find_violations(path: Path) -> list[str]:
             matched_end: int | None = None
             for end_idx, line_no, window in command_windows(run_entries, line_idx):
                 for label, pattern in REMOTE_SHELL_PATTERNS:
-                    if pattern.search(window):
+                    candidate = strip_quoted_literals(window) if label == "remote shell pipe" else window
+                    matched = pattern.search(candidate)
+                    if not matched and label == "remote shell pipe" and (" env -S " in window or "--split-string" in window):
+                        matched = pattern.search(window)
+                    if matched:
                         violations.append(f"{rendered_path}:{line_no}: {label}: {window}")
                         matched_end = end_idx
                         break
