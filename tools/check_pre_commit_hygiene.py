@@ -281,31 +281,34 @@ def check_rust_warnings(files: list[str]) -> list[str]:
     return []
 
 
-# ── Check 4: git diff HEAD after amend ───────────────────────────────
+# ── Check 4: working tree clean (git status --porcelain) ────────────
 
 def check_amend_completeness(staged_only: bool) -> list[str]:
-    """Check for any working-tree changes (staged + unstaged) vs HEAD.
+    """Check that the working tree is fully clean vs HEAD.
 
     In staged-only mode (pre-commit), skip — staged diff from HEAD is
-    intentional.  Otherwise compare working tree against HEAD: catches
-    BOTH staged-but-not-amended fixes AND unstaged edits, so the
-    after-amend "zero diff" guard actually fires when fixes are still
-    sitting in the index.
+    intentional.  Otherwise run `git status --porcelain` which reports
+    ALL three classes of pending change in one call:
+      - staged tracked changes  (XY=`M `, `A `, `D `, etc.)
+      - unstaged tracked changes (XY=` M`, ` D`, etc.)
+      - untracked files          (XY=`??`)
+    The previous `git diff HEAD --stat` missed untracked files (e.g.
+    a new test/fix file forgotten during `git commit --amend`).
     """
     if staged_only:
         return []
-    r = run(["git", "diff", "HEAD", "--stat"])  # vs HEAD = staged + unstaged
+    r = run(["git", "status", "--porcelain"])
     if r.returncode != 0:
         detail = _sanitize_paths((r.stderr or "").strip())
         print(
-            f"[WARN] git diff HEAD --stat failed (rc={r.returncode}) -- fail closed: "
+            f"[WARN] git status --porcelain failed (rc={r.returncode}) -- fail closed: "
             f"{detail}",
             file=sys.stderr,
         )
         sys.exit(2)
     if r.stdout.strip():
-        files = r.stdout.strip().splitlines()
-        return [f"changes vs HEAD (staged or unstaged): {f.strip()}" for f in files[:5]]
+        entries = r.stdout.splitlines()
+        return [f"working tree not clean (XY status): {e}" for e in entries[:5]]
     return []
 
 
@@ -329,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     # surfaced even if the file-set derivation came back empty.
     v = check_amend_completeness(args.staged_only)
     if v:
-        print(f"\n[FAIL] Changes vs HEAD after amend ({len(v)}):")
+        print(f"\n[FAIL] Working tree not clean ({len(v)}):")
         for line in v:
             print(f"  {line}")
         all_violations.extend(v)
