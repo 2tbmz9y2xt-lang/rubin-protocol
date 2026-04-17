@@ -126,14 +126,17 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
     windows: list[tuple[int, int, str]] = []
     parts: list[str] = []
     join_without_space = False
-    active_heredoc: str | None = None
+    active_heredoc: tuple[str, bool] | None = None
     for idx in range(start, len(entries)):
         line_no, raw = entries[idx]
         stripped = raw.strip()
         if active_heredoc is not None:
+            terminator, allow_tabs = active_heredoc
             parts.append(stripped if stripped else "")
             windows.append((idx, line_no, "\n".join(parts)))
-            if stripped == active_heredoc:
+            line_text = raw.rstrip("\r\n")
+            compare_text = line_text.lstrip("\t") if allow_tabs else line_text
+            if compare_text == terminator:
                 active_heredoc = None
                 break
             join_without_space = raw.rstrip().endswith("\\")
@@ -160,15 +163,16 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
         else:
             parts.append(normalized)
         join_without_space = raw.rstrip().endswith("\\")
-        heredoc_match = re.search(r"<<-?\s*(\S+)$", normalized)
+        heredoc_match = re.search(r"<<(?P<tabs>-?)\s*(?P<terminator>\S+)$", normalized)
         if heredoc_match is not None:
-            active_heredoc = heredoc_match.group(1)
+            terminator = heredoc_match.group("terminator")
             if (
-                len(active_heredoc) >= 2
-                and active_heredoc[0] == active_heredoc[-1]
-                and active_heredoc[0] in {"'", '"'}
+                len(terminator) >= 2
+                and terminator[0] == terminator[-1]
+                and terminator[0] in {"'", '"'}
             ):
-                active_heredoc = active_heredoc[1:-1]
+                terminator = terminator[1:-1]
+            active_heredoc = (terminator, heredoc_match.group("tabs") == "-")
         windows.append((idx, line_no, "\n".join(parts)))
     return windows
 
