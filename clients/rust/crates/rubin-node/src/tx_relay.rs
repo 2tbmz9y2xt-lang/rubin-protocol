@@ -267,17 +267,54 @@ pub fn announce_tx(
     )
 }
 
+/// Outcome of processing a peer-relayed tx.
+///
+/// The caller (peer session in `p2p_runtime`) inspects this value to mirror
+/// Go's per-outcome ban-score policy in `clients/go/node/p2p/handlers_tx.go`:
+/// parse/oversize failures bump the peer's ban score, while pool/metadata
+/// rejections of a structurally-valid tx are silent no-ops (peers must not
+/// be punished for a tx the local policy simply doesn't want to relay).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayTxOutcome {
+    /// Tx was parsed, admitted to relay pool, and re-announced.
+    Relayed,
+    /// Tx was already seen — silently ignored.
+    DuplicateSeen,
+    /// Relay-metadata derivation failed (fee/policy); marked seen so peers
+    /// don't churn INV/GETDATA, but peer session is not penalized.
+    MetadataRejected,
+    /// Relay pool rejected admission (full or lower-priority eviction).
+    PoolRejected,
+    /// Payload exceeded `MAX_RELAY_MSG_BYTES`. Caller must bump ban score
+    /// and fail the session if over threshold (parity with Go
+    /// `handleTx` oversize path).
+    Oversized,
+    /// Consensus parse or canonical-bytes check failed. Caller must bump
+    /// ban score (parity with Go `handleTx` parse-fail path which calls
+    /// `p.bumpBan(10, ...)`).
+    MalformedParse(String),
+}
+
+impl RelayTxOutcome {
+    /// True when the outcome corresponds to a malformed/oversized peer input
+    /// that should bump the peer's ban score (parity with Go
+    /// `handlers_tx.go:12` — `p.bumpBan(10, err.Error())`).
+    pub fn is_banworthy(&self) -> bool {
+        matches!(self, Self::Oversized | Self::MalformedParse(_))
+    }
+}
+
 /// Handle a transaction received from a peer.
 ///
 /// Validates structure via consensus parsing, derives relay metadata using the
 /// current chainstate/policy context, then marks seen BEFORE pool admission
 /// (Go's seen-before-pool pattern).
 ///
-/// If relay metadata validation fails, the tx remains marked as seen so peers
-/// do not churn INV/GETDATA retries for the same invalid payload, but the peer
-/// session itself is not failed.
-///
-/// Rejects oversized payloads (> MAX_RELAY_MSG_BYTES) before any processing.
+/// Returns a [`RelayTxOutcome`] so the caller can mirror Go's ban-score
+/// policy: Go's `handleTx` bumps ban by 10 on parse-fail (see
+/// `clients/go/node/p2p/handlers_tx.go:12`), and this function now surfaces
+/// the same signal via `MalformedParse`/`Oversized` variants instead of
+/// silently demoting parse errors to plain `io::Error`.
 pub fn handle_received_tx(
     tx_bytes: &[u8],
     sync_engine: &crate::sync::SyncEngine,
@@ -286,21 +323,21 @@ pub fn handle_received_tx(
     skip_addr: &str,
     local_addr: &str,
     peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
-) -> io::Result<()> {
+) -> io::Result<RelayTxOutcome> {
     // Reject oversized tx payloads early (defense-in-depth).
     if tx_bytes.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "tx payload exceeds MAX_RELAY_MSG_BYTES",
-        ));
+        return Ok(RelayTxOutcome::Oversized);
     }
 
     // Structural validation via consensus parser (matches Go's canonicalTxID + relayTxMetadata).
-    let txid = canonical_txid(tx_bytes).map_err(io::Error::other)?;
+    let txid = match canonical_txid(tx_bytes) {
+        Ok(txid) => txid,
+        Err(reason) => return Ok(RelayTxOutcome::MalformedParse(reason)),
+    };
 
     // Mark seen BEFORE pool admission (matches Go).
     if !relay_state.tx_seen.add(txid) {
-        return Ok(()); // Already seen — don't relay.
+        return Ok(RelayTxOutcome::DuplicateSeen);
     }
 
     let relay_cfg = crate::txpool::TxPoolConfig {
@@ -316,7 +353,7 @@ pub fn handle_received_tx(
         &relay_cfg,
     ) {
         Ok(meta) => meta,
-        Err(_) => return Ok(()),
+        Err(_) => return Ok(RelayTxOutcome::MetadataRejected),
     };
 
     // Store in relay pool with extracted metadata.
@@ -324,7 +361,7 @@ pub fn handle_received_tx(
         .relay_pool
         .put(txid, tx_bytes, meta.fee, meta.size)
     {
-        return Ok(()); // Pool rejected (full, low priority) — don't relay.
+        return Ok(RelayTxOutcome::PoolRejected);
     }
 
     // Re-announce to other peers (skip sender).
@@ -339,7 +376,7 @@ pub fn handle_received_tx(
         local_addr,
         peer_writers,
     );
-    Ok(())
+    Ok(RelayTxOutcome::Relayed)
 }
 
 /// Extract the canonical txid from raw tx bytes using consensus parsing.
@@ -1116,6 +1153,91 @@ mod tests {
         );
         assert!(result.is_ok());
         assert!(!relay.relay_pool.has(&txid)); // Not stored — was already seen.
+    }
+
+    /// C.2 parity: malformed relay tx payload must surface as
+    /// `RelayTxOutcome::MalformedParse` (ban-worthy) rather than being
+    /// silently swallowed. Mirrors Go `handleTx` bumping ban by 10 on parse
+    /// failure (`clients/go/node/p2p/handlers_tx.go:12`).
+    #[test]
+    fn handle_received_tx_malformed_surfaces_ban_worthy_outcome() {
+        let sync_engine = SyncEngine::new(
+            ChainState::new(),
+            None,
+            default_sync_config(None, [0u8; 32], None),
+        )
+        .expect("sync engine");
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+
+        // Garbage bytes that will fail consensus parse.
+        let garbage = vec![0xFFu8, 0xFE];
+        let outcome = handle_received_tx(
+            &garbage,
+            &sync_engine,
+            &relay,
+            &pm,
+            "sender:8333",
+            "local:8333",
+            &outboxes,
+        )
+        .expect("handle_received_tx should not return io::Error on malformed input");
+
+        match &outcome {
+            RelayTxOutcome::MalformedParse(_) => {}
+            other => panic!("expected MalformedParse, got {other:?}"),
+        }
+        assert!(
+            outcome.is_banworthy(),
+            "malformed parse must be ban-worthy for Go parity"
+        );
+        assert!(
+            relay.tx_seen.is_empty(),
+            "malformed tx must not mark seen (parity with Go handleTx early return)"
+        );
+        assert!(
+            relay.relay_pool.is_empty(),
+            "malformed tx must not enter relay pool"
+        );
+    }
+
+    /// C.1 parity: oversized relay payload must surface as
+    /// `RelayTxOutcome::Oversized` (ban-worthy), never touching consensus
+    /// parsing. Mirrors the explicit `MAX_RELAY_MSG_BYTES` guard now added to
+    /// Go `handleTx` (see `clients/go/node/p2p/handlers_tx.go`).
+    #[test]
+    fn handle_received_tx_oversize_surfaces_ban_worthy_outcome() {
+        let sync_engine = SyncEngine::new(
+            ChainState::new(),
+            None,
+            default_sync_config(None, [0u8; 32], None),
+        )
+        .expect("sync engine");
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+
+        let oversize = vec![0u8; rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize + 1];
+        let outcome = handle_received_tx(
+            &oversize,
+            &sync_engine,
+            &relay,
+            &pm,
+            "sender:8333",
+            "local:8333",
+            &outboxes,
+        )
+        .expect("handle_received_tx should not return io::Error on oversize");
+
+        assert_eq!(outcome, RelayTxOutcome::Oversized);
+        assert!(outcome.is_banworthy());
+        assert!(relay.tx_seen.is_empty());
+        assert!(relay.relay_pool.is_empty());
     }
 
     #[test]

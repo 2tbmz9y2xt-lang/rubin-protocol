@@ -94,7 +94,7 @@ fn run_once(network: &str, peer_count: usize, tx_bytes: &[u8]) -> ReceiveSnapsho
         .collect();
     ReceiveSnapshot {
         result: match result {
-            Ok(()) => "ok".to_string(),
+            Ok(outcome) => format!("ok:{outcome:?}"),
             Err(err) => format!("{:?}:{}", err.kind(), err),
         },
         tx_seen_len: relay.tx_seen.len(),
@@ -184,7 +184,15 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(first, second, "handle_received_tx must be deterministic on fresh state");
 
     if mode % 4 == 2 {
-        assert_ne!(first.result, "ok");
+        // Truncated tx: must surface as MalformedParse (ban-worthy per Go
+        // `handlers_tx.go:12` parity), never plain "ok:Relayed".
+        assert!(
+            first.result.starts_with("ok:MalformedParse")
+                || first.result.starts_with("ok:Oversized")
+                || !first.result.starts_with("ok:"),
+            "truncated tx must not be accepted: {}",
+            first.result
+        );
         assert_eq!(first.tx_seen_len, 0);
         assert_eq!(first.relay_pool_len, 0);
         assert!(first.outboxes.values().all(PeerOutbox::is_empty));

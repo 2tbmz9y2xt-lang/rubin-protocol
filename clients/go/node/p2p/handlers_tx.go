@@ -2,11 +2,25 @@ package p2p
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func (p *peer) handleTx(txBytes []byte) error {
+	// Defense-in-depth oversize guard (parity with Rust
+	// clients/rust/crates/rubin-node/src/tx_relay.rs:290-296).
+	// Envelope-level reader already caps tx payload at MAX_BLOCK_BYTES via
+	// postHandshakePayloadCap in wire.go, but an explicit MAX_RELAY_MSG_BYTES
+	// check here fails closed if that upstream cap regresses and keeps ban-score
+	// parity with Rust's malformed-input policy.
+	if len(txBytes) > consensus.MAX_RELAY_MSG_BYTES {
+		reason := fmt.Sprintf("tx payload exceeds MAX_RELAY_MSG_BYTES: %d > %d", len(txBytes), consensus.MAX_RELAY_MSG_BYTES)
+		if p.bumpBan(10, reason) {
+			return errors.New(reason)
+		}
+		return nil
+	}
 	txid, err := canonicalTxID(txBytes)
 	if err != nil {
 		if p.bumpBan(10, err.Error()) {

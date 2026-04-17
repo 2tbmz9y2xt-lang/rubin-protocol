@@ -569,3 +569,40 @@ func TestBlockBytesIOError(t *testing.T) {
 		t.Fatal("expected non-ErrNotExist error, got ErrNotExist")
 	}
 }
+
+// TestHandleTxOversizeBumpsBan covers the C.1 parity gap: Go handleTx must
+// explicitly reject payloads larger than consensus.MAX_RELAY_MSG_BYTES with a
+// ban-score bump, mirroring Rust's tx_relay::handle_received_tx oversize guard
+// (see clients/rust/crates/rubin-node/src/tx_relay.rs RelayTxOutcome::Oversized).
+//
+// Allocates ~96MB; skipped under -short.
+func TestHandleTxOversizeBumpsBan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates MAX_RELAY_MSG_BYTES+1 bytes; skipped in short mode")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	if err := h.service.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer h.service.Close()
+
+	p := &peer{
+		service: h.service,
+		state: node.PeerState{
+			HandshakeComplete: true,
+		},
+	}
+
+	// Payload exactly one byte over MAX_RELAY_MSG_BYTES.
+	oversize := make([]byte, consensus.MAX_RELAY_MSG_BYTES+1)
+	err := p.handleTx(oversize)
+	if err != nil {
+		t.Fatalf("handleTx oversize (sub-threshold ban): %v", err)
+	}
+	if p.state.BanScore != 10 {
+		t.Fatalf("ban score bump=%d, want 10 (parity with malformed-parse path)", p.state.BanScore)
+	}
+}

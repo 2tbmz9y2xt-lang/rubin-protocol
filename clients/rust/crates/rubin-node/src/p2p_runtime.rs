@@ -481,7 +481,7 @@ impl PeerSession {
             }
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
-                    crate::tx_relay::handle_received_tx(
+                    let outcome = crate::tx_relay::handle_received_tx(
                         &msg.payload,
                         sync_engine,
                         ctx.relay_state,
@@ -490,6 +490,27 @@ impl PeerSession {
                         ctx.local_addr,
                         ctx.peer_writers,
                     )?;
+                    // Mirror Go `clients/go/node/p2p/handlers_tx.go:12,19`:
+                    // parse-fail / oversize bumps the peer ban score by 10 and
+                    // fails the session only when the cumulative score crosses
+                    // the ban threshold. Pool/metadata rejections of a valid
+                    // tx stay silent.
+                    if outcome.is_banworthy() {
+                        let reason = match &outcome {
+                            crate::tx_relay::RelayTxOutcome::MalformedParse(r) => r.clone(),
+                            crate::tx_relay::RelayTxOutcome::Oversized => {
+                                format!(
+                                    "tx payload exceeds MAX_RELAY_MSG_BYTES: {}",
+                                    msg.payload.len()
+                                )
+                            }
+                            _ => String::new(),
+                        };
+                        self.bump_ban(10, &reason);
+                        if self.peer.ban_score >= self.cfg.ban_threshold {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
+                        }
+                    }
                 }
                 Ok(LiveMessageOutcome {
                     responses: Vec::new(),
