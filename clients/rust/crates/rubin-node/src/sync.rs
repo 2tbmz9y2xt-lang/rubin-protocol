@@ -609,44 +609,62 @@ impl SyncEngine {
         }
 
         let commit_start = Instant::now();
+        // `canonical_len_before` is the rewind target for the ONLY remaining
+        // post-commit failure point: `chain_state.save` below. If
+        // `commit_canonical_block` itself returns `Err`, the persisted
+        // canonical tip has not advanced: the tip write is the last step
+        // inside the atomic API, so an earlier failure leaves the prior
+        // on-disk tip in place. Note that a save failure inside
+        // `set_canonical_tip` mutates in-memory state before a best-effort
+        // reload of the on-disk length; if that reload also fails, the
+        // in-memory length may still be ahead of disk and the blockstore
+        // would require repair. No rewind is needed here for the normal
+        // `commit_canonical_block` error path.
         let canonical_len_before = self.block_store.as_ref().map_or(0, |bs| bs.canonical_len());
         if let Some(block_store) = self.block_store.as_mut() {
-            if let Err(err) = block_store.put_block(
+            // Atomic canonical commit — Go parity
+            // (`clients/go/node/blockstore.go`, `CommitCanonicalBlock`).
+            // Order inside the call: block bytes -> header bytes -> undo
+            // -> canonical tip (last). A failure before the tip advance
+            // leaves the canonical tip at its prior height, so no rewind
+            // is required on block/header/undo write failure.
+            if let Err(err) = block_store.commit_canonical_block(
                 summary.block_height,
                 block_hash_bytes,
                 &parsed.header_bytes,
                 block_bytes,
+                &undo,
             ) {
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;
                 return Err(err);
             }
-            // Persist the undo record alongside the block.
-            if let Err(err) = block_store.put_undo(block_hash_bytes, &undo) {
-                // Rewind canonical to the length captured before put_block.
-                let rewind_err = block_store.truncate_canonical(canonical_len_before).err();
+        }
+
+        if let Some(chain_state_path) = self.cfg.chain_state_path.as_ref() {
+            if let Err(err) = self.chain_state.save(chain_state_path) {
+                // Canonical commit MAY have advanced the tip. The
+                // same-hash replay path returns Ok(()) without advancing
+                // the canonical index/tip (canonical_len unchanged),
+                // though it may still back-fill missing undo data on
+                // disk, so only rewind when the canonical length
+                // actually grew past the pre-commit snapshot.
+                let rewind_err = self.block_store.as_mut().and_then(|bs| {
+                    if bs.canonical_len() > canonical_len_before {
+                        bs.truncate_canonical(canonical_len_before).err()
+                    } else {
+                        None
+                    }
+                });
                 self.chain_state = snapshot;
                 self.tip_timestamp = old_tip_timestamp;
                 self.best_known_height = old_best_known_height;
                 if let Some(rewind_err) = rewind_err {
                     return Err(format!(
-                        "{err}; failed to rewind canonical index after undo write failure: {rewind_err}; blockstore may require repair"
+                        "{err}; failed to rewind canonical index after chain_state save failure: {rewind_err}; blockstore may require repair"
                     ));
                 }
-                return Err(err);
-            }
-        }
-
-        if let Some(chain_state_path) = self.cfg.chain_state_path.as_ref() {
-            if let Err(err) = self.chain_state.save(chain_state_path) {
-                // Rewind canonical index to the length captured before put_block.
-                if let Some(bs) = self.block_store.as_mut() {
-                    let _ = bs.truncate_canonical(canonical_len_before);
-                }
-                self.chain_state = snapshot;
-                self.tip_timestamp = old_tip_timestamp;
-                self.best_known_height = old_best_known_height;
                 return Err(err);
             }
         }

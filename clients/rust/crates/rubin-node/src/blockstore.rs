@@ -27,6 +27,10 @@ pub struct BlockStore {
     /// Test-only: force `rollback_canonical` to return an error.
     #[cfg(test)]
     pub(crate) force_rollback_error: bool,
+    /// Test-only: force `put_undo` to return an error. Used to exercise
+    /// the crash-style atomicity contract of `commit_canonical_block`.
+    #[cfg(test)]
+    pub(crate) force_undo_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +70,8 @@ impl BlockStore {
             force_truncate_error: false,
             #[cfg(test)]
             force_rollback_error: false,
+            #[cfg(test)]
+            force_undo_error: false,
         })
     }
 
@@ -80,6 +86,154 @@ impl BlockStore {
         header_bytes: &[u8],
         block_bytes: &[u8],
     ) -> Result<(), String> {
+        self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
+        self.set_canonical_tip(height, block_hash_bytes)
+    }
+
+    /// Atomic canonical block commit — Go parity
+    /// (`clients/go/node/blockstore.go:100-114`, `CommitCanonicalBlock`:
+    /// `StoreBlock` -> `PutUndo` -> `SetCanonicalTip`).
+    ///
+    /// Persists block bytes, header bytes, and the undo record BEFORE
+    /// advancing the canonical tip. The tip update is the explicit
+    /// commit point: if any earlier step (block/header/undo write) fails,
+    /// the canonical tip remains at its prior height, so a crash leaves
+    /// the chain with no orphaned canonical block missing its undo —
+    /// which would otherwise break `disconnect_tip` on the next reorg.
+    ///
+    /// Compared to the previous `put_block` + separate `put_undo`
+    /// sequence in `sync.rs`, this API shrinks the failure surface: the
+    /// tip never advances before undo durability, so no post-hoc
+    /// `truncate_canonical` rewind is needed on undo-write failure.
+    /// Note: a subsequent `chain_state.save` failure AFTER a successful
+    /// `commit_canonical_block` still requires the caller to call
+    /// `truncate_canonical(canonical_len_before)` because the tip has
+    /// already advanced; that rewind is outside the atomic boundary of
+    /// this API (see `sync.rs` main commit callsite).
+    ///
+    /// **Orphan semantics on retry.** A failure at any step before the
+    /// tip advance may leave block/header/undo files on disk without a
+    /// canonical reference. These are safe and self-healing: block and
+    /// header files are written via `write_file_if_absent` (idempotent
+    /// no-op if the exact contents already exist on retry), and the
+    /// undo file is written via `write_file_atomic`, whose tmp+rename
+    /// idempotently overwrites at the same path on a subsequent retry
+    /// with the same block hash. No canonical entry references these
+    /// files until the tip advances, so they neither contaminate the
+    /// chain nor leak unboundedly across same-hash retries.
+    pub fn commit_canonical_block(
+        &mut self,
+        height: u64,
+        block_hash_bytes: [u8; 32],
+        header_bytes: &[u8],
+        block_bytes: &[u8],
+        undo: &BlockUndo,
+    ) -> Result<(), String> {
+        // 0. Reject mismatched undo up front. If `undo.block_height` does
+        //    not match the canonical height being committed, a later
+        //    `ChainState::disconnect_block` would trip its height invariant
+        //    and the tip would already have advanced — exactly the
+        //    non-atomic failure mode this API is closing. Rejecting before
+        //    any disk write keeps the canonical state untouched.
+        if undo.block_height != height {
+            return Err(format!(
+                "undo block_height mismatch: commit height={height}, undo.block_height={}",
+                undo.block_height
+            ));
+        }
+        // 0a. Height-range + idempotent same-hash no-op guards. Semantics
+        //     mirror Go's `CommitCanonicalBlock` -> `SetCanonicalTip`
+        //     (`clients/go/node/blockstore.go:126-153`):
+        //
+        //     - `height > canonical_len` is an illegal gap; reject BEFORE
+        //       any disk write so orphan block/header/undo files never
+        //       accumulate in the "skipped future height" case.
+        //
+        //     - `height < canonical_len` with the SAME hash is an
+        //       idempotent replay (crash-recovery path where
+        //       `commit_canonical_block` advanced the blockstore tip
+        //       but `chain_state.save` crashed; on restart
+        //       `SyncEngine::apply_block` replays the already-persisted
+        //       block at its original height). Replay ALWAYS calls
+        //       `persist_block_bytes` for symmetric self-healing of
+        //       block + header files (idempotent: `write_file_if_absent`
+        //       is a no-op when the file already exists and never
+        //       overwrites existing bytes; header hash is still
+        //       validated against `block_hash_bytes`). Undo is
+        //       conditionally back-filled via `put_undo` only when the
+        //       undo file is missing on disk (pre-E.4 partial-commit
+        //       case); an existing undo file is NOT rewritten. Tip /
+        //       canonical index remain unchanged on both sub-paths.
+        //
+        //     - `height < canonical_len` with a DIFFERENT hash is a real
+        //       reorg on the canonical index (same parent, different
+        //       block at this height). Fall through to the normal
+        //       persist -> `set_canonical_tip` path, which truncates
+        //       `canonical[height..]` and pushes the new hash — matching
+        //       Go. The prior block's files stay on disk as orphans (no
+        //       canonical reference); this is the standard blockstore
+        //       behavior for non-canonical blocks.
+        //
+        //     - `height == canonical_len` is the normal append.
+        let current_len = self.canonical_len() as u64;
+        if height > current_len {
+            return Err(format!(
+                "commit_canonical_block height gap: height={height} > canonical_len={current_len}"
+            ));
+        }
+        if height < current_len {
+            let existing = self.canonical_hash(height)?;
+            if existing == Some(block_hash_bytes) {
+                // Idempotent same-hash replay with symmetric healing.
+                //
+                //  - `persist_block_bytes` runs header validation and
+                //    then writes block + header via
+                //    `write_file_if_absent` (idempotent no-op if the
+                //    file already exists, same pre-existing behavior
+                //    as the non-atomic `put_block` path). A replay
+                //    after a pre-E.4 partial-commit crash can
+                //    re-create missing block/header files without
+                //    clobbering existing ones.
+                //
+                //  - Undo is then conditionally back-filled only when
+                //    absent: if the undo file is already on disk the
+                //    historical bytes are NOT rewritten (matches the
+                //    earlier Copilot concern that `write_file_atomic`
+                //    would clobber the historical undo even on a
+                //    same-hash retry); if the undo file is missing
+                //    (pre-E.4 crash between block persist and undo
+                //    write), `put_undo` back-fills it.
+                //
+                //  Canonical index / tip remain unchanged regardless.
+                self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
+                if !self.has_undo(block_hash_bytes) {
+                    self.put_undo(block_hash_bytes, undo)?;
+                }
+                return Ok(());
+            }
+            // Different hash at historical height: real reorg; fall
+            // through to persist + tip replace.
+        }
+        // 1. Persist block + header bytes (idempotent `write_file_if_absent`).
+        self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
+        // 2. Persist undo BEFORE any tip advance. Matches Go ordering in
+        //    `CommitCanonicalBlock` (StoreBlock → PutUndo → SetCanonicalTip).
+        self.put_undo(block_hash_bytes, undo)?;
+        // 3. Advance canonical tip LAST — this is the atomic commit point.
+        self.set_canonical_tip(height, block_hash_bytes)
+    }
+
+    /// Cheap header consistency check — length + computed hash equals
+    /// the caller-supplied hash. Called from `persist_block_bytes` as
+    /// the precondition for any block/header write; every canonical
+    /// entry point (`put_block`, `commit_canonical_block`,
+    /// `store_block`) reaches this check through that helper, so
+    /// header validation cannot drift between paths.
+    fn validate_header_matches_hash(
+        &self,
+        header_bytes: &[u8],
+        block_hash_bytes: [u8; 32],
+    ) -> Result<(), String> {
         if header_bytes.len() != BLOCK_HEADER_BYTES {
             return Err(format!("invalid header length: {}", header_bytes.len()));
         }
@@ -87,7 +241,21 @@ impl BlockStore {
         if computed_hash != block_hash_bytes {
             return Err("header hash mismatch".to_string());
         }
+        Ok(())
+    }
 
+    /// Block/header persistence shared by `put_block`,
+    /// `commit_canonical_block`, and `store_block`. Validates header
+    /// length + hash, then writes block and header files via
+    /// `write_file_if_absent` (idempotent across retries — no-op when
+    /// the file already exists; errors if existing bytes differ).
+    fn persist_block_bytes(
+        &self,
+        block_hash_bytes: [u8; 32],
+        header_bytes: &[u8],
+        block_bytes: &[u8],
+    ) -> Result<(), String> {
+        self.validate_header_matches_hash(header_bytes, block_hash_bytes)?;
         let hash_hex = hex::encode(block_hash_bytes);
         write_file_if_absent(
             &self.blocks_dir.join(format!("{hash_hex}.bin")),
@@ -96,8 +264,7 @@ impl BlockStore {
         write_file_if_absent(
             &self.headers_dir.join(format!("{hash_hex}.bin")),
             header_bytes,
-        )?;
-        self.set_canonical_tip(height, block_hash_bytes)
+        )
     }
 
     /// Set or replace the canonical tip at `height`.
@@ -274,22 +441,11 @@ impl BlockStore {
         header_bytes: &[u8],
         block_bytes: &[u8],
     ) -> Result<(), String> {
-        if header_bytes.len() != BLOCK_HEADER_BYTES {
-            return Err(format!("invalid header length: {}", header_bytes.len()));
-        }
-        let computed_hash = block_hash(header_bytes).map_err(|e| e.to_string())?;
-        if computed_hash != block_hash_bytes {
-            return Err("header hash mismatch".to_string());
-        }
-        let hash_hex = hex::encode(block_hash_bytes);
-        write_file_if_absent(
-            &self.blocks_dir.join(format!("{hash_hex}.bin")),
-            block_bytes,
-        )?;
-        write_file_if_absent(
-            &self.headers_dir.join(format!("{hash_hex}.bin")),
-            header_bytes,
-        )
+        // Delegate to the shared helper so header validation and
+        // block/header file writes stay in one place across all
+        // entry points (`put_block`, `commit_canonical_block`,
+        // `store_block`).
+        self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)
     }
 
     // ----- Chain work -----
@@ -317,7 +473,26 @@ impl BlockStore {
 
     // ----- Undo storage -----
 
-    pub fn put_undo(&self, block_hash_bytes: [u8; 32], undo: &BlockUndo) -> Result<(), String> {
+    /// Persist a single undo record. Crate-private so that any in-crate
+    /// canonical-commit path that needs an undo goes through
+    /// `commit_canonical_block`, which enforces the
+    /// `block -> header -> undo -> tip` ordering contract (see that
+    /// docstring). `put_block` and `set_canonical_tip` remain `pub` for
+    /// the no-undo paths (genesis / interop bootstrap, rollback, index
+    /// truncate) where persisting an undo record is either unnecessary
+    /// or inverted; they are NOT part of the E.4 atomicity lane.
+    /// A standalone `put_undo` paired with `set_canonical_tip` in the
+    /// opposite order would reintroduce the E.4 atomicity gap this task
+    /// is closing.
+    pub(crate) fn put_undo(
+        &self,
+        block_hash_bytes: [u8; 32],
+        undo: &BlockUndo,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if self.force_undo_error {
+            return Err("forced undo error (test)".to_string());
+        }
         let raw = marshal_block_undo(undo)?;
         let path = self
             .undo_dir
@@ -331,6 +506,17 @@ impl BlockStore {
             .join(format!("{}.json", hex::encode(block_hash_bytes)));
         let raw = fs::read(&path).map_err(|e| format!("read undo {}: {e}", path.display()))?;
         unmarshal_block_undo(&raw)
+    }
+
+    /// Cheap undo-presence check used by the same-hash replay branch of
+    /// `commit_canonical_block` to verify that a canonical entry
+    /// inherited from pre-E.4 disk state (or corrupted in some other
+    /// way) actually has its undo file on disk before accepting the
+    /// replay as a no-op.
+    fn has_undo(&self, block_hash_bytes: [u8; 32]) -> bool {
+        self.undo_dir
+            .join(format!("{}.json", hex::encode(block_hash_bytes)))
+            .is_file()
     }
 
     // ----- Canonical index helpers -----
@@ -630,6 +816,326 @@ mod tests {
 
         let err = store.truncate_canonical(5).unwrap_err();
         assert!(err.contains("truncate_canonical"));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Go parity / crash-safety for Q-IMPL-RUST-STORAGE-ATOMIC-CANONICAL-COMMIT-01:
+    /// `commit_canonical_block` persists block/header/undo BEFORE
+    /// advancing the canonical tip. The happy-path roundtrip confirms
+    /// all three pieces land and the tip moves to the new height.
+    #[test]
+    fn commit_canonical_block_happy_path_advances_tip_and_persists_undo() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-commit-happy");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("commit_canonical_block");
+
+        assert_eq!(store.canonical_len(), 1);
+        let tip = store.tip().expect("tip").expect("some");
+        assert_eq!(tip, (0, hash));
+        assert_eq!(store.get_undo(hash).expect("get_undo"), undo);
+        assert_eq!(store.get_block_by_hash(hash).expect("block"), genesis);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Crash-style atomicity evidence for E.4: if undo persistence fails
+    /// (simulated here via `force_undo_error`), the canonical tip MUST
+    /// remain at its prior height. Before this change the tip was
+    /// advanced by `put_block` before the undo write, so a crash at the
+    /// same point would leave a canonical block with no recoverable undo.
+    #[test]
+    fn commit_canonical_block_leaves_tip_unchanged_when_undo_fails() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-commit-undo-fail");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        let canonical_len_before = store.canonical_len();
+        store.force_undo_error = true;
+
+        let err = store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .unwrap_err();
+        assert!(
+            err.contains("forced undo error"),
+            "expected forced undo error, got {err:?}"
+        );
+
+        // Tip MUST NOT have advanced past the prior height.
+        assert_eq!(store.canonical_len(), canonical_len_before);
+        assert!(store.tip().expect("tip").is_none());
+        // Block AND header files landed on disk before the undo step
+        // fired, which is safe because `write_file_if_absent` is
+        // idempotent on retry and no canonical entry references them
+        // until the tip advances. Assert both explicitly rather than
+        // relying on `has_block` (which only checks the header file).
+        assert_eq!(
+            store.get_header_by_hash(hash).expect("get_header_by_hash"),
+            header
+        );
+        assert_eq!(
+            store.get_block_by_hash(hash).expect("get_block_by_hash"),
+            genesis
+        );
+
+        // Retry contract: once the transient undo failure clears, calling
+        // commit_canonical_block again with the same arguments must
+        // succeed (no "already exists" error from block/header writes,
+        // no stale-state corruption) and the tip must finally advance.
+        store.force_undo_error = false;
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("retry commit_canonical_block");
+        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
+        assert_eq!(store.get_undo(hash).expect("get_undo"), undo);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `commit_canonical_block` must reject a mismatched undo before any
+    /// disk write, otherwise a later `disconnect_block` would trip its
+    /// height invariant while the canonical tip has already advanced —
+    /// exactly the non-atomic failure mode this API closes.
+    #[test]
+    fn commit_canonical_block_rejects_mismatched_undo_height() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-commit-undo-mismatch");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        // Deliberately mismatched undo: commit height 0 but undo claims height 7.
+        let bad_undo = BlockUndo {
+            block_height: 7,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        let err = store
+            .commit_canonical_block(0, hash, header, &genesis, &bad_undo)
+            .unwrap_err();
+        assert!(
+            err.contains("undo block_height mismatch"),
+            "expected mismatch error, got {err:?}"
+        );
+
+        // Canonical state must be untouched — no files, no tip advance.
+        // Check block and header files explicitly (`has_block` only
+        // checks the header directory).
+        assert_eq!(store.canonical_len(), 0);
+        assert!(store.tip().expect("tip").is_none());
+        assert!(
+            store.get_header_by_hash(hash).is_err(),
+            "header file must not exist before the mismatch check"
+        );
+        assert!(
+            store.get_block_by_hash(hash).is_err(),
+            "block file must not exist before the mismatch check"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Same-hash replay heals a pre-E.4 partial-commit state: a
+    /// canonical entry present on disk but with its undo missing
+    /// (crash between block persist and undo write on the old
+    /// non-atomic path). `SyncEngine::apply_block` replays the block
+    /// on restart, and the replay must back-fill the undo so recovery
+    /// proceeds — not error out. If the undo IS on disk, the replay
+    /// stays a no-op (doesn't rewrite historical bytes).
+    #[test]
+    fn commit_canonical_block_same_hash_replay_back_fills_missing_undo() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-replay-backfill");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+
+        // Simulate pre-E.4 partial-commit state: block + canonical tip
+        // landed via the non-atomic `put_block`, but the undo file was
+        // never written (crash between the two steps in the old code).
+        store
+            .put_block(0, hash, header, &genesis)
+            .expect("put_block (seed)");
+        assert_eq!(store.canonical_len(), 1);
+        assert!(!store.has_undo(hash), "seeded state must have no undo");
+
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        // Replay the same block. Canonical entry already matches, undo
+        // is missing — API must heal by writing undo and returning Ok.
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("same-hash replay must back-fill missing undo");
+
+        // Canonical index unchanged; undo now present and matches.
+        assert_eq!(store.canonical_len(), 1);
+        assert!(
+            store.has_undo(hash),
+            "undo file must be written during healing"
+        );
+        assert_eq!(store.get_undo(hash).expect("get_undo"), undo);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `commit_canonical_block` rejects future-height gaps BEFORE any
+    /// disk write, so orphan block/header/undo files never accumulate
+    /// when a caller accidentally skips a height.
+    #[test]
+    fn commit_canonical_block_rejects_height_gap_without_orphan_files() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-commit-gap");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        // canonical_len starts at 0; passing height=5 is a gap.
+        let undo = BlockUndo {
+            block_height: 5,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        let err = store
+            .commit_canonical_block(5, hash, header, &genesis, &undo)
+            .unwrap_err();
+        assert!(
+            err.contains("height gap") && err.contains("height=5"),
+            "expected height-gap rejection, got {err:?}"
+        );
+
+        // No disk writes: block AND header files must NOT exist (check
+        // both explicitly — `has_block` only inspects the header dir).
+        assert_eq!(store.canonical_len(), 0);
+        assert!(
+            store.get_header_by_hash(hash).is_err(),
+            "header file must not exist on height-gap rejection"
+        );
+        assert!(
+            store.get_block_by_hash(hash).is_err(),
+            "block file must not exist on height-gap rejection"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Crash-recovery path (GPT-5 review P1): after a successful
+    /// `commit_canonical_block` that advanced the blockstore tip, if
+    /// `chain_state.save` crashes the chain state lags the blockstore
+    /// by one or more blocks. On restart `SyncEngine::apply_block`
+    /// replays the already-persisted block at its original height and
+    /// MUST succeed so recovery can proceed; it MUST NOT rewrite the
+    /// historical undo file (`put_undo` via `write_file_atomic` would
+    /// otherwise clobber the historical bytes on disk). The same-hash
+    /// replay validates the header, runs the idempotent
+    /// `persist_block_bytes` (no-op when block/header already exist,
+    /// self-heals if missing), and only calls `put_undo` when the undo
+    /// file is absent; canonical index / tip stay unchanged.
+    /// This test covers the already-present-undo sub-case: byte
+    /// equality before/after replay proves no rewrite happened.
+    #[test]
+    fn commit_canonical_block_same_hash_replay_is_idempotent_noop() {
+        use crate::genesis::devnet_genesis_block_bytes;
+        use crate::undo::{BlockUndo, TxUndo};
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
+
+        let dir = unique_temp_path("rubin-blockstore-same-hash-replay");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        let undo = BlockUndo {
+            block_height: 0,
+            previous_already_generated: 0,
+            txs: vec![TxUndo { spent: vec![] }],
+        };
+
+        // First commit lands normally.
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("first commit");
+        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
+
+        // Capture undo file bytes so we can assert the replay does NOT
+        // rewrite them. Content comparison is more robust than mtime:
+        // filesystem timestamp resolution and update semantics vary by
+        // platform and may not change on a same-bytes rewrite.
+        let undo_path = root
+            .join("undo")
+            .join(format!("{}.json", hex::encode(hash)));
+        let undo_bytes_before = std::fs::read(&undo_path).expect("undo bytes before");
+
+        // Simulate a crash-recovery replay: same hash at height 0 after
+        // blockstore already advanced to canonical_len == 1. Must succeed
+        // as a no-op.
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("replay same-hash commit must succeed");
+
+        // Canonical index unchanged.
+        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
+        // Undo file bytes unchanged — no rewrite happened.
+        let undo_bytes_after = std::fs::read(&undo_path).expect("undo bytes after");
+        assert_eq!(
+            undo_bytes_before, undo_bytes_after,
+            "same-hash replay must not rewrite the historical undo file"
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
