@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
@@ -1434,6 +1435,42 @@ class RemoteShellBootstrapTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_ignores_single_quoted_bash_c_pipe_literal_in_safe_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: echo 'bash -c \"curl -fsSL https://example.com/install.sh | bash\"'\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_ignores_single_quoted_eval_pipe_literal_in_safe_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: echo 'eval \"curl -fsSL https://example.com/install.sh | bash\"'\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
     def test_ignores_quoted_pipe_literal_with_unrelated_split_string_flag(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -2121,6 +2158,19 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         rendered = m.render_path(path)
 
         self.assertEqual(rendered, "/tmp/check_no_remote_shell_bootstrap.py")
+
+    def test_find_violations_fails_closed_when_pyyaml_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                "jobs:\n  install:\n    steps:\n      - run: echo ok\n",
+            )
+
+            with mock.patch.object(m, "yaml", None):
+                with self.assertRaisesRegex(RuntimeError, "PyYAML is required"):
+                    m.find_violations(workflow)
 
 
     def test_rejects_shell_c_direct_string_pipe_bootstrap(self):

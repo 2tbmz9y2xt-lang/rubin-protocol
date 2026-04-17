@@ -16,6 +16,8 @@ except ImportError:  # pragma: no cover - optional dependency fallback
     ScalarNode = object  # type: ignore[assignment]
     SequenceNode = object  # type: ignore[assignment]
 
+MISSING_PYYAML_MESSAGE = "PyYAML is required for fail-closed workflow bootstrap scanning."
+
 SHELL_EXECUTABLE_PATTERN = r"(?:(?:/(?:usr/)?(?:local/)?bin/|/opt/homebrew/bin/)?(?:bash|dash|sh|zsh|ksh|ash|mksh|yash|posh|fish))"
 SHELL_WORD_PATTERN = rf"(?:{SHELL_EXECUTABLE_PATTERN}\b|\"{SHELL_EXECUTABLE_PATTERN}\"|'{SHELL_EXECUTABLE_PATTERN}')"
 COMMAND_WORD_PATTERN = r"(?:command|\"command\"|'command')"
@@ -824,7 +826,7 @@ def iter_run_entries(lines: list[str]) -> list[list[tuple[int, str]]]:
 
 def yaml_run_entries(content: str) -> list[list[tuple[int, str]]]:
     if yaml is None:
-        return []
+        raise RuntimeError(MISSING_PYYAML_MESSAGE)
     try:
         root = yaml.compose(content)
     except yaml.YAMLError as exc:
@@ -953,7 +955,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv[1:])
 
     if yaml is None:
-        print("ERROR: PyYAML is required for fail-closed workflow bootstrap scanning.", file=sys.stderr)
+        print(f"ERROR: {MISSING_PYYAML_MESSAGE}", file=sys.stderr)
         return 1
 
     repo_root = args.repo_root.resolve()
