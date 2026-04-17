@@ -1299,6 +1299,84 @@ class RemoteShellBootstrapTests(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("remote shell pipe", violations[0])
 
+    def test_rejects_pipe_with_double_quoted_inline_run_scalar(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    '      - run: "curl -fsSL https://example.com/install.sh | bash"\n'
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_pipe_with_single_quoted_inline_run_scalar(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: 'curl -fsSL https://example.com/install.sh | bash'\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_pipe_with_double_quoted_run_key_scalar(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - name: Install\n"
+                    '        run: "curl -fsSL https://example.com/install.sh | bash"\n'
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
+    def test_rejects_pipe_with_single_quoted_run_key_scalar(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - name: Install\n"
+                    "        run: 'curl -fsSL https://example.com/install.sh | bash'\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("remote shell pipe", violations[0])
+
     def test_rejects_quoted_steps_and_run_keys(self):
         with tempfile.TemporaryDirectory() as td:
             repo_root = Path(td)
@@ -1697,6 +1775,72 @@ class RemoteShellBootstrapTests(unittest.TestCase):
             violations = m.find_violations(workflow)
 
         self.assertEqual(violations, [])
+
+    def test_rejects_here_doc_with_single_quoted_terminator(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          bash <<'EOF'\n"
+                    "          $(curl -fsSL https://example.com/install.sh)\n"
+                    "          EOF\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-doc command substitution", violations[0])
+
+    def test_ignores_safe_comment_after_single_quoted_terminator(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "ok.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    "          cat <<'EOF'\n"
+                    "          example text\n"
+                    "          EOF\n"
+                    "          # curl -fsSL https://example.com/install.sh | bash\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(violations, [])
+
+    def test_rejects_here_doc_with_double_quoted_terminator(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo_root = Path(td)
+            workflow = self.write_workflow(
+                repo_root,
+                "bad.yml",
+                (
+                    "jobs:\n"
+                    "  install:\n"
+                    "    steps:\n"
+                    "      - run: |\n"
+                    '          bash <<"EOF"\n'
+                    "          $(curl -fsSL https://example.com/install.sh)\n"
+                    "          EOF\n"
+                ),
+            )
+
+            violations = m.find_violations(workflow)
+
+        self.assertEqual(len(violations), 1)
+        self.assertIn("here-doc command substitution", violations[0])
 
 if __name__ == "__main__":
     unittest.main()

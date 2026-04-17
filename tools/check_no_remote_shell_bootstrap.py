@@ -160,6 +160,12 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
         heredoc_match = re.search(r"<<-?\s*(\S+)$", normalized)
         if heredoc_match is not None:
             active_heredoc = heredoc_match.group(1)
+            if (
+                len(active_heredoc) >= 2
+                and active_heredoc[0] == active_heredoc[-1]
+                and active_heredoc[0] in {"'", '"'}
+            ):
+                active_heredoc = active_heredoc[1:-1]
         windows.append((idx, line_no, "\n".join(parts)))
     return windows
 
