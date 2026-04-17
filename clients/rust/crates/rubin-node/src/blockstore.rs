@@ -141,29 +141,35 @@ impl BlockStore {
                 undo.block_height
             ));
         }
-        // 0a. Append-only invariant guard with an idempotent same-hash
-        //     replay carve-out for crash recovery.
+        // 0a. Height-range + idempotent same-hash no-op guards. Semantics
+        //     mirror Go's `CommitCanonicalBlock` -> `SetCanonicalTip`
+        //     (`clients/go/node/blockstore.go:126-153`):
         //
-        //     `commit_canonical_block` is the canonical APPEND path; real
-        //     non-append rewrites go through `rollback_canonical` /
-        //     `truncate_canonical` / explicit reorg APIs. A future-height
-        //     gap (`height > canonical_len`) would leak orphan
-        //     block/header/undo files before `set_canonical_tip` rejects
-        //     the gap and is rejected up front.
+        //     - `height > canonical_len` is an illegal gap; reject BEFORE
+        //       any disk write so orphan block/header/undo files never
+        //       accumulate in the "skipped future height" case.
         //
-        //     `height < canonical_len` is the crash-recovery case:
-        //     `commit_canonical_block` persisted block/undo and advanced
-        //     the tip, then `chain_state.save` crashed, so on restart the
-        //     chain state lags the blockstore by one or more blocks and
-        //     `SyncEngine::apply_block` replays the already-persisted
-        //     block at its original height. That replay MUST succeed to
-        //     unblock recovery, but MUST NOT rewrite the historical
-        //     block/header/undo files — `put_undo` via `write_file_atomic`
-        //     would otherwise clobber the historical undo on disk. The
-        //     same-hash path therefore returns `Ok(())` as a pure no-op:
-        //     no `persist_block_bytes`, no `put_undo`, no tip mutation.
-        //     Different-hash replay at a historical height is still a
-        //     real reorg and goes through the rollback/truncate APIs.
+        //     - `height < canonical_len` with the SAME hash is an
+        //       idempotent replay (the crash-recovery path where
+        //       `commit_canonical_block` advanced the blockstore tip but
+        //       `chain_state.save` crashed; on restart
+        //       `SyncEngine::apply_block` replays the already-persisted
+        //       block at its original height). Handle as a pure no-op:
+        //       return `Ok(())` with no `persist_block_bytes`, no
+        //       `put_undo`, no tip mutation. Header bytes are still
+        //       validated so replay matches the append path's header/hash
+        //       consistency contract.
+        //
+        //     - `height < canonical_len` with a DIFFERENT hash is a real
+        //       reorg on the canonical index (same parent, different
+        //       block at this height). Fall through to the normal
+        //       persist -> `set_canonical_tip` path, which truncates
+        //       `canonical[height..]` and pushes the new hash — matching
+        //       Go. The prior block's files stay on disk as orphans (no
+        //       canonical reference); this is the standard blockstore
+        //       behavior for non-canonical blocks.
+        //
+        //     - `height == canonical_len` is the normal append.
         let current_len = self.canonical_len() as u64;
         if height > current_len {
             return Err(format!(
@@ -173,13 +179,13 @@ impl BlockStore {
         if height < current_len {
             let existing = self.canonical_hash(height)?;
             if existing == Some(block_hash_bytes) {
-                // Idempotent same-hash replay: skip all disk writes.
+                // Idempotent same-hash replay: validate header, then
+                // short-circuit with no disk writes.
+                self.validate_header_matches_hash(header_bytes, block_hash_bytes)?;
                 return Ok(());
             }
-            return Err(format!(
-                "commit_canonical_block is append-only: height={height} < canonical_len={current_len} \
-                 with a different hash; use rollback/truncate for reorg commits"
-            ));
+            // Different hash at historical height: real reorg; fall
+            // through to persist + tip replace.
         }
         // 1. Persist block + header bytes (idempotent `write_file_if_absent`).
         self.persist_block_bytes(block_hash_bytes, header_bytes, block_bytes)?;
@@ -188,6 +194,26 @@ impl BlockStore {
         self.put_undo(block_hash_bytes, undo)?;
         // 3. Advance canonical tip LAST — this is the atomic commit point.
         self.set_canonical_tip(height, block_hash_bytes)
+    }
+
+    /// Cheap header consistency check — length + computed hash equals
+    /// the caller-supplied hash. Shared by `persist_block_bytes` (as the
+    /// precondition for any disk write) and by the same-hash no-op branch
+    /// of `commit_canonical_block` (so replay/no-op behavior matches the
+    /// append path's validation contract even when no write happens).
+    fn validate_header_matches_hash(
+        &self,
+        header_bytes: &[u8],
+        block_hash_bytes: [u8; 32],
+    ) -> Result<(), String> {
+        if header_bytes.len() != BLOCK_HEADER_BYTES {
+            return Err(format!("invalid header length: {}", header_bytes.len()));
+        }
+        let computed_hash = block_hash(header_bytes).map_err(|e| e.to_string())?;
+        if computed_hash != block_hash_bytes {
+            return Err("header hash mismatch".to_string());
+        }
+        Ok(())
     }
 
     /// Block/header persistence shared by `put_block` and
@@ -200,13 +226,7 @@ impl BlockStore {
         header_bytes: &[u8],
         block_bytes: &[u8],
     ) -> Result<(), String> {
-        if header_bytes.len() != BLOCK_HEADER_BYTES {
-            return Err(format!("invalid header length: {}", header_bytes.len()));
-        }
-        let computed_hash = block_hash(header_bytes).map_err(|e| e.to_string())?;
-        if computed_hash != block_hash_bytes {
-            return Err("header hash mismatch".to_string());
-        }
+        self.validate_header_matches_hash(header_bytes, block_hash_bytes)?;
         let hash_hex = hex::encode(block_hash_bytes);
         write_file_if_absent(
             &self.blocks_dir.join(format!("{hash_hex}.bin")),
@@ -908,54 +928,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// `commit_canonical_block` is append-only. A caller passing a height
-    /// below the current canonical length with a DIFFERENT hash must be
-    /// rejected before any disk write — otherwise `set_canonical_tip`
-    /// would silently truncate live canonical entries and destroy the
-    /// chain view whose undo records are still on disk. Reorg /
-    /// truncation paths must go through the dedicated
-    /// `rollback_canonical` / `truncate_canonical` APIs.
-    #[test]
-    fn commit_canonical_block_rejects_non_append_rewrite() {
-        use crate::undo::{BlockUndo, TxUndo};
-        use rubin_consensus::BLOCK_HEADER_BYTES;
-
-        let dir = unique_temp_path("rubin-blockstore-commit-non-append");
-        let root = block_store_path(&dir);
-        let mut store = BlockStore::open(&root).expect("open");
-
-        // Seed two canonical entries without going through the atomic
-        // commit (the test targets the guard, not the happy path).
-        store.set_canonical_tip(0, [0x11; 32]).expect("seed 0");
-        store.set_canonical_tip(1, [0x22; 32]).expect("seed 1");
-        assert_eq!(store.canonical_len(), 2);
-
-        // Different hash at an existing height must be rejected.
-        let different_hash = [0x33; 32];
-        let undo = BlockUndo {
-            block_height: 1,
-            previous_already_generated: 0,
-            txs: vec![TxUndo { spent: vec![] }],
-        };
-        // Header bytes / block bytes irrelevant here: the append guard
-        // fires before `persist_block_bytes` runs.
-        let fake_header = [0u8; BLOCK_HEADER_BYTES];
-        let err = store
-            .commit_canonical_block(1, different_hash, &fake_header, &fake_header, &undo)
-            .unwrap_err();
-        assert!(
-            err.contains("append-only"),
-            "expected append-only rejection, got {err:?}"
-        );
-
-        // Canonical length stays at 2 and the prior hash at height 1
-        // is intact.
-        assert_eq!(store.canonical_len(), 2);
-        assert_eq!(store.canonical_hash(1).expect("h1"), Some([0x22; 32]));
-
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
     /// `commit_canonical_block` rejects future-height gaps BEFORE any
     /// disk write, so orphan block/header/undo files never accumulate
     /// when a caller accidentally skips a height.
@@ -994,10 +966,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// Strict append-only: even a same-hash call at an existing
-    /// canonical height must be rejected, because the undo file
-    /// would be overwritten at a historical height (sharp edge for
-    /// future callers).
     /// Crash-recovery path (GPT-5 review P1): after a successful
     /// `commit_canonical_block` that advanced the blockstore tip, if
     /// `chain_state.save` crashes the chain state lags the blockstore
@@ -1007,7 +975,8 @@ mod tests {
     /// historical block/header/undo files because `put_undo` via
     /// `write_file_atomic` would clobber the historical undo on disk.
     /// The same-hash replay is therefore handled as a no-op: no disk
-    /// writes, no tip mutation, `Ok(())` returned.
+    /// writes, no tip mutation, `Ok(())` returned (header bytes are
+    /// still validated for consistency with the append path).
     #[test]
     fn commit_canonical_block_same_hash_replay_is_idempotent_noop() {
         use crate::genesis::devnet_genesis_block_bytes;
