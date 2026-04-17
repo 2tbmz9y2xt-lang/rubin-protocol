@@ -721,6 +721,12 @@ mod internal_tests {
 
         let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
         assert_eq!(err.code, ErrorCode::BlockErrDaBatchExceeded);
+        // Exact-message parity with Go (`clients/go/consensus/block_basic.go`,
+        // `validateDASetIntegrity`): lock the full reject message, not just
+        // the code, so future wording drift is caught alongside the
+        // ordering invariant. Mirrors the same assertion style used by the
+        // G.1 length-reject test above.
+        assert_eq!(err.msg, "too many DA commits in block");
     }
 }
 
