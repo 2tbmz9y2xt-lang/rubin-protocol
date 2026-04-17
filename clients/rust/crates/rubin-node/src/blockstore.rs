@@ -141,28 +141,44 @@ impl BlockStore {
                 undo.block_height
             ));
         }
-        // 0a. Strict append-only invariant guard. `commit_canonical_block`
-        //     is the canonical APPEND path; non-append canonical
-        //     rewrites go through `rollback_canonical` /
-        //     `truncate_canonical` / explicit reorg APIs. A stale
-        //     `height < canonical_len` — even with a matching hash —
-        //     would cause `put_undo` to overwrite the historical
-        //     undo file at that height via `write_file_atomic`'s
-        //     tmp+rename, which is a sharp edge for future callers.
-        //     A future-height gap (`height > canonical_len`) would
-        //     leak orphan block/header/undo files before
-        //     `set_canonical_tip` rejects the gap. Both cases are
-        //     rejected up front, before any disk write. Only the
-        //     strict `height == canonical_len` append is accepted;
-        //     retry after a crashed commit is handled by the
-        //     `set_canonical_tip` reload path, which restores the
-        //     pre-commit `canonical_len` so the retry lands as a
-        //     normal append rather than a mid-chain rewrite.
+        // 0a. Append-only invariant guard with an idempotent same-hash
+        //     replay carve-out for crash recovery.
+        //
+        //     `commit_canonical_block` is the canonical APPEND path; real
+        //     non-append rewrites go through `rollback_canonical` /
+        //     `truncate_canonical` / explicit reorg APIs. A future-height
+        //     gap (`height > canonical_len`) would leak orphan
+        //     block/header/undo files before `set_canonical_tip` rejects
+        //     the gap and is rejected up front.
+        //
+        //     `height < canonical_len` is the crash-recovery case:
+        //     `commit_canonical_block` persisted block/undo and advanced
+        //     the tip, then `chain_state.save` crashed, so on restart the
+        //     chain state lags the blockstore by one or more blocks and
+        //     `SyncEngine::apply_block` replays the already-persisted
+        //     block at its original height. That replay MUST succeed to
+        //     unblock recovery, but MUST NOT rewrite the historical
+        //     block/header/undo files — `put_undo` via `write_file_atomic`
+        //     would otherwise clobber the historical undo on disk. The
+        //     same-hash path therefore returns `Ok(())` as a pure no-op:
+        //     no `persist_block_bytes`, no `put_undo`, no tip mutation.
+        //     Different-hash replay at a historical height is still a
+        //     real reorg and goes through the rollback/truncate APIs.
         let current_len = self.canonical_len() as u64;
-        if height != current_len {
+        if height > current_len {
             return Err(format!(
-                "commit_canonical_block is append-only: height={height} != canonical_len={current_len}; \
-                 use rollback/truncate/rewind APIs for non-append commits"
+                "commit_canonical_block height gap: height={height} > canonical_len={current_len}"
+            ));
+        }
+        if height < current_len {
+            let existing = self.canonical_hash(height)?;
+            if existing == Some(block_hash_bytes) {
+                // Idempotent same-hash replay: skip all disk writes.
+                return Ok(());
+            }
+            return Err(format!(
+                "commit_canonical_block is append-only: height={height} < canonical_len={current_len} \
+                 with a different hash; use rollback/truncate for reorg commits"
             ));
         }
         // 1. Persist block + header bytes (idempotent `write_file_if_absent`).
@@ -967,8 +983,8 @@ mod tests {
             .commit_canonical_block(5, hash, header, &genesis, &undo)
             .unwrap_err();
         assert!(
-            err.contains("append-only") && err.contains("height=5"),
-            "expected append-only rejection on future-height gap, got {err:?}"
+            err.contains("height gap") && err.contains("height=5"),
+            "expected height-gap rejection, got {err:?}"
         );
 
         // No disk writes: block/header/undo files must NOT exist.
@@ -982,44 +998,71 @@ mod tests {
     /// canonical height must be rejected, because the undo file
     /// would be overwritten at a historical height (sharp edge for
     /// future callers).
+    /// Crash-recovery path (GPT-5 review P1): after a successful
+    /// `commit_canonical_block` that advanced the blockstore tip, if
+    /// `chain_state.save` crashes the chain state lags the blockstore
+    /// by one or more blocks. On restart `SyncEngine::apply_block`
+    /// replays the already-persisted block at its original height and
+    /// MUST succeed so recovery can proceed; it MUST NOT rewrite the
+    /// historical block/header/undo files because `put_undo` via
+    /// `write_file_atomic` would clobber the historical undo on disk.
+    /// The same-hash replay is therefore handled as a no-op: no disk
+    /// writes, no tip mutation, `Ok(())` returned.
     #[test]
-    fn commit_canonical_block_rejects_same_hash_at_historical_height() {
+    fn commit_canonical_block_same_hash_replay_is_idempotent_noop() {
+        use crate::genesis::devnet_genesis_block_bytes;
         use crate::undo::{BlockUndo, TxUndo};
-        use rubin_consensus::BLOCK_HEADER_BYTES;
+        use rubin_consensus::{block_hash, BLOCK_HEADER_BYTES};
 
-        let dir = unique_temp_path("rubin-blockstore-commit-same-hash");
+        let dir = unique_temp_path("rubin-blockstore-same-hash-replay");
         let root = block_store_path(&dir);
         let mut store = BlockStore::open(&root).expect("open");
 
-        let hash0 = [0x11; 32];
-        let hash1 = [0x22; 32];
-        store.set_canonical_tip(0, hash0).expect("seed 0");
-        store.set_canonical_tip(1, hash1).expect("seed 1");
-        assert_eq!(store.canonical_len(), 2);
-
-        let undo0 = BlockUndo {
+        let genesis = devnet_genesis_block_bytes();
+        let header = &genesis[..BLOCK_HEADER_BYTES];
+        let hash = block_hash(header).expect("hash");
+        let undo = BlockUndo {
             block_height: 0,
             previous_already_generated: 0,
             txs: vec![TxUndo { spent: vec![] }],
         };
-        let fake_header = [0u8; BLOCK_HEADER_BYTES];
 
-        // Same hash at a historical height must be rejected to avoid
-        // rewriting the historical undo file.
-        let err = store
-            .commit_canonical_block(0, hash0, &fake_header, &fake_header, &undo0)
-            .unwrap_err();
-        assert!(
-            err.contains("append-only")
-                && err.contains("height=0")
-                && err.contains("canonical_len=2"),
-            "expected strict append-only rejection, got {err:?}"
-        );
+        // First commit lands normally.
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("first commit");
+        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
+
+        // Capture undo file mtime so we can assert the replay does NOT
+        // rewrite it.
+        let undo_path = root
+            .join("undo")
+            .join(format!("{}.json", hex::encode(hash)));
+        let mtime_before = std::fs::metadata(&undo_path)
+            .expect("undo metadata")
+            .modified()
+            .expect("mtime");
+
+        // Simulate a crash-recovery replay: same hash at height 0 after
+        // blockstore already advanced to canonical_len == 1. Must succeed
+        // as a no-op.
+        store
+            .commit_canonical_block(0, hash, header, &genesis, &undo)
+            .expect("replay same-hash commit must succeed");
 
         // Canonical index unchanged.
-        assert_eq!(store.canonical_len(), 2);
-        assert_eq!(store.canonical_hash(0).expect("h0"), Some(hash0));
-        assert_eq!(store.canonical_hash(1).expect("h1"), Some(hash1));
+        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(store.tip().expect("tip").expect("some"), (0, hash));
+        // Undo file NOT rewritten — mtime stable.
+        let mtime_after = std::fs::metadata(&undo_path)
+            .expect("undo metadata after replay")
+            .modified()
+            .expect("mtime after");
+        assert_eq!(
+            mtime_before, mtime_after,
+            "same-hash replay must not rewrite the historical undo file"
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
