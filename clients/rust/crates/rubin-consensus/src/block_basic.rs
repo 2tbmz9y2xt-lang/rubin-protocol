@@ -293,7 +293,7 @@ fn validate_da_set_maps(
     commits: &HashMap<[u8; 32], DaCommitSet>,
     chunks: &HashMap<[u8; 32], HashMap<u16, Tx>>,
 ) -> Result<(), TxError> {
-    // Go parity (clients/go/consensus/block_basic.go, `validateDASetsInBlock`):
+    // Go parity (clients/go/consensus/block_basic.go, `validateDASetIntegrity`):
     // the batch-count guard runs BEFORE the sortedDAIDs loops so a block that
     // exceeds `MAX_DA_BATCHES_PER_BLOCK` surfaces as `BLOCK_ERR_DA_BATCH_EXCEEDED`,
     // not as `BLOCK_ERR_DA_SET_INVALID` / `BLOCK_ERR_DA_INCOMPLETE` from a
@@ -355,7 +355,7 @@ fn validate_da_set_maps(
             }
             da_commit_outputs += 1;
             // Go parity (clients/go/consensus/block_basic.go,
-            // `validateDASetsInBlock` payload-commitment loop): a DA commit
+            // `validateDASetIntegrity` payload-commitment loop): a DA commit
             // output whose covenant payload is not exactly 32 bytes is
             // rejected as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID /
             // "DA commitment output has invalid length"` BEFORE the
