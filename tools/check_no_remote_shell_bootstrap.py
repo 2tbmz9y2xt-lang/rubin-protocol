@@ -120,6 +120,8 @@ def command_windows(entries: list[tuple[int, str]], start: int) -> list[tuple[in
         if pipe_comment_match:
             pipe_token = pipe_comment_match.group(0).split("#", 1)[0].rstrip()
             normalized = normalized[: pipe_comment_match.start()].rstrip() + f" {pipe_token}"
+        else:
+            normalized = strip_shell_comment(normalized)
         parts.append(normalized)
         windows.append((idx, line_no, " ".join(parts)))
     return windows
@@ -197,8 +199,66 @@ def strip_quoted_literals(text: str) -> str:
     return "".join(parts)
 
 
-def contains_quoted_downloader_word(text: str) -> bool:
-    return any(token in text for token in ('"curl"', "'curl'", '"wget"', "'wget'"))
+def strip_shell_comment(text: str) -> str:
+    quote: str | None = None
+    escape = False
+    for idx, ch in enumerate(text):
+        if quote is None:
+            if ch in {"'", '"'}:
+                quote = ch
+                continue
+            if ch == "#":
+                return text[:idx].rstrip()
+            continue
+        if quote == '"':
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = None
+        elif ch == quote:
+            quote = None
+    return text
+
+
+def mask_pipe_window(text: str) -> str:
+    parts: list[str] = []
+    quote: str | None = None
+    escape = False
+    quoted: list[str] = []
+    for ch in text:
+        if quote is None:
+            if ch in {"'", '"'}:
+                quote = ch
+                quoted = []
+                parts.append(ch)
+            else:
+                parts.append(ch)
+            continue
+        if quote == '"':
+            if escape:
+                escape = False
+                quoted.append(ch)
+                continue
+            if ch == "\\":
+                escape = True
+                quoted.append(ch)
+                continue
+        if ch == quote:
+            quoted_text = "".join(quoted)
+            if re.fullmatch(DOWNLOADER_EXECUTABLE_PATTERN, quoted_text):
+                parts.extend(quoted_text)
+            else:
+                parts.extend(" " * len(quoted_text))
+            parts.append(ch)
+            quote = None
+            quoted = []
+            continue
+        quoted.append(ch)
+    if quote is not None and quoted:
+        parts.extend(" " * len(quoted))
+    return "".join(parts)
 
 
 def extract_flow_mapping_run(mapping_text: str) -> str | None:
@@ -495,12 +555,10 @@ def find_violations(path: Path) -> list[str]:
             matched_end: int | None = None
             for end_idx, line_no, window in command_windows(run_entries, line_idx):
                 for label, pattern in REMOTE_SHELL_PATTERNS:
-                    candidate = strip_quoted_literals(window) if label == "remote shell pipe" else window
+                    candidate = mask_pipe_window(window) if label == "remote shell pipe" else window
                     matched = pattern.search(candidate)
                     if not matched and label == "remote shell pipe" and (
-                        " env -S " in window
-                        or "--split-string" in window
-                        or contains_quoted_downloader_word(window)
+                        " env -S " in window or "--split-string" in window
                     ):
                         matched = pattern.search(window)
                     if matched:
