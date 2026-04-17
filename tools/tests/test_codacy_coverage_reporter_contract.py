@@ -50,7 +50,7 @@ class CodacyCoverageReporterContractTests(unittest.TestCase):
 
     def test_sha_tool_failures_do_not_fall_through_as_checksum_mismatch(self):
         text = SCRIPT_PATH.read_text(encoding="utf-8")
-        self.assertIn('actual="$(compute_sha512 "$path")" || return 2', text)
+        self.assertIn('if ! actual="$(compute_sha512 "$path")"; then', text)
         self.assertIn('if [[ $verify_rc -eq 2 ]]; then', text)
 
     def test_mismatched_cached_binary_is_removed_before_redownload(self):

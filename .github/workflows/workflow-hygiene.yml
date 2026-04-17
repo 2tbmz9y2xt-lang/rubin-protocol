@@ -106,7 +106,8 @@ jobs:
         if: steps.scope.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          python3 -m pip install --disable-pip-version-check "PyYAML==6.0.2"
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
 
       - name: Reject remote shell bootstrap in workflows
         if: steps.scope.outputs.skip != 'true'

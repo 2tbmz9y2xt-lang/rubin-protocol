@@ -283,6 +283,9 @@ if remote_pr_head and local_head and remote_pr_head != local_head and local_head
             file=sys.stderr,
         )
         raise SystemExit(1)
+    if not head_sha:
+        print("FAIL: Codacy PR head is missing and cannot be verified yet", file=sys.stderr)
+        raise SystemExit(1)
     if head_sha and remote_pr_head and head_sha != remote_pr_head:
         print(
             f"FAIL: Codacy head commit {head_sha} does not match GitHub PR head {remote_pr_head}",

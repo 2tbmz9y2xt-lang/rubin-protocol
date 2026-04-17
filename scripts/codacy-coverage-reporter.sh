@@ -56,8 +56,13 @@ verify_sha512() {
   local expected="$2"
   local actual
 
-  actual="$(compute_sha512 "$path")" || return 2
-  [[ "$actual" == "$expected" ]]
+  if ! actual="$(compute_sha512 "$path")"; then
+    return 2
+  fi
+  if [[ "$actual" == "$expected" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 platform_config() {
