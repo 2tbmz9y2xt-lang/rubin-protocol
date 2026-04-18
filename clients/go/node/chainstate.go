@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -764,28 +765,29 @@ func parseHex32(name, value string) ([32]byte, error) {
 }
 
 // writeFileAtomic writes data to path via a temp+rename pattern with an
-// honest fsync durability contract (E.1). The actual file IO lives in the
-// helpers writeAndSyncTemp and syncDir — see their doc comments for the
-// short-write loop, errors.Join semantics, and Close error handling.
+// honest fsync durability contract (E.1). The actual file IO lives in
+// the helpers allocateAndWriteTemp, writeAndSyncTemp, and syncDir.
 //
 // Sequence (any failure removes the temp file before returning):
-//  1. delegate to writeAndSyncTemp: open temp with O_TRUNC|O_CREATE|O_WRONLY,
-//     loop Write until all bytes are persisted, Sync (fsync-equivalent:
-//     flushes file data + metadata to stable storage), Close, return joined
-//     errors;
+//  1. delegate to allocateAndWriteTemp: pick a unique temp path via
+//     tempPathFor+nextTempSeq and delegate to writeAndSyncTemp, which
+//     opens the temp with O_CREATE|O_EXCL|O_WRONLY (NO O_TRUNC — see
+//     that helper's doc for the crash-safety rationale), loops Write
+//     until all bytes are persisted, Sync, Close, returns joined
+//     errors. A stale-temp collision (PID + seq reuse across a crash)
+//     retries up to maxTempAllocRetries with a fresh seq;
 //  2. Rename temp -> destination (atomic on the same filesystem);
-//  3. delegate to syncDir on the parent directory so the rename itself is
-//     durable (without this the destination's bytes are on disk after
-//     step 1's Sync, but the directory entry mapping `path` to the new
-//     inode may still live only in the kernel page cache and be lost on
-//     crash).
+//  3. delegate to syncDir on the parent directory so the rename itself
+//     is durable (without this the destination's bytes are on disk
+//     after step 1's Sync, but the directory entry mapping `path` to
+//     the new inode may still live only in the kernel page cache and
+//     be lost on crash).
 //
 // Mirrors the Rust `clients/rust/crates/rubin-node/src/io_utils.rs`
 // `write_file_atomic` for cross-client storage parity.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	tmpPath := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := writeAndSyncTemp(tmpPath, data, mode); err != nil {
-		_ = os.Remove(tmpPath)
+	tmpPath, err := allocateAndWriteTemp(path, data, mode)
+	if err != nil {
 		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
@@ -795,9 +797,87 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return syncDir(filepath.Dir(path))
 }
 
-// writeAndSyncTemp writes data to a fresh temp path, syncs the file's bytes
-// and inode metadata to stable storage, and closes it. Splitting this out
-// keeps writeFileAtomic linear and lets the rename + dir-sync stay readable.
+// tempSeq is a process-wide monotonic counter appended to every
+// temp-file name so two concurrent writers in the same process
+// (goroutines, or the same goroutine retrying after a previous failed
+// attempt) never collide on a shared `.tmp.<pid>` path (audit E.3).
+// Without this, two goroutines writing different content to the same
+// destination would silently overwrite each other's temp bytes between
+// Write and Rename/Link.
+//
+// Scope is in-process uniqueness only. After a process crash the
+// counter resets to zero, and PID reuse across processes is possible
+// on long-running systems — so a fresh process CAN pick the same
+// `<pid>.<seq>` prefix as a stale leftover on disk. That cross-process
+// collision is handled at a different layer: `writeAndSyncTemp` opens
+// the temp with O_CREATE|O_EXCL (no O_TRUNC) and returns os.ErrExist
+// on collision, and `allocateAndWriteTemp` retries with a fresh seq
+// up to `maxTempAllocRetries` times. tempSeq narrows the collision
+// window; O_EXCL + retries close it.
+//
+// Note: this is a filesystem-uniqueness counter, not a cryptographic
+// nonce.
+var tempSeq atomic.Uint64
+
+func nextTempSeq() uint64 {
+	return tempSeq.Add(1)
+}
+
+// tempPathFor builds the companion temp path for a destination. Keeps
+// pid + monotonic seq in the filename so the temp is unique across
+// threads, processes, and retries. Mirrors the Rust
+// `io_utils::temp_path_for` helper for cross-client parity.
+func tempPathFor(path string, pid int, seq uint64) string {
+	return fmt.Sprintf("%s.tmp.%d.%d", path, pid, seq)
+}
+
+// maxTempAllocRetries bounds the stale-temp collision retries in
+// allocateAndWriteTemp. A collision on `<dest>.tmp.<pid>.<seq>` should
+// be vanishingly rare (it requires PID reuse PLUS nextTempSeq wrapping
+// back over a stale leftover from a prior process), so 16 is
+// deliberately generous for the tail case while bounding pathological
+// loops.
+const maxTempAllocRetries = 16
+
+// allocateAndWriteTemp picks a unique temp path for `path`, writes
+// `data` to it via writeAndSyncTemp (exclusive-create + fsync), and
+// returns the temp path on success. Retries up to maxTempAllocRetries
+// with a fresh nextTempSeq on the rare os.ErrExist case (stale
+// leftover temp after PID + seq reuse across a crash). Fatal I/O
+// errors surface immediately without retry.
+//
+// On success the caller owns `tmpPath` and is responsible for the
+// final rename/link + removing the temp name on error paths. On
+// failure writeAndSyncTemp already best-effort removes the temp
+// before returning.
+func allocateAndWriteTemp(path string, data []byte, mode os.FileMode) (string, error) {
+	pid := os.Getpid()
+	var lastCollision error
+	for i := 0; i < maxTempAllocRetries; i++ {
+		tmpPath := tempPathFor(path, pid, nextTempSeq())
+		err := writeAndSyncTemp(tmpPath, data, mode)
+		if err == nil {
+			return tmpPath, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			lastCollision = fmt.Errorf("temp path already exists: %s", tmpPath)
+			continue
+		}
+		return "", err
+	}
+	if lastCollision == nil {
+		lastCollision = fmt.Errorf("exhausted %d retries allocating temp for %s", maxTempAllocRetries, path)
+	}
+	return "", lastCollision
+}
+
+// writeAndSyncTemp writes data to a fresh temp path, syncs the file's
+// bytes and inode metadata to stable storage, and closes it. Opens
+// with O_CREATE|O_EXCL|O_WRONLY — NO O_TRUNC — so a stale temp
+// leftover from a crashed prior process that happens to be hard-linked
+// to a live destination inode cannot be truncated through the shared
+// inode (Copilot P1 audit on PR #1220). The caller
+// (allocateAndWriteTemp) retries with a fresh seq on os.ErrExist.
 //
 // Write is looped until all bytes are persisted, matching Rust's
 // `Write::write_all` contract: io.Writer is allowed to return a short
@@ -815,11 +895,11 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 //     from a unit test (no realistic way to provoke a Write or Sync
 //     failure on an already-opened regular file in CI).
 //
-// On error the outer writeFileAtomic removes the temp file, so a partial
-// Sync after a failed Write does not leak state to the destination — the
-// rename never runs.
+// On any error after successful open, the temp is best-effort removed
+// before returning so callers (allocateAndWriteTemp / writeFileAtomic
+// / writeFileIfAbsent) do not need to clean up the error path.
 func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
-	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}
@@ -838,7 +918,11 @@ func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
 	}
 	serr := tmp.Sync()
 	cerr := tmp.Close()
-	return errors.Join(werr, serr, cerr)
+	joined := errors.Join(werr, serr, cerr)
+	if joined != nil {
+		_ = os.Remove(tmpPath)
+	}
+	return joined
 }
 
 // syncDir opens the directory and calls Sync so any rename or unlink

@@ -152,44 +152,18 @@ func TestBlockStoreGetBlockByHash_Nil(t *testing.T) {
 	}
 }
 
-func TestWriteFileIfAbsent_PropagatesWriteError(t *testing.T) {
-	prevRead := readFileByPathFn
-	prevWrite := writeFileAtomicFn
-	t.Cleanup(func() {
-		readFileByPathFn = prevRead
-		writeFileAtomicFn = prevWrite
-	})
-
-	readFileByPathFn = func(string) ([]byte, error) { return nil, os.ErrNotExist }
-	writeFileAtomicFn = func(string, []byte, os.FileMode) error { return os.ErrPermission }
-
-	if err := writeFileIfAbsent(filepath.Join(t.TempDir(), "x.bin"), []byte("x")); err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestWriteFileIfAbsent_PropagatesReadAfterWriteError(t *testing.T) {
-	prevRead := readFileByPathFn
-	prevWrite := writeFileAtomicFn
-	t.Cleanup(func() {
-		readFileByPathFn = prevRead
-		writeFileAtomicFn = prevWrite
-	})
-
-	reads := 0
-	readFileByPathFn = func(string) ([]byte, error) {
-		reads++
-		if reads == 1 {
-			return nil, os.ErrNotExist
-		}
-		return nil, os.ErrPermission
-	}
-	writeFileAtomicFn = func(string, []byte, os.FileMode) error { return nil }
-
-	if err := writeFileIfAbsent(filepath.Join(t.TempDir(), "x.bin"), []byte("x")); err == nil {
-		t.Fatalf("expected error")
-	}
-}
+// After the E.3 TOCTOU hardening, writeFileIfAbsent writes via
+// writeAndSyncTemp + os.Link rather than the old
+// readFileByPathFn + writeFileAtomicFn injection points. Two tests that
+// relied on mocking writeFileAtomicFn to simulate a write error, plus
+// one that relied on a second readFileByPathFn call returning an error
+// after the atomic write, no longer have a real execution path to
+// exercise: writeFileAtomicFn isn't called from writeFileIfAbsent
+// anymore, and there is no "read back after atomic write" step because
+// os.Link is the atomic commit (no verify-after-write round-trip).
+// Replacement coverage for the new contract lives in blockstore_test.go
+// as the TestWriteFileIfAbsent_ConcurrentSameContent and
+// TestWriteFileIfAbsent_ConcurrentDifferentContent tests.
 
 func TestWriteFileIfAbsent_ExistingSameContentOk(t *testing.T) {
 	dir := t.TempDir()
@@ -246,41 +220,13 @@ func TestBlockStorePutBlock_CallsSetCanonicalTip(t *testing.T) {
 	}
 }
 
-func TestCommitCanonicalBlock_DoesNotAdvanceTipWhenUndoWriteFails(t *testing.T) {
-	store := mustOpenBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
-	header := testHeaderBytes(13, 13)
-	hash := mustHeaderHash(t, header)
-	blockBytes := []byte("blk")
-
-	prevWrite := writeFileAtomicFn
-	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
-	undoPath := filepath.Join(store.undoDir, hex.EncodeToString(hash[:])+".json")
-	writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
-		if path == undoPath {
-			return os.ErrPermission
-		}
-		return prevWrite(path, data, mode)
-	}
-
-	if err := store.CommitCanonicalBlock(0, hash, header, blockBytes, &BlockUndo{}); err == nil {
-		t.Fatalf("expected undo write failure")
-	}
-	if _, _, ok, err := store.Tip(); err != nil {
-		t.Fatalf("Tip: %v", err)
-	} else if ok {
-		t.Fatalf("canonical tip must stay empty after undo failure")
-	}
-	if _, err := os.Stat(undoPath); !os.IsNotExist(err) {
-		t.Fatalf("undo file must be absent after failed commit, err=%v", err)
-	}
-	gotBlock, err := store.GetBlockByHash(hash)
-	if err != nil {
-		t.Fatalf("GetBlockByHash: %v", err)
-	}
-	if !bytes.Equal(gotBlock, blockBytes) {
-		t.Fatalf("block bytes mismatch after failed commit")
-	}
-}
+// TestCommitCanonicalBlock_DoesNotAdvanceTipWhenUndoWriteFails lives in
+// blockstore_commit_unix_test.go behind a `//go:build unix` tag: after
+// the E.3 TOCTOU hardening PutUndo -> writeFileIfAbsent uses
+// writeAndSyncTemp + os.Link (not writeFileAtomicFn), so the only
+// portable way to provoke the undo-write failure is a chmod-based
+// permission error on the undo directory. That requires os.Geteuid()
+// to skip under root.
 
 func TestCommitCanonicalBlock_RejectsNilInputs(t *testing.T) {
 	header := testHeaderBytes(14, 14)

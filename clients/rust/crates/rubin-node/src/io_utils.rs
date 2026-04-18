@@ -1,9 +1,24 @@
 use std::fs;
-use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
-#[cfg(test)]
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-wide monotonic sequence counter appended to every temp-file
+/// name so two threads writing to the same destination within the same
+/// process can never collide on a shared `.tmp.<pid>` path (audit
+/// `E.3`). Not a cryptographic nonce — it is a plain uniqueness counter
+/// for filesystem path disambiguation. Name deliberately avoids the
+/// word "nonce" so CodeQL's `Hard-coded cryptographic value` check does
+/// not mis-flag test literals feeding this parameter.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the NEW value (1, 2, 3, ...) — mirrors Go's
+/// `atomic.Uint64.Add(1)` semantics so the cross-client naming
+/// convention for `.tmp.<pid>.<seq>` files starts at the same seq in
+/// both runtimes. Using `fetch_add(1) + 1` instead of `fetch_add(1)`
+/// costs nothing at runtime and removes a cross-client drift class.
+fn next_temp_seq() -> u64 {
+    TEMP_SEQ.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
@@ -17,16 +32,26 @@ pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
 
 /// Atomically write `data` to `path` with an honest fsync durability
 /// contract (audit `E.1`). Sequence (any failure between open and rename
-/// removes the partially-written `<dest>.tmp.<pid>`):
+/// best-effort removes the partially-written
+/// `<dest>.tmp.<pid>.<seq>`):
 ///
 /// 1. resolve the target's effective parent (see `effective_parent`),
 ///    `create_dir_all` it if missing;
-/// 2. open `<path>.tmp.<pid>` with `O_TRUNC|O_CREATE|O_WRONLY`;
+/// 2. open `<path>.tmp.<pid>.<seq>` with `O_CREATE|O_EXCL|O_WRONLY` —
+///    NO `O_TRUNC`, so a stale temp leftover from a crashed prior
+///    process that happens to be hard-linked to a live destination
+///    inode cannot be truncated through the shared inode
+///    (`allocate_and_write_temp` retries with a fresh `seq` on
+///    `AlreadyExists`). `<seq>` is a process-wide atomic counter
+///    ensuring concurrent writers in the same process get distinct
+///    temp paths (`E.3`);
 /// 3. `write_all` (loops on short writes per stdlib contract);
 /// 4. `sync_all` — flushes data + inode metadata to disk;
 /// 5. close (implicit on scope exit; see `sync_dir` doc on Rust File close
 ///    error semantics);
-/// 6. `fs::rename` temp -> destination (atomic on the same filesystem);
+/// 6. `fs::rename` temp -> destination (atomic on the same filesystem;
+///    OVERWRITES an existing destination — use `write_file_exclusive`
+///    for create-if-absent semantics);
 /// 7. `sync_dir` on the effective parent so the rename itself is durable.
 ///
 /// Mirrors the Go `clients/go/node/chainstate.go` `writeFileAtomic` for
@@ -37,36 +62,9 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
         fs::create_dir_all(parent)
             .map_err(|e| format!("create parent {}: {e}", parent.display()))?;
     }
-    let tmp_path = temp_path_for(path, std::process::id());
-    // Durability contract (E.1): the temp file's bytes AND its inode metadata
-    // must hit stable storage before the rename, otherwise a crash between
-    // rename and the next implicit flush can leave the destination pointing
-    // at a zero-length / partially-written file. Using `OpenOptions` here
-    // explicitly so we control flush ordering: write all bytes, then
-    // `sync_all()` (data + metadata), then close, then rename, then sync the
-    // parent directory so the rename itself is durable.
-    //
-    // Mirrors the Go helper: any failure between `open temp` and the rename
-    // removes the partially-written `<dest>.tmp.<pid>` so we do not strand
-    // a large file on disk under realistic I/O fault conditions
-    // (e.g. ENOSPC/EIO after the data write).
-    let write_result: Result<(), String> = (|| {
-        use std::io::Write;
-        let mut tmp = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .map_err(|e| format!("open temp {}: {e}", tmp_path.display()))?;
-        tmp.write_all(data)
-            .map_err(|e| format!("write temp {}: {e}", tmp_path.display()))?;
-        tmp.sync_all()
-            .map_err(|e| format!("sync temp {}: {e}", tmp_path.display()))
-    })();
-    if let Err(e) = write_result {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
+    let tmp_path = allocate_and_write_temp(path, data)?;
+    // Rename OVERWRITES an existing destination. If the caller requires
+    // create-if-absent semantics, use `write_file_exclusive` instead.
     fs::rename(&tmp_path, path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         format!(
@@ -87,22 +85,236 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Build the `<dest>.tmp.<pid>` companion path for a target `path`
-/// without going through lossy `Path::display()`. `display()` replaces
-/// non-UTF-8 bytes with `U+FFFD`; on Unix a `PathBuf` can contain any
-/// byte sequence other than `/` and `\0`, so a lossy conversion would
-/// produce a temp at a different location than the caller's actual
-/// target — breaking both the atomic rename and the failure cleanup.
-/// `OsString::push` preserves the original bytes exactly. Split into
-/// its own helper so the byte-preservation contract is independently
-/// testable without going through the filesystem (APFS on macOS
-/// rejects non-UTF-8 filenames with EILSEQ, so a filesystem-level
-/// round-trip test is not portable). Copilot review feedback on PR #1218.
-fn temp_path_for(path: &Path, pid: u32) -> std::path::PathBuf {
+/// Error returned by [`write_file_exclusive`] distinguishing the
+/// create-if-absent race — caller needs to know "the destination already
+/// exists, read it and verify content" vs "some other I/O failure".
+///
+/// Cross-client parity: matches the error branching in the Go
+/// `writeFileIfAbsent` helper which uses `errors.Is(err, os.ErrExist)`
+/// on the `os.Link` result.
+#[derive(Debug)]
+pub enum AtomicWriteError {
+    /// `path` already exists at link time. Caller must inspect the
+    /// existing content to decide whether this is an idempotent retry
+    /// (content matches) or a corruption/conflict (content differs).
+    AlreadyExists,
+    /// Any other surfaced failure along the atomic-create sequence —
+    /// for example `create_dir_all` on the parent, temp-file exclusive
+    /// open (including exhaustion of the `allocate_and_write_temp`
+    /// retry budget on repeated stale-temp collisions), write,
+    /// file-`sync_all`, `hard_link`, or the parent-directory
+    /// `sync_dir`/directory-fsync durability step that runs after a
+    /// successful link. Best-effort temp-file cleanup failures are not
+    /// reported through this enum (the unlink is run on every exit
+    /// path but its error is intentionally discarded to keep the
+    /// primary error visible).
+    Other(String),
+}
+
+impl From<String> for AtomicWriteError {
+    fn from(msg: String) -> Self {
+        AtomicWriteError::Other(msg)
+    }
+}
+
+/// Atomically write `data` to `path` only if `path` does not already
+/// exist (audit `E.3`, the TOCTOU-hardened companion to
+/// `write_file_atomic`). Uses the POSIX `link(2)` primitive to get
+/// create-if-absent semantics at the syscall layer:
+///
+/// 1. resolve effective parent, `create_dir_all` if missing;
+/// 2. allocate a per-call-unique `<path>.tmp.<pid>.<seq>` via
+///    [`allocate_and_write_temp`] and write `data` with the exclusive
+///    `O_CREATE|O_EXCL` contract — same durability semantics as
+///    `write_file_atomic`, retries on stale-temp collisions (PID +
+///    seq reuse after a crash);
+/// 3. `hard_link(temp, path)` — atomic create-if-absent. Fails with
+///    [`AtomicWriteError::AlreadyExists`] if `path` is already on disk
+///    (EEXIST); that race cannot silently overwrite the existing file;
+/// 4. best-effort `unlink(temp)` — the destination (or the pre-existing
+///    file on EEXIST) keeps the inode, so removing the temp name never
+///    drops data. The unlink runs on every exit path, and its error is
+///    intentionally discarded (a leaked temp is operational cleanup,
+///    not a correctness issue) — see [`AtomicWriteError::Other`] doc
+///    for the best-effort cleanup contract;
+/// 5. `sync_dir` on the parent so the new directory entry is durable.
+///
+/// Mirrors the Go `writeFileIfAbsent` hard-link pattern in
+/// `clients/go/node/blockstore.go`. The per-call monotonic `seq`
+/// (filesystem counter, not a cryptographic nonce) closes the thread
+/// race where two concurrent writers in the same process would
+/// otherwise collide on a shared `.tmp.<pid>` path.
+pub fn write_file_exclusive(path: &Path, data: &[u8]) -> Result<(), AtomicWriteError> {
+    let parent = effective_parent(path);
+    if let Some(parent) = parent {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("create parent {}: {e}", parent.display()))?;
+    }
+    let tmp_path = allocate_and_write_temp(path, data)?;
+    let link_result = fs::hard_link(&tmp_path, path);
+    // Best-effort unlink of the temp name. On link success the
+    // destination inode keeps its own reference, so the temp name is
+    // redundant. On link failure the temp must not strand on disk. The
+    // unlink error itself is intentionally discarded to keep the
+    // primary link error visible to the caller — see
+    // `AtomicWriteError::Other` doc on the best-effort cleanup
+    // contract.
+    let _ = fs::remove_file(&tmp_path);
+    match link_result {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(AtomicWriteError::AlreadyExists);
+        }
+        Err(e) => {
+            return Err(AtomicWriteError::Other(format!(
+                "hard_link {} -> {}: {e}",
+                tmp_path.display(),
+                path.display()
+            )));
+        }
+    }
+    if let Some(parent) = parent {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// Bounded retry count for [`allocate_and_write_temp`]. A collision on
+/// `<dest>.tmp.<pid>.<seq>` should be vanishingly rare in practice (it
+/// requires PID reuse PLUS `next_temp_seq` wrapping back over a stale
+/// leftover from a prior process), so 16 attempts is deliberately
+/// generous for the tail case while still bounding pathological loops.
+const MAX_TEMP_ALLOC_RETRIES: u32 = 16;
+/// Internal error from [`write_and_sync_temp`] so callers can
+/// distinguish a stale-temp collision (retry with a new `seq`) from a
+/// fatal I/O failure (surface to the caller).
+enum TempWriteError {
+    /// The `create_new(true)` open failed with `AlreadyExists`, i.e. a
+    /// temp file with this exact `<pid>.<seq>` suffix already exists
+    /// on disk. After a process crash, a leftover temp from the prior
+    /// process can be hard-linked to a live destination inode; if we
+    /// reopened it with `O_TRUNC` we would truncate the destination
+    /// through that shared inode. `O_EXCL` refuses that reuse, and the
+    /// caller retries with a fresh `seq`.
+    AlreadyExists,
+    /// Any other failure along `open → write_all → sync_all`. The temp
+    /// path, if it was created, is best-effort removed by
+    /// `write_and_sync_temp` before returning so callers do not need
+    /// to clean up on the error path.
+    Fatal(String),
+}
+
+/// Internal helper: open a fresh temp file at `tmp_path` with
+/// `O_CREATE | O_EXCL` (Rust's `create_new(true)`) — NO `O_TRUNC`.
+/// Refuses to reuse a pre-existing temp name so a stale leftover from
+/// a crashed prior process cannot be truncated through a shared inode
+/// (Copilot P1 audit on PR #1220). Writes all bytes, `sync_all`,
+/// closes.
+///
+/// Mirrors the Go `writeAndSyncTemp` helper. On any failure this
+/// helper best-effort removes `tmp_path` before returning the error,
+/// so callers do NOT need to perform separate temp cleanup on error;
+/// they may still unlink the temp after success (as
+/// `write_file_exclusive` does after a successful `hard_link`) to
+/// reclaim the redundant name.
+fn write_and_sync_temp(tmp_path: &Path, data: &[u8]) -> Result<(), TempWriteError> {
+    use std::io::Write;
+    let mut tmp = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp_path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(TempWriteError::AlreadyExists);
+        }
+        Err(e) => {
+            return Err(TempWriteError::Fatal(format!(
+                "open temp {}: {e}",
+                tmp_path.display()
+            )));
+        }
+    };
+    let write_result: Result<(), String> = (|| {
+        tmp.write_all(data)
+            .map_err(|e| format!("write temp {}: {e}", tmp_path.display()))?;
+        tmp.sync_all()
+            .map_err(|e| format!("sync temp {}: {e}", tmp_path.display()))
+    })();
+    // Drop the file handle BEFORE attempting to unlink the temp path.
+    // On Windows `fs::remove_file` on an open handle fails with
+    // `PermissionDenied`, which would leak the failed temp and, under
+    // repeated I/O failures, burn through the `MAX_TEMP_ALLOC_RETRIES`
+    // budget with stale `.tmp.<pid>.<seq>` leftovers (Codex P2 on PR
+    // #1220). On Unix the drop is harmless ordering (close-then-unlink
+    // always works, and unlink-then-close leaves the inode alive
+    // through the open fd anyway). Explicit `drop` keeps the semantics
+    // portable.
+    drop(tmp);
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(tmp_path);
+        return Err(TempWriteError::Fatal(e));
+    }
+    Ok(())
+}
+
+/// Allocate a unique temp path for `path`, write `data` to it with the
+/// exclusive-create + fsync contract, and return the temp path on
+/// success. Retries up to [`MAX_TEMP_ALLOC_RETRIES`] times with a
+/// fresh `next_temp_seq` on the rare `AlreadyExists` case (stale
+/// leftover temp after PID + seq reuse). Fatal I/O errors surface
+/// immediately without retry.
+fn allocate_and_write_temp(path: &Path, data: &[u8]) -> Result<std::path::PathBuf, String> {
+    let pid = std::process::id();
+    let mut last_collision: Option<String> = None;
+    for _ in 0..MAX_TEMP_ALLOC_RETRIES {
+        let tmp_path = temp_path_for(path, pid, next_temp_seq());
+        match write_and_sync_temp(&tmp_path, data) {
+            Ok(()) => return Ok(tmp_path),
+            Err(TempWriteError::AlreadyExists) => {
+                last_collision = Some(format!("temp path already exists: {}", tmp_path.display()));
+                continue;
+            }
+            Err(TempWriteError::Fatal(msg)) => return Err(msg),
+        }
+    }
+    Err(last_collision.unwrap_or_else(|| {
+        format!(
+            "exhausted {MAX_TEMP_ALLOC_RETRIES} retries allocating temp for {}",
+            path.display()
+        )
+    }))
+}
+
+/// Build the `<dest>.tmp.<pid>.<seq>` companion path for a target
+/// `path` without going through lossy `Path::display()`. The `<seq>`
+/// component is a process-wide monotonic uniqueness counter (see
+/// `next_temp_seq`) that closes the thread race where two concurrent
+/// writers in the same process would otherwise share a `.tmp.<pid>`
+/// filename and one would silently overwrite the other's temp bytes
+/// between write and rename/link (audit `E.3`). Not a cryptographic
+/// nonce — it is a plain counter for filesystem path disambiguation;
+/// named `seq` rather than `nonce` so CodeQL's "Hard-coded
+/// cryptographic value" check does not mis-flag test literals that
+/// feed this parameter.
+///
+/// `display()` replaces non-UTF-8 bytes with `U+FFFD`; on Unix a
+/// `PathBuf` can contain any byte sequence other than `/` and `\0`, so a
+/// lossy conversion would produce a temp at a different location than
+/// the caller's actual target — breaking both the atomic rename and the
+/// failure cleanup. `OsString::push` preserves the original bytes
+/// exactly. Split into its own helper so the byte-preservation contract
+/// is independently testable without going through the filesystem (APFS
+/// on macOS rejects non-UTF-8 filenames with EILSEQ, so a filesystem-
+/// level round-trip test is not portable). Copilot + Codex review
+/// feedback on PR #1218 + the E.3 lane.
+fn temp_path_for(path: &Path, pid: u32, seq: u64) -> PathBuf {
     let mut tmp_os = path.as_os_str().to_os_string();
     tmp_os.push(".tmp.");
     tmp_os.push(pid.to_string());
-    std::path::PathBuf::from(tmp_os)
+    tmp_os.push(".");
+    tmp_os.push(seq.to_string());
+    PathBuf::from(tmp_os)
 }
 
 /// Compute the directory whose existence we must ensure (and whose entry we
@@ -111,7 +323,7 @@ fn temp_path_for(path: &Path, pid: u32) -> std::path::PathBuf {
 /// not `None`. An empty path can neither be created via `create_dir_all`
 /// nor opened via `OpenOptions::open` for `sync_dir`, so map empty to `.`
 /// (current directory) — matches the previous `fs::write` semantics.
-fn effective_parent(path: &Path) -> Option<&Path> {
+pub(crate) fn effective_parent(path: &Path) -> Option<&Path> {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => Some(p),
         Some(_) => Some(Path::new(".")),
@@ -344,21 +556,56 @@ mod tests {
         bytes.extend_from_slice(b"-name.bin");
         let path = PathBuf::from(OsString::from_vec(bytes.clone()));
 
-        let tmp = temp_path_for(&path, 12345);
+        let tmp = temp_path_for(&path, 12345, 7);
 
         let mut expected = bytes.clone();
-        expected.extend_from_slice(b".tmp.12345");
+        expected.extend_from_slice(b".tmp.12345.7");
         assert_eq!(tmp.as_os_str().as_bytes(), expected.as_slice());
 
-        // Negative: lossy `format!("{}.tmp.{}", path.display(), 12345)`
+        // Negative: lossy `format!("{}.tmp.{}.{}", path.display(), ...)`
         // would replace the 0xff byte with U+FFFD (three bytes
         // 0xef 0xbf 0xbd), producing DIFFERENT bytes.
-        let lossy = format!("{}.tmp.12345", path.display());
+        let lossy = format!("{}.tmp.12345.7", path.display());
         assert_ne!(
             tmp.as_os_str().as_bytes(),
             lossy.as_bytes(),
             "temp_path_for must not agree with lossy display() on non-UTF-8 input"
         );
+    }
+
+    /// The seq component is what closes the thread race (`E.3`): two
+    /// consecutive calls within the same process must produce distinct
+    /// temp paths, even though they share the same PID. Without the
+    /// seq, two threads writing to the same destination would overwrite
+    /// each other's temp bytes between open and rename/link.
+    #[test]
+    fn temp_path_for_is_unique_per_seq() {
+        let path = std::path::Path::new("/tmp/shared-dest.bin");
+        let a = super::temp_path_for(path, 42, 0);
+        let b = super::temp_path_for(path, 42, 1);
+        assert_ne!(a, b);
+        // Same pid+seq must remain deterministic for callers that need
+        // to compute the expected temp name in tests.
+        let a_again = super::temp_path_for(path, 42, 0);
+        assert_eq!(a, a_again);
+    }
+
+    /// `next_temp_seq` must never return the same value twice within a
+    /// single process so that concurrent callers pass distinct seq
+    /// values into `temp_path_for`. Verify ordering AND uniqueness in a
+    /// small burst — `AtomicU64::fetch_add` gives strict monotonic
+    /// growth which is stronger than uniqueness and helps diagnose a
+    /// future counter-wrap or reset regression.
+    #[test]
+    fn next_temp_seq_is_monotonic_and_unique() {
+        let a = super::next_temp_seq();
+        let b = super::next_temp_seq();
+        let c = super::next_temp_seq();
+        // Uniqueness.
+        assert!(b != a && c != a && c != b);
+        // Monotonic ordering.
+        assert!(a < b, "seq must be monotonically increasing: a={a} b={b}");
+        assert!(b < c, "seq must be monotonically increasing: b={b} c={c}");
     }
 
     /// On a sync_all/write_all failure before rename the temp file MUST be
@@ -394,6 +641,56 @@ mod tests {
             entries,
             vec!["not-a-dir".to_string()],
             "stranded files present"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Copilot P1 regression on PR #1220: a stale
+    /// `<dest>.tmp.<pid>.<seq>` leftover from a crashed prior process
+    /// (potentially hard-linked to a live destination inode) must NOT
+    /// be reopened with O_TRUNC — that would truncate the destination
+    /// through the shared inode. `write_and_sync_temp` uses
+    /// `create_new(true)` (O_EXCL), so reopening the same path
+    /// returns `AlreadyExists` without touching inode data.
+    ///
+    /// Probe `write_and_sync_temp` directly with an explicit temp
+    /// path so the test does not depend on the global `TEMP_SEQ`
+    /// counter — Rust's `cargo test` runs tests in parallel by
+    /// default, and a probe like `stale_seq = next_temp_seq() + 1`
+    /// would race against any other `TEMP_SEQ`-advancing test and
+    /// silently pass under a regression. The `allocate_and_write_temp`
+    /// retry wrapper is just a loop on top of this primitive, so
+    /// validating the primitive's EEXIST-without-truncate contract is
+    /// sufficient for the retry path. Go-side integration coverage
+    /// (`TestWriteFileAtomic_SkipsStaleTempViaExclusiveCreate`) runs
+    /// in a serial test binary by default and exercises the full
+    /// allocate-then-link flow for end-to-end confidence.
+    #[test]
+    fn write_and_sync_temp_refuses_to_reopen_existing_temp() {
+        use super::{write_and_sync_temp, TempWriteError};
+        let dir = unique_temp_path("rubin-io-utils-excl-temp");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let tmp_path = dir.join("seeded.tmp");
+        let stale_bytes = b"STALE BYTES - must not be truncated";
+        fs::write(&tmp_path, stale_bytes).expect("seed stale temp");
+
+        match write_and_sync_temp(&tmp_path, b"attempted new bytes") {
+            Err(TempWriteError::AlreadyExists) => {}
+            Ok(()) => {
+                panic!("write_and_sync_temp accepted a pre-existing path — O_EXCL is not in effect")
+            }
+            Err(TempWriteError::Fatal(msg)) => {
+                panic!("expected AlreadyExists, got Fatal({msg}) — unexpected error kind")
+            }
+        }
+
+        // The existing temp file must be byte-identical to the seed:
+        // O_EXCL refused the open, so the inode was never touched.
+        assert_eq!(
+            fs::read(&tmp_path).expect("read after"),
+            stale_bytes,
+            "pre-existing temp was truncated — O_TRUNC regression",
         );
 
         let _ = fs::remove_dir_all(&dir);

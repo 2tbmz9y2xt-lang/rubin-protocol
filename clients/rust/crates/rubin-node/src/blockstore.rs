@@ -7,7 +7,7 @@ use rubin_consensus::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::io_utils::{parse_hex32, write_file_atomic};
+use crate::io_utils::{parse_hex32, write_file_atomic, write_file_exclusive, AtomicWriteError};
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 
 pub const BLOCK_STORE_DIR_NAME: &str = "blockstore";
@@ -672,7 +672,101 @@ struct BlockStoreIndexView<'a> {
     canonical: &'a [String],
 }
 
+/// Write `content` to `path` only if the destination is absent
+/// (idempotent replay: a subsequent call with matching bytes is a
+/// silent no-op). Hardened against the TOCTOU race audited as `E.3`:
+/// the previous implementation did `fs::read()` then `write_file_atomic`
+/// which could silently overwrite a file that appeared between the two
+/// syscalls. The new implementation keeps a read-compare fast path for
+/// the idempotent-replay case (matches the Go `writeFileIfAbsent` fast
+/// path) and falls through to `io_utils::write_file_exclusive` (which
+/// uses `hard_link(2)` for atomic create-if-absent) only when the
+/// destination is genuinely absent. On EEXIST from the race window we
+/// read back the destination and preserve the idempotent-same-content
+/// contract; on content mismatch we surface an explicit error.
+///
+/// Read-compare fast path matters for two reasons (Codex review on
+/// PR #1220):
+/// 1. idempotent replay during sync-engine restart is the dominant
+///    caller and must not do unnecessary disk I/O;
+/// 2. it keeps the "dest already has matching bytes" case working even
+///    when the parent directory is temporarily unwritable (for example
+///    chmod 0o500 hardening), because read does not need write
+///    permission but the temp-write path does.
+///
+/// Mirrors the Go `writeFileIfAbsent` helper's `os.Link` flow for
+/// cross-client storage parity.
+///
+/// # Threat model
+///
+/// **Concurrent actors**: Two writers race on `fs::hard_link(tmp, path)`;
+/// exactly one link succeeds. The loser sees `AlreadyExists`, reads the
+/// winner's content, and returns `Ok(())` on match (idempotent replay)
+/// or an explicit error on drift (never overwrite). Per-call
+/// `temp_path_for(path, pid, next_temp_seq())` gives distinct temp
+/// paths so in-process threads never collide.
+///
+/// **Process crash**: A crash between `hard_link` and the best-effort
+/// temp-unlink leaves a stale `<pid>.<seq>` hard-linked to the
+/// destination inode. That is safe: `write_and_sync_temp` uses
+/// `O_CREATE|O_EXCL` (no `O_TRUNC`), so any later call hitting the same
+/// temp path returns `AlreadyExists` via `allocate_and_write_temp` and
+/// retries with a fresh `seq` (16-retry budget). Startup reconcile
+/// (`E.2`) sweeps orphan `.tmp.*` siblings. A crash before the final
+/// `sync_dir` leaves the dirent in page cache; the fast-path on retry
+/// re-runs `sync_dir` and PROPAGATES its error so the durability
+/// failure is surfaced.
+///
+/// **Cross-platform**: Unix (Linux, macOS) is the production target:
+/// `fs::hard_link`, `create_new(true)` (O_EXCL), and directory fsync
+/// all honoured. Windows: directory fsync is a no-op at the stdlib
+/// level; `fs::remove_file` on an open fd would fail, which is why
+/// `write_and_sync_temp` explicitly `drop(fd)` before `remove_file`.
+/// Rust does not ship Rubin on Windows as a production target.
+///
+/// **Retry / exhaustion**: `allocate_and_write_temp` retries up to
+/// `MAX_TEMP_ALLOC_RETRIES` (16) on `AlreadyExists` with a fresh
+/// `next_temp_seq()`. Fatal I/O surfaces immediately. Exhaustion
+/// surfaces as `Err` mentioning the destination path.
+///
+/// **Inode / fs-layer**: `hard_link` is refcount-safe — destination
+/// and temp share the inode; unlinking temp drops the name without
+/// affecting bytes visible through `path`. `O_TRUNC` on any path that
+/// could share an inode with a live destination is intentionally
+/// avoided everywhere in the helper stack; see `write_and_sync_temp`
+/// for the explicit O_EXCL contract.
+///
+/// **Durability**: `write_and_sync_temp` fsyncs the temp's bytes + inode
+/// metadata before returning. `fs::hard_link` then exposes the inode
+/// under `path`. `sync_dir` on the parent flushes the directory entry
+/// so the link is itself durable. Both the `Ok` fast-path and the
+/// `AlreadyExists`-retry branches PROPAGATE the final `sync_dir` error
+/// — the previous `let _ = sync_dir(parent)` double-swallowed EIO
+/// through `sync_dir`'s own best-effort wrapper (Copilot P1 wave-7 on
+/// PR #1220).
 fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
+    // Fast path: destination already on disk. Same behaviour as the Go
+    // helper's `readFileByPathFn(path)` fast path — short-circuit
+    // before any temp write when the file is already present with the
+    // right bytes (dominant idempotent-replay case).
+    //
+    // Copilot P1 on PR #1220: a previous call may have successfully
+    // created the destination but returned an error from the final
+    // `sync_dir(parent)` step (e.g. transient EIO). If the caller
+    // retries, we hit this fast-path and would silently report Ok
+    // without ever making the directory entry durable. Re-run
+    // `sync_dir` on the idempotent match branch and PROPAGATE its
+    // result — `io_utils::sync_dir` already applies the intended
+    // permission policy internally (execute-only/hardened parents
+    // treated as Ok), so propagating does NOT break the
+    // idempotent-replay-on-hardened-dir contract; it only surfaces
+    // real durability failures (EIO / ENOENT) that would otherwise be
+    // silent.
+    //
+    // Copilot P1 wave-7 on PR #1220: `let _ = sync_dir(parent)`
+    // double-swallowed errors — `sync_dir` is already best-effort,
+    // so the outer `let _` discarded the exact failures that MUST
+    // reach the caller. Propagate via `?` instead.
     match fs::read(path) {
         Ok(existing) => {
             if existing != content {
@@ -681,18 +775,44 @@ fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
                     path.display()
                 ));
             }
-            Ok(())
+            if let Some(parent) = crate::io_utils::effective_parent(path) {
+                crate::io_utils::sync_dir(parent)?;
+            }
+            return Ok(());
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            write_file_atomic(path, content)?;
+            // Fall through to the race-hardened atomic write.
+        }
+        Err(e) => {
+            return Err(format!("read existing {}: {e}", path.display()));
+        }
+    }
+
+    match write_file_exclusive(path, content) {
+        Ok(()) => Ok(()),
+        Err(AtomicWriteError::AlreadyExists) => {
+            // Race: destination appeared between the fast-path read
+            // and our link. Verify content matches (idempotent retry)
+            // or surface the drift as an error — never silently
+            // overwrite, never return Ok on drift.
             let existing =
-                fs::read(path).map_err(|err| format!("read back {}: {err}", path.display()))?;
+                fs::read(path).map_err(|e| format!("read existing {}: {e}", path.display()))?;
             if existing != content {
-                return Err(format!("written content mismatch: {}", path.display()));
+                return Err(format!(
+                    "file already exists with different content: {}",
+                    path.display()
+                ));
+            }
+            // Propagate parent dir-sync result on the EEXIST-retry
+            // branch for the same reason as the Ok fast-path above:
+            // `sync_dir` already applies the permission policy, so
+            // `?` surfaces only real durability failures.
+            if let Some(parent) = crate::io_utils::effective_parent(path) {
+                crate::io_utils::sync_dir(parent)?;
             }
             Ok(())
         }
-        Err(e) => Err(format!("read {}: {e}", path.display())),
+        Err(AtomicWriteError::Other(msg)) => Err(msg),
     }
 }
 
@@ -700,7 +820,128 @@ fn write_file_if_absent(path: &Path, content: &[u8]) -> Result<(), String> {
 mod tests {
     use crate::io_utils::unique_temp_path;
 
-    use super::{block_store_path, BlockStore, BLOCK_STORE_DIR_NAME};
+    use super::{block_store_path, write_file_if_absent, BlockStore, BLOCK_STORE_DIR_NAME};
+
+    /// Happy path for the E.3-hardened helper: destination absent,
+    /// write_file_if_absent creates it via the atomic hard_link path,
+    /// and a subsequent call with matching bytes is an idempotent
+    /// no-op. Mirrors the Go `TestWriteFileIfAbsent_Fresh` for
+    /// cross-client parity.
+    #[test]
+    fn write_file_if_absent_fresh_then_idempotent() {
+        let dir = unique_temp_path("rubin-wfia-fresh");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("fresh.bin");
+        let content = b"hello E.3".to_vec();
+
+        write_file_if_absent(&path, &content).expect("fresh write");
+        let got = std::fs::read(&path).expect("read back");
+        assert_eq!(got, content);
+
+        // Idempotent replay: same bytes must succeed as a no-op.
+        write_file_if_absent(&path, &content).expect("idempotent replay");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// write_file_if_absent must refuse to overwrite an existing file
+    /// with different bytes and surface an explicit error. Never
+    /// silent replace — the TOCTOU-hardened helper reads the current
+    /// destination on EEXIST and compares.
+    #[test]
+    fn write_file_if_absent_existing_different_content_is_error() {
+        let dir = unique_temp_path("rubin-wfia-mismatch");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("occupied.bin");
+        std::fs::write(&path, b"existing bytes").expect("seed");
+
+        let err = write_file_if_absent(&path, b"different bytes").expect_err("must error");
+        assert!(
+            err.contains("different content"),
+            "expected mismatch error, got: {err}"
+        );
+
+        // Destination bytes must not have been overwritten.
+        let got = std::fs::read(&path).expect("read back");
+        assert_eq!(got, b"existing bytes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Concurrent race — identical content. Fires N threads at the
+    /// same destination; exactly one creates the file via hard_link,
+    /// the rest observe EEXIST, read back, match, return Ok. Dominant
+    /// case during idempotent sync-engine replay — must never error
+    /// under heavy concurrency. Mirrors the Go
+    /// `TestWriteFileIfAbsent_ConcurrentSameContent`.
+    #[test]
+    fn write_file_if_absent_concurrent_same_content_all_ok() {
+        let dir = unique_temp_path("rubin-wfia-concurrent-same");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = std::sync::Arc::new(dir.join("shared.bin"));
+        let content =
+            std::sync::Arc::new(b"shared payload - every thread writes these same bytes".to_vec());
+
+        const N: usize = 16;
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let p = std::sync::Arc::clone(&path);
+            let c = std::sync::Arc::clone(&content);
+            handles.push(std::thread::spawn(move || write_file_if_absent(&p, &c)));
+        }
+        for h in handles {
+            h.join()
+                .expect("thread panic")
+                .expect("same-content race must be Ok");
+        }
+        let got = std::fs::read(&*path).expect("read back");
+        assert_eq!(&got, &*content);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Concurrent race — different content per thread. Exactly one
+    /// thread wins the hard_link; the others read back the winner's
+    /// bytes, observe the mismatch, and error. Critical invariant: the
+    /// destination never holds "wrong" bytes from a losing thread —
+    /// atomic hard_link prevents that silent overwrite that the old
+    /// read-then-write_file_atomic implementation could permit under
+    /// concurrent races. Mirrors the Go
+    /// `TestWriteFileIfAbsent_ConcurrentDifferentContent`.
+    #[test]
+    fn write_file_if_absent_concurrent_different_content_exactly_one_ok() {
+        let dir = unique_temp_path("rubin-wfia-concurrent-different");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = std::sync::Arc::new(dir.join("contested.bin"));
+
+        const N: usize = 16;
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let p = std::sync::Arc::clone(&path);
+            handles.push(std::thread::spawn(move || {
+                let unique = format!("thread-{i}-payload").into_bytes();
+                write_file_if_absent(&p, &unique)
+            }));
+        }
+        let mut successes = 0;
+        for h in handles {
+            if h.join().expect("thread panic").is_ok() {
+                successes += 1;
+            }
+        }
+        assert_eq!(successes, 1, "exactly one thread must win the link");
+
+        // Whatever ended up on disk must be the bytes of the winning
+        // thread — NOT truncated, NOT corrupted.
+        let got = std::fs::read(&*path).expect("read back");
+        let got_str = String::from_utf8(got).expect("utf8");
+        assert!(
+            got_str.starts_with("thread-") && got_str.ends_with("-payload"),
+            "destination has corrupt bytes: {got_str}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn blockstore_open_and_reopen() {
