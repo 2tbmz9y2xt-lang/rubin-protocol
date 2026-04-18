@@ -159,6 +159,30 @@ class ScopeGuardTests(unittest.TestCase):
         self.assertFalse(warnings)
         self.assertFalse(blockers)
 
+    def test_fails_on_rename_from_forbidden_source_path(self):
+        payload = self.runtime_manifest()
+        payload["allowed_globs"] = ["clients/go/node/**"]
+        manifest = self.write_manifest(payload)
+        run(
+            ["git", "mv", "docs/note.md", "clients/go/node/note.md"],
+            self.repo_root,
+        )
+        changed_files = m.list_changed_files(self.repo_root, "HEAD")
+
+        blockers, warnings = m.evaluate_scope(manifest, "HEAD")
+
+        self.assertFalse(warnings)
+        self.assertIn("docs/note.md", changed_files)
+        self.assertIn("clients/go/node/note.md", changed_files)
+        self.assertTrue(
+            any("docs/note.md: touched forbidden surface" == item for item in blockers),
+            msg=blockers,
+        )
+        self.assertFalse(
+            any("clients/go/node/note.md" in item for item in blockers),
+            msg=blockers,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

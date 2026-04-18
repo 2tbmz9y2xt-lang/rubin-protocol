@@ -108,6 +108,21 @@ class QPreflightTests(unittest.TestCase):
             result.stdout + result.stderr,
         )
 
+    def test_preflight_rejects_whitespace_only_required_test(self):
+        self.write_manifest(["   "])
+
+        result = run(
+            [str(PREFLIGHT), str(self.manifest_path)],
+            self.repo_root,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "required test commands must contain non-whitespace text",
+            result.stdout + result.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

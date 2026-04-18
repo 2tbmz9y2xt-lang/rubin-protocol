@@ -6,6 +6,7 @@ import sys
 import unittest
 
 from pathlib import Path
+from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
@@ -89,6 +90,24 @@ class ManifestContractTests(unittest.TestCase):
 
         self.assertIn("required test commands must be single-line", str(ctx.exception))
 
+    def test_manifest_rejects_whitespace_only_required_test(self):
+        manifest = {
+            "q_id": "Q-IMPL-NODE-TEST-01",
+            "owner_area": "node",
+            "allowed_files": ["clients/go/node/sync.go"],
+            "required_tests": ["   "],
+            "hard_production_loc": 250,
+            "required_invariants": list(m.CANONICAL_INVARIANTS),
+        }
+
+        with self.assertRaises(m.ManifestValidationError) as ctx:
+            m.validate_manifest_document(manifest)
+
+        self.assertIn(
+            "required test commands must contain non-whitespace text",
+            str(ctx.exception),
+        )
+
     def test_manifest_rejects_non_string_required_invariant_entries(self):
         manifest = {
             "q_id": "Q-IMPL-NODE-TEST-01",
@@ -121,6 +140,14 @@ class ManifestContractTests(unittest.TestCase):
                 m.load_json(path)
 
         self.assertIn("invalid utf-8", str(ctx.exception))
+
+    def test_list_changed_files_rejects_truncated_name_status_stream(self):
+        with mock.patch.object(m, "run_git", return_value="M\0"):
+            with mock.patch.object(m, "list_untracked_files", return_value=[]):
+                with self.assertRaises(m.GitCommandError) as ctx:
+                    m.list_changed_files(Path("/tmp/repo"), "HEAD")
+
+        self.assertIn("malformed changed-path entry", str(ctx.exception))
 
 
 if __name__ == "__main__":

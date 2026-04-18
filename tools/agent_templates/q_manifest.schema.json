@@ -58,7 +58,7 @@
       "items": {
         "type": "string",
         "minLength": 1,
-        "pattern": "^[^\\r\\n]+$"
+        "pattern": "^(?=.*\\S)[^\\r\\n]+$"
       }
     },
     "target_production_loc": {

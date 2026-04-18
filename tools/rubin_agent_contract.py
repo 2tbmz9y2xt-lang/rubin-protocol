@@ -250,6 +250,10 @@ def validate_manifest_document(document: Any) -> dict[str, Any]:
                     errors.append(
                         f"$.required_tests[{idx}]: required test commands must be single-line"
                     )
+                if isinstance(command, str) and not command.strip():
+                    errors.append(
+                        f"$.required_tests[{idx}]: required test commands must contain non-whitespace text"
+                    )
 
     if (
         isinstance(document.get("target_production_loc"), int)
@@ -302,8 +306,39 @@ def resolve_diff_range(repo_root: Path, diff_range: str | None) -> str:
 
 
 def list_changed_files(repo_root: Path, diff_range: str) -> list[str]:
-    output = run_git(repo_root, ["diff", "--name-only", diff_range, "--"])
-    changed = {normalize_rel_path(line) for line in output.splitlines() if line.strip()}
+    output = run_git(
+        repo_root,
+        ["diff", "--name-status", "--find-renames", "-z", diff_range, "--"],
+    )
+    tokens = output.split("\0")
+    if tokens and tokens[-1] == "":
+        tokens.pop()
+    changed: set[str] = set()
+    idx = 0
+
+    while idx < len(tokens):
+        status = tokens[idx]
+        idx += 1
+        if not status:
+            continue
+
+        if status.startswith(("R", "C")):
+            if idx + 1 >= len(tokens):
+                raise GitCommandError(
+                    "git diff --name-status returned malformed rename/copy entry"
+                )
+            changed.add(normalize_rel_path(tokens[idx]))
+            changed.add(normalize_rel_path(tokens[idx + 1]))
+            idx += 2
+            continue
+
+        if idx >= len(tokens):
+            raise GitCommandError(
+                "git diff --name-status returned malformed changed-path entry"
+            )
+        changed.add(normalize_rel_path(tokens[idx]))
+        idx += 1
+
     changed.update(list_untracked_files(repo_root))
     return sorted(changed)
 
