@@ -761,14 +761,56 @@ func parseHex32(name, value string) ([32]byte, error) {
 	return out, nil
 }
 
+// writeFileAtomic writes data to path via a temp+rename pattern with an
+// honest fsync durability contract (E.1):
+//  1. open the temp file with O_TRUNC|O_CREATE|O_WRONLY, write the bytes,
+//  2. Sync the temp file (fdatasync-equivalent on the file's data + inode),
+//  3. close the temp file,
+//  4. Rename temp -> destination,
+//  5. open the parent directory and Sync it so the rename itself is durable.
+//
+// Without step 5 the destination's bytes are on disk after step 2, but the
+// directory entry mapping `path` to the new inode may still live only in the
+// kernel page cache and be lost on crash. Mirrors the Rust
+// `clients/rust/crates/rubin-node/src/io_utils.rs` `write_file_atomic` for
+// cross-client storage parity.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	tmpPath := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmpPath, data, mode); err != nil {
+	if err := writeAndSyncTemp(tmpPath, data, mode); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	return nil
+	return syncDir(filepath.Dir(path))
+}
+
+// writeAndSyncTemp writes data to a fresh temp path, syncs the file's bytes
+// and inode metadata to stable storage, and closes it. Splitting this out
+// keeps writeFileAtomic linear and lets the rename + dir-sync stay readable.
+func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	defer tmp.Close()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	return tmp.Sync()
+}
+
+// syncDir opens the directory and calls Sync so any rename or unlink
+// performed in it is itself durable. Unix-only: directory Sync is the
+// portable way to flush the parent's directory entry on Linux/macOS;
+// Windows lacks an equivalent and is not a Rubin production target.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
