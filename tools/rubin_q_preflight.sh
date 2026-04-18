@@ -57,7 +57,12 @@ if ! python3 "$SCRIPT_DIR/rubin_invariant_scan.py" --q-manifest "$MANIFEST_PATH"
   exit 1
 fi
 
-COMMAND_LIST=$(mktemp)
+TMP_ROOT=${TMPDIR:-/tmp}
+TMP_ROOT=${TMP_ROOT%/}
+if [ -z "$TMP_ROOT" ]; then
+  TMP_ROOT=/
+fi
+COMMAND_LIST=$(mktemp "$TMP_ROOT/rubin-q-preflight.XXXXXX")
 trap 'rm -f "$COMMAND_LIST"' EXIT HUP INT TERM
 
 python3 - "$MANIFEST_PATH" > "$COMMAND_LIST" <<'PY'

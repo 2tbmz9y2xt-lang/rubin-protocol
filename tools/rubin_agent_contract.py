@@ -43,7 +43,21 @@ RUNTIME_SENSITIVE_TOKENS = (
 )
 
 PRODUCTION_SUFFIXES = {".go", ".rs", ".lean"}
-COMMENT_PREFIXES = ("//", "#", "/*", "*", "--")
+COMMENT_PREFIXES = ("//", "#", "/*", "*/", "--")
+DEFAULT_RUNTIME_FORBIDDEN_GLOBS = (
+    ".cursor/**",
+    ".claude/**",
+    ".github/workflows/**",
+    "tools/**",
+    "docs/**",
+)
+DEFAULT_FORBIDDEN_OWNER_AREAS = {
+    "consensus",
+    "node",
+    "p2p",
+    "storage",
+    "rpc",
+}
 
 DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
 HUNK_HEADER_RE = re.compile(
@@ -193,25 +207,43 @@ def _validate_instance(instance: Any, schema: dict[str, Any], pointer: str = "$"
     return errors
 
 
-def validate_manifest_document(document: dict[str, Any]) -> dict[str, Any]:
+def validate_manifest_document(document: Any) -> dict[str, Any]:
     schema = load_json(SCHEMA_PATH)
     errors = _validate_instance(document, schema)
+
+    if not isinstance(document, dict):
+        raise ManifestValidationError(errors or ["$: expected object"])
 
     if "required_invariants" in document:
         observed = document["required_invariants"]
         if isinstance(observed, list):
-            missing = sorted(set(CANONICAL_INVARIANTS) - set(observed))
-            extras = sorted(set(observed) - set(CANONICAL_INVARIANTS))
-            if missing:
+            if all(isinstance(item, str) for item in observed):
+                observed_set = set(observed)
+                missing = sorted(set(CANONICAL_INVARIANTS) - observed_set)
+                extras = sorted(observed_set - set(CANONICAL_INVARIANTS))
+                if missing:
+                    errors.append(
+                        "$.required_invariants: missing canonical invariant(s): "
+                        + ", ".join(missing)
+                    )
+                if extras:
+                    errors.append(
+                        "$.required_invariants: unsupported invariant(s): "
+                        + ", ".join(extras)
+                    )
+            else:
                 errors.append(
-                    "$.required_invariants: missing canonical invariant(s): "
-                    + ", ".join(missing)
+                    "$.required_invariants: entries must all be strings"
                 )
-            if extras:
-                errors.append(
-                    "$.required_invariants: unsupported invariant(s): "
-                    + ", ".join(extras)
-                )
+
+    if "required_tests" in document:
+        observed_tests = document["required_tests"]
+        if isinstance(observed_tests, list):
+            for idx, command in enumerate(observed_tests):
+                if isinstance(command, str) and ("\n" in command or "\r" in command):
+                    errors.append(
+                        f"$.required_tests[{idx}]: required test commands must be single-line"
+                    )
 
     if (
         isinstance(document.get("target_production_loc"), int)
@@ -347,13 +379,47 @@ def parse_diff_patches(repo_root: Path, diff_range: str) -> dict[str, FilePatch]
 
 
 def path_matches_glob(rel_path: str, pattern: str) -> bool:
-    rel = PurePosixPath(normalize_rel_path(rel_path))
     normalized_pattern = normalize_rel_path(pattern)
-    return rel.match(normalized_pattern) or rel.as_posix() == normalized_pattern
+    normalized_path = normalize_rel_path(rel_path)
+    regex_parts = ["^"]
+    idx = 0
+
+    while idx < len(normalized_pattern):
+        char = normalized_pattern[idx]
+        if char == "*":
+            next_is_star = idx + 1 < len(normalized_pattern) and normalized_pattern[idx + 1] == "*"
+            if next_is_star:
+                regex_parts.append(".*")
+                idx += 2
+                continue
+            regex_parts.append("[^/]*")
+            idx += 1
+            continue
+        if char == "?":
+            regex_parts.append("[^/]")
+            idx += 1
+            continue
+        regex_parts.append(re.escape(char))
+        idx += 1
+
+    regex_parts.append("$")
+    return re.fullmatch("".join(regex_parts), normalized_path) is not None
 
 
 def matches_any_glob(rel_path: str, patterns: list[str]) -> bool:
     return any(path_matches_glob(rel_path, pattern) for pattern in patterns)
+
+
+def effective_forbidden_globs(manifest: dict[str, Any]) -> list[str]:
+    configured = manifest.get("forbidden_globs")
+    if isinstance(configured, list):
+        return [normalize_rel_path(pattern) for pattern in configured]
+
+    owner_area = manifest.get("owner_area")
+    if owner_area in DEFAULT_FORBIDDEN_OWNER_AREAS:
+        return list(DEFAULT_RUNTIME_FORBIDDEN_GLOBS)
+
+    return []
 
 
 def is_test_file(rel_path: str) -> bool:

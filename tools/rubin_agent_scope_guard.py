@@ -6,6 +6,7 @@ import sys
 
 from rubin_agent_contract import (
     count_production_loc,
+    effective_forbidden_globs,
     list_changed_files,
     load_manifest,
     matches_any_glob,
@@ -22,20 +23,19 @@ def evaluate_scope(manifest_path: str, diff_range: str | None = None) -> tuple[l
     changed_files = list_changed_files(repo_root, resolved_diff_range)
     allowed_files = {normalize_rel_path(path) for path in manifest["allowed_files"]}
     manifest_rel = manifest_path_resolved.resolve().relative_to(repo_root.resolve())
-    allowed_files.add(normalize_rel_path(str(manifest_rel)))
+    manifest_rel_str = normalize_rel_path(str(manifest_rel))
+    allowed_files.add(manifest_rel_str)
     allowed_globs = [normalize_rel_path(pattern) for pattern in manifest.get("allowed_globs", [])]
-    forbidden_globs = [
-        normalize_rel_path(pattern) for pattern in manifest.get("forbidden_globs", [])
-    ]
+    forbidden_globs = effective_forbidden_globs(manifest)
 
     blockers: list[str] = []
     warnings: list[str] = []
 
     for rel_path in changed_files:
+        if rel_path == manifest_rel_str:
+            continue
         if forbidden_globs and matches_any_glob(rel_path, forbidden_globs):
-            blockers.append(
-                f"{rel_path}: touched forbidden surface declared in forbidden_globs"
-            )
+            blockers.append(f"{rel_path}: touched forbidden surface")
             continue
         if rel_path in allowed_files:
             continue

@@ -12,7 +12,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
 
 import rubin_agent_scope_guard as m
-from rubin_agent_contract import CANONICAL_INVARIANTS
+from rubin_agent_contract import CANONICAL_INVARIANTS, GitCommandError
 
 
 def run(cmd: list[str], cwd: Path) -> str:
@@ -33,6 +33,7 @@ def init_repo() -> tuple[tempfile.TemporaryDirectory[str], Path]:
     run(["git", "init"], root)
     run(["git", "config", "user.name", "Test User"], root)
     run(["git", "config", "user.email", "test@example.com"], root)
+    run(["git", "config", "commit.gpgsign", "false"], root)
     run(["git", "branch", "-M", "main"], root)
     (root / "tools" / "agent_tasks").mkdir(parents=True, exist_ok=True)
     (root / "clients" / "go" / "node").mkdir(parents=True, exist_ok=True)
@@ -121,7 +122,7 @@ class ScopeGuardTests(unittest.TestCase):
         manifest = self.write_manifest(self.runtime_manifest())
         run(["git", "update-ref", "-d", "refs/remotes/origin/main"], self.repo_root)
 
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(GitCommandError) as ctx:
             m.evaluate_scope(manifest, None)
 
         self.assertIn("origin/main", str(ctx.exception))
@@ -135,6 +136,28 @@ class ScopeGuardTests(unittest.TestCase):
 
         self.assertFalse(warnings)
         self.assertTrue(any("outside allowed_files/allowed_globs" in item for item in blockers))
+
+    def test_runtime_defaults_enforce_forbidden_globs_when_manifest_omits_them(self):
+        payload = self.runtime_manifest()
+        payload.pop("forbidden_globs")
+        manifest = self.write_manifest(payload)
+        touched = self.repo_root / "docs" / "note.md"
+        touched.write_text("runtime drift\n", encoding="utf-8")
+
+        blockers, warnings = m.evaluate_scope(manifest, None)
+
+        self.assertFalse(warnings)
+        self.assertTrue(any("forbidden surface" in item for item in blockers))
+
+    def test_runtime_defaults_allow_manifest_control_plane_artifact(self):
+        payload = self.runtime_manifest()
+        payload.pop("forbidden_globs")
+        manifest = self.write_manifest(payload)
+
+        blockers, warnings = m.evaluate_scope(manifest, None)
+
+        self.assertFalse(warnings)
+        self.assertFalse(blockers)
 
 
 if __name__ == "__main__":

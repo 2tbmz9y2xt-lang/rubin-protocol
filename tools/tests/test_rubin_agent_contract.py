@@ -67,6 +67,50 @@ class ManifestContractTests(unittest.TestCase):
 
         self.assertIn("missing canonical invariant(s)", str(ctx.exception))
 
+    def test_manifest_rejects_non_object_root(self):
+        with self.assertRaises(m.ManifestValidationError) as ctx:
+            m.validate_manifest_document(["not", "an", "object"])
+
+        self.assertIn("expected object", str(ctx.exception))
+
+    def test_manifest_rejects_multiline_required_test(self):
+        manifest = {
+            "q_id": "Q-IMPL-NODE-TEST-01",
+            "owner_area": "node",
+            "allowed_files": ["clients/go/node/sync.go"],
+            "required_tests": ["printf ok\nprintf nope"],
+            "hard_production_loc": 250,
+            "required_invariants": list(m.CANONICAL_INVARIANTS),
+        }
+
+        with self.assertRaises(m.ManifestValidationError) as ctx:
+            m.validate_manifest_document(manifest)
+
+        self.assertIn("required test commands must be single-line", str(ctx.exception))
+
+    def test_manifest_rejects_non_string_required_invariant_entries(self):
+        manifest = {
+            "q_id": "Q-IMPL-NODE-TEST-01",
+            "owner_area": "node",
+            "allowed_files": ["clients/go/node/sync.go"],
+            "required_tests": ["printf ok"],
+            "hard_production_loc": 250,
+            "required_invariants": list(m.CANONICAL_INVARIANTS[:-1]) + [["bad"]],
+        }
+
+        with self.assertRaises(m.ManifestValidationError) as ctx:
+            m.validate_manifest_document(manifest)
+
+        self.assertIn("entries must all be strings", str(ctx.exception))
+
+    def test_root_anchored_globs_match_only_from_repo_root(self):
+        self.assertTrue(
+            m.path_matches_glob("clients/go/node/sync.go", "clients/**")
+        )
+        self.assertFalse(
+            m.path_matches_glob("vendor/clients/go/node/sync.go", "clients/**")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

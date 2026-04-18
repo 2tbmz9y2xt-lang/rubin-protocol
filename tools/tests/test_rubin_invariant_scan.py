@@ -33,6 +33,7 @@ def init_repo() -> tuple[tempfile.TemporaryDirectory[str], Path]:
     run(["git", "init"], root)
     run(["git", "config", "user.name", "Test User"], root)
     run(["git", "config", "user.email", "test@example.com"], root)
+    run(["git", "config", "commit.gpgsign", "false"], root)
     run(["git", "branch", "-M", "main"], root)
     (root / "tools" / "agent_tasks").mkdir(parents=True, exist_ok=True)
     (root / "clients" / "go" / "node").mkdir(parents=True, exist_ok=True)
@@ -130,6 +131,17 @@ class InvariantScanTests(unittest.TestCase):
         target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "p2p_runtime.rs"
         target.write_text(
             "pub fn relay() {\n    let _value = Some(1).unwrap();\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertTrue(any("unwrap/expect added in runtime-sensitive" in item for item in blockers))
+
+    def test_fails_on_dereference_line_with_unwrap(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "p2p_runtime.rs"
+        target.write_text(
+            "pub fn relay(slot: &mut Option<i32>) {\n    *slot = Some(1).unwrap();\n}\n",
             encoding="utf-8",
         )
 

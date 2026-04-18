@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +28,7 @@ def init_repo() -> tuple[tempfile.TemporaryDirectory[str], Path, Path]:
     run(["git", "init"], root)
     run(["git", "config", "user.name", "Test User"], root)
     run(["git", "config", "user.email", "test@example.com"], root)
+    run(["git", "config", "commit.gpgsign", "false"], root)
     run(["git", "branch", "-M", "main"], root)
     (root / "tools" / "agent_tasks").mkdir(parents=True, exist_ok=True)
     (root / "clients" / "go" / "node").mkdir(parents=True, exist_ok=True)
@@ -92,6 +92,21 @@ class QPreflightTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
         self.assertIn("PASS: q preflight", result.stdout)
+
+    def test_preflight_rejects_multiline_required_test(self):
+        self.write_manifest(["printf ok\nprintf nope"])
+
+        result = run(
+            [str(PREFLIGHT), str(self.manifest_path)],
+            self.repo_root,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "required test commands must be single-line",
+            result.stdout + result.stderr,
+        )
 
 
 if __name__ == "__main__":
