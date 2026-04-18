@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"math/big"
 	"os"
@@ -848,9 +849,22 @@ func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
 // Sync and Close errors are combined via errors.Join so a Close error after
 // a successful Sync still surfaces (Copilot review feedback on PR #1218,
 // mirrors the writeAndSyncTemp pattern).
+//
+// Best-effort on permission-denied open: a parent directory with mode
+// 0300 (write+execute, no read) permits create/rename but blocks
+// os.Open(dir) for reading (Codex review feedback on PR #1218). The
+// rename has already succeeded by the time we get here, so returning
+// an error would make the caller treat committed state as failed on
+// hardened directory-permission setups. Return nil instead — the
+// destination bytes are already on disk via the temp file's Sync; only
+// the directory-entry fsync is degraded to best-effort. Any other open
+// error (ENOENT, EIO, etc) still propagates as a real anomaly.
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			return nil
+		}
 		return err
 	}
 	serr := d.Sync()

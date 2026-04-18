@@ -110,13 +110,26 @@ fn effective_parent(path: &Path) -> Option<&Path> {
 /// is honestly reported; only the rare close-after-successful-sync error
 /// is silently absorbed by Drop. This is an accepted Rust stdlib
 /// limitation, not a missing fix.
+///
+/// Best-effort on permission-denied open: a parent directory with mode
+/// `0300` (write+execute, no read) permits create/rename but blocks
+/// `OpenOptions::new().read(true).open(dir)` (Codex review feedback on
+/// PR #1218). The rename has already succeeded by the time `sync_dir`
+/// runs, so returning an error would make the caller treat committed
+/// state as failed on hardened directory-permission setups. Return
+/// `Ok(())` instead — the destination bytes are already on disk via
+/// the temp file's `sync_all()`; only the directory-entry fsync is
+/// degraded to best-effort. Any other open error (`NotFound`, `Other`,
+/// etc) still propagates as a real anomaly.
 pub fn sync_dir(dir: &Path) -> Result<(), String> {
-    fs::OpenOptions::new()
-        .read(true)
-        .open(dir)
-        .map_err(|e| format!("open dir {}: {e}", dir.display()))?
-        .sync_all()
-        .map_err(|e| format!("sync dir {}: {e}", dir.display()))
+    use std::io::ErrorKind;
+    match fs::OpenOptions::new().read(true).open(dir) {
+        Ok(file) => file
+            .sync_all()
+            .map_err(|e| format!("sync dir {}: {e}", dir.display())),
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => Ok(()),
+        Err(e) => Err(format!("open dir {}: {e}", dir.display())),
+    }
 }
 
 #[cfg(test)]
@@ -207,6 +220,46 @@ mod tests {
         sync_dir(&dir).expect("sync_dir on existing directory");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Codex P2 fix from PR #1218: `sync_dir` on an execute-only parent
+    /// (mode `0300` — write+execute, no read) must return `Ok(())`
+    /// instead of surfacing `EACCES`, because the rename has already
+    /// succeeded by the time we call it. Without this, hardened
+    /// directory-permission setups would see writes reported as failed
+    /// even though the destination bytes are durably on disk.
+    #[cfg(unix)]
+    #[test]
+    fn sync_dir_is_best_effort_on_execute_only_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        // Skip when running as root — the chmod-based permission check
+        // does not apply (CAP_DAC_READ_SEARCH bypasses it). Detected via
+        // `id -u` (no extra crate dependency on `libc` or `users`).
+        let is_root = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim() == "0")
+            .unwrap_or(false);
+        if is_root {
+            return;
+        }
+        let dir = unique_temp_path("rubin-io-utils-syncdir-eaccess");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let mut perms = fs::metadata(&dir).expect("stat").permissions();
+        perms.set_mode(0o300);
+        fs::set_permissions(&dir, perms).expect("chmod 0o300");
+
+        let result = sync_dir(&dir);
+
+        // Restore writable mode before any remove call so cleanup works.
+        let mut restore = fs::metadata(&dir).expect("stat").permissions();
+        restore.set_mode(0o700);
+        let _ = fs::set_permissions(&dir, restore);
+        let _ = fs::remove_dir_all(&dir);
+
+        result.expect("sync_dir on execute-only dir must be best-effort (Ok)");
     }
 
     /// Pure-helper unit test for the `path.parent()` edge case: a relative
