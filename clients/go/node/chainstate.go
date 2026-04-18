@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"os"
@@ -791,14 +792,21 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 // and inode metadata to stable storage, and closes it. Splitting this out
 // keeps writeFileAtomic linear and lets the rename + dir-sync stay readable.
 //
+// Write is looped until all bytes are persisted, matching Rust's
+// `Write::write_all` contract: io.Writer is allowed to return a short
+// write without an error, and treating that as success would let us
+// sync+rename a truncated file (Copilot review feedback on PR #1218).
+// A zero-byte short write is reported as io.ErrShortWrite to avoid an
+// infinite loop on a well-behaved-but-stuck writer.
+//
 // We always run Write, Sync and Close, then combine their errors with
 // errors.Join (Go 1.20+). This guarantees:
 //  1. the Close error is NOT silently dropped — it surfaces in the joined
-//     error and reaches the caller (Copilot review feedback on PR #1218);
+//     error and reaches the caller;
 //  2. the FD is always released, even when Write or Sync fail, without
 //     duplicating cleanup branches that would otherwise be unreachable
 //     from a unit test (no realistic way to provoke a Write or Sync
-//     failure on an already-opened file in CI).
+//     failure on an already-opened regular file in CI).
 //
 // On error the outer writeFileAtomic removes the temp file, so a partial
 // Sync after a failed Write does not leak state to the destination — the
@@ -808,7 +816,19 @@ func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	_, werr := tmp.Write(data)
+	var werr error
+	for written := 0; written < len(data); {
+		n, e := tmp.Write(data[written:])
+		if e != nil {
+			werr = e
+			break
+		}
+		if n == 0 {
+			werr = io.ErrShortWrite
+			break
+		}
+		written += n
+	}
 	serr := tmp.Sync()
 	cerr := tmp.Close()
 	return errors.Join(werr, serr, cerr)
