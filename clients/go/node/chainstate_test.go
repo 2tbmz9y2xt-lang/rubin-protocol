@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -611,3 +612,88 @@ func TestChainState_ConnectBlock_DefaultRotation_StillWorks(t *testing.T) {
 		t.Fatalf("unexpected state after genesis: has_tip=%v height=%d", st.HasTip, st.Height)
 	}
 }
+
+// TestWriteFileAtomicDurablyPersistsFreshFile is the Go-side smoke test for
+// the E.1 durability contract: a fresh write goes through OpenFile + Sync +
+// Rename + parent dir Sync without surfacing an error on a real filesystem,
+// and the resulting bytes are exactly what we wrote. We cannot directly
+// observe the fsync syscall from a unit test, but this DOES regression-guard
+// the OpenFile/Sync/Rename chain returning an error on the platforms that
+// run CI (Linux/macOS).
+func TestWriteFileAtomicDurablyPersistsFreshFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "payload.bin")
+	data := []byte("E.1 fsync contract: bytes + dir entry must both be durable")
+
+	if err := writeFileAtomic(path, data, 0o600); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("payload mismatch: got %q want %q", got, data)
+	}
+}
+
+// TestWriteFileAtomicReplacesExistingFileWithNewDurableBytes verifies the
+// dominant chainstate/blockstore path: rewriting the index file on every
+// commit must atomically replace it AND leave no stale .tmp.* sibling
+// behind once the rename succeeds.
+func TestWriteFileAtomicReplacesExistingFileWithNewDurableBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "index.json")
+
+	if err := writeFileAtomic(path, []byte("first"), 0o600); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if err := writeFileAtomic(path, []byte("second"), 0o600); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, []byte("second")) {
+		t.Fatalf("payload mismatch: got %q want %q", got, "second")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.Contains(name, ".tmp.") {
+			t.Fatalf("stale tmp file remained after rename: %s", name)
+		}
+	}
+}
+
+// TestSyncDirSucceedsOnExistingDirectory pins the standalone helper:
+// storage callers may want to fsync ad-hoc directory mutations (for example
+// after deleting a stale undo file) without going through writeFileAtomic.
+func TestSyncDirSucceedsOnExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := syncDir(dir); err != nil {
+		t.Fatalf("syncDir on existing directory: %v", err)
+	}
+}
+
+// TestSyncDirFailsOnMissingDirectory exercises the error path of syncDir
+// (os.Open returns an error). Without this the durability helper's failure
+// mode is silent under coverage.
+func TestSyncDirFailsOnMissingDirectory(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-subdir")
+	if err := syncDir(missing); err == nil {
+		t.Fatalf("syncDir on missing dir: expected error, got nil")
+	}
+}
+
+// Permission-based tests that rely on os.Geteuid() (Unix-only) live in
+// chainstate_fsync_unix_test.go behind a `//go:build unix` tag so this
+// file still compiles under GOOS=windows (Copilot review feedback on
+// PR #1218).

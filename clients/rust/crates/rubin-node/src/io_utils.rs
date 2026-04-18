@@ -15,17 +15,143 @@ pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+/// Atomically write `data` to `path` with an honest fsync durability
+/// contract (audit `E.1`). Sequence (any failure between open and rename
+/// removes the partially-written `<dest>.tmp.<pid>`):
+///
+/// 1. resolve the target's effective parent (see `effective_parent`),
+///    `create_dir_all` it if missing;
+/// 2. open `<path>.tmp.<pid>` with `O_TRUNC|O_CREATE|O_WRONLY`;
+/// 3. `write_all` (loops on short writes per stdlib contract);
+/// 4. `sync_all` — flushes data + inode metadata to disk;
+/// 5. close (implicit on scope exit; see `sync_dir` doc on Rust File close
+///    error semantics);
+/// 6. `fs::rename` temp -> destination (atomic on the same filesystem);
+/// 7. `sync_dir` on the effective parent so the rename itself is durable.
+///
+/// Mirrors the Go `clients/go/node/chainstate.go` `writeFileAtomic` for
+/// cross-client storage parity.
 pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
+    let parent = effective_parent(path);
+    if let Some(parent) = parent {
         fs::create_dir_all(parent)
             .map_err(|e| format!("create parent {}: {e}", parent.display()))?;
     }
-    let tmp_path = format!("{}.tmp.{}", path.display(), std::process::id());
-    fs::write(&tmp_path, data).map_err(|e| format!("write temp {}: {e}", tmp_path))?;
+    let tmp_path = temp_path_for(path, std::process::id());
+    // Durability contract (E.1): the temp file's bytes AND its inode metadata
+    // must hit stable storage before the rename, otherwise a crash between
+    // rename and the next implicit flush can leave the destination pointing
+    // at a zero-length / partially-written file. Using `OpenOptions` here
+    // explicitly so we control flush ordering: write all bytes, then
+    // `sync_all()` (data + metadata), then close, then rename, then sync the
+    // parent directory so the rename itself is durable.
+    //
+    // Mirrors the Go helper: any failure between `open temp` and the rename
+    // removes the partially-written `<dest>.tmp.<pid>` so we do not strand
+    // a large file on disk under realistic I/O fault conditions
+    // (e.g. ENOSPC/EIO after the data write).
+    let write_result: Result<(), String> = (|| {
+        use std::io::Write;
+        let mut tmp = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("open temp {}: {e}", tmp_path.display()))?;
+        tmp.write_all(data)
+            .map_err(|e| format!("write temp {}: {e}", tmp_path.display()))?;
+        tmp.sync_all()
+            .map_err(|e| format!("sync temp {}: {e}", tmp_path.display()))
+    })();
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
     fs::rename(&tmp_path, path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
-        format!("rename temp {} -> {}: {e}", tmp_path, path.display())
-    })
+        format!(
+            "rename temp {} -> {}: {e}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
+    // Directory fsync makes the rename itself durable. Without this the
+    // destination file's bytes are on disk after the temp `sync_all()` above,
+    // but the directory entry that points the destination name at the new
+    // inode may still live only in the kernel page cache and be lost on
+    // crash. Mirrors the Go `writeFileAtomic` `Sync` on parent directory
+    // for cross-client parity.
+    if let Some(parent) = parent {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// Build the `<dest>.tmp.<pid>` companion path for a target `path`
+/// without going through lossy `Path::display()`. `display()` replaces
+/// non-UTF-8 bytes with `U+FFFD`; on Unix a `PathBuf` can contain any
+/// byte sequence other than `/` and `\0`, so a lossy conversion would
+/// produce a temp at a different location than the caller's actual
+/// target — breaking both the atomic rename and the failure cleanup.
+/// `OsString::push` preserves the original bytes exactly. Split into
+/// its own helper so the byte-preservation contract is independently
+/// testable without going through the filesystem (APFS on macOS
+/// rejects non-UTF-8 filenames with EILSEQ, so a filesystem-level
+/// round-trip test is not portable). Copilot review feedback on PR #1218.
+fn temp_path_for(path: &Path, pid: u32) -> std::path::PathBuf {
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".tmp.");
+    tmp_os.push(pid.to_string());
+    std::path::PathBuf::from(tmp_os)
+}
+
+/// Compute the directory whose existence we must ensure (and whose entry we
+/// must fsync) for a target path. For relative bare-name targets like
+/// `Path::new("foo")` the standard library returns `Some(Path::new(""))`,
+/// not `None`. An empty path can neither be created via `create_dir_all`
+/// nor opened via `OpenOptions::open` for `sync_dir`, so map empty to `.`
+/// (current directory) — matches the previous `fs::write` semantics.
+fn effective_parent(path: &Path) -> Option<&Path> {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => Some(p),
+        Some(_) => Some(Path::new(".")),
+        None => None,
+    }
+}
+
+/// Open the parent directory and call `sync_all()` so any rename or unlink
+/// performed in it is itself durable. Splitting this out keeps
+/// `write_file_atomic` linear and lets storage callers fsync ad-hoc
+/// directory mutations later if they need to.
+///
+/// Cross-client note: the Go counterpart `syncDir` uses
+/// `errors.Join(serr, cerr)` to surface a Close error after a successful
+/// Sync. Rust cannot easily mirror that — `std::fs::File::drop` discards
+/// the close error by design, and there is no stable safe API to surface
+/// it. The Sync error itself is returned, so a kernel-level flush failure
+/// is honestly reported; only the rare close-after-successful-sync error
+/// is silently absorbed by Drop. This is an accepted Rust stdlib
+/// limitation, not a missing fix.
+///
+/// Best-effort on permission-denied open: a parent directory with mode
+/// `0300` (write+execute, no read) permits create/rename but blocks
+/// `OpenOptions::new().read(true).open(dir)` (Codex review feedback on
+/// PR #1218). The rename has already succeeded by the time `sync_dir`
+/// runs, so returning an error would make the caller treat committed
+/// state as failed on hardened directory-permission setups. Return
+/// `Ok(())` instead — the destination bytes are already on disk via
+/// the temp file's `sync_all()`; only the directory-entry fsync is
+/// degraded to best-effort. Any other open error (`NotFound`, `Other`,
+/// etc) still propagates as a real anomaly.
+pub fn sync_dir(dir: &Path) -> Result<(), String> {
+    use std::io::ErrorKind;
+    match fs::OpenOptions::new().read(true).open(dir) {
+        Ok(file) => file
+            .sync_all()
+            .map_err(|e| format!("sync dir {}: {e}", dir.display())),
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => Ok(()),
+        Err(e) => Err(format!("open dir {}: {e}", dir.display())),
+    }
 }
 
 #[cfg(test)]
@@ -40,4 +166,236 @@ pub fn unique_temp_path(prefix: &str) -> PathBuf {
             .as_nanos(),
         NEXT_UNIQUE_TEMP_ID.fetch_add(1, Ordering::Relaxed),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sync_dir, unique_temp_path, write_file_atomic};
+    use std::fs;
+
+    /// Smoke test for the E.1 durability contract: a fresh write goes
+    /// through OpenOptions + sync_all + rename + parent dir-sync without
+    /// surfacing an error on a real filesystem, and the resulting bytes
+    /// are exactly what we wrote. We cannot directly observe the fsync
+    /// syscall from a unit test, but we DO want a regression that
+    /// notices if the `OpenOptions`/`sync_all` chain ever returns an
+    /// error on the platforms that run CI (Linux/macOS).
+    #[test]
+    fn write_file_atomic_durably_persists_fresh_file() {
+        let dir = unique_temp_path("rubin-io-utils-fresh");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("payload.bin");
+        let data = b"E.1 fsync contract: bytes + dir entry must both be durable";
+
+        write_file_atomic(&path, data).expect("write_file_atomic");
+
+        let read_back = fs::read(&path).expect("read back");
+        assert_eq!(read_back, data);
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Replace path: existing destination is overwritten with new bytes.
+    /// Verifies sync_all + rename idempotency on top of an existing inode
+    /// (this is the dominant chainstate/blockstore path: rewrite the
+    /// index file every commit).
+    #[test]
+    fn write_file_atomic_replaces_existing_file_with_new_durable_bytes() {
+        let dir = unique_temp_path("rubin-io-utils-replace");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("index.json");
+
+        write_file_atomic(&path, b"first").expect("first write");
+        write_file_atomic(&path, b"second").expect("second write");
+
+        let read_back = fs::read(&path).expect("read back");
+        assert_eq!(read_back, b"second");
+
+        // No leftover .tmp.* sibling — temp must have been renamed away.
+        let leftover_tmps: Vec<_> = fs::read_dir(&dir)
+            .expect("list dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftover_tmps.is_empty(),
+            "stale .tmp.* file remained after rename: {:?}",
+            leftover_tmps
+                .iter()
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Standalone `sync_dir` helper accepts an existing directory and
+    /// returns Ok. Storage callers may want to fsync ad-hoc directory
+    /// mutations (e.g. after deleting a stale undo file) without going
+    /// through `write_file_atomic`.
+    #[test]
+    fn sync_dir_succeeds_on_existing_directory() {
+        let dir = unique_temp_path("rubin-io-utils-syncdir");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        sync_dir(&dir).expect("sync_dir on existing directory");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Codex P2 fix from PR #1218: `sync_dir` on an execute-only parent
+    /// (mode `0300` — write+execute, no read) must return `Ok(())`
+    /// instead of surfacing `EACCES`, because the rename has already
+    /// succeeded by the time we call it. Without this, hardened
+    /// directory-permission setups would see writes reported as failed
+    /// even though the destination bytes are durably on disk.
+    #[cfg(unix)]
+    #[test]
+    fn sync_dir_is_best_effort_on_execute_only_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        // Skip when running as root — the chmod-based permission check
+        // does not apply (CAP_DAC_READ_SEARCH bypasses it). Detected via
+        // `id -u` (no extra crate dependency on `libc` or `users`).
+        let is_root = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim() == "0")
+            .unwrap_or(false);
+        if is_root {
+            return;
+        }
+        let dir = unique_temp_path("rubin-io-utils-syncdir-eaccess");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let mut perms = fs::metadata(&dir).expect("stat").permissions();
+        perms.set_mode(0o300);
+        fs::set_permissions(&dir, perms).expect("chmod 0o300");
+
+        let result = sync_dir(&dir);
+
+        // Restore writable mode before any remove call so cleanup works.
+        let mut restore = fs::metadata(&dir).expect("stat").permissions();
+        restore.set_mode(0o700);
+        let _ = fs::set_permissions(&dir, restore);
+        let _ = fs::remove_dir_all(&dir);
+
+        result.expect("sync_dir on execute-only dir must be best-effort (Ok)");
+    }
+
+    /// Pure-helper unit test for the `path.parent()` edge case: a relative
+    /// bare-name target like `Path::new("relative.bin")` returns
+    /// `Some(Path::new(""))` from `parent()`, not `None`. The previous
+    /// `fs::write` implementation silently no-op'd the parent, so callers
+    /// in CWD-relative paths kept working. The internal `effective_parent`
+    /// helper maps the empty parent to `.` so `create_dir_all` and
+    /// `sync_dir` both get a usable path.
+    ///
+    /// We test the helper directly rather than mutating the process-wide
+    /// CWD with `std::env::set_current_dir`, which would race other tests
+    /// running in parallel (Rust tests are concurrent by default).
+    #[test]
+    fn effective_parent_maps_empty_parent_to_current_directory() {
+        use super::effective_parent;
+        use std::path::Path;
+
+        // Bare relative target: parent is "" -> mapped to "."
+        assert_eq!(
+            effective_parent(Path::new("relative.bin")),
+            Some(Path::new("."))
+        );
+        // Absolute target with explicit parent: returned as-is
+        assert_eq!(
+            effective_parent(Path::new("/tmp/sub/file")),
+            Some(Path::new("/tmp/sub"))
+        );
+        // Filesystem root: no parent at all
+        assert_eq!(effective_parent(Path::new("/")), None);
+        // Multi-segment relative target: parent retained
+        assert_eq!(
+            effective_parent(Path::new("sub/file")),
+            Some(Path::new("sub"))
+        );
+    }
+
+    /// Copilot P1 regression from PR #1218: the temp path must be built
+    /// via byte-level `OsString::push`, NOT via lossy
+    /// `format!("{}.tmp.{}", path.display(), pid)`. `path.display()`
+    /// replaces non-UTF-8 bytes with `U+FFFD`, so a `PathBuf` containing
+    /// any non-UTF-8 byte would round-trip to a DIFFERENT temp path
+    /// than the caller's actual target.
+    ///
+    /// Tested on the pure helper because APFS on macOS rejects non-UTF-8
+    /// filenames at the syscall layer with `EILSEQ`, which makes a
+    /// filesystem-level round-trip test non-portable. `temp_path_for`
+    /// is the only place where the lossy-vs-exact decision lives, so
+    /// byte-level verification here pins the fix completely.
+    #[cfg(unix)]
+    #[test]
+    fn temp_path_for_preserves_non_utf8_bytes() {
+        use super::temp_path_for;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        use std::path::PathBuf;
+
+        let mut bytes = b"/tmp/bad-".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"-name.bin");
+        let path = PathBuf::from(OsString::from_vec(bytes.clone()));
+
+        let tmp = temp_path_for(&path, 12345);
+
+        let mut expected = bytes.clone();
+        expected.extend_from_slice(b".tmp.12345");
+        assert_eq!(tmp.as_os_str().as_bytes(), expected.as_slice());
+
+        // Negative: lossy `format!("{}.tmp.{}", path.display(), 12345)`
+        // would replace the 0xff byte with U+FFFD (three bytes
+        // 0xef 0xbf 0xbd), producing DIFFERENT bytes.
+        let lossy = format!("{}.tmp.12345", path.display());
+        assert_ne!(
+            tmp.as_os_str().as_bytes(),
+            lossy.as_bytes(),
+            "temp_path_for must not agree with lossy display() on non-UTF-8 input"
+        );
+    }
+
+    /// On a sync_all/write_all failure before rename the temp file MUST be
+    /// removed, otherwise a real I/O fault (ENOSPC/EIO after data write)
+    /// would strand large `<dest>.tmp.<pid>` siblings on disk while the
+    /// caller sees an error.
+    ///
+    /// We exercise the path indirectly: provoke a `create_parent` failure
+    /// by passing a destination whose parent path component is an existing
+    /// regular file (not a directory). The early-exit must NOT leave any
+    /// unrelated file behind in the surrounding temp directory.
+    #[test]
+    fn write_file_atomic_does_not_strand_temp_when_create_parent_fails() {
+        let dir = unique_temp_path("rubin-io-utils-strand");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let blocker = dir.join("not-a-dir");
+        fs::write(&blocker, b"existing file masquerading as parent").expect("write blocker");
+        // Path whose parent (`blocker`) is a regular file, so create_dir_all
+        // will fail before any temp open/write happens.
+        let bad_target = blocker.join("payload");
+
+        let result = write_file_atomic(&bad_target, b"never-written");
+        assert!(result.is_err(), "expected create_parent failure");
+
+        // The directory must contain only the blocker file; no `.tmp.*`
+        // sibling was created by this failed call.
+        let entries: Vec<_> = fs::read_dir(&dir)
+            .expect("list dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec!["not-a-dir".to_string()],
+            "stranded files present"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"math"
 	"math/big"
 	"os"
@@ -761,14 +763,111 @@ func parseHex32(name, value string) ([32]byte, error) {
 	return out, nil
 }
 
+// writeFileAtomic writes data to path via a temp+rename pattern with an
+// honest fsync durability contract (E.1). The actual file IO lives in the
+// helpers writeAndSyncTemp and syncDir — see their doc comments for the
+// short-write loop, errors.Join semantics, and Close error handling.
+//
+// Sequence (any failure removes the temp file before returning):
+//  1. delegate to writeAndSyncTemp: open temp with O_TRUNC|O_CREATE|O_WRONLY,
+//     loop Write until all bytes are persisted, Sync (fsync-equivalent:
+//     flushes file data + metadata to stable storage), Close, return joined
+//     errors;
+//  2. Rename temp -> destination (atomic on the same filesystem);
+//  3. delegate to syncDir on the parent directory so the rename itself is
+//     durable (without this the destination's bytes are on disk after
+//     step 1's Sync, but the directory entry mapping `path` to the new
+//     inode may still live only in the kernel page cache and be lost on
+//     crash).
+//
+// Mirrors the Rust `clients/rust/crates/rubin-node/src/io_utils.rs`
+// `write_file_atomic` for cross-client storage parity.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	tmpPath := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmpPath, data, mode); err != nil {
+	if err := writeAndSyncTemp(tmpPath, data, mode); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	return nil
+	return syncDir(filepath.Dir(path))
+}
+
+// writeAndSyncTemp writes data to a fresh temp path, syncs the file's bytes
+// and inode metadata to stable storage, and closes it. Splitting this out
+// keeps writeFileAtomic linear and lets the rename + dir-sync stay readable.
+//
+// Write is looped until all bytes are persisted, matching Rust's
+// `Write::write_all` contract: io.Writer is allowed to return a short
+// write without an error, and treating that as success would let us
+// sync+rename a truncated file (Copilot review feedback on PR #1218).
+// A zero-byte short write is reported as io.ErrShortWrite to avoid an
+// infinite loop on a well-behaved-but-stuck writer.
+//
+// We always run Write, Sync and Close, then combine their errors with
+// errors.Join (Go 1.20+). This guarantees:
+//  1. the Close error is NOT silently dropped — it surfaces in the joined
+//     error and reaches the caller;
+//  2. the FD is always released, even when Write or Sync fail, without
+//     duplicating cleanup branches that would otherwise be unreachable
+//     from a unit test (no realistic way to provoke a Write or Sync
+//     failure on an already-opened regular file in CI).
+//
+// On error the outer writeFileAtomic removes the temp file, so a partial
+// Sync after a failed Write does not leak state to the destination — the
+// rename never runs.
+func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	var werr error
+	for written := 0; written < len(data); {
+		n, e := tmp.Write(data[written:])
+		if e != nil {
+			werr = e
+			break
+		}
+		if n == 0 {
+			werr = io.ErrShortWrite
+			break
+		}
+		written += n
+	}
+	serr := tmp.Sync()
+	cerr := tmp.Close()
+	return errors.Join(werr, serr, cerr)
+}
+
+// syncDir opens the directory and calls Sync so any rename or unlink
+// performed in it is itself durable. Unix-only: directory Sync is the
+// portable way to flush the parent's directory entry on Linux/macOS;
+// Windows lacks an equivalent and is not a Rubin production target.
+//
+// Sync and Close errors are combined via errors.Join so a Close error after
+// a successful Sync still surfaces (Copilot review feedback on PR #1218,
+// mirrors the writeAndSyncTemp pattern).
+//
+// Best-effort on permission-denied open: a parent directory with mode
+// 0300 (write+execute, no read) permits create/rename but blocks
+// os.Open(dir) for reading (Codex review feedback on PR #1218). The
+// rename has already succeeded by the time we get here, so returning
+// an error would make the caller treat committed state as failed on
+// hardened directory-permission setups. Return nil instead — the
+// destination bytes are already on disk via the temp file's Sync; only
+// the directory-entry fsync is degraded to best-effort. Any other open
+// error (ENOENT, EIO, etc) still propagates as a real anomaly.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			return nil
+		}
+		return err
+	}
+	serr := d.Sync()
+	cerr := d.Close()
+	return errors.Join(serr, cerr)
 }
