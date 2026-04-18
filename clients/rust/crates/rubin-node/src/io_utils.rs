@@ -16,7 +16,17 @@ pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
 }
 
 pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
+    // For relative paths like `Path::new("foo")` the standard library returns
+    // `Some(Path::new(""))` rather than `None`. An empty path can neither be
+    // created via `create_dir_all` nor opened via `OpenOptions::open` for
+    // `sync_dir`. Treat empty as the current directory so behaviour matches
+    // the previous `fs::write` semantics for bare-name targets.
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => Some(p),
+        Some(_) => Some(Path::new(".")),
+        None => None,
+    };
+    if let Some(parent) = parent {
         fs::create_dir_all(parent)
             .map_err(|e| format!("create parent {}: {e}", parent.display()))?;
     }
@@ -51,7 +61,7 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     // inode may still live only in the kernel page cache and be lost on
     // crash. Mirrors the Go `writeFileAtomic` `Sync` on parent directory
     // for cross-client parity.
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = parent {
         sync_dir(parent)?;
     }
     Ok(())
@@ -158,5 +168,36 @@ mod tests {
         sync_dir(&dir).expect("sync_dir on existing directory");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for the `path.parent()` edge case: a relative bare-name
+    /// target like `Path::new("relative.bin")` returns `Some(Path::new(""))`
+    /// from `parent()`, not `None`. The previous `fs::write` implementation
+    /// silently no-op'd the parent, so callers in tests/CWD-relative paths
+    /// kept working. Make sure the new implementation maps the empty parent
+    /// to `.` and does not surface `create_dir_all("")` / `sync_dir("")`
+    /// errors.
+    #[test]
+    fn write_file_atomic_handles_relative_bare_name_target() {
+        use std::path::Path;
+
+        // Run with a private CWD to avoid polluting wherever the test runner
+        // happens to be.
+        let cwd = unique_temp_path("rubin-io-utils-cwd");
+        fs::create_dir_all(&cwd).expect("create cwd");
+        let prev_cwd = std::env::current_dir().expect("getcwd");
+        std::env::set_current_dir(&cwd).expect("chdir into test cwd");
+
+        let bare = Path::new("relative.bin");
+        let result = write_file_atomic(bare, b"relative-target");
+
+        // Restore CWD before any assertion so a panic does not leak it.
+        std::env::set_current_dir(&prev_cwd).expect("chdir back");
+
+        result.expect("write_file_atomic on bare relative target");
+        let read_back = fs::read(cwd.join("relative.bin")).expect("read back");
+        assert_eq!(read_back, b"relative-target");
+
+        let _ = fs::remove_dir_all(&cwd);
     }
 }

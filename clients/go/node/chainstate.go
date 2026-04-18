@@ -790,16 +790,28 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 // writeAndSyncTemp writes data to a fresh temp path, syncs the file's bytes
 // and inode metadata to stable storage, and closes it. Splitting this out
 // keeps writeFileAtomic linear and lets the rename + dir-sync stay readable.
+//
+// We always run Write, Sync and Close, then combine their errors with
+// errors.Join (Go 1.20+). This guarantees:
+//  1. the Close error is NOT silently dropped — it surfaces in the joined
+//     error and reaches the caller (Copilot review feedback on PR #1218);
+//  2. the FD is always released, even when Write or Sync fail, without
+//     duplicating cleanup branches that would otherwise be unreachable
+//     from a unit test (no realistic way to provoke a Write or Sync
+//     failure on an already-opened file in CI).
+//
+// On error the outer writeFileAtomic removes the temp file, so a partial
+// Sync after a failed Write does not leak state to the destination — the
+// rename never runs.
 func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
 	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
-	defer tmp.Close()
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	return tmp.Sync()
+	_, werr := tmp.Write(data)
+	serr := tmp.Sync()
+	cerr := tmp.Close()
+	return errors.Join(werr, serr, cerr)
 }
 
 // syncDir opens the directory and calls Sync so any rename or unlink
