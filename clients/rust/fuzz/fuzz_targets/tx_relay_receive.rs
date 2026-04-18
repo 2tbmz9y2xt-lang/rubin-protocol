@@ -184,8 +184,9 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(first, second, "handle_received_tx must be deterministic on fresh state");
 
     if mode % 4 == 2 {
-        // Truncated tx: must surface as MalformedParse (ban-worthy per Go
-        // `handlers_tx.go:12` parity), never plain "ok:Relayed".
+        // Truncated tx: must surface as MalformedParse (ban-worthy per
+        // Go's `peer.handleTx` parse-fail / `bumpBan(10, ...)` parity),
+        // never plain "ok:Relayed".
         assert!(
             first.result.starts_with("ok:MalformedParse")
                 || first.result.starts_with("ok:Oversized")

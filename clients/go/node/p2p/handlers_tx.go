@@ -9,11 +9,12 @@ import (
 
 func (p *peer) handleTx(txBytes []byte) error {
 	// Defense-in-depth oversize guard (parity with Rust
-	// clients/rust/crates/rubin-node/src/tx_relay.rs:290-296).
-	// Envelope-level reader already caps tx payload at MAX_BLOCK_BYTES via
-	// postHandshakePayloadCap in wire.go, but an explicit MAX_RELAY_MSG_BYTES
-	// check here fails closed if that upstream cap regresses and keeps ban-score
-	// parity with Rust's malformed-input policy.
+	// `tx_relay::handle_received_tx` oversize guard, surfaced as
+	// `RelayTxOutcome::Oversized`). Envelope-level reader already caps tx
+	// payload at MAX_BLOCK_BYTES via postHandshakePayloadCap in wire.go,
+	// but an explicit MAX_RELAY_MSG_BYTES check here fails closed if that
+	// upstream cap regresses and keeps ban-score parity with Rust's
+	// malformed-input policy.
 	if len(txBytes) > consensus.MAX_RELAY_MSG_BYTES {
 		reason := fmt.Sprintf("tx payload exceeds MAX_RELAY_MSG_BYTES: %d > %d", len(txBytes), consensus.MAX_RELAY_MSG_BYTES)
 		if p.bumpBan(10, reason) {

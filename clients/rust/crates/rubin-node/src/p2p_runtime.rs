@@ -509,11 +509,14 @@ impl PeerSession {
                         ctx.local_addr,
                         ctx.peer_writers,
                     )?;
-                    // Mirror Go `clients/go/node/p2p/handlers_tx.go:12,19`:
-                    // parse-fail / oversize bumps the peer ban score by 10 and
-                    // fails the session only when the cumulative score crosses
-                    // the ban threshold. Pool/metadata rejections of a valid
-                    // tx stay silent.
+                    // Mirror Go's `peer.handleTx` parse-fail policy: parse
+                    // failures bump the peer ban score by 10 and fail the
+                    // session only when the cumulative score crosses the
+                    // ban threshold. Pool/metadata rejections of a valid
+                    // tx stay silent. Wire-level oversize is rejected
+                    // earlier in `parse_envelope_header`; this branch only
+                    // fires for parse failures that reach
+                    // `handle_received_tx` (RPC path or sub-cap garbage).
                     if outcome.is_banworthy() {
                         let reason = match &outcome {
                             crate::tx_relay::RelayTxOutcome::MalformedParse(r) => r.clone(),
