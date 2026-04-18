@@ -37,6 +37,34 @@ TEST_BRITTLE_PATTERNS = (
 )
 RUNTIME_UNWRAP_RE = re.compile(r"\.(unwrap|expect)\s*\(")
 DROP_PANIC_RE = re.compile(r"\b(panic|todo|unimplemented)!\s*\(|\.(unwrap|expect)\s*\(")
+INLINE_COMMENT_PATTERNS = (
+    re.compile(r"(^|[^:])(?P<comment>//.*)"),
+    re.compile(r"(?P<comment>/\*.*)"),
+    re.compile(r"(^|\s)(?P<comment>#.*)"),
+    re.compile(r"(^|\s)(?P<comment>--.*)"),
+)
+
+
+def extract_comment_fragments(text: str) -> list[str]:
+    fragments: list[str] = []
+    stripped = text.lstrip()
+
+    if (
+        is_comment_line(text)
+        or stripped.startswith("* ")
+        or stripped == "*"
+    ):
+        fragments.append(stripped)
+
+    for pattern in INLINE_COMMENT_PATTERNS:
+        match = pattern.search(text)
+        if match is None:
+            continue
+        fragment = match.group("comment")
+        if fragment and fragment not in fragments:
+            fragments.append(fragment)
+
+    return fragments
 
 
 def scan_invariants(
@@ -65,7 +93,8 @@ def scan_invariants(
                         )
                         break
 
-            if is_comment_line(text) and FILE_LINE_ANCHOR_RE.search(text):
+            comment_fragments = extract_comment_fragments(text)
+            if any(FILE_LINE_ANCHOR_RE.search(fragment) for fragment in comment_fragments):
                 blockers.append(f"{location}: file:line anchor in added comment")
 
             if test_file:

@@ -105,6 +105,28 @@ class InvariantScanTests(unittest.TestCase):
 
         self.assertTrue(any("file:line anchor" in item for item in blockers))
 
+    def test_fails_on_inline_file_line_anchor_comment(self):
+        target = self.repo_root / "clients" / "go" / "node" / "sync.go"
+        target.write_text(
+            "package node\nfunc sync() { doWork() // see p2p_runtime.rs:123 before editing\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertTrue(any("file:line anchor" in item for item in blockers))
+
+    def test_fails_on_block_comment_interior_file_line_anchor(self):
+        target = self.repo_root / "clients" / "go" / "node" / "sync.go"
+        target.write_text(
+            "package node\n/*\n * see p2p_runtime.rs:123 before editing\n */\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertTrue(any("file:line anchor" in item for item in blockers))
+
     def test_fails_on_set_current_dir_in_test(self):
         target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "tests" / "cwd.rs"
         target.write_text(
