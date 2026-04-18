@@ -80,7 +80,7 @@ struct SharedServiceState {
     /// (clients/go/node/p2p/service_peer_lifecycle.go:75-77) so addr-gossip /
     /// bootstrap reconnect dedup finds the peer under either the hostname the
     /// dialer used or the concrete IP the remote end is reachable on.
-    peer_aliases: Arc<Mutex<HashMap<String, String>>>,
+    peer_aliases: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     local_addr: String,
 }
 
@@ -312,11 +312,15 @@ fn is_connected_with_alias(shared: &SharedServiceState, addr: &str) -> bool {
     if is_connected(&shared.peer_manager, addr) {
         return true;
     }
-    // Matches the `.lock().unwrap()` convention used elsewhere in this
-    // module (`peer_outboxes.lock().unwrap()`); peer_aliases is never
-    // held across a panic-prone call, so a poisoned mutex would signal a
-    // prior bug and crashing fast is the documented behavior.
-    shared.peer_aliases.lock().unwrap().contains_key(addr)
+    // Recover from poison so a prior panic while holding `peer_aliases`
+    // does not permanently stop bootstrap reconnect / dedup for the
+    // rest of the process. An alias is considered live when at least
+    // one owner peer is still registered for it.
+    let aliases = match shared.peer_aliases.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    aliases.get(addr).is_some_and(|owners| !owners.is_empty())
 }
 
 /// Insert a `remote_raw_addr -> peer_addr` alias only when the observed
@@ -337,11 +341,15 @@ fn register_peer_alias(
     {
         return None;
     }
-    shared
-        .peer_aliases
-        .lock()
-        .unwrap()
-        .insert(remote_raw_addr.to_string(), peer_addr.to_string());
+    let mut aliases = match shared.peer_aliases.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    aliases
+        .entry(remote_raw_addr.to_string())
+        .or_default()
+        .insert(peer_addr.to_string());
+    drop(aliases);
     Some(PeerAliasGuard {
         peer_aliases: Arc::clone(&shared.peer_aliases),
         alias: remote_raw_addr.to_string(),
@@ -763,12 +771,16 @@ fn handle_peer(
     // no-op, mirroring Go's `alias != "" && alias != p.addr()` guard.
     let _alias_guard = register_peer_alias(&shared, &remote_raw_addr, &peer_addr);
 
-    // Register outbox for this peer so relay broadcasts can enqueue frames.
-    shared
-        .peer_outboxes
-        .lock()
-        .unwrap()
-        .insert(peer_addr.clone(), PeerOutbox::default());
+    // Register outbox for this peer so relay broadcasts can enqueue
+    // frames. Recover from poison so a single earlier worker panic
+    // (while holding the outbox lock) does not cascade into panics on
+    // every subsequent peer handshake.
+    let mut peer_outboxes = match shared.peer_outboxes.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    peer_outboxes.insert(peer_addr.clone(), PeerOutbox::default());
+    drop(peer_outboxes);
     let _outbox_guard = PeerOutboxGuard {
         peer_outboxes: Arc::clone(&shared.peer_outboxes),
         addr: peer_addr.clone(),
@@ -974,7 +986,7 @@ impl Drop for PeerOutboxGuard {
 }
 
 struct PeerAliasGuard {
-    peer_aliases: Arc<Mutex<HashMap<String, String>>>,
+    peer_aliases: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     alias: String,
     /// Primary peer key this guard registered. Checked on drop so that
     /// if two concurrent dials from the same remote label race
@@ -986,17 +998,26 @@ struct PeerAliasGuard {
 
 impl Drop for PeerAliasGuard {
     fn drop(&mut self) {
-        let mut aliases = self.peer_aliases.lock().unwrap();
-        // Only remove when the alias still points at the peer that
-        // created this guard. If another dial overwrote the mapping
-        // while this peer was live, the newer owner's guard is
-        // responsible for cleanup on its own exit.
-        if aliases
-            .get(&self.alias)
-            .map(|owner| owner == &self.peer_addr)
-            .unwrap_or(false)
-        {
-            aliases.remove(&self.alias);
+        // Recover from poison: panicking inside `Drop` while the worker
+        // is already unwinding from another panic would abort the whole
+        // process. Cleanup must never panic.
+        let mut aliases = match self.peer_aliases.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        // Multi-owner cleanup: remove only THIS peer from the alias's
+        // owner set. The alias key is dropped only after the LAST
+        // owner exits — that closes both race directions:
+        //   - older drops first → alias still owned by newer (set
+        //     non-empty) → key retained.
+        //   - newer drops first → alias still owned by older (set
+        //     non-empty) → key retained, dedup keeps working for the
+        //     still-active connection.
+        if let Some(owners) = aliases.get_mut(&self.alias) {
+            owners.remove(&self.peer_addr);
+            if owners.is_empty() {
+                aliases.remove(&self.alias);
+            }
         }
     }
 }
@@ -1924,7 +1945,9 @@ mod tests {
             .peer_aliases
             .lock()
             .expect("alias lock")
-            .insert(alias.clone(), primary.clone());
+            .entry(alias.clone())
+            .or_default()
+            .insert(primary.clone());
         let guard = PeerAliasGuard {
             peer_aliases: Arc::clone(&shared.peer_aliases),
             alias: alias.clone(),
@@ -1971,17 +1994,18 @@ mod tests {
         let alias = "seed.example.com:19111";
         let guard = register_peer_alias(&shared, alias, peer_addr)
             .expect("diverging label must register an alias");
-        assert_eq!(
+        assert!(
             shared
                 .peer_aliases
                 .lock()
                 .unwrap()
                 .get(alias)
-                .map(String::as_str),
-            Some(peer_addr),
+                .map(|owners| owners.contains(peer_addr))
+                .unwrap_or(false),
+            "alias must list this peer as an owner",
         );
 
-        // Dropping the guard clears the alias back out.
+        // Dropping the only owner clears the alias back out.
         drop(guard);
         assert!(!shared.peer_aliases.lock().unwrap().contains_key(alias));
 
@@ -1995,6 +2019,10 @@ mod tests {
     /// overwrites the alias, but the OLDER guard's drop must NOT
     /// remove the alias — otherwise the still-active newer connection
     /// loses its dedup index and accepts a duplicate dial.
+    /// Multi-owner alias race: the alias must stay live as long as ANY
+    /// owner is still connected. Both drop directions are exercised
+    /// (older-first and newer-first); only after the LAST owner exits
+    /// does the alias key drop out.
     #[test]
     fn peer_alias_guard_drop_preserves_newer_owner() {
         let (sync_engine, dir) = test_engine("rubin-node-p2p-alias-race");
@@ -2005,35 +2033,43 @@ mod tests {
         let primary_old = "seed.example.com:19111";
         let primary_new = "mirror.example.org:19111";
 
-        // Older dial registers alias -> primary_old.
         let guard_old =
             register_peer_alias(&shared, alias, primary_old).expect("older dial registers alias");
-        // Newer dial overwrites alias -> primary_new.
-        let _guard_new =
-            register_peer_alias(&shared, alias, primary_new).expect("newer dial overwrites alias");
-        assert_eq!(
-            shared
-                .peer_aliases
-                .lock()
-                .unwrap()
-                .get(alias)
-                .map(String::as_str),
-            Some(primary_new),
-            "newer dial owns the alias entry",
-        );
+        let guard_new =
+            register_peer_alias(&shared, alias, primary_new).expect("newer dial registers alias");
 
-        // Older guard drops: alias must NOT be removed because it now
-        // points at the newer peer.
+        // Both owners present in the alias's owner set.
+        let owners = shared
+            .peer_aliases
+            .lock()
+            .unwrap()
+            .get(alias)
+            .cloned()
+            .expect("alias must exist");
+        assert!(owners.contains(primary_old));
+        assert!(owners.contains(primary_new));
+
+        // Drop older first: newer still owns → alias key + dedup stay live.
         drop(guard_old);
-        assert_eq!(
-            shared
-                .peer_aliases
-                .lock()
-                .unwrap()
-                .get(alias)
-                .map(String::as_str),
-            Some(primary_new),
-            "older guard's drop must not delete the newer owner's alias",
+        assert!(
+            is_connected_with_alias(&shared, alias),
+            "alias must remain live while newer owner is still connected",
+        );
+        let owners = shared
+            .peer_aliases
+            .lock()
+            .unwrap()
+            .get(alias)
+            .cloned()
+            .expect("alias still alive");
+        assert!(!owners.contains(primary_old));
+        assert!(owners.contains(primary_new));
+
+        // Drop newer: last owner gone → alias key removed.
+        drop(guard_new);
+        assert!(
+            !shared.peer_aliases.lock().unwrap().contains_key(alias),
+            "alias must be removed only after the LAST owner exits",
         );
 
         fs::remove_dir_all(dir).expect("cleanup");
