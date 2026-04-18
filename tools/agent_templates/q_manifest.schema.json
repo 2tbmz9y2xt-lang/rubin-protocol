@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "rubin-protocol local coder-agent Q manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "q_id",
+    "owner_area",
+    "allowed_files",
+    "required_tests",
+    "hard_production_loc",
+    "required_invariants"
+  ],
+  "properties": {
+    "q_id": {
+      "type": "string",
+      "pattern": "^Q-[A-Z0-9][A-Z0-9-]*$"
+    },
+    "owner_area": {
+      "type": "string",
+      "enum": [
+        "consensus",
+        "node",
+        "p2p",
+        "storage",
+        "rpc",
+        "ci",
+        "formal",
+        "docs",
+        "tooling"
+      ]
+    },
+    "allowed_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "allowed_globs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "forbidden_globs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "required_tests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "target_production_loc": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "hard_production_loc": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "required_invariants": {
+      "type": "array",
+      "minItems": 7,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "scope",
+          "state_ownership",
+          "lock_io",
+          "failure_atomicity",
+          "go_rust_parity",
+          "caller_fuzz_test_sweep",
+          "test_stability"
+        ]
+      }
+    }
+  }
+}
