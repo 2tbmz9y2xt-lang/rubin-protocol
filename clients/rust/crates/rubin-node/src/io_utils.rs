@@ -37,7 +37,7 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
         fs::create_dir_all(parent)
             .map_err(|e| format!("create parent {}: {e}", parent.display()))?;
     }
-    let tmp_path = format!("{}.tmp.{}", path.display(), std::process::id());
+    let tmp_path = temp_path_for(path, std::process::id());
     // Durability contract (E.1): the temp file's bytes AND its inode metadata
     // must hit stable storage before the rename, otherwise a crash between
     // rename and the next implicit flush can leave the destination pointing
@@ -57,11 +57,11 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
             .create(true)
             .truncate(true)
             .open(&tmp_path)
-            .map_err(|e| format!("open temp {}: {e}", tmp_path))?;
+            .map_err(|e| format!("open temp {}: {e}", tmp_path.display()))?;
         tmp.write_all(data)
-            .map_err(|e| format!("write temp {}: {e}", tmp_path))?;
+            .map_err(|e| format!("write temp {}: {e}", tmp_path.display()))?;
         tmp.sync_all()
-            .map_err(|e| format!("sync temp {}: {e}", tmp_path))
+            .map_err(|e| format!("sync temp {}: {e}", tmp_path.display()))
     })();
     if let Err(e) = write_result {
         let _ = fs::remove_file(&tmp_path);
@@ -69,7 +69,11 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     }
     fs::rename(&tmp_path, path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
-        format!("rename temp {} -> {}: {e}", tmp_path, path.display())
+        format!(
+            "rename temp {} -> {}: {e}",
+            tmp_path.display(),
+            path.display()
+        )
     })?;
     // Directory fsync makes the rename itself durable. Without this the
     // destination file's bytes are on disk after the temp `sync_all()` above,
@@ -81,6 +85,24 @@ pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
         sync_dir(parent)?;
     }
     Ok(())
+}
+
+/// Build the `<dest>.tmp.<pid>` companion path for a target `path`
+/// without going through lossy `Path::display()`. `display()` replaces
+/// non-UTF-8 bytes with `U+FFFD`; on Unix a `PathBuf` can contain any
+/// byte sequence other than `/` and `\0`, so a lossy conversion would
+/// produce a temp at a different location than the caller's actual
+/// target — breaking both the atomic rename and the failure cleanup.
+/// `OsString::push` preserves the original bytes exactly. Split into
+/// its own helper so the byte-preservation contract is independently
+/// testable without going through the filesystem (APFS on macOS
+/// rejects non-UTF-8 filenames with EILSEQ, so a filesystem-level
+/// round-trip test is not portable). Copilot review feedback on PR #1218.
+fn temp_path_for(path: &Path, pid: u32) -> std::path::PathBuf {
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(".tmp.");
+    tmp_os.push(pid.to_string());
+    std::path::PathBuf::from(tmp_os)
 }
 
 /// Compute the directory whose existence we must ensure (and whose entry we
@@ -294,6 +316,48 @@ mod tests {
         assert_eq!(
             effective_parent(Path::new("sub/file")),
             Some(Path::new("sub"))
+        );
+    }
+
+    /// Copilot P1 regression from PR #1218: the temp path must be built
+    /// via byte-level `OsString::push`, NOT via lossy
+    /// `format!("{}.tmp.{}", path.display(), pid)`. `path.display()`
+    /// replaces non-UTF-8 bytes with `U+FFFD`, so a `PathBuf` containing
+    /// any non-UTF-8 byte would round-trip to a DIFFERENT temp path
+    /// than the caller's actual target.
+    ///
+    /// Tested on the pure helper because APFS on macOS rejects non-UTF-8
+    /// filenames at the syscall layer with `EILSEQ`, which makes a
+    /// filesystem-level round-trip test non-portable. `temp_path_for`
+    /// is the only place where the lossy-vs-exact decision lives, so
+    /// byte-level verification here pins the fix completely.
+    #[cfg(unix)]
+    #[test]
+    fn temp_path_for_preserves_non_utf8_bytes() {
+        use super::temp_path_for;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        use std::path::PathBuf;
+
+        let mut bytes = b"/tmp/bad-".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"-name.bin");
+        let path = PathBuf::from(OsString::from_vec(bytes.clone()));
+
+        let tmp = temp_path_for(&path, 12345);
+
+        let mut expected = bytes.clone();
+        expected.extend_from_slice(b".tmp.12345");
+        assert_eq!(tmp.as_os_str().as_bytes(), expected.as_slice());
+
+        // Negative: lossy `format!("{}.tmp.{}", path.display(), 12345)`
+        // would replace the 0xff byte with U+FFFD (three bytes
+        // 0xef 0xbf 0xbd), producing DIFFERENT bytes.
+        let lossy = format!("{}.tmp.12345", path.display());
+        assert_ne!(
+            tmp.as_os_str().as_bytes(),
+            lossy.as_bytes(),
+            "temp_path_for must not agree with lossy display() on non-UTF-8 input"
         );
     }
 
