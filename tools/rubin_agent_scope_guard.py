@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-import sys
+from pathlib import Path
 
 from rubin_agent_contract import (
     count_production_loc,
@@ -16,7 +16,9 @@ from rubin_agent_contract import (
 )
 
 
-def evaluate_scope(manifest_path: str, diff_range: str | None = None) -> tuple[list[str], list[str]]:
+def evaluate_scope(
+    manifest_path: str | Path, diff_range: str | None = None
+) -> tuple[list[str], list[str]]:
     manifest_path_resolved, repo_root, manifest = load_manifest(manifest_path)
     resolved_diff_range = resolve_diff_range(repo_root, diff_range)
 

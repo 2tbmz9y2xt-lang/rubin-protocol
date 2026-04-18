@@ -131,6 +131,10 @@ class ManifestContractTests(unittest.TestCase):
             m.path_matches_glob("vendor/clients/go/node/sync.go", "clients/**")
         )
 
+    def test_double_star_slash_glob_matches_repo_root_files(self):
+        self.assertTrue(m.path_matches_glob("README.md", "**/*.md"))
+        self.assertTrue(m.path_matches_glob("docs/guide.md", "**/*.md"))
+
     def test_load_json_rejects_invalid_utf8(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "bad.json"

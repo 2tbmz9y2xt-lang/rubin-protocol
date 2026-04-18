@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
+from pathlib import Path
 
 from rubin_agent_contract import (
     find_drop_block_ranges,
     is_comment_line,
+    is_production_loc_file,
     is_runtime_sensitive_path,
     is_test_file,
     line_in_ranges,
@@ -70,7 +71,7 @@ def extract_comment_fragments(text: str) -> list[str]:
 
 
 def scan_invariants(
-    manifest_path: str, diff_range: str | None = None, fast: bool = False
+    manifest_path: str | Path, diff_range: str | None = None, fast: bool = False
 ) -> list[str]:
     _, repo_root, _ = load_manifest(manifest_path)
     resolved_diff_range = resolve_diff_range(repo_root, diff_range)
@@ -81,13 +82,18 @@ def scan_invariants(
 
     for rel_path, patch in sorted(patches.items()):
         test_file = is_test_file(rel_path)
-        runtime_sensitive = is_runtime_sensitive_path(rel_path) and not test_file
+        production_file = is_production_loc_file(rel_path)
+        runtime_sensitive = (
+            production_file
+            and rel_path.endswith(".rs")
+            and is_runtime_sensitive_path(rel_path)
+        )
 
         for added in patch.added_lines:
             text = added.text
             location = f"{rel_path}:{added.number}"
 
-            if not test_file:
+            if production_file:
                 for pattern in ENV_KNOB_PATTERNS:
                     if pattern.search(text):
                         blockers.append(
@@ -96,7 +102,9 @@ def scan_invariants(
                         break
 
             comment_fragments = extract_comment_fragments(text)
-            if any(FILE_LINE_ANCHOR_RE.search(fragment) for fragment in comment_fragments):
+            if production_file and any(
+                FILE_LINE_ANCHOR_RE.search(fragment) for fragment in comment_fragments
+            ):
                 blockers.append(f"{location}: file:line anchor in added comment")
 
             if test_file:

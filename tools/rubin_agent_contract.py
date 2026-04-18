@@ -430,6 +430,11 @@ def path_matches_glob(rel_path: str, pattern: str) -> bool:
         if char == "*":
             next_is_star = idx + 1 < len(normalized_pattern) and normalized_pattern[idx + 1] == "*"
             if next_is_star:
+                slash_after_star = idx + 2 < len(normalized_pattern) and normalized_pattern[idx + 2] == "/"
+                if slash_after_star:
+                    regex_parts.append("(?:[^/]+/)*")
+                    idx += 3
+                    continue
                 regex_parts.append(".*")
                 idx += 2
                 continue
@@ -511,13 +516,19 @@ def find_drop_block_ranges(text: str) -> list[tuple[int, int]]:
     started = False
     start_line = 0
     brace_depth = 0
+    header_lines: list[str] = []
+    drop_header_re = re.compile(r"^\s*impl(?:\s*<[^{}]*>)?\s+Drop\b.*\bfor\b")
 
     for idx, line in enumerate(lines, start=1):
         stripped = line.lstrip()
         comment_like = is_comment_line(line) or stripped.startswith("* ") or stripped == "*"
 
-        if not tracking_header and not comment_like and re.search(r"^\s*impl\b.*\bDrop\b", line):
+        if not tracking_header and not comment_like and re.search(r"^\s*impl\b", line):
             tracking_header = True
+            header_lines = [line.split("{", 1)[0]]
+            start_line = idx
+        elif tracking_header and not started:
+            header_lines.append(line.split("{", 1)[0])
 
         if not tracking_header:
             continue
@@ -526,14 +537,19 @@ def find_drop_block_ranges(text: str) -> list[tuple[int, int]]:
         close_braces = line.count("}")
 
         if not started and open_braces:
+            header_text = " ".join(part.strip() for part in header_lines if part.strip())
+            if not drop_header_re.search(header_text):
+                tracking_header = False
+                header_lines = []
+                continue
             started = True
-            start_line = idx
             brace_depth += open_braces - close_braces
             if brace_depth <= 0:
                 ranges.append((start_line, idx))
                 tracking_header = False
                 started = False
                 brace_depth = 0
+                header_lines = []
             continue
 
         if started:
@@ -543,6 +559,7 @@ def find_drop_block_ranges(text: str) -> list[tuple[int, int]]:
                 tracking_header = False
                 started = False
                 brace_depth = 0
+                header_lines = []
 
     return ranges
 

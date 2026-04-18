@@ -40,6 +40,7 @@ def init_repo() -> tuple[tempfile.TemporaryDirectory[str], Path]:
     (root / "clients" / "go" / "node" / "tests").mkdir(parents=True, exist_ok=True)
     (root / "clients" / "rust" / "crates" / "rubin-node" / "src").mkdir(parents=True, exist_ok=True)
     (root / "clients" / "rust" / "crates" / "rubin-node" / "tests").mkdir(parents=True, exist_ok=True)
+    (root / "docs").mkdir(parents=True, exist_ok=True)
     (root / "clients" / "go" / "node" / "sync.go").write_text("package node\n", encoding="utf-8")
     (root / "clients" / "go" / "node" / "tests" / "sync_test.go").write_text(
         "package tests\n",
@@ -61,6 +62,7 @@ def init_repo() -> tuple[tempfile.TemporaryDirectory[str], Path]:
         "#[test]\nfn ok() {}\n",
         encoding="utf-8",
     )
+    (root / "docs" / "sync-guide.md").write_text("# Guide\n", encoding="utf-8")
     run(["git", "add", "."], root)
     run(["git", "commit", "-m", "baseline"], root)
     head = run(["git", "rev-parse", "HEAD"], root)
@@ -225,6 +227,28 @@ class InvariantScanTests(unittest.TestCase):
         blockers = self.scan()
 
         self.assertTrue(any("brittle test path or OS-string match" in item for item in blockers))
+
+    def test_does_not_flag_non_code_docs_examples(self):
+        target = self.repo_root / "docs" / "sync-guide.md"
+        target.write_text(
+            "# see p2p_runtime.rs:123\nRUBIN_TEST_ONLY\nOption::unwrap(value)\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertFalse(blockers)
+
+    def test_does_not_treat_generic_drop_bounds_as_impl_drop(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "dropper.rs"
+        target.write_text(
+            "struct Wrapper<T>(T);\n\nimpl<T: Drop> Wrapper<T> {\n    fn demo(&self) {\n        let _value = Some(1).unwrap();\n    }\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertFalse(any("panic-like cleanup added inside impl Drop" in item for item in blockers))
 
 
 if __name__ == "__main__":
