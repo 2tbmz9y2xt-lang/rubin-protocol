@@ -304,6 +304,25 @@ impl PeerSession {
             stream: &mut self.stream,
             prefetched_read_byte: self.prefetched_read_byte.take(),
         };
+        // NOTE on tx-oversize ban policy (parity gap with Go's
+        // `peer.handleTx`):
+        //
+        // Wire-level oversize is rejected by `parse_envelope_header`
+        // BEFORE `collect_live_responses` / `handle_received_tx` can
+        // surface `RelayTxOutcome::Oversized`. The Err propagates up the
+        // session loop and tears the peer connection down — which is a
+        // hard-stop equivalent to ban_score crossing the threshold.
+        //
+        // Go's `peer.handleTx` bumps `BanScore += 10` and lets the
+        // session continue if still below threshold, accumulating up to
+        // ~10 oversize attempts before disconnect. Rust currently
+        // disconnects on the first oversize tx — strictly more
+        // restrictive but with the same security outcome (offending
+        // peer is removed). A future task can soften Rust to bump-only
+        // by reading payload length without erroring, then applying
+        // ban-score policy at the higher layer; that is intentionally
+        // out of scope for this Q-* task (which only aligns the
+        // malformed/parse-fail surface).
         read_message_from(
             &mut reader,
             network_magic(&self.cfg.network),

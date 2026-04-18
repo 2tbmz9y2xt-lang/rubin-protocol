@@ -298,7 +298,7 @@ pub enum RelayTxOutcome {
 impl RelayTxOutcome {
     /// True when the outcome corresponds to a malformed/oversized peer input
     /// that should bump the peer's ban score (parity with Go
-    /// `handlers_tx.go:12` — `p.bumpBan(10, err.Error())`).
+    /// `peer.handleTx` — `p.bumpBan(10, err.Error())`).
     pub fn is_banworthy(&self) -> bool {
         matches!(self, Self::Oversized | Self::MalformedParse(_))
     }
@@ -312,7 +312,7 @@ impl RelayTxOutcome {
 ///
 /// Returns a [`RelayTxOutcome`] so the caller can mirror Go's ban-score
 /// policy: Go's `handleTx` bumps ban by 10 on parse-fail (see
-/// `clients/go/node/p2p/handlers_tx.go:12`), and this function now surfaces
+/// `peer.handleTx` in `clients/go/node/p2p/handlers_tx.go`), and this function now surfaces
 /// the same signal via `MalformedParse`/`Oversized` variants instead of
 /// silently demoting parse errors to plain `io::Error`.
 pub fn handle_received_tx(
@@ -1158,7 +1158,7 @@ mod tests {
     /// C.2 parity: malformed relay tx payload must surface as
     /// `RelayTxOutcome::MalformedParse` (ban-worthy) rather than being
     /// silently swallowed. Mirrors Go `handleTx` bumping ban by 10 on parse
-    /// failure (`clients/go/node/p2p/handlers_tx.go:12`).
+    /// failure (`peer.handleTx` in `clients/go/node/p2p/handlers_tx.go`).
     #[test]
     fn handle_received_tx_malformed_surfaces_ban_worthy_outcome() {
         let sync_engine = SyncEngine::new(
