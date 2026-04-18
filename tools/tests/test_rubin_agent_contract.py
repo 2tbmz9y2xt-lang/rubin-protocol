@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import tempfile
 import sys
 import unittest
 
@@ -110,6 +111,16 @@ class ManifestContractTests(unittest.TestCase):
         self.assertFalse(
             m.path_matches_glob("vendor/clients/go/node/sync.go", "clients/**")
         )
+
+    def test_load_json_rejects_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "bad.json"
+            path.write_bytes(b"\xff\xfe\x00")
+
+            with self.assertRaises(m.ManifestValidationError) as ctx:
+                m.load_json(path)
+
+        self.assertIn("invalid utf-8", str(ctx.exception))
 
 
 if __name__ == "__main__":

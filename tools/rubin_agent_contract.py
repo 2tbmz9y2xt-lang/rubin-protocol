@@ -135,6 +135,12 @@ def load_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ManifestValidationError([f"{path}: file not found"]) from exc
+    except UnicodeDecodeError as exc:
+        raise ManifestValidationError(
+            [f"{path}: invalid utf-8 at byte {exc.start}"]
+        ) from exc
+    except OSError as exc:
+        raise ManifestValidationError([f"{path}: unable to read file: {exc}"]) from exc
     except json.JSONDecodeError as exc:
         raise ManifestValidationError(
             [f"{path}: invalid json at line {exc.lineno} column {exc.colno}: {exc.msg}"]
@@ -466,16 +472,19 @@ def read_worktree_text(repo_root: Path, rel_path: str) -> str:
 def find_drop_block_ranges(text: str) -> list[tuple[int, int]]:
     lines = text.splitlines()
     ranges: list[tuple[int, int]] = []
-    tracking = False
+    tracking_header = False
     started = False
     start_line = 0
     brace_depth = 0
 
     for idx, line in enumerate(lines, start=1):
-        if not tracking and "Drop for" in line:
-            tracking = True
+        stripped = line.lstrip()
+        comment_like = is_comment_line(line) or stripped.startswith("* ") or stripped == "*"
 
-        if not tracking:
+        if not tracking_header and not comment_like and re.search(r"^\s*impl\b.*\bDrop\b", line):
+            tracking_header = True
+
+        if not tracking_header:
             continue
 
         open_braces = line.count("{")
@@ -487,7 +496,7 @@ def find_drop_block_ranges(text: str) -> list[tuple[int, int]]:
             brace_depth += open_braces - close_braces
             if brace_depth <= 0:
                 ranges.append((start_line, idx))
-                tracking = False
+                tracking_header = False
                 started = False
                 brace_depth = 0
             continue
@@ -496,7 +505,7 @@ def find_drop_block_ranges(text: str) -> list[tuple[int, int]]:
             brace_depth += open_braces - close_braces
             if brace_depth <= 0:
                 ranges.append((start_line, idx))
-                tracking = False
+                tracking_header = False
                 started = False
                 brace_depth = 0
 

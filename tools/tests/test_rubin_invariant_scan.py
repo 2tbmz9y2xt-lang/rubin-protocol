@@ -171,10 +171,32 @@ class InvariantScanTests(unittest.TestCase):
 
         self.assertTrue(any("unwrap/expect added in runtime-sensitive" in item for item in blockers))
 
+    def test_fails_on_ufcs_unwrap_in_runtime_sensitive_path(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "p2p_runtime.rs"
+        target.write_text(
+            "pub fn relay(value: Option<i32>) {\n    let _value = Option::unwrap(value);\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertTrue(any("unwrap/expect added in runtime-sensitive" in item for item in blockers))
+
     def test_fails_on_panic_in_drop(self):
         target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "dropper.rs"
         target.write_text(
             "struct Dropper;\n\nimpl Drop for Dropper {\n    fn drop(&mut self) {\n        panic!(\"boom\");\n    }\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertTrue(any("panic-like cleanup added inside impl Drop" in item for item in blockers))
+
+    def test_fails_on_ufcs_expect_in_multiline_drop_impl(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "dropper.rs"
+        target.write_text(
+            "struct Dropper;\n\nimpl Drop\nfor Dropper\n{\n    fn drop(&mut self) {\n        let _value = Result::<i32, &str>::expect(Err(\"boom\"), \"boom\");\n    }\n}\n",
             encoding="utf-8",
         )
 

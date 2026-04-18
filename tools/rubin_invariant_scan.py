@@ -35,8 +35,10 @@ TEST_BRITTLE_PATTERNS = (
     re.compile(r"read-only", re.IGNORECASE),
     re.compile(r"\bchmod\s*\("),
 )
-RUNTIME_UNWRAP_RE = re.compile(r"\.(unwrap|expect)\s*\(")
-DROP_PANIC_RE = re.compile(r"\b(panic|todo|unimplemented)!\s*\(|\.(unwrap|expect)\s*\(")
+RUNTIME_UNWRAP_RE = re.compile(r"(?:\.|::)(unwrap|expect)\s*\(")
+DROP_PANIC_RE = re.compile(
+    r"\b(panic|todo|unimplemented)!\s*\(|(?:\.|::)(unwrap|expect)\s*\("
+)
 INLINE_COMMENT_PATTERNS = (
     re.compile(r"(^|[^:])(?P<comment>//.*)"),
     re.compile(r"(?P<comment>/\*.*)"),

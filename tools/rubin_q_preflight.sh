@@ -65,12 +65,15 @@ fi
 COMMAND_LIST=$(mktemp "$TMP_ROOT/rubin-q-preflight.XXXXXX")
 trap 'rm -f "$COMMAND_LIST"' EXIT HUP INT TERM
 
-python3 - "$MANIFEST_PATH" > "$COMMAND_LIST" <<'PY'
-import json
+python3 - "$SCRIPT_DIR" "$MANIFEST_PATH" > "$COMMAND_LIST" <<'PY'
 from pathlib import Path
 import sys
 
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+sys.path.insert(0, sys.argv[1])
+
+from rubin_agent_contract import load_manifest
+
+manifest = load_manifest(Path(sys.argv[2]))[2]
 for command in manifest["required_tests"]:
     print(command)
 PY
