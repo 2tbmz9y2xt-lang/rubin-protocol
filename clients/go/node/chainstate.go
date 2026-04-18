@@ -763,18 +763,23 @@ func parseHex32(name, value string) ([32]byte, error) {
 }
 
 // writeFileAtomic writes data to path via a temp+rename pattern with an
-// honest fsync durability contract (E.1):
-//  1. open the temp file with O_TRUNC|O_CREATE|O_WRONLY, write the bytes,
-//  2. Sync the temp file (fdatasync-equivalent on the file's data + inode),
-//  3. close the temp file,
-//  4. Rename temp -> destination,
-//  5. open the parent directory and Sync it so the rename itself is durable.
+// honest fsync durability contract (E.1). The actual file IO lives in the
+// helpers writeAndSyncTemp and syncDir — see their doc comments for the
+// short-write loop, errors.Join semantics, and Close error handling.
 //
-// Without step 5 the destination's bytes are on disk after step 2, but the
-// directory entry mapping `path` to the new inode may still live only in the
-// kernel page cache and be lost on crash. Mirrors the Rust
-// `clients/rust/crates/rubin-node/src/io_utils.rs` `write_file_atomic` for
-// cross-client storage parity.
+// Sequence (any failure removes the temp file before returning):
+//  1. delegate to writeAndSyncTemp: open temp with O_TRUNC|O_CREATE|O_WRONLY,
+//     loop Write until all bytes are persisted, Sync (fdatasync-equivalent
+//     on data + inode), Close, return joined errors;
+//  2. Rename temp -> destination (atomic on the same filesystem);
+//  3. delegate to syncDir on the parent directory so the rename itself is
+//     durable (without this the destination's bytes are on disk after
+//     step 1's Sync, but the directory entry mapping `path` to the new
+//     inode may still live only in the kernel page cache and be lost on
+//     crash).
+//
+// Mirrors the Rust `clients/rust/crates/rubin-node/src/io_utils.rs`
+// `write_file_atomic` for cross-client storage parity.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	tmpPath := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
 	if err := writeAndSyncTemp(tmpPath, data, mode); err != nil {

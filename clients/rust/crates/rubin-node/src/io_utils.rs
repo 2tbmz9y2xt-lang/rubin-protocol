@@ -15,6 +15,22 @@ pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+/// Atomically write `data` to `path` with an honest fsync durability
+/// contract (audit `E.1`). Sequence (any failure between open and rename
+/// removes the partially-written `<dest>.tmp.<pid>`):
+///
+/// 1. resolve the target's effective parent (see `effective_parent`),
+///    `create_dir_all` it if missing;
+/// 2. open `<path>.tmp.<pid>` with `O_TRUNC|O_CREATE|O_WRONLY`;
+/// 3. `write_all` (loops on short writes per stdlib contract);
+/// 4. `sync_all` — flushes data + inode metadata to disk;
+/// 5. close (implicit on scope exit; see `sync_dir` doc on Rust File close
+///    error semantics);
+/// 6. `fs::rename` temp -> destination (atomic on the same filesystem);
+/// 7. `sync_dir` on the effective parent so the rename itself is durable.
+///
+/// Mirrors the Go `clients/go/node/chainstate.go` `writeFileAtomic` for
+/// cross-client storage parity.
 pub fn write_file_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     let parent = effective_parent(path);
     if let Some(parent) = parent {
@@ -85,6 +101,15 @@ fn effective_parent(path: &Path) -> Option<&Path> {
 /// performed in it is itself durable. Splitting this out keeps
 /// `write_file_atomic` linear and lets storage callers fsync ad-hoc
 /// directory mutations later if they need to.
+///
+/// Cross-client note: the Go counterpart `syncDir` uses
+/// `errors.Join(serr, cerr)` to surface a Close error after a successful
+/// Sync. Rust cannot easily mirror that — `std::fs::File::drop` discards
+/// the close error by design, and there is no stable safe API to surface
+/// it. The Sync error itself is returned, so a kernel-level flush failure
+/// is honestly reported; only the rare close-after-successful-sync error
+/// is silently absorbed by Drop. This is an accepted Rust stdlib
+/// limitation, not a missing fix.
 pub fn sync_dir(dir: &Path) -> Result<(), String> {
     fs::OpenOptions::new()
         .read(true)
