@@ -818,11 +818,16 @@ func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
 // performed in it is itself durable. Unix-only: directory Sync is the
 // portable way to flush the parent's directory entry on Linux/macOS;
 // Windows lacks an equivalent and is not a Rubin production target.
+//
+// Sync and Close errors are combined via errors.Join so a Close error after
+// a successful Sync still surfaces (Copilot review feedback on PR #1218,
+// mirrors the writeAndSyncTemp pattern).
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
-	defer d.Close()
-	return d.Sync()
+	serr := d.Sync()
+	cerr := d.Close()
+	return errors.Join(serr, cerr)
 }
