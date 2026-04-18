@@ -74,12 +74,18 @@ struct SharedServiceState {
     /// between reads, ensuring writes are serialized on the same TcpStream.
     peer_outboxes: Arc<Mutex<HashMap<String, PeerOutbox>>>,
     /// Secondary peer-identity index: maps the *raw remote socket address*
-    /// observed on the TcpStream to the *primary* key used by `peer_manager`
-    /// (which is the outbound dial target when the peer was dialed outbound).
+    /// observed on the TcpStream to the set of *primary* `peer_manager` keys
+    /// that currently own this alias. The set (rather than a single key) is
+    /// required because two concurrent dials can legitimately share the same
+    /// remote socket label briefly during overlapping connect/disconnect:
+    /// dropping the older guard must NOT remove the alias entry while the
+    /// newer peer still owns it (and vice-versa), otherwise dedup breaks and
+    /// duplicate dials slip through.
     /// Mirrors Go `s.peers[alias] = p` in `registerPeer`
-    /// (clients/go/node/p2p/service_peer_lifecycle.go:75-77) so addr-gossip /
-    /// bootstrap reconnect dedup finds the peer under either the hostname the
-    /// dialer used or the concrete IP the remote end is reachable on.
+    /// (`registerPeer` in clients/go/node/p2p/service_peer_lifecycle.go) so
+    /// addr-gossip / bootstrap reconnect dedup finds the peer under either
+    /// the hostname the dialer used or the concrete IP the remote end is
+    /// reachable on.
     peer_aliases: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     local_addr: String,
 }
@@ -761,15 +767,27 @@ fn handle_peer(
         .peer_manager
         .add_peer(peer_state)
         .map_err(|err| format!("peer register: {err}"))?;
-    let _peer_guard = PeerGuard {
-        peer_manager: Arc::clone(&shared.peer_manager),
-        addr: peer_addr.clone(),
-    };
 
+    // Declaration order is critical: Rust drops locals in REVERSE
+    // declaration order, so guards declared earlier outlive guards
+    // declared later. We need the alias to stay registered until AFTER
+    // the peer is removed from `peer_manager`, otherwise there is a
+    // window in which the peer still answers as connected but its alias
+    // is gone, so `is_connected_with_alias(shared, remote_raw_addr)`
+    // returns false and a concurrent dialer can attach a duplicate
+    // session against the same remote. Therefore: alias_guard FIRST
+    // (drops last), peer_guard SECOND (drops before alias), outbox_guard
+    // LAST (drops first).
+    //
     // Register alias only when the observed remote socket address differs
     // from the primary key. Empty / "<unknown>" / duplicate aliases are a
     // no-op, mirroring Go's `alias != "" && alias != p.addr()` guard.
     let _alias_guard = register_peer_alias(&shared, &remote_raw_addr, &peer_addr);
+
+    let _peer_guard = PeerGuard {
+        peer_manager: Arc::clone(&shared.peer_manager),
+        addr: peer_addr.clone(),
+    };
 
     // Register outbox for this peer so relay broadcasts can enqueue
     // frames. Recover from poison so a single earlier worker panic
@@ -979,20 +997,28 @@ struct PeerOutboxGuard {
 
 impl Drop for PeerOutboxGuard {
     fn drop(&mut self) {
-        if let Ok(mut outboxes) = self.peer_outboxes.lock() {
-            outboxes.remove(&self.addr);
-        }
+        // Recover from poison: the registration path also recovers on
+        // poisoned `peer_outboxes.lock()`, so an asymmetric `if let Ok`
+        // here would skip cleanup after any earlier worker panic and let
+        // the map grow unbounded with stale per-peer queues. Cleanup must
+        // never panic (we may already be unwinding), so we deliberately
+        // discard the poisoned guard wrapper instead of `.unwrap()`.
+        let mut outboxes = match self.peer_outboxes.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        outboxes.remove(&self.addr);
     }
 }
 
 struct PeerAliasGuard {
     peer_aliases: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     alias: String,
-    /// Primary peer key this guard registered. Checked on drop so that
-    /// if two concurrent dials from the same remote label race
-    /// (`alias -> peerA` overwritten by `alias -> peerB`), dropping the
-    /// earlier guard does NOT delete the newer mapping and re-enable
-    /// duplicate dials against the still-connected peer.
+    /// Peer key registered by this specific guard. Checked on drop so
+    /// cleanup removes only this owner from the alias's owner set; if
+    /// other peers still own the same alias, their entries must remain
+    /// so dropping one guard does not re-enable duplicate dials against
+    /// still-connected peers.
     peer_addr: String,
 }
 
