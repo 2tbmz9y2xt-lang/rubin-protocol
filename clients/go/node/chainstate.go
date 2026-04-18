@@ -769,8 +769,9 @@ func parseHex32(name, value string) ([32]byte, error) {
 //
 // Sequence (any failure removes the temp file before returning):
 //  1. delegate to writeAndSyncTemp: open temp with O_TRUNC|O_CREATE|O_WRONLY,
-//     loop Write until all bytes are persisted, Sync (fdatasync-equivalent
-//     on data + inode), Close, return joined errors;
+//     loop Write until all bytes are persisted, Sync (fsync-equivalent:
+//     flushes file data + metadata to stable storage), Close, return joined
+//     errors;
 //  2. Rename temp -> destination (atomic on the same filesystem);
 //  3. delegate to syncDir on the parent directory so the rename itself is
 //     durable (without this the destination's bytes are on disk after
