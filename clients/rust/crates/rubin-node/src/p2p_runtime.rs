@@ -381,55 +381,10 @@ impl PeerSession {
                 }
             }
             let msg = self.read_message()?;
-            match msg.command.as_str() {
-                MESSAGE_INV => {
-                    let requests = self.handle_inv(&msg.payload, sync_engine, None)?;
-                    if !requests.is_empty() {
-                        let payload = encode_inventory_vectors(&requests)?;
-                        self.write_message(&WireMessage {
-                            command: MESSAGE_GETDATA.to_string(),
-                            payload,
-                        })?;
-                    }
-                }
-                MESSAGE_GETDATA => {
-                    self.respond_to_getdata(&msg.payload, sync_engine, None)?;
-                }
-                MESSAGE_GETBLOCKS => {
-                    let items = self.handle_getblocks(&msg.payload, sync_engine)?;
-                    if items.is_empty() {
-                        continue;
-                    }
-                    self.write_message(&WireMessage {
-                        command: MESSAGE_INV.to_string(),
-                        payload: encode_inventory_vectors(&items)?,
-                    })?;
-                }
-                MESSAGE_BLOCK => {
-                    let _ = self.handle_block(&msg.payload, sync_engine)?;
-                    self.request_more_blocks_if_behind(sync_engine)?;
-                }
-                MESSAGE_TX | "headers" | "pong" => {}
-                "ping" => {
-                    self.write_message(&WireMessage {
-                        command: "pong".to_string(),
-                        payload: Vec::new(),
-                    })?;
-                }
-                MESSAGE_GETADDR => {
-                    self.write_message(&WireMessage {
-                        command: MESSAGE_ADDR.to_string(),
-                        payload: marshal_empty_addr_payload(),
-                    })?;
-                }
-                MESSAGE_ADDR => {
-                    let _ = unmarshal_addr_payload(&msg.payload)?;
-                }
-                other => {
-                    self.peer.last_error = format!("unknown command: {other}");
-                    return Err(unknown_command_err(other));
-                }
-            }
+            // Dispatch through the single live command truth (collect_live_responses).
+            // The block-sync loop has no relay context and discards the tx-pool
+            // cleanup plan, matching the prior inline-match behavior.
+            let _ = self.handle_live_message(msg, sync_engine, None)?;
         }
     }
 
@@ -586,6 +541,11 @@ impl PeerSession {
         Ok(outcome.tx_pool_cleanup)
     }
 
+    // Historically used by the inline run_block_sync_loop match; preserved under
+    // #[cfg(test)] so the original behavioral test keeps documenting the
+    // follow-up getblocks path. Production dispatch routes through
+    // collect_live_responses -> prepare_block_request_if_behind instead.
+    #[cfg(test)]
     fn request_more_blocks_if_behind(&mut self, sync_engine: &SyncEngine) -> io::Result<()> {
         if self.is_behind(sync_engine)? {
             self.request_blocks(sync_engine)?;
@@ -759,6 +719,12 @@ impl PeerSession {
         Ok(())
     }
 
+    // Historically used by the inline run_block_sync_loop match; preserved
+    // under #[cfg(test)] so the "ignores missing blocks" behavioral test keeps
+    // documenting the helper's contract. Production dispatch now returns the
+    // block responses through collect_live_responses and writes them via
+    // handle_live_message.
+    #[cfg(test)]
     fn respond_to_getdata(
         &mut self,
         payload: &[u8],
@@ -2809,5 +2775,63 @@ mod tests {
             "unknown command should disconnect, not ban"
         );
         assert_eq!(state.last_error, "unknown command: weird");
+    }
+
+    // Regression for Q-IMPL-RUST-P2P-DISPATCHER-TRUTH-01 (D.2).
+    // Proves run_block_sync_loop dispatches every inbound command through the
+    // single live truth (collect_live_responses) rather than a duplicated
+    // inline match: a ping received inside the sync loop must produce a pong
+    // reply — that reply arm lives in collect_live_responses, so receiving it
+    // here means dispatch actually routed through the consolidated path.
+    #[test]
+    fn run_block_sync_loop_dispatches_via_collect_live_responses() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            // Force the loop to stay live past the initial request_blocks write.
+            session.peer.remote_version.best_height = 2;
+            let mut engine = test_sync_engine_with_genesis();
+            let err = session
+                .run_block_sync_loop(&mut engine)
+                .expect_err("unknown command terminates the sync loop");
+            (err.kind(), err.to_string())
+        });
+
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set_read_timeout");
+
+        // Consume the initial bootstrap getblocks the sync loop sends first.
+        let bootstrap =
+            read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+                .expect("read bootstrap getblocks");
+        assert_eq!(bootstrap.command, MESSAGE_GETBLOCKS);
+
+        // Send a ping — if dispatch truly routes through collect_live_responses,
+        // the session will reply with a pong.
+        let ping_header =
+            build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
+        client.write_all(&ping_header).expect("write ping");
+        client.flush().expect("flush ping");
+
+        let pong = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read pong");
+        assert_eq!(pong.command, "pong");
+        assert!(pong.payload.is_empty(), "pong must have empty payload");
+
+        // Terminate the loop deterministically through the shared unknown-command arm.
+        let weird_header =
+            build_envelope_header(network_magic("devnet"), "weird", &[]).expect("weird header");
+        client.write_all(&weird_header).expect("write weird");
+        client.flush().expect("flush weird");
+
+        let (kind, err) = server.join().expect("server join");
+        assert_eq!(kind, io::ErrorKind::InvalidData);
+        assert!(err.contains("unknown message type: weird"), "got: {err}");
     }
 }
