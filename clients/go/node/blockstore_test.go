@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -150,41 +153,208 @@ func TestWriteFileIfAbsentRejectsDifferentContent(t *testing.T) {
 }
 
 func TestWriteFileIfAbsentPropagatesReadError(t *testing.T) {
+	// Only the readFileByPathFn injection is relevant after the E.3
+	// TOCTOU hardening: writeFileIfAbsent no longer routes writes
+	// through writeFileAtomicFn (it goes directly through
+	// allocateAndWriteTemp + os.Link), so mocking writeFileAtomicFn
+	// here was dead-but-harmless and has been removed.
 	prevRead := readFileByPathFn
-	prevWrite := writeFileAtomicFn
 	t.Cleanup(func() {
 		readFileByPathFn = prevRead
-		writeFileAtomicFn = prevWrite
 	})
 
 	readFileByPathFn = func(string) ([]byte, error) { return nil, errors.New("boom") }
-	writeFileAtomicFn = func(string, []byte, os.FileMode) error { return nil }
 
 	if err := writeFileIfAbsent(filepath.Join(t.TempDir(), "x.bin"), []byte("x")); err == nil {
 		t.Fatalf("expected error")
 	}
 }
 
-func TestWriteFileIfAbsentDetectsWrittenMismatch(t *testing.T) {
-	prevRead := readFileByPathFn
-	prevWrite := writeFileAtomicFn
-	t.Cleanup(func() {
-		readFileByPathFn = prevRead
-		writeFileAtomicFn = prevWrite
-	})
+// TestWriteFileIfAbsentDetectsWrittenMismatch was a legacy test that
+// relied on writeFileAtomicFn injection to simulate a "wrong bytes hit
+// the disk" scenario before the atomic-link hardening. After the E.3
+// TOCTOU fix the write path uses os.Link as the atomic commit, so there
+// is no longer a verify-after-write hook point. Race coverage for the
+// equivalent "different content on disk" branch is now in
+// TestWriteFileIfAbsent_ConcurrentDifferentContent below.
 
-	reads := 0
-	readFileByPathFn = func(string) ([]byte, error) {
-		reads++
-		if reads == 1 {
-			return nil, os.ErrNotExist
-		}
-		return []byte("wrong"), nil
+// TestWriteFileIfAbsent_Fresh exercises the happy path: destination is
+// absent, writeFileIfAbsent creates it with the given bytes, and a
+// subsequent call with the same bytes is a silent no-op (idempotent
+// replay contract).
+func TestWriteFileIfAbsent_Fresh(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fresh.bin")
+	content := []byte("hello E.3")
+
+	if err := writeFileIfAbsent(path, content); err != nil {
+		t.Fatalf("fresh write: %v", err)
 	}
-	writeFileAtomicFn = func(string, []byte, os.FileMode) error { return nil }
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("content mismatch: got %q want %q", got, content)
+	}
+	// Idempotent replay: same bytes must succeed as a no-op.
+	if err := writeFileIfAbsent(path, content); err != nil {
+		t.Fatalf("idempotent replay: %v", err)
+	}
+}
 
-	if err := writeFileIfAbsent(filepath.Join(t.TempDir(), "x.bin"), []byte("right")); err == nil {
-		t.Fatalf("expected mismatch error")
+// TestWriteFileIfAbsent_ExistingDifferentContent exercises the non-race
+// detection branch: destination is already on disk with bytes that
+// differ from the caller's content. writeFileIfAbsent must refuse to
+// overwrite and surface an explicit error (never silently replace).
+func TestWriteFileIfAbsent_ExistingDifferentContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "occupied.bin")
+	if err := os.WriteFile(path, []byte("existing bytes"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err := writeFileIfAbsent(path, []byte("different bytes"))
+	if err == nil {
+		t.Fatalf("expected mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "different content") {
+		t.Fatalf("expected mismatch error, got: %v", err)
+	}
+	// Destination bytes must not have been overwritten.
+	got, _ := os.ReadFile(path)
+	if string(got) != "existing bytes" {
+		t.Fatalf("destination was silently overwritten: %q", got)
+	}
+}
+
+// TestWriteFileIfAbsent_ConcurrentSameContent fires N goroutines at the
+// same destination with identical content. Atomic os.Link ensures
+// exactly one goroutine creates the file; the rest observe the EEXIST
+// race branch, verify the content matches, and return nil. This is the
+// dominant case during idempotent sync-engine replay, and it must NOT
+// produce any errors even under heavy concurrency.
+func TestWriteFileIfAbsent_ConcurrentSameContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shared.bin")
+	content := []byte("shared payload — every goroutine writes these same bytes")
+
+	const N = 16
+	errs := make(chan error, N)
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- writeFileIfAbsent(path, append([]byte(nil), content...))
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if e != nil {
+			t.Fatalf("concurrent same-content write returned error: %v", e)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("content mismatch after concurrency: got %q want %q", got, content)
+	}
+}
+
+// TestWriteFileIfAbsent_ConcurrentDifferentContent fires N goroutines
+// at the same destination but each writes DIFFERENT bytes. Exactly one
+// goroutine creates the file; the others observe the EEXIST race
+// branch, read the existing bytes, see a mismatch, and error. The key
+// invariant: the destination must never end up with "wrong" bytes from
+// a losing goroutine — atomic link prevents that silent overwrite.
+func TestWriteFileIfAbsent_ConcurrentDifferentContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "contested.bin")
+
+	const N = 16
+	errs := make(chan error, N)
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		id := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			unique := []byte(fmt.Sprintf("goroutine-%d-payload", id))
+			errs <- writeFileIfAbsent(path, unique)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	successes := 0
+	for e := range errs {
+		if e == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly 1 success, got %d", successes)
+	}
+	// Whatever ended up on disk must be the bytes of the winning
+	// goroutine — NOT truncated, NOT corrupted by a racing temp write.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.HasPrefix(string(got), "goroutine-") || !strings.HasSuffix(string(got), "-payload") {
+		t.Fatalf("destination has corrupt/unexpected bytes: %q", got)
+	}
+}
+
+// Copilot P1 regression on PR #1220: a stale `<dest>.tmp.<pid>.<seq>`
+// leftover from a crashed prior process (potentially hard-linked to
+// a live destination inode) must NOT be reopened with O_TRUNC —
+// that would truncate the destination through the shared inode.
+// writeAndSyncTemp uses O_CREATE|O_EXCL (no O_TRUNC), and
+// allocateAndWriteTemp retries with a fresh seq on os.ErrExist.
+// Verify the retry path by pre-creating a temp at the next seq the
+// allocator would produce, then confirm writeFileAtomic succeeds,
+// the pre-existing stale temp is NOT truncated, and the destination
+// has the expected bytes.
+func TestWriteFileAtomic_SkipsStaleTempViaExclusiveCreate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "payload.bin")
+
+	// Pre-create stale temp at the seq the next allocation would hit.
+	staleSeq := nextTempSeq() + 1
+	staleTmp := tempPathFor(path, os.Getpid(), staleSeq)
+	staleBytes := []byte("STALE LEFTOVER - must not be truncated")
+	if err := os.WriteFile(staleTmp, staleBytes, 0o600); err != nil {
+		t.Fatalf("seed stale temp: %v", err)
+	}
+
+	// Counter is already at staleSeq-1 after the `nextTempSeq()+1`
+	// probe above; the next nextTempSeq() call (first allocator attempt)
+	// returns staleSeq and triggers the O_EXCL AlreadyExists branch.
+
+	if err := writeFileAtomic(path, []byte("fresh bytes"), 0o600); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+
+	// Destination has new bytes.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(got) != "fresh bytes" {
+		t.Fatalf("dest: got %q, want %q", got, "fresh bytes")
+	}
+
+	// Stale temp untouched — O_EXCL refused to reopen/truncate.
+	gotStale, err := os.ReadFile(staleTmp)
+	if err != nil {
+		t.Fatalf("read stale after: %v", err)
+	}
+	if !bytes.Equal(gotStale, staleBytes) {
+		t.Fatalf("stale temp was overwritten — O_EXCL retry path is broken: got %q", gotStale)
 	}
 }
 
