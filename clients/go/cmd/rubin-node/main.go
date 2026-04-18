@@ -340,6 +340,41 @@ func run(args []string, stdout, stderr io.Writer) int {
 	applySuiteContextToSyncConfig(&syncCfg, rotation, registry)
 	syncCfg.ParallelValidationMode = *pvMode
 	syncCfg.PVShadowMaxSamples = *pvShadowMax
+	// Mainnet target / genesis guard runs BEFORE any reconcile-driven
+	// state mutation (truncate_canonical / chainstate replay). MkdirAll,
+	// LoadChainState, and OpenBlockStore above are read/open-only
+	// operations that do not rewrite canonical or chainstate contents;
+	// the authoritative boundary we care about is reconcile + save +
+	// sync engine start, and the guard must run before that boundary.
+	// Mirror of Rust main.rs validate_mainnet_genesis_guard pre-reconcile
+	// call. NewSyncEngine also runs the same guard internally (see
+	// sync.go validateMainnetGenesisGuard) so tests / embedded callers
+	// that construct an engine directly still get the check.
+	// Devnet / test networks no-op.
+	if err := node.ValidateMainnetGenesisGuard(syncCfg); err != nil {
+		_, _ = fmt.Fprintf(stderr, "mainnet genesis guard failed: %v\n", err)
+		return 2
+	}
+	// Reconcile + save BEFORE constructing the sync engine. Rust mirror
+	// in clients/rust/crates/rubin-node/src/main.rs: the contract is
+	// that chainstate is persisted to disk BEFORE any sync / P2P / RPC /
+	// miner thread can observe it, so a post-reconcile crash cannot
+	// expose a chainstate whose claimed tip exceeds the truncated
+	// canonical index. If chainState.Save fails after a successful
+	// reconcile, the canonical index on disk is already truncated
+	// (atomic via write_file_atomic) but the chainstate snapshot may be
+	// stale; the next startup will detect this via height/tip mismatch
+	// and reset+replay from height 0 — correct, just wasteful on large
+	// chains. If the sync engine constructor itself fails later, the
+	// already-repaired chainstate is durable on disk.
+	if _, err := node.ReconcileChainStateWithBlockStore(chainState, blockStore, syncCfg); err != nil {
+		_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
+		return 2
+	}
+	if err := chainState.Save(chainStatePath); err != nil {
+		_, _ = fmt.Fprintf(stderr, "chainstate save failed: %v\n", err)
+		return 2
+	}
 	syncEngine, err := newSyncEngineFn(
 		chainState,
 		blockStore,
@@ -347,14 +382,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "sync engine init failed: %v\n", err)
-		return 2
-	}
-	if _, err := node.ReconcileChainStateWithBlockStore(chainState, blockStore, syncCfg); err != nil {
-		_, _ = fmt.Fprintf(stderr, "chainstate reconcile failed: %v\n", err)
-		return 2
-	}
-	if err := chainState.Save(chainStatePath); err != nil {
-		_, _ = fmt.Fprintf(stderr, "chainstate save failed: %v\n", err)
 		return 2
 	}
 	mempoolCfg := node.DefaultMempoolConfig()

@@ -316,6 +316,12 @@ impl SyncEngine {
         block_store: Option<BlockStore>,
         mut cfg: SyncConfig,
     ) -> Result<Self, String> {
+        // Defence-in-depth re-check on the final `SyncConfig` actually
+        // used to construct the engine — catches any mutation of cfg
+        // between the authoritative early guard in `main.rs` (run BEFORE
+        // reconcile) and engine construction. For callers that construct
+        // `SyncEngine` directly (tests, embedded uses) this is the ONLY
+        // guard. Devnet / test networks no-op; guard itself is idempotent.
         validate_mainnet_genesis_guard(&cfg)?;
         if cfg.header_batch_limit == 0 {
             cfg.header_batch_limit = DEFAULT_HEADER_BATCH_LIMIT;
@@ -823,7 +829,7 @@ impl SyncEngine {
     }
 }
 
-fn validate_mainnet_genesis_guard(cfg: &SyncConfig) -> Result<(), String> {
+pub fn validate_mainnet_genesis_guard(cfg: &SyncConfig) -> Result<(), String> {
     let network = cfg.network.trim().to_ascii_lowercase();
     let network = if network.is_empty() {
         "devnet".to_string()

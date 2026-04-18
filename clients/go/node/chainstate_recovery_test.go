@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -456,5 +457,77 @@ func TestReconcileChainStateWithBlockStore_ResetsDirtyTiplessSnapshotBeforeRepla
 	}
 	if len(dirty.Utxos) != len(expected.Utxos) {
 		t.Fatalf("unexpected utxo count after dirty replay: got=%d want=%d", len(dirty.Utxos), len(expected.Utxos))
+	}
+}
+
+// TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap
+// pins the cross-client re-hash defence: a parseable-but-wrong
+// <hash>.bin (block 1's payload overwritten with block 2's bytes,
+// which still link to b1_hash as prev_hash so chain-integrity
+// inside ConnectBlock would PASS) MUST be rejected by reconcile's
+// pre-replay re-hash check. Mirror of Rust
+// `reconcile_propagates_corrupt_canonical_block_artifact`.
+func TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+	store, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+
+	target := consensus.POW_LIMIT
+	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath)
+	liveState := NewChainState()
+	engine, err := NewSyncEngine(liveState, store, cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	genesisParsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(genesis): %v", err)
+	}
+	block1Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1)
+	block1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, genesisParsed.Header.Timestamp+1, block1Coinbase)
+	if _, err := engine.ApplyBlock(block1, nil); err != nil {
+		t.Fatalf("ApplyBlock(block1): %v", err)
+	}
+	block1Parsed, err := consensus.ParseBlockBytes(block1)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(block1): %v", err)
+	}
+	block1Hash, err := consensus.BlockHash(block1Parsed.HeaderBytes)
+	if err != nil {
+		t.Fatalf("BlockHash(block1): %v", err)
+	}
+	// Build a second valid block at height 2 whose prev_hash is
+	// block1Hash. Overwrite block 1's <hash>.bin with block 2's
+	// bytes so the file is parseable, prev_hash links to the
+	// current canonical tip (passes connect_block prev-hash
+	// integrity), but its header hashes to block2_hash, NOT
+	// block1_hash — only the re-hash check catches the swap.
+	block2Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, 2)
+	block2 := buildSingleTxBlock(t, block1Hash, target, block1Parsed.Header.Timestamp+1, block2Coinbase)
+	block1Path := filepath.Join(store.blocksDir, hex.EncodeToString(block1Hash[:])+".bin")
+	if err := os.WriteFile(block1Path, block2, 0o600); err != nil {
+		t.Fatalf("overwrite block1 bytes: %v", err)
+	}
+
+	state := NewChainState()
+	if _, err := state.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+		devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID,
+		cfg.CoreExtProfiles, cfg.RotationProvider, cfg.SuiteRegistry,
+	); err != nil {
+		t.Fatalf("seed genesis state: %v", err)
+	}
+	_, err = ReconcileChainStateWithBlockStore(state, store, cfg)
+	if err == nil {
+		t.Fatalf("expected canonical-artifact-corruption error, got nil")
+	}
+	want := "canonical artifact corruption during chainstate replay at height 1"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected error containing %q, got %v", want, err)
 	}
 }
