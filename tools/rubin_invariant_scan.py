@@ -36,9 +36,9 @@ TEST_BRITTLE_PATTERNS = (
     re.compile(r"read-only", re.IGNORECASE),
     re.compile(r"\bchmod\s*\("),
 )
-RUNTIME_UNWRAP_RE = re.compile(r"(?:\.|::)(unwrap|expect)\s*\(")
+RUNTIME_UNWRAP_RE = re.compile(r"(?:\.\s*|::\s*)(unwrap|expect)\s*\(")
 DROP_PANIC_RE = re.compile(
-    r"\b(panic|todo|unimplemented)!\s*\(|(?:\.|::)(unwrap|expect)\s*\("
+    r"\b(panic|todo|unimplemented)\s*!\s*\(|(?:\.\s*|::\s*)(unwrap|expect)\s*\("
 )
 INLINE_COMMENT_PATTERNS = (
     re.compile(r"(^|[^:])(?P<comment>//.*)"),
@@ -46,6 +46,12 @@ INLINE_COMMENT_PATTERNS = (
     re.compile(r"(^|\s)(?P<comment>#.*)"),
     re.compile(r"(^|\s)(?P<comment>--.*)"),
 )
+RUST_INLINE_COMMENT_PATTERNS = (
+    re.compile(r"(^|[^:])(?P<comment>//.*)"),
+    re.compile(r"(?P<comment>/\*.*)"),
+)
+RUST_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/")
+RUST_LINE_COMMENT_RE = re.compile(r"(^|[^:])//.*")
 
 
 def extract_comment_fragments(text: str) -> list[str]:
@@ -70,6 +76,21 @@ def extract_comment_fragments(text: str) -> list[str]:
     return fragments
 
 
+def strip_inline_comment_suffix(
+    text: str, patterns: tuple[re.Pattern[str], ...]
+) -> str:
+    sanitized = RUST_BLOCK_COMMENT_RE.sub("", text)
+    for pattern in patterns:
+        match = pattern.search(sanitized)
+        if match is None:
+            continue
+        sanitized = sanitized[:match.start("comment")]
+    line_match = RUST_LINE_COMMENT_RE.search(sanitized)
+    if line_match is not None:
+        sanitized = sanitized[: line_match.start()] + line_match.group(1)
+    return sanitized
+
+
 def scan_invariants(
     manifest_path: str | Path, diff_range: str | None = None, fast: bool = False
 ) -> list[str]:
@@ -91,6 +112,7 @@ def scan_invariants(
 
         for added in patch.added_lines:
             text = added.text
+            scan_text = strip_inline_comment_suffix(text, RUST_INLINE_COMMENT_PATTERNS)
             location = f"{rel_path}:{added.number}"
 
             if production_file:
@@ -117,7 +139,7 @@ def scan_invariants(
                         blockers.append(f"{location}: brittle test path or OS-string match")
                         break
 
-            if runtime_sensitive and not is_comment_line(text) and RUNTIME_UNWRAP_RE.search(text):
+            if runtime_sensitive and not is_comment_line(text) and RUNTIME_UNWRAP_RE.search(scan_text):
                 blockers.append(
                     f"{location}: unwrap/expect added in runtime-sensitive non-test path"
                 )
@@ -133,7 +155,8 @@ def scan_invariants(
             continue
 
         for added in patch.added_lines:
-            if line_in_ranges(added.number, drop_ranges) and DROP_PANIC_RE.search(added.text):
+            scan_text = strip_inline_comment_suffix(added.text, RUST_INLINE_COMMENT_PATTERNS)
+            if line_in_ranges(added.number, drop_ranges) and DROP_PANIC_RE.search(scan_text):
                 blockers.append(
                     f"{rel_path}:{added.number}: panic-like cleanup added inside impl Drop"
                 )

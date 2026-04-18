@@ -153,6 +153,18 @@ class ManifestContractTests(unittest.TestCase):
 
         self.assertIn("malformed changed-path entry", str(ctx.exception))
 
+    def test_find_drop_block_ranges_accepts_qualified_drop_impl(self):
+        text = (
+            "struct Dropper;\n\n"
+            "impl std::ops::Drop for Dropper {\n"
+            "    fn drop(&mut self) {\n"
+            "        panic!(\"boom\");\n"
+            "    }\n"
+            "}\n"
+        )
+
+        self.assertEqual(m.find_drop_block_ranges(text), [(3, 7)])
+
 
 if __name__ == "__main__":
     unittest.main()

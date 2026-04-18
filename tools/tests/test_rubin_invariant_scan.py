@@ -184,6 +184,17 @@ class InvariantScanTests(unittest.TestCase):
 
         self.assertTrue(any("unwrap/expect added in runtime-sensitive" in item for item in blockers))
 
+    def test_fails_on_whitespace_separated_unwrap_in_runtime_sensitive_path(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "p2p_runtime.rs"
+        target.write_text(
+            "pub fn relay(value: Option<i32>) {\n    let _value = Option :: unwrap(value);\n    let _copy = value . expect(\"boom\");\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertTrue(any("unwrap/expect added in runtime-sensitive" in item for item in blockers))
+
     def test_fails_on_panic_in_drop(self):
         target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "dropper.rs"
         target.write_text(
@@ -194,6 +205,39 @@ class InvariantScanTests(unittest.TestCase):
         blockers = self.scan()
 
         self.assertTrue(any("panic-like cleanup added inside impl Drop" in item for item in blockers))
+
+    def test_fails_on_whitespace_panic_in_qualified_drop_impl(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "dropper.rs"
+        target.write_text(
+            "struct Dropper;\n\nimpl std::ops::Drop for Dropper {\n    fn drop(&mut self) {\n        panic ! (\"boom\");\n    }\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertTrue(any("panic-like cleanup added inside impl Drop" in item for item in blockers))
+
+    def test_does_not_flag_inline_comment_mentions_of_unwrap(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "p2p_runtime.rs"
+        target.write_text(
+            "pub fn relay(value: Option<i32>) {\n    let _value = value; // prefer Option :: unwrap(value) avoidance here\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertFalse(any("unwrap/expect added in runtime-sensitive" in item for item in blockers))
+
+    def test_finds_unwrap_after_closed_inline_block_comment(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "p2p_runtime.rs"
+        target.write_text(
+            "pub fn relay(value: Option<i32>) {\n    let _value = /* note */ Option :: unwrap(value);\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertTrue(any("unwrap/expect added in runtime-sensitive" in item for item in blockers))
 
     def test_fails_on_ufcs_expect_in_multiline_drop_impl(self):
         target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "dropper.rs"
@@ -243,6 +287,17 @@ class InvariantScanTests(unittest.TestCase):
         target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "dropper.rs"
         target.write_text(
             "struct Wrapper<T>(T);\n\nimpl<T: Drop> Wrapper<T> {\n    fn demo(&self) {\n        let _value = Some(1).unwrap();\n    }\n}\n",
+            encoding="utf-8",
+        )
+
+        blockers = self.scan()
+
+        self.assertFalse(any("panic-like cleanup added inside impl Drop" in item for item in blockers))
+
+    def test_does_not_treat_qualified_generic_drop_bounds_as_impl_drop(self):
+        target = self.repo_root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "dropper.rs"
+        target.write_text(
+            "struct Wrapper<T>(T);\n\nimpl<T: std::ops::Drop> Wrapper<T> {\n    fn demo(&self) {\n        let _value = Result::<i32, &str> :: expect(Err(\"boom\"), \"boom\");\n    }\n}\n",
             encoding="utf-8",
         )
 

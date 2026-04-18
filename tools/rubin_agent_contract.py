@@ -517,7 +517,10 @@ def find_drop_block_ranges(text: str) -> list[tuple[int, int]]:
     start_line = 0
     brace_depth = 0
     header_lines: list[str] = []
-    drop_header_re = re.compile(r"^\s*impl(?:\s*<[^{}]*>)?\s+Drop\b.*\bfor\b")
+    drop_header_re = re.compile(
+        r"^\s*impl(?:\s*<[^{}]*>)?\s+"
+        r"(?:(?:::)?[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*Drop\b\s+for\b"
+    )
 
     for idx, line in enumerate(lines, start=1):
         stripped = line.lstrip()
