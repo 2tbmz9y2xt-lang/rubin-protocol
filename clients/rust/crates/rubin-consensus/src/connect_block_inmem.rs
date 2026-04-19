@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use sha3::{Digest, Sha3_256};
 
 use crate::block_basic::{
-    median_time_past, parse_block_bytes, validate_block_basic_with_context_at_height,
-    validate_coinbase_apply_outputs, validate_coinbase_value_bound,
+    median_time_past, parse_block_bytes, validate_coinbase_apply_outputs,
+    validate_coinbase_value_bound, validate_parsed_block_basic_with_context_at_height,
 };
 use crate::compactsize::encode_compact_size;
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
@@ -105,16 +105,17 @@ pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_sui
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
-    // Stateless checks first.
-    validate_block_basic_with_context_at_height(
-        block_bytes,
+    // G.9: parse once, then run stateless checks against the parsed block;
+    // previously this path called validate_*_with_context_at_height (which
+    // parsed internally) and then re-parsed via parse_block_bytes.
+    let pb = parse_block_bytes(block_bytes)?;
+    validate_parsed_block_basic_with_context_at_height(
+        &pb,
         expected_prev_hash,
         expected_target,
         block_height,
         prev_timestamps,
     )?;
-
-    let pb = parse_block_bytes(block_bytes)?;
     if pb.txs.is_empty() || pb.txids.len() != pb.txs.len() {
         return Err(TxError::new(
             ErrorCode::BlockErrParse,
@@ -269,15 +270,16 @@ pub fn connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_con
     registry: Option<&SuiteRegistry>,
     workers: usize,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
-    validate_block_basic_with_context_at_height(
-        block_bytes,
+    // G.9: parse once and validate against the parsed block, mirroring the
+    // sequential connect path above.
+    let pb = parse_block_bytes(block_bytes)?;
+    validate_parsed_block_basic_with_context_at_height(
+        &pb,
         expected_prev_hash,
         expected_target,
         block_height,
         prev_timestamps,
     )?;
-
-    let pb = parse_block_bytes(block_bytes)?;
     if pb.txs.is_empty() || pb.txids.len() != pb.txs.len() {
         return Err(TxError::new(
             ErrorCode::BlockErrParse,
