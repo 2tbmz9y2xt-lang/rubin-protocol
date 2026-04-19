@@ -114,6 +114,28 @@ pub fn read_file_from_dir(dir: &Path, name: &str) -> Result<Vec<u8>, std::io::Er
 /// `.`/`..`/separators/drive-prefix; full-path sandboxing is the
 /// caller's responsibility (see `chainstate.rs` for an example
 /// where the path is constructed from a trusted data-dir).
+/// Length of the volume prefix at the start of `s`. On Windows, returns
+/// 2 if `s` begins with an ASCII-letter + `:` (drive prefix like `C:`).
+/// On Unix and on Windows non-drive paths, returns 0. Mirrors Go's
+/// `filepath.VolumeName` length contract for the path shapes the
+/// `read_file_by_path` helper accepts (drive-letter paths only — UNC
+/// roots are not exercised by current callers).
+fn volume_prefix_len(s: &str) -> usize {
+    #[cfg(windows)]
+    {
+        let bytes = s.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            return 2;
+        }
+        0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = s;
+        0
+    }
+}
+
 pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
     // Extract leaf via Go's `filepath.Base` semantics (string-based)
     // rather than `Path::file_name`, which silently SKIPS trailing
@@ -170,7 +192,21 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
         // No trailing separator. Standard split at last separator.
         match trimmed.rfind(is_sep) {
             Some(idx) => {
-                let dir = if idx == 0 { "/" } else { &trimmed[..idx] };
+                // Preserve the rooting separator when the last separator
+                // is the path's root marker, otherwise the dir loses its
+                // absolute-root semantics:
+                //   - Unix `/foo`        → idx=0, dir must be `/`
+                //   - Windows `C:\foo`   → idx=2 right after drive vol,
+                //     dir must be `C:\` (NOT `C:`, which would be
+                //     drive-relative on Windows)
+                let vol_len = volume_prefix_len(trimmed);
+                let dir = if idx == 0 {
+                    "/"
+                } else if vol_len > 0 && idx == vol_len {
+                    &trimmed[..idx + 1]
+                } else {
+                    &trimmed[..idx]
+                };
                 (dir, &trimmed[idx + 1..])
             }
             None => (".", trimmed),
@@ -608,11 +644,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// E.10: a `..` segment embedded in the FULL path passed to
-    /// `read_file_by_path` becomes the leaf component after
-    /// `Path::file_name`, which the leaf-name guard rejects. This
-    /// prevents `<data_dir>/..` and `<data_dir>/../etc/passwd` style
-    /// callers from sneaking past via `Path::join`.
+    /// E.10: a TRAILING `..` segment in the FULL path passed to
+    /// `read_file_by_path` becomes the extracted leaf, which the
+    /// leaf-name guard rejects. Covers shapes like `<data_dir>/..`
+    /// (leaf is `..`). It does NOT cover `..` in parent components
+    /// (e.g. `<data_dir>/../etc/passwd` has leaf `passwd` which
+    /// passes the guard) — full-path sandboxing is the caller's
+    /// responsibility, by design.
     #[test]
     fn read_file_by_path_rejects_dotdot_leaf() {
         let dir = unique_temp_path("rubin-io-utils-by-path-dotdot");
