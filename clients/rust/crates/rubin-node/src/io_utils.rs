@@ -697,6 +697,46 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// E.10 trailing-separator semantics: a caller passing
+    /// `<dir>/foo/` MUST NOT silently read `<dir>/foo` (which would
+    /// be the result of `Path::parent`/`Path::file_name`-style
+    /// stripping). Mirrors Go's `filepath.Dir` + `filepath.Base`,
+    /// where `<dir>/foo/` resolves to dir=`<dir>/foo` + leaf=`foo`,
+    /// so the read attempts `<dir>/foo/foo` and surfaces an OS error
+    /// instead of returning bytes from `<dir>/foo`.
+    #[test]
+    fn read_file_by_path_trailing_separator_does_not_silently_rewrite() {
+        let dir = unique_temp_path("rubin-io-utils-by-path-trailing-sep");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let real = dir.join("foo");
+        fs::write(&real, b"contents-of-real-foo").expect("seed");
+
+        // Build a trailing-separator path: "<dir>/foo/"
+        let mut trailing = real.clone().into_os_string();
+        trailing.push("/");
+        let trailing_path = std::path::PathBuf::from(trailing);
+
+        let result = read_file_by_path(&trailing_path);
+        match result {
+            Ok(bytes) => panic!(
+                "expected error on trailing-separator input, got Ok({} bytes); \
+                 silent-rewrite-to-{} regression",
+                bytes.len(),
+                real.display()
+            ),
+            Err(e) => {
+                assert_ne!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidInput,
+                    "trailing-separator input should fall through to OS read \
+                     (NOT be rejected by the leaf-name guard); got {e}"
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Smoke test for the E.1 durability contract: a fresh write goes
     /// through OpenOptions + sync_all + rename + parent dir-sync without
     /// surfacing an error on a real filesystem, and the resulting bytes
