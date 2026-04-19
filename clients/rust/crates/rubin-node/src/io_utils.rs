@@ -115,8 +115,36 @@ pub fn read_file_from_dir(dir: &Path, name: &str) -> Result<Vec<u8>, std::io::Er
 /// caller's responsibility (see `chainstate.rs` for an example
 /// where the path is constructed from a trusted data-dir).
 pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    read_file_from_dir(path.parent().unwrap_or(Path::new("")), name)
+    // Extract leaf via Go's `filepath.Base` semantics (string-based)
+    // rather than `Path::file_name`, which silently SKIPS trailing
+    // `.` components. With `Path::file_name`, an input like
+    // `"/etc/passwd/."` returns `"passwd"` and would silently read
+    // `/etc/passwd`; Go's `filepath.Base` returns `"."` for the same
+    // input and the leaf-name guard then rejects it. This implementation
+    // reproduces Go's behavior: trim trailing `/` (separator-only
+    // suffix), then take everything after the last `/`. The result is
+    // fed to the same `check_safe_file_name` guard.
+    let raw = match path.to_str() {
+        Some(s) => s,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid path: non-UTF8 {path:?}"),
+            ));
+        }
+    };
+    let trimmed = raw.trim_end_matches('/');
+    let leaf = if trimmed.is_empty() {
+        // All-separator input; Go returns "/" — match by passing "/" to
+        // the leaf guard, which rejects it (contains `/`).
+        "/"
+    } else {
+        match trimmed.rfind('/') {
+            Some(idx) => &trimmed[idx + 1..],
+            None => trimmed,
+        }
+    };
+    read_file_from_dir(path.parent().unwrap_or(Path::new("")), leaf)
 }
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {

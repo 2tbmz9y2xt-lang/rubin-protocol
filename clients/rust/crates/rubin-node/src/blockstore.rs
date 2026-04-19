@@ -8,7 +8,8 @@ use rubin_consensus::{
 use serde::{Deserialize, Serialize};
 
 use crate::io_utils::{
-    parse_hex32, read_file_from_dir, write_file_atomic, write_file_exclusive, AtomicWriteError,
+    parse_hex32, read_file_by_path, read_file_from_dir, write_file_atomic, write_file_exclusive,
+    AtomicWriteError,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 
@@ -756,7 +757,10 @@ fn try_has_file_at(path: &Path) -> Result<bool, String> {
 }
 
 fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
-    let raw = match fs::read(path) {
+    // E.10: route through `read_file_by_path` so the index file read
+    // gets the same leaf-name guard Go's `loadBlockStoreIndex` enforces
+    // via its `readFileByPath` call. Mirrors Go cross-client.
+    let raw = match read_file_by_path(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(BlockStoreIndexDisk {
