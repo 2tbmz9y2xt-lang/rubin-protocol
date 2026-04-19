@@ -143,18 +143,40 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
     #[cfg(not(windows))]
     let is_sep = |c: char| c == '/';
 
+    let had_trailing_sep = raw.chars().next_back().is_some_and(is_sep);
     let trimmed = raw.trim_end_matches(is_sep);
-    let leaf = if trimmed.is_empty() {
-        // All-separator input; Go returns "/" — match by passing "/" to
-        // the leaf guard, which rejects it (contains `/`).
-        "/"
-    } else {
-        match trimmed.rfind(is_sep) {
+    // Compute (dir, leaf) to match Go's `filepath.Dir`/`filepath.Base`
+    // pair exactly. The notable case is trailing-separator input
+    // `/etc/passwd/`: Go's `Dir` returns `/etc/passwd` (the trimmed
+    // path including the would-be-leaf) and `Base` returns `passwd`,
+    // so Go's `readFileByPath` then attempts `/etc/passwd/passwd`
+    // which surfaces as ENOENT/ENOTDIR — NOT a silent read of
+    // `/etc/passwd`. Mirroring `Path::parent`/`Path::file_name` would
+    // diverge (parent="/etc"+name="passwd" → reads `/etc/passwd`).
+    let (dir_str, leaf) = if trimmed.is_empty() {
+        // All-separator input; Go returns "/" for both `Base` and `Dir`.
+        ("/", "/")
+    } else if had_trailing_sep {
+        // Trailing-separator input. Go: dir = trimmed, leaf = last
+        // path component name. The combined read target is
+        // `<trimmed>/<leaf>` which surfaces a real OS error on
+        // misuse instead of silently rewriting.
+        let leaf = match trimmed.rfind(is_sep) {
             Some(idx) => &trimmed[idx + 1..],
             None => trimmed,
+        };
+        (trimmed, leaf)
+    } else {
+        // No trailing separator. Standard split at last separator.
+        match trimmed.rfind(is_sep) {
+            Some(idx) => {
+                let dir = if idx == 0 { "/" } else { &trimmed[..idx] };
+                (dir, &trimmed[idx + 1..])
+            }
+            None => (".", trimmed),
         }
     };
-    read_file_from_dir(path.parent().unwrap_or(Path::new("")), leaf)
+    read_file_from_dir(Path::new(dir_str), leaf)
 }
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
