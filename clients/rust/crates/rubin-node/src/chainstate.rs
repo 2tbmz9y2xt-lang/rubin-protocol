@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_incoming_chain_id;
+use crate::io_utils::read_file_by_path;
 use crate::io_utils::{parse_hex32, write_file_atomic};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
@@ -282,7 +283,19 @@ pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
 
 pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     let path = path.as_ref();
-    let raw = match fs::read(path) {
+    // E.10: route through `read_file_by_path` so the LEAF component
+    // gets the same `.`/`..`/separator (+ Windows drive-prefix) guard
+    // Go enforces in `readFileByPath` -> `readFileFromDir`. The guard
+    // refuses ONLY trailing-leaf escapes — a path of the shape
+    // `<data_dir>/<leaf>` whose leaf would itself escape (e.g. leaf is
+    // `..` literally, or contains a separator). It does NOT validate
+    // parent components: e.g. `<data_dir>/../etc/passwd` has leaf
+    // `passwd` which passes validation, and the read proceeds against
+    // the resolved parent. Full-path sandboxing is the caller's
+    // responsibility (here `path` originates from a trusted data-dir
+    // join). Mirrors the Go `LoadChainState` reader in
+    // `clients/go/node/chainstate.go`.
+    let raw = match read_file_by_path(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ChainState::new()),
         Err(e) => return Err(format!("read chainstate {}: {e}", path.display())),
@@ -627,6 +640,29 @@ mod tests {
         assert_eq!(got, st);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// E.10 wiring lock: pin that `load_chain_state` routes through the
+    /// `read_file_by_path` guard so a path whose TRAILING-LEAF component
+    /// is `.` (or another guard-rejected shape) returns Err instead of
+    /// attempting an OS read. The guard validates ONLY the leaf
+    /// component — `..` appearing in PARENT components of an absolute
+    /// path is NOT blocked (e.g. `<dir>/../etc/passwd` has leaf
+    /// `passwd` and would proceed). Mirrors Go's
+    /// `TestLoadChainState_InvalidFileName`. Without this test a future
+    /// refactor could replace `read_file_by_path` with raw `fs::read`
+    /// and the leaf-name guard would silently disappear.
+    #[test]
+    fn load_chain_state_invalid_leaf_name_rejected() {
+        // Leaf == "." — read_file_by_path's guard rejects with
+        // ErrorKind::InvalidInput; load_chain_state propagates as the
+        // operator-facing "read chainstate <path>: ..." error.
+        let result = load_chain_state(std::path::Path::new("."));
+        let err = result.expect_err("expected Err for leaf `.`");
+        assert!(
+            err.contains("invalid file name"),
+            "expected guard error in {err:?}"
+        );
     }
 
     #[test]
