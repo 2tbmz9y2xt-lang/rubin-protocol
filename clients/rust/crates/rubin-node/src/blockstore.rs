@@ -718,7 +718,12 @@ pub fn block_store_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
 fn build_canonical_hash_cache(canonical: &[String]) -> Result<Vec<[u8; 32]>, String> {
     let mut out = Vec::with_capacity(canonical.len());
     for (i, hash_hex) in canonical.iter().enumerate() {
-        let hash = parse_hex32(&format!("canonical[{i}]"), hash_hex)?;
+        // Use a constant label on the success path; allocate the
+        // index-tagged label only on the error path to keep cold-start
+        // / reorg cost O(N) bytes lower (one Vec allocation, no per-
+        // entry String).
+        let hash =
+            parse_hex32("canonical", hash_hex).map_err(|e| format!("canonical[{i}]: {e}"))?;
         out.push(hash);
     }
     Ok(out)
