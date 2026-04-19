@@ -7,7 +7,9 @@ use rubin_consensus::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::io_utils::{parse_hex32, write_file_atomic, write_file_exclusive, AtomicWriteError};
+use crate::io_utils::{
+    parse_hex32, read_file_from_dir, write_file_atomic, write_file_exclusive, AtomicWriteError,
+};
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 
 pub const BLOCK_STORE_DIR_NAME: &str = "blockstore";
@@ -341,17 +343,26 @@ impl BlockStore {
     }
 
     pub fn get_block_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
-        let path = self
-            .blocks_dir
-            .join(format!("{}.bin", hex::encode(block_hash_bytes)));
-        fs::read(&path).map_err(|e| format!("read block {}: {e}", path.display()))
+        // E.10: route through `read_file_from_dir` so the leaf name is
+        // validated against the same traversal / absolute-path / empty-name
+        // guard Go enforces in `readFileFromDir`. The synthesized
+        // `<hex>.bin` cannot in practice contain a separator, but the
+        // guard removes the entire class of "leaf name from on-disk
+        // index drift becomes a traversal" without runtime cost.
+        let name = format!("{}.bin", hex::encode(block_hash_bytes));
+        read_file_from_dir(&self.blocks_dir, &name)
+            .map_err(|e| format!("read block {}: {e}", self.blocks_dir.join(&name).display()))
     }
 
     pub fn get_header_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
-        let path = self
-            .headers_dir
-            .join(format!("{}.bin", hex::encode(block_hash_bytes)));
-        fs::read(&path).map_err(|e| format!("read header {}: {e}", path.display()))
+        // E.10: see `get_block_by_hash` doc.
+        let name = format!("{}.bin", hex::encode(block_hash_bytes));
+        read_file_from_dir(&self.headers_dir, &name).map_err(|e| {
+            format!(
+                "read header {}: {e}",
+                self.headers_dir.join(&name).display()
+            )
+        })
     }
 
     pub fn has_block(&self, block_hash_bytes: [u8; 32]) -> bool {
@@ -541,10 +552,10 @@ impl BlockStore {
     }
 
     pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
-        let path = self
-            .undo_dir
-            .join(format!("{}.json", hex::encode(block_hash_bytes)));
-        let raw = fs::read(&path).map_err(|e| format!("read undo {}: {e}", path.display()))?;
+        // E.10: see `get_block_by_hash` doc.
+        let name = format!("{}.json", hex::encode(block_hash_bytes));
+        let raw = read_file_from_dir(&self.undo_dir, &name)
+            .map_err(|e| format!("read undo {}: {e}", self.undo_dir.join(&name).display()))?;
         unmarshal_block_undo(&raw)
     }
 

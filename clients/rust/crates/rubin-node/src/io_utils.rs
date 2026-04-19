@@ -20,6 +20,105 @@ fn next_temp_seq() -> u64 {
     TEMP_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// Reject a file name (the leaf component, NOT a full path) that would
+/// escape the directory it is being looked up in (audit `E.10`).
+///
+/// Mirrors the Go `readFileFromDir` guard in
+/// `clients/go/node/safeio.go`:
+///
+/// ```text
+/// if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+///     return invalid
+/// }
+/// ```
+///
+/// Rejected vectors (cross-platform-uniform unless noted):
+/// - empty name (`""`)
+/// - `"."` and `".."` (parent / current dir refs)
+/// - any name containing a `/` separator (would escape `dir` via
+///   `dir.join("../foo")` becoming a traversal — true on every OS)
+/// - any absolute path (`/etc/passwd` would override `dir.join`)
+///
+/// Windows-only additional vectors (gated by `cfg(windows)` to preserve
+/// strict per-OS Go parity — `filepath.Base` on Unix accepts both of
+/// these unchanged):
+/// - any name containing a `\` separator (path separator on Windows)
+/// - any Windows drive-prefixed leaf (`C:foo`, `C:`) — `Path::join`
+///   on a drive-prefixed component REPLACES the base path on Windows,
+///   defeating the dir-rooted contract; harmless on Unix where `:`
+///   has no path-shape semantics.
+///
+/// This is a per-leaf-name guard, not a canonicalization-based sandbox.
+/// It deliberately does NOT follow symlinks or canonicalize, because:
+///   1. blockstore / chainstate readers always synthesize the leaf name
+///      from `hex::encode(hash)` plus a fixed extension, so a legitimate
+///      leaf can never contain a separator;
+///   2. canonicalization would require disk I/O on every read and would
+///      change error semantics on transient I/O failure.
+fn check_safe_file_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(format!("invalid file name: {name:?}"));
+    }
+    if name.contains('/') {
+        return Err(format!("invalid file name: {name:?}"));
+    }
+    if Path::new(name).is_absolute() {
+        return Err(format!("invalid file name: {name:?}"));
+    }
+    // Windows-only hardening: backslash separator + drive-prefix leaf.
+    // Both are no-ops on Unix where `\` is a regular filename byte and
+    // `C:` has no path-shape semantics — so gating them on `cfg(windows)`
+    // matches Go's `filepath.Base` per-OS behaviour exactly.
+    #[cfg(windows)]
+    {
+        if name.contains('\\') {
+            return Err(format!("invalid file name: {name:?}"));
+        }
+        let bytes = name.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            return Err(format!("invalid file name: {name:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Read `dir/name` after validating `name` is a safe leaf file name
+/// (audit `E.10`). Mirrors the Go `readFileFromDir` helper in
+/// `clients/go/node/safeio.go` so cross-client storage readers refuse
+/// the same set of traversal / absolute-path / empty-name vectors.
+///
+/// Use this instead of raw `fs::read(dir.join(untrusted_name))` for any
+/// reader where the leaf name comes from data that could in principle
+/// be attacker-influenced (block index entries, on-disk headers, etc.)
+/// even when the current call sites synthesize the name from a fixed
+/// `hex::encode(hash) + ".bin"` shape.
+pub fn read_file_from_dir(dir: &Path, name: &str) -> Result<Vec<u8>, std::io::Error> {
+    if let Err(msg) = check_safe_file_name(name) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
+    }
+    fs::read(dir.join(name))
+}
+
+/// Read a file by full path after validating only the LEAF component
+/// (not the full path) with the same `E.10` guard `read_file_from_dir`
+/// enforces. Mirrors the Go `readFileByPath` helper in
+/// `clients/go/node/safeio.go` for chainstate-style call sites that
+/// already work with a fully-resolved path
+/// (`<data_dir>/chainstate.json`) and need a drop-in safe reader.
+///
+/// This is a leaf-name / traversal guard, NOT a sandbox against
+/// arbitrary full-path input: a caller passing `/etc/passwd` will
+/// still read the absolute path because the leaf `"passwd"` passes
+/// the guard. The guard's job is to refuse names that, when treated
+/// as the trailing component, would escape their directory via
+/// `.`/`..`/separators/drive-prefix; full-path sandboxing is the
+/// caller's responsibility (see `chainstate.rs` for an example
+/// where the path is constructed from a trusted data-dir).
+pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    read_file_from_dir(path.parent().unwrap_or(Path::new("")), name)
+}
+
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
     if bytes.len() != 32 {
@@ -382,8 +481,106 @@ pub fn unique_temp_path(prefix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{sync_dir, unique_temp_path, write_file_atomic};
+    use super::{
+        read_file_by_path, read_file_from_dir, sync_dir, unique_temp_path, write_file_atomic,
+    };
     use std::fs;
+
+    /// E.10 parity: `read_file_from_dir` mirrors Go `readFileFromDir`.
+    /// Rejected vectors (must surface `InvalidInput`):
+    ///   `""`, `"."`, `".."`, `"../etc/passwd"`, `"sub/file"`,
+    ///   `"/etc/passwd"`.
+    /// Accepted: a real leaf name pointing at a file inside `dir`.
+    #[test]
+    fn read_file_from_dir_rejects_traversal_and_absolute_and_empty() {
+        let dir = unique_temp_path("rubin-io-utils-safe-read");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        // Cross-platform-uniform rejected vectors (Go-twin parity on
+        // every OS).
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../etc/passwd",
+            "sub/file",
+            "/etc/passwd", // absolute Unix
+        ] {
+            match read_file_from_dir(&dir, bad) {
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+                Err(e) => panic!("expected InvalidInput for {bad:?}, got {:?}: {e}", e.kind()),
+                Ok(_) => panic!("expected error for {bad:?}, got Ok"),
+            }
+        }
+
+        // Windows-only rejected vectors: backslash separator + drive-
+        // prefix leaf. On Unix these are valid filename bytes (Go's
+        // `filepath.Base` accepts them too) — gating on cfg(windows)
+        // preserves strict per-OS Go parity.
+        #[cfg(windows)]
+        for bad in [
+            "sub\\file", // backslash separator (path separator on Windows)
+            "C:foo",     // drive-prefixed leaf — Path::join replaces base on Windows
+            "C:",
+            "z:bar",
+        ] {
+            match read_file_from_dir(&dir, bad) {
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+                Err(e) => panic!("expected InvalidInput for {bad:?}, got {:?}: {e}", e.kind()),
+                Ok(_) => panic!("expected error for {bad:?}, got Ok"),
+            }
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// E.10 happy path: a real leaf name reads back the bytes.
+    #[test]
+    fn read_file_from_dir_reads_inside_root() {
+        let dir = unique_temp_path("rubin-io-utils-safe-read-ok");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let leaf = "ok.bin";
+        fs::write(dir.join(leaf), b"hi").expect("seed");
+
+        let got = read_file_from_dir(&dir, leaf).expect("read leaf");
+        assert_eq!(got, b"hi");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// E.10: a `..` segment embedded in the FULL path passed to
+    /// `read_file_by_path` becomes the leaf component after
+    /// `Path::file_name`, which the leaf-name guard rejects. This
+    /// prevents `<data_dir>/..` and `<data_dir>/../etc/passwd` style
+    /// callers from sneaking past via `Path::join`.
+    #[test]
+    fn read_file_by_path_rejects_dotdot_leaf() {
+        let dir = unique_temp_path("rubin-io-utils-by-path-dotdot");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        let bad = dir.join("..");
+        match read_file_by_path(&bad) {
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+            other => panic!("expected InvalidInput for trailing .., got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// E.10 happy path for `read_file_by_path`: full-path readers like
+    /// the chainstate loader read back what they wrote.
+    #[test]
+    fn read_file_by_path_reads_inside_root() {
+        let dir = unique_temp_path("rubin-io-utils-by-path-ok");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("chainstate.json");
+        fs::write(&path, b"{}").expect("seed");
+
+        let got = read_file_by_path(&path).expect("read by path");
+        assert_eq!(got, b"{}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// Smoke test for the E.1 durability contract: a fresh write goes
     /// through OpenOptions + sync_all + rename + parent dir-sync without

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_incoming_chain_id;
+use crate::io_utils::read_file_by_path;
 use crate::io_utils::{parse_hex32, write_file_atomic};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
@@ -244,7 +245,16 @@ pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
 
 pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     let path = path.as_ref();
-    let raw = match fs::read(path) {
+    // E.10: route through `read_file_by_path` so the LEAF component is
+    // validated against the same `.`/`..`/separator/drive-prefix guard
+    // Go enforces in `readFileByPath` -> `readFileFromDir`. This is a
+    // leaf-name guard, NOT a full-path sandbox: a caller passing an
+    // absolute path like `/etc/passwd` would still read it because the
+    // leaf `"passwd"` passes validation. Full-path sandboxing is the
+    // caller's responsibility (here `path` originates from a trusted
+    // data-dir join). Mirrors the Go `LoadChainState` reader in
+    // `clients/go/node/chainstate.go`.
+    let raw = match read_file_by_path(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ChainState::new()),
         Err(e) => return Err(format!("read chainstate {}: {e}", path.display())),
