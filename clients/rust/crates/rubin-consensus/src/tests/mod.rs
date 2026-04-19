@@ -621,6 +621,7 @@ mod connect_block_parallel_conformance;
 mod connect_block_parallel_integration;
 mod covenant_genesis;
 mod da_verify_parallel;
+mod parse_dedup;
 mod precompute;
 mod tx_parse;
 mod tx_validate_worker;
