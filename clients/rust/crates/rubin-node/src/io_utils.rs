@@ -115,6 +115,21 @@ pub fn read_file_from_dir(dir: &Path, name: &str) -> Result<Vec<u8>, std::io::Er
 /// caller's responsibility (see `chainstate.rs` for an example
 /// where the path is constructed from a trusted data-dir).
 pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+    // Reject trailing-separator inputs explicitly: `Path::file_name()`
+    // strips a trailing `/` (or `\` on Windows) and `Path::parent()`
+    // returns the parent of the would-be leaf, so without this check
+    // `read_file_by_path("/etc/passwd/")` would silently read
+    // `/etc/passwd` — a different file than the caller passed in.
+    let raw = path.as_os_str().as_encoded_bytes();
+    if let Some(&last) = raw.last() {
+        let is_sep = last == b'/' || (cfg!(windows) && last == b'\\');
+        if is_sep {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid path: {path:?} ends with a separator"),
+            ));
+        }
+    }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     read_file_from_dir(path.parent().unwrap_or(Path::new("")), name)
 }
