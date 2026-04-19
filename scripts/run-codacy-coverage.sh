@@ -11,6 +11,18 @@ mkdir -p "$(dirname "$go_cover_out")" "$rust_lcov_dir"
 rm -f "$go_cover_out" "$rust_lcov_out" "$rust_lcov_dir/lcov.info"
 
 run_go_coverage() {
+  if [[ "${RUBIN_SKIP_GO:-0}" = "1" ]]; then
+    # Caller (typically local-codacy-coverage-check.sh on HEAD when there
+    # are no Go file diffs vs base) asked us to skip running `go test`.
+    # Emit a valid-but-empty Go cover file so downstream consumers don't
+    # bail on parse errors. After both runs, the orchestrator overlays the
+    # HEAD artifact with the BASE artifact so head==base for Go (delta=0);
+    # that base artifact may be real coverage or an empty placeholder,
+    # depending on the skip settings used for the base run.
+    printf 'mode: set\n' > "$go_cover_out"
+    echo "go coverage: SKIPPED (RUBIN_SKIP_GO=1) — empty placeholder at $go_cover_out"
+    return 0
+  fi
   cd "$repo_root/clients/go"
   # Keep the Codacy gate scoped to runtime libraries plus the entrypoints
   # added in the devnet RPC track. Unrelated cmd/* tools stay out of scope.
@@ -25,6 +37,12 @@ run_go_coverage() {
 }
 
 run_rust_coverage() {
+  if [[ "${RUBIN_SKIP_RUST:-0}" = "1" ]]; then
+    # Symmetric to RUBIN_SKIP_GO: minimal valid lcov placeholder.
+    printf 'TN:\nend_of_record\n' > "$rust_lcov_out"
+    echo "rust lcov: SKIPPED (RUBIN_SKIP_RUST=1) — empty placeholder at $rust_lcov_out"
+    return 0
+  fi
   cd "$repo_root/clients/rust"
   cargo tarpaulin --workspace \
     --exclude rubin-consensus-cli \
@@ -63,7 +81,10 @@ if [[ "$go_rc" -ne 0 || "$rust_rc" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ "$rust_lcov_dir/lcov.info" != "$rust_lcov_out" ]]; then
+# Tarpaulin always writes to $rust_lcov_dir/lcov.info; rename to caller's
+# requested path. Skip when RUBIN_SKIP_RUST=1 (placeholder already at
+# $rust_lcov_out, no tarpaulin output to rename).
+if [[ "${RUBIN_SKIP_RUST:-0}" != "1" && "$rust_lcov_dir/lcov.info" != "$rust_lcov_out" ]]; then
   mv "$rust_lcov_dir/lcov.info" "$rust_lcov_out"
 fi
 
