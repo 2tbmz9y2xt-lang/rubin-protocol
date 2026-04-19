@@ -179,6 +179,16 @@ func normalizedNetworkName(network string) string {
 	return network
 }
 
+// ValidateMainnetGenesisGuard exposes the mainnet genesis / target
+// guard so cmd/rubin-node/main.go can run it BEFORE reconcile (mirror
+// of Rust main.rs validate_mainnet_genesis_guard call). Devnet / test
+// networks no-op. Defence-in-depth: NewSyncEngine still runs the same
+// guard internally for callers that construct an engine directly
+// (tests, embedded uses).
+func ValidateMainnetGenesisGuard(cfg SyncConfig) error {
+	return validateMainnetGenesisGuard(cfg)
+}
+
 func validateMainnetGenesisGuard(cfg SyncConfig) error {
 	if normalizedNetworkName(cfg.Network) != "mainnet" {
 		return nil

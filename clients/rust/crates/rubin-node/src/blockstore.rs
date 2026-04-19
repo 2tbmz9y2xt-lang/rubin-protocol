@@ -360,6 +360,46 @@ impl BlockStore {
             .exists()
     }
 
+    /// Fallible header-file presence probe used by reconcile. Returns
+    /// `Ok(true)` on present, `Ok(false)` only on `NotFound`, and
+    /// `Err` on any other metadata error (EACCES / EIO / ENOTDIR on
+    /// parent / etc.). Distinct from `has_block` — the boolean
+    /// `has_block` is `Path::exists()` which conflates "missing" with
+    /// metadata errors and is therefore unsafe for the
+    /// reconcile-vs-truncate decision: a transient I/O failure must
+    /// surface as a HARD startup error, not silently look like a
+    /// "missing file → truncate canonical suffix" trigger.
+    pub fn try_has_block(&self, block_hash_bytes: [u8; 32]) -> Result<bool, String> {
+        try_has_file_at(
+            &self
+                .headers_dir
+                .join(format!("{}.bin", hex::encode(block_hash_bytes))),
+        )
+    }
+
+    /// Fallible block-bytes presence probe (in `blocks_dir`). Same
+    /// semantics as `try_has_block`: only `NotFound` returns
+    /// `Ok(false)`, every other metadata failure surfaces as `Err`.
+    pub fn try_has_block_data(&self, block_hash_bytes: [u8; 32]) -> Result<bool, String> {
+        try_has_file_at(
+            &self
+                .blocks_dir
+                .join(format!("{}.bin", hex::encode(block_hash_bytes))),
+        )
+    }
+
+    /// Fallible undo-file presence probe. Same semantics as
+    /// `try_has_block`. Use this in `chainstate_recovery::truncate_
+    /// incomplete_canonical_suffix` and any other path that must
+    /// distinguish "missing" from "present but unreadable".
+    pub fn try_has_undo(&self, block_hash_bytes: [u8; 32]) -> Result<bool, String> {
+        try_has_file_at(
+            &self
+                .undo_dir
+                .join(format!("{}.json", hex::encode(block_hash_bytes))),
+        )
+    }
+
     pub fn find_canonical_height(&self, block_hash_bytes: [u8; 32]) -> Result<Option<u64>, String> {
         let Some((tip_height, _)) = self.tip()? else {
             return Ok(None);
@@ -508,11 +548,13 @@ impl BlockStore {
         unmarshal_block_undo(&raw)
     }
 
-    /// Cheap undo-presence check used by the same-hash replay branch of
-    /// `commit_canonical_block` to verify that a canonical entry
+    /// Cheap undo-presence check used by the same-hash replay branch
+    /// of `commit_canonical_block` to verify that a canonical entry
     /// inherited from pre-E.4 disk state (or corrupted in some other
     /// way) actually has its undo file on disk before accepting the
-    /// replay as a no-op.
+    /// replay as a no-op. Reconcile / truncate paths use the fallible
+    /// `try_has_undo` instead so EACCES / EIO surface as Err rather
+    /// than silently looking like NotFound.
     fn has_undo(&self, block_hash_bytes: [u8; 32]) -> bool {
         self.undo_dir
             .join(format!("{}.json", hex::encode(block_hash_bytes)))
@@ -618,6 +660,21 @@ impl BlockStore {
 
 pub fn block_store_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
     data_dir.as_ref().join(BLOCK_STORE_DIR_NAME)
+}
+
+/// Fallible existence probe used by the `try_has_*` family. Returns
+/// `Ok(true)` if the file is present and stat'able, `Ok(false)` only
+/// on `ErrorKind::NotFound`, `Err` on every other metadata failure
+/// (EACCES on parent, EIO, ENOTDIR, etc.). Distinct from
+/// `Path::exists()` which silently treats every metadata failure as
+/// "missing" — that is unsafe for paths that gate truncate-vs-error
+/// decisions in startup reconcile.
+fn try_has_file_at(path: &Path) -> Result<bool, String> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("stat {}: {e}", path.display())),
+    }
 }
 
 fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {

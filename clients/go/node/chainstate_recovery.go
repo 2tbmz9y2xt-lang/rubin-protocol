@@ -2,7 +2,10 @@ package node
 
 import (
 	"errors"
+	"fmt"
 	"os"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 const (
@@ -145,11 +148,46 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 			return false, err
 		}
 		if !ok {
-			return false, errors.New("missing canonical block hash during chainstate replay")
+			// Suffix `at height N (tip_height=N')` is part of the
+			// cross-client error literal — Rust mirror in
+			// `clients/rust/crates/rubin-node/src/chainstate_recovery.rs`
+			// emits the bit-identical wording. Operators searching
+			// logs for canonical-index corruption get the exact
+			// height instead of having to reconstruct the loop state.
+			return false, fmt.Errorf("missing canonical block hash during chainstate replay at height %d (tip_height=%d)", height, tipHeight)
 		}
 		blockBytes, err := store.GetBlockByHash(blockHash)
 		if err != nil {
 			return false, err
+		}
+		// Defence-in-depth: re-hash the loaded block's header and
+		// confirm it matches the canonical-index entry BEFORE
+		// delegating to ConnectBlockWithCoreExtProfilesAndSuiteContext.
+		// A parseable-but-swapped <hash>.bin (bit-rot, manual disk
+		// repair gone wrong, adversarial replacement that happens to
+		// link to the current tip's prev_hash) would otherwise be
+		// accepted by ConnectBlock, leaving ChainState with a tip
+		// that no longer corresponds to its canonical-index entry.
+		// The prev_hash chain-integrity check inside ConnectBlock
+		// catches some of this class but NOT the same-prev-hash
+		// adversarial case. One hash per replay block is recovery-
+		// path-only cost (N rows, not steady state). Cross-client
+		// symmetric: Rust `clients/rust/crates/rubin-node/src/chainstate_recovery.rs`
+		// reconcile_chain_state_with_block_store performs the
+		// bit-identical check with the same error literal.
+		parsed, err := consensus.ParseBlockBytes(blockBytes)
+		if err != nil {
+			return false, fmt.Errorf("parse block bytes during chainstate replay at height %d: %w", height, err)
+		}
+		observedHash, err := consensus.BlockHash(parsed.HeaderBytes)
+		if err != nil {
+			return false, fmt.Errorf("hash header during chainstate replay at height %d: %w", height, err)
+		}
+		if observedHash != blockHash {
+			return false, fmt.Errorf(
+				"canonical artifact corruption during chainstate replay at height %d: expected %x, on-disk header hashes to %x",
+				height, blockHash, observedHash,
+			)
 		}
 		prevTimestamps, err := prevTimestampsFromStore(store, height)
 		if err != nil {

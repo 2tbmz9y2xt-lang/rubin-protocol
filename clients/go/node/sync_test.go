@@ -938,3 +938,35 @@ func TestTxErrCode(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateMainnetGenesisGuard_ExportedWrapperParity(t *testing.T) {
+	// The exported wrapper is the entry point used by cmd/rubin-node/main.go
+	// to run the guard BEFORE reconcile (mirror of Rust main.rs ordering).
+	// It must produce identical results to the unexported form used inside
+	// NewSyncEngine — same pass on devnet, same reject on misconfigured
+	// mainnet. Cross-client parity: matches Rust validate_mainnet_genesis_guard
+	// re-export (clients/rust/crates/rubin-node/src/lib.rs).
+
+	t.Run("devnet_passes", func(t *testing.T) {
+		cfg := SyncConfig{Network: "devnet"}
+		if err := ValidateMainnetGenesisGuard(cfg); err != nil {
+			t.Fatalf("devnet: ValidateMainnetGenesisGuard returned %v, want nil", err)
+		}
+		// Wrapper and inner must agree.
+		if inner := validateMainnetGenesisGuard(cfg); inner != nil {
+			t.Fatalf("devnet: validateMainnetGenesisGuard returned %v, want nil", inner)
+		}
+	})
+
+	t.Run("mainnet_without_expected_target_rejects", func(t *testing.T) {
+		cfg := SyncConfig{Network: "mainnet"} // ExpectedTarget==nil
+		err := ValidateMainnetGenesisGuard(cfg)
+		if err == nil {
+			t.Fatal("mainnet without ExpectedTarget: ValidateMainnetGenesisGuard returned nil, want error")
+		}
+		inner := validateMainnetGenesisGuard(cfg)
+		if inner == nil || inner.Error() != err.Error() {
+			t.Fatalf("wrapper/inner divergence: wrapper=%v inner=%v", err, inner)
+		}
+	})
+}

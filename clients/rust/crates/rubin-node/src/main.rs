@@ -13,9 +13,10 @@ use rubin_consensus::{
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
     load_chain_state, load_genesis_config, new_devnet_rpc_state_with_tx_pool,
-    new_shared_runtime_tx_pool, parse_mine_address_arg, rpc_bind_host_is_loopback,
-    start_devnet_rpc_server, start_node_p2p_service, BlockStore, LoadedGenesisConfig, Miner,
-    MinerConfig, NodeP2PServiceConfig, PeerManager, SyncEngine,
+    new_shared_runtime_tx_pool, parse_mine_address_arg, reconcile_chain_state_with_block_store,
+    rpc_bind_host_is_loopback, start_devnet_rpc_server, start_node_p2p_service,
+    validate_mainnet_genesis_guard, BlockStore, LoadedGenesisConfig, Miner, MinerConfig,
+    NodeP2PServiceConfig, PeerManager, SyncEngine,
 };
 use serde::{Deserialize, Serialize};
 
@@ -188,7 +189,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         );
         return 2;
     }
-    let chain_state = match load_chain_state(&chain_state_file) {
+    let mut chain_state = match load_chain_state(&chain_state_file) {
         Ok(chain_state) => chain_state,
         Err(err) => {
             let _ = writeln!(
@@ -200,16 +201,8 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         }
     };
     let chain_id = genesis_cfg.chain_id;
-    if let Err(err) = chain_state.save(&chain_state_file) {
-        let _ = writeln!(
-            stderr,
-            "chainstate save failed ({}): {err}",
-            chain_state_file.display()
-        );
-        return 2;
-    }
 
-    let block_store = match BlockStore::open(block_store_path(&cfg.data_dir)) {
+    let mut block_store = match BlockStore::open(block_store_path(&cfg.data_dir)) {
         Ok(block_store) => block_store,
         Err(err) => {
             let _ = writeln!(stderr, "blockstore open failed: {err}");
@@ -223,6 +216,58 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     sync_cfg.suite_context = genesis_cfg.suite_context.clone();
     sync_cfg.parallel_validation_mode = cfg.pv_mode.clone();
     sync_cfg.pv_shadow_max_samples = cfg.pv_shadow_max;
+
+    // Mainnet target / genesis guard runs BEFORE reconcile so a
+    // misconfigured `--network mainnet` startup is rejected before
+    // any reconcile-driven state mutation: reconcile may rewrite
+    // chainstate via truncate / replay, and we must not touch persisted
+    // state when the network config itself is invalid. `SyncEngine::new`
+    // runs the same guard internally as defence-in-depth: it re-validates
+    // the final `SyncConfig` actually passed to the engine, catching any
+    // mutation between this early call and engine construction. For
+    // callers that construct `SyncEngine` directly (tests, embedded uses)
+    // it is the ONLY guard. Do not remove the inner call as a perceived
+    // duplicate. Devnet / test networks no-op.
+    if let Err(err) = validate_mainnet_genesis_guard(&sync_cfg) {
+        let _ = writeln!(stderr, "mainnet genesis guard failed: {err}");
+        return 2;
+    }
+
+    // Startup reconcile (E.2): repair any chainstate ↔ blockstore
+    // mismatch left by a crash (incomplete canonical suffix, stale
+    // snapshot, ahead snapshot, mismatched tip hash) BEFORE the live
+    // sync engine, P2P, RPC, or miner start. Mirrors the Go
+    // `ReconcileChainStateWithBlockStore` call in `cmd/rubin-node/main.go`.
+    // A reconcile error is fatal: continuing would let the engine run
+    // with a chainstate tip that no longer points at any canonical
+    // block on disk.
+    if let Err(err) =
+        reconcile_chain_state_with_block_store(&mut chain_state, &mut block_store, &sync_cfg)
+    {
+        let _ = writeln!(stderr, "chainstate reconcile failed: {err}");
+        return 2;
+    }
+    if let Err(err) = chain_state.save(&chain_state_file) {
+        let _ = writeln!(
+            stderr,
+            "chainstate save failed ({}): {err}",
+            chain_state_file.display()
+        );
+        return 2;
+    }
+
+    // NOTE: `block_store.clone()` here mirrors the pre-existing
+    // pattern in `main.rs` (the RPC handoff at `Some(block_store)`
+    // below also moves an independent copy). After reconcile the
+    // clone captures the post-truncate snapshot, so the engine
+    // starts from the repaired index. The RPC vs SyncEngine
+    // BlockStore-divergence (their independent clones do NOT track
+    // each other's post-startup canonical advances) is a
+    // pre-existing main.rs gap, NOT introduced by E.2 reconcile,
+    // and is out of scope for this PR — see the Q-IMPL-RUST-RPC-
+    // BLOCKSTORE-SHARING follow-up for the proper Arc<BlockStore>
+    // fix that touches both `SyncEngine::new` and
+    // `new_devnet_rpc_state_with_tx_pool` signatures.
     let mut sync_engine = match SyncEngine::new(chain_state, Some(block_store.clone()), sync_cfg) {
         Ok(engine) => engine,
         Err(err) => {
