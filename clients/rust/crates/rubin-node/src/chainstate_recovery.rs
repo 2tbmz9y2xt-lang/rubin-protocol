@@ -53,9 +53,55 @@
 //!   handles steady-state mismatch through reorg / disconnect paths).
 
 use crate::blockstore::BlockStore;
-use crate::chainstate::ChainState;
+use crate::chainstate::{ChainState, ChainStateConnectSummary};
 use crate::sync::SyncConfig;
 use rubin_consensus::parse_block_header_bytes;
+
+/// Snapshot cadence: persist `ChainState` to disk on every block until
+/// the UTxO set crosses [`CHAIN_STATE_SNAPSHOT_SMALL_UTXO_CUTOFF`], then
+/// throttle to once every [`CHAIN_STATE_SNAPSHOT_INTERVAL_BLOCKS`]
+/// blocks. Mirrors Go `chainStateSnapshotIntervalBlocks` in
+/// `clients/go/node/chainstate_recovery.go`.
+pub const CHAIN_STATE_SNAPSHOT_INTERVAL_BLOCKS: u64 = 32;
+
+/// At or below this UTxO-set size the snapshot is small enough that
+/// per-block save cost is negligible; persist on every block to
+/// minimise the post-crash replay window. The gate is inclusive
+/// (`<= CHAIN_STATE_SNAPSHOT_SMALL_UTXO_CUTOFF`) — matching Go's
+/// `chainStateSnapshotSmallUtxoCutoff` comparison shape.
+pub const CHAIN_STATE_SNAPSHOT_SMALL_UTXO_CUTOFF: u64 = 4096;
+
+/// Decide whether the apply-block hot path should persist the
+/// `ChainState` snapshot to disk after the current block. Mirrors Go
+/// `shouldPersistChainStateSnapshot` (`clients/go/node/chainstate_recovery.go`):
+///
+/// * `state == None` or `summary == None` → fail-closed, persist.
+/// * tipless state OR `block_height == 0` → seed first snapshot.
+/// * UTxO count `<= CHAIN_STATE_SNAPSHOT_SMALL_UTXO_CUTOFF` → persist
+///   every block (cheap snapshot, small replay window).
+/// * Otherwise persist only when `block_height` is a multiple of
+///   `CHAIN_STATE_SNAPSHOT_INTERVAL_BLOCKS`.
+///
+/// Boundary saves outside the apply-block hot path
+/// (`SyncEngine::disconnect_tip`, reorg rollback, miner publish, and
+/// the startup E.2 reconcile in `main.rs`) call `ChainState::save`
+/// directly and are NOT gated by this policy: shutdown / reorg /
+/// explicit-flush durability is preserved.
+pub(crate) fn should_persist_chainstate_snapshot(
+    state: Option<&ChainState>,
+    summary: Option<&ChainStateConnectSummary>,
+) -> bool {
+    let (Some(state), Some(summary)) = (state, summary) else {
+        return true;
+    };
+    if !state.has_tip || summary.block_height == 0 {
+        return true;
+    }
+    if (state.utxos.len() as u64) <= CHAIN_STATE_SNAPSHOT_SMALL_UTXO_CUTOFF {
+        return true;
+    }
+    summary.block_height % CHAIN_STATE_SNAPSHOT_INTERVAL_BLOCKS == 0
+}
 
 /// Walk the canonical index forward; for every canonical hash, verify
 /// the matching header file, block-bytes file, and undo file all exist
@@ -869,6 +915,185 @@ mod tests {
         assert_eq!(state.tip_hash, genesis_hash);
         // Stale snapshot is unused after the test — silence dead-code.
         drop(stale_state);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Cross-client cadence parity: cell-by-cell mirror of Go
+    /// `TestShouldPersistChainStateSnapshotCadence` in
+    /// `clients/go/node/chainstate_recovery_test.go`. Any divergence
+    /// here means Rust apply_block hot-path saves drift away from Go.
+    #[test]
+    fn should_persist_chainstate_snapshot_cadence() {
+        // Nil-equivalent inputs → fail-closed persist.
+        assert!(
+            should_persist_chainstate_snapshot(None, None),
+            "missing state+summary must persist (fail-closed)"
+        );
+
+        // Tipless state seeds the first snapshot regardless of height.
+        let empty = ChainState::new();
+        assert!(
+            should_persist_chainstate_snapshot(
+                Some(&empty),
+                Some(&ChainStateConnectSummary {
+                    block_height: 1,
+                    block_hash: [0u8; 32],
+                    sum_fees: 0,
+                    already_generated: 0,
+                    already_generated_n1: 0,
+                    utxo_count: 0,
+                }),
+            ),
+            "tipless state must persist to seed first snapshot"
+        );
+
+        // Small UTxO set persists every block, even off the interval.
+        let mut small = ChainState::new();
+        small.has_tip = true;
+        for i in 0..CHAIN_STATE_SNAPSHOT_SMALL_UTXO_CUTOFF {
+            let mut txid = [0u8; 32];
+            txid[0] = i as u8;
+            small.utxos.insert(
+                rubin_consensus::Outpoint {
+                    txid,
+                    vout: i as u32,
+                },
+                rubin_consensus::UtxoEntry {
+                    value: i + 1,
+                    covenant_type: 0,
+                    covenant_data: Vec::new(),
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            );
+        }
+        assert!(
+            should_persist_chainstate_snapshot(
+                Some(&small),
+                Some(&ChainStateConnectSummary {
+                    block_height: 17,
+                    block_hash: [0u8; 32],
+                    sum_fees: 0,
+                    already_generated: 0,
+                    already_generated_n1: 0,
+                    utxo_count: small.utxos.len() as u64,
+                }),
+            ),
+            "small utxo set must persist every block"
+        );
+
+        // Crossing the cutoff switches to interval-only persistence.
+        let mut large = ChainState::new();
+        large.has_tip = true;
+        for i in 0..=CHAIN_STATE_SNAPSHOT_SMALL_UTXO_CUTOFF {
+            let mut txid = [0u8; 32];
+            txid[0] = i as u8;
+            txid[1] = (i >> 8) as u8;
+            large.utxos.insert(
+                rubin_consensus::Outpoint {
+                    txid,
+                    vout: i as u32,
+                },
+                rubin_consensus::UtxoEntry {
+                    value: i + 1,
+                    covenant_type: 0,
+                    covenant_data: Vec::new(),
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            );
+        }
+        // Off-interval block at (interval - 1) MUST be skipped.
+        assert!(
+            !should_persist_chainstate_snapshot(
+                Some(&large),
+                Some(&ChainStateConnectSummary {
+                    block_height: CHAIN_STATE_SNAPSHOT_INTERVAL_BLOCKS - 1,
+                    block_hash: [0u8; 32],
+                    sum_fees: 0,
+                    already_generated: 0,
+                    already_generated_n1: 0,
+                    utxo_count: large.utxos.len() as u64,
+                }),
+            ),
+            "large utxo set must skip non-interval snapshots"
+        );
+        // Interval boundary triggers the throttled persist.
+        assert!(
+            should_persist_chainstate_snapshot(
+                Some(&large),
+                Some(&ChainStateConnectSummary {
+                    block_height: CHAIN_STATE_SNAPSHOT_INTERVAL_BLOCKS,
+                    block_hash: [0u8; 32],
+                    sum_fees: 0,
+                    already_generated: 0,
+                    already_generated_n1: 0,
+                    utxo_count: large.utxos.len() as u64,
+                }),
+            ),
+            "large utxo set must persist on interval boundary"
+        );
+        // height == 0 always seeds (genesis snapshot).
+        assert!(
+            should_persist_chainstate_snapshot(
+                Some(&large),
+                Some(&ChainStateConnectSummary {
+                    block_height: 0,
+                    block_hash: [0u8; 32],
+                    sum_fees: 0,
+                    already_generated: 0,
+                    already_generated_n1: 0,
+                    utxo_count: large.utxos.len() as u64,
+                }),
+            ),
+            "height zero summary must persist"
+        );
+    }
+
+    /// Boundary contract: even with the apply-block save gated, the
+    /// pre-existing E.2 startup reconcile path (`main.rs` calling
+    /// `chain_state.save` after `reconcile_chain_state_with_block_store`)
+    /// continues to land a snapshot on disk. This test pins the
+    /// reconcile + explicit-save sequence end-to-end so a future change
+    /// to the apply-block gate cannot silently break the explicit-flush
+    /// boundary contract documented on `should_persist_chainstate_snapshot`.
+    #[test]
+    fn reconcile_then_explicit_save_persists_snapshot_independent_of_gate() {
+        let dir = fresh_dir("rubin-recover-explicit-save");
+        let chain_state_file = crate::chainstate::chain_state_path(&dir);
+        let store = open_store_in(&dir);
+        let (_genesis_hash, mut store, mut state) = apply_genesis(store);
+        // Force the gate to its "skip" branch by faking a large UTxO
+        // set + off-interval height; reconcile + explicit save must
+        // STILL land the snapshot.
+        for i in 0..=CHAIN_STATE_SNAPSHOT_SMALL_UTXO_CUTOFF {
+            let mut txid = [0u8; 32];
+            txid[0] = i as u8;
+            txid[1] = (i >> 8) as u8;
+            state.utxos.insert(
+                rubin_consensus::Outpoint {
+                    txid,
+                    vout: i as u32,
+                },
+                rubin_consensus::UtxoEntry {
+                    value: i + 1,
+                    covenant_type: 0,
+                    covenant_data: Vec::new(),
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            );
+        }
+        let cfg = devnet_cfg();
+        // Reconcile is a noop here (genesis tip already matches), but
+        // the explicit save AFTER it is the durability point.
+        let _ = reconcile_chain_state_with_block_store(&mut state, &mut store, &cfg)
+            .expect("reconcile");
+        state.save(&chain_state_file).expect("explicit save");
+        assert!(
+            chain_state_file.exists(),
+            "explicit save outside the apply-block gate must always land"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

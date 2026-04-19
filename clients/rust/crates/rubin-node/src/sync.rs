@@ -11,6 +11,7 @@ use rubin_consensus::{RotationProvider, SuiteRegistry};
 
 use crate::blockstore::BlockStore;
 use crate::chainstate::{ChainState, ChainStateConnectSummary};
+use crate::chainstate_recovery::should_persist_chainstate_snapshot;
 use crate::undo::build_block_undo;
 
 pub const DEFAULT_IBD_LAG_SECONDS: u64 = 24 * 60 * 60;
@@ -648,30 +649,51 @@ impl SyncEngine {
             }
         }
 
+        // Snapshot cadence gate (B.1, sub-issue #1246) — Go parity with
+        // `clients/go/node/sync.go::persistAppliedBlock` save guard:
+        // when a blockstore is wired, throttle per-block snapshot writes
+        // through `should_persist_chainstate_snapshot`. The blockstore
+        // already durably persists block bytes / header / undo on every
+        // commit, so a missing snapshot at crash time is recoverable by
+        // the E.2 startup reconcile path. Without a blockstore (test /
+        // embedded mode), we do not throttle per-block snapshot attempts
+        // through this cadence gate; an on-disk save still only occurs
+        // when `cfg.chain_state_path` is configured. Boundary saves
+        // (disconnect_tip, reorg rollback, miner publish, startup
+        // reconcile in main.rs) call `chain_state.save` directly and are
+        // unaffected by this gate.
+        //
+        // Early-return when chainstate persistence is fully disabled
+        // (`chain_state_path == None`): no save would happen anyway, so
+        // skip the cadence computation entirely on the hot path.
         if let Some(chain_state_path) = self.cfg.chain_state_path.as_ref() {
-            if let Err(err) = self.chain_state.save(chain_state_path) {
-                // Canonical commit MAY have advanced the tip. The
-                // same-hash replay path returns Ok(()) without advancing
-                // the canonical index/tip (canonical_len unchanged),
-                // though it may still back-fill missing undo data on
-                // disk, so only rewind when the canonical length
-                // actually grew past the pre-commit snapshot.
-                let rewind_err = self.block_store.as_mut().and_then(|bs| {
-                    if bs.canonical_len() > canonical_len_before {
-                        bs.truncate_canonical(canonical_len_before).err()
-                    } else {
-                        None
+            let persist_snapshot = self.block_store.is_none()
+                || should_persist_chainstate_snapshot(Some(&self.chain_state), Some(&summary));
+            if persist_snapshot {
+                if let Err(err) = self.chain_state.save(chain_state_path) {
+                    // Canonical commit MAY have advanced the tip. The
+                    // same-hash replay path returns Ok(()) without advancing
+                    // the canonical index/tip (canonical_len unchanged),
+                    // though it may still back-fill missing undo data on
+                    // disk, so only rewind when the canonical length
+                    // actually grew past the pre-commit snapshot.
+                    let rewind_err = self.block_store.as_mut().and_then(|bs| {
+                        if bs.canonical_len() > canonical_len_before {
+                            bs.truncate_canonical(canonical_len_before).err()
+                        } else {
+                            None
+                        }
+                    });
+                    self.chain_state = snapshot;
+                    self.tip_timestamp = old_tip_timestamp;
+                    self.best_known_height = old_best_known_height;
+                    if let Some(rewind_err) = rewind_err {
+                        return Err(format!(
+                            "{err}; failed to rewind canonical index after chain_state save failure: {rewind_err}; blockstore may require repair"
+                        ));
                     }
-                });
-                self.chain_state = snapshot;
-                self.tip_timestamp = old_tip_timestamp;
-                self.best_known_height = old_best_known_height;
-                if let Some(rewind_err) = rewind_err {
-                    return Err(format!(
-                        "{err}; failed to rewind canonical index after chain_state save failure: {rewind_err}; blockstore may require repair"
-                    ));
+                    return Err(err);
                 }
-                return Err(err);
             }
         }
 
@@ -1062,6 +1084,50 @@ mod tests {
             .expect("tip")
             .expect("some tip");
         assert_eq!(tip.0, 0);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// B.1 sub-issue #1246: when `cfg.chain_state_path == None`,
+    /// `apply_block` should skip the chainstate snapshot save path.
+    /// Verified by constructing a `SyncEngine` with a blockstore but
+    /// no chainstate path, running `apply_block`, and asserting:
+    ///
+    ///   - `apply_block` returns `Ok` (no panic / no error from a
+    ///     missing-path-but-attempted-save mismatch);
+    ///   - no `chainstate.json` file is created in the data dir.
+    ///
+    /// This test does not assert whether
+    /// `should_persist_chainstate_snapshot` is evaluated internally;
+    /// it only verifies that no snapshot file is written when the
+    /// chainstate path is absent.
+    ///
+    /// Full end-to-end coverage of the >4096-UTXO + off-interval skip
+    /// path requires synthesising valid PoW blocks at specific heights
+    /// (height % 32 != 0) and is tracked as a follow-up Q (see #1246
+    /// thread).
+    #[test]
+    fn sync_engine_apply_block_no_chainstate_path_skips_save_path() {
+        let dir = unique_temp_path("rubin-node-sync-no-chainstate-path");
+        let block_store_root = block_store_path(&dir);
+        let store = BlockStore::open(block_store_root).expect("open blockstore");
+
+        let st = ChainState::new();
+        let cfg = default_sync_config(Some(POW_LIMIT), [0u8; 32], None /* chain_state_path */);
+        let mut engine = SyncEngine::new(st, Some(store), cfg).expect("new sync");
+
+        let block = hex_to_bytes(VALID_BLOCK_HEX);
+        let summary = engine.apply_block(&block, None).expect("apply block");
+        assert_eq!(summary.block_height, 0);
+
+        // Chainstate file must NOT exist — the early-return on
+        // `chain_state_path == None` skipped the save call entirely.
+        let would_have_been_path = chain_state_path(&dir);
+        assert!(
+            !would_have_been_path.exists(),
+            "chainstate file at {} must not be written when chain_state_path is None",
+            would_have_been_path.display()
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
