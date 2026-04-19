@@ -133,7 +133,7 @@ impl ChainState {
         let (block_height, expected_prev_hash) = self.next_block_context()?;
         validate_incoming_chain_id(block_height, chain_id)?;
         let mut work_state = InMemoryChainState {
-            utxos: self.utxos.clone(),
+            utxos: copy_utxo_set(&self.utxos),
             already_generated: u128::from(self.already_generated),
         };
 
@@ -180,6 +180,20 @@ impl ChainState {
 
     pub fn state_digest(&self) -> [u8; 32] {
         self.utxo_set_hash()
+    }
+
+    /// Defensive-copy read path for a single UTXO entry. Mirrors the Go twin
+    /// `copyUtxoEntry` contract in `clients/go/node/chainstate.go`: callers
+    /// receive an owned `UtxoEntry` whose mutation cannot reach the canonical
+    /// `self.utxos` map. Returns `None` for missing outpoints.
+    ///
+    /// Prefer this read path for code that needs to mutate the returned entry
+    /// or forward it across trust boundaries. Direct reads from `self.utxos`
+    /// also exist (the field is `pub`), including read-only fast paths such as
+    /// iteration in `utxo_set_hash` and `indexed_suite_ids`, but those callers
+    /// do not get the defensive-copy guarantee provided by this method.
+    pub fn lookup_utxo_owned(&self, outpoint: &Outpoint) -> Option<UtxoEntry> {
+        self.utxos.get(outpoint).map(copy_utxo_entry)
     }
 
     /// Returns the sorted suite IDs that are explicitly bound in current UTXO
@@ -236,6 +250,30 @@ impl Default for ChainState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Canonical deep-copy helper for a single UTXO entry. Mirrors the Go twin
+/// `copyUtxoEntry` in `clients/go/node/chainstate.go`. Implemented in terms
+/// of `entry.clone()` so future fields added to `UtxoEntry` are deep-copied
+/// by construction (the derived `Clone` already deep-copies
+/// `covenant_data: Vec<u8>`); the named helper preserves the explicit
+/// defensive-copy intent at call sites and makes the contract greppable.
+pub(crate) fn copy_utxo_entry(entry: &UtxoEntry) -> UtxoEntry {
+    entry.clone()
+}
+
+/// Defensive deep-copy of a full UTXO set. Mirrors the Go twin `copyUtxoSet`.
+/// Used by `connect_block_with_core_ext_deployments_and_suite_context` to
+/// build the `work_state` replay map without sharing entries with the
+/// canonical `ChainState.utxos` map. Implemented as `src.clone()` to avoid
+/// a manual per-entry `insert` loop and preserve the source `HashMap`'s
+/// hasher / configuration. The exact rehashing behaviour of `HashMap::clone`
+/// is not a documented stdlib guarantee, so this comment makes only the
+/// weaker claim — but in practice both `std` and `hashbrown` reuse the
+/// existing layout, which is the implementation reason for picking
+/// `src.clone()` over a hand-rolled re-insert.
+pub(crate) fn copy_utxo_set(src: &HashMap<Outpoint, UtxoEntry>) -> HashMap<Outpoint, UtxoEntry> {
+    src.clone()
 }
 
 pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
@@ -388,7 +426,8 @@ mod tests {
     use crate::io_utils::unique_temp_path;
 
     use super::{
-        chain_state_path, load_chain_state, ChainState, ChainStateDisk, CHAIN_STATE_FILE_NAME,
+        chain_state_path, copy_utxo_entry, copy_utxo_set, load_chain_state, ChainState,
+        ChainStateDisk, CHAIN_STATE_FILE_NAME,
     };
     use rubin_consensus::constants::POW_LIMIT;
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
@@ -932,5 +971,102 @@ mod tests {
         )
         .expect_err("maturity fixture must reject");
         assert_eq!(err.code.as_str(), vector.expect_err, "{}", vector.id);
+    }
+
+    // ---------- E.9: Rust UTXO defensive-copy helper twin (Go parity) ----------
+    //
+    // These tests pin the contract that mirrors `copyUtxoEntry`,
+    // `copyUtxoSet`, and the snapshot-isolation invariants in
+    // `clients/go/node/chainstate.go`.
+
+    fn sample_entry(value: u64, covenant_byte: u8) -> UtxoEntry {
+        UtxoEntry {
+            value,
+            covenant_type: 0x0001,
+            covenant_data: vec![covenant_byte; 4],
+            creation_height: 7,
+            created_by_coinbase: false,
+        }
+    }
+
+    fn sample_outpoint(byte: u8) -> Outpoint {
+        Outpoint {
+            txid: [byte; 32],
+            vout: 0,
+        }
+    }
+
+    #[test]
+    fn copy_utxo_entry_deep_copies_covenant_data() {
+        // Mutating the copy's covenant_data must not touch the source.
+        let src = sample_entry(100, 0xAA);
+        let mut dst = copy_utxo_entry(&src);
+        dst.covenant_data[0] = 0xFF;
+        dst.value = 999;
+        assert_eq!(src.covenant_data, vec![0xAA; 4]);
+        assert_eq!(src.value, 100);
+    }
+
+    #[test]
+    fn copy_utxo_set_deep_copies_all_entries() {
+        let mut src = HashMap::new();
+        src.insert(sample_outpoint(1), sample_entry(10, 0x11));
+        src.insert(sample_outpoint(2), sample_entry(20, 0x22));
+
+        let mut dst = copy_utxo_set(&src);
+        // Mutate every entry in the copy.
+        for entry in dst.values_mut() {
+            entry.covenant_data[0] = 0x00;
+            entry.value = 0;
+        }
+        // Insert a new entry into the copy; canonical map must be unaffected.
+        dst.insert(sample_outpoint(3), sample_entry(30, 0x33));
+
+        assert_eq!(src.len(), 2);
+        assert_eq!(src[&sample_outpoint(1)].covenant_data, vec![0x11; 4]);
+        assert_eq!(src[&sample_outpoint(1)].value, 10);
+        assert_eq!(src[&sample_outpoint(2)].covenant_data, vec![0x22; 4]);
+        assert_eq!(src[&sample_outpoint(2)].value, 20);
+        assert!(!src.contains_key(&sample_outpoint(3)));
+    }
+
+    #[test]
+    fn lookup_utxo_owned_returns_none_for_missing_outpoint() {
+        // Mirrors the Go twin's presence-check / skip-missing semantics
+        // for absent UTXOs (cf. `copySelectedUtxoSet` in
+        // `clients/go/node/chainstate.go`, which uses `value, ok := m[op]`
+        // and skips when `!ok` rather than treating zero-value entries as
+        // present).
+        let st = ChainState::new();
+        assert!(st.lookup_utxo_owned(&sample_outpoint(0xEE)).is_none());
+    }
+
+    #[test]
+    fn lookup_utxo_owned_returns_owned_copy_caller_mutation_isolated() {
+        // Caller mutates the returned entry; canonical map must be unaffected.
+        let mut st = ChainState::new();
+        let op = sample_outpoint(7);
+        st.utxos.insert(op.clone(), sample_entry(500, 0xBB));
+
+        let mut owned = st.lookup_utxo_owned(&op).expect("present");
+        owned.covenant_data.fill(0x00);
+        owned.value = 1;
+
+        let canonical = st.utxos.get(&op).expect("still present");
+        assert_eq!(canonical.value, 500);
+        assert_eq!(canonical.covenant_data, vec![0xBB; 4]);
+    }
+
+    #[test]
+    fn lookup_utxo_owned_drop_does_not_leak_or_panic() {
+        // Caller drops the copy; canonical map remains intact.
+        let mut st = ChainState::new();
+        let op = sample_outpoint(9);
+        st.utxos.insert(op.clone(), sample_entry(42, 0xCC));
+        {
+            let owned = st.lookup_utxo_owned(&op).expect("present");
+            assert_eq!(owned.value, 42);
+        } // owned dropped here
+        assert_eq!(st.utxos.get(&op).expect("still present").value, 42);
     }
 }
