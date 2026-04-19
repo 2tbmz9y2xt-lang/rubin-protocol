@@ -155,6 +155,86 @@ func TestChainStateConnectBlockDeterministicUpdate(t *testing.T) {
 	}
 }
 
+// E.8 surface-parity: pinned cross-client digest vectors. The genesis-only
+// digest is also pinned in conformance/fixtures/CV-PV-*.json (expect_digest)
+// and in the Rust ChainState test (GENESIS_ONLY_STATE_DIGEST_HEX), so a single
+// hex string here keeps Go bit-identical with Rust. The empty-set digest is
+// the bare SHA3-256 of DST || 0_u64_le and is exercised here to lock in the
+// nil-receiver / fresh-state contract; any encoding drift would change it.
+const (
+	chainStateEmptyDigestHex       = "e0a6004258a669e1c7f1e12c1b249964e31ad956661237162a6d4daa22d39a6f"
+	chainStateGenesisOnlyDigestHex = "8b172fb3a5e70b56de9ae78ce750c04eccbc4dd8b3be55751252e5a1b4f2e752"
+)
+
+func TestChainStateUtxoSetHashEmptyAndNilReceiver(t *testing.T) {
+	emptyDigest := NewChainState().UtxoSetHash()
+	if got := hex.EncodeToString(emptyDigest[:]); got != chainStateEmptyDigestHex {
+		t.Fatalf("empty UTXO digest=%s, want %s", got, chainStateEmptyDigestHex)
+	}
+
+	var nilState *ChainState
+	if nilState.UtxoSetHash() != emptyDigest {
+		t.Fatalf("nil receiver must return empty-set digest")
+	}
+	if nilState.StateDigest() != emptyDigest {
+		t.Fatalf("nil receiver StateDigest must return empty-set digest")
+	}
+
+	st := NewChainState()
+	if st.StateDigest() != st.UtxoSetHash() {
+		t.Fatalf("StateDigest must alias UtxoSetHash")
+	}
+}
+
+func TestChainStateUtxoSetHashMatchesRustGenesisOnlyVector(t *testing.T) {
+	target := consensus.POW_LIMIT
+	st := NewChainState()
+	if _, err := st.ConnectBlock(devnetGenesisBlockBytes, &target, nil, devnetGenesisChainID); err != nil {
+		t.Fatalf("connect genesis block: %v", err)
+	}
+	digest := st.StateDigest()
+	if got := hex.EncodeToString(digest[:]); got != chainStateGenesisOnlyDigestHex {
+		t.Fatalf("genesis-only state_digest=%s, want %s (Rust parity)", got, chainStateGenesisOnlyDigestHex)
+	}
+	if st.UtxoSetHash() != digest {
+		t.Fatalf("UtxoSetHash and StateDigest must agree")
+	}
+}
+
+func TestChainStateUtxoSetHashIsDeterministicAndSensitiveToChange(t *testing.T) {
+	st := NewChainState()
+	st.Utxos[consensus.Outpoint{
+		Txid: mustHash32Hex(t, "1111111111111111111111111111111111111111111111111111111111111111"),
+		Vout: 0,
+	}] = consensus.UtxoEntry{
+		Value:             42,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testP2PKCovenantData(0x11),
+		CreationHeight:    5,
+		CreatedByCoinbase: false,
+	}
+
+	first := st.UtxoSetHash()
+	if first != st.UtxoSetHash() {
+		t.Fatalf("UtxoSetHash must be idempotent on the same state")
+	}
+
+	st.Utxos[consensus.Outpoint{
+		Txid: mustHash32Hex(t, "2222222222222222222222222222222222222222222222222222222222222222"),
+		Vout: 1,
+	}] = consensus.UtxoEntry{
+		Value:             7,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      testP2PKCovenantData(0x22),
+		CreationHeight:    6,
+		CreatedByCoinbase: false,
+	}
+	second := st.UtxoSetHash()
+	if first == second {
+		t.Fatalf("adding a UTXO must change the digest")
+	}
+}
+
 func TestChainStateConnectBlockAcceptsLocalGenesisWithConfiguredChainID(t *testing.T) {
 	target := consensus.POW_LIMIT
 	st := NewChainState()
