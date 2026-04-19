@@ -21,6 +21,18 @@ pub struct BlockStore {
     headers_dir: PathBuf,
     undo_dir: PathBuf,
     index: BlockStoreIndexDisk,
+    /// E.7: O(1) canonical-height -> hash cache, mirror of Go's eager
+    /// `buildCanonicalHeightIndex` precompute (see `clients/go/node/blockstore.go`
+    /// `canonicalHeightByHash` + rebuild on `replaceCanonicalState`).
+    ///
+    /// Pre-decoded `[u8; 32]` for each entry in `index.canonical`, kept
+    /// in lock-step on every mutation site. `canonical_hash` and `tip`
+    /// read from this vector and skip the per-call hex decode of the
+    /// 64-char canonical string. Eager build on `open` so lookups in
+    /// startup reconcile (`truncate_incomplete_canonical_suffix`) and
+    /// in the per-block `commit_canonical_block` no-op probe pay no
+    /// hex-parse tax.
+    canonical_hash_by_height: Vec<[u8; 32]>,
     /// Test-only: force `truncate_canonical` to return an error.
     #[cfg(test)]
     pub(crate) force_truncate_error: bool,
@@ -59,6 +71,7 @@ impl BlockStore {
             .map_err(|e| format!("create blockstore undo {}: {e}", undo_dir.display()))?;
 
         let index = load_blockstore_index(&index_path)?;
+        let canonical_hash_by_height = build_canonical_hash_cache(&index.canonical)?;
         Ok(Self {
             root_path,
             index_path,
@@ -66,6 +79,7 @@ impl BlockStore {
             headers_dir,
             undo_dir,
             index,
+            canonical_hash_by_height,
             #[cfg(test)]
             force_truncate_error: false,
             #[cfg(test)]
@@ -292,9 +306,12 @@ impl BlockStore {
         }
         if height == current_len {
             self.index.canonical.push(hash_hex);
+            self.canonical_hash_by_height.push(block_hash_bytes);
         } else {
             self.index.canonical.truncate(height as usize);
+            self.canonical_hash_by_height.truncate(height as usize);
             self.index.canonical.push(hash_hex);
+            self.canonical_hash_by_height.push(block_hash_bytes);
         }
         if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
             self.reload_index_from_disk();
@@ -316,6 +333,7 @@ impl BlockStore {
             return Err(format!("rewind height out of range: {height}"));
         }
         self.index.canonical.truncate(height as usize + 1);
+        self.canonical_hash_by_height.truncate(height as usize + 1);
         if let Err(e) = save_blockstore_index(&self.index_path, &self.index) {
             self.reload_index_from_disk();
             return Err(e);
@@ -323,21 +341,25 @@ impl BlockStore {
         Ok(())
     }
 
+    /// E.7: O(1) hot lookup served from `canonical_hash_by_height`
+    /// (Go parity: `clients/go/node/blockstore.go` `CanonicalHash` reads
+    /// the in-memory canonical slice that was decoded once at open).
     pub fn canonical_hash(&self, height: u64) -> Result<Option<[u8; 32]>, String> {
-        if height >= self.index.canonical.len() as u64 {
+        if height >= self.canonical_hash_by_height.len() as u64 {
             return Ok(None);
         }
-        let hash = parse_hex32("canonical hash", &self.index.canonical[height as usize])?;
-        Ok(Some(hash))
+        Ok(Some(self.canonical_hash_by_height[height as usize]))
     }
 
     pub fn tip(&self) -> Result<Option<(u64, [u8; 32])>, String> {
-        if self.index.canonical.is_empty() {
+        if self.canonical_hash_by_height.is_empty() {
             return Ok(None);
         }
-        let height = self.index.canonical.len() as u64 - 1;
-        let hash = parse_hex32("tip hash", &self.index.canonical[height as usize])?;
-        Ok(Some((height, hash)))
+        let height = self.canonical_hash_by_height.len() as u64 - 1;
+        Ok(Some((
+            height,
+            self.canonical_hash_by_height[height as usize],
+        )))
     }
 
     pub fn get_block_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
@@ -601,13 +623,21 @@ impl BlockStore {
         let mut next_canonical = Vec::with_capacity(clamped_base + suffix.len());
         next_canonical.extend_from_slice(&self.index.canonical[..clamped_base]);
         next_canonical.extend(suffix);
+        // Build the next height->hash cache BEFORE the disk write so a
+        // malformed entry in `suffix` (e.g. non-hex hash string) fails
+        // closed without touching disk. Documented atomicity contract
+        // ("Err means no state change") requires every fallible step to
+        // run before `save_blockstore_index_serializable`.
+        let next_cache = build_canonical_hash_cache(&next_canonical)?;
         let view = BlockStoreIndexView {
             version: self.index.version,
             canonical: &next_canonical,
         };
         save_blockstore_index_serializable(&self.index_path, &view)?;
-        // Save succeeded — commit to in-memory.
+        // Disk save succeeded — commit to in-memory (E.7 parity: mirror
+        // Go's `replaceCanonicalState` rebuild after rollback).
         self.index.canonical = next_canonical;
+        self.canonical_hash_by_height = next_cache;
         Ok(())
     }
 
@@ -640,6 +670,11 @@ impl BlockStore {
         save_blockstore_index_serializable(&self.index_path, &view)?;
         // Save succeeded — now apply O(1) in-memory truncate.
         self.index.canonical.truncate(new_len);
+        // E.7: keep height->hash cache coherent with the canonical
+        // slice. Truncate is the only path that needs this on the
+        // accepted-cases test (`canonical_hash` after `truncate_canonical(n)`
+        // returns None for h >= n).
+        self.canonical_hash_by_height.truncate(new_len);
         Ok(())
     }
 
@@ -653,13 +688,45 @@ impl BlockStore {
     /// out-of-place transaction pattern instead.
     fn reload_index_from_disk(&mut self) {
         if let Ok(disk) = load_blockstore_index(&self.index_path) {
-            self.index = disk;
+            // E.7: canonical hash decoding/validation happens in
+            // `build_canonical_hash_cache` (not in `load_blockstore_index`).
+            // If disk canonical entries are malformed, keep the prior
+            // in-memory state untouched to preserve the documented
+            // unrecoverable-state contract.
+            if let Ok(cache) = build_canonical_hash_cache(&disk.canonical) {
+                self.canonical_hash_by_height = cache;
+                self.index = disk;
+            }
         }
     }
 }
 
 pub fn block_store_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
     data_dir.as_ref().join(BLOCK_STORE_DIR_NAME)
+}
+
+/// E.7: build the height -> hash cache used by `canonical_hash` and
+/// `tip` for O(1) hot lookups (see `BlockStore::canonical_hash_by_height`).
+///
+/// Mirror of Go's `buildCanonicalHeightIndex` (`clients/go/node/blockstore.go`)
+/// which precomputes the inverse `hash -> height` map at open. The Rust
+/// surface only needs the `height -> hash` direction for the consensus
+/// hot path (sync, reconcile, devnet RPC, txpool reorg detection); a
+/// failure here propagates the same `parse_hex32` error the previous
+/// per-call decode would have produced, so reconcile keeps the
+/// "operator must investigate corrupt index entry" semantics.
+fn build_canonical_hash_cache(canonical: &[String]) -> Result<Vec<[u8; 32]>, String> {
+    let mut out = Vec::with_capacity(canonical.len());
+    for (i, hash_hex) in canonical.iter().enumerate() {
+        // Use a constant label on the success path; allocate the
+        // index-tagged label only on the error path to keep cold-start
+        // / reorg cost O(N) bytes lower (one Vec allocation, no per-
+        // entry String).
+        let hash =
+            parse_hex32("canonical", hash_hex).map_err(|e| format!("canonical[{i}]: {e}"))?;
+        out.push(hash);
+    }
+    Ok(out)
 }
 
 /// Fallible existence probe used by the `try_has_*` family. Returns
@@ -696,9 +763,14 @@ fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
             index.version
         ));
     }
-    for (idx, hash_hex) in index.canonical.iter().enumerate() {
-        parse_hex32(&format!("canonical[{idx}]"), hash_hex)?;
-    }
+    // Canonical hash validation is performed in `build_canonical_hash_cache`
+    // when callers (e.g. `BlockStore::open`, `reload_index_from_disk`) build
+    // the height->hash cache from this index. Validating here would re-decode
+    // every canonical entry on cold start (one decode in this loop, another
+    // inside `build_canonical_hash_cache`); the cache build is the
+    // single sanctioned `parse_hex32` site for canonical entries. Any caller
+    // that consumes `index.canonical` strings without going through that
+    // helper is expected to keep its own validation discipline.
     Ok(index)
 }
 
@@ -1433,6 +1505,166 @@ mod tests {
         assert_eq!(
             undo_bytes_before, undo_bytes_after,
             "same-hash replay must not rewrite the historical undo file"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    // ====================================================================
+    // E.7 — canonical-height O(1) cache parity tests (sub-issue #1247).
+    // Cache invariant: `canonical_hash_by_height[i]` is the decoded form
+    // of `index.canonical[i]` for every i in 0..canonical_len, after
+    // every mutation path. The lookup contract is "what's in the index
+    // is also in the cache, byte-for-byte, no stale tail".
+    // ====================================================================
+
+    /// Helper: assert the cache mirrors `index.canonical` exactly.
+    /// Decodes each hex string fresh so a desync (cache stale, cache
+    /// short, cache long) shows up here instead of as a silent wrong
+    /// answer in `canonical_hash`.
+    fn assert_cache_matches_index(store: &BlockStore) {
+        assert_eq!(
+            store.canonical_hash_by_height.len(),
+            store.index.canonical.len(),
+            "cache len must equal index.canonical len",
+        );
+        for (i, hash_hex) in store.index.canonical.iter().enumerate() {
+            let expected = crate::io_utils::parse_hex32("test", hash_hex).expect("decode");
+            assert_eq!(
+                store.canonical_hash_by_height[i], expected,
+                "cache entry at height {i} drifted from index.canonical",
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_hash_cache_coherent_after_append_and_truncate() {
+        let dir = unique_temp_path("rubin-blockstore-e7-cache-append-trunc");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        // Append three entries via the production hot path.
+        store.set_canonical_tip(0, [0xA0; 32]).expect("set 0");
+        store.set_canonical_tip(1, [0xA1; 32]).expect("set 1");
+        store.set_canonical_tip(2, [0xA2; 32]).expect("set 2");
+        assert_cache_matches_index(&store);
+        assert_eq!(store.canonical_hash(0).unwrap(), Some([0xA0; 32]));
+        assert_eq!(store.canonical_hash(2).unwrap(), Some([0xA2; 32]));
+        assert_eq!(store.tip().unwrap(), Some((2, [0xA2; 32])));
+
+        // Truncate to length 1 — heights >= 1 must be gone from BOTH
+        // the index and the cache (rejected case: cache returns
+        // Some(hash) for h beyond truncated tip).
+        store.truncate_canonical(1).expect("truncate to 1");
+        assert_cache_matches_index(&store);
+        assert_eq!(store.canonical_hash(0).unwrap(), Some([0xA0; 32]));
+        assert_eq!(store.canonical_hash(1).unwrap(), None);
+        assert_eq!(store.canonical_hash(2).unwrap(), None);
+
+        // Append at the freshly-truncated tail — new entry visible
+        // without reopen (accepted case).
+        store.set_canonical_tip(1, [0xB1; 32]).expect("re-set 1");
+        assert_cache_matches_index(&store);
+        assert_eq!(store.canonical_hash(1).unwrap(), Some([0xB1; 32]));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn canonical_hash_cache_coherent_after_replace_at_height() {
+        // set_canonical_tip(height < current_len, different hash) is
+        // the reorg-replace branch (truncate-then-push). The cache
+        // must follow exactly: a stale entry at the replaced height
+        // is the rejected case.
+        let dir = unique_temp_path("rubin-blockstore-e7-cache-replace");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        store.set_canonical_tip(0, [0x10; 32]).expect("set 0");
+        store.set_canonical_tip(1, [0x11; 32]).expect("set 1");
+        store.set_canonical_tip(2, [0x12; 32]).expect("set 2");
+
+        // Replace at height 1 with a different hash — entries beyond
+        // height 1 are dropped from both index and cache.
+        store.set_canonical_tip(1, [0x99; 32]).expect("replace 1");
+        assert_cache_matches_index(&store);
+        assert_eq!(store.canonical_hash(0).unwrap(), Some([0x10; 32]));
+        assert_eq!(store.canonical_hash(1).unwrap(), Some([0x99; 32]));
+        assert_eq!(store.canonical_hash(2).unwrap(), None);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn canonical_hash_cache_coherent_after_rewind_to_height() {
+        let dir = unique_temp_path("rubin-blockstore-e7-cache-rewind");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        store.set_canonical_tip(0, [0x21; 32]).expect("set 0");
+        store.set_canonical_tip(1, [0x22; 32]).expect("set 1");
+        store.set_canonical_tip(2, [0x23; 32]).expect("set 2");
+
+        store.rewind_to_height(0).expect("rewind to 0");
+        assert_cache_matches_index(&store);
+        assert_eq!(store.canonical_len(), 1);
+        assert_eq!(store.canonical_hash(0).unwrap(), Some([0x21; 32]));
+        assert_eq!(store.canonical_hash(1).unwrap(), None);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn canonical_hash_cache_coherent_after_rollback_canonical() {
+        let dir = unique_temp_path("rubin-blockstore-e7-cache-rollback");
+        let root = block_store_path(&dir);
+        let mut store = BlockStore::open(&root).expect("open");
+
+        store.set_canonical_tip(0, [0x30; 32]).expect("set 0");
+        store.set_canonical_tip(1, [0x31; 32]).expect("set 1");
+        store.set_canonical_tip(2, [0x32; 32]).expect("set 2");
+
+        // Reorg-style rollback: trim to base_len=1, then re-append two
+        // disconnected suffix hashes.
+        let suffix = vec![hex::encode([0x41u8; 32]), hex::encode([0x42u8; 32])];
+        store
+            .rollback_canonical(1, suffix)
+            .expect("rollback_canonical");
+        assert_cache_matches_index(&store);
+        assert_eq!(store.canonical_len(), 3);
+        assert_eq!(store.canonical_hash(0).unwrap(), Some([0x30; 32]));
+        assert_eq!(store.canonical_hash(1).unwrap(), Some([0x41; 32]));
+        assert_eq!(store.canonical_hash(2).unwrap(), Some([0x42; 32]));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn canonical_hash_cache_built_eagerly_on_cold_open() {
+        // Accepted case: "Cold start with N canonical entries — cache
+        // built lazy or eager — pick one and document". We chose
+        // eager. After reopening, the cache must already mirror the
+        // persisted index without any further write touching the
+        // store, and `canonical_hash` must return the right hash with
+        // zero hex parses on the read path.
+        let dir = unique_temp_path("rubin-blockstore-e7-cache-cold-open");
+        let root = block_store_path(&dir);
+        let entries: Vec<[u8; 32]> = (0..16u8).map(|i| [i; 32]).collect();
+        {
+            let mut store = BlockStore::open(&root).expect("open");
+            for (i, h) in entries.iter().enumerate() {
+                store.set_canonical_tip(i as u64, *h).expect("set");
+            }
+        }
+        // Drop the original store, reopen — cache rebuilt from disk.
+        let store = BlockStore::open(&root).expect("reopen");
+        assert_cache_matches_index(&store);
+        for (i, h) in entries.iter().enumerate() {
+            assert_eq!(store.canonical_hash(i as u64).unwrap(), Some(*h));
+        }
+        assert_eq!(
+            store.tip().unwrap(),
+            Some(((entries.len() - 1) as u64, *entries.last().unwrap()))
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
