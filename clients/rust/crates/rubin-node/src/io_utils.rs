@@ -209,7 +209,24 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
                 };
                 (dir, &trimmed[idx + 1..])
             }
-            None => (".", trimmed),
+            None => {
+                // No separator inside trimmed. If trimmed starts with
+                // a Windows drive volume prefix and has more after it
+                // (e.g. "C:foo"), Go's filepath.Dir/Base split as
+                // dir = "<vol>" + leaf = "<rest>", giving a drive-
+                // relative read on Windows. Mirror that split here so
+                // callers passing drive-relative paths get the same
+                // resolution as Go (and the leaf-name guard still
+                // validates "<rest>", not the whole drive-prefixed
+                // string). On Unix volume_prefix_len always returns 0
+                // and this branch is a no-op.
+                let vol_len = volume_prefix_len(trimmed);
+                if vol_len > 0 && trimmed.len() > vol_len {
+                    (&trimmed[..vol_len], &trimmed[vol_len..])
+                } else {
+                    (".", trimmed)
+                }
+            }
         }
     };
     read_file_from_dir(Path::new(dir_str), leaf)
