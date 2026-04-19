@@ -688,11 +688,9 @@ impl BlockStore {
     /// out-of-place transaction pattern instead.
     fn reload_index_from_disk(&mut self) {
         if let Ok(disk) = load_blockstore_index(&self.index_path) {
-            // E.7: `load_blockstore_index` already validates every
-            // `disk.canonical` entry with `parse_hex32`, so rebuilding
-            // the height->hash cache from the freshly-loaded canonical
-            // data should only fail if those invariants are broken
-            // unexpectedly. In that unexpected case, leave the prior
+            // E.7: canonical hash decoding/validation happens in
+            // `build_canonical_hash_cache` (not in `load_blockstore_index`).
+            // If disk canonical entries are malformed, keep the prior
             // in-memory state untouched to preserve the documented
             // unrecoverable-state contract.
             if let Ok(cache) = build_canonical_hash_cache(&disk.canonical) {
