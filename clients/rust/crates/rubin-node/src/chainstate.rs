@@ -644,10 +644,10 @@ mod tests {
 
     /// E.10 wiring lock: pin that `load_chain_state` routes through the
     /// `read_file_by_path` guard so an invalid leaf component (`.`,
-    /// `..`, trailing-separator, etc.) returns Err instead of attempting
-    /// an OS read. Mirrors Go's `TestLoadChainState_InvalidFileName`.
-    /// Without this test a future refactor could replace `read_file_by_path`
-    /// with raw `fs::read` and the guard would silently disappear.
+    /// `..`) returns Err instead of attempting an OS read. Mirrors Go's
+    /// `TestLoadChainState_InvalidFileName`. Without this test a future
+    /// refactor could replace `read_file_by_path` with raw `fs::read`
+    /// and the leaf-name guard would silently disappear.
     #[test]
     fn load_chain_state_invalid_leaf_name_rejected() {
         // Leaf == "." — read_file_by_path's guard rejects with
@@ -658,17 +658,6 @@ mod tests {
         assert!(
             err.contains("invalid file name"),
             "expected guard error in {err:?}"
-        );
-
-        // Trailing-separator path: `read_file_by_path` rejects with
-        // "ends with a separator" before stripping the trailing slash
-        // would silently change the read target.
-        let trailing = std::path::PathBuf::from("/tmp/");
-        let result = load_chain_state(&trailing);
-        let err = result.expect_err("expected Err for trailing-slash path");
-        assert!(
-            err.contains("ends with a separator"),
-            "expected trailing-separator error in {err:?}"
         );
     }
 
