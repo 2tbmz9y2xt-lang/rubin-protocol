@@ -1088,16 +1088,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// B.1 sub-issue #1246: when `cfg.chain_state_path == None`, the
-    /// snapshot cadence gate must early-return BEFORE calling
-    /// `should_persist_chainstate_snapshot`, so apply_block does no
-    /// chainstate-save-related work on the hot path. Verified by
-    /// constructing a SyncEngine with a blockstore but no chainstate
-    /// path, running apply_block, and asserting:
+    /// B.1 sub-issue #1246: when `cfg.chain_state_path == None`,
+    /// `apply_block` should skip the chainstate snapshot save path.
+    /// Verified by constructing a `SyncEngine` with a blockstore but
+    /// no chainstate path, running `apply_block`, and asserting:
     ///
-    ///   - apply_block returns Ok (no panic / no side-channel error
-    ///     from a missing-path-but-attempted-save mismatch);
-    ///   - no chainstate.json file is created in the data dir.
+    ///   - `apply_block` returns `Ok` (no panic / no error from a
+    ///     missing-path-but-attempted-save mismatch);
+    ///   - no `chainstate.json` file is created in the data dir.
+    ///
+    /// This test does not assert whether
+    /// `should_persist_chainstate_snapshot` is evaluated internally;
+    /// it only verifies that no snapshot file is written when the
+    /// chainstate path is absent.
     ///
     /// Full end-to-end coverage of the >4096-UTXO + off-interval skip
     /// path requires synthesising valid PoW blocks at specific heights
