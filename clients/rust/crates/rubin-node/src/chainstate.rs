@@ -643,8 +643,12 @@ mod tests {
     }
 
     /// E.10 wiring lock: pin that `load_chain_state` routes through the
-    /// `read_file_by_path` guard so an invalid leaf component (`.`,
-    /// `..`) returns Err instead of attempting an OS read. Mirrors Go's
+    /// `read_file_by_path` guard so a path whose TRAILING-LEAF component
+    /// is `.` (or another guard-rejected shape) returns Err instead of
+    /// attempting an OS read. The guard validates ONLY the leaf
+    /// component — `..` appearing in PARENT components of an absolute
+    /// path is NOT blocked (e.g. `<dir>/../etc/passwd` has leaf
+    /// `passwd` and would proceed). Mirrors Go's
     /// `TestLoadChainState_InvalidFileName`. Without this test a future
     /// refactor could replace `read_file_by_path` with raw `fs::read`
     /// and the leaf-name guard would silently disappear.

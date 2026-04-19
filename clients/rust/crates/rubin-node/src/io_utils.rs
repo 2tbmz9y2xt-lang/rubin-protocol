@@ -120,10 +120,15 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
     // `.` components. With `Path::file_name`, an input like
     // `"/etc/passwd/."` returns `"passwd"` and would silently read
     // `/etc/passwd`; Go's `filepath.Base` returns `"."` for the same
-    // input and the leaf-name guard then rejects it. This implementation
-    // reproduces Go's behavior: trim trailing `/` (separator-only
-    // suffix), then take everything after the last `/`. The result is
-    // fed to the same `check_safe_file_name` guard.
+    // input and the leaf-name guard then rejects it.
+    //
+    // Per-OS separator parity with Go's `filepath.Base`: on Windows
+    // both `'/'` and `'\\'` are treated as separators; on Unix only
+    // `'/'`. Without the cfg(windows) branch, ordinary Windows paths
+    // like `C:\data\chainstate.json` would have no separator match,
+    // the whole string would become the leaf, and `check_safe_file_name`
+    // would reject it (contains `\` / drive prefix), regressing all
+    // Windows reads through this helper.
     let raw = match path.to_str() {
         Some(s) => s,
         None => {
@@ -133,13 +138,18 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
             ));
         }
     };
-    let trimmed = raw.trim_end_matches('/');
+    #[cfg(windows)]
+    let is_sep = |c: char| c == '/' || c == '\\';
+    #[cfg(not(windows))]
+    let is_sep = |c: char| c == '/';
+
+    let trimmed = raw.trim_end_matches(is_sep);
     let leaf = if trimmed.is_empty() {
         // All-separator input; Go returns "/" — match by passing "/" to
         // the leaf guard, which rejects it (contains `/`).
         "/"
     } else {
-        match trimmed.rfind('/') {
+        match trimmed.rfind(is_sep) {
             Some(idx) => &trimmed[idx + 1..],
             None => trimmed,
         }
