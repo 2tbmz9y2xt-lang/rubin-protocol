@@ -246,9 +246,11 @@ fn cut_first_separator(tail: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Lexical path cleanup mirroring Go's `path/filepath::Clean` for the
-/// path shapes `read_file_by_path` accepts. Performs no syscalls — `..`
-/// is collapsed against the preceding component textually, NOT through
-/// symlink resolution.
+/// `--data-dir` path shapes `normalize_data_dir` passes in (drive,
+/// UNC, Local Device, Root Local Device, POSIX absolute, and
+/// relative paths with `.` / `..` segments). Performs no syscalls —
+/// `..` is collapsed against the preceding component textually, NOT
+/// through symlink resolution.
 ///
 /// Called once per node startup from `normalize_data_dir`, which
 /// cleans `cfg.data_dir` at the CLI parse site so every subsystem
