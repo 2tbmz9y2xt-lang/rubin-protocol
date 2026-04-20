@@ -99,92 +99,150 @@ pub fn read_file_from_dir(dir: &Path, name: &str) -> Result<Vec<u8>, std::io::Er
     fs::read(dir.join(name))
 }
 
-/// Length of the volume prefix at the start of `s`. Mirrors Go's
-/// `path/filepath/path_windows.go::volumeNameLen` byte-for-byte for
-/// every path shape that helper accepts:
+/// Length of the volume prefix at the start of `s`. Mirrors Go
+/// `internal/filepathlite/path_windows.go::volumeNameLen` byte-for-byte.
 ///
-/// - drive-letter: `C:` → 2 (`C:foo`, `C:\foo`, bare `C:`)
-/// - UNC: `\\HOST\SHARE` → len of `\\HOST\SHARE`
-/// - DOS device drive: `\\?\C:` / `\\.\C:` → 6
-/// - DOS device UNC: `\\?\UNC\HOST\SHARE` → len of that prefix
+/// Path shapes recognised (each case mirrors Go's switch arm):
+/// - drive letter: `C:` → 2 (`C:foo`, `C:\foo`, bare `C:`, `2:`
+///   — Go does not enforce ASCII-letter range; we follow)
+/// - no leading separator → 0 (relative / Unix-style)
+/// - Local Device UNC forward: `\\.\UNC\HOST\SHARE\...` → uncLen
+///   starting after the `\\.\UNC\` prefix (8 bytes)
+/// - Local Device / Root Local Device: `\\.\X`, `\\?\X`, `\??\X` →
+///   next segment after the 3-char prefix is part of the volume
+///   (matches Go issue #64028: `Clean("\\?\c:\")` must keep trailing
+///   `\` because the `c:` segment is still the volume)
+/// - Two-leading-separator UNC: `\\HOST\SHARE...` → uncLen from pos 2
+/// - anything else → 0
 ///
-/// Malformed path shapes (`\\`, `\\host`, `\\host\`, `\\?\UNC\host`
-/// without a share segment) return the full input length to match
-/// Go's fail-closed behaviour — there is no valid path to split.
-/// Returns 0 on Unix and for non-volume-rooted Windows paths.
+/// Returns 0 on non-Windows builds.
 fn volume_prefix_len(s: &str) -> usize {
     #[cfg(windows)]
     {
         let bytes = s.as_bytes();
-        if bytes.len() < 2 {
-            return 0;
-        }
-        // Drive letter.
-        if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        // Drive letter — Go matches on `path[1] == ':'` without
+        // enforcing that `path[0]` is a letter. Mirror that.
+        if bytes.len() >= 2 && bytes[1] == b':' {
             return 2;
         }
-        let is_slash = |b: u8| b == b'/' || b == b'\\';
-        // UNC / DOS device paths require two leading separators.
-        if !is_slash(bytes[0]) || !is_slash(bytes[1]) {
+        if bytes.is_empty() || !is_path_separator_byte(bytes[0]) {
             return 0;
         }
-        // Scan for the next separator starting at `start`. Returns
-        // `(segment_end, rest_start)`. `segment_end == bytes.len()`
-        // means no further separator exists.
-        let cut_at = |start: usize| -> (usize, usize) {
-            let mut i = start;
-            while i < bytes.len() && !is_slash(bytes[i]) {
-                i += 1;
-            }
-            if i < bytes.len() {
-                (i, i + 1)
-            } else {
-                (bytes.len(), bytes.len())
-            }
-        };
-        let (p1_end, after_p1_sep) = cut_at(2);
-        if p1_end == bytes.len() {
-            // `\\` or `\\host` — no separator after host. Go returns
-            // `len(path)`; mirror it.
-            return bytes.len();
+        // Local Device UNC forward: `\\.\UNC\...`. Go treats the
+        // HOST and SHARE after `\\.\UNC\` as part of the volume.
+        if path_has_prefix_fold(bytes, br"\\.\UNC") {
+            return unc_len(bytes, br"\\.\UNC\".len());
         }
-        let (p2_end, after_p2_sep) = cut_at(after_p1_sep);
-        if p2_end == bytes.len() {
-            // `\\host\share` with no further separator. Go's
-            // `cutPath` returns `ok=false` here and falls through to
-            // `return len(path)` at the matching `if !ok` branch.
-            return bytes.len();
-        }
-        let p1 = &bytes[2..p1_end];
-        // Regular UNC: `\\HOST\SHARE\...` — volume is through share.
-        if p1 != b"." && p1 != b"?" {
-            return p2_end;
-        }
-        let p2 = &bytes[after_p1_sep..p2_end];
-        // DOS device that forwards to UNC: `\\?\UNC\HOST\SHARE\...`.
-        if p2.len() == 3
-            && p2[0].to_ascii_uppercase() == b'U'
-            && p2[1].to_ascii_uppercase() == b'N'
-            && p2[2].to_ascii_uppercase() == b'C'
+        // Local / Root Local Device: `\\.` / `\\?` / `\??`.
+        // The next component after the 3-byte prefix is part of the
+        // volume, so `\\?\C:` (6) and `\??\C:` (6) both include the
+        // `C:` segment as volume. Exact match (len == 3) returns 3.
+        if path_has_prefix_fold(bytes, br"\\.")
+            || path_has_prefix_fold(bytes, br"\\?")
+            || path_has_prefix_fold(bytes, br"\??")
         {
-            if after_p2_sep >= bytes.len() {
+            if bytes.len() == 3 {
+                return 3;
+            }
+            // Go: `_, rest, ok := cutPath(path[4:])`. Prefix + sep is
+            // 4 bytes (`\\?\`, `\??\`, etc.). If `path[4:]` is empty,
+            // cutPath returns ok=false and Go returns len(path).
+            if 4 >= bytes.len() {
                 return bytes.len();
             }
-            let (_host_end, share_start) = cut_at(after_p2_sep);
-            if share_start == bytes.len() {
-                return bytes.len();
+            let tail = &bytes[4..];
+            match cut_first_separator(tail) {
+                None => bytes.len(),
+                Some((_before_end, after_start_in_tail)) => {
+                    // Go: `return len(path) - len(rest) - 1`.
+                    let rest_len = tail.len() - after_start_in_tail;
+                    bytes.len() - rest_len - 1
+                }
             }
-            let (share_end, _) = cut_at(share_start);
-            return share_end;
+        } else if bytes.len() >= 2 && is_path_separator_byte(bytes[1]) {
+            // Two-leading-separator UNC: `\\HOST\SHARE...`.
+            unc_len(bytes, 2)
+        } else {
+            0
         }
-        // DOS device drive or other DOS device: `\\?\C:` / `\\.\X`.
-        p2_end
     }
     #[cfg(not(windows))]
     {
         let _ = s;
         0
     }
+}
+
+#[cfg(windows)]
+#[inline]
+fn is_path_separator_byte(c: u8) -> bool {
+    c == b'/' || c == b'\\'
+}
+
+#[cfg(windows)]
+#[inline]
+fn ascii_upper(c: u8) -> u8 {
+    if c >= b'a' && c <= b'z' {
+        c - 32
+    } else {
+        c
+    }
+}
+
+/// Mirrors Go `pathHasPrefixFold`: ignore ASCII case on non-separator
+/// bytes; treat any separator in `prefix` as matching any separator
+/// in `s`; require `s[len(prefix)]` to be a separator if `s` is
+/// strictly longer than `prefix`.
+#[cfg(windows)]
+fn path_has_prefix_fold(s: &[u8], prefix: &[u8]) -> bool {
+    if s.len() < prefix.len() {
+        return false;
+    }
+    for i in 0..prefix.len() {
+        if is_path_separator_byte(prefix[i]) {
+            if !is_path_separator_byte(s[i]) {
+                return false;
+            }
+        } else if ascii_upper(prefix[i]) != ascii_upper(s[i]) {
+            return false;
+        }
+    }
+    if s.len() > prefix.len() && !is_path_separator_byte(s[prefix.len()]) {
+        return false;
+    }
+    true
+}
+
+/// Mirrors Go `uncLen`: returns the index of the second path
+/// separator at or after `prefix_len`. If fewer than two separators
+/// remain, returns `path.len()` (matches Go's fall-through).
+#[cfg(windows)]
+fn unc_len(path: &[u8], prefix_len: usize) -> usize {
+    let mut count = 0usize;
+    let mut i = prefix_len;
+    while i < path.len() {
+        if is_path_separator_byte(path[i]) {
+            count += 1;
+            if count == 2 {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    path.len()
+}
+
+/// Mirrors Go `cutPath`: scan for the first separator in `tail`;
+/// return `Some((before_end, after_start))` with slicing indices
+/// into `tail`. `None` means no separator exists in `tail`.
+#[cfg(windows)]
+fn cut_first_separator(tail: &[u8]) -> Option<(usize, usize)> {
+    for (i, &b) in tail.iter().enumerate() {
+        if is_path_separator_byte(b) {
+            return Some((i, i + 1));
+        }
+    }
+    None
 }
 
 /// Lexical path cleanup mirroring Go's `path/filepath::Clean` for the
@@ -276,6 +334,64 @@ pub(crate) fn lexical_clean(input: &str) -> String {
     };
     if out.len() == vol.len() && !rooted && !starts_with_double_sep {
         out.push('.');
+    }
+    // Go `postClean` (path_windows.go:302) — protect against a
+    // relative path being lexically reduced into an absolute /
+    // rooted shape. Only runs when `vol_len == 0` (input had no
+    // recognised volume), mirroring Go's guard
+    // `if out.volLen != 0 || out.buf == nil { return }`.
+    //
+    // Two cases Go defends against:
+    //
+    // 1. First path element contains `:` before any separator —
+    //    e.g. `a/../c:` lexically reduces to `c:` which Windows
+    //    would interpret as a drive-relative reference. Prepend
+    //    `.` + separator so the result stays relative: `.\c:`.
+    //
+    // 2. Output starts with `\??` (Root Local Device prefix) after
+    //    lexical reduction — e.g. `\a\..\??\c:\x` reduces to
+    //    `\??\c:\x`, which would be read as `c:\x` via the NT
+    //    namespace. Prepend separator + `.` so the result is
+    //    `\.\??\c:\x` and the `\??\` is neutralised.
+    //
+    // Both prepends preserve the lexical result bytes intact; they
+    // only neutralise the Windows-specific interpretation. On Unix
+    // these shapes are not meaningful but the prepend is still
+    // harmless for the resulting string.
+    #[cfg(windows)]
+    {
+        if vol_len == 0 && !out.is_empty() {
+            let bytes = out.as_bytes();
+            // Case 1: `:` in first segment before any separator.
+            let mut first_segment_has_colon = false;
+            for &b in bytes.iter() {
+                if is_sep(b as char) {
+                    break;
+                }
+                if b == b':' {
+                    first_segment_has_colon = true;
+                    break;
+                }
+            }
+            if first_segment_has_colon {
+                let mut prepended = String::with_capacity(out.len() + 2);
+                prepended.push('.');
+                prepended.push(sep);
+                prepended.push_str(&out);
+                out = prepended;
+            } else if bytes.len() >= 3
+                && is_sep(bytes[0] as char)
+                && bytes[1] == b'?'
+                && bytes[2] == b'?'
+            {
+                // Case 2: starts with `\??`.
+                let mut prepended = String::with_capacity(out.len() + 2);
+                prepended.push(sep);
+                prepended.push('.');
+                prepended.push_str(&out);
+                out = prepended;
+            }
+        }
     }
     out
 }
@@ -807,11 +923,28 @@ mod tests {
     }
 
     /// `volume_prefix_len` must match Go `filepath.VolumeName` length
-    /// on every path shape the `lexical_clean` helper may encounter
-    /// on Windows: drive-letter, UNC (`\\HOST\SHARE`), DOS device
-    /// drive (`\\?\C:`, `\\.\C:`), DOS device UNC
-    /// (`\\?\UNC\HOST\SHARE`), and the malformed-prefix fail-closed
-    /// cases. Non-Windows input always returns 0.
+    /// on every path shape the `lexical_clean` helper may encounter.
+    /// Reference: Go's own `volumenametests` table in
+    /// `src/path/filepath/path_test.go` + `volumeNameLen` in
+    /// `src/internal/filepathlite/path_windows.go`. Non-Windows input
+    /// always returns 0.
+    ///
+    /// Case classes covered:
+    /// - Drive letter (`C:`) — Go matches `path[1] == ':'` without
+    ///   enforcing ASCII-letter range, so `1:`, `2:`, `:` (len<2) all
+    ///   follow Go's own rule.
+    /// - UNC (`\\HOST\SHARE`) — volume is through share (two seps).
+    /// - Local Device UNC (`\\.\UNC\HOST\SHARE`) — case 3 in Go's
+    ///   switch; UncLen-based, includes host + share.
+    /// - Local / Root Local Device (`\\.\X`, `\\?\X`, `\??\X`) — next
+    ///   segment after the 3-byte prefix is part of the volume. For
+    ///   `\\?\UNC\host\share` this means volume = `\\?\UNC` (7), NOT
+    ///   the full UNC path.
+    /// - `\??\` specifically — Root Local Device; an earlier version
+    ///   of this port missed it because it required two leading
+    ///   separators, but Go's `pathHasPrefixFold` match works with a
+    ///   single leading sep + `??`.
+    /// - Malformed-prefix cases return `len(path)` (Go fail-closed).
     #[test]
     fn volume_prefix_len_matches_go_filepath_volumename() {
         // Unix-style / relative / non-volume input: always 0.
@@ -825,41 +958,89 @@ mod tests {
         // assertions in this block would fail.
         #[cfg(windows)]
         {
-            // Drive-letter: `C:`, `C:foo`, `C:\foo`, `c:\foo`.
+            // Drive-letter family.
             assert_eq!(volume_prefix_len("C:"), 2);
             assert_eq!(volume_prefix_len("C:foo"), 2);
             assert_eq!(volume_prefix_len("C:\\"), 2);
             assert_eq!(volume_prefix_len("C:\\foo"), 2);
             assert_eq!(volume_prefix_len("c:\\foo"), 2);
-            // Non-drive single-colon shapes — not a drive letter.
-            assert_eq!(volume_prefix_len("1:foo"), 0);
+            // Go matches `path[1] == ':'` without enforcing letter,
+            // so `2:` IS a "drive-letter" shape per Go's own test
+            // table (`{"2:", "2:"}`).
+            assert_eq!(volume_prefix_len("2:"), 2);
+            // One-byte / empty / no colon: 0.
             assert_eq!(volume_prefix_len(":foo"), 0);
 
-            // UNC: `\\HOST\SHARE` — volume includes HOST and SHARE.
+            // Plain UNC (case 5: two leading seps + uncLen).
             assert_eq!(volume_prefix_len("\\\\host\\share"), 12);
             assert_eq!(volume_prefix_len("\\\\host\\share\\"), 12);
             assert_eq!(volume_prefix_len("\\\\host\\share\\foo"), 12);
             assert_eq!(volume_prefix_len("//host/share/foo"), 12);
 
-            // Malformed UNC prefixes: Go returns `len(path)`
-            // (fail-closed — no legitimate split). Mirror it.
+            // Malformed UNC prefixes: Go returns `len(path)`.
             assert_eq!(volume_prefix_len("\\\\"), 2);
             assert_eq!(volume_prefix_len("\\\\host"), 6);
             assert_eq!(volume_prefix_len("\\\\host\\"), 7);
 
-            // DOS device drive: `\\?\C:` and `\\.\C:`.
+            // Local Device / Root Local Device (case 4): next
+            // segment after the 3-byte prefix is volume.
             assert_eq!(volume_prefix_len("\\\\?\\C:"), 6);
             assert_eq!(volume_prefix_len("\\\\?\\C:\\foo"), 6);
             assert_eq!(volume_prefix_len("\\\\.\\C:"), 6);
+            assert_eq!(volume_prefix_len("\\\\.\\C:\\foo"), 6);
+            // Root Local Device via `\??\` — ONE leading sep + `??`.
+            // Missed by the previous two-leading-separator-only
+            // detector.
+            assert_eq!(volume_prefix_len("\\??\\C:"), 6);
+            assert_eq!(volume_prefix_len("\\??\\C:\\foo"), 6);
+            assert_eq!(volume_prefix_len("\\??\\NUL"), 7);
+            // Exact prefix length 3 → return 3.
+            assert_eq!(volume_prefix_len("\\\\?"), 3);
+            assert_eq!(volume_prefix_len("\\\\."), 3);
+            assert_eq!(volume_prefix_len("\\??"), 3);
+            // Empty tail after 4-byte prefix → full path length.
+            assert_eq!(volume_prefix_len("\\\\?\\"), 4);
+            assert_eq!(volume_prefix_len("\\??\\"), 4);
 
-            // DOS device UNC: `\\?\UNC\HOST\SHARE`.
-            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share"), 18);
-            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share\\"), 18);
-            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share\\foo"), 18);
-            // Malformed DOS-UNC (no share segment) → full path.
-            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host"), 12);
+            // DOS-device UNC forward (case 3): only `\\.\UNC\` form.
+            // `\\.\UNC\host\share` uses uncLen → full 18 chars.
+            assert_eq!(volume_prefix_len("\\\\.\\UNC\\host\\share"), 18);
+            assert_eq!(volume_prefix_len("\\\\.\\UNC\\host\\share\\foo"), 18);
+            // `\\?\UNC\host\share` falls into case 4 (not case 3),
+            // so volume is just `\\?\UNC` (7). This differs from the
+            // previous port which incorrectly returned the full UNC
+            // length here — Go's switch routes `\\?\UNC...` through
+            // the Root Local Device arm, not the `\\.\UNC` arm.
+            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share"), 7);
+            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share\\foo"), 7);
             assert_eq!(volume_prefix_len("\\\\?\\UNC"), 7);
         }
+    }
+
+    /// `lexical_clean` must apply Go's Windows `postClean` safeguard
+    /// on a build targeting Windows: a relative input that lexically
+    /// reduces into a path whose first segment contains `:` (e.g.
+    /// `a/../C:\node` → `C:\node`) must be prepended with `.\` so the
+    /// result stays relative (`.\C:\node`). Similarly, a path that
+    /// lexically reduces to start with `\??` (Root Local Device
+    /// prefix) must be prepended with `\.` to neutralise the NT
+    /// namespace interpretation.
+    ///
+    /// Reference: Go `internal/filepathlite/path_windows.go::postClean`.
+    /// Non-Windows builds do not run postClean — the result stays as
+    /// the raw lexical reduction.
+    #[cfg(windows)]
+    #[test]
+    fn lexical_clean_postclean_protects_against_drive_and_device_rewrites() {
+        // Case 1: relative path reduces to drive-qualified shape.
+        assert_eq!(lexical_clean("a/../C:\\node"), ".\\C:\\node");
+        assert_eq!(lexical_clean("a\\..\\c:"), ".\\c:");
+        // Case 2: relative path reduces to Root Local Device shape.
+        assert_eq!(lexical_clean("\\a\\..\\??\\c:\\x"), "\\.\\??\\c:\\x");
+        assert_eq!(lexical_clean("\\??\\c:\\x"), "\\??\\c:\\x"); // vol_len != 0
+                                                                 // Sanity: a plain relative path with no colon / `\??` stays
+                                                                 // unchanged by postClean.
+        assert_eq!(lexical_clean("foo/bar"), "foo\\bar");
     }
 
     /// Smoke test for the E.1 durability contract: a fresh write goes
