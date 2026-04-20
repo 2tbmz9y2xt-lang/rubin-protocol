@@ -69,13 +69,23 @@ fn check_safe_file_name(name: &str) -> Result<(), String> {
     // Both are no-ops on Unix where `\` is a regular filename byte and
     // `C:` has no path-shape semantics — so gating them on `cfg(windows)`
     // matches Go's `filepath.Base` per-OS behaviour exactly.
+    //
+    // Drive-prefix rejection: Go's guard is
+    // `filepath.Base(name) != name`. On Windows `filepath.Base("X:foo")`
+    // strips the 2-byte volume prefix and returns `"foo"` for ANY
+    // byte at `name[0]` (Go matches `path[1] == ':'` unconditionally
+    // in `volumeNameLen`, no ASCII-letter enforcement). So `"1:foo"`,
+    // `":foo"` (2-byte, first byte is `:` — fails len>=2 + bytes[1]==':'
+    // test below, `bytes[1]` is `f`), and `"_:foo"` all get rejected
+    // by Go's guard. Drop the `is_ascii_alphabetic` narrowing here
+    // so the Rust guard covers the same vector set.
     #[cfg(windows)]
     {
         if name.contains('\\') {
             return Err(format!("invalid file name: {name:?}"));
         }
         let bytes = name.as_bytes();
-        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        if bytes.len() >= 2 && bytes[1] == b':' {
             return Err(format!("invalid file name: {name:?}"));
         }
     }
@@ -337,6 +347,19 @@ pub(crate) fn lexical_clean(input: &str) -> String {
     if out.len() == vol.len() && !rooted && !starts_with_double_sep {
         out.push('.');
     }
+    // Mirror Go's `return FromSlash(out.string())` at the end of
+    // Clean: on Windows every `/` is replaced with the OS
+    // separator `\`. This canonicalises Windows inputs whose
+    // volume prefix came in with forward slashes (e.g.
+    // `//host/share/foo` → `\\host\share\foo`) and any `/` that
+    // snuck through inside the vol copy. On Unix `MAIN_SEPARATOR`
+    // is `/` so this pass is a no-op (we still guard it with
+    // `cfg(windows)` to keep the output verbatim on non-Windows).
+    #[cfg(windows)]
+    {
+        out = out.replace('/', "\\");
+    }
+
     // Go `postClean` (path_windows.go:302) — protect against a
     // relative path being lexically reduced into an absolute /
     // rooted shape. Only runs when `vol_len == 0` (input had no
@@ -840,6 +863,14 @@ mod tests {
             "C:foo",     // drive-prefixed leaf — Path::join replaces base on Windows
             "C:",
             "z:bar",
+            // Go's `filepath.Base(name) != name` guard rejects ANY
+            // byte at position 0 paired with `:` at position 1 —
+            // Go's volumeNameLen matches `path[1] == ':'` without
+            // letter enforcement. Cover the non-alphabetic vectors
+            // to pin the same coverage.
+            "1:foo",
+            "_:foo",
+            "0:",
         ] {
             match read_file_from_dir(&dir, bad) {
                 Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
@@ -1017,6 +1048,24 @@ mod tests {
             assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share\\foo"), 7);
             assert_eq!(volume_prefix_len("\\\\?\\UNC"), 7);
         }
+    }
+
+    /// `lexical_clean` must canonicalise forward slashes inside the
+    /// VOLUME prefix on Windows — Go's `Clean` ends with
+    /// `FromSlash(out.string())` which replaces every `/` with `\`.
+    /// Inputs like `//host/share/foo` (UNC with forward slashes, a
+    /// shape Windows accepts) must come out as `\\host\share\foo`,
+    /// NOT `//host/share\foo` (which would mix separators and
+    /// diverge from Go).
+    #[cfg(windows)]
+    #[test]
+    fn lexical_clean_canonicalises_forward_slashes_in_volume_prefix() {
+        // UNC with forward slashes in vol → backslash-canonical UNC.
+        assert_eq!(lexical_clean("//host/share/foo"), "\\\\host\\share\\foo");
+        // Trailing / on pure UNC vol stays a single trailing `\`.
+        assert_eq!(lexical_clean("//host/share/"), "\\\\host\\share\\");
+        // Mixed separators inside the path body collapse to `\`.
+        assert_eq!(lexical_clean("C:/foo/bar"), "C:\\foo\\bar");
     }
 
     /// `lexical_clean` must apply Go's Windows `postClean` safeguard
