@@ -8,8 +8,7 @@ use rubin_consensus::{
 use serde::{Deserialize, Serialize};
 
 use crate::io_utils::{
-    parse_hex32, read_file_by_path, read_file_from_dir, write_file_atomic,
-    write_file_atomic_by_path, write_file_exclusive, AtomicWriteError,
+    parse_hex32, read_file_from_dir, write_file_atomic, write_file_exclusive, AtomicWriteError,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 
@@ -775,10 +774,19 @@ fn try_has_file_at(path: &Path) -> Result<bool, String> {
 }
 
 fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
-    // E.10: route through `read_file_by_path` so the index file read
-    // gets the same leaf-name guard Go's `loadBlockStoreIndex` enforces
-    // via its `readFileByPath` call. Mirrors Go cross-client.
-    let raw = match read_file_by_path(path) {
+    // The blockstore reads block / header / undo files via raw
+    // `read_file_from_dir` on `self.*_dir.join(...)` — no
+    // `lexical_clean` on the dir portion. Keep the index on the
+    // same raw resolution strategy so a single operator `--data-dir`
+    // that crosses a symlink combined with `..` lands on one
+    // physical tree for the index AND the block/header/undo files
+    // the index references. Routing the index read through
+    // `read_file_by_path` (which cleans) diverged the two: the
+    // index would load from the cleaned tree while block/header
+    // files resolved via OS symlink traversal to a different
+    // location, so a restart could load an index that points at
+    // hashes whose block/header files live elsewhere.
+    let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(BlockStoreIndexDisk {
@@ -822,7 +830,13 @@ fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
     let mut raw =
         serde_json::to_vec_pretty(index).map_err(|e| format!("encode blockstore index: {e}"))?;
     raw.push(b'\n');
-    write_file_atomic_by_path(path, &raw)
+    // Keep writer on raw `write_file_atomic` (no `lexical_clean`)
+    // so the index file persists to the same physical directory
+    // that block / header / undo writers use and that
+    // `load_blockstore_index` reads back from. See the comment in
+    // `load_blockstore_index` for the full blockstore-wide symmetry
+    // rationale.
+    write_file_atomic(path, &raw)
 }
 
 /// Borrowed view of `BlockStoreIndexDisk` that serializes identically
