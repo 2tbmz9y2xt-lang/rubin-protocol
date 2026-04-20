@@ -280,8 +280,10 @@ fn lexical_clean(input: &str) -> String {
 ///   exactly. Per Go's own documented `ExampleDir`
 ///   (<https://pkg.go.dev/path/filepath#Dir>):
 ///
-///       filepath.Dir("/foo/bar/baz/")  → "/foo/bar/baz"
-///       filepath.Dir("/foo/bar/baz")   → "/foo/bar"
+///   ```text
+///   filepath.Dir("/foo/bar/baz/")  -> "/foo/bar/baz"
+///   filepath.Dir("/foo/bar/baz")   -> "/foo/bar"
+///   ```
 ///
 ///   The trailing separator changes the result — Go's `Dir` does
 ///   NOT strip trailing separators and return the parent-of-parent.
