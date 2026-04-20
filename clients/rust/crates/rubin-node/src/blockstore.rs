@@ -572,14 +572,22 @@ impl BlockStore {
             .undo_dir
             .join(format!("{}.json", hex::encode(block_hash_bytes)));
         // Undo files intentionally stay on the raw `write_file_atomic`
-        // path (no `lexical_clean`) so the writer and the readers
-        // (`get_undo` / `has_undo` / `try_has_undo`, which all go
-        // through `self.undo_dir.join(...)` + raw `fs::read` or
-        // `.is_file()`) share one path-resolution strategy. The
-        // symlink-divergence defense matters for the durable
-        // chainstate / blockstore-index surface (startup read vs
-        // later save); undo files are ephemeral, reorg-scoped, and
-        // keep the Go-baseline symmetric raw-OS resolution so a
+        // path (no `lexical_clean`). Writer and readers share one
+        // dir-resolution strategy:
+        //   - `get_undo`     → `read_file_from_dir(&self.undo_dir, ...)`
+        //     (E.10 leaf-name guard on the leaf, NO `lexical_clean`
+        //     on `self.undo_dir`)
+        //   - `has_undo`     → `self.undo_dir.join(...).is_file()`
+        //   - `try_has_undo` → `try_has_file_at(&self.undo_dir.join(...))`
+        // None of them apply `lexical_clean` to `self.undo_dir`, so
+        // keeping the writer on raw `write_file_atomic` means a write
+        // that goes to `self.undo_dir.join(<hex>.json)` is the exact
+        // same path the readers probe. The symlink-divergence
+        // defense matters for the durable chainstate /
+        // blockstore-index surface (startup read vs later save
+        // under an operator `--data-dir` that crosses a symlink);
+        // undo files are ephemeral and reorg-scoped, and keep the
+        // Go-baseline symmetric raw-OS resolution so a freshly
         // written undo is always visible to the corresponding read.
         write_file_atomic(&path, &raw)
     }
