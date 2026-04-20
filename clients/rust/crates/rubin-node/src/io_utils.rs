@@ -851,47 +851,74 @@ mod tests {
     }
 
     /// E.10 symlink-divergence defence: lexically-clean dir BEFORE OS
-    /// resolution so `<dir>/link/../foo` reads `<dir>/foo`, not the
+    /// resolution so `<root>/link/../foo` reads `<root>/foo`, not the
     /// file under wherever `link` resolves. Mirrors Go `filepath.Dir`,
     /// which Cleans textually and never follows the symlink for `..`
     /// resolution.
     ///
-    /// Concretely: `dir/foo` exists with bytes A, `dir/link` is a
-    /// symlink pointing at a sibling directory `dir/other` (which also
-    /// has a `foo` with different bytes B). A read of
-    /// `dir/link/../foo` MUST return A (lexical resolve to `dir/foo`),
-    /// NOT B (symlink-resolve to `dir/other/foo`).
+    /// Divergence fixture: `root/foo` exists with bytes A; `link` is a
+    /// symlink pointing at `elsewhere/target/` where `elsewhere/` is
+    /// OUTSIDE `root`, and `elsewhere/foo` holds different bytes B.
+    /// With physical path resolution the kernel follows `link` to
+    /// `elsewhere/target/`, treats `..` as `elsewhere/`, and reads B.
+    /// With lexical cleaning `link/..` collapses textually, the read
+    /// stays under `root/`, and returns A.
+    ///
+    /// A sibling-directory setup (e.g. `link -> root/other`) does NOT
+    /// demonstrate divergence: `root/other`'s parent is `root`, so
+    /// physical and lexical both resolve to `root/foo`. The link target
+    /// must leave `root` for the two resolutions to diverge.
     #[cfg(unix)]
     #[test]
     fn read_file_by_path_lexical_clean_defeats_symlink_divergence() {
         use std::os::unix::fs as unix_fs;
 
-        let root = unique_temp_path("rubin-io-utils-by-path-symlink-div");
+        let root = unique_temp_path("rubin-io-utils-by-path-symlink-div-root");
         fs::create_dir_all(&root).expect("create root");
+        fs::write(root.join("foo"), b"local-bytes").expect("seed root/foo");
 
-        let local_foo = root.join("foo");
-        fs::write(&local_foo, b"local-bytes").expect("seed local foo");
-
-        let other = root.join("other");
-        fs::create_dir_all(&other).expect("create other");
-        fs::write(other.join("foo"), b"other-bytes").expect("seed other/foo");
+        // `elsewhere/` is a separate tempdir so that its parent is NOT
+        // `root`. Put `elsewhere/foo` with different bytes, and
+        // `elsewhere/target/` as the symlink's point-to so that
+        // `link/..` physically resolves to `elsewhere/`.
+        let elsewhere = unique_temp_path("rubin-io-utils-by-path-symlink-div-elsewhere");
+        fs::create_dir_all(&elsewhere).expect("create elsewhere");
+        fs::write(elsewhere.join("foo"), b"other-bytes").expect("seed elsewhere/foo");
+        let target = elsewhere.join("target");
+        fs::create_dir_all(&target).expect("create elsewhere/target");
 
         let link = root.join("link");
-        unix_fs::symlink(&other, &link).expect("symlink link → other");
+        unix_fs::symlink(&target, &link).expect("symlink link → elsewhere/target");
 
         // Caller-supplied path: <root>/link/../foo
         let mut tricky = link.clone().into_os_string();
         tricky.push("/../foo");
         let tricky_path = std::path::PathBuf::from(tricky);
 
+        // Sanity: the kernel's physical resolution follows the symlink
+        // out of `root` to `elsewhere/target/`, treats `..` as
+        // `elsewhere/`, and reads `elsewhere/foo` = "other-bytes". This
+        // proves the divergence actually exists for this fixture; if
+        // this assertion ever flips to "local-bytes" the setup has
+        // regressed and the main assertion below is a no-op.
+        let direct = fs::read(&tricky_path).expect("direct fs::read");
+        assert_eq!(
+            direct, b"other-bytes",
+            "kernel physical resolution must follow symlink and read \
+             elsewhere/foo — fixture is broken otherwise"
+        );
+
+        // Main contract: `read_file_by_path` lexically cleans `link/..`
+        // before touching the filesystem, so it reads `root/foo`.
         let got = read_file_by_path(&tricky_path).expect("read should succeed lexically");
         assert_eq!(
             got, b"local-bytes",
-            "lexical clean must collapse `link/..` textually and read root/foo, \
-             NOT follow the symlink to other/foo"
+            "lexical clean must collapse `link/..` textually and read \
+             root/foo, NOT follow the symlink to elsewhere/foo"
         );
 
         let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
     }
 
     /// Smoke test for the E.1 durability contract: a fresh write goes
