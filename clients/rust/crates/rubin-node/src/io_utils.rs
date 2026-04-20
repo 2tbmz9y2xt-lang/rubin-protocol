@@ -432,11 +432,11 @@ pub(crate) fn lexical_clean(input: &str) -> String {
 /// read and write for operator paths that cross a symlink combined
 /// with `..`.
 ///
-/// Returns `Err` if `path` is not valid UTF-8 (the lexical cleaner
-/// works on the string form of the path); the practical expectation
-/// is that `--data-dir` is a UTF-8 string since it comes from the
-/// argv vector this binary was launched with, but surfacing an
-/// explicit error keeps the failure mode obvious on unusual setups.
+/// If `path` is valid UTF-8, applies `lexical_clean` to its string
+/// form and returns the cleaned `PathBuf`. If `path` is not valid
+/// UTF-8, returns it unchanged: `lexical_clean` is string-based, and
+/// preserving the original OS-native path avoids rejecting otherwise
+/// valid non-UTF-8 filesystem paths on unusual setups.
 pub fn normalize_data_dir(path: &Path) -> Result<PathBuf, String> {
     match path.to_str() {
         Some(s) => Ok(PathBuf::from(lexical_clean(s))),
