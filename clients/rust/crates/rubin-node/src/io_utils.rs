@@ -293,7 +293,7 @@ pub(crate) fn lexical_clean(input: &str) -> String {
     let vol_len = volume_prefix_len(input);
     let vol = &input[..vol_len];
     let rest = &input[vol_len..];
-    let rooted = rest.starts_with(is_sep);
+    let rooted = rest.chars().next().is_some_and(is_sep);
 
     let mut parts: Vec<&str> = Vec::new();
     for component in rest.split(is_sep) {
