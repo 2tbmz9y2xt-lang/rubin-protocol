@@ -76,10 +76,17 @@ impl ChainState {
         let mut raw =
             serde_json::to_vec_pretty(&disk).map_err(|e| format!("encode chainstate: {e}"))?;
         raw.push(b'\n');
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("create chainstate parent {}: {e}", parent.display()))?;
-        }
+        // Parent creation is delegated to `write_file_atomic`, which
+        // runs `fs::create_dir_all(effective_parent(path))` on the
+        // actual write target. `effective_parent` maps a bare-filename
+        // input (`Path::new("chainstate.json").parent() == Some("")`)
+        // to `Some(".")` so the `create_dir_all` call always receives
+        // a non-empty directory. Running an explicit
+        // `fs::create_dir_all(path.parent())` here — as an earlier
+        // version did — instead passed `""` to `create_dir_all` on
+        // bare-filename callers and failed with an I/O error; this
+        // helper's own `effective_parent` is the correct layer.
+        //
         // Raw `write_file_atomic`. Paired with `load_chain_state`'s
         // raw `fs::read` — both use the caller-supplied path
         // directly, with no per-helper `lexical_clean` step.
@@ -649,6 +656,36 @@ mod tests {
         st.save(&path).expect("save");
         let got = load_chain_state(&path).expect("load");
         assert_eq!(got, st);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `ChainState::save` must accept a bare-filename path (e.g.
+    /// `"chainstate.json"`) without the pre-write `create_dir_all`
+    /// running against `""`. An earlier version of `save` called
+    /// `fs::create_dir_all(path.parent())` directly; for a
+    /// bare-filename input `path.parent()` is `Some("")` on Unix,
+    /// and `create_dir_all("")` fails with an I/O error. Parent
+    /// creation is delegated to `write_file_atomic` which uses
+    /// `effective_parent` (maps `""` → `.`), so `save("file.json")`
+    /// from the current working directory succeeds.
+    #[test]
+    fn save_accepts_bare_filename_via_effective_parent() {
+        use std::path::Path;
+        let dir = unique_temp_path("rubin-chainstate-bare-filename");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        // cd into the temp dir so "chainstate.json" resolves locally.
+        let prev_cwd = std::env::current_dir().expect("get cwd");
+        std::env::set_current_dir(&dir).expect("cd");
+
+        let st = ChainState::new();
+        let result = st.save(Path::new("chainstate.json"));
+
+        // Always restore cwd before asserting so a failing assert
+        // does not leave the process in the temp dir.
+        std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+
+        result.expect("save with bare filename must not error on empty parent");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
