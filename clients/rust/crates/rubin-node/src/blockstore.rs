@@ -11,6 +11,7 @@ use crate::io_utils::{
     parse_hex32, read_file_from_dir, write_file_atomic, write_file_exclusive, AtomicWriteError,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
+use std::ffi::OsStr;
 
 pub const BLOCK_STORE_DIR_NAME: &str = "blockstore";
 const BLOCK_STORE_INDEX_VERSION: u32 = 1;
@@ -774,19 +775,28 @@ fn try_has_file_at(path: &Path) -> Result<bool, String> {
 }
 
 fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
-    // The blockstore reads block / header / undo files via raw
-    // `read_file_from_dir` on `self.*_dir.join(...)` — no
-    // `lexical_clean` on the dir portion. Keep the index on the
-    // same raw resolution strategy so a single operator `--data-dir`
-    // that crosses a symlink combined with `..` lands on one
-    // physical tree for the index AND the block/header/undo files
-    // the index references. Routing the index read through
-    // `read_file_by_path` (which cleans) diverged the two: the
-    // index would load from the cleaned tree while block/header
-    // files resolved via OS symlink traversal to a different
-    // location, so a restart could load an index that points at
-    // hashes whose block/header files live elsewhere.
-    let raw = match fs::read(path) {
+    // Use `read_file_from_dir(parent, file_name)` so the leaf
+    // component still goes through the E.10 leaf-name guard, but
+    // the dir portion is kept AS-IS (no `lexical_clean`) — that
+    // way the index reads from the same physical directory the
+    // block / header / undo readers + writers use when they call
+    // `self.*_dir.join(...)` + raw `fs::read` / `write_file_atomic`.
+    // Operator `--data-dir` is already lexically cleaned once at
+    // the CLI parse site (`normalize_data_dir` in main.rs), so
+    // `path.parent()` here is also pre-cleaned; there is nothing
+    // to clean per-helper and no risk of split persistence between
+    // the index and the block / header / undo files it references.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = match path.file_name().and_then(OsStr::to_str) {
+        Some(s) => s,
+        None => {
+            return Err(format!(
+                "blockstore index path has no valid UTF-8 leaf: {}",
+                path.display()
+            ));
+        }
+    };
+    let raw = match read_file_from_dir(parent, name) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(BlockStoreIndexDisk {

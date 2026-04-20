@@ -213,7 +213,7 @@ fn volume_prefix_len(s: &str) -> usize {
 /// On Windows both `/` and `\` are treated as separators per Go's
 /// `filepath` package; the canonical separator in the returned string
 /// is `std::path::MAIN_SEPARATOR`.
-fn lexical_clean(input: &str) -> String {
+pub(crate) fn lexical_clean(input: &str) -> String {
     #[cfg(windows)]
     let is_sep = |c: char| c == '/' || c == '\\';
     #[cfg(not(windows))]
@@ -263,187 +263,42 @@ fn lexical_clean(input: &str) -> String {
     out
 }
 
-/// Split a full path into `(cleaned_dir, leaf)` using the same
-/// dir/leaf derivation `read_file_by_path` and `write_file_atomic_by_path`
-/// share so read-then-write round-trips on the same input path cannot
-/// drift apart. Mirrors Go's `filepath.Dir` + `filepath.Base` pair,
-/// including Go's `filepath.Dir` internal `Clean` step: rooted `..`
-/// segments are collapsed textually (`lexical_clean`), not resolved
-/// through the OS.
+/// Normalise an operator-supplied `--data-dir` once at the CLI parse
+/// site so every subsystem that derives a path from it
+/// (`ChainState::save` / `load_chain_state`, `BlockStore::open` and
+/// its blocks / headers / undo / index sub-directories, etc.) sees
+/// the same already-cleaned root. With the root normalised once,
+/// internal readers and writers can stay on raw `fs::read` /
+/// `write_file_atomic` and remain symmetric with each other — there
+/// is no per-helper `lexical_clean` step that could diverge between
+/// read and write for operator paths that cross a symlink combined
+/// with `..`.
 ///
-/// Edge-case behaviour (kept identical between the read and write
-/// surfaces so a single operator-supplied path lands on the same file
-/// in both directions):
-/// - All-separator input (`"/"`, `"//"`): returns `("/", "/")`.
-/// - Trailing-separator input (`"/etc/passwd/"`): returns
-///   `("/etc/passwd", "passwd")`, matching Go's Dir/Base pair
-///   exactly. Per Go's own documented `ExampleDir`
-///   (<https://pkg.go.dev/path/filepath#Dir>):
-///
-///   ```text
-///   filepath.Dir("/foo/bar/baz/")  -> "/foo/bar/baz"
-///   filepath.Dir("/foo/bar/baz")   -> "/foo/bar"
-///   ```
-///
-///   The trailing separator changes the result — Go's `Dir` does
-///   NOT strip trailing separators and return the parent-of-parent.
-///   So Go's `readFileByPath("/etc/passwd/")` calls
-///   `readFileFromDir("/etc/passwd", "passwd")` and attempts to
-///   read `"/etc/passwd/passwd"`, which the OS then surfaces as
-///   ENOENT / ENOTDIR. The Rust mirror produces the same path.
-///   This behaviour is deliberate Go-parity — not a divergence —
-///   and is covered by
-///   `read_file_by_path_trailing_separator_does_not_silently_rewrite`.
-/// - Drive-root input (`"C:\\foo"` on Windows): dir preserves the
-///   trailing rooting separator (`"C:\\"`) so `dir.join(leaf)` stays
-///   drive-rooted rather than collapsing to drive-relative.
-/// - Drive-relative input (`"C:foo"` on Windows): splits as
-///   `("C:.", "foo")` after the `lexical_clean` step — the raw dir
-///   portion is `"C:"`, which Clean normalises to `"C:."` (volume
-///   present, no explicit component) exactly as Go's
-///   `filepath.Dir("C:foo")` does. The subsequent `dir.join(leaf)`
-///   still resolves to `C:foo` on Windows.
-///
-/// Returns `InvalidInput` if the path is not valid UTF-8 (the helper
-/// relies on byte-level parsing of path separators).
-fn resolve_io_path_dir_leaf(path: &Path) -> Result<(String, String), std::io::Error> {
-    // `Path::file_name`/`Path::parent` silently skip trailing `.`
-    // components: an input like `"/etc/passwd/."` returns
-    // `file_name = "passwd"`, which would make the read target
-    // `/etc/passwd` and bypass the leaf-name guard. Going through
-    // the raw `&str` and mirroring Go's `filepath.Base` keeps that
-    // vector rejected the same way Go rejects it.
-    //
-    // Per-OS separator parity with Go's `filepath.Base`: on Windows
-    // both `'/'` and `'\\'` are treated as separators; on Unix only
-    // `'/'`. Without the `cfg(windows)` branch, ordinary Windows
-    // paths like `C:\data\chainstate.json` would have no separator
-    // match, the whole string would become the leaf, and
-    // `check_safe_file_name` would reject it (contains `\` / drive
-    // prefix), regressing every Windows read/write through this
-    // helper.
-    let raw = match path.to_str() {
-        Some(s) => s,
-        None => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid path: non-UTF8 {path:?}"),
-            ));
-        }
-    };
-    #[cfg(windows)]
-    let is_sep = |c: char| c == '/' || c == '\\';
-    #[cfg(not(windows))]
-    let is_sep = |c: char| c == '/';
-
-    // Empty input is distinct from all-separator input. Go's
-    // `filepath.Dir("")` and `filepath.Base("")` both return `"."`,
-    // and the leaf-name guard then rejects `"."` with
-    // `invalid file name: "."`. Without this branch, empty input
-    // would fall into the all-separator arm below and surface as
-    // `invalid file name: "/"` — a confusing error that implies the
-    // operator passed a rooted path when they passed no path at all.
-    if raw.is_empty() {
-        return Ok((".".to_string(), ".".to_string()));
+/// Returns `Err` if `path` is not valid UTF-8 (the lexical cleaner
+/// works on the string form of the path); the practical expectation
+/// is that `--data-dir` is a UTF-8 string since it comes from the
+/// argv vector this binary was launched with, but surfacing an
+/// explicit error keeps the failure mode obvious on unusual setups.
+pub fn normalize_data_dir(path: &Path) -> Result<PathBuf, String> {
+    match path.to_str() {
+        Some(s) => Ok(PathBuf::from(lexical_clean(s))),
+        None => Err(format!("data_dir must be valid UTF-8: {}", path.display())),
     }
-    let had_trailing_sep = raw.chars().next_back().is_some_and(is_sep);
-    let trimmed = raw.trim_end_matches(is_sep);
-    let (dir_str, leaf) = if trimmed.is_empty() {
-        // `raw` is non-empty but all separators (e.g. `"/"`, `"//"`).
-        // Go returns `"/"` for both `Dir` and `Base` here.
-        ("/", "/")
-    } else if had_trailing_sep {
-        // Go parity (see function-level doc for ExampleDir citation):
-        //   filepath.Dir("/foo/bar/baz/")  = "/foo/bar/baz"
-        //   filepath.Base("/foo/bar/baz/") = "baz"
-        // So for trailing-sep input the dir is the TRIMMED path
-        // itself and the leaf is the last component name. The
-        // resulting read/write target is `<trimmed>/<leaf>`, which
-        // surfaces as a real OS error on misuse — identical to Go.
-        let leaf = match trimmed.rfind(is_sep) {
-            Some(idx) => &trimmed[idx + 1..],
-            None => trimmed,
-        };
-        (trimmed, leaf)
-    } else {
-        match trimmed.rfind(is_sep) {
-            Some(idx) => {
-                // Preserve the rooting separator when the last
-                // separator is the path's root marker, otherwise the
-                // dir loses its absolute-root semantics:
-                //   - Unix `/foo`        → idx=0, dir must be `/`
-                //   - Windows `C:\foo`   → idx=2 right after drive
-                //     vol, dir must be `C:\` (NOT `C:`, which would
-                //     be drive-relative on Windows)
-                let vol_len = volume_prefix_len(trimmed);
-                let dir = if idx == 0 {
-                    "/"
-                } else if vol_len > 0 && idx == vol_len {
-                    &trimmed[..idx + 1]
-                } else {
-                    &trimmed[..idx]
-                };
-                (dir, &trimmed[idx + 1..])
-            }
-            None => {
-                let vol_len = volume_prefix_len(trimmed);
-                if vol_len > 0 && trimmed.len() > vol_len {
-                    (&trimmed[..vol_len], &trimmed[vol_len..])
-                } else {
-                    (".", trimmed)
-                }
-            }
-        }
-    };
-    let cleaned_dir = lexical_clean(dir_str);
-    Ok((cleaned_dir, leaf.to_string()))
 }
 
-/// Read a file by full path after validating only the LEAF component
-/// (not the full path) with the same `E.10` guard `read_file_from_dir`
-/// enforces. Mirrors the Go `readFileByPath` helper in
-/// `clients/go/node/safeio.go` for chainstate-style call sites that
-/// already work with a fully-resolved path
-/// (`<data_dir>/chainstate.json`) and need a drop-in safe reader.
-///
-/// This is a leaf-name / traversal guard, NOT a sandbox against
-/// arbitrary full-path input: a caller passing `/etc/passwd` will
-/// still read the absolute path because the leaf `"passwd"` passes
-/// the guard. The guard's job is to refuse names that, when treated
-/// as the trailing component, would escape their directory via
-/// `.`/`..`/separators/drive-prefix; full-path sandboxing is the
-/// caller's responsibility (see `chainstate.rs` for an example where
-/// the path is constructed from a trusted data-dir).
-pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
-    let (cleaned_dir, leaf) = resolve_io_path_dir_leaf(path)?;
-    read_file_from_dir(Path::new(&cleaned_dir), &leaf)
-}
-
-/// Write `data` atomically to the file identified by `path`, using the
-/// same dir/leaf derivation `read_file_by_path` uses so a round-trip
-/// read-then-write on the same operator-supplied path lands on the
-/// same on-disk file. Without this symmetry, an operator `--data-dir`
-/// that passes through a symlink combined with `..` segments can
-/// cause startup to read one file while subsequent saves persist to
-/// a different file (split persistence / apparent state loss on
-/// symlink-escape paths).
-///
-/// This is deliberately stricter than the Go `safeio.go` twin, which
-/// calls `writeFileAtomic` directly on the original path (Go's read
-/// side applies `filepath.Dir`'s `Clean` step while its write side
-/// does not). Fixing the asymmetry in Go is tracked as a separate
-/// concern; the Rust side converges read and write here.
-///
-/// The `E.10` leaf-name guard still applies: the leaf derived from
-/// `path` must pass `check_safe_file_name`, so writes refuse the
-/// same traversal / absolute-path / drive-prefix vectors reads do.
-pub fn write_file_atomic_by_path(path: &Path, data: &[u8]) -> Result<(), String> {
-    let (cleaned_dir, leaf) =
-        resolve_io_path_dir_leaf(path).map_err(|e| format!("resolve path: {e}"))?;
-    check_safe_file_name(&leaf)?;
-    let target = Path::new(&cleaned_dir).join(&leaf);
-    write_file_atomic(&target, data)
-}
+// Historical helpers `resolve_io_path_dir_leaf`, `read_file_by_path`,
+// and `write_file_atomic_by_path` used to sit here. They applied
+// `lexical_clean` to the dir portion of a caller-supplied full path
+// so that symlink-divergence on an operator `--data-dir` could be
+// defeated at the per-read / per-write site. After adopting
+// CLI-level normalisation via `normalize_data_dir` in `main.rs`,
+// every subsystem now receives a pre-cleaned data-dir and can stay
+// on raw `fs::read` / `write_file_atomic`; the per-helper cleaning
+// step is no longer needed (and having it at some call sites but
+// not others reintroduced asymmetries between chainstate and
+// blockstore surfaces). The removed helpers and their regression
+// tests lived in git history; the CLI-level approach is the single
+// resolution strategy the whole node now uses.
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
@@ -808,11 +663,10 @@ pub fn unique_temp_path(prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        lexical_clean, read_file_by_path, read_file_from_dir, sync_dir, unique_temp_path,
-        volume_prefix_len, write_file_atomic, write_file_atomic_by_path,
+        lexical_clean, read_file_from_dir, sync_dir, unique_temp_path, volume_prefix_len,
+        write_file_atomic,
     };
     use std::fs;
-    use std::path::Path;
 
     /// E.10 parity: `read_file_from_dir` mirrors Go `readFileFromDir`.
     /// Rejected vectors (must surface `InvalidInput`):
@@ -862,45 +716,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Empty-path parity with Go `filepath.Dir("")` / `filepath.Base("")`
-    /// (both return `"."`): the leaf extraction must produce leaf=`"."`
-    /// and the guard must reject it with the `name == "."` branch of
-    /// `check_safe_file_name`, NOT the all-separator `"/"` rejection
-    /// path. Without this branch the empty-input error surfaces as
-    /// `invalid file name: "/"` — confusing because the operator did
-    /// not pass a rooted path.
-    #[test]
-    fn read_file_by_path_empty_input_rejected_as_dot_not_slash() {
-        let err = read_file_by_path(Path::new("")).expect_err("empty path must be rejected");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        let msg = err.to_string();
-        assert!(
-            msg.contains("\".\""),
-            "expected `\".\"` leaf-guard rejection (Go parity), got: {msg}"
-        );
-        assert!(
-            !msg.contains("\"/\""),
-            "must not fall through to all-separator branch, got: {msg}"
-        );
-    }
-
-    /// Matching Go parity for the write side: `write_file_atomic_by_path`
-    /// uses the same leaf-guard error path as reads, so empty input
-    /// produces `invalid file name: "."` there too.
-    #[test]
-    fn write_file_atomic_by_path_empty_input_rejected_as_dot_not_slash() {
-        let err = write_file_atomic_by_path(Path::new(""), b"bytes")
-            .expect_err("empty path must be rejected");
-        assert!(
-            err.contains("\".\""),
-            "expected `\".\"` leaf-guard rejection (Go parity), got: {err}"
-        );
-        assert!(
-            !err.contains("\"/\""),
-            "must not fall through to all-separator branch, got: {err}"
-        );
-    }
-
     /// E.10 happy path: a real leaf name reads back the bytes.
     #[test]
     fn read_file_from_dir_reads_inside_root() {
@@ -911,94 +726,6 @@ mod tests {
 
         let got = read_file_from_dir(&dir, leaf).expect("read leaf");
         assert_eq!(got, b"hi");
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// E.10: a TRAILING `..` segment in the FULL path passed to
-    /// `read_file_by_path` becomes the extracted leaf, which the
-    /// leaf-name guard rejects. Covers shapes like `<data_dir>/..`
-    /// (leaf is `..`). It does NOT cover `..` in parent components
-    /// (e.g. `<data_dir>/../etc/passwd` has leaf `passwd` which
-    /// passes the guard) — full-path sandboxing is the caller's
-    /// responsibility, by design.
-    #[test]
-    fn read_file_by_path_rejects_dotdot_leaf() {
-        let dir = unique_temp_path("rubin-io-utils-by-path-dotdot");
-        fs::create_dir_all(&dir).expect("create test dir");
-
-        let bad = dir.join("..");
-        match read_file_by_path(&bad) {
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
-            other => panic!("expected InvalidInput for trailing .., got {other:?}"),
-        }
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// E.10 happy path for `read_file_by_path`: full-path readers like
-    /// the chainstate loader read back what they wrote.
-    #[test]
-    fn read_file_by_path_reads_inside_root() {
-        let dir = unique_temp_path("rubin-io-utils-by-path-ok");
-        fs::create_dir_all(&dir).expect("create test dir");
-        let path = dir.join("chainstate.json");
-        fs::write(&path, b"{}").expect("seed");
-
-        let got = read_file_by_path(&path).expect("read by path");
-        assert_eq!(got, b"{}");
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// E.10 trailing-separator semantics: a caller passing
-    /// `<dir>/foo/` MUST NOT silently read `<dir>/foo` (which would
-    /// be the result of `Path::parent`/`Path::file_name`-style
-    /// stripping). This mirrors Go's `filepath.Dir` + `filepath.Base`
-    /// exactly — trailing separator changes the result of `Dir`, it
-    /// does NOT strip the trailing sep and return the parent-of-parent.
-    ///
-    /// Go's own `ExampleDir` (<https://pkg.go.dev/path/filepath#Dir>)
-    /// demonstrates this directly:
-    ///
-    ///     filepath.Dir("/foo/bar/baz/")  → "/foo/bar/baz"
-    ///     filepath.Dir("/foo/bar/baz")   → "/foo/bar"
-    ///
-    /// So for `<dir>/foo/` Go returns dir=`<dir>/foo`, leaf=`foo`;
-    /// the subsequent `readFileFromDir` attempt lands on
-    /// `<dir>/foo/foo` and surfaces ENOENT/ENOTDIR. This test pins
-    /// that Go-parity behaviour — it is NOT a divergence from Go
-    /// and MUST NOT be "fixed" by making the Rust side strip the
-    /// trailing separator (that would be the actual divergence).
-    #[test]
-    fn read_file_by_path_trailing_separator_does_not_silently_rewrite() {
-        let dir = unique_temp_path("rubin-io-utils-by-path-trailing-sep");
-        fs::create_dir_all(&dir).expect("create test dir");
-        let real = dir.join("foo");
-        fs::write(&real, b"contents-of-real-foo").expect("seed");
-
-        // Build a trailing-separator path: "<dir>/foo/"
-        let mut trailing = real.clone().into_os_string();
-        trailing.push("/");
-        let trailing_path = std::path::PathBuf::from(trailing);
-
-        let result = read_file_by_path(&trailing_path);
-        match result {
-            Ok(bytes) => panic!(
-                "expected error on trailing-separator input, got Ok({} bytes); \
-                 silent-rewrite-to-{} regression",
-                bytes.len(),
-                real.display()
-            ),
-            Err(e) => {
-                assert_ne!(
-                    e.kind(),
-                    std::io::ErrorKind::InvalidInput,
-                    "trailing-separator input should fall through to OS read \
-                     (NOT be rejected by the leaf-name guard); got {e}"
-                );
-            }
-        }
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1033,144 +760,10 @@ mod tests {
         );
     }
 
-    /// E.10 symlink-divergence defence: lexically-clean dir BEFORE OS
-    /// resolution so `<root>/link/../foo` reads `<root>/foo`, not the
-    /// file under wherever `link` resolves. Mirrors Go `filepath.Dir`,
-    /// which Cleans textually and never follows the symlink for `..`
-    /// resolution.
-    ///
-    /// Divergence fixture: `root/foo` exists with bytes A; `link` is a
-    /// symlink pointing at `elsewhere/target/` where `elsewhere/` is
-    /// OUTSIDE `root`, and `elsewhere/foo` holds different bytes B.
-    /// With physical path resolution the kernel follows `link` to
-    /// `elsewhere/target/`, treats `..` as `elsewhere/`, and reads B.
-    /// With lexical cleaning `link/..` collapses textually, the read
-    /// stays under `root/`, and returns A.
-    ///
-    /// A sibling-directory setup (e.g. `link -> root/other`) does NOT
-    /// demonstrate divergence: `root/other`'s parent is `root`, so
-    /// physical and lexical both resolve to `root/foo`. The link target
-    /// must leave `root` for the two resolutions to diverge.
-    #[cfg(unix)]
-    #[test]
-    fn read_file_by_path_lexical_clean_defeats_symlink_divergence() {
-        use std::os::unix::fs as unix_fs;
-
-        let root = unique_temp_path("rubin-io-utils-by-path-symlink-div-root");
-        fs::create_dir_all(&root).expect("create root");
-        fs::write(root.join("foo"), b"local-bytes").expect("seed root/foo");
-
-        // `elsewhere/` is a separate tempdir so that its parent is NOT
-        // `root`. Put `elsewhere/foo` with different bytes, and
-        // `elsewhere/target/` as the symlink's point-to so that
-        // `link/..` physically resolves to `elsewhere/`.
-        let elsewhere = unique_temp_path("rubin-io-utils-by-path-symlink-div-elsewhere");
-        fs::create_dir_all(&elsewhere).expect("create elsewhere");
-        fs::write(elsewhere.join("foo"), b"other-bytes").expect("seed elsewhere/foo");
-        let target = elsewhere.join("target");
-        fs::create_dir_all(&target).expect("create elsewhere/target");
-
-        let link = root.join("link");
-        unix_fs::symlink(&target, &link).expect("symlink link → elsewhere/target");
-
-        // Caller-supplied path: <root>/link/../foo
-        let mut tricky = link.clone().into_os_string();
-        tricky.push("/../foo");
-        let tricky_path = std::path::PathBuf::from(tricky);
-
-        // Sanity: the kernel's physical resolution follows the symlink
-        // out of `root` to `elsewhere/target/`, treats `..` as
-        // `elsewhere/`, and reads `elsewhere/foo` = "other-bytes". This
-        // proves the divergence actually exists for this fixture; if
-        // this assertion ever flips to "local-bytes" the setup has
-        // regressed and the main assertion below is a no-op.
-        let direct = fs::read(&tricky_path).expect("direct fs::read");
-        assert_eq!(
-            direct, b"other-bytes",
-            "kernel physical resolution must follow symlink and read \
-             elsewhere/foo — fixture is broken otherwise"
-        );
-
-        // Main contract: `read_file_by_path` lexically cleans `link/..`
-        // before touching the filesystem, so it reads `root/foo`.
-        let got = read_file_by_path(&tricky_path).expect("read should succeed lexically");
-        assert_eq!(
-            got, b"local-bytes",
-            "lexical clean must collapse `link/..` textually and read \
-             root/foo, NOT follow the symlink to elsewhere/foo"
-        );
-
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&elsewhere);
-    }
-
-    /// `write_file_atomic_by_path` + `read_file_by_path` must land on
-    /// the same physical file for an operator-supplied path that
-    /// crosses a symlink combined with `..`. Without shared dir/leaf
-    /// resolution between read and write, a `--data-dir` of the shape
-    /// `<real>/link/..` where `link` escapes `<real>` causes startup
-    /// reads to hit `<real>/chainstate.json` (via lexical clean) but
-    /// saves to persist at `<elsewhere>/chainstate.json` (via OS
-    /// symlink resolution), surfacing as apparent state loss after
-    /// restart. This test pins the round-trip on one file.
-    #[cfg(unix)]
-    #[test]
-    fn write_by_path_then_read_by_path_round_trips_through_symlink_escape() {
-        use std::os::unix::fs as unix_fs;
-
-        let root = unique_temp_path("rubin-io-utils-by-path-write-rt-root");
-        fs::create_dir_all(&root).expect("create root");
-
-        let elsewhere = unique_temp_path("rubin-io-utils-by-path-write-rt-elsewhere");
-        fs::create_dir_all(&elsewhere).expect("create elsewhere");
-        let target = elsewhere.join("target");
-        fs::create_dir_all(&target).expect("create elsewhere/target");
-
-        // Seed `elsewhere/foo` so we can tell if the write escaped.
-        fs::write(elsewhere.join("foo"), b"pre-existing-elsewhere").expect("seed elsewhere/foo");
-
-        let link = root.join("link");
-        unix_fs::symlink(&target, &link).expect("symlink link → elsewhere/target");
-
-        // Operator-supplied path: <root>/link/../foo
-        let mut tricky = link.clone().into_os_string();
-        tricky.push("/../foo");
-        let tricky_path = std::path::PathBuf::from(tricky);
-
-        // Write via `_by_path`. With shared resolution, this lands
-        // on `root/foo`, NOT `elsewhere/foo`.
-        write_file_atomic_by_path(&tricky_path, b"round-trip-bytes")
-            .expect("write_file_atomic_by_path");
-
-        // Read via `_by_path`. With shared resolution, this reads
-        // the same `root/foo` that the write produced.
-        let got = read_file_by_path(&tricky_path).expect("read back");
-        assert_eq!(
-            got, b"round-trip-bytes",
-            "read must see the bytes the write produced"
-        );
-
-        // Positive-proof that the write did NOT escape to `elsewhere`:
-        // `elsewhere/foo` keeps its pre-existing bytes.
-        let elsewhere_bytes = fs::read(elsewhere.join("foo")).expect("read elsewhere/foo");
-        assert_eq!(
-            elsewhere_bytes, b"pre-existing-elsewhere",
-            "write must NOT have followed the symlink out of root"
-        );
-
-        // And `root/foo` now holds the round-trip bytes.
-        let root_bytes = fs::read(root.join("foo")).expect("read root/foo");
-        assert_eq!(root_bytes, b"round-trip-bytes");
-
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&elsewhere);
-    }
-
     /// `volume_prefix_len` must match Go `filepath.VolumeName` length
-    /// on every path shape the `read_file_by_path` /
-    /// `write_file_atomic_by_path` pair may encounter on Windows:
-    /// drive-letter, UNC (`\\HOST\SHARE`), DOS device drive
-    /// (`\\?\C:`, `\\.\C:`), DOS device UNC
+    /// on every path shape the `lexical_clean` helper may encounter
+    /// on Windows: drive-letter, UNC (`\\HOST\SHARE`), DOS device
+    /// drive (`\\?\C:`, `\\.\C:`), DOS device UNC
     /// (`\\?\UNC\HOST\SHARE`), and the malformed-prefix fail-closed
     /// cases. Non-Windows input always returns 0.
     #[test]

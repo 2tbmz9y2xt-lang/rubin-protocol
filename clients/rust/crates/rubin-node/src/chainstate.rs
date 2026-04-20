@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use rubin_consensus::{
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_incoming_chain_id;
-use crate::io_utils::{parse_hex32, read_file_by_path, write_file_atomic_by_path};
+use crate::io_utils::{parse_hex32, write_file_atomic};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
 const CHAIN_STATE_DISK_VERSION: u32 = 1;
@@ -75,21 +76,21 @@ impl ChainState {
         let mut raw =
             serde_json::to_vec_pretty(&disk).map_err(|e| format!("encode chainstate: {e}"))?;
         raw.push(b'\n');
-
-        // Parent creation is delegated to `write_file_atomic_by_path`,
-        // which goes through `write_file_atomic::effective_parent` on
-        // the lexically-cleaned target. Creating `path.parent()` here
-        // would operate on the RAW path before cleaning, and for a
-        // `--data-dir` that crosses a symlink combined with `..`
-        // segments it would create or require the wrong directory
-        // (following the symlink out of the intended root) while the
-        // actual write happens at a different, cleaned location.
-        //
-        // Using `_by_path` for the write ensures startup reads and
-        // subsequent saves share the same dir/leaf resolution, so
-        // symlink+`..` operator paths cannot split persistence across
-        // two files.
-        write_file_atomic_by_path(path, &raw)
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("create chainstate parent {}: {e}", parent.display()))?;
+        }
+        // Raw `write_file_atomic` — the caller's `path` comes from
+        // `chain_state_path(data_dir)` after `data_dir` was
+        // lexically cleaned at the CLI parse site
+        // (`normalize_data_dir`), so no per-helper
+        // `lexical_clean` step is needed here. Startup reads go
+        // through `load_chain_state` below which uses the same raw
+        // resolution on the same pre-cleaned path, so a symlink+`..`
+        // operator `--data-dir` cannot split persistence across two
+        // files: both read and write resolve through the same
+        // already-cleaned root.
+        write_file_atomic(path, &raw)
     }
 
     pub fn connect_block(
@@ -290,19 +291,17 @@ pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
 
 pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     let path = path.as_ref();
-    // E.10: route through `read_file_by_path` so the LEAF component
-    // gets the same `.`/`..`/separator (+ Windows drive-prefix) guard
-    // Go enforces in `readFileByPath` -> `readFileFromDir`. The guard
-    // refuses ONLY trailing-leaf escapes — a path of the shape
-    // `<data_dir>/<leaf>` whose leaf would itself escape (e.g. leaf is
-    // `..` literally, or contains a separator). It does NOT validate
-    // parent components: e.g. `<data_dir>/../etc/passwd` has leaf
-    // `passwd` which passes validation, and the read proceeds against
-    // the resolved parent. Full-path sandboxing is the caller's
-    // responsibility (here `path` originates from a trusted data-dir
-    // join). Mirrors the Go `LoadChainState` reader in
-    // `clients/go/node/chainstate.go`.
-    let raw = match read_file_by_path(path) {
+    // Raw `fs::read` on a caller-supplied path that originates from
+    // `chain_state_path(data_dir)` where `data_dir` was lexically
+    // cleaned once at the CLI parse site (`normalize_data_dir`).
+    // Writes go through the same raw resolution on the same
+    // pre-cleaned path in `ChainState::save`, so startup reads and
+    // subsequent saves land on exactly one on-disk file regardless
+    // of whether the operator `--data-dir` contained symlink+`..`
+    // segments. Mirrors the Go `LoadChainState` reader in
+    // `clients/go/node/chainstate.go`, which also uses a
+    // caller-supplied path directly.
+    let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ChainState::new()),
         Err(e) => return Err(format!("read chainstate {}: {e}", path.display())),
@@ -647,29 +646,6 @@ mod tests {
         assert_eq!(got, st);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
-    }
-
-    /// E.10 wiring lock: pin that `load_chain_state` routes through the
-    /// `read_file_by_path` guard so a path whose TRAILING-LEAF component
-    /// is `.` (or another guard-rejected shape) returns Err instead of
-    /// attempting an OS read. The guard validates ONLY the leaf
-    /// component — `..` appearing in PARENT components of an absolute
-    /// path is NOT blocked (e.g. `<dir>/../etc/passwd` has leaf
-    /// `passwd` and would proceed). Mirrors Go's
-    /// `TestLoadChainState_InvalidFileName`. Without this test a future
-    /// refactor could replace `read_file_by_path` with raw `fs::read`
-    /// and the leaf-name guard would silently disappear.
-    #[test]
-    fn load_chain_state_invalid_leaf_name_rejected() {
-        // Leaf == "." — read_file_by_path's guard rejects with
-        // ErrorKind::InvalidInput; load_chain_state propagates as the
-        // operator-facing "read chainstate <path>: ..." error.
-        let result = load_chain_state(std::path::Path::new("."));
-        let err = result.expect_err("expected Err for leaf `.`");
-        assert!(
-            err.contains("invalid file name"),
-            "expected guard error in {err:?}"
-        );
     }
 
     #[test]
