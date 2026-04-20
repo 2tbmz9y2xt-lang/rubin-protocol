@@ -440,7 +440,23 @@ pub(crate) fn lexical_clean(input: &str) -> String {
 pub fn normalize_data_dir(path: &Path) -> Result<PathBuf, String> {
     match path.to_str() {
         Some(s) => Ok(PathBuf::from(lexical_clean(s))),
-        None => Err(format!("data_dir must be valid UTF-8: {}", path.display())),
+        None => {
+            // Non-UTF-8 path: `lexical_clean` is string-based and
+            // cannot run on the raw bytes. Rather than hard-fail
+            // startup for an otherwise valid OS-level path (on Unix
+            // `PathBuf` can hold arbitrary bytes; `default_data_dir`
+            // derives its path from `env::var_os("HOME")` which may
+            // legitimately be non-UTF-8), pass the path through
+            // unchanged. Plain `fs::read` / `fs::write` are
+            // byte-transparent and worked on the pre-CLI-normalize
+            // codebase for these paths, so we preserve that
+            // compatibility. The cost for this edge case is that a
+            // non-UTF-8 operator `--data-dir` with symlink+`..`
+            // shapes bypasses the CLI-level lexical cleanup — rare
+            // enough that we accept the trade-off over breaking
+            // the startup path.
+            Ok(path.to_path_buf())
+        }
     }
 }
 
@@ -894,6 +910,36 @@ mod tests {
         assert_eq!(got, b"hi");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `normalize_data_dir` must pass non-UTF-8 Unix paths through
+    /// unchanged rather than hard-fail. On Unix `PathBuf` can hold
+    /// arbitrary bytes (e.g. when `default_data_dir` derives the
+    /// path from `env::var_os("HOME")` and `$HOME` is not valid
+    /// UTF-8). Hard-failing here would regress startup for
+    /// otherwise-valid OS-level paths that `fs::read` / `fs::write`
+    /// handle correctly. The trade-off: non-UTF-8 operator
+    /// `--data-dir` values bypass the lexical cleanup, which is
+    /// acceptable for this rare edge case.
+    #[cfg(unix)]
+    #[test]
+    fn normalize_data_dir_preserves_non_utf8_unix_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        // Bytes include a valid-looking prefix followed by an
+        // invalid UTF-8 continuation byte (0xFF).
+        let raw_bytes: &[u8] = b"/tmp/rubin-data-\xFFdir";
+        let os_str = OsStr::from_bytes(raw_bytes);
+        let input = Path::new(os_str);
+        assert!(input.to_str().is_none(), "fixture must be non-UTF-8");
+
+        let cleaned = super::normalize_data_dir(input)
+            .expect("non-UTF-8 path must not hard-fail — falls through to raw");
+        // Raw bytes are preserved verbatim — no `.` appending, no
+        // separator rewriting, no UTF-8-lossy replacement.
+        assert_eq!(cleaned.as_os_str().as_bytes(), raw_bytes);
     }
 
     /// `lexical_clean` mirrors Go `path/filepath::Clean`. Each case
