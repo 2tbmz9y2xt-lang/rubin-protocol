@@ -284,7 +284,11 @@ fn lexical_clean(input: &str) -> String {
 ///   trailing rooting separator (`"C:\\"`) so `dir.join(leaf)` stays
 ///   drive-rooted rather than collapsing to drive-relative.
 /// - Drive-relative input (`"C:foo"` on Windows): splits as
-///   `("C:", "foo")`, matching Go's drive-relative split.
+///   `("C:.", "foo")` after the `lexical_clean` step — the raw dir
+///   portion is `"C:"`, which Clean normalises to `"C:."` (volume
+///   present, no explicit component) exactly as Go's
+///   `filepath.Dir("C:foo")` does. The subsequent `dir.join(leaf)`
+///   still resolves to `C:foo` on Windows.
 ///
 /// Returns `InvalidInput` if the path is not valid UTF-8 (the helper
 /// relies on byte-level parsing of path separators).

@@ -8,8 +8,8 @@ use rubin_consensus::{
 use serde::{Deserialize, Serialize};
 
 use crate::io_utils::{
-    parse_hex32, read_file_by_path, read_file_from_dir, write_file_atomic_by_path,
-    write_file_exclusive, AtomicWriteError,
+    parse_hex32, read_file_by_path, read_file_from_dir, write_file_atomic,
+    write_file_atomic_by_path, write_file_exclusive, AtomicWriteError,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 
@@ -571,7 +571,17 @@ impl BlockStore {
         let path = self
             .undo_dir
             .join(format!("{}.json", hex::encode(block_hash_bytes)));
-        write_file_atomic_by_path(&path, &raw)
+        // Undo files intentionally stay on the raw `write_file_atomic`
+        // path (no `lexical_clean`) so the writer and the readers
+        // (`get_undo` / `has_undo` / `try_has_undo`, which all go
+        // through `self.undo_dir.join(...)` + raw `fs::read` or
+        // `.is_file()`) share one path-resolution strategy. The
+        // symlink-divergence defense matters for the durable
+        // chainstate / blockstore-index surface (startup read vs
+        // later save); undo files are ephemeral, reorg-scoped, and
+        // keep the Go-baseline symmetric raw-OS resolution so a
+        // written undo is always visible to the corresponding read.
+        write_file_atomic(&path, &raw)
     }
 
     pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
