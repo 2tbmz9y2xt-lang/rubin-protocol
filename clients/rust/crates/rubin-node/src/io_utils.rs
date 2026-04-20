@@ -136,6 +136,82 @@ fn volume_prefix_len(s: &str) -> usize {
     }
 }
 
+/// Lexical path cleanup mirroring Go's `path/filepath::Clean` for the
+/// path shapes `read_file_by_path` accepts. Performs no syscalls — `..`
+/// is collapsed against the preceding component textually, NOT through
+/// symlink resolution.
+///
+/// Without this step, a path like `link/../foo` where `link` is a
+/// symlink to another directory would resolve via the symlink at
+/// `stat()` time, reading a file under the symlink target instead of
+/// the local `foo`. Go applies `Clean` inside `filepath.Dir` so its
+/// `readFileByPath` does not exhibit this divergence; mirroring the
+/// lexical cleanup here keeps cross-client behaviour aligned for
+/// operator-supplied paths (notably `--data-dir` values that may
+/// contain `..` segments combined with symlinks anywhere along the
+/// resolved chain).
+///
+/// Rules (per Go `Clean`):
+///   - Drop each `.` element.
+///   - Eliminate each inner `..` element along with the non-`..`
+///     element immediately preceding it.
+///   - For a rooted path, drop a leading `..` (cannot escape root).
+///   - Collapse runs of consecutive separators into a single separator.
+///   - Empty input becomes `.`; an otherwise empty result becomes `.`.
+///
+/// On Windows both `/` and `\` are treated as separators per Go's
+/// `filepath` package; the canonical separator in the returned string
+/// is `std::path::MAIN_SEPARATOR`.
+fn lexical_clean(input: &str) -> String {
+    #[cfg(windows)]
+    let is_sep = |c: char| c == '/' || c == '\\';
+    #[cfg(not(windows))]
+    let is_sep = |c: char| c == '/';
+
+    let vol_len = volume_prefix_len(input);
+    let vol = &input[..vol_len];
+    let rest = &input[vol_len..];
+    let rooted = rest.starts_with(is_sep);
+
+    let mut parts: Vec<&str> = Vec::new();
+    for component in rest.split(is_sep) {
+        match component {
+            "" | "." => continue,
+            ".." => {
+                if let Some(last) = parts.last() {
+                    if *last != ".." {
+                        parts.pop();
+                        continue;
+                    }
+                }
+                if rooted {
+                    // /.. → /  : drop the parent-of-root reference.
+                    continue;
+                }
+                parts.push("..");
+            }
+            other => parts.push(other),
+        }
+    }
+
+    let sep = std::path::MAIN_SEPARATOR;
+    let mut out = String::with_capacity(input.len());
+    out.push_str(vol);
+    if rooted {
+        out.push(sep);
+    }
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(sep);
+        }
+        out.push_str(p);
+    }
+    if out.len() == vol.len() && !rooted {
+        out.push('.');
+    }
+    out
+}
+
 pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
     // Extract leaf via Go's `filepath.Base` semantics (string-based)
     // rather than `Path::file_name`, which silently SKIPS trailing
@@ -229,7 +305,13 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
             }
         }
     };
-    read_file_from_dir(Path::new(dir_str), leaf)
+    // Lexically clean the dir before passing to read_file_from_dir.
+    // This mirrors Go's `filepath.Dir`, which Cleans the result, so
+    // parent-component `..` segments are textually collapsed instead
+    // of resolved through the OS — defending against symlink-divergence
+    // when the path passes through a symlink before a `..`.
+    let cleaned_dir = lexical_clean(dir_str);
+    read_file_from_dir(Path::new(&cleaned_dir), leaf)
 }
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
@@ -595,7 +677,8 @@ pub fn unique_temp_path(prefix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_file_by_path, read_file_from_dir, sync_dir, unique_temp_path, write_file_atomic,
+        lexical_clean, read_file_by_path, read_file_from_dir, sync_dir, unique_temp_path,
+        write_file_atomic,
     };
     use std::fs;
 
@@ -735,6 +818,80 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `lexical_clean` mirrors Go `path/filepath::Clean`. Each case
+    /// here is verified against Go's documented behaviour for the path
+    /// shapes the storage helpers accept.
+    #[test]
+    fn lexical_clean_matches_go_filepath_clean() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let join = |parts: &[&str]| parts.join(&sep.to_string());
+
+        assert_eq!(lexical_clean(""), ".");
+        assert_eq!(lexical_clean("."), ".");
+        assert_eq!(lexical_clean(".."), "..");
+        assert_eq!(lexical_clean("../"), "..");
+        assert_eq!(lexical_clean("../.."), join(&["..", ".."]));
+        assert_eq!(lexical_clean("../foo"), join(&["..", "foo"]));
+        assert_eq!(lexical_clean("foo/../bar"), "bar");
+        assert_eq!(lexical_clean("foo/./bar"), join(&["foo", "bar"]));
+        assert_eq!(lexical_clean("foo//bar"), join(&["foo", "bar"]));
+        assert_eq!(lexical_clean("link/../foo"), "foo");
+        assert_eq!(lexical_clean("link/.."), ".");
+
+        // Rooted: leading `..` is dropped (cannot escape root).
+        assert_eq!(lexical_clean("/"), format!("{sep}"));
+        assert_eq!(lexical_clean("/.."), format!("{sep}"));
+        assert_eq!(lexical_clean("/../foo"), format!("{sep}foo"));
+        assert_eq!(
+            lexical_clean("/var/data/link/../chainstate.json"),
+            format!("{sep}var{sep}data{sep}chainstate.json")
+        );
+    }
+
+    /// E.10 symlink-divergence defence: lexically-clean dir BEFORE OS
+    /// resolution so `<dir>/link/../foo` reads `<dir>/foo`, not the
+    /// file under wherever `link` resolves. Mirrors Go `filepath.Dir`,
+    /// which Cleans textually and never follows the symlink for `..`
+    /// resolution.
+    ///
+    /// Concretely: `dir/foo` exists with bytes A, `dir/link` is a
+    /// symlink pointing at a sibling directory `dir/other` (which also
+    /// has a `foo` with different bytes B). A read of
+    /// `dir/link/../foo` MUST return A (lexical resolve to `dir/foo`),
+    /// NOT B (symlink-resolve to `dir/other/foo`).
+    #[cfg(unix)]
+    #[test]
+    fn read_file_by_path_lexical_clean_defeats_symlink_divergence() {
+        use std::os::unix::fs as unix_fs;
+
+        let root = unique_temp_path("rubin-io-utils-by-path-symlink-div");
+        fs::create_dir_all(&root).expect("create root");
+
+        let local_foo = root.join("foo");
+        fs::write(&local_foo, b"local-bytes").expect("seed local foo");
+
+        let other = root.join("other");
+        fs::create_dir_all(&other).expect("create other");
+        fs::write(other.join("foo"), b"other-bytes").expect("seed other/foo");
+
+        let link = root.join("link");
+        unix_fs::symlink(&other, &link).expect("symlink link → other");
+
+        // Caller-supplied path: <root>/link/../foo
+        let mut tricky = link.clone().into_os_string();
+        tricky.push("/../foo");
+        let tricky_path = std::path::PathBuf::from(tricky);
+
+        let got = read_file_by_path(&tricky_path).expect("read should succeed lexically");
+        assert_eq!(
+            got, b"local-bytes",
+            "lexical clean must collapse `link/..` textually and read root/foo, \
+             NOT follow the symlink to other/foo"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Smoke test for the E.1 durability contract: a fresh write goes
