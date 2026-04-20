@@ -766,6 +766,17 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     if cfg.data_dir.as_os_str().is_empty() {
         return Err("data_dir is required".to_string());
     }
+    // Normalise `--data-dir` once so every subsystem
+    // (`ChainState::save` / `load_chain_state`, `BlockStore::open`
+    // and its block / header / undo / index sub-directories, etc.)
+    // derives paths from a single lexically-cleaned root. Internal
+    // readers and writers then stay on raw `fs::read` /
+    // `write_file_atomic` and remain symmetric with each other
+    // (block + index surface live in the same physical tree, and a
+    // chainstate read lands on exactly the file a prior chainstate
+    // save produced) — even for operator `--data-dir` values that
+    // cross a symlink combined with `..` segments.
+    cfg.data_dir = rubin_node::normalize_data_dir(&cfg.data_dir)?;
     validate_addr_inner("bind_addr", &cfg.bind_addr, true)?;
     if !cfg.rpc_bind_addr.trim().is_empty() {
         validate_addr_inner("rpc_bind_addr", &cfg.rpc_bind_addr, true)?;

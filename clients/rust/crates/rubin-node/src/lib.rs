@@ -41,6 +41,7 @@ pub use genesis::{
     load_genesis_config, validate_incoming_chain_id, LoadedGenesisConfig,
     PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR,
 };
+pub use io_utils::normalize_data_dir;
 pub use miner::{parse_mine_address_arg, MinedBlock, Miner, MinerConfig};
 pub use p2p_runtime::{default_peer_runtime_config, PeerManager};
 pub use p2p_service::{start_node_p2p_service, NodeP2PServiceConfig, RunningNodeP2PService};

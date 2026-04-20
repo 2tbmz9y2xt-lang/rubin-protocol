@@ -76,11 +76,29 @@ impl ChainState {
         let mut raw =
             serde_json::to_vec_pretty(&disk).map_err(|e| format!("encode chainstate: {e}"))?;
         raw.push(b'\n');
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("create chainstate parent {}: {e}", parent.display()))?;
-        }
+        // Parent creation is delegated to `write_file_atomic`, which
+        // runs `fs::create_dir_all(effective_parent(path))` on the
+        // actual write target. `effective_parent` maps a bare-filename
+        // input (`Path::new("chainstate.json").parent() == Some("")`)
+        // to `Some(".")` so the `create_dir_all` call always receives
+        // a non-empty directory. Running an explicit
+        // `fs::create_dir_all(path.parent())` here — as an earlier
+        // version did — instead passed `""` to `create_dir_all` on
+        // bare-filename callers and failed with an I/O error; this
+        // helper's own `effective_parent` is the correct layer.
+        //
+        // Raw `write_file_atomic`. Paired with `load_chain_state`'s
+        // raw `fs::read` — both use the caller-supplied path
+        // directly, with no per-helper `lexical_clean` step.
+        //
+        // For the node binary, `path` originates from
+        // `chain_state_path(cfg.data_dir)` after `cfg.data_dir` was
+        // cleaned at the CLI parse site, so the startup read and
+        // every subsequent save land on one on-disk file even for
+        // operator `--data-dir` values that cross a symlink
+        // combined with `..`. Other callers of `ChainState::save`
+        // are responsible for their own path hygiene — see
+        // `load_chain_state` for the mirror note.
         write_file_atomic(path, &raw)
     }
 
@@ -282,6 +300,19 @@ pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
 
 pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     let path = path.as_ref();
+    // Raw `fs::read` on a caller-supplied path. Mirrors the Go
+    // `LoadChainState` reader in `clients/go/node/chainstate.go`,
+    // which also uses a caller-supplied path directly.
+    //
+    // For the node binary's own call site, `path` originates from
+    // `chain_state_path(cfg.data_dir)` after `cfg.data_dir` was
+    // lexically cleaned at the CLI parse site (`normalize_data_dir`
+    // in `main.rs`), so the startup read and subsequent
+    // `ChainState::save` writes land on exactly one on-disk file
+    // regardless of whether the operator `--data-dir` contained
+    // symlink+`..` segments. Other callers of this public function
+    // are responsible for their own path hygiene — this helper does
+    // NOT canonicalise or sandbox its input.
     let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ChainState::new()),
@@ -626,6 +657,55 @@ mod tests {
         let got = load_chain_state(&path).expect("load");
         assert_eq!(got, st);
 
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `ChainState::save` must accept a bare-filename path (e.g.
+    /// `"chainstate.json"`) without the pre-write `create_dir_all`
+    /// running against `""`. An earlier version of `save` called
+    /// `fs::create_dir_all(path.parent())` directly; for a
+    /// bare-filename input `path.parent()` is `Some("")` on Unix,
+    /// and `create_dir_all("")` fails with an I/O error. Parent
+    /// creation is delegated to `write_file_atomic` which uses
+    /// `effective_parent` (maps `""` → `.`), so `save("file.json")`
+    /// from the current working directory succeeds.
+    #[test]
+    fn save_accepts_bare_filename_via_effective_parent() {
+        use std::path::Path;
+        use std::process::Command;
+
+        const CHILD_ENV: &str = "RUBIN_CHAINSTATE_BARE_FILENAME_CHILD";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let st = ChainState::new();
+            st.save(Path::new("chainstate.json"))
+                .expect("save with bare filename must not error on empty parent");
+            return;
+        }
+
+        let dir = unique_temp_path("rubin-chainstate-bare-filename");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // Rust's test harness `--exact` mode matches against the
+        // FULLY-QUALIFIED test name (`module::path::test_name`). Just
+        // the leaf name would filter to zero tests, the child process
+        // would exit successfully without running anything, and the
+        // parent `assert!(status.success())` would pass — leaving
+        // this regression test as a silent no-op. Pass the full path
+        // so the child actually re-enters this function through the
+        // `CHILD_ENV`-set branch above.
+        let status = Command::new(std::env::current_exe().expect("current test binary"))
+            .current_dir(&dir)
+            .env(CHILD_ENV, "1")
+            .arg("--exact")
+            .arg("chainstate::tests::save_accepts_bare_filename_via_effective_parent")
+            .status()
+            .expect("spawn child test process");
+
+        assert!(
+            status.success(),
+            "child test process failed for bare filename save"
+        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 

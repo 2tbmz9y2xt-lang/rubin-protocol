@@ -20,6 +20,460 @@ fn next_temp_seq() -> u64 {
     TEMP_SEQ.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// Reject a file name (the leaf component, NOT a full path) that would
+/// escape the directory it is being looked up in (audit `E.10`).
+///
+/// Mirrors the Go `readFileFromDir` guard in
+/// `clients/go/node/safeio.go`:
+///
+/// ```text
+/// if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+///     return invalid
+/// }
+/// ```
+///
+/// Rejected vectors (cross-platform-uniform unless noted):
+/// - empty name (`""`)
+/// - `"."` and `".."` (parent / current dir refs)
+/// - any name containing a `/` separator (would escape `dir` via
+///   `dir.join("../foo")` becoming a traversal — true on every OS)
+/// - any absolute path (`/etc/passwd` would override `dir.join`)
+///
+/// Windows-only additional vectors (gated by `cfg(windows)` to preserve
+/// strict per-OS Go parity — `filepath.Base` on Unix accepts both of
+/// these unchanged):
+/// - any name containing a `\` separator (path separator on Windows)
+/// - any Windows drive-prefixed leaf (`C:foo`, `C:`) — `Path::join`
+///   on a drive-prefixed component REPLACES the base path on Windows,
+///   defeating the dir-rooted contract; harmless on Unix where `:`
+///   has no path-shape semantics.
+///
+/// This is a per-leaf-name guard, not a canonicalization-based sandbox.
+/// It deliberately does NOT follow symlinks or canonicalize, because:
+///   1. blockstore / chainstate readers always synthesize the leaf name
+///      from `hex::encode(hash)` plus a fixed extension, so a legitimate
+///      leaf can never contain a separator;
+///   2. canonicalization would require disk I/O on every read and would
+///      change error semantics on transient I/O failure.
+fn check_safe_file_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(format!("invalid file name: {name:?}"));
+    }
+    if name.contains('/') {
+        return Err(format!("invalid file name: {name:?}"));
+    }
+    if Path::new(name).is_absolute() {
+        return Err(format!("invalid file name: {name:?}"));
+    }
+    // Windows-only hardening: backslash separator + drive-prefix leaf.
+    // Both are no-ops on Unix where `\` is a regular filename byte and
+    // `C:` has no path-shape semantics — so gating them on `cfg(windows)`
+    // matches Go's `filepath.Base` per-OS behaviour exactly.
+    //
+    // Drive-prefix rejection: Go's guard is
+    // `filepath.Base(name) != name`. On Windows `filepath.Base("X:foo")`
+    // strips the 2-byte volume prefix and returns `"foo"` for ANY
+    // byte at `name[0]` (Go matches `path[1] == ':'` unconditionally
+    // in `volumeNameLen`, no ASCII-letter enforcement). So `"1:foo"`,
+    // `":foo"` (2-byte, first byte is `:` — fails len>=2 + bytes[1]==':'
+    // test below, `bytes[1]` is `f`), and `"_:foo"` all get rejected
+    // by Go's guard. Drop the `is_ascii_alphabetic` narrowing here
+    // so the Rust guard covers the same vector set.
+    #[cfg(windows)]
+    {
+        if name.contains('\\') {
+            return Err(format!("invalid file name: {name:?}"));
+        }
+        let bytes = name.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' {
+            return Err(format!("invalid file name: {name:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Read `dir/name` after validating `name` is a safe leaf file name
+/// (audit `E.10`). Mirrors the Go `readFileFromDir` helper in
+/// `clients/go/node/safeio.go` so cross-client storage readers refuse
+/// the same set of traversal / absolute-path / empty-name vectors.
+///
+/// Use this instead of raw `fs::read(dir.join(untrusted_name))` for any
+/// reader where the leaf name comes from data that could in principle
+/// be attacker-influenced (block index entries, on-disk headers, etc.)
+/// even when the current call sites synthesize the name from a fixed
+/// `hex::encode(hash) + ".bin"` shape.
+pub fn read_file_from_dir(dir: &Path, name: &str) -> Result<Vec<u8>, std::io::Error> {
+    if let Err(msg) = check_safe_file_name(name) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
+    }
+    fs::read(dir.join(name))
+}
+
+/// Length of the volume prefix at the start of `s`. Mirrors Go
+/// `internal/filepathlite/path_windows.go::volumeNameLen` byte-for-byte.
+///
+/// Path shapes recognised (each case mirrors Go's switch arm):
+/// - drive letter: `C:` → 2 (`C:foo`, `C:\foo`, bare `C:`, `2:`
+///   — Go does not enforce ASCII-letter range; we follow)
+/// - no leading separator → 0 (relative / Unix-style)
+/// - Local Device UNC forward: `\\.\UNC\HOST\SHARE\...` → uncLen
+///   starting after the `\\.\UNC\` prefix (8 bytes)
+/// - Local Device / Root Local Device: `\\.\X`, `\\?\X`, `\??\X` →
+///   next segment after the 3-char prefix is part of the volume
+///   (matches Go issue #64028: `Clean("\\?\c:\")` must keep trailing
+///   `\` because the `c:` segment is still the volume)
+/// - Two-leading-separator UNC: `\\HOST\SHARE...` → uncLen from pos 2
+/// - anything else → 0
+///
+/// Returns 0 on non-Windows builds.
+fn volume_prefix_len(s: &str) -> usize {
+    #[cfg(windows)]
+    {
+        let bytes = s.as_bytes();
+        // Drive letter — Go matches on `path[1] == ':'` without
+        // enforcing that `path[0]` is a letter. Mirror that.
+        if bytes.len() >= 2 && bytes[1] == b':' {
+            return 2;
+        }
+        if bytes.is_empty() || !is_path_separator_byte(bytes[0]) {
+            return 0;
+        }
+        // Local Device UNC forward: `\\.\UNC\...`. Go treats the
+        // HOST and SHARE after `\\.\UNC\` as part of the volume.
+        if path_has_prefix_fold(bytes, br"\\.\UNC") {
+            return unc_len(bytes, br"\\.\UNC\".len());
+        }
+        // Local / Root Local Device: `\\.` / `\\?` / `\??`.
+        // The next component after the 3-byte prefix is part of the
+        // volume, so `\\?\C:` (6) and `\??\C:` (6) both include the
+        // `C:` segment as volume. Exact match (len == 3) returns 3.
+        if path_has_prefix_fold(bytes, br"\\.")
+            || path_has_prefix_fold(bytes, br"\\?")
+            || path_has_prefix_fold(bytes, br"\??")
+        {
+            if bytes.len() == 3 {
+                return 3;
+            }
+            // Go: `_, rest, ok := cutPath(path[4:])`. Prefix + sep is
+            // 4 bytes (`\\?\`, `\??\`, etc.). If `path[4:]` is empty,
+            // cutPath returns ok=false and Go returns len(path).
+            if 4 >= bytes.len() {
+                return bytes.len();
+            }
+            let tail = &bytes[4..];
+            match cut_first_separator(tail) {
+                None => bytes.len(),
+                Some((_before_end, after_start_in_tail)) => {
+                    // Go: `return len(path) - len(rest) - 1`.
+                    let rest_len = tail.len() - after_start_in_tail;
+                    bytes.len() - rest_len - 1
+                }
+            }
+        } else if bytes.len() >= 2 && is_path_separator_byte(bytes[1]) {
+            // Two-leading-separator UNC: `\\HOST\SHARE...`.
+            unc_len(bytes, 2)
+        } else {
+            0
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = s;
+        0
+    }
+}
+
+#[cfg(windows)]
+#[inline]
+fn is_path_separator_byte(c: u8) -> bool {
+    c == b'/' || c == b'\\'
+}
+
+#[cfg(windows)]
+#[inline]
+fn ascii_upper(c: u8) -> u8 {
+    if c >= b'a' && c <= b'z' {
+        c - 32
+    } else {
+        c
+    }
+}
+
+/// Mirrors Go `pathHasPrefixFold`: ignore ASCII case on non-separator
+/// bytes; treat any separator in `prefix` as matching any separator
+/// in `s`; require `s[len(prefix)]` to be a separator if `s` is
+/// strictly longer than `prefix`.
+#[cfg(windows)]
+fn path_has_prefix_fold(s: &[u8], prefix: &[u8]) -> bool {
+    if s.len() < prefix.len() {
+        return false;
+    }
+    for i in 0..prefix.len() {
+        if is_path_separator_byte(prefix[i]) {
+            if !is_path_separator_byte(s[i]) {
+                return false;
+            }
+        } else if ascii_upper(prefix[i]) != ascii_upper(s[i]) {
+            return false;
+        }
+    }
+    if s.len() > prefix.len() && !is_path_separator_byte(s[prefix.len()]) {
+        return false;
+    }
+    true
+}
+
+/// Mirrors Go `uncLen`: returns the index of the second path
+/// separator at or after `prefix_len`. If fewer than two separators
+/// remain, returns `path.len()` (matches Go's fall-through).
+#[cfg(windows)]
+fn unc_len(path: &[u8], prefix_len: usize) -> usize {
+    let mut count = 0usize;
+    let mut i = prefix_len;
+    while i < path.len() {
+        if is_path_separator_byte(path[i]) {
+            count += 1;
+            if count == 2 {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    path.len()
+}
+
+/// Mirrors Go `cutPath`: scan for the first separator in `tail`;
+/// return `Some((before_end, after_start))` with slicing indices
+/// into `tail`. `None` means no separator exists in `tail`.
+#[cfg(windows)]
+fn cut_first_separator(tail: &[u8]) -> Option<(usize, usize)> {
+    for (i, &b) in tail.iter().enumerate() {
+        if is_path_separator_byte(b) {
+            return Some((i, i + 1));
+        }
+    }
+    None
+}
+
+/// Lexical path cleanup mirroring Go's `path/filepath::Clean` for the
+/// `--data-dir` path shapes `normalize_data_dir` passes in (drive,
+/// UNC, Local Device, Root Local Device, POSIX absolute, and
+/// relative paths with `.` / `..` segments). Performs no syscalls —
+/// `..` is collapsed against the preceding component textually, NOT
+/// through symlink resolution.
+///
+/// Called once per node startup from `normalize_data_dir`, which
+/// cleans `cfg.data_dir` at the CLI parse site so every subsystem
+/// that derives a path from it sees an already-normalised root.
+/// Without this step, a path like `link/../foo` where `link` is a
+/// symlink to another directory would resolve via the symlink at
+/// `stat()` time, reading a file under the symlink target instead
+/// of the local `foo`; applying the lexical cleanup once at CLI
+/// keeps cross-client behaviour aligned for operator-supplied
+/// `--data-dir` values that may contain `..` segments combined with
+/// symlinks anywhere along the resolved chain.
+///
+/// Rules (per Go `Clean`):
+///   - Drop each `.` element.
+///   - Eliminate each inner `..` element along with the non-`..`
+///     element immediately preceding it.
+///   - For a rooted path, drop a leading `..` (cannot escape root).
+///   - Collapse runs of consecutive separators into a single separator.
+///   - Empty input becomes `.`; an otherwise empty result becomes `.`.
+///
+/// On Windows both `/` and `\` are treated as separators per Go's
+/// `filepath` package; the canonical separator in the returned string
+/// is `std::path::MAIN_SEPARATOR`.
+pub(crate) fn lexical_clean(input: &str) -> String {
+    #[cfg(windows)]
+    let is_sep = |c: char| c == '/' || c == '\\';
+    #[cfg(not(windows))]
+    let is_sep = |c: char| c == '/';
+
+    let vol_len = volume_prefix_len(input);
+    let vol = &input[..vol_len];
+    let rest = &input[vol_len..];
+    let rooted = rest.chars().next().is_some_and(is_sep);
+
+    let mut parts: Vec<&str> = Vec::new();
+    for component in rest.split(is_sep) {
+        match component {
+            "" | "." => continue,
+            ".." => {
+                if let Some(last) = parts.last() {
+                    if *last != ".." {
+                        parts.pop();
+                        continue;
+                    }
+                }
+                if rooted {
+                    // /.. → /  : drop the parent-of-root reference.
+                    continue;
+                }
+                parts.push("..");
+            }
+            other => parts.push(other),
+        }
+    }
+
+    let sep = std::path::MAIN_SEPARATOR;
+    let mut out = String::with_capacity(input.len());
+    out.push_str(vol);
+    if rooted {
+        out.push(sep);
+    }
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(sep);
+        }
+        out.push_str(p);
+    }
+    // Append the `.` fallback only for the cases where Go's `Clean`
+    // actually emits one:
+    //   - No volume, no root, no parts: plain relative current-dir.
+    //   - Drive-letter volume (e.g. `C:`) with empty rest: Go's
+    //     `Clean("C:") = "C:."` (drive-relative current on that drive).
+    // UNC / DOS-device volume roots (any prefix starting with two
+    // path separators: `\\HOST\SHARE`, `\\?\UNC\HOST\SHARE`,
+    // `\\?\C:`) must NOT receive the trailing `.` — Go returns the
+    // volume unchanged there (`filepath.Clean("\\\\server\\share")` =
+    // `"\\\\server\\share"`). Without this guard a UNC volume-only
+    // input would be rewritten to `"\\\\server\\share."`, which is a
+    // different (and invalid) path.
+    let starts_with_double_sep = {
+        let bytes = input.as_bytes();
+        bytes.len() >= 2 && is_sep(bytes[0] as char) && is_sep(bytes[1] as char)
+    };
+    if out.len() == vol.len() && !rooted && !starts_with_double_sep {
+        out.push('.');
+    }
+    // Mirror Go's `return FromSlash(out.string())` at the end of
+    // Clean: on Windows every `/` is replaced with the OS
+    // separator `\`. This canonicalises Windows inputs whose
+    // volume prefix came in with forward slashes (e.g.
+    // `//host/share/foo` → `\\host\share\foo`) and any `/` that
+    // snuck through inside the vol copy. On Unix `MAIN_SEPARATOR`
+    // is `/` so this pass is a no-op (we still guard it with
+    // `cfg(windows)` to keep the output verbatim on non-Windows).
+    #[cfg(windows)]
+    {
+        out = out.replace('/', "\\");
+    }
+
+    // Go `postClean` (path_windows.go:302) — protect against a
+    // relative path being lexically reduced into an absolute /
+    // rooted shape. Only runs when `vol_len == 0` (input had no
+    // recognised volume), mirroring Go's guard
+    // `if out.volLen != 0 || out.buf == nil { return }`.
+    //
+    // Two cases Go defends against:
+    //
+    // 1. First path element contains `:` before any separator —
+    //    e.g. `a/../c:` lexically reduces to `c:` which Windows
+    //    would interpret as a drive-relative reference. Prepend
+    //    `.` + separator so the result stays relative: `.\c:`.
+    //
+    // 2. Output starts with `\??` (Root Local Device prefix) after
+    //    lexical reduction — e.g. `\a\..\??\c:\x` reduces to
+    //    `\??\c:\x`, which would be read as `c:\x` via the NT
+    //    namespace. Prepend separator + `.` so the result is
+    //    `\.\??\c:\x` and the `\??\` is neutralised.
+    //
+    // Both prepends preserve the lexical result bytes intact; they
+    // only neutralise the Windows-specific interpretation. On Unix
+    // these shapes are not meaningful but the prepend is still
+    // harmless for the resulting string.
+    #[cfg(windows)]
+    {
+        if vol_len == 0 && !out.is_empty() {
+            let bytes = out.as_bytes();
+            // Case 1: `:` in first segment before any separator.
+            let mut first_segment_has_colon = false;
+            for &b in bytes.iter() {
+                if is_sep(b as char) {
+                    break;
+                }
+                if b == b':' {
+                    first_segment_has_colon = true;
+                    break;
+                }
+            }
+            if first_segment_has_colon {
+                let mut prepended = String::with_capacity(out.len() + 2);
+                prepended.push('.');
+                prepended.push(sep);
+                prepended.push_str(&out);
+                out = prepended;
+            } else if bytes.len() >= 3
+                && is_sep(bytes[0] as char)
+                && bytes[1] == b'?'
+                && bytes[2] == b'?'
+            {
+                // Case 2: starts with `\??`.
+                let mut prepended = String::with_capacity(out.len() + 2);
+                prepended.push(sep);
+                prepended.push('.');
+                prepended.push_str(&out);
+                out = prepended;
+            }
+        }
+    }
+    out
+}
+
+/// Normalise an operator-supplied `--data-dir` once at the CLI parse
+/// site so every subsystem that derives a path from it
+/// (`ChainState::save` / `load_chain_state`, `BlockStore::open` and
+/// its blocks / headers / undo / index sub-directories, etc.) sees
+/// the same already-cleaned root. With the root normalised once,
+/// internal readers and writers can stay on raw `fs::read` /
+/// `write_file_atomic` and remain symmetric with each other — there
+/// is no per-helper `lexical_clean` step that could diverge between
+/// read and write for operator paths that cross a symlink combined
+/// with `..`.
+///
+/// If `path` is valid UTF-8, applies `lexical_clean` to its string
+/// form and returns the cleaned `PathBuf`. If `path` is not valid
+/// UTF-8, returns it unchanged: `lexical_clean` is string-based, and
+/// preserving the original OS-native path avoids rejecting otherwise
+/// valid non-UTF-8 filesystem paths on unusual setups.
+pub fn normalize_data_dir(path: &Path) -> Result<PathBuf, String> {
+    match path.to_str() {
+        Some(s) => Ok(PathBuf::from(lexical_clean(s))),
+        None => {
+            // Non-UTF-8 path: `lexical_clean` is string-based and
+            // cannot run on the raw bytes. Rather than hard-fail
+            // startup for an otherwise valid OS-level path (on Unix
+            // `PathBuf` can hold arbitrary bytes; `default_data_dir`
+            // derives its path from `env::var_os("HOME")` which may
+            // legitimately be non-UTF-8), pass the path through
+            // unchanged. Plain `fs::read` / `fs::write` are
+            // byte-transparent and worked on the pre-CLI-normalize
+            // codebase for these paths, so we preserve that
+            // compatibility. The cost for this edge case is that a
+            // non-UTF-8 operator `--data-dir` with symlink+`..`
+            // shapes bypasses the CLI-level lexical cleanup — rare
+            // enough that we accept the trade-off over breaking
+            // the startup path.
+            Ok(path.to_path_buf())
+        }
+    }
+}
+
+// Historical helpers `resolve_io_path_dir_leaf`, `read_file_by_path`,
+// and `write_file_atomic_by_path` used to sit here. They applied
+// `lexical_clean` to the dir portion of a caller-supplied full path
+// so that symlink-divergence on an operator `--data-dir` could be
+// defeated at the per-read / per-write site. After adopting
+// CLI-level normalisation via `normalize_data_dir` in `main.rs`,
+// every subsystem now receives a pre-cleaned data-dir and can stay
+// on raw `fs::read` / `write_file_atomic`; the per-helper cleaning
+// step is no longer needed (and having it at some call sites but
+// not others reintroduced asymmetries between chainstate and
+// blockstore surfaces). The removed helpers and their regression
+// tests lived in git history; the CLI-level approach is the single
+// resolution strategy the whole node now uses.
+
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(value).map_err(|e| format!("{name}: {e}"))?;
     if bytes.len() != 32 {
@@ -382,8 +836,309 @@ pub fn unique_temp_path(prefix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{sync_dir, unique_temp_path, write_file_atomic};
+    use super::{
+        lexical_clean, read_file_from_dir, sync_dir, unique_temp_path, volume_prefix_len,
+        write_file_atomic,
+    };
     use std::fs;
+
+    /// E.10 parity: `read_file_from_dir` mirrors Go `readFileFromDir`.
+    /// Rejected vectors (must surface `InvalidInput`):
+    ///   `""`, `"."`, `".."`, `"../etc/passwd"`, `"sub/file"`,
+    ///   `"/etc/passwd"`.
+    /// Accepted: a real leaf name pointing at a file inside `dir`.
+    #[test]
+    fn read_file_from_dir_rejects_traversal_and_absolute_and_empty() {
+        let dir = unique_temp_path("rubin-io-utils-safe-read");
+        fs::create_dir_all(&dir).expect("create test dir");
+
+        // Cross-platform-uniform rejected vectors (Go-twin parity on
+        // every OS).
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../etc/passwd",
+            "sub/file",
+            "/etc/passwd", // absolute Unix
+        ] {
+            match read_file_from_dir(&dir, bad) {
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+                Err(e) => panic!("expected InvalidInput for {bad:?}, got {:?}: {e}", e.kind()),
+                Ok(_) => panic!("expected error for {bad:?}, got Ok"),
+            }
+        }
+
+        // Windows-only rejected vectors: backslash separator + drive-
+        // prefix leaf. On Unix these are valid filename bytes (Go's
+        // `filepath.Base` accepts them too) — gating on cfg(windows)
+        // preserves strict per-OS Go parity.
+        #[cfg(windows)]
+        for bad in [
+            "sub\\file", // backslash separator (path separator on Windows)
+            "C:foo",     // drive-prefixed leaf — Path::join replaces base on Windows
+            "C:",
+            "z:bar",
+            // Go's `filepath.Base(name) != name` guard rejects ANY
+            // byte at position 0 paired with `:` at position 1 —
+            // Go's volumeNameLen matches `path[1] == ':'` without
+            // letter enforcement. Cover the non-alphabetic vectors
+            // to pin the same coverage.
+            "1:foo",
+            "_:foo",
+            "0:",
+        ] {
+            match read_file_from_dir(&dir, bad) {
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {}
+                Err(e) => panic!("expected InvalidInput for {bad:?}, got {:?}: {e}", e.kind()),
+                Ok(_) => panic!("expected error for {bad:?}, got Ok"),
+            }
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// E.10 happy path: a real leaf name reads back the bytes.
+    #[test]
+    fn read_file_from_dir_reads_inside_root() {
+        let dir = unique_temp_path("rubin-io-utils-safe-read-ok");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let leaf = "ok.bin";
+        fs::write(dir.join(leaf), b"hi").expect("seed");
+
+        let got = read_file_from_dir(&dir, leaf).expect("read leaf");
+        assert_eq!(got, b"hi");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `normalize_data_dir` must pass non-UTF-8 Unix paths through
+    /// unchanged rather than hard-fail. On Unix `PathBuf` can hold
+    /// arbitrary bytes (e.g. when `default_data_dir` derives the
+    /// path from `env::var_os("HOME")` and `$HOME` is not valid
+    /// UTF-8). Hard-failing here would regress startup for
+    /// otherwise-valid OS-level paths that `fs::read` / `fs::write`
+    /// handle correctly. The trade-off: non-UTF-8 operator
+    /// `--data-dir` values bypass the lexical cleanup, which is
+    /// acceptable for this rare edge case.
+    #[cfg(unix)]
+    #[test]
+    fn normalize_data_dir_preserves_non_utf8_unix_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        // Bytes include a valid-looking prefix followed by an
+        // invalid UTF-8 continuation byte (0xFF).
+        let raw_bytes: &[u8] = b"/tmp/rubin-data-\xFFdir";
+        let os_str = OsStr::from_bytes(raw_bytes);
+        let input = Path::new(os_str);
+        assert!(input.to_str().is_none(), "fixture must be non-UTF-8");
+
+        let cleaned = super::normalize_data_dir(input)
+            .expect("non-UTF-8 path must not hard-fail — falls through to raw");
+        // Raw bytes are preserved verbatim — no `.` appending, no
+        // separator rewriting, no UTF-8-lossy replacement.
+        assert_eq!(cleaned.as_os_str().as_bytes(), raw_bytes);
+    }
+
+    /// `lexical_clean` mirrors Go `path/filepath::Clean`. Each case
+    /// here is verified against Go's documented behaviour for the path
+    /// shapes the storage helpers accept.
+    #[test]
+    fn lexical_clean_matches_go_filepath_clean() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let join = |parts: &[&str]| parts.join(&sep.to_string());
+
+        assert_eq!(lexical_clean(""), ".");
+        assert_eq!(lexical_clean("."), ".");
+        assert_eq!(lexical_clean(".."), "..");
+        assert_eq!(lexical_clean("../"), "..");
+        assert_eq!(lexical_clean("../.."), join(&["..", ".."]));
+        assert_eq!(lexical_clean("../foo"), join(&["..", "foo"]));
+        assert_eq!(lexical_clean("foo/../bar"), "bar");
+        assert_eq!(lexical_clean("foo/./bar"), join(&["foo", "bar"]));
+        assert_eq!(lexical_clean("foo//bar"), join(&["foo", "bar"]));
+        assert_eq!(lexical_clean("link/../foo"), "foo");
+        assert_eq!(lexical_clean("link/.."), ".");
+
+        // Rooted: leading `..` is dropped (cannot escape root).
+        assert_eq!(lexical_clean("/"), format!("{sep}"));
+        assert_eq!(lexical_clean("/.."), format!("{sep}"));
+        assert_eq!(lexical_clean("/../foo"), format!("{sep}foo"));
+        assert_eq!(
+            lexical_clean("/var/data/link/../chainstate.json"),
+            format!("{sep}var{sep}data{sep}chainstate.json")
+        );
+    }
+
+    /// Windows UNC and DOS-device volume-only inputs must pass
+    /// through `lexical_clean` unchanged. Go's `filepath.Clean`
+    /// special-cases this: when the volume is the whole path and the
+    /// input starts with two path separators (UNC / DOS device), the
+    /// volume is returned as-is — NOT with a trailing `.` appended
+    /// (that `.` fallback is only for no-volume empty results and for
+    /// drive-letter-only inputs where Go returns `"C:."`).
+    ///
+    /// Without that special case a UNC volume root would be rewritten
+    /// to a different (and invalid) path, e.g.
+    /// `"\\\\server\\share"` → `"\\\\server\\share."`.
+    #[cfg(windows)]
+    #[test]
+    fn lexical_clean_preserves_unc_volume_roots() {
+        // Plain UNC volume root.
+        assert_eq!(lexical_clean("\\\\server\\share"), "\\\\server\\share");
+        // DOS-device UNC volume root.
+        assert_eq!(
+            lexical_clean("\\\\?\\UNC\\server\\share"),
+            "\\\\?\\UNC\\server\\share"
+        );
+        // Drive-letter volume with empty rest still gets the `.`
+        // (Go parity: `filepath.Clean("C:") = "C:."`).
+        assert_eq!(lexical_clean("C:"), "C:.");
+        // UNC volume root with trailing separator collapses the
+        // trailing sep but keeps the volume intact.
+        assert_eq!(lexical_clean("\\\\server\\share\\"), "\\\\server\\share\\");
+    }
+
+    /// `volume_prefix_len` must match Go `filepath.VolumeName` length
+    /// on every path shape the `lexical_clean` helper may encounter.
+    /// Reference: Go's own `volumenametests` table in
+    /// `src/path/filepath/path_test.go` + `volumeNameLen` in
+    /// `src/internal/filepathlite/path_windows.go`. Non-Windows input
+    /// always returns 0.
+    ///
+    /// Case classes covered:
+    /// - Drive letter (`C:`) — Go matches `path[1] == ':'` without
+    ///   enforcing ASCII-letter range, so `1:`, `2:`, `:` (len<2) all
+    ///   follow Go's own rule.
+    /// - UNC (`\\HOST\SHARE`) — volume is through share (two seps).
+    /// - Local Device UNC (`\\.\UNC\HOST\SHARE`) — case 3 in Go's
+    ///   switch; UncLen-based, includes host + share.
+    /// - Local / Root Local Device (`\\.\X`, `\\?\X`, `\??\X`) — next
+    ///   segment after the 3-byte prefix is part of the volume. For
+    ///   `\\?\UNC\host\share` this means volume = `\\?\UNC` (7), NOT
+    ///   the full UNC path.
+    /// - `\??\` specifically — Root Local Device; an earlier version
+    ///   of this port missed it because it required two leading
+    ///   separators, but Go's `pathHasPrefixFold` match works with a
+    ///   single leading sep + `??`.
+    /// - Malformed-prefix cases return `len(path)` (Go fail-closed).
+    #[test]
+    fn volume_prefix_len_matches_go_filepath_volumename() {
+        // Unix-style / relative / non-volume input: always 0.
+        for s in ["", "foo", "/foo", "/foo/bar", "foo/bar", "."] {
+            assert_eq!(volume_prefix_len(s), 0, "non-volume input {s:?}");
+        }
+
+        // Windows-gated cases: the byte-level parser runs only when
+        // this crate is compiled for Windows. Run the full table
+        // there; on non-Windows the function short-circuits to 0 so
+        // assertions in this block would fail.
+        #[cfg(windows)]
+        {
+            // Drive-letter family.
+            assert_eq!(volume_prefix_len("C:"), 2);
+            assert_eq!(volume_prefix_len("C:foo"), 2);
+            assert_eq!(volume_prefix_len("C:\\"), 2);
+            assert_eq!(volume_prefix_len("C:\\foo"), 2);
+            assert_eq!(volume_prefix_len("c:\\foo"), 2);
+            // Go matches `path[1] == ':'` without enforcing letter,
+            // so `2:` IS a "drive-letter" shape per Go's own test
+            // table (`{"2:", "2:"}`).
+            assert_eq!(volume_prefix_len("2:"), 2);
+            // One-byte / empty / no colon: 0.
+            assert_eq!(volume_prefix_len(":foo"), 0);
+
+            // Plain UNC (case 5: two leading seps + uncLen).
+            assert_eq!(volume_prefix_len("\\\\host\\share"), 12);
+            assert_eq!(volume_prefix_len("\\\\host\\share\\"), 12);
+            assert_eq!(volume_prefix_len("\\\\host\\share\\foo"), 12);
+            assert_eq!(volume_prefix_len("//host/share/foo"), 12);
+
+            // Malformed UNC prefixes: Go returns `len(path)`.
+            assert_eq!(volume_prefix_len("\\\\"), 2);
+            assert_eq!(volume_prefix_len("\\\\host"), 6);
+            assert_eq!(volume_prefix_len("\\\\host\\"), 7);
+
+            // Local Device / Root Local Device (case 4): next
+            // segment after the 3-byte prefix is volume.
+            assert_eq!(volume_prefix_len("\\\\?\\C:"), 6);
+            assert_eq!(volume_prefix_len("\\\\?\\C:\\foo"), 6);
+            assert_eq!(volume_prefix_len("\\\\.\\C:"), 6);
+            assert_eq!(volume_prefix_len("\\\\.\\C:\\foo"), 6);
+            // Root Local Device via `\??\` — ONE leading sep + `??`.
+            // Missed by the previous two-leading-separator-only
+            // detector.
+            assert_eq!(volume_prefix_len("\\??\\C:"), 6);
+            assert_eq!(volume_prefix_len("\\??\\C:\\foo"), 6);
+            assert_eq!(volume_prefix_len("\\??\\NUL"), 7);
+            // Exact prefix length 3 → return 3.
+            assert_eq!(volume_prefix_len("\\\\?"), 3);
+            assert_eq!(volume_prefix_len("\\\\."), 3);
+            assert_eq!(volume_prefix_len("\\??"), 3);
+            // Empty tail after 4-byte prefix → full path length.
+            assert_eq!(volume_prefix_len("\\\\?\\"), 4);
+            assert_eq!(volume_prefix_len("\\??\\"), 4);
+
+            // DOS-device UNC forward (case 3): only `\\.\UNC\` form.
+            // `\\.\UNC\host\share` uses uncLen → full 18 chars.
+            assert_eq!(volume_prefix_len("\\\\.\\UNC\\host\\share"), 18);
+            assert_eq!(volume_prefix_len("\\\\.\\UNC\\host\\share\\foo"), 18);
+            // `\\?\UNC\host\share` falls into case 4 (not case 3),
+            // so volume is just `\\?\UNC` (7). This differs from the
+            // previous port which incorrectly returned the full UNC
+            // length here — Go's switch routes `\\?\UNC...` through
+            // the Root Local Device arm, not the `\\.\UNC` arm.
+            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share"), 7);
+            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share\\foo"), 7);
+            assert_eq!(volume_prefix_len("\\\\?\\UNC"), 7);
+        }
+    }
+
+    /// `lexical_clean` must canonicalise forward slashes inside the
+    /// VOLUME prefix on Windows — Go's `Clean` ends with
+    /// `FromSlash(out.string())` which replaces every `/` with `\`.
+    /// Inputs like `//host/share/foo` (UNC with forward slashes, a
+    /// shape Windows accepts) must come out as `\\host\share\foo`,
+    /// NOT `//host/share\foo` (which would mix separators and
+    /// diverge from Go).
+    #[cfg(windows)]
+    #[test]
+    fn lexical_clean_canonicalises_forward_slashes_in_volume_prefix() {
+        // UNC with forward slashes in vol → backslash-canonical UNC.
+        assert_eq!(lexical_clean("//host/share/foo"), "\\\\host\\share\\foo");
+        // Trailing / on pure UNC vol stays a single trailing `\`.
+        assert_eq!(lexical_clean("//host/share/"), "\\\\host\\share\\");
+        // Mixed separators inside the path body collapse to `\`.
+        assert_eq!(lexical_clean("C:/foo/bar"), "C:\\foo\\bar");
+    }
+
+    /// `lexical_clean` must apply Go's Windows `postClean` safeguard
+    /// on a build targeting Windows: a relative input that lexically
+    /// reduces into a path whose first segment contains `:` (e.g.
+    /// `a/../C:\node` → `C:\node`) must be prepended with `.\` so the
+    /// result stays relative (`.\C:\node`). Similarly, a path that
+    /// lexically reduces to start with `\??` (Root Local Device
+    /// prefix) must be prepended with `\.` to neutralise the NT
+    /// namespace interpretation.
+    ///
+    /// Reference: Go `internal/filepathlite/path_windows.go::postClean`.
+    /// Non-Windows builds do not run postClean — the result stays as
+    /// the raw lexical reduction.
+    #[cfg(windows)]
+    #[test]
+    fn lexical_clean_postclean_protects_against_drive_and_device_rewrites() {
+        // Case 1: relative path reduces to drive-qualified shape.
+        assert_eq!(lexical_clean("a/../C:\\node"), ".\\C:\\node");
+        assert_eq!(lexical_clean("a\\..\\c:"), ".\\c:");
+        // Case 2: relative path reduces to Root Local Device shape.
+        assert_eq!(lexical_clean("\\a\\..\\??\\c:\\x"), "\\.\\??\\c:\\x");
+        assert_eq!(lexical_clean("\\??\\c:\\x"), "\\??\\c:\\x"); // vol_len != 0
+                                                                 // Sanity: a plain relative path with no colon / `\??` stays
+                                                                 // unchanged by postClean.
+        assert_eq!(lexical_clean("foo/bar"), "foo\\bar");
+    }
 
     /// Smoke test for the E.1 durability contract: a fresh write goes
     /// through OpenOptions + sync_all + rename + parent dir-sync without

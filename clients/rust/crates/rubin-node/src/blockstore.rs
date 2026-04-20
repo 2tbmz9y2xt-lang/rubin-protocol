@@ -7,8 +7,11 @@ use rubin_consensus::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::io_utils::{parse_hex32, write_file_atomic, write_file_exclusive, AtomicWriteError};
+use crate::io_utils::{
+    parse_hex32, read_file_from_dir, write_file_atomic, write_file_exclusive, AtomicWriteError,
+};
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
+use std::ffi::OsStr;
 
 pub const BLOCK_STORE_DIR_NAME: &str = "blockstore";
 const BLOCK_STORE_INDEX_VERSION: u32 = 1;
@@ -363,17 +366,26 @@ impl BlockStore {
     }
 
     pub fn get_block_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
-        let path = self
-            .blocks_dir
-            .join(format!("{}.bin", hex::encode(block_hash_bytes)));
-        fs::read(&path).map_err(|e| format!("read block {}: {e}", path.display()))
+        // E.10: route through `read_file_from_dir` so the leaf name is
+        // validated against the same traversal / absolute-path / empty-name
+        // guard Go enforces in `readFileFromDir`. The synthesized
+        // `<hex>.bin` cannot in practice contain a separator, but the
+        // guard removes the entire class of "leaf name from on-disk
+        // index drift becomes a traversal" without runtime cost.
+        let name = format!("{}.bin", hex::encode(block_hash_bytes));
+        read_file_from_dir(&self.blocks_dir, &name)
+            .map_err(|e| format!("read block {}: {e}", self.blocks_dir.join(&name).display()))
     }
 
     pub fn get_header_by_hash(&self, block_hash_bytes: [u8; 32]) -> Result<Vec<u8>, String> {
-        let path = self
-            .headers_dir
-            .join(format!("{}.bin", hex::encode(block_hash_bytes)));
-        fs::read(&path).map_err(|e| format!("read header {}: {e}", path.display()))
+        // E.10: see `get_block_by_hash` doc.
+        let name = format!("{}.bin", hex::encode(block_hash_bytes));
+        read_file_from_dir(&self.headers_dir, &name).map_err(|e| {
+            format!(
+                "read header {}: {e}",
+                self.headers_dir.join(&name).display()
+            )
+        })
     }
 
     pub fn has_block(&self, block_hash_bytes: [u8; 32]) -> bool {
@@ -559,14 +571,32 @@ impl BlockStore {
         let path = self
             .undo_dir
             .join(format!("{}.json", hex::encode(block_hash_bytes)));
+        // Undo files intentionally stay on the raw `write_file_atomic`
+        // path (no `lexical_clean`). Writer and readers share one
+        // dir-resolution strategy:
+        //   - `get_undo`     → `read_file_from_dir(&self.undo_dir, ...)`
+        //     (E.10 leaf-name guard on the leaf, NO `lexical_clean`
+        //     on `self.undo_dir`)
+        //   - `has_undo`     → `self.undo_dir.join(...).is_file()`
+        //   - `try_has_undo` → `try_has_file_at(&self.undo_dir.join(...))`
+        // None of them apply `lexical_clean` to `self.undo_dir`, so
+        // keeping the writer on raw `write_file_atomic` means a write
+        // that goes to `self.undo_dir.join(<hex>.json)` is the exact
+        // same path the readers probe. The symlink-divergence
+        // defense matters for the durable chainstate /
+        // blockstore-index surface (startup read vs later save
+        // under an operator `--data-dir` that crosses a symlink);
+        // undo files are ephemeral and reorg-scoped, and keep the
+        // Go-baseline symmetric raw-OS resolution so a freshly
+        // written undo is always visible to the corresponding read.
         write_file_atomic(&path, &raw)
     }
 
     pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
-        let path = self
-            .undo_dir
-            .join(format!("{}.json", hex::encode(block_hash_bytes)));
-        let raw = fs::read(&path).map_err(|e| format!("read undo {}: {e}", path.display()))?;
+        // E.10: see `get_block_by_hash` doc.
+        let name = format!("{}.json", hex::encode(block_hash_bytes));
+        let raw = read_file_from_dir(&self.undo_dir, &name)
+            .map_err(|e| format!("read undo {}: {e}", self.undo_dir.join(&name).display()))?;
         unmarshal_block_undo(&raw)
     }
 
@@ -745,7 +775,28 @@ fn try_has_file_at(path: &Path) -> Result<bool, String> {
 }
 
 fn load_blockstore_index(path: &Path) -> Result<BlockStoreIndexDisk, String> {
-    let raw = match fs::read(path) {
+    // Use `read_file_from_dir(parent, file_name)` so the leaf
+    // component still goes through the E.10 leaf-name guard, but
+    // the dir portion is kept AS-IS (no `lexical_clean`) — that
+    // way the index reads from the same physical directory the
+    // block / header / undo readers + writers use when they call
+    // `self.*_dir.join(...)` + raw `fs::read` / `write_file_atomic`.
+    // Operator `--data-dir` is already lexically cleaned once at
+    // the CLI parse site (`normalize_data_dir` in main.rs), so
+    // `path.parent()` here is also pre-cleaned; there is nothing
+    // to clean per-helper and no risk of split persistence between
+    // the index and the block / header / undo files it references.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = match path.file_name().and_then(OsStr::to_str) {
+        Some(s) => s,
+        None => {
+            return Err(format!(
+                "blockstore index path has no valid UTF-8 leaf: {}",
+                path.display()
+            ));
+        }
+    };
+    let raw = match read_file_from_dir(parent, name) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(BlockStoreIndexDisk {
@@ -789,6 +840,12 @@ fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
     let mut raw =
         serde_json::to_vec_pretty(index).map_err(|e| format!("encode blockstore index: {e}"))?;
     raw.push(b'\n');
+    // Keep writer on raw `write_file_atomic` (no `lexical_clean`)
+    // so the index file persists to the same physical directory
+    // that block / header / undo writers use and that
+    // `load_blockstore_index` reads back from. See the comment in
+    // `load_blockstore_index` for the full blockstore-wide symmetry
+    // rationale.
     write_file_atomic(path, &raw)
 }
 
