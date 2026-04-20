@@ -276,10 +276,22 @@ fn lexical_clean(input: &str) -> String {
 /// in both directions):
 /// - All-separator input (`"/"`, `"//"`): returns `("/", "/")`.
 /// - Trailing-separator input (`"/etc/passwd/"`): returns
-///   `("/etc/passwd", "passwd")`, matching Go's Dir/Base pair — the
-///   subsequent join produces `"/etc/passwd/passwd"` and the OS
-///   surfaces ENOENT/ENOTDIR instead of a silent read/write of
-///   `/etc/passwd`.
+///   `("/etc/passwd", "passwd")`, matching Go's Dir/Base pair
+///   exactly. Per Go's own documented `ExampleDir`
+///   (<https://pkg.go.dev/path/filepath#Dir>):
+///
+///       filepath.Dir("/foo/bar/baz/")  → "/foo/bar/baz"
+///       filepath.Dir("/foo/bar/baz")   → "/foo/bar"
+///
+///   The trailing separator changes the result — Go's `Dir` does
+///   NOT strip trailing separators and return the parent-of-parent.
+///   So Go's `readFileByPath("/etc/passwd/")` calls
+///   `readFileFromDir("/etc/passwd", "passwd")` and attempts to
+///   read `"/etc/passwd/passwd"`, which the OS then surfaces as
+///   ENOENT / ENOTDIR. The Rust mirror produces the same path.
+///   This behaviour is deliberate Go-parity — not a divergence —
+///   and is covered by
+///   `read_file_by_path_trailing_separator_does_not_silently_rewrite`.
 /// - Drive-root input (`"C:\\foo"` on Windows): dir preserves the
 ///   trailing rooting separator (`"C:\\"`) so `dir.join(leaf)` stays
 ///   drive-rooted rather than collapsing to drive-relative.
@@ -339,6 +351,13 @@ fn resolve_io_path_dir_leaf(path: &Path) -> Result<(String, String), std::io::Er
         // Go returns `"/"` for both `Dir` and `Base` here.
         ("/", "/")
     } else if had_trailing_sep {
+        // Go parity (see function-level doc for ExampleDir citation):
+        //   filepath.Dir("/foo/bar/baz/")  = "/foo/bar/baz"
+        //   filepath.Base("/foo/bar/baz/") = "baz"
+        // So for trailing-sep input the dir is the TRIMMED path
+        // itself and the leaf is the last component name. The
+        // resulting read/write target is `<trimmed>/<leaf>`, which
+        // surfaces as a real OS error on misuse — identical to Go.
         let leaf = match trimmed.rfind(is_sep) {
             Some(idx) => &trimmed[idx + 1..],
             None => trimmed,
@@ -933,10 +952,22 @@ mod tests {
     /// E.10 trailing-separator semantics: a caller passing
     /// `<dir>/foo/` MUST NOT silently read `<dir>/foo` (which would
     /// be the result of `Path::parent`/`Path::file_name`-style
-    /// stripping). Mirrors Go's `filepath.Dir` + `filepath.Base`,
-    /// where `<dir>/foo/` resolves to dir=`<dir>/foo` + leaf=`foo`,
-    /// so the read attempts `<dir>/foo/foo` and surfaces an OS error
-    /// instead of returning bytes from `<dir>/foo`.
+    /// stripping). This mirrors Go's `filepath.Dir` + `filepath.Base`
+    /// exactly — trailing separator changes the result of `Dir`, it
+    /// does NOT strip the trailing sep and return the parent-of-parent.
+    ///
+    /// Go's own `ExampleDir` (<https://pkg.go.dev/path/filepath#Dir>)
+    /// demonstrates this directly:
+    ///
+    ///     filepath.Dir("/foo/bar/baz/")  → "/foo/bar/baz"
+    ///     filepath.Dir("/foo/bar/baz")   → "/foo/bar"
+    ///
+    /// So for `<dir>/foo/` Go returns dir=`<dir>/foo`, leaf=`foo`;
+    /// the subsequent `readFileFromDir` attempt lands on
+    /// `<dir>/foo/foo` and surfaces ENOENT/ENOTDIR. This test pins
+    /// that Go-parity behaviour — it is NOT a divergence from Go
+    /// and MUST NOT be "fixed" by making the Rust side strip the
+    /// trailing separator (that would be the actual divergence).
     #[test]
     fn read_file_by_path_trailing_separator_does_not_silently_rewrite() {
         let dir = unique_temp_path("rubin-io-utils-by-path-trailing-sep");
