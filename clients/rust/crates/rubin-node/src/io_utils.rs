@@ -318,9 +318,21 @@ fn resolve_io_path_dir_leaf(path: &Path) -> Result<(String, String), std::io::Er
     #[cfg(not(windows))]
     let is_sep = |c: char| c == '/';
 
+    // Empty input is distinct from all-separator input. Go's
+    // `filepath.Dir("")` and `filepath.Base("")` both return `"."`,
+    // and the leaf-name guard then rejects `"."` with
+    // `invalid file name: "."`. Without this branch, empty input
+    // would fall into the all-separator arm below and surface as
+    // `invalid file name: "/"` — a confusing error that implies the
+    // operator passed a rooted path when they passed no path at all.
+    if raw.is_empty() {
+        return Ok((".".to_string(), ".".to_string()));
+    }
     let had_trailing_sep = raw.chars().next_back().is_some_and(is_sep);
     let trimmed = raw.trim_end_matches(is_sep);
     let (dir_str, leaf) = if trimmed.is_empty() {
+        // `raw` is non-empty but all separators (e.g. `"/"`, `"//"`).
+        // Go returns `"/"` for both `Dir` and `Base` here.
         ("/", "/")
     } else if had_trailing_sep {
         let leaf = match trimmed.rfind(is_sep) {
@@ -775,6 +787,7 @@ mod tests {
         volume_prefix_len, write_file_atomic, write_file_atomic_by_path,
     };
     use std::fs;
+    use std::path::Path;
 
     /// E.10 parity: `read_file_from_dir` mirrors Go `readFileFromDir`.
     /// Rejected vectors (must surface `InvalidInput`):
@@ -822,6 +835,45 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Empty-path parity with Go `filepath.Dir("")` / `filepath.Base("")`
+    /// (both return `"."`): the leaf extraction must produce leaf=`"."`
+    /// and the guard must reject it with the `name == "."` branch of
+    /// `check_safe_file_name`, NOT the all-separator `"/"` rejection
+    /// path. Without this branch the empty-input error surfaces as
+    /// `invalid file name: "/"` — confusing because the operator did
+    /// not pass a rooted path.
+    #[test]
+    fn read_file_by_path_empty_input_rejected_as_dot_not_slash() {
+        let err = read_file_by_path(Path::new("")).expect_err("empty path must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\".\""),
+            "expected `\".\"` leaf-guard rejection (Go parity), got: {msg}"
+        );
+        assert!(
+            !msg.contains("\"/\""),
+            "must not fall through to all-separator branch, got: {msg}"
+        );
+    }
+
+    /// Matching Go parity for the write side: `write_file_atomic_by_path`
+    /// uses the same leaf-guard error path as reads, so empty input
+    /// produces `invalid file name: "."` there too.
+    #[test]
+    fn write_file_atomic_by_path_empty_input_rejected_as_dot_not_slash() {
+        let err = write_file_atomic_by_path(Path::new(""), b"bytes")
+            .expect_err("empty path must be rejected");
+        assert!(
+            err.contains("\".\""),
+            "expected `\".\"` leaf-guard rejection (Go parity), got: {err}"
+        );
+        assert!(
+            !err.contains("\"/\""),
+            "must not fall through to all-separator branch, got: {err}"
+        );
     }
 
     /// E.10 happy path: a real leaf name reads back the bytes.

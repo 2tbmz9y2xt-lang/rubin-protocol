@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use rubin_consensus::{
@@ -77,15 +76,19 @@ impl ChainState {
             serde_json::to_vec_pretty(&disk).map_err(|e| format!("encode chainstate: {e}"))?;
         raw.push(b'\n');
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("create chainstate parent {}: {e}", parent.display()))?;
-        }
-        // Use `_by_path` so the write's dir/leaf resolution matches
-        // what `read_file_by_path` does at load time. Without this,
-        // a `--data-dir` that crosses a symlink combined with `..`
-        // segments would read one file on startup and persist to a
-        // different file on subsequent saves.
+        // Parent creation is delegated to `write_file_atomic_by_path`,
+        // which goes through `write_file_atomic::effective_parent` on
+        // the lexically-cleaned target. Creating `path.parent()` here
+        // would operate on the RAW path before cleaning, and for a
+        // `--data-dir` that crosses a symlink combined with `..`
+        // segments it would create or require the wrong directory
+        // (following the symlink out of the intended root) while the
+        // actual write happens at a different, cleaned location.
+        //
+        // Using `_by_path` for the write ensures startup reads and
+        // subsequent saves share the same dir/leaf resolution, so
+        // symlink+`..` operator paths cannot split persistence across
+        // two files.
         write_file_atomic_by_path(path, &raw)
     }
 
