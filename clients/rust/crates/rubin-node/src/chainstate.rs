@@ -686,11 +686,19 @@ mod tests {
         let dir = unique_temp_path("rubin-chainstate-bare-filename");
         std::fs::create_dir_all(&dir).expect("mkdir");
 
+        // Rust's test harness `--exact` mode matches against the
+        // FULLY-QUALIFIED test name (`module::path::test_name`). Just
+        // the leaf name would filter to zero tests, the child process
+        // would exit successfully without running anything, and the
+        // parent `assert!(status.success())` would pass — leaving
+        // this regression test as a silent no-op. Pass the full path
+        // so the child actually re-enters this function through the
+        // `CHILD_ENV`-set branch above.
         let status = Command::new(std::env::current_exe().expect("current test binary"))
             .current_dir(&dir)
             .env(CHILD_ENV, "1")
             .arg("--exact")
-            .arg("save_accepts_bare_filename_via_effective_parent")
+            .arg("chainstate::tests::save_accepts_bare_filename_via_effective_parent")
             .status()
             .expect("spawn child test process");
 
