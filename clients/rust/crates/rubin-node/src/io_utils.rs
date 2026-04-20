@@ -99,35 +99,86 @@ pub fn read_file_from_dir(dir: &Path, name: &str) -> Result<Vec<u8>, std::io::Er
     fs::read(dir.join(name))
 }
 
-/// Read a file by full path after validating only the LEAF component
-/// (not the full path) with the same `E.10` guard `read_file_from_dir`
-/// enforces. Mirrors the Go `readFileByPath` helper in
-/// `clients/go/node/safeio.go` for chainstate-style call sites that
-/// already work with a fully-resolved path
-/// (`<data_dir>/chainstate.json`) and need a drop-in safe reader.
+/// Length of the volume prefix at the start of `s`. Mirrors Go's
+/// `path/filepath/path_windows.go::volumeNameLen` byte-for-byte for
+/// every path shape that helper accepts:
 ///
-/// This is a leaf-name / traversal guard, NOT a sandbox against
-/// arbitrary full-path input: a caller passing `/etc/passwd` will
-/// still read the absolute path because the leaf `"passwd"` passes
-/// the guard. The guard's job is to refuse names that, when treated
-/// as the trailing component, would escape their directory via
-/// `.`/`..`/separators/drive-prefix; full-path sandboxing is the
-/// caller's responsibility (see `chainstate.rs` for an example
-/// where the path is constructed from a trusted data-dir).
-/// Length of the volume prefix at the start of `s`. On Windows, returns
-/// 2 if `s` begins with an ASCII-letter + `:` (drive prefix like `C:`).
-/// On Unix and on Windows non-drive paths, returns 0. Mirrors Go's
-/// `filepath.VolumeName` length contract for the path shapes the
-/// `read_file_by_path` helper accepts (drive-letter paths only — UNC
-/// roots are not exercised by current callers).
+/// - drive-letter: `C:` → 2 (`C:foo`, `C:\foo`, bare `C:`)
+/// - UNC: `\\HOST\SHARE` → len of `\\HOST\SHARE`
+/// - DOS device drive: `\\?\C:` / `\\.\C:` → 6
+/// - DOS device UNC: `\\?\UNC\HOST\SHARE` → len of that prefix
+///
+/// Malformed path shapes (`\\`, `\\host`, `\\host\`, `\\?\UNC\host`
+/// without a share segment) return the full input length to match
+/// Go's fail-closed behaviour — there is no valid path to split.
+/// Returns 0 on Unix and for non-volume-rooted Windows paths.
 fn volume_prefix_len(s: &str) -> usize {
     #[cfg(windows)]
     {
         let bytes = s.as_bytes();
-        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        if bytes.len() < 2 {
+            return 0;
+        }
+        // Drive letter.
+        if bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
             return 2;
         }
-        0
+        let is_slash = |b: u8| b == b'/' || b == b'\\';
+        // UNC / DOS device paths require two leading separators.
+        if !is_slash(bytes[0]) || !is_slash(bytes[1]) {
+            return 0;
+        }
+        // Scan for the next separator starting at `start`. Returns
+        // `(segment_end, rest_start)`. `segment_end == bytes.len()`
+        // means no further separator exists.
+        let cut_at = |start: usize| -> (usize, usize) {
+            let mut i = start;
+            while i < bytes.len() && !is_slash(bytes[i]) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                (i, i + 1)
+            } else {
+                (bytes.len(), bytes.len())
+            }
+        };
+        let (p1_end, after_p1_sep) = cut_at(2);
+        if p1_end == bytes.len() {
+            // `\\` or `\\host` — no separator after host. Go returns
+            // `len(path)`; mirror it.
+            return bytes.len();
+        }
+        let (p2_end, after_p2_sep) = cut_at(after_p1_sep);
+        if p2_end == bytes.len() {
+            // `\\host\share` with no further separator. Go's
+            // `cutPath` returns `ok=false` here and falls through to
+            // `return len(path)` at the matching `if !ok` branch.
+            return bytes.len();
+        }
+        let p1 = &bytes[2..p1_end];
+        // Regular UNC: `\\HOST\SHARE\...` — volume is through share.
+        if p1 != b"." && p1 != b"?" {
+            return p2_end;
+        }
+        let p2 = &bytes[after_p1_sep..p2_end];
+        // DOS device that forwards to UNC: `\\?\UNC\HOST\SHARE\...`.
+        if p2.len() == 3
+            && p2[0].to_ascii_uppercase() == b'U'
+            && p2[1].to_ascii_uppercase() == b'N'
+            && p2[2].to_ascii_uppercase() == b'C'
+        {
+            if after_p2_sep >= bytes.len() {
+                return bytes.len();
+            }
+            let (_host_end, share_start) = cut_at(after_p2_sep);
+            if share_start == bytes.len() {
+                return bytes.len();
+            }
+            let (share_end, _) = cut_at(share_start);
+            return share_end;
+        }
+        // DOS device drive or other DOS device: `\\?\C:` / `\\.\X`.
+        p2_end
     }
     #[cfg(not(windows))]
     {
@@ -212,21 +263,47 @@ fn lexical_clean(input: &str) -> String {
     out
 }
 
-pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
-    // Extract leaf via Go's `filepath.Base` semantics (string-based)
-    // rather than `Path::file_name`, which silently SKIPS trailing
-    // `.` components. With `Path::file_name`, an input like
-    // `"/etc/passwd/."` returns `"passwd"` and would silently read
-    // `/etc/passwd`; Go's `filepath.Base` returns `"."` for the same
-    // input and the leaf-name guard then rejects it.
+/// Split a full path into `(cleaned_dir, leaf)` using the same
+/// dir/leaf derivation `read_file_by_path` and `write_file_atomic_by_path`
+/// share so read-then-write round-trips on the same input path cannot
+/// drift apart. Mirrors Go's `filepath.Dir` + `filepath.Base` pair,
+/// including Go's `filepath.Dir` internal `Clean` step: rooted `..`
+/// segments are collapsed textually (`lexical_clean`), not resolved
+/// through the OS.
+///
+/// Edge-case behaviour (kept identical between the read and write
+/// surfaces so a single operator-supplied path lands on the same file
+/// in both directions):
+/// - All-separator input (`"/"`, `"//"`): returns `("/", "/")`.
+/// - Trailing-separator input (`"/etc/passwd/"`): returns
+///   `("/etc/passwd", "passwd")`, matching Go's Dir/Base pair — the
+///   subsequent join produces `"/etc/passwd/passwd"` and the OS
+///   surfaces ENOENT/ENOTDIR instead of a silent read/write of
+///   `/etc/passwd`.
+/// - Drive-root input (`"C:\\foo"` on Windows): dir preserves the
+///   trailing rooting separator (`"C:\\"`) so `dir.join(leaf)` stays
+///   drive-rooted rather than collapsing to drive-relative.
+/// - Drive-relative input (`"C:foo"` on Windows): splits as
+///   `("C:", "foo")`, matching Go's drive-relative split.
+///
+/// Returns `InvalidInput` if the path is not valid UTF-8 (the helper
+/// relies on byte-level parsing of path separators).
+fn resolve_io_path_dir_leaf(path: &Path) -> Result<(String, String), std::io::Error> {
+    // `Path::file_name`/`Path::parent` silently skip trailing `.`
+    // components: an input like `"/etc/passwd/."` returns
+    // `file_name = "passwd"`, which would make the read target
+    // `/etc/passwd` and bypass the leaf-name guard. Going through
+    // the raw `&str` and mirroring Go's `filepath.Base` keeps that
+    // vector rejected the same way Go rejects it.
     //
     // Per-OS separator parity with Go's `filepath.Base`: on Windows
     // both `'/'` and `'\\'` are treated as separators; on Unix only
-    // `'/'`. Without the cfg(windows) branch, ordinary Windows paths
-    // like `C:\data\chainstate.json` would have no separator match,
-    // the whole string would become the leaf, and `check_safe_file_name`
-    // would reject it (contains `\` / drive prefix), regressing all
-    // Windows reads through this helper.
+    // `'/'`. Without the `cfg(windows)` branch, ordinary Windows
+    // paths like `C:\data\chainstate.json` would have no separator
+    // match, the whole string would become the leaf, and
+    // `check_safe_file_name` would reject it (contains `\` / drive
+    // prefix), regressing every Windows read/write through this
+    // helper.
     let raw = match path.to_str() {
         Some(s) => s,
         None => {
@@ -243,38 +320,24 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
 
     let had_trailing_sep = raw.chars().next_back().is_some_and(is_sep);
     let trimmed = raw.trim_end_matches(is_sep);
-    // Compute (dir, leaf) to match Go's `filepath.Dir`/`filepath.Base`
-    // pair exactly. The notable case is trailing-separator input
-    // `/etc/passwd/`: Go's `Dir` returns `/etc/passwd` (the trimmed
-    // path including the would-be-leaf) and `Base` returns `passwd`,
-    // so Go's `readFileByPath` then attempts `/etc/passwd/passwd`
-    // which surfaces as ENOENT/ENOTDIR — NOT a silent read of
-    // `/etc/passwd`. Mirroring `Path::parent`/`Path::file_name` would
-    // diverge (parent="/etc"+name="passwd" → reads `/etc/passwd`).
     let (dir_str, leaf) = if trimmed.is_empty() {
-        // All-separator input; Go returns "/" for both `Base` and `Dir`.
         ("/", "/")
     } else if had_trailing_sep {
-        // Trailing-separator input. Go: dir = trimmed, leaf = last
-        // path component name. The combined read target is
-        // `<trimmed>/<leaf>` which surfaces a real OS error on
-        // misuse instead of silently rewriting.
         let leaf = match trimmed.rfind(is_sep) {
             Some(idx) => &trimmed[idx + 1..],
             None => trimmed,
         };
         (trimmed, leaf)
     } else {
-        // No trailing separator. Standard split at last separator.
         match trimmed.rfind(is_sep) {
             Some(idx) => {
-                // Preserve the rooting separator when the last separator
-                // is the path's root marker, otherwise the dir loses its
-                // absolute-root semantics:
+                // Preserve the rooting separator when the last
+                // separator is the path's root marker, otherwise the
+                // dir loses its absolute-root semantics:
                 //   - Unix `/foo`        → idx=0, dir must be `/`
-                //   - Windows `C:\foo`   → idx=2 right after drive vol,
-                //     dir must be `C:\` (NOT `C:`, which would be
-                //     drive-relative on Windows)
+                //   - Windows `C:\foo`   → idx=2 right after drive
+                //     vol, dir must be `C:\` (NOT `C:`, which would
+                //     be drive-relative on Windows)
                 let vol_len = volume_prefix_len(trimmed);
                 let dir = if idx == 0 {
                     "/"
@@ -286,16 +349,6 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
                 (dir, &trimmed[idx + 1..])
             }
             None => {
-                // No separator inside trimmed. If trimmed starts with
-                // a Windows drive volume prefix and has more after it
-                // (e.g. "C:foo"), Go's filepath.Dir/Base split as
-                // dir = "<vol>" + leaf = "<rest>", giving a drive-
-                // relative read on Windows. Mirror that split here so
-                // callers passing drive-relative paths get the same
-                // resolution as Go (and the leaf-name guard still
-                // validates "<rest>", not the whole drive-prefixed
-                // string). On Unix volume_prefix_len always returns 0
-                // and this branch is a no-op.
                 let vol_len = volume_prefix_len(trimmed);
                 if vol_len > 0 && trimmed.len() > vol_len {
                     (&trimmed[..vol_len], &trimmed[vol_len..])
@@ -305,13 +358,54 @@ pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
             }
         }
     };
-    // Lexically clean the dir before passing to read_file_from_dir.
-    // This mirrors Go's `filepath.Dir`, which Cleans the result, so
-    // parent-component `..` segments are textually collapsed instead
-    // of resolved through the OS — defending against symlink-divergence
-    // when the path passes through a symlink before a `..`.
     let cleaned_dir = lexical_clean(dir_str);
-    read_file_from_dir(Path::new(&cleaned_dir), leaf)
+    Ok((cleaned_dir, leaf.to_string()))
+}
+
+/// Read a file by full path after validating only the LEAF component
+/// (not the full path) with the same `E.10` guard `read_file_from_dir`
+/// enforces. Mirrors the Go `readFileByPath` helper in
+/// `clients/go/node/safeio.go` for chainstate-style call sites that
+/// already work with a fully-resolved path
+/// (`<data_dir>/chainstate.json`) and need a drop-in safe reader.
+///
+/// This is a leaf-name / traversal guard, NOT a sandbox against
+/// arbitrary full-path input: a caller passing `/etc/passwd` will
+/// still read the absolute path because the leaf `"passwd"` passes
+/// the guard. The guard's job is to refuse names that, when treated
+/// as the trailing component, would escape their directory via
+/// `.`/`..`/separators/drive-prefix; full-path sandboxing is the
+/// caller's responsibility (see `chainstate.rs` for an example where
+/// the path is constructed from a trusted data-dir).
+pub fn read_file_by_path(path: &Path) -> Result<Vec<u8>, std::io::Error> {
+    let (cleaned_dir, leaf) = resolve_io_path_dir_leaf(path)?;
+    read_file_from_dir(Path::new(&cleaned_dir), &leaf)
+}
+
+/// Write `data` atomically to the file identified by `path`, using the
+/// same dir/leaf derivation `read_file_by_path` uses so a round-trip
+/// read-then-write on the same operator-supplied path lands on the
+/// same on-disk file. Without this symmetry, an operator `--data-dir`
+/// that passes through a symlink combined with `..` segments can
+/// cause startup to read one file while subsequent saves persist to
+/// a different file (split persistence / apparent state loss on
+/// symlink-escape paths).
+///
+/// This is deliberately stricter than the Go `safeio.go` twin, which
+/// calls `writeFileAtomic` directly on the original path (Go's read
+/// side applies `filepath.Dir`'s `Clean` step while its write side
+/// does not). Fixing the asymmetry in Go is tracked as a separate
+/// concern; the Rust side converges read and write here.
+///
+/// The `E.10` leaf-name guard still applies: the leaf derived from
+/// `path` must pass `check_safe_file_name`, so writes refuse the
+/// same traversal / absolute-path / drive-prefix vectors reads do.
+pub fn write_file_atomic_by_path(path: &Path, data: &[u8]) -> Result<(), String> {
+    let (cleaned_dir, leaf) =
+        resolve_io_path_dir_leaf(path).map_err(|e| format!("resolve path: {e}"))?;
+    check_safe_file_name(&leaf)?;
+    let target = Path::new(&cleaned_dir).join(&leaf);
+    write_file_atomic(&target, data)
 }
 
 pub fn parse_hex32(name: &str, value: &str) -> Result<[u8; 32], String> {
@@ -678,7 +772,7 @@ pub fn unique_temp_path(prefix: &str) -> PathBuf {
 mod tests {
     use super::{
         lexical_clean, read_file_by_path, read_file_from_dir, sync_dir, unique_temp_path,
-        write_file_atomic,
+        volume_prefix_len, write_file_atomic, write_file_atomic_by_path,
     };
     use std::fs;
 
@@ -919,6 +1013,125 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    /// `write_file_atomic_by_path` + `read_file_by_path` must land on
+    /// the same physical file for an operator-supplied path that
+    /// crosses a symlink combined with `..`. Without shared dir/leaf
+    /// resolution between read and write, a `--data-dir` of the shape
+    /// `<real>/link/..` where `link` escapes `<real>` causes startup
+    /// reads to hit `<real>/chainstate.json` (via lexical clean) but
+    /// saves to persist at `<elsewhere>/chainstate.json` (via OS
+    /// symlink resolution), surfacing as apparent state loss after
+    /// restart. This test pins the round-trip on one file.
+    #[cfg(unix)]
+    #[test]
+    fn write_by_path_then_read_by_path_round_trips_through_symlink_escape() {
+        use std::os::unix::fs as unix_fs;
+
+        let root = unique_temp_path("rubin-io-utils-by-path-write-rt-root");
+        fs::create_dir_all(&root).expect("create root");
+
+        let elsewhere = unique_temp_path("rubin-io-utils-by-path-write-rt-elsewhere");
+        fs::create_dir_all(&elsewhere).expect("create elsewhere");
+        let target = elsewhere.join("target");
+        fs::create_dir_all(&target).expect("create elsewhere/target");
+
+        // Seed `elsewhere/foo` so we can tell if the write escaped.
+        fs::write(elsewhere.join("foo"), b"pre-existing-elsewhere").expect("seed elsewhere/foo");
+
+        let link = root.join("link");
+        unix_fs::symlink(&target, &link).expect("symlink link → elsewhere/target");
+
+        // Operator-supplied path: <root>/link/../foo
+        let mut tricky = link.clone().into_os_string();
+        tricky.push("/../foo");
+        let tricky_path = std::path::PathBuf::from(tricky);
+
+        // Write via `_by_path`. With shared resolution, this lands
+        // on `root/foo`, NOT `elsewhere/foo`.
+        write_file_atomic_by_path(&tricky_path, b"round-trip-bytes")
+            .expect("write_file_atomic_by_path");
+
+        // Read via `_by_path`. With shared resolution, this reads
+        // the same `root/foo` that the write produced.
+        let got = read_file_by_path(&tricky_path).expect("read back");
+        assert_eq!(
+            got, b"round-trip-bytes",
+            "read must see the bytes the write produced"
+        );
+
+        // Positive-proof that the write did NOT escape to `elsewhere`:
+        // `elsewhere/foo` keeps its pre-existing bytes.
+        let elsewhere_bytes = fs::read(elsewhere.join("foo")).expect("read elsewhere/foo");
+        assert_eq!(
+            elsewhere_bytes, b"pre-existing-elsewhere",
+            "write must NOT have followed the symlink out of root"
+        );
+
+        // And `root/foo` now holds the round-trip bytes.
+        let root_bytes = fs::read(root.join("foo")).expect("read root/foo");
+        assert_eq!(root_bytes, b"round-trip-bytes");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    /// `volume_prefix_len` must match Go `filepath.VolumeName` length
+    /// on every path shape the `read_file_by_path` /
+    /// `write_file_atomic_by_path` pair may encounter on Windows:
+    /// drive-letter, UNC (`\\HOST\SHARE`), DOS device drive
+    /// (`\\?\C:`, `\\.\C:`), DOS device UNC
+    /// (`\\?\UNC\HOST\SHARE`), and the malformed-prefix fail-closed
+    /// cases. Non-Windows input always returns 0.
+    #[test]
+    fn volume_prefix_len_matches_go_filepath_volumename() {
+        // Unix-style / relative / non-volume input: always 0.
+        for s in ["", "foo", "/foo", "/foo/bar", "foo/bar", "."] {
+            assert_eq!(volume_prefix_len(s), 0, "non-volume input {s:?}");
+        }
+
+        // Windows-gated cases: the byte-level parser runs only when
+        // this crate is compiled for Windows. Run the full table
+        // there; on non-Windows the function short-circuits to 0 so
+        // assertions in this block would fail.
+        #[cfg(windows)]
+        {
+            // Drive-letter: `C:`, `C:foo`, `C:\foo`, `c:\foo`.
+            assert_eq!(volume_prefix_len("C:"), 2);
+            assert_eq!(volume_prefix_len("C:foo"), 2);
+            assert_eq!(volume_prefix_len("C:\\"), 2);
+            assert_eq!(volume_prefix_len("C:\\foo"), 2);
+            assert_eq!(volume_prefix_len("c:\\foo"), 2);
+            // Non-drive single-colon shapes — not a drive letter.
+            assert_eq!(volume_prefix_len("1:foo"), 0);
+            assert_eq!(volume_prefix_len(":foo"), 0);
+
+            // UNC: `\\HOST\SHARE` — volume includes HOST and SHARE.
+            assert_eq!(volume_prefix_len("\\\\host\\share"), 12);
+            assert_eq!(volume_prefix_len("\\\\host\\share\\"), 12);
+            assert_eq!(volume_prefix_len("\\\\host\\share\\foo"), 12);
+            assert_eq!(volume_prefix_len("//host/share/foo"), 12);
+
+            // Malformed UNC prefixes: Go returns `len(path)`
+            // (fail-closed — no legitimate split). Mirror it.
+            assert_eq!(volume_prefix_len("\\\\"), 2);
+            assert_eq!(volume_prefix_len("\\\\host"), 6);
+            assert_eq!(volume_prefix_len("\\\\host\\"), 7);
+
+            // DOS device drive: `\\?\C:` and `\\.\C:`.
+            assert_eq!(volume_prefix_len("\\\\?\\C:"), 6);
+            assert_eq!(volume_prefix_len("\\\\?\\C:\\foo"), 6);
+            assert_eq!(volume_prefix_len("\\\\.\\C:"), 6);
+
+            // DOS device UNC: `\\?\UNC\HOST\SHARE`.
+            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share"), 18);
+            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share\\"), 18);
+            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host\\share\\foo"), 18);
+            // Malformed DOS-UNC (no share segment) → full path.
+            assert_eq!(volume_prefix_len("\\\\?\\UNC\\host"), 12);
+            assert_eq!(volume_prefix_len("\\\\?\\UNC"), 7);
+        }
     }
 
     /// Smoke test for the E.1 durability contract: a fresh write goes

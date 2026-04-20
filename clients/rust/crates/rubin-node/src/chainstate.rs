@@ -14,7 +14,7 @@ use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_incoming_chain_id;
 use crate::io_utils::read_file_by_path;
-use crate::io_utils::{parse_hex32, write_file_atomic};
+use crate::io_utils::{parse_hex32, write_file_atomic_by_path};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
 const CHAIN_STATE_DISK_VERSION: u32 = 1;
@@ -82,7 +82,12 @@ impl ChainState {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("create chainstate parent {}: {e}", parent.display()))?;
         }
-        write_file_atomic(path, &raw)
+        // Use `_by_path` so the write's dir/leaf resolution matches
+        // what `read_file_by_path` does at load time. Without this,
+        // a `--data-dir` that crosses a symlink combined with `..`
+        // segments would read one file on startup and persist to a
+        // different file on subsequent saves.
+        write_file_atomic_by_path(path, &raw)
     }
 
     pub fn connect_block(

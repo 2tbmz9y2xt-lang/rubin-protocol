@@ -8,8 +8,8 @@ use rubin_consensus::{
 use serde::{Deserialize, Serialize};
 
 use crate::io_utils::{
-    parse_hex32, read_file_by_path, read_file_from_dir, write_file_atomic, write_file_exclusive,
-    AtomicWriteError,
+    parse_hex32, read_file_by_path, read_file_from_dir, write_file_atomic_by_path,
+    write_file_exclusive, AtomicWriteError,
 };
 use crate::undo::{marshal_block_undo, unmarshal_block_undo, BlockUndo};
 
@@ -571,7 +571,7 @@ impl BlockStore {
         let path = self
             .undo_dir
             .join(format!("{}.json", hex::encode(block_hash_bytes)));
-        write_file_atomic(&path, &raw)
+        write_file_atomic_by_path(&path, &raw)
     }
 
     pub fn get_undo(&self, block_hash_bytes: [u8; 32]) -> Result<BlockUndo, String> {
@@ -804,7 +804,7 @@ fn save_blockstore_index_serializable<S: serde::Serialize + ?Sized>(
     let mut raw =
         serde_json::to_vec_pretty(index).map_err(|e| format!("encode blockstore index: {e}"))?;
     raw.push(b'\n');
-    write_file_atomic(path, &raw)
+    write_file_atomic_by_path(path, &raw)
 }
 
 /// Borrowed view of `BlockStoreIndexDisk` that serializes identically
