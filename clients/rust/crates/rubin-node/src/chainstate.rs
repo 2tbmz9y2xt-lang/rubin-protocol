@@ -672,21 +672,32 @@ mod tests {
     #[test]
     fn save_accepts_bare_filename_via_effective_parent() {
         use std::path::Path;
+        use std::process::Command;
+
+        const CHILD_ENV: &str = "RUBIN_CHAINSTATE_BARE_FILENAME_CHILD";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let st = ChainState::new();
+            st.save(Path::new("chainstate.json"))
+                .expect("save with bare filename must not error on empty parent");
+            return;
+        }
+
         let dir = unique_temp_path("rubin-chainstate-bare-filename");
         std::fs::create_dir_all(&dir).expect("mkdir");
-        // cd into the temp dir so "chainstate.json" resolves locally.
-        let prev_cwd = std::env::current_dir().expect("get cwd");
-        std::env::set_current_dir(&dir).expect("cd");
 
-        let st = ChainState::new();
-        let result = st.save(Path::new("chainstate.json"));
+        let status = Command::new(std::env::current_exe().expect("current test binary"))
+            .current_dir(&dir)
+            .env(CHILD_ENV, "1")
+            .arg("--exact")
+            .arg("save_accepts_bare_filename_via_effective_parent")
+            .status()
+            .expect("spawn child test process");
 
-        // Always restore cwd before asserting so a failing assert
-        // does not leave the process in the temp dir.
-        std::env::set_current_dir(&prev_cwd).expect("restore cwd");
-
-        result.expect("save with bare filename must not error on empty parent");
-
+        assert!(
+            status.success(),
+            "child test process failed for bare filename save"
+        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
