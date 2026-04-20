@@ -192,15 +192,16 @@ fn volume_prefix_len(s: &str) -> usize {
 /// is collapsed against the preceding component textually, NOT through
 /// symlink resolution.
 ///
+/// Called once per node startup from `normalize_data_dir`, which
+/// cleans `cfg.data_dir` at the CLI parse site so every subsystem
+/// that derives a path from it sees an already-normalised root.
 /// Without this step, a path like `link/../foo` where `link` is a
 /// symlink to another directory would resolve via the symlink at
-/// `stat()` time, reading a file under the symlink target instead of
-/// the local `foo`. Go applies `Clean` inside `filepath.Dir` so its
-/// `readFileByPath` does not exhibit this divergence; mirroring the
-/// lexical cleanup here keeps cross-client behaviour aligned for
-/// operator-supplied paths (notably `--data-dir` values that may
-/// contain `..` segments combined with symlinks anywhere along the
-/// resolved chain).
+/// `stat()` time, reading a file under the symlink target instead
+/// of the local `foo`; applying the lexical cleanup once at CLI
+/// keeps cross-client behaviour aligned for operator-supplied
+/// `--data-dir` values that may contain `..` segments combined with
+/// symlinks anywhere along the resolved chain.
 ///
 /// Rules (per Go `Clean`):
 ///   - Drop each `.` element.
@@ -257,7 +258,23 @@ pub(crate) fn lexical_clean(input: &str) -> String {
         }
         out.push_str(p);
     }
-    if out.len() == vol.len() && !rooted {
+    // Append the `.` fallback only for the cases where Go's `Clean`
+    // actually emits one:
+    //   - No volume, no root, no parts: plain relative current-dir.
+    //   - Drive-letter volume (e.g. `C:`) with empty rest: Go's
+    //     `Clean("C:") = "C:."` (drive-relative current on that drive).
+    // UNC / DOS-device volume roots (any prefix starting with two
+    // path separators: `\\HOST\SHARE`, `\\?\UNC\HOST\SHARE`,
+    // `\\?\C:`) must NOT receive the trailing `.` — Go returns the
+    // volume unchanged there (`filepath.Clean("\\\\server\\share")` =
+    // `"\\\\server\\share"`). Without this guard a UNC volume-only
+    // input would be rewritten to `"\\\\server\\share."`, which is a
+    // different (and invalid) path.
+    let starts_with_double_sep = {
+        let bytes = input.as_bytes();
+        bytes.len() >= 2 && is_sep(bytes[0] as char) && is_sep(bytes[1] as char)
+    };
+    if out.len() == vol.len() && !rooted && !starts_with_double_sep {
         out.push('.');
     }
     out
@@ -758,6 +775,35 @@ mod tests {
             lexical_clean("/var/data/link/../chainstate.json"),
             format!("{sep}var{sep}data{sep}chainstate.json")
         );
+    }
+
+    /// Windows UNC and DOS-device volume-only inputs must pass
+    /// through `lexical_clean` unchanged. Go's `filepath.Clean`
+    /// special-cases this: when the volume is the whole path and the
+    /// input starts with two path separators (UNC / DOS device), the
+    /// volume is returned as-is — NOT with a trailing `.` appended
+    /// (that `.` fallback is only for no-volume empty results and for
+    /// drive-letter-only inputs where Go returns `"C:."`).
+    ///
+    /// Without that special case a UNC volume root would be rewritten
+    /// to a different (and invalid) path, e.g.
+    /// `"\\\\server\\share"` → `"\\\\server\\share."`.
+    #[cfg(windows)]
+    #[test]
+    fn lexical_clean_preserves_unc_volume_roots() {
+        // Plain UNC volume root.
+        assert_eq!(lexical_clean("\\\\server\\share"), "\\\\server\\share");
+        // DOS-device UNC volume root.
+        assert_eq!(
+            lexical_clean("\\\\?\\UNC\\server\\share"),
+            "\\\\?\\UNC\\server\\share"
+        );
+        // Drive-letter volume with empty rest still gets the `.`
+        // (Go parity: `filepath.Clean("C:") = "C:."`).
+        assert_eq!(lexical_clean("C:"), "C:.");
+        // UNC volume root with trailing separator collapses the
+        // trailing sep but keeps the volume intact.
+        assert_eq!(lexical_clean("\\\\server\\share\\"), "\\\\server\\share\\");
     }
 
     /// `volume_prefix_len` must match Go `filepath.VolumeName` length

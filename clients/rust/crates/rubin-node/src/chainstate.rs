@@ -80,16 +80,18 @@ impl ChainState {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("create chainstate parent {}: {e}", parent.display()))?;
         }
-        // Raw `write_file_atomic` — the caller's `path` comes from
-        // `chain_state_path(data_dir)` after `data_dir` was
-        // lexically cleaned at the CLI parse site
-        // (`normalize_data_dir`), so no per-helper
-        // `lexical_clean` step is needed here. Startup reads go
-        // through `load_chain_state` below which uses the same raw
-        // resolution on the same pre-cleaned path, so a symlink+`..`
-        // operator `--data-dir` cannot split persistence across two
-        // files: both read and write resolve through the same
-        // already-cleaned root.
+        // Raw `write_file_atomic`. Paired with `load_chain_state`'s
+        // raw `fs::read` — both use the caller-supplied path
+        // directly, with no per-helper `lexical_clean` step.
+        //
+        // For the node binary, `path` originates from
+        // `chain_state_path(cfg.data_dir)` after `cfg.data_dir` was
+        // cleaned at the CLI parse site, so the startup read and
+        // every subsequent save land on one on-disk file even for
+        // operator `--data-dir` values that cross a symlink
+        // combined with `..`. Other callers of `ChainState::save`
+        // are responsible for their own path hygiene — see
+        // `load_chain_state` for the mirror note.
         write_file_atomic(path, &raw)
     }
 
@@ -291,16 +293,19 @@ pub fn chain_state_path<P: AsRef<Path>>(data_dir: P) -> PathBuf {
 
 pub fn load_chain_state<P: AsRef<Path>>(path: P) -> Result<ChainState, String> {
     let path = path.as_ref();
-    // Raw `fs::read` on a caller-supplied path that originates from
-    // `chain_state_path(data_dir)` where `data_dir` was lexically
-    // cleaned once at the CLI parse site (`normalize_data_dir`).
-    // Writes go through the same raw resolution on the same
-    // pre-cleaned path in `ChainState::save`, so startup reads and
-    // subsequent saves land on exactly one on-disk file regardless
-    // of whether the operator `--data-dir` contained symlink+`..`
-    // segments. Mirrors the Go `LoadChainState` reader in
-    // `clients/go/node/chainstate.go`, which also uses a
-    // caller-supplied path directly.
+    // Raw `fs::read` on a caller-supplied path. Mirrors the Go
+    // `LoadChainState` reader in `clients/go/node/chainstate.go`,
+    // which also uses a caller-supplied path directly.
+    //
+    // For the node binary's own call site, `path` originates from
+    // `chain_state_path(cfg.data_dir)` after `cfg.data_dir` was
+    // lexically cleaned at the CLI parse site (`normalize_data_dir`
+    // in `main.rs`), so the startup read and subsequent
+    // `ChainState::save` writes land on exactly one on-disk file
+    // regardless of whether the operator `--data-dir` contained
+    // symlink+`..` segments. Other callers of this public function
+    // are responsible for their own path hygiene — this helper does
+    // NOT canonicalise or sandbox its input.
     let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ChainState::new()),
