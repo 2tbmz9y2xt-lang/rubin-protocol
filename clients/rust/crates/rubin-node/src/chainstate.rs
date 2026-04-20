@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 use crate::genesis::validate_incoming_chain_id;
-use crate::io_utils::read_file_by_path;
-use crate::io_utils::{parse_hex32, write_file_atomic_by_path};
+use crate::io_utils::{parse_hex32, read_file_by_path, write_file_atomic_by_path};
 
 pub const CHAIN_STATE_FILE_NAME: &str = "chainstate.json";
 const CHAIN_STATE_DISK_VERSION: u32 = 1;
