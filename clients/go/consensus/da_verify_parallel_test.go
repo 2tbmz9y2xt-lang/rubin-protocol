@@ -72,7 +72,7 @@ func TestVerifyDAChunkHashes_CancelledContext(t *testing.T) {
 	}
 	err := VerifyDAChunkHashesParallel(ctx, tasks, 1)
 	if err == nil {
-		t.Fatalf("expected error from cancelled context")
+		t.Fatalf("expected error from canceled context")
 	}
 }
 

@@ -160,7 +160,7 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 		if err != nil {
 			return false, err
 		}
-		// Defence-in-depth: re-hash the loaded block's header and
+		// Defense-in-depth: re-hash the loaded block's header and
 		// confirm it matches the canonical-index entry BEFORE
 		// delegating to ConnectBlockWithCoreExtProfilesAndSuiteContext.
 		// A parseable-but-swapped <hash>.bin (bit-rot, manual disk

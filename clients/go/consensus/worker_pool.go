@@ -37,7 +37,7 @@ func (e *WorkerPoolRunError) Error() string {
 //   - Deterministic: result[i] corresponds to task[i].
 //   - Panic-safe: a panicking task produces an error result, does not crash
 //     the process, and does not prevent other tasks from completing.
-//   - Cancellable: if the context is cancelled, unstarted tasks are skipped
+//   - Cancellable: if the context is canceled, unstarted tasks are skipped
 //     and their results are set to the context error.
 type WorkerPool[T any, R any] struct {
 	// MaxWorkers is the maximum number of concurrent goroutines.
@@ -62,7 +62,7 @@ type WorkerResult[R any] struct {
 // Run executes all tasks in parallel and returns results in submission order.
 // The returned slice has the same length as tasks.
 //
-// If ctx is cancelled, unstarted tasks receive ctx.Err() as their error.
+// If ctx is canceled, unstarted tasks receive ctx.Err() as their error.
 // Already-running tasks continue to completion (Go goroutines cannot be
 // forcibly stopped).
 //
