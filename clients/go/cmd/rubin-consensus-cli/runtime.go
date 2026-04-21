@@ -1167,8 +1167,8 @@ func runFromStdin() {
 			return
 		}
 		if req.RotationDescriptor != nil && len(req.SuiteRegistry) > 0 {
-			reg, err := buildSuiteRegistry(req.SuiteRegistry)
-			if err != nil {
+			reg, regErr := buildSuiteRegistry(req.SuiteRegistry)
+			if regErr != nil {
 				writeResp(os.Stdout, Response{Ok: false, Err: "bad suite_registry"})
 				return
 			}
@@ -1180,12 +1180,11 @@ func runFromStdin() {
 				SpendHeight:  req.RotationDescriptor.SpendHeight,
 				SunsetHeight: req.RotationDescriptor.SunsetHeight,
 			}
-			if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
+			if validateErr := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); validateErr != nil {
 				writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
 				return
 			}
 			rp := consensus.DescriptorRotationProvider{Descriptor: desc}
-			//nolint:ineffassign // outer err is read by the `if err != nil` below; linter is confused by the shadowed local `err` in the preceding `if err := Validate...` block.
 			w, da, anchor, err = consensus.TxWeightAndStatsAtHeight(tx, req.Height, rp, reg)
 		} else {
 			w, da, anchor, err = consensus.TxWeightAndStats(tx)
