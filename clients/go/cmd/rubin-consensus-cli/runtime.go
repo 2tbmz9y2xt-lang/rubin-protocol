@@ -1167,8 +1167,8 @@ func runFromStdin() {
 			return
 		}
 		if req.RotationDescriptor != nil && len(req.SuiteRegistry) > 0 {
-			reg, err := buildSuiteRegistry(req.SuiteRegistry)
-			if err != nil {
+			reg, regErr := buildSuiteRegistry(req.SuiteRegistry)
+			if regErr != nil {
 				writeResp(os.Stdout, Response{Ok: false, Err: "bad suite_registry"})
 				return
 			}
@@ -1180,7 +1180,7 @@ func runFromStdin() {
 				SpendHeight:  req.RotationDescriptor.SpendHeight,
 				SunsetHeight: req.RotationDescriptor.SunsetHeight,
 			}
-			if err := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); err != nil {
+			if validateErr := consensus.ValidateRotationDescriptorForNetwork(req.Network, desc, reg); validateErr != nil {
 				writeResp(os.Stdout, Response{Ok: false, Err: rotationDescriptorNotActivatedErr})
 				return
 			}

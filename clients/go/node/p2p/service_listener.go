@@ -14,7 +14,7 @@ import (
 // exhaustion) are retried with an exponential backoff capped at
 // acceptErrorBackoffCap. The constants mirror rubin-node Rust
 // ACCEPT_ERROR_BACKOFF_INIT / ACCEPT_ERROR_BACKOFF_CAP for cross-client
-// behavioural parity; see
+// behavioral parity; see
 // clients/rust/crates/rubin-node/src/p2p_service.rs.
 const (
 	acceptErrorBackoffInit = 100 * time.Millisecond
@@ -44,7 +44,7 @@ func nextAcceptErrorBackoff(current time.Duration) time.Duration {
 
 // isAcceptLoopTerminal reports whether an Accept error should exit the
 // accept loop. Terminal conditions are: the service context has been
-// cancelled (Close path), or the listener has been closed.
+// canceled (Close path), or the listener has been closed.
 func isAcceptLoopTerminal(ctx context.Context, err error) bool {
 	if ctx != nil && ctx.Err() != nil {
 		return true
@@ -275,7 +275,7 @@ func (s *Service) acceptLoop() {
 	}
 }
 
-// sleepOrStop sleeps for d unless the service context is cancelled first.
+// sleepOrStop sleeps for d unless the service context is canceled first.
 // Returns true if the full sleep elapsed, false if cancellation unblocked
 // the sleep (callers treat false as "exit the loop"). A non-positive d or
 // nil receiver/context falls back to the obvious no-op or unconditional

@@ -247,7 +247,7 @@ func (s *SyncEngine) syntheticSideChainSummary(height uint64, blockHash [32]byte
 	alreadyGenerated := uint64(0)
 	if s != nil && s.chainState != nil {
 		view := s.chainState.view()
-		utxoCount = uint64(view.utxoCount)
+		utxoCount = uint64(view.utxoCount) //nolint:gosec // G115: view.utxoCount is non-negative by chainstate invariant
 		alreadyGenerated = view.alreadyGenerated
 	}
 	return &ChainStateConnectSummary{

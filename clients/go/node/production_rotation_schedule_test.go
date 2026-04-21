@@ -202,7 +202,7 @@ func TestLoadCompiledProductionRotationScheduleRejectsReservedSentinelSuiteID(t 
 	}
 
 	for _, tc := range cases {
-		tc := tc
+
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, err := loadCompiledProductionRotationScheduleFromJSONWithRegistry([]byte(`{
 				"version": 1,
@@ -280,7 +280,7 @@ func TestLoadCompiledProductionRotationScheduleRejectsNonFiniteSunsetHeightOnPro
 	}
 
 	for _, tc := range cases {
-		tc := tc
+
 		t.Run(tc.name, func(t *testing.T) {
 			sunsetField := ""
 			if tc.sunsetField != "" {

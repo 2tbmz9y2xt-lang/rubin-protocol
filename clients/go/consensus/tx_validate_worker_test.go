@@ -437,7 +437,7 @@ func TestRunTxValidationWorkers_CancelledContext(t *testing.T) {
 	}}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled
+	cancel() // already canceled
 
 	results, err := RunTxValidationWorkers(ctx, 2, txcs, [32]byte{}, 1, 0, nil, nil)
 	if err != nil {
@@ -447,7 +447,7 @@ func TestRunTxValidationWorkers_CancelledContext(t *testing.T) {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
 	if results[0].Err == nil {
-		t.Fatalf("expected error from cancelled context")
+		t.Fatalf("expected error from canceled context")
 	}
 }
 

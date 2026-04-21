@@ -263,7 +263,7 @@ func TestWorkerPool_ContextCancellation(t *testing.T) {
 
 func TestWorkerPool_AlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled
+	cancel() // already canceled
 
 	pool := &WorkerPool[int, int]{MaxWorkers: 4, MaxTasks: 8, Func: intIdentity}
 	tasks := []int{1, 2, 3}
