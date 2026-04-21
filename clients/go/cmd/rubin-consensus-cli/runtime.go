@@ -1185,6 +1185,7 @@ func runFromStdin() {
 				return
 			}
 			rp := consensus.DescriptorRotationProvider{Descriptor: desc}
+			//nolint:ineffassign // outer err is read by the `if err != nil` below; linter is confused by the shadowed local `err` in the preceding `if err := Validate...` block.
 			w, da, anchor, err = consensus.TxWeightAndStatsAtHeight(tx, req.Height, rp, reg)
 		} else {
 			w, da, anchor, err = consensus.TxWeightAndStats(tx)
