@@ -543,7 +543,7 @@ func canonicalTipHeight(canonical []string) (uint64, bool) {
 //	                    fast-path on retry re-runs syncDir and
 //	                    propagates its error so durability is surfaced.
 //	cross-platform:     Unix (Linux, macOS): os.Link, O_EXCL, dir Sync
-//	                    all semantically honoured. Windows: Sync on
+//	                    all semantically honored. Windows: Sync on
 //	                    directories is a no-op in stdlib; Rubin does
 //	                    not ship Windows as a production target.
 //	                    Test surfaces that rely on os.Geteuid()/chmod
@@ -573,7 +573,7 @@ func canonicalTipHeight(canonical []string) (uint64, bool) {
 //	                    PR #1220).
 func writeFileIfAbsent(path string, content []byte) error {
 	// Fast path: destination already exists. Read once and verify match
-	// before attempting any writes. Same behaviour as the Rust helper
+	// before attempting any writes. Same behavior as the Rust helper
 	// via `write_file_exclusive` + EEXIST branch, but short-circuited
 	// here to avoid a useless temp write when the file is already
 	// present with the right bytes (dominant case during idempotent

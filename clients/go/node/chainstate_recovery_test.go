@@ -461,7 +461,7 @@ func TestReconcileChainStateWithBlockStore_ResetsDirtyTiplessSnapshotBeforeRepla
 }
 
 // TestReconcileChainStateWithBlockStore_PropagatesCorruptBlockBytesSwap
-// pins the cross-client re-hash defence: a parseable-but-wrong
+// pins the cross-client re-hash defense: a parseable-but-wrong
 // <hash>.bin (block 1's payload overwritten with block 2's bytes,
 // which still link to b1_hash as prev_hash so chain-integrity
 // inside ConnectBlock would PASS) MUST be rejected by reconcile's
