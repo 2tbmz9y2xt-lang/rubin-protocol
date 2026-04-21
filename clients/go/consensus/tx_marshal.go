@@ -2,7 +2,7 @@ package consensus
 
 import "fmt"
 
-// MarshalTx serialises a Tx into its canonical wire-format bytes.
+// MarshalTx serializes a Tx into its canonical wire-format bytes.
 // The output is the exact inverse of ParseTx (roundtrip property).
 func MarshalTx(tx *Tx) ([]byte, error) {
 	if tx == nil {

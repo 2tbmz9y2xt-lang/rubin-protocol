@@ -30,7 +30,7 @@ func TestNextAcceptErrorBackoff(t *testing.T) {
 		{"overshoot clamps to cap", 10 * time.Second, acceptErrorBackoffCap},
 	}
 	for _, tc := range cases {
-		tc := tc
+
 		t.Run(tc.name, func(t *testing.T) {
 			got := nextAcceptErrorBackoff(tc.current)
 			if got != tc.want {
@@ -45,7 +45,7 @@ func TestIsAcceptLoopTerminalCtxCancelled(t *testing.T) {
 	cancel()
 	someErr := errors.New("temporary accept failure")
 	if !isAcceptLoopTerminal(ctx, someErr) {
-		t.Fatalf("cancelled ctx should make error terminal")
+		t.Fatalf("canceled ctx should make error terminal")
 	}
 }
 
@@ -88,10 +88,10 @@ func TestSleepOrStopCancelledCtx(t *testing.T) {
 	s := &Service{ctx: ctx}
 	start := time.Now()
 	if s.sleepOrStop(5 * time.Second) {
-		t.Fatalf("sleepOrStop with cancelled ctx must return false")
+		t.Fatalf("sleepOrStop with canceled ctx must return false")
 	}
 	if elapsed := time.Since(start); elapsed >= 1*time.Second {
-		t.Fatalf("sleepOrStop should return promptly on cancelled ctx, elapsed=%s", elapsed)
+		t.Fatalf("sleepOrStop should return promptly on canceled ctx, elapsed=%s", elapsed)
 	}
 }
 

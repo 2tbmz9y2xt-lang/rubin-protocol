@@ -3,7 +3,7 @@ package consensus
 // ValidateTxCovenantsGenesis checks that every output's covenant is well-formed
 // at creation time. The rotation parameter controls which signature suites are
 // valid for native covenant creation at the given block height. Pass nil for
-// the default pre-rotation behaviour ({ML-DSA-87} only).
+// the default pre-rotation behavior ({ML-DSA-87} only).
 func ValidateTxCovenantsGenesis(tx *Tx, blockHeight uint64, rotation RotationProvider) error {
 	if tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")
