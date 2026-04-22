@@ -1,336 +1,202 @@
 #!/usr/bin/env bash
 
 # Shared fail-closed process helpers for devnet evidence scripts.
-# Source this file from scenario scripts, then call rubin_process_init.
+# Source this file, then call rubin_process_init before using helpers.
 
 RUBIN_PROCESS_ARTIFACT_ROOT="${RUBIN_PROCESS_ARTIFACT_ROOT:-}"
+RUBIN_PROCESS_ARTIFACT_PARENT="${RUBIN_PROCESS_ARTIFACT_PARENT:-}"
 RUBIN_PROCESS_KEEP_ARTIFACTS="${RUBIN_PROCESS_KEEP_ARTIFACTS:-${KEEP_TMP:-0}}"
 RUBIN_PROCESS_STOP_GRACE_SECONDS="${RUBIN_PROCESS_STOP_GRACE_SECONDS:-5}"
 RUBIN_PROCESS_PIDS=()
 RUBIN_PROCESS_LOGS=()
 RUBIN_PROCESS_LAST_PID=""
+_RUBIN_PROCESS_CREATED_PARENT=""
 
-rubin_process_require_uint() {
-  local name="$1"
-  local value="$2"
+_rubin_process_error() { echo "$*" >&2; }
 
-  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
-    echo "${name} must be a non-negative integer: ${value}" >&2
-    return 1
-  fi
+_rubin_process_uint() {
+  [[ "${2:-}" =~ ^[0-9]+$ ]] || { _rubin_process_error "$1 must be a non-negative integer: ${2:-<empty>}"; return 1; }
 }
 
-rubin_process_require_args() {
-  local name="$1"
-  local minimum="$2"
-  local actual="$3"
+_rubin_process_pid() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
 
-  if (( actual < minimum )); then
-    echo "${name} requires at least ${minimum} argument(s), got ${actual}" >&2
-    return 1
-  fi
+_rubin_process_require_init() {
+  [[ -n "${RUBIN_PROCESS_ARTIFACT_ROOT}" && -d "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || { _rubin_process_error "rubin_process_init must run before process helpers"; return 1; }
+}
+
+_rubin_process_resolve_log() {
+  local log_file="${1:-}"
+  _rubin_process_require_init || return 1
+  [[ -n "${log_file}" ]] || { _rubin_process_error "log path must not be empty"; return 1; }
+  [[ "${log_file}" == /* ]] || log_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/${log_file}"
+  case "${log_file}" in
+    "${RUBIN_PROCESS_ARTIFACT_ROOT}"/*) printf '%s\n' "${log_file}" ;;
+    *) _rubin_process_error "log path must stay under artifact root: ${log_file}"; return 1 ;;
+  esac
 }
 
 rubin_process_init() {
   local prefix="${1:-rubin-devnet-process}"
-  local safe_prefix="${prefix//\//_}"
-  safe_prefix="${safe_prefix//\\/_}"
-  local artifact_parent="${RUBIN_PROCESS_ARTIFACT_ROOT:-${TMPDIR:-/tmp}}"
-  local existing_exit_trap
+  local safe_prefix="${prefix//[^[:alnum:]._-]/_}"
+  local parent="${RUBIN_PROCESS_ARTIFACT_PARENT:-${RUBIN_PROCESS_ARTIFACT_ROOT:-${TMPDIR:-/tmp}}}"
 
-  existing_exit_trap="$(trap -p EXIT || true)"
-  if [[ -n "${existing_exit_trap}" ]]; then
-    echo "refusing to overwrite existing EXIT trap" >&2
+  [[ -z "$(trap -p EXIT || true)" ]] || {
+    _rubin_process_error "refusing to overwrite existing EXIT trap"
+    return 1
+  }
+  [[ -n "${safe_prefix}" && "${safe_prefix}" != "." && "${safe_prefix}" != ".." ]] || safe_prefix="rubin-devnet-process"
+  [[ "${parent}" == /* && "${parent}" != "/" && "${parent}" != "." && "${parent}" != ".." ]] || {
+    _rubin_process_error "unsafe artifact parent: ${parent:-<empty>}"
+    return 1
+  }
+  _rubin_process_uint "RUBIN_PROCESS_STOP_GRACE_SECONDS" "${RUBIN_PROCESS_STOP_GRACE_SECONDS}" || return 1
+  mkdir -p "${parent}" || { _rubin_process_error "failed to create artifact parent: ${parent}"; return 1; }
+
+  _RUBIN_PROCESS_CREATED_PARENT="${parent%/}"
+  if ! RUBIN_PROCESS_ARTIFACT_ROOT="$(mktemp -d "${_RUBIN_PROCESS_CREATED_PARENT}/${safe_prefix}.XXXXXX")"; then
+    RUBIN_PROCESS_ARTIFACT_ROOT=""
+    _rubin_process_error "failed to create artifact root under ${_RUBIN_PROCESS_CREATED_PARENT}"
     return 1
   fi
-
-  if [[ -z "${safe_prefix}" || "${safe_prefix}" == "." || "${safe_prefix}" == ".." ]]; then
-    safe_prefix="rubin-devnet-process"
-  fi
-  if [[ -z "${artifact_parent}" || "${artifact_parent}" == "/" || "${artifact_parent}" == "." ]]; then
-    echo "unsafe artifact parent: ${artifact_parent:-<empty>}" >&2
-    return 1
-  fi
-  rubin_process_require_uint "RUBIN_PROCESS_STOP_GRACE_SECONDS" "${RUBIN_PROCESS_STOP_GRACE_SECONDS}" || return 1
-
-  if ! mkdir -p "${artifact_parent}"; then
-    echo "failed to create artifact parent: ${artifact_parent}" >&2
-    return 1
-  fi
-  if ! RUBIN_PROCESS_ARTIFACT_ROOT="$(mktemp -d "${artifact_parent%/}/${safe_prefix}.XXXXXX")"; then
-    echo "failed to create artifact root under ${artifact_parent}" >&2
+  [[ -d "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || {
+    _rubin_process_error "artifact root is not a directory: ${RUBIN_PROCESS_ARTIFACT_ROOT}"
     RUBIN_PROCESS_ARTIFACT_ROOT=""
     return 1
-  fi
-  if [[ ! -d "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]]; then
-    echo "artifact root is not a directory: ${RUBIN_PROCESS_ARTIFACT_ROOT}" >&2
-    RUBIN_PROCESS_ARTIFACT_ROOT=""
-    return 1
-  fi
-
+  }
   RUBIN_PROCESS_PIDS=()
   RUBIN_PROCESS_LOGS=()
   RUBIN_PROCESS_LAST_PID=""
   trap rubin_process_exit_trap EXIT
 }
 
-rubin_process_register_log() {
-  rubin_process_require_args "rubin_process_register_log" 1 "$#" || return 1
-  local log_file="$1"
-  RUBIN_PROCESS_LOGS+=("${log_file}")
+rubin_process_is_alive() {
+  _rubin_process_pid "${1:-}" || return 1
+  kill -0 "$1" >/dev/null 2>&1
 }
 
 rubin_process_start() {
-  rubin_process_require_args "rubin_process_start" 2 "$#" || return 1
-  local log_file="$1"
+  local log_file log_dir started_pid
+  (( $# >= 2 )) || { _rubin_process_error "rubin_process_start requires a log path and command"; return 1; }
+  log_file="$(_rubin_process_resolve_log "$1")" || return 1
   shift
-  local log_dir
-  local started_pid
-
   log_dir="$(dirname "${log_file}")"
-  if ! mkdir -p "${log_dir}"; then
-    echo "failed to create log directory: ${log_dir}" >&2
-    RUBIN_PROCESS_LAST_PID=""
-    return 1
-  fi
-  rubin_process_register_log "${log_file}"
+  mkdir -p "${log_dir}" || { _rubin_process_error "failed to create log directory: ${log_dir}"; return 1; }
+
   RUBIN_PROCESS_LAST_PID=""
   "$@" >"${log_file}" 2>&1 &
   started_pid="$!"
-  if [[ -z "${started_pid}" ]]; then
-    echo "failed to start background command for log: ${log_file}" >&2
+  sleep 0.2
+  if ! rubin_process_is_alive "${started_pid}"; then
+    wait "${started_pid}" >/dev/null 2>&1 || true
+    _rubin_process_error "background command exited before registration: ${log_file}"
     return 1
   fi
   RUBIN_PROCESS_LAST_PID="${started_pid}"
-  if ! rubin_process_is_alive "${RUBIN_PROCESS_LAST_PID}"; then
-    echo "background command exited before registration: ${log_file}" >&2
-    RUBIN_PROCESS_LAST_PID=""
-    return 1
-  fi
-  RUBIN_PROCESS_PIDS+=("${RUBIN_PROCESS_LAST_PID}")
-}
-
-rubin_process_is_alive() {
-  rubin_process_require_args "rubin_process_is_alive" 1 "$#" || return 1
-  local pid="$1"
-  kill -0 "${pid}" >/dev/null 2>&1
+  RUBIN_PROCESS_PIDS+=("${started_pid}")
+  RUBIN_PROCESS_LOGS+=("${log_file}")
 }
 
 rubin_process_stop_pid() {
-  rubin_process_require_args "rubin_process_stop_pid" 1 "$#" || return 1
-  local pid="$1"
-
+  local pid="${1:-}" deadline
+  _rubin_process_pid "${pid}" || return 1
   if rubin_process_is_alive "${pid}"; then
     kill "${pid}" >/dev/null 2>&1 || true
-    rubin_process_require_uint "RUBIN_PROCESS_STOP_GRACE_SECONDS" "${RUBIN_PROCESS_STOP_GRACE_SECONDS}" || return 1
-    local deadline=$((SECONDS + RUBIN_PROCESS_STOP_GRACE_SECONDS))
-    while rubin_process_is_alive "${pid}" && (( SECONDS < deadline )); do
-      sleep 1
-    done
+    _rubin_process_uint "RUBIN_PROCESS_STOP_GRACE_SECONDS" "${RUBIN_PROCESS_STOP_GRACE_SECONDS}" || return 1
+    deadline=$((SECONDS + RUBIN_PROCESS_STOP_GRACE_SECONDS))
+    while rubin_process_is_alive "${pid}" && (( SECONDS < deadline )); do sleep 1; done
   fi
-  if rubin_process_is_alive "${pid}"; then
-    kill -KILL "${pid}" >/dev/null 2>&1 || true
-  fi
+  rubin_process_is_alive "${pid}" && kill -KILL "${pid}" >/dev/null 2>&1 || true
   wait "${pid}" >/dev/null 2>&1 || true
 }
 
 rubin_process_stop_all() {
-  local pid
-  for pid in "${RUBIN_PROCESS_PIDS[@]:-}"; do
-    rubin_process_stop_pid "${pid}"
+  local i
+  for ((i=${#RUBIN_PROCESS_PIDS[@]} - 1; i >= 0; i--)); do
+    rubin_process_stop_pid "${RUBIN_PROCESS_PIDS[$i]}" || return 1
   done
 }
 
 rubin_process_wait_for_log() {
-  rubin_process_require_args "rubin_process_wait_for_log" 3 "$#" || return 1
-  local file="$1"
-  local needle="$2"
-  local timeout="$3"
-  local pid="${4:-}"
-  local deadline
-
-  rubin_process_require_uint "timeout" "${timeout}" || return 1
+  local file="${1:-}" needle="${2:-}" timeout="${3:-}" pid="${4:-}" deadline
+  [[ -n "${file}" && -n "${needle}" ]] || {
+    _rubin_process_error "rubin_process_wait_for_log requires file, needle, timeout"
+    return 1
+  }
+  _rubin_process_uint "timeout" "${timeout}" || return 1
   deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
-    if [[ -f "${file}" ]] && grep -F -q -- "${needle}" "${file}"; then
-      return 0
-    fi
+    [[ -f "${file}" ]] && grep -F -q -- "${needle}" "${file}" && return 0
     if [[ -n "${pid}" ]] && ! rubin_process_is_alive "${pid}"; then
-      echo "process ${pid} exited before ${needle} appeared in ${file}" >&2
+      _rubin_process_error "process ${pid} exited before ${needle} appeared in ${file}"
       return 1
     fi
     sleep 1
   done
-
-  echo "timeout waiting for ${needle} in ${file}" >&2
+  _rubin_process_error "timeout waiting for ${needle} in ${file}"
   return 1
 }
 
 rubin_process_extract_rpc_addr() {
-  rubin_process_require_args "rubin_process_extract_rpc_addr" 1 "$#" || return 1
-  local file="$1"
-  local addr
-
-  if [[ ! -r "${file}" ]]; then
-    echo "rpc log file is missing or unreadable: ${file}" >&2
+  local file="${1:-}" addr
+  [[ -r "${file}" ]] || { _rubin_process_error "rpc log file is missing or unreadable: ${file:-<empty>}"; return 1; }
+  if ! addr="$(sed -n 's/.*rpc: listening=//p' "${file}" | tail -n 1 | tr -d '[:space:]')"; then
+    _rubin_process_error "failed to extract rpc listening banner from ${file}"
     return 1
   fi
-  if ! addr="$(awk -F= '/rpc: listening=/{print $2}' "${file}" | tail -n 1 | tr -d '[:space:]')"; then
-    echo "failed to extract rpc listening banner from ${file}" >&2
-    return 1
-  fi
-  if [[ -z "${addr}" ]]; then
-    echo "missing rpc listening banner in ${file}" >&2
-    return 1
-  fi
+  [[ -n "${addr}" ]] || { _rubin_process_error "missing rpc listening banner in ${file}"; return 1; }
   printf '%s\n' "${addr}"
 }
 
 rubin_process_wait_for_rpc_ready() {
-  rubin_process_require_args "rubin_process_wait_for_rpc_ready" 2 "$#" || return 1
-  local rpc_addr="$1"
-  local timeout="$2"
-  local deadline
-
-  rubin_process_require_uint "timeout" "${timeout}" || return 1
+  local rpc_addr="${1:-}" timeout="${2:-}" deadline
+  [[ -n "${rpc_addr}" && "${rpc_addr}" != *[[:space:]/]* ]] || { _rubin_process_error "invalid rpc address: ${rpc_addr:-<empty>}"; return 1; }
+  _rubin_process_uint "timeout" "${timeout}" || return 1
+  command -v python3 >/dev/null 2>&1 || { _rubin_process_error "python3 is required to poll /get_tip"; return 1; }
   deadline=$((SECONDS + timeout))
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "python3 is required to poll /get_tip" >&2
-    return 1
-  fi
-
   while (( SECONDS < deadline )); do
-    if python3 - "${rpc_addr}" 2>/dev/null <<'PY'
-import json
-import sys
-import urllib.request
-
-rpc_addr = sys.argv[1]
-with urllib.request.urlopen(f"http://{rpc_addr}/get_tip", timeout=2) as resp:
-    if resp.status != 200:
-        raise SystemExit(1)
-    json.load(resp)
-PY
-    then
+    if python3 -c 'import json,sys,urllib.request as u; r=u.urlopen(f"http://{sys.argv[1]}/get_tip", timeout=2); json.load(r); sys.exit(0 if r.status == 200 else 1)' "${rpc_addr}" 2>/dev/null; then
       return 0
     fi
     sleep 1
   done
-
-  echo "timeout waiting for /get_tip on ${rpc_addr}" >&2
+  _rubin_process_error "timeout waiting for /get_tip on ${rpc_addr}"
   return 1
 }
 
 rubin_process_dump_artifacts() {
   local log_file
-
-  echo "FAIL: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT}" >&2
+  _rubin_process_error "FAIL: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT:-<unset>}"
   for log_file in "${RUBIN_PROCESS_LOGS[@]:-}"; do
-    if [[ -f "${log_file}" ]]; then
-      echo "----- $(basename "${log_file}") -----" >&2
-      tail -n 80 "${log_file}" >&2 || true
-    fi
+    [[ -f "${log_file}" ]] || continue
+    _rubin_process_error "----- $(basename "${log_file}") -----"
+    tail -n 80 "${log_file}" >&2 || true
   done
 }
 
 rubin_process_cleanup() {
-  local status="$1"
-
-  rubin_process_stop_all
-  if [[ "${status}" != "0" ]]; then
-    rubin_process_dump_artifacts
-    return "${status}"
-  fi
-  if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
+  local status="${1:-0}" cleanup_status=0
+  _rubin_process_uint "status" "${status}" || return 1
+  rubin_process_stop_all || cleanup_status=$?
+  if [[ "${status}" != "0" ]]; then rubin_process_dump_artifacts; return "${status}"; fi
+  [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && {
     echo "OK: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT}"
-    return 0
-  fi
-  if [[ -z "${RUBIN_PROCESS_ARTIFACT_ROOT}" ||
-        "${RUBIN_PROCESS_ARTIFACT_ROOT}" == "/" ||
-        "${RUBIN_PROCESS_ARTIFACT_ROOT}" == "." ]]; then
-    echo "refusing to remove unsafe artifact root: ${RUBIN_PROCESS_ARTIFACT_ROOT:-<empty>}" >&2
+    return "${cleanup_status}"
+  }
+  [[ -n "${_RUBIN_PROCESS_CREATED_PARENT}" && -n "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || {
+    _rubin_process_error "refusing cleanup without initialized artifact paths"
     return 1
-  fi
-  rm -rf -- "${RUBIN_PROCESS_ARTIFACT_ROOT}"
+  }
+  case "${RUBIN_PROCESS_ARTIFACT_ROOT}" in
+    "${_RUBIN_PROCESS_CREATED_PARENT}"/*) ;;
+    *) _rubin_process_error "refusing to remove unsafe artifact root: ${RUBIN_PROCESS_ARTIFACT_ROOT}"; return 1 ;;
+  esac
+  rm -rf -- "${RUBIN_PROCESS_ARTIFACT_ROOT}" || cleanup_status=$?
+  return "${cleanup_status}"
 }
 
 rubin_process_exit_trap() {
-  local status=$?
-  local cleanup_status=0
+  local status=$? cleanup_status=0
   rubin_process_cleanup "${status}" || cleanup_status=$?
-  if [[ "${status}" != "0" ]]; then
-    exit "${status}"
-  fi
+  [[ "${status}" != "0" ]] && exit "${status}"
   exit "${cleanup_status}"
 }
-
-rubin_process_self_test() (
-  set -euo pipefail
-
-  local parent_root
-  parent_root="$(mktemp -d "${TMPDIR:-/tmp}/rubin-devnet-process-parent.XXXXXX")"
-  RUBIN_PROCESS_ARTIFACT_ROOT="${parent_root}"
-  rubin_process_init "unsafe/prefix"
-  if [[ "${RUBIN_PROCESS_ARTIFACT_ROOT}" == "${parent_root}" ||
-        "${RUBIN_PROCESS_ARTIFACT_ROOT}" != "${parent_root}/"* ]]; then
-    echo "custom artifact parent was not isolated: ${RUBIN_PROCESS_ARTIFACT_ROOT}" >&2
-    return 1
-  fi
-  rubin_process_cleanup 0
-  trap - EXIT
-  if [[ ! -d "${parent_root}" ]]; then
-    echo "custom artifact parent was removed: ${parent_root}" >&2
-    return 1
-  fi
-  rm -rf -- "${parent_root}"
-  RUBIN_PROCESS_ARTIFACT_ROOT=""
-
-  local parent_file
-  parent_file="$(mktemp "${TMPDIR:-/tmp}/rubin-devnet-process-parent-file.XXXXXX")"
-  RUBIN_PROCESS_ARTIFACT_ROOT="${parent_file}"
-  if rubin_process_init "bad-parent" 2>"${parent_file}.err"; then
-    echo "artifact root creation unexpectedly succeeded under file parent" >&2
-    return 1
-  fi
-  rm -f -- "${parent_file}" "${parent_file}.err"
-  RUBIN_PROCESS_ARTIFACT_ROOT=""
-
-  if bash -c 'source "$1"; rubin_process_init trap-fail; RUBIN_PROCESS_ARTIFACT_ROOT=/; exit 0' bash "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
-    echo "exit trap ignored cleanup failure" >&2
-    return 1
-  fi
-
-  if bash -c 'source "$1"; trap "echo caller trap >&2" EXIT; rubin_process_init trap-clobber' bash "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
-    echo "existing EXIT trap was overwritten" >&2
-    return 1
-  fi
-
-  rubin_process_init "rubin-devnet-process-selftest"
-  local log_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/selftest.log"
-  local pid
-  rubin_process_start "${log_file}" bash -c 'trap "exit 0" TERM; echo "rpc: listening=127.0.0.1:12345"; while :; do sleep 1; done'
-  pid="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 5 "${pid}"
-
-  local addr
-  addr="$(rubin_process_extract_rpc_addr "${log_file}")"
-  if [[ "${addr}" != "127.0.0.1:12345" ]]; then
-    echo "unexpected rpc addr: ${addr}" >&2
-    return 1
-  fi
-
-  rubin_process_stop_pid "${pid}"
-  echo "PASS: devnet process common self-test"
-)
-
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  case "${1:-}" in
-    --self-test)
-      rubin_process_self_test
-      ;;
-    *)
-      echo "usage: $0 --self-test" >&2
-      exit 2
-      ;;
-  esac
-fi
