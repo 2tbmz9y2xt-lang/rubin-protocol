@@ -12,12 +12,20 @@ RUBIN_PROCESS_LAST_PID=""
 
 rubin_process_init() {
   local prefix="${1:-rubin-devnet-process}"
+  local safe_prefix="${prefix//\//_}"
+  safe_prefix="${safe_prefix//\\/_}"
+  local artifact_parent="${RUBIN_PROCESS_ARTIFACT_ROOT:-${TMPDIR:-/tmp}}"
 
-  if [[ -z "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]]; then
-    RUBIN_PROCESS_ARTIFACT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")"
-  else
-    mkdir -p "${RUBIN_PROCESS_ARTIFACT_ROOT}"
+  if [[ -z "${safe_prefix}" || "${safe_prefix}" == "." || "${safe_prefix}" == ".." ]]; then
+    safe_prefix="rubin-devnet-process"
   fi
+  if [[ -z "${artifact_parent}" || "${artifact_parent}" == "/" || "${artifact_parent}" == "." ]]; then
+    echo "unsafe artifact parent: ${artifact_parent:-<empty>}" >&2
+    return 1
+  fi
+
+  mkdir -p "${artifact_parent}"
+  RUBIN_PROCESS_ARTIFACT_ROOT="$(mktemp -d "${artifact_parent%/}/${safe_prefix}.XXXXXX")"
 
   RUBIN_PROCESS_PIDS=()
   RUBIN_PROCESS_LOGS=()
@@ -71,23 +79,23 @@ rubin_process_stop_all() {
 
 rubin_process_wait_for_log() {
   local file="$1"
-  local pattern="$2"
+  local needle="$2"
   local timeout="$3"
   local pid="${4:-}"
   local deadline=$((SECONDS + timeout))
 
   while (( SECONDS < deadline )); do
-    if [[ -f "${file}" ]] && grep -q "${pattern}" "${file}"; then
+    if [[ -f "${file}" ]] && grep -F -q -- "${needle}" "${file}"; then
       return 0
     fi
     if [[ -n "${pid}" ]] && ! rubin_process_is_alive "${pid}"; then
-      echo "process ${pid} exited before ${pattern} appeared in ${file}" >&2
+      echo "process ${pid} exited before ${needle} appeared in ${file}" >&2
       return 1
     fi
     sleep 1
   done
 
-  echo "timeout waiting for ${pattern} in ${file}" >&2
+  echo "timeout waiting for ${needle} in ${file}" >&2
   return 1
 }
 
@@ -95,7 +103,14 @@ rubin_process_extract_rpc_addr() {
   local file="$1"
   local addr
 
-  addr="$(awk -F= '/rpc: listening=/{print $2}' "${file}" | tail -n 1 | tr -d '[:space:]')"
+  if [[ ! -r "${file}" ]]; then
+    echo "rpc log file is missing or unreadable: ${file}" >&2
+    return 1
+  fi
+  if ! addr="$(awk -F= '/rpc: listening=/{print $2}' "${file}" | tail -n 1 | tr -d '[:space:]')"; then
+    echo "failed to extract rpc listening banner from ${file}" >&2
+    return 1
+  fi
   if [[ -z "${addr}" ]]; then
     echo "missing rpc listening banner in ${file}" >&2
     return 1
@@ -107,6 +122,11 @@ rubin_process_wait_for_rpc_ready() {
   local rpc_addr="$1"
   local timeout="$2"
   local deadline=$((SECONDS + timeout))
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to poll /get_tip" >&2
+    return 1
+  fi
 
   while (( SECONDS < deadline )); do
     if python3 - "${rpc_addr}" 2>/dev/null <<'PY'
@@ -154,7 +174,13 @@ rubin_process_cleanup() {
     echo "OK: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT}"
     return 0
   fi
-  rm -rf "${RUBIN_PROCESS_ARTIFACT_ROOT}"
+  if [[ -z "${RUBIN_PROCESS_ARTIFACT_ROOT}" ||
+        "${RUBIN_PROCESS_ARTIFACT_ROOT}" == "/" ||
+        "${RUBIN_PROCESS_ARTIFACT_ROOT}" == "." ]]; then
+    echo "refusing to remove unsafe artifact root: ${RUBIN_PROCESS_ARTIFACT_ROOT:-<empty>}" >&2
+    return 1
+  fi
+  rm -rf -- "${RUBIN_PROCESS_ARTIFACT_ROOT}"
 }
 
 rubin_process_exit_trap() {
@@ -165,6 +191,24 @@ rubin_process_exit_trap() {
 
 rubin_process_self_test() {
   set -euo pipefail
+
+  local parent_root
+  parent_root="$(mktemp -d "${TMPDIR:-/tmp}/rubin-devnet-process-parent.XXXXXX")"
+  RUBIN_PROCESS_ARTIFACT_ROOT="${parent_root}"
+  rubin_process_init "unsafe/prefix"
+  if [[ "${RUBIN_PROCESS_ARTIFACT_ROOT}" == "${parent_root}" ||
+        "${RUBIN_PROCESS_ARTIFACT_ROOT}" != "${parent_root}/"* ]]; then
+    echo "custom artifact parent was not isolated: ${RUBIN_PROCESS_ARTIFACT_ROOT}" >&2
+    return 1
+  fi
+  rubin_process_cleanup 0
+  trap - EXIT
+  if [[ ! -d "${parent_root}" ]]; then
+    echo "custom artifact parent was removed: ${parent_root}" >&2
+    return 1
+  fi
+  rm -rf -- "${parent_root}"
+  RUBIN_PROCESS_ARTIFACT_ROOT=""
 
   rubin_process_init "rubin-devnet-process-selftest"
   local log_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/selftest.log"
