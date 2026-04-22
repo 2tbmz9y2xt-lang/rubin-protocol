@@ -10,11 +10,39 @@ RUBIN_PROCESS_PIDS=()
 RUBIN_PROCESS_LOGS=()
 RUBIN_PROCESS_LAST_PID=""
 
+rubin_process_require_uint() {
+  local name="$1"
+  local value="$2"
+
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    echo "${name} must be a non-negative integer: ${value}" >&2
+    return 1
+  fi
+}
+
+rubin_process_require_args() {
+  local name="$1"
+  local minimum="$2"
+  local actual="$3"
+
+  if (( actual < minimum )); then
+    echo "${name} requires at least ${minimum} argument(s), got ${actual}" >&2
+    return 1
+  fi
+}
+
 rubin_process_init() {
   local prefix="${1:-rubin-devnet-process}"
   local safe_prefix="${prefix//\//_}"
   safe_prefix="${safe_prefix//\\/_}"
   local artifact_parent="${RUBIN_PROCESS_ARTIFACT_ROOT:-${TMPDIR:-/tmp}}"
+  local existing_exit_trap
+
+  existing_exit_trap="$(trap -p EXIT || true)"
+  if [[ -n "${existing_exit_trap}" ]]; then
+    echo "refusing to overwrite existing EXIT trap" >&2
+    return 1
+  fi
 
   if [[ -z "${safe_prefix}" || "${safe_prefix}" == "." || "${safe_prefix}" == ".." ]]; then
     safe_prefix="rubin-devnet-process"
@@ -23,10 +51,20 @@ rubin_process_init() {
     echo "unsafe artifact parent: ${artifact_parent:-<empty>}" >&2
     return 1
   fi
+  rubin_process_require_uint "RUBIN_PROCESS_STOP_GRACE_SECONDS" "${RUBIN_PROCESS_STOP_GRACE_SECONDS}" || return 1
 
-  mkdir -p "${artifact_parent}"
+  if ! mkdir -p "${artifact_parent}"; then
+    echo "failed to create artifact parent: ${artifact_parent}" >&2
+    return 1
+  fi
   if ! RUBIN_PROCESS_ARTIFACT_ROOT="$(mktemp -d "${artifact_parent%/}/${safe_prefix}.XXXXXX")"; then
     echo "failed to create artifact root under ${artifact_parent}" >&2
+    RUBIN_PROCESS_ARTIFACT_ROOT=""
+    return 1
+  fi
+  if [[ ! -d "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]]; then
+    echo "artifact root is not a directory: ${RUBIN_PROCESS_ARTIFACT_ROOT}" >&2
+    RUBIN_PROCESS_ARTIFACT_ROOT=""
     return 1
   fi
 
@@ -37,31 +75,54 @@ rubin_process_init() {
 }
 
 rubin_process_register_log() {
+  rubin_process_require_args "rubin_process_register_log" 1 "$#" || return 1
   local log_file="$1"
   RUBIN_PROCESS_LOGS+=("${log_file}")
 }
 
 rubin_process_start() {
+  rubin_process_require_args "rubin_process_start" 2 "$#" || return 1
   local log_file="$1"
   shift
+  local log_dir
+  local started_pid
 
-  mkdir -p "$(dirname "${log_file}")"
+  log_dir="$(dirname "${log_file}")"
+  if ! mkdir -p "${log_dir}"; then
+    echo "failed to create log directory: ${log_dir}" >&2
+    RUBIN_PROCESS_LAST_PID=""
+    return 1
+  fi
   rubin_process_register_log "${log_file}"
+  RUBIN_PROCESS_LAST_PID=""
   "$@" >"${log_file}" 2>&1 &
-  RUBIN_PROCESS_LAST_PID="$!"
+  started_pid="$!"
+  if [[ -z "${started_pid}" ]]; then
+    echo "failed to start background command for log: ${log_file}" >&2
+    return 1
+  fi
+  RUBIN_PROCESS_LAST_PID="${started_pid}"
+  if ! rubin_process_is_alive "${RUBIN_PROCESS_LAST_PID}"; then
+    echo "background command exited before registration: ${log_file}" >&2
+    RUBIN_PROCESS_LAST_PID=""
+    return 1
+  fi
   RUBIN_PROCESS_PIDS+=("${RUBIN_PROCESS_LAST_PID}")
 }
 
 rubin_process_is_alive() {
+  rubin_process_require_args "rubin_process_is_alive" 1 "$#" || return 1
   local pid="$1"
   kill -0 "${pid}" >/dev/null 2>&1
 }
 
 rubin_process_stop_pid() {
+  rubin_process_require_args "rubin_process_stop_pid" 1 "$#" || return 1
   local pid="$1"
 
   if rubin_process_is_alive "${pid}"; then
     kill "${pid}" >/dev/null 2>&1 || true
+    rubin_process_require_uint "RUBIN_PROCESS_STOP_GRACE_SECONDS" "${RUBIN_PROCESS_STOP_GRACE_SECONDS}" || return 1
     local deadline=$((SECONDS + RUBIN_PROCESS_STOP_GRACE_SECONDS))
     while rubin_process_is_alive "${pid}" && (( SECONDS < deadline )); do
       sleep 1
@@ -81,12 +142,15 @@ rubin_process_stop_all() {
 }
 
 rubin_process_wait_for_log() {
+  rubin_process_require_args "rubin_process_wait_for_log" 3 "$#" || return 1
   local file="$1"
   local needle="$2"
   local timeout="$3"
   local pid="${4:-}"
-  local deadline=$((SECONDS + timeout))
+  local deadline
 
+  rubin_process_require_uint "timeout" "${timeout}" || return 1
+  deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     if [[ -f "${file}" ]] && grep -F -q -- "${needle}" "${file}"; then
       return 0
@@ -103,6 +167,7 @@ rubin_process_wait_for_log() {
 }
 
 rubin_process_extract_rpc_addr() {
+  rubin_process_require_args "rubin_process_extract_rpc_addr" 1 "$#" || return 1
   local file="$1"
   local addr
 
@@ -122,10 +187,13 @@ rubin_process_extract_rpc_addr() {
 }
 
 rubin_process_wait_for_rpc_ready() {
+  rubin_process_require_args "rubin_process_wait_for_rpc_ready" 2 "$#" || return 1
   local rpc_addr="$1"
   local timeout="$2"
-  local deadline=$((SECONDS + timeout))
+  local deadline
 
+  rubin_process_require_uint "timeout" "${timeout}" || return 1
+  deadline=$((SECONDS + timeout))
   if ! command -v python3 >/dev/null 2>&1; then
     echo "python3 is required to poll /get_tip" >&2
     return 1
@@ -196,7 +264,7 @@ rubin_process_exit_trap() {
   exit "${cleanup_status}"
 }
 
-rubin_process_self_test() {
+rubin_process_self_test() (
   set -euo pipefail
 
   local parent_root
@@ -232,6 +300,11 @@ rubin_process_self_test() {
     return 1
   fi
 
+  if bash -c 'source "$1"; trap "echo caller trap >&2" EXIT; rubin_process_init trap-clobber' bash "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
+    echo "existing EXIT trap was overwritten" >&2
+    return 1
+  fi
+
   rubin_process_init "rubin-devnet-process-selftest"
   local log_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/selftest.log"
   local pid
@@ -248,7 +321,7 @@ rubin_process_self_test() {
 
   rubin_process_stop_pid "${pid}"
   echo "PASS: devnet process common self-test"
-}
+)
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   case "${1:-}" in
