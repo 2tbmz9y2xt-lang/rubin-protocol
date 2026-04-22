@@ -299,11 +299,11 @@ func (s *Service) sleepOrStop(d time.Duration) bool {
 }
 
 func (s *Service) dialPeer(addr string) {
-	defer s.loopWG.Done()
-	defer s.finishDialPeer(addr)
 	if s == nil {
 		return
 	}
+	defer s.loopWG.Done()
+	defer s.finishDialPeer(addr)
 	dialer := &net.Dialer{Timeout: s.cfg.PeerRuntimeConfig.HandshakeTimeout}
 	conn, err := dialer.DialContext(s.ctx, "tcp", addr)
 	if err != nil {

@@ -289,7 +289,7 @@ func TestHandleTxPoolFullMarksSeen(t *testing.T) {
 	}
 }
 
-func TestHandleTxMetadataErrorStillMarksSeen(t *testing.T) {
+func TestHandleTxMetadataErrorIsPeerNeutralAndMarksSeen(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -313,6 +313,12 @@ func TestHandleTxMetadataErrorStillMarksSeen(t *testing.T) {
 	}
 	if err := p.handleTx(txBytes); err != nil {
 		t.Fatalf("handleTx metadata error should be swallowed, got %v", err)
+	}
+	if p.state.BanScore != 0 {
+		t.Fatalf("ban score=%d, want 0 for peer-neutral metadata error", p.state.BanScore)
+	}
+	if p.state.LastError != "" {
+		t.Fatalf("last error=%q, want empty for peer-neutral metadata error", p.state.LastError)
 	}
 	if h.service.cfg.TxPool.Has(txid) {
 		t.Fatal("metadata failure should not admit tx into relay pool")

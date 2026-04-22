@@ -37,7 +37,10 @@ func (p *peer) handleTx(txBytes []byte) error {
 	}
 	meta, err := p.service.relayTxMetadata(txBytes)
 	if err != nil {
-		return nil
+		// Keep metadata rejections peer-neutral for Go/Rust relay parity:
+		// local policy/runtime state can reject a structurally valid tx, and
+		// Rust surfaces the same branch as non-banworthy MetadataRejected.
+		return nil //nolint:nilerr
 	}
 	if !p.service.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
 		return nil

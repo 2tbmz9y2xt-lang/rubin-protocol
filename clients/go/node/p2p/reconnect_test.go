@@ -147,6 +147,11 @@ func TestDialPeerFailureRecordsReconnect(t *testing.T) {
 	}
 }
 
+func TestDialPeerNilReceiverReturnsBeforeDefers(t *testing.T) {
+	var service *Service
+	service.dialPeer("127.0.0.1:1")
+}
+
 func TestReconnectDuePeersSkipsConnectedAndNotDue(t *testing.T) {
 	restore := overrideReconnectTiming(50*time.Millisecond, 50*time.Millisecond, 200*time.Millisecond)
 	defer restore()
