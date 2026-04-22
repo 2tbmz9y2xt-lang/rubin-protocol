@@ -30,9 +30,6 @@ func ParseVaultCovenantDataForSpend(covData []byte) (*VaultCovenant, error) {
 }
 
 func parseVaultCovenantData(covData []byte, enforceWhitelistCanonical bool) (*VaultCovenant, error) {
-	if covData == nil {
-		return nil, txerr(TX_ERR_VAULT_MALFORMED, "nil CORE_VAULT covenant_data")
-	}
 	if len(covData) < 34 {
 		return nil, txerr(TX_ERR_VAULT_MALFORMED, "CORE_VAULT covenant_data too short")
 	}
@@ -92,9 +89,6 @@ func parseVaultCovenantData(covData []byte, enforceWhitelistCanonical bool) (*Va
 }
 
 func ParseMultisigCovenantData(covData []byte) (*MultisigCovenant, error) {
-	if covData == nil {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "nil CORE_MULTISIG covenant_data")
-	}
 	if len(covData) < 34 {
 		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_MULTISIG covenant_data too short")
 	}

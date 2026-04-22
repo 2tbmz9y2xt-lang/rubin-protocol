@@ -6,9 +6,6 @@ type StealthCovenant struct {
 }
 
 func ParseStealthCovenantData(covData []byte) (*StealthCovenant, error) {
-	if covData == nil {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "nil CORE_STEALTH covenant_data")
-	}
 	if len(covData) != MAX_STEALTH_COVENANT_DATA {
 		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_STEALTH covenant_data length mismatch")
 	}

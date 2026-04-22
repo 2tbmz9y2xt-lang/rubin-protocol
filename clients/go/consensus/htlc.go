@@ -11,9 +11,6 @@ type HTLCCovenant struct {
 }
 
 func ParseHTLCCovenantData(covData []byte) (*HTLCCovenant, error) {
-	if covData == nil {
-		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "nil CORE_HTLC covenant_data")
-	}
 	if len(covData) != MAX_HTLC_COVENANT_DATA {
 		return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC covenant_data length mismatch")
 	}
