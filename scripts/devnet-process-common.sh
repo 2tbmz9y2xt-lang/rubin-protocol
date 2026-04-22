@@ -12,6 +12,7 @@ RUBIN_PROCESS_LOGS=()
 RUBIN_PROCESS_LAST_PID=""
 _RUBIN_PROCESS_CREATED_PARENT=""
 _RUBIN_PROCESS_CREATED_ROOT=""
+_RUBIN_PROCESS_CREATED_ROOT_REAL=""
 _RUBIN_PROCESS_STOP_GRACE_SECONDS_DECIMAL=""
 
 _rubin_process_error() { echo "$*" >&2; }
@@ -29,8 +30,16 @@ _rubin_process_pid() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
 
 _rubin_process_has_parent_ref() { case "/${1:-}/" in *"/../"*) return 0 ;; *) return 1 ;; esac; }
 
+_rubin_process_physical_dir() {
+  local dir="${1:-}"
+  [[ -n "${dir}" && -d "${dir}" ]] || { _rubin_process_error "directory does not exist: ${dir:-<empty>}"; return 1; }
+  (cd "${dir}" && pwd -P) || { _rubin_process_error "failed to resolve directory: ${dir}"; return 1; }
+}
+
 _rubin_process_require_init() {
   [[ -n "${RUBIN_PROCESS_ARTIFACT_ROOT}" && -d "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || { _rubin_process_error "rubin_process_init must run before process helpers"; return 1; }
+  [[ -n "${_RUBIN_PROCESS_CREATED_ROOT}" && "${RUBIN_PROCESS_ARTIFACT_ROOT}" == "${_RUBIN_PROCESS_CREATED_ROOT}" ]] || { _rubin_process_error "rubin_process_init must complete successfully before process helpers"; return 1; }
+  [[ -n "${_RUBIN_PROCESS_CREATED_ROOT_REAL}" && "$(_rubin_process_physical_dir "${RUBIN_PROCESS_ARTIFACT_ROOT}")" == "${_RUBIN_PROCESS_CREATED_ROOT_REAL}" ]] || { _rubin_process_error "artifact root no longer resolves to the helper-created directory: ${RUBIN_PROCESS_ARTIFACT_ROOT}"; return 1; }
   [[ ! -L "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || { _rubin_process_error "artifact root must not be a symlink: ${RUBIN_PROCESS_ARTIFACT_ROOT}"; return 1; }
 }
 
@@ -68,11 +77,12 @@ _rubin_process_reject_symlink_components() {
 
 _rubin_process_require_artifact_parent() {
   local file="${1:-}" dir root_real dir_real
+  _rubin_process_require_init || return 1
   _rubin_process_reject_symlink_components "${file}" || return 1
   dir="$(dirname "${file}")"
   [[ -d "${dir}" ]] || return 0
-  root_real="$(cd "${RUBIN_PROCESS_ARTIFACT_ROOT}" && pwd -P)" || { _rubin_process_error "failed to resolve artifact root: ${RUBIN_PROCESS_ARTIFACT_ROOT}"; return 1; }
-  dir_real="$(cd "${dir}" && pwd -P)" || { _rubin_process_error "failed to resolve log directory: ${dir}"; return 1; }
+  root_real="$(_rubin_process_physical_dir "${RUBIN_PROCESS_ARTIFACT_ROOT}")" || return 1
+  dir_real="$(_rubin_process_physical_dir "${dir}")" || return 1
   case "${dir_real}" in
     "${root_real}"|"${root_real}"/*) ;;
     *) _rubin_process_error "log directory must stay under artifact root: ${dir}"; return 1 ;;
@@ -130,6 +140,10 @@ rubin_process_init() {
     return 1
   }
   _RUBIN_PROCESS_CREATED_ROOT="${RUBIN_PROCESS_ARTIFACT_ROOT}"
+  _RUBIN_PROCESS_CREATED_ROOT_REAL="$(_rubin_process_physical_dir "${RUBIN_PROCESS_ARTIFACT_ROOT}")" || {
+    RUBIN_PROCESS_ARTIFACT_ROOT=""
+    return 1
+  }
   RUBIN_PROCESS_PIDS=()
   RUBIN_PROCESS_LOGS=()
   RUBIN_PROCESS_LAST_PID=""
@@ -186,15 +200,18 @@ rubin_process_stop_pid() {
 }
 
 rubin_process_stop_all() {
-  local i
+  local i rc status=0
   for ((i=${#RUBIN_PROCESS_PIDS[@]} - 1; i >= 0; i--)); do
-    rubin_process_stop_pid "${RUBIN_PROCESS_PIDS[$i]}" || return 1
+    rc=0
+    rubin_process_stop_pid "${RUBIN_PROCESS_PIDS[$i]}" || rc=$?
+    (( rc == 0 )) || { (( status == 0 )) && status="${rc}"; }
   done
+  return "${status}"
 }
 
 rubin_process_wait_for_log() {
   local file="${1:-}" needle="${2:-}" timeout="${3:-}" pid="${4:-}" timeout_seconds deadline
-  [[ -n "${file}" && -n "${needle}" ]] || { _rubin_process_error "rubin_process_wait_for_log requires file, needle, timeout"; return 1; }
+  [[ -n "${file}" && -n "${needle}" && -n "${timeout}" ]] || { _rubin_process_error "rubin_process_wait_for_log requires file, needle, timeout"; return 1; }
   file="$(_rubin_process_resolve_log "${file}")" || return 1
   _rubin_process_require_artifact_parent "${file}" || return 1
   timeout_seconds="$(_rubin_process_uint_decimal "timeout" "${timeout}")" || return 1
@@ -230,7 +247,8 @@ rubin_process_extract_rpc_addr() {
 
 rubin_process_wait_for_rpc_ready() {
   local rpc_addr="${1:-}" timeout="${2:-}" timeout_seconds deadline
-  [[ -n "${rpc_addr}" && "${rpc_addr}" != *[[:space:]/]* ]] || { _rubin_process_error "invalid rpc address: ${rpc_addr:-<empty>}"; return 1; }
+  [[ -n "${rpc_addr}" && -n "${timeout}" ]] || { _rubin_process_error "rubin_process_wait_for_rpc_ready requires rpc address and timeout"; return 1; }
+  [[ "${rpc_addr}" != *[[:space:]/]* ]] || { _rubin_process_error "invalid rpc address: ${rpc_addr:-<empty>}"; return 1; }
   timeout_seconds="$(_rubin_process_uint_decimal "timeout" "${timeout}")" || return 1
   command -v python3 >/dev/null 2>&1 || { _rubin_process_error "python3 is required to poll /get_tip"; return 1; }
   deadline=$((SECONDS + timeout_seconds))
@@ -247,7 +265,8 @@ rubin_process_wait_for_rpc_ready() {
 rubin_process_dump_artifacts() {
   local log_file
   _rubin_process_error "FAIL: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT:-<unset>}"
-  for log_file in "${RUBIN_PROCESS_LOGS[@]:-}"; do
+  for log_file in "${RUBIN_PROCESS_LOGS[@]}"; do
+    _rubin_process_require_artifact_parent "${log_file}" || { _rubin_process_error "skipping unsafe log file: ${log_file}"; continue; }
     [[ -f "${log_file}" ]] || continue
     _rubin_process_error "----- $(basename "${log_file}") -----"
     tail -n 80 "${log_file}" >&2 || true
@@ -263,10 +282,11 @@ rubin_process_cleanup() {
     echo "OK: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT}"
     return "${cleanup_status}"
   }
-  if [[ -z "${_RUBIN_PROCESS_CREATED_PARENT}" || -z "${_RUBIN_PROCESS_CREATED_ROOT}" || -z "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || _rubin_process_has_parent_ref "${RUBIN_PROCESS_ARTIFACT_ROOT}"; then
+  if [[ -z "${_RUBIN_PROCESS_CREATED_PARENT}" || -z "${_RUBIN_PROCESS_CREATED_ROOT}" || -z "${_RUBIN_PROCESS_CREATED_ROOT_REAL}" || -z "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || _rubin_process_has_parent_ref "${RUBIN_PROCESS_ARTIFACT_ROOT}"; then
     _rubin_process_error "refusing cleanup without initialized artifact paths or with parent traversal"
     return 1
   fi
+  _rubin_process_require_init || return 1
   [[ "${RUBIN_PROCESS_ARTIFACT_ROOT}" == "${_RUBIN_PROCESS_CREATED_ROOT}" ]] || {
     _rubin_process_error "refusing to remove artifact root not created by rubin_process_init: ${RUBIN_PROCESS_ARTIFACT_ROOT}"
     return 1
@@ -275,7 +295,7 @@ rubin_process_cleanup() {
     "${_RUBIN_PROCESS_CREATED_PARENT}"/*) ;;
     *) _rubin_process_error "refusing to remove unsafe artifact root: ${RUBIN_PROCESS_ARTIFACT_ROOT}"; return 1 ;;
   esac
-  rm -rf -- "${RUBIN_PROCESS_ARTIFACT_ROOT}" || cleanup_status=$?
+  rm -rf -- "${_RUBIN_PROCESS_CREATED_ROOT_REAL}" || cleanup_status=$?
   return "${cleanup_status}"
 }
 
