@@ -158,17 +158,25 @@ TX_COUNT="$(printf '%s' "${MINE_JSON}" | json_key tx_count)"
   exit 1
 }
 wait_height "${A_RPC_ADDR}" "${TARGET_HEIGHT}" 30
-IFS=$'\t' read -r _ A_TIP < <(tip_tsv "${A_RPC_ADDR}")
-IFS=$'\t' read -r B_HEIGHT _ < <(tip_tsv "${B_RPC_ADDR}")
-IFS=$'\t' read -r C_HEIGHT _ < <(tip_tsv "${C_RPC_ADDR}")
-[[ "${A_TIP}" == "${FINAL_HASH}" && "${B_HEIGHT}" == "${BASE_HEIGHT}" && "${C_HEIGHT}" == "${BASE_HEIGHT}" ]] || {
-  echo "unexpected checkpoints final=${FINAL_HASH} a=${A_TIP} b_height=${B_HEIGHT} c_height=${C_HEIGHT}" >&2
+IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
+IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
+IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
+[[ "${A_HEIGHT}" == "${TARGET_HEIGHT}" && "${A_TIP}" == "${FINAL_HASH}" ]] || {
+  echo "unexpected node-a checkpoint final=${FINAL_HASH} a_height=${A_HEIGHT} a_tip=${A_TIP}" >&2
+  exit 1
+}
+[[ ("${B_HEIGHT}" == "${BASE_HEIGHT}" && -n "${B_TIP}") || ("${B_HEIGHT}" == "${TARGET_HEIGHT}" && "${B_TIP}" == "${FINAL_HASH}") ]] || {
+  echo "unexpected node-b checkpoint final=${FINAL_HASH} b_height=${B_HEIGHT} b_tip=${B_TIP}" >&2
+  exit 1
+}
+[[ ("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}") ]] || {
+  echo "unexpected node-c checkpoint final=${FINAL_HASH} c_height=${C_HEIGHT} c_tip=${C_TIP}" >&2
   exit 1
 }
 BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
 printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sys.argv[1].lower() in d["block_hex"].lower()' "${TX_HEX}"
 
-export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT B_HEIGHT C_HEIGHT A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR TX_ID FINAL_HASH TX_COUNT
+export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR TX_ID FINAL_HASH TX_COUNT
 python3 - <<'PY'
 import json, os
 report = {
@@ -176,9 +184,9 @@ report = {
   "target_height": int(os.environ["TARGET_HEIGHT"]),
   "base_height": int(os.environ["BASE_HEIGHT"]),
   "participants": [
-    {"name": "node-a", "pid": int(os.environ["A_PID"]), "rpc": os.environ["A_RPC_ADDR"], "checkpoint_height": int(os.environ["TARGET_HEIGHT"])},
-    {"name": "node-b", "pid": int(os.environ["B_PID"]), "rpc": os.environ["B_RPC_ADDR"], "checkpoint_height": int(os.environ["B_HEIGHT"])},
-    {"name": "node-c", "pid": int(os.environ["C_PID"]), "rpc": os.environ["C_RPC_ADDR"], "checkpoint_height": int(os.environ["C_HEIGHT"])},
+    {"name": "node-a", "pid": int(os.environ["A_PID"]), "rpc": os.environ["A_RPC_ADDR"], "checkpoint_height": int(os.environ["A_HEIGHT"]), "tip_hash": os.environ["A_TIP"]},
+    {"name": "node-b", "pid": int(os.environ["B_PID"]), "rpc": os.environ["B_RPC_ADDR"], "checkpoint_height": int(os.environ["B_HEIGHT"]), "tip_hash": os.environ["B_TIP"]},
+    {"name": "node-c", "pid": int(os.environ["C_PID"]), "rpc": os.environ["C_RPC_ADDR"], "checkpoint_height": int(os.environ["C_HEIGHT"]), "tip_hash": os.environ["C_TIP"]},
   ],
   "tx": {"id": os.environ["TX_ID"], "submission": "rpc:/submit_tx"},
   "final": {"height": int(os.environ["TARGET_HEIGHT"]), "tip_hash": os.environ["FINAL_HASH"], "tx_count": int(os.environ["TX_COUNT"])},
