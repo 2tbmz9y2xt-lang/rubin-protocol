@@ -44,13 +44,11 @@ KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"
 KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-binary-soak-report.json"
 BASE_HEIGHT=$((TARGET_HEIGHT - 1))
-BASE_MINE_BLOCKS="${TARGET_HEIGHT}"
+BASE_MINE_BLOCKS=$((BASE_HEIGHT + 1))
 A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 B_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-b"
 C_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-c"
-A_LOG="node-a.log"
-B_LOG="node-b.log"
-C_LOG="node-c.log"
+A_LOG="node-a.log" B_LOG="node-b.log" C_LOG="node-c.log"
 MINE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-base.log"
 
 rpc_json() {
@@ -194,4 +192,8 @@ with open(os.environ["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
-echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; report=${REPORT_JSON}"
+if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
+  echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; report=${REPORT_JSON}"
+else
+  echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; set KEEP_TMP=1 to retain report"
+fi
