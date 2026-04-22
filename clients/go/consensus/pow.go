@@ -102,6 +102,9 @@ func retargetV1WithActual(targetOld [32]byte, tActual uint64) ([32]byte, error) 
 
 // PowCheck verifies integer(block_hash, be) < integer(target, be).
 func PowCheck(headerBytes []byte, target [32]byte) error {
+	if len(headerBytes) != BLOCK_HEADER_BYTES {
+		return txerr(TX_ERR_PARSE, "pow: invalid header length")
+	}
 	targetInt := new(big.Int).SetBytes(target[:])
 	powLimit := new(big.Int).SetBytes(POW_LIMIT[:])
 	if targetInt.Sign() == 0 || targetInt.Cmp(powLimit) > 0 {

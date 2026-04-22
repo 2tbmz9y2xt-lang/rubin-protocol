@@ -553,3 +553,28 @@ fn pow_check_strict_less() {
     let err = pow_check(&header, zero_target).unwrap_err();
     assert_eq!(err.code, ErrorCode::BlockErrTargetInvalid);
 }
+
+#[test]
+fn pow_check_rejects_invalid_header_length_before_target() {
+    for (name, header, target) in [
+        (
+            "short_valid_target",
+            vec![0u8; BLOCK_HEADER_BYTES - 1],
+            POW_LIMIT,
+        ),
+        (
+            "overlong_valid_target",
+            vec![0u8; BLOCK_HEADER_BYTES + 1],
+            POW_LIMIT,
+        ),
+        (
+            "short_zero_target",
+            vec![0u8; BLOCK_HEADER_BYTES - 1],
+            [0u8; 32],
+        ),
+    ] {
+        let err = pow_check(&header, target).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrParse, "{name}");
+        assert_eq!(err.msg, "pow: invalid header length", "{name}");
+    }
+}
