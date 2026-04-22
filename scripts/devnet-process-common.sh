@@ -3,17 +3,17 @@
 # Shared fail-closed process helpers for devnet evidence scripts.
 # Source this file, then call rubin_process_init before using helpers.
 
-RUBIN_PROCESS_ARTIFACT_ROOT="${RUBIN_PROCESS_ARTIFACT_ROOT:-}"
-RUBIN_PROCESS_ARTIFACT_PARENT="${RUBIN_PROCESS_ARTIFACT_PARENT:-}"
-RUBIN_PROCESS_KEEP_ARTIFACTS="${RUBIN_PROCESS_KEEP_ARTIFACTS:-${KEEP_TMP:-0}}"
-RUBIN_PROCESS_STOP_GRACE_SECONDS="${RUBIN_PROCESS_STOP_GRACE_SECONDS:-5}"
-RUBIN_PROCESS_PIDS=()
-RUBIN_PROCESS_LOGS=()
-RUBIN_PROCESS_LAST_PID=""
-_RUBIN_PROCESS_CREATED_PARENT=""
-_RUBIN_PROCESS_CREATED_ROOT=""
-_RUBIN_PROCESS_CREATED_ROOT_REAL=""
-_RUBIN_PROCESS_STOP_GRACE_SECONDS_DECIMAL=""
+: "${RUBIN_PROCESS_ARTIFACT_ROOT:=}"
+: "${RUBIN_PROCESS_ARTIFACT_PARENT:=}"
+: "${RUBIN_PROCESS_KEEP_ARTIFACTS:=${KEEP_TMP:-0}}"
+: "${RUBIN_PROCESS_STOP_GRACE_SECONDS:=5}"
+declare -p RUBIN_PROCESS_PIDS >/dev/null 2>&1 || RUBIN_PROCESS_PIDS=()
+declare -p RUBIN_PROCESS_LOGS >/dev/null 2>&1 || RUBIN_PROCESS_LOGS=()
+: "${RUBIN_PROCESS_LAST_PID:=}"
+: "${_RUBIN_PROCESS_CREATED_PARENT:=}"
+: "${_RUBIN_PROCESS_CREATED_ROOT:=}"
+: "${_RUBIN_PROCESS_CREATED_ROOT_REAL:=}"
+: "${_RUBIN_PROCESS_STOP_GRACE_SECONDS_DECIMAL:=}"
 
 _rubin_process_error() { echo "$*" >&2; }
 
@@ -22,8 +22,15 @@ _rubin_process_uint() {
 }
 
 _rubin_process_uint_decimal() {
+  local value max=2147483647
   _rubin_process_uint "$1" "$2" || return 1
-  printf '%s\n' "$((10#$2))"
+  value="$2"
+  while [[ "${#value}" -gt 1 && "${value:0:1}" == "0" ]]; do value="${value:1}"; done
+  if (( ${#value} > ${#max} )) || { (( ${#value} == ${#max} )) && (( 10#${value} > max )); }; then
+    _rubin_process_error "$1 is too large: $2"
+    return 1
+  fi
+  printf '%s\n' "$((10#${value}))"
 }
 
 _rubin_process_pid() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
@@ -87,6 +94,17 @@ _rubin_process_require_artifact_parent() {
     "${root_real}"|"${root_real}"/*) ;;
     *) _rubin_process_error "log directory must stay under artifact root: ${dir}"; return 1 ;;
   esac
+}
+
+_rubin_process_clear_state() {
+  trap - EXIT
+  RUBIN_PROCESS_PIDS=()
+  RUBIN_PROCESS_LOGS=()
+  RUBIN_PROCESS_LAST_PID=""
+  RUBIN_PROCESS_ARTIFACT_ROOT=""
+  _RUBIN_PROCESS_CREATED_PARENT=""
+  _RUBIN_PROCESS_CREATED_ROOT=""
+  _RUBIN_PROCESS_CREATED_ROOT_REAL=""
 }
 
 _rubin_process_mkdir_under_artifact_root() {
@@ -163,9 +181,10 @@ rubin_process_start() {
   log_dir="$(dirname "${log_file}")"
   _rubin_process_mkdir_under_artifact_root "${log_dir}" || return 1
   _rubin_process_require_artifact_parent "${log_file}" || return 1
+  command -v perl >/dev/null 2>&1 || { _rubin_process_error "perl is required to launch managed process groups"; return 1; }
 
   RUBIN_PROCESS_LAST_PID=""
-  "$@" >"${log_file}" 2>&1 &
+  perl -e 'setpgrp(0, 0) or die "setpgrp failed: $!"; exec @ARGV or die "exec failed: $!"' -- "$@" >"${log_file}" 2>&1 &
   launch_status=$?
   if (( launch_status != 0 )); then
     _rubin_process_error "failed to launch background command for ${log_file}"
@@ -175,6 +194,7 @@ rubin_process_start() {
   _rubin_process_pid "${started_pid}" || { _rubin_process_error "failed to capture background pid for ${log_file}"; return 1; }
   sleep 0.2
   if ! rubin_process_is_alive "${started_pid}"; then
+    kill -- "-${started_pid}" >/dev/null 2>&1 || true
     wait "${started_pid}" >/dev/null 2>&1 || true
     _rubin_process_error "background command exited before registration: ${log_file}"
     return 1
@@ -183,6 +203,7 @@ rubin_process_start() {
   RUBIN_PROCESS_LAST_PID="${started_pid}"
   RUBIN_PROCESS_PIDS+=("${started_pid}")
   RUBIN_PROCESS_LOGS+=("${log_file}")
+  disown "${started_pid}" 2>/dev/null || true
 }
 
 rubin_process_stop_pid() {
@@ -191,11 +212,13 @@ rubin_process_stop_pid() {
   grace_seconds="${_RUBIN_PROCESS_STOP_GRACE_SECONDS_DECIMAL:-}"
   [[ -n "${grace_seconds}" ]] || grace_seconds="$(_rubin_process_uint_decimal "RUBIN_PROCESS_STOP_GRACE_SECONDS" "${RUBIN_PROCESS_STOP_GRACE_SECONDS}")" || return 1
   if rubin_process_is_alive "${pid}"; then
-    kill "${pid}" >/dev/null 2>&1 || true
+    kill -- "-${pid}" >/dev/null 2>&1 || kill "${pid}" >/dev/null 2>&1 || true
     deadline=$((SECONDS + grace_seconds))
     while rubin_process_is_alive "${pid}" && (( SECONDS < deadline )); do sleep 1; done
   fi
-  rubin_process_is_alive "${pid}" && kill -KILL "${pid}" >/dev/null 2>&1 || true
+  if rubin_process_is_alive "${pid}"; then
+    kill -KILL -- "-${pid}" >/dev/null 2>&1 || kill -KILL "${pid}" >/dev/null 2>&1 || true
+  fi
   wait "${pid}" >/dev/null 2>&1 || true
 }
 
@@ -276,10 +299,15 @@ rubin_process_dump_artifacts() {
 rubin_process_cleanup() {
   local status="${1:-0}" cleanup_status=0
   _rubin_process_uint "status" "${status}" || return 1
+  if [[ -z "${RUBIN_PROCESS_ARTIFACT_ROOT}" && -z "${_RUBIN_PROCESS_CREATED_ROOT}" && ${#RUBIN_PROCESS_PIDS[@]} -eq 0 ]]; then
+    _rubin_process_clear_state
+    return 0
+  fi
   rubin_process_stop_all || cleanup_status=$?
   if [[ "${status}" != "0" ]]; then rubin_process_dump_artifacts; return "${status}"; fi
   [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && {
     echo "OK: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT}"
+    _rubin_process_clear_state
     return "${cleanup_status}"
   }
   if [[ -z "${_RUBIN_PROCESS_CREATED_PARENT}" || -z "${_RUBIN_PROCESS_CREATED_ROOT}" || -z "${_RUBIN_PROCESS_CREATED_ROOT_REAL}" || -z "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || _rubin_process_has_parent_ref "${RUBIN_PROCESS_ARTIFACT_ROOT}"; then
@@ -296,6 +324,7 @@ rubin_process_cleanup() {
     *) _rubin_process_error "refusing to remove unsafe artifact root: ${RUBIN_PROCESS_ARTIFACT_ROOT}"; return 1 ;;
   esac
   rm -rf -- "${_RUBIN_PROCESS_CREATED_ROOT_REAL}" || cleanup_status=$?
+  _rubin_process_clear_state
   return "${cleanup_status}"
 }
 
