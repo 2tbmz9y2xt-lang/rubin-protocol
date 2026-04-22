@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 )
@@ -199,5 +200,77 @@ func TestCoverage_StealthBranches(t *testing.T) {
 	}
 	if err := validateCoreStealthSpend(entry, w, tx, 0, 1, [32]byte{}, 0); err == nil {
 		t.Fatalf("expected noncanonical witness rejection")
+	}
+}
+
+func TestCoverage_NilCovenantDataUsesGenericMalformedContext(t *testing.T) {
+	cases := []struct {
+		name    string
+		parse   func([]byte) error
+		code    ErrorCode
+		message string
+	}{
+		{
+			name: "htlc",
+			parse: func(covData []byte) error {
+				_, err := ParseHTLCCovenantData(covData)
+				return err
+			},
+			code:    TX_ERR_COVENANT_TYPE_INVALID,
+			message: "CORE_HTLC covenant_data length mismatch",
+		},
+		{
+			name: "vault",
+			parse: func(covData []byte) error {
+				_, err := ParseVaultCovenantData(covData)
+				return err
+			},
+			code:    TX_ERR_VAULT_MALFORMED,
+			message: "CORE_VAULT covenant_data too short",
+		},
+		{
+			name: "stealth",
+			parse: func(covData []byte) error {
+				_, err := ParseStealthCovenantData(covData)
+				return err
+			},
+			code:    TX_ERR_COVENANT_TYPE_INVALID,
+			message: "CORE_STEALTH covenant_data length mismatch",
+		},
+		{
+			name: "multisig",
+			parse: func(covData []byte) error {
+				_, err := ParseMultisigCovenantData(covData)
+				return err
+			},
+			code:    TX_ERR_COVENANT_TYPE_INVALID,
+			message: "CORE_MULTISIG covenant_data too short",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+"/nil", func(t *testing.T) {
+			assertTxErrCodeMsg(t, tc.parse(nil), tc.code, tc.message)
+		})
+		t.Run(tc.name+"/empty", func(t *testing.T) {
+			assertTxErrCodeMsg(t, tc.parse([]byte{}), tc.code, tc.message)
+		})
+	}
+}
+
+func assertTxErrCodeMsg(t *testing.T, err error, code ErrorCode, message string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var te *TxError
+	if !errors.As(err, &te) {
+		t.Fatalf("expected *TxError, got %T: %v", err, err)
+	}
+	if te.Code != code {
+		t.Fatalf("code=%s, want %s", te.Code, code)
+	}
+	if te.Msg != message {
+		t.Fatalf("msg=%q, want %q", te.Msg, message)
 	}
 }
