@@ -54,25 +54,28 @@ MINE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-base.log"
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
   python3 - "${method}" "${addr}" "${path}" "${body}" <<'PY'
-import json, sys, urllib.request
+import sys, urllib.error, urllib.request
 method, addr, path, body = sys.argv[1:5]
 data = body.encode() if body else None
 req = urllib.request.Request(f"http://{addr}{path}", data=data, method=method)
 if body:
     req.add_header("Content-Type", "application/json")
-with urllib.request.urlopen(req, timeout=5) as resp:
+try:
+    resp = urllib.request.urlopen(req, timeout=5)
+except urllib.error.HTTPError as exc:
+    print(exc.read().decode("utf-8"), end="")
+    sys.exit(22)
+with resp:
     print(resp.read().decode("utf-8"), end="")
 PY
 }
 
-json_key() {
-  python3 -c 'import json,sys; d=json.load(sys.stdin)
-for p in sys.argv[1].split("."): d=d[p]
-print(d)' "$1"
-}
-
 tip_tsv() {
   rpc_json GET "$1" /get_tip | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["height"], d["tip_hash"], sep="\t")'
+}
+
+metric_value() {
+  rpc_json GET "$1" /metrics | awk -v name="$2" '$1 == name {print int($2); found=1} END {exit !found}'
 }
 
 wait_height() {
@@ -145,10 +148,8 @@ echo "Submitting tx through Go RPC and mining it through /mine_next"
 TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
 MEMPOOL_JSON="$(rpc_json GET "${A_RPC_ADDR}" /get_mempool)"
 TX_ID="$(printf '%s' "${MEMPOOL_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 1; print(d["txids"][0])')"
-MINE_JSON="$(rpc_json POST "${A_RPC_ADDR}" /mine_next '{}')"
-FINAL_HEIGHT="$(printf '%s' "${MINE_JSON}" | json_key height)"
-FINAL_HASH="$(printf '%s' "${MINE_JSON}" | json_key block_hash)"
-TX_COUNT="$(printf '%s' "${MINE_JSON}" | json_key tx_count)"
+if ! MINE_JSON="$(rpc_json POST "${A_RPC_ADDR}" /mine_next '{}')"; then echo "mine_next request failed: ${MINE_JSON}" >&2; exit 1; fi
+IFS=$'\t' read -r FINAL_HEIGHT FINAL_HASH TX_COUNT < <(printf '%s' "${MINE_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); (d.get("mined") is True) or sys.exit("mine_next failed: "+str(d.get("error","missing mined result"))); print(d["height"], d["block_hash"], d["tx_count"], sep="\t")')
 [[ "${FINAL_HEIGHT}" == "${TARGET_HEIGHT}" && "${TX_COUNT}" -ge 2 ]] || {
   echo "unexpected mine_next result height=${FINAL_HEIGHT} tx_count=${TX_COUNT}" >&2
   exit 1
@@ -157,22 +158,19 @@ wait_height "${A_RPC_ADDR}" "${TARGET_HEIGHT}" 30
 IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
 IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
+A_PEERS="$(metric_value "${A_RPC_ADDR}" rubin_node_peer_count)" B_PEERS="$(metric_value "${B_RPC_ADDR}" rubin_node_peer_count)" C_PEERS="$(metric_value "${C_RPC_ADDR}" rubin_node_peer_count)"
 [[ "${A_HEIGHT}" == "${TARGET_HEIGHT}" && "${A_TIP}" == "${FINAL_HASH}" ]] || {
   echo "unexpected node-a checkpoint final=${FINAL_HASH} a_height=${A_HEIGHT} a_tip=${A_TIP}" >&2
   exit 1
 }
-[[ ("${B_HEIGHT}" == "${BASE_HEIGHT}" && -n "${B_TIP}") || ("${B_HEIGHT}" == "${TARGET_HEIGHT}" && "${B_TIP}" == "${FINAL_HASH}") ]] || {
-  echo "unexpected node-b checkpoint final=${FINAL_HASH} b_height=${B_HEIGHT} b_tip=${B_TIP}" >&2
-  exit 1
-}
-[[ ("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}") ]] || {
-  echo "unexpected node-c checkpoint final=${FINAL_HASH} c_height=${C_HEIGHT} c_tip=${C_TIP}" >&2
+[[ (("${B_HEIGHT}" == "${BASE_HEIGHT}" && -n "${B_TIP}") || ("${B_HEIGHT}" == "${TARGET_HEIGHT}" && "${B_TIP}" == "${FINAL_HASH}")) && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
+  echo "unexpected peer checkpoint/connectivity final=${FINAL_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
   exit 1
 }
 BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
 printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sys.argv[1].lower() in d["block_hex"].lower()' "${TX_HEX}"
 
-export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR TX_ID FINAL_HASH TX_COUNT
+export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT
 python3 - <<'PY'
 import json, os
 report = {
@@ -180,9 +178,9 @@ report = {
   "target_height": int(os.environ["TARGET_HEIGHT"]),
   "base_height": int(os.environ["BASE_HEIGHT"]),
   "participants": [
-    {"name": "node-a", "pid": int(os.environ["A_PID"]), "rpc": os.environ["A_RPC_ADDR"], "checkpoint_height": int(os.environ["A_HEIGHT"]), "tip_hash": os.environ["A_TIP"]},
-    {"name": "node-b", "pid": int(os.environ["B_PID"]), "rpc": os.environ["B_RPC_ADDR"], "checkpoint_height": int(os.environ["B_HEIGHT"]), "tip_hash": os.environ["B_TIP"]},
-    {"name": "node-c", "pid": int(os.environ["C_PID"]), "rpc": os.environ["C_RPC_ADDR"], "checkpoint_height": int(os.environ["C_HEIGHT"]), "tip_hash": os.environ["C_TIP"]},
+    {"name": "node-a", "pid": int(os.environ["A_PID"]), "rpc": os.environ["A_RPC_ADDR"], "checkpoint_height": int(os.environ["A_HEIGHT"]), "tip_hash": os.environ["A_TIP"], "peer_count": int(os.environ["A_PEERS"])},
+    {"name": "node-b", "pid": int(os.environ["B_PID"]), "rpc": os.environ["B_RPC_ADDR"], "checkpoint_height": int(os.environ["B_HEIGHT"]), "tip_hash": os.environ["B_TIP"], "peer_count": int(os.environ["B_PEERS"])},
+    {"name": "node-c", "pid": int(os.environ["C_PID"]), "rpc": os.environ["C_RPC_ADDR"], "checkpoint_height": int(os.environ["C_HEIGHT"]), "tip_hash": os.environ["C_TIP"], "peer_count": int(os.environ["C_PEERS"])},
   ],
   "tx": {"id": os.environ["TX_ID"], "submission": "rpc:/submit_tx"},
   "final": {"height": int(os.environ["TARGET_HEIGHT"]), "tip_hash": os.environ["FINAL_HASH"], "tx_count": int(os.environ["TX_COUNT"])},
