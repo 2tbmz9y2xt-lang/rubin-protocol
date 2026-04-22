@@ -46,20 +46,19 @@ RUBIN_PROCESS_LOGS+=("${MINE_LOG}")
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
   python3 - "${method}" "${addr}" "${path}" "${body}" <<'PY'
-import sys, urllib.error, urllib.request
+import socket, sys, urllib.error, urllib.request
 method, addr, path, body = sys.argv[1:5]
 data = body.encode() if body else None
 req = urllib.request.Request(f"http://{addr}{path}", data=data, method=method)
 if body:
     req.add_header("Content-Type", "application/json")
 try:
-    resp = urllib.request.urlopen(req, timeout=5)
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        print(resp.read().decode("utf-8"), end="")
 except urllib.error.HTTPError as exc:
     print(exc.read().decode("utf-8"), end=""); sys.exit(22)
-except (urllib.error.URLError, TimeoutError) as exc:
+except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
     print(f"request failed: {getattr(exc, 'reason', exc)}", end=""); sys.exit(1)
-with resp:
-    print(resp.read().decode("utf-8"), end="")
 PY
 }
 tip_tsv() {
