@@ -7,13 +7,23 @@
 : "${RUBIN_PROCESS_ARTIFACT_PARENT:=}"
 : "${RUBIN_PROCESS_KEEP_ARTIFACTS:=${KEEP_TMP:-0}}"
 : "${RUBIN_PROCESS_STOP_GRACE_SECONDS:=5}"
-declare -p RUBIN_PROCESS_PIDS >/dev/null 2>&1 || RUBIN_PROCESS_PIDS=()
-declare -p RUBIN_PROCESS_LOGS >/dev/null 2>&1 || RUBIN_PROCESS_LOGS=()
-: "${RUBIN_PROCESS_LAST_PID:=}"
-: "${_RUBIN_PROCESS_CREATED_PARENT:=}"
-: "${_RUBIN_PROCESS_CREATED_ROOT:=}"
-: "${_RUBIN_PROCESS_CREATED_ROOT_REAL:=}"
-: "${_RUBIN_PROCESS_STOP_GRACE_SECONDS_DECIMAL:=}"
+_rubin_process_existing_exit_trap="$(trap -p EXIT || true)"
+if [[ "${_rubin_process_existing_exit_trap}" == *"rubin_process_exit_trap"* ]]; then
+  echo "refusing to re-source devnet process helper after rubin_process_init" >&2
+  unset _rubin_process_existing_exit_trap
+  if ! return 1 2>/dev/null; then
+    # shellcheck disable=SC2317 # reachable only when the helper is executed instead of sourced.
+    exit 1
+  fi
+fi
+unset _rubin_process_existing_exit_trap
+RUBIN_PROCESS_PIDS=()
+RUBIN_PROCESS_LOGS=()
+RUBIN_PROCESS_LAST_PID=""
+_RUBIN_PROCESS_CREATED_PARENT=""
+_RUBIN_PROCESS_CREATED_ROOT=""
+_RUBIN_PROCESS_CREATED_ROOT_REAL=""
+_RUBIN_PROCESS_STOP_GRACE_SECONDS_DECIMAL=""
 
 _rubin_process_error() { echo "$*" >&2; }
 
