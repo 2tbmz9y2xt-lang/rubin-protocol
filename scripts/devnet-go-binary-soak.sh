@@ -52,7 +52,6 @@ A_LOG="node-a.log"
 B_LOG="node-b.log"
 C_LOG="node-c.log"
 MINE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-base.log"
-A_P2P_ADDR="127.0.0.1:$((29110 + ($$ % 1000)))"
 
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
@@ -125,25 +124,24 @@ cp -R "${A_DIR}/." "${B_DIR}/"
 cp -R "${A_DIR}/." "${C_DIR}/"
 
 echo "Starting three Go rubin-node processes"
-rubin_process_start "${A_LOG}" "${NODE_BIN}" --datadir "${A_DIR}" --bind "${A_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --mine-address "${MINE_ADDRESS_HEX}"
-A_PID="${RUBIN_PROCESS_LAST_PID}"
+A_PID=""
+for _ in 1 2 3; do
+  A_P2P_ADDR="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(f"127.0.0.1:{s.getsockname()[1]}"); s.close()')"
+  if rubin_process_start "${A_LOG}" "${NODE_BIN}" --datadir "${A_DIR}" --bind "${A_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --mine-address "${MINE_ADDRESS_HEX}" && rubin_process_wait_for_log "${A_LOG}" "rpc: listening=" 30 "${RUBIN_PROCESS_LAST_PID}"; then A_PID="${RUBIN_PROCESS_LAST_PID}"; A_RPC_ADDR="$(rubin_process_extract_rpc_addr "${A_LOG}")"; break; fi
+  [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || rubin_process_stop_pid "${RUBIN_PROCESS_LAST_PID}" || true
+done
+[[ -n "${A_PID}" ]] || { echo "failed to start node-a after retrying loopback bind ports" >&2; exit 1; }
 rubin_process_start "${B_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
 B_PID="${RUBIN_PROCESS_LAST_PID}"
 rubin_process_start "${C_LOG}" "${NODE_BIN}" --datadir "${C_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
 C_PID="${RUBIN_PROCESS_LAST_PID}"
 
-rubin_process_wait_for_log "${A_LOG}" "rpc: listening=" 30 "${A_PID}"
-A_RPC_ADDR="$(rubin_process_extract_rpc_addr "${A_LOG}")"
 rubin_process_wait_for_log "${B_LOG}" "rpc: listening=" 30 "${B_PID}"
 B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_LOG}")"
 rubin_process_wait_for_log "${C_LOG}" "rpc: listening=" 30 "${C_PID}"
 C_RPC_ADDR="$(rubin_process_extract_rpc_addr "${C_LOG}")"
-rubin_process_wait_for_rpc_ready "${A_RPC_ADDR}" 30
-rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30
-rubin_process_wait_for_rpc_ready "${C_RPC_ADDR}" 30
-wait_height "${A_RPC_ADDR}" "${BASE_HEIGHT}" 30
-wait_height "${B_RPC_ADDR}" "${BASE_HEIGHT}" 30
-wait_height "${C_RPC_ADDR}" "${BASE_HEIGHT}" 30
+for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do rubin_process_wait_for_rpc_ready "${addr}" 30; done
+for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do wait_height "${addr}" "${BASE_HEIGHT}" 30; done
 
 echo "Submitting tx through Go RPC and mining it through /mine_next"
 TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
