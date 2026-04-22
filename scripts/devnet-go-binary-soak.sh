@@ -55,8 +55,9 @@ if body:
 try:
     resp = urllib.request.urlopen(req, timeout=5)
 except urllib.error.HTTPError as exc:
-    print(exc.read().decode("utf-8"), end="")
-    sys.exit(22)
+    print(exc.read().decode("utf-8"), end=""); sys.exit(22)
+except (urllib.error.URLError, TimeoutError) as exc:
+    print(f"request failed: {getattr(exc, 'reason', exc)}", end=""); sys.exit(1)
 with resp:
     print(resp.read().decode("utf-8"), end="")
 PY
