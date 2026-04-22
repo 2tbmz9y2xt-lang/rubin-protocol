@@ -116,6 +116,38 @@ func TestSigCheckQueue_MultipleAllValid(t *testing.T) {
 	}
 }
 
+func TestSigCheckQueue_RollbackClearsDroppedTail(t *testing.T) {
+	q := NewSigCheckQueue(1)
+	firstPubkey := []byte{0x01}
+	firstSig := []byte{0x02}
+	droppedPubkey := []byte{0x03}
+	droppedSig := []byte{0x04}
+
+	q.Push(SUITE_ID_ML_DSA_87, firstPubkey, firstSig, [32]byte{0x11}, txerr(TX_ERR_SIG_INVALID, "keep"))
+	mark := q.mark()
+	q.Push(SUITE_ID_ML_DSA_87, droppedPubkey, droppedSig, [32]byte{0x22}, txerr(TX_ERR_SIG_INVALID, "drop"))
+
+	q.rollbackTo(mark)
+	if q.Len() != 1 {
+		t.Fatalf("expected rollback to preserve one task, got %d", q.Len())
+	}
+	if len(q.tasks[0].pubkey) == 0 || len(q.tasks[0].sig) == 0 || q.tasks[0].errOnFail == nil {
+		t.Fatal("rollback cleared preserved task")
+	}
+
+	backing := q.tasks[:cap(q.tasks)]
+	if len(backing) < 2 {
+		t.Fatalf("test requires retained backing slot, got cap %d", cap(q.tasks))
+	}
+	dropped := backing[1]
+	if dropped.pubkey != nil || dropped.sig != nil || dropped.errOnFail != nil {
+		t.Fatalf("rollback retained dropped task references: pubkey=%v sig=%v err=%v", dropped.pubkey, dropped.sig, dropped.errOnFail)
+	}
+	if dropped.suiteID != 0 || dropped.digest != ([32]byte{}) {
+		t.Fatalf("rollback retained dropped task values: suite=%d digest=%x", dropped.suiteID, dropped.digest)
+	}
+}
+
 func TestSigCheckQueue_DeterministicFirstError(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 
