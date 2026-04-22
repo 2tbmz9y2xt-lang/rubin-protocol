@@ -289,7 +289,7 @@ func TestHandleTxPoolFullMarksSeen(t *testing.T) {
 	}
 }
 
-func TestHandleTxMetadataErrorBumpsBanAndMarksSeen(t *testing.T) {
+func TestHandleTxMetadataErrorIsPeerNeutralAndMarksSeen(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -314,54 +314,17 @@ func TestHandleTxMetadataErrorBumpsBanAndMarksSeen(t *testing.T) {
 	if err := p.handleTx(txBytes); err != nil {
 		t.Fatalf("handleTx metadata error should be swallowed, got %v", err)
 	}
-	if p.state.BanScore != 10 {
-		t.Fatalf("ban score=%d, want 10 after metadata error", p.state.BanScore)
+	if p.state.BanScore != 0 {
+		t.Fatalf("ban score=%d, want 0 for peer-neutral metadata error", p.state.BanScore)
 	}
-	if p.state.LastError != "metadata unavailable" {
-		t.Fatalf("last error=%q, want metadata unavailable", p.state.LastError)
+	if p.state.LastError != "" {
+		t.Fatalf("last error=%q, want empty for peer-neutral metadata error", p.state.LastError)
 	}
 	if h.service.cfg.TxPool.Has(txid) {
 		t.Fatal("metadata failure should not admit tx into relay pool")
 	}
 	if !h.service.txSeen.Has(txid) {
 		t.Fatal("metadata failure should still mark tx as seen to suppress churn")
-	}
-}
-
-func TestHandleTxMetadataErrorReturnsAtBanThreshold(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	h.service.cfg.PeerRuntimeConfig.BanThreshold = 10
-	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
-		return node.RelayTxMetadata{}, errors.New("metadata unavailable")
-	}
-	if err := h.service.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer h.service.Close()
-
-	p := &peer{
-		service: h.service,
-		state:   node.PeerState{HandshakeComplete: true},
-	}
-	txBytes := distinctTxBytes(t, 780)
-	txid, err := canonicalTxID(txBytes)
-	if err != nil {
-		t.Fatalf("canonicalTxID: %v", err)
-	}
-	if err := p.handleTx(txBytes); err == nil {
-		t.Fatal("handleTx metadata error should return error at ban threshold")
-	}
-	if p.state.BanScore != 10 {
-		t.Fatalf("ban score=%d, want 10 after metadata error", p.state.BanScore)
-	}
-	if h.service.cfg.TxPool.Has(txid) {
-		t.Fatal("metadata failure should not admit tx into relay pool")
-	}
-	if !h.service.txSeen.Has(txid) {
-		t.Fatal("metadata failure should still mark tx as seen before threshold return")
 	}
 }
 
