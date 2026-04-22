@@ -20,6 +20,8 @@ _rubin_process_uint() {
 
 _rubin_process_pid() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
 
+_rubin_process_has_parent_ref() { case "/${1:-}/" in *"/../"*) return 0 ;; *) return 1 ;; esac; }
+
 _rubin_process_require_init() {
   [[ -n "${RUBIN_PROCESS_ARTIFACT_ROOT}" && -d "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || { _rubin_process_error "rubin_process_init must run before process helpers"; return 1; }
 }
@@ -29,6 +31,7 @@ _rubin_process_resolve_log() {
   _rubin_process_require_init || return 1
   [[ -n "${log_file}" ]] || { _rubin_process_error "log path must not be empty"; return 1; }
   [[ "${log_file}" == /* ]] || log_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/${log_file}"
+  ! _rubin_process_has_parent_ref "${log_file}" || { _rubin_process_error "log path must not contain '..': ${log_file}"; return 1; }
   case "${log_file}" in
     "${RUBIN_PROCESS_ARTIFACT_ROOT}"/*) printf '%s\n' "${log_file}" ;;
     *) _rubin_process_error "log path must stay under artifact root: ${log_file}"; return 1 ;;
@@ -45,7 +48,7 @@ rubin_process_init() {
     return 1
   }
   [[ -n "${safe_prefix}" && "${safe_prefix}" != "." && "${safe_prefix}" != ".." ]] || safe_prefix="rubin-devnet-process"
-  [[ "${parent}" == /* && "${parent}" != "/" && "${parent}" != "." && "${parent}" != ".." ]] || {
+  [[ "${parent}" == /* && "${parent}" != "/" && "${parent}" != "." && "${parent}" != ".." ]] && ! _rubin_process_has_parent_ref "${parent}" || {
     _rubin_process_error "unsafe artifact parent: ${parent:-<empty>}"
     return 1
   }
@@ -118,10 +121,8 @@ rubin_process_stop_all() {
 
 rubin_process_wait_for_log() {
   local file="${1:-}" needle="${2:-}" timeout="${3:-}" pid="${4:-}" deadline
-  [[ -n "${file}" && -n "${needle}" ]] || {
-    _rubin_process_error "rubin_process_wait_for_log requires file, needle, timeout"
-    return 1
-  }
+  [[ -n "${file}" && -n "${needle}" ]] || { _rubin_process_error "rubin_process_wait_for_log requires file, needle, timeout"; return 1; }
+  file="$(_rubin_process_resolve_log "${file}")" || return 1
   _rubin_process_uint "timeout" "${timeout}" || return 1
   deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
@@ -138,6 +139,7 @@ rubin_process_wait_for_log() {
 
 rubin_process_extract_rpc_addr() {
   local file="${1:-}" addr
+  file="$(_rubin_process_resolve_log "${file}")" || return 1
   [[ -r "${file}" ]] || { _rubin_process_error "rpc log file is missing or unreadable: ${file:-<empty>}"; return 1; }
   if ! addr="$(sed -n 's/.*rpc: listening=//p' "${file}" | tail -n 1 | tr -d '[:space:]')"; then
     _rubin_process_error "failed to extract rpc listening banner from ${file}"
@@ -182,8 +184,8 @@ rubin_process_cleanup() {
     echo "OK: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT}"
     return "${cleanup_status}"
   }
-  [[ -n "${_RUBIN_PROCESS_CREATED_PARENT}" && -n "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] || {
-    _rubin_process_error "refusing cleanup without initialized artifact paths"
+  [[ -n "${_RUBIN_PROCESS_CREATED_PARENT}" && -n "${RUBIN_PROCESS_ARTIFACT_ROOT}" ]] && ! _rubin_process_has_parent_ref "${RUBIN_PROCESS_ARTIFACT_ROOT}" || {
+    _rubin_process_error "refusing cleanup without initialized artifact paths or with parent traversal"
     return 1
   }
   case "${RUBIN_PROCESS_ARTIFACT_ROOT}" in
