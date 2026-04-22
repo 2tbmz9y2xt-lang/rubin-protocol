@@ -7,10 +7,7 @@ GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 TARGET_HEIGHT=120
 
-usage() {
-  echo "usage: $0 [--target-height N]" >&2
-}
-
+usage() { echo "usage: $0 [--target-height N]" >&2; }
 while (($#)); do
   case "$1" in
     --target-height)
@@ -28,16 +25,10 @@ while (($#)); do
       ;;
   esac
 done
-
-[[ "${TARGET_HEIGHT}" =~ ^[0-9]+$ && "${TARGET_HEIGHT}" -ge 102 ]] || {
-  echo "--target-height must be an integer >= 102" >&2
-  exit 2
-}
-
+[[ "${TARGET_HEIGHT}" =~ ^[0-9]+$ && "${TARGET_HEIGHT}" -ge 102 ]] || { echo "--target-height must be an integer >= 102" >&2; exit 2; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
 rubin_process_init go-binary-soak
-
 NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"
 KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"
@@ -50,7 +41,7 @@ B_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-b"
 C_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-c"
 A_LOG="node-a.log" B_LOG="node-b.log" C_LOG="node-c.log"
 MINE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-base.log"
-
+RUBIN_PROCESS_LOGS+=("${MINE_LOG}")
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
   python3 - "${method}" "${addr}" "${path}" "${body}" <<'PY'
@@ -69,15 +60,12 @@ with resp:
     print(resp.read().decode("utf-8"), end="")
 PY
 }
-
 tip_tsv() {
   rpc_json GET "$1" /get_tip | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["height"], d["tip_hash"], sep="\t")'
 }
-
 metric_value() {
   rpc_json GET "$1" /metrics | awk -v name="$2" '$1 == name {print int($2); found=1} END {exit !found}'
 }
-
 wait_height() {
   local addr="$1" want="$2" timeout="$3" height hash
   local deadline=$((SECONDS + timeout))
@@ -90,7 +78,19 @@ wait_height() {
   echo "timeout waiting for ${addr} height=${want}" >&2
   return 1
 }
-
+wait_peers() {
+  local addr="$1" want="$2" timeout="$3" value
+  local deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    if value="$(metric_value "${addr}" rubin_node_peer_count 2>/dev/null)" && [[ "${value}" =~ ^[0-9]+$ && "${value}" -ge "${want}" ]]; then
+      printf '%s\n' "${value}"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timeout waiting for ${addr} peer_count>=${want}" >&2
+  return 1
+}
 write_keygen() {
   cat >"${KEYGEN_GO}" <<'EOF'
 package main
@@ -108,7 +108,6 @@ func main() {
 }
 EOF
 }
-
 echo "Building Go rubin-node and rubin-txgen"
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${NODE_BIN}" ./cmd/rubin-node
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${TXGEN_BIN}" ./cmd/rubin-txgen
@@ -117,13 +116,11 @@ write_keygen
 FROM_DER_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["from_der_hex"])' "${KEYGEN_JSON}")"
 MINE_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mine_address_hex"])' "${KEYGEN_JSON}")"
 TO_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["to_address_hex"])' "${KEYGEN_JSON}")"
-
 mkdir -p "${A_DIR}" "${B_DIR}" "${C_DIR}"
 echo "Mining mature Go chain to height ${BASE_HEIGHT}"
 "${NODE_BIN}" --datadir "${A_DIR}" --mine-address "${MINE_ADDRESS_HEX}" --mine-blocks "${BASE_MINE_BLOCKS}" --mine-exit >"${MINE_LOG}" 2>&1
 cp -R "${A_DIR}/." "${B_DIR}/"
 cp -R "${A_DIR}/." "${C_DIR}/"
-
 echo "Starting three Go rubin-node processes"
 A_PID=""
 for _ in 1 2 3; do
@@ -136,14 +133,12 @@ rubin_process_start "${B_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind 127.0.0
 B_PID="${RUBIN_PROCESS_LAST_PID}"
 rubin_process_start "${C_LOG}" "${NODE_BIN}" --datadir "${C_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
 C_PID="${RUBIN_PROCESS_LAST_PID}"
-
 rubin_process_wait_for_log "${B_LOG}" "rpc: listening=" 30 "${B_PID}"
 B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_LOG}")"
 rubin_process_wait_for_log "${C_LOG}" "rpc: listening=" 30 "${C_PID}"
 C_RPC_ADDR="$(rubin_process_extract_rpc_addr "${C_LOG}")"
 for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do rubin_process_wait_for_rpc_ready "${addr}" 30; done
 for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do wait_height "${addr}" "${BASE_HEIGHT}" 30; done
-
 echo "Submitting tx through Go RPC and mining it through /mine_next"
 TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
 MEMPOOL_JSON="$(rpc_json GET "${A_RPC_ADDR}" /get_mempool)"
@@ -158,7 +153,9 @@ wait_height "${A_RPC_ADDR}" "${TARGET_HEIGHT}" 30
 IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
 IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
-A_PEERS="$(metric_value "${A_RPC_ADDR}" rubin_node_peer_count)" B_PEERS="$(metric_value "${B_RPC_ADDR}" rubin_node_peer_count)" C_PEERS="$(metric_value "${C_RPC_ADDR}" rubin_node_peer_count)"
+A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)"
+B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)"
+C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
 [[ "${A_HEIGHT}" == "${TARGET_HEIGHT}" && "${A_TIP}" == "${FINAL_HASH}" ]] || {
   echo "unexpected node-a checkpoint final=${FINAL_HASH} a_height=${A_HEIGHT} a_tip=${A_TIP}" >&2
   exit 1
@@ -169,29 +166,15 @@ A_PEERS="$(metric_value "${A_RPC_ADDR}" rubin_node_peer_count)" B_PEERS="$(metri
 }
 BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
 printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sys.argv[1].lower() in d["block_hex"].lower()' "${TX_HEX}"
-
 export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT
 python3 - <<'PY'
 import json, os
-report = {
-  "scenario": "go_binary_soak_skeleton",
-  "target_height": int(os.environ["TARGET_HEIGHT"]),
-  "base_height": int(os.environ["BASE_HEIGHT"]),
-  "participants": [
-    {"name": "node-a", "pid": int(os.environ["A_PID"]), "rpc": os.environ["A_RPC_ADDR"], "checkpoint_height": int(os.environ["A_HEIGHT"]), "tip_hash": os.environ["A_TIP"], "peer_count": int(os.environ["A_PEERS"])},
-    {"name": "node-b", "pid": int(os.environ["B_PID"]), "rpc": os.environ["B_RPC_ADDR"], "checkpoint_height": int(os.environ["B_HEIGHT"]), "tip_hash": os.environ["B_TIP"], "peer_count": int(os.environ["B_PEERS"])},
-    {"name": "node-c", "pid": int(os.environ["C_PID"]), "rpc": os.environ["C_RPC_ADDR"], "checkpoint_height": int(os.environ["C_HEIGHT"]), "tip_hash": os.environ["C_TIP"], "peer_count": int(os.environ["C_PEERS"])},
-  ],
-  "tx": {"id": os.environ["TX_ID"], "submission": "rpc:/submit_tx"},
-  "final": {"height": int(os.environ["TARGET_HEIGHT"]), "tip_hash": os.environ["FINAL_HASH"], "tx_count": int(os.environ["TX_COUNT"])},
-  "verdict": "PASS",
-}
+participants = []
+for node in ("A", "B", "C"):
+    participants.append({"name": f"node-{node.lower()}", "pid": int(os.environ[f"{node}_PID"]), "rpc": os.environ[f"{node}_RPC_ADDR"], "checkpoint_height": int(os.environ[f"{node}_HEIGHT"]), "tip_hash": os.environ[f"{node}_TIP"], "peer_count": int(os.environ[f"{node}_PEERS"])})
+report = {"scenario": "go_binary_soak_skeleton", "target_height": int(os.environ["TARGET_HEIGHT"]), "base_height": int(os.environ["BASE_HEIGHT"]), "participants": participants, "tx": {"id": os.environ["TX_ID"], "submission": "rpc:/submit_tx"}, "final": {"height": int(os.environ["TARGET_HEIGHT"]), "tip_hash": os.environ["FINAL_HASH"], "tx_count": int(os.environ["TX_COUNT"])}, "verdict": "PASS"}
 with open(os.environ["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
-if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
-  echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; report=${REPORT_JSON}"
-else
-  echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; set KEEP_TMP=1 to retain report"
-fi
+if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; report=${REPORT_JSON}"; else echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; set KEEP_TMP=1 to retain report"; fi
