@@ -25,8 +25,8 @@ while (($#)); do
       ;;
   esac
 done
-# Runtime txgen needs base height >=100; target 100 has no mature spend.
-[[ "${TARGET_HEIGHT}" =~ ^[0-9]+$ && "${TARGET_HEIGHT}" -ge 101 ]] || { echo "--target-height must be an integer >= 101" >&2; exit 2; }
+# Runtime txgen needs base height >=100; bound height to keep the soak finite.
+TARGET_HEIGHT="$(python3 -c 'import sys; s=sys.argv[1]; n=int(s) if s.isdecimal() else -1; 101 <= n <= 10000 or sys.exit(2); print(n)' "${TARGET_HEIGHT}")" || { echo "--target-height must be an integer in [101, 10000]" >&2; exit 2; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
 rubin_process_init go-binary-soak
