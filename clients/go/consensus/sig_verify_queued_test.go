@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -252,6 +253,164 @@ func TestValidateThresholdSigSpendQ_ThresholdNotMet(t *testing.T) {
 	}
 	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
 		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", err)
+	}
+}
+
+func TestValidateThresholdSigSpendQ_RollbackOnThresholdFailure(t *testing.T) {
+	kp1 := mustMLDSA87Keypair(t)
+	kp2 := mustMLDSA87Keypair(t)
+	keyID1 := sha3_256(kp1.PubkeyBytes())
+	keyID2 := sha3_256(kp2.PubkeyBytes())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+	sig1 := signDigestWithSighashType(t, kp1, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+
+	keys := [][32]byte{keyID1, keyID2}
+	ws := []WitnessItem{
+		{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp1.PubkeyBytes(), Signature: sig1},
+		{SuiteID: SUITE_ID_SENTINEL, Pubkey: nil, Signature: nil},
+	}
+
+	q := NewSigCheckQueue(1)
+	err := validateThresholdSigSpendQ(keys, 2, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
+	if err == nil {
+		t.Fatal("expected threshold not met error")
+	}
+	if !isTxErrCode(err, TX_ERR_SIG_INVALID) {
+		t.Fatalf("expected TX_ERR_SIG_INVALID, got: %v", err)
+	}
+	if q.Len() != 0 {
+		t.Fatalf("expected rollback to clear threshold task, got %d queued tasks", q.Len())
+	}
+}
+
+func TestValidateThresholdSigSpendQ_RollbackPreservesExistingQueue(t *testing.T) {
+	existingKP := mustMLDSA87Keypair(t)
+	existingDigest := [32]byte{0xA5}
+	existingSig, err := existingKP.SignDigest32(existingDigest)
+	if err != nil {
+		t.Fatalf("existing sign: %v", err)
+	}
+
+	q := NewSigCheckQueue(1)
+	q.Push(SUITE_ID_ML_DSA_87, existingKP.PubkeyBytes(), existingSig, existingDigest, txerr(TX_ERR_SIG_INVALID, "existing invalid"))
+
+	kp1 := mustMLDSA87Keypair(t)
+	kp2 := mustMLDSA87Keypair(t)
+	keyID1 := sha3_256(kp1.PubkeyBytes())
+	keyID2 := sha3_256(kp2.PubkeyBytes())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+	sig1 := signDigestWithSighashType(t, kp1, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+
+	keys := [][32]byte{keyID1, keyID2}
+	ws := []WitnessItem{
+		{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp1.PubkeyBytes(), Signature: sig1},
+		{SuiteID: SUITE_ID_SENTINEL, Pubkey: nil, Signature: nil},
+	}
+
+	err = validateThresholdSigSpendQ(keys, 2, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
+	if err == nil {
+		t.Fatal("expected threshold not met error")
+	}
+	if q.Len() != 1 {
+		t.Fatalf("expected rollback to preserve prior task only, got %d queued tasks", q.Len())
+	}
+	if err := q.Flush(); err != nil {
+		t.Fatalf("prior queued task should still flush: %v", err)
+	}
+}
+
+func TestValidateThresholdSigSpendQ_RollbackOnLateThresholdErrors(t *testing.T) {
+	kp1 := mustMLDSA87Keypair(t)
+	kp2 := mustMLDSA87Keypair(t)
+	keyID1 := sha3_256(kp1.PubkeyBytes())
+	keyID2 := sha3_256(kp2.PubkeyBytes())
+
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	cache, _ := NewSighashV1PrehashCache(tx)
+	sig1 := signDigestWithSighashType(t, kp1, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	sig2 := signDigestWithSighashType(t, kp2, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
+	invalidSighashSig := append([]byte(nil), sig2...)
+	invalidSighashSig[len(invalidSighashSig)-1] = 0x00
+
+	existingKP := mustMLDSA87Keypair(t)
+	existingDigest := [32]byte{0xA6}
+	existingSig, err := existingKP.SignDigest32(existingDigest)
+	if err != nil {
+		t.Fatalf("existing sign: %v", err)
+	}
+
+	validFirst := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp1.PubkeyBytes(), Signature: sig1}
+	tests := []struct {
+		name       string
+		keys       [][32]byte
+		second     WitnessItem
+		wantErr    ErrorCode
+		wantErrMsg string
+	}{
+		{
+			name:       "sentinel_with_data",
+			keys:       [][32]byte{keyID1, keyID2},
+			second:     WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: []byte{0x01}, Signature: nil},
+			wantErr:    TX_ERR_PARSE,
+			wantErrMsg: "SENTINEL witness must be keyless",
+		},
+		{
+			name:       "invalid_suite",
+			keys:       [][32]byte{keyID1, keyID2},
+			second:     WitnessItem{SuiteID: 0xFE, Pubkey: kp2.PubkeyBytes(), Signature: sig2},
+			wantErr:    TX_ERR_SIG_ALG_INVALID,
+			wantErrMsg: "suite not in native spend set",
+		},
+		{
+			name:       "noncanonical_lengths",
+			keys:       [][32]byte{keyID1, keyID2},
+			second:     WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp2.PubkeyBytes(), Signature: sig2[:ML_DSA_87_SIG_BYTES]},
+			wantErr:    TX_ERR_SIG_NONCANONICAL,
+			wantErrMsg: "non-canonical witness item lengths",
+		},
+		{
+			name:       "key_binding_mismatch",
+			keys:       [][32]byte{keyID1, [32]byte{0xEE}},
+			second:     WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp2.PubkeyBytes(), Signature: sig2},
+			wantErr:    TX_ERR_SIG_INVALID,
+			wantErrMsg: "key binding mismatch",
+		},
+		{
+			name:       "invalid_sighash_type",
+			keys:       [][32]byte{keyID1, keyID2},
+			second:     WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp2.PubkeyBytes(), Signature: invalidSighashSig},
+			wantErr:    TX_ERR_SIGHASH_TYPE_INVALID,
+			wantErrMsg: "invalid sighash_type",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			q := NewSigCheckQueue(1)
+			q.Push(SUITE_ID_ML_DSA_87, existingKP.PubkeyBytes(), existingSig, existingDigest, txerr(TX_ERR_SIG_INVALID, "existing invalid"))
+			preLen := q.Len()
+
+			err := validateThresholdSigSpendQ(tc.keys, 2, []WitnessItem{validFirst, tc.second}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
+			if err == nil {
+				t.Fatal("expected late threshold error")
+			}
+			if !isTxErrCode(err, tc.wantErr) {
+				t.Fatalf("expected %s, got: %v", tc.wantErr, err)
+			}
+			if tc.wantErrMsg != "" && !strings.Contains(err.Error(), tc.wantErrMsg) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErrMsg, err)
+			}
+			if q.Len() != preLen {
+				t.Fatalf("expected rollback to pre-call queue length %d, got %d", preLen, q.Len())
+			}
+			if err := q.Flush(); err != nil {
+				t.Fatalf("pre-existing queued task should still flush: %v", err)
+			}
+		})
 	}
 }
 

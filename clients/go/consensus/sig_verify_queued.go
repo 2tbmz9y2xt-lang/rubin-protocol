@@ -132,36 +132,41 @@ func validateThresholdSigSpendQ(
 
 	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	valid := 0
+	queueMark := sigQueue.mark()
+	rollbackOnError := func(err error) error {
+		sigQueue.rollbackTo(queueMark)
+		return err
+	}
 
 	for i := range keys {
 		w := ws[i]
 		if w.SuiteID == SUITE_ID_SENTINEL {
 			if len(w.Pubkey) != 0 || len(w.Signature) != 0 {
-				return txerr(TX_ERR_PARSE, "SENTINEL witness must be keyless")
+				return rollbackOnError(txerr(TX_ERR_PARSE, "SENTINEL witness must be keyless"))
 			}
 			continue
 		}
 
 		if !nativeSpend.Contains(w.SuiteID) {
-			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not in native spend set")
+			return rollbackOnError(txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not in native spend set"))
 		}
 
 		params, ok := registry.Lookup(w.SuiteID)
 		if !ok {
-			return txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not registered")
+			return rollbackOnError(txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not registered"))
 		}
 
 		if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
-			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
+			return rollbackOnError(txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths"))
 		}
 
 		if err := verifyMLDSAKeyAndSigQ(w, keys[i], tx, inputIndex, inputValue, chainID, cache, sigQueue, registry, context); err != nil {
-			return err
+			return rollbackOnError(err)
 		}
 		valid++
 	}
 	if valid < int(threshold) {
-		return txerr(TX_ERR_SIG_INVALID, context+" threshold not met")
+		return rollbackOnError(txerr(TX_ERR_SIG_INVALID, context+" threshold not met"))
 	}
 	return nil
 }

@@ -38,6 +38,10 @@ type sigCheckTask struct {
 	errOnFail error // error to return if this verification fails
 }
 
+type sigCheckQueueMark struct {
+	len int
+}
+
 // NewSigCheckQueue creates a new signature check queue.
 // If workers <= 0, defaults to GOMAXPROCS.
 func NewSigCheckQueue(workers int) *SigCheckQueue {
@@ -92,6 +96,21 @@ func (q *SigCheckQueue) Len() int {
 		return 0
 	}
 	return len(q.tasks)
+}
+
+func (q *SigCheckQueue) mark() sigCheckQueueMark {
+	if q == nil {
+		return sigCheckQueueMark{}
+	}
+	return sigCheckQueueMark{len: len(q.tasks)}
+}
+
+func (q *SigCheckQueue) rollbackTo(mark sigCheckQueueMark) {
+	if q == nil || mark.len >= len(q.tasks) {
+		return
+	}
+	clear(q.tasks[mark.len:])
+	q.tasks = q.tasks[:mark.len]
 }
 
 // Panics returns the number of panics recovered during the last Flush.
