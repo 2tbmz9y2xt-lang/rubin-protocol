@@ -315,8 +315,9 @@ func decodeWireCommand(raw []byte) (string, error) {
 
 func networkMagic(network string) [4]byte {
 	network, _ = node.CanonicalNetworkName(network)
-	// Low-level wire helpers keep a fixed isolation fallback for custom/private
-	// transports; the node config/runtime surface rejects those names before startup.
+	// Low-level wire helpers keep a fixed isolation fallback for unknown or
+	// custom/private transport names. Validated config flows typically reject
+	// unknown names earlier, but runtime normalization is not the rejection point.
 	switch network {
 	case "mainnet":
 		return [4]byte{'R', 'B', 'M', 'N'}
