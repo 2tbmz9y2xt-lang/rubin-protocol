@@ -25,7 +25,7 @@ _RUBIN_PROCESS_CREATED_ROOT=""
 _RUBIN_PROCESS_CREATED_ROOT_REAL=""
 _RUBIN_PROCESS_STOP_GRACE_SECONDS_DECIMAL=""
 
-_rubin_process_error() { echo "$*" >&2; }
+_rubin_process_error() { printf '%s\n' "$*" >&2; }
 
 _rubin_process_uint() {
   [[ "${2:-}" =~ ^[0-9]+$ ]] || { _rubin_process_error "$1 must be a non-negative integer: ${2:-<empty>}"; return 1; }
@@ -298,6 +298,7 @@ rubin_process_wait_for_rpc_ready() {
 rubin_process_dump_artifacts() {
   local log_file
   _rubin_process_error "FAIL: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT:-<unset>}"
+  ((${#RUBIN_PROCESS_LOGS[@]} > 0)) || return 0
   for log_file in "${RUBIN_PROCESS_LOGS[@]}"; do
     _rubin_process_require_artifact_parent "${log_file}" || { _rubin_process_error "skipping unsafe log file: ${log_file}"; continue; }
     [[ -f "${log_file}" ]] || continue
@@ -314,7 +315,11 @@ rubin_process_cleanup() {
     return 0
   fi
   rubin_process_stop_all || cleanup_status=$?
-  if [[ "${status}" != "0" ]]; then rubin_process_dump_artifacts; return "${status}"; fi
+  if [[ "${status}" != "0" ]]; then
+    rubin_process_dump_artifacts
+    _rubin_process_clear_state
+    return "${status}"
+  fi
   [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && {
     echo "OK: artifacts preserved at ${RUBIN_PROCESS_ARTIFACT_ROOT}"
     _rubin_process_clear_state
