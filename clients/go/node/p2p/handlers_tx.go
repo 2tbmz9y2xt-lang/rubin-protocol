@@ -37,6 +37,9 @@ func (p *peer) handleTx(txBytes []byte) error {
 	}
 	meta, err := p.service.relayTxMetadata(txBytes)
 	if err != nil {
+		if p.bumpBan(10, err.Error()) {
+			return err
+		}
 		return nil
 	}
 	if !p.service.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
