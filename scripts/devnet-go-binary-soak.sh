@@ -25,7 +25,8 @@ while (($#)); do
       ;;
   esac
 done
-[[ "${TARGET_HEIGHT}" =~ ^[0-9]+$ && "${TARGET_HEIGHT}" -ge 102 ]] || { echo "--target-height must be an integer >= 102" >&2; exit 2; }
+# Runtime txgen needs base height >=100; target 100 has no mature spend.
+[[ "${TARGET_HEIGHT}" =~ ^[0-9]+$ && "${TARGET_HEIGHT}" -ge 101 ]] || { echo "--target-height must be an integer >= 101" >&2; exit 2; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
 rubin_process_init go-binary-soak
@@ -141,8 +142,8 @@ for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do rubin_process_wa
 for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do wait_height "${addr}" "${BASE_HEIGHT}" 30; done
 echo "Submitting tx through Go RPC and mining it through /mine_next"
 TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
-MEMPOOL_JSON="$(rpc_json GET "${A_RPC_ADDR}" /get_mempool)"
-TX_ID="$(printf '%s' "${MEMPOOL_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 1; print(d["txids"][0])')"
+if ! MEMPOOL_JSON="$(rpc_json GET "${A_RPC_ADDR}" /get_mempool)"; then echo "get_mempool request failed: ${MEMPOOL_JSON}" >&2; exit 1; fi
+TX_ID="$(printf '%s' "${MEMPOOL_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); (d.get("count") == 1 and d.get("txids")) or sys.exit("expected mempool count=1; mempool_json="+json.dumps(d, sort_keys=True)); print(d["txids"][0])')"
 if ! MINE_JSON="$(rpc_json POST "${A_RPC_ADDR}" /mine_next '{}')"; then echo "mine_next request failed: ${MINE_JSON}" >&2; exit 1; fi
 IFS=$'\t' read -r FINAL_HEIGHT FINAL_HASH TX_COUNT < <(printf '%s' "${MINE_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); (d.get("mined") is True) or sys.exit("mine_next failed: "+str(d.get("error","missing mined result"))); print(d["height"], d["block_hash"], d["tx_count"], sep="\t")')
 [[ "${FINAL_HEIGHT}" == "${TARGET_HEIGHT}" && "${TX_COUNT}" -ge 2 ]] || {
@@ -153,9 +154,7 @@ wait_height "${A_RPC_ADDR}" "${TARGET_HEIGHT}" 30
 IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
 IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
-A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)"
-B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)"
-C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
+A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)" B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)" C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
 [[ "${A_HEIGHT}" == "${TARGET_HEIGHT}" && "${A_TIP}" == "${FINAL_HASH}" ]] || {
   echo "unexpected node-a checkpoint final=${FINAL_HASH} a_height=${A_HEIGHT} a_tip=${A_TIP}" >&2
   exit 1
@@ -165,7 +164,7 @@ C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
   exit 1
 }
 BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
-printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert sys.argv[1].lower() in d["block_hex"].lower()' "${TX_HEX}"
+printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.argv[1].lower() in d.get("block_hex", "").lower() or sys.exit("submitted tx bytes missing from target block")' "${TX_HEX}"
 export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT
 python3 - <<'PY'
 import json, os
