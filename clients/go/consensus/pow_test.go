@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"testing"
 )
@@ -191,6 +192,49 @@ func TestPowCheck_TargetRangeInvalidZero(t *testing.T) {
 	}
 	if got := mustTxErrCode(t, err); got != BLOCK_ERR_TARGET_INVALID {
 		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_TARGET_INVALID)
+	}
+}
+
+func TestPowCheck_HeaderLengthGuardSurface(t *testing.T) {
+	cases := []struct {
+		name   string
+		header []byte
+		target [32]byte
+	}{
+		{
+			name:   "short_valid_target",
+			header: make([]byte, BLOCK_HEADER_BYTES-1),
+			target: POW_LIMIT,
+		},
+		{
+			name:   "overlong_valid_target",
+			header: make([]byte, BLOCK_HEADER_BYTES+1),
+			target: POW_LIMIT,
+		},
+		{
+			name:   "short_zero_target",
+			header: make([]byte, BLOCK_HEADER_BYTES-1),
+			target: [32]byte{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := PowCheck(tc.header, tc.target)
+			if err == nil {
+				t.Fatalf("expected invalid header length error")
+			}
+			var te *TxError
+			if !errors.As(err, &te) {
+				t.Fatalf("expected *TxError, got %T: %v", err, err)
+			}
+			if te.Code != TX_ERR_PARSE {
+				t.Fatalf("code=%s, want %s", te.Code, TX_ERR_PARSE)
+			}
+			if te.Msg != "pow: invalid header length" {
+				t.Fatalf("msg=%q, want %q", te.Msg, "pow: invalid header length")
+			}
+		})
 	}
 }
 
