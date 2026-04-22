@@ -109,6 +109,7 @@ func (q *SigCheckQueue) rollbackTo(mark sigCheckQueueMark) {
 	if q == nil || mark.len >= len(q.tasks) {
 		return
 	}
+	clear(q.tasks[mark.len:])
 	q.tasks = q.tasks[:mark.len]
 }
 
