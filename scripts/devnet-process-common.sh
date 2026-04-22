@@ -25,7 +25,10 @@ rubin_process_init() {
   fi
 
   mkdir -p "${artifact_parent}"
-  RUBIN_PROCESS_ARTIFACT_ROOT="$(mktemp -d "${artifact_parent%/}/${safe_prefix}.XXXXXX")"
+  if ! RUBIN_PROCESS_ARTIFACT_ROOT="$(mktemp -d "${artifact_parent%/}/${safe_prefix}.XXXXXX")"; then
+    echo "failed to create artifact root under ${artifact_parent}" >&2
+    return 1
+  fi
 
   RUBIN_PROCESS_PIDS=()
   RUBIN_PROCESS_LOGS=()
@@ -185,8 +188,12 @@ rubin_process_cleanup() {
 
 rubin_process_exit_trap() {
   local status=$?
-  rubin_process_cleanup "${status}"
-  exit "${status}"
+  local cleanup_status=0
+  rubin_process_cleanup "${status}" || cleanup_status=$?
+  if [[ "${status}" != "0" ]]; then
+    exit "${status}"
+  fi
+  exit "${cleanup_status}"
 }
 
 rubin_process_self_test() {
@@ -209,6 +216,21 @@ rubin_process_self_test() {
   fi
   rm -rf -- "${parent_root}"
   RUBIN_PROCESS_ARTIFACT_ROOT=""
+
+  local parent_file
+  parent_file="$(mktemp "${TMPDIR:-/tmp}/rubin-devnet-process-parent-file.XXXXXX")"
+  RUBIN_PROCESS_ARTIFACT_ROOT="${parent_file}"
+  if rubin_process_init "bad-parent" 2>"${parent_file}.err"; then
+    echo "artifact root creation unexpectedly succeeded under file parent" >&2
+    return 1
+  fi
+  rm -f -- "${parent_file}" "${parent_file}.err"
+  RUBIN_PROCESS_ARTIFACT_ROOT=""
+
+  if bash -c 'source "$1"; rubin_process_init trap-fail; RUBIN_PROCESS_ARTIFACT_ROOT=/; exit 0' bash "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
+    echo "exit trap ignored cleanup failure" >&2
+    return 1
+  fi
 
   rubin_process_init "rubin-devnet-process-selftest"
   local log_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/selftest.log"
