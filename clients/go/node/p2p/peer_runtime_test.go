@@ -165,6 +165,31 @@ func TestApplyPostHandshakeDisconnectErrorUnknownCommandNoBan(t *testing.T) {
 	if snap.LastError != "unknown command: weird" {
 		t.Fatalf("last_error=%q, want unknown command: weird", snap.LastError)
 	}
+
+	unknownReason, unknownOK := unknownCommandPolicyReason(errors.New("plain runtime error"))
+	if unknownOK || unknownReason != "" {
+		t.Fatalf("plain error reason=%q ok=%v, want empty/false", unknownReason, unknownOK)
+	}
+}
+
+func TestApplyPostHandshakeDisconnectErrorNilAndGenericFallback(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.setLastError("keep")
+	before := p.snapshotState()
+	p.applyPostHandshakeDisconnectError(nil)
+	after := p.snapshotState()
+	if after.LastError != before.LastError || after.BanScore != before.BanScore {
+		t.Fatalf("nil disconnect error mutated state: before=%+v after=%+v", before, after)
+	}
+
+	p.applyPostHandshakeDisconnectError(errors.New("plain runtime error"))
+	snap := p.snapshotState()
+	if snap.LastError != "plain runtime error" {
+		t.Fatalf("last_error=%q, want plain runtime error", snap.LastError)
+	}
+	if snap.BanScore != 0 {
+		t.Fatalf("ban_score=%d, want 0 for generic runtime error mapping", snap.BanScore)
+	}
 }
 
 func TestRunUnknownCommandDisconnectWithoutBan(t *testing.T) {

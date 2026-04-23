@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -293,9 +294,7 @@ func TestCoverage_HandleConnSuccessPath(t *testing.T) {
 
 func TestCoverage_HandleConnRunErrorPath(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	h.service.ctx = ctx
+	h.service.ctx = context.Background()
 
 	local, remote := net.Pipe()
 	defer local.Close()
@@ -303,32 +302,37 @@ func TestCoverage_HandleConnRunErrorPath(t *testing.T) {
 
 	remoteDone := make(chan error, 1)
 	go func() {
+		remoteVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)
+		if err := completeRemoteHandshake(remote, h.service.cfg.PeerRuntimeConfig, remoteVersion); err != nil {
+			remoteDone <- err
+			return
+		}
 		frame, err := readFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 		if err != nil {
 			remoteDone <- err
 			return
 		}
-		if frame.Command != messageVersion {
-			remoteDone <- nil
+		if frame.Command != messageGetAddr {
+			remoteDone <- fmt.Errorf("unexpected outbound command: %s", frame.Command)
 			return
 		}
-		payload, err := encodeVersionPayload(testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0))
-		if err != nil {
+		if err := writeFrame(
+			remote,
+			networkMagic(h.service.cfg.PeerRuntimeConfig.Network),
+			message{Command: "weird"},
+			h.service.cfg.PeerRuntimeConfig.MaxMessageSize,
+		); err != nil {
 			remoteDone <- err
 			return
 		}
-		if err := writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize); err != nil {
-			remoteDone <- err
-			return
-		}
-		err = writeFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), message{Command: messageVersion, Payload: payload}, h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
-		if err != nil && strings.Contains(err.Error(), "closed pipe") {
-			err = nil
-		}
-		remoteDone <- err
+		remoteDone <- nil
 	}()
 
-	h.service.handleConn(local, "")
+	if err := h.service.handleConn(local, ""); err == nil {
+		t.Fatalf("expected run error for unknown post-handshake command")
+	} else if !strings.Contains(err.Error(), "unknown message type: weird") {
+		t.Fatalf("handleConn error=%v, want unknown message type: weird", err)
+	}
 	if err := <-remoteDone; err != nil {
 		t.Fatalf("remote sequence: %v", err)
 	}
