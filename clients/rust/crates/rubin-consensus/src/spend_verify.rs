@@ -257,6 +257,50 @@ pub(crate) fn validate_threshold_sig_spend_at_height(
     )
 }
 
+#[derive(Clone, Copy)]
+enum ThresholdSigErrorDetail {
+    SuiteNotInNativeSpendSet,
+    SuiteNotRegistered,
+    KeyBindingMismatch,
+    SignatureInvalid,
+    ThresholdNotMet,
+}
+
+fn threshold_sig_error_message(
+    context: &'static str,
+    detail: ThresholdSigErrorDetail,
+) -> &'static str {
+    match (context, detail) {
+        ("CORE_MULTISIG", ThresholdSigErrorDetail::SuiteNotInNativeSpendSet) => {
+            "CORE_MULTISIG suite not in native spend set"
+        }
+        ("CORE_MULTISIG", ThresholdSigErrorDetail::SuiteNotRegistered) => {
+            "CORE_MULTISIG suite not registered"
+        }
+        ("CORE_MULTISIG", ThresholdSigErrorDetail::KeyBindingMismatch) => {
+            "CORE_MULTISIG key binding mismatch"
+        }
+        ("CORE_MULTISIG", ThresholdSigErrorDetail::SignatureInvalid) => {
+            "CORE_MULTISIG signature invalid"
+        }
+        ("CORE_MULTISIG", ThresholdSigErrorDetail::ThresholdNotMet) => {
+            "CORE_MULTISIG threshold not met"
+        }
+        ("CORE_VAULT", ThresholdSigErrorDetail::SuiteNotInNativeSpendSet) => {
+            "CORE_VAULT suite not in native spend set"
+        }
+        ("CORE_VAULT", ThresholdSigErrorDetail::SuiteNotRegistered) => {
+            "CORE_VAULT suite not registered"
+        }
+        ("CORE_VAULT", ThresholdSigErrorDetail::KeyBindingMismatch) => {
+            "CORE_VAULT key binding mismatch"
+        }
+        ("CORE_VAULT", ThresholdSigErrorDetail::SignatureInvalid) => "CORE_VAULT signature invalid",
+        ("CORE_VAULT", ThresholdSigErrorDetail::ThresholdNotMet) => "CORE_VAULT threshold not met",
+        _ => context,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_threshold_sig_spend_q(
     keys: &[[u8; 32]],
@@ -303,12 +347,24 @@ pub(crate) fn validate_threshold_sig_spend_q(
             }
 
             if !native_spend.contains(w.suite_id) {
-                return Err(TxError::new(ErrorCode::TxErrSigAlgInvalid, context));
+                return Err(TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    threshold_sig_error_message(
+                        context,
+                        ThresholdSigErrorDetail::SuiteNotInNativeSpendSet,
+                    ),
+                ));
             }
 
-            let params = reg
-                .lookup(w.suite_id)
-                .ok_or_else(|| TxError::new(ErrorCode::TxErrSigAlgInvalid, context))?;
+            let params = reg.lookup(w.suite_id).ok_or_else(|| {
+                TxError::new(
+                    ErrorCode::TxErrSigAlgInvalid,
+                    threshold_sig_error_message(
+                        context,
+                        ThresholdSigErrorDetail::SuiteNotRegistered,
+                    ),
+                )
+            })?;
 
             if w.pubkey.len() as u64 != params.pubkey_len
                 || w.signature.len() as u64 != params.sig_len + 1
@@ -328,13 +384,25 @@ pub(crate) fn validate_threshold_sig_spend_q(
                 cache,
                 reg,
                 &mut sig_queue,
-                TxError::new(ErrorCode::TxErrSigInvalid, context),
-                TxError::new(ErrorCode::TxErrSigInvalid, context),
+                TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    threshold_sig_error_message(
+                        context,
+                        ThresholdSigErrorDetail::KeyBindingMismatch,
+                    ),
+                ),
+                TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    threshold_sig_error_message(context, ThresholdSigErrorDetail::SignatureInvalid),
+                ),
             )?;
             valid = valid.saturating_add(1);
         }
         if valid < threshold {
-            return Err(TxError::new(ErrorCode::TxErrSigInvalid, context));
+            return Err(TxError::new(
+                ErrorCode::TxErrSigInvalid,
+                threshold_sig_error_message(context, ThresholdSigErrorDetail::ThresholdNotMet),
+            ));
         }
         Ok(())
     })();
@@ -389,11 +457,25 @@ mod tests {
     };
     use crate::hash::sha3_256;
     use crate::sighash_v1_digest_with_cache;
-    use crate::suite_registry::{SuiteParams, SuiteRegistry};
+    use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteParams, SuiteRegistry};
     use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
     use crate::verify_sig_openssl::Mldsa87Keypair;
     use crate::SighashV1PrehashCache;
     use std::collections::BTreeMap;
+
+    struct TestSpendSetRotation {
+        spend: NativeSuiteSet,
+    }
+
+    impl RotationProvider for TestSpendSetRotation {
+        fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
+            self.spend.clone()
+        }
+
+        fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
+            self.spend.clone()
+        }
+    }
 
     fn dummy_entry() -> UtxoEntry {
         UtxoEntry {
@@ -1272,6 +1354,156 @@ mod tests {
         .expect_err("bad signature");
 
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    }
+
+    #[test]
+    fn threshold_at_height_core_context_messages_match_go_surface() {
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let suite_not_native = WitnessItem {
+            suite_id: 0xBB,
+            pubkey: vec![],
+            signature: vec![],
+        };
+        let err = validate_threshold_sig_spend_at_height(
+            &[[0x11; 32]],
+            1,
+            &[suite_not_native],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "CORE_MULTISIG",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("suite not in native spend set");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "CORE_MULTISIG suite not in native spend set");
+        let suite_not_registered = WitnessItem {
+            suite_id: 0xBB,
+            pubkey: vec![0x01; ML_DSA_87_PUBKEY_BYTES as usize],
+            signature: vec![0x02; ML_DSA_87_SIG_BYTES as usize + 1],
+        };
+        let only_unregistered = TestSpendSetRotation {
+            spend: NativeSuiteSet::new(&[0xBB]),
+        };
+        let default_registry = SuiteRegistry::default_registry();
+        let err = validate_threshold_sig_spend_at_height(
+            &[[0x11; 32]],
+            1,
+            &[suite_not_registered],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "CORE_VAULT",
+            &mut cache,
+            Some(&only_unregistered),
+            Some(&default_registry),
+        )
+        .expect_err("suite not registered");
+        assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+        assert_eq!(err.msg, "CORE_VAULT suite not registered");
+        let keypair_binding = Mldsa87Keypair::generate().expect("keypair binding");
+        let witness_binding =
+            sign_witness(&keypair_binding, &tx, input_index, input_value, chain_id);
+        let err = validate_threshold_sig_spend_at_height(
+            &[[0xEE; 32]],
+            1,
+            &[witness_binding],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "CORE_MULTISIG",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("key binding mismatch");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "CORE_MULTISIG key binding mismatch");
+        let kp_bad = Mldsa87Keypair::generate().expect("keypair invalid sig");
+        let mut witness_invalid_sig =
+            sign_witness(&kp_bad, &tx, input_index, input_value, chain_id);
+        witness_invalid_sig.signature[0] ^= 0xFF;
+        let key_id = sha3_256(&kp_bad.pubkey_bytes());
+        let err = validate_threshold_sig_spend_at_height(
+            &[key_id],
+            1,
+            &[witness_invalid_sig],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "CORE_VAULT",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("invalid signature");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "CORE_VAULT signature invalid");
+        let threshold_not_met = WitnessItem {
+            suite_id: SUITE_ID_SENTINEL,
+            pubkey: vec![],
+            signature: vec![],
+        };
+        let err = validate_threshold_sig_spend_at_height(
+            &[[0x22; 32]],
+            1,
+            &[threshold_not_met],
+            &tx,
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "CORE_VAULT",
+            &mut cache,
+            None,
+            None,
+        )
+        .expect_err("threshold not met");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "CORE_VAULT threshold not met");
+    }
+
+    #[test]
+    fn threshold_queue_flush_preserves_core_context_signature_invalid() {
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let key_id = sha3_256(&keypair.pubkey_bytes());
+        let (tx, input_index, input_value, chain_id) = dummy_tx_ctx();
+        let mut witness = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
+        witness.signature[0] ^= 0xFF;
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let registry = SuiteRegistry::default_registry();
+        let mut queue = crate::sig_queue::SigCheckQueue::new(1).with_registry(&registry);
+        validate_threshold_sig_spend_q(
+            &[key_id],
+            1,
+            &[witness],
+            input_index,
+            input_value,
+            chain_id,
+            0,
+            "CORE_MULTISIG",
+            &mut cache,
+            Some(&mut queue),
+            None,
+            Some(&registry),
+        )
+        .expect("queue path should defer signature verification");
+        let err = queue
+            .flush()
+            .expect_err("flush must surface invalid signature");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "CORE_MULTISIG signature invalid");
     }
 
     // ======== Key & Sig with Registry Cache Tests (5) ========
