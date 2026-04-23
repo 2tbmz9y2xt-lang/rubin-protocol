@@ -55,6 +55,9 @@ PRE_RESTART_B_RPC_ADDR=""
 PRE_RESTART_B_PID=""
 POST_RESTART_B_RPC_ADDR=""
 POST_RESTART_B_PID=""
+POST_RESTART_MINE_HEIGHT=""
+POST_RESTART_MINE_HASH=""
+POST_RESTART_MINE_TX_COUNT="0"
 INCLUSION_PROOF_NODE="node-a"
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
@@ -195,22 +198,35 @@ if (( WITH_RESTART == 1 )); then
   POST_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
   rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30
   wait_height "${B_RPC_ADDR}" "${TARGET_HEIGHT}" 60
-  INCLUSION_PROOF_NODE="node-b-restarted"
+  echo "Mining one additional block after restart to exercise live process path"
+  if ! POST_RESTART_MINE_JSON="$(rpc_json POST "${B_RPC_ADDR}" /mine_next '{}')"; then echo "post-restart mine_next request failed: ${POST_RESTART_MINE_JSON}" >&2; exit 1; fi
+  IFS=$'\t' read -r POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT < <(printf '%s' "${POST_RESTART_MINE_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); (d.get("mined") is True) or sys.exit("post-restart mine_next failed: "+str(d.get("error","missing mined result"))); print(d["height"], d["block_hash"], d["tx_count"], sep="\t")')
+  POST_RESTART_TARGET_HEIGHT=$((TARGET_HEIGHT + 1))
+  [[ "${POST_RESTART_MINE_HEIGHT}" == "${POST_RESTART_TARGET_HEIGHT}" && "${POST_RESTART_MINE_TX_COUNT}" -ge 1 ]] || {
+    echo "unexpected post-restart mine_next result height=${POST_RESTART_MINE_HEIGHT} tx_count=${POST_RESTART_MINE_TX_COUNT}" >&2
+    exit 1
+  }
+  wait_height "${B_RPC_ADDR}" "${POST_RESTART_TARGET_HEIGHT}" 60
+  INCLUSION_PROOF_NODE="node-b"
 fi
 IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
 IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
 A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)" B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)" C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
-[[ "${A_HEIGHT}" == "${TARGET_HEIGHT}" && "${A_TIP}" == "${FINAL_HASH}" ]] || {
-  echo "unexpected node-a checkpoint final=${FINAL_HASH} a_height=${A_HEIGHT} a_tip=${A_TIP}" >&2
-  exit 1
-}
 if (( WITH_RESTART == 1 )); then
-  [[ "${B_HEIGHT}" == "${TARGET_HEIGHT}" && "${B_TIP}" == "${FINAL_HASH}" && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
-    echo "unexpected restart checkpoint/connectivity final=${FINAL_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
+  [[ (("${A_HEIGHT}" == "${TARGET_HEIGHT}" && "${A_TIP}" == "${FINAL_HASH}") || ("${A_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${A_TIP}" == "${POST_RESTART_MINE_HASH}")) ]] || {
+    echo "unexpected restart node-a checkpoint target=${TARGET_HEIGHT}/${FINAL_HASH} post_restart=${POST_RESTART_MINE_HEIGHT}/${POST_RESTART_MINE_HASH} got=${A_HEIGHT}/${A_TIP}" >&2
+    exit 1
+  }
+  [[ "${B_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${B_TIP}" == "${POST_RESTART_MINE_HASH}" && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}") || ("${C_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${C_TIP}" == "${POST_RESTART_MINE_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
+    echo "unexpected restart checkpoint/connectivity post_restart=${POST_RESTART_MINE_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
     exit 1
   }
 else
+  [[ "${A_HEIGHT}" == "${TARGET_HEIGHT}" && "${A_TIP}" == "${FINAL_HASH}" ]] || {
+    echo "unexpected node-a checkpoint final=${FINAL_HASH} a_height=${A_HEIGHT} a_tip=${A_TIP}" >&2
+    exit 1
+  }
   [[ (("${B_HEIGHT}" == "${BASE_HEIGHT}" && -n "${B_TIP}") || ("${B_HEIGHT}" == "${TARGET_HEIGHT}" && "${B_TIP}" == "${FINAL_HASH}")) && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
     echo "unexpected peer checkpoint/connectivity final=${FINAL_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
     exit 1
@@ -218,11 +234,15 @@ else
 fi
 if (( WITH_RESTART == 1 )); then
   BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
+  POST_RESTART_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"
 else
   BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
 fi
 printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.argv[1].lower() in d.get("block_hex", "").lower() or sys.exit("submitted tx bytes missing from target block")' "${TX_HEX}"
-export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_PID INCLUSION_PROOF_NODE
+if (( WITH_RESTART == 1 )); then
+  printf '%s' "${POST_RESTART_BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); h=d.get("block_hex",""); (isinstance(h, str) and len(h) > 0) or sys.exit("post-restart block visibility check failed")'
+fi
+export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_PID POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT INCLUSION_PROOF_NODE
 python3 - <<'PY'
 import json, os
 participants = []
@@ -238,8 +258,13 @@ report = {
         "id": os.environ["TX_ID"],
         "submission": "rpc:/submit_tx",
         "post_restart_inclusion_node": os.environ["INCLUSION_PROOF_NODE"],
+        "inclusion_height": int(os.environ["TARGET_HEIGHT"]),
     },
-    "final": {"height": int(os.environ["TARGET_HEIGHT"]), "tip_hash": os.environ["FINAL_HASH"], "tx_count": int(os.environ["TX_COUNT"])},
+    "final": {
+        "height": int(os.environ["POST_RESTART_MINE_HEIGHT"] if restart_enabled else os.environ["TARGET_HEIGHT"]),
+        "tip_hash": os.environ["POST_RESTART_MINE_HASH"] if restart_enabled else os.environ["FINAL_HASH"],
+        "tx_count": int(os.environ["POST_RESTART_MINE_TX_COUNT"] if restart_enabled else os.environ["TX_COUNT"]),
+    },
     "verdict": "PASS",
 }
 if restart_enabled:
@@ -259,6 +284,12 @@ if restart_enabled:
             "pid": int(os.environ["POST_RESTART_B_PID"]),
             "peer_count": int(os.environ["B_PEERS"]),
         },
+        "post_restart_live_action": {
+            "action": "mine_next",
+            "height": int(os.environ["POST_RESTART_MINE_HEIGHT"]),
+            "block_hash": os.environ["POST_RESTART_MINE_HASH"],
+            "tx_count": int(os.environ["POST_RESTART_MINE_TX_COUNT"]),
+        },
     }
 else:
     report["restart"] = {"enabled": False}
@@ -266,4 +297,13 @@ with open(os.environ["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
-if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID} (restart=${WITH_RESTART}); report=${REPORT_JSON}"; else echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID} (restart=${WITH_RESTART}); set KEEP_TMP=1 to retain report"; fi
+if (( WITH_RESTART == 1 )); then
+  PASS_SUMMARY="PASS: Go binary soak mined tx at height ${TARGET_HEIGHT} and post-restart block at height ${POST_RESTART_MINE_HEIGHT} (tx=${TX_ID}, restart=1)"
+else
+  PASS_SUMMARY="PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID} (restart=0)"
+fi
+if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
+  echo "${PASS_SUMMARY}; report=${REPORT_JSON}"
+else
+  echo "${PASS_SUMMARY}; set KEEP_TMP=1 to retain report"
+fi
