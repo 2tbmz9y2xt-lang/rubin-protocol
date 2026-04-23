@@ -45,6 +45,34 @@ func TestAccumulateBlockResourceStats_SumWeightOverflow(t *testing.T) {
 	if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
 	}
+	if got := err.Error(); got != "TX_ERR_PARSE: sum_weight overflow" {
+		t.Fatalf("err=%q, want %q", got, "TX_ERR_PARSE: sum_weight overflow")
+	}
+}
+
+func TestAddBlockResourceStat_OverflowMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  string
+	}{
+		{name: "sum_weight", msg: "sum_weight overflow"},
+		{name: "sum_da", msg: "sum_da overflow"},
+		{name: "sum_anchor", msg: "sum_anchor overflow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := addBlockResourceStat(^uint64(0), 1, tc.msg)
+			if err == nil {
+				t.Fatalf("expected overflow error")
+			}
+			if got := mustTxErrCode(t, err); got != TX_ERR_PARSE {
+				t.Fatalf("code=%s, want %s", got, TX_ERR_PARSE)
+			}
+			want := "TX_ERR_PARSE: " + tc.msg
+			if got := err.Error(); got != want {
+				t.Fatalf("err=%q, want %q", got, want)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

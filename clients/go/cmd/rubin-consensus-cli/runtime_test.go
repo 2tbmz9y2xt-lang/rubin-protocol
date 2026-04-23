@@ -140,10 +140,6 @@ func runRawJSON(t *testing.T, raw []byte, entry func()) Response {
 	if err != nil {
 		t.Fatalf("pipe stdin: %v", err)
 	}
-	if _, err := wIn.Write(raw); err != nil {
-		t.Fatalf("write stdin: %v", err)
-	}
-	_ = wIn.Close()
 
 	rOut, wOut, err := os.Pipe()
 	if err != nil {
@@ -154,11 +150,26 @@ func runRawJSON(t *testing.T, raw []byte, entry func()) Response {
 	oldOut := os.Stdout
 	os.Stdin = rIn
 	os.Stdout = wOut
+	defer func() {
+		os.Stdin = oldIn
+		os.Stdout = oldOut
+		_ = rIn.Close()
+		_ = rOut.Close()
+	}()
 
 	outCh := make(chan []byte, 1)
 	go func() {
 		b, _ := io.ReadAll(rOut)
 		outCh <- b
+	}()
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, err := wIn.Write(raw)
+		if closeErr := wIn.Close(); err == nil {
+			err = closeErr
+		}
+		writeErrCh <- err
 	}()
 
 	entry()
@@ -171,10 +182,14 @@ func runRawJSON(t *testing.T, raw []byte, entry func()) Response {
 		t.Fatalf("timeout waiting for CLI output")
 	}
 
-	os.Stdin = oldIn
-	os.Stdout = oldOut
-	_ = rIn.Close()
-	_ = rOut.Close()
+	select {
+	case err := <-writeErrCh:
+		if err != nil {
+			t.Fatalf("write stdin: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for stdin writer")
+	}
 
 	var resp Response
 	if err := json.Unmarshal(bytes.TrimSpace(outBytes), &resp); err != nil {

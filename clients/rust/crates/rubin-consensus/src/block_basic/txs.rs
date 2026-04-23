@@ -17,20 +17,18 @@ pub(super) fn accumulate_block_resource_stats(pb: &ParsedBlock) -> Result<BlockT
     };
     for tx in &pb.txs {
         let (w, da, anchor_bytes) = tx_weight_and_stats(tx)?;
-        stats.sum_weight = stats
-            .sum_weight
-            .checked_add(w)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-        stats.sum_da = stats
-            .sum_da
-            .checked_add(da)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
-        stats.sum_anchor = stats
-            .sum_anchor
-            .checked_add(anchor_bytes)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u64 overflow"))?;
+        stats.sum_weight = add_block_resource_stat(stats.sum_weight, w, "sum_weight overflow")?;
+        stats.sum_da = add_block_resource_stat(stats.sum_da, da, "sum_da overflow")?;
+        stats.sum_anchor =
+            add_block_resource_stat(stats.sum_anchor, anchor_bytes, "sum_anchor overflow")?;
     }
     Ok(stats)
+}
+
+fn add_block_resource_stat(current: u64, delta: u64, msg: &'static str) -> Result<u64, TxError> {
+    current
+        .checked_add(delta)
+        .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, msg))
 }
 
 pub(super) fn validate_block_tx_semantics(
@@ -180,6 +178,19 @@ mod tests {
         let pb = parsed_block(vec![coinbase(1), bad_da]);
         let err = accumulate_block_resource_stats(&pb).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn add_block_resource_stat_reports_named_overflow() {
+        for msg in [
+            "sum_weight overflow",
+            "sum_da overflow",
+            "sum_anchor overflow",
+        ] {
+            let err = add_block_resource_stat(u64::MAX, 1, msg).unwrap_err();
+            assert_eq!(err.code, ErrorCode::TxErrParse);
+            assert_eq!(err.msg, msg);
+        }
     }
 
     #[test]
