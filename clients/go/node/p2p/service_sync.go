@@ -5,12 +5,33 @@ import (
 	"os"
 )
 
+// maxBestHeightDelta bounds how far above the local tip a peer's claimed
+// best_height is allowed to influence sync decisions, mirroring the Rust
+// client's MAX_BEST_HEIGHT_DELTA in clients/rust/crates/rubin-node/src/p2p_runtime.rs.
+// Without this clamp a malicious or misconfigured peer reporting an absurdly
+// high best_height could force unnecessary sync behavior downstream.
+const maxBestHeightDelta uint64 = 100_000
+
+// clampRemoteBestHeight returns the peer's claimed best_height bounded by
+// localHeight + maxBestHeightDelta. Uses saturating addition so a localHeight
+// near uint64 max does not wrap and silently accept arbitrary remote claims.
+func clampRemoteBestHeight(localHeight, remote uint64) uint64 {
+	upper := localHeight + maxBestHeightDelta
+	if upper < localHeight {
+		upper = ^uint64(0)
+	}
+	if remote > upper {
+		return upper
+	}
+	return remote
+}
+
 func (s *Service) requestBlocksIfBehind(p *peer) error {
 	localHeight, hasTip, err := s.tipHeight()
 	if err != nil {
 		return err
 	}
-	remoteBest := p.snapshotState().RemoteVersion.BestHeight
+	remoteBest := clampRemoteBestHeight(localHeight, p.snapshotState().RemoteVersion.BestHeight)
 	if hasTip && localHeight >= remoteBest {
 		return nil
 	}
