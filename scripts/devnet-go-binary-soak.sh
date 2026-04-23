@@ -7,8 +7,6 @@ GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 TARGET_HEIGHT=120
 WITH_RESTART=0
-CLUSTER_START_ATTEMPTS=5
-NODE_RESTART_ATTEMPTS=5
 
 usage() { echo "usage: $0 [--target-height N] [--with-restart]" >&2; }
 while (($#)); do
@@ -41,6 +39,7 @@ NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"
 KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"
 KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"
+TCP_PROXY_PY="${RUBIN_PROCESS_ARTIFACT_ROOT}/tcp_proxy.py"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-binary-soak-report.json"
 BASE_HEIGHT=$((TARGET_HEIGHT - 1))
 BASE_MINE_BLOCKS=$((BASE_HEIGHT + 1))
@@ -48,14 +47,15 @@ A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 B_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-b"
 C_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-c"
 A_LOG="node-a.log" B_LOG="node-b.log" C_LOG="node-c.log"
+B_PROXY_LOG="node-b-proxy.log" C_PROXY_LOG="node-c-proxy.log"
 B_RESTART_LOG="node-b-restart.log"
 MINE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-base.log"
 RUBIN_PROCESS_LOGS+=("${MINE_LOG}")
 PRE_RESTART_B_HEIGHT=""
 PRE_RESTART_B_TIP=""
-PRE_RESTART_B_RPC_ADDR=""
+PRE_RESTART_B_RPC_ADDR="" PRE_RESTART_B_P2P_ADDR=""
 PRE_RESTART_B_PID=""
-POST_RESTART_B_RPC_ADDR=""
+POST_RESTART_B_RPC_ADDR="" POST_RESTART_B_P2P_ADDR=""
 POST_RESTART_B_PID=""
 POST_RESTART_CATCHUP_HEIGHT=""
 POST_RESTART_CATCHUP_TIP=""
@@ -65,6 +65,8 @@ POST_RESTART_MINE_HASH=""
 POST_RESTART_MINE_TX_COUNT="0"
 POST_RESTART_ACCEPTED_PEER=""
 INCLUSION_PROOF_NODE="node-a"
+B_PROXY_TARGET="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-b-proxy-target"
+C_PROXY_TARGET="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-c-proxy-target"
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
   python3 - "${method}" "${addr}" "${path}" "${body}" <<'PY'
@@ -118,90 +120,108 @@ block_matches_hash_canonical() {
   local block_json="$1" expected_hash="$2"
   printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); expected=sys.argv[1].lower(); actual=(d.get("hash") or d.get("block_hash") or "").lower(); actual == expected or sys.exit(1); d.get("canonical") is True or sys.exit(2)' "${expected_hash}"
 }
-allocate_loopback_addr() {
-  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(f"127.0.0.1:{s.getsockname()[1]}"); s.close()'
+write_tcp_proxy() {
+  cat >"${TCP_PROXY_PY}" <<'PY'
+import socket, sys, threading
+target_file = sys.argv[1]; listener = socket.socket(); listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); listener.bind(("127.0.0.1", 0)); listener.listen()
+print(f"proxy: listening={listener.getsockname()[0]}:{listener.getsockname()[1]}", flush=True)
+def pump(src, dst):
+    try:
+        while data := src.recv(65536):
+            dst.sendall(data)
+    except OSError:
+        pass
+    for sock in (src, dst):
+        try: sock.close()
+        except OSError: pass
+while True:
+    client, _ = listener.accept()
+    try:
+        host, port = open(target_file, encoding="utf-8").read().strip().rsplit(":", 1)
+        if host != "127.0.0.1": raise ValueError("proxy target must be loopback")
+        upstream = socket.create_connection((host, int(port)), timeout=5)
+    except Exception:
+        client.close(); continue
+    for src, dst in ((client, upstream), (upstream, client)):
+        threading.Thread(target=pump, args=(src, dst), daemon=True).start()
+PY
 }
-unregister_managed_pid() {
-  local stale_pid="${1:-}" kept=() pid
-  [[ -n "${stale_pid}" ]] || return 1
-  for pid in "${RUBIN_PROCESS_PIDS[@]}"; do
-    [[ "${pid}" == "${stale_pid}" ]] || kept+=("${pid}")
-  done
-  RUBIN_PROCESS_PIDS=("${kept[@]}")
-}
-stop_managed_pid() {
-  local managed_pid="${1:-}"
-  [[ -n "${managed_pid}" ]] || return 1
-  rubin_process_stop_pid "${managed_pid}"
-  unregister_managed_pid "${managed_pid}"
+PROXY_PID=""
+PROXY_ADDR=""
+start_proxy() {
+  local log_file="$1" target_file="$2"
+  PROXY_PID="" PROXY_ADDR=""
+  rubin_process_start "${log_file}" python3 -u "${TCP_PROXY_PY}" "${target_file}"
+  PROXY_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${log_file}" "proxy: listening=" 30 "${PROXY_PID}"
+  PROXY_ADDR="$(sed -n 's/.*proxy: listening=//p' "${RUBIN_PROCESS_ARTIFACT_ROOT}/${log_file}" | tail -n 1 | tr -d '[:space:]')"
+  [[ -n "${PROXY_ADDR}" ]] || { echo "missing proxy listening banner in ${log_file}" >&2; return 1; }
+  [[ "${PROXY_ADDR}" == 127.0.0.1:* ]] || { echo "proxy must listen on 127.0.0.1, got ${PROXY_ADDR}" >&2; return 1; }
 }
 STARTED_PID=""
 STARTED_RPC=""
+STARTED_P2P=""
+p2p_addr_for_pid() {
+  local pid="$1" rpc_addr="$2" timeout="$3"
+  command -v lsof >/dev/null 2>&1 || { echo "lsof is required to resolve p2p :0 bind address" >&2; return 1; }
+  python3 - "${pid}" "${rpc_addr}" "${timeout}" <<'PY'
+import re, subprocess, sys, time
+pid, rpc_addr, timeout = sys.argv[1], sys.argv[2], int(sys.argv[3]); deadline = time.time() + timeout
+while time.time() < deadline:
+    proc = subprocess.run(["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    addrs = sorted({line[1:].strip() for line in proc.stdout.splitlines() if line.startswith("n") and line[1:].strip() != rpc_addr and re.fullmatch(r"127\.0\.0\.1:[0-9]+", line[1:].strip())})
+    if len(addrs) == 1:
+        print(addrs[0]); sys.exit(0)
+    if len(addrs) > 1:
+        sys.exit(f"ambiguous p2p listen addresses for pid={pid}: {addrs}")
+    time.sleep(1)
+sys.exit(f"timeout resolving p2p listen address for pid={pid}")
+PY
+}
 start_node_ready() {
-  local label="$1" log_file="$2" datadir="$3" bind_addr="$4" peers="$5" attempt="$6"
-  STARTED_PID="" STARTED_RPC=""
-  if ! rubin_process_start "${log_file}" "${NODE_BIN}" --datadir "${datadir}" --bind "${bind_addr}" --rpc-bind 127.0.0.1:0 --peers "${peers}" --mine-address "${MINE_ADDRESS_HEX}"; then
-    echo "${label} attempt ${attempt} failed; retrying with fresh loopback port(s)" >&2
-    [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || stop_managed_pid "${RUBIN_PROCESS_LAST_PID}" || true
+  local label="$1" log_file="$2" datadir="$3" peers="${4:-}" args
+  args=(--datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --mine-address "${MINE_ADDRESS_HEX}")
+  [[ -z "${peers}" ]] || args+=(--peers "${peers}")
+  STARTED_PID="" STARTED_RPC="" STARTED_P2P=""
+  if ! rubin_process_start "${log_file}" "${NODE_BIN}" "${args[@]}"; then
+    echo "${label} start failed" >&2
+    [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || rubin_process_stop_pid "${RUBIN_PROCESS_LAST_PID}" || true
     return 1
   fi
   STARTED_PID="${RUBIN_PROCESS_LAST_PID}"
   if ! rubin_process_wait_for_log "${log_file}" "rpc: listening=" 30 "${STARTED_PID}"; then
-    echo "${label} did not become ready on attempt ${attempt}; retrying with fresh loopback port(s)" >&2
-    stop_managed_pid "${STARTED_PID}" || true
+    echo "${label} did not become ready" >&2
+    rubin_process_stop_pid "${STARTED_PID}" || true
     STARTED_PID=""
     return 1
   fi
-  STARTED_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || return 1
-}
-stop_cluster_attempt() {
-  local managed_pid
-  for managed_pid in "${C_PID:-}" "${B_PID:-}" "${A_PID:-}"; do
-    [[ -z "${managed_pid}" ]] || stop_managed_pid "${managed_pid}" || true
-  done
-  A_PID="" B_PID="" C_PID=""
+  STARTED_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || { rubin_process_stop_pid "${STARTED_PID}" || true; return 1; }
+  STARTED_P2P="$(p2p_addr_for_pid "${STARTED_PID}" "${STARTED_RPC}" 30)" || { rubin_process_stop_pid "${STARTED_PID}" || true; return 1; }
 }
 start_soak_cluster() {
-  local attempt
-  attempt=1
-  while (( attempt <= CLUSTER_START_ATTEMPTS )); do
-    A_PID="" B_PID="" C_PID="" A_RPC_ADDR="" B_RPC_ADDR="" C_RPC_ADDR=""
-    A_P2P_ADDR="$(allocate_loopback_addr)" || return 1
-    B_P2P_ADDR="$(allocate_loopback_addr)" || return 1
-    C_P2P_ADDR="$(allocate_loopback_addr)" || return 1
-    start_node_ready node-a "${A_LOG}" "${A_DIR}" "${A_P2P_ADDR}" "${B_P2P_ADDR},${C_P2P_ADDR}" "${attempt}" || { stop_cluster_attempt; ((attempt++)); continue; }
-    A_PID="${STARTED_PID}" A_RPC_ADDR="${STARTED_RPC}"
-    start_node_ready node-b "${B_LOG}" "${B_DIR}" "${B_P2P_ADDR}" "${A_P2P_ADDR}" "${attempt}" || { stop_cluster_attempt; ((attempt++)); continue; }
-    B_PID="${STARTED_PID}" B_RPC_ADDR="${STARTED_RPC}"
-    start_node_ready node-c "${C_LOG}" "${C_DIR}" "${C_P2P_ADDR}" "${A_P2P_ADDR}" "${attempt}" || { stop_cluster_attempt; ((attempt++)); continue; }
-    C_PID="${STARTED_PID}" C_RPC_ADDR="${STARTED_RPC}"
-    if rubin_process_wait_for_rpc_ready "${A_RPC_ADDR}" 30 && rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30 && rubin_process_wait_for_rpc_ready "${C_RPC_ADDR}" 30; then
-      return 0
-    fi
-    echo "cluster RPC readiness failed on attempt ${attempt}; retrying with fresh loopback ports" >&2
-    stop_cluster_attempt
-    ((attempt++))
-  done
-  echo "failed to start three-node cluster after ${CLUSTER_START_ATTEMPTS} attempts" >&2
-  return 1
+  A_PID="" B_PID="" C_PID="" A_RPC_ADDR="" B_RPC_ADDR="" C_RPC_ADDR=""
+  start_node_ready node-b "${B_LOG}" "${B_DIR}" || return 1
+  B_PID="${STARTED_PID}" B_RPC_ADDR="${STARTED_RPC}" B_P2P_ADDR="${STARTED_P2P}"
+  printf '%s\n' "${B_P2P_ADDR}" >"${B_PROXY_TARGET}"
+  start_proxy "${B_PROXY_LOG}" "${B_PROXY_TARGET}"
+  B_PROXY_ADDR="${PROXY_ADDR}"
+  start_node_ready node-c "${C_LOG}" "${C_DIR}" || return 1
+  C_PID="${STARTED_PID}" C_RPC_ADDR="${STARTED_RPC}" C_P2P_ADDR="${STARTED_P2P}"
+  printf '%s\n' "${C_P2P_ADDR}" >"${C_PROXY_TARGET}"
+  start_proxy "${C_PROXY_LOG}" "${C_PROXY_TARGET}"
+  C_PROXY_ADDR="${PROXY_ADDR}"
+  start_node_ready node-a "${A_LOG}" "${A_DIR}" "${B_PROXY_ADDR},${C_PROXY_ADDR}" || return 1
+  A_PID="${STARTED_PID}" A_RPC_ADDR="${STARTED_RPC}" A_P2P_ADDR="${STARTED_P2P}"
+  rubin_process_wait_for_rpc_ready "${A_RPC_ADDR}" 30
+  rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30
+  rubin_process_wait_for_rpc_ready "${C_RPC_ADDR}" 30
 }
 restart_node_b() {
-  local attempt
-  attempt=1
-  while (( attempt <= NODE_RESTART_ATTEMPTS )); do
-    if (( attempt > 1 )); then
-      B_P2P_ADDR="$(allocate_loopback_addr)" || return 1
-    fi
-    if start_node_ready "node-b restart" "${B_RESTART_LOG}" "${B_DIR}" "${B_P2P_ADDR}" "${A_P2P_ADDR}" "${attempt}"; then
-      B_PID="${STARTED_PID}" B_RPC_ADDR="${STARTED_RPC}"
-      POST_RESTART_B_PID="${B_PID}"
-      POST_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
-      return 0
-    fi
-    ((attempt++))
-  done
-  echo "failed to restart node-b after ${NODE_RESTART_ATTEMPTS} attempts" >&2
-  return 1
+  start_node_ready "node-b restart" "${B_RESTART_LOG}" "${B_DIR}" "${A_P2P_ADDR}" || return 1
+  B_PID="${STARTED_PID}" B_RPC_ADDR="${STARTED_RPC}" B_P2P_ADDR="${STARTED_P2P}"
+  printf '%s\n' "${B_P2P_ADDR}" >"${B_PROXY_TARGET}"
+  POST_RESTART_B_PID="${B_PID}"
+  POST_RESTART_B_RPC_ADDR="${B_RPC_ADDR}" POST_RESTART_B_P2P_ADDR="${B_P2P_ADDR}"
 }
 write_keygen() {
   cat >"${KEYGEN_GO}" <<'EOF'
@@ -224,6 +244,7 @@ echo "Building Go rubin-node and rubin-txgen"
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${NODE_BIN}" ./cmd/rubin-node
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${TXGEN_BIN}" ./cmd/rubin-txgen
 write_keygen
+write_tcp_proxy
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" >"${KEYGEN_JSON}"
 FROM_DER_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["from_der_hex"])' "${KEYGEN_JSON}")"
 MINE_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mine_address_hex"])' "${KEYGEN_JSON}")"
@@ -238,10 +259,10 @@ start_soak_cluster
 for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do wait_height "${addr}" "${BASE_HEIGHT}" 30; done
 if (( WITH_RESTART == 1 )); then
   IFS=$'\t' read -r PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP < <(tip_tsv "${B_RPC_ADDR}")
-  PRE_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
+  PRE_RESTART_B_RPC_ADDR="${B_RPC_ADDR}" PRE_RESTART_B_P2P_ADDR="${B_P2P_ADDR}"
   PRE_RESTART_B_PID="${B_PID}"
   echo "Stopping node-b pid=${B_PID} at deterministic restart checkpoint height ${PRE_RESTART_B_HEIGHT}"
-  stop_managed_pid "${B_PID}"
+  rubin_process_stop_pid "${B_PID}"
 fi
 echo "Submitting tx through Go RPC and mining it through /mine_next"
 TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
@@ -325,28 +346,23 @@ printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin
 if (( WITH_RESTART == 1 )); then
   printf '%s' "${POST_RESTART_BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); h=d.get("block_hex",""); (isinstance(h, str) and len(h) > 0) or sys.exit("post-restart block visibility check failed")'
 fi
-export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_PID POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP POST_RESTART_CATCHUP_PEERS POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT POST_RESTART_ACCEPTED_PEER INCLUSION_PROOF_NODE
+export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_P2P_ADDR B_P2P_ADDR C_P2P_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_P2P_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_P2P_ADDR POST_RESTART_B_PID POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP POST_RESTART_CATCHUP_PEERS POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT POST_RESTART_ACCEPTED_PEER INCLUSION_PROOF_NODE
 python3 - <<'PY'
 import json, os
-participants = []
-for node in ("A", "B", "C"):
-    participants.append({"name": f"node-{node.lower()}", "pid": int(os.environ[f"{node}_PID"]), "rpc": os.environ[f"{node}_RPC_ADDR"], "checkpoint_height": int(os.environ[f"{node}_HEIGHT"]), "tip_hash": os.environ[f"{node}_TIP"], "peer_count": int(os.environ[f"{node}_PEERS"])})
-restart_enabled = os.environ["WITH_RESTART"] == "1"
+e = os.environ
+i = lambda key: int(e[key])
+participants = [{"name": f"node-{n.lower()}", "pid": i(f"{n}_PID"), "rpc": e[f"{n}_RPC_ADDR"], "p2p": e[f"{n}_P2P_ADDR"], "checkpoint_height": i(f"{n}_HEIGHT"), "tip_hash": e[f"{n}_TIP"], "peer_count": i(f"{n}_PEERS")} for n in ("A", "B", "C")]
+restart_enabled = e["WITH_RESTART"] == "1"
 report = {
     "scenario": "go_binary_soak_restart" if restart_enabled else "go_binary_soak_skeleton",
-    "target_height": int(os.environ["TARGET_HEIGHT"]),
-    "base_height": int(os.environ["BASE_HEIGHT"]),
+    "target_height": i("TARGET_HEIGHT"),
+    "base_height": i("BASE_HEIGHT"),
     "participants": participants,
-    "tx": {
-        "id": os.environ["TX_ID"],
-        "submission": "rpc:/submit_tx",
-        "inclusion_proof_node": os.environ["INCLUSION_PROOF_NODE"],
-        "inclusion_height": int(os.environ["TARGET_HEIGHT"]),
-    },
+    "tx": {"id": e["TX_ID"], "submission": "rpc:/submit_tx", "inclusion_proof_node": e["INCLUSION_PROOF_NODE"], "inclusion_height": i("TARGET_HEIGHT")},
     "final": {
-        "height": int(os.environ["POST_RESTART_MINE_HEIGHT"] if restart_enabled else os.environ["TARGET_HEIGHT"]),
-        "tip_hash": os.environ["POST_RESTART_MINE_HASH"] if restart_enabled else os.environ["FINAL_HASH"],
-        "tx_count": int(os.environ["POST_RESTART_MINE_TX_COUNT"] if restart_enabled else os.environ["TX_COUNT"]),
+        "height": i("POST_RESTART_MINE_HEIGHT" if restart_enabled else "TARGET_HEIGHT"),
+        "tip_hash": e["POST_RESTART_MINE_HASH"] if restart_enabled else e["FINAL_HASH"],
+        "tx_count": i("POST_RESTART_MINE_TX_COUNT" if restart_enabled else "TX_COUNT"),
     },
     "verdict": "PASS",
 }
@@ -354,30 +370,13 @@ if restart_enabled:
     report["restart"] = {
         "enabled": True,
         "stopped_node": "node-b",
-        "checkpoint_before_stop": {
-            "height": int(os.environ["PRE_RESTART_B_HEIGHT"]),
-            "tip_hash": os.environ["PRE_RESTART_B_TIP"],
-            "rpc": os.environ["PRE_RESTART_B_RPC_ADDR"],
-            "pid": int(os.environ["PRE_RESTART_B_PID"]),
-        },
-        "state_after_catchup": {
-            "height": int(os.environ["POST_RESTART_CATCHUP_HEIGHT"]),
-            "tip_hash": os.environ["POST_RESTART_CATCHUP_TIP"],
-            "rpc": os.environ["POST_RESTART_B_RPC_ADDR"],
-            "pid": int(os.environ["POST_RESTART_B_PID"]),
-            "peer_count": int(os.environ["POST_RESTART_CATCHUP_PEERS"]),
-        },
-        "post_restart_live_action": {
-            "action": "mine_next",
-            "height": int(os.environ["POST_RESTART_MINE_HEIGHT"]),
-            "block_hash": os.environ["POST_RESTART_MINE_HASH"],
-            "tx_count": int(os.environ["POST_RESTART_MINE_TX_COUNT"]),
-            "accepted_by_peer": os.environ["POST_RESTART_ACCEPTED_PEER"],
-        },
+        "checkpoint_before_stop": {"height": i("PRE_RESTART_B_HEIGHT"), "tip_hash": e["PRE_RESTART_B_TIP"], "rpc": e["PRE_RESTART_B_RPC_ADDR"], "p2p": e["PRE_RESTART_B_P2P_ADDR"], "pid": i("PRE_RESTART_B_PID")},
+        "state_after_catchup": {"height": i("POST_RESTART_CATCHUP_HEIGHT"), "tip_hash": e["POST_RESTART_CATCHUP_TIP"], "rpc": e["POST_RESTART_B_RPC_ADDR"], "p2p": e["POST_RESTART_B_P2P_ADDR"], "pid": i("POST_RESTART_B_PID"), "peer_count": i("POST_RESTART_CATCHUP_PEERS")},
+        "post_restart_live_action": {"action": "mine_next", "height": i("POST_RESTART_MINE_HEIGHT"), "block_hash": e["POST_RESTART_MINE_HASH"], "tx_count": i("POST_RESTART_MINE_TX_COUNT"), "accepted_by_peer": e["POST_RESTART_ACCEPTED_PEER"]},
     }
 else:
     report["restart"] = {"enabled": False}
-with open(os.environ["REPORT_JSON"], "w", encoding="utf-8") as f:
+with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
