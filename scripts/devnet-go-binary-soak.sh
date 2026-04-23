@@ -120,10 +120,7 @@ block_matches_hash_canonical() {
   local block_json="$1" expected_hash="$2"
   printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); expected=sys.argv[1].lower(); actual=(d.get("hash") or d.get("block_hash") or "").lower(); actual == expected or sys.exit(1); d.get("canonical") is True or sys.exit(2)' "${expected_hash}"
 }
-describe_block_json() {
-  local block_json="$1"
-  printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); actual=d.get("hash") or d.get("block_hash") or "<missing>"; print("reported_hash=%s reported_canonical=%r" % (actual, d.get("canonical")))'
-}
+describe_block_json() { local block_json="$1"; printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); actual=d.get("hash") or d.get("block_hash") or "<missing>"; print("reported_hash=%s reported_canonical=%r" % (actual, d.get("canonical")))'; }
 stop_registered_pid() { local managed_pid="${1:-}" rc=0 kept=() pid; [[ -n "${managed_pid}" ]] || return 1; rubin_process_stop_pid "${managed_pid}" || rc=$?; for pid in "${RUBIN_PROCESS_PIDS[@]}"; do [[ "${pid}" == "${managed_pid}" ]] || kept+=("${pid}"); done; if ((${#kept[@]})); then RUBIN_PROCESS_PIDS=("${kept[@]}"); else RUBIN_PROCESS_PIDS=(); fi; if ((${#RUBIN_PROCESS_PIDS[@]})); then for pid in "${RUBIN_PROCESS_PIDS[@]}"; do [[ "${pid}" != "${managed_pid}" ]] || { echo "stale managed pid remained registered after stop: ${managed_pid}" >&2; return 1; }; done; fi; return "${rc}"; }
 write_tcp_proxy() {
   cat >"${TCP_PROXY_PY}" <<'PY'
@@ -299,14 +296,12 @@ if (( WITH_RESTART == 1 )); then
   wait_height "${B_RPC_ADDR}" "${POST_RESTART_TARGET_HEIGHT}" 60
   POST_RESTART_B_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_TARGET_HEIGHT}")"
   block_matches_hash_canonical "${POST_RESTART_B_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
-    actual="$(describe_block_json "${POST_RESTART_B_BLOCK_JSON}")"
-    echo "post-restart block was not adopted by restarted node-b at height=${POST_RESTART_TARGET_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} ${actual}" >&2
+    echo "post-restart block was not adopted by restarted node-b at height=${POST_RESTART_TARGET_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} $(describe_block_json "${POST_RESTART_B_BLOCK_JSON}")" >&2
     exit 1
   }
   POST_RESTART_A_BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${POST_RESTART_TARGET_HEIGHT}")"
   block_matches_hash_canonical "${POST_RESTART_A_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
-    actual="$(describe_block_json "${POST_RESTART_A_BLOCK_JSON}")"
-    echo "post-restart block was not adopted by node-a at height=${POST_RESTART_TARGET_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} ${actual}" >&2
+    echo "post-restart block was not adopted by node-a at height=${POST_RESTART_TARGET_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} $(describe_block_json "${POST_RESTART_A_BLOCK_JSON}")" >&2
     exit 1
   }
   POST_RESTART_ACCEPTED_PEER="node-a"
@@ -324,8 +319,7 @@ if (( WITH_RESTART == 1 )); then
   }
   POST_RESTART_A_BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"
   block_matches_hash_canonical "${POST_RESTART_A_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
-    actual="$(describe_block_json "${POST_RESTART_A_BLOCK_JSON}")"
-    echo "post-restart adoption marker node-a mismatch height=${POST_RESTART_MINE_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} ${actual}" >&2
+    echo "post-restart adoption marker node-a mismatch height=${POST_RESTART_MINE_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} $(describe_block_json "${POST_RESTART_A_BLOCK_JSON}")" >&2
     exit 1
   }
   [[ "${A_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${A_TIP}" == "${POST_RESTART_MINE_HASH}" && "${B_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${B_TIP}" == "${POST_RESTART_MINE_HASH}" && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}") || ("${C_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${C_TIP}" == "${POST_RESTART_MINE_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
@@ -345,8 +339,8 @@ fi
 if (( WITH_RESTART == 1 )); then
   BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
   POST_RESTART_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"
-  block_matches_hash_canonical "${BLOCK_JSON}" "${FINAL_HASH}" || { actual="$(describe_block_json "${BLOCK_JSON}")"; echo "restart target block mismatch expected_hash=${FINAL_HASH} ${actual}" >&2; exit 1; }
-  block_matches_hash_canonical "${POST_RESTART_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || { actual="$(describe_block_json "${POST_RESTART_BLOCK_JSON}")"; echo "restart post-restart block mismatch expected_hash=${POST_RESTART_MINE_HASH} ${actual}" >&2; exit 1; }
+  block_matches_hash_canonical "${BLOCK_JSON}" "${FINAL_HASH}" || { echo "restart target block mismatch expected_hash=${FINAL_HASH} $(describe_block_json "${BLOCK_JSON}")" >&2; exit 1; }
+  block_matches_hash_canonical "${POST_RESTART_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || { echo "restart post-restart block mismatch expected_hash=${POST_RESTART_MINE_HASH} $(describe_block_json "${POST_RESTART_BLOCK_JSON}")" >&2; exit 1; }
 else
   BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
 fi
