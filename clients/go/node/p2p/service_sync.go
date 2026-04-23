@@ -9,7 +9,7 @@ import (
 // best_height is allowed to influence sync decisions, mirroring the Rust
 // client's MAX_BEST_HEIGHT_DELTA in clients/rust/crates/rubin-node/src/p2p_runtime.rs.
 // Without this clamp a malicious or misconfigured peer reporting an absurdly
-// high best_height could force unnecessary sync behaviour downstream.
+// high best_height could force unnecessary sync behavior downstream.
 const maxBestHeightDelta uint64 = 100_000
 
 // clampRemoteBestHeight returns the peer's claimed best_height bounded by
