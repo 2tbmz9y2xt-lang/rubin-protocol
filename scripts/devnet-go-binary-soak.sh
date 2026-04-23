@@ -282,7 +282,10 @@ if (( WITH_RESTART == 1 )); then
   rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30
   wait_height "${B_RPC_ADDR}" "${TARGET_HEIGHT}" 60
   IFS=$'\t' read -r POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP < <(tip_tsv "${B_RPC_ADDR}")
-  POST_RESTART_CATCHUP_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)"
+  if ! POST_RESTART_CATCHUP_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)"; then
+    echo "failed post-restart node-b peer wait addr=${B_RPC_ADDR} want=1 timeout=30" >&2
+    exit 1
+  fi
   echo "Mining one additional block after restart through restarted node-b"
   if ! POST_RESTART_MINE_JSON="$(rpc_json POST "${B_RPC_ADDR}" /mine_next '{}')"; then echo "post-restart mine_next request failed: ${POST_RESTART_MINE_JSON}" >&2; exit 1; fi
   IFS=$'\t' read -r POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT < <(printf '%s' "${POST_RESTART_MINE_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); (d.get("mined") is True) or sys.exit("post-restart mine_next failed: "+str(d.get("error","missing mined result"))); print(d["height"], d["block_hash"], d["tx_count"], sep="\t")')
@@ -309,8 +312,18 @@ fi
 IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
 IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
-A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)"
-B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)" C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
+if ! A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)"; then
+  echo "failed node-a peer wait addr=${A_RPC_ADDR} want=2 timeout=30" >&2
+  exit 1
+fi
+if ! B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)"; then
+  echo "failed node-b peer wait addr=${B_RPC_ADDR} want=1 timeout=30" >&2
+  exit 1
+fi
+if ! C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"; then
+  echo "failed node-c peer wait addr=${C_RPC_ADDR} want=1 timeout=30" >&2
+  exit 1
+fi
 if (( WITH_RESTART == 1 )); then
   [[ "${POST_RESTART_ACCEPTED_PEER}" == "node-a" ]] || {
     echo "unexpected post-restart adoption marker=${POST_RESTART_ACCEPTED_PEER}" >&2
