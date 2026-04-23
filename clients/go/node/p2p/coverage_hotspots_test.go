@@ -124,6 +124,9 @@ func TestCoverage_AnnounceTxAndHandleTxBranches(t *testing.T) {
 	txBytes := mustBuildSignedP2PTx(t, utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
 
 	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.TxMetadataFunc = func(b []byte) (node.RelayTxMetadata, error) {
+		return node.RelayTxMetadata{Fee: 0, Size: len(b)}, nil
+	}
 	p.service.cfg.PeerRuntimeConfig.BanThreshold = 100
 	if err := p.handleTx(append(txBytes, 0x00)); err != nil {
 		t.Fatalf("expected below-threshold invalid tx to be ignored, got %v", err)

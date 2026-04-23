@@ -1,13 +1,17 @@
 package p2p
 
-import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
+import (
+	"errors"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
+)
 
 func (s *Service) relayTxMetadata(txBytes []byte) (node.RelayTxMetadata, error) {
-	if s != nil && s.cfg.TxMetadataFunc != nil {
-		return s.cfg.TxMetadataFunc(txBytes)
+	if s == nil {
+		return node.RelayTxMetadata{}, errors.New("nil service")
 	}
-	return node.RelayTxMetadata{
-		Fee:  0,
-		Size: len(txBytes),
-	}, nil
+	if s.cfg.TxMetadataFunc == nil {
+		return node.RelayTxMetadata{}, errors.New("nil tx metadata func")
+	}
+	return s.cfg.TxMetadataFunc(txBytes)
 }

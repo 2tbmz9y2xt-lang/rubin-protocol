@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,19 +123,24 @@ func TestInventoryRelayKeyMultipleItems(t *testing.T) {
 	}
 }
 
-func TestRelayTxMetadataFallbackAndProvider(t *testing.T) {
+func TestRelayTxMetadataNilProviderErrors(t *testing.T) {
+	if _, err := (*Service)(nil).relayTxMetadata(nil); err == nil {
+		t.Fatal("relayTxMetadata on nil service should error")
+	}
+
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	meta, err := h.service.relayTxMetadata([]byte{0xAA, 0xBB, 0xCC})
-	if err != nil {
-		t.Fatalf("fallback relayTxMetadata: %v", err)
+	_, err := h.service.relayTxMetadata([]byte{0xAA, 0xBB, 0xCC})
+	if err == nil {
+		t.Fatal("relayTxMetadata must error when TxMetadataFunc is nil")
 	}
-	if meta.Fee != 0 || meta.Size != 3 {
-		t.Fatalf("fallback meta=%+v, want fee=0 size=3", meta)
+	if !strings.Contains(err.Error(), "tx metadata") {
+		t.Fatalf("error=%q, want substring 'tx metadata'", err.Error())
 	}
+
 	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
 		return node.RelayTxMetadata{Fee: 9, Size: 7}, nil
 	}
-	meta, err = h.service.relayTxMetadata([]byte{0x00})
+	meta, err := h.service.relayTxMetadata([]byte{0x00})
 	if err != nil {
 		t.Fatalf("provider relayTxMetadata: %v", err)
 	}
