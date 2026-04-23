@@ -55,6 +55,9 @@ PRE_RESTART_B_RPC_ADDR=""
 PRE_RESTART_B_PID=""
 POST_RESTART_B_RPC_ADDR=""
 POST_RESTART_B_PID=""
+POST_RESTART_CATCHUP_HEIGHT=""
+POST_RESTART_CATCHUP_TIP=""
+POST_RESTART_CATCHUP_PEERS="0"
 POST_RESTART_MINE_HEIGHT=""
 POST_RESTART_MINE_HASH=""
 POST_RESTART_MINE_TX_COUNT="0"
@@ -198,6 +201,8 @@ if (( WITH_RESTART == 1 )); then
   POST_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
   rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30
   wait_height "${B_RPC_ADDR}" "${TARGET_HEIGHT}" 60
+  IFS=$'\t' read -r POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP < <(tip_tsv "${B_RPC_ADDR}")
+  POST_RESTART_CATCHUP_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)"
   echo "Mining one additional block after restart to exercise live process path"
   if ! POST_RESTART_MINE_JSON="$(rpc_json POST "${B_RPC_ADDR}" /mine_next '{}')"; then echo "post-restart mine_next request failed: ${POST_RESTART_MINE_JSON}" >&2; exit 1; fi
   IFS=$'\t' read -r POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT < <(printf '%s' "${POST_RESTART_MINE_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); (d.get("mined") is True) or sys.exit("post-restart mine_next failed: "+str(d.get("error","missing mined result"))); print(d["height"], d["block_hash"], d["tx_count"], sep="\t")')
@@ -242,7 +247,7 @@ printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin
 if (( WITH_RESTART == 1 )); then
   printf '%s' "${POST_RESTART_BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); h=d.get("block_hex",""); (isinstance(h, str) and len(h) > 0) or sys.exit("post-restart block visibility check failed")'
 fi
-export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_PID POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT INCLUSION_PROOF_NODE
+export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_PID POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP POST_RESTART_CATCHUP_PEERS POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT INCLUSION_PROOF_NODE
 python3 - <<'PY'
 import json, os
 participants = []
@@ -278,11 +283,11 @@ if restart_enabled:
             "pid": int(os.environ["PRE_RESTART_B_PID"]),
         },
         "state_after_catchup": {
-            "height": int(os.environ["B_HEIGHT"]),
-            "tip_hash": os.environ["B_TIP"],
+            "height": int(os.environ["POST_RESTART_CATCHUP_HEIGHT"]),
+            "tip_hash": os.environ["POST_RESTART_CATCHUP_TIP"],
             "rpc": os.environ["POST_RESTART_B_RPC_ADDR"],
             "pid": int(os.environ["POST_RESTART_B_PID"]),
-            "peer_count": int(os.environ["B_PEERS"]),
+            "peer_count": int(os.environ["POST_RESTART_CATCHUP_PEERS"]),
         },
         "post_restart_live_action": {
             "action": "mine_next",
