@@ -6,14 +6,19 @@ DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 TARGET_HEIGHT=120
+WITH_RESTART=0
 
-usage() { echo "usage: $0 [--target-height N]" >&2; }
+usage() { echo "usage: $0 [--target-height N] [--with-restart]" >&2; }
 while (($#)); do
   case "$1" in
     --target-height)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       TARGET_HEIGHT="$2"
       shift 2
+      ;;
+    --with-restart)
+      WITH_RESTART=1
+      shift
       ;;
     -h|--help)
       usage
@@ -41,8 +46,16 @@ A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 B_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-b"
 C_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-c"
 A_LOG="node-a.log" B_LOG="node-b.log" C_LOG="node-c.log"
+B_RESTART_LOG="node-b-restart.log"
 MINE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-base.log"
 RUBIN_PROCESS_LOGS+=("${MINE_LOG}")
+PRE_RESTART_B_HEIGHT=""
+PRE_RESTART_B_TIP=""
+PRE_RESTART_B_RPC_ADDR=""
+PRE_RESTART_B_PID=""
+POST_RESTART_B_RPC_ADDR=""
+POST_RESTART_B_PID=""
+INCLUSION_PROOF_NODE="node-a"
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
   python3 - "${method}" "${addr}" "${path}" "${body}" <<'PY'
@@ -92,6 +105,20 @@ wait_peers() {
   echo "timeout waiting for ${addr} peer_count>=${want}" >&2
   return 1
 }
+unregister_managed_pid() {
+  local stale_pid="${1:-}" kept=() pid
+  [[ -n "${stale_pid}" ]] || return 1
+  for pid in "${RUBIN_PROCESS_PIDS[@]}"; do
+    [[ "${pid}" == "${stale_pid}" ]] || kept+=("${pid}")
+  done
+  RUBIN_PROCESS_PIDS=("${kept[@]}")
+}
+stop_managed_pid() {
+  local managed_pid="${1:-}"
+  [[ -n "${managed_pid}" ]] || return 1
+  rubin_process_stop_pid "${managed_pid}"
+  unregister_managed_pid "${managed_pid}"
+}
 write_keygen() {
   cat >"${KEYGEN_GO}" <<'EOF'
 package main
@@ -127,7 +154,7 @@ A_PID=""
 for _ in 1 2 3; do
   A_P2P_ADDR="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(f"127.0.0.1:{s.getsockname()[1]}"); s.close()')"
   if rubin_process_start "${A_LOG}" "${NODE_BIN}" --datadir "${A_DIR}" --bind "${A_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --mine-address "${MINE_ADDRESS_HEX}" && rubin_process_wait_for_log "${A_LOG}" "rpc: listening=" 30 "${RUBIN_PROCESS_LAST_PID}"; then A_PID="${RUBIN_PROCESS_LAST_PID}"; A_RPC_ADDR="$(rubin_process_extract_rpc_addr "${A_LOG}")"; break; fi
-  [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || rubin_process_stop_pid "${RUBIN_PROCESS_LAST_PID}" || true
+  [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || stop_managed_pid "${RUBIN_PROCESS_LAST_PID}" || true
 done
 [[ -n "${A_PID}" ]] || { echo "failed to start node-a after retrying loopback bind ports" >&2; exit 1; }
 rubin_process_start "${B_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
@@ -140,6 +167,13 @@ rubin_process_wait_for_log "${C_LOG}" "rpc: listening=" 30 "${C_PID}"
 C_RPC_ADDR="$(rubin_process_extract_rpc_addr "${C_LOG}")"
 for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do rubin_process_wait_for_rpc_ready "${addr}" 30; done
 for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do wait_height "${addr}" "${BASE_HEIGHT}" 30; done
+if (( WITH_RESTART == 1 )); then
+  IFS=$'\t' read -r PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP < <(tip_tsv "${B_RPC_ADDR}")
+  PRE_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
+  PRE_RESTART_B_PID="${B_PID}"
+  echo "Stopping node-b pid=${B_PID} at deterministic restart checkpoint height ${PRE_RESTART_B_HEIGHT}"
+  stop_managed_pid "${B_PID}"
+fi
 echo "Submitting tx through Go RPC and mining it through /mine_next"
 TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
 if ! MEMPOOL_JSON="$(rpc_json GET "${A_RPC_ADDR}" /get_mempool)"; then echo "get_mempool request failed: ${MEMPOOL_JSON}" >&2; exit 1; fi
@@ -151,6 +185,18 @@ IFS=$'\t' read -r FINAL_HEIGHT FINAL_HASH TX_COUNT < <(printf '%s' "${MINE_JSON}
   exit 1
 }
 wait_height "${A_RPC_ADDR}" "${TARGET_HEIGHT}" 30
+if (( WITH_RESTART == 1 )); then
+  echo "Restarting node-b from disk-backed datadir ${B_DIR}"
+  rubin_process_start "${B_RESTART_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
+  B_PID="${RUBIN_PROCESS_LAST_PID}"
+  POST_RESTART_B_PID="${B_PID}"
+  rubin_process_wait_for_log "${B_RESTART_LOG}" "rpc: listening=" 30 "${B_PID}"
+  B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_RESTART_LOG}")"
+  POST_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
+  rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30
+  wait_height "${B_RPC_ADDR}" "${TARGET_HEIGHT}" 60
+  INCLUSION_PROOF_NODE="node-b-restarted"
+fi
 IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
 IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
@@ -159,21 +205,65 @@ A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)" B_PEERS="$(wait_peers "${B_RPC_ADDR
   echo "unexpected node-a checkpoint final=${FINAL_HASH} a_height=${A_HEIGHT} a_tip=${A_TIP}" >&2
   exit 1
 }
-[[ (("${B_HEIGHT}" == "${BASE_HEIGHT}" && -n "${B_TIP}") || ("${B_HEIGHT}" == "${TARGET_HEIGHT}" && "${B_TIP}" == "${FINAL_HASH}")) && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
-  echo "unexpected peer checkpoint/connectivity final=${FINAL_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
-  exit 1
-}
-BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
+if (( WITH_RESTART == 1 )); then
+  [[ "${B_HEIGHT}" == "${TARGET_HEIGHT}" && "${B_TIP}" == "${FINAL_HASH}" && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
+    echo "unexpected restart checkpoint/connectivity final=${FINAL_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
+    exit 1
+  }
+else
+  [[ (("${B_HEIGHT}" == "${BASE_HEIGHT}" && -n "${B_TIP}") || ("${B_HEIGHT}" == "${TARGET_HEIGHT}" && "${B_TIP}" == "${FINAL_HASH}")) && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
+    echo "unexpected peer checkpoint/connectivity final=${FINAL_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
+    exit 1
+  }
+fi
+if (( WITH_RESTART == 1 )); then
+  BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
+else
+  BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
+fi
 printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.argv[1].lower() in d.get("block_hex", "").lower() or sys.exit("submitted tx bytes missing from target block")' "${TX_HEX}"
-export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT
+export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_PID INCLUSION_PROOF_NODE
 python3 - <<'PY'
 import json, os
 participants = []
 for node in ("A", "B", "C"):
     participants.append({"name": f"node-{node.lower()}", "pid": int(os.environ[f"{node}_PID"]), "rpc": os.environ[f"{node}_RPC_ADDR"], "checkpoint_height": int(os.environ[f"{node}_HEIGHT"]), "tip_hash": os.environ[f"{node}_TIP"], "peer_count": int(os.environ[f"{node}_PEERS"])})
-report = {"scenario": "go_binary_soak_skeleton", "target_height": int(os.environ["TARGET_HEIGHT"]), "base_height": int(os.environ["BASE_HEIGHT"]), "participants": participants, "tx": {"id": os.environ["TX_ID"], "submission": "rpc:/submit_tx"}, "final": {"height": int(os.environ["TARGET_HEIGHT"]), "tip_hash": os.environ["FINAL_HASH"], "tx_count": int(os.environ["TX_COUNT"])}, "verdict": "PASS"}
+restart_enabled = os.environ["WITH_RESTART"] == "1"
+report = {
+    "scenario": "go_binary_soak_restart" if restart_enabled else "go_binary_soak_skeleton",
+    "target_height": int(os.environ["TARGET_HEIGHT"]),
+    "base_height": int(os.environ["BASE_HEIGHT"]),
+    "participants": participants,
+    "tx": {
+        "id": os.environ["TX_ID"],
+        "submission": "rpc:/submit_tx",
+        "post_restart_inclusion_node": os.environ["INCLUSION_PROOF_NODE"],
+    },
+    "final": {"height": int(os.environ["TARGET_HEIGHT"]), "tip_hash": os.environ["FINAL_HASH"], "tx_count": int(os.environ["TX_COUNT"])},
+    "verdict": "PASS",
+}
+if restart_enabled:
+    report["restart"] = {
+        "enabled": True,
+        "stopped_node": "node-b",
+        "checkpoint_before_stop": {
+            "height": int(os.environ["PRE_RESTART_B_HEIGHT"]),
+            "tip_hash": os.environ["PRE_RESTART_B_TIP"],
+            "rpc": os.environ["PRE_RESTART_B_RPC_ADDR"],
+            "pid": int(os.environ["PRE_RESTART_B_PID"]),
+        },
+        "state_after_catchup": {
+            "height": int(os.environ["B_HEIGHT"]),
+            "tip_hash": os.environ["B_TIP"],
+            "rpc": os.environ["POST_RESTART_B_RPC_ADDR"],
+            "pid": int(os.environ["POST_RESTART_B_PID"]),
+            "peer_count": int(os.environ["B_PEERS"]),
+        },
+    }
+else:
+    report["restart"] = {"enabled": False}
 with open(os.environ["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
-if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; report=${REPORT_JSON}"; else echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID}; set KEEP_TMP=1 to retain report"; fi
+if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID} (restart=${WITH_RESTART}); report=${REPORT_JSON}"; else echo "PASS: Go binary soak reached height ${TARGET_HEIGHT} with tx ${TX_ID} (restart=${WITH_RESTART}); set KEEP_TMP=1 to retain report"; fi
