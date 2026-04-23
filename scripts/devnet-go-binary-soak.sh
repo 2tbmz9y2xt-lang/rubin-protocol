@@ -119,7 +119,26 @@ block_matches_hash_canonical() {
   printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); expected=sys.argv[1].lower(); actual=(d.get("hash") or d.get("block_hash") or "").lower(); canonical=d.get("canonical"); (actual == expected and canonical is True) or sys.exit("expected_hash=%s actual_hash=%s actual_canonical=%r" % (expected, actual or "<missing>", canonical))' "${expected_hash}"
 }
 describe_block_json() { local block_json="$1"; printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); actual=d.get("hash") or d.get("block_hash") or "<missing>"; print("reported_hash=%s reported_canonical=%r" % (actual, d.get("canonical")))'; }
-stop_registered_pid() { local managed_pid="${1:-}" rc=0 kept=() pid; [[ -n "${managed_pid}" ]] || return 1; rubin_process_stop_pid "${managed_pid}" || rc=$?; for pid in "${RUBIN_PROCESS_PIDS[@]}"; do [[ "${pid}" == "${managed_pid}" ]] || kept+=("${pid}"); done; if ((${#kept[@]})); then RUBIN_PROCESS_PIDS=("${kept[@]}"); else RUBIN_PROCESS_PIDS=(); fi; if ((${#RUBIN_PROCESS_PIDS[@]})); then for pid in "${RUBIN_PROCESS_PIDS[@]}"; do [[ "${pid}" != "${managed_pid}" ]] || { echo "stale managed pid remained registered after stop: ${managed_pid}" >&2; return 1; }; done; fi; return "${rc}"; }
+stop_registered_pid() {
+  local managed_pid="${1:-}" rc=0 kept=() pid
+  [[ -n "${managed_pid}" ]] || return 1
+  rubin_process_stop_pid "${managed_pid}" || rc=$?
+  for pid in "${RUBIN_PROCESS_PIDS[@]}"; do
+    [[ "${pid}" == "${managed_pid}" ]] || kept+=("${pid}")
+  done
+  if ((${#kept[@]})); then
+    RUBIN_PROCESS_PIDS=("${kept[@]}")
+  else
+    RUBIN_PROCESS_PIDS=()
+  fi
+  for pid in "${RUBIN_PROCESS_PIDS[@]}"; do
+    [[ "${pid}" != "${managed_pid}" ]] || {
+      echo "stale managed pid remained registered after stop: ${managed_pid}" >&2
+      return 1
+    }
+  done
+  return "${rc}"
+}
 write_tcp_proxy() {
   cat >"${TCP_PROXY_PY}" <<'PY'
 import socket, sys, threading
@@ -296,12 +315,18 @@ if (( WITH_RESTART == 1 )); then
   }
   wait_height "${A_RPC_ADDR}" "${POST_RESTART_TARGET_HEIGHT}" 90
   wait_height "${B_RPC_ADDR}" "${POST_RESTART_TARGET_HEIGHT}" 60
-  POST_RESTART_B_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_TARGET_HEIGHT}")"
+  if ! POST_RESTART_B_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_TARGET_HEIGHT}")"; then
+    echo "post-restart restarted node-b get_block failed addr=${B_RPC_ADDR} height=${POST_RESTART_TARGET_HEIGHT}: ${POST_RESTART_B_BLOCK_JSON}" >&2
+    exit 1
+  fi
   block_matches_hash_canonical "${POST_RESTART_B_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
     echo "post-restart block was not adopted by restarted node-b at height=${POST_RESTART_TARGET_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} $(describe_block_json "${POST_RESTART_B_BLOCK_JSON}")" >&2
     exit 1
   }
-  POST_RESTART_A_BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${POST_RESTART_TARGET_HEIGHT}")"
+  if ! POST_RESTART_A_BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${POST_RESTART_TARGET_HEIGHT}")"; then
+    echo "post-restart node-a get_block failed addr=${A_RPC_ADDR} height=${POST_RESTART_TARGET_HEIGHT}: ${POST_RESTART_A_BLOCK_JSON}" >&2
+    exit 1
+  fi
   block_matches_hash_canonical "${POST_RESTART_A_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
     echo "post-restart block was not adopted by node-a at height=${POST_RESTART_TARGET_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} $(describe_block_json "${POST_RESTART_A_BLOCK_JSON}")" >&2
     exit 1
@@ -329,7 +354,10 @@ if (( WITH_RESTART == 1 )); then
     echo "unexpected post-restart adoption marker=${POST_RESTART_ACCEPTED_PEER}" >&2
     exit 1
   }
-  POST_RESTART_A_BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"
+  if ! POST_RESTART_A_BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"; then
+    echo "post-restart adoption marker node-a get_block failed addr=${A_RPC_ADDR} height=${POST_RESTART_MINE_HEIGHT}: ${POST_RESTART_A_BLOCK_JSON}" >&2
+    exit 1
+  fi
   block_matches_hash_canonical "${POST_RESTART_A_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
     echo "post-restart adoption marker node-a mismatch height=${POST_RESTART_MINE_HEIGHT} expected_hash=${POST_RESTART_MINE_HASH} $(describe_block_json "${POST_RESTART_A_BLOCK_JSON}")" >&2
     exit 1
@@ -349,12 +377,21 @@ else
   }
 fi
 if (( WITH_RESTART == 1 )); then
-  BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
-  POST_RESTART_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"
+  if ! BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"; then
+    echo "restart target block get_block failed addr=${B_RPC_ADDR} height=${TARGET_HEIGHT}: ${BLOCK_JSON}" >&2
+    exit 1
+  fi
+  if ! POST_RESTART_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"; then
+    echo "restart post-restart block get_block failed addr=${B_RPC_ADDR} height=${POST_RESTART_MINE_HEIGHT}: ${POST_RESTART_BLOCK_JSON}" >&2
+    exit 1
+  fi
   block_matches_hash_canonical "${BLOCK_JSON}" "${FINAL_HASH}" || { echo "restart target block mismatch expected_hash=${FINAL_HASH} $(describe_block_json "${BLOCK_JSON}")" >&2; exit 1; }
   block_matches_hash_canonical "${POST_RESTART_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || { echo "restart post-restart block mismatch expected_hash=${POST_RESTART_MINE_HASH} $(describe_block_json "${POST_RESTART_BLOCK_JSON}")" >&2; exit 1; }
 else
-  BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
+  if ! BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"; then
+    echo "target block get_block failed addr=${A_RPC_ADDR} height=${TARGET_HEIGHT}: ${BLOCK_JSON}" >&2
+    exit 1
+  fi
 fi
 printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.argv[1].lower() in d.get("block_hex", "").lower() or sys.exit("submitted tx bytes missing from target block")' "${TX_HEX}"
 if (( WITH_RESTART == 1 )); then
