@@ -7,20 +7,28 @@ func accumulateBlockResourceStats(pb *ParsedBlock) (*blockTxStats, error) {
 		if err != nil {
 			return nil, err
 		}
-		stats.sumWeight, err = addU64(stats.sumWeight, w)
+		stats.sumWeight, err = addBlockResourceStat(stats.sumWeight, w, "sum_weight overflow")
 		if err != nil {
 			return nil, err
 		}
-		stats.sumDa, err = addU64(stats.sumDa, da)
+		stats.sumDa, err = addBlockResourceStat(stats.sumDa, da, "sum_da overflow")
 		if err != nil {
 			return nil, err
 		}
-		stats.sumAnchor, err = addU64(stats.sumAnchor, anchorBytes)
+		stats.sumAnchor, err = addBlockResourceStat(stats.sumAnchor, anchorBytes, "sum_anchor overflow")
 		if err != nil {
 			return nil, err
 		}
 	}
 	return stats, nil
+}
+
+func addBlockResourceStat(a uint64, b uint64, msg string) (uint64, error) {
+	sum, err := addU64(a, b)
+	if err != nil {
+		return 0, txerr(TX_ERR_PARSE, msg)
+	}
+	return sum, nil
 }
 
 func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64) error {
