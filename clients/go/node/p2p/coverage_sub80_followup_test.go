@@ -129,6 +129,11 @@ func TestRelayTxMetadataNilProviderErrors(t *testing.T) {
 	}
 
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	// NewService fails closed on nil TxMetadataFunc, so the harness wires a
+	// default. Clear it after construction to prove the method-level guard
+	// still refuses to synthesize metadata if the provider is removed at
+	// runtime.
+	h.service.cfg.TxMetadataFunc = nil
 	_, err := h.service.relayTxMetadata([]byte{0xAA, 0xBB, 0xCC})
 	if err == nil {
 		t.Fatal("relayTxMetadata must error when TxMetadataFunc is nil")
@@ -146,6 +151,21 @@ func TestRelayTxMetadataNilProviderErrors(t *testing.T) {
 	}
 	if meta.Fee != 9 || meta.Size != 7 {
 		t.Fatalf("provider meta=%+v, want fee=9 size=7", meta)
+	}
+}
+
+func TestNewServiceRejectsNilTxMetadataFunc(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	if _, err := NewService(ServiceConfig{
+		BindAddr:    "127.0.0.1:0",
+		PeerManager: h.peerManager,
+		SyncConfig:  h.syncCfg,
+		SyncEngine:  h.syncEngine,
+		BlockStore:  h.blockStore,
+	}); err == nil {
+		t.Fatal("NewService must reject a ServiceConfig with nil TxMetadataFunc")
+	} else if !strings.Contains(err.Error(), "tx metadata") {
+		t.Fatalf("error=%q, want substring 'tx metadata'", err.Error())
 	}
 }
 

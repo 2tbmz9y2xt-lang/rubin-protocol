@@ -295,6 +295,7 @@ func newPeerRuntimeTestPeer(t *testing.T) *peer {
 		SyncEngine:        syncEngine,
 		BlockStore:        blockStore,
 		TxPool:            NewMemoryTxPool(),
+		TxMetadataFunc:    testHarnessDefaultTxMetadata,
 		PeerRuntimeConfig: node.DefaultPeerRuntimeConfig("devnet", 8),
 		Now:               time.Now,
 	}

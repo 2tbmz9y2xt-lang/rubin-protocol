@@ -89,9 +89,6 @@ func TestHandleTxValid(t *testing.T) {
 	defer cancel()
 
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	h.service.cfg.TxMetadataFunc = func(b []byte) (node.RelayTxMetadata, error) {
-		return node.RelayTxMetadata{Fee: 0, Size: len(b)}, nil
-	}
 	if err := h.service.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -172,18 +169,12 @@ func TestAnnounceTx(t *testing.T) {
 	defer cancel()
 
 	source := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	source.service.cfg.TxMetadataFunc = func(b []byte) (node.RelayTxMetadata, error) {
-		return node.RelayTxMetadata{Fee: 0, Size: len(b)}, nil
-	}
 	if err := source.service.Start(ctx); err != nil {
 		t.Fatalf("source.Start: %v", err)
 	}
 	defer source.service.Close()
 
 	sink := newTestHarness(t, 1, "127.0.0.1:0", []string{source.service.Addr()})
-	sink.service.cfg.TxMetadataFunc = func(b []byte) (node.RelayTxMetadata, error) {
-		return node.RelayTxMetadata{Fee: 0, Size: len(b)}, nil
-	}
 	if err := sink.service.Start(ctx); err != nil {
 		t.Fatalf("sink.Start: %v", err)
 	}
@@ -251,9 +242,6 @@ func TestHandleTxPoolFullMarksSeen(t *testing.T) {
 	defer cancel()
 
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	h.service.cfg.TxMetadataFunc = func(b []byte) (node.RelayTxMetadata, error) {
-		return node.RelayTxMetadata{Fee: 0, Size: len(b)}, nil
-	}
 	if err := h.service.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

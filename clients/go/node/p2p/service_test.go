@@ -658,6 +658,14 @@ func TestRetainOrResolveOrphanImmediatelyResolvesWhenParentAlreadyExists(t *test
 	}
 }
 
+// testHarnessDefaultTxMetadata is the TxMetadataFunc wired by newTestHarness
+// and newPeerRuntimeTestPeer so tests that do not exercise fee/size specifics
+// still satisfy the NewService non-nil-provider contract. Tests that need a
+// specific provider override the field after construction.
+func testHarnessDefaultTxMetadata(b []byte) (node.RelayTxMetadata, error) {
+	return node.RelayTxMetadata{Fee: 0, Size: len(b)}, nil
+}
+
 func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeers []string) *testHarness {
 	t.Helper()
 
@@ -708,6 +716,7 @@ func newTestHarness(t *testing.T, blockCount int, bindAddr string, bootstrapPeer
 		SyncConfig:        syncCfg,
 		SyncEngine:        syncEngine,
 		BlockStore:        blockStore,
+		TxMetadataFunc:    testHarnessDefaultTxMetadata,
 	})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
