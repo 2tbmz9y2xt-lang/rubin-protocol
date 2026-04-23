@@ -120,6 +120,7 @@ block_matches_hash_canonical() {
   local block_json="$1" expected_hash="$2"
   printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); expected=sys.argv[1].lower(); actual=(d.get("hash") or d.get("block_hash") or "").lower(); actual == expected or sys.exit(1); d.get("canonical") is True or sys.exit(2)' "${expected_hash}"
 }
+stop_registered_pid() { local managed_pid="${1:-}" rc=0 kept=() pid; [[ -n "${managed_pid}" ]] || return 1; rubin_process_stop_pid "${managed_pid}" || rc=$?; for pid in "${RUBIN_PROCESS_PIDS[@]}"; do [[ "${pid}" == "${managed_pid}" ]] || kept+=("${pid}"); done; if ((${#kept[@]})); then RUBIN_PROCESS_PIDS=("${kept[@]}"); else RUBIN_PROCESS_PIDS=(); fi; if ((${#RUBIN_PROCESS_PIDS[@]})); then for pid in "${RUBIN_PROCESS_PIDS[@]}"; do [[ "${pid}" != "${managed_pid}" ]] || { echo "stale managed pid remained registered after stop: ${managed_pid}" >&2; return 1; }; done; fi; return "${rc}"; }
 write_tcp_proxy() {
   cat >"${TCP_PROXY_PY}" <<'PY'
 import socket, sys, threading
@@ -153,10 +154,10 @@ start_proxy() {
   PROXY_PID="" PROXY_ADDR=""
   rubin_process_start "${log_file}" python3 -u "${TCP_PROXY_PY}" "${target_file}"
   PROXY_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${log_file}" "proxy: listening=" 30 "${PROXY_PID}"
+  rubin_process_wait_for_log "${log_file}" "proxy: listening=" 30 "${PROXY_PID}" || { stop_registered_pid "${PROXY_PID}" || true; PROXY_PID=""; return 1; }
   PROXY_ADDR="$(sed -n 's/.*proxy: listening=//p' "${RUBIN_PROCESS_ARTIFACT_ROOT}/${log_file}" | tail -n 1 | tr -d '[:space:]')"
-  [[ -n "${PROXY_ADDR}" ]] || { echo "missing proxy listening banner in ${log_file}" >&2; return 1; }
-  [[ "${PROXY_ADDR}" == 127.0.0.1:* ]] || { echo "proxy must listen on 127.0.0.1, got ${PROXY_ADDR}" >&2; return 1; }
+  [[ -n "${PROXY_ADDR}" ]] || { echo "missing proxy listening banner in ${log_file}" >&2; stop_registered_pid "${PROXY_PID}" || true; PROXY_PID=""; return 1; }
+  [[ "${PROXY_ADDR}" == 127.0.0.1:* ]] || { echo "proxy must listen on 127.0.0.1, got ${PROXY_ADDR}" >&2; stop_registered_pid "${PROXY_PID}" || true; PROXY_PID=""; return 1; }
 }
 STARTED_PID=""
 STARTED_RPC=""
@@ -185,18 +186,18 @@ start_node_ready() {
   STARTED_PID="" STARTED_RPC="" STARTED_P2P=""
   if ! rubin_process_start "${log_file}" "${NODE_BIN}" "${args[@]}"; then
     echo "${label} start failed" >&2
-    [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || rubin_process_stop_pid "${RUBIN_PROCESS_LAST_PID}" || true
+    [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || stop_registered_pid "${RUBIN_PROCESS_LAST_PID}" || true
     return 1
   fi
   STARTED_PID="${RUBIN_PROCESS_LAST_PID}"
   if ! rubin_process_wait_for_log "${log_file}" "rpc: listening=" 30 "${STARTED_PID}"; then
     echo "${label} did not become ready" >&2
-    rubin_process_stop_pid "${STARTED_PID}" || true
+    stop_registered_pid "${STARTED_PID}" || true
     STARTED_PID=""
     return 1
   fi
-  STARTED_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || { rubin_process_stop_pid "${STARTED_PID}" || true; return 1; }
-  STARTED_P2P="$(p2p_addr_for_pid "${STARTED_PID}" "${STARTED_RPC}" 30)" || { rubin_process_stop_pid "${STARTED_PID}" || true; return 1; }
+  STARTED_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || { stop_registered_pid "${STARTED_PID}" || true; return 1; }
+  STARTED_P2P="$(p2p_addr_for_pid "${STARTED_PID}" "${STARTED_RPC}" 30)" || { stop_registered_pid "${STARTED_PID}" || true; return 1; }
 }
 start_soak_cluster() {
   A_PID="" B_PID="" C_PID="" A_RPC_ADDR="" B_RPC_ADDR="" C_RPC_ADDR=""
@@ -262,7 +263,7 @@ if (( WITH_RESTART == 1 )); then
   PRE_RESTART_B_RPC_ADDR="${B_RPC_ADDR}" PRE_RESTART_B_P2P_ADDR="${B_P2P_ADDR}"
   PRE_RESTART_B_PID="${B_PID}"
   echo "Stopping node-b pid=${B_PID} at deterministic restart checkpoint height ${PRE_RESTART_B_HEIGHT}"
-  rubin_process_stop_pid "${B_PID}"
+  stop_registered_pid "${B_PID}"
 fi
 echo "Submitting tx through Go RPC and mining it through /mine_next"
 TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
