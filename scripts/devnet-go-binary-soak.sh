@@ -5,8 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
-TARGET_HEIGHT=120
-WITH_RESTART=0
+TARGET_HEIGHT=120 WITH_RESTART=0
 
 usage() { echo "usage: $0 [--target-height N] [--with-restart]" >&2; }
 while (($#)); do
@@ -29,7 +28,7 @@ while (($#)); do
       exit 2
       ;;
   esac
-done
+done; for tool in python3 perl lsof; do command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is required for Go binary soak evidence" >&2; exit 1; }; done
 # Runtime txgen needs base height >=100; bound height to keep the soak finite.
 TARGET_HEIGHT="$(python3 -c 'import sys; s=sys.argv[1]; n=int(s) if s.isdecimal() else -1; 101 <= n <= 10000 or sys.exit(2); print(n)' "${TARGET_HEIGHT}")" || { echo "--target-height must be an integer in [101, 10000]" >&2; exit 2; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
@@ -51,8 +50,7 @@ B_PROXY_LOG="node-b-proxy.log" C_PROXY_LOG="node-c-proxy.log"
 B_RESTART_LOG="node-b-restart.log"
 MINE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-base.log"
 RUBIN_PROCESS_LOGS+=("${MINE_LOG}")
-PRE_RESTART_B_HEIGHT=""
-PRE_RESTART_B_TIP=""
+PRE_RESTART_B_HEIGHT="" PRE_RESTART_B_TIP=""
 PRE_RESTART_B_RPC_ADDR="" PRE_RESTART_B_P2P_ADDR=""
 PRE_RESTART_B_PID=""
 POST_RESTART_B_RPC_ADDR="" POST_RESTART_B_P2P_ADDR=""
@@ -118,7 +116,7 @@ wait_peers() {
 }
 block_matches_hash_canonical() {
   local block_json="$1" expected_hash="$2"
-  printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); expected=sys.argv[1].lower(); actual=(d.get("hash") or d.get("block_hash") or "").lower(); actual == expected or sys.exit(1); d.get("canonical") is True or sys.exit(2)' "${expected_hash}"
+  printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); expected=sys.argv[1].lower(); actual=(d.get("hash") or d.get("block_hash") or "").lower(); canonical=d.get("canonical"); (actual == expected and canonical is True) or sys.exit("expected_hash=%s actual_hash=%s actual_canonical=%r" % (expected, actual or "<missing>", canonical))' "${expected_hash}"
 }
 describe_block_json() { local block_json="$1"; printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); actual=d.get("hash") or d.get("block_hash") or "<missing>"; print("reported_hash=%s reported_canonical=%r" % (actual, d.get("canonical")))'; }
 stop_registered_pid() { local managed_pid="${1:-}" rc=0 kept=() pid; [[ -n "${managed_pid}" ]] || return 1; rubin_process_stop_pid "${managed_pid}" || rc=$?; for pid in "${RUBIN_PROCESS_PIDS[@]}"; do [[ "${pid}" == "${managed_pid}" ]] || kept+=("${pid}"); done; if ((${#kept[@]})); then RUBIN_PROCESS_PIDS=("${kept[@]}"); else RUBIN_PROCESS_PIDS=(); fi; if ((${#RUBIN_PROCESS_PIDS[@]})); then for pid in "${RUBIN_PROCESS_PIDS[@]}"; do [[ "${pid}" != "${managed_pid}" ]] || { echo "stale managed pid remained registered after stop: ${managed_pid}" >&2; return 1; }; done; fi; return "${rc}"; }
@@ -129,8 +127,8 @@ target_file = sys.argv[1]; listener = socket.socket(); listener.setsockopt(socke
 print(f"proxy: listening={listener.getsockname()[0]}:{listener.getsockname()[1]}", flush=True)
 def pump(src, dst):
     try:
-        while data := src.recv(65536):
-            dst.sendall(data)
+        data = src.recv(65536)
+        while data: dst.sendall(data); data = src.recv(65536)
     except OSError:
         pass
     for sock in (src, dst):
@@ -142,6 +140,7 @@ while True:
         host, port = open(target_file, encoding="utf-8").read().strip().rsplit(":", 1)
         if host != "127.0.0.1": raise ValueError("proxy target must be loopback")
         upstream = socket.create_connection((host, int(port)), timeout=5)
+        upstream.settimeout(None)
     except Exception:
         client.close(); continue
     for src, dst in ((client, upstream), (upstream, client)):
