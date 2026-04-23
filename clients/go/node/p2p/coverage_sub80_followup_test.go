@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,24 +123,49 @@ func TestInventoryRelayKeyMultipleItems(t *testing.T) {
 	}
 }
 
-func TestRelayTxMetadataFallbackAndProvider(t *testing.T) {
+func TestRelayTxMetadataNilProviderErrors(t *testing.T) {
+	if _, err := (*Service)(nil).relayTxMetadata(nil); err == nil {
+		t.Fatal("relayTxMetadata on nil service should error")
+	}
+
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	meta, err := h.service.relayTxMetadata([]byte{0xAA, 0xBB, 0xCC})
-	if err != nil {
-		t.Fatalf("fallback relayTxMetadata: %v", err)
+	// NewService fails closed on nil TxMetadataFunc, so the harness wires a
+	// default. Clear it after construction to prove the method-level guard
+	// still refuses to synthesize metadata if the provider is removed at
+	// runtime.
+	h.service.cfg.TxMetadataFunc = nil
+	_, err := h.service.relayTxMetadata([]byte{0xAA, 0xBB, 0xCC})
+	if err == nil {
+		t.Fatal("relayTxMetadata must error when TxMetadataFunc is nil")
 	}
-	if meta.Fee != 0 || meta.Size != 3 {
-		t.Fatalf("fallback meta=%+v, want fee=0 size=3", meta)
+	if !strings.Contains(err.Error(), "tx metadata") {
+		t.Fatalf("error=%q, want substring 'tx metadata'", err.Error())
 	}
+
 	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
 		return node.RelayTxMetadata{Fee: 9, Size: 7}, nil
 	}
-	meta, err = h.service.relayTxMetadata([]byte{0x00})
+	meta, err := h.service.relayTxMetadata([]byte{0x00})
 	if err != nil {
 		t.Fatalf("provider relayTxMetadata: %v", err)
 	}
 	if meta.Fee != 9 || meta.Size != 7 {
 		t.Fatalf("provider meta=%+v, want fee=9 size=7", meta)
+	}
+}
+
+func TestNewServiceRejectsNilTxMetadataFunc(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	if _, err := NewService(ServiceConfig{
+		BindAddr:    "127.0.0.1:0",
+		PeerManager: h.peerManager,
+		SyncConfig:  h.syncCfg,
+		SyncEngine:  h.syncEngine,
+		BlockStore:  h.blockStore,
+	}); err == nil {
+		t.Fatal("NewService must reject a ServiceConfig with nil TxMetadataFunc")
+	} else if !strings.Contains(err.Error(), "tx metadata") {
+		t.Fatalf("error=%q, want substring 'tx metadata'", err.Error())
 	}
 }
 
