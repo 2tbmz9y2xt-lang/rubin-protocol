@@ -61,6 +61,7 @@ POST_RESTART_CATCHUP_PEERS="0"
 POST_RESTART_MINE_HEIGHT=""
 POST_RESTART_MINE_HASH=""
 POST_RESTART_MINE_TX_COUNT="0"
+POST_RESTART_ACCEPTED_PEER=""
 INCLUSION_PROOF_NODE="node-a"
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
@@ -110,6 +111,10 @@ wait_peers() {
   done
   echo "timeout waiting for ${addr} peer_count>=${want}" >&2
   return 1
+}
+block_matches_hash_canonical() {
+  local block_json="$1" expected_hash="$2"
+  printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); expected=sys.argv[1].lower(); actual=(d.get("hash") or d.get("block_hash") or "").lower(); actual == expected or sys.exit(1); d.get("canonical") is True or sys.exit(2)' "${expected_hash}"
 }
 unregister_managed_pid() {
   local stale_pid="${1:-}" kept=() pid
@@ -203,7 +208,7 @@ if (( WITH_RESTART == 1 )); then
   wait_height "${B_RPC_ADDR}" "${TARGET_HEIGHT}" 60
   IFS=$'\t' read -r POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP < <(tip_tsv "${B_RPC_ADDR}")
   POST_RESTART_CATCHUP_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)"
-  echo "Mining one additional block after restart to exercise live process path"
+  echo "Mining one additional block after restart through restarted node-b"
   if ! POST_RESTART_MINE_JSON="$(rpc_json POST "${B_RPC_ADDR}" /mine_next '{}')"; then echo "post-restart mine_next request failed: ${POST_RESTART_MINE_JSON}" >&2; exit 1; fi
   IFS=$'\t' read -r POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT < <(printf '%s' "${POST_RESTART_MINE_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); (d.get("mined") is True) or sys.exit("post-restart mine_next failed: "+str(d.get("error","missing mined result"))); print(d["height"], d["block_hash"], d["tx_count"], sep="\t")')
   POST_RESTART_TARGET_HEIGHT=$((TARGET_HEIGHT + 1))
@@ -211,19 +216,41 @@ if (( WITH_RESTART == 1 )); then
     echo "unexpected post-restart mine_next result height=${POST_RESTART_MINE_HEIGHT} tx_count=${POST_RESTART_MINE_TX_COUNT}" >&2
     exit 1
   }
+  wait_height "${A_RPC_ADDR}" "${POST_RESTART_TARGET_HEIGHT}" 90
   wait_height "${B_RPC_ADDR}" "${POST_RESTART_TARGET_HEIGHT}" 60
+  POST_RESTART_B_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_TARGET_HEIGHT}")"
+  block_matches_hash_canonical "${POST_RESTART_B_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
+    echo "post-restart block was not adopted by restarted node-b at height=${POST_RESTART_TARGET_HEIGHT} hash=${POST_RESTART_MINE_HASH}" >&2
+    exit 1
+  }
+  POST_RESTART_A_BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${POST_RESTART_TARGET_HEIGHT}")"
+  block_matches_hash_canonical "${POST_RESTART_A_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
+    echo "post-restart block was not adopted by node-a at height=${POST_RESTART_TARGET_HEIGHT} hash=${POST_RESTART_MINE_HASH}" >&2
+    exit 1
+  }
+  POST_RESTART_ACCEPTED_PEER="node-a"
   INCLUSION_PROOF_NODE="node-b"
 fi
 IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
 IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
-A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)" B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)" C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
 if (( WITH_RESTART == 1 )); then
-  [[ (("${A_HEIGHT}" == "${TARGET_HEIGHT}" && "${A_TIP}" == "${FINAL_HASH}") || ("${A_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${A_TIP}" == "${POST_RESTART_MINE_HASH}")) ]] || {
-    echo "unexpected restart node-a checkpoint target=${TARGET_HEIGHT}/${FINAL_HASH} post_restart=${POST_RESTART_MINE_HEIGHT}/${POST_RESTART_MINE_HASH} got=${A_HEIGHT}/${A_TIP}" >&2
+  A_PEERS="$(wait_peers "${A_RPC_ADDR}" 1 30)"
+else
+  A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)"
+fi
+B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)" C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
+if (( WITH_RESTART == 1 )); then
+  [[ "${POST_RESTART_ACCEPTED_PEER}" == "node-a" ]] || {
+    echo "unexpected post-restart adoption marker=${POST_RESTART_ACCEPTED_PEER}" >&2
     exit 1
   }
-  [[ "${B_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${B_TIP}" == "${POST_RESTART_MINE_HASH}" && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}") || ("${C_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${C_TIP}" == "${POST_RESTART_MINE_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
+  POST_RESTART_A_BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"
+  block_matches_hash_canonical "${POST_RESTART_A_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || {
+    echo "post-restart adoption marker node-a mismatch height=${A_HEIGHT} tip=${A_TIP}" >&2
+    exit 1
+  }
+  [[ "${A_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${A_TIP}" == "${POST_RESTART_MINE_HASH}" && "${B_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${B_TIP}" == "${POST_RESTART_MINE_HASH}" && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}") || ("${C_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${C_TIP}" == "${POST_RESTART_MINE_HASH}")) && "${A_PEERS}" -ge 1 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
     echo "unexpected restart checkpoint/connectivity post_restart=${POST_RESTART_MINE_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
     exit 1
   }
@@ -240,6 +267,8 @@ fi
 if (( WITH_RESTART == 1 )); then
   BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
   POST_RESTART_BLOCK_JSON="$(rpc_json GET "${B_RPC_ADDR}" "/get_block?height=${POST_RESTART_MINE_HEIGHT}")"
+  block_matches_hash_canonical "${BLOCK_JSON}" "${FINAL_HASH}" || { echo "restart target block mismatch canonical/hash expected=${FINAL_HASH}" >&2; exit 1; }
+  block_matches_hash_canonical "${POST_RESTART_BLOCK_JSON}" "${POST_RESTART_MINE_HASH}" || { echo "restart post-restart block mismatch canonical/hash expected=${POST_RESTART_MINE_HASH}" >&2; exit 1; }
 else
   BLOCK_JSON="$(rpc_json GET "${A_RPC_ADDR}" "/get_block?height=${TARGET_HEIGHT}")"
 fi
@@ -247,7 +276,7 @@ printf '%s' "${BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin
 if (( WITH_RESTART == 1 )); then
   printf '%s' "${POST_RESTART_BLOCK_JSON}" | python3 -c 'import json,sys; d=json.load(sys.stdin); h=d.get("block_hex",""); (isinstance(h, str) and len(h) > 0) or sys.exit("post-restart block visibility check failed")'
 fi
-export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_PID POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP POST_RESTART_CATCHUP_PEERS POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT INCLUSION_PROOF_NODE
+export REPORT_JSON TARGET_HEIGHT BASE_HEIGHT A_HEIGHT B_HEIGHT C_HEIGHT A_TIP B_TIP C_TIP A_PID B_PID C_PID A_RPC_ADDR B_RPC_ADDR C_RPC_ADDR A_PEERS B_PEERS C_PEERS TX_ID FINAL_HASH TX_COUNT WITH_RESTART PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP PRE_RESTART_B_RPC_ADDR PRE_RESTART_B_PID POST_RESTART_B_RPC_ADDR POST_RESTART_B_PID POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP POST_RESTART_CATCHUP_PEERS POST_RESTART_MINE_HEIGHT POST_RESTART_MINE_HASH POST_RESTART_MINE_TX_COUNT POST_RESTART_ACCEPTED_PEER INCLUSION_PROOF_NODE
 python3 - <<'PY'
 import json, os
 participants = []
@@ -294,6 +323,7 @@ if restart_enabled:
             "height": int(os.environ["POST_RESTART_MINE_HEIGHT"]),
             "block_hash": os.environ["POST_RESTART_MINE_HASH"],
             "tx_count": int(os.environ["POST_RESTART_MINE_TX_COUNT"]),
+            "accepted_by_peer": os.environ["POST_RESTART_ACCEPTED_PEER"],
         },
     }
 else:
