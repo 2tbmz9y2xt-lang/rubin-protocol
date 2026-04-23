@@ -103,6 +103,9 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if cfg.BlockStore == nil {
 		return nil, errors.New("nil blockstore")
 	}
+	if cfg.TxMetadataFunc == nil {
+		return nil, errors.New("nil tx metadata func")
+	}
 	if cfg.TxPool == nil {
 		cfg.TxPool = NewMemoryTxPool()
 	}

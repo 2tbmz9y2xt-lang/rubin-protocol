@@ -49,11 +49,12 @@ func TestCoverage_NewServiceAndListenerGuards(t *testing.T) {
 func TestCoverage_NewServiceDefaultsAndAnnounceBlock(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	svc, err := NewService(ServiceConfig{
-		BindAddr:    "127.0.0.1:0",
-		PeerManager: h.peerManager,
-		SyncConfig:  h.syncCfg,
-		SyncEngine:  h.syncEngine,
-		BlockStore:  h.blockStore,
+		BindAddr:       "127.0.0.1:0",
+		PeerManager:    h.peerManager,
+		SyncConfig:     h.syncCfg,
+		SyncEngine:     h.syncEngine,
+		BlockStore:     h.blockStore,
+		TxMetadataFunc: testHarnessDefaultTxMetadata,
 	})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
