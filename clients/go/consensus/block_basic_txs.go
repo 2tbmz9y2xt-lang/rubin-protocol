@@ -24,10 +24,11 @@ func accumulateBlockResourceStats(pb *ParsedBlock) (*blockTxStats, error) {
 }
 
 func addBlockResourceStat(a uint64, b uint64, msg string) (uint64, error) {
-	if a > ^uint64(0)-b {
+	sum, err := addU64(a, b)
+	if err != nil {
 		return 0, txerr(TX_ERR_PARSE, msg)
 	}
-	return a + b, nil
+	return sum, nil
 }
 
 func validateBlockTxSemantics(pb *ParsedBlock, blockHeight uint64) error {

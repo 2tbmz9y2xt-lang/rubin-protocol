@@ -155,6 +155,7 @@ func runRawJSON(t *testing.T, raw []byte, entry func()) Response {
 		os.Stdout = oldOut
 		_ = rIn.Close()
 		_ = rOut.Close()
+		_ = wOut.Close()
 	}()
 
 	outCh := make(chan []byte, 1)
