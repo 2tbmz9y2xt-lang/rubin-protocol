@@ -7,6 +7,8 @@ GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 TARGET_HEIGHT=120
 WITH_RESTART=0
+CLUSTER_START_ATTEMPTS=5
+NODE_RESTART_ATTEMPTS=5
 
 usage() { echo "usage: $0 [--target-height N] [--with-restart]" >&2; }
 while (($#)); do
@@ -133,6 +135,101 @@ stop_managed_pid() {
   rubin_process_stop_pid "${managed_pid}"
   unregister_managed_pid "${managed_pid}"
 }
+stop_cluster_attempt() {
+  local managed_pid
+  for managed_pid in "${C_PID:-}" "${B_PID:-}" "${A_PID:-}"; do
+    [[ -z "${managed_pid}" ]] || stop_managed_pid "${managed_pid}" || true
+  done
+  A_PID="" B_PID="" C_PID=""
+}
+start_soak_cluster() {
+  local attempt
+  attempt=1
+  while (( attempt <= CLUSTER_START_ATTEMPTS )); do
+    A_PID="" B_PID="" C_PID="" A_RPC_ADDR="" B_RPC_ADDR="" C_RPC_ADDR=""
+    A_P2P_ADDR="$(allocate_loopback_addr)" || return 1
+    B_P2P_ADDR="$(allocate_loopback_addr)" || return 1
+    C_P2P_ADDR="$(allocate_loopback_addr)" || return 1
+    if ! rubin_process_start "${A_LOG}" "${NODE_BIN}" --datadir "${A_DIR}" --bind "${A_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${B_P2P_ADDR},${C_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"; then
+      echo "node-a start attempt ${attempt} failed; retrying with fresh loopback ports" >&2
+      stop_cluster_attempt
+      ((attempt++))
+      continue
+    fi
+    A_PID="${RUBIN_PROCESS_LAST_PID}"
+    if ! rubin_process_wait_for_log "${A_LOG}" "rpc: listening=" 30 "${A_PID}"; then
+      echo "node-a did not become ready on attempt ${attempt}; retrying with fresh loopback ports" >&2
+      stop_cluster_attempt
+      ((attempt++))
+      continue
+    fi
+    A_RPC_ADDR="$(rubin_process_extract_rpc_addr "${A_LOG}")" || { stop_cluster_attempt; return 1; }
+    if ! rubin_process_start "${B_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind "${B_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"; then
+      echo "node-b start attempt ${attempt} failed; retrying with fresh loopback ports" >&2
+      stop_cluster_attempt
+      ((attempt++))
+      continue
+    fi
+    B_PID="${RUBIN_PROCESS_LAST_PID}"
+    if ! rubin_process_wait_for_log "${B_LOG}" "rpc: listening=" 30 "${B_PID}"; then
+      echo "node-b did not become ready on attempt ${attempt}; retrying with fresh loopback ports" >&2
+      stop_cluster_attempt
+      ((attempt++))
+      continue
+    fi
+    B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_LOG}")" || { stop_cluster_attempt; return 1; }
+    if ! rubin_process_start "${C_LOG}" "${NODE_BIN}" --datadir "${C_DIR}" --bind "${C_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"; then
+      echo "node-c start attempt ${attempt} failed; retrying with fresh loopback ports" >&2
+      stop_cluster_attempt
+      ((attempt++))
+      continue
+    fi
+    C_PID="${RUBIN_PROCESS_LAST_PID}"
+    if ! rubin_process_wait_for_log "${C_LOG}" "rpc: listening=" 30 "${C_PID}"; then
+      echo "node-c did not become ready on attempt ${attempt}; retrying with fresh loopback ports" >&2
+      stop_cluster_attempt
+      ((attempt++))
+      continue
+    fi
+    C_RPC_ADDR="$(rubin_process_extract_rpc_addr "${C_LOG}")" || { stop_cluster_attempt; return 1; }
+    if rubin_process_wait_for_rpc_ready "${A_RPC_ADDR}" 30 && rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30 && rubin_process_wait_for_rpc_ready "${C_RPC_ADDR}" 30; then
+      return 0
+    fi
+    echo "cluster RPC readiness failed on attempt ${attempt}; retrying with fresh loopback ports" >&2
+    stop_cluster_attempt
+    ((attempt++))
+  done
+  echo "failed to start three-node cluster after ${CLUSTER_START_ATTEMPTS} attempts" >&2
+  return 1
+}
+restart_node_b() {
+  local attempt
+  attempt=1
+  while (( attempt <= NODE_RESTART_ATTEMPTS )); do
+    if (( attempt > 1 )); then
+      B_P2P_ADDR="$(allocate_loopback_addr)" || return 1
+    fi
+    if ! rubin_process_start "${B_RESTART_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind "${B_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"; then
+      echo "node-b restart attempt ${attempt} failed; retrying with fresh loopback port" >&2
+      [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || stop_managed_pid "${RUBIN_PROCESS_LAST_PID}" || true
+      ((attempt++))
+      continue
+    fi
+    B_PID="${RUBIN_PROCESS_LAST_PID}"
+    if rubin_process_wait_for_log "${B_RESTART_LOG}" "rpc: listening=" 30 "${B_PID}"; then
+      B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_RESTART_LOG}")" || return 1
+      POST_RESTART_B_PID="${B_PID}"
+      POST_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
+      return 0
+    fi
+    echo "node-b restart did not become ready on attempt ${attempt}; retrying with fresh loopback port" >&2
+    stop_managed_pid "${B_PID}" || true
+    B_PID=""
+    ((attempt++))
+  done
+  echo "failed to restart node-b after ${NODE_RESTART_ATTEMPTS} attempts" >&2
+  return 1
+}
 write_keygen() {
   cat >"${KEYGEN_GO}" <<'EOF'
 package main
@@ -164,24 +261,7 @@ echo "Mining mature Go chain to height ${BASE_HEIGHT}"
 cp -R "${A_DIR}/." "${B_DIR}/"
 cp -R "${A_DIR}/." "${C_DIR}/"
 echo "Starting three Go rubin-node processes"
-A_PID=""
-B_P2P_ADDR="$(allocate_loopback_addr)"
-C_P2P_ADDR="$(allocate_loopback_addr)"
-for _ in 1 2 3; do
-  A_P2P_ADDR="$(allocate_loopback_addr)"
-  if rubin_process_start "${A_LOG}" "${NODE_BIN}" --datadir "${A_DIR}" --bind "${A_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${B_P2P_ADDR},${C_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}" && rubin_process_wait_for_log "${A_LOG}" "rpc: listening=" 30 "${RUBIN_PROCESS_LAST_PID}"; then A_PID="${RUBIN_PROCESS_LAST_PID}"; A_RPC_ADDR="$(rubin_process_extract_rpc_addr "${A_LOG}")"; break; fi
-  [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || stop_managed_pid "${RUBIN_PROCESS_LAST_PID}" || true
-done
-[[ -n "${A_PID}" ]] || { echo "failed to start node-a after retrying loopback bind ports" >&2; exit 1; }
-rubin_process_start "${B_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind "${B_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
-B_PID="${RUBIN_PROCESS_LAST_PID}"
-rubin_process_start "${C_LOG}" "${NODE_BIN}" --datadir "${C_DIR}" --bind "${C_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
-C_PID="${RUBIN_PROCESS_LAST_PID}"
-rubin_process_wait_for_log "${B_LOG}" "rpc: listening=" 30 "${B_PID}"
-B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_LOG}")"
-rubin_process_wait_for_log "${C_LOG}" "rpc: listening=" 30 "${C_PID}"
-C_RPC_ADDR="$(rubin_process_extract_rpc_addr "${C_LOG}")"
-for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do rubin_process_wait_for_rpc_ready "${addr}" 30; done
+start_soak_cluster
 for addr in "${A_RPC_ADDR}" "${B_RPC_ADDR}" "${C_RPC_ADDR}"; do wait_height "${addr}" "${BASE_HEIGHT}" 30; done
 if (( WITH_RESTART == 1 )); then
   IFS=$'\t' read -r PRE_RESTART_B_HEIGHT PRE_RESTART_B_TIP < <(tip_tsv "${B_RPC_ADDR}")
@@ -203,12 +283,7 @@ IFS=$'\t' read -r FINAL_HEIGHT FINAL_HASH TX_COUNT < <(printf '%s' "${MINE_JSON}
 wait_height "${A_RPC_ADDR}" "${TARGET_HEIGHT}" 30
 if (( WITH_RESTART == 1 )); then
   echo "Restarting node-b from disk-backed datadir ${B_DIR}"
-  rubin_process_start "${B_RESTART_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind "${B_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
-  B_PID="${RUBIN_PROCESS_LAST_PID}"
-  POST_RESTART_B_PID="${B_PID}"
-  rubin_process_wait_for_log "${B_RESTART_LOG}" "rpc: listening=" 30 "${B_PID}"
-  B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_RESTART_LOG}")"
-  POST_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
+  restart_node_b
   rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30
   wait_height "${B_RPC_ADDR}" "${TARGET_HEIGHT}" 60
   IFS=$'\t' read -r POST_RESTART_CATCHUP_HEIGHT POST_RESTART_CATCHUP_TIP < <(tip_tsv "${B_RPC_ADDR}")
@@ -239,11 +314,7 @@ fi
 IFS=$'\t' read -r A_HEIGHT A_TIP < <(tip_tsv "${A_RPC_ADDR}")
 IFS=$'\t' read -r B_HEIGHT B_TIP < <(tip_tsv "${B_RPC_ADDR}")
 IFS=$'\t' read -r C_HEIGHT C_TIP < <(tip_tsv "${C_RPC_ADDR}")
-if (( WITH_RESTART == 1 )); then
-  A_PEERS="$(wait_peers "${A_RPC_ADDR}" 1 30)"
-else
-  A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)"
-fi
+A_PEERS="$(wait_peers "${A_RPC_ADDR}" 2 30)"
 B_PEERS="$(wait_peers "${B_RPC_ADDR}" 1 30)" C_PEERS="$(wait_peers "${C_RPC_ADDR}" 1 30)"
 if (( WITH_RESTART == 1 )); then
   [[ "${POST_RESTART_ACCEPTED_PEER}" == "node-a" ]] || {
@@ -255,7 +326,7 @@ if (( WITH_RESTART == 1 )); then
     echo "post-restart adoption marker node-a mismatch height=${A_HEIGHT} tip=${A_TIP}" >&2
     exit 1
   }
-  [[ "${A_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${A_TIP}" == "${POST_RESTART_MINE_HASH}" && "${B_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${B_TIP}" == "${POST_RESTART_MINE_HASH}" && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}") || ("${C_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${C_TIP}" == "${POST_RESTART_MINE_HASH}")) && "${A_PEERS}" -ge 1 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
+  [[ "${A_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${A_TIP}" == "${POST_RESTART_MINE_HASH}" && "${B_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${B_TIP}" == "${POST_RESTART_MINE_HASH}" && (("${C_HEIGHT}" == "${BASE_HEIGHT}" && -n "${C_TIP}") || ("${C_HEIGHT}" == "${TARGET_HEIGHT}" && "${C_TIP}" == "${FINAL_HASH}") || ("${C_HEIGHT}" == "${POST_RESTART_MINE_HEIGHT}" && "${C_TIP}" == "${POST_RESTART_MINE_HASH}")) && "${A_PEERS}" -ge 2 && "${B_PEERS}" -ge 1 && "${C_PEERS}" -ge 1 ]] || {
     echo "unexpected restart checkpoint/connectivity post_restart=${POST_RESTART_MINE_HASH} b_height=${B_HEIGHT} c_height=${C_HEIGHT} peers=${A_PEERS}/${B_PEERS}/${C_PEERS}" >&2
     exit 1
   }
@@ -296,7 +367,7 @@ report = {
     "tx": {
         "id": os.environ["TX_ID"],
         "submission": "rpc:/submit_tx",
-        "post_restart_inclusion_node": os.environ["INCLUSION_PROOF_NODE"],
+        "inclusion_proof_node": os.environ["INCLUSION_PROOF_NODE"],
         "inclusion_height": int(os.environ["TARGET_HEIGHT"]),
     },
     "final": {
