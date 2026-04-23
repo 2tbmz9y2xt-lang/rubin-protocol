@@ -116,6 +116,9 @@ block_matches_hash_canonical() {
   local block_json="$1" expected_hash="$2"
   printf '%s' "${block_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); expected=sys.argv[1].lower(); actual=(d.get("hash") or d.get("block_hash") or "").lower(); actual == expected or sys.exit(1); d.get("canonical") is True or sys.exit(2)' "${expected_hash}"
 }
+allocate_loopback_addr() {
+  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(f"127.0.0.1:{s.getsockname()[1]}"); s.close()'
+}
 unregister_managed_pid() {
   local stale_pid="${1:-}" kept=() pid
   [[ -n "${stale_pid}" ]] || return 1
@@ -162,15 +165,17 @@ cp -R "${A_DIR}/." "${B_DIR}/"
 cp -R "${A_DIR}/." "${C_DIR}/"
 echo "Starting three Go rubin-node processes"
 A_PID=""
+B_P2P_ADDR="$(allocate_loopback_addr)"
+C_P2P_ADDR="$(allocate_loopback_addr)"
 for _ in 1 2 3; do
-  A_P2P_ADDR="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(f"127.0.0.1:{s.getsockname()[1]}"); s.close()')"
-  if rubin_process_start "${A_LOG}" "${NODE_BIN}" --datadir "${A_DIR}" --bind "${A_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --mine-address "${MINE_ADDRESS_HEX}" && rubin_process_wait_for_log "${A_LOG}" "rpc: listening=" 30 "${RUBIN_PROCESS_LAST_PID}"; then A_PID="${RUBIN_PROCESS_LAST_PID}"; A_RPC_ADDR="$(rubin_process_extract_rpc_addr "${A_LOG}")"; break; fi
+  A_P2P_ADDR="$(allocate_loopback_addr)"
+  if rubin_process_start "${A_LOG}" "${NODE_BIN}" --datadir "${A_DIR}" --bind "${A_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${B_P2P_ADDR},${C_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}" && rubin_process_wait_for_log "${A_LOG}" "rpc: listening=" 30 "${RUBIN_PROCESS_LAST_PID}"; then A_PID="${RUBIN_PROCESS_LAST_PID}"; A_RPC_ADDR="$(rubin_process_extract_rpc_addr "${A_LOG}")"; break; fi
   [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || stop_managed_pid "${RUBIN_PROCESS_LAST_PID}" || true
 done
 [[ -n "${A_PID}" ]] || { echo "failed to start node-a after retrying loopback bind ports" >&2; exit 1; }
-rubin_process_start "${B_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
+rubin_process_start "${B_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind "${B_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
 B_PID="${RUBIN_PROCESS_LAST_PID}"
-rubin_process_start "${C_LOG}" "${NODE_BIN}" --datadir "${C_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
+rubin_process_start "${C_LOG}" "${NODE_BIN}" --datadir "${C_DIR}" --bind "${C_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
 C_PID="${RUBIN_PROCESS_LAST_PID}"
 rubin_process_wait_for_log "${B_LOG}" "rpc: listening=" 30 "${B_PID}"
 B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_LOG}")"
@@ -198,7 +203,7 @@ IFS=$'\t' read -r FINAL_HEIGHT FINAL_HASH TX_COUNT < <(printf '%s' "${MINE_JSON}
 wait_height "${A_RPC_ADDR}" "${TARGET_HEIGHT}" 30
 if (( WITH_RESTART == 1 )); then
   echo "Restarting node-b from disk-backed datadir ${B_DIR}"
-  rubin_process_start "${B_RESTART_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
+  rubin_process_start "${B_RESTART_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind "${B_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"
   B_PID="${RUBIN_PROCESS_LAST_PID}"
   POST_RESTART_B_PID="${B_PID}"
   rubin_process_wait_for_log "${B_RESTART_LOG}" "rpc: listening=" 30 "${B_PID}"
