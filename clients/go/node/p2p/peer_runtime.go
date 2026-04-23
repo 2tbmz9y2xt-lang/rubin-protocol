@@ -12,6 +12,18 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
+type postHandshakeUnknownCommandError struct {
+	command string
+}
+
+func (e postHandshakeUnknownCommandError) Error() string {
+	return fmt.Sprintf("unknown message type: %s", e.command)
+}
+
+func (e postHandshakeUnknownCommandError) peerReason() string {
+	return fmt.Sprintf("unknown command: %s", e.command)
+}
+
 func (p *peer) run(ctx context.Context) error {
 	for {
 		if ctx != nil {
@@ -81,8 +93,16 @@ func (p *peer) handleMessage(frame message) error {
 	case messageVerAck:
 		return errors.New("invalid verack after handshake")
 	default:
-		return fmt.Errorf("unknown message type: %s", frame.Command)
+		return postHandshakeUnknownCommandError{command: frame.Command}
 	}
+}
+
+func unknownCommandPolicyReason(err error) (string, bool) {
+	var unknownErr postHandshakeUnknownCommandError
+	if errors.As(err, &unknownErr) {
+		return unknownErr.peerReason(), true
+	}
+	return "", false
 }
 
 func (p *peer) send(command string, payload []byte) error {
@@ -114,6 +134,17 @@ func (p *peer) setLastError(reason string) {
 	state := p.state
 	p.stateMu.Unlock()
 	_ = p.service.cfg.PeerManager.UpsertPeer(&state)
+}
+
+func (p *peer) applyPostHandshakeDisconnectError(err error) {
+	if err == nil {
+		return
+	}
+	if reason, ok := unknownCommandPolicyReason(err); ok {
+		p.setLastError(reason)
+		return
+	}
+	p.setLastError(err.Error())
 }
 
 func (p *peer) bumpBan(delta int, reason string) bool {
