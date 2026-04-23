@@ -59,7 +59,7 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		current.setLastError(err.Error())
 	}
 	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
-		current.setLastError(err.Error())
+		current.applyPostHandshakeDisconnectError(err)
 		return err
 	}
 	return nil

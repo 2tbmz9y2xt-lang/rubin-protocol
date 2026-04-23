@@ -147,6 +147,68 @@ func TestSetLastErrorAndBumpBanPersistState(t *testing.T) {
 	}
 }
 
+func TestApplyPostHandshakeDisconnectErrorUnknownCommandNoBan(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	err := postHandshakeUnknownCommandError{command: "weird"}
+	reason, ok := unknownCommandPolicyReason(err)
+	if !ok {
+		t.Fatalf("unknown command policy reason not detected")
+	}
+	if reason != "unknown command: weird" {
+		t.Fatalf("reason=%q, want unknown command: weird", reason)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	snap := p.snapshotState()
+	if snap.BanScore != 0 {
+		t.Fatalf("ban_score=%d, want 0 for unknown post-handshake command", snap.BanScore)
+	}
+	if snap.LastError != "unknown command: weird" {
+		t.Fatalf("last_error=%q, want unknown command: weird", snap.LastError)
+	}
+}
+
+func TestRunUnknownCommandDisconnectWithoutBan(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	p.conn = local
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = 0
+	p.service.cfg.PeerRuntimeConfig.WriteDeadline = 0
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		writeErrCh <- writeFrame(
+			remote,
+			networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
+			message{Command: "weird"},
+			p.service.cfg.PeerRuntimeConfig.MaxMessageSize,
+		)
+	}()
+
+	err := p.run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unknown message type: weird") {
+		t.Fatalf("expected unknown-command disconnect error, got %v", err)
+	}
+	if writeErr := <-writeErrCh; writeErr != nil {
+		t.Fatalf("writeFrame(unknown): %v", writeErr)
+	}
+
+	reason, ok := unknownCommandPolicyReason(err)
+	if !ok || reason != "unknown command: weird" {
+		t.Fatalf("reason=%q ok=%v, want unknown command policy reason", reason, ok)
+	}
+
+	p.applyPostHandshakeDisconnectError(err)
+	snap := p.snapshotState()
+	if snap.BanScore != 0 {
+		t.Fatalf("ban_score=%d, want 0 for unknown command disconnect", snap.BanScore)
+	}
+	if snap.LastError != "unknown command: weird" {
+		t.Fatalf("last_error=%q, want unknown command: weird", snap.LastError)
+	}
+}
+
 func TestSendAndRunContextCancellation(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	local, remote := net.Pipe()
