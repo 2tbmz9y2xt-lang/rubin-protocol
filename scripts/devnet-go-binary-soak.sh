@@ -135,6 +135,25 @@ stop_managed_pid() {
   rubin_process_stop_pid "${managed_pid}"
   unregister_managed_pid "${managed_pid}"
 }
+STARTED_PID=""
+STARTED_RPC=""
+start_node_ready() {
+  local label="$1" log_file="$2" datadir="$3" bind_addr="$4" peers="$5" attempt="$6"
+  STARTED_PID="" STARTED_RPC=""
+  if ! rubin_process_start "${log_file}" "${NODE_BIN}" --datadir "${datadir}" --bind "${bind_addr}" --rpc-bind 127.0.0.1:0 --peers "${peers}" --mine-address "${MINE_ADDRESS_HEX}"; then
+    echo "${label} attempt ${attempt} failed; retrying with fresh loopback port(s)" >&2
+    [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || stop_managed_pid "${RUBIN_PROCESS_LAST_PID}" || true
+    return 1
+  fi
+  STARTED_PID="${RUBIN_PROCESS_LAST_PID}"
+  if ! rubin_process_wait_for_log "${log_file}" "rpc: listening=" 30 "${STARTED_PID}"; then
+    echo "${label} did not become ready on attempt ${attempt}; retrying with fresh loopback port(s)" >&2
+    stop_managed_pid "${STARTED_PID}" || true
+    STARTED_PID=""
+    return 1
+  fi
+  STARTED_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || return 1
+}
 stop_cluster_attempt() {
   local managed_pid
   for managed_pid in "${C_PID:-}" "${B_PID:-}" "${A_PID:-}"; do
@@ -150,48 +169,12 @@ start_soak_cluster() {
     A_P2P_ADDR="$(allocate_loopback_addr)" || return 1
     B_P2P_ADDR="$(allocate_loopback_addr)" || return 1
     C_P2P_ADDR="$(allocate_loopback_addr)" || return 1
-    if ! rubin_process_start "${A_LOG}" "${NODE_BIN}" --datadir "${A_DIR}" --bind "${A_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${B_P2P_ADDR},${C_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"; then
-      echo "node-a start attempt ${attempt} failed; retrying with fresh loopback ports" >&2
-      stop_cluster_attempt
-      ((attempt++))
-      continue
-    fi
-    A_PID="${RUBIN_PROCESS_LAST_PID}"
-    if ! rubin_process_wait_for_log "${A_LOG}" "rpc: listening=" 30 "${A_PID}"; then
-      echo "node-a did not become ready on attempt ${attempt}; retrying with fresh loopback ports" >&2
-      stop_cluster_attempt
-      ((attempt++))
-      continue
-    fi
-    A_RPC_ADDR="$(rubin_process_extract_rpc_addr "${A_LOG}")" || { stop_cluster_attempt; return 1; }
-    if ! rubin_process_start "${B_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind "${B_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"; then
-      echo "node-b start attempt ${attempt} failed; retrying with fresh loopback ports" >&2
-      stop_cluster_attempt
-      ((attempt++))
-      continue
-    fi
-    B_PID="${RUBIN_PROCESS_LAST_PID}"
-    if ! rubin_process_wait_for_log "${B_LOG}" "rpc: listening=" 30 "${B_PID}"; then
-      echo "node-b did not become ready on attempt ${attempt}; retrying with fresh loopback ports" >&2
-      stop_cluster_attempt
-      ((attempt++))
-      continue
-    fi
-    B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_LOG}")" || { stop_cluster_attempt; return 1; }
-    if ! rubin_process_start "${C_LOG}" "${NODE_BIN}" --datadir "${C_DIR}" --bind "${C_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"; then
-      echo "node-c start attempt ${attempt} failed; retrying with fresh loopback ports" >&2
-      stop_cluster_attempt
-      ((attempt++))
-      continue
-    fi
-    C_PID="${RUBIN_PROCESS_LAST_PID}"
-    if ! rubin_process_wait_for_log "${C_LOG}" "rpc: listening=" 30 "${C_PID}"; then
-      echo "node-c did not become ready on attempt ${attempt}; retrying with fresh loopback ports" >&2
-      stop_cluster_attempt
-      ((attempt++))
-      continue
-    fi
-    C_RPC_ADDR="$(rubin_process_extract_rpc_addr "${C_LOG}")" || { stop_cluster_attempt; return 1; }
+    start_node_ready node-a "${A_LOG}" "${A_DIR}" "${A_P2P_ADDR}" "${B_P2P_ADDR},${C_P2P_ADDR}" "${attempt}" || { stop_cluster_attempt; ((attempt++)); continue; }
+    A_PID="${STARTED_PID}" A_RPC_ADDR="${STARTED_RPC}"
+    start_node_ready node-b "${B_LOG}" "${B_DIR}" "${B_P2P_ADDR}" "${A_P2P_ADDR}" "${attempt}" || { stop_cluster_attempt; ((attempt++)); continue; }
+    B_PID="${STARTED_PID}" B_RPC_ADDR="${STARTED_RPC}"
+    start_node_ready node-c "${C_LOG}" "${C_DIR}" "${C_P2P_ADDR}" "${A_P2P_ADDR}" "${attempt}" || { stop_cluster_attempt; ((attempt++)); continue; }
+    C_PID="${STARTED_PID}" C_RPC_ADDR="${STARTED_RPC}"
     if rubin_process_wait_for_rpc_ready "${A_RPC_ADDR}" 30 && rubin_process_wait_for_rpc_ready "${B_RPC_ADDR}" 30 && rubin_process_wait_for_rpc_ready "${C_RPC_ADDR}" 30; then
       return 0
     fi
@@ -209,22 +192,12 @@ restart_node_b() {
     if (( attempt > 1 )); then
       B_P2P_ADDR="$(allocate_loopback_addr)" || return 1
     fi
-    if ! rubin_process_start "${B_RESTART_LOG}" "${NODE_BIN}" --datadir "${B_DIR}" --bind "${B_P2P_ADDR}" --rpc-bind 127.0.0.1:0 --peers "${A_P2P_ADDR}" --mine-address "${MINE_ADDRESS_HEX}"; then
-      echo "node-b restart attempt ${attempt} failed; retrying with fresh loopback port" >&2
-      [[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || stop_managed_pid "${RUBIN_PROCESS_LAST_PID}" || true
-      ((attempt++))
-      continue
-    fi
-    B_PID="${RUBIN_PROCESS_LAST_PID}"
-    if rubin_process_wait_for_log "${B_RESTART_LOG}" "rpc: listening=" 30 "${B_PID}"; then
-      B_RPC_ADDR="$(rubin_process_extract_rpc_addr "${B_RESTART_LOG}")" || return 1
+    if start_node_ready "node-b restart" "${B_RESTART_LOG}" "${B_DIR}" "${B_P2P_ADDR}" "${A_P2P_ADDR}" "${attempt}"; then
+      B_PID="${STARTED_PID}" B_RPC_ADDR="${STARTED_RPC}"
       POST_RESTART_B_PID="${B_PID}"
       POST_RESTART_B_RPC_ADDR="${B_RPC_ADDR}"
       return 0
     fi
-    echo "node-b restart did not become ready on attempt ${attempt}; retrying with fresh loopback port" >&2
-    stop_managed_pid "${B_PID}" || true
-    B_PID=""
     ((attempt++))
   done
   echo "failed to restart node-b after ${NODE_RESTART_ATTEMPTS} attempts" >&2
