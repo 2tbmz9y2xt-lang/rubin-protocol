@@ -365,6 +365,11 @@ fn handle_connection(mut stream: TcpStream, state: &DevnetRPCState) -> Result<()
 }
 
 fn read_http_error_response(err: &str) -> HttpResponse {
+    // Preserve the specific framing-class error string emitted by the reader
+    // so debugging/parity checks see the exact class, not a generic fallback.
+    // Any unrecognised error falls through to the generic "invalid request"
+    // 400 body — kept deliberately broad so transient I/O or unknown classes
+    // surface as a safe default.
     let (status, message) = match err {
         "body too large" | "request too large" => (413, "request body too large"),
         "conflicting transfer-encoding and content-length" => {
@@ -375,6 +380,10 @@ fn read_http_error_response(err: &str) -> HttpResponse {
         "invalid chunk size" | "invalid chunk terminator" | "invalid chunked body" => {
             (400, "invalid chunked body")
         }
+        "headers too large" => (400, "headers too large"),
+        "invalid Content-Length" => (400, "invalid Content-Length"),
+        "invalid request headers" => (400, "invalid request headers"),
+        "malformed header" => (400, "malformed header"),
         _ => (400, "invalid request"),
     };
     let body = serde_json::to_vec(&SubmitTxResponse {
@@ -1524,7 +1533,12 @@ fn read_chunked_body(
                 .read(temp)
                 .map_err(|err| format!("read chunk size: {err}"))?;
             if read == 0 {
-                return Err("unexpected eof".to_string());
+                // Peer closed while the chunk-size line was still being read;
+                // classify as chunked-framing error so handle_connection
+                // returns the same 400 "invalid chunked body" JSON it emits
+                // for other malformed chunked framing (not the generic
+                // "invalid request" default).
+                return Err("invalid chunked body".to_string());
             }
             buf.extend_from_slice(&temp[..read]);
         };
@@ -1581,7 +1595,9 @@ fn read_chunked_body(
                 .read(temp)
                 .map_err(|err| format!("read chunk data: {err}"))?;
             if read == 0 {
-                return Err("unexpected eof".to_string());
+                // Peer closed mid-chunk before chunk_size+CRLF was delivered;
+                // same chunked-framing classification as above.
+                return Err("invalid chunked body".to_string());
             }
             buf.extend_from_slice(&temp[..read]);
         }
@@ -2865,6 +2881,32 @@ mod tests {
     }
 
     #[test]
+    fn read_http_request_rejects_chunked_body_eof_in_chunk_size_line() {
+        // Peer closes while the parser is still reading the chunk-size line
+        // (no CRLF yet). Classified as a chunked-framing error so callers see
+        // the same 400 JSON "invalid chunked body" the other framing failures
+        // surface — not the generic "invalid request" fallback.
+        let raw =
+            b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n100";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunked_body_eof_mid_chunk_data() {
+        // Size line declares 5 bytes; peer sends only 3 then closes before
+        // the chunk data + trailing CRLF completes. Same chunked-framing
+        // classification as above.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
     fn read_http_request_rejects_unsupported_transfer_encoding() {
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n";
         assert_eq!(
@@ -2916,8 +2958,11 @@ mod tests {
             ("invalid chunk size", 400, "invalid chunked body"),
             ("invalid chunk terminator", 400, "invalid chunked body"),
             ("invalid chunked body", 400, "invalid chunked body"),
+            ("headers too large", 400, "headers too large"),
+            ("invalid Content-Length", 400, "invalid Content-Length"),
+            ("invalid request headers", 400, "invalid request headers"),
+            ("malformed header", 400, "malformed header"),
             ("unexpected eof", 400, "invalid request"),
-            ("malformed header", 400, "invalid request"),
         ];
         for (err, expected_status, expected_error) in cases {
             let response = read_http_error_response(err);
