@@ -1601,10 +1601,19 @@ fn read_chunked_body(
         // Go-style non-data budget (see module doc above). The increment uses
         // saturating casts so a malicious size line close to isize::MAX does
         // not panic; the decrement floor-at-0 matches Go semantics.
+        // `chunk_size: usize` can exceed `i64::MAX`; the bare `as i64` cast
+        // would sign-wrap for values in [i64::MAX + 1, usize::MAX] and
+        // produce a huge negative `allowance`, which then inflates `excess`
+        // past CHUNK_EXCESS_LIMIT and returns "invalid chunked body" (400)
+        // when the decoded-body cap below would have returned
+        // "body too large" (413). `i64::try_from + unwrap_or(i64::MAX)`
+        // saturates the conversion so oversized chunks hit the correct
+        // 413 class.
         excess = excess
             .saturating_add(size_line_len as i64)
             .saturating_add(2);
-        let allowance = 16i64.saturating_add((chunk_size as i64).saturating_mul(2));
+        let chunk_size_i64 = i64::try_from(chunk_size).unwrap_or(i64::MAX);
+        let allowance = 16i64.saturating_add(chunk_size_i64.saturating_mul(2));
         excess = excess.saturating_sub(allowance);
         if excess < 0 {
             excess = 0;
@@ -2949,6 +2958,18 @@ mod tests {
         // chunk size 0x200001 = MAX_BODY_BYTES + 1, rejected before the data
         // slice is even read so there is no allocation cliff.
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n200001\r\n";
+        assert_eq!(read_request_from_bytes(raw).unwrap_err(), "body too large");
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunk_size_over_i64_max_with_body_too_large() {
+        // chunk size 0xFFFF_FFFF_FFFF_FFFF (usize::MAX on 64-bit) exceeds
+        // i64::MAX; the saturating `i64::try_from + unwrap_or(i64::MAX)`
+        // conversion keeps `allowance` monotonic so the decoded-body cap
+        // below fires with "body too large" (413) instead of leaking into
+        // the chunk-excess class "invalid chunked body" (400) via a
+        // sign-bit wrap during i64 accounting.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFFF\r\n";
         assert_eq!(read_request_from_bytes(raw).unwrap_err(), "body too large");
     }
 
