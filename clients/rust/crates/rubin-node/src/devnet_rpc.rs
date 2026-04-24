@@ -371,7 +371,9 @@ fn read_http_error_response(err: &str) -> HttpResponse {
             (400, "conflicting transfer-encoding and content-length")
         }
         "unsupported transfer-encoding" => (400, "unsupported transfer-encoding"),
-        "invalid chunk size" | "invalid chunk terminator" => (400, "invalid chunked body"),
+        "invalid chunk size" | "invalid chunk terminator" | "invalid chunked body" => {
+            (400, "invalid chunked body")
+        }
         _ => (400, "invalid request"),
     };
     let body = serde_json::to_vec(&SubmitTxResponse {
@@ -1470,24 +1472,42 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 
 // read_chunked_body decodes an HTTP/1.1 `Transfer-Encoding: chunked` body
 // from a stream into a flat Vec<u8>. The returned body is capped at
-// MAX_BODY_BYTES; any chunk (or accumulation of chunks) that would push the
-// decoded body past the cap returns `Err("body too large")`, which
-// handle_connection translates into a 413 JSON response. Raw on-wire bytes
-// are bounded by `MAX_HEADER_BYTES + 3 * MAX_BODY_BYTES` so a tiny-chunk DoS
-// cannot force unbounded buffer growth.
+// MAX_BODY_BYTES to match the Go `/submit_tx` cap; any chunk (or accumulation
+// of chunks) that would push the *decoded* body past the cap returns
+// `Err("body too large")`, which handle_connection translates into a 413 JSON
+// response. After each chunk segment is consumed the parser drains the raw
+// buffer to keep retained state bounded by one chunk-size or trailer line
+// (≤ MAX_HEADER_BYTES) plus at most one chunk-data window; this prevents a
+// tiny-chunk DoS without rejecting valid high-overhead chunked bodies whose
+// decoded size is still below the cap.
 fn read_chunked_body(
     buf: &mut Vec<u8>,
     stream: &mut TcpStream,
-    mut start: usize,
+    body_start: usize,
     temp: &mut [u8],
 ) -> Result<Vec<u8>, String> {
+    let mut pos = body_start;
     let mut body: Vec<u8> = Vec::new();
+    // Compact the parser window so retained raw state never exceeds roughly
+    // MAX_HEADER_BYTES plus one chunk read's worth of unread bytes. This runs
+    // amortized O(N_decoded) across all chunks rather than O(N_decoded^2) that
+    // a per-chunk drain would cost for a very-high-overhead body.
+    let compact = |buf: &mut Vec<u8>, pos: &mut usize| {
+        if *pos >= MAX_HEADER_BYTES {
+            buf.drain(..*pos);
+            *pos = 0;
+        }
+    };
     loop {
-        // Wait for the CRLF that terminates the chunk-size line, reading
-        // more bytes from the stream as needed.
+        // Wait for the CRLF that terminates the chunk-size line. A size line
+        // that grows past MAX_HEADER_BYTES without finding a CRLF is treated
+        // as malformed rather than allowed to grow unbounded.
         let size_end = loop {
-            if let Some(pos) = find_crlf(&buf[start..]) {
-                break start + pos;
+            if let Some(rel) = find_crlf(&buf[pos..]) {
+                break pos + rel;
+            }
+            if buf.len() - pos > MAX_HEADER_BYTES {
+                return Err("invalid chunk size".to_string());
             }
             let read = stream
                 .read(temp)
@@ -1496,28 +1516,31 @@ fn read_chunked_body(
                 return Err("unexpected eof".to_string());
             }
             buf.extend_from_slice(&temp[..read]);
-            if buf.len() > MAX_HEADER_BYTES + 3 * MAX_BODY_BYTES {
-                return Err("request too large".to_string());
-            }
         };
-        let size_text = std::str::from_utf8(&buf[start..size_end])
+        let size_text = std::str::from_utf8(&buf[pos..size_end])
             .map_err(|_| "invalid chunk size".to_string())?;
         // Strip optional chunk extensions after ';'.
         let size_hex = size_text.split(';').next().unwrap_or("").trim();
         let chunk_size =
             usize::from_str_radix(size_hex, 16).map_err(|_| "invalid chunk size".to_string())?;
-        start = size_end + 2;
+        pos = size_end + 2;
 
         if chunk_size == 0 {
             // Last-chunk marker. Consume optional trailer headers until the
-            // empty line that terminates the message, then return.
+            // empty line that terminates the message, then return. A single
+            // trailer line that grows past MAX_HEADER_BYTES without a CRLF is
+            // treated as malformed.
             loop {
-                if let Some(pos) = find_crlf(&buf[start..]) {
-                    if pos == 0 {
+                compact(buf, &mut pos);
+                if let Some(rel) = find_crlf(&buf[pos..]) {
+                    if rel == 0 {
                         return Ok(body);
                     }
-                    start += pos + 2;
+                    pos += rel + 2;
                     continue;
+                }
+                if buf.len() - pos > MAX_HEADER_BYTES {
+                    return Err("invalid chunked body".to_string());
                 }
                 let read = stream
                     .read(temp)
@@ -1528,20 +1551,19 @@ fn read_chunked_body(
                     return Ok(body);
                 }
                 buf.extend_from_slice(&temp[..read]);
-                if buf.len() > MAX_HEADER_BYTES + 3 * MAX_BODY_BYTES {
-                    return Err("request too large".to_string());
-                }
             }
         }
 
-        // Enforce the body cap BEFORE reading or allocating chunk bytes so a
-        // single oversized chunk does not trigger an OOM-sized allocation.
+        // Enforce the decoded body cap BEFORE reading or allocating chunk
+        // bytes so a single oversized chunk does not trigger an OOM-sized
+        // allocation and a cumulative overflow is rejected at the earliest
+        // chunk that would cross the cap.
         if chunk_size > MAX_BODY_BYTES.saturating_sub(body.len()) {
             return Err("body too large".to_string());
         }
 
-        let chunk_end = start + chunk_size + 2; // +2 for trailing CRLF
-        while buf.len() < chunk_end {
+        // Wait until the chunk data + trailing CRLF are buffered.
+        while buf.len() < pos + chunk_size + 2 {
             let read = stream
                 .read(temp)
                 .map_err(|err| format!("read chunk data: {err}"))?;
@@ -1549,15 +1571,13 @@ fn read_chunked_body(
                 return Err("unexpected eof".to_string());
             }
             buf.extend_from_slice(&temp[..read]);
-            if buf.len() > MAX_HEADER_BYTES + 3 * MAX_BODY_BYTES {
-                return Err("request too large".to_string());
-            }
         }
-        if buf[start + chunk_size] != b'\r' || buf[start + chunk_size + 1] != b'\n' {
+        if buf[pos + chunk_size] != b'\r' || buf[pos + chunk_size + 1] != b'\n' {
             return Err("invalid chunk terminator".to_string());
         }
-        body.extend_from_slice(&buf[start..start + chunk_size]);
-        start = chunk_end;
+        body.extend_from_slice(&buf[pos..pos + chunk_size]);
+        pos += chunk_size + 2;
+        compact(buf, &mut pos);
     }
 }
 
@@ -2747,6 +2767,27 @@ mod tests {
     }
 
     #[test]
+    fn read_http_request_accepts_chunked_body_with_high_framing_overhead() {
+        // Many 1-byte chunks ("1\r\nx\r\n" = 6 raw bytes per 1 decoded byte).
+        // Decoded body is 1.1 MiB (under MAX_BODY_BYTES = 2 MiB), but the raw
+        // wire bytes are ~6.6 MiB. This regression pins the decoder to the
+        // decoded-body cap so valid chunked bodies below the cap are not
+        // rejected on framing overhead alone.
+        let decoded_size: usize = 1_100_000;
+        let mut raw = Vec::with_capacity(decoded_size * 6 + 128);
+        raw.extend_from_slice(
+            b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+        );
+        for _ in 0..decoded_size {
+            raw.extend_from_slice(b"1\r\nx\r\n");
+        }
+        raw.extend_from_slice(b"0\r\n\r\n");
+        let req = read_request_from_bytes(&raw).expect("high-overhead chunked body accepted");
+        assert_eq!(req.body.len(), decoded_size);
+        assert!(req.body.iter().all(|&b| b == b'x'));
+    }
+
+    #[test]
     fn read_http_request_rejects_chunked_body_over_cap() {
         // chunk size 0x200001 = MAX_BODY_BYTES + 1, rejected before the data
         // slice is even read so there is no allocation cliff.
@@ -2823,6 +2864,7 @@ mod tests {
             ),
             ("invalid chunk size", 400, "invalid chunked body"),
             ("invalid chunk terminator", 400, "invalid chunked body"),
+            ("invalid chunked body", 400, "invalid chunked body"),
             ("unexpected eof", 400, "invalid request"),
             ("malformed header", 400, "invalid request"),
         ];
