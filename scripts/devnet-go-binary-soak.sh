@@ -28,7 +28,13 @@ while (($#)); do
       exit 2
       ;;
   esac
-done; for tool in python3 perl lsof; do command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is required for Go binary soak evidence" >&2; exit 1; }; done
+done
+for tool in python3 perl lsof; do
+  command -v "${tool}" >/dev/null 2>&1 || {
+    echo "${tool} is required for Go binary soak evidence" >&2
+    exit 1
+  }
+done
 # Runtime txgen needs base height >=100; bound height to keep the soak finite.
 TARGET_HEIGHT="$(python3 -c 'import sys; s=sys.argv[1]; n=int(s) if s.isdecimal() else -1; 101 <= n <= 10000 or sys.exit(2); print(n)' "${TARGET_HEIGHT}")" || { echo "--target-height must be an integer in [101, 10000]" >&2; exit 2; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
