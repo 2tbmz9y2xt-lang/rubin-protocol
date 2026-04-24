@@ -1580,8 +1580,20 @@ fn read_chunked_body(
         let size_line_len = size_end - pos;
         let size_text = std::str::from_utf8(&buf[pos..size_end])
             .map_err(|_| "invalid chunk size".to_string())?;
-        // Strip optional chunk extensions after ';'.
-        let size_hex = size_text.split(';').next().unwrap_or("").trim();
+        // Match Go's chunked.go:54-59 byte-strict parse order:
+        //   1. trimTrailingWhitespace over the full line (OWS = space|tab)
+        //   2. removeChunkExtension (`split on ';'`)
+        //   3. parseHexUint byte-strict (every remaining byte must be a hex
+        //      digit; leading OWS, internal OWS, or any other non-hex byte
+        //      yields `invalid byte in chunk length`).
+        // Only stripping trailing OWS at step 1 is critical — the prior
+        // `.trim()` accepted malformed lines like `" 1"` and `"1 ;ext"` that
+        // Go rejects.
+        let size_trimmed = size_text.trim_end_matches([' ', '\t']);
+        let size_hex = size_trimmed.split(';').next().unwrap_or("");
+        if size_hex.is_empty() || !size_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("invalid chunk size".to_string());
+        }
         let chunk_size =
             usize::from_str_radix(size_hex, 16).map_err(|_| "invalid chunk size".to_string())?;
         pos = size_end + 2;
@@ -1620,15 +1632,21 @@ fn read_chunked_body(
                     if rel == 0 {
                         return Ok(body);
                     }
-                    // Trailer lines are HTTP header fields per RFC 7230 §4.1,
-                    // so every non-empty trailer line must contain a `:` that
-                    // separates the field-name from the field-value. Blind
-                    // accept-and-advance would let a request of the form
-                    // `...0\r\nBadTrailer\r\n\r\n` reach /submit_tx as if the
-                    // framing were valid. Go's net/http reports malformed
-                    // trailer headers; we mirror that by requiring at least
-                    // a field-name/value separator.
-                    if !buf[pos..pos + rel].contains(&b':') {
+                    // Trailer lines are HTTP header fields per RFC 7230 §4.1.
+                    // Enforce the full field-name syntax: name must be a
+                    // non-empty token (RFC 7230 §3.2.6) followed by `:`. This
+                    // matches Go's mimeReader semantics and rejects lines
+                    // like `": v"` (empty name), `"Bad\tName: v"` (tab in
+                    // name), and `" Leading: v"` (leading OWS is disallowed
+                    // in trailers per §4.1; §3.2.4 obs-fold only applies to
+                    // message headers during the pre-HTTP/1.1 obs-fold era).
+                    let line_bytes = &buf[pos..pos + rel];
+                    let colon_idx = line_bytes
+                        .iter()
+                        .position(|&b| b == b':')
+                        .ok_or_else(|| "invalid chunked body".to_string())?;
+                    let name = &line_bytes[..colon_idx];
+                    if name.is_empty() || !name.iter().all(|&b| is_tchar(b)) {
                         return Err("invalid chunked body".to_string());
                     }
                     trailer_bytes = trailer_bytes.saturating_add(rel + 2);
@@ -1682,6 +1700,32 @@ fn read_chunked_body(
 
 fn find_crlf(slice: &[u8]) -> Option<usize> {
     slice.windows(2).position(|w| w == b"\r\n")
+}
+
+// RFC 7230 §3.2.6 token: any VCHAR except delimiters.
+//   tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+//           "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+fn is_tchar(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+            | b'0'..=b'9'
+            | b'A'..=b'Z'
+            | b'a'..=b'z'
+    )
 }
 
 fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<(), String> {
@@ -3080,6 +3124,78 @@ mod tests {
         // as a malformed trailer; we mirror that behaviour so malformed
         // chunked requests do not reach /submit_tx.
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nBadTrailer\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunk_size_line_with_leading_whitespace() {
+        // Go's parseHexUint (src/net/http/internal/chunked.go:278-294) is
+        // byte-strict: any non-hex byte at any position returns
+        // `invalid byte in chunk length`. Leading OWS is NOT stripped —
+        // Go's trimTrailingWhitespace only strips the trailing side.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n 1\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunk size"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunk_size_line_with_internal_whitespace_before_extension() {
+        // `1 ;ext` — after Go's `removeChunkExtension` strips ';ext', the
+        // remaining "1 " has a non-hex byte at index 1, which parseHexUint
+        // rejects. The prior `.trim()` accepted this; the new byte-strict
+        // check rejects it.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n1 ;ext\r\nx\r\n0\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunk size"
+        );
+    }
+
+    #[test]
+    fn read_http_request_accepts_chunk_size_line_with_trailing_whitespace() {
+        // Go's trimTrailingWhitespace (chunked.go:186-190) strips trailing
+        // space/tab BEFORE parseHexUint; trailing OWS like "1 " or "1\t"
+        // must still be accepted.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n1 \t\r\nx\r\n0\r\n\r\n";
+        let req = read_request_from_bytes(raw).expect("trailing OWS in size line accepted");
+        assert_eq!(req.body, b"x");
+    }
+
+    #[test]
+    fn read_http_request_rejects_trailer_with_empty_field_name() {
+        // `: value` has an empty field-name. Go's mimeReader rejects this
+        // as a malformed header; we enforce the RFC 7230 §3.2.6 token rule
+        // (field-name must be 1*tchar) so trailers match.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n: value\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_trailer_with_whitespace_in_field_name() {
+        // A tab inside the field-name makes it a non-token. RFC 7230 §3.2.6
+        // tchar excludes whitespace; Go rejects `"Bad\tName: v"` as
+        // malformed. Same here.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nBad\tName: v\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_trailer_with_leading_whitespace_before_field_name() {
+        // Leading OWS before field-name violates RFC 7230 §3.2.6 (token is
+        // 1*tchar, OWS is not a tchar). Go rejects such a line during
+        // mimeReader parse. Mirror that here.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n Leading: v\r\n\r\n";
         assert_eq!(
             read_request_from_bytes(raw).unwrap_err(),
             "invalid chunked body"
