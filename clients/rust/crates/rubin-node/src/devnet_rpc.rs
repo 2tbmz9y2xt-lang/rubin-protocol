@@ -1387,6 +1387,16 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
             return Err("request too large".to_string());
         }
         if let Some(pos) = find_header_end(&buf) {
+            // Enforce the header-block cap BEFORE accepting a terminator
+            // that arrives in a crossing read: a sender can leave the
+            // parser at exactly MAX_HEADER_BYTES bytes without CRLFCRLF
+            // (still below the post-read cap below) and then deliver the
+            // terminator plus one more byte in the next read. Go's net/http
+            // header reader rejects equivalent over-cap terminated lines
+            // (textproto.Reader.readContinuedLineSlice); so do we.
+            if pos > MAX_HEADER_BYTES {
+                return Err("headers too large".to_string());
+            }
             break pos;
         }
         if buf.len() > MAX_HEADER_BYTES {
@@ -1426,8 +1436,15 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         };
         // RFC 7230 §3.2.4: no whitespace is permitted between the header
         // field-name and colon. Differences in handling whitespace here have
-        // led to request-smuggling vulnerabilities, so Go `net/http` rejects
-        // such messages at its MIME header parse. Enforce the token rule
+        // led to request-smuggling vulnerabilities. This is a deliberate
+        // RFC fail-closed rejection and is STRICTER than Go's `textproto`
+        // legacy behaviour — Go accepts such messages, stores the name
+        // uncanonicalized (`canonicalMIMEHeaderKey` returns the raw bytes
+        // unchanged, see src/net/textproto/reader.go:753-770), and lets
+        // downstream canonical-key lookups (`Header.Get("Transfer-Encoding")`)
+        // silently miss the spaced variant. That silent miss is itself a
+        // smuggling hazard when an upstream component canonicalises
+        // differently, so we reject outright. Enforce the token rule
         // directly on the raw `name` slice (no `.trim()`): field-name is
         // `1*tchar` per RFC 7230 §3.2.6, so any leading/trailing/interior
         // whitespace (or other non-token byte) is a framing error.
@@ -1569,6 +1586,16 @@ fn read_chunked_body(
         // as malformed rather than allowed to grow unbounded.
         let size_end = loop {
             if let Some(rel) = find_crlf(&buf[pos..]) {
+                // Enforce per-line cap BEFORE accepting the terminator —
+                // a crossing read can deliver the byte that pushes the line
+                // past MAX_HEADER_BYTES together with the CRLF in the same
+                // syscall, where the post-read cap below has not fired yet.
+                // Matches Go's `readChunkLine` which rejects
+                // `len(p) >= maxLineLength` after stripping CRLF
+                // (src/net/http/internal/chunked.go:180-182).
+                if rel > MAX_HEADER_BYTES {
+                    return Err("invalid chunk size".to_string());
+                }
                 break pos + rel;
             }
             if buf.len() - pos > MAX_HEADER_BYTES {
@@ -1651,16 +1678,25 @@ fn read_chunked_body(
                     if rel == 0 {
                         return Ok(body);
                     }
+                    // Per-line cap before accepting the terminator (same
+                    // crossing-read guard as the chunk-size loop above).
+                    if rel > MAX_HEADER_BYTES {
+                        return Err("invalid chunked body".to_string());
+                    }
                     // Trailer lines are HTTP header fields per RFC 7230 §4.1.
                     // Enforce the full field-name + field-value syntax:
                     //   field-name = 1*tchar  (RFC 7230 §3.2.6)
                     //   field-value = *( field-content / obs-fold )
                     //     field-vchar = VCHAR / obs-text
                     //     obs-text = %x80-FF
-                    // This matches Go mimeReader semantics and rejects
+                    // The name check is an RFC fail-closed divergence from
+                    // Go's textproto which accepts a non-canonical key and
+                    // silently fails lookups (`canonicalMIMEHeaderKey`
+                    // returns the raw bytes unchanged at
+                    // src/net/textproto/reader.go:753-770). We reject
                     // `": v"` (empty name), `"Bad\tName: v"` (tab in name),
                     // `" Leading: v"` (leading OWS), and `"X:\0"` (control
-                    // byte in value). Empty values (`"X:"`) are allowed per
+                    // byte in value); empty values (`"X:"`) are allowed per
                     // the `*( ... )` grammar.
                     let line_bytes = &buf[pos..pos + rel];
                     let colon_idx = line_bytes
@@ -3266,16 +3302,64 @@ mod tests {
     #[test]
     fn read_http_request_rejects_header_with_whitespace_between_field_name_and_colon() {
         // RFC 7230 §3.2.4: no whitespace is permitted between header
-        // field-name and colon. Go rejects via MIME header parse; we reject
-        // as `"malformed header"` (400 JSON "malformed header"). This
-        // closes the request-smuggling vector where upstream parsers treat
-        // `"Transfer-Encoding : chunked"` as a non-TE header and our
-        // previous `name.trim()` treated it as valid TE.
+        // field-name and colon. This reject is an RFC fail-closed
+        // divergence from Go's `textproto` legacy behaviour, which accepts
+        // the message but stores the name uncanonicalised so canonical-key
+        // lookups (`Header.Get("Transfer-Encoding")`) silently miss the
+        // spaced variant — itself a smuggling hazard when upstreams
+        // canonicalise differently. We reject outright with
+        // `"malformed header"` (400 JSON "malformed header").
         let raw =
             b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding : chunked\r\n\r\n";
         assert_eq!(
             read_request_from_bytes(raw).unwrap_err(),
             "malformed header"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_headers_terminated_just_over_cap() {
+        // A header block whose CRLFCRLF terminator arrives at byte
+        // MAX_HEADER_BYTES + 1 (i.e. header bytes plus the terminator cross
+        // the cap only in the same read that delivers the terminator) must
+        // be rejected. Without the pre-break cap this crossing-read case
+        // slips through the post-read `buf.len() > MAX_HEADER_BYTES` guard.
+        // Matches Go's textproto header read bound.
+        // Place the CRLFCRLF so `find_header_end` returns MAX_HEADER_BYTES + 1
+        // — the position of the `\r` at the start of the terminator sequence.
+        let prefix = b"GET /get_tip HTTP/1.1\r\nX-Test: ";
+        let pad = super::MAX_HEADER_BYTES + 1 - prefix.len();
+        let raw = format!(
+            "GET /get_tip HTTP/1.1\r\nX-Test: {}\r\n\r\n",
+            "a".repeat(pad)
+        );
+        assert_eq!(
+            read_request_from_bytes(raw.as_bytes()).unwrap_err(),
+            "headers too large"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunk_size_line_terminated_just_over_cap() {
+        // A chunk-size line (with a valid large chunk_size so the Go-style
+        // excess counter allowance cannot reject it first) whose CRLF
+        // arrives at MAX_HEADER_BYTES + 1 must be rejected. Pre-break cap
+        // is required because the post-read `buf.len() - pos > MAX_HEADER_
+        // BYTES` guard does NOT fire when the CRLF and the byte that
+        // crossed the cap arrive in the same read. Matches Go's
+        // `readChunkLine` `len(p) >= maxLineLength` post-CRLF check.
+        let chunk_hex = "1000000"; // 16 MiB — large enough that the excess
+                                   // allowance `16 + 2 * 16 MiB` dwarfs any
+                                   // size-line overhead under the 16 KiB
+                                   // CHUNK_EXCESS_LIMIT.
+        let ext_len = super::MAX_HEADER_BYTES - chunk_hex.len() - ";ext=".len() + 1;
+        let ext = "a".repeat(ext_len);
+        let raw = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n{chunk_hex};ext={ext}\r\nx\r\n0\r\n\r\n"
+        );
+        assert_eq!(
+            read_request_from_bytes(raw.as_bytes()).unwrap_err(),
+            "invalid chunk size"
         );
     }
 
