@@ -1424,7 +1424,17 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         let Some((name, value)) = line.split_once(':') else {
             return Err("malformed header".to_string());
         };
-        let name_trimmed = name.trim();
+        // RFC 7230 §3.2.4: no whitespace is permitted between the header
+        // field-name and colon. Differences in handling whitespace here have
+        // led to request-smuggling vulnerabilities, so Go `net/http` rejects
+        // such messages at its MIME header parse. Enforce the token rule
+        // directly on the raw `name` slice (no `.trim()`): field-name is
+        // `1*tchar` per RFC 7230 §3.2.6, so any leading/trailing/interior
+        // whitespace (or other non-token byte) is a framing error.
+        if name.is_empty() || !name.bytes().all(is_tchar) {
+            return Err("malformed header".to_string());
+        }
+        let name_trimmed = name;
         if name_trimmed.eq_ignore_ascii_case("content-length") {
             let value_trimmed = value.trim();
             // RFC 7230 §3.3.2 + Go net/http fixLength parity: duplicate
@@ -1642,13 +1652,16 @@ fn read_chunked_body(
                         return Ok(body);
                     }
                     // Trailer lines are HTTP header fields per RFC 7230 §4.1.
-                    // Enforce the full field-name syntax: name must be a
-                    // non-empty token (RFC 7230 §3.2.6) followed by `:`. This
-                    // matches Go's mimeReader semantics and rejects lines
-                    // like `": v"` (empty name), `"Bad\tName: v"` (tab in
-                    // name), and `" Leading: v"` (leading OWS is disallowed
-                    // in trailers per §4.1; §3.2.4 obs-fold only applies to
-                    // message headers during the pre-HTTP/1.1 obs-fold era).
+                    // Enforce the full field-name + field-value syntax:
+                    //   field-name = 1*tchar  (RFC 7230 §3.2.6)
+                    //   field-value = *( field-content / obs-fold )
+                    //     field-vchar = VCHAR / obs-text
+                    //     obs-text = %x80-FF
+                    // This matches Go mimeReader semantics and rejects
+                    // `": v"` (empty name), `"Bad\tName: v"` (tab in name),
+                    // `" Leading: v"` (leading OWS), and `"X:\0"` (control
+                    // byte in value). Empty values (`"X:"`) are allowed per
+                    // the `*( ... )` grammar.
                     let line_bytes = &buf[pos..pos + rel];
                     let colon_idx = line_bytes
                         .iter()
@@ -1656,6 +1669,10 @@ fn read_chunked_body(
                         .ok_or_else(|| "invalid chunked body".to_string())?;
                     let name = &line_bytes[..colon_idx];
                     if name.is_empty() || !name.iter().all(|&b| is_tchar(b)) {
+                        return Err("invalid chunked body".to_string());
+                    }
+                    let value = &line_bytes[colon_idx + 1..];
+                    if !value.iter().all(|&b| is_field_vchar_or_ows(b)) {
                         return Err("invalid chunked body".to_string());
                     }
                     trailer_bytes = trailer_bytes.saturating_add(rel + 2);
@@ -1735,6 +1752,16 @@ fn is_tchar(b: u8) -> bool {
             | b'A'..=b'Z'
             | b'a'..=b'z'
     )
+}
+
+// RFC 7230 §3.2.6 field-value body-char:
+//   field-vchar = VCHAR / obs-text
+//   OWS         = *( SP / HTAB )
+// i.e. visible ASCII, horizontal tab, space, or obs-text (0x80-0xFF).
+// Control bytes (0x00-0x08, 0x0A-0x1F, 0x7F) are rejected — Go's net/http
+// mimeReader treats them as malformed and so do we.
+fn is_field_vchar_or_ows(b: u8) -> bool {
+    b == b' ' || b == b'\t' || (0x21..=0x7e).contains(&b) || b >= 0x80
 }
 
 fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<(), String> {
@@ -3234,6 +3261,46 @@ mod tests {
             read_request_from_bytes(raw).unwrap_err(),
             "invalid chunked body"
         );
+    }
+
+    #[test]
+    fn read_http_request_rejects_header_with_whitespace_between_field_name_and_colon() {
+        // RFC 7230 §3.2.4: no whitespace is permitted between header
+        // field-name and colon. Go rejects via MIME header parse; we reject
+        // as `"malformed header"` (400 JSON "malformed header"). This
+        // closes the request-smuggling vector where upstream parsers treat
+        // `"Transfer-Encoding : chunked"` as a non-TE header and our
+        // previous `name.trim()` treated it as valid TE.
+        let raw =
+            b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding : chunked\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "malformed header"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_trailer_with_control_byte_in_field_value() {
+        // RFC 7230 §3.2.6 field-value body is VCHAR / obs-text / OWS;
+        // control bytes (NUL, other C0 chars except HTAB) are not allowed.
+        // Go rejects malformed trailer headers; we mirror.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trace: v\x00\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
+    fn read_http_request_accepts_trailer_with_tab_and_obs_text_in_field_value() {
+        // HTAB and obs-text (0x80-0xFF) are both valid in field-value per
+        // RFC 7230 §3.2.6; the check must accept these so legitimate
+        // trailers with UTF-8 content (e.g. `"тест"`) continue to work.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trace:\t\xd1\x82\xd0\xb5\xd1\x81\xd1\x82\r\n\r\n";
+        let req = read_request_from_bytes(raw).expect("trailer with HTAB + obs-text accepted");
+        // Body has no data chunks in this case, so the decoded body is empty
+        // and only the trailer parse is under test.
+        assert!(req.body.is_empty());
     }
 
     #[test]
