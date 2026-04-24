@@ -1414,6 +1414,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         .ok_or_else(|| "missing http version".to_string())?;
 
     let mut content_length: Option<usize> = None;
+    let mut content_length_raw: Option<String> = None;
     let mut is_chunked = false;
     let mut te_seen = false;
     for line in lines {
@@ -1425,21 +1426,26 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         };
         let name_trimmed = name.trim();
         if name_trimmed.eq_ignore_ascii_case("content-length") {
-            let parsed = value
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| "invalid Content-Length".to_string())?;
-            // RFC 7230 §3.3.2: a request that carries multiple Content-Length
-            // headers with differing values is ambiguous and must be rejected
-            // to prevent request smuggling. Identical duplicates are accepted
-            // to match Go's net/http permissive behavior on duplicate-but-
-            // consistent headers.
-            match content_length {
-                Some(existing) if existing != parsed => {
+            let value_trimmed = value.trim();
+            // RFC 7230 §3.3.2 + Go net/http fixLength parity: duplicate
+            // Content-Length headers are accepted only when their trimmed
+            // byte values are IDENTICAL. Go uses `textproto.TrimString(first)
+            // != textproto.TrimString(ct)` (src/net/http/transfer.go:671-674),
+            // so "4" + "04" is rejected as smuggling vector even though the
+            // numeric values are equal. Storing the raw trimmed string and
+            // doing a byte-equality check matches Go exactly.
+            if let Some(existing) = content_length_raw.as_deref() {
+                if existing != value_trimmed {
                     return Err("conflicting Content-Length".to_string());
                 }
-                _ => content_length = Some(parsed),
+                // Exact duplicate — already parsed, skip re-parse.
+                continue;
             }
+            let parsed = value_trimmed
+                .parse::<usize>()
+                .map_err(|_| "invalid Content-Length".to_string())?;
+            content_length_raw = Some(value_trimmed.to_string());
+            content_length = Some(parsed);
         } else if name_trimmed.eq_ignore_ascii_case("transfer-encoding") {
             // Matches Go net/http readTransfer: more than one Transfer-Encoding
             // header is rejected as `too many transfer encodings`, regardless
@@ -1488,7 +1494,12 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
             return Err("unexpected eof".to_string());
         }
         buf.extend_from_slice(&temp[..read]);
-        if buf.len() > MAX_HEADER_BYTES + MAX_BODY_BYTES {
+        // Boundary-safe cap: body_start already accounts for the 4-byte
+        // `\r\n\r\n` delimiter between headers and body, so comparing the
+        // buffered length against `body_start + MAX_BODY_BYTES` allows a
+        // Content-Length exactly at MAX_BODY_BYTES without falsely rejecting
+        // as "request too large".
+        if buf.len() > body_start + MAX_BODY_BYTES {
             return Err("request too large".to_string());
         }
     }
@@ -1510,6 +1521,19 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 // (≤ MAX_HEADER_BYTES) plus at most one chunk-data window; this prevents a
 // tiny-chunk DoS without rejecting valid high-overhead chunked bodies whose
 // decoded size is still below the cap.
+//
+// In addition to the decoded-body cap, the decoder tracks a Go-style
+// "excess" counter mirroring `src/net/http/internal/chunked.go`:
+//   excess += size_line_len + 2           // per chunk
+//   excess -= 16 + 2 * chunk_size         // per-chunk allowance
+//   excess  = max(excess, 0)
+// if excess > 16 * 1024 then reject. This prevents the "chunked encoding
+// contains too much non-data" DoS class where a sender uses large chunk
+// extensions to inflate encoded overhead relative to decoded payload. The
+// trailer section is separately capped by a total-bytes counter so a
+// peer cannot stream valid-looking short trailer lines forever.
+const CHUNK_EXCESS_LIMIT: i64 = 16 * 1024;
+
 fn read_chunked_body(
     buf: &mut Vec<u8>,
     stream: &mut TcpStream,
@@ -1518,6 +1542,7 @@ fn read_chunked_body(
 ) -> Result<Vec<u8>, String> {
     let mut pos = body_start;
     let mut body: Vec<u8> = Vec::new();
+    let mut excess: i64 = 0;
     // Compact the parser window so retained raw state never exceeds roughly
     // MAX_HEADER_BYTES plus one chunk read's worth of unread bytes. This runs
     // amortized O(N_decoded) across all chunks rather than O(N_decoded^2) that
@@ -1552,6 +1577,7 @@ fn read_chunked_body(
             }
             buf.extend_from_slice(&temp[..read]);
         };
+        let size_line_len = size_end - pos;
         let size_text = std::str::from_utf8(&buf[pos..size_end])
             .map_err(|_| "invalid chunk size".to_string())?;
         // Strip optional chunk extensions after ';'.
@@ -1560,20 +1586,54 @@ fn read_chunked_body(
             usize::from_str_radix(size_hex, 16).map_err(|_| "invalid chunk size".to_string())?;
         pos = size_end + 2;
 
+        // Go-style non-data budget (see module doc above). The increment uses
+        // saturating casts so a malicious size line close to isize::MAX does
+        // not panic; the decrement floor-at-0 matches Go semantics.
+        excess = excess
+            .saturating_add(size_line_len as i64)
+            .saturating_add(2);
+        let allowance = 16i64.saturating_add((chunk_size as i64).saturating_mul(2));
+        excess = excess.saturating_sub(allowance);
+        if excess < 0 {
+            excess = 0;
+        }
+        if excess > CHUNK_EXCESS_LIMIT {
+            return Err("invalid chunked body".to_string());
+        }
+
         if chunk_size == 0 {
             // Last-chunk marker. Consume optional trailer headers until the
             // empty line that terminates the message. EOF before the
             // terminating empty-line CRLF is rejected as malformed framing to
             // match Go's net/http chunked reader (which returns
             // io.ErrUnexpectedEOF); this also keeps parity with this module's
-            // strict CRLF check for individual chunk terminators. A single
-            // trailer line that grows past MAX_HEADER_BYTES without a CRLF is
-            // likewise treated as malformed.
+            // strict CRLF check for individual chunk terminators.
+            //
+            // The trailer section is bounded by total bytes (not just per
+            // line): a peer that streams unlimited valid-looking short
+            // trailer lines would otherwise keep one of the RPC workers busy
+            // indefinitely under the decoded-body cap.
+            let mut trailer_bytes: usize = 0;
             loop {
                 compact(buf, &mut pos);
                 if let Some(rel) = find_crlf(&buf[pos..]) {
                     if rel == 0 {
                         return Ok(body);
+                    }
+                    // Trailer lines are HTTP header fields per RFC 7230 §4.1,
+                    // so every non-empty trailer line must contain a `:` that
+                    // separates the field-name from the field-value. Blind
+                    // accept-and-advance would let a request of the form
+                    // `...0\r\nBadTrailer\r\n\r\n` reach /submit_tx as if the
+                    // framing were valid. Go's net/http reports malformed
+                    // trailer headers; we mirror that by requiring at least
+                    // a field-name/value separator.
+                    if !buf[pos..pos + rel].contains(&b':') {
+                        return Err("invalid chunked body".to_string());
+                    }
+                    trailer_bytes = trailer_bytes.saturating_add(rel + 2);
+                    if trailer_bytes > MAX_HEADER_BYTES {
+                        return Err("invalid chunked body".to_string());
                     }
                     pos += rel + 2;
                     continue;
@@ -2896,15 +2956,37 @@ mod tests {
     }
 
     #[test]
-    fn read_http_request_accepts_duplicate_content_length_headers_with_leading_zeros() {
-        // Duplicate Content-Length values that differ only by leading zeros
-        // (`4` vs `004`) resolve to the same numeric value and must NOT be
-        // flagged as conflicting — the conflict check compares parsed usize,
-        // not raw header strings.
-        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nContent-Length: 004\r\n\r\nbody";
-        let req = read_request_from_bytes(raw)
-            .expect("leading-zero duplicate Content-Length accepted because numeric values match");
-        assert_eq!(req.body, b"body");
+    fn read_http_request_accepts_content_length_at_exact_cap() {
+        if skip_under_coverage_instrumentation() {
+            return;
+        }
+        // Content-Length exactly at MAX_BODY_BYTES must be accepted. This
+        // pins the boundary-safe raw-buffer cap (`body_start + MAX_BODY_BYTES`)
+        // that replaced the earlier `MAX_HEADER_BYTES + MAX_BODY_BYTES` check
+        // which falsely rejected boundary-valid requests because `body_start`
+        // already accounts for the 4-byte `\r\n\r\n` delimiter.
+        let body_len = super::MAX_BODY_BYTES;
+        let headers = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {body_len}\r\n\r\n"
+        );
+        let mut raw = headers.into_bytes();
+        raw.extend(std::iter::repeat_n(b'x', body_len));
+        let req = read_request_from_bytes(&raw).expect("body at MAX_BODY_BYTES accepted");
+        assert_eq!(req.body.len(), body_len);
+    }
+
+    #[test]
+    fn read_http_request_rejects_duplicate_content_length_headers_with_leading_zeros() {
+        // Go parity: duplicate Content-Length headers are accepted only when
+        // their trimmed byte values are IDENTICAL. `4` and `004` trim to
+        // different byte strings ("4" vs "004") even though they parse to the
+        // same usize, so Go's `src/net/http/transfer.go:671-674` rejects this
+        // case (`textproto.TrimString(first) != textproto.TrimString(ct)`).
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nContent-Length: 004\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "conflicting Content-Length"
+        );
     }
 
     #[test]
@@ -2939,6 +3021,65 @@ mod tests {
         // the chunk data + trailing CRLF completes. Same chunked-framing
         // classification as above.
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunked_body_excess_extension_overhead() {
+        // Matches Go chunked.go excess counter (src/net/http/internal/chunked.go
+        // :43-82): per chunk, excess grows by `size_line_len + 2` and is
+        // reduced by the `16 + 2 * chunk_size` allowance; if total excess
+        // crosses 16 KiB the request is rejected. Six 1-byte chunks whose
+        // size lines carry a 4 KiB chunk extension each push excess past the
+        // cap before any legitimate payload is decoded.
+        let ext = "a".repeat(4000);
+        let mut raw = Vec::from(
+            &b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+        );
+        for _ in 0..6 {
+            raw.extend_from_slice(format!("1;{ext}\r\nx\r\n").as_bytes());
+        }
+        raw.extend_from_slice(b"0\r\n\r\n");
+        assert_eq!(
+            read_request_from_bytes(&raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunked_body_excessive_trailer_bytes() {
+        // A peer that streams unlimited valid-looking short trailer lines
+        // after the zero chunk must not be able to keep an RPC worker busy
+        // indefinitely under the decoded-body cap. The trailer section is
+        // bounded by total bytes (not just per-line), so 1100 short valid
+        // trailer lines totaling > MAX_HEADER_BYTES (64 KiB) are rejected.
+        let mut raw = Vec::from(
+            &b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n"
+                [..],
+        );
+        for i in 0..1100 {
+            raw.extend_from_slice(
+                format!("X-Trailer-{i:04}: value-that-is-padded-to-60-bytes-abcdefghijklmnop\r\n")
+                    .as_bytes(),
+            );
+        }
+        raw.extend_from_slice(b"\r\n");
+        assert_eq!(
+            read_request_from_bytes(&raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunked_body_malformed_trailer_line() {
+        // Trailer lines are HTTP header fields per RFC 7230 §4.1, so a line
+        // without a `:` is not a valid trailer. Go's net/http reports this
+        // as a malformed trailer; we mirror that behaviour so malformed
+        // chunked requests do not reach /submit_tx.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nBadTrailer\r\n\r\n";
         assert_eq!(
             read_request_from_bytes(raw).unwrap_err(),
             "invalid chunked body"
