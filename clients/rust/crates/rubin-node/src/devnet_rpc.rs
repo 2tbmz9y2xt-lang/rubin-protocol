@@ -1486,6 +1486,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         return Err("body too large".to_string());
     }
 
+    // `content_length` was already bounded by MAX_BODY_BYTES above, so this
+    // loop terminates as soon as `body_start + content_length` bytes are
+    // buffered. A single `stream.read` may pull a few extra bytes past that
+    // point (e.g. the start of a pipelined next request on the same
+    // connection); those are discarded when we slice the body below, so no
+    // in-loop raw-buffer cap is needed here — adding one would spuriously
+    // reject a boundary-valid body whose last read coalesced with trailing
+    // bytes.
     while buf.len() < body_start + content_length {
         let read = stream
             .read(&mut temp)
@@ -1494,14 +1502,6 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
             return Err("unexpected eof".to_string());
         }
         buf.extend_from_slice(&temp[..read]);
-        // Boundary-safe cap: body_start already accounts for the 4-byte
-        // `\r\n\r\n` delimiter between headers and body, so comparing the
-        // buffered length against `body_start + MAX_BODY_BYTES` allows a
-        // Content-Length exactly at MAX_BODY_BYTES without falsely rejecting
-        // as "request too large".
-        if buf.len() > body_start + MAX_BODY_BYTES {
-            return Err("request too large".to_string());
-        }
     }
     let body = buf[body_start..body_start + content_length].to_vec();
     Ok(HttpRequest {
@@ -3020,6 +3020,19 @@ mod tests {
     }
 
     #[test]
+    fn read_http_request_accepts_content_length_body_with_trailing_garbage() {
+        // A TCP read that coalesces the declared body with a few trailing
+        // bytes (e.g. start of a pipelined next request on the same
+        // connection) must NOT cause the body-read loop to reject the
+        // current request. The body is sliced by exact `content_length`;
+        // trailing bytes are discarded.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nbodyGARBAGEafter";
+        let req =
+            read_request_from_bytes(raw).expect("body + trailing bytes in coalesced read accepted");
+        assert_eq!(req.body, b"body");
+    }
+
+    #[test]
     fn read_http_request_rejects_duplicate_content_length_headers_with_leading_zeros() {
         // Go parity: duplicate Content-Length headers are accepted only when
         // their trimmed byte values are IDENTICAL. `4` and `004` trim to
@@ -3298,10 +3311,26 @@ mod tests {
         }
     }
 
+    struct TempDirCleanupGuard {
+        path: PathBuf,
+    }
+
+    impl Drop for TempDirCleanupGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
     fn handle_connection_roundtrip(raw: &[u8]) -> (u16, String, Value) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local_addr");
-        let (state, _dir) = build_state(false);
+        let (state, dir) = build_state(false);
+        // `handle_connection_roundtrip` hides the `dir` PathBuf from its
+        // callers, so wrap it in a Drop guard that cleans up after the
+        // test returns. Without this the helper would leave a
+        // `rubin-devnet-rpc*` directory per invocation (matches the
+        // `_dir` hygiene used by tests that call `build_state` directly).
+        let _cleanup = TempDirCleanupGuard { path: dir };
         let payload = raw.to_vec();
         let client = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(addr).expect("connect");
