@@ -77,6 +77,64 @@ func TestCoverage_NewServiceDefaultsAndAnnounceBlock(t *testing.T) {
 	}
 }
 
+func TestValidateRemoteVersion_Bounds(t *testing.T) {
+	chainID := node.DevnetGenesisChainID()
+	genesis := node.DevnetGenesisBlockHash()
+	makePayload := func(pv uint32) node.VersionPayloadV1 {
+		p := testVersionPayload(chainID, genesis, "ua", 0)
+		p.ProtocolVersion = pv
+		return p
+	}
+	cases := []struct {
+		name     string
+		pv       uint32
+		wantErr  bool
+		errMatch string
+	}{
+		{"zero rejected", 0, true, "invalid protocol_version"},
+		{"over max rejected", maxProtocolVersion + 1, true, "exceeds max"},
+		{"normal accepted", ProtocolVersion, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var state node.PeerState
+			err := validateRemoteVersion(makePayload(tc.pv), ProtocolVersion, chainID, genesis, 10, &state)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("pv=%d: want error, got nil", tc.pv)
+				}
+				if !strings.Contains(err.Error(), tc.errMatch) {
+					t.Fatalf("pv=%d: err=%q, want substring %q", tc.pv, err.Error(), tc.errMatch)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("pv=%d: want nil error, got %v", tc.pv, err)
+			}
+		})
+	}
+}
+
+func TestClampRemoteBestHeight(t *testing.T) {
+	cases := []struct {
+		name                string
+		localHeight, remote uint64
+		want                uint64
+	}{
+		{"within delta returns remote", 100, 500, 500},
+		{"absurd remote clamps to local+delta", 100, 99_999_999, 100 + maxBestHeightDelta},
+		{"saturates when local near uint64 max", ^uint64(0) - 1, ^uint64(0), ^uint64(0)},
+		{"zero local caps remote to delta", 0, 10 * maxBestHeightDelta, maxBestHeightDelta},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clampRemoteBestHeight(tc.localHeight, tc.remote); got != tc.want {
+				t.Fatalf("local=%d remote=%d: got %d want %d", tc.localHeight, tc.remote, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCoverage_HandshakeHelpers(t *testing.T) {
 	localConn, remoteConn := net.Pipe()
 	defer localConn.Close()

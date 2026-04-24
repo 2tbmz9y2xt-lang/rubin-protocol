@@ -119,6 +119,14 @@ func interruptHandshakeOnContextCancel(ctx context.Context, conn net.Conn, done 
 	}
 }
 
+// maxProtocolVersion is the absolute upper bound for a remote peer's
+// claimed protocol_version, mirroring the Rust client's MAX_PROTOCOL_VERSION
+// in clients/rust/crates/rubin-node/src/p2p_runtime.rs. A version above this
+// bound is rejected by validateRemoteVersion regardless of local/remote
+// adjacency so absurd claims from a malicious or misconfigured peer cannot
+// slip past the pairwise compatibility window.
+const maxProtocolVersion uint32 = 1024
+
 func validateRemoteVersion(
 	remote node.VersionPayloadV1,
 	localProtocolVersion uint32,
@@ -131,6 +139,9 @@ func validateRemoteVersion(
 	case remote.ProtocolVersion == 0:
 		state.LastError = "invalid protocol_version"
 		return errors.New("invalid protocol_version")
+	case remote.ProtocolVersion > maxProtocolVersion:
+		state.LastError = fmt.Sprintf("protocol_version %d exceeds max %d", remote.ProtocolVersion, maxProtocolVersion)
+		return fmt.Errorf("protocol_version %d exceeds max %d", remote.ProtocolVersion, maxProtocolVersion)
 	case !protocolVersionsCompatible(localProtocolVersion, remote.ProtocolVersion):
 		state.LastError = fmt.Sprintf("protocol_version mismatch: local=%d remote=%d", localProtocolVersion, remote.ProtocolVersion)
 		return fmt.Errorf("protocol_version mismatch: local=%d remote=%d", localProtocolVersion, remote.ProtocolVersion)
