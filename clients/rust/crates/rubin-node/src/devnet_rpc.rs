@@ -405,6 +405,10 @@ fn read_http_error_response(err: &str) -> HttpResponse {
         "invalid request headers" => (400, "invalid request headers"),
         "malformed header" => (400, "malformed header"),
         "malformed HTTP version" => (400, "malformed HTTP version"),
+        "missing request line" => (400, "missing request line"),
+        "missing method" => (400, "missing method"),
+        "missing target" => (400, "missing target"),
+        "missing http version" => (400, "missing http version"),
         _ => (400, "invalid request"),
     };
     let body = serde_json::to_vec(&SubmitTxResponse {
@@ -3673,6 +3677,10 @@ mod tests {
             ("invalid request headers", 400, "invalid request headers"),
             ("malformed header", 400, "malformed header"),
             ("malformed HTTP version", 400, "malformed HTTP version"),
+            ("missing request line", 400, "missing request line"),
+            ("missing method", 400, "missing method"),
+            ("missing target", 400, "missing target"),
+            ("missing http version", 400, "missing http version"),
             ("unexpected eof", 400, "invalid request"),
         ];
         for (err, expected_status, expected_error) in cases {
@@ -3799,6 +3807,22 @@ mod tests {
         assert_eq!(
             json.get("error").and_then(Value::as_str),
             Some("unsupported transfer-encoding")
+        );
+    }
+
+    #[test]
+    fn handle_connection_returns_400_json_for_empty_request_target() {
+        // Double space after method yields an empty request-target after the
+        // two `split_once(' ')` calls in `read_http_request`. Before the
+        // structured-error mapping was extended to the request-line classes,
+        // this collapsed to the generic `"invalid request"` JSON; now it
+        // preserves the specific `"missing target"` class on the wire.
+        let request = b"POST  HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let (status, _reason, json) = handle_connection_roundtrip(request);
+        assert_eq!(status, 400);
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("missing target")
         );
     }
 
