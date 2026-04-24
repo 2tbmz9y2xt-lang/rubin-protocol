@@ -622,9 +622,10 @@ func TestDevnetRPCSubmitTxRejectsTrailingGarbageAfterBufferedWindow(t *testing.T
 	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, false)))
 	defer server.Close()
 
-	// The decoder's internal buffer is a few KiB; 512 KiB of whitespace is
-	// guaranteed to push the trailing 'x' past dec.Buffered() into the raw
-	// body stream.
+	// 512 KiB of whitespace is chosen to exceed typical json.Decoder buffering
+	// while remaining well below the 2 MiB body cap, so the trailing 'x' is
+	// expected to be read from the underlying body stream rather than only from
+	// dec.Buffered().
 	payload := `{"tx_hex":"00"}` + strings.Repeat(" ", 512*1024) + "x"
 	resp, err := http.Post(server.URL+"/submit_tx", "application/json", strings.NewReader(payload))
 	if err != nil {

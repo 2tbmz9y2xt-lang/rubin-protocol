@@ -453,12 +453,15 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req submitTxRequest
-	defer r.Body.Close()
 	// http.MaxBytesReader enforces maxBodyBytes for chunked / unknown-length
 	// bodies as well. When the limit is exceeded the wrapped reader surfaces
 	// a *http.MaxBytesError, which lets us return 413 instead of collapsing
 	// an oversized body into a generic "invalid JSON body" 400.
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	// Defer the Close AFTER the MaxBytesReader wrap so the deferred call
+	// targets the wrapped reader (any wrapper-specific Close behavior runs,
+	// and the close aligns with what dec / drainSubmitTxBody actually read).
+	defer r.Body.Close()
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&req); err != nil {
 		respondSubmitTxBodyError(state, route, w, err)
