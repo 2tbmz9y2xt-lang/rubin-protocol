@@ -14,6 +14,11 @@ use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+// Per-line cap for chunk-size and trailer lines: matches Go's
+// `src/net/http/internal/chunked.go` `maxLineLength = 4096`. Go rejects
+// `len(p) >= maxLineLength` after `trimTrailingWhitespace`, so we use `>=`
+// as well — a 4095-byte line is the largest accepted.
+const MAX_CHUNK_LINE_BYTES: usize = 4096;
 const MAX_CONCURRENT_RPC_CONNS: usize = 8;
 
 pub type AnnounceTxFn =
@@ -1586,19 +1591,20 @@ fn read_chunked_body(
         // as malformed rather than allowed to grow unbounded.
         let size_end = loop {
             if let Some(rel) = find_crlf(&buf[pos..]) {
-                // Enforce per-line cap BEFORE accepting the terminator —
-                // a crossing read can deliver the byte that pushes the line
-                // past MAX_HEADER_BYTES together with the CRLF in the same
-                // syscall, where the post-read cap below has not fired yet.
-                // Matches Go's `readChunkLine` which rejects
-                // `len(p) >= maxLineLength` after stripping CRLF
-                // (src/net/http/internal/chunked.go:180-182).
-                if rel > MAX_HEADER_BYTES {
+                // Enforce per-line cap BEFORE accepting the terminator. A
+                // crossing read can deliver the byte that pushes the line
+                // over the cap together with the CRLF in the same syscall,
+                // where the post-read cap below has not fired yet. Matches
+                // Go's `readChunkLine` which rejects
+                // `len(p) >= maxLineLength` after `trimTrailingWhitespace`
+                // (src/net/http/internal/chunked.go:19, 180-182) where
+                // `maxLineLength = 4096`.
+                if rel >= MAX_CHUNK_LINE_BYTES {
                     return Err("invalid chunk size".to_string());
                 }
                 break pos + rel;
             }
-            if buf.len() - pos > MAX_HEADER_BYTES {
+            if buf.len() - pos >= MAX_CHUNK_LINE_BYTES {
                 return Err("invalid chunk size".to_string());
             }
             let read = stream
@@ -1679,8 +1685,9 @@ fn read_chunked_body(
                         return Ok(body);
                     }
                     // Per-line cap before accepting the terminator (same
-                    // crossing-read guard as the chunk-size loop above).
-                    if rel > MAX_HEADER_BYTES {
+                    // crossing-read guard as the chunk-size loop above,
+                    // same Go `readChunkLine` `maxLineLength = 4096` limit).
+                    if rel >= MAX_CHUNK_LINE_BYTES {
                         return Err("invalid chunked body".to_string());
                     }
                     // Trailer lines are HTTP header fields per RFC 7230 §4.1.
@@ -1718,7 +1725,7 @@ fn read_chunked_body(
                     pos += rel + 2;
                     continue;
                 }
-                if buf.len() - pos > MAX_HEADER_BYTES {
+                if buf.len() - pos >= MAX_CHUNK_LINE_BYTES {
                     return Err("invalid chunked body".to_string());
                 }
                 let read = stream
@@ -3340,19 +3347,18 @@ mod tests {
     }
 
     #[test]
-    fn read_http_request_rejects_chunk_size_line_terminated_just_over_cap() {
-        // A chunk-size line (with a valid large chunk_size so the Go-style
-        // excess counter allowance cannot reject it first) whose CRLF
-        // arrives at MAX_HEADER_BYTES + 1 must be rejected. Pre-break cap
-        // is required because the post-read `buf.len() - pos > MAX_HEADER_
-        // BYTES` guard does NOT fire when the CRLF and the byte that
-        // crossed the cap arrive in the same read. Matches Go's
-        // `readChunkLine` `len(p) >= maxLineLength` post-CRLF check.
-        let chunk_hex = "1000000"; // 16 MiB — large enough that the excess
-                                   // allowance `16 + 2 * 16 MiB` dwarfs any
-                                   // size-line overhead under the 16 KiB
-                                   // CHUNK_EXCESS_LIMIT.
-        let ext_len = super::MAX_HEADER_BYTES - chunk_hex.len() - ";ext=".len() + 1;
+    fn read_http_request_rejects_chunk_size_line_at_go_max_line_length() {
+        // Go `src/net/http/internal/chunked.go:19,180-182`:
+        //   const maxLineLength = 4096
+        //   if len(p) >= maxLineLength { return nil, ErrLineTooLong }
+        // (where `p` is the chunk-size line after `trimTrailingWhitespace`).
+        // We mirror this with `MAX_CHUNK_LINE_BYTES = 4096` and a `>=`
+        // check. A chunk-size line of exactly 4096 bytes before CRLF must
+        // be rejected. The chunk_size hex itself is kept small (1 byte) so
+        // the excess-overhead counter (16 KiB cap) cannot reject first on
+        // a single such chunk.
+        let chunk_hex = "1";
+        let ext_len = super::MAX_CHUNK_LINE_BYTES - chunk_hex.len() - ";ext=".len();
         let ext = "a".repeat(ext_len);
         let raw = format!(
             "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n{chunk_hex};ext={ext}\r\nx\r\n0\r\n\r\n"
@@ -3361,6 +3367,22 @@ mod tests {
             read_request_from_bytes(raw.as_bytes()).unwrap_err(),
             "invalid chunk size"
         );
+    }
+
+    #[test]
+    fn read_http_request_accepts_chunk_size_line_at_largest_go_allowed_length() {
+        // Largest Go-accepted length is `maxLineLength - 1 = 4095` bytes
+        // before CRLF. Must still be accepted here so legal boundary
+        // extensions are not rejected.
+        let chunk_hex = "1";
+        let ext_len = super::MAX_CHUNK_LINE_BYTES - chunk_hex.len() - ";ext=".len() - 1;
+        let ext = "a".repeat(ext_len);
+        let raw = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n{chunk_hex};ext={ext}\r\nx\r\n0\r\n\r\n"
+        );
+        let req = read_request_from_bytes(raw.as_bytes())
+            .expect("chunk-size line at MAX_CHUNK_LINE_BYTES - 1 accepted");
+        assert_eq!(req.body, b"x");
     }
 
     #[test]
