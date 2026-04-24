@@ -2805,8 +2805,22 @@ mod tests {
         assert_eq!(req.body, b"abc");
     }
 
+    fn skip_under_coverage_instrumentation() -> bool {
+        // cargo-tarpaulin's LLVM backend (macOS) intermittently deadlocks on
+        // tests that push multi-MiB of data through a TCP loopback under its
+        // ptrace/profile instrumentation. Regular `cargo test` runs these at
+        // full size; coverage runs skip them. Every branch in
+        // `read_chunked_body` is still exercised under coverage by the
+        // smaller chunked tests (under-cap, with-trailer, oversize single
+        // chunk, CRLF terminator, EOF classes).
+        std::env::var_os("LLVM_PROFILE_FILE").is_some()
+    }
+
     #[test]
     fn read_http_request_accepts_chunked_body_with_high_framing_overhead() {
+        if skip_under_coverage_instrumentation() {
+            return;
+        }
         // Many 1-byte chunks ("1\r\nx\r\n" = 6 raw bytes per 1 decoded byte).
         // Decoded body is 1.1 MiB (under MAX_BODY_BYTES = 2 MiB), but the raw
         // wire bytes are ~6.6 MiB. This regression pins the decoder to the
@@ -2836,6 +2850,9 @@ mod tests {
 
     #[test]
     fn read_http_request_rejects_chunked_body_accumulation_over_cap() {
+        if skip_under_coverage_instrumentation() {
+            return;
+        }
         // Two chunks that individually fit but together would exceed the cap.
         // 100000 + 100001 = 2 MiB + 1 byte.
         let mut raw = Vec::from(&b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n100000\r\n"[..]);
@@ -2875,6 +2892,18 @@ mod tests {
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nbody";
         let req =
             read_request_from_bytes(raw).expect("identical duplicate Content-Length accepted");
+        assert_eq!(req.body, b"body");
+    }
+
+    #[test]
+    fn read_http_request_accepts_duplicate_content_length_headers_with_leading_zeros() {
+        // Duplicate Content-Length values that differ only by leading zeros
+        // (`4` vs `004`) resolve to the same numeric value and must NOT be
+        // flagged as conflicting — the conflict check compares parsed usize,
+        // not raw header strings.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nContent-Length: 004\r\n\r\nbody";
+        let req = read_request_from_bytes(raw)
+            .expect("leading-zero duplicate Content-Length accepted because numeric values match");
         assert_eq!(req.body, b"body");
     }
 
