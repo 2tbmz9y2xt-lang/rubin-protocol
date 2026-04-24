@@ -370,6 +370,7 @@ fn read_http_error_response(err: &str) -> HttpResponse {
         "conflicting transfer-encoding and content-length" => {
             (400, "conflicting transfer-encoding and content-length")
         }
+        "conflicting Content-Length" => (400, "conflicting Content-Length"),
         "unsupported transfer-encoding" => (400, "unsupported transfer-encoding"),
         "invalid chunk size" | "invalid chunk terminator" | "invalid chunked body" => {
             (400, "invalid chunked body")
@@ -1417,7 +1418,17 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
                 .trim()
                 .parse::<usize>()
                 .map_err(|_| "invalid Content-Length".to_string())?;
-            content_length = Some(parsed);
+            // RFC 7230 §3.3.2: a request that carries multiple Content-Length
+            // headers with differing values is ambiguous and must be rejected
+            // to prevent request smuggling. Identical duplicates are accepted
+            // to match Go's net/http permissive behavior on duplicate-but-
+            // consistent headers.
+            match content_length {
+                Some(existing) if existing != parsed => {
+                    return Err("conflicting Content-Length".to_string());
+                }
+                _ => content_length = Some(parsed),
+            }
         } else if name_trimmed.eq_ignore_ascii_case("transfer-encoding") {
             // Only "chunked" is supported; anything else is rejected so we
             // never read a body under a framing we cannot decode correctly.
@@ -1527,9 +1538,13 @@ fn read_chunked_body(
 
         if chunk_size == 0 {
             // Last-chunk marker. Consume optional trailer headers until the
-            // empty line that terminates the message, then return. A single
+            // empty line that terminates the message. EOF before the
+            // terminating empty-line CRLF is rejected as malformed framing to
+            // match Go's net/http chunked reader (which returns
+            // io.ErrUnexpectedEOF); this also keeps parity with this module's
+            // strict CRLF check for individual chunk terminators. A single
             // trailer line that grows past MAX_HEADER_BYTES without a CRLF is
-            // treated as malformed.
+            // likewise treated as malformed.
             loop {
                 compact(buf, &mut pos);
                 if let Some(rel) = find_crlf(&buf[pos..]) {
@@ -1546,9 +1561,7 @@ fn read_chunked_body(
                     .read(temp)
                     .map_err(|err| format!("read trailer: {err}"))?;
                 if read == 0 {
-                    // Lenient: treat EOF after the last chunk as end-of-message
-                    // even if the final CRLF is missing.
-                    return Ok(body);
+                    return Err("invalid chunked body".to_string());
                 }
                 buf.extend_from_slice(&temp[..read]);
             }
@@ -2819,6 +2832,39 @@ mod tests {
     }
 
     #[test]
+    fn read_http_request_rejects_conflicting_content_length_headers() {
+        // RFC 7230 §3.3.2: multiple Content-Length headers with differing
+        // values is a request-smuggling vector and must be rejected.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nContent-Length: 8\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "conflicting Content-Length"
+        );
+    }
+
+    #[test]
+    fn read_http_request_accepts_duplicate_content_length_headers_with_same_value() {
+        // Identical duplicate Content-Length is permissive (matches Go net/http
+        // behaviour). Body must be present and equal to the declared length.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nbody";
+        let req =
+            read_request_from_bytes(raw).expect("identical duplicate Content-Length accepted");
+        assert_eq!(req.body, b"body");
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunked_body_eof_before_final_crlf() {
+        // Matches Go net/http chunked reader: EOF after the last-chunk marker
+        // without the terminating empty-line CRLF is io.ErrUnexpectedEOF and
+        // returns a 400 framing error on this path.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunked body"
+        );
+    }
+
+    #[test]
     fn read_http_request_rejects_unsupported_transfer_encoding() {
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n";
         assert_eq!(
@@ -2856,6 +2902,11 @@ mod tests {
                 "conflicting transfer-encoding and content-length",
                 400,
                 "conflicting transfer-encoding and content-length",
+            ),
+            (
+                "conflicting Content-Length",
+                400,
+                "conflicting Content-Length",
             ),
             (
                 "unsupported transfer-encoding",
