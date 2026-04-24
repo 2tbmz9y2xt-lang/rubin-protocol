@@ -390,6 +390,7 @@ fn read_http_error_response(err: &str) -> HttpResponse {
         "invalid Content-Length" => (400, "invalid Content-Length"),
         "invalid request headers" => (400, "invalid request headers"),
         "malformed header" => (400, "malformed header"),
+        "malformed HTTP version" => (400, "malformed HTTP version"),
         _ => (400, "invalid request"),
     };
     let body = serde_json::to_vec(&SubmitTxResponse {
@@ -1415,18 +1416,35 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     let request_line = lines
         .next()
         .ok_or_else(|| "missing request line".to_string())?;
-    let mut request_parts = request_line.split_whitespace();
-    let method = request_parts
-        .next()
-        .ok_or_else(|| "missing method".to_string())?
-        .to_string();
-    let target = request_parts
-        .next()
-        .ok_or_else(|| "missing target".to_string())?
-        .to_string();
-    let _version = request_parts
-        .next()
+    // Go `src/net/http/request.go parseRequestLine` uses exactly two
+    // `strings.Cut(line, " ")` on single spaces, so the proto segment is
+    // the FULL remainder after the second cut (not a third whitespace
+    // token). That lets `ParseHTTPVersion` reject both trailing junk
+    // (`"HTTP/1.1 EXTRA"`) and multi-space-separated requests
+    // (`"POST  /submit_tx HTTP/1.1"` → method="POST", rest=" /submit_tx …",
+    // target="", version="/submit_tx HTTP/1.1" → malformed). Mirror that
+    // here via `split_once(' ')` — whitespace other than a single ASCII
+    // space is NOT a token separator.
+    let (method, rest) = request_line
+        .split_once(' ')
+        .ok_or_else(|| "missing target".to_string())?;
+    let (target, version) = rest
+        .split_once(' ')
         .ok_or_else(|| "missing http version".to_string())?;
+    if method.is_empty() {
+        return Err("missing method".to_string());
+    }
+    let method = method.to_string();
+    let target = target.to_string();
+    // Go `src/net/http/request.go readRequest` calls `ParseHTTPVersion` and
+    // returns `badStringError("malformed HTTP version", req.Proto)` when
+    // the result is not ok, so the handler never runs on a malformed
+    // version string. Mirror that: reject outright on malformed shape,
+    // then use `protoAtLeast(1, 1)` to gate Transfer-Encoding parsing per
+    // `src/net/http/transfer.go parseTransferEncoding` (Issue 12785 — TE is
+    // silently ignored on HTTP/1.0 but still processed on HTTP/1.1+).
+    let (proto_major, proto_minor) = parse_http_version(version)?;
+    let http_proto_at_least_11 = proto_major > 1 || (proto_major == 1 && proto_minor >= 1);
 
     let mut content_length: Option<usize> = None;
     let mut content_length_raw: Option<String> = None;
@@ -1479,6 +1497,13 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
             content_length_raw = Some(value_trimmed.to_string());
             content_length = Some(parsed);
         } else if name_trimmed.eq_ignore_ascii_case("transfer-encoding") {
+            if !http_proto_at_least_11 {
+                // Pre-HTTP/1.1 request: ignore Transfer-Encoding per Go
+                // `parseTransferEncoding` (src/net/http/transfer.go). The
+                // header is silently dropped so the request falls through
+                // to the Content-Length-or-empty body path.
+                continue;
+            }
             // Matches Go net/http readTransfer: more than one Transfer-Encoding
             // header is rejected as `too many transfer encodings`, regardless
             // of whether both values are `chunked`. Accepting duplicates would
@@ -1548,10 +1573,11 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 // MAX_BODY_BYTES to match the Go `/submit_tx` cap; any chunk (or accumulation
 // of chunks) that would push the *decoded* body past the cap returns
 // `Err("body too large")`, which handle_connection translates into a 413 JSON
-// response. After each chunk segment is consumed the parser drains the raw
-// buffer to keep retained state bounded by one chunk-size or trailer line
-// (≤ MAX_HEADER_BYTES) plus at most one chunk-data window; this prevents a
-// tiny-chunk DoS without rejecting valid high-overhead chunked bodies whose
+// response. The parser compacts the raw buffer on an amortized basis rather
+// than draining it after every chunk segment, but retained unread state stays
+// bounded to the current parse window: at most one chunk-size or trailer line
+// (< MAX_CHUNK_LINE_BYTES) plus at most one chunk-data window. This prevents
+// a tiny-chunk DoS without rejecting valid high-overhead chunked bodies whose
 // decoded size is still below the cap.
 //
 // In addition to the decoded-body cap, the decoder tracks a Go-style
@@ -1769,6 +1795,35 @@ fn read_chunked_body(
 
 fn find_crlf(slice: &[u8]) -> Option<usize> {
     slice.windows(2).position(|w| w == b"\r\n")
+}
+
+// Parses the HTTP request-line version string to `(major, minor)`.
+// Mirrors Go's `ParseHTTPVersion` (`src/net/http/request.go`): only the
+// exact 8-byte form `"HTTP/X.Y"` with single-digit major and minor is
+// accepted. Any deviation (length mismatch, missing `HTTP/` prefix,
+// missing `.` separator, non-digit byte) returns
+// `Err("malformed HTTP version")`, which `read_http_error_response`
+// maps to a 400 JSON body — matching Go's
+// `badStringError("malformed HTTP version", req.Proto)` reject-before-
+// handler path.
+fn parse_http_version(version: &str) -> Result<(u8, u8), String> {
+    // "HTTP/X.Y" is exactly 8 ASCII bytes.
+    if version.len() != 8 {
+        return Err("malformed HTTP version".to_string());
+    }
+    let bytes = version.as_bytes();
+    if &bytes[..5] != b"HTTP/" || bytes[6] != b'.' {
+        return Err("malformed HTTP version".to_string());
+    }
+    let maj = match bytes[5] {
+        b'0'..=b'9' => bytes[5] - b'0',
+        _ => return Err("malformed HTTP version".to_string()),
+    };
+    let min = match bytes[7] {
+        b'0'..=b'9' => bytes[7] - b'0',
+        _ => return Err("malformed HTTP version".to_string()),
+    };
+    Ok((maj, min))
 }
 
 // RFC 7230 §3.2.6 token: any VCHAR except delimiters.
@@ -3419,6 +3474,95 @@ mod tests {
     }
 
     #[test]
+    fn read_http_request_ignores_transfer_encoding_on_http_1_0() {
+        // Go `src/net/http/transfer.go parseTransferEncoding` returns early
+        // for `!protoAtLeast(1, 1)`, so an HTTP/1.0 request with
+        // `Transfer-Encoding: chunked` is NOT decoded as chunked. Mirror
+        // that here: the TE header is ignored and the body falls through to
+        // the Content-Length-or-empty path (no CL here → zero-length body).
+        let raw =
+            b"POST /submit_tx HTTP/1.0\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let req =
+            read_request_from_bytes(raw).expect("HTTP/1.0 TE:chunked accepted with empty body");
+        assert_eq!(req.method, "POST");
+        assert!(req.body.is_empty());
+    }
+
+    #[test]
+    fn read_http_request_processes_transfer_encoding_on_http_1_1() {
+        // Sanity: HTTP/1.1 with TE:chunked continues to decode chunked.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+        let req = read_request_from_bytes(raw).expect("HTTP/1.1 TE:chunked decoded as chunked");
+        assert_eq!(req.body, b"abc");
+    }
+
+    #[test]
+    fn read_http_request_rejects_malformed_http_version() {
+        // Go `readRequest` (src/net/http/request.go) returns
+        // `badStringError("malformed HTTP version", req.Proto)` when
+        // `ParseHTTPVersion` rejects the version string — the handler
+        // never runs. Mirror that: `parse_http_version` returns
+        // `Err("malformed HTTP version")` for the multi-digit form
+        // `HTTP/1.10`, which maps to 400 JSON at the handler boundary.
+        let raw =
+            b"POST /submit_tx HTTP/1.10\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "malformed HTTP version"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_malformed_http_version_leading_zero() {
+        // `HTTP/01.1` is 9 bytes → length check rejects.
+        let raw = b"POST /submit_tx HTTP/01.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "malformed HTTP version"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_malformed_http_version_non_digit() {
+        // `HTTP/1.A` has the right shape but a non-digit minor → rejected.
+        let raw = b"POST /submit_tx HTTP/1.A\r\nHost: localhost\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "malformed HTTP version"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_request_line_with_extra_trailing_token() {
+        // Go `parseRequestLine` does two single-space cuts, so the proto
+        // segment is the full remainder and `ParseHTTPVersion` rejects
+        // `"HTTP/1.1 EXTRA"`. We mirror that by splitting on exactly one
+        // space twice and passing the whole proto remainder to
+        // `parse_http_version`, which rejects the 14-byte string.
+        let raw = b"POST /submit_tx HTTP/1.1 EXTRA\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "malformed HTTP version"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_request_line_with_double_space_after_method() {
+        // Double space after method collapses differently in Go vs. in
+        // `split_whitespace`: Go keeps the empty target token and the
+        // proto becomes `"/submit_tx HTTP/1.1"`. That is rejected by
+        // `ParseHTTPVersion`. We mirror exactly — the second
+        // `split_once(' ')` yields `target=""` and `version="/submit_tx
+        // HTTP/1.1"`, which `parse_http_version` rejects on the
+        // non-`HTTP/` prefix.
+        let raw = b"POST  /submit_tx HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "malformed HTTP version"
+        );
+    }
+
+    #[test]
     fn read_http_request_rejects_duplicate_transfer_encoding() {
         // Matches Go net/http readTransfer: two Transfer-Encoding headers is
         // `too many transfer encodings`, even when both values are `chunked`.
@@ -3483,6 +3627,7 @@ mod tests {
             ("invalid Content-Length", 400, "invalid Content-Length"),
             ("invalid request headers", 400, "invalid request headers"),
             ("malformed header", 400, "malformed header"),
+            ("malformed HTTP version", 400, "malformed HTTP version"),
             ("unexpected eof", 400, "invalid request"),
         ];
         for (err, expected_status, expected_error) in cases {
