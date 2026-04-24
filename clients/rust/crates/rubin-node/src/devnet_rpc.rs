@@ -349,9 +349,38 @@ fn handle_connection(mut stream: TcpStream, state: &DevnetRPCState) -> Result<()
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|err| format!("set_write_timeout: {err}"))?;
-    let req = read_http_request(&mut stream)?;
+    // Translate recognised request-framing errors into structured HTTP
+    // responses so callers see the same 413/400 surface that the Go devnet
+    // RPC emits (parity with the #1148 Go-first slice merged as PR #1279).
+    // Anything unrecognised falls through to a generic 400 "invalid request".
+    let req = match read_http_request(&mut stream) {
+        Ok(req) => req,
+        Err(err) => {
+            let response = read_http_error_response(&err);
+            return write_http_response(&mut stream, response);
+        }
+    };
     let response = route_request(state, req);
     write_http_response(&mut stream, response)
+}
+
+fn read_http_error_response(err: &str) -> HttpResponse {
+    let (status, message) = match err {
+        "body too large" | "request too large" => (413, "request body too large"),
+        "conflicting transfer-encoding and content-length" => {
+            (400, "conflicting transfer-encoding and content-length")
+        }
+        "unsupported transfer-encoding" => (400, "unsupported transfer-encoding"),
+        "invalid chunk size" | "invalid chunk terminator" => (400, "invalid chunked body"),
+        _ => (400, "invalid request"),
+    };
+    let body = serde_json::to_vec(&SubmitTxResponse {
+        accepted: false,
+        txid: None,
+        error: Some(message.to_string()),
+    })
+    .unwrap_or_else(|_| b"{\"accepted\":false,\"error\":\"invalid request\"}".to_vec());
+    HttpResponse::plain(status, "application/json", body)
 }
 
 fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
@@ -1371,7 +1400,8 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         .next()
         .ok_or_else(|| "missing http version".to_string())?;
 
-    let mut content_length = 0usize;
+    let mut content_length: Option<usize> = None;
+    let mut is_chunked = false;
     for line in lines {
         if line.is_empty() {
             continue;
@@ -1379,18 +1409,45 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         let Some((name, value)) = line.split_once(':') else {
             return Err("malformed header".to_string());
         };
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            content_length = value
+        let name_trimmed = name.trim();
+        if name_trimmed.eq_ignore_ascii_case("content-length") {
+            let parsed = value
                 .trim()
                 .parse::<usize>()
                 .map_err(|_| "invalid Content-Length".to_string())?;
+            content_length = Some(parsed);
+        } else if name_trimmed.eq_ignore_ascii_case("transfer-encoding") {
+            // Only "chunked" is supported; anything else is rejected so we
+            // never read a body under a framing we cannot decode correctly.
+            if !value.trim().eq_ignore_ascii_case("chunked") {
+                return Err("unsupported transfer-encoding".to_string());
+            }
+            is_chunked = true;
         }
     }
+    // RFC 7230 §3.3.3: a request that carries both Transfer-Encoding and
+    // Content-Length is ambiguous and must be rejected to prevent request
+    // smuggling.
+    if is_chunked && content_length.is_some() {
+        return Err("conflicting transfer-encoding and content-length".to_string());
+    }
+
+    let body_start = header_end + 4;
+
+    if is_chunked {
+        let body = read_chunked_body(&mut buf, stream, body_start, &mut temp)?;
+        return Ok(HttpRequest {
+            method,
+            target,
+            body,
+        });
+    }
+
+    let content_length = content_length.unwrap_or(0);
     if content_length > MAX_BODY_BYTES {
         return Err("body too large".to_string());
     }
 
-    let body_start = header_end + 4;
     while buf.len() < body_start + content_length {
         let read = stream
             .read(&mut temp)
@@ -1409,6 +1466,103 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
         target,
         body,
     })
+}
+
+// read_chunked_body decodes an HTTP/1.1 `Transfer-Encoding: chunked` body
+// from a stream into a flat Vec<u8>. The returned body is capped at
+// MAX_BODY_BYTES; any chunk (or accumulation of chunks) that would push the
+// decoded body past the cap returns `Err("body too large")`, which
+// handle_connection translates into a 413 JSON response. Raw on-wire bytes
+// are bounded by `MAX_HEADER_BYTES + 3 * MAX_BODY_BYTES` so a tiny-chunk DoS
+// cannot force unbounded buffer growth.
+fn read_chunked_body(
+    buf: &mut Vec<u8>,
+    stream: &mut TcpStream,
+    mut start: usize,
+    temp: &mut [u8],
+) -> Result<Vec<u8>, String> {
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        // Wait for the CRLF that terminates the chunk-size line, reading
+        // more bytes from the stream as needed.
+        let size_end = loop {
+            if let Some(pos) = find_crlf(&buf[start..]) {
+                break start + pos;
+            }
+            let read = stream
+                .read(temp)
+                .map_err(|err| format!("read chunk size: {err}"))?;
+            if read == 0 {
+                return Err("unexpected eof".to_string());
+            }
+            buf.extend_from_slice(&temp[..read]);
+            if buf.len() > MAX_HEADER_BYTES + 3 * MAX_BODY_BYTES {
+                return Err("request too large".to_string());
+            }
+        };
+        let size_text = std::str::from_utf8(&buf[start..size_end])
+            .map_err(|_| "invalid chunk size".to_string())?;
+        // Strip optional chunk extensions after ';'.
+        let size_hex = size_text.split(';').next().unwrap_or("").trim();
+        let chunk_size =
+            usize::from_str_radix(size_hex, 16).map_err(|_| "invalid chunk size".to_string())?;
+        start = size_end + 2;
+
+        if chunk_size == 0 {
+            // Last-chunk marker. Consume optional trailer headers until the
+            // empty line that terminates the message, then return.
+            loop {
+                if let Some(pos) = find_crlf(&buf[start..]) {
+                    if pos == 0 {
+                        return Ok(body);
+                    }
+                    start += pos + 2;
+                    continue;
+                }
+                let read = stream
+                    .read(temp)
+                    .map_err(|err| format!("read trailer: {err}"))?;
+                if read == 0 {
+                    // Lenient: treat EOF after the last chunk as end-of-message
+                    // even if the final CRLF is missing.
+                    return Ok(body);
+                }
+                buf.extend_from_slice(&temp[..read]);
+                if buf.len() > MAX_HEADER_BYTES + 3 * MAX_BODY_BYTES {
+                    return Err("request too large".to_string());
+                }
+            }
+        }
+
+        // Enforce the body cap BEFORE reading or allocating chunk bytes so a
+        // single oversized chunk does not trigger an OOM-sized allocation.
+        if chunk_size > MAX_BODY_BYTES.saturating_sub(body.len()) {
+            return Err("body too large".to_string());
+        }
+
+        let chunk_end = start + chunk_size + 2; // +2 for trailing CRLF
+        while buf.len() < chunk_end {
+            let read = stream
+                .read(temp)
+                .map_err(|err| format!("read chunk data: {err}"))?;
+            if read == 0 {
+                return Err("unexpected eof".to_string());
+            }
+            buf.extend_from_slice(&temp[..read]);
+            if buf.len() > MAX_HEADER_BYTES + 3 * MAX_BODY_BYTES {
+                return Err("request too large".to_string());
+            }
+        }
+        if buf[start + chunk_size] != b'\r' || buf[start + chunk_size + 1] != b'\n' {
+            return Err("invalid chunk terminator".to_string());
+        }
+        body.extend_from_slice(&buf[start..start + chunk_size]);
+        start = chunk_end;
+    }
+}
+
+fn find_crlf(slice: &[u8]) -> Option<usize> {
+    slice.windows(2).position(|w| w == b"\r\n")
 }
 
 fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<(), String> {
@@ -1501,6 +1655,7 @@ fn status_text(status: u16) -> &'static str {
         400 => "Bad Request",
         404 => "Not Found",
         409 => "Conflict",
+        413 => "Request Entity Too Large",
         422 => "Unprocessable Entity",
         503 => "Service Unavailable",
         _ => "Unknown",
@@ -1544,10 +1699,10 @@ mod tests {
     };
 
     use super::{
-        decode_hex_payload, new_devnet_rpc_state, new_devnet_rpc_state_with_tx_pool,
-        new_shared_runtime_tx_pool, parse_hex32, parse_query_map, read_http_request,
-        render_prometheus_metrics, route_request, split_target, start_devnet_rpc_server,
-        status_text, HttpRequest,
+        decode_hex_payload, handle_connection, new_devnet_rpc_state,
+        new_devnet_rpc_state_with_tx_pool, new_shared_runtime_tx_pool, parse_hex32,
+        parse_query_map, read_http_error_response, read_http_request, render_prometheus_metrics,
+        route_request, split_target, start_devnet_rpc_server, status_text, HttpRequest,
     };
 
     fn build_state(with_genesis: bool) -> (super::DevnetRPCState, PathBuf) {
@@ -2572,6 +2727,213 @@ mod tests {
         assert_eq!(
             read_request_from_bytes(oversized_header.as_bytes()).unwrap_err(),
             "headers too large"
+        );
+    }
+
+    #[test]
+    fn read_http_request_accepts_chunked_body_under_cap() {
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n5\r\n-more\r\n0\r\n\r\n";
+        let req = read_request_from_bytes(raw).expect("chunked body accepted");
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.target, "/submit_tx");
+        assert_eq!(req.body, b"data-more");
+    }
+
+    #[test]
+    fn read_http_request_accepts_chunked_body_with_trailer() {
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nX-Trace-Id: 42\r\n\r\n";
+        let req = read_request_from_bytes(raw).expect("chunked body with trailer accepted");
+        assert_eq!(req.body, b"abc");
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunked_body_over_cap() {
+        // chunk size 0x200001 = MAX_BODY_BYTES + 1, rejected before the data
+        // slice is even read so there is no allocation cliff.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n200001\r\n";
+        assert_eq!(read_request_from_bytes(raw).unwrap_err(), "body too large");
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunked_body_accumulation_over_cap() {
+        // Two chunks that individually fit but together would exceed the cap.
+        // 100000 + 100001 = 2 MiB + 1 byte.
+        let mut raw = Vec::from(&b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n100000\r\n"[..]);
+        raw.extend(std::iter::repeat_n(b'a', 0x100000));
+        raw.extend_from_slice(b"\r\n100001\r\n");
+        raw.extend(std::iter::repeat_n(b'b', 0x100001));
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(read_request_from_bytes(&raw).unwrap_err(), "body too large");
+    }
+
+    #[test]
+    fn read_http_request_rejects_chunked_and_content_length_conflict() {
+        // RFC 7230 §3.3.3: both framings present MUST be rejected to prevent
+        // request smuggling.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "conflicting transfer-encoding and content-length"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_unsupported_transfer_encoding() {
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "unsupported transfer-encoding"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_invalid_chunk_size() {
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunk size"
+        );
+    }
+
+    #[test]
+    fn read_http_request_rejects_invalid_chunk_terminator() {
+        // Chunk size "4" promises 4 data bytes followed by CRLF. Replace the
+        // CRLF with "!!" so the reader sees a mis-framed chunk.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata!!0\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "invalid chunk terminator"
+        );
+    }
+
+    #[test]
+    fn read_http_error_response_maps_classes_to_status_and_json() {
+        let cases = [
+            ("body too large", 413u16, "request body too large"),
+            ("request too large", 413, "request body too large"),
+            (
+                "conflicting transfer-encoding and content-length",
+                400,
+                "conflicting transfer-encoding and content-length",
+            ),
+            (
+                "unsupported transfer-encoding",
+                400,
+                "unsupported transfer-encoding",
+            ),
+            ("invalid chunk size", 400, "invalid chunked body"),
+            ("invalid chunk terminator", 400, "invalid chunked body"),
+            ("unexpected eof", 400, "invalid request"),
+            ("malformed header", 400, "invalid request"),
+        ];
+        for (err, expected_status, expected_error) in cases {
+            let response = read_http_error_response(err);
+            assert_eq!(response.status, expected_status, "err={err}");
+            assert_eq!(response.content_type, "application/json", "err={err}");
+            let json: Value = serde_json::from_slice(&response.body)
+                .unwrap_or_else(|e| panic!("json parse for {err}: {e}"));
+            assert_eq!(
+                json.get("accepted").and_then(Value::as_bool),
+                Some(false),
+                "err={err}"
+            );
+            assert_eq!(
+                json.get("error").and_then(Value::as_str),
+                Some(expected_error),
+                "err={err}"
+            );
+            assert!(json.get("txid").is_none(), "err={err}");
+        }
+    }
+
+    fn handle_connection_roundtrip(raw: &[u8]) -> (u16, String, Value) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (state, _dir) = build_state(false);
+        let payload = raw.to_vec();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            stream.write_all(&payload).expect("write payload");
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("shutdown write");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            let mut response = Vec::new();
+            let _ = stream.read_to_end(&mut response);
+            response
+        });
+        let (server_stream, _) = listener.accept().expect("accept");
+        let _ = handle_connection(server_stream, &state);
+        let response = client.join().expect("join client");
+        let head_end = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response head");
+        let head_text = std::str::from_utf8(&response[..head_end]).expect("response head utf8");
+        let mut head_lines = head_text.split("\r\n");
+        let status_line = head_lines.next().expect("status line");
+        let mut parts = status_line.splitn(3, ' ');
+        parts.next().expect("http version");
+        let status: u16 = parts.next().expect("status code").parse().expect("status");
+        let reason = parts.next().expect("reason phrase").to_string();
+        let body = &response[head_end + 4..];
+        let json: Value = serde_json::from_slice(body).expect("json body");
+        (status, reason, json)
+    }
+
+    #[test]
+    fn handle_connection_returns_413_json_for_content_length_oversize() {
+        let request = format!(
+            "POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            2 * 1024 * 1024 + 1
+        );
+        let (status, reason, json) = handle_connection_roundtrip(request.as_bytes());
+        assert_eq!(status, 413, "status={reason}");
+        assert_eq!(reason, "Request Entity Too Large");
+        assert_eq!(json.get("accepted").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("request body too large")
+        );
+    }
+
+    #[test]
+    fn handle_connection_returns_413_json_for_chunked_oversize() {
+        // 0x200001 = MAX_BODY_BYTES + 1, rejected before any chunk bytes are
+        // allocated.
+        let request = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n200001\r\n";
+        let (status, reason, json) = handle_connection_roundtrip(request);
+        assert_eq!(status, 413, "reason={reason}");
+        assert_eq!(reason, "Request Entity Too Large");
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("request body too large")
+        );
+    }
+
+    #[test]
+    fn handle_connection_returns_400_json_for_conflicting_framing() {
+        let request =
+            b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n";
+        let (status, _reason, json) = handle_connection_roundtrip(request);
+        assert_eq!(status, 400);
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("conflicting transfer-encoding and content-length")
+        );
+    }
+
+    #[test]
+    fn handle_connection_returns_400_json_for_unsupported_transfer_encoding() {
+        let request =
+            b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n";
+        let (status, _reason, json) = handle_connection_roundtrip(request);
+        assert_eq!(status, 400);
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("unsupported transfer-encoding")
         );
     }
 
