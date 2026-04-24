@@ -14,10 +14,24 @@ use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
-// Per-line cap for chunk-size and trailer lines: matches Go's
-// `src/net/http/internal/chunked.go` `maxLineLength = 4096`. Go rejects
-// `len(p) >= maxLineLength` after `trimTrailingWhitespace`, so we use `>=`
-// as well — a 4095-byte line is the largest accepted.
+// Per-line cap for chunk-size and trailer lines.
+//
+// For CHUNK-SIZE lines this matches Go's
+// `src/net/http/internal/chunked.go` `maxLineLength = 4096`: Go rejects
+// `len(p) >= maxLineLength` on the POST-CRLF-strip, PRE-OWS-trim byte
+// length (chunked.go:178-182 — the `trimTrailingWhitespace` call only
+// runs AFTER `readChunkLine` returns, in `chunkedReader.beginChunk`
+// line 54, so it never shortens the length the cap sees). We use `>=`
+// the same way — a 4095-byte line is the largest accepted, even if a
+// trailing SP/HTAB would trim it shorter.
+//
+// For TRAILER lines this is a Rust-local fail-closed bound, not a
+// direct Go parity cap: Go parses trailers via `body.readTrailer`
+// (net/http/transfer.go) which calls `seeUpcomingDoubleCRLF` and then
+// delegates to `textproto.Reader.ReadMIMEHeader` — a different path
+// from `readChunkLine`. Reusing `MAX_CHUNK_LINE_BYTES` here gives the
+// same order-of-magnitude upper bound Go imposes via its MIME header
+// parser without claiming byte-for-byte parity with `readChunkLine`.
 const MAX_CHUNK_LINE_BYTES: usize = 4096;
 const MAX_CONCURRENT_RPC_CONNS: usize = 8;
 
@@ -1434,6 +1448,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     if method.is_empty() {
         return Err("missing method".to_string());
     }
+    // Go `parseRequestLine` returns an empty target on inputs like
+    // `"POST  HTTP/1.1"` but the downstream URL parse (`NewRequest`)
+    // rejects the empty URI as `"parse \"\": empty url"`. We fold the
+    // URL-level rejection into the request-line parse here so the
+    // handler is never reached with an empty target.
+    if target.is_empty() {
+        return Err("missing target".to_string());
+    }
     let method = method.to_string();
     let target = target.to_string();
     // Go `src/net/http/request.go readRequest` calls `ParseHTTPVersion` and
@@ -1613,8 +1635,8 @@ fn read_chunked_body(
     };
     loop {
         // Wait for the CRLF that terminates the chunk-size line. A size line
-        // that grows past MAX_HEADER_BYTES without finding a CRLF is treated
-        // as malformed rather than allowed to grow unbounded.
+        // that grows past MAX_CHUNK_LINE_BYTES without finding a CRLF is
+        // treated as malformed rather than allowed to grow unbounded.
         let size_end = loop {
             if let Some(rel) = find_crlf(&buf[pos..]) {
                 // Enforce per-line cap BEFORE accepting the terminator. A
@@ -1622,9 +1644,14 @@ fn read_chunked_body(
                 // over the cap together with the CRLF in the same syscall,
                 // where the post-read cap below has not fired yet. Matches
                 // Go's `readChunkLine` which rejects
-                // `len(p) >= maxLineLength` after `trimTrailingWhitespace`
-                // (src/net/http/internal/chunked.go:19, 180-182) where
-                // `maxLineLength = 4096`.
+                // `len(p) >= maxLineLength` on the POST-CRLF-strip,
+                // PRE-OWS-trim byte length (`src/net/http/internal/
+                // chunked.go:178-182`). `trimTrailingWhitespace` only runs
+                // AFTER `readChunkLine` returns (in
+                // `chunkedReader.beginChunk` line 54), so the cap check
+                // takes the raw length; a line of 4096 raw bytes with a
+                // trailing OWS is rejected by both Go and Rust, matching
+                // exactly.
                 if rel >= MAX_CHUNK_LINE_BYTES {
                     return Err("invalid chunk size".to_string());
                 }
@@ -1711,8 +1738,14 @@ fn read_chunked_body(
                         return Ok(body);
                     }
                     // Per-line cap before accepting the terminator (same
-                    // crossing-read guard as the chunk-size loop above,
-                    // same Go `readChunkLine` `maxLineLength = 4096` limit).
+                    // crossing-read guard as the chunk-size loop above).
+                    // Go trailer parsing goes through `body.readTrailer`
+                    // (`net/http/transfer.go`) plus
+                    // `textproto.Reader.ReadMIMEHeader`, not
+                    // `readChunkLine` — so this is a Rust-local raw-line
+                    // fail-closed bound sized at `MAX_CHUNK_LINE_BYTES`
+                    // (same constant as the chunk-size cap), not a
+                    // byte-for-byte Go-parity cap.
                     if rel >= MAX_CHUNK_LINE_BYTES {
                         return Err("invalid chunked body".to_string());
                     }
@@ -3403,15 +3436,18 @@ mod tests {
 
     #[test]
     fn read_http_request_rejects_chunk_size_line_at_go_max_line_length() {
-        // Go `src/net/http/internal/chunked.go:19,180-182`:
+        // Go `src/net/http/internal/chunked.go:19,178-182`:
         //   const maxLineLength = 4096
+        //   p = p[:len(p)-2]        // strip CRLF
         //   if len(p) >= maxLineLength { return nil, ErrLineTooLong }
-        // (where `p` is the chunk-size line after `trimTrailingWhitespace`).
-        // We mirror this with `MAX_CHUNK_LINE_BYTES = 4096` and a `>=`
-        // check. A chunk-size line of exactly 4096 bytes before CRLF must
-        // be rejected. The chunk_size hex itself is kept small (1 byte) so
-        // the excess-overhead counter (16 KiB cap) cannot reject first on
-        // a single such chunk.
+        // The cap is measured on the POST-CRLF-strip, PRE-OWS-trim byte
+        // length. `trimTrailingWhitespace` is only applied later in
+        // `chunkedReader.beginChunk` line 54, AFTER `readChunkLine`
+        // returns — so the cap never sees the trimmed length. We mirror
+        // this with `MAX_CHUNK_LINE_BYTES = 4096` and a `>=` check.
+        // A chunk-size line of exactly 4096 bytes before CRLF must be
+        // rejected. The chunk_size hex itself is kept small (1 byte) so
+        // the excess-overhead counter (16 KiB cap) cannot reject first.
         let chunk_hex = "1";
         let ext_len = super::MAX_CHUNK_LINE_BYTES - chunk_hex.len() - ";ext=".len();
         let ext = "a".repeat(ext_len);
@@ -3547,19 +3583,28 @@ mod tests {
     }
 
     #[test]
+    fn read_http_request_rejects_request_line_with_empty_target() {
+        // `"POST  HTTP/1.1"` — double space after method places `target=""`
+        // and `version="HTTP/1.1"` under the two-single-space tokeniser.
+        // `parse_http_version("HTTP/1.1")` is OK, so without the empty-target
+        // guard the handler would see `target == ""` and route it to 404.
+        // Go folds this rejection into the URL parse layer
+        // (`NewRequest("POST", "", ...)` → `parse "": empty url`); we fold
+        // it into the request-line parse here.
+        let raw = b"POST  HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(read_request_from_bytes(raw).unwrap_err(), "missing target");
+    }
+
+    #[test]
     fn read_http_request_rejects_request_line_with_double_space_after_method() {
-        // Double space after method collapses differently in Go vs. in
-        // `split_whitespace`: Go keeps the empty target token and the
-        // proto becomes `"/submit_tx HTTP/1.1"`. That is rejected by
-        // `ParseHTTPVersion`. We mirror exactly — the second
-        // `split_once(' ')` yields `target=""` and `version="/submit_tx
-        // HTTP/1.1"`, which `parse_http_version` rejects on the
-        // non-`HTTP/` prefix.
+        // Double space after method yields `target=""` under the
+        // two-single-space tokeniser. The empty-target guard fires
+        // FIRST (before `parse_http_version` sees the remainder
+        // "/submit_tx HTTP/1.1"), so this case rejects with
+        // `"missing target"` — the earlier / more informative class for
+        // this input.
         let raw = b"POST  /submit_tx HTTP/1.1\r\nHost: localhost\r\n\r\n";
-        assert_eq!(
-            read_request_from_bytes(raw).unwrap_err(),
-            "malformed HTTP version"
-        );
+        assert_eq!(read_request_from_bytes(raw).unwrap_err(), "missing target");
     }
 
     #[test]
