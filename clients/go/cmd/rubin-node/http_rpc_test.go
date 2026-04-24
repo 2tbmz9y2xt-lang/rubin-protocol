@@ -640,8 +640,8 @@ func TestDevnetRPCSubmitTxRejectsTrailingGarbageAfterBufferedWindow(t *testing.T
 // TestDevnetRPCSubmitTxRejectsOversizedChunkedBody covers the previously
 // mis-classified path: a chunked / unknown-length body that exceeds
 // maxBodyBytes must surface as 413, not collapse to "invalid JSON body" 400
-// because the drainSubmitTxBody path truncated the stream before
-// json.Decode.
+// due to the pre-MaxBytesReader body-limiting/reader behavior when the
+// size limit is hit during json.Decode.
 func TestDevnetRPCSubmitTxRejectsOversizedChunkedBody(t *testing.T) {
 	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, false)))
 	defer server.Close()
