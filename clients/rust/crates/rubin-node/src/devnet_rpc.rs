@@ -377,6 +377,7 @@ fn read_http_error_response(err: &str) -> HttpResponse {
         }
         "conflicting Content-Length" => (400, "conflicting Content-Length"),
         "unsupported transfer-encoding" => (400, "unsupported transfer-encoding"),
+        "duplicate Transfer-Encoding" => (400, "duplicate Transfer-Encoding"),
         "invalid chunk size" | "invalid chunk terminator" | "invalid chunked body" => {
             (400, "invalid chunked body")
         }
@@ -1414,6 +1415,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
 
     let mut content_length: Option<usize> = None;
     let mut is_chunked = false;
+    let mut te_seen = false;
     for line in lines {
         if line.is_empty() {
             continue;
@@ -1439,6 +1441,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
                 _ => content_length = Some(parsed),
             }
         } else if name_trimmed.eq_ignore_ascii_case("transfer-encoding") {
+            // Matches Go net/http readTransfer: more than one Transfer-Encoding
+            // header is rejected as `too many transfer encodings`, regardless
+            // of whether both values are `chunked`. Accepting duplicates would
+            // desync Rust from upstream components that reject them.
+            if te_seen {
+                return Err("duplicate Transfer-Encoding".to_string());
+            }
+            te_seen = true;
             // Only "chunked" is supported; anything else is rejected so we
             // never read a body under a framing we cannot decode correctly.
             if !value.trim().eq_ignore_ascii_case("chunked") {
@@ -2916,6 +2926,19 @@ mod tests {
     }
 
     #[test]
+    fn read_http_request_rejects_duplicate_transfer_encoding() {
+        // Matches Go net/http readTransfer: two Transfer-Encoding headers is
+        // `too many transfer encodings`, even when both values are `chunked`.
+        // Accepting this would desync Rust from any upstream component that
+        // enforces the Go rule and open a request-smuggling vector.
+        let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n";
+        assert_eq!(
+            read_request_from_bytes(raw).unwrap_err(),
+            "duplicate Transfer-Encoding"
+        );
+    }
+
+    #[test]
     fn read_http_request_rejects_invalid_chunk_size() {
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nZZZ\r\n";
         assert_eq!(
@@ -2954,6 +2977,11 @@ mod tests {
                 "unsupported transfer-encoding",
                 400,
                 "unsupported transfer-encoding",
+            ),
+            (
+                "duplicate Transfer-Encoding",
+                400,
+                "duplicate Transfer-Encoding",
             ),
             ("invalid chunk size", 400, "invalid chunked body"),
             ("invalid chunk terminator", 400, "invalid chunked body"),
