@@ -532,6 +532,142 @@ func TestDevnetRPCSubmitTxRejectsInvalidTx(t *testing.T) {
 	}
 }
 
+// TestDevnetRPCSubmitTxRejectsOversizedContentLength covers the ContentLength
+// short-circuit path (header advertises oversized body → 413 without reading
+// any bytes).
+func TestDevnetRPCSubmitTxRejectsOversizedContentLength(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, false)))
+	defer server.Close()
+
+	// 3 MiB body exceeds the 2 MiB cap; http.Post sets Content-Length.
+	payload := strings.Repeat("a", 3*1024*1024)
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want 413", resp.StatusCode)
+	}
+}
+
+// TestDevnetRPCSubmitTxRejectsOversizedChunkedTrailingBody covers the
+// post-decode path: a valid short JSON value is followed by enough trailing
+// bytes (on a chunked/unknown-length body) to exceed maxBodyBytes. The
+// drainSubmitTxBody path must classify this as 413, not collapse into a
+// generic 400, because http.MaxBytesReader surfaces *http.MaxBytesError
+// during the io.ReadAll over the combined tail.
+func TestDevnetRPCSubmitTxRejectsOversizedChunkedTrailingBody(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, false)))
+	defer server.Close()
+
+	payload := `{"tx_hex":"00"}` + strings.Repeat("a", 3*1024*1024) // >3 MiB trailer
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/submit_tx", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want 413 (trailing oversize must not collapse to 400)", resp.StatusCode)
+	}
+}
+
+// TestDevnetRPCServerExplicitTimeouts pins the Rust-parity timeout surface on
+// the underlying http.Server so a future edit that drops ReadTimeout /
+// WriteTimeout / IdleTimeout gets caught before landing.
+func TestDevnetRPCServerExplicitTimeouts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := startDevnetRPCServer(ctx, "127.0.0.1:0", mustRPCState(t, false), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("startDevnetRPCServer: %v", err)
+	}
+	if srv == nil || srv.server == nil {
+		t.Fatal("nil server")
+	}
+	defer func() { _ = srv.Close(context.Background()) }()
+
+	if got, want := srv.server.ReadHeaderTimeout, 5*time.Second; got != want {
+		t.Errorf("ReadHeaderTimeout=%v, want %v", got, want)
+	}
+	if got, want := srv.server.ReadTimeout, 10*time.Second; got != want {
+		t.Errorf("ReadTimeout=%v, want %v", got, want)
+	}
+	// WriteTimeout is intentionally zero: Go's WriteTimeout is a
+	// request-scoped total-handler deadline, which would abort long-running
+	// RPCs like /mine_next. See rationale in startDevnetRPCServer.
+	if got := srv.server.WriteTimeout; got != 0 {
+		t.Errorf("WriteTimeout=%v, want 0 (WriteTimeout aborts long handlers in Go)", got)
+	}
+	if got, want := srv.server.IdleTimeout, 60*time.Second; got != want {
+		t.Errorf("IdleTimeout=%v, want %v", got, want)
+	}
+}
+
+// TestDevnetRPCSubmitTxRejectsTrailingGarbageAfterBufferedWindow pins the
+// drainSubmitTxBody full-stream scan: a valid JSON body followed by a long
+// whitespace run that pushes trailing garbage past the decoder's internal
+// buffer must still return 400. Without the MultiReader(dec.Buffered(), body)
+// scan, the garbage byte slipped past and /submit_tx incorrectly accepted
+// a malformed body.
+func TestDevnetRPCSubmitTxRejectsTrailingGarbageAfterBufferedWindow(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, false)))
+	defer server.Close()
+
+	// 512 KiB of whitespace is chosen to exceed typical json.Decoder buffering
+	// while remaining well below the 2 MiB body cap, so the trailing 'x' is
+	// expected to be read from the underlying body stream rather than only from
+	// dec.Buffered().
+	payload := `{"tx_hex":"00"}` + strings.Repeat(" ", 512*1024) + "x"
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400 (trailing garbage past buffered window must not be accepted)", resp.StatusCode)
+	}
+}
+
+// TestDevnetRPCSubmitTxRejectsOversizedChunkedBody covers the previously
+// mis-classified path: a chunked / unknown-length body that exceeds
+// maxBodyBytes must surface as 413, not collapse to "invalid JSON body" 400
+// due to the pre-MaxBytesReader body-limiting/reader behavior when the
+// size limit is hit during json.Decode.
+func TestDevnetRPCSubmitTxRejectsOversizedChunkedBody(t *testing.T) {
+	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, false)))
+	defer server.Close()
+
+	// Valid JSON prefix so the decoder advances past the opening tokens and
+	// only hits the body-size limit while reading the oversized string value.
+	payload := `{"tx_hex":"` + strings.Repeat("a", 3*1024*1024) + `"}` // >3 MiB, cap is 2 MiB
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/submit_tx", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	// Force chunked transfer so the ContentLength short-circuit does not fire;
+	// the MaxBytesReader branch must convert the oversize into 413.
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want 413 (chunked body must not collapse to 400)", resp.StatusCode)
+	}
+}
+
 func TestDevnetRPCSubmitTxAcceptsValidTxAndAnnounces(t *testing.T) {
 	fromKey := mustRPCMLDSA87Keypair(t)
 	toKey := mustRPCMLDSA87Keypair(t)
@@ -1384,8 +1520,8 @@ func TestDevnetRPCTxStatusEmptyTxIDValueIsClassifiedAsMissing(t *testing.T) {
 }
 
 func TestDevnetRPCGetTxValuelessTxIDKeyClassifiedAsMissing(t *testing.T) {
-	// Go/Rust parity regression (Codex thread PRRT_kwDORQ3qGs57NpSB):
-	// ?txid (key without `=`) or ?txid&txid=<hex> — Go's net/url parses a
+	// Go/Rust parity regression: ?txid (key without `=`) or ?txid&txid=<hex>
+	// — Go's net/url parses a
 	// key without `=` into url.Values{"txid":[""]}, so Query().Get returns
 	// "" (missing). Rust parser must match: treat key without `=` as
 	// present-with-empty, classify as missing, first-match semantic (never
@@ -1419,8 +1555,7 @@ func TestDevnetRPCGetTxFailsClosedOn503BeforeParsingInvalidTxID(t *testing.T) {
 	// Contract: mempool unavailability is a 503 fail-closed regardless of
 	// query-string validity. A nil mempool + invalid txid MUST return 503
 	// (not 400). Previously handleGetTx parsed first and returned 400 on
-	// bad query, masking the unavailability. Copilot thread
-	// PRRT_kwDORQ3qGs57N-UC flagged this ordering bug.
+	// bad query, masking the unavailability.
 	req := httptest.NewRequest(http.MethodGet, "/get_tx?txid=invalid-not-hex", nil)
 	rec := httptest.NewRecorder()
 	handleGetTx(nil, rec, req)
@@ -1437,8 +1572,7 @@ func TestDevnetRPCGetTxFailsClosedOn503BeforeParsingInvalidTxID(t *testing.T) {
 }
 
 func TestDevnetRPCTxStatusFailsClosedOn503BeforeParsingInvalidTxID(t *testing.T) {
-	// Parity sibling of the handleGetTx ordering fix. Copilot thread
-	// PRRT_kwDORQ3qGs57N-UX.
+	// Parity sibling of the handleGetTx ordering fix.
 	req := httptest.NewRequest(http.MethodGet, "/tx_status?txid=invalid-not-hex", nil)
 	rec := httptest.NewRecorder()
 	handleTxStatus(nil, rec, req)

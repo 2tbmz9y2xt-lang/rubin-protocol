@@ -210,6 +210,19 @@ func startDevnetRPCServer(
 	server := &http.Server{
 		Handler:           newDevnetRPCHandler(state),
 		ReadHeaderTimeout: 5 * time.Second,
+		// ReadTimeout bounds the total duration for reading the entire
+		// request (headers + body) — it is NOT a body-only budget layered
+		// on top of ReadHeaderTimeout. 10 s is ample for a 2 MiB body plus
+		// normal-size headers and stops slow-loris body writes from pinning
+		// a goroutine indefinitely.
+		// WriteTimeout is deliberately NOT set: Go's WriteTimeout is a
+		// request-scoped total-handler deadline, not a per-syscall socket
+		// timeout like Rust's `set_write_timeout(5s)` in devnet_rpc.rs. A
+		// hard WriteTimeout would abort long-running RPCs such as
+		// /mine_next (PoW-bound) even when the client is reading promptly.
+		// IdleTimeout keeps the connection pool bounded.
+		ReadTimeout: 10 * time.Second,
+		IdleTimeout: 60 * time.Second,
 	}
 	go func() {
 		<-ctx.Done()
@@ -440,23 +453,22 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req submitTxRequest
-	body := io.LimitReader(r.Body, maxBodyBytes+1) // +1 to detect over-limit
+	// http.MaxBytesReader enforces maxBodyBytes for chunked / unknown-length
+	// bodies as well. When the limit is exceeded the wrapped reader surfaces
+	// a *http.MaxBytesError, which lets us return 413 instead of collapsing
+	// an oversized body into a generic "invalid JSON body" 400.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	// Defer the Close AFTER the MaxBytesReader wrap so the deferred call
+	// targets the wrapped reader (any wrapper-specific Close behavior runs,
+	// and the close aligns with what dec / drainSubmitTxBody actually read).
 	defer r.Body.Close()
-	dec := json.NewDecoder(body)
+	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&req); err != nil {
-		state.metrics.noteSubmit("bad_request")
-		writeJSONResponse(state, route, w, http.StatusBadRequest, submitTxResponse{
-			Accepted: false,
-			Error:    "invalid JSON body",
-		})
+		respondSubmitTxBodyError(state, route, w, err)
 		return
 	}
-	if err := ensureJSONBodyEOF(dec); err != nil {
-		state.metrics.noteSubmit("bad_request")
-		writeJSONResponse(state, route, w, http.StatusBadRequest, submitTxResponse{
-			Accepted: false,
-			Error:    "invalid JSON body",
-		})
+	if err := drainSubmitTxBody(dec, r.Body); err != nil {
+		respondSubmitTxBodyError(state, route, w, err)
 		return
 	}
 	raw, err := decodeHexPayload(req.TxHex)
@@ -873,16 +885,39 @@ func classifySubmitErr(err error) (int, string) {
 	return http.StatusUnprocessableEntity, "rejected"
 }
 
-func ensureJSONBodyEOF(dec *json.Decoder) error {
+// drainSubmitTxBody finishes reading the /submit_tx body after the first JSON
+// value has been decoded. It must distinguish three tail shapes:
+//
+//  1. Clean EOF (valid-only body) — return nil.
+//  2. Non-whitespace trailing content within the cap — return a JSON-garbage
+//     error so the caller returns 400.
+//  3. Trailing content that exceeds maxBodyBytes — let http.MaxBytesReader
+//     surface *http.MaxBytesError directly so the caller returns 413.
+//
+// The decoder's already-buffered tail and the underlying body reader are
+// concatenated into a single stream via io.MultiReader and read through
+// io.ReadAll. Every byte of the combined tail is then inspected for
+// non-whitespace content, and http.MaxBytesReader surfaces
+// *http.MaxBytesError from io.ReadAll when the combined tail exceeds the
+// cap. This closes the "garbage past dec.Buffered()" class the earlier
+// split-read implementation missed.
+func drainSubmitTxBody(dec *json.Decoder, body io.Reader) error {
 	if dec == nil {
 		return errors.New("nil decoder")
 	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		if err == nil {
+	// Scan BOTH the decoder's already-buffered tail and the rest of the
+	// underlying body as a single stream. Reading through body (via
+	// MultiReader → io.ReadAll) lets http.MaxBytesReader surface
+	// *http.MaxBytesError for oversized tails while every byte in the
+	// combined stream is inspected for non-whitespace garbage.
+	tail, err := io.ReadAll(io.MultiReader(dec.Buffered(), body))
+	if err != nil {
+		return err
+	}
+	for _, b := range tail {
+		if b != ' ' && b != '\t' && b != '\n' && b != '\r' {
 			return errors.New("unexpected trailing JSON value")
 		}
-		return err
 	}
 	return nil
 }
@@ -892,4 +927,26 @@ func (s *devnetRPCState) now() uint64 {
 		return nowUnixU64()
 	}
 	return s.nowUnix()
+}
+
+// respondSubmitTxBodyError classifies a /submit_tx body-read / JSON-decode
+// error into 413 "request body too large" when the http.MaxBytesReader cap
+// was crossed and 400 "invalid JSON body" otherwise. Both the initial
+// dec.Decode and the trailing drainSubmitTxBody check route through this
+// helper so the oversize-vs-malformed distinction stays consistent on every
+// path.
+func respondSubmitTxBodyError(state *devnetRPCState, route string, w http.ResponseWriter, err error) {
+	state.metrics.noteSubmit("bad_request")
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		writeJSONResponse(state, route, w, http.StatusRequestEntityTooLarge, submitTxResponse{
+			Accepted: false,
+			Error:    "request body too large",
+		})
+		return
+	}
+	writeJSONResponse(state, route, w, http.StatusBadRequest, submitTxResponse{
+		Accepted: false,
+		Error:    "invalid JSON body",
+	})
 }
