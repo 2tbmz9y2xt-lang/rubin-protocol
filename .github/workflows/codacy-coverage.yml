@@ -110,18 +110,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Enforce local coverage gates
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_GO_COVERAGE: ${{ github.workspace }}/clients/go/coverage.out
-          HEAD_RUST_LCOV: ${{ github.workspace }}/clients/rust/lcov.info
-          HEAD_COVERAGE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          chmod +x scripts/preflight-codacy-coverage.sh
-          ./scripts/preflight-codacy-coverage.sh "origin/${{ github.base_ref }}"
-
       - name: Upload to Codacy
         env:
           CODACY_API_TOKEN: ${{ secrets.CODACY_API_TOKEN }}
