@@ -19,6 +19,7 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node/p2p"
 )
 
 type failWriter struct{}
@@ -1484,6 +1485,32 @@ func TestRunPassesGenesisCoreExtProfilesToMempool(t *testing.T) {
 	}
 	if !ok || !profile.Active {
 		t.Fatalf("expected active core_ext profile at activation height")
+	}
+}
+
+func TestRunWiresP2PToCanonicalMempool(t *testing.T) {
+	prev := newP2PServiceFn
+	var captured p2p.ServiceConfig
+	newP2PServiceFn = func(cfg p2p.ServiceConfig) (*p2p.Service, error) {
+		captured = cfg
+		return nil, errors.New("capture p2p config")
+	}
+	t.Cleanup(func() { newP2PServiceFn = prev })
+
+	dir := t.TempDir()
+	var errOut bytes.Buffer
+	code := run([]string{"--datadir", dir, "--bind", "127.0.0.1:0", "--rpc-bind", ""}, io.Discard, &errOut)
+	if code != 2 {
+		t.Fatalf("expected exit code 2 from captured p2p init, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "capture p2p config") {
+		t.Fatalf("stderr=%q, want capture error", errOut.String())
+	}
+	if _, ok := captured.TxPool.(*p2p.CanonicalMempoolTxPool); !ok {
+		t.Fatalf("p2p TxPool type=%T, want *p2p.CanonicalMempoolTxPool", captured.TxPool)
+	}
+	if captured.TxMetadataFunc == nil {
+		t.Fatal("expected p2p TxMetadataFunc to use canonical mempool metadata")
 	}
 }
 

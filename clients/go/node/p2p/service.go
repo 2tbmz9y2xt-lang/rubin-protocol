@@ -186,7 +186,13 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size)
+	admitted := s.cfg.TxPool.Has(txid)
+	if !admitted {
+		admitted = s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size)
+	}
+	if !admitted && !s.cfg.TxPool.Has(txid) {
+		return errors.New("tx not admitted to relay pool")
+	}
 	if !s.txSeen.Add(txid) {
 		return nil
 	}
