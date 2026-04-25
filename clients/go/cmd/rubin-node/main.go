@@ -308,6 +308,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "invalid genesis file: %v\n", err)
 		return 2
 	}
+	// Genesis-identity guards run BEFORE the first filesystem mutation
+	// (os.MkdirAll(cfg.DataDir) below). A wrong devnet chain_id /
+	// genesis_hash, or a misconfigured mainnet runtime, must reject on a
+	// clean filesystem so operators do not end up with partial datadir /
+	// chainstate / blockstore artifacts that the next startup would have
+	// to detect and recover. Both validators are pure functions over the
+	// already-parsed config; failure paths only print to stderr and
+	// return exit code 2.
+	if cfg.Network == "devnet" {
+		if err := node.ValidateDevnetGenesisIdentity(genesisCfg.ChainID, genesisCfg.GenesisHash); err != nil {
+			_, _ = fmt.Fprintf(stderr, "devnet genesis identity guard failed: %v\n", err)
+			return 2
+		}
+	}
+	if err := node.ValidateMainnetGenesisGuard(node.SyncConfig{Network: cfg.Network}); err != nil {
+		_, _ = fmt.Fprintf(stderr, "mainnet genesis guard failed: %v\n", err)
+		return 2
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
 		return 2
@@ -342,21 +360,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	applySuiteContextToSyncConfig(&syncCfg, rotation, registry)
 	syncCfg.ParallelValidationMode = *pvMode
 	syncCfg.PVShadowMaxSamples = *pvShadowMax
-	// Mainnet target / genesis guard runs BEFORE any reconcile-driven
-	// state mutation (truncate_canonical / chainstate replay). MkdirAll,
-	// LoadChainState, and OpenBlockStore above are read/open-only
-	// operations that do not rewrite canonical or chainstate contents;
-	// the authoritative boundary we care about is reconcile + save +
-	// sync engine start, and the guard must run before that boundary.
-	// Mirror of Rust main.rs validate_mainnet_genesis_guard pre-reconcile
-	// call. NewSyncEngine also runs the same guard internally (see
-	// sync.go validateMainnetGenesisGuard) so tests / embedded callers
-	// that construct an engine directly still get the check.
-	// Devnet / test networks no-op.
-	if err := node.ValidateMainnetGenesisGuard(syncCfg); err != nil {
-		_, _ = fmt.Fprintf(stderr, "mainnet genesis guard failed: %v\n", err)
-		return 2
-	}
+	// Genesis-identity guards (devnet ValidateDevnetGenesisIdentity and
+	// mainnet ValidateMainnetGenesisGuard) ran above before MkdirAll, so
+	// any malformed pack or misconfigured mainnet runtime has already
+	// rejected on a clean filesystem. NewSyncEngine still re-runs the
+	// mainnet guard internally for embedded / test callers that
+	// construct an engine directly with a custom SyncConfig.
 	// Reconcile + save BEFORE constructing the sync engine. Rust mirror
 	// in clients/rust/crates/rubin-node/src/main.rs: the contract is
 	// that chainstate is persisted to disk BEFORE any sync / P2P / RPC /

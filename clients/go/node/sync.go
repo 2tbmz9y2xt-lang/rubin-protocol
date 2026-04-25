@@ -202,6 +202,39 @@ func validateMainnetGenesisGuard(cfg SyncConfig) error {
 	return nil
 }
 
+// ValidateDevnetGenesisIdentity reports whether a parsed genesis-pack
+// identity (chain_id, genesis_hash) matches the published canonical
+// devnet pack. It is intended to run at startup AFTER the genesis file
+// is parsed and BEFORE any filesystem mutation (datadir create,
+// chainstate load, blockstore open, reconcile, save, sync engine
+// construction). On mismatch returns *consensus.TxError with
+// BLOCK_ERR_LINKAGE_INVALID and the same Msg strings as the runtime
+// height-0 guards in applyCanonicalParsedBlock so log / ban-score /
+// debugging correlate boot-time and runtime rejects under the same
+// class. Callers MUST only invoke this for cfg.Network == "devnet";
+// for other networks the canonical pack identity is undefined here.
+//
+// This helper is intentionally NOT integrated into NewSyncEngine:
+// SyncConfig does not carry the parsed genesis_hash, so a guard there
+// would observe only ChainID and could not actually detect a mismatched
+// hash in an embedded caller. The boot-time call site in
+// cmd/rubin-node/main.go is the only place that has both inputs.
+func ValidateDevnetGenesisIdentity(chainID, genesisHash [32]byte) error {
+	if chainID != devnetGenesisChainID {
+		return &consensus.TxError{
+			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
+			Msg:  "genesis chain_id mismatch",
+		}
+	}
+	if genesisHash != devnetGenesisBlockHash {
+		return &consensus.TxError{
+			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
+			Msg:  "genesis_hash mismatch",
+		}
+	}
+	return nil
+}
+
 // BootstrapCanonicalGenesisIfEmpty applies the published canonical genesis
 // block to an empty chainstate when the configured network has one, so the
 // chain always starts from the published bytes rather than from a miner-

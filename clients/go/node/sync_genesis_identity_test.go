@@ -400,3 +400,54 @@ func TestMinerMineOne_PropagatesBootstrapError(t *testing.T) {
 		t.Fatalf("expected %q, got %q", "sync engine is not initialized", err.Error())
 	}
 }
+
+// TestValidateDevnetGenesisIdentity_Canonical pins the happy path: the
+// helper accepts the published canonical devnet pack identity. The two
+// canonical inputs come from the same exported helpers cmd/rubin-node
+// uses to seed parsedGenesisConfig defaults, so a regression in either
+// constant or in the helper surfaces here.
+func TestValidateDevnetGenesisIdentity_Canonical(t *testing.T) {
+	if err := ValidateDevnetGenesisIdentity(DevnetGenesisChainID(), DevnetGenesisBlockHash()); err != nil {
+		t.Fatalf("expected nil for canonical devnet identity, got %v", err)
+	}
+}
+
+// TestValidateDevnetGenesisIdentity_WrongChainID locks in the wire
+// contract: a genesis-pack chain_id that differs from the canonical
+// devnet chain_id MUST be rejected with a *consensus.TxError carrying
+// BLOCK_ERR_LINKAGE_INVALID and Msg "genesis chain_id mismatch", same
+// shape as the runtime height-0 chain_id reject in
+// applyCanonicalParsedBlock. The errors.As assertion mirrors the
+// pattern handlers_block.go uses for ban-score escalation, so the
+// boot-time and runtime classes are interchangeable from the consumer
+// side.
+func TestValidateDevnetGenesisIdentity_WrongChainID(t *testing.T) {
+	wrongChainID := DevnetGenesisChainID()
+	wrongChainID[0] ^= 0x01
+	err := ValidateDevnetGenesisIdentity(wrongChainID, DevnetGenesisBlockHash())
+	if err == nil {
+		t.Fatal("expected genesis chain_id mismatch TxError, got nil")
+	}
+	var txErr *consensus.TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected *consensus.TxError, got %T: %v", err, err)
+	}
+	if txErr.Code != consensus.BLOCK_ERR_LINKAGE_INVALID {
+		t.Fatalf("expected code %s, got %s", consensus.BLOCK_ERR_LINKAGE_INVALID, txErr.Code)
+	}
+	if txErr.Msg != "genesis chain_id mismatch" {
+		t.Fatalf("expected msg %q, got %q", "genesis chain_id mismatch", txErr.Msg)
+	}
+}
+
+// TestValidateDevnetGenesisIdentity_WrongHash mirrors the wrong-chain_id
+// test for the genesis_hash field. Reuses assertGenesisHashMismatchTxError
+// to match the assertion shape used by the existing height-0
+// genesis_hash tests in this file (TxError code + exact Msg string), so
+// the boot-time helper and the runtime guard share one verifier.
+func TestValidateDevnetGenesisIdentity_WrongHash(t *testing.T) {
+	wrongHash := DevnetGenesisBlockHash()
+	wrongHash[0] ^= 0x01
+	err := ValidateDevnetGenesisIdentity(DevnetGenesisChainID(), wrongHash)
+	assertGenesisHashMismatchTxError(t, err)
+}

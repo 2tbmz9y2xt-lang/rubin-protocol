@@ -806,6 +806,154 @@ func TestRunRejectsInvalidGenesisFileBeforeDataDirCreate(t *testing.T) {
 	}
 }
 
+// writeGenesisPackForTest serializes a minimal devnet genesis pack to a
+// temp file. Both chain_id and genesis_hash are mandatory to exercise
+// the boot-time identity guards: parseGenesisConfigFull rejects missing
+// hash via parseGenesisHash, so a wrong-hash test still needs a valid
+// 32-byte hex value (just one that disagrees with canonical).
+func writeGenesisPackForTest(t *testing.T, dir string, chainID, genesisHash [32]byte) string {
+	t.Helper()
+	pack := map[string]string{
+		"chain_id_hex":     hex.EncodeToString(chainID[:]),
+		"genesis_hash_hex": hex.EncodeToString(genesisHash[:]),
+	}
+	raw, err := json.Marshal(pack)
+	if err != nil {
+		t.Fatalf("json.Marshal(genesis pack): %v", err)
+	}
+	path := filepath.Join(dir, "genesis-pack.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+	return path
+}
+
+// TestRunRejectsDevnetWrongChainIDBeforeDataDirCreate proves the
+// boot-time devnet identity guard fires BEFORE os.MkdirAll(cfg.DataDir).
+// The blocker-file at --datadir would force os.MkdirAll to fail with
+// "datadir create failed" if the guard skipped or ran after MkdirAll;
+// the asymmetric assertion (stderr contains the guard error AND does
+// NOT contain "datadir create failed") is what proves the ordering, not
+// just rejection. Reverting the guard to its old post-MkdirAll position
+// turns this test red.
+func TestRunRejectsDevnetWrongChainIDBeforeDataDirCreate(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+	wrongChainID := node.DevnetGenesisChainID()
+	wrongChainID[0] ^= 0x01
+	genesisPath := writeGenesisPackForTest(t, dir, wrongChainID, node.DevnetGenesisBlockHash())
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--network", "devnet",
+			"--datadir", blocker,
+			"--genesis-file", genesisPath,
+		},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "devnet genesis identity guard failed") {
+		t.Fatalf("stderr missing guard prefix: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "genesis chain_id mismatch") {
+		t.Fatalf("stderr missing chain_id mismatch class: %q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "datadir create failed") {
+		t.Fatalf("devnet identity guard must reject before datadir create: %q", errOut.String())
+	}
+}
+
+// TestRunRejectsDevnetWrongHashBeforeDataDirCreate is the genesis_hash
+// counterpart of TestRunRejectsDevnetWrongChainIDBeforeDataDirCreate.
+// chain_id stays canonical so the helper passes the chain_id arm and
+// reaches the hash arm, locking in that both arms run pre-MkdirAll.
+func TestRunRejectsDevnetWrongHashBeforeDataDirCreate(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+	wrongHash := node.DevnetGenesisBlockHash()
+	wrongHash[0] ^= 0x01
+	genesisPath := writeGenesisPackForTest(t, dir, node.DevnetGenesisChainID(), wrongHash)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--network", "devnet",
+			"--datadir", blocker,
+			"--genesis-file", genesisPath,
+		},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "devnet genesis identity guard failed") {
+		t.Fatalf("stderr missing guard prefix: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "genesis_hash mismatch") {
+		t.Fatalf("stderr missing genesis_hash mismatch class: %q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "datadir create failed") {
+		t.Fatalf("devnet identity guard must reject before datadir create: %q", errOut.String())
+	}
+}
+
+// TestRunRejectsMainnetMisconfigBeforeDataDirCreate covers the third
+// boot-time guard arm: ValidateMainnetGenesisGuard rejects a mainnet
+// runtime that did not wire ExpectedTarget. The CLI does not expose an
+// expected-target flag yet, so any --network mainnet invocation
+// currently fails the guard with "mainnet requires explicit
+// expected_target". The asymmetric assertion proves the guard runs
+// pre-MkdirAll: if the guard moved back below MkdirAll, the blocker
+// file would force a "datadir create failed" stderr line.
+func TestRunRejectsMainnetMisconfigBeforeDataDirCreate(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile(blocker): %v", err)
+	}
+	// Valid genesis-pack shape — chain_id / genesis_hash are devnet
+	// canonical, which is fine on mainnet because the devnet identity
+	// guard is gated on cfg.Network == "devnet" and skips here.
+	genesisPath := writeGenesisPackForTest(t, dir, node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash())
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run(
+		[]string{
+			"--network", "mainnet",
+			"--datadir", blocker,
+			"--genesis-file", genesisPath,
+		},
+		&out,
+		&errOut,
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d (stderr=%q)", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "mainnet genesis guard failed") {
+		t.Fatalf("stderr missing mainnet guard prefix: %q", errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "mainnet requires explicit expected_target") {
+		t.Fatalf("stderr missing expected_target class: %q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "datadir create failed") {
+		t.Fatalf("mainnet guard must reject before datadir create: %q", errOut.String())
+	}
+}
+
 func TestRunLegacyExposureScanPropagatesEncodeFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := testLegacyExposureTippedChainState().Save(node.ChainStatePath(dir)); err != nil {
