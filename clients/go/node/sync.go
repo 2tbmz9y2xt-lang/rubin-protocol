@@ -202,6 +202,67 @@ func validateMainnetGenesisGuard(cfg SyncConfig) error {
 	return nil
 }
 
+// BootstrapCanonicalGenesisIfEmpty applies the published canonical genesis
+// block to an empty chainstate when the configured network has one, so the
+// chain always starts from the published bytes rather than from a miner-
+// synthesized height-0 block. The height-0 genesis-identity guard in
+// applyCanonicalParsedBlock rejects any block at height 0 whose hash
+// differs from devnetGenesisBlockHash under a devnet ChainID; without
+// this bootstrap the miner-driven empty-chain path would always produce
+// a non-canonical height-0 block (current timestamp / freshly mined
+// nonce) and fail under that guard.
+//
+// Idempotent. No-op when:
+//   - the chainstate already has a tip (HasTip is true), or
+//   - the configured SyncConfig.ChainID does not identify a network with
+//     a published canonical genesis (currently only devnetGenesisChainID
+//     is recognized; the all-zero ChainID used by ephemeral unit tests
+//     is skipped on purpose to preserve those tests' synthetic genesis
+//     fixtures, mirroring the chain_id guard's zero-ChainID skip clause
+//     in applyCanonicalParsedBlock).
+//
+// On success, the chainstate's tip is the published devnet genesis at
+// height 0 and the canonical genesis bytes are persisted to the block
+// store via the normal ApplyBlock path. Returns the ApplyBlock error
+// directly on failure; callers wrap if they want a function-prefix.
+//
+// Defensive nil-receiver guard mirrors the pattern used by other exported
+// SyncEngine methods (HeaderSyncRequest, RecordBestKnownHeight, ...). Other
+// exported methods are nil-safe and there are existing tests that exercise
+// the nil-receiver path; this method joins that contract for consistency.
+func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
+	if s == nil || s.chainState == nil {
+		return errors.New("sync engine is not initialized")
+	}
+	if s.chainState.view().hasTip || s.cfg.ChainID != devnetGenesisChainID {
+		return nil
+	}
+	_, applyErr := s.ApplyBlock(devnetGenesisBlockBytes, nil)
+	return raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip)
+}
+
+// raceTolerantBootstrapResult absorbs the TOCTOU window between the hasTip
+// check at the start of BootstrapCanonicalGenesisIfEmpty and the ApplyBlock
+// call below it. If another goroutine installs a tip in that window — for
+// example a P2P inbound block path racing a /mine_next request that both
+// observe an empty chain — our ApplyBlock will fail (typically with a
+// linkage error because nextBlockContextFromFields now sees a non-zero
+// next height) even though the chain is no longer empty. In that case the
+// failure is benign: the chain has the tip we wanted to install, and the
+// caller (e.g. Miner.MineOne) can proceed with normal post-genesis mining.
+//
+// Returns:
+//   - nil when ApplyBlock succeeded (applyErr == nil), regardless of hasTip.
+//   - nil when ApplyBlock failed AND hasTip is true at recheck (race-recovery).
+//   - applyErr when ApplyBlock failed AND hasTip is still false (real failure
+//     unrelated to concurrent tip installation, e.g. blockstore I/O error).
+func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
+	if applyErr != nil && hasTip {
+		return nil
+	}
+	return applyErr
+}
+
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
 	pb, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
@@ -441,11 +502,40 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	}
 	var zeroID [32]byte
 	if blockHeight == 0 && s.cfg.ChainID != zeroID && s.cfg.ChainID != devnetGenesisChainID {
-		return nil, errors.New("genesis chain_id mismatch")
+		// Both genesis-identity rejects on the height-0 admission path are
+		// consensus-invalid block classes from a peer's perspective: a
+		// peer-relayed wrong-identity block must escalate ban score in the
+		// P2P handler (clients/go/node/p2p/handlers_block.go gates ban
+		// escalation via `var txErr *consensus.TxError; errors.As(err, &txErr)`).
+		// Wrap with a TxError so peer attribution is class-closed for both
+		// genesis-identity classes (chain_id mismatch and genesis_hash
+		// mismatch below).
+		return nil, &consensus.TxError{
+			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
+			Msg:  "genesis chain_id mismatch",
+		}
 	}
 	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
 	if err != nil {
 		return nil, err
+	}
+	// Defense in depth on top of the chain_id guard above: at height 0 on a
+	// devnet runtime, the block must be the published devnet genesis. Without
+	// this, a malformed or relayed block whose ChainID matches devnet but
+	// whose contents differ (different timestamp, txs, merkle root, etc.)
+	// would otherwise be admitted as the local genesis and lock the chain
+	// onto a wrong identity. Test mode (zero ChainID) skip-checks to mirror
+	// the chain_id guard pattern above; non-devnet ChainID is already
+	// rejected by that guard. TxError wrap matches the chain_id guard so
+	// the P2P inbound block path can hard-ban peers relaying either flavor
+	// of wrong-genesis block via the standard
+	// `var txErr *consensus.TxError; errors.As(err, &txErr)` pattern in
+	// p2p/handlers_block.go.
+	if blockHeight == 0 && s.cfg.ChainID == devnetGenesisChainID && blockHash != devnetGenesisBlockHash {
+		return nil, &consensus.TxError{
+			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
+			Msg:  "genesis_hash mismatch",
+		}
 	}
 
 	rollbackState, err := s.captureRollbackState()
