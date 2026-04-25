@@ -78,6 +78,31 @@ func TestMemoryTxPool_NilReceiver(t *testing.T) {
 	}
 }
 
+func TestCanonicalMempoolTxPoolNilSafe(t *testing.T) {
+	var nilPool *CanonicalMempoolTxPool
+	var txid [32]byte
+	if raw, ok := nilPool.Get(txid); ok || raw != nil {
+		t.Fatalf("nil adapter Get=(%x,%v), want nil,false", raw, ok)
+	}
+	if nilPool.Has(txid) {
+		t.Fatal("nil adapter Has should return false")
+	}
+	if nilPool.Put(txid, []byte{0x01}, 1, 1) {
+		t.Fatal("nil adapter Put should return false")
+	}
+
+	emptyAdapter := NewCanonicalMempoolTxPool(nil)
+	if raw, ok := emptyAdapter.Get(txid); ok || raw != nil {
+		t.Fatalf("nil-backed adapter Get=(%x,%v), want nil,false", raw, ok)
+	}
+	if emptyAdapter.Has(txid) {
+		t.Fatal("nil-backed adapter Has should return false")
+	}
+	if emptyAdapter.Put(txid, []byte{0x01}, 1, 1) {
+		t.Fatal("nil-backed adapter Put should return false")
+	}
+}
+
 func TestMemoryTxPool_ConcurrentSafe(t *testing.T) {
 	pool := NewMemoryTxPool()
 	var wg sync.WaitGroup
