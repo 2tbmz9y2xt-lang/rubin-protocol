@@ -237,8 +237,30 @@ func (s *SyncEngine) BootstrapCanonicalGenesisIfEmpty() error {
 	if s.chainState.view().hasTip || s.cfg.ChainID != devnetGenesisChainID {
 		return nil
 	}
-	_, err := s.ApplyBlock(devnetGenesisBlockBytes, nil)
-	return err
+	_, applyErr := s.ApplyBlock(devnetGenesisBlockBytes, nil)
+	return raceTolerantBootstrapResult(applyErr, s.chainState.view().hasTip)
+}
+
+// raceTolerantBootstrapResult absorbs the TOCTOU window between the hasTip
+// check at the start of BootstrapCanonicalGenesisIfEmpty and the ApplyBlock
+// call below it. If another goroutine installs a tip in that window — for
+// example a P2P inbound block path racing a /mine_next request that both
+// observe an empty chain — our ApplyBlock will fail (typically with a
+// linkage error because nextBlockContextFromFields now sees a non-zero
+// next height) even though the chain is no longer empty. In that case the
+// failure is benign: the chain has the tip we wanted to install, and the
+// caller (e.g. Miner.MineOne) can proceed with normal post-genesis mining.
+//
+// Returns:
+//   - nil when ApplyBlock succeeded (applyErr == nil), regardless of hasTip.
+//   - nil when ApplyBlock failed AND hasTip is true at recheck (race-recovery).
+//   - applyErr when ApplyBlock failed AND hasTip is still false (real failure
+//     unrelated to concurrent tip installation, e.g. blockstore I/O error).
+func raceTolerantBootstrapResult(applyErr error, hasTip bool) error {
+	if applyErr != nil && hasTip {
+		return nil
+	}
+	return applyErr
 }
 
 func (s *SyncEngine) ApplyBlock(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {

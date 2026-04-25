@@ -224,6 +224,41 @@ func TestSyncEngineBootstrapCanonicalGenesisIfEmpty_IdempotentAfterTip(t *testin
 	}
 }
 
+// TestRaceTolerantBootstrapResult_OutcomeMatrix pins the three outcomes
+// of the TOCTOU recovery helper. Helper input is the (applyErr, hasTip)
+// tuple captured by BootstrapCanonicalGenesisIfEmpty after its ApplyBlock
+// call returns:
+//   - applyErr=nil + hasTip=any: ApplyBlock succeeded; caller treats as
+//     genesis-just-installed; helper returns nil.
+//   - applyErr!=nil + hasTip=false: real failure (chain still empty after
+//     ApplyBlock attempt), e.g. blockstore I/O error; helper propagates it.
+//   - applyErr!=nil + hasTip=true: a concurrent goroutine installed a tip
+//     between our outer hasTip check and ApplyBlock; the failure is
+//     benign because the chain we wanted to bootstrap exists; helper
+//     returns nil so the caller (Miner.MineOne) can proceed.
+func TestRaceTolerantBootstrapResult_OutcomeMatrix(t *testing.T) {
+	sentinel := errors.New("apply block failed")
+	cases := []struct {
+		name     string
+		applyErr error
+		hasTip   bool
+		want     error
+	}{
+		{name: "apply_ok_no_tip", applyErr: nil, hasTip: false, want: nil},
+		{name: "apply_ok_tip_installed", applyErr: nil, hasTip: true, want: nil},
+		{name: "real_failure_chain_still_empty", applyErr: sentinel, hasTip: false, want: sentinel},
+		{name: "race_recovery_tip_installed_concurrently", applyErr: sentinel, hasTip: true, want: nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := raceTolerantBootstrapResult(c.applyErr, c.hasTip)
+			if !errors.Is(got, c.want) {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestSyncEngineBootstrapCanonicalGenesisIfEmpty_NilReceiver pins the
 // nil-receiver branch of the helper. The method is reachable from a nil
 // pointer because Go allows method calls on nil receivers when the method
