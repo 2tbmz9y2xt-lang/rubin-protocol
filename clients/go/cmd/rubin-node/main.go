@@ -472,7 +472,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		SyncEngine:        syncEngine,
 		BlockStore:        blockStore,
 		TxPool:            p2p.NewCanonicalMempoolTxPool(mempool),
-		TxMetadataFunc:    mempool.RelayMetadata,
+		TxMetadataFunc:    p2p.CanonicalMempoolRelayMetadata,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "p2p init failed: %v\n", err)

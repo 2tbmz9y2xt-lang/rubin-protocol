@@ -70,7 +70,7 @@ func wireCanonicalMempoolForP2PTest(t *testing.T, h *testHarness) *node.Mempool 
 	}
 	h.syncEngine.SetMempool(mempool)
 	h.service.cfg.TxPool = NewCanonicalMempoolTxPool(mempool)
-	h.service.cfg.TxMetadataFunc = mempool.RelayMetadata
+	h.service.cfg.TxMetadataFunc = CanonicalMempoolRelayMetadata
 	return mempool
 }
 
@@ -462,7 +462,7 @@ func TestHandleTxMetadataErrorIsPeerNeutralAndMarksSeen(t *testing.T) {
 	}
 }
 
-func TestHandleTxCanonicalMempoolRejectsMalformedAndMetadataWithoutMutation(t *testing.T) {
+func TestHandleTxCanonicalMempoolRejectsMalformedAndAdmissionWithoutMutation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -487,16 +487,16 @@ func TestHandleTxCanonicalMempoolRejectsMalformedAndMetadataWithoutMutation(t *t
 
 	txBytes, txid, _ := signedCanonicalP2PTxWithoutSeeding(t, 9002)
 	if err := p.handleTx(txBytes); err != nil {
-		t.Fatalf("metadata reject handleTx should be peer-neutral, got %v", err)
+		t.Fatalf("admission reject handleTx should be peer-neutral, got %v", err)
 	}
 	if got := canonicalMempool.Len(); got != 0 {
-		t.Fatalf("canonical mempool len after missing-utxo metadata reject=%d, want 0", got)
+		t.Fatalf("canonical mempool len after missing-utxo admission reject=%d, want 0", got)
 	}
 	if !h.service.txSeen.Has(txid) {
-		t.Fatal("metadata-rejected tx should be marked seen to suppress getdata churn")
+		t.Fatal("admission-rejected tx should be marked seen to suppress getdata churn")
 	}
 	if canonicalMempool.Contains(txid) {
-		t.Fatal("metadata-rejected tx must not enter canonical mempool")
+		t.Fatal("admission-rejected tx must not enter canonical mempool")
 	}
 }
 
@@ -540,6 +540,38 @@ func TestHandleTxCanonicalMempoolDuplicateIsIdempotent(t *testing.T) {
 	}
 	if got := canonicalMempool.Len(); got != 1 {
 		t.Fatalf("canonical mempool len after duplicate handleTx=%d, want 1", got)
+	}
+}
+
+func TestHandleTxCanonicalMempoolSkipsValidatingMetadataProvider(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	canonicalMempool := wireCanonicalMempoolForP2PTest(t, h)
+	txBytes, txid, _ := signedCanonicalP2PTxForHarness(t, h, 9004)
+	var metadataCalls atomic.Int32
+	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
+		metadataCalls.Add(1)
+		return node.RelayTxMetadata{}, errors.New("unexpected validating metadata call")
+	}
+	if err := h.service.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer h.service.Close()
+
+	p := &peer{
+		service: h.service,
+		state:   node.PeerState{HandshakeComplete: true},
+	}
+	if err := p.handleTx(txBytes); err != nil {
+		t.Fatalf("handleTx canonical mempool: %v", err)
+	}
+	if got := metadataCalls.Load(); got != 0 {
+		t.Fatalf("validating metadata calls=%d, want 0 for canonical mempool", got)
+	}
+	if !canonicalMempool.Contains(txid) {
+		t.Fatal("canonical mempool should contain relayed tx admitted through Put/AddTx")
 	}
 }
 
@@ -618,6 +650,29 @@ func TestAnnounceTxAdmissionRejectDoesNotMarkSeen(t *testing.T) {
 	}
 	if h.service.txSeen.Has(txid) {
 		t.Fatal("admission-rejected AnnounceTx must not mark tx as seen")
+	}
+}
+
+func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	canonicalMempool := wireCanonicalMempoolForP2PTest(t, h)
+	txBytes, txid, _ := signedCanonicalP2PTxForHarness(t, h, 9005)
+	if err := canonicalMempool.AddTx(txBytes); err != nil {
+		t.Fatalf("canonical AddTx: %v", err)
+	}
+	var metadataCalls atomic.Int32
+	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
+		metadataCalls.Add(1)
+		return node.RelayTxMetadata{}, errors.New("unexpected validating metadata call")
+	}
+	if err := h.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("AnnounceTx already-admitted canonical tx: %v", err)
+	}
+	if got := metadataCalls.Load(); got != 0 {
+		t.Fatalf("validating metadata calls=%d, want 0 for already-admitted tx", got)
+	}
+	if !h.service.txSeen.Has(txid) {
+		t.Fatal("announced tx should be marked seen after already-admitted broadcast")
 	}
 }
 

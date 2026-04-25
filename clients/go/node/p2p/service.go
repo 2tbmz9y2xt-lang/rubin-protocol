@@ -182,12 +182,12 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if consumed != len(txBytes) {
 		return errors.New("non-canonical tx bytes")
 	}
-	meta, err := s.relayTxMetadata(txBytes)
-	if err != nil {
-		return err
-	}
 	admitted := s.cfg.TxPool.Has(txid)
 	if !admitted {
+		meta, err := s.relayTxMetadata(txBytes)
+		if err != nil {
+			return err
+		}
 		admitted = s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size)
 	}
 	if !admitted && !s.cfg.TxPool.Has(txid) {

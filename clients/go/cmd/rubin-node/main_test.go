@@ -1510,7 +1510,14 @@ func TestRunWiresP2PToCanonicalMempool(t *testing.T) {
 		t.Fatalf("p2p TxPool type=%T, want *p2p.CanonicalMempoolTxPool", captured.TxPool)
 	}
 	if captured.TxMetadataFunc == nil {
-		t.Fatal("expected p2p TxMetadataFunc to use canonical mempool metadata")
+		t.Fatal("expected p2p TxMetadataFunc")
+	}
+	meta, err := captured.TxMetadataFunc([]byte{0xFF})
+	if err != nil {
+		t.Fatalf("canonical p2p TxMetadataFunc should be lightweight, got %v", err)
+	}
+	if meta.Size != 1 {
+		t.Fatalf("canonical p2p metadata size=%d, want 1", meta.Size)
 	}
 }
 
