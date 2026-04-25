@@ -94,9 +94,10 @@ func newGenesisIdentityTestEngine(t *testing.T, chainID [32]byte) *SyncEngine {
 // PoW validation, but preserving these fields keeps the test focused
 // on the guard even if future changes reorder the validation pipeline).
 // The chain_id guard at the same call site reads cfg.ChainID, not the
-// header, so it is unaffected by any header-byte mutation. This is the same shape a malformed or maliciously
-// relayed peer block would take when probing whether a freshly started
-// node will accept any zero-prev block as its genesis.
+// header, so it is unaffected by any header-byte mutation. This is the
+// same shape a malformed or maliciously relayed peer block would take
+// when probing whether a freshly started node will accept any zero-prev
+// block as its genesis.
 //
 // DevnetGenesisBlockBytes() already returns a defensive copy, so we mutate
 // it directly. The nonce field is the last 8 bytes of the header, derived
