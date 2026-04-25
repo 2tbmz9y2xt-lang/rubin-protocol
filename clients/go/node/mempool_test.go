@@ -692,18 +692,17 @@ func TestMempoolDoubleSpend(t *testing.T) {
 	}
 }
 
-func TestMempoolFullEvictsLowestPriority(t *testing.T) {
+func TestMempoolFullRejectsWithoutEviction(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
 	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100, 100})
 
-	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 2})
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
-	mp.maxTxs = 2
 
 	txLow := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
 	txHigh := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 4, 2, fromKey, fromAddress, toAddress)
@@ -715,11 +714,14 @@ func TestMempoolFullEvictsLowestPriority(t *testing.T) {
 	if err := mp.AddTx(txHigh); err != nil {
 		t.Fatalf("AddTx(high): %v", err)
 	}
-	if err := mp.AddTx(txBetter); err != nil {
-		t.Fatalf("AddTx(better) should evict low priority entry: %v", err)
+	if err := mp.AddTx(txBetter); err == nil || !strings.Contains(err.Error(), "mempool transaction count limit reached") {
+		t.Fatalf("expected count-limit rejection without eviction, got %v", err)
 	}
 	if got := mp.Len(); got != 2 {
 		t.Fatalf("mempool len=%d, want 2", got)
+	}
+	if mp.usedBytes != len(txLow)+len(txHigh) {
+		t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, len(txLow)+len(txHigh))
 	}
 
 	selected := mp.SelectTransactions(3, 1<<20)
@@ -728,137 +730,158 @@ func TestMempoolFullEvictsLowestPriority(t *testing.T) {
 	}
 	got := []string{txIDHex(t, selected[0]), txIDHex(t, selected[1])}
 	wantHigh := txIDHex(t, txHigh)
-	wantBetter := txIDHex(t, txBetter)
 	wantLow := txIDHex(t, txLow)
-	if got[0] != wantHigh || got[1] != wantBetter {
-		t.Fatalf("selected=%v, want [%s %s]", got, wantHigh, wantBetter)
+	if got[0] != wantHigh || got[1] != wantLow {
+		t.Fatalf("selected=%v, want [%s %s]", got, wantHigh, wantLow)
 	}
-	if got[0] == wantLow || got[1] == wantLow {
-		t.Fatalf("lowest-priority tx should have been evicted: %v", got)
-	}
-}
-
-func TestMempoolFullRejectsWorsePriorityCandidate(t *testing.T) {
-	fromKey := mustNodeMLDSA87Keypair(t)
-	toKey := mustNodeMLDSA87Keypair(t)
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100, 100})
-
-	mp, err := NewMempool(st, nil, devnetGenesisChainID)
-	if err != nil {
-		t.Fatalf("new mempool: %v", err)
-	}
-	mp.maxTxs = 2
-
-	txLow := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
-	txHigh := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 4, 2, fromKey, fromAddress, toAddress)
-	txWorse := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[2]}, 90, 1, 3, fromKey, fromAddress, toAddress)
-
-	if err := mp.AddTx(txLow); err != nil {
-		t.Fatalf("AddTx(low): %v", err)
-	}
-	if err := mp.AddTx(txHigh); err != nil {
-		t.Fatalf("AddTx(high): %v", err)
-	}
-	if err := mp.AddTx(txWorse); err == nil || !strings.Contains(err.Error(), "mempool full") {
-		t.Fatalf("expected mempool full rejection, got %v", err)
-	}
-	if got := mp.Len(); got != 2 {
-		t.Fatalf("mempool len=%d, want 2", got)
-	}
-
-	selected := mp.SelectTransactions(3, 1<<20)
-	got := []string{txIDHex(t, selected[0]), txIDHex(t, selected[1])}
-	if got[0] != txIDHex(t, txHigh) || got[1] != txIDHex(t, txLow) {
-		t.Fatalf("selected=%v, want [%s %s]", got, txIDHex(t, txHigh), txIDHex(t, txLow))
+	if mp.Contains(txID(t, txBetter)) {
+		t.Fatalf("rejected over-cap tx entered mempool")
 	}
 }
 
-func TestMempoolFullRejectPreservesFutureEvictionCandidate(t *testing.T) {
-	fromKey := mustNodeMLDSA87Keypair(t)
-	toKey := mustNodeMLDSA87Keypair(t)
-	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100, 100, 100})
-
-	mp, err := NewMempool(st, nil, devnetGenesisChainID)
-	if err != nil {
-		t.Fatalf("new mempool: %v", err)
-	}
-	mp.maxTxs = 2
-
-	txLow := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
-	txHigh := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 4, 2, fromKey, fromAddress, toAddress)
-	txWorse := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[2]}, 90, 1, 3, fromKey, fromAddress, toAddress)
-	txBetter := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[3]}, 90, 3, 4, fromKey, fromAddress, toAddress)
-
-	if err := mp.AddTx(txLow); err != nil {
-		t.Fatalf("AddTx(low): %v", err)
-	}
-	if err := mp.AddTx(txHigh); err != nil {
-		t.Fatalf("AddTx(high): %v", err)
-	}
-	if err := mp.AddTx(txWorse); err == nil || !strings.Contains(err.Error(), "mempool full") {
-		t.Fatalf("expected mempool full rejection, got %v", err)
-	}
-	if err := mp.AddTx(txBetter); err != nil {
-		t.Fatalf("AddTx(better) should still evict low priority entry after prior reject: %v", err)
-	}
-
-	selected := mp.SelectTransactions(3, 1<<20)
-	got := []string{txIDHex(t, selected[0]), txIDHex(t, selected[1])}
-	if got[0] != txIDHex(t, txHigh) || got[1] != txIDHex(t, txBetter) {
-		t.Fatalf("selected=%v, want [%s %s]", got, txIDHex(t, txHigh), txIDHex(t, txBetter))
-	}
-}
-
-func TestRestoreMempoolSnapshotClearsStaleWorstHeapState(t *testing.T) {
+func TestMempoolByteCapRejectsWithoutMutation(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
 	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
 
-	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 2, 2, fromKey, fromAddress, toAddress)
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 10,
+		MaxBytes:        len(tx1) + len(tx2) - 1,
+	})
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
-	mp.maxTxs = 1
 
-	txLow := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
-	txBetter := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 3, 2, fromKey, fromAddress, toAddress)
-	if err := mp.AddTx(txLow); err != nil {
-		t.Fatalf("AddTx(low): %v", err)
+	if err := mp.AddTx(tx1); err != nil {
+		t.Fatalf("AddTx(tx1): %v", err)
+	}
+	if err := mp.AddTx(tx2); err == nil || !strings.Contains(err.Error(), "mempool byte limit exceeded") {
+		t.Fatalf("expected byte-limit rejection, got %v", err)
+	}
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1", got)
+	}
+	if mp.usedBytes != len(tx1) {
+		t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, len(tx1))
+	}
+	if mp.Contains(txID(t, tx2)) {
+		t.Fatalf("rejected byte-cap tx entered mempool")
+	}
+}
+
+func TestMempoolByteCapAllowsExactBoundary(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 2, 2, fromKey, fromAddress, toAddress)
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 10,
+		MaxBytes:        len(tx1) + len(tx2),
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
 	}
 
+	if err := mp.AddTx(tx1); err != nil {
+		t.Fatalf("AddTx(tx1): %v", err)
+	}
+	if err := mp.AddTx(tx2); err != nil {
+		t.Fatalf("AddTx(tx2) at exact byte cap: %v", err)
+	}
+	if got := mp.Len(); got != 2 {
+		t.Fatalf("mempool len=%d, want 2", got)
+	}
+	if mp.usedBytes != len(tx1)+len(tx2) {
+		t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, len(tx1)+len(tx2))
+	}
+}
+
+func TestMempoolAdmissionRejectsDoNotMutateByteAccounting(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 10})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
+	txDoubleSpend := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 89, 3, 2, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(tx1); err != nil {
+		t.Fatalf("AddTx(tx1): %v", err)
+	}
+	wantBytes := mp.usedBytes
+	wantLen := mp.Len()
+
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "duplicate", raw: tx1},
+		{name: "double_spend", raw: txDoubleSpend},
+		{name: "malformed", raw: []byte{0xde, 0xad}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := mp.AddTx(tc.raw); err == nil {
+				t.Fatalf("expected rejection")
+			}
+			if got := mp.Len(); got != wantLen {
+				t.Fatalf("mempool len=%d, want %d", got, wantLen)
+			}
+			if mp.usedBytes != wantBytes {
+				t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, wantBytes)
+			}
+		})
+	}
+}
+
+func TestRestoreMempoolSnapshotRecomputesByteAccounting(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 2, 2, fromKey, fromAddress, toAddress)
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 10,
+		MaxBytes:        len(tx1) + len(tx2),
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if err := mp.AddTx(tx1); err != nil {
+		t.Fatalf("AddTx(tx1): %v", err)
+	}
 	snapshot, err := snapshotMempool(mp)
 	if err != nil {
 		t.Fatalf("snapshotMempool: %v", err)
 	}
-
-	staleTxid := [32]byte{0xee}
-	staleItem := &mempoolHeapItem{txid: staleTxid, heapID: 99, index: 0}
-	mp.worstHeap = mempoolWorstHeap{staleItem}
-	mp.heapItems = map[[32]byte]*mempoolHeapItem{staleTxid: staleItem}
-	mp.heapSeqs = map[[32]byte]uint64{staleTxid: 99}
-
+	if err := mp.AddTx(tx2); err != nil {
+		t.Fatalf("AddTx(tx2): %v", err)
+	}
 	if err := restoreMempoolSnapshot(mp, snapshot); err != nil {
 		t.Fatalf("restoreMempoolSnapshot: %v", err)
 	}
-	if len(mp.worstHeap) != 0 || len(mp.heapItems) != 0 || len(mp.heapSeqs) != 0 {
-		t.Fatalf("restore must clear heap state: heap=%d items=%d seqs=%d", len(mp.worstHeap), len(mp.heapItems), len(mp.heapSeqs))
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1", got)
 	}
-	if err := mp.AddTx(txBetter); err != nil {
-		t.Fatalf("AddTx(better) after restore should evict low priority entry: %v", err)
+	if mp.usedBytes != len(tx1) {
+		t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, len(tx1))
 	}
-
-	selected := mp.SelectTransactions(2, 1<<20)
-	if len(selected) != 1 {
-		t.Fatalf("selected count=%d, want 1", len(selected))
-	}
-	if txIDHex(t, selected[0]) != txIDHex(t, txBetter) {
-		t.Fatalf("selected=%s, want %s", txIDHex(t, selected[0]), txIDHex(t, txBetter))
+	if mp.Contains(txID(t, tx2)) {
+		t.Fatalf("restored mempool still contains tx2")
 	}
 }
 
@@ -926,11 +949,8 @@ func TestMempoolEviction(t *testing.T) {
 	if got := mp.Len(); got != 0 {
 		t.Fatalf("mempool len=%d, want 0", got)
 	}
-	if got := len(mp.worstHeap); got != 0 {
-		t.Fatalf("worstHeap len=%d, want 0", got)
-	}
-	if got := len(mp.heapItems); got != 0 {
-		t.Fatalf("heapItems len=%d, want 0", got)
+	if got := mp.usedBytes; got != 0 {
+		t.Fatalf("usedBytes=%d, want 0", got)
 	}
 }
 
@@ -1278,11 +1298,17 @@ func mustBuildCoreExtSpendTx(
 
 func txIDHex(t *testing.T, txBytes []byte) string {
 	t.Helper()
+	txid := txID(t, txBytes)
+	return fmt.Sprintf("%x", txid[:])
+}
+
+func txID(t *testing.T, txBytes []byte) [32]byte {
+	t.Helper()
 	_, txid, _, _, err := consensus.ParseTx(txBytes)
 	if err != nil {
 		t.Fatalf("ParseTx: %v", err)
 	}
-	return fmt.Sprintf("%x", txid[:])
+	return txid
 }
 
 func TestTxAdmitErrorKinds(t *testing.T) {
@@ -1339,17 +1365,15 @@ func TestTxAdmitErrorKinds(t *testing.T) {
 
 	t.Run("mempool full unavailable", func(t *testing.T) {
 		st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
-		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 1})
 		if err != nil {
 			t.Fatalf("new mempool: %v", err)
 		}
-		mp.maxTxs = 1
 		tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 5, 1, fromKey, fromAddress, toAddress)
 		tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 1, 2, fromKey, fromAddress, toAddress)
 		if err := mp.AddTx(tx1); err != nil {
 			t.Fatalf("first AddTx: %v", err)
 		}
-		// tx2 has lower fee-rate than tx1 so cannot evict → pool full
 		err = mp.AddTx(tx2)
 		assertKind(t, err, TxAdmitUnavailable)
 	})
@@ -1410,9 +1434,8 @@ func TestMempoolAllTxIDsReturnsEveryEntry(t *testing.T) {
 }
 
 func TestMempoolAllTxIDsSortedDeterministic(t *testing.T) {
-	// Copilot thread on PR #1199: verify that sorting AllTxIDs produces
-	// deterministic lexicographic order (handler sorts; this test proves
-	// the data is sortable and the result matches expectation).
+	// Verify that sorting AllTxIDs produces deterministic lexicographic order;
+	// handlers sort the IDs before presenting them.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())

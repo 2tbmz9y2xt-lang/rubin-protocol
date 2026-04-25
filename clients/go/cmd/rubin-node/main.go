@@ -251,6 +251,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.LogLevel, "log-level", defaults.LogLevel, "log level: debug|info|warn|error")
 	genesisFile := fs.String("genesis-file", "", "path to genesis pack JSON with chain_id_hex, genesis hash, and optional core_ext_profiles")
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
+	fs.IntVar(&cfg.MempoolMaxTxs, "mempool-max-txs", defaults.MempoolMaxTxs, "maximum canonical mempool transactions")
+	fs.IntVar(&cfg.MempoolMaxBytes, "mempool-max-bytes", defaults.MempoolMaxBytes, "maximum canonical mempool serialized transaction bytes")
 	fs.StringVar(&cfg.MineAddress, "mine-address", "", "miner pubkey: 64-char hex key_id or 66-char hex suite_id||key_id")
 	mineBlocks := fs.Int("mine-blocks", 0, "mine N blocks locally after startup")
 	mineExit := fs.Bool("mine-exit", false, "exit immediately after local mining")
@@ -396,6 +398,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	mempoolCfg := node.DefaultMempoolConfig()
+	mempoolCfg.MaxTransactions = cfg.MempoolMaxTxs
+	mempoolCfg.MaxBytes = cfg.MempoolMaxBytes
 	mempoolCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 	mempool, err := newMempoolFn(chainState, blockStore, chainIDFromGenesis, mempoolCfg)
 	if err != nil {

@@ -22,6 +22,8 @@ type Config struct {
 	LogLevel           string              `json:"log_level"`
 	Peers              []string            `json:"peers"`
 	MaxPeers           int                 `json:"max_peers"`
+	MempoolMaxTxs      int                 `json:"mempool_max_txs"`
+	MempoolMaxBytes    int                 `json:"mempool_max_bytes"`
 	ChainID            string              `json:"chain_id_hex,omitempty"`
 	MineAddress        string              `json:"mine_address"`
 	RotationDescriptor *RotationConfigJSON `json:"rotation_descriptor,omitempty"`
@@ -324,14 +326,17 @@ func DefaultDataDir() string {
 }
 
 func DefaultConfig() Config {
+	mempoolDefaults := DefaultMempoolConfig()
 	return Config{
-		Network:     "devnet",
-		DataDir:     DefaultDataDir(),
-		BindAddr:    "0.0.0.0:19111",
-		RPCBindAddr: "",
-		Peers:       nil,
-		LogLevel:    "info",
-		MaxPeers:    64,
+		Network:         "devnet",
+		DataDir:         DefaultDataDir(),
+		BindAddr:        "0.0.0.0:19111",
+		RPCBindAddr:     "",
+		Peers:           nil,
+		LogLevel:        "info",
+		MaxPeers:        64,
+		MempoolMaxTxs:   mempoolDefaults.MaxTransactions,
+		MempoolMaxBytes: mempoolDefaults.MaxBytes,
 	}
 }
 
@@ -387,6 +392,12 @@ func ValidateConfig(cfg Config) error {
 	}
 	if cfg.MaxPeers > 4096 {
 		return errors.New("max_peers must be <= 4096")
+	}
+	if cfg.MempoolMaxTxs <= 0 {
+		return errors.New("mempool_max_txs must be > 0")
+	}
+	if cfg.MempoolMaxBytes <= 0 {
+		return errors.New("mempool_max_bytes must be > 0")
 	}
 	if cfg.MineAddress != "" {
 		raw, err := hex.DecodeString(cfg.MineAddress)
