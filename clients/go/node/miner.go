@@ -116,6 +116,24 @@ func NewMiner(chainState *ChainState, blockStore *BlockStore, sync *SyncEngine, 
 	if sync == nil {
 		return nil, errors.New("nil sync engine")
 	}
+	// Miner.MineOne calls SyncEngine.BootstrapCanonicalGenesisIfEmpty which
+	// mutates sync.chainState and persists the canonical genesis through
+	// sync.blockStore, then m.buildBlock reads timestamp context from
+	// m.blockStore and the chainstate snapshot from m.chainState. Both
+	// pointers MUST alias the SyncEngine's instances; otherwise the
+	// bootstrap mutation lands in one pair while the miner reads from
+	// another, and the first devnet mine on an empty chain deterministically
+	// fails with "missing canonical hash at height 0 for timestamp context"
+	// (because blockstore is split) or with "genesis_hash mismatch" (because
+	// chainstate is split and the synthetic block hits the height-0 guard).
+	// Reject both split shapes at NewMiner time so misuse cannot reach
+	// runtime.
+	if chainState != sync.chainState {
+		return nil, errors.New("miner chainstate must alias sync engine chainstate")
+	}
+	if blockStore != sync.blockStore {
+		return nil, errors.New("miner blockstore must alias sync engine blockstore")
+	}
 	if cfg.TimestampSource == nil {
 		cfg.TimestampSource = func() uint64 { return unixNowU64() }
 	}
@@ -160,6 +178,18 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 			return nil, ctx.Err()
 		default:
 		}
+	}
+
+	// Ensure the chain is bootstrapped at the canonical published genesis
+	// before the miner builds any post-genesis block. The height-0 genesis-
+	// identity guard in sync.go rejects miner-synthesized height-0 blocks
+	// under a devnet ChainID (their hashes differ from the published
+	// genesis), so empty-chain mining must start from the published bytes.
+	// BootstrapCanonicalGenesisIfEmpty is idempotent: a no-op once the
+	// chain has a tip and a no-op for ChainIDs without a published canonical
+	// genesis (e.g. the all-zero ChainID used by some unit tests).
+	if err := m.sync.BootstrapCanonicalGenesisIfEmpty(); err != nil {
+		return nil, err
 	}
 
 	blockBytes, prevTimestamps, timestamp, nonce, txCount, err := m.buildBlock(ctx, txs)
