@@ -885,6 +885,139 @@ func TestRestoreMempoolSnapshotRecomputesByteAccounting(t *testing.T) {
 	}
 }
 
+func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 10,
+		MaxBytes:        len(txBytes) * 2,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+	snapshot, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshotMempool: %v", err)
+	}
+	wantTxID := txID(t, txBytes)
+	wantBytes := mp.usedBytes
+	txDoubleSpend := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 89, 3, 2, fromKey, fromAddress, toAddress)
+	doubleSpendID := txID(t, txDoubleSpend)
+	snapshotEntry := func(txRaw []byte, id [32]byte, inputs []consensus.Outpoint) mempoolEntry {
+		return mempoolEntry{
+			raw:    append([]byte(nil), txRaw...),
+			txid:   id,
+			inputs: append([]consensus.Outpoint(nil), inputs...),
+			size:   len(txRaw),
+		}
+	}
+	cloneSnapshotForTest := func(base mempoolSnapshot) mempoolSnapshot {
+		entries := make([]mempoolEntry, 0, len(base.entries))
+		for i := range base.entries {
+			entries = append(entries, cloneMempoolEntry(&base.entries[i]))
+		}
+		return mempoolSnapshot{entries: entries}
+	}
+	withEditedFirst := func(edit func(*mempoolEntry)) func(mempoolSnapshot) mempoolSnapshot {
+		return func(base mempoolSnapshot) mempoolSnapshot {
+			bad := cloneSnapshotForTest(base)
+			edit(&bad.entries[0])
+			return bad
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(mempoolSnapshot) mempoolSnapshot
+		want   string
+	}{
+		{
+			name:   "zero_size",
+			mutate: withEditedFirst(func(entry *mempoolEntry) { entry.size = 0 }),
+			want:   "invalid mempool snapshot entry size",
+		},
+		{
+			name:   "size_mismatch",
+			mutate: withEditedFirst(func(entry *mempoolEntry) { entry.size = len(entry.raw) + 1 }),
+			want:   "mempool snapshot entry size mismatch",
+		},
+		{
+			name:   "malformed_raw",
+			mutate: withEditedFirst(func(entry *mempoolEntry) { entry.raw, entry.size = []byte{0xde, 0xad}, 2 }),
+			want:   "invalid mempool snapshot entry raw",
+		},
+		{
+			name: "trailing_bytes",
+			mutate: withEditedFirst(func(entry *mempoolEntry) {
+				entry.raw = append(entry.raw, 0)
+				entry.size = len(entry.raw)
+			}),
+			want: "mempool snapshot entry has trailing bytes",
+		},
+		{
+			name: "txid_mismatch",
+			mutate: withEditedFirst(func(entry *mempoolEntry) {
+				entry.txid[0] ^= 0x01
+			}),
+			want: "mempool snapshot entry txid mismatch",
+		},
+		{
+			name:   "input_count_mismatch",
+			mutate: withEditedFirst(func(entry *mempoolEntry) { entry.inputs = nil }),
+			want:   "mempool snapshot entry input count mismatch",
+		},
+		{
+			name: "input_mismatch",
+			mutate: withEditedFirst(func(entry *mempoolEntry) {
+				entry.inputs[0].Vout++
+			}),
+			want: "mempool snapshot entry input mismatch",
+		},
+		{
+			name: "duplicate_txid",
+			mutate: func(base mempoolSnapshot) mempoolSnapshot {
+				bad := cloneSnapshotForTest(base)
+				bad.entries = append(bad.entries, bad.entries[0])
+				return bad
+			},
+			want: "duplicate mempool snapshot txid",
+		},
+		{
+			name: "duplicate_spender",
+			mutate: func(base mempoolSnapshot) mempoolSnapshot {
+				bad := cloneSnapshotForTest(base)
+				bad.entries = append(bad.entries, snapshotEntry(txDoubleSpend, doubleSpendID, []consensus.Outpoint{outpoints[0]}))
+				return bad
+			},
+			want: "duplicate mempool snapshot spender",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := tc.mutate(snapshot)
+			if err := restoreMempoolSnapshot(mp, bad); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q rejection, got %v", tc.want, err)
+			}
+			if got := mp.Len(); got != 1 {
+				t.Fatalf("mempool len=%d, want 1 after rejected restore", got)
+			}
+			if !mp.Contains(wantTxID) {
+				t.Fatalf("rejected restore removed existing tx %x", wantTxID)
+			}
+			if mp.usedBytes != wantBytes {
+				t.Fatalf("usedBytes=%d, want %d after rejected restore", mp.usedBytes, wantBytes)
+			}
+		})
+	}
+}
+
 func TestMempoolAddTxHeightOverflow(t *testing.T) {
 	st := &ChainState{HasTip: true, Height: ^uint64(0)} // MaxUint64
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
