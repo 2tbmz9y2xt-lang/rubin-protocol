@@ -27,7 +27,6 @@ class WorkflowShellTargetTests(unittest.TestCase):
                 "scripts/crypto/openssl/fips-preflight.sh",
                 "scripts/dev-env.sh",
                 "scripts/node-runtime-total-parity-gate.sh",
-                "scripts/preflight-codacy-coverage.sh",
                 "scripts/run-codacy-coverage.sh",
                 "scripts/runtime_perf/run_runtime_perf_suite.sh",
                 "scripts/rust-consensus-total-parity-gate.sh",
