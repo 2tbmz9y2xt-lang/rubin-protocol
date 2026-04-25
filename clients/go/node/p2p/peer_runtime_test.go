@@ -21,12 +21,56 @@ func (timeoutErr) Error() string   { return "timeout" }
 func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return true }
 
+type scriptedRead struct {
+	data []byte
+	err  error
+}
+
+type scriptedConn struct {
+	reads []scriptedRead
+	bytes.Buffer
+}
+
+func (c *scriptedConn) Read(p []byte) (int, error) {
+	if len(c.reads) == 0 {
+		return 0, io.EOF
+	}
+	current := &c.reads[0]
+	if len(current.data) > 0 {
+		n := copy(p, current.data)
+		current.data = current.data[n:]
+		if len(current.data) > 0 {
+			return n, nil
+		}
+		err := current.err
+		c.reads = c.reads[1:]
+		return n, err
+	}
+	err := current.err
+	c.reads = c.reads[1:]
+	return 0, err
+}
+
+func (c *scriptedConn) Write(p []byte) (int, error) { return c.Buffer.Write(p) }
+func (c *scriptedConn) Close() error                { return nil }
+func (c *scriptedConn) LocalAddr() net.Addr         { return stubAddr("local") }
+func (c *scriptedConn) RemoteAddr() net.Addr        { return stubAddr("remote") }
+func (c *scriptedConn) SetDeadline(time.Time) error { return nil }
+func (c *scriptedConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (c *scriptedConn) SetWriteDeadline(time.Time) error { return nil }
+
 func TestShouldIgnoreAndNormalizeReadError(t *testing.T) {
 	if !shouldIgnoreReadError(os.ErrDeadlineExceeded) {
 		t.Fatalf("expected os.ErrDeadlineExceeded to be ignored")
 	}
 	if !shouldIgnoreReadError(timeoutErr{}) {
 		t.Fatalf("expected timeout net.Error to be ignored")
+	}
+	partialTimeout := partialFrameTimeoutError{part: "header", read: 1, want: wireHeaderSize, err: timeoutErr{}}
+	if shouldIgnoreReadError(partialTimeout) {
+		t.Fatalf("partial frame timeout must disconnect instead of being ignored")
 	}
 	if shouldIgnoreReadError(io.EOF) {
 		t.Fatalf("expected EOF to not be ignored")
@@ -41,6 +85,86 @@ func TestShouldIgnoreAndNormalizeReadError(t *testing.T) {
 	boom := errors.New("boom")
 	if err := normalizeReadError(boom); !errors.Is(err, boom) {
 		t.Fatalf("normalizeReadError changed error: %v", err)
+	}
+}
+
+func TestRunDisconnectsOnPartialHeaderTimeoutBeforeFakeFrame(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Millisecond
+
+	staleHeaderPrefix := mustPeerRuntimeFrameBytes(t, p, message{Command: messagePing})[:8]
+	fakeValidFrame := mustPeerRuntimeFrameBytes(t, p, message{Command: messagePing})
+	p.conn = &scriptedConn{reads: []scriptedRead{
+		{data: staleHeaderPrefix},
+		{err: timeoutErr{}},
+		{data: fakeValidFrame},
+	}}
+
+	err := p.run(context.Background())
+	if err == nil {
+		t.Fatalf("partial header timeout was ignored and allowed a later fake frame parse")
+	}
+	var partial partialFrameTimeoutError
+	if !errors.As(err, &partial) {
+		t.Fatalf("err=%v, want partialFrameTimeoutError", err)
+	}
+	if partial.part != "header" || partial.read != len(staleHeaderPrefix) || partial.want != wireHeaderSize {
+		t.Fatalf("partial timeout=%+v, want header %d/%d", partial, len(staleHeaderPrefix), wireHeaderSize)
+	}
+}
+
+func TestRunDisconnectsOnPayloadTimeoutBeforeFakeFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		prefixBytes int
+	}{
+		{name: "timeout before first payload byte", prefixBytes: 0},
+		{name: "timeout after one payload byte", prefixBytes: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPeerRuntimeTestPeer(t)
+			p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Millisecond
+
+			payload := []byte{0xaa, 0xbb}
+			firstFrame := mustPeerRuntimeFrameBytes(t, p, message{Command: messageTx, Payload: payload})
+			fakeValidFrame := mustPeerRuntimeFrameBytes(t, p, message{Command: messagePing})
+			reads := []scriptedRead{{data: firstFrame[:wireHeaderSize]}}
+			if tc.prefixBytes > 0 {
+				reads = append(reads, scriptedRead{data: payload[:tc.prefixBytes]})
+			}
+			reads = append(reads,
+				scriptedRead{err: timeoutErr{}},
+				scriptedRead{data: fakeValidFrame},
+			)
+			p.conn = &scriptedConn{reads: reads}
+
+			err := p.run(context.Background())
+			if err == nil {
+				t.Fatalf("partial payload timeout was ignored and allowed a later fake frame parse")
+			}
+			var partial partialFrameTimeoutError
+			if !errors.As(err, &partial) {
+				t.Fatalf("err=%v, want partialFrameTimeoutError", err)
+			}
+			wantRead := wireHeaderSize + tc.prefixBytes
+			if partial.part != "payload" || partial.read != wantRead || partial.want != wireHeaderSize+len(payload) {
+				t.Fatalf("partial timeout=%+v, want payload %d/%d", partial, wantRead, wireHeaderSize+len(payload))
+			}
+		})
+	}
+}
+
+func TestRunKeepsIdleTimeoutAndCompleteFrameValid(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Millisecond
+	p.conn = &scriptedConn{reads: []scriptedRead{
+		{err: timeoutErr{}},
+		{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messagePing})},
+		{err: io.EOF},
+	}}
+
+	if err := p.run(context.Background()); err != nil {
+		t.Fatalf("idle timeout followed by a complete valid frame should remain valid, got %v", err)
 	}
 }
 
@@ -325,4 +449,18 @@ func mustMarshalPeerRuntimeTx(t *testing.T, tx *consensus.Tx) []byte {
 		t.Fatalf("MarshalTx: %v", err)
 	}
 	return b
+}
+
+func mustPeerRuntimeFrameBytes(t *testing.T, p *peer, frame message) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := writeFrame(
+		&buf,
+		networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
+		frame,
+		p.service.cfg.PeerRuntimeConfig.MaxMessageSize,
+	); err != nil {
+		t.Fatalf("writeFrame(%q): %v", frame.Command, err)
+	}
+	return buf.Bytes()
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -57,8 +56,7 @@ func (p *peer) run(ctx context.Context) error {
 }
 
 func shouldIgnoreReadError(err error) bool {
-	var netErr net.Error
-	return errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
+	return !isPartialFrameTimeout(err) && isReadTimeout(err)
 }
 
 func normalizeReadError(err error) error {

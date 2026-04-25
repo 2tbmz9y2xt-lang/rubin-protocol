@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"os"
 	"strconv"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -57,6 +58,31 @@ type frameHeader struct {
 	Command  string
 	Size     uint32
 	Checksum [4]byte
+}
+
+type partialFrameTimeoutError struct {
+	part string
+	read int
+	want int
+	err  error
+}
+
+func (e partialFrameTimeoutError) Error() string {
+	return fmt.Sprintf("%s timeout after partial frame read: %d/%d bytes", e.part, e.read, e.want)
+}
+
+func (e partialFrameTimeoutError) Unwrap() error {
+	return e.err
+}
+
+func isPartialFrameTimeout(err error) bool {
+	var partial partialFrameTimeoutError
+	return errors.As(err, &partial)
+}
+
+func isReadTimeout(err error) bool {
+	var netErr net.Error
+	return errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
 }
 
 type InventoryVector struct {
@@ -114,7 +140,12 @@ func readPayloadWithChecksum(r io.Reader, size uint32, wantChecksum [4]byte) ([]
 			chunkLen = streamReadChunkBytes
 		}
 		chunk := make([]byte, chunkLen)
-		if _, err := io.ReadFull(r, chunk); err != nil {
+		n, err := io.ReadFull(r, chunk)
+		if err != nil {
+			read := wireHeaderSize + len(payload) + n
+			if isReadTimeout(err) {
+				return nil, partialFrameTimeoutError{part: "payload", read: read, want: wireHeaderSize + int(size), err: err}
+			}
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return nil, io.ErrUnexpectedEOF
 			}
@@ -138,7 +169,11 @@ func readPayloadWithChecksum(r io.Reader, size uint32, wantChecksum [4]byte) ([]
 func readFrameHeader(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32) (frameHeader, error) {
 	var header frameHeader
 	var raw [wireHeaderSize]byte
-	if _, err := io.ReadFull(r, raw[:]); err != nil {
+	n, err := io.ReadFull(r, raw[:])
+	if err != nil {
+		if isReadTimeout(err) && n > 0 {
+			return header, partialFrameTimeoutError{part: "header", read: n, want: wireHeaderSize, err: err}
+		}
 		return header, err
 	}
 	if !bytes.Equal(raw[0:4], expectedMagic[:]) {
