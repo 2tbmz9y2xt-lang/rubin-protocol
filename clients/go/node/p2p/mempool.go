@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"math/bits"
 	"sync"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 const defaultMaxTxPoolSize = 1000
@@ -12,6 +14,43 @@ type TxPool interface {
 	Get(txid [32]byte) ([]byte, bool)
 	Has(txid [32]byte) bool
 	Put(txid [32]byte, raw []byte, fee uint64, size int) bool
+}
+
+// CanonicalMempoolTxPool adapts the node mempool to the P2P relay TxPool
+// interface without introducing a second relay-owned transaction store.
+type CanonicalMempoolTxPool struct {
+	mempool *node.Mempool
+}
+
+// NewCanonicalMempoolTxPool returns a TxPool backed by the canonical node
+// mempool used by RPC submission and miner candidate selection.
+func NewCanonicalMempoolTxPool(mempool *node.Mempool) *CanonicalMempoolTxPool {
+	return &CanonicalMempoolTxPool{mempool: mempool}
+}
+
+func (p *CanonicalMempoolTxPool) Get(txid [32]byte) ([]byte, bool) {
+	if p == nil || p.mempool == nil {
+		return nil, false
+	}
+	return p.mempool.TxByID(txid)
+}
+
+func (p *CanonicalMempoolTxPool) Has(txid [32]byte) bool {
+	if p == nil || p.mempool == nil {
+		return false
+	}
+	return p.mempool.Contains(txid)
+}
+
+func (p *CanonicalMempoolTxPool) Put(txid [32]byte, raw []byte, _ uint64, _ int) bool {
+	if p == nil || p.mempool == nil {
+		return false
+	}
+	rawTxid, err := canonicalTxID(raw)
+	if err != nil || rawTxid != txid {
+		return false
+	}
+	return p.mempool.AddTx(raw) == nil
 }
 
 type MemoryTxPool struct {

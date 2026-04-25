@@ -51,6 +51,74 @@ func putRelayTx(pool *MemoryTxPool, txid [32]byte, raw []byte) bool {
 	return pool.Put(txid, raw, uint64(len(raw)), len(raw))
 }
 
+type rejectingTxPool struct{}
+
+func (rejectingTxPool) Get([32]byte) ([]byte, bool) { return nil, false }
+
+func (rejectingTxPool) Has([32]byte) bool { return false }
+
+func (rejectingTxPool) Put([32]byte, []byte, uint64, int) bool { return false }
+
+func wireCanonicalMempoolForP2PTest(t *testing.T, h *testHarness) *node.Mempool {
+	t.Helper()
+	if h == nil || h.service == nil {
+		t.Fatal("nil p2p test harness")
+	}
+	mempool, err := node.NewMempool(h.chainState, h.blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	h.syncEngine.SetMempool(mempool)
+	h.service.cfg.TxPool = NewCanonicalMempoolTxPool(mempool)
+	h.service.cfg.TxMetadataFunc = CanonicalMempoolRelayMetadata
+	return mempool
+}
+
+func signedCanonicalP2PTxForHarness(t *testing.T, h *testHarness, nonce uint64) ([]byte, [32]byte, map[consensus.Outpoint]consensus.UtxoEntry) {
+	t.Helper()
+	txBytes, txid, utxos := signedCanonicalP2PTxWithoutSeeding(t, nonce)
+	seedHarnessUtxos(h, utxos)
+	return txBytes, txid, utxos
+}
+
+func signedCanonicalP2PTxWithoutSeeding(t *testing.T, nonce uint64) ([]byte, [32]byte, map[consensus.Outpoint]consensus.UtxoEntry) {
+	t.Helper()
+	fromKey := mustP2PMLDSA87Keypair(t)
+	toKey := mustP2PMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	utxos, outpoints := testP2PUtxoSet(fromAddress, []uint64{100})
+	for op, entry := range utxos {
+		entry.CreatedByCoinbase = false
+		entry.CreationHeight = 0
+		utxos[op] = entry
+	}
+	txBytes := mustBuildSignedP2PTx(t, utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, nonce, fromKey, fromAddress, toAddress)
+	txid, err := canonicalTxID(txBytes)
+	if err != nil {
+		t.Fatalf("canonicalTxID: %v", err)
+	}
+	return txBytes, txid, utxos
+}
+
+func seedHarnessUtxos(h *testHarness, utxos map[consensus.Outpoint]consensus.UtxoEntry) {
+	for op, entry := range utxos {
+		h.chainState.Utxos[op] = entry
+	}
+}
+
+func parsedBlockHasTxID(block *consensus.ParsedBlock, txid [32]byte) bool {
+	if block == nil {
+		return false
+	}
+	for _, got := range block.Txids {
+		if got == txid {
+			return true
+		}
+	}
+	return false
+}
+
 func TestHandleTxMalformed(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -211,6 +279,72 @@ func TestAnnounceTx(t *testing.T) {
 	})
 }
 
+func TestAnnounceTxRelaysIntoCanonicalMempoolAndMiner(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	source := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	sourceMempool := wireCanonicalMempoolForP2PTest(t, source)
+	txBytes, txid, utxos := signedCanonicalP2PTxForHarness(t, source, 9001)
+	if err := sourceMempool.AddTx(txBytes); err != nil {
+		t.Fatalf("source canonical AddTx: %v", err)
+	}
+	if err := source.service.Start(ctx); err != nil {
+		t.Fatalf("source.Start: %v", err)
+	}
+	defer source.service.Close()
+
+	sink := newTestHarness(t, 1, "127.0.0.1:0", []string{source.service.Addr()})
+	sinkMempool := wireCanonicalMempoolForP2PTest(t, sink)
+	seedHarnessUtxos(sink, utxos)
+	if err := sink.service.Start(ctx); err != nil {
+		t.Fatalf("sink.Start: %v", err)
+	}
+	defer sink.service.Close()
+
+	waitFor(t, 5*time.Second, func() bool {
+		return source.peerManager.Count() == 1 && sink.peerManager.Count() == 1
+	})
+
+	if err := source.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("AnnounceTx: %v", err)
+	}
+	if !sourceMempool.Contains(txid) {
+		t.Fatal("source canonical mempool should contain announced tx")
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		return sinkMempool.Contains(txid)
+	})
+
+	minerCfg := node.DefaultMinerConfig()
+	minerCfg.TimestampSource = func() uint64 {
+		sink.timestamp++
+		return sink.timestamp
+	}
+	miner, err := node.NewMiner(sink.chainState, sink.blockStore, sink.syncEngine, minerCfg)
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	mined, err := miner.MineOne(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("MineOne: %v", err)
+	}
+	if mined.TxCount != 2 {
+		t.Fatalf("mined tx_count=%d, want 2", mined.TxCount)
+	}
+	blockBytes, err := sink.blockStore.GetBlockByHash(mined.Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	parsed, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes: %v", err)
+	}
+	if !parsedBlockHasTxID(parsed, txid) {
+		t.Fatalf("mined block missing relayed tx %x", txid)
+	}
+}
+
 func TestAnnounceTxNonCanonical(t *testing.T) {
 	txBytes := minimalValidTxBytes(t)
 	nonCanonical := append(txBytes, 0x00)
@@ -328,6 +462,119 @@ func TestHandleTxMetadataErrorIsPeerNeutralAndMarksSeen(t *testing.T) {
 	}
 }
 
+func TestHandleTxCanonicalMempoolRejectsMalformedAndAdmissionWithoutMutation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	canonicalMempool := wireCanonicalMempoolForP2PTest(t, h)
+	if err := h.service.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer h.service.Close()
+
+	p := &peer{
+		service: h.service,
+		state:   node.PeerState{HandshakeComplete: true},
+	}
+
+	if err := p.handleTx([]byte{0xFF, 0xFE}); err != nil {
+		t.Fatalf("malformed handleTx should not return before ban threshold: %v", err)
+	}
+	if got := canonicalMempool.Len(); got != 0 {
+		t.Fatalf("canonical mempool len after malformed=%d, want 0", got)
+	}
+
+	txBytes, txid, _ := signedCanonicalP2PTxWithoutSeeding(t, 9002)
+	if err := p.handleTx(txBytes); err != nil {
+		t.Fatalf("admission reject handleTx should be peer-neutral, got %v", err)
+	}
+	if got := canonicalMempool.Len(); got != 0 {
+		t.Fatalf("canonical mempool len after missing-utxo admission reject=%d, want 0", got)
+	}
+	if !h.service.txSeen.Has(txid) {
+		t.Fatal("admission-rejected tx should be marked seen to suppress getdata churn")
+	}
+	if canonicalMempool.Contains(txid) {
+		t.Fatal("admission-rejected tx must not enter canonical mempool")
+	}
+}
+
+func TestHandleTxCanonicalMempoolDuplicateIsIdempotent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	canonicalMempool := wireCanonicalMempoolForP2PTest(t, h)
+	txBytes, txid, _ := signedCanonicalP2PTxForHarness(t, h, 9003)
+	if err := h.service.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer h.service.Close()
+
+	p := &peer{
+		service: h.service,
+		state:   node.PeerState{HandshakeComplete: true},
+	}
+
+	wrongTxid := txid
+	wrongTxid[0] ^= 0x80
+	if h.service.cfg.TxPool.Put(wrongTxid, txBytes, 0, 0) {
+		t.Fatal("canonical adapter should reject txid/raw mismatch")
+	}
+	if got := canonicalMempool.Len(); got != 0 {
+		t.Fatalf("canonical mempool len after txid/raw mismatch=%d, want 0", got)
+	}
+
+	if err := p.handleTx(txBytes); err != nil {
+		t.Fatalf("handleTx first: %v", err)
+	}
+	if got := canonicalMempool.Len(); got != 1 {
+		t.Fatalf("canonical mempool len after first handleTx=%d, want 1", got)
+	}
+	if !canonicalMempool.Contains(txid) {
+		t.Fatal("canonical mempool should contain first relayed tx")
+	}
+	if err := p.handleTx(txBytes); err != nil {
+		t.Fatalf("handleTx duplicate: %v", err)
+	}
+	if got := canonicalMempool.Len(); got != 1 {
+		t.Fatalf("canonical mempool len after duplicate handleTx=%d, want 1", got)
+	}
+}
+
+func TestHandleTxCanonicalMempoolSkipsValidatingMetadataProvider(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	canonicalMempool := wireCanonicalMempoolForP2PTest(t, h)
+	txBytes, txid, _ := signedCanonicalP2PTxForHarness(t, h, 9004)
+	var metadataCalls atomic.Int32
+	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
+		metadataCalls.Add(1)
+		return node.RelayTxMetadata{}, errors.New("unexpected validating metadata call")
+	}
+	if err := h.service.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer h.service.Close()
+
+	p := &peer{
+		service: h.service,
+		state:   node.PeerState{HandshakeComplete: true},
+	}
+	if err := p.handleTx(txBytes); err != nil {
+		t.Fatalf("handleTx canonical mempool: %v", err)
+	}
+	if got := metadataCalls.Load(); got != 0 {
+		t.Fatalf("validating metadata calls=%d, want 0 for canonical mempool", got)
+	}
+	if !canonicalMempool.Contains(txid) {
+		t.Fatal("canonical mempool should contain relayed tx admitted through Put/AddTx")
+	}
+}
+
 func TestHandleTxDuplicateSkipsMetadataValidation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -387,6 +634,45 @@ func TestAnnounceTxMetadataError(t *testing.T) {
 	}
 	if h.service.txSeen.Has(txid) {
 		t.Fatal("failed AnnounceTx should not mark tx as seen")
+	}
+}
+
+func TestAnnounceTxAdmissionRejectDoesNotMarkSeen(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.TxPool = rejectingTxPool{}
+	txBytes := minimalValidTxBytes(t)
+	txid, err := canonicalTxID(txBytes)
+	if err != nil {
+		t.Fatalf("canonicalTxID: %v", err)
+	}
+	if err := h.service.AnnounceTx(txBytes); err == nil {
+		t.Fatal("AnnounceTx should reject when tx was not admitted to relay pool")
+	}
+	if h.service.txSeen.Has(txid) {
+		t.Fatal("admission-rejected AnnounceTx must not mark tx as seen")
+	}
+}
+
+func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	canonicalMempool := wireCanonicalMempoolForP2PTest(t, h)
+	txBytes, txid, _ := signedCanonicalP2PTxForHarness(t, h, 9005)
+	if err := canonicalMempool.AddTx(txBytes); err != nil {
+		t.Fatalf("canonical AddTx: %v", err)
+	}
+	var metadataCalls atomic.Int32
+	h.service.cfg.TxMetadataFunc = func([]byte) (node.RelayTxMetadata, error) {
+		metadataCalls.Add(1)
+		return node.RelayTxMetadata{}, errors.New("unexpected validating metadata call")
+	}
+	if err := h.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("AnnounceTx already-admitted canonical tx: %v", err)
+	}
+	if got := metadataCalls.Load(); got != 0 {
+		t.Fatalf("validating metadata calls=%d, want 0 for already-admitted tx", got)
+	}
+	if !h.service.txSeen.Has(txid) {
+		t.Fatal("announced tx should be marked seen after already-admitted broadcast")
 	}
 }
 

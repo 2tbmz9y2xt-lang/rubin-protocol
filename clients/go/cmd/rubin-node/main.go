@@ -32,6 +32,8 @@ var newSyncEngineFn = node.NewSyncEngine
 
 var newMempoolFn = node.NewMempoolWithConfig
 
+var newP2PServiceFn = p2p.NewService
+
 func applySuiteContextToSyncConfig(cfg *node.SyncConfig, rotation consensus.RotationProvider, registry *consensus.SuiteRegistry) {
 	if cfg == nil {
 		return
@@ -468,7 +470,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	p2pService, err := p2p.NewService(p2p.ServiceConfig{
+	p2pService, err := newP2PServiceFn(p2p.ServiceConfig{
 		BindAddr:          cfg.BindAddr,
 		BootstrapPeers:    cfg.Peers,
 		UserAgent:         "rubin-node/go",
@@ -478,7 +480,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		SyncConfig:        syncCfg,
 		SyncEngine:        syncEngine,
 		BlockStore:        blockStore,
-		TxMetadataFunc:    mempool.RelayMetadata,
+		TxPool:            p2p.NewCanonicalMempoolTxPool(mempool),
+		TxMetadataFunc:    p2p.CanonicalMempoolRelayMetadata,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "p2p init failed: %v\n", err)
