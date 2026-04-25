@@ -583,10 +583,7 @@ func TestDevnetRPCSubmitTxRejectsOversizedChunkedTrailingBody(t *testing.T) {
 // the underlying http.Server so a future edit that drops ReadTimeout /
 // WriteTimeout / IdleTimeout gets caught before landing.
 func TestDevnetRPCServerExplicitTimeouts(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	srv, err := startDevnetRPCServer(ctx, "127.0.0.1:0", mustRPCState(t, false), io.Discard, io.Discard)
+	srv, err := startDevnetRPCServer("127.0.0.1:0", mustRPCState(t, false), io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("startDevnetRPCServer: %v", err)
 	}
@@ -907,9 +904,7 @@ func TestTxAdmitErrorKindHTTPMapping(t *testing.T) {
 
 func TestStartDevnetRPCServerLifecycle(t *testing.T) {
 	state := mustRPCState(t, false)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	server, err := startDevnetRPCServer(ctx, "127.0.0.1:0", state, nil, nil)
+	server, err := startDevnetRPCServer("127.0.0.1:0", state, nil, nil)
 	if err != nil {
 		t.Fatalf("startDevnetRPCServer: %v", err)
 	}
@@ -932,11 +927,8 @@ func TestStartDevnetRPCServerLifecycle(t *testing.T) {
 
 func TestStartDevnetRPCServerWritesListeningBannerAndCloseHandlesNil(t *testing.T) {
 	state := mustRPCState(t, false)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	var stdout bytes.Buffer
-	server, err := startDevnetRPCServer(ctx, "127.0.0.1:0", state, &stdout, nil)
+	server, err := startDevnetRPCServer("127.0.0.1:0", state, &stdout, nil)
 	if err != nil {
 		t.Fatalf("startDevnetRPCServer: %v", err)
 	}
@@ -954,7 +946,7 @@ func TestStartDevnetRPCServerWritesListeningBannerAndCloseHandlesNil(t *testing.
 }
 
 func TestStartDevnetRPCServerDisabledReturnsNil(t *testing.T) {
-	server, err := startDevnetRPCServer(context.Background(), "   ", mustRPCState(t, false), nil, nil)
+	server, err := startDevnetRPCServer("   ", mustRPCState(t, false), nil, nil)
 	if err != nil {
 		t.Fatalf("startDevnetRPCServer: %v", err)
 	}
@@ -964,7 +956,7 @@ func TestStartDevnetRPCServerDisabledReturnsNil(t *testing.T) {
 }
 
 func TestStartDevnetRPCServerRejectsNilState(t *testing.T) {
-	server, err := startDevnetRPCServer(context.Background(), "127.0.0.1:0", nil, nil, nil)
+	server, err := startDevnetRPCServer("127.0.0.1:0", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected nil-state error")
 	}
@@ -1586,4 +1578,118 @@ func TestDevnetRPCTxStatusFailsClosedOn503BeforeParsingInvalidTxID(t *testing.T)
 	if !strings.Contains(got.Error, "mempool unavailable") {
 		t.Fatalf("Error=%q, want 'mempool unavailable'", got.Error)
 	}
+}
+
+// TestReadyHandlerReports503WhenNotReady pins the default-state contract:
+// a fresh devnetRPCState must report not-ready until cmd/rubin-node has
+// flipped the flag at the all-subsystems-up boundary. atomic.Bool's zero
+// value is false, so a freshly constructed state observes 503 with body
+// {"ready":false}. Reverting that default in the future would silently
+// re-introduce the false-ready-during-partial-init class.
+func TestReadyHandlerReports503WhenNotReady(t *testing.T) {
+	state := mustRPCState(t, false)
+	handler := newDevnetRPCHandler(state)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type=%q, want application/json", got)
+	}
+	var body readyResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if body.Ready {
+		t.Fatalf("body.Ready=true, want false")
+	}
+}
+
+// TestReadyHandlerReports200AfterSetReady pins the positive contract:
+// once SetReady(true) is invoked, GET /ready returns 200 with body
+// {"ready":true}. Subsequent SetReady(false) flips the response back to
+// 503, mirroring cmd/rubin-node's shutdown ordering where SetReady(false)
+// runs at the start of the drain.
+func TestReadyHandlerReports200AfterSetReady(t *testing.T) {
+	state := mustRPCState(t, false)
+	state.SetReady(true)
+	handler := newDevnetRPCHandler(state)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var body readyResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !body.Ready {
+		t.Fatalf("body.Ready=false, want true")
+	}
+
+	// Flip back to false — same handler instance must observe new state.
+	state.SetReady(false)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status after SetReady(false)=%d, want 503", rec.Code)
+	}
+}
+
+// TestReadyHandlerRejectsNonGet locks the method contract: only GET is
+// served. POST/PUT/DELETE/etc must return 405 so probes that accidentally
+// use a non-idempotent verb fail loudly rather than silently observing an
+// unrelated body.
+func TestReadyHandlerRejectsNonGet(t *testing.T) {
+	state := mustRPCState(t, false)
+	state.SetReady(true)
+	handler := newDevnetRPCHandler(state)
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(method, "/ready", nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("method=%s status=%d, want 405", method, rec.Code)
+		}
+		// Error body uses the same submitTxResponse JSON envelope as the
+		// rest of the devnet RPC surface (see handleGetTip / handleSubmitTx
+		// non-method paths) so the endpoint stays machine-readable on error
+		// rather than returning plain-text http.Error.
+		if got := rec.Header().Get("Content-Type"); got != "application/json" {
+			t.Fatalf("method=%s Content-Type=%q, want application/json", method, got)
+		}
+		// RFC 9110 §15.5.6: 405 responses MUST list the permitted methods
+		// in the Allow header so generic HTTP clients can self-correct.
+		if got := rec.Header().Get("Allow"); got != http.MethodGet {
+			t.Fatalf("method=%s Allow=%q, want %q", method, got, http.MethodGet)
+		}
+		var body submitTxResponse
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("method=%s Decode: %v", method, err)
+		}
+		if body.Accepted {
+			t.Fatalf("method=%s body.Accepted=true, want false", method)
+		}
+		if !strings.Contains(body.Error, "GET required") {
+			t.Fatalf("method=%s body.Error=%q, want substring 'GET required'", method, body.Error)
+		}
+	}
+}
+
+// TestRunningServerSetReadyNilSafe documents that the wrapper-level
+// SetReady tolerates a nil receiver, which keeps cmd/rubin-node's
+// shutdown path robust if a future refactor introduces an early return
+// before rpcServer is fully constructed.
+func TestRunningServerSetReadyNilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("nil-receiver SetReady panicked: %v", r)
+		}
+	}()
+	var s *runningDevnetRPCServer
+	s.SetReady(true)
+	s.SetReady(false)
 }
