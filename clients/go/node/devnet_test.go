@@ -155,7 +155,6 @@ func TestDevnetTwoNodeFullBlockP2PBaseline(t *testing.T) {
 		from:    txSourceAddress,
 		to:      txSourceAddress,
 		amount:  txAmount,
-		fee:     txFee,
 	}
 	txBytes, err := txGen.buildNext(txFee)
 	if err != nil {
@@ -340,7 +339,6 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		from:    txSourceAddress,
 		to:      txTargetAddress,
 		amount:  txAmount,
-		fee:     txFee,
 	}
 	submittedTxs := make([][32]byte, 0, targetHeight/txInterval)
 
@@ -591,7 +589,6 @@ type txGenerator struct {
 	from         []byte
 	to           []byte
 	amount       uint64
-	fee          uint64
 	nonceCounter uint64
 }
 
@@ -962,6 +959,7 @@ func assertVersionProbeRejectedWithoutVerAck(t *testing.T, addr string, payload 
 		t.Fatalf("write identity probe: %v", err)
 	}
 
+	sawServiceVersion := false
 	for {
 		command, err := readDevnetProbeCommand(conn)
 		if err != nil {
@@ -969,10 +967,18 @@ func assertVersionProbeRejectedWithoutVerAck(t *testing.T, addr string, payload 
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				t.Fatalf("identity probe timed out waiting for rejection")
 			}
+			if !sawServiceVersion {
+				t.Fatalf("identity probe closed before service version frame: %v", err)
+			}
 			return
 		}
-		if command == "verack" {
+		switch command {
+		case "version":
+			sawServiceVersion = true
+		case "verack":
 			t.Fatalf("identity probe received verack for mismatched payload: chain_id=%x genesis_hash=%x", payload.ChainID, payload.GenesisHash)
+		default:
+			t.Fatalf("identity probe received unexpected command before rejection: %q", command)
 		}
 	}
 }
@@ -986,7 +992,6 @@ func devnetVersionProbePayload() node.VersionPayloadV1 {
 		ChainID:           node.DevnetGenesisChainID(),
 		GenesisHash:       node.DevnetGenesisBlockHash(),
 		BestHeight:        0,
-		UserAgent:         "rubin-go/devnet-identity-probe",
 	}
 }
 
