@@ -830,10 +830,101 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 		"rubin_node_in_ibd 0",
 		"rubin_node_peer_count 0",
 		"rubin_node_mempool_txs 0",
+		"rubin_node_mempool_bytes 0",
+		`rubin_node_mempool_admit_total{result="accepted"} 0`,
+		`rubin_node_mempool_admit_total{result="conflict"} 0`,
+		`rubin_node_mempool_admit_total{result="rejected"} 0`,
+		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics body %q", want, body)
 		}
+	}
+}
+
+// TestRenderPrometheusMetricsMempoolBytesAndAdmitTotal pins the new
+// scrape surface added by #1288: rubin_node_mempool_bytes (gauge,
+// reflects mempool.BytesUsed at scrape) and the four bounded
+// rubin_node_mempool_admit_total{result=...} counter buckets in a
+// fixed rendering order. The test bumps three buckets via real AddTx
+// outcomes (accepted via valid tx, conflict via duplicate tx,
+// rejected via trailing-bytes parse error), reads /metrics, and
+// asserts (a) every bucket line is present in the fixed
+// accepted/conflict/rejected/unavailable order, (b) values match the
+// counter snapshot, (c) BytesUsed reflects the byte size of the
+// accepted transaction. The unavailable bucket stays at 0 because the
+// test mempool has a non-nil chainstate.
+func TestRenderPrometheusMetricsMempoolBytesAndAdmitTotal(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, nil)
+	txBytes, _ := mustRPCSignedTransferTx(t, utxos, input, fromKey, toAddress)
+	if err := state.mempool.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx accept: %v", err)
+	}
+	// Bump conflict bucket via duplicate AddTx.
+	if err := state.mempool.AddTx(txBytes); err == nil {
+		t.Fatalf("duplicate AddTx unexpectedly accepted")
+	}
+	// Bump rejected bucket via trailing-bytes parse error.
+	bad := append([]byte{}, txBytes...)
+	bad = append(bad, 0x00)
+	if err := state.mempool.AddTx(bad); err == nil {
+		t.Fatalf("malformed AddTx unexpectedly accepted")
+	}
+
+	body := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		"# TYPE rubin_node_mempool_bytes gauge",
+		"# TYPE rubin_node_mempool_admit_total counter",
+		`rubin_node_mempool_admit_total{result="accepted"} 1`,
+		`rubin_node_mempool_admit_total{result="conflict"} 1`,
+		`rubin_node_mempool_admit_total{result="rejected"} 1`,
+		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics body %q", want, body)
+		}
+	}
+	// Fixed rendering order: accepted < conflict < rejected < unavailable.
+	idxAccepted := strings.Index(body, `rubin_node_mempool_admit_total{result="accepted"}`)
+	idxConflict := strings.Index(body, `rubin_node_mempool_admit_total{result="conflict"}`)
+	idxRejected := strings.Index(body, `rubin_node_mempool_admit_total{result="rejected"}`)
+	idxUnavailable := strings.Index(body, `rubin_node_mempool_admit_total{result="unavailable"}`)
+	if !(idxAccepted >= 0 && idxAccepted < idxConflict && idxConflict < idxRejected && idxRejected < idxUnavailable) {
+		t.Fatalf("admit_total buckets not in fixed accepted<conflict<rejected<unavailable order; positions %d,%d,%d,%d body=%q", idxAccepted, idxConflict, idxRejected, idxUnavailable, body)
+	}
+	// BytesUsed reflected as gauge: equals the raw byte size of the
+	// single accepted transaction.
+	if !strings.Contains(body, fmt.Sprintf("rubin_node_mempool_bytes %d", len(txBytes))) {
+		t.Fatalf("rubin_node_mempool_bytes does not reflect BytesUsed=%d in body %q", len(txBytes), body)
+	}
+}
+
+// TestRenderPrometheusMetricsTwiceDoesNotIncrementAdmitCounters pins
+// the scrape-time-no-increment contract: rendering /metrics is a pure
+// counter Load() and MUST NOT bump any of the four
+// rubin_node_mempool_admit_total buckets. After one accepted AddTx,
+// rendering twice and re-snapshotting AdmissionCounts must yield the
+// SAME accepted=1 value.
+func TestRenderPrometheusMetricsTwiceDoesNotIncrementAdmitCounters(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, nil)
+	txBytes, _ := mustRPCSignedTransferTx(t, utxos, input, fromKey, toAddress)
+	if err := state.mempool.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+	pre := state.mempool.AdmissionCounts()
+	_ = renderPrometheusMetrics(state)
+	_ = renderPrometheusMetrics(state)
+	post := state.mempool.AdmissionCounts()
+	if pre != post {
+		t.Fatalf("AdmissionCounts changed across two /metrics renders: pre=%+v post=%+v (scrape-time increment regression)", pre, post)
 	}
 }
 

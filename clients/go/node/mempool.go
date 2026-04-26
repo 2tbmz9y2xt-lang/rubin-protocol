@@ -7,6 +7,7 @@ import (
 	"math/bits"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -36,6 +37,28 @@ type Mempool struct {
 	usedBytes  int
 	txs        map[[32]byte]*mempoolEntry
 	spenders   map[consensus.Outpoint][32]byte
+	// Admission counters are bumped exactly once per AddTx call, at the
+	// final outcome. Lock-free via atomic.Uint64 — no impact on the
+	// admissionMu / mu ordering. Buckets are the closed enum
+	// {accepted, conflict, rejected, unavailable}; any non-TxAdmitError
+	// reachable from AddTx falls into the rejected bucket so no
+	// unbounded label class can grow from this surface.
+	admitAccepted    atomic.Uint64
+	admitConflict    atomic.Uint64
+	admitRejected    atomic.Uint64
+	admitUnavailable atomic.Uint64
+}
+
+// MempoolAdmissionCounts is the snapshot view of admission outcomes.
+// Field order matches the /metrics rendering order in
+// renderPrometheusMetrics so the textual output is stable across
+// readings. Values are monotonic counts since process start; readers
+// MUST treat them as Prometheus counters.
+type MempoolAdmissionCounts struct {
+	Accepted    uint64
+	Conflict    uint64
+	Rejected    uint64
+	Unavailable uint64
 }
 
 type MempoolConfig struct {
@@ -137,6 +160,74 @@ func (m *Mempool) Len() int {
 	return len(m.txs)
 }
 
+// BytesUsed returns the total raw byte size of transactions currently
+// resident in the mempool. Mirrors the existing usedBytes accounting
+// already maintained on every AddTx / RemoveTx path. Returns 0 on a
+// nil receiver so callers (e.g. /metrics rendering) can scrape
+// unconditionally.
+func (m *Mempool) BytesUsed() int {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.usedBytes
+}
+
+// AdmissionCounts returns a snapshot of the per-outcome admission
+// counters bumped at the final return path of AddTx. Values are
+// monotonic counts since process start. Returns a zero-valued struct
+// on a nil receiver so callers (e.g. /metrics rendering) can scrape
+// unconditionally. Field order matches the fixed metric rendering
+// order in renderPrometheusMetrics.
+func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
+	if m == nil {
+		return MempoolAdmissionCounts{}
+	}
+	return MempoolAdmissionCounts{
+		Accepted:    m.admitAccepted.Load(),
+		Conflict:    m.admitConflict.Load(),
+		Rejected:    m.admitRejected.Load(),
+		Unavailable: m.admitUnavailable.Load(),
+	}
+}
+
+// noteAdmissionResult bumps exactly one outcome counter based on the
+// final error returned by AddTx. nil error → accepted; *TxAdmitError →
+// matching kind bucket; any other (currently unreachable) error
+// falls into the rejected bucket as a fail-closed default so this
+// helper never silently swallows a metric and never invents a new
+// label. AddTx wires this via named return + defer so every return
+// path increments exactly one counter.
+func (m *Mempool) noteAdmissionResult(err error) {
+	if m == nil {
+		return
+	}
+	if err == nil {
+		m.admitAccepted.Add(1)
+		return
+	}
+	var admitErr *TxAdmitError
+	if errors.As(err, &admitErr) {
+		switch admitErr.Kind {
+		case TxAdmitConflict:
+			m.admitConflict.Add(1)
+		case TxAdmitRejected:
+			m.admitRejected.Add(1)
+		case TxAdmitUnavailable:
+			m.admitUnavailable.Add(1)
+		default:
+			// Unknown TxAdmitErrorKind — bucket as rejected so we never
+			// grow a new label silently.
+			m.admitRejected.Add(1)
+		}
+		return
+	}
+	// Non-TxAdmitError reaching AddTx is currently unreachable per
+	// audit, but bucket as rejected to keep the outcome closed.
+	m.admitRejected.Add(1)
+}
+
 // AllTxIDs returns the txids of every transaction currently in the mempool.
 // The slice ordering is not guaranteed to be stable between calls.
 func (m *Mempool) AllTxIDs() [][32]byte {
@@ -182,10 +273,15 @@ func (m *Mempool) Contains(txid [32]byte) bool {
 	return ok
 }
 
-func (m *Mempool) AddTx(txBytes []byte) error {
+func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
 	}
+	// Single defer bumps exactly one admission counter per call based
+	// on the final return value. Registered AFTER the nil-receiver
+	// guard above so a nil mempool still returns the typed unavailable
+	// error without attempting to record a counter on nil.
+	defer func() { m.noteAdmissionResult(retErr) }()
 	if m.chainState == nil {
 		return txAdmitUnavailable("nil chainstate")
 	}
