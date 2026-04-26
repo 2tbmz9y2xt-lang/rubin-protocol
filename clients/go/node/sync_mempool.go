@@ -90,7 +90,7 @@ func validateMempoolSnapshotEntry(entry mempoolEntry) error {
 		return fmt.Errorf("mempool snapshot entry txid mismatch: entry=%x raw=%x", entry.txid, txid)
 	}
 	if len(entry.inputs) != len(tx.Inputs) {
-		return fmt.Errorf("mempool snapshot entry input count mismatch for txid %x: entry=%d raw=%d", entry.txid, len(entry.inputs), len(tx.Inputs))
+		return fmt.Errorf("mempool snapshot entry input count mismatch for txid %x: entry=%d tx=%d", entry.txid, len(entry.inputs), len(tx.Inputs))
 	}
 	for i, in := range tx.Inputs {
 		want := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
