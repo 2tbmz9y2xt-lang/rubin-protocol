@@ -520,7 +520,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	rpcState := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, stderr, liveMiner)
-	rpcServer, err := startDevnetRPCServer(ctx, cfg.RPCBindAddr, rpcState, stdout, stderr)
+	rpcServer, err := startDevnetRPCServer(cfg.RPCBindAddr, rpcState, stdout, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "rpc start failed: %v\n", err)
 		return 2
@@ -533,8 +533,44 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}()
 	}
 
+	// Readiness flag flips to true ONLY after blockstore open, chainstate
+	// load, p2pService.Start, and RPC bind/listen have all succeeded — the
+	// "all subsystems up" boundary. Gated on rpcServer != nil so the flag
+	// is never claimed when --rpc-bind is empty (no GET /ready surface).
+	// Also gated on ctx.Err() == nil via the helper below: if SIGINT or
+	// SIGTERM was observed in the narrow window between RPC bind success
+	// and this call site, the helper skips the SetReady(true) flip so
+	// the "/ready returns 503 the moment shutdown is observed" contract
+	// is not briefly violated during fast start/stop cycles. Set BEFORE
+	// the "running" stdout banner so test harnesses that wait on the
+	// banner observe a coherent state: log line + GET /ready 200. The
+	// "rpc: ready=true" stdout line is runtime evidence (printed value
+	// reads the flag AFTER SetReady) — not the operator signal itself.
+	// The operator signal is the GET /ready 200 response; this stdout
+	// banner exists so subprocess regression tests can pin that SetReady
+	// actually executed at this exact call site.
+	maybeFlipReadyOnStartup(ctx, rpcServer, stdout)
 	_, _ = fmt.Fprintln(stdout, "rubin-node skeleton running")
 	<-ctx.Done()
+	// Flip readiness false at the START of the shutdown drain — BEFORE
+	// the deferred rpcServer.Close + p2pService.Close fire on return —
+	// so /ready stops claiming healthy as soon as SIGINT/SIGTERM is
+	// observed, even while in-flight RPC handlers are still draining
+	// inside server.Shutdown's grace window. The "rpc: ready=false"
+	// stdout line is the runtime evidence the regression test scans for
+	// after the child exits cleanly: handler-level unit tests cannot
+	// observe the production main.go invocation of SetReady(false) on
+	// the shutdown path, and a post-SIGINT HTTP poll against /ready is
+	// inherently racy because http.Server.Shutdown immediately closes
+	// idle connections and rejects new accepts. Printing the flag value
+	// AFTER SetReady(false) makes the literal "rpc: ready=false" the
+	// only way the line can read; deleting or moving the SetReady(false)
+	// call past the print would change the value to true and turn the
+	// regression test red.
+	if rpcServer != nil {
+		rpcServer.SetReady(false)
+		_, _ = fmt.Fprintf(stdout, "rpc: ready=%v\n", rpcServer.IsReady())
+	}
 	_, _ = fmt.Fprintln(stdout, "rubin-node skeleton stopped")
 	return 0
 }
@@ -673,6 +709,40 @@ type parsedGenesisConfig struct {
 	ChainID         [32]byte
 	GenesisHash     [32]byte
 	CoreExtProfiles consensus.CoreExtProfileProvider
+}
+
+// maybeFlipReadyOnStartup flips the operator-visible readiness flag to
+// true ONLY when all of (a) rpcServer is non-nil (RPC actually bound and
+// listening) and (b) ctx has not yet been canceled. The ctx check
+// closes a narrow race window: SIGINT/SIGTERM can be delivered between
+// startDevnetRPCServer returning a non-nil wrapper and run() reaching
+// the SetReady(true) call site. Without the ctx check, SetReady(true)
+// would fire even though shutdown was already requested, then the
+// existing post-<-ctx.Done() SetReady(false) would flip it back — but
+// in the gap /ready would briefly advertise 200, violating the "false
+// as soon as signal observed" contract during fast start/stop cycles.
+//
+// Per the same audit-banner contract used at the SetReady(false) call
+// site, the stdout "rpc: ready=true" line is printed immediately after
+// SetReady so its value reflects the actual flag state via
+// rpcServer.IsReady(), giving the integration test deterministic
+// runtime evidence that the flip executed at this exact site.
+func maybeFlipReadyOnStartup(ctx context.Context, rpcServer *runningDevnetRPCServer, stdout io.Writer) {
+	if rpcServer == nil {
+		return
+	}
+	select {
+	case <-ctx.Done():
+		// Shutdown already requested — leave readiness false so the
+		// upcoming defer-driven drain observes a flag that was never
+		// claimed healthy in the first place.
+		return
+	default:
+	}
+	rpcServer.SetReady(true)
+	if stdout != nil {
+		_, _ = fmt.Fprintf(stdout, "rpc: ready=%v\n", rpcServer.IsReady())
+	}
 }
 
 func parseGenesisConfig(path string) ([32]byte, [32]byte, error) {
