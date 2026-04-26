@@ -1815,3 +1815,173 @@ func TestMempoolContainsNilReceiver(t *testing.T) {
 		t.Fatalf("Contains on nil receiver=true, want false")
 	}
 }
+
+// TestMempoolBytesUsedTracksUsedBytes pins the BytesUsed gauge: empty
+// mempool reports 0; after a successful AddTx BytesUsed reflects the
+// raw transaction byte size accounted in the existing usedBytes field.
+// This is the metric scrape source for rubin_node_mempool_bytes.
+func TestMempoolBytesUsedTracksUsedBytes(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if got := mp.BytesUsed(); got != 0 {
+		t.Fatalf("BytesUsed empty=%d, want 0", got)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+	if got := mp.BytesUsed(); got != len(txBytes) {
+		t.Fatalf("BytesUsed=%d, want %d (raw tx size)", got, len(txBytes))
+	}
+}
+
+// TestMempoolBytesUsedNilReceiver pins the nil-safety contract used by
+// the /metrics rendering path: a nil mempool reports 0 bytes without
+// panicking, so the scrape rendering can call BytesUsed unconditionally.
+func TestMempoolBytesUsedNilReceiver(t *testing.T) {
+	var mp *Mempool
+	if got := mp.BytesUsed(); got != 0 {
+		t.Fatalf("BytesUsed nil receiver=%d, want 0", got)
+	}
+}
+
+// TestMempoolAdmissionCountsAcceptedBumpsExactlyOnce pins that a happy
+// AddTx call increments only the Accepted bucket of the admission
+// counters and leaves the other three buckets at zero.
+func TestMempoolAdmissionCountsAcceptedBumpsExactlyOnce(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if got := mp.AdmissionCounts(); got != (MempoolAdmissionCounts{}) {
+		t.Fatalf("AdmissionCounts pre-AddTx=%+v, want zero", got)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+	got := mp.AdmissionCounts()
+	if got.Accepted != 1 || got.Conflict != 0 || got.Rejected != 0 || got.Unavailable != 0 {
+		t.Fatalf("AdmissionCounts after accepted AddTx=%+v, want only Accepted=1", got)
+	}
+}
+
+// TestMempoolAdmissionCountsConflictBumpsExactlyOnce pins that a
+// duplicate-txid AddTx call routes to the Conflict bucket. The first
+// AddTx accepts; the second AddTx with the same bytes hits the
+// validateAdmissionLocked duplicate-spender path which returns
+// txAdmitConflict.
+func TestMempoolAdmissionCountsConflictBumpsExactlyOnce(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("first AddTx: %v", err)
+	}
+	dupErr := mp.AddTx(txBytes)
+	if dupErr == nil {
+		t.Fatalf("duplicate AddTx unexpectedly accepted")
+	}
+	var admitErr *TxAdmitError
+	if !errors.As(dupErr, &admitErr) || admitErr.Kind != TxAdmitConflict {
+		t.Fatalf("duplicate AddTx err=%v (kind=%v), want TxAdmitConflict", dupErr, func() any {
+			if admitErr != nil {
+				return admitErr.Kind
+			}
+			return "<nil>"
+		}())
+	}
+	got := mp.AdmissionCounts()
+	if got.Accepted != 1 {
+		t.Fatalf("AdmissionCounts.Accepted=%d, want 1 (first AddTx)", got.Accepted)
+	}
+	if got.Conflict != 1 || got.Rejected != 0 || got.Unavailable != 0 {
+		t.Fatalf("AdmissionCounts after duplicate=%+v, want Conflict=1", got)
+	}
+}
+
+// TestMempoolAdmissionCountsRejectedBumpsExactlyOnce pins that an
+// AddTx call rejected by the parse-time path (here: trailing bytes
+// after canonical tx) routes to the Rejected bucket via the
+// txAdmitRejected helper inside checkTransactionWithSnapshot.
+func TestMempoolAdmissionCountsRejectedBumpsExactlyOnce(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	// Append a trailing byte to force the "trailing bytes after canonical
+	// tx" reject path inside checkTransactionWithSnapshot.
+	bad := append([]byte{}, txBytes...)
+	bad = append(bad, 0x00)
+	addErr := mp.AddTx(bad)
+	if addErr == nil {
+		t.Fatalf("malformed AddTx unexpectedly accepted")
+	}
+	var admitErr *TxAdmitError
+	if !errors.As(addErr, &admitErr) || admitErr.Kind != TxAdmitRejected {
+		t.Fatalf("malformed AddTx err=%v, want TxAdmitRejected", addErr)
+	}
+	got := mp.AdmissionCounts()
+	if got.Rejected != 1 || got.Accepted != 0 || got.Conflict != 0 || got.Unavailable != 0 {
+		t.Fatalf("AdmissionCounts after malformed=%+v, want Rejected=1", got)
+	}
+}
+
+// TestMempoolAdmissionCountsUnavailableBumpsExactlyOnce pins that an
+// AddTx call hitting the nil-chainstate guard routes to the
+// Unavailable bucket. nil-chainstate is the explicit unavailable
+// branch documented in AddTx.
+func TestMempoolAdmissionCountsUnavailableBumpsExactlyOnce(t *testing.T) {
+	mp := &Mempool{} // chainState nil — exercises txAdmitUnavailable("nil chainstate")
+	addErr := mp.AddTx([]byte{0x00})
+	if addErr == nil {
+		t.Fatalf("AddTx on nil-chainstate mempool unexpectedly accepted")
+	}
+	var admitErr *TxAdmitError
+	if !errors.As(addErr, &admitErr) || admitErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("AddTx err=%v, want TxAdmitUnavailable", addErr)
+	}
+	got := mp.AdmissionCounts()
+	if got.Unavailable != 1 || got.Accepted != 0 || got.Conflict != 0 || got.Rejected != 0 {
+		t.Fatalf("AdmissionCounts after unavailable=%+v, want Unavailable=1", got)
+	}
+}
+
+// TestMempoolAdmissionCountsNilReceiver pins the nil-safety contract
+// used by /metrics rendering: a nil mempool returns the zero-value
+// MempoolAdmissionCounts struct without panicking.
+func TestMempoolAdmissionCountsNilReceiver(t *testing.T) {
+	var mp *Mempool
+	if got := mp.AdmissionCounts(); got != (MempoolAdmissionCounts{}) {
+		t.Fatalf("AdmissionCounts nil receiver=%+v, want zero struct", got)
+	}
+}

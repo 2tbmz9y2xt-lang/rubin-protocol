@@ -1021,6 +1021,8 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		inIBD           float64
 		peerCount       float64
 		mempoolTxs      float64
+		mempoolBytes    float64
+		mempoolAdmit    node.MempoolAdmissionCounts
 		routeStatus     map[string]uint64
 		submitByResult  map[string]uint64
 	)
@@ -1038,6 +1040,14 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 	}
 	if state != nil && state.mempool != nil {
 		mempoolTxs = float64(state.mempool.Len())
+		// BytesUsed is a scrape-time read of the mempool's existing
+		// usedBytes accounting (already maintained on every AddTx /
+		// RemoveTx). AdmissionCounts is a snapshot of the per-outcome
+		// counters that AddTx bumps at the final return path — read
+		// here is purely a Load(), no increment, so rendering /metrics
+		// repeatedly cannot perturb the counters.
+		mempoolBytes = float64(state.mempool.BytesUsed())
+		mempoolAdmit = state.mempool.AdmissionCounts()
 	}
 	if state != nil && state.metrics != nil {
 		routeStatus, submitByResult = state.metrics.snapshot()
@@ -1063,6 +1073,19 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		"# HELP rubin_node_mempool_txs Number of transactions currently in the mempool.",
 		"# TYPE rubin_node_mempool_txs gauge",
 		fmt.Sprintf("rubin_node_mempool_txs %.0f", mempoolTxs),
+		"# HELP rubin_node_mempool_bytes Raw byte size of transactions currently in the mempool.",
+		"# TYPE rubin_node_mempool_bytes gauge",
+		fmt.Sprintf("rubin_node_mempool_bytes %.0f", mempoolBytes),
+		"# HELP rubin_node_mempool_admit_total Total mempool AddTx outcomes by result label.",
+		"# TYPE rubin_node_mempool_admit_total counter",
+		// Fixed rendering order: accepted, conflict, rejected,
+		// unavailable. Buckets are the closed enum
+		// MempoolAdmissionCounts; no free-form labels are emitted from
+		// this surface.
+		fmt.Sprintf(`rubin_node_mempool_admit_total{result="accepted"} %d`, mempoolAdmit.Accepted),
+		fmt.Sprintf(`rubin_node_mempool_admit_total{result="conflict"} %d`, mempoolAdmit.Conflict),
+		fmt.Sprintf(`rubin_node_mempool_admit_total{result="rejected"} %d`, mempoolAdmit.Rejected),
+		fmt.Sprintf(`rubin_node_mempool_admit_total{result="unavailable"} %d`, mempoolAdmit.Unavailable),
 		"# HELP rubin_node_rpc_requests_total Total HTTP RPC requests by route and status.",
 		"# TYPE rubin_node_rpc_requests_total counter",
 	)
