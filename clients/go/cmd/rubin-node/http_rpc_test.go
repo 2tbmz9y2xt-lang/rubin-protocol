@@ -2262,9 +2262,8 @@ func TestDevnetRPCHealthReportsReadyFalseAsField(t *testing.T) {
 	}
 }
 
-// TestDevnetRPCHealthFailsClosedOnMissingState invokes the /health
-// handler with a nil state, exercising the strongest fail-closed
-// input on the handler.
+// TestDevnetRPCHealthFailsClosedOnMissingState calls the /health
+// handler with a nil *devnetRPCState.
 // Proof assertion: rec.Code == http.StatusServiceUnavailable
 // and rec.Header.Get("Content-Type") == "application/json".
 func TestDevnetRPCHealthFailsClosedOnMissingState(t *testing.T) {
