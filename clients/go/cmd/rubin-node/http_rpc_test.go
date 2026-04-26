@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1582,10 +1583,11 @@ func TestDevnetRPCTxStatusFailsClosedOn503BeforeParsingInvalidTxID(t *testing.T)
 
 // TestReadyHandlerReports503WhenNotReady pins the default-state contract:
 // a fresh devnetRPCState must report not-ready until cmd/rubin-node has
-// flipped the flag at the all-subsystems-up boundary. atomic.Bool's zero
-// value is false, so a freshly constructed state observes 503 with body
-// {"ready":false}. Reverting that default in the future would silently
-// re-introduce the false-ready-during-partial-init class.
+// transitioned the gate at the all-subsystems-up boundary. The gate's
+// default state is NotReady (zero value of int8 readyState), so a
+// freshly constructed state observes 503 with body {"ready":false}.
+// Reverting that default in the future would silently re-introduce the
+// false-ready-during-partial-init class.
 func TestReadyHandlerReports503WhenNotReady(t *testing.T) {
 	state := mustRPCState(t, false)
 	handler := newDevnetRPCHandler(state)
@@ -1607,14 +1609,16 @@ func TestReadyHandlerReports503WhenNotReady(t *testing.T) {
 	}
 }
 
-// TestReadyHandlerReports200AfterSetReady pins the positive contract:
-// once SetReady(true) is invoked, GET /ready returns 200 with body
-// {"ready":true}. Subsequent SetReady(false) flips the response back to
-// 503, mirroring cmd/rubin-node's shutdown ordering where SetReady(false)
-// runs at the start of the drain.
-func TestReadyHandlerReports200AfterSetReady(t *testing.T) {
+// TestReadyHandlerReports200AfterTryMarkReadyOnStartup pins the positive
+// contract: once the boot-time TryMarkReadyOnStartup transition NotReady → Ready wins, GET /ready
+// returns 200 with body {"ready":true}. A subsequent MarkShutdown stamp
+// flips the response back to 503 and is sticky — TryMarkReadyOnStartup
+// can no longer return the latch to Ready in this state's lifetime.
+func TestReadyHandlerReports200AfterTryMarkReadyOnStartup(t *testing.T) {
 	state := mustRPCState(t, false)
-	state.SetReady(true)
+	if !state.TryMarkReadyOnStartup() {
+		t.Fatalf("TryMarkReadyOnStartup failed on fresh state")
+	}
 	handler := newDevnetRPCHandler(state)
 
 	rec := httptest.NewRecorder()
@@ -1631,12 +1635,21 @@ func TestReadyHandlerReports200AfterSetReady(t *testing.T) {
 		t.Fatalf("body.Ready=false, want true")
 	}
 
-	// Flip back to false — same handler instance must observe new state.
-	state.SetReady(false)
+	// Stamp Shutdown — same handler instance must observe sticky
+	// transition. After this point the latch must NEVER return to
+	// Ready: TryMarkReadyOnStartup cannot succeed against a
+	// current value of 2.
+	state.MarkShutdown()
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
 	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status after SetReady(false)=%d, want 503", rec.Code)
+		t.Fatalf("status after MarkShutdown=%d, want 503", rec.Code)
+	}
+	if got := state.TryMarkReadyOnStartup(); got {
+		t.Fatalf("TryMarkReadyOnStartup unexpectedly succeeded after MarkShutdown")
+	}
+	if state.IsReady() {
+		t.Fatalf("IsReady=true after MarkShutdown, want false (sticky latch)")
 	}
 }
 
@@ -1646,7 +1659,7 @@ func TestReadyHandlerReports200AfterSetReady(t *testing.T) {
 // unrelated body.
 func TestReadyHandlerRejectsNonGet(t *testing.T) {
 	state := mustRPCState(t, false)
-	state.SetReady(true)
+	state.TryMarkReadyOnStartup()
 	handler := newDevnetRPCHandler(state)
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
 		rec := httptest.NewRecorder()
@@ -1679,17 +1692,226 @@ func TestReadyHandlerRejectsNonGet(t *testing.T) {
 	}
 }
 
-// TestRunningServerSetReadyNilSafe documents that the wrapper-level
-// SetReady tolerates a nil receiver, which keeps cmd/rubin-node's
-// shutdown path robust if a future refactor introduces an early return
-// before rpcServer is fully constructed.
-func TestRunningServerSetReadyNilSafe(t *testing.T) {
+// TestRunningServerLatchMethodsNilSafe documents that the wrapper-level
+// readiness latch methods all tolerate a nil receiver, keeping
+// cmd/rubin-node's startup and shutdown paths robust if a future
+// refactor introduces an early return before rpcServer is fully
+// constructed. TryMarkReadyOnStartup must return false on nil; MarkShutdown
+// must not panic; IsReady must return false on nil.
+func TestRunningServerLatchMethodsNilSafe(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("nil-receiver SetReady panicked: %v", r)
+			t.Fatalf("nil-receiver latch method panicked: %v", r)
 		}
 	}()
 	var s *runningDevnetRPCServer
-	s.SetReady(true)
-	s.SetReady(false)
+	if got := s.TryMarkReadyOnStartup(); got {
+		t.Fatalf("TryMarkReadyOnStartup on nil returned true, want false")
+	}
+	s.MarkShutdown()
+	if got := s.IsReady(); got {
+		t.Fatalf("IsReady on nil returned true, want false")
+	}
+}
+
+// stateWithGate constructs a minimal *devnetRPCState wired with a
+// readinessGate using the supplied shutdownCtx. Used by readiness gate
+// tests that do not need the full mustRPCState fixture (chainstate,
+// blockstore, etc.). Pass context.TODO() for state-only fixtures that
+// don't exercise shutdown-ctx observation.
+func stateWithGate(shutdownCtx context.Context) *devnetRPCState {
+	return &devnetRPCState{gate: newReadinessGate(shutdownCtx)}
+}
+
+// TestReadinessGate_NilHandling exercises every nil-receiver guard on
+// readinessGate and on devnetRPCState's gate-forwarding methods. The
+// guards are defensive Go-conventional code paths the production
+// rubin-node never enters (cmd/rubin-node always constructs a non-nil
+// gate via newDevnetRPCState), but they exist to keep the surface
+// robust against future refactors that introduce partial-init paths.
+func TestReadinessGate_NilHandling(t *testing.T) {
+	t.Run("nil_gate_pointer", func(t *testing.T) {
+		var g *readinessGate
+		if g.TryMarkReadyOnStartup() {
+			t.Fatal("nil gate TryMarkReadyOnStartup returned true, want false")
+		}
+		g.MarkShutdown() // must not panic
+		if g.IsReady() {
+			t.Fatal("nil gate IsReady returned true, want false")
+		}
+		g.setShutdownCtx(context.TODO()) // must not panic
+	})
+
+	t.Run("gate_with_nil_shutdownCtx_field", func(t *testing.T) {
+		// Direct struct construction: shutdownCtx zero value is nil.
+		// Exercises observeShutdownLocked's "shutdownCtx == nil →
+		// state-only" branch without violating SA1012 (no nil ctx is
+		// passed through any constructor API).
+		g := &readinessGate{}
+		if !g.TryMarkReadyOnStartup() {
+			t.Fatal("expected fresh gate with nil shutdownCtx to allow startup transition")
+		}
+		if !g.IsReady() {
+			t.Fatal("expected IsReady=true after successful startup transition on state-only gate")
+		}
+		g.MarkShutdown()
+		if g.IsReady() {
+			t.Fatal("expected IsReady=false after MarkShutdown on state-only gate")
+		}
+	})
+
+	t.Run("nil_devnetRPCState_pointer", func(t *testing.T) {
+		var s *devnetRPCState
+		if s.TryMarkReadyOnStartup() {
+			t.Fatal("nil state TryMarkReadyOnStartup returned true, want false")
+		}
+		s.MarkShutdown() // must not panic
+		if s.IsReady() {
+			t.Fatal("nil state IsReady returned true, want false")
+		}
+		s.SetShutdownCtx(context.TODO()) // must not panic
+	})
+
+	t.Run("devnetRPCState_with_nil_gate", func(t *testing.T) {
+		// State without a gate (theoretical partial-init path) must not
+		// panic and must report not-ready for everything.
+		s := &devnetRPCState{}
+		if s.TryMarkReadyOnStartup() {
+			t.Fatal("state with nil gate TryMarkReadyOnStartup returned true, want false")
+		}
+		s.MarkShutdown() // must not panic
+		if s.IsReady() {
+			t.Fatal("state with nil gate IsReady returned true, want false")
+		}
+		s.SetShutdownCtx(context.TODO()) // must not panic
+	})
+}
+
+// TestReadinessGate_AlreadyReadyShortCircuit pins the
+// state-not-NotReady branch of TryMarkReadyOnStartup: a second call on
+// an already-Ready gate must return false (state != NotReady) but
+// must NOT regress IsReady to false.
+func TestReadinessGate_AlreadyReadyShortCircuit(t *testing.T) {
+	state := stateWithGate(context.Background())
+	if !state.TryMarkReadyOnStartup() {
+		t.Fatal("first TryMarkReadyOnStartup returned false on fresh state")
+	}
+	if state.TryMarkReadyOnStartup() {
+		t.Fatal("second TryMarkReadyOnStartup returned true on already-Ready state, want false")
+	}
+	if !state.IsReady() {
+		t.Fatal("expected gate to stay in Ready after duplicate TryMarkReadyOnStartup")
+	}
+}
+
+// TestReadinessGate_DeterministicShutdownBeforeStartup pins the
+// deterministic regression: once MarkShutdown stamps the gate, any
+// subsequent TryMarkReadyOnStartup MUST fail and IsReady MUST stay
+// false. This is the exact bug class the prior atomic.Bool +
+// check-then-set shape (PR #1301) could not catch.
+func TestReadinessGate_DeterministicShutdownBeforeStartup(t *testing.T) {
+	state := stateWithGate(context.TODO())
+	state.MarkShutdown()
+	if got := state.TryMarkReadyOnStartup(); got {
+		t.Fatal("TryMarkReadyOnStartup succeeded after MarkShutdown, want false")
+	}
+	if state.IsReady() {
+		t.Fatal("IsReady=true after MarkShutdown, want false (sticky)")
+	}
+	// Idempotent re-stamp: calling MarkShutdown again is a no-op for
+	// observable state.
+	state.MarkShutdown()
+	if state.IsReady() {
+		t.Fatal("IsReady=true after second MarkShutdown")
+	}
+	if got := state.TryMarkReadyOnStartup(); got {
+		t.Fatal("TryMarkReadyOnStartup unexpectedly succeeded after second MarkShutdown")
+	}
+}
+
+// TestReadinessGate_TryMarkReadyOnStartupObservesShutdownCtxUnderLock
+// pins the strict ctx-observation contract for the boot-time
+// transition: when the gate's wired shutdownCtx is already canceled
+// at the moment TryMarkReadyOnStartup is called, the locked observe-
+// then-decide path stamps Shutdown and the transition fails. This
+// closes the production race where SIGINT/SIGTERM was delivered in
+// the window between the lifecycle ctx being wired and the boot-time
+// transition call site, before any explicit MarkShutdown runs.
+//
+// Reverting the in-lock observeShutdownLocked call from
+// TryMarkReadyOnStartup turns this red.
+func TestReadinessGate_TryMarkReadyOnStartupObservesShutdownCtxUnderLock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	state := stateWithGate(ctx)
+	if got := state.TryMarkReadyOnStartup(); got {
+		t.Fatal("TryMarkReadyOnStartup succeeded with pre-canceled shutdownCtx, want false")
+	}
+	if state.IsReady() {
+		t.Fatal("IsReady=true after TryMarkReadyOnStartup with pre-canceled ctx, want false")
+	}
+}
+
+// TestReadinessGate_IsReadyObservesShutdownCtxUnderLock pins the strict
+// ctx-observation contract for the read path: even when state is
+// Ready, IsReady MUST return false the moment the wired shutdownCtx is
+// observed canceled inside the same lock. This closes the production
+// race where SIGINT/SIGTERM was delivered AFTER TryMarkReadyOnStartup
+// won, but BEFORE main.go reached MarkShutdown — without this contract
+// /ready could briefly report 200 in that window.
+//
+// Reverting IsReady's in-lock observeShutdownLocked call to a state-
+// only Load turns this red.
+func TestReadinessGate_IsReadyObservesShutdownCtxUnderLock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	state := stateWithGate(ctx)
+	// Boot-time transition succeeds with live ctx.
+	if got := state.TryMarkReadyOnStartup(); !got {
+		t.Fatal("TryMarkReadyOnStartup failed on fresh state with live ctx, want true")
+	}
+	if !state.IsReady() {
+		t.Fatal("IsReady=false after successful transition, want true")
+	}
+	// Cancel the wired shutdownCtx; do NOT call MarkShutdown explicitly.
+	// IsReady MUST observe the cancellation under its own lock and
+	// return false on the very next read.
+	cancel()
+	if state.IsReady() {
+		t.Fatal("IsReady=true after wired shutdownCtx canceled, want false (gate must observe ctx under lock)")
+	}
+	// Sticky: even with a fresh live ctx wired afterwards, IsReady stays
+	// false because observeShutdownLocked already stamped Shutdown.
+	freshCtx := context.Background()
+	state.gate.setShutdownCtx(freshCtx)
+	if state.IsReady() {
+		t.Fatal("IsReady=true after re-wiring fresh ctx onto already-stamped gate, want false (Shutdown is sticky)")
+	}
+}
+
+// TestReadinessGate_ConcurrentRaceCannotResurrectReady is supplemental
+// extra-evidence: with mutex-serialized transitions, neither order of
+// concurrent TryMarkReadyOnStartup / MarkShutdown can leave IsReady
+// true. NOT the primary regression — the deterministic
+// shutdown-before-startup test and the ctx-observation tests above
+// are the load-bearing proofs. N is kept small (256) so the test
+// stays fast and non-flaky on shared CI runners.
+func TestReadinessGate_ConcurrentRaceCannotResurrectReady(t *testing.T) {
+	const iterations = 256
+	for i := 0; i < iterations; i++ {
+		state := stateWithGate(context.TODO())
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			state.TryMarkReadyOnStartup()
+		}()
+		go func() {
+			defer wg.Done()
+			state.MarkShutdown()
+		}()
+		wg.Wait()
+		if state.IsReady() {
+			t.Fatalf("iter %d: IsReady=true after concurrent TryMarkReadyOnStartup/MarkShutdown, want false", i)
+		}
+	}
 }

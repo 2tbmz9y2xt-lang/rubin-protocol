@@ -519,7 +519,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
-	rpcState := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, stderr, liveMiner)
+	// newDevnetRPCStateWithLifecycle is the canonical production wiring:
+	// it combines newDevnetRPCState with state.SetShutdownCtx so the
+	// readiness gate observes the lifecycle ctx instead of the
+	// placeholder context.TODO() the bare constructor seeds. The helper
+	// runs BEFORE startDevnetRPCServer so any /ready handler that races
+	// the boot-time TryMarkReadyOnStartup sees shutdownCtx through the
+	// gate's locked IsReady, not via raw state. Tests use the same
+	// helper to keep production-wiring and regression-wiring paths
+	// identical.
+	rpcState := newDevnetRPCStateWithLifecycle(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, stderr, liveMiner, ctx)
 	rpcServer, err := startDevnetRPCServer(cfg.RPCBindAddr, rpcState, stdout, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "rpc start failed: %v\n", err)
@@ -533,42 +542,44 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}()
 	}
 
-	// Readiness flag flips to true ONLY after blockstore open, chainstate
-	// load, p2pService.Start, and RPC bind/listen have all succeeded — the
-	// "all subsystems up" boundary. Gated on rpcServer != nil so the flag
-	// is never claimed when --rpc-bind is empty (no GET /ready surface).
-	// Also gated on ctx.Err() == nil via the helper below: if SIGINT or
-	// SIGTERM was observed in the narrow window between RPC bind success
-	// and this call site, the helper skips the SetReady(true) flip so
-	// the "/ready returns 503 the moment shutdown is observed" contract
-	// is not briefly violated during fast start/stop cycles. Set BEFORE
-	// the "running" stdout banner so test harnesses that wait on the
-	// banner observe a coherent state: log line + GET /ready 200. The
-	// "rpc: ready=true" stdout line is runtime evidence (printed value
-	// reads the flag AFTER SetReady) — not the operator signal itself.
-	// The operator signal is the GET /ready 200 response; this stdout
-	// banner exists so subprocess regression tests can pin that SetReady
-	// actually executed at this exact call site.
-	maybeFlipReadyOnStartup(ctx, rpcServer, stdout)
+	// Boot-time readiness transition. The gate's TryMarkReadyOnStartup
+	// observes the wired shutdownCtx atomically with the state
+	// transition: if SIGINT or SIGTERM was already observed in the
+	// window between the gate wiring above and this call site, the
+	// gate stamps Shutdown and the transition fails. The "rpc:
+	// ready=%v" stdout banner is runtime evidence (the printed value
+	// is the post-call IsReady() readback, which itself observes
+	// shutdownCtx under the gate's mutex) — not the operator signal
+	// itself. The operator signal is the GET /ready 200 response; the
+	// banner exists so subprocess regression tests can pin that the
+	// transition was attempted at this exact call site.
+	maybeFlipReadyOnStartup(rpcServer, stdout)
 	_, _ = fmt.Fprintln(stdout, "rubin-node skeleton running")
 	<-ctx.Done()
-	// Flip readiness false at the START of the shutdown drain — BEFORE
-	// the deferred rpcServer.Close + p2pService.Close fire on return —
-	// so /ready stops claiming healthy as soon as SIGINT/SIGTERM is
-	// observed, even while in-flight RPC handlers are still draining
-	// inside server.Shutdown's grace window. The "rpc: ready=false"
-	// stdout line is the runtime evidence the regression test scans for
-	// after the child exits cleanly: handler-level unit tests cannot
-	// observe the production main.go invocation of SetReady(false) on
-	// the shutdown path, and a post-SIGINT HTTP poll against /ready is
-	// inherently racy because http.Server.Shutdown immediately closes
-	// idle connections and rejects new accepts. Printing the flag value
-	// AFTER SetReady(false) makes the literal "rpc: ready=false" the
-	// only way the line can read; deleting or moving the SetReady(false)
-	// call past the print would change the value to true and turn the
-	// regression test red.
+	// At the start of shutdown drain, stamp the gate Shutdown — the
+	// durable sticky transition. Subsequent gate decisions
+	// (TryMarkReadyOnStartup or IsReady) that observe a canceled
+	// shutdownCtx via observeShutdownLocked also stamp Shutdown, so
+	// in many interleavings the gate is already Shutdown before this
+	// MarkShutdown call runs; the explicit call ensures the stamp is
+	// durable independent of whether shutdownCtx is later replaced
+	// or cleared.
+	//
+	// Contract intentionally limited per the accepted residual
+	// non-goal documented on readinessGate: every NEW gate decision
+	// after ctx is observed canceled returns false; a /ready handler
+	// already inside the gate's lock when the signal arrives may
+	// complete its 200 response with the previously captured Ready
+	// snapshot. Strict request-time arbitration requires a broader
+	// Class-C lifecycle/control-plane owner and is out of scope.
+	//
+	// The "rpc: ready=%v" banner reads the post-stamp IsReady() so
+	// its literal value tracks the gate state; deleting or moving
+	// MarkShutdown past the print would still leave the banner
+	// reading "false" because IsReady's locked observation also
+	// stamps Shutdown when shutdownCtx is canceled.
 	if rpcServer != nil {
-		rpcServer.SetReady(false)
+		rpcServer.MarkShutdown()
 		_, _ = fmt.Fprintf(stdout, "rpc: ready=%v\n", rpcServer.IsReady())
 	}
 	_, _ = fmt.Fprintln(stdout, "rubin-node skeleton stopped")
@@ -711,35 +722,34 @@ type parsedGenesisConfig struct {
 	CoreExtProfiles consensus.CoreExtProfileProvider
 }
 
-// maybeFlipReadyOnStartup flips the operator-visible readiness flag to
-// true ONLY when all of (a) rpcServer is non-nil (RPC actually bound and
-// listening) and (b) ctx has not yet been canceled. The ctx check
-// closes a narrow race window: SIGINT/SIGTERM can be delivered between
-// startDevnetRPCServer returning a non-nil wrapper and run() reaching
-// the SetReady(true) call site. Without the ctx check, SetReady(true)
-// would fire even though shutdown was already requested, then the
-// existing post-<-ctx.Done() SetReady(false) would flip it back — but
-// in the gap /ready would briefly advertise 200, violating the "false
-// as soon as signal observed" contract during fast start/stop cycles.
+// maybeFlipReadyOnStartup attempts the boot-time readiness gate
+// transition NotReady → Ready via TryMarkReadyOnStartup. The gate
+// observes its wired shutdownCtx under its own mutex, so this helper
+// does NOT pass ctx as a parameter — the synchronization boundary is
+// internal to the gate. If SIGINT/SIGTERM was already observed before
+// this helper runs, the gate's locked observe-then-decide path stamps
+// Shutdown and the transition fails. The stdout audit banner reads
+// the post-call IsReady() (which itself observes shutdownCtx under
+// the gate's mutex), so its literal value reflects the gate's actual
+// post-transition state. Regression coverage does not treat
+// "rpc: ready=false" as a failure here: that banner is expected for
+// pre-canceled/Shutdown states. The guarded regression is the inverse
+// case — if shutdown is not observed under lock and the helper reports
+// an incorrect "rpc: ready=true", the corresponding test assertion
+// fails.
 //
-// Per the same audit-banner contract used at the SetReady(false) call
-// site, the stdout "rpc: ready=true" line is printed immediately after
-// SetReady so its value reflects the actual flag state via
-// rpcServer.IsReady(), giving the integration test deterministic
-// runtime evidence that the flip executed at this exact site.
-func maybeFlipReadyOnStartup(ctx context.Context, rpcServer *runningDevnetRPCServer, stdout io.Writer) {
+// Nil-receiver safe: --rpc-bind "" path leaves rpcServer == nil and
+// this helper returns without writing the banner.
+func maybeFlipReadyOnStartup(rpcServer *runningDevnetRPCServer, stdout io.Writer) {
 	if rpcServer == nil {
 		return
 	}
-	select {
-	case <-ctx.Done():
-		// Shutdown already requested — leave readiness false so the
-		// upcoming defer-driven drain observes a flag that was never
-		// claimed healthy in the first place.
-		return
-	default:
-	}
-	rpcServer.SetReady(true)
+	// Locked transition inside the gate. Return value is intentionally
+	// not gating the banner — the banner exists to prove the helper
+	// reached this exact call site and to surface the gate's
+	// post-transition state. If the transition lost (gate observed
+	// shutdownCtx canceled), the banner reads "false".
+	rpcServer.TryMarkReadyOnStartup()
 	if stdout != nil {
 		_, _ = fmt.Fprintf(stdout, "rpc: ready=%v\n", rpcServer.IsReady())
 	}
