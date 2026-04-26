@@ -283,10 +283,11 @@ func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
 	}
-	// Single defer bumps exactly one admission counter per call based
-	// on the final return value. Registered AFTER the nil-receiver
-	// guard above so a nil mempool still returns the typed unavailable
-	// error without attempting to record a counter on nil.
+	// Exactly one admission counter increment per non-nil-receiver call,
+	// based on the final return value. Registered AFTER the nil-receiver
+	// guard above so a nil mempool returns the typed unavailable error
+	// without recording a counter — there is no mempool instance to own
+	// the metric state.
 	defer func() { m.noteAdmissionResult(retErr) }()
 	if m.chainState == nil {
 		return txAdmitUnavailable("nil chainstate")
