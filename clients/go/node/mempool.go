@@ -42,7 +42,11 @@ type Mempool struct {
 	// admissionMu / mu ordering. Buckets are the closed enum
 	// {accepted, conflict, rejected, unavailable}; any non-TxAdmitError
 	// reachable from AddTx falls into the rejected bucket so no
-	// unbounded label class can grow from this surface.
+	// unbounded label class can grow from this surface. P2P disconnect
+	// metrics are intentionally not tracked here; they are scoped to
+	// issue #1307 because the disconnect boundary needs a separate
+	// semantic audit (no double-count, normal shutdown is not a peer
+	// fault).
 	admitAccepted    atomic.Uint64
 	admitConflict    atomic.Uint64
 	admitRejected    atomic.Uint64
