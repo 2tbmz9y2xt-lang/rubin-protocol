@@ -32,6 +32,13 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	if m == nil {
 		return nil
 	}
+	m.mu.RLock()
+	maxTxs := m.maxTxs
+	maxBytes := m.maxBytes
+	m.mu.RUnlock()
+	if maxTxs <= 0 || maxBytes <= 0 {
+		return fmt.Errorf("invalid mempool snapshot restore limits: max_txs=%d max_bytes=%d", maxTxs, maxBytes)
+	}
 	txs := make(map[[32]byte]*mempoolEntry, len(snapshot.entries))
 	spenders := make(map[consensus.Outpoint][32]byte)
 	usedBytes := 0
@@ -42,6 +49,12 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 		}
 		if _, exists := txs[entry.txid]; exists {
 			return fmt.Errorf("duplicate mempool snapshot txid %x", entry.txid)
+		}
+		if len(txs) >= maxTxs {
+			return fmt.Errorf("mempool snapshot exceeds transaction cap: count=%d max=%d", len(txs)+1, maxTxs)
+		}
+		if entry.size > maxBytes || usedBytes > maxBytes-entry.size {
+			return fmt.Errorf("mempool snapshot exceeds byte cap: used=%d entry=%d max=%d", usedBytes, entry.size, maxBytes)
 		}
 		for _, op := range entry.inputs {
 			if existing, exists := spenders[op]; exists {

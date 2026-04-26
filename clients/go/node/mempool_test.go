@@ -890,12 +890,14 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
 
 	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
+	txSecond := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 2, 2, fromKey, fromAddress, toAddress)
+	txSecondID := txID(t, txSecond)
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		MaxTransactions: 10,
-		MaxBytes:        len(txBytes) * 2,
+		MaxBytes:        len(txBytes) + len(txSecond),
 	})
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
@@ -935,9 +937,10 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 	}
 
 	for _, tc := range []struct {
-		name   string
-		mutate func(mempoolSnapshot) mempoolSnapshot
-		want   string
+		name      string
+		configure func(*Mempool)
+		mutate    func(mempoolSnapshot) mempoolSnapshot
+		want      string
 	}{
 		{
 			name:   "zero_size",
@@ -999,8 +1002,37 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 			},
 			want: "duplicate mempool snapshot spender",
 		},
+		{
+			name: "aggregate_count_over_cap",
+			configure: func(m *Mempool) {
+				m.maxTxs = 1
+			},
+			mutate: func(base mempoolSnapshot) mempoolSnapshot {
+				bad := cloneSnapshotForTest(base)
+				bad.entries = append(bad.entries, snapshotEntry(txSecond, txSecondID, []consensus.Outpoint{outpoints[1]}))
+				return bad
+			},
+			want: "mempool snapshot exceeds transaction cap",
+		},
+		{
+			name: "aggregate_bytes_over_cap",
+			configure: func(m *Mempool) {
+				m.maxBytes = len(txBytes) + len(txSecond) - 1
+			},
+			mutate: func(base mempoolSnapshot) mempoolSnapshot {
+				bad := cloneSnapshotForTest(base)
+				bad.entries = append(bad.entries, snapshotEntry(txSecond, txSecondID, []consensus.Outpoint{outpoints[1]}))
+				return bad
+			},
+			want: "mempool snapshot exceeds byte cap",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			mp.maxTxs = 10
+			mp.maxBytes = len(txBytes) + len(txSecond)
+			if tc.configure != nil {
+				tc.configure(mp)
+			}
 			bad := tc.mutate(snapshot)
 			if err := restoreMempoolSnapshot(mp, bad); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("expected %q rejection, got %v", tc.want, err)
@@ -1015,6 +1047,51 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 				t.Fatalf("usedBytes=%d, want %d after rejected restore", mp.usedBytes, wantBytes)
 			}
 		})
+	}
+}
+
+func TestRestoreMempoolSnapshotAllowsExactCapacityBoundary(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 2, 1, fromKey, fromAddress, toAddress)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 2, 2, fromKey, fromAddress, toAddress)
+	source, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 2,
+		MaxBytes:        len(tx1) + len(tx2),
+	})
+	if err != nil {
+		t.Fatalf("new source mempool: %v", err)
+	}
+	if err := source.AddTx(tx1); err != nil {
+		t.Fatalf("source AddTx(tx1): %v", err)
+	}
+	if err := source.AddTx(tx2); err != nil {
+		t.Fatalf("source AddTx(tx2): %v", err)
+	}
+	snapshot, err := snapshotMempool(source)
+	if err != nil {
+		t.Fatalf("snapshotMempool: %v", err)
+	}
+
+	target, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 2,
+		MaxBytes:        len(tx1) + len(tx2),
+	})
+	if err != nil {
+		t.Fatalf("new target mempool: %v", err)
+	}
+	if err := restoreMempoolSnapshot(target, snapshot); err != nil {
+		t.Fatalf("restoreMempoolSnapshot exact boundary: %v", err)
+	}
+	if got := target.Len(); got != 2 {
+		t.Fatalf("mempool len=%d, want 2", got)
+	}
+	if target.usedBytes != len(tx1)+len(tx2) {
+		t.Fatalf("usedBytes=%d, want %d", target.usedBytes, len(tx1)+len(tx2))
 	}
 }
 
