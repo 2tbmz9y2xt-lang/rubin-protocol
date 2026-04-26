@@ -2072,15 +2072,12 @@ func TestDevnetRPCChainIdentityReportsWiredIdentity(t *testing.T) {
 	}
 }
 
-// TestDevnetRPCChainIdentityRejectsHardcodedDevnetConstants is the
-// hostile-review-matrix anchor for "Handler accidentally hardcodes
-// devnet chain id/hash". It wires identity values that DO NOT match
-// node.DevnetGenesisChainID()/DevnetGenesisBlockHash() and asserts
-// the response carries those wired values.
-// Proof assertion: body.ChainIDHex != hex(devnetChainID) AND
-// body.GenesisHashHex != hex(devnetGenesisHash); a handler that
-// returns devnet constants from a non-devnet-wired state fails the
-// strict not-equal check at the t.Fatalf calls below.
+// TestDevnetRPCChainIdentityRejectsHardcodedDevnetConstants wires
+// identity via SetIdentity with [32]byte values chosen to differ
+// from node.DevnetGenesisChainID() and node.DevnetGenesisBlockHash(),
+// then issues GET /chain_identity.
+// Proof assertion: body.ChainIDHex != hex.EncodeToString(devnetChainID[:])
+// and body.GenesisHashHex != hex.EncodeToString(devnetGenesisHash[:]).
 func TestDevnetRPCChainIdentityRejectsHardcodedDevnetConstants(t *testing.T) {
 	devnetChainID := node.DevnetGenesisChainID()
 	devnetGenesisHash := node.DevnetGenesisBlockHash()
@@ -2265,14 +2262,11 @@ func TestDevnetRPCHealthReportsReadyFalseAsField(t *testing.T) {
 	}
 }
 
-// TestDevnetRPCHealthFailsClosedOnMissingState asserts /health
-// returns 503 (not a fabricated 200) when a required runtime
-// dependency is missing. nil state is the strongest fail-closed input
-// because every per-field nil branch shares the same envelope.
-// Proof assertion: rec.Code == http.StatusServiceUnavailable AND
-// rec.Header.Get("Content-Type") == "application/json"; a handler
-// that fabricates a 200 or emits plain-text fails one of the two
-// t.Fatalf calls below.
+// TestDevnetRPCHealthFailsClosedOnMissingState invokes the /health
+// handler with a nil state, exercising the strongest fail-closed
+// input on the handler.
+// Proof assertion: rec.Code == http.StatusServiceUnavailable
+// and rec.Header.Get("Content-Type") == "application/json".
 func TestDevnetRPCHealthFailsClosedOnMissingState(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
