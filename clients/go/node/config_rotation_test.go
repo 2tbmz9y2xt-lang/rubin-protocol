@@ -818,6 +818,8 @@ func TestValidateConfig_RejectsMissingSuiteRegistryAlgName(t *testing.T) {
 		"bind_addr":"0.0.0.0:19111",
 		"log_level":"info",
 		"max_peers":64,
+		"mempool_max_txs":300,
+		"mempool_max_bytes":96000000,
 		"mine_address":"",
 		"suite_registry":[{"suite_id":66,"pubkey_len":2592,"sig_len":4627,"verify_cost":19}]
 	}`), &cfg); err != nil {
@@ -830,11 +832,13 @@ func TestValidateConfig_RejectsMissingSuiteRegistryAlgName(t *testing.T) {
 
 func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 	cfg := Config{
-		Network:  "devnet",
-		DataDir:  "/tmp/test",
-		BindAddr: "0.0.0.0:19111",
-		LogLevel: "info",
-		MaxPeers: 64,
+		Network:         "devnet",
+		DataDir:         "/tmp/test",
+		BindAddr:        "0.0.0.0:19111",
+		LogLevel:        "info",
+		MaxPeers:        64,
+		MempoolMaxTxs:   DefaultMempoolMaxTransactions,
+		MempoolMaxBytes: DefaultMempoolMaxBytes,
 		RotationDescriptor: &RotationConfigJSON{
 			Name:         "test",
 			OldSuiteID:   1,
@@ -907,6 +911,8 @@ func TestValidateConfig_AcceptsLegacySuiteRegistryOpenSSLAlgAlias(t *testing.T) 
 		"bind_addr":"0.0.0.0:19111",
 		"log_level":"info",
 		"max_peers":64,
+		"mempool_max_txs":300,
+		"mempool_max_bytes":96000000,
 		"mine_address":"",
 		"suite_registry":[{"suite_id":66,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"}]
 	}`), &cfg); err != nil {

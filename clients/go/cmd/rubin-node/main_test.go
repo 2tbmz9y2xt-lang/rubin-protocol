@@ -1640,6 +1640,36 @@ func TestRunPassesGenesisCoreExtProfilesToMempool(t *testing.T) {
 	}
 }
 
+func TestRunPassesMempoolLimitsToMempoolAndPrintsConfig(t *testing.T) {
+	prev := newMempoolFn
+	var captured node.MempoolConfig
+	newMempoolFn = func(st *node.ChainState, store *node.BlockStore, chainID [32]byte, cfg node.MempoolConfig) (*node.Mempool, error) {
+		captured = cfg
+		return node.NewMempoolWithConfig(st, store, chainID, cfg)
+	}
+	t.Cleanup(func() { newMempoolFn = prev })
+
+	dir := t.TempDir()
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", dir, "--mempool-max-txs", "7", "--mempool-max-bytes", "4096"}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+	if captured.MaxTransactions != 7 {
+		t.Fatalf("mempool MaxTransactions=%d, want 7", captured.MaxTransactions)
+	}
+	if captured.MaxBytes != 4096 {
+		t.Fatalf("mempool MaxBytes=%d, want 4096", captured.MaxBytes)
+	}
+	if !strings.Contains(out.String(), `"mempool_max_txs": 7`) {
+		t.Fatalf("printed config missing mempool_max_txs: %q", out.String())
+	}
+	if !strings.Contains(out.String(), `"mempool_max_bytes": 4096`) {
+		t.Fatalf("printed config missing mempool_max_bytes: %q", out.String())
+	}
+}
+
 func TestRunWiresP2PToCanonicalMempool(t *testing.T) {
 	prev := newP2PServiceFn
 	var captured p2p.ServiceConfig
@@ -1811,6 +1841,31 @@ func TestRunInvalidConfigMaxPeers(t *testing.T) {
 	)
 	if code == 0 {
 		t.Fatalf("expected non-zero exit code")
+	}
+}
+
+func TestRunInvalidConfigMempoolLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "txs", args: []string{"--mempool-max-txs", "0"}, want: "mempool_max_txs"},
+		{name: "bytes", args: []string{"--mempool-max-bytes", "0"}, want: "mempool_max_bytes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var out bytes.Buffer
+			var errOut bytes.Buffer
+			args := append([]string{"--dry-run", "--datadir", dir}, tc.args...)
+			code := run(args, &out, &errOut)
+			if code != 2 {
+				t.Fatalf("code=%d, want 2", code)
+			}
+			if !strings.Contains(errOut.String(), "invalid config") || !strings.Contains(errOut.String(), tc.want) {
+				t.Fatalf("stderr=%q, want %s validation error", errOut.String(), tc.want)
+			}
+		})
 	}
 }
 

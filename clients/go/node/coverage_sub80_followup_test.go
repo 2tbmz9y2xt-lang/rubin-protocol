@@ -43,9 +43,6 @@ func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	if entries[0].txid[0] != 0x01 {
 		t.Fatalf("expected deterministic txid tie-break")
 	}
-	if got := compareEntryPriority(nil, &mempoolEntry{txid: [32]byte{0x01}, fee: 1, size: 1}); got != 0 {
-		t.Fatalf("compareEntryPriority(nil)= %d", got)
-	}
 
 	st := NewChainState()
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
@@ -99,72 +96,43 @@ func TestCoverageResidual_RemoveConflictingParsesBlockBytes(t *testing.T) {
 	}
 }
 
-func TestCoverageResidual_CompareEntryPriorityTieBreakers(t *testing.T) {
-	if got := compareEntryPriority(
-		&mempoolEntry{txid: [32]byte{0x01}, fee: 10, size: 2},
-		&mempoolEntry{txid: [32]byte{0x02}, fee: 5, size: 1},
-	); got <= 0 {
-		t.Fatalf("expected higher absolute fee to win when fee rates tie, got %d", got)
-	}
-
-	if got := compareEntryPriority(
-		&mempoolEntry{txid: [32]byte{0x01}, fee: 10, weight: 4, size: 2},
-		&mempoolEntry{txid: [32]byte{0x02}, fee: 10, weight: 5, size: 2},
-	); got <= 0 {
-		t.Fatalf("expected lower weight to win when fee and fee rate tie, got %d", got)
-	}
-
-	if got := compareEntryPriority(
-		&mempoolEntry{txid: [32]byte{0x01}, fee: 10, weight: 4, size: 2},
-		&mempoolEntry{txid: [32]byte{0x02}, fee: 10, weight: 4, size: 2},
-	); got <= 0 {
-		t.Fatalf("expected lower txid to win deterministic tie-break, got %d", got)
-	}
-}
-
-func TestCoverageResidual_MempoolHeapRepairBranches(t *testing.T) {
+func TestCoverageResidual_MempoolLimitBranches(t *testing.T) {
 	st := NewChainState()
-	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 1,
+		MaxBytes:        10,
+	})
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}
-
 	mp.mu.Lock()
-	defer mp.mu.Unlock()
+	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x01}, size: 0}); err == nil {
+		t.Fatalf("expected invalid size rejection")
+	}
+	mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x02}, size: 1})
+	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x03}, size: 1}); err == nil {
+		t.Fatalf("expected count-limit rejection")
+	}
+	mp.mu.Unlock()
 
-	liveTxid := [32]byte{0x10}
-	mp.txs[liveTxid] = &mempoolEntry{
-		raw:    []byte{0x01},
-		txid:   liveTxid,
-		inputs: nil,
-		fee:    2,
-		weight: 1,
-		size:   1,
+	mpBytes, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 10,
+		MaxBytes:        2,
+	})
+	if err != nil {
+		t.Fatalf("NewMempool(bytes): %v", err)
 	}
-
-	gotTxid, entry, ok := mp.peekWorstLocked()
-	if !ok || entry == nil || gotTxid != liveTxid {
-		t.Fatalf("peekWorstLocked seeded heap = (%x, %v, %v)", gotTxid, entry, ok)
+	mpBytes.mu.Lock()
+	mpBytes.addEntryLocked(&mempoolEntry{txid: [32]byte{0x04}, size: 1})
+	if err := mpBytes.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x05}, size: 2}); err == nil {
+		t.Fatalf("expected byte-limit rejection")
 	}
-
-	staleTxid := [32]byte{0x01}
-	stale := &mempoolHeapItem{txid: staleTxid, fee: 1, weight: 1, size: 1, heapID: 99, index: 0}
-	liveItem := mp.heapItems[liveTxid]
-	liveItem.index = 1
-	mp.worstHeap = mempoolWorstHeap{stale, liveItem}
-	mp.heapItems[staleTxid] = stale
-	mp.heapSeqs[staleTxid] = stale.heapID
-
-	gotTxid, entry, ok = mp.peekWorstLocked()
-	if !ok || entry == nil || gotTxid != liveTxid {
-		t.Fatalf("peekWorstLocked after stale cleanup = (%x, %v, %v)", gotTxid, entry, ok)
+	mpBytes.usedBytes = 1
+	mpBytes.deleteEntryLocked([32]byte{0x06}, &mempoolEntry{size: 2})
+	if mpBytes.usedBytes != 0 {
+		t.Fatalf("delete underflow guard left usedBytes=%d", mpBytes.usedBytes)
 	}
-	if _, ok := mp.heapItems[staleTxid]; ok {
-		t.Fatalf("expected stale heap item cleanup")
-	}
-	if _, ok := mp.heapSeqs[staleTxid]; ok {
-		t.Fatalf("expected stale heap seq cleanup")
-	}
+	mpBytes.mu.Unlock()
 }
 
 func TestCoverageResidual_CoreExtPolicyBranches(t *testing.T) {

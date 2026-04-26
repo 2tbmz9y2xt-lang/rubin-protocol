@@ -125,6 +125,37 @@ func TestValidateConfigRejectsMaxPeersTooHigh(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigIncludesMempoolLimits(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.MempoolMaxTxs != DefaultMempoolMaxTransactions {
+		t.Fatalf("mempool_max_txs=%d, want %d", cfg.MempoolMaxTxs, DefaultMempoolMaxTransactions)
+	}
+	if cfg.MempoolMaxBytes != DefaultMempoolMaxBytes {
+		t.Fatalf("mempool_max_bytes=%d, want %d", cfg.MempoolMaxBytes, DefaultMempoolMaxBytes)
+	}
+}
+
+func TestValidateConfigRejectsInvalidMempoolLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{name: "zero txs", edit: func(cfg *Config) { cfg.MempoolMaxTxs = 0 }, want: "mempool_max_txs"},
+		{name: "negative txs", edit: func(cfg *Config) { cfg.MempoolMaxTxs = -1 }, want: "mempool_max_txs"},
+		{name: "zero bytes", edit: func(cfg *Config) { cfg.MempoolMaxBytes = 0 }, want: "mempool_max_bytes"},
+		{name: "negative bytes", edit: func(cfg *Config) { cfg.MempoolMaxBytes = -1 }, want: "mempool_max_bytes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tc.edit(&cfg)
+			if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %s rejection, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestParseMineAddressAcceptsKeyIDAndCanonicalEncoding(t *testing.T) {
 	raw := strings.Repeat("11", mineAddressKeyIDBytes)
 	got, err := ParseMineAddress(raw)
