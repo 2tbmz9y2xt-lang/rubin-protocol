@@ -2076,9 +2076,11 @@ func TestDevnetRPCChainIdentityReportsWiredIdentity(t *testing.T) {
 // hostile-review-matrix anchor for "Handler accidentally hardcodes
 // devnet chain id/hash". It wires identity values that DO NOT match
 // node.DevnetGenesisChainID()/DevnetGenesisBlockHash() and asserts
-// the response carries those wired values, so a handler that
-// hardcodes devnet constants (or falls through to a devnet default
-// when state.identity is set) fails this test red.
+// the response carries those wired values.
+// Proof assertion: body.ChainIDHex != hex(devnetChainID) AND
+// body.GenesisHashHex != hex(devnetGenesisHash); a handler that
+// returns devnet constants from a non-devnet-wired state fails the
+// strict not-equal check at the t.Fatalf calls below.
 func TestDevnetRPCChainIdentityRejectsHardcodedDevnetConstants(t *testing.T) {
 	devnetChainID := node.DevnetGenesisChainID()
 	devnetGenesisHash := node.DevnetGenesisBlockHash()
@@ -2265,8 +2267,12 @@ func TestDevnetRPCHealthReportsReadyFalseAsField(t *testing.T) {
 
 // TestDevnetRPCHealthFailsClosedOnMissingState asserts /health
 // returns 503 (not a fabricated 200) when a required runtime
-// dependency is missing. nil state covers the strongest fail-closed
-// path; per-field nil paths share the same envelope.
+// dependency is missing. nil state is the strongest fail-closed input
+// because every per-field nil branch shares the same envelope.
+// Proof assertion: rec.Code == http.StatusServiceUnavailable AND
+// rec.Header.Get("Content-Type") == "application/json"; a handler
+// that fabricates a 200 or emits plain-text fails one of the two
+// t.Fatalf calls below.
 func TestDevnetRPCHealthFailsClosedOnMissingState(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
