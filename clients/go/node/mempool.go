@@ -37,16 +37,18 @@ type Mempool struct {
 	usedBytes  int
 	txs        map[[32]byte]*mempoolEntry
 	spenders   map[consensus.Outpoint][32]byte
-	// Admission counters are bumped exactly once per AddTx call, at the
-	// final outcome. Lock-free via atomic.Uint64 — no impact on the
-	// admissionMu / mu ordering. Buckets are the closed enum
-	// {accepted, conflict, rejected, unavailable}; any non-TxAdmitError
-	// reachable from AddTx falls into the rejected bucket so no
-	// unbounded label class can grow from this surface. P2P disconnect
-	// metrics are intentionally not tracked here; they are scoped to
-	// issue #1307 because the disconnect boundary needs a separate
-	// semantic audit (no double-count, normal shutdown is not a peer
-	// fault).
+	// Admission counters are bumped exactly once for each AddTx call on a
+	// non-nil Mempool that reaches the final outcome accounting path.
+	// Nil-receiver calls return before that defer is registered and are
+	// therefore intentionally excluded from these counters. Lock-free via
+	// atomic.Uint64 — no impact on the admissionMu / mu ordering. Buckets
+	// are the closed enum {accepted, conflict, rejected, unavailable};
+	// any non-TxAdmitError reachable from AddTx falls into the rejected
+	// bucket so no unbounded label class can grow from this surface. P2P
+	// disconnect metrics are intentionally not tracked here; they are
+	// scoped to issue #1307 because the disconnect boundary needs a
+	// separate semantic audit (no double-count, normal shutdown is not a
+	// peer fault).
 	admitAccepted    atomic.Uint64
 	admitConflict    atomic.Uint64
 	admitRejected    atomic.Uint64
