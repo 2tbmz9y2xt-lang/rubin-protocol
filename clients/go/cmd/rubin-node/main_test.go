@@ -2254,10 +2254,10 @@ func TestRunNonDryRunWithRPCBindExitsOnSignal(t *testing.T) {
 // readiness contract end-to-end: in a real `run()` subprocess with
 // --rpc-bind set, the parent observes (a) the rpc:listening= banner, (b)
 // the "rubin-node skeleton running" banner — used as a barrier confirming
-// SetReady(true) has fired — (c) GET /ready returns 200 with body
+// TryMarkReadyOnStartup has fired — (c) GET /ready returns 200 with body
 // {"ready":true} while the node is live, (d) on SIGINT the child exits 0
-// after printing the "stopped" banner. Reverting either the SetReady(true)
-// call or the SetReady(false)-before-drain ordering turns this red.
+// after printing the "stopped" banner. Reverting either the TryMarkReadyOnStartup
+// call or the MarkShutdown-before-drain ordering turns this red.
 //
 // Coverage rationale: handler-level unit tests in http_rpc_test.go pin the
 // 200/503 mapping deterministically. This test pins the cmd/rubin-node
@@ -2333,9 +2333,9 @@ func TestRunRPCBindReadyEndpointReportsLifecycle(t *testing.T) {
 		t.Fatalf("timeout waiting for rpc:listening= banner; stdout so far=%q", dump)
 	}
 
-	// Wait for the "running" banner so SetReady(true) is guaranteed to
+	// Wait for the "running" banner so TryMarkReadyOnStartup is guaranteed to
 	// have fired before we hit /ready. The banner is printed immediately
-	// after rpcServer.SetReady(true) in cmd/rubin-node/main.go.
+	// after rpcServer.TryMarkReadyOnStartup in cmd/rubin-node/main.go.
 	select {
 	case <-runningCh:
 	case <-time.After(20 * time.Second):
@@ -2384,16 +2384,22 @@ func TestRunRPCBindReadyEndpointReportsLifecycle(t *testing.T) {
 	}
 
 	// Runtime evidence audit: the production main.go entrypoint MUST
-	// have printed the "rpc: ready=true" banner before the "running"
-	// banner (boot-time SetReady(true) executed) AND the
-	// "rpc: ready=false" banner before the "stopped" banner (shutdown-
-	// time SetReady(false) executed). The printed values reflect the
-	// flag read AFTER each SetReady call, so removing or moving the
-	// SetReady(false) call past the print would change the literal to
-	// "rpc: ready=true" and turn this assertion red. This closes the
-	// false-ready-during-shutdown class which a post-SIGINT HTTP poll
-	// cannot observe deterministically (http.Server.Shutdown closes
-	// new accepts immediately).
+	// emit the audit banners in a specific stdout order — "rpc:
+	// ready=true" before "rubin-node skeleton running" (boot-time
+	// TryMarkReadyOnStartup executed at the all-subsystems-up
+	// boundary), and "rpc: ready=false" between "skeleton running"
+	// and "skeleton stopped" (shutdown-time MarkShutdown executed
+	// after <-ctx.Done() and before the deferred drain). What this
+	// audit pins is the BANNER ORDERING through main.go's run() —
+	// not the gate behavior itself (the gate's locked
+	// observeShutdownLocked already stamps Shutdown when shutdownCtx
+	// is canceled, even if MarkShutdown is never called). A
+	// regression that drops the boot-time banner emit, the shutdown-
+	// time banner emit, or that reorders them relative to the
+	// running/stopped banners turns the index assertions below red.
+	// This is the deterministic alternative to a post-SIGINT HTTP
+	// poll, which cannot observe stable /ready state because
+	// http.Server.Shutdown immediately closes new accepts.
 	stdoutMu.Lock()
 	full := stdoutBuf.String()
 	stdoutMu.Unlock()
@@ -2504,57 +2510,99 @@ func TestRunDevnetWithRPCBindLiveMinerInitErrorLogsStderr(t *testing.T) {
 	}
 }
 
-// TestMaybeFlipReadyOnStartupSkipsWhenCtxAlreadyCancelled pins the
-// shutdown-signal race-window guard: if SIGINT/SIGTERM is observed in
-// the narrow window between RPC bind success and the boot-time
-// SetReady(true) call site, the helper MUST skip the flip so the
-// readiness flag never advertises healthy after shutdown was already
-// requested. With a pre-canceled ctx the flag stays false and the
-// audit banner is NOT written. Reverting the select/default guard
-// would flip the flag and print the banner, turning this test red.
-func TestMaybeFlipReadyOnStartupSkipsWhenCtxAlreadyCancelled(t *testing.T) {
-	state := &devnetRPCState{}
+// TestMaybeFlipReadyOnStartup_NoopAfterMarkShutdown pins the gate
+// contract on the production helper: when MarkShutdown has already
+// stamped Shutdown, the helper's TryMarkReadyOnStartup MUST fail and
+// IsReady MUST remain false. The audit banner reads the post-call
+// IsReady (which itself observes shutdownCtx under the gate's lock),
+// so it observes "false". Reverting the in-lock observe-then-decide
+// path to a state-only Load turns this red.
+func TestMaybeFlipReadyOnStartup_NoopAfterMarkShutdown(t *testing.T) {
+	state := &devnetRPCState{gate: newReadinessGate(context.TODO())}
 	server := &runningDevnetRPCServer{state: state}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	server.MarkShutdown()
 
 	var buf bytes.Buffer
-	maybeFlipReadyOnStartup(ctx, server, &buf)
+	maybeFlipReadyOnStartup(server, &buf)
 
 	if state.IsReady() {
-		t.Fatalf("expected ready=false when ctx already canceled, got true")
+		t.Fatalf("expected IsReady=false after MarkShutdown, got true")
 	}
-	if got := buf.String(); got != "" {
-		t.Fatalf("expected no audit banner when ctx canceled, got %q", got)
+	if got := buf.String(); !strings.Contains(got, "rpc: ready=false") {
+		t.Fatalf("expected audit banner 'rpc: ready=false' after MarkShutdown, got %q", got)
 	}
 }
 
-// TestMaybeFlipReadyOnStartupFlipsWhenCtxLive pins the happy path: with
-// a live ctx (default branch of the select) the helper flips the flag
-// to true and writes the audit banner. Reverting the SetReady call or
-// the banner print would turn this test red.
-func TestMaybeFlipReadyOnStartupFlipsWhenCtxLive(t *testing.T) {
-	state := &devnetRPCState{}
+// TestMaybeFlipReadyOnStartup_NoopOnPreCanceledShutdownCtx is the
+// production-helper regression. It constructs the state via
+// newDevnetRPCStateWithLifecycle — the SAME canonical wiring helper
+// cmd/rubin-node main.go uses — with a pre-canceled lifecycle ctx,
+// then runs maybeFlipReadyOnStartup. The audit banner MUST read
+// "false" because the gate's locked observeShutdownLocked sees ctx
+// canceled and stamps Shutdown atomically with the state read.
+//
+// What this test protects (and what it does NOT):
+//
+//   - Protects: any change to newDevnetRPCStateWithLifecycle that
+//     drops the internal state.SetShutdownCtx call OR any change to
+//     readinessGate.observeShutdownLocked that no longer stamps
+//     Shutdown on canceled ctx. Either turns this red.
+//   - Does NOT protect: a future cmd/rubin-node main.go refactor
+//     that stops calling newDevnetRPCStateWithLifecycle and inlines
+//     a bare newDevnetRPCState constructor without SetShutdownCtx.
+//     That kind of bypass requires either a deterministic end-to-end
+//     run() test (timing-flaky to trigger pre-startup) or a Class-C
+//     lifecycle/control-plane owner (out of scope for #1303). The
+//     canonical-helper pattern is the agreed Class-B contract: as
+//     long as main.go calls newDevnetRPCStateWithLifecycle the gate
+//     is wired correctly; bypassing the canonical helper is a
+//     deliberate refactor that must be caught by code review.
+func TestMaybeFlipReadyOnStartup_NoopOnPreCanceledShutdownCtx(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Use the canonical production-wiring helper — exactly the same
+	// helper cmd/rubin-node main.go calls.
+	state := newDevnetRPCStateWithLifecycle(nil, nil, nil, nil, nil, io.Discard, nil, ctx)
 	server := &runningDevnetRPCServer{state: state}
 
 	var buf bytes.Buffer
-	maybeFlipReadyOnStartup(context.Background(), server, &buf)
+	maybeFlipReadyOnStartup(server, &buf)
+
+	if state.IsReady() {
+		t.Fatalf("expected IsReady=false after newDevnetRPCStateWithLifecycle(canceledCtx), got true")
+	}
+	if got := buf.String(); !strings.Contains(got, "rpc: ready=false") {
+		t.Fatalf("expected audit banner 'rpc: ready=false' on pre-canceled ctx, got %q", got)
+	}
+}
+
+// TestMaybeFlipReadyOnStartup_FlipsOnFreshStateLiveCtx pins the happy
+// path: with a fresh gate and a live shutdownCtx, the helper's
+// TryMarkReadyOnStartup wins the locked transition and the audit
+// banner reads "true". Reverting the transition or removing the
+// banner print turns this red.
+func TestMaybeFlipReadyOnStartup_FlipsOnFreshStateLiveCtx(t *testing.T) {
+	state := &devnetRPCState{gate: newReadinessGate(context.Background())}
+	server := &runningDevnetRPCServer{state: state}
+
+	var buf bytes.Buffer
+	maybeFlipReadyOnStartup(server, &buf)
 
 	if !state.IsReady() {
-		t.Fatalf("expected ready=true when ctx live, got false")
+		t.Fatalf("expected IsReady=true on fresh state with live ctx, got false")
 	}
 	if got := buf.String(); !strings.Contains(got, "rpc: ready=true") {
 		t.Fatalf("expected audit banner 'rpc: ready=true', got %q", got)
 	}
 }
 
-// TestMaybeFlipReadyOnStartupNilServerNoOp pins the --rpc-bind="" path:
+// TestMaybeFlipReadyOnStartup_NilServerNoOp pins the --rpc-bind="" path:
 // with a nil rpcServer the helper returns early without touching state
 // or stdout, so cmd/rubin-node main.go can call it unconditionally.
-func TestMaybeFlipReadyOnStartupNilServerNoOp(t *testing.T) {
+func TestMaybeFlipReadyOnStartup_NilServerNoOp(t *testing.T) {
 	var buf bytes.Buffer
-	maybeFlipReadyOnStartup(context.Background(), nil, &buf)
+	maybeFlipReadyOnStartup(nil, &buf)
 	if got := buf.String(); got != "" {
 		t.Fatalf("expected no output for nil server, got %q", got)
 	}

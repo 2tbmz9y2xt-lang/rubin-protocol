@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -34,32 +33,193 @@ type devnetRPCState struct {
 	// so concurrent HTTP handlers cannot interleave chain/mempool updates.
 	rpcMut sync.Mutex
 	miner  *node.Miner // devnet live mining for POST /mine_next; nil disables the route
-	// ready is the operator-visible readiness flag exposed via GET /ready.
-	// false until cmd/rubin-node has finished blockstore open, chainstate
-	// load, p2pService.Start, and RPC bind/listen; flipped back to false at
-	// the start of the shutdown drain so /ready stops claiming healthy as
-	// soon as SIGINT/SIGTERM fires. The single new public/operator surface
-	// in this PR is the bounded GET /ready route + this flag's setter.
-	ready atomic.Bool
+	// gate is the operator-visible readiness latch observed via GET
+	// /ready. All transitions and reads go through a single
+	// sync.Mutex inside the gate, AND every public read (IsReady)
+	// observes the gate's stored shutdownCtx under that same mutex —
+	// so a /ready request that arrives after the lifecycle context
+	// has been canceled atomically stamps Shutdown and returns false,
+	// independent of whether cmd/rubin-node main goroutine has yet
+	// reached MarkShutdown. This closes the race class issue #1303
+	// flagged: shutdown observed by the gate at the moment of the
+	// readiness decision, not separately by main.
+	gate *readinessGate
 }
 
-// SetReady toggles the operator-visible readiness flag observed by the
-// GET /ready handler. Safe under nil receiver so cmd/rubin-node can call
-// it unconditionally without re-checking whether the RPC server actually
-// started (the wrapper-level SetReady gates on rpcServer != nil).
-func (s *devnetRPCState) SetReady(ready bool) {
+// readyStateNotReady, readyStateReady, readyStateShutdown encode the
+// three states of the readiness gate. NotReady is the zero value so a
+// freshly zeroed gate behaves correctly without explicit init.
+const (
+	readyStateNotReady int8 = 0
+	readyStateReady    int8 = 1
+	readyStateShutdown int8 = 2
+)
+
+// readinessGate serializes readiness state transitions and reads under
+// a single mutex AND owns the lifecycle shutdown context so that every
+// public decision observes shutdown atomically with the state read.
+//
+// Strict invariants:
+//
+//   - TryMarkReadyOnStartup transitions NotReady → Ready only when the
+//     gate has not already been stamped Shutdown AND shutdownCtx has
+//     not been canceled. If shutdownCtx is observed canceled, the gate
+//     stamps Shutdown atomically before returning false — there is no
+//     observable interleaving where Ready could be set after the
+//     lifecycle context was already canceled.
+//   - MarkShutdown stamps Shutdown unconditionally; idempotent.
+//   - IsReady observes shutdownCtx under the same mutex; if it is
+//     canceled at the moment of the read, the gate stamps Shutdown and
+//     returns false. After Shutdown the gate never returns to Ready.
+//
+// shutdownCtx may be nil in tests that exercise the state primitive
+// without a lifecycle context; with shutdownCtx == nil the gate
+// behaves as a state-only latch (no auto-stamp on read).
+//
+// Acceptance reading (the claim this gate makes): startup-ready and
+// shutdown-accepted transitions are serialized through one readiness
+// gate; once the gate accepts shutdown — either via MarkShutdown or
+// via observing the shutdownCtx canceled inside any public method —
+// Ready cannot be re-entered for this gate's lifetime.
+//
+// Out-of-scope (explicit non-goal): the gate does NOT promise that no
+// /ready handler invocation initiated before the lifecycle signal can
+// complete its 200 response. A request already inside the handler
+// when ctx becomes canceled completes its in-flight work; the
+// guarantee is for the next public decision, not for already-running
+// HTTP responses. Strict request-time arbitration would require a
+// broader lifecycle/request owner outside this PR's scope.
+type readinessGate struct {
+	mu          sync.Mutex
+	state       int8
+	shutdownCtx context.Context
+}
+
+// newReadinessGate constructs a gate. For state-only fixtures that do
+// not need cancellation, pass context.Background() or context.TODO()
+// rather than nil so constructor callers follow normal context
+// conventions. Reserve nil for explicit low-level tests that construct
+// readinessGate directly and intentionally disable shutdown observation.
+func newReadinessGate(shutdownCtx context.Context) *readinessGate {
+	return &readinessGate{shutdownCtx: shutdownCtx}
+}
+
+// observeShutdownLocked stamps Shutdown if g.shutdownCtx is non-nil and
+// has been canceled. Caller MUST hold g.mu. Returns true iff the gate
+// is now (or was already) in Shutdown state.
+func (g *readinessGate) observeShutdownLocked() bool {
+	if g.state == readyStateShutdown {
+		return true
+	}
+	if g.shutdownCtx == nil {
+		return false
+	}
+	select {
+	case <-g.shutdownCtx.Done():
+		g.state = readyStateShutdown
+		return true
+	default:
+		return false
+	}
+}
+
+// TryMarkReadyOnStartup performs the boot-time NotReady → Ready
+// transition under one lock. Returns true iff the gate was NotReady
+// AND shutdownCtx was not canceled at the moment of the call AND the
+// transition won. Returns false in every other case (already Ready,
+// already Shutdown, or shutdownCtx observed canceled — in which case
+// the gate is also stamped Shutdown before return). Nil-receiver
+// safe.
+func (g *readinessGate) TryMarkReadyOnStartup() bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.observeShutdownLocked() {
+		return false
+	}
+	if g.state != readyStateNotReady {
+		return false
+	}
+	g.state = readyStateReady
+	return true
+}
+
+// MarkShutdown stamps the gate into the sticky Shutdown state.
+// Idempotent. Nil-receiver safe.
+func (g *readinessGate) MarkShutdown() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.state = readyStateShutdown
+}
+
+// IsReady returns true iff the gate is in Ready state AND shutdownCtx
+// (if wired) has not been canceled at the moment of the call. If
+// shutdownCtx is observed canceled, the gate is stamped Shutdown
+// atomically before return so subsequent reads remain false.
+// Nil-receiver safe.
+func (g *readinessGate) IsReady() bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.observeShutdownLocked() {
+		return false
+	}
+	return g.state == readyStateReady
+}
+
+// setShutdownCtx is used at construction-adjacent wiring time to
+// late-bind shutdownCtx after newDevnetRPCState. Caller MUST NOT hold
+// g.mu when invoking this method.
+func (g *readinessGate) setShutdownCtx(ctx context.Context) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.shutdownCtx = ctx
+}
+
+// TryMarkReadyOnStartup forwards to the gate. Nil-receiver safe.
+func (s *devnetRPCState) TryMarkReadyOnStartup() bool {
+	if s == nil {
+		return false
+	}
+	return s.gate.TryMarkReadyOnStartup()
+}
+
+// MarkShutdown forwards to the gate. Nil-receiver safe.
+func (s *devnetRPCState) MarkShutdown() {
 	if s == nil {
 		return
 	}
-	s.ready.Store(ready)
+	s.gate.MarkShutdown()
 }
 
-// IsReady reports the current readiness flag value.
+// IsReady forwards to the gate. The gate's IsReady observes shutdownCtx
+// under its own mutex, so callers cannot accidentally bypass the
+// shutdown observation by reading state directly. Nil-receiver safe.
 func (s *devnetRPCState) IsReady() bool {
 	if s == nil {
 		return false
 	}
-	return s.ready.Load()
+	return s.gate.IsReady()
+}
+
+// SetShutdownCtx late-binds the lifecycle shutdown context onto the
+// gate. cmd/rubin-node calls this once after newDevnetRPCState and
+// before the first /ready handler can run.
+func (s *devnetRPCState) SetShutdownCtx(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.gate.setShutdownCtx(ctx)
 }
 
 type runningDevnetRPCServer struct {
@@ -68,24 +228,28 @@ type runningDevnetRPCServer struct {
 	state  *devnetRPCState
 }
 
-// SetReady forwards the readiness toggle to the underlying state so the
-// GET /ready handler observes the new value. Nil-receiver safe: callers
-// in cmd/rubin-node use a single `if rpcServer != nil` gate at startup
-// (only invoke after a non-nil return from startDevnetRPCServer) but
-// this method also tolerates a nil receiver to keep the shutdown path
-// robust against partial-init failure paths.
-func (s *runningDevnetRPCServer) SetReady(ready bool) {
+// TryMarkReadyOnStartup forwards through to the underlying gate.
+// Returns true iff the gate transitioned NotReady → Ready under its
+// internal lock with shutdownCtx live. Nil-receiver safe.
+func (s *runningDevnetRPCServer) TryMarkReadyOnStartup() bool {
+	if s == nil {
+		return false
+	}
+	return s.state.TryMarkReadyOnStartup()
+}
+
+// MarkShutdown forwards the sticky shutdown stamp through to the gate.
+// Nil-receiver safe.
+func (s *runningDevnetRPCServer) MarkShutdown() {
 	if s == nil {
 		return
 	}
-	s.state.SetReady(ready)
+	s.state.MarkShutdown()
 }
 
-// IsReady reads the underlying readiness flag. Nil-receiver safe:
-// returns false if the server wrapper or its backing state is nil.
-// cmd/rubin-node uses this to print runtime evidence of each
-// SetReady transition to stdout (the banner-style audit trail
-// TestRunRPCBindReadyEndpointReportsLifecycle scans).
+// IsReady forwards through to the gate's locked IsReady, which
+// observes shutdownCtx atomically with the state read. Nil-receiver
+// safe.
 func (s *runningDevnetRPCServer) IsReady() bool {
 	if s == nil {
 		return false
@@ -175,7 +339,52 @@ func newDevnetRPCState(
 		nowUnix:     nowUnixU64,
 		metrics:     newRPCMetrics(),
 		miner:       liveMiner,
+		// gate starts seeded with context.TODO() (never canceled) —
+		// production wiring uses newDevnetRPCStateWithLifecycle below
+		// to late-bind the actual lifecycle ctx. Tests that exercise
+		// the readiness API call SetShutdownCtx explicitly; tests
+		// that don't care leave the gate on the placeholder ctx and
+		// observe state-only behavior (observeShutdownLocked's select
+		// default branch returns false because TODO never cancels).
+		gate: newReadinessGate(context.TODO()),
 	}
+}
+
+// newDevnetRPCStateWithLifecycle is the canonical production wiring for
+// a *devnetRPCState that participates in the cmd/rubin-node readiness
+// lifecycle. It is the single function cmd/rubin-node uses to construct
+// the state — combining newDevnetRPCState with state.SetShutdownCtx so
+// the gate observes the actual lifecycle ctx instead of the placeholder
+// context.TODO() from the bare constructor.
+//
+// Putting both steps inside one helper makes the wiring testable as a
+// unit: tests that pre-cancel ctx and call this helper directly fail
+// red if the helper internally drops the SetShutdownCtx call.
+// cmd/rubin-node main.go calls THIS helper (not newDevnetRPCState +
+// SetShutdownCtx separately) so the production wiring path matches
+// the regression-test wiring path exactly.
+func newDevnetRPCStateWithLifecycle(
+	syncEngine *node.SyncEngine,
+	blockStore *node.BlockStore,
+	mempool *node.Mempool,
+	peerManager *node.PeerManager,
+	announceTx func([]byte) error,
+	stderr io.Writer,
+	liveMiner *node.Miner,
+	shutdownCtx context.Context,
+) *devnetRPCState {
+	// The bare newDevnetRPCState constructor intentionally does not
+	// accept ctx — it is reused by tests that do not need a lifecycle
+	// gate observation. The shutdownCtx is late-bound here via
+	// SetShutdownCtx so the gate transitions from its placeholder
+	// context.TODO() seed to the actual lifecycle ctx in a single
+	// canonical wiring step. contextcheck is disabled for this line
+	// because the ctx is not lost — it is forwarded to the gate via
+	// SetShutdownCtx on the very next statement.
+	//nolint:contextcheck
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, stderr, liveMiner)
+	state.SetShutdownCtx(shutdownCtx)
+	return state
 }
 
 // rpcBindHostIsLoopback reports whether the host part of host:port is suitable
