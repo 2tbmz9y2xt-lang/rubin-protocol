@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/sha3"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -87,6 +92,142 @@ func TestDevnetThreeNodeSyncAndDeterminism(t *testing.T) {
 		if state.Height != 10 {
 			t.Fatalf("%s height=%d, want 10", current.name, state.Height)
 		}
+	}
+}
+
+func TestDevnetTwoNodeFullBlockP2PBaseline(t *testing.T) {
+	const (
+		txAmount = 10
+		txFee    = 1
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	txKeypair := mustTxGenKeypair(t)
+	txSourceAddress := consensus.P2PKCovenantDataForPubkey(txKeypair.PubkeyBytes())
+
+	nodeA := newDevnetNodeWithMineAddress(
+		t,
+		"node-a",
+		"127.0.0.1:0",
+		nil,
+		txSourceAddress,
+		true,
+	)
+	if err := nodeA.start(ctx); err != nil {
+		t.Fatalf("start node A: %v", err)
+	}
+	defer nodeA.close()
+
+	nodeB := newDevnetNodeWithMineAddress(
+		t,
+		"node-b",
+		"127.0.0.1:0",
+		[]string{nodeA.service.Addr()},
+		mustMineAddress(t, 0x22),
+		false,
+	)
+	if err := nodeB.start(ctx); err != nil {
+		t.Fatalf("start node B: %v", err)
+	}
+	defer nodeB.close()
+
+	waitFor(t, 5*time.Second, "two-node peer connectivity", func() bool {
+		return nodeA.peerManager.Count() == 1 && nodeB.peerManager.Count() == 1
+	})
+	assertPeerChainIdentity(t, nodeA, nodeB)
+	waitForHeight(t, nodeB, 0)
+
+	for wantHeight := uint64(1); wantHeight <= consensus.COINBASE_MATURITY; wantHeight++ {
+		mined := nodeA.mineOne(t, true)
+		if mined.Height != wantHeight {
+			t.Fatalf("node A mined height=%d, want %d", mined.Height, wantHeight)
+		}
+		waitForHeight(t, nodeB, wantHeight)
+	}
+	assertSameTip(t, nodeA, nodeB)
+
+	txGen := &txGenerator{
+		node:    nodeA,
+		signer:  txKeypair,
+		chainID: node.DevnetGenesisChainID(),
+		from:    txSourceAddress,
+		to:      txSourceAddress,
+		amount:  txAmount,
+		fee:     txFee,
+	}
+	txBytes, err := txGen.buildNext(txFee)
+	if err != nil {
+		t.Fatalf("build P2P-submitted tx: %v", err)
+	}
+	txid := mustTxIDFromRaw(t, txBytes)
+	if nodeB.mempool.Contains(txid) {
+		t.Fatalf("node B canonical mempool contains tx %x before P2P relay", txid)
+	}
+
+	if err := nodeA.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("node A P2P announce tx: %v", err)
+	}
+	if !nodeA.mempool.Contains(txid) {
+		t.Fatalf("node A canonical mempool missing announced tx %x", txid)
+	}
+	waitForMempoolTx(t, nodeB, txid)
+
+	mined := nodeB.mineOne(t, true)
+	wantHeight := uint64(consensus.COINBASE_MATURITY + 1)
+	if mined.Height != wantHeight {
+		t.Fatalf("node B mined height=%d, want %d", mined.Height, wantHeight)
+	}
+	if mined.TxCount != 2 {
+		t.Fatalf("node B mined tx_count=%d, want 2", mined.TxCount)
+	}
+	assertBlockContainsTxID(t, nodeB, mined.Hash, txid)
+
+	waitForHeight(t, nodeA, wantHeight)
+	assertSameTip(t, nodeA, nodeB)
+	assertSameUTXOSet(t, nodeA, nodeB)
+	assertSameChainStateFile(t, nodeA, nodeB)
+	assertBlockContainsTxID(t, nodeA, mined.Hash, txid)
+}
+
+func TestDevnetP2PRejectsWrongChainIdentity(t *testing.T) {
+	cases := []struct {
+		name      string
+		configure func(*node.VersionPayloadV1)
+	}{
+		{
+			name: "chain_id",
+			configure: func(payload *node.VersionPayloadV1) {
+				payload.ChainID[0] ^= 0x01
+			},
+		},
+		{
+			name: "genesis_hash",
+			configure: func(payload *node.VersionPayloadV1) {
+				payload.GenesisHash[0] ^= 0x01
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			nodeA := newDevnetNode(t, "node-a", "127.0.0.1:0", nil, 0x11, true)
+			if err := nodeA.start(ctx); err != nil {
+				t.Fatalf("start node A: %v", err)
+			}
+			defer nodeA.close()
+
+			payload := devnetVersionProbePayload()
+			tc.configure(&payload)
+			assertVersionProbeRejectedWithoutVerAck(t, nodeA.service.Addr(), payload)
+			if got := nodeA.peerManager.Count(); got != 0 {
+				t.Fatalf("node A peer_count=%d after rejected %s probe; peers=%+v", got, tc.name, nodeA.peerManager.Snapshot())
+			}
+		})
 	}
 }
 
@@ -349,6 +490,10 @@ func newDevnetNodeWithMineAddress(
 }
 
 func newDevnetService(current *devnetNode, bindAddr string, bootstrapPeers []string) (*p2p.Service, error) {
+	return newDevnetServiceWithGenesisHash(current, bindAddr, bootstrapPeers, node.DevnetGenesisBlockHash())
+}
+
+func newDevnetServiceWithGenesisHash(current *devnetNode, bindAddr string, bootstrapPeers []string, genesisHash [32]byte) (*p2p.Service, error) {
 	if current == nil {
 		return nil, fmt.Errorf("nil node")
 	}
@@ -356,13 +501,14 @@ func newDevnetService(current *devnetNode, bindAddr string, bootstrapPeers []str
 		BindAddr:          bindAddr,
 		BootstrapPeers:    bootstrapPeers,
 		UserAgent:         "rubin-go/devnet-test",
-		GenesisHash:       node.DevnetGenesisBlockHash(),
+		GenesisHash:       genesisHash,
 		PeerRuntimeConfig: defaultPeerRuntimeConfig(),
 		PeerManager:       current.peerManager,
 		SyncConfig:        current.syncCfg,
 		SyncEngine:        current.syncEngine,
 		BlockStore:        current.blockStore,
-		TxMetadataFunc:    current.mempool.RelayMetadata,
+		TxPool:            p2p.NewCanonicalMempoolTxPool(current.mempool),
+		TxMetadataFunc:    p2p.CanonicalMempoolRelayMetadata,
 	})
 	if err != nil {
 		return nil, err
@@ -767,6 +913,175 @@ func waitForPeerCountWithTimeout(t *testing.T, current *devnetNode, want int, ti
 	waitFor(t, timeout, fmt.Sprintf("%s peer_count=%d", current.name, want), func() bool {
 		return current != nil && current.peerManager != nil && current.peerManager.Count() == want
 	})
+}
+
+func waitForMempoolTx(t *testing.T, current *devnetNode, txid [32]byte) {
+	t.Helper()
+	waitFor(t, 5*time.Second, fmt.Sprintf("%s canonical mempool tx=%x", current.name, txid), func() bool {
+		return current != nil && current.mempool != nil && current.mempool.Contains(txid)
+	})
+}
+
+func assertPeerChainIdentity(t *testing.T, nodes ...*devnetNode) {
+	t.Helper()
+	for _, current := range nodes {
+		if current == nil || current.peerManager == nil {
+			t.Fatalf("nil peer manager for chain identity assertion")
+		}
+		snapshot := current.peerManager.Snapshot()
+		if len(snapshot) == 0 {
+			t.Fatalf("%s has no peer identity snapshot", current.name)
+		}
+		for _, peer := range snapshot {
+			if !peer.HandshakeComplete {
+				t.Fatalf("%s peer %s handshake_complete=false", current.name, peer.Addr)
+			}
+			if peer.RemoteVersion.ChainID != node.DevnetGenesisChainID() {
+				t.Fatalf("%s peer %s chain_id=%x want %x", current.name, peer.Addr, peer.RemoteVersion.ChainID, node.DevnetGenesisChainID())
+			}
+			if peer.RemoteVersion.GenesisHash != node.DevnetGenesisBlockHash() {
+				t.Fatalf("%s peer %s genesis_hash=%x want %x", current.name, peer.Addr, peer.RemoteVersion.GenesisHash, node.DevnetGenesisBlockHash())
+			}
+		}
+	}
+}
+
+func assertVersionProbeRejectedWithoutVerAck(t *testing.T, addr string, payload node.VersionPayloadV1) {
+	t.Helper()
+
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial identity probe %s: %v", addr, err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set identity probe deadline: %v", err)
+	}
+	if err := writeDevnetVersionProbe(conn, payload); err != nil {
+		t.Fatalf("write identity probe: %v", err)
+	}
+
+	for {
+		command, err := readDevnetProbeCommand(conn)
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				t.Fatalf("identity probe timed out waiting for rejection")
+			}
+			return
+		}
+		if command == "verack" {
+			t.Fatalf("identity probe received verack for mismatched payload: chain_id=%x genesis_hash=%x", payload.ChainID, payload.GenesisHash)
+		}
+	}
+}
+
+func devnetVersionProbePayload() node.VersionPayloadV1 {
+	return node.VersionPayloadV1{
+		ProtocolVersion:   p2p.ProtocolVersion,
+		TxRelay:           true,
+		PrunedBelowHeight: 0,
+		DaMempoolSize:     0,
+		ChainID:           node.DevnetGenesisChainID(),
+		GenesisHash:       node.DevnetGenesisBlockHash(),
+		BestHeight:        0,
+		UserAgent:         "rubin-go/devnet-identity-probe",
+	}
+}
+
+func writeDevnetVersionProbe(w io.Writer, payload node.VersionPayloadV1) error {
+	body, err := encodeDevnetVersionProbePayload(payload)
+	if err != nil {
+		return err
+	}
+	return writeDevnetProbeFrame(w, "version", body)
+}
+
+func encodeDevnetVersionProbePayload(payload node.VersionPayloadV1) ([]byte, error) {
+	var body bytes.Buffer
+	if err := binary.Write(&body, binary.LittleEndian, payload.ProtocolVersion); err != nil {
+		return nil, err
+	}
+	txRelay := byte(0)
+	if payload.TxRelay {
+		txRelay = 1
+	}
+	if err := body.WriteByte(txRelay); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&body, binary.LittleEndian, payload.PrunedBelowHeight); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&body, binary.LittleEndian, payload.DaMempoolSize); err != nil {
+		return nil, err
+	}
+	if _, err := body.Write(payload.ChainID[:]); err != nil {
+		return nil, err
+	}
+	if _, err := body.Write(payload.GenesisHash[:]); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&body, binary.LittleEndian, payload.BestHeight); err != nil {
+		return nil, err
+	}
+	return body.Bytes(), nil
+}
+
+func writeDevnetProbeFrame(w io.Writer, command string, payload []byte) error {
+	var header [24]byte
+	copy(header[0:4], []byte{'R', 'B', 'D', 'V'})
+	copy(header[4:16], []byte(command))
+	binary.LittleEndian.PutUint32(header[16:20], uint32(len(payload)))
+	checksum := sha3.Sum256(payload)
+	copy(header[20:24], checksum[:4])
+	if _, err := w.Write(header[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(payload)
+	return err
+}
+
+func readDevnetProbeCommand(r io.Reader) (string, error) {
+	var header [24]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return "", err
+	}
+	command := string(bytes.TrimRight(header[4:16], "\x00"))
+	size := binary.LittleEndian.Uint32(header[16:20])
+	if size > 0 {
+		if _, err := io.CopyN(io.Discard, r, int64(size)); err != nil {
+			return "", err
+		}
+	}
+	return command, nil
+}
+
+func assertBlockContainsTxID(t *testing.T, current *devnetNode, blockHash [32]byte, txid [32]byte) {
+	t.Helper()
+	blockBytes, err := current.blockStore.GetBlockByHash(blockHash)
+	if err != nil {
+		t.Fatalf("%s get block %x: %v", current.name, blockHash, err)
+	}
+	parsed, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		t.Fatalf("%s parse block %x: %v", current.name, blockHash, err)
+	}
+	if !parsedBlockHasTxID(parsed, txid) {
+		t.Fatalf("%s block %x missing tx %x", current.name, blockHash, txid)
+	}
+}
+
+func parsedBlockHasTxID(block *consensus.ParsedBlock, txid [32]byte) bool {
+	if block == nil {
+		return false
+	}
+	for _, got := range block.Txids {
+		if got == txid {
+			return true
+		}
+	}
+	return false
 }
 
 func assertSoakConsensusMetrics(t *testing.T, nodes ...*devnetNode) {
