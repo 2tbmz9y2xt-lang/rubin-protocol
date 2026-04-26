@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -33,11 +34,63 @@ type devnetRPCState struct {
 	// so concurrent HTTP handlers cannot interleave chain/mempool updates.
 	rpcMut sync.Mutex
 	miner  *node.Miner // devnet live mining for POST /mine_next; nil disables the route
+	// ready is the operator-visible readiness flag exposed via GET /ready.
+	// false until cmd/rubin-node has finished blockstore open, chainstate
+	// load, p2pService.Start, and RPC bind/listen; flipped back to false at
+	// the start of the shutdown drain so /ready stops claiming healthy as
+	// soon as SIGINT/SIGTERM fires. The single new public/operator surface
+	// in this PR is the bounded GET /ready route + this flag's setter.
+	ready atomic.Bool
+}
+
+// SetReady toggles the operator-visible readiness flag observed by the
+// GET /ready handler. Safe under nil receiver so cmd/rubin-node can call
+// it unconditionally without re-checking whether the RPC server actually
+// started (the wrapper-level SetReady gates on rpcServer != nil).
+func (s *devnetRPCState) SetReady(ready bool) {
+	if s == nil {
+		return
+	}
+	s.ready.Store(ready)
+}
+
+// IsReady reports the current readiness flag value.
+func (s *devnetRPCState) IsReady() bool {
+	if s == nil {
+		return false
+	}
+	return s.ready.Load()
 }
 
 type runningDevnetRPCServer struct {
 	addr   string
 	server *http.Server
+	state  *devnetRPCState
+}
+
+// SetReady forwards the readiness toggle to the underlying state so the
+// GET /ready handler observes the new value. Nil-receiver safe: callers
+// in cmd/rubin-node use a single `if rpcServer != nil` gate at startup
+// (only invoke after a non-nil return from startDevnetRPCServer) but
+// this method also tolerates a nil receiver to keep the shutdown path
+// robust against partial-init failure paths.
+func (s *runningDevnetRPCServer) SetReady(ready bool) {
+	if s == nil {
+		return
+	}
+	s.state.SetReady(ready)
+}
+
+// IsReady reads the underlying readiness flag. Nil-receiver safe:
+// returns false if the server wrapper or its backing state is nil.
+// cmd/rubin-node uses this to print runtime evidence of each
+// SetReady transition to stdout (the banner-style audit trail
+// TestRunRPCBindReadyEndpointReportsLifecycle scans).
+func (s *runningDevnetRPCServer) IsReady() bool {
+	if s == nil {
+		return false
+	}
+	return s.state.IsReady()
 }
 
 type rpcMetrics struct {
@@ -191,8 +244,15 @@ func (m *rpcMetrics) snapshot() (map[string]uint64, map[string]uint64) {
 	return routeStatus, submitByResult
 }
 
+// startDevnetRPCServer binds the devnet RPC listener and starts serving.
+// Shutdown is driven exclusively by cmd/rubin-node/main.go's deferred
+// rpcServer.Close(...) call; this function neither accepts nor observes
+// a context — there used to be an inline `<-ctx.Done()` goroutine that
+// called server.Shutdown in parallel with main.go's defer, but that
+// produced two concurrent Shutdown calls on the same *http.Server. The
+// defer in main.go is the single canonical Shutdown call site, so the
+// readiness flag's "false-on-shutdown" hop runs at exactly one place.
 func startDevnetRPCServer(
-	ctx context.Context,
 	bindAddr string,
 	state *devnetRPCState,
 	stdout, stderr io.Writer,
@@ -225,12 +285,6 @@ func startDevnetRPCServer(
 		IdleTimeout: 60 * time.Second,
 	}
 	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	go func() {
 		err := server.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) && stderr != nil {
 			_, _ = fmt.Fprintf(stderr, "rpc server failed: %v\n", err)
@@ -240,7 +294,7 @@ func startDevnetRPCServer(
 	if stdout != nil {
 		_, _ = fmt.Fprintf(stdout, "rpc: listening=%s\n", addr)
 	}
-	return &runningDevnetRPCServer{addr: addr, server: server}, nil
+	return &runningDevnetRPCServer{addr: addr, server: server, state: state}, nil
 }
 
 func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
@@ -250,8 +304,45 @@ func (s *runningDevnetRPCServer) Close(ctx context.Context) error {
 	return s.server.Shutdown(ctx)
 }
 
+// readyResponse is the tiny JSON payload served by GET /ready. The shape
+// is intentionally minimal: a single boolean. Status code (200 vs 503) is
+// the primary contract for orchestrators; the body is for human eyes.
+type readyResponse struct {
+	Ready bool `json:"ready"`
+}
+
+func handleReady(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
+	const route = "/ready"
+	if r.Method != http.MethodGet {
+		// RFC 9110 §15.5.6 requires 405 responses to advertise the
+		// permitted methods via an Allow response header so generic HTTP
+		// clients and debugging tools can self-correct without re-reading
+		// the body. Set the header BEFORE writeJSONResponse calls
+		// WriteHeader because headers are frozen once status is written.
+		w.Header().Set("Allow", http.MethodGet)
+		// Match the JSON-error envelope used by the rest of the devnet
+		// RPC surface (see handleGetTip / handleSubmitTx non-method paths
+		// at L364+ / L511+) so /ready stays machine-readable on error.
+		// Status stays 405 — semantically correct for method-not-allowed
+		// and pinned by TestReadyHandlerRejectsNonGet.
+		writeJSONResponse(state, route, w, http.StatusMethodNotAllowed, submitTxResponse{
+			Accepted: false,
+			Error:    "GET required",
+		})
+		return
+	}
+	if state.IsReady() {
+		writeJSONResponse(state, route, w, http.StatusOK, readyResponse{Ready: true})
+		return
+	}
+	writeJSONResponse(state, route, w, http.StatusServiceUnavailable, readyResponse{Ready: false})
+}
+
 func newDevnetRPCHandler(state *devnetRPCState) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		handleReady(state, w, r)
+	})
 	mux.HandleFunc("/get_tip", func(w http.ResponseWriter, r *http.Request) {
 		handleGetTip(state, w, r)
 	})
