@@ -883,6 +883,12 @@ func TestRestoreMempoolSnapshotRecomputesByteAccounting(t *testing.T) {
 	if mp.Contains(txID(t, tx2)) {
 		t.Fatalf("restored mempool still contains tx2")
 	}
+	if err := mp.AddTx(tx2); err != nil {
+		t.Fatalf("AddTx(tx2) after restore: %v", err)
+	}
+	if mp.usedBytes != len(tx1)+len(tx2) {
+		t.Fatalf("usedBytes=%d, want %d after post-restore AddTx", mp.usedBytes, len(tx1)+len(tx2))
+	}
 }
 
 func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T) {

@@ -32,10 +32,10 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	if m == nil {
 		return nil
 	}
-	m.mu.RLock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	maxTxs := m.maxTxs
 	maxBytes := m.maxBytes
-	m.mu.RUnlock()
 	if maxTxs <= 0 || maxBytes <= 0 {
 		return fmt.Errorf("invalid mempool snapshot restore limits: max_txs=%d max_bytes=%d", maxTxs, maxBytes)
 	}
@@ -66,8 +66,6 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 		txs[entryCopy.txid] = &entryCopy
 		usedBytes += entryCopy.size
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.txs = txs
 	m.spenders = spenders
 	m.usedBytes = usedBytes
