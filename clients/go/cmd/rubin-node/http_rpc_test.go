@@ -893,7 +893,7 @@ func TestRenderPrometheusMetricsMempoolBytesAndAdmitTotal(t *testing.T) {
 	idxConflict := strings.Index(body, `rubin_node_mempool_admit_total{result="conflict"}`)
 	idxRejected := strings.Index(body, `rubin_node_mempool_admit_total{result="rejected"}`)
 	idxUnavailable := strings.Index(body, `rubin_node_mempool_admit_total{result="unavailable"}`)
-	if !(idxAccepted >= 0 && idxAccepted < idxConflict && idxConflict < idxRejected && idxRejected < idxUnavailable) {
+	if idxAccepted < 0 || idxAccepted >= idxConflict || idxConflict >= idxRejected || idxRejected >= idxUnavailable {
 		t.Fatalf("admit_total buckets not in fixed accepted<conflict<rejected<unavailable order; positions %d,%d,%d,%d body=%q", idxAccepted, idxConflict, idxRejected, idxUnavailable, body)
 	}
 	// BytesUsed reflected as gauge: equals the raw byte size of the
