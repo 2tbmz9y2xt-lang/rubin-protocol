@@ -54,7 +54,7 @@ func mustRPCStateAtDir(t *testing.T, dir string, withGenesis bool) *devnetRPCSta
 	}
 	syncEngine.SetMempool(mempool)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard, nil)
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, nil, io.Discard, nil)
 	state.nowUnix = func() uint64 { return 0 }
 	return state
 }
@@ -109,7 +109,7 @@ func mustRPCStateWithSpendableUTXO(
 	}
 	syncEngine.SetMempool(mempool)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, io.Discard, nil)
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, nil, io.Discard, nil)
 	state.nowUnix = func() uint64 { return 0 }
 	return state, outpoint, chainState.Utxos
 }
@@ -1106,7 +1106,7 @@ func TestDevnetRPCSubmitTxLogsAnnounceTxError(t *testing.T) {
 }
 
 func TestNewDevnetRPCStateNilStderrFallsBackToDiscard(t *testing.T) {
-	state := newDevnetRPCState(nil, nil, nil, nil, nil, nil, nil)
+	state := newDevnetRPCState(nil, nil, nil, nil, nil, nil, nil, nil)
 	if state.stderr != io.Discard {
 		t.Fatal("expected io.Discard for nil stderr")
 	}
@@ -1196,7 +1196,7 @@ func TestDevnetRPCMineNextMineOneError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMiner: %v", err)
 	}
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard, miner)
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, nil, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1274,7 +1274,11 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMiner: %v", err)
 	}
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, io.Discard, miner)
+	var announcedBlock []byte
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, func(block []byte) error {
+		announcedBlock = append([]byte(nil), block...)
+		return nil
+	}, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	t.Cleanup(server.Close)
@@ -1295,6 +1299,80 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	}
 	if got.Nonce == nil {
 		t.Fatalf("want nonce field in JSON for Go/Rust RPC parity, got %+v", got)
+	}
+	if len(announcedBlock) == 0 {
+		t.Fatal("expected /mine_next to announce the mined full block")
+	}
+	parsedBlock, err := consensus.ParseBlockBytes(announcedBlock)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(announced): %v", err)
+	}
+	announcedHash, err := consensus.BlockHash(parsedBlock.HeaderBytes)
+	if err != nil {
+		t.Fatalf("BlockHash(announced): %v", err)
+	}
+	if got.BlockHash == nil || *got.BlockHash != hex.EncodeToString(announcedHash[:]) {
+		t.Fatalf("announced block hash=%x response_block_hash=%v", announcedHash, got.BlockHash)
+	}
+}
+
+func TestDevnetRPCMineNextLogsAnnounceBlockError(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	chainState := node.NewChainState()
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
+	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	syncEngine.SetMempool(mempool)
+	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
+	miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	var stderrBuf bytes.Buffer
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, func(block []byte) error {
+		return errors.New("p2p block broadcast unavailable")
+	}, &stderrBuf, miner)
+	state.nowUnix = func() uint64 { return 0 }
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	t.Cleanup(server.Close)
+	resp, err := http.Post(server.URL+"/mine_next", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !got.Mined {
+		t.Fatalf("mined=false, want true: %+v", got)
+	}
+	stderrOutput := stderrBuf.String()
+	if !strings.Contains(stderrOutput, "rpc: announce-block:") {
+		t.Fatalf("expected announce-block error on stderr, got: %q", stderrOutput)
+	}
+	if !strings.Contains(stderrOutput, "p2p block broadcast unavailable") {
+		t.Fatalf("expected announce-block error message on stderr, got: %q", stderrOutput)
 	}
 }
 
