@@ -181,6 +181,30 @@ func runGeneratorCLI() {
 		mustWriteFixture(path, f)
 	}
 
+	// Devnet-signed CORE_MULTISIG 1-of-1 spend operator-evidence
+	// artifact for live rubin-node consumption. Same non-conformance-
+	// namespace rationale as the CORE_VAULT and CORE_HTLC artifacts
+	// above (lives under conformance/fixtures/devnet/, escapes the
+	// top-level CV-*.json auto-discovery glob in
+	// conformance/runner/run_cv_bundle.py /
+	// tools/gen_conformance_matrix.py /
+	// tools/check_formal_coverage.py). Reuses the existing
+	// updateMultisigVector1of1 helper as-is — it is already
+	// parameterised on (id, chainID, signer, inValue, outValue), so
+	// signing under the canonical devnet chain_id is a single arg
+	// swap; chain_id_hex is pinned on the vector after the helper
+	// returns. Prerequisite for #1242 live operator evidence.
+	{
+		path := filepath.Join(repoRoot, "conformance", "fixtures", "devnet", "devnet-multisig-spend-01.json")
+		f := mustLoadFixture(path)
+		devnetChainID := node.DevnetGenesisChainID()
+		updateMultisigVector1of1(f, "DEVNET-MULTISIG-SPEND-01", devnetChainID, multisigKP, 100, 90)
+		// Pin chain_id_hex on the vector so the artifact carries
+		// explicit metadata matching the chainID just used to sign.
+		findVector(f, "DEVNET-MULTISIG-SPEND-01")["chain_id_hex"] = hex.EncodeToString(devnetChainID[:])
+		mustWriteFixture(path, f)
+	}
+
 	// CV-SUBSIDY updates (block-level coinbase bound; requires valid non-coinbase sig).
 	{
 		path := filepath.Join(repoRoot, "conformance/fixtures/CV-SUBSIDY.json")
