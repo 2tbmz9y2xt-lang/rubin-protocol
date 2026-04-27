@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 // This generator updates a small set of conformance fixtures to use *real* ML-DSA
@@ -128,6 +129,32 @@ func runGeneratorCLI() {
 		path := filepath.Join(repoRoot, "conformance/fixtures/CV-HTLC.json")
 		f := mustLoadFixture(path)
 		updateHTLCVector(f, "CV-HTLC-13", zeroChainID, htlcClaimKP, htlcRefundKP, destKP)
+		mustWriteFixture(path, f)
+	}
+
+	// Devnet-signed CORE_VAULT operator-evidence artifact for live
+	// rubin-node consumption. Lives under conformance/fixtures/devnet/
+	// — INTENTIONALLY OUT of the auto-discovered CV-*.json conformance
+	// namespace (top-level glob in conformance/runner/run_cv_bundle.py,
+	// tools/gen_conformance_matrix.py, tools/check_formal_coverage.py)
+	// because the artifact is signed under the canonical devnet
+	// chain_id and would not pass the zero-chain-domain conformance
+	// replay contract those tools enforce. Distinct from CV-VAULT.json
+	// which stays signed under zeroChainID for cross-client conformance
+	// replay; this artifact is the canonical input for #1240 live
+	// devnet operator evidence (issue #1312).
+	{
+		path := filepath.Join(repoRoot, "conformance", "fixtures", "devnet", "devnet-vault-create-01.json")
+		f := mustLoadFixture(path)
+		updateDevnetVaultCreateVector(
+			f,
+			node.DevnetGenesisChainID(),
+			ownerKP,
+			vaultKP,
+			destKP,
+			100, // input_value
+			90,  // vault_output_value (fee=10)
+		)
 		mustWriteFixture(path, f)
 	}
 
@@ -608,6 +635,75 @@ func updateVaultCreateVectors(
 		v["tx_hex"] = hex.EncodeToString(b)
 		v["utxos"] = utxos
 	}
+}
+
+// updateDevnetVaultCreateVector populates the positive owner-authorized
+// CORE_VAULT create transaction in
+// conformance/fixtures/devnet/devnet-vault-create-01.json, signed under
+// the canonical devnet chain_id (see node.DevnetGenesisChainID). The
+// resulting tx is the canonical input artifact for #1240 live
+// devnet-mode operator evidence; submitting it through
+// `rubin-node --network devnet /submit_tx` accepts it because its
+// signature domain matches the live node's chain_id, unlike the
+// zero-chain VAULT-CREATE-02 vector in CV-VAULT.json which targets
+// cross-client conformance replay only. The artifact intentionally
+// lives outside the top-level CV-*.json conformance namespace so the
+// existing conformance runner/matrix/formal glob does not auto-discover
+// it (devnet-domain signatures would fail the zero-chain replay those
+// tools enforce). The vector pins the signing chain_id explicitly via
+// the chain_id_hex field so an operator/orchestrator can verify the
+// artifact metadata without re-deriving it from tx_hex.
+func updateDevnetVaultCreateVector(
+	f *fixtureFile,
+	devnetChainID [32]byte,
+	ownerKP *consensus.MLDSA87Keypair,
+	vaultKP *consensus.MLDSA87Keypair,
+	destKP *consensus.MLDSA87Keypair,
+	inValue uint64,
+	vaultOutValue uint64,
+) {
+	ownerPub := ownerKP.PubkeyBytes()
+	ownerInCov := p2pkCovenantData(ownerPub)
+	ownerLockID := sha3_256(consensus.OutputDescriptorBytes(consensus.COV_TYPE_P2PK, ownerInCov))
+
+	vaultKeyID := keyIDForPub(vaultKP.PubkeyBytes())
+	destCov := p2pkCovenantData(destKP.PubkeyBytes())
+	destDescHash := sha3_256(consensus.OutputDescriptorBytes(consensus.COV_TYPE_P2PK, destCov))
+	vaultCov := vaultCovenantData(ownerLockID, vaultKeyID, destDescHash)
+
+	id := "DEVNET-VAULT-CREATE-01"
+	v := findVector(f, id)
+	utxos := anyToSliceMap(v["utxos"])
+	if len(utxos) != 1 {
+		fatalf("%s: want 1 utxo", id)
+	}
+	utxos[0]["covenant_data"] = hex.EncodeToString(ownerInCov)
+	utxos[0]["value"] = float64(inValue)
+
+	prevTxidStr, ok := utxos[0]["txid"].(string)
+	if !ok {
+		fatalf("%s: utxos[0].txid is not a string", id)
+	}
+	prev := mustHex32(prevTxidStr)
+	vout := mustJSONUint32(id+".utxos[0].vout", utxos[0]["vout"])
+	tx := &consensus.Tx{
+		Version:  1,
+		TxKind:   0x00,
+		TxNonce:  1,
+		Inputs:   []consensus.TxInput{{PrevTxid: prev, PrevVout: vout, ScriptSig: nil, Sequence: 0}},
+		Outputs:  []consensus.TxOutput{{Value: vaultOutValue, CovenantType: consensus.COV_TYPE_VAULT, CovenantData: vaultCov}},
+		Locktime: 0,
+	}
+	sig := mustSignInputDigest(id, "input0_owner_devnet", ownerKP, tx, 0, inValue, devnetChainID)
+	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: ownerPub, Signature: sig}}
+	b := mustTxBytes(tx)
+	v["tx_hex"] = hex.EncodeToString(b)
+	v["utxos"] = utxos
+	// Pin the signing chain_id on the vector so the artifact carries
+	// explicit metadata for live-evidence consumers; the regenerator
+	// always writes the canonical devnet chain_id here, matching the
+	// chainID parameter used to sign.
+	v["chain_id_hex"] = hex.EncodeToString(devnetChainID[:])
 }
 
 func updateVaultSpendVectorsVaultFixture(
