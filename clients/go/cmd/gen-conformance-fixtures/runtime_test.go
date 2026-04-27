@@ -268,47 +268,92 @@ func TestDevnetVaultCreateArtifactSignedUnderDevnetChainID(t *testing.T) {
 	// the artifact can verify the metadata without re-deriving it.
 	devnetChainID := node.DevnetGenesisChainID()
 	wantChainIDHex := hex.EncodeToString(devnetChainID[:])
-	gotChainIDHex, _ := v["chain_id_hex"].(string)
+	// Validated readers: every numeric fixture field MUST go through
+	// parseJSONUint32 so missing keys, non-numeric values, fractional
+	// values, and out-of-range values fail closed via t.Fatalf instead
+	// of silently truncating to zero. String/bool fields use comma-ok
+	// assertions with explicit type errors. The fixture stores small
+	// values (height=200, value=100, etc.) so a uint32 ceiling is more
+	// than sufficient; uint64 destination fields take an explicit
+	// uint32→uint64 widening which is lossless.
+	mustU32 := func(label string, raw any) uint32 {
+		t.Helper()
+		n, perr := parseJSONUint32(label, raw)
+		if perr != nil {
+			t.Fatalf("%v", perr)
+		}
+		return n
+	}
+	mustU16 := func(label string, raw any) uint16 {
+		t.Helper()
+		n, perr := parseJSONUint32(label, raw)
+		if perr != nil {
+			t.Fatalf("%v", perr)
+		}
+		if n > 0xFFFF {
+			t.Fatalf("%s: value %d exceeds uint16", label, n)
+		}
+		return uint16(n)
+	}
+	mustString := func(label string, raw any) string {
+		t.Helper()
+		s, ok := raw.(string)
+		if !ok {
+			t.Fatalf("%s: expected string, got %T", label, raw)
+		}
+		return s
+	}
+	mustBool := func(label string, raw any) bool {
+		t.Helper()
+		b, ok := raw.(bool)
+		if !ok {
+			t.Fatalf("%s: expected bool, got %T", label, raw)
+		}
+		return b
+	}
+
+	gotChainIDHex := mustString("chain_id_hex", v["chain_id_hex"])
 	if gotChainIDHex != wantChainIDHex {
 		t.Fatalf("chain_id_hex=%q want %q (canonical devnet)", gotChainIDHex, wantChainIDHex)
 	}
 
 	// Reconstruct the utxoSet from the fixture so ApplyNonCoinbaseTxBasic
 	// has the input it needs to verify the signature against.
-	utxosRaw, _ := v["utxos"].([]any)
+	utxosRaw, ok := v["utxos"].([]any)
+	if !ok {
+		t.Fatalf("utxos: expected array, got %T", v["utxos"])
+	}
 	if len(utxosRaw) != 1 {
 		t.Fatalf("utxos=%d want 1", len(utxosRaw))
 	}
-	u, _ := utxosRaw[0].(map[string]any)
-	prevTxidHex, _ := u["txid"].(string)
+	u, ok := utxosRaw[0].(map[string]any)
+	if !ok {
+		t.Fatalf("utxos[0]: expected object, got %T", utxosRaw[0])
+	}
+	prevTxidHex := mustString("utxos[0].txid", u["txid"])
 	prevTxidBytes, err := hex.DecodeString(prevTxidHex)
 	if err != nil || len(prevTxidBytes) != 32 {
 		t.Fatalf("utxo txid=%q invalid: %v", prevTxidHex, err)
 	}
 	var prevTxid [32]byte
 	copy(prevTxid[:], prevTxidBytes)
-	voutF, _ := u["vout"].(float64)
-	valueF, _ := u["value"].(float64)
-	covenantTypeF, _ := u["covenant_type"].(float64)
-	covenantDataHex, _ := u["covenant_data"].(string)
+	covenantDataHex := mustString("utxos[0].covenant_data", u["covenant_data"])
 	covenantData, err := hex.DecodeString(covenantDataHex)
 	if err != nil {
 		t.Fatalf("utxo covenant_data hex: %v", err)
 	}
-	creationHeightF, _ := u["creation_height"].(float64)
-	createdByCoinbase, _ := u["created_by_coinbase"].(bool)
 	utxoSet := map[consensus.Outpoint]consensus.UtxoEntry{
-		{Txid: prevTxid, Vout: uint32(voutF)}: {
-			Value:             uint64(valueF),
-			CovenantType:      uint16(covenantTypeF),
+		{Txid: prevTxid, Vout: mustU32("utxos[0].vout", u["vout"])}: {
+			Value:             uint64(mustU32("utxos[0].value", u["value"])),
+			CovenantType:      mustU16("utxos[0].covenant_type", u["covenant_type"]),
 			CovenantData:      covenantData,
-			CreationHeight:    uint64(creationHeightF),
-			CreatedByCoinbase: createdByCoinbase,
+			CreationHeight:    uint64(mustU32("utxos[0].creation_height", u["creation_height"])),
+			CreatedByCoinbase: mustBool("utxos[0].created_by_coinbase", u["created_by_coinbase"]),
 		},
 	}
 
 	// Parse the committed tx_hex.
-	txHex, _ := v["tx_hex"].(string)
+	txHex := mustString("tx_hex", v["tx_hex"])
 	if txHex == "" {
 		t.Fatalf("tx_hex is empty — regenerate the fixture via `cd clients/go && go run ./cmd/gen-conformance-fixtures`")
 	}
@@ -328,10 +373,8 @@ func TestDevnetVaultCreateArtifactSignedUnderDevnetChainID(t *testing.T) {
 		t.Fatalf("ParseTx (re): %v", err)
 	}
 
-	heightF, _ := v["height"].(float64)
-	tsF, _ := v["block_timestamp"].(float64)
-	height := uint64(heightF)
-	blockTimestamp := uint64(tsF)
+	height := uint64(mustU32("height", v["height"]))
+	blockTimestamp := uint64(mustU32("block_timestamp", v["block_timestamp"]))
 
 	// Positive: signature MUST verify under the canonical devnet chain_id.
 	if _, err := consensus.ApplyNonCoinbaseTxBasic(parsedTx, txid, utxoSet, height, blockTimestamp, devnetChainID); err != nil {
