@@ -123,13 +123,18 @@ def load_file(p):
 
 
 participants = []
-if pid and rpc:
+# Include the node-a participant whenever pid is known, even if rpc address
+# could not be observed yet. This keeps pid/datadir visible in the report on
+# partial-start failures (e.g. start_live_node failing after process spawn but
+# before /chain_identity), without inventing rpc/chain_identity values that
+# were never observed.
+if pid:
     participants.append({
         "name": "node-a",
         "pid": int(pid),
-        "rpc": rpc,
-        "datadir": datadir,
-        "chain_identity": load(identity),
+        "rpc": rpc or None,
+        "datadir": datadir or None,
+        "chain_identity": load(identity) if identity else None,
     })
 
 report = {
@@ -342,8 +347,10 @@ GO
 
 PHASE="fixture_preflight"
 [[ -f "${CANONICAL_FIXTURE_PATH}" ]] || fail FAIL_INPUT "canonical devnet CORE_MULTISIG fixture missing: ${CANONICAL_FIXTURE_PATH}"
-CANONICAL_FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${CANONICAL_FIXTURE_PATH}")"
-FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${REQUESTED_FIXTURE_PATH}")"
+CANONICAL_FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${CANONICAL_FIXTURE_PATH}")" || \
+  fail FAIL_INPUT "failed to resolve canonical CORE_MULTISIG fixture realpath: ${CANONICAL_FIXTURE_PATH}"
+FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${REQUESTED_FIXTURE_PATH}")" || \
+  fail FAIL_INPUT "failed to resolve requested CORE_MULTISIG fixture realpath: ${REQUESTED_FIXTURE_PATH}"
 [[ "${FIXTURE_REAL}" == "${CANONICAL_FIXTURE_REAL}" ]] || fail FAIL_INPUT "non-canonical CORE_MULTISIG fixture rejected: actual=${FIXTURE_REAL} expected=${CANONICAL_FIXTURE_REAL}"
 [[ "${REQUESTED_VECTOR_ID}" == "${CANONICAL_VECTOR_ID}" ]] || fail FAIL_INPUT "non-canonical CORE_MULTISIG vector rejected: actual=${REQUESTED_VECTOR_ID} expected=${CANONICAL_VECTOR_ID}"
 write_seed_go || fail FAIL_LOCAL_HARNESS "failed to write seed program"
@@ -449,12 +456,12 @@ pass_rc=0
 write_report PASS "" || pass_rc=$?
 if (( pass_rc != 0 )); then
   echo "FAIL_REPORT_WRITE_FAILED: report writer exit=${pass_rc} path=${REPORT_JSON} primary_status=PASS primary_phase=${PHASE}" >&2
-  exit 1
+  exit "${pass_rc}"
 fi
 pass_rc=0
 python3 -m json.tool "${REPORT_JSON}" >/dev/null || pass_rc=$?
 if (( pass_rc != 0 )); then
   echo "FAIL_REPORT_WRITE_FAILED: report json validation exit=${pass_rc} path=${REPORT_JSON} primary_status=PASS primary_phase=${PHASE}" >&2
-  exit 1
+  exit "${pass_rc}"
 fi
 echo "PASS: CORE_MULTISIG live evidence submit->mine->query succeeded; report=${REPORT_JSON}"
