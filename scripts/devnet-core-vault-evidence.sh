@@ -25,6 +25,8 @@ rubin_process_init core-vault-evidence
 NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
 SEED_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed_core_vault.go"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/core-vault-evidence-report.json"
+SEED_STDERR="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed-stderr.log"
+BLOCK_RESPONSE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/get-block-response.json"
 NODE_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 NODE_LOG="node-a.log"
 NODE_PID=""; NODE_RPC_ADDR=""; CHAIN_IDENTITY_JSON="{}"
@@ -33,26 +35,38 @@ PHASE="init"
 
 write_report() {
   local status="$1" reason="$2"
-  python3 - "${REPORT_JSON}" "${status}" "${PHASE}" "${reason}" "${FIXTURE_PATH}" "${VECTOR_ID}" \
+  if ! python3 - "${REPORT_JSON}" "${status}" "${PHASE}" "${reason}" "${FIXTURE_PATH}" "${VECTOR_ID}" \
     "${RUBIN_PROCESS_ARTIFACT_ROOT}" "${NODE_PID}" "${NODE_RPC_ADDR}" "${NODE_DIR}" "${CHAIN_IDENTITY_JSON}" \
-    "${SUBMIT_JSON}" "${MINE_JSON}" "${BLOCK_JSON}" "${DEVNET_CHAIN_ID}" "${FIXTURE_CHAIN_ID}" "${LIVE_CHAIN_ID}" "${SUBMITTED_TXID}" "${MINED_HEIGHT}" "${MINED_HASH}" <<'PY' || true
+    "${SUBMIT_JSON}" "${MINE_JSON}" "${BLOCK_RESPONSE_JSON}" "${DEVNET_CHAIN_ID}" "${FIXTURE_CHAIN_ID}" "${LIVE_CHAIN_ID}" "${SUBMITTED_TXID}" "${MINED_HEIGHT}" "${MINED_HASH}" <<'PY'
 import json, sys
-(path,status,phase,reason,fixture,vector,root,pid,rpc,datadir,identity,submit,mine,block,expected_chain_id,fixture_chain_id,live_chain_id,txid,height,block_hash)=sys.argv[1:21]
+(path,status,phase,reason,fixture,vector,root,pid,rpc,datadir,identity,submit,mine,block_path,expected_chain_id,fixture_chain_id,live_chain_id,txid,height,block_hash)=sys.argv[1:21]
 def load(raw):
     try: return json.loads(raw) if raw else None
     except Exception: return {"raw": raw}
+def load_file(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        return {"raw_error": str(exc)}
 participants=[]
 if pid and rpc:
     participants.append({"name":"node-a","pid":int(pid),"rpc":rpc,"datadir":datadir,"chain_identity":load(identity)})
-report={"scenario":"CORE_VAULT","status":status,"canonical_input":{"artifact":fixture,"vector_id":vector},"canonical_input_chain_id":fixture_chain_id or None,"expected_devnet_chain_id":expected_chain_id,"live_devnet_chain_id":live_chain_id or None,"artifact_root":root,"participants":participants,"submitted_txid":txid or None,"mined_height":int(height) if height else None,"mined_hash":block_hash or None,"inclusion_node":"node-a" if status=="PASS" else None,"inclusion_proven":status=="PASS","live_submit_response":load(submit),"live_mine_response":load(mine),"live_block_response":load(block),"verdict":"PASS" if status=="PASS" else "FAIL"}
+report={"scenario":"CORE_VAULT","status":status,"canonical_input":{"artifact":fixture,"vector_id":vector},"canonical_input_chain_id":fixture_chain_id or None,"expected_devnet_chain_id":expected_chain_id,"live_devnet_chain_id":live_chain_id or None,"artifact_root":root,"participants":participants,"submitted_txid":txid or None,"mined_height":int(height) if height else None,"mined_hash":block_hash or None,"inclusion_node":"node-a" if status=="PASS" else None,"inclusion_proven":status=="PASS","live_submit_response":load(submit),"live_mine_response":load(mine),"live_block_response":load_file(block_path),"verdict":"PASS" if status=="PASS" else "FAIL"}
 if status != "PASS":
     report["failure_phase"] = phase; report["failure_reason"] = reason
 with open(path,"w",encoding="utf-8") as fh:
     json.dump(report,fh,indent=2,sort_keys=True); fh.write("\n")
 PY
+  then
+    [[ "${status}" == "PASS" ]] && return 1
+    return 0
+  fi
 }
 
-fail() { local status="$1" reason="$2"; write_report "${status}" "${reason}"; echo "${reason}" >&2; exit 1; }
+fail() { local status="$1" reason="$2"; write_report "${status}" "${reason}" || true; echo "${reason}" >&2; exit 1; }
 
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
@@ -117,10 +131,14 @@ CANONICAL_FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.
 FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${REQUESTED_FIXTURE_PATH}")"
 [[ "${FIXTURE_REAL}" == "${CANONICAL_FIXTURE_REAL}" ]] || fail FAIL_INPUT "non-canonical CORE_VAULT fixture rejected: actual=${FIXTURE_REAL} expected=${CANONICAL_FIXTURE_REAL}"
 [[ "${REQUESTED_VECTOR_ID}" == "${CANONICAL_VECTOR_ID}" ]] || fail FAIL_INPUT "non-canonical CORE_VAULT vector rejected: actual=${REQUESTED_VECTOR_ID} expected=${CANONICAL_VECTOR_ID}"
-write_seed_go; mkdir -p "${NODE_DIR}" || fail FAIL_LOCAL_HARNESS "failed to create node datadir"
+write_seed_go || fail FAIL_LOCAL_HARNESS "failed to write seed program"
+mkdir -p "${NODE_DIR}" || fail FAIL_LOCAL_HARNESS "failed to create node datadir"
 PHASE="seed_fixture_context"
-SEED_OUT="$({ "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${SEED_GO}" --datadir "${NODE_DIR}" --fixture "${FIXTURE_PATH}" --vector-id "${VECTOR_ID}" --chain-id "${DEVNET_CHAIN_ID}"; } 2>&1)" || fail FAIL_INPUT "fixture validation/seed failed: ${SEED_OUT}"
-FIXTURE_CHAIN_ID="${SEED_OUT%%$'\n'*}"; TX_HEX="${SEED_OUT#*$'\n'}"; [[ "${TX_HEX}" != "${SEED_OUT}" ]] || fail FAIL_INPUT "fixture validation did not emit tx_hex"
+if ! SEED_OUT="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${SEED_GO}" --datadir "${NODE_DIR}" --fixture "${FIXTURE_PATH}" --vector-id "${VECTOR_ID}" --chain-id "${DEVNET_CHAIN_ID}" 2>"${SEED_STDERR}")"; then
+  fail FAIL_INPUT "fixture validation/seed failed: stdout=${SEED_OUT}; stderr=$(cat "${SEED_STDERR}" 2>/dev/null || true)"
+fi
+FIXTURE_CHAIN_ID="${SEED_OUT%%$'\n'*}"; TX_HEX="${SEED_OUT#*$'\n'}"
+[[ "${TX_HEX}" != "${SEED_OUT}" && "${TX_HEX}" != *$'\n'* && -n "${FIXTURE_CHAIN_ID}" && -n "${TX_HEX}" ]] || fail FAIL_INPUT "fixture validation emitted unexpected stdout shape: ${SEED_OUT}"
 PHASE="build"
 echo "Building Go rubin-node"
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${NODE_BIN}" ./cmd/rubin-node || fail FAIL_LOCAL_HARNESS "rubin-node build failed"
@@ -163,9 +181,12 @@ read -r MINED_HEIGHT MINED_HASH <<<"${MINE_PARSED}"
 
 PHASE="query_inclusion"
 BLOCK_JSON="$(rpc_json GET "${NODE_RPC_ADDR}" "/get_block?height=${MINED_HEIGHT}")" || fail FAIL_INCLUSION "get_block failed at height ${MINED_HEIGHT}: ${BLOCK_JSON}"
-BLOCK_CHECK="$(python3 - "${BLOCK_JSON}" "${MINED_HEIGHT}" "${MINED_HASH}" "${TX_HEX}" 2>&1 <<'PY'
+printf '%s' "${BLOCK_JSON}" >"${BLOCK_RESPONSE_JSON}" || fail FAIL_INCLUSION "failed to persist get_block response"
+BLOCK_CHECK="$(python3 - "${BLOCK_RESPONSE_JSON}" "${MINED_HEIGHT}" "${MINED_HASH}" "${TX_HEX}" 2>&1 <<'PY'
 import json, sys
-d=json.loads(sys.argv[1]); want_height=int(sys.argv[2]); want_hash=sys.argv[3].lower(); tx_hex=sys.argv[4].lower()
+with open(sys.argv[1], encoding="utf-8") as fh:
+    d=json.load(fh)
+want_height=int(sys.argv[2]); want_hash=sys.argv[3].lower(); tx_hex=sys.argv[4].lower()
 actual_height=d.get("height"); actual_hash=str(d.get("hash", "")).lower(); canonical=d.get("canonical"); block_hex=str(d.get("block_hex", "")).lower()
 if actual_height != want_height: raise SystemExit(f"height actual={actual_height} expected={want_height}")
 if actual_hash != want_hash: raise SystemExit(f"hash actual={actual_hash} expected={want_hash}")
@@ -175,5 +196,6 @@ PY
 )" || fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response=${BLOCK_JSON}"
 
 PHASE="pass"
-write_report PASS ""
+write_report PASS "" || { echo "failed to write PASS report: ${REPORT_JSON}" >&2; exit 1; }
+python3 -m json.tool "${REPORT_JSON}" >/dev/null || { echo "invalid PASS report: ${REPORT_JSON}" >&2; exit 1; }
 echo "PASS: CORE_VAULT live evidence submit->mine->query succeeded; report=${REPORT_JSON}"
