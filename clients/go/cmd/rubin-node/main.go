@@ -528,7 +528,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// gate's locked IsReady, not via raw state. Tests use the same
 	// helper to keep production-wiring and regression-wiring paths
 	// identical.
-	rpcState := newDevnetRPCStateWithLifecycle(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, stderr, liveMiner, ctx)
+	rpcState := newDevnetRPCStateWithLifecycle(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, p2pService.AnnounceBlock, stderr, liveMiner, ctx)
 	// Late-bind the startup-wired chain identity so the read-only
 	// /chain_identity handler echoes the values that already flowed
 	// through genesis parsing + network canonicalization, rather than
