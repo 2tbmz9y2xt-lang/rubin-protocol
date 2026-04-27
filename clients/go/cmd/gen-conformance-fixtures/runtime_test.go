@@ -178,11 +178,21 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 	}
 	// devnet-multisig-spend-01 skeleton (#1242 prerequisite). Same
 	// non-conformance namespace rationale as the other devnet/*
-	// fixtures.
+	// fixtures. The skeleton's utxos[0].covenant_type is overridden
+	// to COV_TYPE_MULTISIG (260) so the temp-repo seed mirrors the
+	// shape of the committed devnet-multisig-spend-01 fixture; if a
+	// future generator change starts depending on covenant_type, the
+	// skeleton matches what the committed artifact already encodes.
 	{
+		multisigVec := newVector("DEVNET-MULTISIG-SPEND-01", 1, nil)
+		if utxos, ok := multisigVec["utxos"].([]any); ok && len(utxos) > 0 {
+			if u, ok := utxos[0].(map[string]any); ok {
+				u["covenant_type"] = float64(260) // COV_TYPE_MULTISIG
+			}
+		}
 		raw, err := json.MarshalIndent(&fixtureFile{
 			Gate:    "devnet-multisig-spend-01",
-			Vectors: []map[string]any{newVector("DEVNET-MULTISIG-SPEND-01", 1, nil)},
+			Vectors: []map[string]any{multisigVec},
 		}, "", "  ")
 		if err != nil {
 			t.Fatalf("marshal devnet multisig skeleton: %v", err)
