@@ -565,11 +565,14 @@ func TestDevnetHTLCClaimArtifactSignedUnderDevnetChainID(t *testing.T) {
 		t.Fatalf("ApplyNonCoinbaseTxBasicWithMTP(devnet chain_id): %v — artifact is not signed under canonical devnet domain", err)
 	}
 
-	// Re-parse to drop cached state, then assert zero chain_id rejects.
-	// Proof assertion: rejection under [32]byte{} zero chain_id; a nil
-	// error here would mean the tx_hex validates under both devnet
-	// and zero chain_id, contradicting the devnet-domain-bound
-	// contract this artifact must satisfy.
+	// Re-parse the tx bytes (drops cached state from the positive
+	// call) before invoking ApplyNonCoinbaseTxBasicWithMTP with zero
+	// chain_id.
+	// Proof assertion: ApplyNonCoinbaseTxBasicWithMTP returns a
+	// non-nil error under chainID == [32]byte{}; a nil error would
+	// mean the tx_hex validates under both devnet and zero chain_id,
+	// contradicting the devnet-domain-bound contract this artifact
+	// must satisfy.
 	parsedTx2, _, _, _, err := consensus.ParseTx(rawTx)
 	if err != nil {
 		t.Fatalf("ParseTx (negative): %v", err)
