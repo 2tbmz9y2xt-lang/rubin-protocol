@@ -44,13 +44,13 @@ type devnetRPCState struct {
 	// flagged: shutdown observed by the gate at the moment of the
 	// readiness decision, not separately by main.
 	gate *readinessGate
-	// identity is the startup-wired chain identity used by the
-	// read-only operator route /chain_identity. nil means identity
-	// has not been wired yet (or the bare constructor was used by a
-	// test that does not exercise identity-dependent routes), and the
-	// /chain_identity handler MUST fail closed with 503 in that case.
-	// Set exactly once at startup via SetIdentity from main.go; never
-	// mutated after wiring.
+	// identity stores startup-provided chain identity for the
+	// /chain_identity route. nil means SetIdentity has not been called
+	// (e.g. a test fixture that does not exercise identity-dependent
+	// routes), and the /chain_identity handler returns 503 in that
+	// case. Multiple SetIdentity calls overwrite the previous value;
+	// in production cmd/rubin-node main.go invokes SetIdentity once
+	// during startup wiring.
 	identity *chainIdentity
 }
 
@@ -241,14 +241,13 @@ func (s *devnetRPCState) SetShutdownCtx(ctx context.Context) {
 	s.gate.setShutdownCtx(ctx)
 }
 
-// SetIdentity late-binds the startup-wired chain identity onto the
-// rpc state. cmd/rubin-node calls this once after
-// newDevnetRPCStateWithLifecycle so the /chain_identity handler reads
-// values straight from the wiring path; no devnet constants are
-// chosen inside the handler. Tests that exercise /chain_identity call
-// SetIdentity explicitly with the values they want to assert; tests
-// that do not exercise identity leave state.identity nil and observe
-// the canonical 503 fail-closed response. Nil-receiver safe.
+// SetIdentity stores the provided identity values on the rpc state
+// for the /chain_identity route to read. Subsequent calls overwrite
+// the previous value (no single-assignment guard); cmd/rubin-node
+// main.go invokes this once during startup wiring. Tests can call
+// SetIdentity with arbitrary values to observe the resulting
+// /chain_identity response, or leave state.identity nil to observe
+// the 503 response. Nil-receiver safe.
 func (s *devnetRPCState) SetIdentity(network string, chainID, genesisHash [32]byte) {
 	if s == nil {
 		return
@@ -1454,7 +1453,7 @@ func handleHealth(state *devnetRPCState, w http.ResponseWriter, r *http.Request)
 		HasTip:          hasTip,
 		BestKnownHeight: state.syncEngine.BestKnownHeight(),
 		InIBD:           state.syncEngine.IsInIBD(state.now()),
-		PeerCount:       len(state.peerManager.Snapshot()),
+		PeerCount:       state.peerManager.Count(),
 		MempoolTxs:      state.mempool.Len(),
 		MempoolBytes:    state.mempool.BytesUsed(),
 	}
