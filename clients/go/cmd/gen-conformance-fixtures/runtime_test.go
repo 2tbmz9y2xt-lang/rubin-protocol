@@ -320,11 +320,12 @@ func TestCVVaultDevnetArtifactSignedUnderDevnetChainID(t *testing.T) {
 		t.Fatalf("ApplyNonCoinbaseTxBasic(devnet chain_id): %v — artifact is not signed under canonical devnet domain", err)
 	}
 
-	// Negative: re-parse a fresh tx (same bytes) to avoid any mutated
-	// internal state from the positive call, then assert the same tx
-	// is REJECTED under zero chain_id. A tx that validates under both
-	// domains would prove the signature domain is not actually bound
-	// to devnet, which is the exact failure the artifact must rule out.
+	// Re-parse the tx bytes to drop any cached state from the positive
+	// call, then call ApplyNonCoinbaseTxBasic with zero chain_id.
+	// Proof assertion: the second ApplyNonCoinbaseTxBasic call returns
+	// a non-nil error; a nil error would mean the tx_hex validates
+	// under both devnet and zero chain_id, which contradicts the
+	// devnet-domain-bound contract this artifact must satisfy.
 	parsedTx2, _, _, _, err := consensus.ParseTx(rawTx)
 	if err != nil {
 		t.Fatalf("ParseTx (negative): %v", err)
