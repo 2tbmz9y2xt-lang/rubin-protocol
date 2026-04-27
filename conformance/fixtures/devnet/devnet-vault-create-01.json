@@ -1,5 +1,5 @@
 {
-  "gate": "CV-VAULT-DEVNET",
+  "gate": "devnet-vault-create-01",
   "vectors": [
     {
       "block_timestamp": 1000,

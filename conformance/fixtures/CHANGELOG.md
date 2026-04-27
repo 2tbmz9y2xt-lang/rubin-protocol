@@ -11,21 +11,6 @@ Policy:
 
 ---
 
-## 2026-04-27 — Devnet-signed CORE_VAULT artifact (Q-GO-DEVNET-CORE-VAULT-SIGNED-ARTIFACT-01)
-
-Причина:
-- предоставить #1240 канонический CORE_VAULT input artifact, подписанный под канонический devnet `chain_id` `88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103`, чтобы live `rubin-node --network devnet` принимал tx через `/submit_tx` без re-sign в evidence script;
-- зафиксировать explicit `chain_id_hex` поле на vector чтобы оператор/orchestrator мог сверить metadata без re-derivation из `tx_hex`;
-- сохранить существующий `CV-VAULT.json` zero-chain conformance replay byte-identical (cross-client invariant не затронут).
-
-Инструменты:
-- новый fixture `conformance/fixtures/CV-VAULT-DEVNET.json` (gate `CV-VAULT-DEVNET`, vector `DEVNET-VAULT-CREATE-01`);
-- helper `updateDevnetVaultCreateVector` в `clients/go/cmd/gen-conformance-fixtures/runtime.go` (signs under `node.DevnetGenesisChainID()`);
-- регенерация: `cd clients/go && go run ./cmd/gen-conformance-fixtures` (бинарные `tx_hex` меняются на каждом run из-за random keypair'а в `mustKeypair`; structural fields constant).
-
-Изменённые fixtures:
-- `CV-VAULT-DEVNET.json` (new)
-
 ## 2026-04-12 — Live binding policy artifact (Q-IMPL-ROTATION-SUITESET-BINDING-CLOSURE-01)
 
 Причина:

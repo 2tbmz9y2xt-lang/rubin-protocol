@@ -132,14 +132,19 @@ func runGeneratorCLI() {
 		mustWriteFixture(path, f)
 	}
 
-	// CV-VAULT-DEVNET update — devnet-signed CORE_VAULT artifact for live
-	// rubin-node operator evidence. Distinct from CV-VAULT.json which is
-	// signed under zeroChainID for cross-client conformance replay; this
-	// fixture is signed under the canonical devnet chain_id so a live
-	// `rubin-node --network devnet` accepts the tx through /submit_tx.
-	// Issue #1312 (blocker for #1240).
+	// Devnet-signed CORE_VAULT operator-evidence artifact for live
+	// rubin-node consumption. Lives under conformance/fixtures/devnet/
+	// — INTENTIONALLY OUT of the auto-discovered CV-*.json conformance
+	// namespace (top-level glob in conformance/runner/run_cv_bundle.py,
+	// tools/gen_conformance_matrix.py, tools/check_formal_coverage.py)
+	// because the artifact is signed under the canonical devnet
+	// chain_id and would not pass the zero-chain-domain conformance
+	// replay contract those tools enforce. Distinct from CV-VAULT.json
+	// which stays signed under zeroChainID for cross-client conformance
+	// replay; this artifact is the canonical input for #1240 live
+	// devnet operator evidence (issue #1312).
 	{
-		path := filepath.Join(repoRoot, "conformance", "fixtures", "CV-VAULT-DEVNET.json")
+		path := filepath.Join(repoRoot, "conformance", "fixtures", "devnet", "devnet-vault-create-01.json")
 		f := mustLoadFixture(path)
 		updateDevnetVaultCreateVector(
 			f,
@@ -633,17 +638,21 @@ func updateVaultCreateVectors(
 }
 
 // updateDevnetVaultCreateVector populates the positive owner-authorized
-// CORE_VAULT create transaction in CV-VAULT-DEVNET.json signed under the
-// canonical devnet chain_id (see node.DevnetGenesisChainID). The
+// CORE_VAULT create transaction in
+// conformance/fixtures/devnet/devnet-vault-create-01.json, signed under
+// the canonical devnet chain_id (see node.DevnetGenesisChainID). The
 // resulting tx is the canonical input artifact for #1240 live
 // devnet-mode operator evidence; submitting it through
 // `rubin-node --network devnet /submit_tx` accepts it because its
 // signature domain matches the live node's chain_id, unlike the
 // zero-chain VAULT-CREATE-02 vector in CV-VAULT.json which targets
-// cross-client conformance replay only. The vector also pins the
-// signing chain_id explicitly via the chain_id_hex field so an
-// operator/orchestrator can verify the artifact metadata without
-// re-deriving it from tx_hex.
+// cross-client conformance replay only. The artifact intentionally
+// lives outside the top-level CV-*.json conformance namespace so the
+// existing conformance runner/matrix/formal glob does not auto-discover
+// it (devnet-domain signatures would fail the zero-chain replay those
+// tools enforce). The vector pins the signing chain_id explicitly via
+// the chain_id_hex field so an operator/orchestrator can verify the
+// artifact metadata without re-deriving it from tx_hex.
 func updateDevnetVaultCreateVector(
 	f *fixtureFile,
 	devnetChainID [32]byte,

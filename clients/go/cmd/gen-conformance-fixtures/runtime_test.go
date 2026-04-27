@@ -138,11 +138,29 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 		newVector("VAULT-SPEND-04", 2, nil),
 	})
 
-	// CV-VAULT-DEVNET skeleton — generator (#1312) populates the
-	// devnet-signed CORE_VAULT artifact at vector DEVNET-VAULT-CREATE-01.
-	writeFixture("CV-VAULT-DEVNET.json", []map[string]any{
-		newVector("DEVNET-VAULT-CREATE-01", 1, nil),
-	})
+	// devnet operator-evidence artifact skeleton (#1312). Lives under
+	// conformance/fixtures/devnet/, intentionally outside the auto-
+	// discovered CV-*.json conformance namespace because the tx is
+	// signed under the canonical devnet chain_id (and would fail the
+	// zero-chain conformance replay the runner/matrix/formal tools
+	// enforce on top-level CV-*.json fixtures).
+	devnetDir := filepath.Join(fixturesDir, "devnet")
+	if err := os.MkdirAll(devnetDir, 0o755); err != nil {
+		t.Fatalf("mkdir devnet: %v", err)
+	}
+	{
+		raw, err := json.MarshalIndent(&fixtureFile{
+			Gate:    "devnet-vault-create-01",
+			Vectors: []map[string]any{newVector("DEVNET-VAULT-CREATE-01", 1, nil)},
+		}, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal devnet skeleton: %v", err)
+		}
+		raw = append(raw, '\n')
+		if err := os.WriteFile(filepath.Join(devnetDir, "devnet-vault-create-01.json"), raw, 0o600); err != nil {
+			t.Fatalf("write devnet skeleton: %v", err)
+		}
+	}
 
 	writeFixture("CV-HTLC.json", []map[string]any{
 		newVector("CV-HTLC-13", 1, nil),
@@ -197,32 +215,32 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 	mustContainField("CV-VAULT.json", "tx_hex")
 	mustContainField("CV-HTLC.json", "tx_hex")
 	mustContainField("CV-SUBSIDY.json", "block_hex")
-	mustContainField("CV-VAULT-DEVNET.json", "tx_hex")
-	mustContainField("CV-VAULT-DEVNET.json", "chain_id_hex")
+	mustContainField(filepath.Join("devnet", "devnet-vault-create-01.json"), "tx_hex")
+	mustContainField(filepath.Join("devnet", "devnet-vault-create-01.json"), "chain_id_hex")
 }
 
-// TestCVVaultDevnetArtifactSignedUnderDevnetChainID validates the
-// committed canonical CV-VAULT-DEVNET artifact end-to-end through the
-// public consensus.ApplyNonCoinbaseTxBasic verification path. This is
-// the hostile-matrix proof that the artifact's signature domain is
-// exactly the canonical devnet chain_id (issue #1312, blocker for
-// #1240); a parse-only test would not exercise signature verification
-// and could not reject a zero-chain-signed tx accidentally tagged as
-// devnet.
+// TestDevnetVaultCreateArtifactSignedUnderDevnetChainID validates the
+// committed canonical devnet operator-evidence artifact end-to-end
+// through the public consensus.ApplyNonCoinbaseTxBasic verification
+// path. This is the hostile-matrix proof that the artifact's signature
+// domain is exactly the canonical devnet chain_id (issue #1312,
+// blocker for #1240); a parse-only test would not exercise signature
+// verification and could not reject a zero-chain-signed tx
+// accidentally tagged as devnet.
 //
 // Proof assertion: ApplyNonCoinbaseTxBasic returns nil when called
 // with chainID == node.DevnetGenesisChainID() AND returns a non-nil
 // error when called with chainID == [32]byte{} (zero) — the latter
 // rejection proves the signature is bound to the devnet domain and
 // not a zero-chain tx coincidentally routed.
-func TestCVVaultDevnetArtifactSignedUnderDevnetChainID(t *testing.T) {
+func TestDevnetVaultCreateArtifactSignedUnderDevnetChainID(t *testing.T) {
 	// Locate the committed fixture relative to this test file (which
 	// lives at clients/go/cmd/gen-conformance-fixtures/runtime_test.go).
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	fixturePath := filepath.Join(wd, "..", "..", "..", "..", "conformance", "fixtures", "CV-VAULT-DEVNET.json")
+	fixturePath := filepath.Join(wd, "..", "..", "..", "..", "conformance", "fixtures", "devnet", "devnet-vault-create-01.json")
 	raw, err := os.ReadFile(fixturePath)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -234,8 +252,8 @@ func TestCVVaultDevnetArtifactSignedUnderDevnetChainID(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("unmarshal fixture: %v", err)
 	}
-	if doc.Gate != "CV-VAULT-DEVNET" {
-		t.Fatalf("gate=%q want CV-VAULT-DEVNET", doc.Gate)
+	if doc.Gate != "devnet-vault-create-01" {
+		t.Fatalf("gate=%q want devnet-vault-create-01", doc.Gate)
 	}
 	if len(doc.Vectors) != 1 {
 		t.Fatalf("vectors=%d want 1", len(doc.Vectors))
