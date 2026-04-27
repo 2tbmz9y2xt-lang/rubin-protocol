@@ -97,11 +97,33 @@ func (s *Service) unregisterPeer(p *peer) {
 	}
 	s.peersMu.Unlock()
 	if remove {
+		// Lifecycle-exit counter increments here, exactly once per
+		// unregisterPeer call that actually deleted peer entries from
+		// the s.peers map. Repeat calls on the same already-removed
+		// peer leave remove==false above and do not reach this line,
+		// so cleanup retries cannot double-count. atomic.Uint64.Add is
+		// safe to call without peersMu (the lock has been released
+		// above) because the counter is independent of peer-map state.
+		s.peerLifecycleExits.Add(1)
 		s.cfg.PeerManager.RemovePeer(addr)
 	}
 	if remove && s.isOutboundAddr(addr) {
 		s.scheduleReconnect(addr)
 	}
+}
+
+// PeerLifecycleExits returns the monotonic count of peer lifecycle
+// exits observed by this Service since construction. The counter is
+// incremented inside unregisterPeer at the single canonical removal
+// boundary; see the field comment on Service.peerLifecycleExits for
+// the dedupe contract. Pure atomic.Load — safe to call concurrently
+// with unregisterPeer and from /metrics rendering. Returns 0 on a
+// nil receiver so scrape callers can read unconditionally.
+func (s *Service) PeerLifecycleExits() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.peerLifecycleExits.Load()
 }
 
 func peerAddressKey(outboundAddr string, runtimeAddr string) string {

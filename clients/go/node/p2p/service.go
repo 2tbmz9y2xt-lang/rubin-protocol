@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -78,6 +79,20 @@ type Service struct {
 	blockSeen *boundedHashSet
 	txSeen    *boundedHashSet
 	orphans   *orphanPool
+
+	// peerLifecycleExits counts peer lifecycle exits at the single
+	// canonical removal boundary inside unregisterPeer. The counter is
+	// incremented exactly once per unregisterPeer call that actually
+	// deletes one or more entries from the s.peers map (i.e. when the
+	// dedupe flag remove==true). Repeated unregisterPeer calls on the
+	// same already-removed peer leave remove==false and do not bump
+	// the counter. The metric is intentionally unlabeled: the
+	// underlying exit cause (remote EOF, protocol error, local
+	// Service.Close ctx cancel, request/send error) is not available
+	// at the unregisterPeer site without plumbing it through, and
+	// labeled buckets cannot be proven non-overlapping under the
+	// current cleanup graph (issue #1307).
+	peerLifecycleExits atomic.Uint64
 }
 
 type peer struct {

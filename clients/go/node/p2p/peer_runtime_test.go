@@ -464,3 +464,108 @@ func mustPeerRuntimeFrameBytes(t *testing.T, p *peer, frame message) []byte {
 	}
 	return buf.Bytes()
 }
+
+// TestPeerLifecycleExitsCounter_SingleRemovalIncrementsOnce registers
+// one peer manually, calls unregisterPeer once.
+// Proof assertion: PeerLifecycleExits() == 1 after the call AND
+// the peer key is gone from s.peers.
+func TestPeerLifecycleExitsCounter_SingleRemovalIncrementsOnce(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	p := &peer{service: h.service, state: node.PeerState{Addr: "peer-A"}}
+	h.service.peers[p.addr()] = p
+	if got := h.service.PeerLifecycleExits(); got != 0 {
+		t.Fatalf("baseline counter=%d want 0", got)
+	}
+	h.service.unregisterPeer(p)
+	if got := h.service.PeerLifecycleExits(); got != 1 {
+		t.Fatalf("counter=%d want 1 after one unregister", got)
+	}
+	if _, still := h.service.peers[p.addr()]; still {
+		t.Fatalf("peer still registered after unregister")
+	}
+}
+
+// TestPeerLifecycleExitsCounter_RepeatedUnregisterDoesNotDoubleCount
+// pins the dedupe contract: cleanup retries on an already-removed
+// peer must not bump the counter again.
+// Proof assertion: PeerLifecycleExits() == 1 after the second
+// unregisterPeer call (the first bumped to 1, the second is a no-op).
+func TestPeerLifecycleExitsCounter_RepeatedUnregisterDoesNotDoubleCount(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	p := &peer{service: h.service, state: node.PeerState{Addr: "peer-B"}}
+	h.service.peers[p.addr()] = p
+	h.service.unregisterPeer(p)
+	first := h.service.PeerLifecycleExits()
+	h.service.unregisterPeer(p)
+	if got := h.service.PeerLifecycleExits(); got != first {
+		t.Fatalf("counter=%d want %d after repeat unregister (no second bump)", got, first)
+	}
+	if first != 1 {
+		t.Fatalf("first unregister bumped counter to %d, want 1", first)
+	}
+}
+
+// TestPeerLifecycleExitsCounter_AliasEntriesCountAsOneExit registers
+// a peer twice into s.peers under two distinct keys, mirroring
+// registerPeer's canonical-addr-plus-remoteAddr-alias path.
+// Proof assertion: PeerLifecycleExits() == 1 after one
+// unregisterPeer call AND len(s.peers) == 0; the alias entries
+// collapse into a single exit increment.
+func TestPeerLifecycleExitsCounter_AliasEntriesCountAsOneExit(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	p := &peer{service: h.service, state: node.PeerState{Addr: "peer-C"}}
+	h.service.peers[p.addr()] = p
+	h.service.peers["peer-C-alias"] = p
+	if len(h.service.peers) != 2 {
+		t.Fatalf("setup peers=%d want 2", len(h.service.peers))
+	}
+	h.service.unregisterPeer(p)
+	if got := h.service.PeerLifecycleExits(); got != 1 {
+		t.Fatalf("counter=%d want 1 (alias entries collapse into one exit)", got)
+	}
+	if len(h.service.peers) != 0 {
+		t.Fatalf("peers map=%d after alias unregister, want 0", len(h.service.peers))
+	}
+}
+
+// TestPeerLifecycleExitsCounter_UnknownPeerNoBump constructs a peer
+// that was never registered and calls unregisterPeer on it.
+// Proof assertion: PeerLifecycleExits() == 0 because
+// unregisterPeer's `remove` flag stays false when the peer has no
+// entry in s.peers, so the increment branch is skipped.
+func TestPeerLifecycleExitsCounter_UnknownPeerNoBump(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	stranger := &peer{service: h.service, state: node.PeerState{Addr: "peer-stranger"}}
+	h.service.unregisterPeer(stranger)
+	if got := h.service.PeerLifecycleExits(); got != 0 {
+		t.Fatalf("counter=%d want 0 for unregister on never-registered peer", got)
+	}
+}
+
+// TestPeerLifecycleExitsCounter_NilReceiverReturnsZero pins the
+// nil-receiver contract on the public accessor.
+// Proof assertion: ((*Service)(nil)).PeerLifecycleExits() == 0
+// without panic.
+func TestPeerLifecycleExitsCounter_NilReceiverReturnsZero(t *testing.T) {
+	var s *Service
+	if got := s.PeerLifecycleExits(); got != 0 {
+		t.Fatalf("nil receiver counter=%d want 0", got)
+	}
+}
+
+// TestPeerLifecycleExitsCounter_TwoPeersExitsTotalsTwo registers two
+// distinct peers and unregisters both.
+// Proof assertion: PeerLifecycleExits() == 2; the increment is
+// per-peer, not per-call or per-map-entry.
+func TestPeerLifecycleExitsCounter_TwoPeersExitsTotalsTwo(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	p1 := &peer{service: h.service, state: node.PeerState{Addr: "peer-1"}}
+	p2 := &peer{service: h.service, state: node.PeerState{Addr: "peer-2"}}
+	h.service.peers[p1.addr()] = p1
+	h.service.peers[p2.addr()] = p2
+	h.service.unregisterPeer(p1)
+	h.service.unregisterPeer(p2)
+	if got := h.service.PeerLifecycleExits(); got != 2 {
+		t.Fatalf("counter=%d want 2 after two distinct peer exits", got)
+	}
+}

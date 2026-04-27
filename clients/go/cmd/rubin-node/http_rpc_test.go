@@ -835,6 +835,7 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 		`rubin_node_mempool_admit_total{result="conflict"} 0`,
 		`rubin_node_mempool_admit_total{result="rejected"} 0`,
 		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
+		"rubin_node_p2p_peer_lifecycle_exits_total 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics body %q", want, body)
@@ -925,6 +926,69 @@ func TestRenderPrometheusMetricsTwiceDoesNotIncrementAdmitCounters(t *testing.T)
 	post := state.mempool.AdmissionCounts()
 	if pre != post {
 		t.Fatalf("AdmissionCounts changed across two /metrics renders: pre=%+v post=%+v (scrape-time increment regression)", pre, post)
+	}
+}
+
+// TestRenderPrometheusMetricsExposesPeerLifecycleExits wires a stub
+// closure on devnetRPCState that returns a fixed non-zero count and
+// renders /metrics once.
+// Proof assertion: body contains "rubin_node_p2p_peer_lifecycle_exits_total 7"
+// (the value returned by the stub) AND contains the HELP/TYPE
+// preamble for that metric AND the metric is unlabeled (no `{...}`
+// brace appears between the metric name and the value).
+func TestRenderPrometheusMetricsExposesPeerLifecycleExits(t *testing.T) {
+	state := mustRPCState(t, false)
+	state.SetPeerLifecycleExitsFunc(func() uint64 { return 7 })
+	body := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		"# HELP rubin_node_p2p_peer_lifecycle_exits_total Total peer lifecycle exits observed by the p2p service since process start.",
+		"# TYPE rubin_node_p2p_peer_lifecycle_exits_total counter",
+		"rubin_node_p2p_peer_lifecycle_exits_total 7",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics body %q", want, body)
+		}
+	}
+	// Reject any labeled form: the metric must be emitted unlabeled
+	// (single line "name <value>"), never "name{kind=...} <value>".
+	if strings.Contains(body, "rubin_node_p2p_peer_lifecycle_exits_total{") {
+		t.Fatalf("metric emitted with labels — must stay unlabeled per #1307: %q", body)
+	}
+}
+
+// TestRenderPrometheusMetricsTwiceDoesNotMutatePeerLifecycleExits
+// pins the scrape-time-no-mutation contract for the new lifecycle
+// exit metric. The stub closure tracks how many times the renderer
+// invokes it; the renderer is allowed to call the closure (it is a
+// pure Load() on the production side), but the rendered counter
+// value MUST equal what the closure returns each scrape — render
+// itself MUST NOT add any per-scrape delta.
+// Proof assertion: rendered value on second scrape equals first
+// scrape's value (closure returns constant 5).
+func TestRenderPrometheusMetricsTwiceDoesNotMutatePeerLifecycleExits(t *testing.T) {
+	state := mustRPCState(t, false)
+	const fixedValue uint64 = 5
+	state.SetPeerLifecycleExitsFunc(func() uint64 { return fixedValue })
+	body1 := renderPrometheusMetrics(state)
+	body2 := renderPrometheusMetrics(state)
+	want := "rubin_node_p2p_peer_lifecycle_exits_total 5"
+	if !strings.Contains(body1, want) || !strings.Contains(body2, want) {
+		t.Fatalf("expected %q in both renders; body1=%q body2=%q", want, body1, body2)
+	}
+}
+
+// TestRenderPrometheusMetricsNilPeerLifecycleClosureRendersZero
+// covers the test-fixture path where SetPeerLifecycleExitsFunc was
+// never called.
+// Proof assertion: body contains "rubin_node_p2p_peer_lifecycle_exits_total 0"
+// without panic.
+func TestRenderPrometheusMetricsNilPeerLifecycleClosureRendersZero(t *testing.T) {
+	state := mustRPCState(t, false)
+	// Deliberately do NOT call state.SetPeerLifecycleExitsFunc.
+	body := renderPrometheusMetrics(state)
+	want := "rubin_node_p2p_peer_lifecycle_exits_total 0"
+	if !strings.Contains(body, want) {
+		t.Fatalf("missing %q (nil closure must render 0): body=%q", want, body)
 	}
 }
 
