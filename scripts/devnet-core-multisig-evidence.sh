@@ -23,9 +23,14 @@ RPC_TIMEOUT_SECONDS=30
 export KEEP_TMP
 export RUBIN_PROCESS_ARTIFACT_PARENT="${CORE_MULTISIG_ARTIFACT_PARENT:-${TMPDIR:-/tmp}/rubin-core-multisig-evidence}"
 
+# Pre-init tool availability checks. These run BEFORE rubin_process_init,
+# so the runtime artifact contract has not yet begun (no artifact_root, no
+# JSON report can be written). Missing python3/perl is a harness-environment
+# failure surfaced on stderr with a non-zero exit; FAIL JSON reports become
+# mandatory only after rubin_process_init succeeds.
 for tool in python3 perl; do
   command -v "${tool}" >/dev/null 2>&1 || {
-    echo "${tool} is required for CORE_MULTISIG evidence" >&2
+    echo "FAIL_HARNESS_PRE_INIT: ${tool} is required for CORE_MULTISIG evidence; runtime artifact contract has not started yet" >&2
     exit 1
   }
 done
@@ -57,8 +62,11 @@ LIVE_CHAIN_ID=""
 PHASE="init"
 
 write_report() {
+  # Always returns the underlying python writer's exit code. Callers MUST
+  # treat a non-zero return as a real artifact-emission failure, regardless
+  # of the requested status (PASS or FAIL).
   local status="$1" reason="$2"
-  if ! python3 - "${REPORT_JSON}" "${status}" "${PHASE}" "${reason}" "${FIXTURE_PATH}" "${VECTOR_ID}" \
+  python3 - "${REPORT_JSON}" "${status}" "${PHASE}" "${reason}" "${FIXTURE_PATH}" "${VECTOR_ID}" \
     "${RUBIN_PROCESS_ARTIFACT_ROOT}" "${NODE_PID}" "${NODE_RPC_ADDR}" "${NODE_DIR}" "${CHAIN_IDENTITY_JSON}" \
     "${SUBMIT_JSON}" "${MINE_JSON}" "${BLOCK_RESPONSE_JSON}" "${DEVNET_CHAIN_ID}" "${FIXTURE_CHAIN_ID}" "${LIVE_CHAIN_ID}" \
     "${SUBMITTED_TXID}" "${MINED_HEIGHT}" "${MINED_HASH}" <<'PY'
@@ -143,15 +151,22 @@ with open(path, "w", encoding="utf-8") as fh:
     json.dump(report, fh, indent=2, sort_keys=True)
     fh.write("\n")
 PY
-  then
-    [[ "${status}" == "PASS" ]] && return 1
-    return 0
-  fi
 }
 
 fail() {
-  local status="$1" reason="$2"
-  write_report "${status}" "${reason}" || true
+  # FAIL artifact emission is mandatory once rubin_process_init succeeds.
+  # write_report failures are not silently swallowed: a secondary stderr
+  # line names the report path, the original failure reason is still
+  # printed, and the script exits 1.
+  local status="$1" reason="$2" rc=0
+  if [[ -n "${RUBIN_PROCESS_ARTIFACT_ROOT:-}" ]]; then
+    write_report "${status}" "${reason}" || rc=$?
+    if (( rc != 0 )); then
+      echo "FAIL_REPORT_WRITE_FAILED: report writer exit=${rc} path=${REPORT_JSON} primary_status=${status} primary_phase=${PHASE}" >&2
+    fi
+  else
+    echo "FAIL_PRE_INIT: artifact root not initialized; no JSON report written" >&2
+  fi
   echo "${reason}" >&2
   exit 1
 }
