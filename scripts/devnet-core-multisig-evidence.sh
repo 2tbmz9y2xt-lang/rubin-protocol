@@ -442,6 +442,19 @@ PY
 )" || fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response_file=${BLOCK_RESPONSE_JSON}"
 
 PHASE="pass"
-write_report PASS "" || { echo "failed to write PASS report: ${REPORT_JSON}" >&2; exit 1; }
-python3 -m json.tool "${REPORT_JSON}" >/dev/null || { echo "invalid PASS report: ${REPORT_JSON}" >&2; exit 1; }
+# PASS-side writer/validation failures route through the same
+# FAIL_REPORT_WRITE_FAILED stderr marker that fail() emits, so the
+# report-writer failure class is closed across both PASS and FAIL paths.
+pass_rc=0
+write_report PASS "" || pass_rc=$?
+if (( pass_rc != 0 )); then
+  echo "FAIL_REPORT_WRITE_FAILED: report writer exit=${pass_rc} path=${REPORT_JSON} primary_status=PASS primary_phase=${PHASE}" >&2
+  exit 1
+fi
+pass_rc=0
+python3 -m json.tool "${REPORT_JSON}" >/dev/null || pass_rc=$?
+if (( pass_rc != 0 )); then
+  echo "FAIL_REPORT_WRITE_FAILED: report json validation exit=${pass_rc} path=${REPORT_JSON} primary_status=PASS primary_phase=${PHASE}" >&2
+  exit 1
+fi
 echo "PASS: CORE_MULTISIG live evidence submit->mine->query succeeded; report=${REPORT_JSON}"
