@@ -26,9 +26,14 @@ type devnetRPCState struct {
 	mempool     *node.Mempool
 	peerManager *node.PeerManager
 	announceTx  func([]byte) error
-	stderr      io.Writer
-	nowUnix     func() uint64
-	metrics     *rpcMetrics
+	// announceBlock is the P2P full-block announcement hook for locally
+	// mined blocks. It is best-effort at the RPC boundary; process-level
+	// devnet evidence must still prove peer adoption instead of treating
+	// /mine_next success as network success.
+	announceBlock func([]byte) error
+	stderr        io.Writer
+	nowUnix       func() uint64
+	metrics       *rpcMetrics
 	// rpcMut serializes mutating devnet RPC work (mempool admits + live mining)
 	// so concurrent HTTP handlers cannot interleave chain/mempool updates.
 	rpcMut sync.Mutex
@@ -414,6 +419,7 @@ func newDevnetRPCState(
 	mempool *node.Mempool,
 	peerManager *node.PeerManager,
 	announceTx func([]byte) error,
+	announceBlock func([]byte) error,
 	stderr io.Writer,
 	liveMiner *node.Miner,
 ) *devnetRPCState {
@@ -421,15 +427,16 @@ func newDevnetRPCState(
 		stderr = io.Discard
 	}
 	return &devnetRPCState{
-		syncEngine:  syncEngine,
-		blockStore:  blockStore,
-		mempool:     mempool,
-		peerManager: peerManager,
-		announceTx:  announceTx,
-		stderr:      stderr,
-		nowUnix:     nowUnixU64,
-		metrics:     newRPCMetrics(),
-		miner:       liveMiner,
+		syncEngine:    syncEngine,
+		blockStore:    blockStore,
+		mempool:       mempool,
+		peerManager:   peerManager,
+		announceTx:    announceTx,
+		announceBlock: announceBlock,
+		stderr:        stderr,
+		nowUnix:       nowUnixU64,
+		metrics:       newRPCMetrics(),
+		miner:         liveMiner,
 		// gate starts seeded with context.TODO() (never canceled) —
 		// production wiring uses newDevnetRPCStateWithLifecycle below
 		// to late-bind the actual lifecycle ctx. Tests that exercise
@@ -460,6 +467,7 @@ func newDevnetRPCStateWithLifecycle(
 	mempool *node.Mempool,
 	peerManager *node.PeerManager,
 	announceTx func([]byte) error,
+	announceBlock func([]byte) error,
 	stderr io.Writer,
 	liveMiner *node.Miner,
 	shutdownCtx context.Context,
@@ -473,7 +481,7 @@ func newDevnetRPCStateWithLifecycle(
 	// because the ctx is not lost — it is forwarded to the gate via
 	// SetShutdownCtx on the very next statement.
 	//nolint:contextcheck
-	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, stderr, liveMiner)
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, announceBlock, stderr, liveMiner)
 	state.SetShutdownCtx(shutdownCtx)
 	return state
 }
@@ -940,14 +948,24 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		return
 	}
 	state.rpcMut.Lock()
-	defer state.rpcMut.Unlock()
 	mb, err := state.miner.MineOne(r.Context(), nil)
 	if err != nil {
+		state.rpcMut.Unlock()
 		writeJSONResponse(state, route, w, http.StatusUnprocessableEntity, mineNextResponse{
 			Mined: false,
 			Error: err.Error(),
 		})
 		return
+	}
+	state.rpcMut.Unlock()
+	if state.announceBlock != nil {
+		if state.blockStore == nil {
+			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: block store unavailable for %x\n", mb.Hash)
+		} else if blockBytes, err := state.blockStore.GetBlockByHash(mb.Hash); err != nil {
+			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: get mined block %x: %v\n", mb.Hash, err)
+		} else if err := state.announceBlock(blockBytes); err != nil {
+			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: %v\n", err)
+		}
 	}
 	height := mb.Height
 	ts := mb.Timestamp

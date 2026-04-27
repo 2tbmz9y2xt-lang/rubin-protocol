@@ -2563,7 +2563,7 @@ func TestMaybeFlipReadyOnStartup_NoopOnPreCanceledShutdownCtx(t *testing.T) {
 
 	// Use the canonical production-wiring helper — exactly the same
 	// helper cmd/rubin-node main.go calls.
-	state := newDevnetRPCStateWithLifecycle(nil, nil, nil, nil, nil, io.Discard, nil, ctx)
+	state := newDevnetRPCStateWithLifecycle(nil, nil, nil, nil, nil, nil, io.Discard, nil, ctx)
 	server := &runningDevnetRPCServer{state: state}
 
 	var buf bytes.Buffer
