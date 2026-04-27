@@ -529,6 +529,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// helper to keep production-wiring and regression-wiring paths
 	// identical.
 	rpcState := newDevnetRPCStateWithLifecycle(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, stderr, liveMiner, ctx)
+	// Late-bind the startup-wired chain identity so the read-only
+	// /chain_identity handler echoes the values that already flowed
+	// through genesis parsing + network canonicalization, rather than
+	// synthesizing devnet constants inside the handler. Done in one
+	// place after newDevnetRPCStateWithLifecycle so production wiring
+	// matches the regression-test wiring path that calls SetIdentity
+	// directly.
+	rpcState.SetIdentity(cfg.Network, chainIDFromGenesis, genesisHashFromGenesis)
 	rpcServer, err := startDevnetRPCServer(cfg.RPCBindAddr, rpcState, stdout, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "rpc start failed: %v\n", err)

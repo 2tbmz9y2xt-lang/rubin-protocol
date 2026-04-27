@@ -2006,3 +2006,474 @@ func TestReadinessGate_ConcurrentRaceCannotResurrectReady(t *testing.T) {
 		}
 	}
 }
+
+// nonDevnetChainID and nonDevnetGenesisHash are fixed [32]byte values
+// chosen specifically to NOT match node.DevnetGenesisChainID() or
+// node.DevnetGenesisBlockHash(). The /chain_identity tests inject
+// these via SetIdentity and assert the handler echoes them verbatim;
+// a handler that secretly hardcodes devnet constants would emit the
+// devnet hexes instead and fail the assertion. The values are fixed
+// (not random) so the assertion is deterministic across CI runs.
+var (
+	nonDevnetChainID = [32]byte{
+		0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+		0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+		0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+		0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+	}
+	nonDevnetGenesisHash = [32]byte{
+		0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
+		0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
+		0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
+		0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
+	}
+)
+
+// TestDevnetRPCChainIdentityReportsWiredIdentity proves the handler
+// echoes the identity values that flowed through SetIdentity. Network
+// is exercised against a non-default ("testnet") to catch a handler
+// that always reports "devnet".
+func TestDevnetRPCChainIdentityReportsWiredIdentity(t *testing.T) {
+	state := mustRPCState(t, false)
+	state.SetIdentity("testnet", nonDevnetChainID, nonDevnetGenesisHash)
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/chain_identity")
+	if err != nil {
+		t.Fatalf("GET /chain_identity: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type=%q want application/json", got)
+	}
+	var body chainIdentityResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Network != "testnet" {
+		t.Fatalf("network=%q want testnet", body.Network)
+	}
+	if body.ChainIDHex != hex.EncodeToString(nonDevnetChainID[:]) {
+		t.Fatalf("chain_id_hex=%q want %q", body.ChainIDHex, hex.EncodeToString(nonDevnetChainID[:]))
+	}
+	if body.GenesisHashHex != hex.EncodeToString(nonDevnetGenesisHash[:]) {
+		t.Fatalf("genesis_hash_hex=%q want %q", body.GenesisHashHex, hex.EncodeToString(nonDevnetGenesisHash[:]))
+	}
+	// Hex contract: 64 lowercase chars, no 0x prefix.
+	if len(body.ChainIDHex) != 64 || strings.HasPrefix(body.ChainIDHex, "0x") || strings.ToLower(body.ChainIDHex) != body.ChainIDHex {
+		t.Fatalf("chain_id_hex shape violation: %q", body.ChainIDHex)
+	}
+	if len(body.GenesisHashHex) != 64 || strings.HasPrefix(body.GenesisHashHex, "0x") || strings.ToLower(body.GenesisHashHex) != body.GenesisHashHex {
+		t.Fatalf("genesis_hash_hex shape violation: %q", body.GenesisHashHex)
+	}
+}
+
+// TestDevnetRPCChainIdentityRejectsHardcodedDevnetConstants wires
+// identity via SetIdentity with [32]byte values chosen to differ
+// from node.DevnetGenesisChainID() and node.DevnetGenesisBlockHash(),
+// then issues GET /chain_identity.
+// Proof assertion: body.ChainIDHex != hex.EncodeToString(devnetChainID[:])
+// and body.GenesisHashHex != hex.EncodeToString(devnetGenesisHash[:]).
+func TestDevnetRPCChainIdentityRejectsHardcodedDevnetConstants(t *testing.T) {
+	devnetChainID := node.DevnetGenesisChainID()
+	devnetGenesisHash := node.DevnetGenesisBlockHash()
+	if nonDevnetChainID == devnetChainID || nonDevnetGenesisHash == devnetGenesisHash {
+		t.Fatalf("test fixture broken: non-devnet constants accidentally match devnet")
+	}
+	state := mustRPCState(t, false)
+	state.SetIdentity("devnet", nonDevnetChainID, nonDevnetGenesisHash)
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/chain_identity")
+	if err != nil {
+		t.Fatalf("GET /chain_identity: %v", err)
+	}
+	defer resp.Body.Close()
+	var body chainIdentityResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ChainIDHex == hex.EncodeToString(devnetChainID[:]) {
+		t.Fatalf("chain_id_hex matches devnet constant; handler appears to hardcode devnet identity")
+	}
+	if body.GenesisHashHex == hex.EncodeToString(devnetGenesisHash[:]) {
+		t.Fatalf("genesis_hash_hex matches devnet constant; handler appears to hardcode devnet identity")
+	}
+}
+
+// TestDevnetRPCChainIdentityFailsClosedWithoutWiredIdentity asserts
+// the handler returns 503 when SetIdentity has not been called. A
+// fabricated 200 with devnet defaults would silently mislead an
+// operator about which chain the node is on; failing closed is the
+// load-bearing contract.
+func TestDevnetRPCChainIdentityFailsClosedWithoutWiredIdentity(t *testing.T) {
+	state := mustRPCState(t, false)
+	// Deliberately do NOT call state.SetIdentity.
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/chain_identity")
+	if err != nil {
+		t.Fatalf("GET /chain_identity: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type=%q want application/json (no plain-text 503)", got)
+	}
+}
+
+// TestDevnetRPCChainIdentityRejectsBadMethod asserts non-GET methods
+// produce 405 + Allow: GET + JSON envelope (not plain-text), matching
+// the canonical /ready handler shape.
+func TestDevnetRPCChainIdentityRejectsBadMethod(t *testing.T) {
+	state := mustRPCState(t, false)
+	state.SetIdentity("devnet", nonDevnetChainID, nonDevnetGenesisHash)
+	req := httptest.NewRequest(http.MethodPost, "/chain_identity", nil)
+	rec := httptest.NewRecorder()
+	newDevnetRPCHandler(state).ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("Allow=%q want GET", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type=%q want application/json", got)
+	}
+}
+
+// TestDevnetRPCHealthReportsLiveSnapshot brings up a state with the
+// devnet genesis applied so has_tip=true, height=0, tip_hash=devnet
+// genesis hash, and adds one peer + one mempool tx so the bounded
+// counters are non-zero. Asserts every contracted field on /health.
+// The spendable UTXO injection happens AFTER genesis is applied so
+// blockstore.Tip() returns the genesis hash; mustRPCStateWithSpendableUTXO
+// alone leaves blockstore empty because it pre-stages a UTXO directly
+// in chainstate without going through syncEngine.ApplyBlock.
+func TestDevnetRPCHealthReportsLiveSnapshot(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, nil)
+	if _, err := state.syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	state.SetIdentity("devnet", node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash())
+	if !state.TryMarkReadyOnStartup() {
+		t.Fatalf("TryMarkReadyOnStartup: false on a fresh gate")
+	}
+	// Inject one peer with a known address + version so peer_count == 1.
+	if err := state.peerManager.AddPeer(&node.PeerState{
+		Addr:              "127.0.0.1:30001",
+		HandshakeComplete: true,
+		BanScore:          0,
+		LastError:         "",
+		RemoteVersion: node.VersionPayloadV1{
+			ProtocolVersion: 1,
+			TxRelay:         true,
+			BestHeight:      7,
+		},
+	}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	// Admit one tx so mempool_txs == 1 and mempool_bytes == len(txBytes).
+	txBytes, _ := mustRPCSignedTransferTx(t, utxos, input, fromKey, toAddress)
+	if err := state.mempool.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	var body healthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !body.Ready {
+		t.Fatalf("ready=false; expected true after TryMarkReadyOnStartup")
+	}
+	if !body.HasTip {
+		t.Fatalf("has_tip=false; expected true (no genesis applied?)")
+	}
+	if body.Height == nil {
+		t.Fatalf("height is null; expected non-nil with has_tip=true")
+	}
+	if body.TipHash == nil || len(*body.TipHash) != 64 {
+		t.Fatalf("tip_hash invalid: %v", body.TipHash)
+	}
+	if body.PeerCount != 1 {
+		t.Fatalf("peer_count=%d want 1", body.PeerCount)
+	}
+	if body.MempoolTxs != 1 {
+		t.Fatalf("mempool_txs=%d want 1", body.MempoolTxs)
+	}
+	if body.MempoolBytes != len(txBytes) {
+		t.Fatalf("mempool_bytes=%d want %d", body.MempoolBytes, len(txBytes))
+	}
+}
+
+// TestDevnetRPCHealthReportsReadyFalseAsField asserts a
+// not-yet-ready node returns 200 with ready:false (not 503). The
+// readiness gate is independent of /health's HTTP success; an
+// orchestrator distinguishes "boot" (200 + ready:false) from "broken"
+// (503).
+func TestDevnetRPCHealthReportsReadyFalseAsField(t *testing.T) {
+	state := mustRPCState(t, false)
+	// Deliberately do NOT call TryMarkReadyOnStartup so IsReady is false.
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200 (ready=false is a field, not an error)", resp.StatusCode)
+	}
+	var body healthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Ready {
+		t.Fatalf("ready=true on a non-ready node")
+	}
+	if body.HasTip {
+		t.Fatalf("has_tip=true; expected false on a node without genesis applied")
+	}
+	if body.Height != nil || body.TipHash != nil {
+		t.Fatalf("height/tip_hash non-nil with has_tip=false: %v / %v", body.Height, body.TipHash)
+	}
+}
+
+// TestDevnetRPCHealthFailsClosedOnMissingState calls the /health
+// handler with a nil *devnetRPCState.
+// Proof assertion: rec.Code == http.StatusServiceUnavailable
+// and rec.Header.Get("Content-Type") == "application/json".
+func TestDevnetRPCHealthFailsClosedOnMissingState(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	newDevnetRPCHandler(nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type=%q want application/json (no plain-text 503)", got)
+	}
+}
+
+// TestDevnetRPCHealthRejectsBadMethod asserts non-GET produces 405 +
+// Allow: GET + JSON envelope.
+func TestDevnetRPCHealthRejectsBadMethod(t *testing.T) {
+	state := mustRPCState(t, false)
+	req := httptest.NewRequest(http.MethodPost, "/health", nil)
+	rec := httptest.NewRecorder()
+	newDevnetRPCHandler(state).ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("Allow=%q want GET", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type=%q want application/json", got)
+	}
+}
+
+// TestDevnetRPCPeersDeterministicSortByAddr injects three peers in
+// non-sorted insertion order (and with map iteration randomization
+// in PeerManager) and asserts /peers returns them sorted by addr
+// ascending. Count == len(peers) is checked simultaneously.
+func TestDevnetRPCPeersDeterministicSortByAddr(t *testing.T) {
+	state := mustRPCState(t, false)
+	addrs := []string{"127.0.0.1:30003", "127.0.0.1:30001", "127.0.0.1:30002"}
+	for _, addr := range addrs {
+		if err := state.peerManager.AddPeer(&node.PeerState{
+			Addr:              addr,
+			HandshakeComplete: true,
+			BanScore:          0,
+			LastError:         "",
+			RemoteVersion: node.VersionPayloadV1{
+				ProtocolVersion: 1,
+				TxRelay:         true,
+			},
+		}); err != nil {
+			t.Fatalf("AddPeer %q: %v", addr, err)
+		}
+	}
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/peers")
+	if err != nil {
+		t.Fatalf("GET /peers: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200", resp.StatusCode)
+	}
+	var body peersResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != len(body.Peers) {
+		t.Fatalf("count=%d != len(peers)=%d", body.Count, len(body.Peers))
+	}
+	if body.Count != 3 {
+		t.Fatalf("count=%d want 3", body.Count)
+	}
+	wantSorted := []string{"127.0.0.1:30001", "127.0.0.1:30002", "127.0.0.1:30003"}
+	for i, want := range wantSorted {
+		if body.Peers[i].Addr != want {
+			t.Fatalf("peers[%d].addr=%q want %q (sort by addr asc violated)", i, body.Peers[i].Addr, want)
+		}
+	}
+}
+
+// TestDevnetRPCPeersEmptyReturnsEmptyArray asserts an initialized
+// node with zero peers returns 200, count:0, and a JSON empty array
+// for "peers" (NOT null and NOT 503). This is the false-positive
+// case from the issue contract: zero peers is healthy.
+func TestDevnetRPCPeersEmptyReturnsEmptyArray(t *testing.T) {
+	state := mustRPCState(t, false)
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/peers")
+	if err != nil {
+		t.Fatalf("GET /peers: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200 (empty peer set is healthy)", resp.StatusCode)
+	}
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(rawBody), `"peers":[]`) {
+		t.Fatalf("body=%q want JSON empty array `\"peers\":[]` (not null)", string(rawBody))
+	}
+	var body peersResponse
+	if err := json.Unmarshal(rawBody, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != 0 {
+		t.Fatalf("count=%d want 0", body.Count)
+	}
+	if len(body.Peers) != 0 {
+		t.Fatalf("len(peers)=%d want 0", len(body.Peers))
+	}
+}
+
+// TestDevnetRPCPeersFailsClosedOnNilPeerManager asserts /peers
+// returns 503 when state.peerManager is nil. Constructed manually so
+// the nil path is exercised through the public handler, not internal
+// state mutation.
+func TestDevnetRPCPeersFailsClosedOnNilPeerManager(t *testing.T) {
+	state := &devnetRPCState{
+		gate:    newReadinessGate(context.TODO()),
+		stderr:  io.Discard,
+		nowUnix: func() uint64 { return 0 },
+		metrics: newRPCMetrics(),
+		// peerManager intentionally left nil.
+	}
+	req := httptest.NewRequest(http.MethodGet, "/peers", nil)
+	rec := httptest.NewRecorder()
+	newDevnetRPCHandler(state).ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want 503", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type=%q want application/json", got)
+	}
+}
+
+// TestDevnetRPCPeersRejectsBadMethod asserts non-GET produces 405 +
+// Allow: GET + JSON envelope.
+func TestDevnetRPCPeersRejectsBadMethod(t *testing.T) {
+	state := mustRPCState(t, false)
+	req := httptest.NewRequest(http.MethodPost, "/peers", nil)
+	rec := httptest.NewRecorder()
+	newDevnetRPCHandler(state).ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("Allow=%q want GET", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type=%q want application/json", got)
+	}
+}
+
+// TestDevnetRPCPeersExposesAllBoundedFields populates one peer with
+// every contracted field set to a distinct non-zero value and asserts
+// every field round-trips through the JSON response. This catches a
+// handler that silently drops a contracted field or maps it to the
+// wrong PeerState/VersionPayloadV1 attribute.
+func TestDevnetRPCPeersExposesAllBoundedFields(t *testing.T) {
+	state := mustRPCState(t, false)
+	peer := &node.PeerState{
+		Addr:              "127.0.0.1:31337",
+		HandshakeComplete: true,
+		BanScore:          17,
+		LastError:         "previous handshake timed out",
+		RemoteVersion: node.VersionPayloadV1{
+			ProtocolVersion:   2,
+			TxRelay:           true,
+			BestHeight:        99,
+			PrunedBelowHeight: 12,
+			DaMempoolSize:     34,
+		},
+	}
+	if err := state.peerManager.AddPeer(peer); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/peers")
+	if err != nil {
+		t.Fatalf("GET /peers: %v", err)
+	}
+	defer resp.Body.Close()
+	var body peersResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != 1 {
+		t.Fatalf("count=%d want 1", body.Count)
+	}
+	got := body.Peers[0]
+	want := peerEntry{
+		Addr:              "127.0.0.1:31337",
+		HandshakeComplete: true,
+		BanScore:          17,
+		LastError:         "previous handshake timed out",
+		ProtocolVersion:   2,
+		BestHeight:        99,
+		TxRelay:           true,
+		PrunedBelowHeight: 12,
+		DaMempoolSize:     34,
+	}
+	if got != want {
+		t.Fatalf("peer entry mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}

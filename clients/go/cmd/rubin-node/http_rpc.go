@@ -44,6 +44,25 @@ type devnetRPCState struct {
 	// flagged: shutdown observed by the gate at the moment of the
 	// readiness decision, not separately by main.
 	gate *readinessGate
+	// identity stores startup-provided chain identity for the
+	// /chain_identity route. nil means SetIdentity has not been called
+	// (e.g. a test fixture that does not exercise identity-dependent
+	// routes), and the /chain_identity handler returns 503 in that
+	// case. Multiple SetIdentity calls overwrite the previous value;
+	// in production cmd/rubin-node main.go invokes SetIdentity once
+	// during startup wiring.
+	identity *chainIdentity
+}
+
+// chainIdentity is a snapshot of startup-wired chain identity. Fields
+// flow into devnetRPCState through SetIdentity and feed the read-only
+// /chain_identity route. The struct deliberately stores raw [32]byte
+// values: hex encoding happens at the handler boundary so identity
+// comparison stays a byte equality check, not a hex string compare.
+type chainIdentity struct {
+	network     string
+	chainID     [32]byte
+	genesisHash [32]byte
 }
 
 // readyStateNotReady, readyStateReady, readyStateShutdown encode the
@@ -222,6 +241,24 @@ func (s *devnetRPCState) SetShutdownCtx(ctx context.Context) {
 	s.gate.setShutdownCtx(ctx)
 }
 
+// SetIdentity stores the provided identity values on the rpc state
+// for the /chain_identity route to read. Subsequent calls overwrite
+// the previous value (no single-assignment guard); cmd/rubin-node
+// main.go invokes this once during startup wiring. Tests can call
+// SetIdentity with arbitrary values to observe the resulting
+// /chain_identity response, or leave state.identity nil to observe
+// the 503 response. Nil-receiver safe.
+func (s *devnetRPCState) SetIdentity(network string, chainID, genesisHash [32]byte) {
+	if s == nil {
+		return
+	}
+	s.identity = &chainIdentity{
+		network:     network,
+		chainID:     chainID,
+		genesisHash: genesisHash,
+	}
+}
+
 type runningDevnetRPCServer struct {
 	addr   string
 	server *http.Server
@@ -315,6 +352,60 @@ type txStatusResponse struct {
 	Status string `json:"status"`
 	TxID   string `json:"txid,omitempty"`
 	Error  string `json:"error,omitempty"`
+}
+
+// chainIdentityResponse is the bounded read-only payload served by GET
+// /chain_identity. All three fields are required (no omitempty) so
+// the wire shape is stable for orchestrators that assert presence.
+type chainIdentityResponse struct {
+	Network        string `json:"network"`
+	ChainIDHex     string `json:"chain_id_hex"`
+	GenesisHashHex string `json:"genesis_hash_hex"`
+}
+
+// healthResponse is the bounded operator snapshot served by GET
+// /health. ready reads the existing readiness gate (this PR does not
+// redefine readiness/shutdown semantics). Height and TipHash are
+// pointer-typed so they encode as JSON null when the local ChainState
+// has no tip yet — has_tip distinguishes the two cases without
+// conflating "no tip" with "RPC failure". The remaining fields are
+// non-optional snapshots of existing node state; renaming or adding
+// fields is out of scope for this PR.
+type healthResponse struct {
+	Ready           bool    `json:"ready"`
+	HasTip          bool    `json:"has_tip"`
+	Height          *uint64 `json:"height"`
+	TipHash         *string `json:"tip_hash"`
+	BestKnownHeight uint64  `json:"best_known_height"`
+	InIBD           bool    `json:"in_ibd"`
+	PeerCount       int     `json:"peer_count"`
+	MempoolTxs      int     `json:"mempool_txs"`
+	MempoolBytes    int     `json:"mempool_bytes"`
+}
+
+// peerEntry mirrors the bounded subset of node.PeerState plus the
+// VersionPayloadV1 fields that an operator can act on. The handler
+// must NOT add free-form fields beyond this struct so the operator
+// surface stays bounded; out-of-scope additions belong in a new Q.
+type peerEntry struct {
+	Addr              string `json:"addr"`
+	HandshakeComplete bool   `json:"handshake_complete"`
+	BanScore          int    `json:"ban_score"`
+	LastError         string `json:"last_error"`
+	ProtocolVersion   uint32 `json:"protocol_version"`
+	BestHeight        uint64 `json:"best_height"`
+	TxRelay           bool   `json:"tx_relay"`
+	PrunedBelowHeight uint64 `json:"pruned_below_height"`
+	DaMempoolSize     uint32 `json:"da_mempool_size"`
+}
+
+// peersResponse is the bounded payload served by GET /peers. Count
+// equals len(Peers) by construction in handlePeers, and Peers is
+// sorted by Addr ascending for deterministic output across map
+// iteration randomization.
+type peersResponse struct {
+	Count int         `json:"count"`
+	Peers []peerEntry `json:"peers"`
 }
 
 func newDevnetRPCState(
@@ -575,6 +666,15 @@ func newDevnetRPCHandler(state *devnetRPCState) http.Handler {
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		handleMetrics(state, w, r)
+	})
+	mux.HandleFunc("/chain_identity", func(w http.ResponseWriter, r *http.Request) {
+		handleChainIdentity(state, w, r)
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		handleHealth(state, w, r)
+	})
+	mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
+		handlePeers(state, w, r)
 	})
 	return mux
 }
@@ -1271,5 +1371,144 @@ func respondSubmitTxBodyError(state *devnetRPCState, route string, w http.Respon
 	writeJSONResponse(state, route, w, http.StatusBadRequest, submitTxResponse{
 		Accepted: false,
 		Error:    "invalid JSON body",
+	})
+}
+
+// handleChainIdentity serves GET /chain_identity. It echoes the
+// startup-wired chain identity so an operator can confirm which
+// network/chain the running node belongs to without reading logs or
+// /metrics. Identity flows from main.go startup wiring via
+// SetIdentity; this handler does NOT independently choose devnet
+// constants. Missing identity wiring fails closed with 503 instead of
+// fabricating a devnet-shaped response. Non-GET methods return 405
+// with an Allow: GET header (RFC 9110 §15.5.6) and the canonical JSON
+// error envelope used by /ready.
+func handleChainIdentity(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
+	const route = "/chain_identity"
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSONResponse(state, route, w, http.StatusMethodNotAllowed, submitTxResponse{
+			Accepted: false,
+			Error:    "GET required",
+		})
+		return
+	}
+	if state == nil || state.identity == nil || state.identity.network == "" {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, submitTxResponse{
+			Accepted: false,
+			Error:    "chain identity unavailable",
+		})
+		return
+	}
+	writeJSONResponse(state, route, w, http.StatusOK, chainIdentityResponse{
+		Network:        state.identity.network,
+		ChainIDHex:     hex.EncodeToString(state.identity.chainID[:]),
+		GenesisHashHex: hex.EncodeToString(state.identity.genesisHash[:]),
+	})
+}
+
+// handleHealth serves GET /health, the bounded operator snapshot for
+// orchestrators that need a single-call probe of liveness, tip state,
+// peer count, and mempool fill without scraping /metrics or chasing
+// individual routes. ready reads the existing readiness gate
+// (state.IsReady — observed under the gate's mutex with shutdown
+// atomically observed); this handler does NOT redefine readiness or
+// shutdown semantics. ready=false from the gate is reported as a
+// field on a 200 response, NOT as an HTTP failure: an orchestrator
+// distinguishes "node up but not yet ready" (200 + ready:false) from
+// "node missing required runtime state" (503). Missing BlockStore,
+// PeerManager, Mempool, or SyncEngine fails closed with 503 rather
+// than reporting fabricated zero counts.
+func handleHealth(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
+	const route = "/health"
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSONResponse(state, route, w, http.StatusMethodNotAllowed, submitTxResponse{
+			Accepted: false,
+			Error:    "GET required",
+		})
+		return
+	}
+	if state == nil ||
+		state.syncEngine == nil ||
+		state.blockStore == nil ||
+		state.peerManager == nil ||
+		state.mempool == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, submitTxResponse{
+			Accepted: false,
+			Error:    "runtime dependency unavailable",
+		})
+		return
+	}
+	height, tipHash, hasTip, err := tipFromBlockStore(state.blockStore)
+	if err != nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, submitTxResponse{
+			Accepted: false,
+			Error:    err.Error(),
+		})
+		return
+	}
+	body := healthResponse{
+		Ready:           state.IsReady(),
+		HasTip:          hasTip,
+		BestKnownHeight: state.syncEngine.BestKnownHeight(),
+		InIBD:           state.syncEngine.IsInIBD(state.now()),
+		PeerCount:       state.peerManager.Count(),
+		MempoolTxs:      state.mempool.Len(),
+		MempoolBytes:    state.mempool.BytesUsed(),
+	}
+	if hasTip {
+		body.Height = &height
+		tipHex := hex.EncodeToString(tipHash[:])
+		body.TipHash = &tipHex
+	}
+	writeJSONResponse(state, route, w, http.StatusOK, body)
+}
+
+// handlePeers serves GET /peers, the deterministic snapshot of
+// PeerManager.Snapshot() projected to a bounded JSON shape. Output
+// MUST be sorted by Addr ascending so /peers responses are stable
+// across map iteration randomization; map-iteration order would let
+// two consecutive scrapes diff against each other for no semantic
+// reason. Count equals len(Peers) by construction. Empty initialized
+// peer set returns 200 with count:0 and peers:[] (NOT null). Nil
+// PeerManager fails closed with 503; the handler never mutates peer
+// state or accepts admin actions.
+func handlePeers(state *devnetRPCState, w http.ResponseWriter, r *http.Request) {
+	const route = "/peers"
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSONResponse(state, route, w, http.StatusMethodNotAllowed, submitTxResponse{
+			Accepted: false,
+			Error:    "GET required",
+		})
+		return
+	}
+	if state == nil || state.peerManager == nil {
+		writeJSONResponse(state, route, w, http.StatusServiceUnavailable, submitTxResponse{
+			Accepted: false,
+			Error:    "peer manager unavailable",
+		})
+		return
+	}
+	snapshot := state.peerManager.Snapshot()
+	sort.Slice(snapshot, func(i, j int) bool { return snapshot[i].Addr < snapshot[j].Addr })
+	peers := make([]peerEntry, 0, len(snapshot))
+	for _, p := range snapshot {
+		peers = append(peers, peerEntry{
+			Addr:              p.Addr,
+			HandshakeComplete: p.HandshakeComplete,
+			BanScore:          p.BanScore,
+			LastError:         p.LastError,
+			ProtocolVersion:   p.RemoteVersion.ProtocolVersion,
+			BestHeight:        p.RemoteVersion.BestHeight,
+			TxRelay:           p.RemoteVersion.TxRelay,
+			PrunedBelowHeight: p.RemoteVersion.PrunedBelowHeight,
+			DaMempoolSize:     p.RemoteVersion.DaMempoolSize,
+		})
+	}
+	writeJSONResponse(state, route, w, http.StatusOK, peersResponse{
+		Count: len(peers),
+		Peers: peers,
 	})
 }
