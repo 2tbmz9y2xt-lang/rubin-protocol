@@ -27,7 +27,9 @@ rubin_process_init core-htlc-evidence
 
 NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
 SEED_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed_core_htlc.go"
-REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/core-htlc-evidence-report.json"
+REPORT_BASENAME="${CORE_HTLC_REPORT_BASENAME:-core-htlc-evidence-report.json}"
+[[ -n "${REPORT_BASENAME}" && "${REPORT_BASENAME}" != "." && "${REPORT_BASENAME}" != ".." && "${REPORT_BASENAME}" != */* ]] || { echo "unsafe CORE_HTLC_REPORT_BASENAME: ${REPORT_BASENAME}" >&2; exit 1; }
+REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/${REPORT_BASENAME}"
 SEED_STDERR="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed-stderr.log"
 TX_HEX_FILE="${RUBIN_PROCESS_ARTIFACT_ROOT}/submitted-tx.hex"
 SUBMIT_BODY_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/submit-body.json"
@@ -41,7 +43,7 @@ PHASE="init"
 
 write_report() {
   local status="$1" reason="$2"
-  if ! python3 - "${REPORT_JSON}" "${status}" "${PHASE}" "${reason}" "${FIXTURE_PATH}" "${VECTOR_ID}" "${RUBIN_PROCESS_ARTIFACT_ROOT}" "${NODE_PID}" "${NODE_RPC_ADDR}" "${NODE_DIR}" "${CHAIN_IDENTITY_JSON}" "${SUBMIT_JSON}" "${MINE_JSON}" "${BLOCK_RESPONSE_JSON}" "${DEVNET_CHAIN_ID}" "${FIXTURE_CHAIN_ID}" "${LIVE_CHAIN_ID}" "${SUBMITTED_TXID}" "${MINED_HEIGHT}" "${MINED_HASH}" <<'PY'
+  python3 - "${REPORT_JSON}" "${status}" "${PHASE}" "${reason}" "${FIXTURE_PATH}" "${VECTOR_ID}" "${RUBIN_PROCESS_ARTIFACT_ROOT}" "${NODE_PID}" "${NODE_RPC_ADDR}" "${NODE_DIR}" "${CHAIN_IDENTITY_JSON}" "${SUBMIT_JSON}" "${MINE_JSON}" "${BLOCK_RESPONSE_JSON}" "${DEVNET_CHAIN_ID}" "${FIXTURE_CHAIN_ID}" "${LIVE_CHAIN_ID}" "${SUBMITTED_TXID}" "${MINED_HEIGHT}" "${MINED_HASH}" <<'PY'
 import json, sys
 (path,status,phase,reason,fixture,vector,root,pid,rpc,datadir,identity,submit,mine,block_path,expected_chain_id,fixture_chain_id,live_chain_id,txid,height,block_hash)=sys.argv[1:21]
 def load(raw):
@@ -61,12 +63,10 @@ if status != "PASS":
 with open(path,"w",encoding="utf-8") as fh:
     json.dump(report,fh,indent=2,sort_keys=True); fh.write("\n")
 PY
-  then
-    return 1
-  fi
 }
 
-fail() { local status="$1" reason="$2"; if ! write_report "${status}" "${reason}"; then echo "failed to write ${status} report: ${REPORT_JSON}" >&2; fi; echo "${reason}" >&2; exit 1; }
+report_write_failed() { echo "FAIL_REPORT_WRITE_FAILED: report_writer_exit=$2 path=${REPORT_JSON} primary_status=$1 primary_phase=${PHASE}" >&2; }
+fail() { local status="$1" reason="$2" rc=0; write_report "${status}" "${reason}" || rc=$?; (( rc == 0 )) || report_write_failed "${status}" "${rc}"; echo "${reason}" >&2; exit 1; }
 
 rpc_json() {
   local method="$1" addr="$2" path="$3" body_file="${4:-}"
@@ -123,6 +123,7 @@ func main() {
 GO
 }
 
+mkdir -p "${NODE_DIR}" || fail FAIL_LOCAL_HARNESS "failed to create node datadir"
 PHASE="fixture_preflight"
 [[ -f "${CANONICAL_FIXTURE_PATH}" ]] || fail FAIL_INPUT "canonical devnet CORE_HTLC fixture missing: ${CANONICAL_FIXTURE_PATH}"
 CANONICAL_FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${CANONICAL_FIXTURE_PATH}")"
@@ -130,7 +131,6 @@ FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))'
 [[ "${FIXTURE_REAL}" == "${CANONICAL_FIXTURE_REAL}" ]] || fail FAIL_INPUT "non-canonical CORE_HTLC fixture rejected: actual=${FIXTURE_REAL} expected=${CANONICAL_FIXTURE_REAL}"
 [[ "${REQUESTED_VECTOR_ID}" == "${CANONICAL_VECTOR_ID}" ]] || fail FAIL_INPUT "non-canonical CORE_HTLC vector rejected: actual=${REQUESTED_VECTOR_ID} expected=${CANONICAL_VECTOR_ID}"
 write_seed_go || fail FAIL_LOCAL_HARNESS "failed to write seed program"
-mkdir -p "${NODE_DIR}" || fail FAIL_LOCAL_HARNESS "failed to create node datadir"
 PHASE="seed_fixture_context"
 if ! SEED_OUT="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${SEED_GO}" --datadir "${NODE_DIR}" --fixture "${FIXTURE_PATH}" --vector-id "${VECTOR_ID}" --chain-id "${DEVNET_CHAIN_ID}" 2>"${SEED_STDERR}")"; then
   fail FAIL_INPUT "fixture validation/seed failed: stdout=${SEED_OUT}; stderr=$(<"${SEED_STDERR}")"
@@ -191,6 +191,6 @@ if tx_hex not in block_hex: raise SystemExit("submitted CORE_HTLC tx_hex missing
 PY
 )" || fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response_file=${BLOCK_RESPONSE_JSON}"
 
-PHASE="pass"; write_report PASS "" || { echo "failed to write PASS report: ${REPORT_JSON}" >&2; exit 1; }
-python3 -m json.tool "${REPORT_JSON}" >/dev/null || { echo "invalid PASS report: ${REPORT_JSON}" >&2; exit 1; }
+PHASE="pass"; rc=0; write_report PASS "" || rc=$?; (( rc == 0 )) || { report_write_failed PASS "${rc}"; exit 1; }
+python3 -m json.tool "${REPORT_JSON}" >/dev/null || { rc=$?; echo "FAIL_REPORT_JSON_INVALID: json_tool_exit=${rc} path=${REPORT_JSON} primary_status=PASS primary_phase=${PHASE}" >&2; exit 1; }
 echo "PASS: CORE_HTLC live evidence submit->mine->query succeeded; report=${REPORT_JSON}"
