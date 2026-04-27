@@ -158,6 +158,29 @@ func runGeneratorCLI() {
 		mustWriteFixture(path, f)
 	}
 
+	// Devnet-signed CORE_HTLC claim operator-evidence artifact for live
+	// rubin-node consumption. Same non-conformance-namespace rationale
+	// as the CORE_VAULT artifact above (lives under
+	// conformance/fixtures/devnet/, escapes the top-level CV-*.json
+	// auto-discovery glob in conformance/runner/run_cv_bundle.py /
+	// tools/gen_conformance_matrix.py / tools/check_formal_coverage.py).
+	// Reuses the existing updateHTLCVector helper as-is — it is already
+	// parameterised on (id, chainID), so signing under the canonical
+	// devnet chain_id is a single arg swap; chain_id_hex is pinned on
+	// the vector immediately after the helper returns so the artifact
+	// metadata matches what was actually signed. Prerequisite for
+	// #1241 live operator evidence.
+	{
+		path := filepath.Join(repoRoot, "conformance", "fixtures", "devnet", "devnet-htlc-claim-01.json")
+		f := mustLoadFixture(path)
+		devnetChainID := node.DevnetGenesisChainID()
+		updateHTLCVector(f, "DEVNET-HTLC-CLAIM-01", devnetChainID, htlcClaimKP, htlcRefundKP, destKP)
+		// Pin chain_id_hex on the vector so the artifact carries
+		// explicit metadata matching the chainID just used to sign.
+		findVector(f, "DEVNET-HTLC-CLAIM-01")["chain_id_hex"] = hex.EncodeToString(devnetChainID[:])
+		mustWriteFixture(path, f)
+	}
+
 	// CV-SUBSIDY updates (block-level coinbase bound; requires valid non-coinbase sig).
 	{
 		path := filepath.Join(repoRoot, "conformance/fixtures/CV-SUBSIDY.json")
