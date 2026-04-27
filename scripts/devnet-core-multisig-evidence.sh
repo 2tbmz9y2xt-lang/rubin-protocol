@@ -4,8 +4,16 @@ set -euo pipefail
 # Live Go devnet operator evidence for the canonical CORE_MULTISIG 1-of-1
 # spend artifact. The script seeds a fresh devnet chainstate with the
 # fixture's UTXO context, launches rubin-node, and proves submit -> mine ->
-# get_block inclusion through live RPC. Fails closed and writes a JSON
-# report on every exit path.
+# get_block inclusion through live RPC.
+#
+# Reporting contract:
+#   - JSON report is mandatory on every post-init PASS/FAIL path.
+#   - Pre-init missing-tool failures (python3/perl) emit FAIL_HARNESS_PRE_INIT
+#     on stderr only, with non-zero exit, before the runtime artifact contract
+#     begins.
+#   - Report-writer failures surface FAIL_REPORT_WRITE_FAILED on stderr
+#     alongside the original failure reason and the non-zero exit; they are
+#     never silently swallowed.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
