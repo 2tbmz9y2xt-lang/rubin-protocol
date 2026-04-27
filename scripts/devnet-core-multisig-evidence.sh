@@ -234,6 +234,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -262,17 +264,92 @@ type fixtureFile struct {
 	Vectors []fixtureVector `json:"vectors"`
 }
 
+type blockResp struct {
+	Hash      string `json:"hash"`
+	Height    uint64 `json:"height"`
+	Canonical bool   `json:"canonical"`
+	BlockHex  string `json:"block_hex"`
+}
+
 func die(v any) {
 	fmt.Fprintln(os.Stderr, v)
 	os.Exit(2)
 }
 
+// checkBlock parses /get_block response, parses tx_hex, parses block_hex, and
+// proves inclusion by: (a) parsed tx txid equals submitted txid, (b) parsed
+// block hash equals mined hash, (c) parsed block Txids contains the parsed tx
+// txid. Substring containment of tx_hex bytes inside block_hex is NOT
+// sufficient: only parsed-block-txid containment counts as inclusion proof.
+func checkBlock(respPath, txPath, txidHex, heightRaw, hashHex string) {
+	wantHeight, err := strconv.ParseUint(heightRaw, 10, 64)
+	if err != nil {
+		die(err)
+	}
+	raw, err := os.ReadFile(respPath)
+	if err != nil {
+		die(err)
+	}
+	var r blockResp
+	if err := json.Unmarshal(raw, &r); err != nil {
+		die(err)
+	}
+	if r.Height != wantHeight || strings.ToLower(r.Hash) != strings.ToLower(hashHex) || !r.Canonical {
+		die(fmt.Sprintf("block response mismatch height=%d/%d hash=%s/%s canonical=%v",
+			r.Height, wantHeight, r.Hash, hashHex, r.Canonical))
+	}
+	txRaw, err := os.ReadFile(txPath)
+	if err != nil {
+		die(err)
+	}
+	txBytes, err := hex.DecodeString(strings.TrimSpace(string(txRaw)))
+	if err != nil {
+		die(err)
+	}
+	_, wantTxid, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		die(err)
+	}
+	if hex.EncodeToString(wantTxid[:]) != strings.ToLower(txidHex) {
+		die("submit txid does not match parsed tx_hex")
+	}
+	blockBytes, err := hex.DecodeString(strings.TrimSpace(r.BlockHex))
+	if err != nil {
+		die(err)
+	}
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		die(err)
+	}
+	gotHash, err := consensus.BlockHash(pb.HeaderBytes)
+	if err != nil || hex.EncodeToString(gotHash[:]) != strings.ToLower(hashHex) {
+		die("parsed block hash mismatch")
+	}
+	for _, got := range pb.Txids {
+		if got == wantTxid {
+			return
+		}
+	}
+	die("submitted CORE_MULTISIG txid missing from parsed live block txids")
+}
+
 func main() {
+	mode := flag.String("mode", "seed", "")
 	datadir := flag.String("datadir", "", "")
 	fixturePath := flag.String("fixture", "", "")
 	vectorID := flag.String("vector-id", "", "")
 	chainID := flag.String("chain-id", "", "")
+	blockRespPath := flag.String("block-response", "", "")
+	txHexPath := flag.String("tx-hex-file", "", "")
+	txidHex := flag.String("txid", "", "")
+	blockHeight := flag.String("height", "", "")
+	blockHash := flag.String("hash", "", "")
 	flag.Parse()
+
+	if *mode == "block-check" {
+		checkBlock(*blockRespPath, *txHexPath, *txidHex, *blockHeight, *blockHash)
+		return
+	}
 
 	raw, err := os.ReadFile(*fixturePath)
 	if err != nil {
@@ -423,30 +500,21 @@ read -r MINED_HEIGHT MINED_HASH <<<"${MINE_PARSED}"
 PHASE="query_inclusion"
 BLOCK_JSON="$(rpc_json GET "${NODE_RPC_ADDR}" "/get_block?height=${MINED_HEIGHT}")" || fail FAIL_INCLUSION "get_block failed at height ${MINED_HEIGHT}: ${BLOCK_JSON}"
 printf '%s' "${BLOCK_JSON}" >"${BLOCK_RESPONSE_JSON}" || fail FAIL_INCLUSION "failed to persist get_block response"
-BLOCK_CHECK="$(python3 - "${BLOCK_RESPONSE_JSON}" "${TX_HEX_FILE}" "${MINED_HEIGHT}" "${MINED_HASH}" 2>&1 <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as fh:
-    d = json.load(fh)
-with open(sys.argv[2], encoding="utf-8") as fh:
-    tx_hex = fh.read().strip().lower()
-want_height = int(sys.argv[3])
-want_hash = sys.argv[4].lower()
-actual_height = d.get("height")
-actual_hash = str(d.get("hash", "")).lower()
-canonical = d.get("canonical")
-block_hex = str(d.get("block_hex", "")).lower()
-if actual_height != want_height:
-    raise SystemExit(f"height actual={actual_height} expected={want_height}")
-if actual_hash != want_hash:
-    raise SystemExit(f"hash actual={actual_hash} expected={want_hash}")
-if canonical is not True:
-    raise SystemExit(f"canonical actual={canonical} expected=True")
-if tx_hex not in block_hex:
-    raise SystemExit("submitted tx_hex missing from live block_hex")
-PY
-)" || fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response_file=${BLOCK_RESPONSE_JSON}"
+# Parsed inclusion proof: invoke the embedded Go helper in --mode block-check.
+# The Go helper parses TX_HEX via consensus.ParseTx, asserts the parsed txid
+# matches the submitted /submit_tx txid, parses /get_block.block_hex via
+# consensus.ParseBlockBytes, asserts consensus.BlockHash(parsed.HeaderBytes)
+# equals MINED_HASH, and verifies the parsed block Txids set contains the
+# parsed tx txid. Substring containment of tx_hex bytes inside block_hex is
+# NOT accepted as inclusion proof; only parsed-block-txid containment counts.
+BLOCK_CHECK="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${SEED_GO}" \
+  --mode block-check \
+  --block-response "${BLOCK_RESPONSE_JSON}" \
+  --tx-hex-file "${TX_HEX_FILE}" \
+  --txid "${SUBMITTED_TXID}" \
+  --height "${MINED_HEIGHT}" \
+  --hash "${MINED_HASH}" 2>&1)" || \
+  fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response_file=${BLOCK_RESPONSE_JSON}"
 
 PHASE="pass"
 # PASS-side writer/validation failures route through the same
