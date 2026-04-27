@@ -176,6 +176,22 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 			t.Fatalf("write devnet htlc skeleton: %v", err)
 		}
 	}
+	// devnet-multisig-spend-01 skeleton (#1242 prerequisite). Same
+	// non-conformance namespace rationale as the other devnet/*
+	// fixtures.
+	{
+		raw, err := json.MarshalIndent(&fixtureFile{
+			Gate:    "devnet-multisig-spend-01",
+			Vectors: []map[string]any{newVector("DEVNET-MULTISIG-SPEND-01", 1, nil)},
+		}, "", "  ")
+		if err != nil {
+			t.Fatalf("marshal devnet multisig skeleton: %v", err)
+		}
+		raw = append(raw, '\n')
+		if err := os.WriteFile(filepath.Join(devnetDir, "devnet-multisig-spend-01.json"), raw, 0o600); err != nil {
+			t.Fatalf("write devnet multisig skeleton: %v", err)
+		}
+	}
 
 	writeFixture("CV-HTLC.json", []map[string]any{
 		newVector("CV-HTLC-13", 1, nil),
@@ -234,6 +250,8 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 	mustContainField(filepath.Join("devnet", "devnet-vault-create-01.json"), "chain_id_hex")
 	mustContainField(filepath.Join("devnet", "devnet-htlc-claim-01.json"), "tx_hex")
 	mustContainField(filepath.Join("devnet", "devnet-htlc-claim-01.json"), "chain_id_hex")
+	mustContainField(filepath.Join("devnet", "devnet-multisig-spend-01.json"), "tx_hex")
+	mustContainField(filepath.Join("devnet", "devnet-multisig-spend-01.json"), "chain_id_hex")
 }
 
 // TestDevnetVaultCreateArtifactSignedUnderDevnetChainID validates the
@@ -580,5 +598,165 @@ func TestDevnetHTLCClaimArtifactSignedUnderDevnetChainID(t *testing.T) {
 	zeroChainID := [32]byte{}
 	if _, err := consensus.ApplyNonCoinbaseTxBasicWithMTP(parsedTx2, txid, utxoSet, height, blockTimestamp, blockMTP, zeroChainID); err == nil {
 		t.Fatalf("ApplyNonCoinbaseTxBasicWithMTP(zero chain_id) unexpectedly accepted — artifact signature must NOT verify under zero chain_id, otherwise it is not exclusively devnet-domain-bound")
+	}
+}
+
+// TestDevnetMultisigSpendArtifactSignedUnderDevnetChainID validates
+// the committed canonical devnet operator-evidence CORE_MULTISIG
+// 1-of-1 spend artifact end-to-end through the public
+// consensus.ApplyNonCoinbaseTxBasic verification path. Mirrors the
+// CORE_VAULT and CORE_HTLC equivalents with the same validated-reader
+// pattern (parseJSONUint32 + comma-ok t.Fatalf) so missing /
+// non-numeric / out-of-range fixture metadata fails closed.
+//
+// Proof assertion: ApplyNonCoinbaseTxBasic returns nil under
+// chainID == node.DevnetGenesisChainID() AND non-nil under
+// chainID == [32]byte{} zero. Issue #1242 prerequisite.
+func TestDevnetMultisigSpendArtifactSignedUnderDevnetChainID(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	fixturePath := filepath.Join(wd, "..", "..", "..", "..", "conformance", "fixtures", "devnet", "devnet-multisig-spend-01.json")
+	raw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var doc struct {
+		Gate    string           `json:"gate"`
+		Vectors []map[string]any `json:"vectors"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal fixture: %v", err)
+	}
+	if doc.Gate != "devnet-multisig-spend-01" {
+		t.Fatalf("gate=%q want devnet-multisig-spend-01", doc.Gate)
+	}
+	if len(doc.Vectors) != 1 {
+		t.Fatalf("vectors=%d want 1", len(doc.Vectors))
+	}
+	v := doc.Vectors[0]
+	if id, _ := v["id"].(string); id != "DEVNET-MULTISIG-SPEND-01" {
+		t.Fatalf("vector id=%q want DEVNET-MULTISIG-SPEND-01", id)
+	}
+
+	mustU32 := func(label string, raw any) uint32 {
+		t.Helper()
+		n, perr := parseJSONUint32(label, raw)
+		if perr != nil {
+			t.Fatalf("%v", perr)
+		}
+		return n
+	}
+	mustU16 := func(label string, raw any) uint16 {
+		t.Helper()
+		n, perr := parseJSONUint32(label, raw)
+		if perr != nil {
+			t.Fatalf("%v", perr)
+		}
+		if n > 0xFFFF {
+			t.Fatalf("%s: value %d exceeds uint16", label, n)
+		}
+		return uint16(n)
+	}
+	mustString := func(label string, raw any) string {
+		t.Helper()
+		s, ok := raw.(string)
+		if !ok {
+			t.Fatalf("%s: expected string, got %T", label, raw)
+		}
+		return s
+	}
+	mustBool := func(label string, raw any) bool {
+		t.Helper()
+		b, ok := raw.(bool)
+		if !ok {
+			t.Fatalf("%s: expected bool, got %T", label, raw)
+		}
+		return b
+	}
+
+	devnetChainID := node.DevnetGenesisChainID()
+	wantChainIDHex := hex.EncodeToString(devnetChainID[:])
+	gotChainIDHex := mustString("chain_id_hex", v["chain_id_hex"])
+	if gotChainIDHex != wantChainIDHex {
+		t.Fatalf("chain_id_hex=%q want %q (canonical devnet)", gotChainIDHex, wantChainIDHex)
+	}
+
+	utxosRaw, ok := v["utxos"].([]any)
+	if !ok {
+		t.Fatalf("utxos: expected array, got %T", v["utxos"])
+	}
+	if len(utxosRaw) != 1 {
+		t.Fatalf("utxos=%d want 1", len(utxosRaw))
+	}
+	u, ok := utxosRaw[0].(map[string]any)
+	if !ok {
+		t.Fatalf("utxos[0]: expected object, got %T", utxosRaw[0])
+	}
+	prevTxidHex := mustString("utxos[0].txid", u["txid"])
+	prevTxidBytes, err := hex.DecodeString(prevTxidHex)
+	if err != nil || len(prevTxidBytes) != 32 {
+		t.Fatalf("utxo txid=%q invalid: %v", prevTxidHex, err)
+	}
+	var prevTxid [32]byte
+	copy(prevTxid[:], prevTxidBytes)
+	covenantDataHex := mustString("utxos[0].covenant_data", u["covenant_data"])
+	covenantData, err := hex.DecodeString(covenantDataHex)
+	if err != nil {
+		t.Fatalf("utxo covenant_data hex: %v", err)
+	}
+	utxoSet := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: prevTxid, Vout: mustU32("utxos[0].vout", u["vout"])}: {
+			Value:             uint64(mustU32("utxos[0].value", u["value"])),
+			CovenantType:      mustU16("utxos[0].covenant_type", u["covenant_type"]),
+			CovenantData:      covenantData,
+			CreationHeight:    uint64(mustU32("utxos[0].creation_height", u["creation_height"])),
+			CreatedByCoinbase: mustBool("utxos[0].created_by_coinbase", u["created_by_coinbase"]),
+		},
+	}
+
+	txHex := mustString("tx_hex", v["tx_hex"])
+	if txHex == "" {
+		t.Fatalf("tx_hex is empty — regenerate via `cd clients/go && go run ./cmd/gen-conformance-fixtures`")
+	}
+	rawTx, err := hex.DecodeString(txHex)
+	if err != nil {
+		t.Fatalf("tx_hex decode: %v", err)
+	}
+	_, txid, _, consumed, err := consensus.ParseTx(rawTx)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	if consumed != len(rawTx) {
+		t.Fatalf("ParseTx consumed=%d want %d", consumed, len(rawTx))
+	}
+	parsedTx, _, _, _, err := consensus.ParseTx(rawTx)
+	if err != nil {
+		t.Fatalf("ParseTx (re): %v", err)
+	}
+
+	height := uint64(mustU32("height", v["height"]))
+	blockTimestamp := uint64(mustU32("block_timestamp", v["block_timestamp"]))
+
+	// Positive: signature MUST verify under canonical devnet chain_id.
+	if _, err := consensus.ApplyNonCoinbaseTxBasic(parsedTx, txid, utxoSet, height, blockTimestamp, devnetChainID); err != nil {
+		t.Fatalf("ApplyNonCoinbaseTxBasic(devnet chain_id): %v — artifact is not signed under canonical devnet domain", err)
+	}
+
+	// Re-parse the tx bytes (drops cached state from the positive
+	// call) before invoking ApplyNonCoinbaseTxBasic with zero chain_id.
+	// Proof assertion: ApplyNonCoinbaseTxBasic returns a non-nil
+	// error under chainID == [32]byte{}; a nil error would mean the
+	// tx_hex validates under both devnet and zero chain_id,
+	// contradicting the devnet-domain-bound contract this artifact
+	// must satisfy.
+	parsedTx2, _, _, _, err := consensus.ParseTx(rawTx)
+	if err != nil {
+		t.Fatalf("ParseTx (negative): %v", err)
+	}
+	zeroChainID := [32]byte{}
+	if _, err := consensus.ApplyNonCoinbaseTxBasic(parsedTx2, txid, utxoSet, height, blockTimestamp, zeroChainID); err == nil {
+		t.Fatalf("ApplyNonCoinbaseTxBasic(zero chain_id) unexpectedly accepted — artifact signature must NOT verify under zero chain_id, otherwise it is not exclusively devnet-domain-bound")
 	}
 }
