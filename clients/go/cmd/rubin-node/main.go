@@ -537,6 +537,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// matches the regression-test wiring path that calls SetIdentity
 	// directly.
 	rpcState.SetIdentity(cfg.Network, chainIDFromGenesis, genesisHashFromGenesis)
+	// Bind the peer-lifecycle-exit closure so /metrics rendering can
+	// observe the running *p2p.Service counter without cmd/rubin-node's
+	// RPC state taking a structural dependency on the p2p package —
+	// same indirection pattern as p2pService.AnnounceTx above.
+	rpcState.SetPeerLifecycleExitsFunc(p2pService.PeerLifecycleExits)
 	rpcServer, err := startDevnetRPCServer(cfg.RPCBindAddr, rpcState, stdout, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "rpc start failed: %v\n", err)

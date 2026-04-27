@@ -57,6 +57,15 @@ type devnetRPCState struct {
 	// in production cmd/rubin-node main.go invokes SetIdentity once
 	// during startup wiring.
 	identity *chainIdentity
+	// peerLifecycleExits is a closure provided by cmd/rubin-node main.go
+	// that returns the monotonic peer-lifecycle-exit count from the
+	// running *p2p.Service. nil means the closure has not been wired
+	// (e.g. a test fixture that does not exercise the metric); the
+	// metrics renderer treats a nil closure as 0 so scraping does not
+	// panic on a fixture state. The closure is itself a pure
+	// atomic.Load on the service side, so /metrics rendering does not
+	// mutate any counter.
+	peerLifecycleExits func() uint64
 }
 
 // chainIdentity is a snapshot of startup-wired chain identity. Fields
@@ -262,6 +271,20 @@ func (s *devnetRPCState) SetIdentity(network string, chainID, genesisHash [32]by
 		chainID:     chainID,
 		genesisHash: genesisHash,
 	}
+}
+
+// SetPeerLifecycleExitsFunc stores a closure that returns the
+// monotonic peer-lifecycle-exit count from the running *p2p.Service.
+// cmd/rubin-node main.go binds it to p2pService.PeerLifecycleExits
+// once during startup wiring. /metrics rendering reads it on each
+// scrape; a nil closure renders the metric as 0 so test fixtures
+// without a wired service still scrape cleanly. Subsequent calls
+// overwrite the previous closure. Nil-receiver safe.
+func (s *devnetRPCState) SetPeerLifecycleExitsFunc(fn func() uint64) {
+	if s == nil {
+		return
+	}
+	s.peerLifecycleExits = fn
 }
 
 type runningDevnetRPCServer struct {
@@ -1134,15 +1157,16 @@ func handleMetrics(state *devnetRPCState, w http.ResponseWriter, r *http.Request
 
 func renderPrometheusMetrics(state *devnetRPCState) string {
 	var (
-		tipHeight       float64
-		bestKnownHeight float64
-		inIBD           float64
-		peerCount       float64
-		mempoolTxs      float64
-		mempoolBytes    float64
-		mempoolAdmit    node.MempoolAdmissionCounts
-		routeStatus     map[string]uint64
-		submitByResult  map[string]uint64
+		tipHeight          float64
+		bestKnownHeight    float64
+		inIBD              float64
+		peerCount          float64
+		mempoolTxs         float64
+		mempoolBytes       float64
+		mempoolAdmit       node.MempoolAdmissionCounts
+		peerLifecycleExits uint64
+		routeStatus        map[string]uint64
+		submitByResult     map[string]uint64
 	)
 	if state != nil && state.syncEngine != nil {
 		bestKnownHeight = float64(state.syncEngine.BestKnownHeight())
@@ -1166,6 +1190,11 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		// repeatedly cannot perturb the counters.
 		mempoolBytes = float64(state.mempool.BytesUsed())
 		mempoolAdmit = state.mempool.AdmissionCounts()
+	}
+	if state != nil && state.peerLifecycleExits != nil {
+		// Pure atomic.Load behind the closure — repeated /metrics
+		// scrapes never bump the underlying counter.
+		peerLifecycleExits = state.peerLifecycleExits()
 	}
 	if state != nil && state.metrics != nil {
 		routeStatus, submitByResult = state.metrics.snapshot()
@@ -1204,6 +1233,14 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		fmt.Sprintf(`rubin_node_mempool_admit_total{result="conflict"} %d`, mempoolAdmit.Conflict),
 		fmt.Sprintf(`rubin_node_mempool_admit_total{result="rejected"} %d`, mempoolAdmit.Rejected),
 		fmt.Sprintf(`rubin_node_mempool_admit_total{result="unavailable"} %d`, mempoolAdmit.Unavailable),
+		// Unlabeled lifecycle-exit counter; the underlying exit cause
+		// (remote close, protocol error, local Service.Close) is not
+		// available at the unregisterPeer site without plumbing it
+		// through, so labeled buckets cannot be proven non-overlapping
+		// today and are intentionally not emitted (issue #1307).
+		"# HELP rubin_node_p2p_peer_lifecycle_exits_total Total peer lifecycle exits observed by the p2p service since process start.",
+		"# TYPE rubin_node_p2p_peer_lifecycle_exits_total counter",
+		fmt.Sprintf("rubin_node_p2p_peer_lifecycle_exits_total %d", peerLifecycleExits),
 		"# HELP rubin_node_rpc_requests_total Total HTTP RPC requests by route and status.",
 		"# TYPE rubin_node_rpc_requests_total counter",
 	)
