@@ -185,8 +185,11 @@ fail() {
 }
 
 rpc_json() {
-  local method="$1" addr="$2" path="$3" body_file="${4:-}"
-  python3 - "${method}" "${addr}" "${path}" "${body_file}" "${RPC_TIMEOUT_SECONDS}" <<'PY'
+  # Per-call timeout defaults to RPC_TIMEOUT_SECONDS but can be overridden by
+  # the 5th argument so polling helpers (e.g. /ready) can use a tight per-attempt
+  # deadline that does not let a single hung request consume the outer budget.
+  local method="$1" addr="$2" path="$3" body_file="${4:-}" timeout_s="${5:-${RPC_TIMEOUT_SECONDS}}"
+  python3 - "${method}" "${addr}" "${path}" "${body_file}" "${timeout_s}" <<'PY'
 import socket
 import sys
 import urllib.error
@@ -215,7 +218,7 @@ PY
 wait_ready_true() {
   local addr="$1" deadline=$((SECONDS + 30)) body
   while ((SECONDS < deadline)); do
-    if body="$(rpc_json GET "${addr}" /ready 2>/dev/null)" &&
+    if body="$(rpc_json GET "${addr}" /ready "" 2 2>/dev/null)" &&
       printf '%s' "${body}" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ready") is True else 1)' 2>/dev/null; then
       return 0
     fi
