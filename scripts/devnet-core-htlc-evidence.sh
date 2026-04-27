@@ -27,8 +27,7 @@ rubin_process_init core-htlc-evidence
 
 NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
 SEED_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed_core_htlc.go"
-REPORT_BASENAME="${CORE_HTLC_REPORT_BASENAME:-core-htlc-evidence-report.json}"
-[[ -n "${REPORT_BASENAME}" && "${REPORT_BASENAME}" != "." && "${REPORT_BASENAME}" != ".." && "${REPORT_BASENAME}" != */* ]] || { echo "unsafe CORE_HTLC_REPORT_BASENAME: ${REPORT_BASENAME}" >&2; exit 1; }
+DEFAULT_REPORT_BASENAME="core-htlc-evidence-report.json"; REQUESTED_REPORT_BASENAME="${CORE_HTLC_REPORT_BASENAME:-${DEFAULT_REPORT_BASENAME}}"; REPORT_BASENAME="${DEFAULT_REPORT_BASENAME}"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/${REPORT_BASENAME}"
 SEED_STDERR="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed-stderr.log"
 TX_HEX_FILE="${RUBIN_PROCESS_ARTIFACT_ROOT}/submitted-tx.hex"
@@ -67,6 +66,8 @@ PY
 
 report_write_failed() { echo "FAIL_REPORT_WRITE_FAILED: report_writer_exit=$2 path=${REPORT_JSON} primary_status=$1 primary_phase=${PHASE}" >&2; }
 fail() { local status="$1" reason="$2" rc=0; write_report "${status}" "${reason}" || rc=$?; (( rc == 0 )) || report_write_failed "${status}" "${rc}"; echo "${reason}" >&2; exit 1; }
+if [[ -z "${REQUESTED_REPORT_BASENAME}" || "${REQUESTED_REPORT_BASENAME}" == "." || "${REQUESTED_REPORT_BASENAME}" == ".." || "${REQUESTED_REPORT_BASENAME}" == */* ]]; then fail FAIL_LOCAL_HARNESS "unsafe CORE_HTLC_REPORT_BASENAME: ${REQUESTED_REPORT_BASENAME}"; fi
+REPORT_BASENAME="${REQUESTED_REPORT_BASENAME}"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/${REPORT_BASENAME}"
 
 rpc_json() {
   local method="$1" addr="$2" path="$3" body_file="${4:-}"
