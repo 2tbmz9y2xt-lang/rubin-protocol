@@ -26,6 +26,7 @@ NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
 SEED_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed_core_vault.go"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/core-vault-evidence-report.json"
 SEED_STDERR="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed-stderr.log"
+TX_HEX_FILE="${RUBIN_PROCESS_ARTIFACT_ROOT}/submitted-tx.hex"
 BLOCK_RESPONSE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/get-block-response.json"
 NODE_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 NODE_LOG="node-a.log"
@@ -139,13 +140,14 @@ if ! SEED_OUT="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${SEED_GO}" --da
 fi
 FIXTURE_CHAIN_ID="${SEED_OUT%%$'\n'*}"; TX_HEX="${SEED_OUT#*$'\n'}"
 [[ "${TX_HEX}" != "${SEED_OUT}" && "${TX_HEX}" != *$'\n'* && -n "${FIXTURE_CHAIN_ID}" && -n "${TX_HEX}" ]] || fail FAIL_INPUT "fixture validation emitted unexpected stdout shape: ${SEED_OUT}"
+printf '%s' "${TX_HEX}" >"${TX_HEX_FILE}" || fail FAIL_INPUT "failed to persist submitted tx_hex"
 PHASE="build"
 echo "Building Go rubin-node"
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${NODE_BIN}" ./cmd/rubin-node || fail FAIL_LOCAL_HARNESS "rubin-node build failed"
 
 PHASE="start_live_node"
 echo "Starting Go rubin-node with canonical devnet CORE_VAULT fixture context"
-rubin_process_start "${NODE_LOG}" "${NODE_BIN}" --datadir "${NODE_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 || fail FAIL_LOCAL_HARNESS "rubin-node start failed"
+rubin_process_start "${NODE_LOG}" "${NODE_BIN}" --network devnet --datadir "${NODE_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 || fail FAIL_LOCAL_HARNESS "rubin-node start failed"
 NODE_PID="${RUBIN_PROCESS_LAST_PID}"
 rubin_process_wait_for_log "${NODE_LOG}" "rpc: listening=" 30 "${NODE_PID}" || fail FAIL_LOCAL_HARNESS "rubin-node did not expose RPC"
 NODE_RPC_ADDR="$(rubin_process_extract_rpc_addr "${NODE_LOG}")" || fail FAIL_LOCAL_HARNESS "failed to extract node RPC address"
@@ -157,7 +159,7 @@ LIVE_CHAIN_ID="$(printf '%s' "${CHAIN_IDENTITY_JSON}" | python3 -c 'import json,
 
 PHASE="submit_live_rpc"
 echo "Submitting canonical devnet CORE_VAULT tx through live /submit_tx"
-SUBMIT_BODY="$(python3 -c 'import json,sys; print(json.dumps({"tx_hex": sys.argv[1]}))' "${TX_HEX}")"
+SUBMIT_BODY="$(printf '{"tx_hex":"%s"}' "${TX_HEX}")"
 SUBMIT_JSON="$(rpc_json POST "${NODE_RPC_ADDR}" /submit_tx "${SUBMIT_BODY}")" || fail FAIL_SUBMIT "submit_tx request failed: ${SUBMIT_JSON}"
 SUBMITTED_TXID="$(python3 - "${SUBMIT_JSON}" 2>&1 <<'PY'
 import json, sys
@@ -182,11 +184,13 @@ read -r MINED_HEIGHT MINED_HASH <<<"${MINE_PARSED}"
 PHASE="query_inclusion"
 BLOCK_JSON="$(rpc_json GET "${NODE_RPC_ADDR}" "/get_block?height=${MINED_HEIGHT}")" || fail FAIL_INCLUSION "get_block failed at height ${MINED_HEIGHT}: ${BLOCK_JSON}"
 printf '%s' "${BLOCK_JSON}" >"${BLOCK_RESPONSE_JSON}" || fail FAIL_INCLUSION "failed to persist get_block response"
-BLOCK_CHECK="$(python3 - "${BLOCK_RESPONSE_JSON}" "${MINED_HEIGHT}" "${MINED_HASH}" "${TX_HEX}" 2>&1 <<'PY'
+BLOCK_CHECK="$(python3 - "${BLOCK_RESPONSE_JSON}" "${TX_HEX_FILE}" "${MINED_HEIGHT}" "${MINED_HASH}" 2>&1 <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as fh:
     d=json.load(fh)
-want_height=int(sys.argv[2]); want_hash=sys.argv[3].lower(); tx_hex=sys.argv[4].lower()
+with open(sys.argv[2], encoding="utf-8") as fh:
+    tx_hex=fh.read().strip().lower()
+want_height=int(sys.argv[3]); want_hash=sys.argv[4].lower()
 actual_height=d.get("height"); actual_hash=str(d.get("hash", "")).lower(); canonical=d.get("canonical"); block_hex=str(d.get("block_hex", "")).lower()
 if actual_height != want_height: raise SystemExit(f"height actual={actual_height} expected={want_height}")
 if actual_hash != want_hash: raise SystemExit(f"hash actual={actual_hash} expected={want_hash}")
