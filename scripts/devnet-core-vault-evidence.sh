@@ -27,6 +27,8 @@ SEED_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed_core_vault.go"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/core-vault-evidence-report.json"
 SEED_STDERR="${RUBIN_PROCESS_ARTIFACT_ROOT}/seed-stderr.log"
 TX_HEX_FILE="${RUBIN_PROCESS_ARTIFACT_ROOT}/submitted-tx.hex"
+SUBMIT_BODY_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/submit-body.json"
+MINE_BODY_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-body.json"
 BLOCK_RESPONSE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/get-block-response.json"
 NODE_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 NODE_LOG="node-a.log"
@@ -70,12 +72,16 @@ PY
 fail() { local status="$1" reason="$2"; write_report "${status}" "${reason}" || true; echo "${reason}" >&2; exit 1; }
 
 rpc_json() {
-  local method="$1" addr="$2" path="$3" body="${4:-}"
-  python3 - "${method}" "${addr}" "${path}" "${body}" "${RPC_TIMEOUT_SECONDS}" <<'PY'
+  local method="$1" addr="$2" path="$3" body_file="${4:-}"
+  python3 - "${method}" "${addr}" "${path}" "${body_file}" "${RPC_TIMEOUT_SECONDS}" <<'PY'
 import socket, sys, urllib.error, urllib.request
-method, addr, path, body, timeout_s = sys.argv[1:6]
-req = urllib.request.Request(f"http://{addr}{path}", data=(body.encode() if body else None), method=method)
-if body: req.add_header("Content-Type", "application/json")
+method, addr, path, body_file, timeout_s = sys.argv[1:6]
+body = None
+if body_file:
+    with open(body_file, "rb") as fh:
+        body = fh.read()
+req = urllib.request.Request(f"http://{addr}{path}", data=body, method=method)
+if body is not None: req.add_header("Content-Type", "application/json")
 try:
     with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp: print(resp.read().decode(), end="")
 except urllib.error.HTTPError as exc:
@@ -159,8 +165,8 @@ LIVE_CHAIN_ID="$(printf '%s' "${CHAIN_IDENTITY_JSON}" | python3 -c 'import json,
 
 PHASE="submit_live_rpc"
 echo "Submitting canonical devnet CORE_VAULT tx through live /submit_tx"
-SUBMIT_BODY="$(printf '{"tx_hex":"%s"}' "${TX_HEX}")"
-SUBMIT_JSON="$(rpc_json POST "${NODE_RPC_ADDR}" /submit_tx "${SUBMIT_BODY}")" || fail FAIL_SUBMIT "submit_tx request failed: ${SUBMIT_JSON}"
+printf '{"tx_hex":"%s"}' "${TX_HEX}" >"${SUBMIT_BODY_JSON}" || fail FAIL_SUBMIT "failed to persist submit body"
+SUBMIT_JSON="$(rpc_json POST "${NODE_RPC_ADDR}" /submit_tx "${SUBMIT_BODY_JSON}")" || fail FAIL_SUBMIT "submit_tx request failed: ${SUBMIT_JSON}"
 SUBMITTED_TXID="$(python3 - "${SUBMIT_JSON}" 2>&1 <<'PY'
 import json, sys
 d=json.loads(sys.argv[1])
@@ -171,7 +177,8 @@ PY
 
 PHASE="mine_live_rpc"
 echo "Mining submitted CORE_VAULT tx through live /mine_next"
-MINE_JSON="$(rpc_json POST "${NODE_RPC_ADDR}" /mine_next "{}")" || fail FAIL_MINE "mine_next request failed: ${MINE_JSON}"
+printf '{}' >"${MINE_BODY_JSON}" || fail FAIL_MINE "failed to persist mine body"
+MINE_JSON="$(rpc_json POST "${NODE_RPC_ADDR}" /mine_next "${MINE_BODY_JSON}")" || fail FAIL_MINE "mine_next request failed: ${MINE_JSON}"
 MINE_PARSED="$(python3 - "${MINE_JSON}" 2>&1 <<'PY'
 import json, sys
 d=json.loads(sys.argv[1])
@@ -197,7 +204,7 @@ if actual_hash != want_hash: raise SystemExit(f"hash actual={actual_hash} expect
 if canonical is not True: raise SystemExit(f"canonical actual={canonical} expected=True")
 if tx_hex not in block_hex: raise SystemExit("submitted tx_hex missing from live block_hex")
 PY
-)" || fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response=${BLOCK_JSON}"
+)" || fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response_file=${BLOCK_RESPONSE_JSON}"
 
 PHASE="pass"
 write_report PASS "" || { echo "failed to write PASS report: ${REPORT_JSON}" >&2; exit 1; }
