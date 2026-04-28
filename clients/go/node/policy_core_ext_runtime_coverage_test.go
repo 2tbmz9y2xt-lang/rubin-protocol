@@ -7,15 +7,15 @@ package node
 // exercising the same admit / mine paths through a
 // `consensus.NewStaticCoreExtProfileProvider`-constructed
 // CoreExtProfileProvider — i.e. the exact provider type that
-// cmd/rubin-node/main.go's buildGenesisCoreExtProfiles returns when the
+// clients/go/cmd/rubin-node/main.go's buildGenesisCoreExtProfiles returns when the
 // operator passes --genesis-file with a populated core_ext_profiles[]
 // section.
 //
 // In production:
-//   * cmd/rubin-node/main.go:800 calls buildGenesisCoreExtProfiles(...) and
+//   * clients/go/cmd/rubin-node/main.go:800 calls buildGenesisCoreExtProfiles(...) and
 //     receives a consensus.NewStaticCoreExtProfileProvider(...) back;
-//   * cmd/rubin-node/main.go:403 writes that provider into mempoolCfg;
-//   * cmd/rubin-node/main.go:456 (and :513) writes the same provider into
+//   * clients/go/cmd/rubin-node/main.go:403 writes that provider into mempoolCfg;
+//   * clients/go/cmd/rubin-node/main.go:456 (and :513) writes the same provider into
 //     minerCfg.
 //
 // This test reproduces the wiring contract in-process: it builds a provider
@@ -37,7 +37,7 @@ import (
 )
 
 // staticCoreExtProvider returns a CoreExtProfileProvider built via the same
-// public constructor that cmd/rubin-node/main.go's buildGenesisCoreExtProfiles
+// public constructor that clients/go/cmd/rubin-node/main.go's buildGenesisCoreExtProfiles
 // uses when --genesis-file core_ext_profiles[] is non-empty.
 func staticCoreExtProvider(t *testing.T, extID uint16, activationHeight uint64) consensus.CoreExtProfileProvider {
 	t.Helper()
@@ -47,7 +47,7 @@ func staticCoreExtProvider(t *testing.T, extID uint16, activationHeight uint64) 
 		// NewStaticCoreExtProfileProvider rejects deployments with empty
 		// AllowedSuites; the production buildGenesisCoreExtProfiles surfaces
 		// the same constraint via the genesis JSON's allowed_suite_ids[]
-		// field. The values here mirror cmd/rubin-node/main_test.go's
+		// field. The values here mirror clients/go/cmd/rubin-node/main_test.go's
 		// TestParseGenesisConfigFullBuildsCoreExtProfiles fixture.
 		AllowedSuites: map[uint8]struct{}{1: {}, 3: {}},
 	}}
