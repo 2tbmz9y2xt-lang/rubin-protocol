@@ -501,8 +501,17 @@ PY
 read -r MINED_HEIGHT MINED_HASH <<<"${MINE_PARSED}"
 
 PHASE="query_inclusion"
-BLOCK_JSON="$(rpc_json GET "${NODE_RPC_ADDR}" "/get_block?height=${MINED_HEIGHT}")" || fail FAIL_INCLUSION "get_block failed at height ${MINED_HEIGHT}: ${BLOCK_JSON}"
+# Capture rpc_json rc but persist the response body regardless. On HTTP errors
+# rpc_json prints the error body to stdout before exit 22, and on transport
+# errors it prints the request_failed reason; in both cases the operator
+# needs the observed body in the JSON report (load_file reads
+# get-block-response.json into report.live_block_response).
+get_block_rc=0
+BLOCK_JSON="$(rpc_json GET "${NODE_RPC_ADDR}" "/get_block?height=${MINED_HEIGHT}")" || get_block_rc=$?
 printf '%s' "${BLOCK_JSON}" >"${BLOCK_RESPONSE_JSON}" || fail FAIL_INCLUSION "failed to persist get_block response"
+if (( get_block_rc != 0 )); then
+  fail FAIL_INCLUSION "get_block failed at height ${MINED_HEIGHT} (rc=${get_block_rc}); persisted body at ${BLOCK_RESPONSE_JSON}: ${BLOCK_JSON}"
+fi
 # Parsed inclusion proof: invoke the embedded Go helper in --mode block-check.
 # The Go helper parses TX_HEX via consensus.ParseTx, asserts the parsed txid
 # matches the submitted /submit_tx txid, parses /get_block.block_hex via
