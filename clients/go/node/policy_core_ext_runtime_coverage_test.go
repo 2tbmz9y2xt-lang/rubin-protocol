@@ -155,6 +155,21 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 		if err := mp.AddTx(txBytes); err != nil {
 			t.Fatalf("expected ACTIVE-profile CORE_EXT output admission, got %v", err)
 		}
+
+		// Cover the sibling RelayMetadata path on the ACTIVE admission
+		// branch. The runtime-coverage contract requires both pre-ACTIVE
+		// rejection AND ACTIVE admission to be asserted through
+		// RelayMetadata; the pre-ACTIVE rejection halves are above. Proof
+		// assertion: mp.RelayMetadata returns a nil error and a populated
+		// RelayTxMetadata (non-zero size) for the same txBytes that AddTx
+		// admitted, using the same profiles instance.
+		meta, relayErr := mp.RelayMetadata(txBytes)
+		if relayErr != nil {
+			t.Fatalf("expected ACTIVE-profile CORE_EXT output RelayMetadata success, got %v", relayErr)
+		}
+		if meta.Size == 0 {
+			t.Fatalf("RelayMetadata returned zero Size for admitted CORE_EXT tx")
+		}
 	})
 
 	t.Run("MempoolRejectsPreActiveCoreExtSpend", func(t *testing.T) {
