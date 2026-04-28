@@ -116,7 +116,7 @@ func mustRPCStateWithSpendableUTXOAndMempoolConfig(
 	}
 	mempool, err := node.NewMempoolWithConfig(chainState, blockStore, node.DevnetGenesisChainID(), mempoolConfig)
 	if err != nil {
-		t.Fatalf("NewMempool: %v", err)
+		t.Fatalf("NewMempoolWithConfig: %v", err)
 	}
 	syncEngine.SetMempool(mempool)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
@@ -182,11 +182,15 @@ func mustRPCSignedDaCommitTx(
 	nonce uint64,
 	signer *consensus.MLDSA87Keypair,
 	toAddress []byte,
-	manifest []byte,
+	commitTxPayload []byte,
+	singleChunkPayload []byte,
 ) ([]byte, string) {
 	t.Helper()
-	if len(manifest) == 0 {
-		t.Fatalf("DA_COMMIT manifest must be non-empty")
+	if len(commitTxPayload) == 0 {
+		t.Fatalf("DA_COMMIT tx payload must be non-empty")
+	}
+	if len(singleChunkPayload) == 0 {
+		t.Fatalf("DA_COMMIT chunk payload must be non-empty")
 	}
 	entry, ok := utxos[input]
 	if !ok {
@@ -195,7 +199,7 @@ func mustRPCSignedDaCommitTx(
 	if entry.Value < fee {
 		t.Fatalf("utxo value=%d, want at least fee=%d", entry.Value, fee)
 	}
-	payloadCommitment := sha3.Sum256(manifest)
+	chunkPayloadCommitment := sha3.Sum256(singleChunkPayload)
 	tx := &consensus.Tx{
 		Version: 1,
 		TxKind:  0x01,
@@ -208,14 +212,14 @@ func mustRPCSignedDaCommitTx(
 		Outputs: []consensus.TxOutput{{
 			Value:        0,
 			CovenantType: consensus.COV_TYPE_DA_COMMIT,
-			CovenantData: payloadCommitment[:],
+			CovenantData: chunkPayloadCommitment[:],
 		}, {
 			Value:        entry.Value - fee,
 			CovenantType: consensus.COV_TYPE_P2PK,
 			CovenantData: append([]byte(nil), toAddress...),
 		}},
 		Locktime:  0,
-		DaPayload: append([]byte(nil), manifest...),
+		DaPayload: append([]byte(nil), commitTxPayload...),
 		DaCommitCore: &consensus.DaCommitCore{
 			ChunkCount:  1,
 			BatchNumber: 1,
@@ -238,6 +242,9 @@ func mustRPCSignedDaCommitTx(
 	if parsed.TxKind != 0x01 || parsed.DaCommitCore == nil || len(parsed.DaPayload) == 0 {
 		t.Fatalf("parsed DA_COMMIT shape mismatch: tx_kind=%d da_core_nil=%t da_payload_len=%d", parsed.TxKind, parsed.DaCommitCore == nil, len(parsed.DaPayload))
 	}
+	if !bytes.Equal(parsed.DaPayload, commitTxPayload) {
+		t.Fatalf("parsed DA_COMMIT payload mismatch")
+	}
 	daCommitOutputs := 0
 	for _, out := range parsed.Outputs {
 		if out.CovenantType != consensus.COV_TYPE_DA_COMMIT {
@@ -247,7 +254,7 @@ func mustRPCSignedDaCommitTx(
 		if out.Value != 0 {
 			t.Fatalf("CORE_DA_COMMIT output value=%d, want 0", out.Value)
 		}
-		if !bytes.Equal(out.CovenantData, payloadCommitment[:]) {
+		if !bytes.Equal(out.CovenantData, chunkPayloadCommitment[:]) {
 			t.Fatalf("CORE_DA_COMMIT output commitment mismatch")
 		}
 	}
@@ -882,7 +889,7 @@ func TestDevnetRPCSubmitTxAcceptsDaCommitUnderDefaultPolicy(t *testing.T) {
 		announced = append(announced, append([]byte(nil), tx...))
 		return nil
 	})
-	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 10, 7, fromKey, toAddress, []byte("0123456789"))
+	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 10, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	defer server.Close()
 
@@ -1006,7 +1013,7 @@ func TestDevnetRPCSubmitTxRejectsLowFeeDaCommitWhenSurchargePolicyEnabled(t *tes
 		announceCalled = true
 		return nil
 	}, mempoolConfig)
-	txBytes, _ := mustRPCSignedDaCommitTx(t, utxos, input, 1, 8, fromKey, toAddress, []byte("0123456789"))
+	txBytes, _ := mustRPCSignedDaCommitTx(t, utxos, input, 1, 8, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	defer server.Close()
 
