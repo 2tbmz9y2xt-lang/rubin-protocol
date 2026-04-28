@@ -32,13 +32,13 @@ MINE_BODY_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-body.json"
 BLOCK_RESPONSE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/get-block-response.json"
 NODE_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 NODE_LOG="node-a.log"
-NODE_PID=""; NODE_RPC_ADDR=""; CHAIN_IDENTITY_JSON="{}"
+NODE_PID=""; NODE_RPC_ADDR=""; CHAIN_IDENTITY_JSON=""
 SUBMIT_JSON=""; SUBMITTED_TXID=""; MINE_JSON=""; MINED_HEIGHT=""; MINED_HASH=""; BLOCK_JSON=""; FIXTURE_CHAIN_ID=""; LIVE_CHAIN_ID=""
 PHASE="init"
 
 write_report() {
   local status="$1" reason="$2"
-  if ! python3 - "${REPORT_JSON}" "${status}" "${PHASE}" "${reason}" "${FIXTURE_PATH}" "${VECTOR_ID}" \
+  python3 - "${REPORT_JSON}" "${status}" "${PHASE}" "${reason}" "${FIXTURE_PATH}" "${VECTOR_ID}" \
     "${RUBIN_PROCESS_ARTIFACT_ROOT}" "${NODE_PID}" "${NODE_RPC_ADDR}" "${NODE_DIR}" "${CHAIN_IDENTITY_JSON}" \
     "${SUBMIT_JSON}" "${MINE_JSON}" "${BLOCK_RESPONSE_JSON}" "${DEVNET_CHAIN_ID}" "${FIXTURE_CHAIN_ID}" "${LIVE_CHAIN_ID}" "${SUBMITTED_TXID}" "${MINED_HEIGHT}" "${MINED_HASH}" <<'PY'
 import json, sys
@@ -55,25 +55,22 @@ def load_file(path):
     except Exception as exc:
         return {"raw_error": str(exc)}
 participants=[]
-if pid and rpc:
-    participants.append({"name":"node-a","pid":int(pid),"rpc":rpc,"datadir":datadir,"chain_identity":load(identity)})
+if pid:
+    participants.append({"name":"node-a","pid":int(pid),"rpc":rpc or None,"datadir":datadir or None,"chain_identity":load(identity) if identity else None})
 report={"scenario":"CORE_VAULT","status":status,"canonical_input":{"artifact":fixture,"vector_id":vector},"canonical_input_chain_id":fixture_chain_id or None,"expected_devnet_chain_id":expected_chain_id,"live_devnet_chain_id":live_chain_id or None,"artifact_root":root,"participants":participants,"submitted_txid":txid or None,"mined_height":int(height) if height else None,"mined_hash":block_hash or None,"inclusion_node":"node-a" if status=="PASS" else None,"inclusion_proven":status=="PASS","live_submit_response":load(submit),"live_mine_response":load(mine),"live_block_response":load_file(block_path),"verdict":"PASS" if status=="PASS" else "FAIL"}
 if status != "PASS":
     report["failure_phase"] = phase; report["failure_reason"] = reason
 with open(path,"w",encoding="utf-8") as fh:
     json.dump(report,fh,indent=2,sort_keys=True); fh.write("\n")
 PY
-  then
-    [[ "${status}" == "PASS" ]] && return 1
-    return 0
-  fi
 }
 
-fail() { local status="$1" reason="$2"; write_report "${status}" "${reason}" || true; echo "${reason}" >&2; exit 1; }
+report_write_failed() { echo "FAIL_REPORT_WRITE_FAILED: report_writer_exit=$2 path=${REPORT_JSON} primary_status=$1 primary_phase=${PHASE}" >&2; }
+fail() { local status="$1" reason="$2" rc=0; write_report "${status}" "${reason}" || rc=$?; (( rc == 0 )) || report_write_failed "${status}" "${rc}"; echo "${reason}" >&2; exit 1; }
 
 rpc_json() {
-  local method="$1" addr="$2" path="$3" body_file="${4:-}"
-  python3 - "${method}" "${addr}" "${path}" "${body_file}" "${RPC_TIMEOUT_SECONDS}" <<'PY'
+  local method="$1" addr="$2" path="$3" body_file="${4:-}" timeout_s="${5:-${RPC_TIMEOUT_SECONDS}}"
+  python3 - "${method}" "${addr}" "${path}" "${body_file}" "${timeout_s}" <<'PY'
 import socket, sys, urllib.error, urllib.request
 method, addr, path, body_file, timeout_s = sys.argv[1:6]
 body = None
@@ -94,7 +91,7 @@ PY
 wait_ready_true() {
   local addr="$1" deadline=$((SECONDS + 30)) body
   while ((SECONDS < deadline)); do
-    if body="$(rpc_json GET "${addr}" /ready 2>/dev/null)" &&
+    if body="$(rpc_json GET "${addr}" /ready "" 2 2>/dev/null)" &&
       printf '%s' "${body}" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ready") is True else 1)' 2>/dev/null; then
       return 0
     fi
@@ -107,14 +104,17 @@ write_seed_go() {
   cat >"${SEED_GO}" <<'GO'
 package main
 import (
- "encoding/hex"; "encoding/json"; "flag"; "fmt"; "os"
+ "encoding/hex"; "encoding/json"; "flag"; "fmt"; "os"; "strconv"; "strings"
  "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
  "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 type fixture struct{ Vectors []struct{ ID string `json:"id"`; ExpectOK bool `json:"expect_ok"`; ExpectErr string `json:"expect_err"`; ChainIDHex string `json:"chain_id_hex"`; TxHex string `json:"tx_hex"`; Utxos []struct{ Txid string `json:"txid"`; Vout uint32 `json:"vout"`; Value uint64 `json:"value"`; CovenantType uint16 `json:"covenant_type"`; CovenantData string `json:"covenant_data"`; CreationHeight uint64 `json:"creation_height"`; CreatedByCoinbase bool `json:"created_by_coinbase"` } `json:"utxos"` } `json:"vectors"` }
+type blockResp struct{ Hash string `json:"hash"`; Height uint64 `json:"height"`; Canonical bool `json:"canonical"`; BlockHex string `json:"block_hex"` }
 func die(v any) { fmt.Fprintln(os.Stderr, v); os.Exit(2) }
+func checkBlock(respPath, txPath, txidHex, heightRaw, hashHex string) { wantHeight,err:=strconv.ParseUint(heightRaw,10,64); if err!=nil { die(err) }; raw,err:=os.ReadFile(respPath); if err!=nil { die(err) }; var r blockResp; if err:=json.Unmarshal(raw,&r); err!=nil { die(err) }; if r.Height!=wantHeight || strings.ToLower(r.Hash)!=strings.ToLower(hashHex) || !r.Canonical { die(fmt.Sprintf("block response mismatch height=%d/%d hash=%s/%s canonical=%v", r.Height,wantHeight,r.Hash,hashHex,r.Canonical)) }; txRaw,err:=os.ReadFile(txPath); if err!=nil { die(err) }; txBytes,err:=hex.DecodeString(strings.TrimSpace(string(txRaw))); if err!=nil { die(err) }; _,wantTxid,_,_,err:=consensus.ParseTx(txBytes); if err!=nil { die(err) }; if hex.EncodeToString(wantTxid[:])!=strings.ToLower(txidHex) { die("submit txid does not match parsed tx_hex") }; blockBytes,err:=hex.DecodeString(strings.TrimSpace(r.BlockHex)); if err!=nil { die(err) }; pb,err:=consensus.ParseBlockBytes(blockBytes); if err!=nil { die(err) }; gotHash,err:=consensus.BlockHash(pb.HeaderBytes); if err!=nil || hex.EncodeToString(gotHash[:])!=strings.ToLower(hashHex) { die("parsed block hash mismatch") }; for _,got:=range pb.Txids { if got==wantTxid { return } }; die("submitted CORE_VAULT txid missing from parsed live block txids") }
 func main() {
- datadir, fixturePath, vectorID, chainID := flag.String("datadir", "", ""), flag.String("fixture", "", ""), flag.String("vector-id", "", ""), flag.String("chain-id", "", ""); flag.Parse()
+ mode, datadir, fixturePath, vectorID, chainID := flag.String("mode", "seed", ""), flag.String("datadir", "", ""), flag.String("fixture", "", ""), flag.String("vector-id", "", ""), flag.String("chain-id", "", ""); blockRespPath, txHexPath, txidHex, blockHeight, blockHash := flag.String("block-response", "", ""), flag.String("tx-hex-file", "", ""), flag.String("txid", "", ""), flag.String("height", "", ""), flag.String("hash", "", ""); flag.Parse()
+ if *mode=="block-check" { checkBlock(*blockRespPath,*txHexPath,*txidHex,*blockHeight,*blockHash); return }
  raw, err := os.ReadFile(*fixturePath); if err != nil { die(fmt.Sprintf("read fixture: %v", err)) }
  var fx fixture; if err := json.Unmarshal(raw, &fx); err != nil { die(fmt.Sprintf("parse fixture JSON: %v", err)) }
  idx := -1; for i := range fx.Vectors { if fx.Vectors[i].ID == *vectorID { if idx >= 0 { die("duplicate CORE_VAULT vector id") }; idx = i } }
@@ -134,8 +134,8 @@ GO
 
 PHASE="fixture_preflight"
 [[ -f "${CANONICAL_FIXTURE_PATH}" ]] || fail FAIL_INPUT "canonical devnet CORE_VAULT fixture missing: ${CANONICAL_FIXTURE_PATH}"
-CANONICAL_FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${CANONICAL_FIXTURE_PATH}")"
-FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${REQUESTED_FIXTURE_PATH}")"
+CANONICAL_FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${CANONICAL_FIXTURE_PATH}")" || fail FAIL_INPUT "canonical fixture realpath failed: ${CANONICAL_FIXTURE_PATH}"
+FIXTURE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${REQUESTED_FIXTURE_PATH}")" || fail FAIL_INPUT "requested fixture realpath failed: ${REQUESTED_FIXTURE_PATH}"
 [[ "${FIXTURE_REAL}" == "${CANONICAL_FIXTURE_REAL}" ]] || fail FAIL_INPUT "non-canonical CORE_VAULT fixture rejected: actual=${FIXTURE_REAL} expected=${CANONICAL_FIXTURE_REAL}"
 [[ "${REQUESTED_VECTOR_ID}" == "${CANONICAL_VECTOR_ID}" ]] || fail FAIL_INPUT "non-canonical CORE_VAULT vector rejected: actual=${REQUESTED_VECTOR_ID} expected=${CANONICAL_VECTOR_ID}"
 write_seed_go || fail FAIL_LOCAL_HARNESS "failed to write seed program"
@@ -189,24 +189,25 @@ PY
 read -r MINED_HEIGHT MINED_HASH <<<"${MINE_PARSED}"
 
 PHASE="query_inclusion"
-BLOCK_JSON="$(rpc_json GET "${NODE_RPC_ADDR}" "/get_block?height=${MINED_HEIGHT}")" || fail FAIL_INCLUSION "get_block failed at height ${MINED_HEIGHT}: ${BLOCK_JSON}"
+get_block_rc=0
+BLOCK_JSON="$(rpc_json GET "${NODE_RPC_ADDR}" "/get_block?height=${MINED_HEIGHT}")" || get_block_rc=$?
 printf '%s' "${BLOCK_JSON}" >"${BLOCK_RESPONSE_JSON}" || fail FAIL_INCLUSION "failed to persist get_block response"
-BLOCK_CHECK="$(python3 - "${BLOCK_RESPONSE_JSON}" "${TX_HEX_FILE}" "${MINED_HEIGHT}" "${MINED_HASH}" 2>&1 <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as fh:
-    d=json.load(fh)
-with open(sys.argv[2], encoding="utf-8") as fh:
-    tx_hex=fh.read().strip().lower()
-want_height=int(sys.argv[3]); want_hash=sys.argv[4].lower()
-actual_height=d.get("height"); actual_hash=str(d.get("hash", "")).lower(); canonical=d.get("canonical"); block_hex=str(d.get("block_hex", "")).lower()
-if actual_height != want_height: raise SystemExit(f"height actual={actual_height} expected={want_height}")
-if actual_hash != want_hash: raise SystemExit(f"hash actual={actual_hash} expected={want_hash}")
-if canonical is not True: raise SystemExit(f"canonical actual={canonical} expected=True")
-if tx_hex not in block_hex: raise SystemExit("submitted tx_hex missing from live block_hex")
-PY
-)" || fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response_file=${BLOCK_RESPONSE_JSON}"
+if (( get_block_rc != 0 )); then
+  fail FAIL_INCLUSION "get_block failed at height ${MINED_HEIGHT} (rc=${get_block_rc}); persisted body at ${BLOCK_RESPONSE_JSON}: ${BLOCK_JSON}"
+fi
+BLOCK_CHECK="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${SEED_GO}" --mode block-check --block-response "${BLOCK_RESPONSE_JSON}" --tx-hex-file "${TX_HEX_FILE}" --txid "${SUBMITTED_TXID}" --height "${MINED_HEIGHT}" --hash "${MINED_HASH}" 2>&1)" || fail FAIL_INCLUSION "get_block inclusion check failed: ${BLOCK_CHECK}; response_file=${BLOCK_RESPONSE_JSON}"
 
 PHASE="pass"
-write_report PASS "" || { echo "failed to write PASS report: ${REPORT_JSON}" >&2; exit 1; }
-python3 -m json.tool "${REPORT_JSON}" >/dev/null || { echo "invalid PASS report: ${REPORT_JSON}" >&2; exit 1; }
+pass_rc=0
+write_report PASS "" || pass_rc=$?
+if (( pass_rc != 0 )); then
+  report_write_failed PASS "${pass_rc}"
+  exit "${pass_rc}"
+fi
+pass_rc=0
+python3 -m json.tool "${REPORT_JSON}" >/dev/null || pass_rc=$?
+if (( pass_rc != 0 )); then
+  echo "FAIL_REPORT_WRITE_FAILED: report_json_validation_exit=${pass_rc} path=${REPORT_JSON} primary_status=PASS primary_phase=${PHASE}" >&2
+  exit "${pass_rc}"
+fi
 echo "PASS: CORE_VAULT live evidence submit->mine->query succeeded; report=${REPORT_JSON}"
