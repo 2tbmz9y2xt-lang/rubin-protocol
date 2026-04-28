@@ -163,6 +163,61 @@ func mustRPCSignedTransferTx(
 	return txBytes, hex.EncodeToString(txid[:])
 }
 
+func mustRPCSignedAnchorOutputTx(
+	t *testing.T,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	input consensus.Outpoint,
+	signer *consensus.MLDSA87Keypair,
+) []byte {
+	t.Helper()
+	entry, ok := utxos[input]
+	if !ok {
+		t.Fatalf("missing utxo for %x:%d", input.Txid, input.Vout)
+	}
+	if entry.Value < 1 {
+		t.Fatalf("utxo value=%d, want at least 1 to pay anchor helper fee", entry.Value)
+	}
+	changeAddress := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	var anchorData [32]byte
+	anchorData[0] = 0x42
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 2,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: input.Txid,
+			PrevVout: input.Vout,
+			Sequence: 0,
+		}},
+		Outputs: []consensus.TxOutput{
+			{
+				Value:        0,
+				CovenantType: consensus.COV_TYPE_ANCHOR,
+				CovenantData: anchorData[:],
+			},
+			{
+				Value:        entry.Value - 1,
+				CovenantType: consensus.COV_TYPE_P2PK,
+				CovenantData: append([]byte(nil), changeAddress...),
+			},
+		},
+		Locktime: 0,
+	}
+	if err := consensus.SignTransaction(tx, utxos, node.DevnetGenesisChainID(), signer); err != nil {
+		t.Fatalf("SignTransaction(anchor): %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx(anchor): %v", err)
+	}
+	if _, _, _, consumed, err := consensus.ParseTx(txBytes); err != nil {
+		t.Fatalf("ParseTx(anchor): %v", err)
+	} else if consumed != len(txBytes) {
+		t.Fatalf("anchor consumed=%d, want %d", consumed, len(txBytes))
+	}
+	return txBytes
+}
+
 func TestDevnetRPCGetTipNoTip(t *testing.T) {
 	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, false)))
 	defer server.Close()
@@ -762,6 +817,67 @@ func TestDevnetRPCSubmitTxRejectsDuplicateMempoolEntry(t *testing.T) {
 	}
 }
 
+func TestDevnetRPCSubmitTxRejectsNonCoinbaseCoreAnchorByPolicy(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+
+	var announceCalled bool
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, func(tx []byte) error {
+		announceCalled = true
+		return nil
+	})
+	txBytes := mustRPCSignedAnchorOutputTx(t, utxos, input, fromKey)
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(txBytes)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d, want 422", resp.StatusCode)
+	}
+
+	var got submitTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Accepted {
+		t.Fatalf("accepted=true, want false")
+	}
+	if got.TxID != "" {
+		t.Fatalf("txid=%q, want empty rejected response", got.TxID)
+	}
+	if !strings.Contains(got.Error, "non-coinbase CORE_ANCHOR") {
+		t.Fatalf("error=%q, want non-coinbase CORE_ANCHOR policy reject", got.Error)
+	}
+	if announceCalled {
+		t.Fatalf("announceTx was called for rejected non-coinbase CORE_ANCHOR tx")
+	}
+	if got := state.mempool.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
+	}
+	admission := state.mempool.AdmissionCounts()
+	if admission.Rejected != 1 || admission.Accepted != 0 || admission.Conflict != 0 || admission.Unavailable != 0 {
+		t.Fatalf("admission counts=%+v, want one rejected AddTx", admission)
+	}
+	metrics := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		`rubin_node_submit_tx_total{result="rejected"} 1`,
+		`rubin_node_mempool_admit_total{result="rejected"} 1`,
+		`rubin_node_mempool_txs 0`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("missing %q in metrics %q", want, metrics)
+		}
+	}
+}
+
 func TestDevnetRPCMetricsEndpoint(t *testing.T) {
 	server := httptest.NewServer(newDevnetRPCHandler(mustRPCState(t, true)))
 	defer server.Close()
@@ -1358,7 +1474,7 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if !got.Mined || got.Height == nil || *got.Height != 1 || got.TxCount == nil || *got.TxCount < 1 {
+	if !got.Mined || got.Height == nil || *got.Height != 1 || got.TxCount == nil || *got.TxCount != 1 {
 		t.Fatalf("unexpected response: %+v", got)
 	}
 	if got.Nonce == nil {
@@ -1377,6 +1493,33 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	}
 	if got.BlockHash == nil || *got.BlockHash != hex.EncodeToString(announcedHash[:]) {
 		t.Fatalf("announced block hash=%x response_block_hash=%v", announcedHash, got.BlockHash)
+	}
+	if len(parsedBlock.Txs) != 1 {
+		t.Fatalf("mined block tx count=%d, want 1 coinbase tx only", len(parsedBlock.Txs))
+	}
+	coinbase := parsedBlock.Txs[0]
+	var zeroTxid [32]byte
+	if coinbase.TxKind != 0x00 || coinbase.TxNonce != 0 || len(coinbase.Witness) != 0 || len(coinbase.Inputs) != 1 {
+		t.Fatalf("tx[0] is not a canonical coinbase shape: %+v", coinbase)
+	}
+	if coinbase.Inputs[0].PrevTxid != zeroTxid || coinbase.Inputs[0].PrevVout != ^uint32(0) || coinbase.Inputs[0].Sequence != ^uint32(0) || len(coinbase.Inputs[0].ScriptSig) != 0 {
+		t.Fatalf("tx[0] coinbase input mismatch: %+v", coinbase.Inputs[0])
+	}
+	var anchorOutputs int
+	for _, out := range coinbase.Outputs {
+		if out.CovenantType != consensus.COV_TYPE_ANCHOR {
+			continue
+		}
+		anchorOutputs++
+		if out.Value != 0 {
+			t.Fatalf("coinbase CORE_ANCHOR value=%d, want 0", out.Value)
+		}
+		if len(out.CovenantData) != 32 {
+			t.Fatalf("coinbase CORE_ANCHOR covenant_data_len=%d, want 32", len(out.CovenantData))
+		}
+	}
+	if anchorOutputs != 1 {
+		t.Fatalf("coinbase CORE_ANCHOR outputs=%d, want 1", anchorOutputs)
 	}
 }
 
