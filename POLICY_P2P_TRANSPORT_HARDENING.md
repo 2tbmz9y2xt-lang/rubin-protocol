@@ -80,7 +80,8 @@ Disconnect the peer if:
 3. Payload progress falls below the minimum rate.
 4. Payload exceeds maximum read bytes.
 5. Frame checksum fails repeatedly.
-6. Compact payload is malformed and peer score is below disconnect threshold.
+6. Compact payload is malformed and peer score reaches or exceeds disconnect
+   threshold.
 
 If queued decoded caps are exceeded, stop admitting more decoded relay work from
 the peer until backlog falls below cap. Persistent offenders SHOULD be penalized
