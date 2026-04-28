@@ -6,17 +6,16 @@ package node
 // `testCoreExtProfiles` mock provider; this file complements them by
 // exercising the same admit / mine paths through a
 // `consensus.NewStaticCoreExtProfileProvider`-constructed
-// CoreExtProfileProvider — i.e. the exact provider type that
-// clients/go/cmd/rubin-node/main.go's buildGenesisCoreExtProfiles returns when the
-// operator passes --genesis-file with a populated core_ext_profiles[]
-// section.
+// CoreExtProfileProvider — i.e. the exact provider type that the rubin-node
+// binary's buildGenesisCoreExtProfiles returns when the operator passes
+// --genesis-file with a populated core_ext_profiles[] section.
 //
-// In production:
-//   * clients/go/cmd/rubin-node/main.go:800 calls buildGenesisCoreExtProfiles(...) and
+// In production (function/field anchors only; line numbers are intentionally
+// omitted to keep this comment stable as the rubin-node main.go evolves):
+//   * parseGenesisConfigFull calls buildGenesisCoreExtProfiles(...) and
 //     receives a consensus.NewStaticCoreExtProfileProvider(...) back;
-//   * clients/go/cmd/rubin-node/main.go:403 writes that provider into mempoolCfg;
-//   * clients/go/cmd/rubin-node/main.go:456 (and :513) writes the same provider into
-//     minerCfg.
+//   * the resulting provider is written into mempoolCfg.CoreExtProfiles;
+//   * the same provider is written into minerCfg.CoreExtProfiles.
 //
 // This test reproduces the wiring contract in-process: it builds a provider
 // via the same public constructor that buildGenesisCoreExtProfiles uses, then
@@ -37,6 +36,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,7 +44,7 @@ import (
 )
 
 // staticCoreExtProvider returns a CoreExtProfileProvider built via the same
-// public constructor that clients/go/cmd/rubin-node/main.go's buildGenesisCoreExtProfiles
+// public constructor that the rubin-node binary's buildGenesisCoreExtProfiles
 // uses when --genesis-file core_ext_profiles[] is non-empty.
 func staticCoreExtProvider(t *testing.T, extID uint16, activationHeight uint64) consensus.CoreExtProfileProvider {
 	t.Helper()
@@ -54,9 +54,15 @@ func staticCoreExtProvider(t *testing.T, extID uint16, activationHeight uint64) 
 		// NewStaticCoreExtProfileProvider rejects deployments with empty
 		// AllowedSuites; the production buildGenesisCoreExtProfiles surfaces
 		// the same constraint via the genesis JSON's allowed_suite_ids[]
-		// field. The values here mirror clients/go/cmd/rubin-node/main_test.go's
+		// field. The values here mirror the cmd/rubin-node main_test.go
 		// TestParseGenesisConfigFullBuildsCoreExtProfiles fixture.
-		AllowedSuites: map[uint8]struct{}{1: {}, 3: {}},
+		AllowedSuites: map[uint8]struct{}{
+			consensus.SUITE_ID_ML_DSA_87: {},
+			// suite_id=3 has no named consensus constant in this codebase;
+			// kept as a raw placeholder fixture value matching the parser
+			// test fixture's allowed_suite_ids=[1,3] shape.
+			3: {},
+		},
 	}}
 	provider, err := consensus.NewStaticCoreExtProfileProvider(deployments)
 	if err != nil {
@@ -110,11 +116,22 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 		// reason. TxAdmitRejected is a broad bucket that also covers parse,
 		// signature, and other check failures; matching the explicit policy
 		// message proves this rejection came from the CORE_EXT pre-ACTIVE
-		// gate (RejectCoreExtTxPreActivation in clients/go/node/policy_core_ext.go),
-		// not from an unrelated reject path.
-		const wantOutputReason = "CORE_EXT output pre-ACTIVE ext_id=7"
+		// gate (RejectCoreExtTxPreActivation), not from an unrelated reject
+		// path. The expected substring is built from the test's extID
+		// constant so renaming extID will not silently break the assertion.
+		wantOutputReason := fmt.Sprintf("CORE_EXT output pre-ACTIVE ext_id=%d", extID)
 		if !strings.Contains(err.Error(), wantOutputReason) {
 			t.Fatalf("AddTx error %q does not contain %q", err.Error(), wantOutputReason)
+		}
+
+		// Cover the sibling RelayMetadata path. /submit_tx invokes
+		// state.mempool.AddTx, but the relay layer uses RelayMetadata
+		// (admissionSnapshotForInputs) which is a distinct snapshot path;
+		// the same policy gate must reject pre-ACTIVE CORE_EXT outputs on
+		// both. Proof assertion: mp.RelayMetadata returns a non-nil error
+		// whose message contains wantOutputReason.
+		if _, relayErr := mp.RelayMetadata(txBytes); relayErr == nil || !strings.Contains(relayErr.Error(), wantOutputReason) {
+			t.Fatalf("RelayMetadata error %v does not contain %q", relayErr, wantOutputReason)
 		}
 	})
 
@@ -185,9 +202,20 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 		if admit.Kind != TxAdmitRejected {
 			t.Fatalf("AddTx error kind=%v, want %v (TxAdmitRejected)", admit.Kind, TxAdmitRejected)
 		}
-		const wantSpendReason = "CORE_EXT spend pre-ACTIVE ext_id=7"
+		wantSpendReason := fmt.Sprintf("CORE_EXT spend pre-ACTIVE ext_id=%d", extID)
 		if !strings.Contains(err.Error(), wantSpendReason) {
 			t.Fatalf("AddTx error %q does not contain %q", err.Error(), wantSpendReason)
+		}
+
+		// Cover the sibling RelayMetadata path on the input/spend branch.
+		// Existing mempool_test.go:TestMempoolPolicyRejectsCoreExtSpendPreActivation
+		// exercises both AddTx and RelayMetadata against a mock provider;
+		// this assertion proves the same contract holds against the
+		// production NewStaticCoreExtProfileProvider provider type. Proof
+		// assertion: mp.RelayMetadata returns a non-nil error whose message
+		// contains wantSpendReason.
+		if _, relayErr := mp.RelayMetadata(txBytes); relayErr == nil || !strings.Contains(relayErr.Error(), wantSpendReason) {
+			t.Fatalf("RelayMetadata error %v does not contain %q", relayErr, wantSpendReason)
 		}
 	})
 
