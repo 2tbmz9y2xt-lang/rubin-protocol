@@ -153,6 +153,15 @@ func TestPVShadowStats_NilEngine(t *testing.T) {
 	}
 }
 
+func TestBlockApplyCountsNilEngine(t *testing.T) {
+	var nilEngine *SyncEngine
+	if got := nilEngine.BlockApplyCounts(); got != (BlockApplyCounts{}) {
+		t.Fatalf("nil BlockApplyCounts=%+v, want zero", got)
+	}
+	nilEngine.noteBlockApplyAccepted()
+	nilEngine.noteBlockApplyRejected()
+}
+
 func TestPVShadowMismatch_IsBounded(t *testing.T) {
 	st := NewChainState()
 	cfg := DefaultSyncConfig(nil, [32]byte{}, "")
