@@ -577,7 +577,7 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 		// Wrap with a TxError so peer attribution is class-closed for both
 		// genesis-identity classes (chain_id mismatch and genesis_hash
 		// mismatch below).
-		return nil, blockApplyMetricNone, &consensus.TxError{
+		return nil, blockApplyMetricRejected, &consensus.TxError{
 			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
 			Msg:  "genesis chain_id mismatch",
 		}
@@ -599,7 +599,7 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	// `var txErr *consensus.TxError; errors.As(err, &txErr)` pattern in
 	// p2p/handlers_block.go.
 	if blockHeight == 0 && s.cfg.ChainID == devnetGenesisChainID && blockHash != devnetGenesisBlockHash {
-		return nil, blockApplyMetricNone, &consensus.TxError{
+		return nil, blockApplyMetricRejected, &consensus.TxError{
 			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
 			Msg:  "genesis_hash mismatch",
 		}

@@ -1262,9 +1262,11 @@ func TestRenderPrometheusMetricsExposesBlockApplyCountersReadOnly(t *testing.T) 
 				t.Fatalf("missing %q in metrics body %q", want, body)
 			}
 		}
-		if strings.Contains(body, `rubin_node_block_apply_total{result="`) &&
-			(strings.Contains(body, `error=`) || strings.Contains(body, `hash=`) || strings.Contains(body, `peer=`)) {
-			t.Fatalf("block apply metrics leaked unbounded labels in body %q", body)
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, `rubin_node_block_apply_total{`) &&
+				(strings.Contains(line, `error=`) || strings.Contains(line, `hash=`) || strings.Contains(line, `peer=`)) {
+				t.Fatalf("block apply metrics leaked unbounded labels in line %q from body %q", line, body)
+			}
 		}
 	}
 	if afterRender := state.syncEngine.BlockApplyCounts(); afterRender != beforeRender {

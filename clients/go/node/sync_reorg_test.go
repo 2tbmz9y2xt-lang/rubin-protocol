@@ -425,18 +425,41 @@ func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 		t.Fatalf("expected nil sync engine error")
 	}
 
-	engine, _, _ := newReorgTestEngine(t)
+	target := consensus.POW_LIMIT
+	newEmptyEngine := func(t *testing.T, chainID [32]byte) *SyncEngine {
+		t.Helper()
+		dir := t.TempDir()
+		store, err := OpenBlockStore(BlockStorePath(dir))
+		if err != nil {
+			t.Fatalf("OpenBlockStore: %v", err)
+		}
+		engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, chainID, ChainStatePath(dir)))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		return engine
+	}
+
+	engine := newEmptyEngine(t, devnetGenesisChainID)
 	if _, err := engine.applyCanonicalParsedBlock(nil, nil, nil); err == nil {
 		t.Fatalf("expected nil parsed block error")
 	}
 
-	engine.cfg.ChainID = [32]byte{0x99}
-	pb, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
-	if err != nil {
-		t.Fatalf("ParseBlockBytes(genesis): %v", err)
-	}
-	if _, err := engine.applyCanonicalParsedBlock(pb, devnetGenesisBlockBytes, nil); err == nil {
+	engine = newEmptyEngine(t, [32]byte{0x99})
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err == nil {
 		t.Fatalf("expected genesis chain_id mismatch")
+	}
+	if got := engine.BlockApplyCounts(); got.Accepted != 0 || got.Rejected != 1 {
+		t.Fatalf("genesis chain_id mismatch BlockApplyCounts=%+v, want accepted=0 rejected=1", got)
+	}
+
+	engine = newEmptyEngine(t, devnetGenesisChainID)
+	badGenesis := buildSingleTxBlock(t, [32]byte{}, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 0, 0))
+	if _, err := engine.ApplyBlock(badGenesis, nil); err == nil {
+		t.Fatalf("expected genesis_hash mismatch")
+	}
+	if got := engine.BlockApplyCounts(); got.Accepted != 0 || got.Rejected != 1 {
+		t.Fatalf("genesis_hash mismatch BlockApplyCounts=%+v, want accepted=0 rejected=1", got)
 	}
 }
 
