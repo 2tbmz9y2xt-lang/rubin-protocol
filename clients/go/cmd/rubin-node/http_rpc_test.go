@@ -174,6 +174,9 @@ func mustRPCSignedAnchorOutputTx(
 	if !ok {
 		t.Fatalf("missing utxo for %x:%d", input.Txid, input.Vout)
 	}
+	if entry.Value < 1 {
+		t.Fatalf("utxo value=%d, want at least 1 to pay anchor helper fee", entry.Value)
+	}
 	changeAddress := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
 	var anchorData [32]byte
 	anchorData[0] = 0x42
