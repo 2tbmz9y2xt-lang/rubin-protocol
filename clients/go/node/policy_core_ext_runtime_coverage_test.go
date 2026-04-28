@@ -31,6 +31,7 @@ package node
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -73,10 +74,11 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 		fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 		st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
 
-		// Activation height is far ahead of the seeded chainstate (which has
-		// a single UTXO at creation_height=0), so the next-block height is
-		// strictly below activation_height and the CORE_EXT output tx must be
-		// rejected pre-ACTIVE by the mempool admit path.
+		// Activation height is far ahead of the seeded chainstate
+		// (testSpendableChainState seeds spendable P2PK UTXOs with
+		// CreationHeight: 1 and sets st.Height = 100), so the next-block
+		// height is still strictly below activation_height and the CORE_EXT
+		// output tx must be rejected pre-ACTIVE by the mempool admit path.
 		profiles := staticCoreExtProvider(t, extID, 1_000_000)
 		mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 			PolicyRejectCoreExtPreActivation: true,
@@ -97,6 +99,16 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 		}
 		if admit.Kind != TxAdmitRejected {
 			t.Fatalf("AddTx error kind=%v, want %v (TxAdmitRejected)", admit.Kind, TxAdmitRejected)
+		}
+		// Tighten the assertion to the exact CORE_EXT pre-ACTIVE policy
+		// reason. TxAdmitRejected is a broad bucket that also covers parse,
+		// signature, and other check failures; matching the explicit policy
+		// message proves this rejection came from the CORE_EXT pre-ACTIVE
+		// gate (RejectCoreExtTxPreActivation in clients/go/node/policy_core_ext.go),
+		// not from an unrelated reject path.
+		const wantOutputReason = "CORE_EXT output pre-ACTIVE ext_id=7"
+		if !strings.Contains(err.Error(), wantOutputReason) {
+			t.Fatalf("AddTx error %q does not contain %q", err.Error(), wantOutputReason)
 		}
 	})
 
@@ -119,6 +131,56 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 		txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 90, 1, 1, fromKey, fromAddress, extID)
 		if err := mp.AddTx(txBytes); err != nil {
 			t.Fatalf("expected ACTIVE-profile CORE_EXT output admission, got %v", err)
+		}
+	})
+
+	t.Run("MempoolRejectsPreActiveCoreExtSpend", func(t *testing.T) {
+		// CORE_EXT spend coverage: RejectCoreExtTxPreActivation enforces the
+		// pre-ACTIVE gate on transaction *inputs* whose previous UTXO already
+		// has CovenantType=CORE_EXT, in addition to outputs. The output
+		// sub-tests above prove the output gate; this sub-test proves the
+		// spend gate through the production provider type. Without this
+		// sub-test the runtime coverage would not exercise the input branch
+		// of RejectCoreExtTxPreActivation against the real provider.
+		toKey := mustNodeMLDSA87Keypair(t)
+		toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+		var prev [32]byte
+		prev[0] = 0x55
+		st := NewChainState()
+		st.HasTip = true
+		st.Height = 100
+		st.TipHash[0] = 0x11
+		st.Utxos[consensus.Outpoint{Txid: prev, Vout: 0}] = consensus.UtxoEntry{
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_CORE_EXT,
+			CovenantData: coreExtCovenantDataForNodeTest(extID, nil),
+		}
+
+		profiles := staticCoreExtProvider(t, extID, 1_000_000)
+		mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+			PolicyRejectCoreExtPreActivation: true,
+			CoreExtProfiles:                  profiles,
+		})
+		if err != nil {
+			t.Fatalf("NewMempoolWithConfig: %v", err)
+		}
+
+		txBytes := mustBuildCoreExtSpendTx(t, prev, 99, 1, 1, toAddress)
+		err = mp.AddTx(txBytes)
+		if err == nil {
+			t.Fatalf("expected mempool to reject pre-ACTIVE CORE_EXT spend, got nil error")
+		}
+		var admit *TxAdmitError
+		if !errors.As(err, &admit) {
+			t.Fatalf("expected *TxAdmitError, got %T: %v", err, err)
+		}
+		if admit.Kind != TxAdmitRejected {
+			t.Fatalf("AddTx error kind=%v, want %v (TxAdmitRejected)", admit.Kind, TxAdmitRejected)
+		}
+		const wantSpendReason = "CORE_EXT spend pre-ACTIVE ext_id=7"
+		if !strings.Contains(err.Error(), wantSpendReason) {
+			t.Fatalf("AddTx error %q does not contain %q", err.Error(), wantSpendReason)
 		}
 	})
 
