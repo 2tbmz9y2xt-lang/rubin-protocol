@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -78,6 +79,16 @@ func mustRPCStateWithSpendableUTXO(
 	announceTx func([]byte) error,
 ) (*devnetRPCState, consensus.Outpoint, map[consensus.Outpoint]consensus.UtxoEntry) {
 	t.Helper()
+	return mustRPCStateWithSpendableUTXOAndMempoolConfig(t, fromAddress, announceTx, node.DefaultMempoolConfig())
+}
+
+func mustRPCStateWithSpendableUTXOAndMempoolConfig(
+	t *testing.T,
+	fromAddress []byte,
+	announceTx func([]byte) error,
+	mempoolConfig node.MempoolConfig,
+) (*devnetRPCState, consensus.Outpoint, map[consensus.Outpoint]consensus.UtxoEntry) {
+	t.Helper()
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
 	chainState := node.NewChainState()
@@ -103,9 +114,9 @@ func mustRPCStateWithSpendableUTXO(
 	if err != nil {
 		t.Fatalf("NewSyncEngine: %v", err)
 	}
-	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	mempool, err := node.NewMempoolWithConfig(chainState, blockStore, node.DevnetGenesisChainID(), mempoolConfig)
 	if err != nil {
-		t.Fatalf("NewMempool: %v", err)
+		t.Fatalf("NewMempoolWithConfig: %v", err)
 	}
 	syncEngine.SetMempool(mempool)
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
@@ -159,6 +170,96 @@ func mustRPCSignedTransferTx(
 	}
 	if consumed != len(txBytes) {
 		t.Fatalf("consumed=%d, want %d", consumed, len(txBytes))
+	}
+	return txBytes, hex.EncodeToString(txid[:])
+}
+
+func mustRPCSignedDaCommitTx(
+	t *testing.T,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	input consensus.Outpoint,
+	fee uint64,
+	nonce uint64,
+	signer *consensus.MLDSA87Keypair,
+	toAddress []byte,
+	commitTxPayload []byte,
+	singleChunkPayload []byte,
+) ([]byte, string) {
+	t.Helper()
+	if len(commitTxPayload) == 0 {
+		t.Fatalf("DA_COMMIT tx payload must be non-empty")
+	}
+	if len(singleChunkPayload) == 0 {
+		t.Fatalf("DA_COMMIT chunk payload must be non-empty")
+	}
+	entry, ok := utxos[input]
+	if !ok {
+		t.Fatalf("missing utxo for %x:%d", input.Txid, input.Vout)
+	}
+	if entry.Value < fee {
+		t.Fatalf("utxo value=%d, want at least fee=%d", entry.Value, fee)
+	}
+	chunkPayloadCommitment := sha3.Sum256(singleChunkPayload)
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x01,
+		TxNonce: nonce,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: input.Txid,
+			PrevVout: input.Vout,
+			Sequence: 0,
+		}},
+		Outputs: []consensus.TxOutput{{
+			Value:        0,
+			CovenantType: consensus.COV_TYPE_DA_COMMIT,
+			CovenantData: chunkPayloadCommitment[:],
+		}, {
+			Value:        entry.Value - fee,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), toAddress...),
+		}},
+		Locktime:  0,
+		DaPayload: append([]byte(nil), commitTxPayload...),
+		DaCommitCore: &consensus.DaCommitCore{
+			ChunkCount:  1,
+			BatchNumber: 1,
+		},
+	}
+	if err := consensus.SignTransaction(tx, utxos, node.DevnetGenesisChainID(), signer); err != nil {
+		t.Fatalf("SignTransaction(da): %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx(da): %v", err)
+	}
+	parsed, txid, _, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(da): %v", err)
+	}
+	if consumed != len(txBytes) {
+		t.Fatalf("da consumed=%d, want %d", consumed, len(txBytes))
+	}
+	if parsed.TxKind != 0x01 || parsed.DaCommitCore == nil || len(parsed.DaPayload) == 0 {
+		t.Fatalf("parsed DA_COMMIT shape mismatch: tx_kind=%d da_core_nil=%t da_payload_len=%d", parsed.TxKind, parsed.DaCommitCore == nil, len(parsed.DaPayload))
+	}
+	if !bytes.Equal(parsed.DaPayload, commitTxPayload) {
+		t.Fatalf("parsed DA_COMMIT payload mismatch")
+	}
+	daCommitOutputs := 0
+	for _, out := range parsed.Outputs {
+		if out.CovenantType != consensus.COV_TYPE_DA_COMMIT {
+			continue
+		}
+		daCommitOutputs++
+		if out.Value != 0 {
+			t.Fatalf("CORE_DA_COMMIT output value=%d, want 0", out.Value)
+		}
+		if !bytes.Equal(out.CovenantData, chunkPayloadCommitment[:]) {
+			t.Fatalf("CORE_DA_COMMIT output commitment mismatch")
+		}
+	}
+	if daCommitOutputs != 1 {
+		t.Fatalf("CORE_DA_COMMIT outputs=%d, want 1", daCommitOutputs)
 	}
 	return txBytes, hex.EncodeToString(txid[:])
 }
@@ -774,6 +875,88 @@ func TestDevnetRPCSubmitTxAcceptsValidTxAndAnnounces(t *testing.T) {
 	}
 }
 
+func TestDevnetRPCSubmitTxAcceptsDaCommitUnderDefaultPolicy(t *testing.T) {
+	if got := node.DefaultMempoolConfig().PolicyDaSurchargePerByte; got != 0 {
+		t.Fatalf("default DA surcharge=%d, want 0 for current default operator submit policy", got)
+	}
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	var announced [][]byte
+	state, input, utxos := mustRPCStateWithSpendableUTXO(t, fromAddress, func(tx []byte) error {
+		announced = append(announced, append([]byte(nil), tx...))
+		return nil
+	})
+	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 10, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(txBytes)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+
+	var got submitTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !got.Accepted {
+		t.Fatalf("accepted=false, want true")
+	}
+	if got.TxID != wantTxID {
+		t.Fatalf("txid=%q, want parsed DA_COMMIT txid %q", got.TxID, wantTxID)
+	}
+	if got.Error != "" {
+		t.Fatalf("error=%q, want empty", got.Error)
+	}
+	if len(announced) != 1 {
+		t.Fatalf("announceTx calls=%d, want 1", len(announced))
+	}
+	if !bytes.Equal(announced[0], txBytes) {
+		t.Fatalf("announceTx payload mismatch")
+	}
+	if got := state.mempool.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1", got)
+	}
+	wantTxIDBytes, err := hex.DecodeString(wantTxID)
+	if err != nil || len(wantTxIDBytes) != 32 {
+		t.Fatalf("parsed DA_COMMIT txid %q did not decode to 32 bytes", wantTxID)
+	}
+	var wantTxIDArray [32]byte
+	copy(wantTxIDArray[:], wantTxIDBytes)
+	mempoolTx, ok := state.mempool.TxByID(wantTxIDArray)
+	if !ok {
+		t.Fatalf("mempool missing accepted DA_COMMIT txid %q", wantTxID)
+	}
+	if !bytes.Equal(mempoolTx, txBytes) {
+		t.Fatalf("mempool tx bytes mismatch for accepted DA_COMMIT txid %q", wantTxID)
+	}
+	admission := state.mempool.AdmissionCounts()
+	if admission.Accepted != 1 || admission.Rejected != 0 || admission.Conflict != 0 || admission.Unavailable != 0 {
+		t.Fatalf("admission counts=%+v, want one accepted AddTx", admission)
+	}
+	metrics := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		`rubin_node_submit_tx_total{result="accepted"} 1`,
+		`rubin_node_mempool_admit_total{result="accepted"} 1`,
+		`rubin_node_mempool_txs 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("missing %q in metrics %q", want, metrics)
+		}
+	}
+}
+
 func TestDevnetRPCSubmitTxRejectsDuplicateMempoolEntry(t *testing.T) {
 	fromKey := mustRPCMLDSA87Keypair(t)
 	toKey := mustRPCMLDSA87Keypair(t)
@@ -814,6 +997,71 @@ func TestDevnetRPCSubmitTxRejectsDuplicateMempoolEntry(t *testing.T) {
 	metrics := renderPrometheusMetrics(state)
 	if !strings.Contains(metrics, `rubin_node_submit_tx_total{result="conflict"} 1`) {
 		t.Fatalf("missing conflict metric in %q", metrics)
+	}
+}
+
+func TestDevnetRPCSubmitTxRejectsLowFeeDaCommitWhenSurchargePolicyEnabled(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	var announceCalled bool
+	mempoolConfig := node.DefaultMempoolConfig()
+	mempoolConfig.PolicyDaSurchargePerByte = 1
+	state, input, utxos := mustRPCStateWithSpendableUTXOAndMempoolConfig(t, fromAddress, func(tx []byte) error {
+		announceCalled = true
+		return nil
+	}, mempoolConfig)
+	txBytes, _ := mustRPCSignedDaCommitTx(t, utxos, input, 1, 8, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(txBytes)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d, want 422", resp.StatusCode)
+	}
+
+	var got submitTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Accepted {
+		t.Fatalf("accepted=true, want false")
+	}
+	if got.TxID != "" {
+		t.Fatalf("txid=%q, want empty rejected response", got.TxID)
+	}
+	if !strings.Contains(got.Error, "DA fee below policy minimum") {
+		t.Fatalf("error=%q, want DA surcharge policy reject", got.Error)
+	}
+	if announceCalled {
+		t.Fatalf("announceTx was called for rejected DA_COMMIT tx")
+	}
+	if got := state.mempool.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
+	}
+	admission := state.mempool.AdmissionCounts()
+	if admission.Rejected != 1 || admission.Accepted != 0 || admission.Conflict != 0 || admission.Unavailable != 0 {
+		t.Fatalf("admission counts=%+v, want one rejected AddTx", admission)
+	}
+	metrics := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		`rubin_node_submit_tx_total{result="rejected"} 1`,
+		`rubin_node_mempool_admit_total{result="rejected"} 1`,
+		`rubin_node_mempool_txs 0`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("missing %q in metrics %q", want, metrics)
+		}
 	}
 }
 
