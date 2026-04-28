@@ -1162,6 +1162,7 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		inIBD              float64
 		reorgCount         uint64
 		lastReorgDepth     uint64
+		blockApply         node.BlockApplyCounts
 		peerCount          float64
 		mempoolTxs         float64
 		mempoolBytes       float64
@@ -1174,6 +1175,7 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		bestKnownHeight = float64(state.syncEngine.BestKnownHeight())
 		reorgCount = state.syncEngine.ReorgCount()
 		lastReorgDepth = state.syncEngine.LastReorgDepth()
+		blockApply = state.syncEngine.BlockApplyCounts()
 		if state.syncEngine.IsInIBD(state.now()) {
 			inIBD = 1
 		}
@@ -1224,6 +1226,10 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		"# HELP rubin_node_last_reorg_depth Depth of the most recent canonical reorg, or 0 when no reorg depth is currently recorded.",
 		"# TYPE rubin_node_last_reorg_depth gauge",
 		fmt.Sprintf("rubin_node_last_reorg_depth %d", lastReorgDepth),
+		"# HELP rubin_node_block_apply_total Total canonical block apply outcomes by result label.",
+		"# TYPE rubin_node_block_apply_total counter",
+		fmt.Sprintf(`rubin_node_block_apply_total{result="accepted"} %d`, blockApply.Accepted),
+		fmt.Sprintf(`rubin_node_block_apply_total{result="rejected"} %d`, blockApply.Rejected),
 		"# HELP rubin_node_peer_count Currently tracked peers.",
 		"# TYPE rubin_node_peer_count gauge",
 		fmt.Sprintf("rubin_node_peer_count %.0f", peerCount),

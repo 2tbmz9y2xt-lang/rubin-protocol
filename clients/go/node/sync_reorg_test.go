@@ -173,11 +173,15 @@ func blockHeaderBytes(t *testing.T, blockBytes []byte) []byte {
 
 func TestApplyBlockWithReorgRejectsMissingParent(t *testing.T) {
 	engine, _, target := newReorgTestEngine(t)
+	before := engine.BlockApplyCounts()
 	var missingParent [32]byte
 	missingParent[0] = 0x42
 	block := buildSingleTxBlock(t, missingParent, target, 77, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
 	if _, err := engine.ApplyBlockWithReorg(block, nil); !errors.Is(err, ErrParentNotFound) {
 		t.Fatalf("ApplyBlockWithReorg(missing parent) err=%v, want ErrParentNotFound", err)
+	}
+	if after := engine.BlockApplyCounts(); after != before {
+		t.Fatalf("missing-parent block changed BlockApplyCounts from %+v to %+v", before, after)
 	}
 }
 
@@ -198,8 +202,12 @@ func TestApplyBlockWithReorgRejectsInvalidNonHeavierSideBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockHash(invalid B1): %v", err)
 	}
+	beforeInvalidSide := engine.BlockApplyCounts()
 	if _, err := engine.ApplyBlockWithReorg(invalidB1, nil); err == nil {
 		t.Fatalf("expected invalid competing branch rejection")
+	}
+	if after := engine.BlockApplyCounts(); after != beforeInvalidSide {
+		t.Fatalf("invalid non-canonical side branch changed BlockApplyCounts from %+v to %+v", beforeInvalidSide, after)
 	}
 
 	if engine.chainState.Height != 1 || engine.chainState.TipHash != summaryA1.BlockHash {
@@ -956,9 +964,13 @@ func TestApplyBlockWithReorgKeepsLighterSideBranchOffCanonicalTip(t *testing.T) 
 	}
 
 	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 4, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	beforeSide := engine.BlockApplyCounts()
 	sideSummary, err := engine.ApplyBlockWithReorg(sideB1, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	if after := engine.BlockApplyCounts(); after != beforeSide {
+		t.Fatalf("lighter side branch changed BlockApplyCounts from %+v to %+v", beforeSide, after)
 	}
 	if sideSummary.BlockHeight != 1 {
 		t.Fatalf("side branch synthetic height=%d, want 1", sideSummary.BlockHeight)

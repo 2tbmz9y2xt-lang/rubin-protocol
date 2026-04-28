@@ -1163,6 +1163,7 @@ func TestRenderPrometheusMetricsIncludesV1Names(t *testing.T) {
 		"rubin_node_in_ibd",
 		"rubin_node_reorg_total",
 		"rubin_node_last_reorg_depth",
+		"rubin_node_block_apply_total",
 		"rubin_node_peer_count",
 		"rubin_node_mempool_txs",
 		"rubin_node_rpc_requests_total",
@@ -1196,6 +1197,8 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 		"rubin_node_in_ibd 0",
 		"rubin_node_reorg_total 0",
 		"rubin_node_last_reorg_depth 0",
+		`rubin_node_block_apply_total{result="accepted"} 0`,
+		`rubin_node_block_apply_total{result="rejected"} 0`,
 		"rubin_node_peer_count 0",
 		"rubin_node_mempool_txs 0",
 		"rubin_node_mempool_bytes 0",
@@ -1208,6 +1211,64 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics body %q", want, body)
 		}
+	}
+}
+
+func TestRenderPrometheusMetricsExposesBlockApplyCountersReadOnly(t *testing.T) {
+	state := mustRPCState(t, true)
+	initial := state.syncEngine.BlockApplyCounts()
+	if initial.Accepted != 1 || initial.Rejected != 0 {
+		t.Fatalf("initial BlockApplyCounts=%+v, want accepted=1 rejected=0 after devnet genesis", initial)
+	}
+
+	target := consensus.POW_LIMIT
+	block1 := mustRPCSingleTxBlock(
+		t,
+		node.DevnetGenesisBlockHash(),
+		target,
+		mustRPCReorgTestTimestamp(t, 1),
+		mustRPCCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)),
+	)
+	summary1, err := state.syncEngine.ApplyBlock(block1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(block1): %v", err)
+	}
+
+	invalidBlock2 := append([]byte(nil), mustRPCSingleTxBlock(
+		t,
+		summary1.BlockHash,
+		target,
+		mustRPCReorgTestTimestamp(t, 2),
+		mustRPCCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, summary1.AlreadyGenerated)),
+	)...)
+	invalidBlock2[4+32] ^= 0x01 // keep the block parseable but break merkle-root validation.
+	if _, err := state.syncEngine.ApplyBlock(invalidBlock2, nil); err == nil {
+		t.Fatalf("expected invalid canonical block rejection")
+	}
+
+	beforeRender := state.syncEngine.BlockApplyCounts()
+	if beforeRender.Accepted != 2 || beforeRender.Rejected != 1 {
+		t.Fatalf("pre-render BlockApplyCounts=%+v, want accepted=2 rejected=1", beforeRender)
+	}
+	body1 := renderPrometheusMetrics(state)
+	body2 := renderPrometheusMetrics(state)
+	for _, body := range []string{body1, body2} {
+		for _, want := range []string{
+			"# TYPE rubin_node_block_apply_total counter",
+			`rubin_node_block_apply_total{result="accepted"} 2`,
+			`rubin_node_block_apply_total{result="rejected"} 1`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("missing %q in metrics body %q", want, body)
+			}
+		}
+		if strings.Contains(body, `rubin_node_block_apply_total{result="`) &&
+			(strings.Contains(body, `error=`) || strings.Contains(body, `hash=`) || strings.Contains(body, `peer=`)) {
+			t.Fatalf("block apply metrics leaked unbounded labels in body %q", body)
+		}
+	}
+	if afterRender := state.syncEngine.BlockApplyCounts(); afterRender != beforeRender {
+		t.Fatalf("renderPrometheusMetrics mutated BlockApplyCounts from %+v to %+v", beforeRender, afterRender)
 	}
 }
 

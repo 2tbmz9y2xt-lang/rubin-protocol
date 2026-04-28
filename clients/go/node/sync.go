@@ -70,6 +70,12 @@ type HeaderRequest struct {
 	Limit    uint64
 }
 
+// BlockApplyCounts is the bounded canonical block-apply outcome metric state.
+type BlockApplyCounts struct {
+	Accepted uint64
+	Rejected uint64
+}
+
 type SyncEngine struct {
 	chainState      *ChainState
 	blockStore      *BlockStore
@@ -81,6 +87,7 @@ type SyncEngine struct {
 	bestKnownHeight uint64
 	lastReorgDepth  uint64
 	reorgCount      uint64
+	blockApply      BlockApplyCounts
 
 	pvMode             parallelValidationMode
 	pvShadowMax        uint64
@@ -393,6 +400,15 @@ func (s *SyncEngine) ReorgCount() uint64 {
 	return s.reorgCount
 }
 
+func (s *SyncEngine) BlockApplyCounts() BlockApplyCounts {
+	if s == nil {
+		return BlockApplyCounts{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.blockApply
+}
+
 // isInIBDUnchecked returns true if the engine appears to be in IBD based on
 // the recorded tip timestamp and the configured IBD lag threshold. Unlike
 // IsInIBD, it does not require a nowUnix argument — it uses time.Now().
@@ -449,6 +465,7 @@ type syncRollbackState struct {
 	bestKnownHeight uint64
 	lastReorgDepth  uint64
 	reorgCount      uint64
+	blockApply      BlockApplyCounts
 }
 
 func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
@@ -478,6 +495,7 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 		bestKnownHeight: s.bestKnownHeight,
 		lastReorgDepth:  s.lastReorgDepth,
 		reorgCount:      s.reorgCount,
+		blockApply:      s.blockApply,
 	}, nil
 }
 
@@ -511,6 +529,7 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 	s.bestKnownHeight = state.bestKnownHeight
 	s.lastReorgDepth = state.lastReorgDepth
 	s.reorgCount = state.reorgCount
+	s.blockApply = state.blockApply
 	s.mu.Unlock()
 	if restoreErr != nil {
 		return fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
@@ -620,6 +639,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 		} else {
 			s.pvTelemetry.RecordBlockSkipped()
 		}
+		s.noteBlockApplyRejected()
 		return nil, err
 	}
 	if pvActive {
@@ -662,6 +682,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
 
 	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
+	s.noteBlockApplyAccepted()
 	if s.mempool != nil {
 		if err := s.mempool.EvictConfirmedParsed(pb); err != nil {
 			_, _ = fmt.Fprintf(s.stderr, "mempool: evict-confirmed: %v\n", err)
@@ -715,6 +736,24 @@ func (s *SyncEngine) recordAppliedBlock(height uint64, timestamp uint64) {
 		s.bestKnownHeight = height
 	}
 	s.lastReorgDepth = 0
+}
+
+func (s *SyncEngine) noteBlockApplyAccepted() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockApply.Accepted++
+}
+
+func (s *SyncEngine) noteBlockApplyRejected() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockApply.Rejected++
 }
 
 func (s *SyncEngine) noteReorg(depth uint64) {
