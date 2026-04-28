@@ -159,7 +159,14 @@ func TestBlockApplyCountsNilEngine(t *testing.T) {
 		t.Fatalf("nil BlockApplyCounts=%+v, want zero", got)
 	}
 	nilEngine.noteBlockApplyAccepted()
+	nilEngine.noteBlockApplyAcceptedN(2)
 	nilEngine.noteBlockApplyRejected()
+	nilEngine.noteBlockApplyOutcome(blockApplyMetricNone)
+	nilEngine.noteBlockApplyOutcome(blockApplyMetricAccepted)
+	nilEngine.noteBlockApplyOutcome(blockApplyMetricRejected)
+	if got := nilEngine.BlockApplyCounts(); got != (BlockApplyCounts{}) {
+		t.Fatalf("nil BlockApplyCounts after notes=%+v, want zero", got)
+	}
 }
 
 func TestPVShadowMismatch_IsBounded(t *testing.T) {

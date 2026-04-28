@@ -126,6 +126,7 @@ func (s *SyncEngine) applyHeavierBranch(
 	}
 
 	var summary *ChainStateConnectSummary
+	var pendingAccepted uint64
 	for i, item := range branch {
 		// Derive fresh timestamps from the (updated) canonical index for
 		// each block in the branch.  The stale caller prevTimestamps was
@@ -136,12 +137,21 @@ func (s *SyncEngine) applyHeavierBranch(
 		if tsErr != nil {
 			return nil, s.rollbackApplyBlock(tsErr, rollbackState)
 		}
-		summary, err = s.applyCanonicalParsedBlock(item.parsed, item.blockBytes, freshTs)
+		var outcome blockApplyMetricOutcome
+		summary, outcome, err = s.applyCanonicalParsedBlockTracked(item.parsed, item.blockBytes, freshTs)
 		if err != nil {
-			return nil, s.rollbackApplyBlock(err, rollbackState)
+			rollbackErr := s.rollbackApplyBlock(err, rollbackState)
+			if outcome == blockApplyMetricRejected {
+				s.noteBlockApplyRejected()
+			}
+			return nil, rollbackErr
+		}
+		if outcome == blockApplyMetricAccepted {
+			pendingAccepted++
 		}
 	}
 	s.requeueDisconnectedTransactions(disconnectedBlocks)
+	s.noteBlockApplyAcceptedN(pendingAccepted)
 	s.noteReorg(reorgDepth)
 	return summary, nil
 }

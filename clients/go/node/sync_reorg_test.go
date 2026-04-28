@@ -55,6 +55,7 @@ func TestReorgTwoMiners(t *testing.T) {
 	} else if work.Sign() <= 0 {
 		t.Fatalf("ChainWork(B1)=%s, want positive", work)
 	}
+	beforeReorgCounts := engine.BlockApplyCounts()
 
 	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
 	blockB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB1))
@@ -74,6 +75,9 @@ func TestReorgTwoMiners(t *testing.T) {
 	}
 	if count := engine.ReorgCount(); count != 1 {
 		t.Fatalf("ReorgCount()=%d, want 1", count)
+	}
+	if after := engine.BlockApplyCounts(); after.Accepted != beforeReorgCounts.Accepted+2 || after.Rejected != beforeReorgCounts.Rejected {
+		t.Fatalf("BlockApplyCounts after successful reorg=%+v, want accepted=%d rejected=%d", after, beforeReorgCounts.Accepted+2, beforeReorgCounts.Rejected)
 	}
 
 	b1CanonicalHash, ok, err := store.CanonicalHash(1)
@@ -807,6 +811,9 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 	subsidyB102 := consensus.BlockSubsidy(102, alreadyGenerated+subsidyB101)
 	blockB102 := buildSingleTxBlock(t, blockB101Hash, target, 204, reorgTestCoinbaseForAddress(t, 102, subsidyB102, destAddress))
 
+	beforeReorgCounts := engine.BlockApplyCounts()
+	var duringFailedCommitCounts BlockApplyCounts
+	observedFailedCommit := false
 	prevWrite := writeFileAtomicFn
 	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
 	indexWrites := 0
@@ -814,6 +821,8 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 		if path == store.indexPath {
 			indexWrites++
 			if indexWrites == 3 {
+				observedFailedCommit = true
+				duringFailedCommitCounts = engine.BlockApplyCounts()
 				return os.ErrPermission
 			}
 		}
@@ -822,6 +831,15 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 
 	if _, err := engine.ApplyBlockWithReorg(blockB102, nil); err == nil {
 		t.Fatalf("expected reorg persist failure")
+	}
+	if !observedFailedCommit {
+		t.Fatalf("expected forced index write failure to be observed")
+	}
+	if duringFailedCommitCounts != beforeReorgCounts {
+		t.Fatalf("speculative reorg apply published BlockApplyCounts before rollback: got %+v want %+v", duringFailedCommitCounts, beforeReorgCounts)
+	}
+	if after := engine.BlockApplyCounts(); after != beforeReorgCounts {
+		t.Fatalf("failed reorg changed BlockApplyCounts from %+v to %+v", beforeReorgCounts, after)
 	}
 	if engine.chainState.Height != summaryA101.BlockHeight || engine.chainState.TipHash != summaryA101.BlockHash {
 		t.Fatalf("chainstate tip changed after rollback: height=%d hash=%x", engine.chainState.Height, engine.chainState.TipHash)
