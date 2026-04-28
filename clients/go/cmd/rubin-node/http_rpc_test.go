@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -194,6 +195,7 @@ func mustRPCSignedDaCommitTx(
 	if entry.Value < fee {
 		t.Fatalf("utxo value=%d, want at least fee=%d", entry.Value, fee)
 	}
+	payloadCommitment := sha3.Sum256(manifest)
 	tx := &consensus.Tx{
 		Version: 1,
 		TxKind:  0x01,
@@ -204,6 +206,10 @@ func mustRPCSignedDaCommitTx(
 			Sequence: 0,
 		}},
 		Outputs: []consensus.TxOutput{{
+			Value:        0,
+			CovenantType: consensus.COV_TYPE_DA_COMMIT,
+			CovenantData: payloadCommitment[:],
+		}, {
 			Value:        entry.Value - fee,
 			CovenantType: consensus.COV_TYPE_P2PK,
 			CovenantData: append([]byte(nil), toAddress...),
@@ -231,6 +237,22 @@ func mustRPCSignedDaCommitTx(
 	}
 	if parsed.TxKind != 0x01 || parsed.DaCommitCore == nil || len(parsed.DaPayload) == 0 {
 		t.Fatalf("parsed DA_COMMIT shape mismatch: tx_kind=%d da_core_nil=%t da_payload_len=%d", parsed.TxKind, parsed.DaCommitCore == nil, len(parsed.DaPayload))
+	}
+	daCommitOutputs := 0
+	for _, out := range parsed.Outputs {
+		if out.CovenantType != consensus.COV_TYPE_DA_COMMIT {
+			continue
+		}
+		daCommitOutputs++
+		if out.Value != 0 {
+			t.Fatalf("CORE_DA_COMMIT output value=%d, want 0", out.Value)
+		}
+		if !bytes.Equal(out.CovenantData, payloadCommitment[:]) {
+			t.Fatalf("CORE_DA_COMMIT output commitment mismatch")
+		}
+	}
+	if daCommitOutputs != 1 {
+		t.Fatalf("CORE_DA_COMMIT outputs=%d, want 1", daCommitOutputs)
 	}
 	return txBytes, hex.EncodeToString(txid[:])
 }
