@@ -1160,6 +1160,8 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		tipHeight          float64
 		bestKnownHeight    float64
 		inIBD              float64
+		reorgCount         uint64
+		lastReorgDepth     uint64
 		peerCount          float64
 		mempoolTxs         float64
 		mempoolBytes       float64
@@ -1170,6 +1172,8 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 	)
 	if state != nil && state.syncEngine != nil {
 		bestKnownHeight = float64(state.syncEngine.BestKnownHeight())
+		reorgCount = state.syncEngine.ReorgCount()
+		lastReorgDepth = state.syncEngine.LastReorgDepth()
 		if state.syncEngine.IsInIBD(state.now()) {
 			inIBD = 1
 		}
@@ -1214,6 +1218,12 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		"# HELP rubin_node_in_ibd Whether the node currently considers itself in IBD (0 or 1).",
 		"# TYPE rubin_node_in_ibd gauge",
 		fmt.Sprintf("rubin_node_in_ibd %.0f", inIBD),
+		"# HELP rubin_node_reorg_total Total canonical reorg events observed by the sync engine.",
+		"# TYPE rubin_node_reorg_total counter",
+		fmt.Sprintf("rubin_node_reorg_total %d", reorgCount),
+		"# HELP rubin_node_last_reorg_depth Depth of the most recent canonical reorg, or 0 when no reorg depth is currently recorded.",
+		"# TYPE rubin_node_last_reorg_depth gauge",
+		fmt.Sprintf("rubin_node_last_reorg_depth %d", lastReorgDepth),
 		"# HELP rubin_node_peer_count Currently tracked peers.",
 		"# TYPE rubin_node_peer_count gauge",
 		fmt.Sprintf("rubin_node_peer_count %.0f", peerCount),

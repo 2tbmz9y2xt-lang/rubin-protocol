@@ -1161,6 +1161,8 @@ func TestRenderPrometheusMetricsIncludesV1Names(t *testing.T) {
 		"rubin_node_tip_height",
 		"rubin_node_best_known_height",
 		"rubin_node_in_ibd",
+		"rubin_node_reorg_total",
+		"rubin_node_last_reorg_depth",
 		"rubin_node_peer_count",
 		"rubin_node_mempool_txs",
 		"rubin_node_rpc_requests_total",
@@ -1192,6 +1194,8 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 		"rubin_node_tip_height 0",
 		"rubin_node_best_known_height 0",
 		"rubin_node_in_ibd 0",
+		"rubin_node_reorg_total 0",
+		"rubin_node_last_reorg_depth 0",
 		"rubin_node_peer_count 0",
 		"rubin_node_mempool_txs 0",
 		"rubin_node_mempool_bytes 0",
@@ -1205,6 +1209,201 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 			t.Fatalf("missing %q in metrics body %q", want, body)
 		}
 	}
+}
+
+func TestRenderPrometheusMetricsExposesReorgCountersReadOnly(t *testing.T) {
+	state := mustRPCState(t, true)
+	target := consensus.POW_LIMIT
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+
+	blockA1 := mustRPCSingleTxBlock(
+		t,
+		node.DevnetGenesisBlockHash(),
+		target,
+		mustRPCReorgTestTimestamp(t, 1),
+		mustRPCCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1),
+	)
+	summaryA1, err := state.syncEngine.ApplyBlock(blockA1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+
+	blockB1 := mustRPCSingleTxBlock(
+		t,
+		node.DevnetGenesisBlockHash(),
+		target,
+		mustRPCReorgTestTimestamp(t, 2),
+		mustRPCCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1),
+	)
+	if _, err := state.syncEngine.ApplyBlockWithReorg(blockB1, nil); err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	if state.syncEngine.LastReorgDepth() != 0 || state.syncEngine.ReorgCount() != 0 {
+		t.Fatalf("side branch before heavier tip mutated reorg counters")
+	}
+
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	blockB2 := mustRPCSingleTxBlock(
+		t,
+		mustRPCBlockHash(t, blockB1),
+		target,
+		mustRPCReorgTestTimestamp(t, 3),
+		mustRPCCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2),
+	)
+	summaryB2, err := state.syncEngine.ApplyBlockWithReorg(blockB2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
+	}
+	if summaryB2.BlockHash == summaryA1.BlockHash {
+		t.Fatalf("heavier branch did not move canonical tip")
+	}
+	tipHeight, tipHash, ok, err := state.blockStore.Tip()
+	if err != nil {
+		t.Fatalf("blockStore.Tip: %v", err)
+	}
+	if !ok || tipHeight != summaryB2.BlockHeight || tipHash != summaryB2.BlockHash {
+		t.Fatalf("canonical tip height/hash=%d/%x ok=%v, want %d/%x", tipHeight, tipHash, ok, summaryB2.BlockHeight, summaryB2.BlockHash)
+	}
+	if got := state.syncEngine.ReorgCount(); got != 1 {
+		t.Fatalf("ReorgCount()=%d, want 1", got)
+	}
+	if got := state.syncEngine.LastReorgDepth(); got != 1 {
+		t.Fatalf("LastReorgDepth()=%d, want 1", got)
+	}
+
+	body1 := renderPrometheusMetrics(state)
+	body2 := renderPrometheusMetrics(state)
+	for _, body := range []string{body1, body2} {
+		for _, want := range []string{
+			"# TYPE rubin_node_reorg_total counter",
+			"rubin_node_reorg_total 1",
+			"# TYPE rubin_node_last_reorg_depth gauge",
+			"rubin_node_last_reorg_depth 1",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("missing %q in metrics body %q", want, body)
+			}
+		}
+		if strings.Contains(body, "rubin_node_reorg_total{") || strings.Contains(body, "rubin_node_last_reorg_depth{") {
+			t.Fatalf("reorg metrics unexpectedly used labels in body %q", body)
+		}
+	}
+	if got := state.syncEngine.ReorgCount(); got != 1 {
+		t.Fatalf("renderPrometheusMetrics mutated ReorgCount() to %d, want 1", got)
+	}
+	if got := state.syncEngine.LastReorgDepth(); got != 1 {
+		t.Fatalf("renderPrometheusMetrics mutated LastReorgDepth() to %d, want 1", got)
+	}
+}
+
+type rpcTestOutput struct {
+	covenantData []byte
+	value        uint64
+	covenantType uint16
+}
+
+func mustRPCReorgTestTimestamp(t *testing.T, delta uint64) uint64 {
+	t.Helper()
+	genesisParsed, err := consensus.ParseBlockBytes(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(devnet genesis): %v", err)
+	}
+	return genesisParsed.Header.Timestamp + delta
+}
+
+func mustRPCCoinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t *testing.T, height uint64, value uint64) []byte {
+	t.Helper()
+	if height > uint64(^uint32(0)) {
+		t.Fatalf("coinbase height=%d exceeds locktime uint32 range", height)
+	}
+	wroot, err := consensus.WitnessMerkleRootWtxids([][32]byte{{}})
+	if err != nil {
+		t.Fatalf("WitnessMerkleRootWtxids: %v", err)
+	}
+	commitment := consensus.WitnessCommitmentHash(wroot)
+	return mustRPCCoinbaseTxWithOutputs(t, uint32(height), []rpcTestOutput{
+		{value: value, covenantType: consensus.COV_TYPE_P2PK, covenantData: rpcTestP2PKCovenantData(0x11)},
+		{value: 0, covenantType: consensus.COV_TYPE_ANCHOR, covenantData: commitment[:]},
+	})
+}
+
+func mustRPCCoinbaseTxWithOutputs(t *testing.T, locktime uint32, outputs []rpcTestOutput) []byte {
+	t.Helper()
+	sizeHint := 128
+	for _, out := range outputs {
+		sizeHint += 16 + len(out.covenantData)
+	}
+	b := make([]byte, 0, sizeHint)
+	b = consensus.AppendU32le(b, 1)
+	b = append(b, 0x00)
+	b = consensus.AppendU64le(b, 0)
+	b = consensus.AppendCompactSize(b, 1)
+	b = append(b, make([]byte, 32)...)
+	b = consensus.AppendU32le(b, ^uint32(0))
+	b = consensus.AppendCompactSize(b, 0)
+	b = consensus.AppendU32le(b, ^uint32(0))
+	b = consensus.AppendCompactSize(b, uint64(len(outputs)))
+	for _, out := range outputs {
+		b = consensus.AppendU64le(b, out.value)
+		b = consensus.AppendU16le(b, out.covenantType)
+		b = consensus.AppendCompactSize(b, uint64(len(out.covenantData)))
+		b = append(b, out.covenantData...)
+	}
+	b = consensus.AppendU32le(b, locktime)
+	b = consensus.AppendCompactSize(b, 0)
+	b = consensus.AppendCompactSize(b, 0)
+	if _, _, _, consumed, err := consensus.ParseTx(b); err != nil {
+		t.Fatalf("ParseTx(coinbase): %v", err)
+	} else if consumed != len(b) {
+		t.Fatalf("ParseTx(coinbase) consumed=%d, want %d", consumed, len(b))
+	}
+	return b
+}
+
+func rpcTestP2PKCovenantData(seed byte) []byte {
+	data := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	data[0] = consensus.SUITE_ID_ML_DSA_87
+	for i := 1; i < len(data); i++ {
+		data[i] = seed + byte(i)
+	}
+	return data
+}
+
+func mustRPCSingleTxBlock(t *testing.T, prevHash [32]byte, target [32]byte, timestamp uint64, tx []byte) []byte {
+	t.Helper()
+	_, txid, _, _, err := consensus.ParseTx(tx)
+	if err != nil {
+		t.Fatalf("ParseTx(block tx): %v", err)
+	}
+	root, err := consensus.MerkleRootTxids([][32]byte{txid})
+	if err != nil {
+		t.Fatalf("MerkleRootTxids: %v", err)
+	}
+	header := make([]byte, 0, consensus.BLOCK_HEADER_BYTES)
+	header = consensus.AppendU32le(header, 1)
+	header = append(header, prevHash[:]...)
+	header = append(header, root[:]...)
+	header = consensus.AppendU64le(header, timestamp)
+	header = append(header, target[:]...)
+	header = consensus.AppendU64le(header, 7)
+
+	block := make([]byte, 0, len(header)+len(tx)+4)
+	block = append(block, header...)
+	block = consensus.AppendCompactSize(block, 1)
+	block = append(block, tx...)
+	return block
+}
+
+func mustRPCBlockHash(t *testing.T, block []byte) [32]byte {
+	t.Helper()
+	if len(block) < consensus.BLOCK_HEADER_BYTES {
+		t.Fatalf("block length=%d, want at least %d", len(block), consensus.BLOCK_HEADER_BYTES)
+	}
+	hash, err := consensus.BlockHash(block[:consensus.BLOCK_HEADER_BYTES])
+	if err != nil {
+		t.Fatalf("BlockHash: %v", err)
+	}
+	return hash
 }
 
 // TestRenderPrometheusMetricsMempoolBytesAndAdmitTotal pins the new
