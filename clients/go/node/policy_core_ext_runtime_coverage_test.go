@@ -179,8 +179,9 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 		// exercises the input branch of RejectCoreExtTxPreActivation against
 		// the production provider type built via NewStaticCoreExtProfileProvider.
 		// Proof assertion: mp.AddTx returns *TxAdmitError with
-		// Kind == TxAdmitRejected and err.Error() containing
-		// "CORE_EXT spend pre-ACTIVE ext_id=7".
+		// Kind == TxAdmitRejected and err.Error() containing the
+		// fmt.Sprintf-built spend reason (wantSpendReason, derived from
+		// the test's extID constant).
 		toKey := mustNodeMLDSA87Keypair(t)
 		toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
 
