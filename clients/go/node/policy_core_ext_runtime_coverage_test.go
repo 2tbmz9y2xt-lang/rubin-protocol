@@ -20,17 +20,22 @@ package node
 // This test reproduces the wiring contract in-process: it builds a provider
 // via the same public constructor that buildGenesisCoreExtProfiles uses, then
 // hands it to MempoolConfig and MinerConfig and verifies that:
-//   * pre-ACTIVE CORE_EXT output tx is rejected by mempool.AddTx (the policy
-//     rejection path used by /submit_tx via state.mempool.AddTx) with the
-//     explicit policy reason "CORE_EXT output pre-ACTIVE ext_id=<N>";
+//   * pre-ACTIVE CORE_EXT output tx is rejected by BOTH mempool.AddTx (the
+//     policy rejection path used by /submit_tx via state.mempool.AddTx) AND
+//     mempool.RelayMetadata (the relay snapshot path
+//     admissionSnapshotForInputs), with the rejection error matching the
+//     fmt.Sprintf-built CORE_EXT output pre-ACTIVE policy reason derived
+//     from the test's extID constant;
 //   * pre-ACTIVE CORE_EXT spend tx (transaction whose input previous UTXO
-//     has CovenantType=CORE_EXT) is rejected by mempool.AddTx with the
-//     explicit policy reason "CORE_EXT spend pre-ACTIVE ext_id=<N>",
-//     covering the input branch of RejectCoreExtTxPreActivation against the
+//     has CovenantType=CORE_EXT) is rejected by BOTH mempool.AddTx AND
+//     mempool.RelayMetadata, with the rejection error matching the
+//     fmt.Sprintf-built CORE_EXT spend pre-ACTIVE policy reason; this
+//     covers the input branch of RejectCoreExtTxPreActivation against the
 //     production provider type;
-//   * pre-ACTIVE CORE_EXT output tx is filtered by miner.MineOne (the policy
-//     filter path used by /mine_next);
-//   * ACTIVE-profile CORE_EXT output tx is admitted by mempool.AddTx when
+//   * pre-ACTIVE CORE_EXT output tx is filtered by miner.MineOne (the
+//     policy filter path used by /mine_next);
+//   * ACTIVE-profile CORE_EXT output tx is admitted by BOTH mempool.AddTx
+//     AND mempool.RelayMetadata (with non-zero RelayTxMetadata.Size) when
 //     the activation height is at or below the next-block height.
 
 import (
