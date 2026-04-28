@@ -136,12 +136,13 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 
 	t.Run("MempoolRejectsPreActiveCoreExtSpend", func(t *testing.T) {
 		// CORE_EXT spend coverage: RejectCoreExtTxPreActivation enforces the
-		// pre-ACTIVE gate on transaction *inputs* whose previous UTXO already
-		// has CovenantType=CORE_EXT, in addition to outputs. The output
-		// sub-tests above prove the output gate; this sub-test proves the
-		// spend gate through the production provider type. Without this
-		// sub-test the runtime coverage would not exercise the input branch
-		// of RejectCoreExtTxPreActivation against the real provider.
+		// pre-ACTIVE gate on transaction inputs whose previous UTXO already
+		// has CovenantType=CORE_EXT, in addition to outputs. This sub-test
+		// exercises the input branch of RejectCoreExtTxPreActivation against
+		// the production provider type built via NewStaticCoreExtProfileProvider.
+		// Proof assertion: mp.AddTx returns *TxAdmitError with
+		// Kind == TxAdmitRejected and err.Error() containing
+		// "CORE_EXT spend pre-ACTIVE ext_id=7".
 		toKey := mustNodeMLDSA87Keypair(t)
 		toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
 
