@@ -25,6 +25,12 @@ its existing local cap before rollout. Peer scoring and disconnect thresholds
 are local relay policy parameters; they are not consensus inputs and are not
 specified by this document.
 
+Transport byte caps below distinguish between a frame currently being read and
+queued decoded relay work. A node MUST NOT reject a single otherwise-valid frame
+only because its payload is larger than the queued-work cap; large-but-allowed
+frames must either be streamed or accounted separately from queued decoded
+payloads.
+
 ## 1. Decision
 
 Production relay implementations MUST enforce bounded transport behavior.
@@ -61,7 +67,7 @@ P2P_HEADER_READ_DEADLINE_MS = 5_000
 P2P_PAYLOAD_READ_DEADLINE_MS = 15_000
 P2P_MAX_PAYLOAD_READ_BYTES = MAX_RELAY_MSG_BYTES
 P2P_MAX_INFLIGHT_MSGS_PER_CONN = 64
-P2P_MAX_INFLIGHT_BYTES_PER_CONN = 8_388_608
+P2P_MAX_QUEUED_DECODED_BYTES_PER_CONN = 8_388_608
 P2P_MIN_PAYLOAD_PROGRESS_BYTES_PER_SEC = 32_768
 ```
 
@@ -76,16 +82,23 @@ Disconnect the peer if:
 5. Frame checksum fails repeatedly.
 6. Compact payload is malformed and peer score is below disconnect threshold.
 
-If in-flight caps are exceeded, stop reading more payload from the peer until
-backlog falls below cap. Persistent offenders SHOULD be penalized and
-disconnected.
+If queued decoded caps are exceeded, stop admitting more decoded relay work from
+the peer until backlog falls below cap. Persistent offenders SHOULD be penalized
+and disconnected. This queued-work cap does not lower
+`P2P_MAX_PAYLOAD_READ_BYTES`.
 
 ## 5. Handshake Rules
 
-A peer MUST send `version` first.
+A peer SHOULD send `version` first.
 
-A node MUST NOT process non-`version` messages from a peer before receiving that
-peer's `version`.
+Implementations MAY accept an early `verack` before receiving the peer's
+`version`, but MUST NOT mark the handshake complete or apply any
+`version`-gated state changes until that peer's `version` has been received and
+validated.
+
+Other non-`version` messages received before the peer's `version` MUST NOT
+complete the handshake and SHOULD be ignored or treated as a local transport
+policy violation.
 
 `version.payload_len` MUST be exactly 89 bytes.
 
@@ -129,6 +142,10 @@ Any authenticated profile MUST:
 
 Nodes SHOULD expose:
 
+The names below are policy counter suffixes. Implementations MAY namespace them
+for their telemetry backend, for example by adding the existing `rubin_node_`
+Prometheus prefix.
+
 ```text
 p2p_header_timeout_total
 p2p_payload_timeout_total
@@ -136,7 +153,7 @@ p2p_payload_progress_violation_total
 p2p_payload_oversize_total
 p2p_checksum_fail_total
 p2p_inflight_msg_cap_hit_total
-p2p_inflight_byte_cap_hit_total
+p2p_queued_decoded_byte_cap_hit_total
 p2p_protocol_version_disconnect_total
 p2p_chain_id_mismatch_total
 p2p_genesis_hash_mismatch_total
