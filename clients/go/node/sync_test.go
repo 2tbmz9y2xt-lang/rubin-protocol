@@ -153,6 +153,22 @@ func TestPVShadowStats_NilEngine(t *testing.T) {
 	}
 }
 
+func TestBlockApplyCountsNilEngine(t *testing.T) {
+	var nilEngine *SyncEngine
+	if got := nilEngine.BlockApplyCounts(); got != (BlockApplyCounts{}) {
+		t.Fatalf("nil BlockApplyCounts=%+v, want zero", got)
+	}
+	nilEngine.noteBlockApplyAccepted()
+	nilEngine.noteBlockApplyAcceptedN(2)
+	nilEngine.noteBlockApplyRejected()
+	nilEngine.noteBlockApplyOutcome(blockApplyMetricNone)
+	nilEngine.noteBlockApplyOutcome(blockApplyMetricAccepted)
+	nilEngine.noteBlockApplyOutcome(blockApplyMetricRejected)
+	if got := nilEngine.BlockApplyCounts(); got != (BlockApplyCounts{}) {
+		t.Fatalf("nil BlockApplyCounts after notes=%+v, want zero", got)
+	}
+}
+
 func TestPVShadowMismatch_IsBounded(t *testing.T) {
 	st := NewChainState()
 	cfg := DefaultSyncConfig(nil, [32]byte{}, "")
@@ -380,6 +396,65 @@ func TestSyncEngineApplyBlockPersistsChainstateAndStore(t *testing.T) {
 	}
 	if !ok || height != 1 {
 		t.Fatalf("unexpected blockstore tip: ok=%v height=%d", ok, height)
+	}
+}
+
+func TestSyncEngineBlockApplyCountsCanonicalAcceptedRejected(t *testing.T) {
+	dir := t.TempDir()
+	chainStatePath := ChainStatePath(dir)
+	store, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("open blockstore: %v", err)
+	}
+	st := NewChainState()
+	target := consensus.POW_LIMIT
+	engine, err := NewSyncEngine(st, store, DefaultSyncConfig(&target, devnetGenesisChainID, chainStatePath))
+	if err != nil {
+		t.Fatalf("new sync engine: %v", err)
+	}
+	if got := engine.BlockApplyCounts(); got != (BlockApplyCounts{}) {
+		t.Fatalf("initial BlockApplyCounts=%+v, want zero", got)
+	}
+
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	if got := engine.BlockApplyCounts(); got.Accepted != 1 || got.Rejected != 0 {
+		t.Fatalf("after genesis BlockApplyCounts=%+v, want accepted=1 rejected=0", got)
+	}
+
+	block1Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1)
+	block1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, block1Coinbase)
+	summary1, err := engine.ApplyBlock(block1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(block1): %v", err)
+	}
+	if got := engine.BlockApplyCounts(); got.Accepted != 2 || got.Rejected != 0 {
+		t.Fatalf("after block1 BlockApplyCounts=%+v, want accepted=2 rejected=0", got)
+	}
+	tipHeight, tipHash, ok, err := store.Tip()
+	if err != nil {
+		t.Fatalf("Tip after accepted block1: %v", err)
+	}
+	if !ok || tipHeight != summary1.BlockHeight || tipHash != summary1.BlockHash {
+		t.Fatalf("canonical tip after accepted block1=%d/%x ok=%v, want %d/%x", tipHeight, tipHash, ok, summary1.BlockHeight, summary1.BlockHash)
+	}
+
+	block2Coinbase := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, consensus.BlockSubsidy(2, summary1.AlreadyGenerated))
+	invalidBlock2 := append([]byte(nil), buildSingleTxBlock(t, summary1.BlockHash, target, 3, block2Coinbase)...)
+	invalidBlock2[4+32] ^= 0x01 // keep the block parseable but break merkle-root validation.
+	if _, err := engine.ApplyBlock(invalidBlock2, nil); err == nil {
+		t.Fatalf("expected invalid canonical block rejection")
+	}
+	if got := engine.BlockApplyCounts(); got.Accepted != 2 || got.Rejected != 1 {
+		t.Fatalf("after invalid block BlockApplyCounts=%+v, want accepted=2 rejected=1", got)
+	}
+	tipHeight, tipHash, ok, err = store.Tip()
+	if err != nil {
+		t.Fatalf("Tip after rejected block2: %v", err)
+	}
+	if !ok || tipHeight != summary1.BlockHeight || tipHash != summary1.BlockHash {
+		t.Fatalf("canonical tip changed after rejected block2=%d/%x ok=%v, want %d/%x", tipHeight, tipHash, ok, summary1.BlockHeight, summary1.BlockHash)
 	}
 }
 
@@ -625,6 +700,9 @@ func TestSyncEngineApplyBlock_RollbackOnSaveFailure(t *testing.T) {
 		t.Fatalf("expected apply error")
 	}
 
+	if got := engine.BlockApplyCounts(); got != (BlockApplyCounts{}) {
+		t.Fatalf("persist failure changed BlockApplyCounts=%+v, want zero", got)
+	}
 	after, err := stateToDisk(st)
 	if err != nil {
 		t.Fatalf("stateToDisk after: %v", err)

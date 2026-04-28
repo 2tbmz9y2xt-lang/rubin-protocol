@@ -70,6 +70,20 @@ type HeaderRequest struct {
 	Limit    uint64
 }
 
+// BlockApplyCounts is the bounded canonical block-apply outcome metric state.
+type BlockApplyCounts struct {
+	Accepted uint64
+	Rejected uint64
+}
+
+type blockApplyMetricOutcome uint8
+
+const (
+	blockApplyMetricNone blockApplyMetricOutcome = iota
+	blockApplyMetricAccepted
+	blockApplyMetricRejected
+)
+
 type SyncEngine struct {
 	chainState      *ChainState
 	blockStore      *BlockStore
@@ -81,6 +95,7 @@ type SyncEngine struct {
 	bestKnownHeight uint64
 	lastReorgDepth  uint64
 	reorgCount      uint64
+	blockApply      BlockApplyCounts
 
 	pvMode             parallelValidationMode
 	pvShadowMax        uint64
@@ -393,6 +408,15 @@ func (s *SyncEngine) ReorgCount() uint64 {
 	return s.reorgCount
 }
 
+func (s *SyncEngine) BlockApplyCounts() BlockApplyCounts {
+	if s == nil {
+		return BlockApplyCounts{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.blockApply
+}
+
 // isInIBDUnchecked returns true if the engine appears to be in IBD based on
 // the recorded tip timestamp and the configured IBD lag threshold. Unlike
 // IsInIBD, it does not require a nowUnix argument — it uses time.Now().
@@ -523,15 +547,25 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	blockBytes []byte,
 	prevTimestamps []uint64,
 ) (*ChainStateConnectSummary, error) {
+	summary, outcome, err := s.applyCanonicalParsedBlockTracked(pb, blockBytes, prevTimestamps)
+	s.noteBlockApplyOutcome(outcome)
+	return summary, err
+}
+
+func (s *SyncEngine) applyCanonicalParsedBlockTracked(
+	pb *consensus.ParsedBlock,
+	blockBytes []byte,
+	prevTimestamps []uint64,
+) (*ChainStateConnectSummary, blockApplyMetricOutcome, error) {
 	if s == nil || s.chainState == nil {
-		return nil, errors.New("sync engine is not initialized")
+		return nil, blockApplyMetricNone, errors.New("sync engine is not initialized")
 	}
 	if pb == nil {
-		return nil, errors.New("nil parsed block")
+		return nil, blockApplyMetricNone, errors.New("nil parsed block")
 	}
 	blockHeight, _, err := nextBlockContext(s.chainState)
 	if err != nil {
-		return nil, err
+		return nil, blockApplyMetricNone, err
 	}
 	var zeroID [32]byte
 	if blockHeight == 0 && s.cfg.ChainID != zeroID && s.cfg.ChainID != devnetGenesisChainID {
@@ -543,14 +577,14 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 		// Wrap with a TxError so peer attribution is class-closed for both
 		// genesis-identity classes (chain_id mismatch and genesis_hash
 		// mismatch below).
-		return nil, &consensus.TxError{
+		return nil, blockApplyMetricRejected, &consensus.TxError{
 			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
 			Msg:  "genesis chain_id mismatch",
 		}
 	}
 	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
 	if err != nil {
-		return nil, err
+		return nil, blockApplyMetricNone, err
 	}
 	// Defense in depth on top of the chain_id guard above: at height 0 on a
 	// devnet runtime, the block must be the published devnet genesis. Without
@@ -565,7 +599,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	// `var txErr *consensus.TxError; errors.As(err, &txErr)` pattern in
 	// p2p/handlers_block.go.
 	if blockHeight == 0 && s.cfg.ChainID == devnetGenesisChainID && blockHash != devnetGenesisBlockHash {
-		return nil, &consensus.TxError{
+		return nil, blockApplyMetricRejected, &consensus.TxError{
 			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
 			Msg:  "genesis_hash mismatch",
 		}
@@ -573,7 +607,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 
 	rollbackState, err := s.captureRollbackState()
 	if err != nil {
-		return nil, err
+		return nil, blockApplyMetricNone, err
 	}
 	prevState := cloneChainState(rollbackState.chainState)
 
@@ -620,7 +654,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 		} else {
 			s.pvTelemetry.RecordBlockSkipped()
 		}
-		return nil, err
+		return nil, blockApplyMetricRejected, err
 	}
 	if pvActive {
 		s.pvTelemetry.RecordBlockValidated()
@@ -657,7 +691,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	}
 	commitStart := time.Now()
 	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
-		return nil, s.rollbackApplyBlock(err, rollbackState)
+		return nil, blockApplyMetricNone, s.rollbackApplyBlock(err, rollbackState)
 	}
 	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
 
@@ -670,7 +704,7 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 			_, _ = fmt.Fprintf(s.stderr, "mempool: remove-conflicting: %v\n", err)
 		}
 	}
-	return summary, nil
+	return summary, blockApplyMetricAccepted, nil
 }
 
 // txErrCode extracts the consensus.TxError code string from err for
@@ -715,6 +749,44 @@ func (s *SyncEngine) recordAppliedBlock(height uint64, timestamp uint64) {
 		s.bestKnownHeight = height
 	}
 	s.lastReorgDepth = 0
+}
+
+func (s *SyncEngine) noteBlockApplyAccepted() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockApply.Accepted++
+}
+
+func (s *SyncEngine) noteBlockApplyAcceptedN(count uint64) {
+	if s == nil || count == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockApply.Accepted += count
+}
+
+func (s *SyncEngine) noteBlockApplyRejected() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockApply.Rejected++
+}
+
+func (s *SyncEngine) noteBlockApplyOutcome(outcome blockApplyMetricOutcome) {
+	switch outcome {
+	case blockApplyMetricNone:
+		return
+	case blockApplyMetricAccepted:
+		s.noteBlockApplyAccepted()
+	case blockApplyMetricRejected:
+		s.noteBlockApplyRejected()
+	}
 }
 
 func (s *SyncEngine) noteReorg(depth uint64) {

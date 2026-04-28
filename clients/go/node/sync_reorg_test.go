@@ -55,6 +55,7 @@ func TestReorgTwoMiners(t *testing.T) {
 	} else if work.Sign() <= 0 {
 		t.Fatalf("ChainWork(B1)=%s, want positive", work)
 	}
+	beforeReorgCounts := engine.BlockApplyCounts()
 
 	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
 	blockB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB1))
@@ -74,6 +75,9 @@ func TestReorgTwoMiners(t *testing.T) {
 	}
 	if count := engine.ReorgCount(); count != 1 {
 		t.Fatalf("ReorgCount()=%d, want 1", count)
+	}
+	if after := engine.BlockApplyCounts(); after.Accepted != beforeReorgCounts.Accepted+2 || after.Rejected != beforeReorgCounts.Rejected {
+		t.Fatalf("BlockApplyCounts after successful reorg=%+v, want accepted=%d rejected=%d", after, beforeReorgCounts.Accepted+2, beforeReorgCounts.Rejected)
 	}
 
 	b1CanonicalHash, ok, err := store.CanonicalHash(1)
@@ -173,11 +177,15 @@ func blockHeaderBytes(t *testing.T, blockBytes []byte) []byte {
 
 func TestApplyBlockWithReorgRejectsMissingParent(t *testing.T) {
 	engine, _, target := newReorgTestEngine(t)
+	before := engine.BlockApplyCounts()
 	var missingParent [32]byte
 	missingParent[0] = 0x42
 	block := buildSingleTxBlock(t, missingParent, target, 77, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, consensus.BlockSubsidy(1, 0)))
 	if _, err := engine.ApplyBlockWithReorg(block, nil); !errors.Is(err, ErrParentNotFound) {
 		t.Fatalf("ApplyBlockWithReorg(missing parent) err=%v, want ErrParentNotFound", err)
+	}
+	if after := engine.BlockApplyCounts(); after != before {
+		t.Fatalf("missing-parent block changed BlockApplyCounts from %+v to %+v", before, after)
 	}
 }
 
@@ -198,8 +206,12 @@ func TestApplyBlockWithReorgRejectsInvalidNonHeavierSideBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlockHash(invalid B1): %v", err)
 	}
+	beforeInvalidSide := engine.BlockApplyCounts()
 	if _, err := engine.ApplyBlockWithReorg(invalidB1, nil); err == nil {
 		t.Fatalf("expected invalid competing branch rejection")
+	}
+	if after := engine.BlockApplyCounts(); after != beforeInvalidSide {
+		t.Fatalf("invalid non-canonical side branch changed BlockApplyCounts from %+v to %+v", beforeInvalidSide, after)
 	}
 
 	if engine.chainState.Height != 1 || engine.chainState.TipHash != summaryA1.BlockHash {
@@ -413,18 +425,41 @@ func TestApplyCanonicalParsedBlockHelperErrors(t *testing.T) {
 		t.Fatalf("expected nil sync engine error")
 	}
 
-	engine, _, _ := newReorgTestEngine(t)
+	target := consensus.POW_LIMIT
+	newEmptyEngine := func(t *testing.T, chainID [32]byte) *SyncEngine {
+		t.Helper()
+		dir := t.TempDir()
+		store, err := OpenBlockStore(BlockStorePath(dir))
+		if err != nil {
+			t.Fatalf("OpenBlockStore: %v", err)
+		}
+		engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, chainID, ChainStatePath(dir)))
+		if err != nil {
+			t.Fatalf("NewSyncEngine: %v", err)
+		}
+		return engine
+	}
+
+	engine := newEmptyEngine(t, devnetGenesisChainID)
 	if _, err := engine.applyCanonicalParsedBlock(nil, nil, nil); err == nil {
 		t.Fatalf("expected nil parsed block error")
 	}
 
-	engine.cfg.ChainID = [32]byte{0x99}
-	pb, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
-	if err != nil {
-		t.Fatalf("ParseBlockBytes(genesis): %v", err)
-	}
-	if _, err := engine.applyCanonicalParsedBlock(pb, devnetGenesisBlockBytes, nil); err == nil {
+	engine = newEmptyEngine(t, [32]byte{0x99})
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err == nil {
 		t.Fatalf("expected genesis chain_id mismatch")
+	}
+	if got := engine.BlockApplyCounts(); got.Accepted != 0 || got.Rejected != 1 {
+		t.Fatalf("genesis chain_id mismatch BlockApplyCounts=%+v, want accepted=0 rejected=1", got)
+	}
+
+	engine = newEmptyEngine(t, devnetGenesisChainID)
+	badGenesis := buildSingleTxBlock(t, [32]byte{}, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 0, 0))
+	if _, err := engine.ApplyBlock(badGenesis, nil); err == nil {
+		t.Fatalf("expected genesis_hash mismatch")
+	}
+	if got := engine.BlockApplyCounts(); got.Accepted != 0 || got.Rejected != 1 {
+		t.Fatalf("genesis_hash mismatch BlockApplyCounts=%+v, want accepted=0 rejected=1", got)
 	}
 }
 
@@ -799,6 +834,9 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 	subsidyB102 := consensus.BlockSubsidy(102, alreadyGenerated+subsidyB101)
 	blockB102 := buildSingleTxBlock(t, blockB101Hash, target, 204, reorgTestCoinbaseForAddress(t, 102, subsidyB102, destAddress))
 
+	beforeReorgCounts := engine.BlockApplyCounts()
+	var duringFailedCommitCounts BlockApplyCounts
+	observedFailedCommit := false
 	prevWrite := writeFileAtomicFn
 	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
 	indexWrites := 0
@@ -806,6 +844,8 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 		if path == store.indexPath {
 			indexWrites++
 			if indexWrites == 3 {
+				observedFailedCommit = true
+				duringFailedCommitCounts = engine.BlockApplyCounts()
 				return os.ErrPermission
 			}
 		}
@@ -814,6 +854,15 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 
 	if _, err := engine.ApplyBlockWithReorg(blockB102, nil); err == nil {
 		t.Fatalf("expected reorg persist failure")
+	}
+	if !observedFailedCommit {
+		t.Fatalf("expected forced index write failure to be observed")
+	}
+	if duringFailedCommitCounts != beforeReorgCounts {
+		t.Fatalf("speculative reorg apply published BlockApplyCounts before rollback: got %+v want %+v", duringFailedCommitCounts, beforeReorgCounts)
+	}
+	if after := engine.BlockApplyCounts(); after != beforeReorgCounts {
+		t.Fatalf("failed reorg changed BlockApplyCounts from %+v to %+v", beforeReorgCounts, after)
 	}
 	if engine.chainState.Height != summaryA101.BlockHeight || engine.chainState.TipHash != summaryA101.BlockHash {
 		t.Fatalf("chainstate tip changed after rollback: height=%d hash=%x", engine.chainState.Height, engine.chainState.TipHash)
@@ -956,9 +1005,13 @@ func TestApplyBlockWithReorgKeepsLighterSideBranchOffCanonicalTip(t *testing.T) 
 	}
 
 	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 4, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	beforeSide := engine.BlockApplyCounts()
 	sideSummary, err := engine.ApplyBlockWithReorg(sideB1, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
+	}
+	if after := engine.BlockApplyCounts(); after != beforeSide {
+		t.Fatalf("lighter side branch changed BlockApplyCounts from %+v to %+v", beforeSide, after)
 	}
 	if sideSummary.BlockHeight != 1 {
 		t.Fatalf("side branch synthetic height=%d, want 1", sideSummary.BlockHeight)
