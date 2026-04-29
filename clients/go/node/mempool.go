@@ -15,6 +15,10 @@ import (
 const (
 	DefaultMempoolMaxTransactions = 300
 	DefaultMempoolMaxBytes        = consensus.MAX_RELAY_MSG_BYTES
+	DefaultMempoolMinFeeRate      = uint64(1)
+
+	mempoolLowWaterNumerator   = 9
+	mempoolLowWaterDenominator = 10
 )
 
 type mempoolTxSource string
@@ -38,18 +42,20 @@ type mempoolEntry struct {
 }
 
 type Mempool struct {
-	mu               sync.RWMutex
-	chainState       *ChainState
-	blockStore       *BlockStore
-	chainID          [32]byte
-	policy           MempoolConfig
-	maxTxs           int
-	maxBytes         int
-	usedBytes        int
-	lastAdmissionSeq uint64
-	txs              map[[32]byte]*mempoolEntry
-	wtxids           map[[32]byte][32]byte
-	spenders         map[consensus.Outpoint][32]byte
+	mu                sync.RWMutex
+	chainState        *ChainState
+	blockStore        *BlockStore
+	chainID           [32]byte
+	policy            MempoolConfig
+	maxTxs            int
+	maxBytes          int
+	lowWaterBytes     int
+	usedBytes         int
+	lastAdmissionSeq  uint64
+	currentMinFeeRate uint64
+	txs               map[[32]byte]*mempoolEntry
+	wtxids            map[[32]byte][32]byte
+	spenders          map[consensus.Outpoint][32]byte
 	// Admission counters are bumped exactly once for each AddTx call on a
 	// non-nil Mempool that reaches the final outcome accounting path.
 	// Nil-receiver calls return before that defer is registered and are
@@ -149,15 +155,17 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 	}
 	cfg = normalizeMempoolConfig(cfg)
 	return &Mempool{
-		chainState: chainState,
-		blockStore: blockStore,
-		chainID:    chainID,
-		policy:     cfg,
-		maxTxs:     cfg.MaxTransactions,
-		maxBytes:   cfg.MaxBytes,
-		txs:        make(map[[32]byte]*mempoolEntry),
-		wtxids:     make(map[[32]byte][32]byte),
-		spenders:   make(map[consensus.Outpoint][32]byte),
+		chainState:        chainState,
+		blockStore:        blockStore,
+		chainID:           chainID,
+		policy:            cfg,
+		maxTxs:            cfg.MaxTransactions,
+		maxBytes:          cfg.MaxBytes,
+		lowWaterBytes:     defaultMempoolLowWaterBytes(cfg.MaxBytes),
+		currentMinFeeRate: DefaultMempoolMinFeeRate,
+		txs:               make(map[[32]byte]*mempoolEntry),
+		wtxids:            make(map[[32]byte][32]byte),
+		spenders:          make(map[consensus.Outpoint][32]byte),
 	}, nil
 }
 
@@ -169,6 +177,18 @@ func normalizeMempoolConfig(cfg MempoolConfig) MempoolConfig {
 		cfg.MaxBytes = DefaultMempoolMaxBytes
 	}
 	return cfg
+}
+
+func defaultMempoolLowWaterBytes(maxBytes int) int {
+	if maxBytes <= 0 {
+		return 0
+	}
+	lowWater := (maxBytes/mempoolLowWaterDenominator)*mempoolLowWaterNumerator +
+		((maxBytes % mempoolLowWaterDenominator) * mempoolLowWaterNumerator / mempoolLowWaterDenominator)
+	if lowWater > maxBytes {
+		return maxBytes
+	}
+	return lowWater
 }
 
 func (m *Mempool) Len() int {
@@ -477,6 +497,7 @@ func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
 		for _, txid := range block.Txids {
 			m.removeTxLocked(txid)
 		}
+		m.decayMinFeeRateAfterConnectedBlockLocked()
 	})
 }
 
@@ -671,11 +692,28 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 }
 
 func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
+	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
+		return err
+	}
+	_, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
+	if err != nil {
+		return err
+	}
+	if candidateEvicted {
+		return txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering")
+	}
+	return nil
+}
+
+func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error {
 	if entry == nil {
 		return txAdmitRejected("nil mempool entry")
 	}
 	if entry.size <= 0 {
 		return txAdmitRejected("invalid mempool entry size")
+	}
+	if entry.weight == 0 {
+		return txAdmitRejected("invalid mempool entry weight")
 	}
 	txid := entry.txid
 	if txid == ([32]byte{}) {
@@ -691,16 +729,24 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 	if existing, exists := m.wtxids[wtxid]; exists {
 		return txAdmitConflict(fmt.Sprintf("mempool wtxid conflict with %x", existing))
 	}
+	source := entry.source
+	if source == "" {
+		source = mempoolTxSourceLocal
+	}
+	if !validMempoolTxSource(source) {
+		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+	}
 	for _, op := range entry.inputs {
 		if existing, ok := m.spenders[op]; ok {
 			return txAdmitConflict(fmt.Sprintf("mempool double-spend conflict with %x", existing))
 		}
 	}
-	if len(m.txs) >= m.maxTxs {
-		return txAdmitUnavailable(fmt.Sprintf("mempool transaction count limit reached: current=%d max=%d", len(m.txs), m.maxTxs))
-	}
-	if entry.size > m.maxBytes || m.usedBytes > m.maxBytes-entry.size {
-		return txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, entry.size, m.maxBytes))
+	if entry.admissionSeq != 0 {
+		for existingTxid, existing := range m.txs {
+			if existing != nil && existing.admissionSeq == entry.admissionSeq {
+				return txAdmitConflict(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid))
+			}
+		}
 	}
 	if m.lastAdmissionSeq == ^uint64(0) {
 		return txAdmitUnavailable("mempool admission sequence exhausted")
@@ -722,15 +768,23 @@ func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.O
 }
 
 func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
-	if entry == nil {
-		return txAdmitRejected("nil mempool entry")
+	if entry != nil && entry.source == "" {
+		entry.source = mempoolTxSourceLocal
 	}
-	if entry.size <= 0 {
-		return txAdmitRejected("invalid mempool entry size")
+	if entry != nil && entry.wtxid == ([32]byte{}) {
+		entry.wtxid = entry.txid
 	}
-	if entry.txid == ([32]byte{}) {
-		return txAdmitRejected("invalid mempool entry txid")
+	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
+		return err
 	}
+	evictedEntries, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
+	if err != nil {
+		return err
+	}
+	if candidateEvicted {
+		return txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering")
+	}
+	m.ensureMinFeeRateLocked()
 	if m.txs == nil {
 		m.txs = make(map[[32]byte]*mempoolEntry)
 	}
@@ -740,17 +794,14 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 	if m.spenders == nil {
 		m.spenders = make(map[consensus.Outpoint][32]byte)
 	}
+	for _, evicted := range evictedEntries {
+		m.deleteEntryLocked(evicted.txid, evicted)
+	}
 	if entry.admissionSeq == 0 {
 		m.lastAdmissionSeq++
 		entry.admissionSeq = m.lastAdmissionSeq
 	} else if entry.admissionSeq > m.lastAdmissionSeq {
 		m.lastAdmissionSeq = entry.admissionSeq
-	}
-	if entry.source == "" {
-		entry.source = mempoolTxSourceLocal
-	}
-	if entry.wtxid == ([32]byte{}) {
-		entry.wtxid = entry.txid
 	}
 	m.txs[entry.txid] = entry
 	m.wtxids[entry.wtxid] = entry.txid
@@ -758,6 +809,7 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
 	}
+	m.raiseMinFeeRateAfterEvictionLocked(evictedEntries)
 	return nil
 }
 
@@ -841,6 +893,252 @@ func (m *Mempool) deleteEntryLocked(txid [32]byte, entry *mempoolEntry) {
 	}
 }
 
+type mempoolEvictionPlanEntry struct {
+	entry     *mempoolEntry
+	candidate bool
+}
+
+func (m *Mempool) capacityEvictionPlanLocked(candidate *mempoolEntry) ([]*mempoolEntry, bool, error) {
+	if candidate == nil {
+		return nil, false, txAdmitRejected("nil mempool entry")
+	}
+	if m.maxTxs <= 0 || m.maxBytes <= 0 {
+		return nil, false, txAdmitUnavailable(fmt.Sprintf("invalid mempool capacity limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes))
+	}
+	if candidate.size > m.maxBytes {
+		return nil, false, txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, candidate.size, m.maxBytes))
+	}
+	if m.usedBytes < 0 {
+		return nil, false, txAdmitUnavailable(fmt.Sprintf("invalid mempool byte accounting: used=%d", m.usedBytes))
+	}
+	usedBytes, err := nonNegativeMempoolIntToUint64("used_bytes", m.usedBytes)
+	if err != nil {
+		return nil, false, err
+	}
+	candidateSize, err := nonNegativeMempoolIntToUint64("candidate_size", candidate.size)
+	if err != nil {
+		return nil, false, err
+	}
+	maxBytes, err := nonNegativeMempoolIntToUint64("max_bytes", m.maxBytes)
+	if err != nil {
+		return nil, false, err
+	}
+	countPressure := len(m.txs) >= m.maxTxs
+	bytePressure := m.usedBytes > m.maxBytes-candidate.size
+	if !countPressure && !bytePressure {
+		return nil, false, nil
+	}
+	currentMinFeeRate := m.currentMinFeeRateLocked()
+	if feeRateBelowFloor(candidate.fee, candidate.weight, currentMinFeeRate) {
+		return nil, false, txAdmitRejected(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", candidate.fee, candidate.weight, currentMinFeeRate))
+	}
+
+	totalBytes := usedBytes + candidateSize
+	totalCount := len(m.txs) + 1
+	targetBytes := maxBytes
+	if bytePressure {
+		targetBytes, err = nonNegativeMempoolIntToUint64("low_water_bytes", m.effectiveLowWaterBytesLocked())
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	planPool := make([]mempoolEvictionPlanEntry, 0, len(m.txs)+1)
+	admissionSeqs := make(map[uint64][32]byte, len(m.txs))
+	for _, entry := range m.txs {
+		if err := validateEvictionMetadata(entry); err != nil {
+			return nil, false, err
+		}
+		if existing, exists := admissionSeqs[entry.admissionSeq]; exists {
+			return nil, false, txAdmitRejected(fmt.Sprintf("duplicate mempool entry admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid))
+		}
+		admissionSeqs[entry.admissionSeq] = entry.txid
+		planPool = append(planPool, mempoolEvictionPlanEntry{entry: entry})
+	}
+	planPool = append(planPool, mempoolEvictionPlanEntry{entry: candidate, candidate: true})
+
+	evictedEntries := make([]*mempoolEntry, 0)
+	for (totalCount > m.maxTxs || totalBytes > targetBytes) && len(planPool) > 0 {
+		worstIndex := 0
+		for i := 1; i < len(planPool); i++ {
+			if evictionPlanEntryWorse(planPool[i], planPool[worstIndex]) {
+				worstIndex = i
+			}
+		}
+		worst := planPool[worstIndex]
+		if worst.candidate {
+			return nil, true, nil
+		}
+		evictedEntries = append(evictedEntries, worst.entry)
+		worstSize, err := nonNegativeMempoolIntToUint64("eviction_entry_size", worst.entry.size)
+		if err != nil {
+			return nil, false, err
+		}
+		if totalBytes >= worstSize {
+			totalBytes -= worstSize
+		} else {
+			return nil, false, txAdmitUnavailable("mempool eviction byte accounting underflow")
+		}
+		totalCount--
+		planPool = append(planPool[:worstIndex], planPool[worstIndex+1:]...)
+	}
+	if totalCount > m.maxTxs || totalBytes > maxBytes {
+		return nil, false, txAdmitUnavailable(fmt.Sprintf("mempool capacity remains exceeded after dry-run eviction: count=%d/%d bytes=%d/%d", totalCount, m.maxTxs, totalBytes, m.maxBytes))
+	}
+	return evictedEntries, false, nil
+}
+
+func nonNegativeMempoolIntToUint64(label string, value int) (uint64, error) {
+	if value < 0 {
+		return 0, txAdmitUnavailable(fmt.Sprintf("invalid mempool %s: %d", label, value))
+	}
+	return uint64(value), nil
+}
+
+func validateEvictionMetadata(entry *mempoolEntry) error {
+	if entry == nil {
+		return txAdmitRejected("nil mempool entry")
+	}
+	if entry.txid == ([32]byte{}) {
+		return txAdmitRejected("invalid mempool entry txid")
+	}
+	if entry.size <= 0 {
+		return txAdmitRejected("invalid mempool entry size")
+	}
+	if entry.weight == 0 {
+		return txAdmitRejected("invalid mempool entry weight")
+	}
+	if entry.admissionSeq == 0 {
+		return txAdmitRejected(fmt.Sprintf("invalid mempool entry admission_seq for txid %x", entry.txid))
+	}
+	return nil
+}
+
+func evictionPlanEntryWorse(a, b mempoolEvictionPlanEntry) bool {
+	if a.entry == nil || b.entry == nil {
+		return a.entry != nil && b.entry == nil
+	}
+	if cmp := compareMempoolEvictionPriority(a, b); cmp != 0 {
+		return cmp < 0
+	}
+	return bytes.Compare(a.entry.txid[:], b.entry.txid[:]) > 0
+}
+
+func compareMempoolEvictionPriority(a, b mempoolEvictionPlanEntry) int {
+	if a.entry == nil || b.entry == nil {
+		return 0
+	}
+	if cmp := compareEvictionFeeRate(a.entry, b.entry); cmp != 0 {
+		return cmp
+	}
+	if a.entry.fee != b.entry.fee {
+		if a.entry.fee > b.entry.fee {
+			return 1
+		}
+		return -1
+	}
+	aSeq := evictionAdmissionSeq(a)
+	bSeq := evictionAdmissionSeq(b)
+	if aSeq != bSeq {
+		if aSeq > bSeq {
+			return 1
+		}
+		return -1
+	}
+	return 0
+}
+
+func evictionAdmissionSeq(entry mempoolEvictionPlanEntry) uint64 {
+	if entry.candidate {
+		return 0
+	}
+	if entry.entry == nil {
+		return 0
+	}
+	return entry.entry.admissionSeq
+}
+
+func (m *Mempool) ensureMinFeeRateLocked() {
+	if m.currentMinFeeRate < DefaultMempoolMinFeeRate {
+		m.currentMinFeeRate = DefaultMempoolMinFeeRate
+	}
+}
+
+func (m *Mempool) currentMinFeeRateLocked() uint64 {
+	if m.currentMinFeeRate < DefaultMempoolMinFeeRate {
+		return DefaultMempoolMinFeeRate
+	}
+	return m.currentMinFeeRate
+}
+
+func (m *Mempool) effectiveLowWaterBytesLocked() int {
+	if m.lowWaterBytes > 0 || m.maxBytes <= 0 {
+		return m.lowWaterBytes
+	}
+	return defaultMempoolLowWaterBytes(m.maxBytes)
+}
+
+func feeRateBelowFloor(fee uint64, weight uint64, floor uint64) bool {
+	if weight == 0 {
+		return true
+	}
+	if floor < DefaultMempoolMinFeeRate {
+		floor = DefaultMempoolMinFeeRate
+	}
+	hi, lo := bits.Mul64(weight, floor)
+	if hi != 0 {
+		return true
+	}
+	return fee < lo
+}
+
+func (m *Mempool) raiseMinFeeRateAfterEvictionLocked(evictedEntries []*mempoolEntry) {
+	if len(evictedEntries) == 0 {
+		return
+	}
+	m.ensureMinFeeRateLocked()
+	var highestEvictedFloor uint64
+	for _, entry := range evictedEntries {
+		floor, ok := entryFloorRate(entry)
+		if ok && floor > highestEvictedFloor {
+			highestEvictedFloor = floor
+		}
+	}
+	raised := saturatingAddMinRelayFeeStep(highestEvictedFloor)
+	if raised > m.currentMinFeeRate {
+		m.currentMinFeeRate = raised
+	}
+}
+
+func (m *Mempool) decayMinFeeRateAfterConnectedBlockLocked() {
+	m.ensureMinFeeRateLocked()
+	if m.usedBytes >= m.effectiveLowWaterBytesLocked() {
+		return
+	}
+	decayed := m.currentMinFeeRate / 2
+	if decayed < DefaultMempoolMinFeeRate {
+		decayed = DefaultMempoolMinFeeRate
+	}
+	m.currentMinFeeRate = decayed
+}
+
+func entryFloorRate(entry *mempoolEntry) (uint64, bool) {
+	if entry == nil || entry.weight == 0 {
+		return 0, false
+	}
+	floor := entry.fee / entry.weight
+	if entry.fee%entry.weight != 0 {
+		floor++
+	}
+	return floor, true
+}
+
+func saturatingAddMinRelayFeeStep(v uint64) uint64 {
+	if v > ^uint64(0)-DefaultMempoolMinFeeRate {
+		return ^uint64(0)
+	}
+	return v + DefaultMempoolMinFeeRate
+}
+
 func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {
 	if a == nil || b == nil {
 		return 0
@@ -852,8 +1150,22 @@ func compareFeeRateValues(feeA uint64, sizeA int, feeB uint64, sizeB int) int {
 	if sizeA <= 0 || sizeB <= 0 {
 		return 0
 	}
-	ahi, alo := bits.Mul64(feeA, uint64(sizeB))
-	bhi, blo := bits.Mul64(feeB, uint64(sizeA))
+	return compareFeeRateWeightValues(feeA, uint64(sizeA), feeB, uint64(sizeB))
+}
+
+func compareEvictionFeeRate(a *mempoolEntry, b *mempoolEntry) int {
+	if a == nil || b == nil {
+		return 0
+	}
+	return compareFeeRateWeightValues(a.fee, a.weight, b.fee, b.weight)
+}
+
+func compareFeeRateWeightValues(feeA uint64, weightA uint64, feeB uint64, weightB uint64) int {
+	if weightA == 0 || weightB == 0 {
+		return 0
+	}
+	ahi, alo := bits.Mul64(feeA, weightB)
+	bhi, blo := bits.Mul64(feeB, weightA)
 	if ahi != bhi {
 		if ahi > bhi {
 			return 1

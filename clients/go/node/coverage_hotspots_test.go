@@ -101,7 +101,7 @@ func TestCoverage_MempoolHelpers(t *testing.T) {
 		existingTxID = txid
 		break
 	}
-	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: existingTxID, size: 1}); err == nil {
+	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: existingTxID, weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected duplicate tx rejection")
 	}
 	mp.maxTxs = len(mp.txs)
