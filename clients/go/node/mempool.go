@@ -670,7 +670,11 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 	if _, exists := m.txs[txid]; exists {
 		return txAdmitConflict("tx already in mempool")
 	}
-	if existing, exists := m.wtxids[entry.wtxid]; exists {
+	wtxid := entry.wtxid
+	if wtxid == ([32]byte{}) {
+		wtxid = entry.txid
+	}
+	if existing, exists := m.wtxids[wtxid]; exists {
 		return txAdmitConflict(fmt.Sprintf("mempool wtxid conflict with %x", existing))
 	}
 	for _, op := range entry.inputs {
@@ -721,6 +725,9 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
 	}
 	if entry.source == "" {
 		entry.source = mempoolTxSourceLocal
+	}
+	if entry.wtxid == ([32]byte{}) {
+		entry.wtxid = entry.txid
 	}
 	m.txs[entry.txid] = entry
 	m.wtxids[entry.wtxid] = entry.txid

@@ -163,6 +163,33 @@ func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
 	}
 }
 
+func TestMempoolAddEntryLockedDefaultsUnsetWtxid(t *testing.T) {
+	entry := &mempoolEntry{
+		txid: [32]byte{0x0a},
+		size: 1,
+	}
+
+	mp := &Mempool{
+		maxTxs:   1,
+		maxBytes: 10,
+	}
+	mp.addEntryLocked(entry)
+
+	if entry.wtxid != entry.txid {
+		t.Fatalf("entry wtxid=%x, want txid %x", entry.wtxid, entry.txid)
+	}
+	if got, ok := mp.wtxids[entry.txid]; !ok || got != entry.txid {
+		t.Fatalf("wtxid index got %x ok=%v, want txid %x", got, ok, entry.txid)
+	}
+	if got, ok := mp.wtxids[[32]byte{}]; ok {
+		t.Fatalf("zero wtxid key unexpectedly indexed txid %x", got)
+	}
+	err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x0b}, size: 1})
+	if err == nil || !strings.Contains(err.Error(), "mempool transaction count limit reached") {
+		t.Fatalf("expected count-limit rejection after zero-wtxid default, got %v", err)
+	}
+}
+
 func TestMempoolEntryIndexesRemovedWithEntry(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
