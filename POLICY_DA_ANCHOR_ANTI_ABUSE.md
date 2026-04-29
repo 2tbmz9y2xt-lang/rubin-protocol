@@ -140,17 +140,33 @@ invariant `current_mempool_min_fee_rate >= MIN_RELAY_FEE_RATE`, so the
 formula above is always at least as strict as the base relay-fee floor
 and strictly stricter when the rolling floor is above the default.
 This overlay does NOT redefine raise/decay behavior; it only points
-implementers to the parent rolling floor as the effective gate. This
-matches the sibling `POLICY_MEMPOOL_ADMISSION_GENESIS.md` Stage C fee
-gate so both overlays share one fee contract.
+implementers to the parent rolling floor as the effective gate. The
+relay-fee-floor half (`weight(tx) * current_mempool_min_fee_rate`) is
+identical to the sibling `POLICY_MEMPOOL_ADMISSION_GENESIS.md` Stage C
+formula.
 
 `min_da_fee_rate` is the spec-side lower bound for any future
 `PolicyDaSurchargePerByte` setting (`spec/RUBIN_NETWORK_PARAMS.md`
 §12.4); an implementation that wants to enforce a non-zero per-byte DA
 floor MUST raise `PolicyDaSurchargePerByte` to a value at least
-`min_da_fee_rate`. The §4 formula does not add `min_da_fee_rate` as
-an independent term, so the doc and the current node implementations
-agree byte-for-byte.
+`min_da_fee_rate`. The §4 formula here intentionally does not add
+`min_da_fee_rate` as an independent term, so the doc and the current
+Go/Rust node implementations
+(`clients/go/node/policy_da_anchor.go`,
+`clients/rust/crates/rubin-node/src/txpool.rs`) agree byte-for-byte.
+
+**Cross-doc note.** The sibling `POLICY_MEMPOOL_ADMISSION_GENESIS.md`
+Stage C currently expresses the DA half of the admission floor as
+`da_payload_len(tx) * min_da_fee_rate + da_payload_len(tx) *
+PolicyDaSurchargePerByte`, i.e. it includes `min_da_fee_rate` as an
+independent term. That formulation describes a stricter DA floor than
+either this overlay (which matches the Go/Rust implementation) or the
+implementations themselves enforce at the §1 default. Reconciling
+that asymmetry in the sibling document is a separate follow-up scoped
+to `POLICY_MEMPOOL_ADMISSION_GENESIS.md`, not this PR; this overlay
+deliberately tracks code reality so DA admission decisions made by an
+operator following §4 here cannot diverge from what their Go/Rust node
+actually enforces.
 
 Defaults / base parameters (constants are sourced from the documents
 named below; this overlay does not redefine any of them):
