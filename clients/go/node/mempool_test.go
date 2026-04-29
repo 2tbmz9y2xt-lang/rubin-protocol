@@ -141,7 +141,9 @@ func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
 	}
 
 	mp := &Mempool{}
-	mp.addEntryLocked(entry)
+	if err := mp.addEntryLocked(entry); err != nil {
+		t.Fatalf("addEntryLocked: %v", err)
+	}
 
 	if mp.txs == nil || mp.wtxids == nil || mp.spenders == nil {
 		t.Fatalf("indexes were not initialized: txs=%v wtxids=%v spenders=%v", mp.txs != nil, mp.wtxids != nil, mp.spenders != nil)
@@ -173,7 +175,9 @@ func TestMempoolAddEntryLockedDefaultsUnsetWtxid(t *testing.T) {
 		maxTxs:   1,
 		maxBytes: 10,
 	}
-	mp.addEntryLocked(entry)
+	if err := mp.addEntryLocked(entry); err != nil {
+		t.Fatalf("addEntryLocked: %v", err)
+	}
 
 	if entry.wtxid != entry.txid {
 		t.Fatalf("entry wtxid=%x, want txid %x", entry.wtxid, entry.txid)
@@ -187,6 +191,29 @@ func TestMempoolAddEntryLockedDefaultsUnsetWtxid(t *testing.T) {
 	err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x0b}, size: 1})
 	if err == nil || !strings.Contains(err.Error(), "mempool transaction count limit reached") {
 		t.Fatalf("expected count-limit rejection after zero-wtxid default, got %v", err)
+	}
+}
+
+func TestMempoolAddEntryLockedRejectsZeroTxidWithoutMutation(t *testing.T) {
+	mp := &Mempool{}
+
+	err := mp.addEntryLocked(&mempoolEntry{size: 1})
+	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry txid") {
+		t.Fatalf("expected invalid txid rejection, got %v", err)
+	}
+	if mp.txs != nil || mp.wtxids != nil || mp.spenders != nil {
+		t.Fatalf("indexes initialized after zero txid reject: txs=%v wtxids=%v spenders=%v", mp.txs != nil, mp.wtxids != nil, mp.spenders != nil)
+	}
+	if mp.usedBytes != 0 {
+		t.Fatalf("usedBytes=%d, want 0 after zero txid reject", mp.usedBytes)
+	}
+	if mp.lastAdmissionSeq != 0 {
+		t.Fatalf("lastAdmissionSeq=%d, want 0 after zero txid reject", mp.lastAdmissionSeq)
+	}
+
+	err = mp.validateAdmissionLocked(&mempoolEntry{size: 1})
+	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry txid") {
+		t.Fatalf("expected validate invalid txid rejection, got %v", err)
 	}
 }
 

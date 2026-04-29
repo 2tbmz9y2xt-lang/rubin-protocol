@@ -335,8 +335,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 		return err
 	}
 
-	m.addEntryLocked(entry)
-	return nil
+	return m.addEntryLocked(entry)
 }
 
 func validMempoolTxSource(source mempoolTxSource) bool {
@@ -667,6 +666,9 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 		return txAdmitRejected("invalid mempool entry size")
 	}
 	txid := entry.txid
+	if txid == ([32]byte{}) {
+		return txAdmitRejected("invalid mempool entry txid")
+	}
 	if _, exists := m.txs[txid]; exists {
 		return txAdmitConflict("tx already in mempool")
 	}
@@ -707,7 +709,16 @@ func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.O
 	}
 }
 
-func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
+func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
+	if entry == nil {
+		return txAdmitRejected("nil mempool entry")
+	}
+	if entry.size <= 0 {
+		return txAdmitRejected("invalid mempool entry size")
+	}
+	if entry.txid == ([32]byte{}) {
+		return txAdmitRejected("invalid mempool entry txid")
+	}
 	if m.txs == nil {
 		m.txs = make(map[[32]byte]*mempoolEntry)
 	}
@@ -735,6 +746,7 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
 	}
+	return nil
 }
 
 func (m *Mempool) snapshotEntries() []*mempoolEntry {

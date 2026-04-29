@@ -109,7 +109,9 @@ func TestCoverageResidual_MempoolLimitBranches(t *testing.T) {
 	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x01}, size: 0}); err == nil {
 		t.Fatalf("expected invalid size rejection")
 	}
-	mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x02}, size: 1})
+	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x02}, size: 1}); err != nil {
+		t.Fatalf("addEntryLocked(count seed): %v", err)
+	}
 	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x03}, size: 1}); err == nil {
 		t.Fatalf("expected count-limit rejection")
 	}
@@ -123,7 +125,9 @@ func TestCoverageResidual_MempoolLimitBranches(t *testing.T) {
 		t.Fatalf("NewMempool(bytes): %v", err)
 	}
 	mpBytes.mu.Lock()
-	mpBytes.addEntryLocked(&mempoolEntry{txid: [32]byte{0x04}, size: 1})
+	if err := mpBytes.addEntryLocked(&mempoolEntry{txid: [32]byte{0x04}, size: 1}); err != nil {
+		t.Fatalf("addEntryLocked(byte seed): %v", err)
+	}
 	if err := mpBytes.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x05}, size: 2}); err == nil {
 		t.Fatalf("expected byte-limit rejection")
 	}
