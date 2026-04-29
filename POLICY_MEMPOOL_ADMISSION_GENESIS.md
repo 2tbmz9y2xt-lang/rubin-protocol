@@ -293,8 +293,10 @@ A policy-compliant miner template MUST exclude:
 - dust outputs;
 - non-coinbase `CORE_ANCHOR` outputs;
 - pre-activation `CORE_EXT` creates/spends;
-- DA payloads exceeding `PolicyMaxDaBytesPerBlock` for the candidate
-  block.
+- DA-carrying transactions that would cause the cumulative DA bytes
+  selected into the candidate template to exceed
+  `PolicyMaxDaBytesPerBlock`; once that budget is reached, additional
+  DA-carrying transactions are excluded.
 
 Default:
 
