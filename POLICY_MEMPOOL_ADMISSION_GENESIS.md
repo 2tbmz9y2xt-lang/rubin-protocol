@@ -4,12 +4,12 @@
 **Date:** 2026-04-29
 **Revision:** post-review rc3 (overlay landing in `rubin-protocol`)
 **Applies to:** devnet, testnet candidate, mainnet release baseline unless superseded
-**Canonical precedence:** `RUBIN_L1_CANONICAL.md` remains the only source of consensus validity.
+**Canonical precedence:** `spec/RUBIN_L1_CANONICAL.md` remains the only source of consensus validity.
 
 This policy defines what a production node admits to its mempool. It does
 not change block validity. A block containing a transaction rejected by
 this policy can still be consensus-valid if it satisfies
-`RUBIN_L1_CANONICAL.md`.
+`spec/RUBIN_L1_CANONICAL.md`.
 
 ## 0. Normative Parent and Scope Boundary
 
