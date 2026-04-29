@@ -26,6 +26,40 @@ All `spec/...` references in this document point to files in the
 private `rubin-spec` repository (see `SPEC_LOCATION.md` in this repo
 for the cross-repo convention), not in-repo paths.
 
+### 0.1 Implementation Authorization Boundary
+
+This document does NOT authorize implementation by itself. It is
+policy text only and changes no code. Specifically:
+
+- No Go DA/anchor relay implementation is added or modified by this file.
+- No Rust parity is added or modified by this file.
+- No conformance vectors are added by this file.
+- No miner template runtime change is enacted by this file.
+- No telemetry counter is registered by this file beyond declaring
+  the names a future implementation MAY/SHOULD expose.
+
+Any implementation slice MUST land in a separate PR scoped to the
+specific code/conformance surface; this overlay only fixes the policy
+contract.
+
+### 0.2 Terminology
+
+The terms below are used by this overlay but defined elsewhere; this
+file does not redefine them:
+
+- `tx_kind`, `weight(tx)`, `MAX_DA_BYTES_PER_BLOCK`,
+  `MIN_RELAY_FEE_RATE`: `spec/RUBIN_L1_CANONICAL.md`.
+- `min_da_fee_rate`, `MIN_RELAY_OUTPUT_VALUE`: `spec/RUBIN_NETWORK_PARAMS.md`
+  §12.4 / §12.5.
+- `current_mempool_min_fee_rate` (rolling local floor):
+  `spec/RUBIN_MEMPOOL_POLICY.md` §10.
+- `da_id`, `da_payload_len(tx)`, `DA_COMMIT_TX`, `DA_CHUNK_TX`,
+  `COMPLETE_SET`, `STAGED_COMMIT`, DA orphan-pool parameters:
+  `spec/RUBIN_COMPACT_BLOCKS.md` (DA relay state machine + parameters
+  table).
+- `CORE_ANCHOR`, `CORE_DA_COMMIT` covenant outputs:
+  `spec/RUBIN_L1_CANONICAL.md` covenant-type definitions.
+
 ## 1. Decision
 
 Production policy applies the following default guardrails:
@@ -38,6 +72,8 @@ NonCoinbaseCoreAnchor = NON_STANDARD
 # (clients/rust/crates/rubin-node/src/txpool.rs,
 #  clients/rust/crates/rubin-node/src/miner.rs)
 PolicyMaxDaBytesPerBlock = MAX_DA_BYTES_PER_BLOCK / 4
+# `MAX_DA_BYTES_PER_BLOCK` is the consensus DA cap defined by
+# `spec/RUBIN_L1_CANONICAL.md`; this overlay does not redefine it.
 PolicyDaSurchargePerByte = 0
 min_da_fee_rate = 1
 # normative spec/network-params constant
@@ -126,7 +162,8 @@ The miner template builder MUST enforce:
 sum_da_payload_bytes(template) <= PolicyMaxDaBytesPerBlock
 ```
 
-Default:
+Default (matches the §1 defaults block; see §1 for the
+`MAX_DA_BYTES_PER_BLOCK` source citation):
 
 ```text
 PolicyMaxDaBytesPerBlock = MAX_DA_BYTES_PER_BLOCK / 4
@@ -143,7 +180,9 @@ For a given `da_id`:
 1. First-seen commit is retained.
 2. Later duplicate commits are discarded.
 3. Higher fee does not replace the first commit.
-4. Duplicate sender receives peer-score penalty.
+4. Duplicate sender receives a peer-score penalty (the magnitude of
+   the penalty is governed by the relay-policy peer-score system; this
+   overlay does not redefine it).
 
 ## 7. DA Set Eviction
 
@@ -163,7 +202,9 @@ Eviction MUST be atomic by `da_id`.
 
 ## 8. Orphan Pool Policy
 
-Use `spec/RUBIN_COMPACT_BLOCKS.md` orphan-state rules:
+Use `spec/RUBIN_COMPACT_BLOCKS.md` orphan-state rules (values reproduced
+verbatim from the parent-spec parameters table; this overlay does not
+redefine them):
 
 ```text
 DA_ORPHAN_POOL_SIZE = 64 MiB
@@ -218,6 +259,12 @@ anchor rejection events are owned by
 not duplicate them.
 
 ## 10. Escalation
+
+The `144-block window` and `24 hours` thresholds in this section
+describe operator-facing observation / escalation cadence, not
+consensus-affecting hysteresis. Consensus-affecting timing in this
+overlay — e.g., the §8 storm-mode exit hysteresis — is expressed in
+block units instead.
 
 If DA fill exceeds 80% over a rolling 144-block window, nodes SHOULD emit a warning.
 
