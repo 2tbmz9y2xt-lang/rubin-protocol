@@ -32,6 +32,11 @@ Production policy applies the following default guardrails:
 
 ```text
 NonCoinbaseCoreAnchor = NON_STANDARD
+# implemented in Go as `PolicyRejectNonCoinbaseAnchorOutputs = true`
+# (clients/go/node/miner.go, clients/go/node/mempool.go); Rust parity
+# `policy_reject_non_coinbase_anchor_outputs = true`
+# (clients/rust/crates/rubin-node/src/txpool.rs,
+#  clients/rust/crates/rubin-node/src/miner.rs)
 PolicyMaxDaBytesPerBlock = MAX_DA_BYTES_PER_BLOCK / 4
 PolicyDaSurchargePerByte = 0
 min_da_fee_rate = 1
