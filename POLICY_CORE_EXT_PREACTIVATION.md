@@ -29,7 +29,7 @@ COUNCIL_CORE_EXT_FRAMEWORK_20260315
 COUNCIL_NATIVE_ROTATION_ARCH_20260315
 Q-IMPL-CORE-EXT-COST-01
 EXT_BASE_COST = 64
-rubin-spec-private/spec/RUBIN_CORE_EXT_EXTENSION_FRAMEWORK.md
+spec/RUBIN_CORE_EXT_EXTENSION_FRAMEWORK.md
 rubin-core-ext-lab/RUBIN_CORE_EXT_EXTENSION_FRAMEWORK.md
 RUBIN_L1_CANONICAL.md §23.2.2
 RUBIN_L1_CANONICAL.md §12.5
@@ -79,14 +79,18 @@ This policy replacement does not claim new implementation coverage. It records p
 wallet, RPC, mempool, relay, miner, unsafe-override, and telemetry surfaces when those surfaces implement
 CORE_EXT pre-activation handling.
 
-The currently documented implemented guardrail remains **miner template filtering**:
+The currently documented implemented guardrails are:
 
-- By default, `Miner` excludes any transaction that creates a `CORE_EXT` output or spends a `CORE_EXT` UTXO.
-- This is policy-only and does not change consensus validity.
+- **Miner template filtering:** by default, `Miner` excludes any transaction that creates a `CORE_EXT`
+  output or spends a `CORE_EXT` UTXO.
+- **Canonical mempool admission:** when `PolicyRejectCoreExtPreActivation` is enabled, `Mempool`
+  applies `RejectCoreExtTxPreActivation` during admission. The Go P2P tx relay path is wired through
+  `CanonicalMempoolTxPool`, so relayed transactions admitted through that path inherit canonical mempool
+  policy.
 
-Wallet construction, transaction-construction RPC, mempool admission, relay forwarding, unsafe override,
-and telemetry behavior require separate implementation evidence before this repository can claim them as
-implemented.
+This is policy-only and does not change consensus validity. Wallet construction, transaction-construction
+RPC, unsafe override, telemetry behavior, and any relay behavior outside canonical mempool admission require
+separate implementation evidence before this repository can claim them as implemented.
 
 ## 3. Wallet Policy
 
@@ -129,8 +133,9 @@ The response SHOULD include:
 
 ## 5. Mempool and Relay Policy
 
-This section is a forward policy requirement for mempool and relay implementations. This document does not
-claim new mempool or relay implementation coverage; see §2.1.
+This section records policy for mempool and relay implementations. Existing Go coverage is limited to
+canonical mempool admission and P2P-relayed transaction admission through `CanonicalMempoolTxPool`; this
+document does not claim broader relay behavior.
 
 Reject as non-standard if a transaction:
 
@@ -199,12 +204,12 @@ currently emitted.
 Nodes SHOULD expose:
 
 ```text
-core_ext_preactivation_reject_total
-core_ext_preactivation_miner_exclude_total
-core_ext_profile_active_total
-core_ext_profile_inactive_total
-core_ext_unknown_ext_id_total
-core_ext_unsafe_override_enabled
+rubin_node_core_ext_preactivation_reject_total
+rubin_node_core_ext_preactivation_miner_exclude_total
+rubin_node_core_ext_profile_active_total
+rubin_node_core_ext_profile_inactive_total
+rubin_node_core_ext_unknown_ext_id_total
+rubin_node_core_ext_unsafe_override_enabled
 ```
 
 ## 10. Review Triggers
