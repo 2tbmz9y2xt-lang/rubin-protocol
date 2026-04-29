@@ -278,11 +278,11 @@ For DA-carrying transactions:
 
 1. Admit only if the Stage C fee gate passes.
 2. Enforce template DA byte budget separately during mining (see §3).
-3. Keep DA relay set-state rules under `RUBIN_COMPACT_BLOCKS.md`.
+3. Keep DA relay set-state rules under `spec/RUBIN_COMPACT_BLOCKS.md`.
 
 This overlay is consistent with `POLICY_DA_ANCHOR_ANTI_ABUSE.md` (this
 repository, root). The duplicate-DA-commit rule and DA pool semantics
-remain governed by `RUBIN_COMPACT_BLOCKS.md`.
+remain governed by `spec/RUBIN_COMPACT_BLOCKS.md`.
 
 ## 3. Mining Template Policy
 
