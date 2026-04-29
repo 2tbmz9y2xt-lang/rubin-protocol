@@ -65,7 +65,7 @@ Production policy is fail-closed.
 PolicyRejectCoreExtPreActivation = true
 ```
 
-This default applies to:
+As a policy requirement, this default applies to implementations of:
 
 - wallet construction;
 - RPC transaction creation;
@@ -90,6 +90,9 @@ implemented.
 
 ## 3. Wallet Policy
 
+This section is a forward policy requirement for wallet implementations. This document does not claim
+that wallet construction for CORE_EXT pre-activation handling is implemented; see §2.1.
+
 Wallets MUST NOT create `CORE_EXT` outputs unless all are true:
 
 1. The target `ext_id` profile is known.
@@ -101,6 +104,10 @@ Wallets MUST NOT create `CORE_EXT` outputs unless all are true:
 If any condition is false, wallet construction MUST fail.
 
 ## 4. RPC Policy
+
+This section is a forward policy requirement for transaction-construction RPC implementations. This document
+does not claim that such RPC rejection is implemented; the error name and response shape below are target
+policy guidance, not present-runtime evidence.
 
 Transaction-construction RPCs MUST reject requests that create a pre-activation `CORE_EXT` output.
 
@@ -122,6 +129,9 @@ The response SHOULD include:
 
 ## 5. Mempool and Relay Policy
 
+This section is a forward policy requirement for mempool and relay implementations. This document does not
+claim new mempool or relay implementation coverage; see §2.1.
+
 Reject as non-standard if a transaction:
 
 1. Creates a `CORE_EXT` output for an inactive profile.
@@ -132,11 +142,16 @@ Relay MUST NOT forward such transactions.
 
 ## 6. Miner Template Policy
 
+This is the currently documented implemented guardrail identified in §2.1.
+
 Miners MUST exclude pre-activation `CORE_EXT` creates/spends from policy-compliant templates.
 
 This does not change consensus validity. It prevents accidental block inclusion by honest miners.
 
 ## 7. Unsafe Test Override
+
+This section applies only if a future implementation exposes a test-only override. This document does not
+claim such an override exists.
 
 A node MAY expose a test-only override:
 
@@ -177,6 +192,9 @@ h >= activation_height
 Version-bit signaling is telemetry only and MUST NOT affect admission.
 
 ## 9. Telemetry
+
+This section records target policy telemetry names. This document does not claim that these metrics are
+currently emitted.
 
 Nodes SHOULD expose:
 
