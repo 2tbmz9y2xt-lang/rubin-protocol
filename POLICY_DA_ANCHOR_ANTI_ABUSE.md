@@ -159,8 +159,13 @@ Blocks with underpaying DA transactions remain consensus-valid if they satisfy c
 The miner template builder MUST enforce:
 
 ```text
-sum_da_payload_bytes(template) <= PolicyMaxDaBytesPerBlock
+Σ da_payload_len(tx) for tx in template <= PolicyMaxDaBytesPerBlock
 ```
+
+`da_payload_len(tx)` is the same wire field used in the §4 fee
+formulas (a byte count, see `spec/RUBIN_L1_CANONICAL.md` definition);
+the §5 budget is the sum across all DA-carrying transactions selected
+into the candidate template.
 
 Default (matches the §1 defaults block; see §1 for the
 `MAX_DA_BYTES_PER_BLOCK` source citation):
@@ -232,8 +237,10 @@ depend on a specific monotonic time source.
 
 ## 9. Telemetry
 
-When implemented, nodes SHOULD expose these counters. This overlay
-declares the logical telemetry surface; concrete Prometheus exports
+When implemented, nodes SHOULD expose these metrics (a mix of
+counters and gauges — counters end in `_total`; gauges are the
+`_fill_pct`, `_bytes`, `_active` entries). This overlay declares the
+logical telemetry surface; concrete Prometheus exports
 MUST remain in the existing `rubin_node_` namespace/prefix used by
 the Go and Rust nodes, so this overlay does not introduce a second,
 conflicting metric namespace. The specific metric names listed below
