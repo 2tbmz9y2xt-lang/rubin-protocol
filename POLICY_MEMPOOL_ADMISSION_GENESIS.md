@@ -93,7 +93,7 @@ Reject as non-standard if any of the following holds:
 4. Non-minimal `CompactSize` encoding is present.
 5. Transaction uses an invalid or malformed covenant encoding.
 6. Transaction has `tx_nonce = 0`, except coinbase.
-7. Transaction uses `sequence > 0x7fffffff`.
+7. Any non-coinbase input uses `sequence > 0x7fffffff`.
 
 This stage mirrors consensus parser constraints, but the result is a
 mempool rejection, not a consensus error.
