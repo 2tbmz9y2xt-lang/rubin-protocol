@@ -223,10 +223,16 @@ If DA fill exceeds 80% over a rolling 144-block window, nodes SHOULD emit a warn
 
 If DA fill exceeds 95% over 24 hours, operators SHOULD consider:
 
-1. Raising `PolicyDaSurchargePerByte` locally (the operator-tunable
-   per-byte DA fee floor; `min_da_fee_rate` itself is a normative
+1. Raising `PolicyDaSurchargePerByte` locally — the operator-tunable
+   per-byte DA fee **surcharge** that, per the §4 formula
+   `da_required_fee(tx) = da_payload_len(tx) * (min_da_fee_rate +
+   PolicyDaSurchargePerByte)`, adds on top of the spec-side
+   `min_da_fee_rate` rather than replacing it. The effective per-byte
+   floor an operator enforces by raising the surcharge to `S` is
+   therefore `min_da_fee_rate + S`, not `S` alone; size the increment
+   accordingly. `min_da_fee_rate` itself is a normative
    spec/network-params constant, not a separate implementation knob —
-   see §1 defaults block).
+   see §1 defaults block.
 2. Coordinating a network-wide relay policy update.
 3. Reducing `PolicyMaxDaBytesPerBlock` temporarily.
 4. Investigating peer-level DA abuse patterns.
