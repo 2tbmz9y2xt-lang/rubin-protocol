@@ -424,11 +424,11 @@ This policy does not define:
 - priority-fee markets;
 - EIP-1559-style dynamics.
 
-Structured logging events for mempool admission (e.g.
-`mempool.reorg_requeue`) are intended to be defined by a future
-`POLICY_STRUCTURED_LOGGING_MINIMUM.md`, owned by `rubin-protocol#1345`.
-Until that policy is merged, implementations SHOULD use the rejection
-fields in §6 as the structured-logging surface.
+Structured logging events for mempool admission are defined by
+`POLICY_STRUCTURED_LOGGING_MINIMUM.md`. The rejection fields in §6 remain the
+bounded policy/metric source that future structured-log implementations should
+use when emitting events such as `mempool.tx_rejected` or
+`mempool.reorg_requeue`.
 
 ## 9. Implementation Follow-Ups (Non-Authorizing)
 
@@ -494,8 +494,8 @@ the review or evidence requirements on those PRs.
   `CORE_ANCHOR` rule.
 - `POLICY_CORE_EXT_PREACTIVATION.md` (this repository, root) —
   `CORE_EXT` pre-activation guardrail (consistent with Stage F).
-- `POLICY_STRUCTURED_LOGGING_MINIMUM.md` — future, owned by
-  `rubin-protocol#1345`.
+- `POLICY_STRUCTURED_LOGGING_MINIMUM.md` — minimum structured logging policy
+  and mempool event-family taxonomy.
 - `rubin-protocol#1341` — this overlay's tracking issue.
 - `rubin-protocol#1335` … `rubin-protocol#1340` — implementation
   follow-ups (see §9).
