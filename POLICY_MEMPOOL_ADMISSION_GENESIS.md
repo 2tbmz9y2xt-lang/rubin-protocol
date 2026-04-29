@@ -78,7 +78,7 @@ reason about, and audit-clean.
 
 ## 2. Admission Overlay Gates
 
-A node SHOULD apply the parent `spec/RUBIN_MEMPOOL_POLICY.md`
+A node MUST apply the parent `spec/RUBIN_MEMPOOL_POLICY.md`
 admission order first. The gates below are overlay requirements that
 must be placed into that ordered flow without changing the parent
 ordering semantics.
