@@ -2,7 +2,7 @@
 
 **Status:** NON-CONSENSUS / operational policy
 **Date:** 2026-04-29
-**Revision:** post-review rc3 aligned with `rubin-spec` PR #245 / issue #242
+**Revision:** post-review rc3 aligned with `rubin-spec` PR #245 / `rubin-spec` issue #242
 **Applies to:** Go node, Rust node, devnet observability, operator logs
 **Canonical precedence:** `spec/RUBIN_L1_CANONICAL.md` remains the only source of consensus validity.
 
@@ -27,19 +27,22 @@ contract:
 
 ```text
 spec/RUBIN_STRUCTURED_LOGGING_CONTRACT.md
-rubin-spec PR #245 / issue #242
+rubin-spec PR #245 / rubin-spec issue #242
 ```
 
 As in other root policy documents in this repository, `spec/...` paths refer to
 the private `rubin-spec` repository; see `SPEC_LOCATION.md` for the cross-repo
 convention.
 
-The rc3 archive source for this policy is:
+The rc3 archive input file used as source material for this policy is:
 
 ```text
-POLICY_STRUCTURED_LOGGING_MINIMUM.md
-sha256 5054e8b9803b71dc3df428efae14bd135345d6707828663476d63a28eb8215a2
+rubin_policy_pack_postreview_rc3_2026-04-28/POLICY_STRUCTURED_LOGGING_MINIMUM.md
 ```
+
+This repository policy file does not embed a digest of itself. Source archive
+checksums belong to release artifacts and task records, not to mutable policy
+text.
 
 ## 1. Decision
 
@@ -54,7 +57,8 @@ implementation framework and it does not make any current runtime logging claim.
 
 ## 2. Common Event Schema
 
-A structured log event SHOULD be an object with the following required fields:
+A structured log event that claims compliance with this policy MUST be an object
+with the following required fields:
 
 | Field | Type | Requirement |
 |---|---|---|
@@ -309,7 +313,7 @@ Review this policy when:
 
 | Artifact | Relationship |
 |---|---|
-| `spec/RUBIN_STRUCTURED_LOGGING_CONTRACT.md` | Parent taxonomy source merged via `rubin-spec` PR #245 / issue #242. |
+| `spec/RUBIN_STRUCTURED_LOGGING_CONTRACT.md` | Parent taxonomy source merged via `rubin-spec` PR #245 / `rubin-spec` issue #242. |
 | `spec/RUBIN_MEMPOOL_POLICY.md` | Standard mempool metrics and bounded-label constraints. |
 | `spec/RUBIN_COMPACT_BLOCKS.md` §13, §14 | Compact relay telemetry and peer quality score sources. |
 | `spec/RUBIN_NETWORK_PARAMS.md` | Network telemetry thresholds. |
