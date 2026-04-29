@@ -44,7 +44,7 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	spenders := make(map[consensus.Outpoint][32]byte)
 	admissionSeqs := make(map[uint64][32]byte, len(snapshot.entries))
 	usedBytes := 0
-	var nextAdmissionSeq uint64
+	var maxAdmissionSeq uint64
 	for _, item := range snapshot.entries {
 		entry := cloneMempoolEntry(&item)
 		if err := validateMempoolSnapshotEntry(entry); err != nil {
@@ -73,15 +73,15 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 		wtxids[entryCopy.wtxid] = entryCopy.txid
 		admissionSeqs[entryCopy.admissionSeq] = entryCopy.txid
 		usedBytes += entryCopy.size
-		if entryCopy.admissionSeq > nextAdmissionSeq {
-			nextAdmissionSeq = entryCopy.admissionSeq
+		if entryCopy.admissionSeq > maxAdmissionSeq {
+			maxAdmissionSeq = entryCopy.admissionSeq
 		}
 	}
 	m.txs = txs
 	m.wtxids = wtxids
 	m.spenders = spenders
 	m.usedBytes = usedBytes
-	m.nextAdmissionSeq = nextAdmissionSeq
+	m.lastAdmissionSeq = maxAdmissionSeq
 	return nil
 }
 

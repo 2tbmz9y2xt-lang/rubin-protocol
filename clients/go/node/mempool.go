@@ -46,7 +46,7 @@ type Mempool struct {
 	maxTxs           int
 	maxBytes         int
 	usedBytes        int
-	nextAdmissionSeq uint64
+	lastAdmissionSeq uint64
 	txs              map[[32]byte]*mempoolEntry
 	wtxids           map[[32]byte][32]byte
 	spenders         map[consensus.Outpoint][32]byte
@@ -681,7 +681,7 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 	if entry.size > m.maxBytes || m.usedBytes > m.maxBytes-entry.size {
 		return txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, entry.size, m.maxBytes))
 	}
-	if m.nextAdmissionSeq == ^uint64(0) {
+	if m.lastAdmissionSeq == ^uint64(0) {
 		return txAdmitUnavailable("mempool admission sequence exhausted")
 	}
 	return nil
@@ -711,10 +711,10 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
 		m.spenders = make(map[consensus.Outpoint][32]byte)
 	}
 	if entry.admissionSeq == 0 {
-		m.nextAdmissionSeq++
-		entry.admissionSeq = m.nextAdmissionSeq
-	} else if entry.admissionSeq > m.nextAdmissionSeq {
-		m.nextAdmissionSeq = entry.admissionSeq
+		m.lastAdmissionSeq++
+		entry.admissionSeq = m.lastAdmissionSeq
+	} else if entry.admissionSeq > m.lastAdmissionSeq {
+		m.lastAdmissionSeq = entry.admissionSeq
 	}
 	if entry.source == "" {
 		entry.source = mempoolTxSourceLocal

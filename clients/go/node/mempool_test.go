@@ -124,8 +124,8 @@ func TestMempoolRejectsInvalidEntrySource(t *testing.T) {
 	if got := mp.Len(); got != 0 {
 		t.Fatalf("mempool len=%d, want 0", got)
 	}
-	if mp.nextAdmissionSeq != 0 {
-		t.Fatalf("nextAdmissionSeq after invalid source=%d, want 0", mp.nextAdmissionSeq)
+	if mp.lastAdmissionSeq != 0 {
+		t.Fatalf("lastAdmissionSeq after invalid source=%d, want 0", mp.lastAdmissionSeq)
 	}
 }
 
@@ -155,8 +155,8 @@ func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
 	if got := mp.spenders[op]; got != entry.txid {
 		t.Fatalf("spender index got %x, want txid %x", got, entry.txid)
 	}
-	if mp.nextAdmissionSeq != entry.admissionSeq {
-		t.Fatalf("nextAdmissionSeq=%d, want %d", mp.nextAdmissionSeq, entry.admissionSeq)
+	if mp.lastAdmissionSeq != entry.admissionSeq {
+		t.Fatalf("lastAdmissionSeq=%d, want %d", mp.lastAdmissionSeq, entry.admissionSeq)
 	}
 	if mp.usedBytes != entry.size {
 		t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, entry.size)
@@ -211,8 +211,8 @@ func TestMempoolAdmissionSeqOnlyAcceptedTxs(t *testing.T) {
 	if err := mp.AddTx([]byte{0xde, 0xad}); err == nil {
 		t.Fatal("malformed tx unexpectedly accepted")
 	}
-	if mp.nextAdmissionSeq != 0 {
-		t.Fatalf("nextAdmissionSeq after malformed=%d, want 0", mp.nextAdmissionSeq)
+	if mp.lastAdmissionSeq != 0 {
+		t.Fatalf("lastAdmissionSeq after malformed=%d, want 0", mp.lastAdmissionSeq)
 	}
 
 	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
@@ -226,8 +226,8 @@ func TestMempoolAdmissionSeqOnlyAcceptedTxs(t *testing.T) {
 	if err := mp.AddTx(tx1); err == nil {
 		t.Fatal("duplicate tx unexpectedly accepted")
 	}
-	if mp.nextAdmissionSeq != 1 {
-		t.Fatalf("nextAdmissionSeq after duplicate=%d, want 1", mp.nextAdmissionSeq)
+	if mp.lastAdmissionSeq != 1 {
+		t.Fatalf("lastAdmissionSeq after duplicate=%d, want 1", mp.lastAdmissionSeq)
 	}
 	if err := mp.AddTx(tx2); err != nil {
 		t.Fatalf("AddTx(tx2): %v", err)
@@ -249,7 +249,7 @@ func TestMempoolAdmissionSeqDoesNotWrap(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
-	mp.nextAdmissionSeq = ^uint64(0)
+	mp.lastAdmissionSeq = ^uint64(0)
 
 	err = mp.AddTx(txBytes)
 	if err == nil || !strings.Contains(err.Error(), "mempool admission sequence exhausted") {
@@ -265,8 +265,8 @@ func TestMempoolAdmissionSeqDoesNotWrap(t *testing.T) {
 	if got := mp.Len(); got != 0 {
 		t.Fatalf("mempool len=%d, want 0", got)
 	}
-	if mp.nextAdmissionSeq != ^uint64(0) {
-		t.Fatalf("nextAdmissionSeq mutated to %d", mp.nextAdmissionSeq)
+	if mp.lastAdmissionSeq != ^uint64(0) {
+		t.Fatalf("lastAdmissionSeq mutated to %d", mp.lastAdmissionSeq)
 	}
 }
 
@@ -923,7 +923,7 @@ func TestMempoolDoubleSpend(t *testing.T) {
 	if got, ok := mp.spenders[outpoints[0]]; !ok || got != tx1ID {
 		t.Fatalf("spender index got %x ok=%v, want tx1 %x", got, ok, tx1ID)
 	}
-	seqAfterTx1 := mp.nextAdmissionSeq
+	seqAfterTx1 := mp.lastAdmissionSeq
 	if err := mp.AddTx(tx2); err == nil {
 		t.Fatalf("expected double-spend rejection")
 	}
@@ -936,8 +936,8 @@ func TestMempoolDoubleSpend(t *testing.T) {
 	if got, ok := mp.spenders[outpoints[0]]; !ok || got != tx1ID {
 		t.Fatalf("spender index after conflict got %x ok=%v, want tx1 %x", got, ok, tx1ID)
 	}
-	if mp.nextAdmissionSeq != seqAfterTx1 {
-		t.Fatalf("nextAdmissionSeq after conflict=%d, want %d", mp.nextAdmissionSeq, seqAfterTx1)
+	if mp.lastAdmissionSeq != seqAfterTx1 {
+		t.Fatalf("lastAdmissionSeq after conflict=%d, want %d", mp.lastAdmissionSeq, seqAfterTx1)
 	}
 }
 
@@ -963,12 +963,12 @@ func TestMempoolFullRejectsWithoutEviction(t *testing.T) {
 	if err := mp.AddTx(txHigh); err != nil {
 		t.Fatalf("AddTx(high): %v", err)
 	}
-	seqAfterAccepted := mp.nextAdmissionSeq
+	seqAfterAccepted := mp.lastAdmissionSeq
 	if err := mp.AddTx(txBetter); err == nil || !strings.Contains(err.Error(), "mempool transaction count limit reached") {
 		t.Fatalf("expected count-limit rejection without eviction, got %v", err)
 	}
-	if mp.nextAdmissionSeq != seqAfterAccepted {
-		t.Fatalf("nextAdmissionSeq after capacity reject=%d, want %d", mp.nextAdmissionSeq, seqAfterAccepted)
+	if mp.lastAdmissionSeq != seqAfterAccepted {
+		t.Fatalf("lastAdmissionSeq after capacity reject=%d, want %d", mp.lastAdmissionSeq, seqAfterAccepted)
 	}
 	if got := mp.Len(); got != 2 {
 		t.Fatalf("mempool len=%d, want 2", got)
@@ -1148,8 +1148,8 @@ func TestRestoreMempoolSnapshotRecomputesByteAccounting(t *testing.T) {
 	if restored.source != mempoolTxSourceLocal {
 		t.Fatalf("restored source=%q, want %q", restored.source, mempoolTxSourceLocal)
 	}
-	if mp.nextAdmissionSeq != restored.admissionSeq {
-		t.Fatalf("nextAdmissionSeq after restore=%d, want %d", mp.nextAdmissionSeq, restored.admissionSeq)
+	if mp.lastAdmissionSeq != restored.admissionSeq {
+		t.Fatalf("lastAdmissionSeq after restore=%d, want %d", mp.lastAdmissionSeq, restored.admissionSeq)
 	}
 	if mp.usedBytes != len(tx1) {
 		t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, len(tx1))
