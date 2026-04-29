@@ -362,8 +362,14 @@ the Go and Rust nodes, so this overlay does not introduce a second,
 conflicting metric namespace. The specific metric names listed below
 are the required names for future exports of this telemetry surface
 when implemented; the implementation locus is the issues in §9, not
-this file:
+this file.
 
+For `rubin_node_mempool_admit_total`, implementations MUST preserve
+the existing label contract already exported by the Go node: a
+`result` label with exactly these buckets:
+`accepted`, `conflict`, `rejected`, and `unavailable`. Future Go and
+Rust exports MUST use the same metric name and `result` label values
+so dashboards/alerts do not diverge across clients.
 ```text
 rubin_node_mempool_admit_total
 rubin_node_mempool_reject_total
