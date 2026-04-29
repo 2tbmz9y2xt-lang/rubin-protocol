@@ -71,7 +71,7 @@ Rubin uses a strict, first-seen mempool at genesis:
 - No child-pays-for-parent admission.
 - No predictive dynamic fee market.
 - Per-transaction admission only.
-- DA set relay remains governed by `RUBIN_COMPACT_BLOCKS.md`.
+- DA set relay remains governed by `spec/RUBIN_COMPACT_BLOCKS.md`.
 
 The goal is to keep Phase-0/devnet admission deterministic, cheap to
 reason about, and audit-clean.
