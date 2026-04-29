@@ -66,24 +66,19 @@ Production policy applies the following default guardrails:
 
 ```text
 NonCoinbaseCoreAnchor = NON_STANDARD
-# implemented in Go as `PolicyRejectNonCoinbaseAnchorOutputs = true`
-# (clients/go/node/miner.go, clients/go/node/mempool.go); Rust parity
-# `policy_reject_non_coinbase_anchor_outputs = true`
-# (clients/rust/crates/rubin-node/src/txpool.rs,
-#  clients/rust/crates/rubin-node/src/miner.rs)
+# config-knob convention: where a node exposes this guardrail, the
+# Go-side knob name is `PolicyRejectNonCoinbaseAnchorOutputs` and the
+# Rust-side knob name is `policy_reject_non_coinbase_anchor_outputs`.
+# This overlay only fixes the policy contract; whether and how a
+# specific build wires that knob is out of scope.
 PolicyMaxDaBytesPerBlock = MAX_DA_BYTES_PER_BLOCK / 4
 # `MAX_DA_BYTES_PER_BLOCK` is the consensus DA cap defined by
 # `spec/RUBIN_L1_CANONICAL.md`; this overlay does not redefine it.
 PolicyDaSurchargePerByte = 0
 min_da_fee_rate = 1
 # normative spec/network-params constant
-# (`spec/RUBIN_NETWORK_PARAMS.md` §12.4); NOT currently a separate
-# implementation knob in the public Go/Rust nodes. DA-byte fee
-# enforcement uses `PolicyDaSurchargePerByte` (above) as the entire
-# per-byte DA fee floor (see §4 formula). An implementation that
-# wants a non-zero per-byte DA fee floor MUST raise
-# `PolicyDaSurchargePerByte` to a value at least `min_da_fee_rate`,
-# not introduce a parallel knob.
+# (`spec/RUBIN_NETWORK_PARAMS.md` §12.4); cited in §4 as the
+# per-byte DA fee floor before any policy surcharge is added.
 ```
 
 These are policy controls only. They do not change consensus validity.
@@ -109,22 +104,15 @@ Commitment matching to chunks is checked when a complete set is available for te
 
 ## 4. DA Fee Policy
 
-For every DA-carrying transaction, the per-byte DA fee floor is:
+Let:
 
 ```text
-da_required_fee(tx) = da_payload_len(tx) * PolicyDaSurchargePerByte
-```
-
-When `PolicyDaSurchargePerByte = 0` (the §1 default), no DA-byte fee
-floor is enforced. This matches the Go and Rust node implementations
-(`clients/go/node/policy_da_anchor.go` and
-`clients/rust/crates/rubin-node/src/txpool.rs`), which short-circuit
-their DA fee check when the surcharge is zero.
-
-The full admission fee formula is:
-
-```text
-required_fee(tx) = max(weight(tx) * current_mempool_min_fee_rate, da_required_fee(tx))
+fee(tx) = sum_inputs - sum_outputs
+relay_fee_floor(tx) = weight(tx) * current_mempool_min_fee_rate
+da_fee_floor(tx)    = da_payload_len(tx) * min_da_fee_rate
+da_surcharge(tx)    = da_payload_len(tx) * PolicyDaSurchargePerByte
+da_required_fee(tx) = da_fee_floor(tx) + da_surcharge(tx)
+required_fee(tx)    = max(relay_fee_floor(tx), da_required_fee(tx))
 ```
 
 Reject as non-standard if:
@@ -133,40 +121,23 @@ Reject as non-standard if:
 fee(tx) < required_fee(tx)
 ```
 
+This means a DA-bearing transaction must satisfy both the base
+relay-fee floor and the DA-specific floor, with the DA surcharge
+applied only to DA bytes.
+
 `current_mempool_min_fee_rate` is the rolling local floor maintained
 by parent `spec/RUBIN_MEMPOOL_POLICY.md` §10 (raise after capacity
 eviction, decay on connected-block events). The parent guarantees the
 invariant `current_mempool_min_fee_rate >= MIN_RELAY_FEE_RATE`, so the
-formula above is always at least as strict as the base relay-fee floor
-and strictly stricter when the rolling floor is above the default.
-This overlay does NOT redefine raise/decay behavior; it only points
-implementers to the parent rolling floor as the effective gate. The
-relay-fee-floor half (`weight(tx) * current_mempool_min_fee_rate`) is
-identical to the sibling `POLICY_MEMPOOL_ADMISSION_GENESIS.md` Stage C
-formula.
+formula above is always at least as strict as the base relay-fee
+floor and strictly stricter when the rolling floor is above the
+default. This overlay does NOT redefine raise/decay behavior; it only
+points implementers to the parent rolling floor as the effective
+gate.
 
-`min_da_fee_rate` is the spec-side lower bound for any future
-`PolicyDaSurchargePerByte` setting (`spec/RUBIN_NETWORK_PARAMS.md`
-§12.4); an implementation that wants to enforce a non-zero per-byte DA
-floor MUST raise `PolicyDaSurchargePerByte` to a value at least
-`min_da_fee_rate`. The §4 formula here intentionally does not add
-`min_da_fee_rate` as an independent term, so the doc and the current
-Go/Rust node implementations
-(`clients/go/node/policy_da_anchor.go`,
-`clients/rust/crates/rubin-node/src/txpool.rs`) agree byte-for-byte.
-
-**Cross-doc note.** The sibling `POLICY_MEMPOOL_ADMISSION_GENESIS.md`
-Stage C currently expresses the DA half of the admission floor as
-`da_payload_len(tx) * min_da_fee_rate + da_payload_len(tx) *
-PolicyDaSurchargePerByte`, i.e. it includes `min_da_fee_rate` as an
-independent term. That formulation describes a stricter DA floor than
-either this overlay (which matches the Go/Rust implementation) or the
-implementations themselves enforce at the §1 default. Reconciling
-that asymmetry in the sibling document is a separate follow-up scoped
-to `POLICY_MEMPOOL_ADMISSION_GENESIS.md`, not this PR; this overlay
-deliberately tracks code reality so DA admission decisions made by an
-operator following §4 here cannot diverge from what their Go/Rust node
-actually enforces.
+This formula is equivalent in meaning to the sibling
+`POLICY_MEMPOOL_ADMISSION_GENESIS.md` Stage C fee gate; both overlays
+define the same admission contract for DA-bearing transactions.
 
 Defaults / base parameters (constants are sourced from the documents
 named below; this overlay does not redefine any of them):
@@ -175,11 +146,9 @@ named below; this overlay does not redefine any of them):
 MIN_RELAY_FEE_RATE       = 1   # base/default floor; parent §10 owns
                                 #   the effective rolling floor
                                 #   current_mempool_min_fee_rate
-min_da_fee_rate          = 1   # spec-side lower bound for
-                                #   PolicyDaSurchargePerByte; not a
-                                #   separate runtime knob
-PolicyDaSurchargePerByte = 0   # operator-tunable per-byte DA fee
-                                #   floor; 0 = disabled
+min_da_fee_rate          = 1   # base unit per DA byte
+                                #   (spec/RUBIN_NETWORK_PARAMS.md §12.4)
+PolicyDaSurchargePerByte = 0
 ```
 
 Blocks with underpaying DA transactions remain consensus-valid if they satisfy consensus rules.
@@ -270,12 +239,13 @@ depend on a specific monotonic time source.
 When implemented, nodes SHOULD expose these metrics (a mix of
 counters and gauges — counters end in `_total`; gauges are the
 `_fill_pct`, `_bytes`, `_active` entries). This overlay declares the
-logical telemetry surface; concrete Prometheus exports
-MUST remain in the existing `rubin_node_` namespace/prefix used by
-the Go and Rust nodes, so this overlay does not introduce a second,
-conflicting metric namespace. The specific metric names listed below
-are the required names for future exports of this telemetry surface
-when implemented; this file does not authorize implementation:
+logical telemetry surface; concrete Prometheus exports MUST stay
+within the `rubin_node_` namespace/prefix that this overlay reserves
+as the Rubin-node DA telemetry convention, so the project does not
+end up with two parallel metric namespaces. The specific metric
+names listed below are the required names for future exports of
+this telemetry surface when implemented; this file does not
+authorize implementation:
 
 ```text
 rubin_node_da_mempool_fill_pct
@@ -316,14 +286,15 @@ If DA fill exceeds 80% over a rolling 144-block window, nodes SHOULD emit a warn
 If DA fill exceeds 95% over 24 hours, operators SHOULD consider:
 
 1. Raising `PolicyDaSurchargePerByte` locally — the operator-tunable
-   per-byte DA fee floor (per §4: `da_required_fee(tx) =
-   da_payload_len(tx) * PolicyDaSurchargePerByte`). Setting the
-   surcharge to `S` enforces an `S`/byte DA fee floor; setting it to
-   `0` (the §1 default) disables the DA-byte fee floor entirely.
-   `min_da_fee_rate` itself is a normative spec/network-params
-   constant — see §1 defaults block — not a separate implementation
-   knob; an implementation that wants a non-zero floor MUST raise the
-   surcharge to a value at least `min_da_fee_rate`.
+   per-byte DA fee surcharge that, per the §4 formula
+   `da_required_fee(tx) = da_payload_len(tx) * (min_da_fee_rate +
+   PolicyDaSurchargePerByte)`, adds on top of the spec-side
+   `min_da_fee_rate` rather than replacing it. Setting the surcharge
+   to `S` raises the effective per-byte DA fee floor from
+   `min_da_fee_rate` to `min_da_fee_rate + S`; the §1 default of
+   `S = 0` leaves the floor at `min_da_fee_rate`. `min_da_fee_rate`
+   itself is a normative spec/network-params constant — see §1
+   defaults block.
 2. Coordinating a network-wide relay policy update.
 3. Reducing `PolicyMaxDaBytesPerBlock` temporarily.
 4. Investigating peer-level DA abuse patterns.
