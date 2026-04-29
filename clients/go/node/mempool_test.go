@@ -98,6 +98,71 @@ func TestMempoolAcceptedEntryMetadataAndIndexes(t *testing.T) {
 	}
 }
 
+func TestMempoolRejectsInvalidEntrySource(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	err = mp.addTxWithSource(txBytes, "sidecar")
+	if err == nil || !strings.Contains(err.Error(), "invalid mempool tx source") {
+		t.Fatalf("expected invalid source rejection, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected TxAdmitError, got %T: %v", err, err)
+	}
+	if txErr.Kind != TxAdmitRejected {
+		t.Fatalf("expected TxAdmitRejected, got %v", txErr.Kind)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
+	}
+	if mp.nextAdmissionSeq != 0 {
+		t.Fatalf("nextAdmissionSeq after invalid source=%d, want 0", mp.nextAdmissionSeq)
+	}
+}
+
+func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
+	op := consensus.Outpoint{Txid: [32]byte{0x01}, Vout: 2}
+	entry := &mempoolEntry{
+		txid:         [32]byte{0x02},
+		wtxid:        [32]byte{0x03},
+		inputs:       []consensus.Outpoint{op},
+		size:         7,
+		admissionSeq: 9,
+		source:       mempoolTxSourceReorg,
+	}
+
+	mp := &Mempool{}
+	mp.addEntryLocked(entry)
+
+	if mp.txs == nil || mp.wtxids == nil || mp.spenders == nil {
+		t.Fatalf("indexes were not initialized: txs=%v wtxids=%v spenders=%v", mp.txs != nil, mp.wtxids != nil, mp.spenders != nil)
+	}
+	if got := mp.txs[entry.txid]; got != entry {
+		t.Fatalf("tx index got %p, want entry %p", got, entry)
+	}
+	if got := mp.wtxids[entry.wtxid]; got != entry.txid {
+		t.Fatalf("wtxid index got %x, want txid %x", got, entry.txid)
+	}
+	if got := mp.spenders[op]; got != entry.txid {
+		t.Fatalf("spender index got %x, want txid %x", got, entry.txid)
+	}
+	if mp.nextAdmissionSeq != entry.admissionSeq {
+		t.Fatalf("nextAdmissionSeq=%d, want %d", mp.nextAdmissionSeq, entry.admissionSeq)
+	}
+	if mp.usedBytes != entry.size {
+		t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, entry.size)
+	}
+}
+
 func TestMempoolEntryIndexesRemovedWithEntry(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)

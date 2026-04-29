@@ -52,9 +52,6 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 		if _, exists := txs[entry.txid]; exists {
 			return fmt.Errorf("duplicate mempool snapshot txid %x", entry.txid)
 		}
-		if existing, exists := wtxids[entry.wtxid]; exists {
-			return fmt.Errorf("duplicate mempool snapshot wtxid %x existing=%x new=%x", entry.wtxid, existing, entry.txid)
-		}
 		if len(txs) >= maxTxs {
 			return fmt.Errorf("mempool snapshot exceeds transaction cap: count=%d max=%d", len(txs)+1, maxTxs)
 		}
