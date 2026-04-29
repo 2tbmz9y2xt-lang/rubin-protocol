@@ -75,13 +75,19 @@ P2P_MIN_PAYLOAD_PROGRESS_BYTES_PER_SEC = 32_768
 
 Disconnect the peer if:
 
-1. Header read exceeds deadline.
-2. Payload read exceeds deadline.
-3. Payload progress falls below the minimum rate.
+1. Header read exceeds deadline after partial header bytes were received.
+2. Payload read exceeds deadline after the frame header was received.
+3. Payload progress falls below the minimum rate after the frame read has
+   started.
 4. Payload exceeds maximum read bytes.
 5. Frame checksum validation fails for a received frame.
 6. Compact payload is malformed and peer score reaches or exceeds disconnect
    threshold.
+
+An idle timeout before any frame bytes are received is not by itself a
+disconnect condition. A timeout after partial header progress, or after the
+header has been received and payload read starts, is terminal for that
+connection and MUST NOT be followed by parsing later bytes as a fresh frame.
 
 A checksum failure is a terminal frame-read error for that connection. It
 remains corruption detection only, not adversarial tamper protection.
@@ -110,8 +116,14 @@ Reject or disconnect if:
 
 1. `chain_id` differs.
 2. `genesis_hash` differs.
-3. `protocol_version` differs by more than 1.
-4. `tx_relay` is malformed and cannot be normalized.
+3. `protocol_version` is 0.
+4. `protocol_version` is greater than 1024.
+5. `protocol_version` differs by more than 1.
+
+`tx_relay` parsing note: a value of `1` is interpreted as `true`; all other
+values are normalized to `false`. Non-`0`/`1` values MAY be treated as a local
+transport policy violation and MAY affect peer score, but are not by themselves
+a reject/disconnect condition.
 
 ## 6. Compact Relay Payloads
 
