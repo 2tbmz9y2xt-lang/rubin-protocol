@@ -450,6 +450,145 @@ func TestMempoolCapacityPlanRejectsInvalidDryRunInputs(t *testing.T) {
 	}
 }
 
+func TestMempoolCapacityPlanRejectsInvalidExistingMetadata(t *testing.T) {
+	validExisting := func(txid [32]byte, seq uint64) *mempoolEntry {
+		return &mempoolEntry{
+			txid:         txid,
+			fee:          10,
+			weight:       1,
+			size:         1,
+			admissionSeq: seq,
+			source:       mempoolTxSourceLocal,
+		}
+	}
+	validCandidate := &mempoolEntry{
+		txid:   [32]byte{0xaa},
+		fee:    10,
+		weight: 1,
+		size:   1,
+	}
+	for _, tc := range []struct {
+		name    string
+		entries map[[32]byte]*mempoolEntry
+		want    string
+	}{
+		{
+			name:    "nil_existing",
+			entries: map[[32]byte]*mempoolEntry{{0x01}: nil},
+			want:    "nil mempool entry",
+		},
+		{
+			name:    "zero_txid",
+			entries: map[[32]byte]*mempoolEntry{{0x02}: {fee: 10, weight: 1, size: 1, admissionSeq: 1}},
+			want:    "invalid mempool entry txid",
+		},
+		{
+			name: "zero_size",
+			entries: map[[32]byte]*mempoolEntry{
+				{0x03}: {txid: [32]byte{0x03}, fee: 10, weight: 1, admissionSeq: 1},
+			},
+			want: "invalid mempool entry size",
+		},
+		{
+			name: "zero_weight",
+			entries: map[[32]byte]*mempoolEntry{
+				{0x04}: {txid: [32]byte{0x04}, fee: 10, size: 1, admissionSeq: 1},
+			},
+			want: "invalid mempool entry weight",
+		},
+		{
+			name: "zero_admission_seq",
+			entries: map[[32]byte]*mempoolEntry{
+				{0x05}: {txid: [32]byte{0x05}, fee: 10, weight: 1, size: 1},
+			},
+			want: "invalid mempool entry admission_seq",
+		},
+		{
+			name: "duplicate_admission_seq",
+			entries: map[[32]byte]*mempoolEntry{
+				{0x06}: validExisting([32]byte{0x06}, 1),
+				{0x07}: validExisting([32]byte{0x07}, 1),
+			},
+			want: "duplicate mempool entry admission_seq",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mp := &Mempool{
+				maxTxs:    1,
+				maxBytes:  100,
+				usedBytes: len(tc.entries),
+				txs:       tc.entries,
+			}
+			_, _, err := mp.capacityEvictionPlanLocked(validCandidate)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q rejection, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestMempoolAddEntryLockedCapacityPlanRejectsWithoutMutation(t *testing.T) {
+	badResidentID := [32]byte{0x30}
+	mp := &Mempool{
+		maxTxs:    1,
+		maxBytes:  100,
+		usedBytes: 1,
+		txs: map[[32]byte]*mempoolEntry{
+			badResidentID: {
+				txid:         badResidentID,
+				fee:          10,
+				size:         1,
+				admissionSeq: 1,
+			},
+		},
+	}
+	err := mp.addEntryLocked(&mempoolEntry{
+		txid:   [32]byte{0x31},
+		fee:    10,
+		weight: 1,
+		size:   1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry weight") {
+		t.Fatalf("expected capacity plan metadata rejection, got %v", err)
+	}
+	if len(mp.txs) != 1 || mp.txs[badResidentID] == nil || mp.wtxids != nil || mp.spenders != nil || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 0 || mp.usedBytes != 1 {
+		t.Fatalf("capacity-plan error mutated mempool: len=%d wtxids=%v spenders=%v seq=%d floor=%d used=%d", len(mp.txs), mp.wtxids != nil, mp.spenders != nil, mp.lastAdmissionSeq, mp.currentMinFeeRate, mp.usedBytes)
+	}
+}
+
+func TestMempoolAddEntryLockedCandidateWorstRejectsWithoutMutation(t *testing.T) {
+	mp := &Mempool{maxTxs: 1, maxBytes: 100}
+	resident := &mempoolEntry{
+		txid:   [32]byte{0x41},
+		fee:    100,
+		weight: 1,
+		size:   1,
+	}
+	if err := mp.addEntryLocked(resident); err != nil {
+		t.Fatalf("addEntryLocked(resident): %v", err)
+	}
+	before, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshot before direct candidate-worst: %v", err)
+	}
+	err = mp.addEntryLocked(&mempoolEntry{
+		txid:   [32]byte{0x42},
+		fee:    1,
+		weight: 1,
+		size:   1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "mempool capacity candidate rejected by eviction ordering") {
+		t.Fatalf("expected direct candidate-worst rejection, got %v", err)
+	}
+	after, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshot after direct candidate-worst: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("direct candidate-worst mutated mempool: before=%+v after=%+v", before, after)
+	}
+}
+
 func TestMempoolRejectsZeroWeightMetadata(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100}
 	err := mp.validateAdmissionLocked(&mempoolEntry{

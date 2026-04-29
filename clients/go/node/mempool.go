@@ -931,10 +931,7 @@ func (m *Mempool) capacityEvictionPlanLocked(candidate *mempoolEntry) ([]*mempoo
 	totalCount := len(m.txs) + 1
 	targetBytes := maxBytes
 	if bytePressure {
-		targetBytes, err = nonNegativeMempoolIntToUint64("low_water_bytes", m.effectiveLowWaterBytesLocked())
-		if err != nil {
-			return nil, false, err
-		}
+		targetBytes = uint64(m.effectiveLowWaterBytesLocked()) // #nosec G115 -- effectiveLowWaterBytesLocked returns 0 or a positive value derived from positive maxBytes.
 	}
 	planPool := make([]mempoolEvictionPlanEntry, 0, len(m.txs)+1)
 	admissionSeqs := make(map[uint64][32]byte, len(m.txs))
@@ -963,10 +960,7 @@ func (m *Mempool) capacityEvictionPlanLocked(candidate *mempoolEntry) ([]*mempoo
 			return nil, true, nil
 		}
 		evictedEntries = append(evictedEntries, worst.entry)
-		worstSize, err := nonNegativeMempoolIntToUint64("eviction_entry_size", worst.entry.size)
-		if err != nil {
-			return nil, false, err
-		}
+		worstSize := uint64(worst.entry.size) // #nosec G115 -- validateEvictionMetadata rejects non-positive entry sizes before this loop.
 		if totalBytes >= worstSize {
 			totalBytes -= worstSize
 		} else {
