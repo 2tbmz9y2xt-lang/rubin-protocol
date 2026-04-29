@@ -35,6 +35,176 @@ func TestMempoolAdd(t *testing.T) {
 	}
 }
 
+func TestMempoolAcceptedEntryMetadataAndIndexes(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 3, 1, fromKey, fromAddress, toAddress)
+	tx, txid, wtxid, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats: %v", err)
+	}
+
+	if err := mp.addTxWithSource(txBytes, mempoolTxSourceRemote); err != nil {
+		t.Fatalf("addTxWithSource: %v", err)
+	}
+
+	mp.mu.RLock()
+	defer mp.mu.RUnlock()
+	entry, ok := mp.txs[txid]
+	if !ok {
+		t.Fatalf("entry for txid %x missing", txid)
+	}
+	if !bytes.Equal(entry.raw, txBytes) {
+		t.Fatal("entry raw bytes mismatch")
+	}
+	if entry.txid != txid {
+		t.Fatalf("entry txid=%x, want %x", entry.txid, txid)
+	}
+	if entry.wtxid != wtxid {
+		t.Fatalf("entry wtxid=%x, want %x", entry.wtxid, wtxid)
+	}
+	if entry.fee != 3 {
+		t.Fatalf("entry fee=%d, want 3", entry.fee)
+	}
+	if entry.weight != weight {
+		t.Fatalf("entry weight=%d, want %d", entry.weight, weight)
+	}
+	if entry.size != len(txBytes) {
+		t.Fatalf("entry wire bytes=%d, want %d", entry.size, len(txBytes))
+	}
+	if entry.admissionSeq != 1 {
+		t.Fatalf("entry admission_seq=%d, want 1", entry.admissionSeq)
+	}
+	if entry.source != mempoolTxSourceRemote {
+		t.Fatalf("entry source=%q, want %q", entry.source, mempoolTxSourceRemote)
+	}
+	if got, ok := mp.wtxids[wtxid]; !ok || got != txid {
+		t.Fatalf("wtxid index got %x ok=%v, want txid %x", got, ok, txid)
+	}
+	if got, ok := mp.spenders[outpoints[0]]; !ok || got != txid {
+		t.Fatalf("spender index got %x ok=%v, want txid %x", got, ok, txid)
+	}
+}
+
+func TestMempoolEntryIndexesRemovedWithEntry(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 3, 1, fromKey, fromAddress, toAddress)
+	_, txid, wtxid, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx: %v", err)
+	}
+
+	mp.mu.Lock()
+	mp.removeTxLocked(txid)
+	if _, ok := mp.txs[txid]; ok {
+		t.Fatalf("removed txid %x still present", txid)
+	}
+	if _, ok := mp.wtxids[wtxid]; ok {
+		t.Fatalf("removed wtxid %x still indexed", wtxid)
+	}
+	if _, ok := mp.spenders[outpoints[0]]; ok {
+		t.Fatalf("removed spender %x:%d still indexed", outpoints[0].Txid, outpoints[0].Vout)
+	}
+	mp.mu.Unlock()
+}
+
+func TestMempoolAdmissionSeqOnlyAcceptedTxs(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if err := mp.AddTx([]byte{0xde, 0xad}); err == nil {
+		t.Fatal("malformed tx unexpectedly accepted")
+	}
+	if mp.nextAdmissionSeq != 0 {
+		t.Fatalf("nextAdmissionSeq after malformed=%d, want 0", mp.nextAdmissionSeq)
+	}
+
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 1, 2, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(tx1); err != nil {
+		t.Fatalf("AddTx(tx1): %v", err)
+	}
+	if got := mp.txs[txID(t, tx1)].admissionSeq; got != 1 {
+		t.Fatalf("tx1 admission_seq=%d, want 1", got)
+	}
+	if err := mp.AddTx(tx1); err == nil {
+		t.Fatal("duplicate tx unexpectedly accepted")
+	}
+	if mp.nextAdmissionSeq != 1 {
+		t.Fatalf("nextAdmissionSeq after duplicate=%d, want 1", mp.nextAdmissionSeq)
+	}
+	if err := mp.AddTx(tx2); err != nil {
+		t.Fatalf("AddTx(tx2): %v", err)
+	}
+	if got := mp.txs[txID(t, tx2)].admissionSeq; got != 2 {
+		t.Fatalf("tx2 admission_seq=%d, want 2", got)
+	}
+}
+
+func TestMempoolAdmissionSeqDoesNotWrap(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	mp.nextAdmissionSeq = ^uint64(0)
+
+	err = mp.AddTx(txBytes)
+	if err == nil || !strings.Contains(err.Error(), "mempool admission sequence exhausted") {
+		t.Fatalf("expected sequence exhaustion rejection, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected TxAdmitError, got %T: %v", err, err)
+	}
+	if txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("expected TxAdmitUnavailable, got %v", txErr.Kind)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
+	}
+	if mp.nextAdmissionSeq != ^uint64(0) {
+		t.Fatalf("nextAdmissionSeq mutated to %d", mp.nextAdmissionSeq)
+	}
+}
+
 func TestMempoolAddTxWaitsForChainStateWriter(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -684,11 +854,25 @@ func TestMempoolDoubleSpend(t *testing.T) {
 	if err := mp.AddTx(tx1); err != nil {
 		t.Fatalf("AddTx(tx1): %v", err)
 	}
+	tx1ID := txID(t, tx1)
+	if got, ok := mp.spenders[outpoints[0]]; !ok || got != tx1ID {
+		t.Fatalf("spender index got %x ok=%v, want tx1 %x", got, ok, tx1ID)
+	}
+	seqAfterTx1 := mp.nextAdmissionSeq
 	if err := mp.AddTx(tx2); err == nil {
 		t.Fatalf("expected double-spend rejection")
 	}
 	if got := mp.Len(); got != 1 {
 		t.Fatalf("mempool len=%d, want 1", got)
+	}
+	if mp.Contains(txID(t, tx2)) {
+		t.Fatalf("conflicting tx entered mempool")
+	}
+	if got, ok := mp.spenders[outpoints[0]]; !ok || got != tx1ID {
+		t.Fatalf("spender index after conflict got %x ok=%v, want tx1 %x", got, ok, tx1ID)
+	}
+	if mp.nextAdmissionSeq != seqAfterTx1 {
+		t.Fatalf("nextAdmissionSeq after conflict=%d, want %d", mp.nextAdmissionSeq, seqAfterTx1)
 	}
 }
 
@@ -714,8 +898,12 @@ func TestMempoolFullRejectsWithoutEviction(t *testing.T) {
 	if err := mp.AddTx(txHigh); err != nil {
 		t.Fatalf("AddTx(high): %v", err)
 	}
+	seqAfterAccepted := mp.nextAdmissionSeq
 	if err := mp.AddTx(txBetter); err == nil || !strings.Contains(err.Error(), "mempool transaction count limit reached") {
 		t.Fatalf("expected count-limit rejection without eviction, got %v", err)
+	}
+	if mp.nextAdmissionSeq != seqAfterAccepted {
+		t.Fatalf("nextAdmissionSeq after capacity reject=%d, want %d", mp.nextAdmissionSeq, seqAfterAccepted)
 	}
 	if got := mp.Len(); got != 2 {
 		t.Fatalf("mempool len=%d, want 2", got)
@@ -877,6 +1065,27 @@ func TestRestoreMempoolSnapshotRecomputesByteAccounting(t *testing.T) {
 	if got := mp.Len(); got != 1 {
 		t.Fatalf("mempool len=%d, want 1", got)
 	}
+	tx1ID := txID(t, tx1)
+	_, _, tx1WTxID, _, err := consensus.ParseTx(tx1)
+	if err != nil {
+		t.Fatalf("ParseTx(tx1): %v", err)
+	}
+	restored := mp.txs[tx1ID]
+	if restored == nil {
+		t.Fatalf("restored entry for tx1 missing")
+	}
+	if restored.wtxid != tx1WTxID {
+		t.Fatalf("restored wtxid=%x, want %x", restored.wtxid, tx1WTxID)
+	}
+	if restored.admissionSeq != 1 {
+		t.Fatalf("restored admission_seq=%d, want 1", restored.admissionSeq)
+	}
+	if restored.source != mempoolTxSourceLocal {
+		t.Fatalf("restored source=%q, want %q", restored.source, mempoolTxSourceLocal)
+	}
+	if mp.nextAdmissionSeq != restored.admissionSeq {
+		t.Fatalf("nextAdmissionSeq after restore=%d, want %d", mp.nextAdmissionSeq, restored.admissionSeq)
+	}
 	if mp.usedBytes != len(tx1) {
 		t.Fatalf("usedBytes=%d, want %d", mp.usedBytes, len(tx1))
 	}
@@ -920,11 +1129,18 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 	txDoubleSpend := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 89, 3, 2, fromKey, fromAddress, toAddress)
 	doubleSpendID := txID(t, txDoubleSpend)
 	snapshotEntry := func(txRaw []byte, id [32]byte, inputs []consensus.Outpoint) mempoolEntry {
+		_, _, wtxid, _, err := consensus.ParseTx(txRaw)
+		if err != nil {
+			t.Fatalf("ParseTx(snapshotEntry): %v", err)
+		}
 		return mempoolEntry{
-			raw:    append([]byte(nil), txRaw...),
-			txid:   id,
-			inputs: append([]consensus.Outpoint(nil), inputs...),
-			size:   len(txRaw),
+			raw:          append([]byte(nil), txRaw...),
+			txid:         id,
+			wtxid:        wtxid,
+			inputs:       append([]consensus.Outpoint(nil), inputs...),
+			size:         len(txRaw),
+			admissionSeq: 99,
+			source:       mempoolTxSourceLocal,
 		}
 	}
 	cloneSnapshotForTest := func(base mempoolSnapshot) mempoolSnapshot {
@@ -977,6 +1193,23 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 				entry.txid[0] ^= 0x01
 			}),
 			want: "mempool snapshot entry txid mismatch",
+		},
+		{
+			name: "wtxid_mismatch",
+			mutate: withEditedFirst(func(entry *mempoolEntry) {
+				entry.wtxid[0] ^= 0x01
+			}),
+			want: "mempool snapshot entry wtxid mismatch",
+		},
+		{
+			name:   "zero_admission_seq",
+			mutate: withEditedFirst(func(entry *mempoolEntry) { entry.admissionSeq = 0 }),
+			want:   "invalid mempool snapshot entry admission_seq",
+		},
+		{
+			name:   "invalid_source",
+			mutate: withEditedFirst(func(entry *mempoolEntry) { entry.source = "sidecar" }),
+			want:   "invalid mempool snapshot entry source",
 		},
 		{
 			name:   "input_count_mismatch",
