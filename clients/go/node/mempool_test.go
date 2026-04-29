@@ -1298,6 +1298,17 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 			want: "duplicate mempool snapshot txid",
 		},
 		{
+			name: "duplicate_admission_seq",
+			mutate: func(base mempoolSnapshot) mempoolSnapshot {
+				bad := cloneSnapshotForTest(base)
+				duplicate := snapshotEntry(txSecond, txSecondID, []consensus.Outpoint{outpoints[1]})
+				duplicate.admissionSeq = bad.entries[0].admissionSeq
+				bad.entries = append(bad.entries, duplicate)
+				return bad
+			},
+			want: "duplicate mempool snapshot admission_seq",
+		},
+		{
 			name: "duplicate_spender",
 			mutate: func(base mempoolSnapshot) mempoolSnapshot {
 				bad := cloneSnapshotForTest(base)

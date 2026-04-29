@@ -42,6 +42,7 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	txs := make(map[[32]byte]*mempoolEntry, len(snapshot.entries))
 	wtxids := make(map[[32]byte][32]byte, len(snapshot.entries))
 	spenders := make(map[consensus.Outpoint][32]byte)
+	admissionSeqs := make(map[uint64][32]byte, len(snapshot.entries))
 	usedBytes := 0
 	var nextAdmissionSeq uint64
 	for _, item := range snapshot.entries {
@@ -51,6 +52,9 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 		}
 		if _, exists := txs[entry.txid]; exists {
 			return fmt.Errorf("duplicate mempool snapshot txid %x", entry.txid)
+		}
+		if existing, exists := admissionSeqs[entry.admissionSeq]; exists {
+			return fmt.Errorf("duplicate mempool snapshot admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid)
 		}
 		if len(txs) >= maxTxs {
 			return fmt.Errorf("mempool snapshot exceeds transaction cap: count=%d max=%d", len(txs)+1, maxTxs)
@@ -67,6 +71,7 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 		entryCopy := entry
 		txs[entryCopy.txid] = &entryCopy
 		wtxids[entryCopy.wtxid] = entryCopy.txid
+		admissionSeqs[entryCopy.admissionSeq] = entryCopy.txid
 		usedBytes += entryCopy.size
 		if entryCopy.admissionSeq > nextAdmissionSeq {
 			nextAdmissionSeq = entryCopy.admissionSeq
