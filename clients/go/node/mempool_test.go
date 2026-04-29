@@ -1221,6 +1221,56 @@ func TestRestoreMempoolSnapshotRecomputesByteAccounting(t *testing.T) {
 	}
 }
 
+func TestRestoreMempoolSnapshotPreservesAdmissionSeqHighWatermark(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100, 100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 1, 2, fromKey, fromAddress, toAddress)
+	tx3 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[2]}, 90, 1, 3, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(tx1); err != nil {
+		t.Fatalf("AddTx(tx1): %v", err)
+	}
+	if err := mp.AddTx(tx2); err != nil {
+		t.Fatalf("AddTx(tx2): %v", err)
+	}
+	tx2ID := txID(t, tx2)
+	mp.mu.Lock()
+	mp.removeTxLocked(tx2ID)
+	if mp.lastAdmissionSeq != 2 {
+		t.Fatalf("lastAdmissionSeq after removing tx2=%d, want 2", mp.lastAdmissionSeq)
+	}
+	mp.mu.Unlock()
+
+	snapshot, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshotMempool: %v", err)
+	}
+	if snapshot.lastAdmissionSeq != 2 {
+		t.Fatalf("snapshot lastAdmissionSeq=%d, want 2", snapshot.lastAdmissionSeq)
+	}
+	if err := restoreMempoolSnapshot(mp, snapshot); err != nil {
+		t.Fatalf("restoreMempoolSnapshot: %v", err)
+	}
+	if mp.lastAdmissionSeq != 2 {
+		t.Fatalf("lastAdmissionSeq after restore=%d, want 2", mp.lastAdmissionSeq)
+	}
+	if err := mp.AddTx(tx3); err != nil {
+		t.Fatalf("AddTx(tx3): %v", err)
+	}
+	tx3ID := txID(t, tx3)
+	if got := mp.txs[tx3ID].admissionSeq; got != 3 {
+		t.Fatalf("tx3 admissionSeq=%d, want 3", got)
+	}
+}
+
 func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -1269,7 +1319,7 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 		for i := range base.entries {
 			entries = append(entries, cloneMempoolEntry(&base.entries[i]))
 		}
-		return mempoolSnapshot{entries: entries}
+		return mempoolSnapshot{entries: entries, lastAdmissionSeq: base.lastAdmissionSeq}
 	}
 	withEditedFirst := func(edit func(*mempoolEntry)) func(mempoolSnapshot) mempoolSnapshot {
 		return func(base mempoolSnapshot) mempoolSnapshot {
@@ -1374,6 +1424,15 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 				return bad
 			},
 			want: "duplicate mempool snapshot wtxid",
+		},
+		{
+			name: "admission_high_watermark_below_entry_max",
+			mutate: func(base mempoolSnapshot) mempoolSnapshot {
+				bad := cloneSnapshotForTest(base)
+				bad.lastAdmissionSeq = bad.entries[0].admissionSeq - 1
+				return bad
+			},
+			want: "mempool snapshot admission high-watermark below restored max",
 		},
 		{
 			name: "duplicate_spender",

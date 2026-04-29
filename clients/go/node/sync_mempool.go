@@ -9,7 +9,8 @@ import (
 )
 
 type mempoolSnapshot struct {
-	entries []mempoolEntry
+	entries          []mempoolEntry
+	lastAdmissionSeq uint64
 }
 
 func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
@@ -25,7 +26,7 @@ func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
 	sort.Slice(entries, func(i, j int) bool {
 		return bytes.Compare(entries[i].txid[:], entries[j].txid[:]) < 0
 	})
-	return mempoolSnapshot{entries: entries}, nil
+	return mempoolSnapshot{entries: entries, lastAdmissionSeq: m.lastAdmissionSeq}, nil
 }
 
 func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
@@ -80,11 +81,14 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 			maxAdmissionSeq = entryCopy.admissionSeq
 		}
 	}
+	if snapshot.lastAdmissionSeq < maxAdmissionSeq {
+		return fmt.Errorf("mempool snapshot admission high-watermark below restored max: last=%d max=%d", snapshot.lastAdmissionSeq, maxAdmissionSeq)
+	}
 	m.txs = txs
 	m.wtxids = wtxids
 	m.spenders = spenders
 	m.usedBytes = usedBytes
-	m.lastAdmissionSeq = maxAdmissionSeq
+	m.lastAdmissionSeq = snapshot.lastAdmissionSeq
 	return nil
 }
 
