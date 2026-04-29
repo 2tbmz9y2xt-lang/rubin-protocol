@@ -330,7 +330,7 @@ This rule applies to:
 - `CORE_EXT` spends.
 
 DA duplicate commits remain governed by the stricter relay rule in
-`RUBIN_COMPACT_BLOCKS.md`: the first-seen commit for a `da_id` is
+`spec/RUBIN_COMPACT_BLOCKS.md`: the first-seen commit for a `da_id` is
 retained; later duplicate commits are discarded and fee-based
 replacement is forbidden.
 
