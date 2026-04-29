@@ -357,10 +357,12 @@ The policy intent is cross-client convergence, not local optimization.
 
 When implemented, nodes SHOULD expose these counters. This overlay
 declares the logical telemetry surface; concrete Prometheus exports
-MUST use the existing `rubin_node_`-prefixed metric names already
-exported by the Go and Rust nodes (so this overlay does not introduce
-a second, conflicting metric namespace). The implementation locus is
-the issues in §9, not this file:
+MUST remain in the existing `rubin_node_` namespace/prefix used by
+the Go and Rust nodes, so this overlay does not introduce a second,
+conflicting metric namespace. The specific metric names listed below
+are the required names for future exports of this telemetry surface
+when implemented; the implementation locus is the issues in §9, not
+this file:
 
 ```text
 rubin_node_mempool_admit_total
