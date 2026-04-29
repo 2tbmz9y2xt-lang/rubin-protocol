@@ -153,11 +153,11 @@ bytes.
 MUST be evaluated with checked widening arithmetic or an equivalent
 overflow-safe integer comparison. If any multiplication or addition
 required to compute or compare `relay_fee_floor(tx)`,
-`da_fee_floor(tx)`, `da_surcharge(tx)`, `da_fee_floor(tx) +
-da_surcharge(tx)`, or `required_fee(tx)` would overflow the
-implementation's exact integer domain, the candidate transaction MUST
-be rejected as non-standard. Wraparound, truncation, floating-point
-comparison, and saturating-to-pass behavior are forbidden.
+`da_fee_floor(tx)`, `da_surcharge(tx)`, `da_fee_floor(tx) + da_surcharge(tx)`,
+or `required_fee(tx)` would overflow the implementation's exact integer
+domain, the candidate transaction MUST be rejected as non-standard.
+Wraparound, truncation, floating-point comparison, and
+saturating-to-pass behavior are forbidden.
 
 `PolicyDaSurchargePerByte = 0` disables only the surcharge term. It
 does NOT disable `da_fee_floor(tx)` when `min_da_fee_rate > 0`; the
