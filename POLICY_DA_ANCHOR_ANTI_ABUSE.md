@@ -40,6 +40,15 @@ NonCoinbaseCoreAnchor = NON_STANDARD
 PolicyMaxDaBytesPerBlock = MAX_DA_BYTES_PER_BLOCK / 4
 PolicyDaSurchargePerByte = 0
 min_da_fee_rate = 1
+# normative spec/network-params constant
+# (`spec/RUBIN_NETWORK_PARAMS.md` §12.4); NOT currently a separate
+# implementation knob in the public Go/Rust nodes — DA-byte fee
+# enforcement uses `PolicyDaSurchargePerByte` (above), which already
+# covers the per-byte floor when set above 0. The §4 admission
+# formula reuses `min_da_fee_rate` as the spec-side lower bound for
+# that per-byte enforcement; an implementation that wants a stricter
+# floor than `PolicyDaSurchargePerByte` MUST raise the surcharge,
+# not introduce a new parallel knob.
 ```
 
 These are policy controls only. They do not change consensus validity.
@@ -172,8 +181,13 @@ orphan_pool_fill_pct > 90%
 Storm mode exits after:
 
 ```text
-orphan_pool_fill_pct < 70% for 60 seconds
+orphan_pool_fill_pct < 70% for 3 consecutive accepted blocks
 ```
+
+The exit hysteresis is expressed in block units (matching
+`DA_ORPHAN_TTL_BLOCKS`) rather than wall-clock seconds so that storm
+exit semantics remain deterministic across implementations and do not
+depend on a specific monotonic time source.
 
 ## 9. Telemetry
 
