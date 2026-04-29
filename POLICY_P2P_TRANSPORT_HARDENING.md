@@ -63,25 +63,25 @@ A successful checksum match MUST NOT increase peer trust score.
 Production defaults:
 
 ```text
-P2P_HEADER_READ_DEADLINE_MS = 5_000
-P2P_PAYLOAD_READ_DEADLINE_MS = 15_000
+P2P_READ_DEADLINE_MS = 15_000
 P2P_MAX_PAYLOAD_READ_BYTES = MAX_RELAY_MSG_BYTES
 P2P_MAX_INFLIGHT_MSGS_PER_CONN = 64
 P2P_MAX_QUEUED_DECODED_BYTES_PER_CONN = 8_388_608
-P2P_MIN_PAYLOAD_PROGRESS_BYTES_PER_SEC = 32_768
 ```
+
+The read-deadline default is a single frame-read guardrail because the current
+Go and Rust runtimes expose one read deadline for whole-frame reads.
 
 ## 4. Enforcement
 
 Disconnect the peer if:
 
-1. Header read exceeds deadline after partial header bytes were received.
-2. Payload read exceeds deadline after the frame header was received.
-3. Payload progress falls below the minimum rate after the frame read has
-   started.
-4. Payload exceeds maximum read bytes.
-5. Frame checksum validation fails for a received frame.
-6. Compact payload is malformed and peer score reaches or exceeds disconnect
+1. Header read exceeds the read deadline after partial header bytes were
+   received.
+2. Payload read exceeds the read deadline after the frame header was received.
+3. Payload exceeds maximum read bytes.
+4. Frame checksum validation fails for a received frame.
+5. Compact payload is malformed and peer score reaches or exceeds disconnect
    threshold.
 
 An idle timeout before any frame bytes are received is not by itself a
@@ -165,7 +165,6 @@ Prometheus prefix.
 ```text
 p2p_header_timeout_total
 p2p_payload_timeout_total
-p2p_payload_progress_violation_total
 p2p_payload_oversize_total
 p2p_checksum_fail_total
 p2p_inflight_msg_cap_hit_total
