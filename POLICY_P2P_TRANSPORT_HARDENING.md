@@ -12,8 +12,8 @@ validity, P2P wire format, conformance fixtures, Go implementation, Rust
 implementation, or CI behavior.
 
 The envelope shown below describes the bounded transport policy surface. It is
-not a new wire format and must not be cited as an implementation change in this
-PR.
+illustrative only; it does not define a new wire format or, by itself, an
+implementation change.
 
 Authenticated transport remains roadmap work unless separately approved and
 implemented in a future slice.
