@@ -297,6 +297,18 @@ func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
 	return m.addTxWithSource(txBytes, mempoolTxSourceLocal)
 }
 
+// AddRemoteTx admits a transaction received from a peer while preserving the
+// same validation and admission policy as AddTx. The source is metadata only.
+func (m *Mempool) AddRemoteTx(txBytes []byte) (retErr error) {
+	return m.addTxWithSource(txBytes, mempoolTxSourceRemote)
+}
+
+// AddReorgTx admits a transaction requeued from a disconnected canonical block
+// while preserving the same validation and admission policy as AddTx.
+func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
+	return m.addTxWithSource(txBytes, mempoolTxSourceReorg)
+}
+
 // addTxWithSource validates and admits a transaction while recording the
 // caller-declared origin in the mempool entry. The source is metadata only in
 // this foundation slice; it must not influence admission or eviction behavior.

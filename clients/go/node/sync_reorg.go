@@ -279,7 +279,7 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 			continue
 		}
 		for _, txBytes := range txs {
-			if err := s.mempool.AddTx(txBytes); err != nil {
+			if err := s.mempool.AddReorgTx(txBytes); err != nil {
 				_, _ = fmt.Fprintf(s.stderr, "mempool: requeue-tx: %v\n", err)
 			}
 		}

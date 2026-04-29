@@ -98,6 +98,66 @@ func TestMempoolAcceptedEntryMetadataAndIndexes(t *testing.T) {
 	}
 }
 
+func TestMempoolAdmissionSourceWrappersRecordOrigin(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100, 100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		outpoint  consensus.Outpoint
+		nonce     uint64
+		source    mempoolTxSource
+		admitFunc func([]byte) error
+	}{
+		{
+			name:      "local",
+			outpoint:  outpoints[0],
+			nonce:     1,
+			source:    mempoolTxSourceLocal,
+			admitFunc: mp.AddTx,
+		},
+		{
+			name:      "remote",
+			outpoint:  outpoints[1],
+			nonce:     2,
+			source:    mempoolTxSourceRemote,
+			admitFunc: mp.AddRemoteTx,
+		},
+		{
+			name:      "reorg",
+			outpoint:  outpoints[2],
+			nonce:     3,
+			source:    mempoolTxSourceReorg,
+			admitFunc: mp.AddReorgTx,
+		},
+	}
+
+	for _, tc := range cases {
+		txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{tc.outpoint}, 90, 3, tc.nonce, fromKey, fromAddress, toAddress)
+		if err := tc.admitFunc(txBytes); err != nil {
+			t.Fatalf("%s admit: %v", tc.name, err)
+		}
+		txid := txID(t, txBytes)
+		mp.mu.RLock()
+		entry := mp.txs[txid]
+		mp.mu.RUnlock()
+		if entry == nil {
+			t.Fatalf("%s entry for txid %x missing", tc.name, txid)
+		}
+		if entry.source != tc.source {
+			t.Fatalf("%s source=%q, want %q", tc.name, entry.source, tc.source)
+		}
+	}
+}
+
 func TestMempoolRejectsInvalidEntrySource(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)

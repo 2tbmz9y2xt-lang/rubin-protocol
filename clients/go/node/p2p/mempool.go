@@ -50,7 +50,7 @@ func (p *CanonicalMempoolTxPool) Put(txid [32]byte, raw []byte, _ uint64, _ int)
 	if err != nil || rawTxid != txid {
 		return false
 	}
-	return p.mempool.AddTx(raw) == nil
+	return p.mempool.AddRemoteTx(raw) == nil
 }
 
 type MemoryTxPool struct {
