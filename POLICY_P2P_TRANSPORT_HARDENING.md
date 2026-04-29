@@ -79,9 +79,12 @@ Disconnect the peer if:
 2. Payload read exceeds deadline.
 3. Payload progress falls below the minimum rate.
 4. Payload exceeds maximum read bytes.
-5. Frame checksum fails repeatedly.
+5. Frame checksum validation fails for a received frame.
 6. Compact payload is malformed and peer score reaches or exceeds disconnect
    threshold.
+
+A checksum failure is a terminal frame-read error for that connection. It
+remains corruption detection only, not adversarial tamper protection.
 
 If queued decoded caps are exceeded, stop admitting more decoded relay work from
 the peer until backlog falls below cap. Persistent offenders SHOULD be penalized
