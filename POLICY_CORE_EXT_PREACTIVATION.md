@@ -14,7 +14,9 @@ This file intentionally keeps the existing repository filename:
 rubin-protocol/POLICY_CORE_EXT_PREACTIVATION.md
 ```
 
-Do not add a parallel file named `POLICY_CORE_EXT_PREACTIVATION_ENFORCEMENT.md` unless all downstream references are explicitly migrated.
+Do not add a parallel file named `POLICY_CORE_EXT_PREACTIVATION_ENFORCEMENT.md`.
+Any future split requires a separate controller-approved governance change with its own traceability anchor;
+this document does not authorize a sibling enforcement file.
 
 This document is an expanded replacement for the existing policy file, not a sibling document.
 
@@ -28,12 +30,14 @@ COUNCIL_NATIVE_ROTATION_ARCH_20260315
 Q-IMPL-CORE-EXT-COST-01
 EXT_BASE_COST = 64
 rubin-spec-private/spec/RUBIN_CORE_EXT_EXTENSION_FRAMEWORK.md
+rubin-core-ext-lab/RUBIN_CORE_EXT_EXTENSION_FRAMEWORK.md
 RUBIN_L1_CANONICAL.md §23.2.2
 RUBIN_L1_CANONICAL.md §12.5
 RUBIN_L1_CANONICAL.md §14
 CANONICAL §23.2.2
 CANONICAL §12.5
 CANONICAL §14
+RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md
 ```
 
 The `EXT_BASE_COST = 64` item is a traceability anchor from the existing repository state. This file does not redefine consensus cost accounting or activation semantics.
@@ -43,6 +47,7 @@ Scope boundary:
 ```text
 CORE_EXT is not a native-crypto replacement track.
 Native cryptographic suite rotation is a separate governance path.
+Native suite lifecycle is governed by RUBIN_NATIVE_CRYPTO_ROTATION_SPEC_v1.md.
 CORE_EXT profiles authorize non-native extension behavior only when ACTIVE.
 ```
 
@@ -67,6 +72,21 @@ This default applies to:
 - mempool admission;
 - relay forwarding;
 - miner template inclusion.
+
+## 2.1 Current Implementation Status
+
+This policy replacement does not claim new implementation coverage. It records policy requirements for
+wallet, RPC, mempool, relay, miner, unsafe-override, and telemetry surfaces when those surfaces implement
+CORE_EXT pre-activation handling.
+
+The currently documented implemented guardrail remains **miner template filtering**:
+
+- By default, `Miner` excludes any transaction that creates a `CORE_EXT` output or spends a `CORE_EXT` UTXO.
+- This is policy-only and does not change consensus validity.
+
+Wallet construction, transaction-construction RPC, mempool admission, relay forwarding, unsafe override,
+and telemetry behavior require separate implementation evidence before this repository can claim them as
+implemented.
 
 ## 3. Wallet Policy
 
