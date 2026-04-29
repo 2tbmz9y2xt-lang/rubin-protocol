@@ -47,11 +47,14 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	var maxAdmissionSeq uint64
 	for _, item := range snapshot.entries {
 		entry := cloneMempoolEntry(&item)
-		if err := validateMempoolSnapshotEntry(entry); err != nil {
-			return err
-		}
 		if _, exists := txs[entry.txid]; exists {
 			return fmt.Errorf("duplicate mempool snapshot txid %x", entry.txid)
+		}
+		if existing, exists := wtxids[entry.wtxid]; exists {
+			return fmt.Errorf("duplicate mempool snapshot wtxid %x existing=%x new=%x", entry.wtxid, existing, entry.txid)
+		}
+		if err := validateMempoolSnapshotEntry(entry); err != nil {
+			return err
 		}
 		if existing, exists := admissionSeqs[entry.admissionSeq]; exists {
 			return fmt.Errorf("duplicate mempool snapshot admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid)

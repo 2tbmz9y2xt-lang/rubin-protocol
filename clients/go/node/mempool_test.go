@@ -270,6 +270,62 @@ func TestMempoolAdmissionSeqDoesNotWrap(t *testing.T) {
 	}
 }
 
+func TestMempoolRejectsDuplicateWtxidIndexWithoutMutation(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	if err := mp.AddTx(tx1); err != nil {
+		t.Fatalf("AddTx(tx1): %v", err)
+	}
+	tx1ID := txID(t, tx1)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 1, 2, fromKey, fromAddress, toAddress)
+	_, tx2ID, tx2Wtxid, _, err := consensus.ParseTx(tx2)
+	if err != nil {
+		t.Fatalf("ParseTx(tx2): %v", err)
+	}
+
+	mp.mu.Lock()
+	mp.wtxids[tx2Wtxid] = tx1ID
+	usedBytes := mp.usedBytes
+	lastAdmissionSeq := mp.lastAdmissionSeq
+	mp.mu.Unlock()
+
+	err = mp.AddTx(tx2)
+	if err == nil || !strings.Contains(err.Error(), "mempool wtxid conflict") {
+		t.Fatalf("expected wtxid conflict rejection, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected TxAdmitError, got %T: %v", err, err)
+	}
+	if txErr.Kind != TxAdmitConflict {
+		t.Fatalf("expected TxAdmitConflict, got %v", txErr.Kind)
+	}
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1 after wtxid conflict", got)
+	}
+	if mp.Contains(tx2ID) {
+		t.Fatalf("wtxid conflict admitted tx2 %x", tx2ID)
+	}
+	if mp.usedBytes != usedBytes {
+		t.Fatalf("usedBytes=%d, want %d after wtxid conflict", mp.usedBytes, usedBytes)
+	}
+	if mp.lastAdmissionSeq != lastAdmissionSeq {
+		t.Fatalf("lastAdmissionSeq=%d, want %d after wtxid conflict", mp.lastAdmissionSeq, lastAdmissionSeq)
+	}
+	if got := mp.wtxids[tx2Wtxid]; got != tx1ID {
+		t.Fatalf("wtxid index overwritten with %x, want existing %x", got, tx1ID)
+	}
+}
+
 func TestMempoolAddTxWaitsForChainStateWriter(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -1307,6 +1363,17 @@ func TestRestoreMempoolSnapshotRejectsInvalidEntriesWithoutMutation(t *testing.T
 				return bad
 			},
 			want: "duplicate mempool snapshot admission_seq",
+		},
+		{
+			name: "duplicate_wtxid",
+			mutate: func(base mempoolSnapshot) mempoolSnapshot {
+				bad := cloneSnapshotForTest(base)
+				duplicate := snapshotEntry(txSecond, txSecondID, []consensus.Outpoint{outpoints[1]})
+				duplicate.wtxid = bad.entries[0].wtxid
+				bad.entries = append(bad.entries, duplicate)
+				return bad
+			},
+			want: "duplicate mempool snapshot wtxid",
 		},
 		{
 			name: "duplicate_spender",
