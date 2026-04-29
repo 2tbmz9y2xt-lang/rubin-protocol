@@ -149,6 +149,22 @@ This means a DA transaction must satisfy both the base relay-fee floor
 and the DA-specific floor, with any DA surcharge applied only to DA
 bytes.
 
+**Arithmetic and overflow rule.** All Stage C fee-floor arithmetic
+MUST be evaluated with checked widening arithmetic or an equivalent
+overflow-safe integer comparison. If any multiplication or addition
+required to compute or compare `relay_fee_floor(tx)`,
+`da_fee_floor(tx)`, `da_surcharge(tx)`, `da_required_fee(tx)`, or
+`required_fee(tx)` would overflow the implementation's exact integer
+domain, the candidate transaction MUST be rejected as non-standard.
+Wraparound, truncation, floating-point comparison, and
+saturating-to-pass behavior are forbidden.
+
+`PolicyDaSurchargePerByte = 0` disables only the surcharge term. It
+does NOT disable `da_fee_floor(tx)` when `min_da_fee_rate > 0`; the
+DA floor is still applied via `da_required_fee(tx) = da_fee_floor(tx)
++ 0 = da_fee_floor(tx)`, and `required_fee(tx)` still takes the
+`max(...)` of the relay-fee floor and the DA floor.
+
 `current_mempool_min_fee_rate` is the rolling local floor defined and
 maintained by the parent `spec/RUBIN_MEMPOOL_POLICY.md` §10
 (raise after capacity eviction, decay on connected-block events). The
