@@ -359,16 +359,106 @@ func TestMempoolAddEntryLockedRejectsInvalidSourceAndDuplicateAdmissionSeq(t *te
 	}
 }
 
-func TestMempoolCapacityPlanRejectsNegativeByteAccounting(t *testing.T) {
-	mp := &Mempool{maxTxs: 10, maxBytes: 100, usedBytes: -1}
-	_, _, err := mp.capacityEvictionPlanLocked(&mempoolEntry{
-		txid:   [32]byte{0x21},
-		fee:    1,
-		weight: 1,
-		size:   1,
+func TestDefaultMempoolLowWaterBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		maxBytes int
+		want     int
+	}{
+		{name: "zero", maxBytes: 0, want: 0},
+		{name: "negative", maxBytes: -1, want: 0},
+		{name: "one", maxBytes: 1, want: 0},
+		{name: "ten", maxBytes: 10, want: 9},
+		{name: "remainder", maxBytes: 11, want: 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultMempoolLowWaterBytes(tc.maxBytes); got != tc.want {
+				t.Fatalf("defaultMempoolLowWaterBytes(%d)=%d, want %d", tc.maxBytes, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMempoolCapacityPlanRejectsInvalidDryRunInputs(t *testing.T) {
+	validCandidate := func() *mempoolEntry {
+		return &mempoolEntry{
+			txid:   [32]byte{0x21},
+			fee:    1,
+			weight: 1,
+			size:   1,
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		mp        *Mempool
+		candidate *mempoolEntry
+		want      string
+	}{
+		{
+			name:      "nil_candidate",
+			mp:        &Mempool{maxTxs: 10, maxBytes: 100},
+			candidate: nil,
+			want:      "nil mempool entry",
+		},
+		{
+			name:      "negative_max_bytes",
+			mp:        &Mempool{maxTxs: 10, maxBytes: -1},
+			candidate: validCandidate(),
+			want:      "invalid mempool max_bytes",
+		},
+		{
+			name:      "zero_capacity",
+			mp:        &Mempool{maxTxs: 0, maxBytes: 100},
+			candidate: validCandidate(),
+			want:      "invalid mempool capacity limits",
+		},
+		{
+			name: "negative_candidate_size",
+			mp:   &Mempool{maxTxs: 10, maxBytes: 100},
+			candidate: &mempoolEntry{
+				txid:   [32]byte{0x22},
+				fee:    1,
+				weight: 1,
+				size:   -1,
+			},
+			want: "invalid mempool candidate_size",
+		},
+		{
+			name:      "negative_used_bytes",
+			mp:        &Mempool{maxTxs: 10, maxBytes: 100, usedBytes: -1},
+			candidate: validCandidate(),
+			want:      "invalid mempool used_bytes",
+		},
+		{
+			name: "candidate_over_max_bytes",
+			mp:   &Mempool{maxTxs: 10, maxBytes: 1},
+			candidate: &mempoolEntry{
+				txid:   [32]byte{0x23},
+				fee:    1,
+				weight: 1,
+				size:   2,
+			},
+			want: "mempool byte limit exceeded",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := tc.mp.capacityEvictionPlanLocked(tc.candidate)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q rejection, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestMempoolRejectsZeroWeightMetadata(t *testing.T) {
+	mp := &Mempool{maxTxs: 10, maxBytes: 100}
+	err := mp.validateAdmissionLocked(&mempoolEntry{
+		txid: [32]byte{0x21},
+		fee:  1,
+		size: 1,
 	})
-	if err == nil || !strings.Contains(err.Error(), "invalid mempool byte accounting") {
-		t.Fatalf("expected negative byte accounting rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry weight") {
+		t.Fatalf("expected zero weight rejection, got %v", err)
 	}
 }
 
@@ -1686,6 +1776,17 @@ func TestRestoreMempoolSnapshotPreservesAdmissionSeqHighWatermark(t *testing.T) 
 	tx3ID := txID(t, tx3)
 	if got := mp.txs[tx3ID].admissionSeq; got != 3 {
 		t.Fatalf("tx3 admissionSeq=%d, want 3", got)
+	}
+}
+
+func TestSnapshotMempoolNormalizesRollingFloor(t *testing.T) {
+	mp := &Mempool{}
+	snapshot, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshotMempool: %v", err)
+	}
+	if snapshot.currentMinFeeRate != DefaultMempoolMinFeeRate {
+		t.Fatalf("snapshot currentMinFeeRate=%d, want %d", snapshot.currentMinFeeRate, DefaultMempoolMinFeeRate)
 	}
 }
 

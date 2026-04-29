@@ -185,9 +185,6 @@ func defaultMempoolLowWaterBytes(maxBytes int) int {
 	}
 	lowWater := (maxBytes/mempoolLowWaterDenominator)*mempoolLowWaterNumerator +
 		((maxBytes % mempoolLowWaterDenominator) * mempoolLowWaterNumerator / mempoolLowWaterDenominator)
-	if lowWater > maxBytes {
-		return maxBytes
-	}
 	return lowWater
 }
 
@@ -902,29 +899,26 @@ func (m *Mempool) capacityEvictionPlanLocked(candidate *mempoolEntry) ([]*mempoo
 	if candidate == nil {
 		return nil, false, txAdmitRejected("nil mempool entry")
 	}
-	if m.maxTxs <= 0 || m.maxBytes <= 0 {
-		return nil, false, txAdmitUnavailable(fmt.Sprintf("invalid mempool capacity limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes))
-	}
-	if candidate.size > m.maxBytes {
-		return nil, false, txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, candidate.size, m.maxBytes))
-	}
-	if m.usedBytes < 0 {
-		return nil, false, txAdmitUnavailable(fmt.Sprintf("invalid mempool byte accounting: used=%d", m.usedBytes))
-	}
-	usedBytes, err := nonNegativeMempoolIntToUint64("used_bytes", m.usedBytes)
+	maxBytes, err := nonNegativeMempoolIntToUint64("max_bytes", m.maxBytes)
 	if err != nil {
 		return nil, false, err
+	}
+	if m.maxTxs <= 0 || maxBytes == 0 {
+		return nil, false, txAdmitUnavailable(fmt.Sprintf("invalid mempool capacity limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes))
 	}
 	candidateSize, err := nonNegativeMempoolIntToUint64("candidate_size", candidate.size)
 	if err != nil {
 		return nil, false, err
 	}
-	maxBytes, err := nonNegativeMempoolIntToUint64("max_bytes", m.maxBytes)
+	usedBytes, err := nonNegativeMempoolIntToUint64("used_bytes", m.usedBytes)
 	if err != nil {
 		return nil, false, err
 	}
+	if candidateSize > maxBytes {
+		return nil, false, txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, candidate.size, m.maxBytes))
+	}
 	countPressure := len(m.txs) >= m.maxTxs
-	bytePressure := m.usedBytes > m.maxBytes-candidate.size
+	bytePressure := usedBytes > maxBytes-candidateSize
 	if !countPressure && !bytePressure {
 		return nil, false, nil
 	}
