@@ -17,26 +17,39 @@ const (
 	DefaultMempoolMaxBytes        = consensus.MAX_RELAY_MSG_BYTES
 )
 
+type mempoolTxSource string
+
+const (
+	mempoolTxSourceRemote mempoolTxSource = "remote"
+	mempoolTxSourceLocal  mempoolTxSource = "local"
+	mempoolTxSourceReorg  mempoolTxSource = "reorg"
+)
+
 type mempoolEntry struct {
-	raw    []byte
-	txid   [32]byte
-	inputs []consensus.Outpoint
-	fee    uint64
-	weight uint64
-	size   int
+	raw          []byte
+	txid         [32]byte
+	wtxid        [32]byte
+	inputs       []consensus.Outpoint
+	fee          uint64
+	weight       uint64
+	size         int
+	admissionSeq uint64
+	source       mempoolTxSource
 }
 
 type Mempool struct {
-	mu         sync.RWMutex
-	chainState *ChainState
-	blockStore *BlockStore
-	chainID    [32]byte
-	policy     MempoolConfig
-	maxTxs     int
-	maxBytes   int
-	usedBytes  int
-	txs        map[[32]byte]*mempoolEntry
-	spenders   map[consensus.Outpoint][32]byte
+	mu               sync.RWMutex
+	chainState       *ChainState
+	blockStore       *BlockStore
+	chainID          [32]byte
+	policy           MempoolConfig
+	maxTxs           int
+	maxBytes         int
+	usedBytes        int
+	lastAdmissionSeq uint64
+	txs              map[[32]byte]*mempoolEntry
+	wtxids           map[[32]byte][32]byte
+	spenders         map[consensus.Outpoint][32]byte
 	// Admission counters are bumped exactly once for each AddTx call on a
 	// non-nil Mempool that reaches the final outcome accounting path.
 	// Nil-receiver calls return before that defer is registered and are
@@ -143,6 +156,7 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		maxTxs:     cfg.MaxTransactions,
 		maxBytes:   cfg.MaxBytes,
 		txs:        make(map[[32]byte]*mempoolEntry),
+		wtxids:     make(map[[32]byte][32]byte),
 		spenders:   make(map[consensus.Outpoint][32]byte),
 	}, nil
 }
@@ -280,6 +294,25 @@ func (m *Mempool) Contains(txid [32]byte) bool {
 }
 
 func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
+	return m.addTxWithSource(txBytes, mempoolTxSourceLocal)
+}
+
+// AddRemoteTx admits a transaction received from a peer while preserving the
+// same validation and admission policy as AddTx. The source is metadata only.
+func (m *Mempool) AddRemoteTx(txBytes []byte) (retErr error) {
+	return m.addTxWithSource(txBytes, mempoolTxSourceRemote)
+}
+
+// AddReorgTx admits a transaction requeued from a disconnected canonical block
+// while preserving the same validation and admission policy as AddTx.
+func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
+	return m.addTxWithSource(txBytes, mempoolTxSourceReorg)
+}
+
+// addTxWithSource validates and admits a transaction while recording the
+// caller-declared origin in the mempool entry. The source is metadata only in
+// this foundation slice; it must not influence admission or eviction behavior.
+func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retErr error) {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
 	}
@@ -291,6 +324,9 @@ func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
 	defer func() { m.noteAdmissionResult(retErr) }()
 	if m.chainState == nil {
 		return txAdmitUnavailable("nil chainstate")
+	}
+	if !validMempoolTxSource(source) {
+		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
 	}
 
 	m.chainState.admissionMu.RLock()
@@ -306,13 +342,21 @@ func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	entry := newMempoolEntry(checked, inputs)
+	entry := newMempoolEntry(checked, inputs, source)
 	if err := m.validateAdmissionLocked(entry); err != nil {
 		return err
 	}
 
-	m.addEntryLocked(entry)
-	return nil
+	return m.addEntryLocked(entry)
+}
+
+func validMempoolTxSource(source mempoolTxSource) bool {
+	switch source {
+	case mempoolTxSourceRemote, mempoolTxSourceLocal, mempoolTxSourceReorg:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
@@ -634,8 +678,18 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 		return txAdmitRejected("invalid mempool entry size")
 	}
 	txid := entry.txid
+	if txid == ([32]byte{}) {
+		return txAdmitRejected("invalid mempool entry txid")
+	}
 	if _, exists := m.txs[txid]; exists {
 		return txAdmitConflict("tx already in mempool")
+	}
+	wtxid := entry.wtxid
+	if wtxid == ([32]byte{}) {
+		wtxid = entry.txid
+	}
+	if existing, exists := m.wtxids[wtxid]; exists {
+		return txAdmitConflict(fmt.Sprintf("mempool wtxid conflict with %x", existing))
 	}
 	for _, op := range entry.inputs {
 		if existing, ok := m.spenders[op]; ok {
@@ -648,26 +702,63 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 	if entry.size > m.maxBytes || m.usedBytes > m.maxBytes-entry.size {
 		return txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, entry.size, m.maxBytes))
 	}
+	if m.lastAdmissionSeq == ^uint64(0) {
+		return txAdmitUnavailable("mempool admission sequence exhausted")
+	}
 	return nil
 }
 
-func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.Outpoint) *mempoolEntry {
+func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.Outpoint, source mempoolTxSource) *mempoolEntry {
 	return &mempoolEntry{
 		raw:    append([]byte(nil), checked.Bytes...),
 		txid:   checked.TxID,
+		wtxid:  checked.WTxID,
 		inputs: append([]consensus.Outpoint(nil), inputs...),
 		fee:    checked.Fee,
 		weight: checked.Weight,
 		size:   checked.SerializedSize,
+		source: source,
 	}
 }
 
-func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
+func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
+	if entry == nil {
+		return txAdmitRejected("nil mempool entry")
+	}
+	if entry.size <= 0 {
+		return txAdmitRejected("invalid mempool entry size")
+	}
+	if entry.txid == ([32]byte{}) {
+		return txAdmitRejected("invalid mempool entry txid")
+	}
+	if m.txs == nil {
+		m.txs = make(map[[32]byte]*mempoolEntry)
+	}
+	if m.wtxids == nil {
+		m.wtxids = make(map[[32]byte][32]byte)
+	}
+	if m.spenders == nil {
+		m.spenders = make(map[consensus.Outpoint][32]byte)
+	}
+	if entry.admissionSeq == 0 {
+		m.lastAdmissionSeq++
+		entry.admissionSeq = m.lastAdmissionSeq
+	} else if entry.admissionSeq > m.lastAdmissionSeq {
+		m.lastAdmissionSeq = entry.admissionSeq
+	}
+	if entry.source == "" {
+		entry.source = mempoolTxSourceLocal
+	}
+	if entry.wtxid == ([32]byte{}) {
+		entry.wtxid = entry.txid
+	}
 	m.txs[entry.txid] = entry
+	m.wtxids[entry.wtxid] = entry.txid
 	m.usedBytes += entry.size
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
 	}
+	return nil
 }
 
 func (m *Mempool) snapshotEntries() []*mempoolEntry {
@@ -744,6 +835,9 @@ func (m *Mempool) deleteEntryLocked(txid [32]byte, entry *mempoolEntry) {
 	}
 	for _, op := range entry.inputs {
 		delete(m.spenders, op)
+	}
+	if existing, ok := m.wtxids[entry.wtxid]; ok && existing == txid {
+		delete(m.wtxids, entry.wtxid)
 	}
 }
 
