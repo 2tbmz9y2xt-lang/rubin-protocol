@@ -497,9 +497,10 @@ func TestPolicyNeedsReadonlyUtxoSnapshotMatrix(t *testing.T) {
 //
 // Test setup picks feePaid based on the observed daTestTx weight so that
 // fee > weight*1 (would admit on baseline) but fee < weight*providerFloor
-// (rejects under provider). We assert reject==true AND that the provider
-// closure was actually invoked, so a future edit that drops the provider
-// call would fail the build.
+// (rejects under provider). Proof assertion: rejectCandidate returns
+// reject==true AND providerCalls>0 (the closure increments a counter on
+// every invocation); a future edit that drops the provider call leaves
+// providerCalls==0 and fails the assertion.
 func TestMinerRejectCandidateUsesCurrentMempoolMinFeeRateFnProvider(t *testing.T) {
 	var providerCalls int
 	const providerFloor = uint64(100)
@@ -577,10 +578,11 @@ func TestMinerRejectCandidateFallbackUsesStaticCurrentMempoolMinFeeRate(t *testi
 }
 
 // TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate pins the
-// T-D clamp at miner.go:506-508: a provider that returns a value below
-// DefaultMempoolMinFeeRate is clamped up to that baseline before being
-// fed into RejectDaAnchorTxPolicy, so a misconfigured provider cannot
-// silently disable the relay-fee floor.
+// T-D clamp at clients/go/node/miner.go inside rejectCandidate: a
+// provider that returns a value below DefaultMempoolMinFeeRate is
+// clamped up to that baseline before being fed into
+// RejectDaAnchorTxPolicy, so a misconfigured provider cannot silently
+// disable the relay-fee floor.
 func TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate(t *testing.T) {
 	cfg := DefaultMinerConfig()
 	cfg.PolicyDaAnchorAntiAbuse = true
