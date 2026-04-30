@@ -127,11 +127,11 @@ func validateMempoolSnapshotEntry(entry mempoolEntry) error {
 		return fmt.Errorf("invalid mempool snapshot entry weight for txid %x: %w", entry.txid, err)
 	}
 	if entry.weight != weight {
-		return fmt.Errorf("mempool snapshot entry weight mismatch: entry=%d raw=%d txid=%x", entry.weight, weight, entry.txid)
+		return fmt.Errorf("mempool snapshot entry weight mismatch: entry=%d computed=%d txid=%x", entry.weight, weight, entry.txid)
 	}
 	if entry.admissionSeq == 0 {
 		return fmt.Errorf("invalid mempool snapshot entry admission_seq for txid %x: seq=0", entry.txid)
-	}
+		}
 	if !validMempoolTxSource(entry.source) {
 		return fmt.Errorf("invalid mempool snapshot entry source for txid %x: source=%q", entry.txid, entry.source)
 	}
