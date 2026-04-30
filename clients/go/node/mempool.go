@@ -1032,31 +1032,50 @@ func (m *Mempool) evictionPlanPoolLocked(candidate *mempoolEntry) ([]mempoolEvic
 
 func dryRunCapacityEvictions(planPool []mempoolEvictionPlanEntry, state mempoolCapacityState, maxTxs int) ([]*mempoolEntry, bool, error) {
 	evictedEntries := make([]*mempoolEntry, 0)
-	for (state.totalCount > maxTxs || state.totalBytes > state.targetBytes) && len(planPool) > 0 {
-		worstIndex := 0
-		for i := 1; i < len(planPool); i++ {
-			if evictionPlanEntryWorse(planPool[i], planPool[worstIndex]) {
-				worstIndex = i
-			}
-		}
+	for state.exceedsEvictionTarget(maxTxs) && len(planPool) > 0 {
+		worstIndex := worstEvictionPlanIndex(planPool)
 		worst := planPool[worstIndex]
 		if worst.candidate {
 			return nil, true, nil
 		}
 		evictedEntries = append(evictedEntries, worst.entry)
-		worstSize := uint64(worst.entry.size) // #nosec G115 -- validateEvictionMetadata rejects non-positive entry sizes before this loop.
-		if state.totalBytes >= worstSize {
-			state.totalBytes -= worstSize
-		} else {
-			return nil, false, txAdmitUnavailable("mempool eviction byte accounting underflow")
+		if err := state.applyDryRunEviction(worst.entry); err != nil {
+			return nil, false, err
 		}
-		state.totalCount--
 		planPool = append(planPool[:worstIndex], planPool[worstIndex+1:]...)
 	}
-	if state.totalCount > maxTxs || state.totalBytes > state.maxBytes {
+	if state.exceedsHardCapacity(maxTxs) {
 		return nil, false, txAdmitUnavailable(fmt.Sprintf("mempool capacity remains exceeded after dry-run eviction: count=%d/%d bytes=%d/%d", state.totalCount, maxTxs, state.totalBytes, state.maxBytes))
 	}
 	return evictedEntries, false, nil
+}
+
+func (state mempoolCapacityState) exceedsEvictionTarget(maxTxs int) bool {
+	return state.totalCount > maxTxs || state.totalBytes > state.targetBytes
+}
+
+func (state mempoolCapacityState) exceedsHardCapacity(maxTxs int) bool {
+	return state.totalCount > maxTxs || state.totalBytes > state.maxBytes
+}
+
+func (state *mempoolCapacityState) applyDryRunEviction(entry *mempoolEntry) error {
+	worstSize := uint64(entry.size) // #nosec G115 -- validateEvictionMetadata rejects non-positive entry sizes before this helper.
+	if state.totalBytes < worstSize {
+		return txAdmitUnavailable("mempool eviction byte accounting underflow")
+	}
+	state.totalBytes -= worstSize
+	state.totalCount--
+	return nil
+}
+
+func worstEvictionPlanIndex(planPool []mempoolEvictionPlanEntry) int {
+	worstIndex := 0
+	for i := 1; i < len(planPool); i++ {
+		if evictionPlanEntryWorse(planPool[i], planPool[worstIndex]) {
+			worstIndex = i
+		}
+	}
+	return worstIndex
 }
 
 func nonNegativeMempoolIntToUint64(label string, value int) (uint64, error) {
