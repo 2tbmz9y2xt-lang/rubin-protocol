@@ -87,7 +87,7 @@ Gate падает если:
 
 Правила:
 
-1. Генератор **НЕ** запускается из CI (ни в `ci.yml`, ни в других workflow).
+1. Mutating-режим генератора **НЕ** запускается из CI (ни в `ci.yml`, ни в других workflow).
 2. Регенерация fixtures выполняется вручную локально через reproducible env:
    - `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/gen-conformance-fixtures'`
 3. Любое изменение `conformance/fixtures/CV-*.json` обязано сопровождаться обновлением
@@ -100,6 +100,36 @@ Guard-проверка (CI):
 ```bash
 scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_policy.py
 ```
+
+### Check-only `--output-dir` mode
+
+`gen-conformance-fixtures` поддерживает non-mutating режим: при передаче
+абсолютного `--output-dir <path>` генератор пишет candidate fixtures
+**только** под `<path>`, не трогая `conformance/fixtures/**`. Источник
+данных по-прежнему читается из committed `conformance/fixtures/**`.
+
+```bash
+scripts/dev-env.sh -- bash -lc \
+  'cd clients/go && go run ./cmd/gen-conformance-fixtures --output-dir /tmp/candidate-fixtures'
+```
+
+Свойства check-only режима:
+
+- ML-DSA-87 ключи deterministic, embedded под `clients/go/cmd/gen-conformance-fixtures/testdata/keys/*.der`
+  (committed conformance test material, не production keys);
+- подпись через `(*consensus.MLDSA87Keypair).SignDigest32ForConformanceFixture`
+  (FIPS 204 deterministic ML-DSA); package-level caller-grep guard
+  в `consensus/openssl_signer_conformance_fixture_test.go` ограничивает
+  использование этим генератором;
+- два прогона с разными `--output-dir` дают **byte-identical** результат
+  (`TestGenerator_DeterministicOutputDir`);
+- `--output-dir` обязан быть абсолютным; запрет указывать committed
+  `conformance/fixtures` или путь под ним;
+- production signing path (`SignDigest32`, hedged ML-DSA) **не** меняется.
+
+Использование: предусмотрено для будущей CI-only drift gate
+(`Q-CONF-FIXTURE-DRIFT-CHECK-01`), которая сравнит candidate bytes
+с committed bytes без мутации репо.
 
 ## Fuzz crash promotion (manual-only)
 
