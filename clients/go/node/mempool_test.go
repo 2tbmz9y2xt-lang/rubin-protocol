@@ -1495,47 +1495,62 @@ func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
 	}
 }
 
-func TestPolicyNeedsInputSnapshotCoversStageCDaPath(t *testing.T) {
-	// Stage C predicate: required_fee = max(relay_fee_floor, da_fee_floor +
-	// da_surcharge). A DA-bearing tx exercises computeFeeNoVerify, which
-	// requires a non-nil utxo map. policyNeedsInputSnapshot MUST trigger
-	// for any config that can produce a non-zero DA-side floor, otherwise
-	// the admit path returns "nil utxo set" instead of a Stage C verdict.
+// TestPolicyNeedsInputSnapshotForTxMatrix pins the tx-aware snapshot
+// gate semantics. The decision depends on BOTH the policy config AND
+// the tx shape (DA-bearing or not). This avoids building the per-tx
+// input snapshot for non-DA admissions when only the DA-side floor is
+// configured — the prior policy-only gate built it unconditionally for
+// any `MinDaFeeRate > 0` config and the helper short-circuited without
+// using the snapshot, which is wasted map-copy on the hot non-DA
+// admit path.
+//
+// Proof assertion: for each (config, tx-DA-flag) pair, the function
+// returns the documented value. Adding a new policy lane that reads
+// input state without updating this matrix breaks the build.
+func TestPolicyNeedsInputSnapshotForTxMatrix(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	parseFor := func(t *testing.T, txBytes []byte) *consensus.Tx {
+		t.Helper()
+		tx, _, _, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			t.Fatalf("ParseTx: %v", err)
+		}
+		return tx
+	}
+
+	daBytesPayload := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, []byte("0123456789"))
+	nonDaBytesPayload := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 900_000, 1, fromKey, fromAddress, toAddress)
+	daTx := parseFor(t, daBytesPayload)
+	nonDaTx := parseFor(t, nonDaBytesPayload)
+
 	cases := []struct {
 		name string
 		cfg  MempoolConfig
+		tx   *consensus.Tx
 		want bool
 	}{
-		{
-			name: "all_zero_no_core_ext",
-			cfg:  MempoolConfig{},
-			want: false,
-		},
-		{
-			name: "min_da_fee_rate_only",
-			cfg:  MempoolConfig{MinDaFeeRate: 1},
-			want: true,
-		},
-		{
-			name: "surcharge_only",
-			cfg:  MempoolConfig{PolicyDaSurchargePerByte: 1},
-			want: true,
-		},
-		{
-			name: "core_ext_only",
-			cfg:  MempoolConfig{PolicyRejectCoreExtPreActivation: true},
-			want: true,
-		},
-		{
-			name: "min_da_fee_rate_without_core_ext",
-			cfg:  MempoolConfig{MinDaFeeRate: 1, PolicyRejectCoreExtPreActivation: false},
-			want: true,
-		},
+		{name: "all_zero_no_core_ext_non_da", cfg: MempoolConfig{}, tx: nonDaTx, want: false},
+		{name: "all_zero_no_core_ext_da", cfg: MempoolConfig{}, tx: daTx, want: false},
+		{name: "min_da_fee_rate_only_non_da", cfg: MempoolConfig{MinDaFeeRate: 1}, tx: nonDaTx, want: false},
+		{name: "min_da_fee_rate_only_da", cfg: MempoolConfig{MinDaFeeRate: 1}, tx: daTx, want: true},
+		{name: "surcharge_only_non_da", cfg: MempoolConfig{PolicyDaSurchargePerByte: 1}, tx: nonDaTx, want: false},
+		{name: "surcharge_only_da", cfg: MempoolConfig{PolicyDaSurchargePerByte: 1}, tx: daTx, want: true},
+		{name: "core_ext_non_da", cfg: MempoolConfig{PolicyRejectCoreExtPreActivation: true}, tx: nonDaTx, want: true},
+		{name: "core_ext_da", cfg: MempoolConfig{PolicyRejectCoreExtPreActivation: true}, tx: daTx, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := policyNeedsInputSnapshot(tc.cfg); got != tc.want {
-				t.Fatalf("policyNeedsInputSnapshot(%+v)=%v, want %v", tc.cfg, got, tc.want)
+			got, err := policyNeedsInputSnapshotForTx(tc.tx, tc.cfg)
+			if err != nil {
+				t.Fatalf("policyNeedsInputSnapshotForTx error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got=%v want=%v", got, tc.want)
 			}
 		})
 	}

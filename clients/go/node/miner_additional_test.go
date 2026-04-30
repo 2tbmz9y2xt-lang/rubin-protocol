@@ -516,10 +516,10 @@ func TestMinerRejectCandidateUsesCurrentMempoolMinFeeRateFnProvider(t *testing.T
 	}
 	miner := &Miner{cfg: cfg}
 
-	// Two-pass: first build a tx to learn the weight, then rebuild with a
-	// feePaid in the (weight*1, weight*providerFloor) window. ML-DSA
-	// signatures make weight ~1100 bytes; the actual figure is checked at
-	// runtime so the test stays correct if signature size changes.
+	// Two-pass: first build a tx to learn the fixture's actual weight, then
+	// rebuild with a feePaid in the (weight*1, weight*providerFloor) window.
+	// The exact size is determined at runtime from daTestTx so this test
+	// stays correct if the fixture's serialized weight changes.
 	_, _, weight := daTestTx(t, 0x40, 1_000_000, 0, 10)
 	if weight == 0 {
 		t.Fatalf("test setup: weight=0")

@@ -451,7 +451,11 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	}
 
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	if policyNeedsInputSnapshot(policy) {
+	needs, err := policyNeedsInputSnapshotForTx(tx, policy)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	if needs {
 		policyUtxos, err = policyInputSnapshot(tx, snapshot.utxos)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
@@ -588,8 +592,21 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if consumed != len(txBytes) {
 		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
 	}
+	// Policy checks consume an immutable pre-validation snapshot of only the
+	// transaction inputs they inspect, avoiding both live-state mutation and
+	// whole-chainstate copying on mempool admission. The snapshot is built
+	// only when a policy lane that actually reads input state will fire on
+	// this specific tx (CORE_EXT pre-activation gate, or a DA-bearing tx
+	// under any non-zero DA-side fee term); non-DA tx with no CORE_EXT gate
+	// skip the map-copy entirely. The snapshot must be built BEFORE
+	// CheckTransaction*WithOwnedUtxoSet, because that helper takes ownership
+	// of the supplied utxo map and removes spent inputs as it validates.
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	if policyNeedsInputSnapshot(policy) {
+	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	if needs {
 		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.utxos)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
@@ -608,9 +625,6 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
-	// Policy checks consume an immutable pre-validation snapshot of only the
-	// transaction inputs they inspect, avoiding both live-state mutation and
-	// whole-chainstate copying on mempool admission.
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
@@ -621,20 +635,50 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	return checked, inputs, nil
 }
 
-func policyNeedsInputSnapshot(policy MempoolConfig) bool {
-	// applyPolicyAgainstState only invokes RejectDaAnchorTxPolicy when the
-	// DA-side floor is configured (MinDaFeeRate > 0) or a per-byte surcharge
-	// applies; for all-zero DA config the rolling relay-fee floor is enforced
-	// by validateFeeFloorLocked instead, which does not need a UTXO snapshot.
-	// The CORE_EXT pre-activation gate reads input state for spend
-	// classification, so it is the third trigger.
-	//
-	// This gate must stay aligned with the helper-call guard in
-	// applyPolicyAgainstState: if either path widens, the other must widen
-	// too, otherwise a config that satisfies one but not the other re-opens
-	// the "nil utxo set" admission failure that this gate was designed to
-	// prevent.
-	return policy.PolicyDaSurchargePerByte > 0 || policy.MinDaFeeRate > 0 || policy.PolicyRejectCoreExtPreActivation
+// policyNeedsInputSnapshotForTx returns true if applying policy to the
+// already-parsed transaction will read input UTXOs. The decision is
+// tx-aware so admissions of non-DA transactions under the default
+// config (`MinDaFeeRate=DefaultMinDaFeeRate=1`,
+// `PolicyDaSurchargePerByte=0`, `PolicyRejectCoreExtPreActivation=false`)
+// skip the per-tx map copy entirely.
+//
+// Trigger conditions:
+//
+//  1. `PolicyRejectCoreExtPreActivation` is on — the CORE_EXT classifier
+//     reads input state for any candidate, so the snapshot is required
+//     regardless of tx shape.
+//  2. The DA path is exercisable AND the tx is DA-bearing
+//     (`daBytes > 0`). `applyPolicyAgainstState` invokes
+//     `RejectDaAnchorTxPolicy` only when `MinDaFeeRate > 0` or
+//     `PolicyDaSurchargePerByte > 0`, and the helper itself short-circuits
+//     for `daBytes == 0` without touching utxos. Non-DA tx therefore
+//     never consume the snapshot.
+//
+// All-zero DA config + non-CORE_EXT routing relies on
+// `validateFeeFloorLocked` to enforce the rolling relay-fee floor; that
+// path does not need a UTXO snapshot.
+//
+// The function takes the parsed `*consensus.Tx` (not the post-validation
+// `*CheckedTransaction`) on purpose: the caller must build the snapshot
+// BEFORE invoking `CheckTransaction*WithOwnedUtxoSet`, which takes
+// ownership of the supplied utxo map and removes spent inputs as it
+// validates. Computing daBytes via `consensus.TxWeightAndStats` is a
+// readonly structural walk and is therefore safe to run pre-check.
+func policyNeedsInputSnapshotForTx(tx *consensus.Tx, policy MempoolConfig) (bool, error) {
+	if policy.PolicyRejectCoreExtPreActivation {
+		return true, nil
+	}
+	if policy.MinDaFeeRate == 0 && policy.PolicyDaSurchargePerByte == 0 {
+		return false, nil
+	}
+	if tx == nil {
+		return false, errors.New("nil transaction")
+	}
+	_, daBytes, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		return false, err
+	}
+	return daBytes > 0, nil
 }
 
 func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
