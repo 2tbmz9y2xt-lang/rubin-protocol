@@ -1163,8 +1163,8 @@ func TestDevnetRPCSubmitTxRejectsLowFeeDaCommitWhenSurchargePolicyEnabled(t *tes
 	if got.TxID != "" {
 		t.Fatalf("txid=%q, want empty rejected response", got.TxID)
 	}
-	if !strings.Contains(got.Error, "DA fee below policy minimum") {
-		t.Fatalf("error=%q, want DA surcharge policy reject", got.Error)
+	if !strings.Contains(got.Error, "DA fee below Stage C floor") {
+		t.Fatalf("error=%q, want DA Stage C floor reject", got.Error)
 	}
 	if announceCalled {
 		t.Fatalf("announceTx was called for rejected DA_COMMIT tx")

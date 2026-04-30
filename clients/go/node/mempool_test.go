@@ -1112,11 +1112,11 @@ func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
 	}
 
 	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 99, 1, 1, fromKey, toAddress, []byte("0123456789"))
-	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
-		t.Fatalf("expected DA surcharge rejection, got %v", err)
+	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below Stage C floor") {
+		t.Fatalf("expected DA Stage C floor rejection, got %v", err)
 	}
-	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
-		t.Fatalf("expected relay metadata DA surcharge rejection, got %v", err)
+	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below Stage C floor") {
+		t.Fatalf("expected relay metadata DA Stage C floor rejection, got %v", err)
 	}
 }
 
@@ -1145,7 +1145,12 @@ func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	// Stage C admission requires the input value to cover both the
+	// relay-fee floor (weight * current_mempool_min_fee_rate) and the DA
+	// floor (da_payload_len * (min_da_fee_rate + surcharge_per_byte)),
+	// so this snapshot-mutation regression test has to provide enough
+	// value for the admission path to actually exercise the DA helper.
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyDaSurchargePerByte: 1,
@@ -1154,7 +1159,7 @@ func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 80, 10, 1, fromKey, toAddress, []byte("0123456789"))
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, []byte("0123456789"))
 	nextHeight, _, err := nextBlockContext(st)
 	if err != nil {
 		t.Fatalf("nextBlockContext: %v", err)

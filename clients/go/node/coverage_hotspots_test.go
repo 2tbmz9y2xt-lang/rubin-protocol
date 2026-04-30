@@ -7,7 +7,7 @@ import (
 )
 
 func TestCoverage_DaAnchorPolicyGuards(t *testing.T) {
-	if reject, _, _, err := RejectDaAnchorTxPolicy(nil, nil, 1); !reject || err == nil {
+	if reject, _, _, err := RejectDaAnchorTxPolicy(nil, nil, 0, 0, 0, 1); !reject || err == nil {
 		t.Fatalf("expected nil tx rejection")
 	}
 	if reject, reason, err := RejectNonCoinbaseAnchorOutputs(nil); !reject || err == nil || reason == "" {

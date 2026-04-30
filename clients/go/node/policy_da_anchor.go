@@ -23,18 +23,42 @@ func RejectNonCoinbaseAnchorOutputs(tx *consensus.Tx) (reject bool, reason strin
 	return false, "", nil
 }
 
-// RejectDaAnchorTxPolicy implements policy-only DA/anchor anti-abuse checks.
+// RejectDaAnchorTxPolicy implements policy-only DA/anchor anti-abuse checks
+// aligned with POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C:
 //
-// Current policy surface (no consensus changes):
-//   - Compute da_bytes(tx) using consensus weight accounting (TxWeightAndStats).
-//   - If da_bytes(tx) > 0 and daSurchargePerByte > 0, require:
-//     fee(tx) >= da_bytes(tx) * daSurchargePerByte
-//     Fee is computed from the provided UTXO snapshot without signature verification.
+//	fee(tx)             = sum_inputs - sum_outputs
+//	relay_fee_floor(tx) = weight(tx) * currentMempoolMinFeeRate
+//	da_fee_floor(tx)    = da_payload_len(tx) * minDaFeeRate
+//	da_surcharge(tx)    = da_payload_len(tx) * daSurchargePerByte
+//	da_required_fee(tx) = da_fee_floor(tx) + da_surcharge(tx)
+//	required_fee(tx)    = max(relay_fee_floor(tx), da_required_fee(tx))
+//	reject if fee(tx) < required_fee(tx)
+//
+// Arithmetic is checked widening; any overflow rejects fail-closed as a
+// policy error. The helper does not change consensus validity. Non-DA
+// transactions (da_payload_len == 0) keep the relay-fee floor only.
+//
+// Inputs:
+//   - weight: consensus tx weight; supplied by the caller because callers
+//     already compute weight via consensus.TxWeightAndStats.
+//   - currentMempoolMinFeeRate: rolling local mempool floor exposed by
+//     #1336 (e.g. Mempool.currentMinFeeRateLocked()). Callers without a
+//     live mempool may use DefaultMempoolMinFeeRate as the documented
+//     default for that rolling state — not a parallel floor invention.
+//   - minDaFeeRate: the spec-side DA per-byte floor
+//     (POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C `min_da_fee_rate`,
+//     default 1).
+//   - daSurchargePerByte: operator-tunable DA per-byte surcharge added on
+//     top of the spec-side floor; default 0 disables only the surcharge,
+//     not the DA floor.
 //
 // Miner template budget capping is enforced by the caller (needs running sum).
 func RejectDaAnchorTxPolicy(
 	tx *consensus.Tx,
 	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	weight uint64,
+	currentMempoolMinFeeRate uint64,
+	minDaFeeRate uint64,
 	daSurchargePerByte uint64,
 ) (reject bool, daBytes uint64, reason string, err error) {
 	if tx == nil {
@@ -44,19 +68,49 @@ func RejectDaAnchorTxPolicy(
 	if err != nil {
 		return true, 0, "tx weight/stats error", err
 	}
-	if daBytes == 0 || daSurchargePerByte == 0 {
-		return false, daBytes, "", nil
+	if daBytes == 0 {
+		// Non-DA transaction: this helper only enforces the DA half of
+		// the Stage C admission contract. The relay-fee floor for non-DA
+		// transactions is enforced by the mempool admission path
+		// (validateFeeFloorLocked), so the helper deliberately
+		// short-circuits and does not compute fee or apply any
+		// DA-specific term to non-DA transactions.
+		return false, 0, "", nil
 	}
-	minFee, err := mulU64NoOverflow(daBytes, daSurchargePerByte)
+	relayFloor, err := mulU64NoOverflow(weight, currentMempoolMinFeeRate)
 	if err != nil {
-		return true, daBytes, "min fee overflow", err
+		return true, daBytes, fmt.Sprintf("relay fee floor overflow (weight=%d current_mempool_min_fee_rate=%d)", weight, currentMempoolMinFeeRate), err
+	}
+	daFloor, err := mulU64NoOverflow(daBytes, minDaFeeRate)
+	if err != nil {
+		return true, daBytes, fmt.Sprintf("DA fee floor overflow (da_payload_len=%d min_da_fee_rate=%d)", daBytes, minDaFeeRate), err
+	}
+	daSurcharge, err := mulU64NoOverflow(daBytes, daSurchargePerByte)
+	if err != nil {
+		return true, daBytes, fmt.Sprintf("DA surcharge overflow (da_payload_len=%d surcharge_per_byte=%d)", daBytes, daSurchargePerByte), err
+	}
+	daRequired := daFloor
+	if err := addU64NoOverflow(&daRequired, daSurcharge); err != nil {
+		return true, daBytes, fmt.Sprintf("DA required fee overflow (da_fee_floor=%d da_surcharge=%d)", daFloor, daSurcharge), err
+	}
+	required := relayFloor
+	if daRequired > required {
+		required = daRequired
+	}
+	if required == 0 {
+		// DA tx but every Stage C term is zero (zero weight + zero DA
+		// constants). Nothing to enforce; admit without fee compute.
+		return false, daBytes, "", nil
 	}
 	fee, err := computeFeeNoVerify(tx, utxos)
 	if err != nil {
 		return true, daBytes, "cannot compute fee for DA tx (policy)", err
 	}
-	if fee < minFee {
-		return true, daBytes, fmt.Sprintf("DA fee below policy minimum (fee=%d min_fee=%d)", fee, minFee), nil
+	if fee < required {
+		return true, daBytes, fmt.Sprintf(
+			"DA fee below Stage C floor (fee=%d required_fee=%d relay_fee_floor=%d da_fee_floor=%d da_surcharge=%d weight=%d da_payload_len=%d)",
+			fee, required, relayFloor, daFloor, daSurcharge, weight, daBytes,
+		), nil
 	}
 	return false, daBytes, "", nil
 }

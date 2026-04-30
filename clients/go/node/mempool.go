@@ -17,6 +17,10 @@ const (
 	DefaultMempoolMaxBytes        = consensus.MAX_RELAY_MSG_BYTES
 	DefaultMempoolMinFeeRate      = uint64(1)
 
+	// DefaultMinDaFeeRate is the spec-side per-byte DA fee floor from
+	// POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C (`min_da_fee_rate`).
+	DefaultMinDaFeeRate = uint64(1)
+
 	mempoolLowWaterNumerator   = 9
 	mempoolLowWaterDenominator = 10
 )
@@ -87,9 +91,14 @@ type MempoolAdmissionCounts struct {
 }
 
 type MempoolConfig struct {
-	MaxTransactions                      int
-	MaxBytes                             int
-	PolicyDaSurchargePerByte             uint64
+	MaxTransactions          int
+	MaxBytes                 int
+	PolicyDaSurchargePerByte uint64
+	// MinDaFeeRate is the spec-side per-byte DA fee floor
+	// (POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C `min_da_fee_rate`,
+	// default 1). Setting it to 0 disables only the spec floor; the
+	// surcharge term still applies when PolicyDaSurchargePerByte > 0.
+	MinDaFeeRate                         uint64
 	PolicyRejectNonCoinbaseAnchorOutputs bool
 	PolicyRejectCoreExtPreActivation     bool
 	PolicyMaxExtPayloadBytes             int
@@ -144,6 +153,7 @@ func DefaultMempoolConfig() MempoolConfig {
 		MaxTransactions:                      DefaultMempoolMaxTransactions,
 		MaxBytes:                             DefaultMempoolMaxBytes,
 		PolicyDaSurchargePerByte:             minerDefaults.PolicyDaSurchargePerByte,
+		MinDaFeeRate:                         DefaultMinDaFeeRate,
 		PolicyRejectNonCoinbaseAnchorOutputs: minerDefaults.PolicyRejectNonCoinbaseAnchorOutputs,
 		PolicyRejectCoreExtPreActivation:     minerDefaults.PolicyRejectCoreExtPreActivation,
 	}
@@ -612,7 +622,11 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 }
 
 func policyNeedsInputSnapshot(policy MempoolConfig) bool {
-	return policy.PolicyDaSurchargePerByte > 0 || policy.PolicyRejectCoreExtPreActivation
+	// Stage C admission may require fee computation against the input
+	// UTXO set whenever the relay-fee floor or the DA-side floor can be
+	// non-zero. Conservatively require the snapshot any time the DA
+	// floor (min_da_fee_rate or surcharge) or the core-ext gate is on.
+	return policy.PolicyDaSurchargePerByte > 0 || policy.MinDaFeeRate > 0 || policy.PolicyRejectCoreExtPreActivation
 }
 
 func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
@@ -648,12 +662,20 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 			return errors.New(reason)
 		}
 	}
-	reject, _, reason, err := RejectDaAnchorTxPolicy(checked.Tx, utxos, policy.PolicyDaSurchargePerByte)
+	currentMin := m.currentMinFeeRateSnapshot()
+	reject, _, reason, err := RejectDaAnchorTxPolicy(
+		checked.Tx,
+		utxos,
+		checked.Weight,
+		currentMin,
+		policy.MinDaFeeRate,
+		policy.PolicyDaSurchargePerByte,
+	)
 	if err != nil {
-		return err
+		return txAdmitRejected(fmt.Sprintf("%s: %v", reason, err))
 	}
 	if reject {
-		return errors.New(reason)
+		return txAdmitRejected(reason)
 	}
 	if policy.PolicyRejectCoreExtPreActivation {
 		reject, reason, err := RejectCoreExtTxPreActivation(checked.Tx, utxos, nextHeight, policy.CoreExtProfiles)
@@ -1187,6 +1209,16 @@ func (m *Mempool) currentMinFeeRateLocked() uint64 {
 		return DefaultMempoolMinFeeRate
 	}
 	return m.currentMinFeeRate
+}
+
+// currentMinFeeRateSnapshot returns the rolling local floor without
+// requiring the caller to already hold m.mu. It briefly takes a read
+// lock so that race-free Stage C admission helpers (which run under a
+// chainstate-side lock, not m.mu) can read the value safely.
+func (m *Mempool) currentMinFeeRateSnapshot() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentMinFeeRateLocked()
 }
 
 func (m *Mempool) effectiveLowWaterBytesLocked() int {
