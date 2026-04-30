@@ -22,6 +22,7 @@ KEYGEN_JSON="${TMP_ROOT}/key_material.json"
 GO_RPC_ADDR="${GO_RPC_ADDR:-127.0.0.1:0}"
 RUST_RPC_ADDR="${RUST_RPC_ADDR:-127.0.0.1:0}"
 DETERMINISTIC_TX_FEE=10000
+RPC_REQUEST_TIMEOUT_SECONDS="${RPC_REQUEST_TIMEOUT_SECONDS:-10}"
 
 PIDS=()
 
@@ -90,13 +91,14 @@ wait_for_rpc_height() {
   local timeout="$2"
   local deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
-    if python3 - "${rpc_addr}" 2>/dev/null <<'PY'
+    if python3 - "${rpc_addr}" "${RPC_REQUEST_TIMEOUT_SECONDS}" 2>/dev/null <<'PY'
 import json
 import sys
 import urllib.request
 
 rpc_addr = sys.argv[1]
-with urllib.request.urlopen(f"http://{rpc_addr}/get_tip", timeout=2) as resp:
+request_timeout = float(sys.argv[2])
+with urllib.request.urlopen(f"http://{rpc_addr}/get_tip", timeout=request_timeout) as resp:
     if resp.status != 200:
         raise SystemExit(1)
     data = json.load(resp)
@@ -109,32 +111,37 @@ PY
     fi
     sleep 1
   done
-  echo "timeout waiting for /get_tip on ${rpc_addr}" >&2
+  echo "timeout waiting for /get_tip on ${rpc_addr} after ${timeout}s (request_timeout=${RPC_REQUEST_TIMEOUT_SECONDS}s)" >&2
   return 1
 }
 
 read_tip_tsv() {
   local rpc_addr="$1"
-  python3 - "${rpc_addr}" <<'PY'
+  python3 - "${rpc_addr}" "${RPC_REQUEST_TIMEOUT_SECONDS}" <<'PY'
 import json
 import sys
 import urllib.request
 
 rpc_addr = sys.argv[1]
-with urllib.request.urlopen(f"http://{rpc_addr}/get_tip", timeout=2) as resp:
-    data = json.load(resp)
+request_timeout = float(sys.argv[2])
+try:
+    with urllib.request.urlopen(f"http://{rpc_addr}/get_tip", timeout=request_timeout) as resp:
+        data = json.load(resp)
+except Exception as exc:
+    raise SystemExit(f"/get_tip request failed for {rpc_addr} with request_timeout={request_timeout}s: {exc}")
 print(data["height"], data["tip_hash"], sep="\t")
 PY
 }
 
 check_metrics() {
   local rpc_addr="$1"
-  python3 - "${rpc_addr}" <<'PY'
+  python3 - "${rpc_addr}" "${RPC_REQUEST_TIMEOUT_SECONDS}" <<'PY'
 import re
 import sys
 import urllib.request
 
 rpc_addr = sys.argv[1]
+request_timeout = float(sys.argv[2])
 expected = {
     "rubin_node_tip_height",
     "rubin_node_best_known_height",
@@ -144,10 +151,13 @@ expected = {
     "rubin_node_rpc_requests_total",
     "rubin_node_submit_tx_total",
 }
-with urllib.request.urlopen(f"http://{rpc_addr}/metrics", timeout=2) as resp:
-    if resp.status != 200:
-        raise SystemExit(1)
-    body = resp.read().decode("utf-8")
+try:
+    with urllib.request.urlopen(f"http://{rpc_addr}/metrics", timeout=request_timeout) as resp:
+        if resp.status != 200:
+            raise SystemExit(f"/metrics returned status={resp.status} for {rpc_addr} with request_timeout={request_timeout}s")
+        body = resp.read().decode("utf-8")
+except Exception as exc:
+    raise SystemExit(f"/metrics request failed for {rpc_addr} with request_timeout={request_timeout}s: {exc}")
 names = set()
 for line in body.splitlines():
     line = line.strip()
