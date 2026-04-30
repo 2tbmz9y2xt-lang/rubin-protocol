@@ -583,17 +583,28 @@ func TestMinerRejectCandidateFallbackUsesStaticCurrentMempoolMinFeeRate(t *testi
 // clamped up to that baseline before being fed into
 // RejectDaAnchorTxPolicy, so a misconfigured provider cannot silently
 // disable the relay-fee floor.
+//
+// The test is intentionally fail-sensitive on the clamp ALONE. Both the
+// DA floor (MinDaFeeRate) and the DA surcharge are zero, so without the
+// clamp the helper computes required_fee = max(weight*0, 0+0) = 0 and
+// admits the fee=0 candidate. With the clamp, currentMin is raised to
+// DefaultMempoolMinFeeRate=1 and required_fee = weight*1 > 0 forces a
+// reject. Removing the clamp at miner.go:506-508 therefore makes this
+// test go green-to-red on the same input — proving the clamp is the
+// only thing keeping the candidate out.
 func TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate(t *testing.T) {
 	cfg := DefaultMinerConfig()
 	cfg.PolicyDaAnchorAntiAbuse = true
 	cfg.PolicyRejectCoreExtPreActivation = false
-	cfg.MinDaFeeRate = 1
+	cfg.MinDaFeeRate = 0
 	cfg.PolicyDaSurchargePerByte = 0
 	cfg.CurrentMempoolMinFeeRate = 1
 	cfg.CurrentMempoolMinFeeRateFn = func() uint64 { return 0 } // below DefaultMempoolMinFeeRate=1; clamped up
 	miner := &Miner{cfg: cfg}
 
-	// fee=0 must reject because clamped relay floor is weight*1 > 0.
+	// With the clamp, relay floor = weight * DefaultMempoolMinFeeRate=1 > 0
+	// and DA-side terms are zero, so required_fee = weight*1 and fee=0
+	// rejects. Without the clamp, currentMin stays 0 → required_fee=0 → admit.
 	tx, utxos, weight := daTestTx(t, 0x42, 1_000_000, 0, 10)
 	if weight == 0 {
 		t.Fatalf("test setup: weight=0")
