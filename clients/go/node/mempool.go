@@ -1010,10 +1010,7 @@ func (m *Mempool) capacityStateLocked(candidate *mempoolEntry) (mempoolCapacityS
 	bytePressure := usedBytes > maxBytes-candidateSize
 	targetBytes := maxBytes
 	if bytePressure {
-		targetBytes = uint64(m.effectiveLowWaterBytesLocked()) // #nosec G115 -- effectiveLowWaterBytesLocked returns 0 or a positive value derived from positive maxBytes.
-		if targetBytes < candidateSize {
-			targetBytes = candidateSize
-		}
+		targetBytes = mempoolBytePressureTarget(uint64(m.effectiveLowWaterBytesLocked()), candidateSize) // #nosec G115 -- effectiveLowWaterBytesLocked returns 0 or a positive value derived from positive maxBytes.
 	}
 	return mempoolCapacityState{
 		maxBytes:      maxBytes,
@@ -1025,6 +1022,13 @@ func (m *Mempool) capacityStateLocked(candidate *mempoolEntry) (mempoolCapacityS
 		countPressure: countPressure,
 		bytePressure:  bytePressure,
 	}, nil
+}
+
+func mempoolBytePressureTarget(lowWaterBytes uint64, candidateSize uint64) uint64 {
+	if lowWaterBytes < candidateSize {
+		return candidateSize
+	}
+	return lowWaterBytes
 }
 
 func (state mempoolCapacityState) underPressure() bool {
