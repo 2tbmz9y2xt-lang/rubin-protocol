@@ -76,9 +76,25 @@ jobs:
         run: |
           scripts/benchmarks/run_combined_load_benchmark.sh artifacts/combined-load
 
+      - name: Build combined-load trend artifact
+        if: always()
+        run: |
+          python3 scripts/runtime_perf/build_runtime_perf_trend.py \
+            --run-dir artifacts/combined-load \
+            --output artifacts/combined-load/trend.json \
+            --summary artifacts/combined-load/trend.md \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --run-number "${GITHUB_RUN_NUMBER}" \
+            --sha "${GITHUB_SHA}" \
+            --ref "${GITHUB_REF}" \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --workflow "${GITHUB_WORKFLOW}"
+
       - name: Upload combined-load artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: combined-load-benchmark
           path: artifacts/combined-load
+          retention-days: 90

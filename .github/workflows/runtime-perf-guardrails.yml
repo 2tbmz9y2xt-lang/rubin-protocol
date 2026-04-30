@@ -1,6 +1,9 @@
 name: runtime-perf-guardrails
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     paths:
       - 'clients/go/node/**'
@@ -125,9 +128,25 @@ jobs:
           } > artifacts/runtime-perf/summary.md
           cat artifacts/runtime-perf/summary.md >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Build runtime perf trend artifact
+        if: always()
+        run: |
+          python3 scripts/runtime_perf/build_runtime_perf_trend.py \
+            --run-dir artifacts/runtime-perf/head \
+            --output artifacts/runtime-perf/trend.json \
+            --summary artifacts/runtime-perf/trend.md \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --run-number "${GITHUB_RUN_NUMBER}" \
+            --sha "${GITHUB_SHA}" \
+            --ref "${GITHUB_REF}" \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --workflow "${GITHUB_WORKFLOW}"
+
       - name: Upload runtime perf artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-perf-guardrails
           path: artifacts/runtime-perf
+          retention-days: 90
