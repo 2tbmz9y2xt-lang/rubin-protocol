@@ -530,7 +530,7 @@ func TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool(t *testi
 		engine.chainState.Utxos,
 		[]consensus.Outpoint{sourceOutpoint},
 		700,
-		50,
+		100_000,
 		1,
 		sourceKP,
 		sourceAddress,
@@ -547,7 +547,7 @@ func TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool(t *testi
 		prevHash,
 		target,
 		202,
-		reorgTestCoinbaseForWtxids(t, 101, subsidyA101+50, sourceAddress, [][32]byte{{}, spendWtxid}),
+		reorgTestCoinbaseForWtxids(t, 101, subsidyA101+100_000, sourceAddress, [][32]byte{{}, spendWtxid}),
 		spendTx,
 	)
 	summaryA101, err := engine.ApplyBlock(blockA101, nil)
@@ -617,14 +617,14 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 	sourceOutpointB := consensus.Outpoint{Txid: [32]byte{0x22}, Vout: 0}
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		sourceOutpointA: {
-			Value:             750,
+			Value:             1_000_000,
 			CovenantType:      consensus.COV_TYPE_P2PK,
 			CovenantData:      append([]byte(nil), sourceAddressA...),
 			CreationHeight:    0,
 			CreatedByCoinbase: false,
 		},
 		sourceOutpointB: {
-			Value:             730,
+			Value:             1_000_000,
 			CovenantType:      consensus.COV_TYPE_P2PK,
 			CovenantData:      append([]byte(nil), sourceAddressB...),
 			CreationHeight:    0,
@@ -637,7 +637,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		utxos,
 		[]consensus.Outpoint{sourceOutpointA},
 		680,
-		50,
+		100_000,
 		1,
 		sourceKPA,
 		sourceAddressA,
@@ -648,7 +648,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		utxos,
 		[]consensus.Outpoint{sourceOutpointB},
 		665,
-		50,
+		100_000,
 		2,
 		sourceKPB,
 		sourceAddressB,
@@ -690,7 +690,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		devnetGenesisBlockHash,
 		target,
 		reorgTestTimestamp(1),
-		reorgTestCoinbaseForWtxids(t, 1, subsidy1+50, sourceAddressA, [][32]byte{{}, blockASpendWtxid}),
+		reorgTestCoinbaseForWtxids(t, 1, subsidy1+100_000, sourceAddressA, [][32]byte{{}, blockASpendWtxid}),
 		blockASpend,
 	)
 	summaryA1, err := engine.ApplyBlock(blockA1, nil)
@@ -707,7 +707,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		devnetGenesisBlockHash,
 		target,
 		reorgTestTimestamp(2),
-		reorgTestCoinbaseForWtxids(t, 1, subsidy1+50, destAddressB, [][32]byte{{}, blockBSpendWtxid}),
+		reorgTestCoinbaseForWtxids(t, 1, subsidy1+100_000, destAddressB, [][32]byte{{}, blockBSpendWtxid}),
 		blockBSpend,
 	)
 	if _, err := engine.ApplyBlockWithReorg(blockB1, nil); err != nil {
@@ -790,7 +790,7 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 		engine.chainState.Utxos,
 		[]consensus.Outpoint{sourceOutpoint},
 		700,
-		50,
+		100_000,
 		1,
 		sourceKP,
 		sourceAddress,
@@ -820,7 +820,7 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 		prevHash,
 		target,
 		203,
-		reorgTestCoinbaseForWtxids(t, 101, subsidyB101+50, destAddress, [][32]byte{{}, spendWtxid}),
+		reorgTestCoinbaseForWtxids(t, 101, subsidyB101+100_000, destAddress, [][32]byte{{}, spendWtxid}),
 		spendTx,
 	)
 	if _, err := engine.ApplyBlockWithReorg(blockB101, nil); err != nil {

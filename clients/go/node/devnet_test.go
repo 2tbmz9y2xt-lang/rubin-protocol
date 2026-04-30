@@ -98,7 +98,7 @@ func TestDevnetThreeNodeSyncAndDeterminism(t *testing.T) {
 func TestDevnetTwoNodeFullBlockP2PBaseline(t *testing.T) {
 	const (
 		txAmount = 10
-		txFee    = 1
+		txFee    = 100_000
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -273,7 +273,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 		checkpointEvery = 100
 		txInterval      = 10
 		txAmount        = 10
-		txFee           = 1
+		txFee           = 100_000
 		restartAt       = 700
 		killAt          = 500
 	)

@@ -74,14 +74,14 @@ func TestCoverageResidual_RemoveConflictingParsesBlockBytes(t *testing.T) {
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
 
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}
-	txPool := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
-	txBlock := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 89, 2, 2, fromKey, fromAddress, toAddress)
+	txPool := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	txBlock := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 200_000, 2, fromKey, fromAddress, toAddress)
 	if err := mp.AddTx(txPool); err != nil {
 		t.Fatalf("AddTx(txPool): %v", err)
 	}
@@ -109,10 +109,10 @@ func TestCoverageResidual_MempoolLimitBranches(t *testing.T) {
 	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x01}, size: 0}); err == nil {
 		t.Fatalf("expected invalid size rejection")
 	}
-	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x02}, weight: 1, size: 1}); err != nil {
+	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x02}, fee: 1, weight: 1, size: 1}); err != nil {
 		t.Fatalf("addEntryLocked(count seed): %v", err)
 	}
-	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x03}, weight: 1, size: 1}); err == nil {
+	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x03}, fee: 1, weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected capacity rejection")
 	}
 	mp.mu.Unlock()
@@ -125,10 +125,10 @@ func TestCoverageResidual_MempoolLimitBranches(t *testing.T) {
 		t.Fatalf("NewMempool(bytes): %v", err)
 	}
 	mpBytes.mu.Lock()
-	if err := mpBytes.addEntryLocked(&mempoolEntry{txid: [32]byte{0x04}, weight: 1, size: 1}); err != nil {
+	if err := mpBytes.addEntryLocked(&mempoolEntry{txid: [32]byte{0x04}, fee: 1, weight: 1, size: 1}); err != nil {
 		t.Fatalf("addEntryLocked(byte seed): %v", err)
 	}
-	if err := mpBytes.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x05}, weight: 1, size: 2}); err == nil {
+	if err := mpBytes.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x05}, fee: 1, weight: 1, size: 2}); err == nil {
 		t.Fatalf("expected byte-capacity rejection")
 	}
 	mpBytes.usedBytes = 1

@@ -692,6 +692,9 @@ func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
 	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
 		return err
 	}
+	if err := m.validateFeeFloorLocked(entry); err != nil {
+		return err
+	}
 	_, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
 	if err != nil {
 		return err
@@ -751,6 +754,17 @@ func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error 
 	return nil
 }
 
+func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
+	if entry == nil {
+		return txAdmitRejected("nil mempool entry")
+	}
+	currentMinFeeRate := m.currentMinFeeRateLocked()
+	if feeRateBelowFloor(entry.fee, entry.weight, currentMinFeeRate) {
+		return txAdmitRejected(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, currentMinFeeRate))
+	}
+	return nil
+}
+
 func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.Outpoint, source mempoolTxSource) *mempoolEntry {
 	return &mempoolEntry{
 		raw:    append([]byte(nil), checked.Bytes...),
@@ -772,6 +786,9 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 		entry.wtxid = entry.txid
 	}
 	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
+		return err
+	}
+	if err := m.validateFeeFloorLocked(entry); err != nil {
 		return err
 	}
 	evictedEntries, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
@@ -921,10 +938,6 @@ func (m *Mempool) capacityEvictionPlanLocked(candidate *mempoolEntry) ([]*mempoo
 	bytePressure := usedBytes > maxBytes-candidateSize
 	if !countPressure && !bytePressure {
 		return nil, false, nil
-	}
-	currentMinFeeRate := m.currentMinFeeRateLocked()
-	if feeRateBelowFloor(candidate.fee, candidate.weight, currentMinFeeRate) {
-		return nil, false, txAdmitRejected(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", candidate.fee, candidate.weight, currentMinFeeRate))
 	}
 
 	totalBytes := usedBytes + candidateSize

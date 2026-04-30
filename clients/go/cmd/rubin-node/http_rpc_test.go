@@ -96,7 +96,7 @@ func mustRPCStateWithSpendableUTXOAndMempoolConfig(
 	prevTxid[0] = 0x44
 	outpoint := consensus.Outpoint{Txid: prevTxid, Vout: 0}
 	chainState.Utxos[outpoint] = consensus.UtxoEntry{
-		Value:             100,
+		Value:             1_000_000,
 		CovenantType:      consensus.COV_TYPE_P2PK,
 		CovenantData:      append([]byte(nil), fromAddress...),
 		CreationHeight:    0,
@@ -145,12 +145,12 @@ func mustRPCSignedTransferTx(
 		}},
 		Outputs: []consensus.TxOutput{
 			{
-				Value:        90,
+				Value:        100_000,
 				CovenantType: consensus.COV_TYPE_P2PK,
 				CovenantData: append([]byte(nil), toAddress...),
 			},
 			{
-				Value:        9,
+				Value:        800_000,
 				CovenantType: consensus.COV_TYPE_P2PK,
 				CovenantData: append([]byte(nil), changeAddress...),
 			},
@@ -889,7 +889,7 @@ func TestDevnetRPCSubmitTxAcceptsDaCommitUnderDefaultPolicy(t *testing.T) {
 		announced = append(announced, append([]byte(nil), tx...))
 		return nil
 	})
-	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 10, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
+	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 100_000, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	defer server.Close()
 
