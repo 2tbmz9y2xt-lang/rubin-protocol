@@ -194,7 +194,7 @@ func TestMempoolAddTxPreservesBaseChainState(t *testing.T) {
 	toKey := mustBenchmarkNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{100})
+	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{1_000_000})
 	before := snapshotChainState(t, state)
 	mp, err := NewMempool(state, nil, devnetGenesisChainID)
 	if err != nil {
@@ -204,8 +204,8 @@ func TestMempoolAddTxPreservesBaseChainState(t *testing.T) {
 		t,
 		state.Utxos,
 		[]consensus.Outpoint{outpoints[0]},
-		90,
-		1,
+		100_000,
+		100_000,
 		1,
 		fromKey,
 		fromAddress,
@@ -250,7 +250,7 @@ func TestMempoolAddTxDaCommitPreservesBaseChainState(t *testing.T) {
 	toKey := mustBenchmarkNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{100})
+	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{1_000_000})
 	before := snapshotChainState(t, state)
 	mp, err := NewMempoolWithConfig(state, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyDaSurchargePerByte: 1,
@@ -262,8 +262,8 @@ func TestMempoolAddTxDaCommitPreservesBaseChainState(t *testing.T) {
 		t,
 		state.Utxos,
 		outpoints[0],
-		80,
-		10,
+		100_000,
+		900_000,
 		1,
 		fromKey,
 		toAddress,
@@ -278,7 +278,7 @@ func TestMempoolAddTxDaCommitPreservesBaseChainState(t *testing.T) {
 func TestMempoolAddTxCoreExtPreservesBaseChainState(t *testing.T) {
 	fromKey := mustBenchmarkNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{100})
+	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{1_000_000})
 	before := snapshotChainState(t, state)
 	mp, err := NewMempoolWithConfig(state, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyRejectCoreExtPreActivation: true,
@@ -291,8 +291,8 @@ func TestMempoolAddTxCoreExtPreservesBaseChainState(t *testing.T) {
 		t,
 		state.Utxos,
 		outpoints[0],
-		90,
-		1,
+		100_000,
+		100_000,
 		1,
 		fromKey,
 		fromAddress,
@@ -309,13 +309,13 @@ func BenchmarkMempoolAddTx(b *testing.B) {
 	toKey := mustBenchmarkNodeMLDSA87Keypair(b)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{100})
+	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{1_000_000})
 	txBytes := mustBenchmarkSignedTransferTx(
 		b,
 		state.Utxos,
 		[]consensus.Outpoint{outpoints[0]},
-		90,
-		1,
+		100_000,
+		100_000,
 		1,
 		fromKey,
 		fromAddress,

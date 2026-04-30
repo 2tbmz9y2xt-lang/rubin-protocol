@@ -46,13 +46,11 @@ struct WorstEntryKey {
     txid: [u8; 32],
     fee: u64,
     weight: u64,
-    size: usize,
     heap_id: u64,
 }
 
 struct AdmitPriority<'a> {
     fee: u64,
-    size: usize,
     weight: u64,
     tie: &'a [u8],
 }
@@ -62,13 +60,11 @@ impl Ord for WorstEntryKey {
         compare_priority_values(
             AdmitPriority {
                 fee: other.fee,
-                size: other.size,
                 weight: other.weight,
                 tie: &other.txid,
             },
             AdmitPriority {
                 fee: self.fee,
-                size: self.size,
                 weight: self.weight,
                 tie: &self.txid,
             },
@@ -383,7 +379,6 @@ impl TxPool {
             txid,
             fee: entry.fee,
             weight: entry.weight,
-            size: entry.size,
             heap_id,
         });
         self.txs.insert(txid, entry);
@@ -442,7 +437,6 @@ impl TxPool {
                 txid: *txid,
                 fee: entry.fee,
                 weight: entry.weight,
-                size: entry.size,
                 heap_id,
             });
         }
@@ -792,13 +786,11 @@ fn compare_admit_priority(
     compare_priority_values(
         AdmitPriority {
             fee: a.fee,
-            size: a.size,
             weight: a.weight,
             tie: &txid_a,
         },
         AdmitPriority {
             fee: b.fee,
-            size: b.size,
             weight: b.weight,
             tie: &txid_b,
         },
@@ -806,7 +798,7 @@ fn compare_admit_priority(
 }
 
 fn compare_priority_values(a: AdmitPriority<'_>, b: AdmitPriority<'_>) -> Ordering {
-    match compare_fee_rate_values(a.fee, a.size, b.fee, b.size) {
+    match compare_fee_rate_values(a.fee, a.weight, b.fee, b.weight) {
         Ordering::Equal => match a.fee.cmp(&b.fee) {
             Ordering::Equal => match b.weight.cmp(&a.weight) {
                 Ordering::Equal => b.tie.cmp(a.tie),
@@ -819,7 +811,7 @@ fn compare_priority_values(a: AdmitPriority<'_>, b: AdmitPriority<'_>) -> Orderi
 }
 
 fn compare_fee_rate(a: &TxPoolEntry, b: &TxPoolEntry) -> Ordering {
-    compare_fee_rate_values(a.fee, a.size, b.fee, b.size)
+    compare_fee_rate_values(a.fee, a.weight, b.fee, b.weight)
 }
 
 fn estimate_tx_fee(tx: &Tx, utxos: &HashMap<Outpoint, UtxoEntry>) -> Option<u64> {
@@ -841,12 +833,12 @@ fn estimate_tx_fee(tx: &Tx, utxos: &HashMap<Outpoint, UtxoEntry>) -> Option<u64>
     u64::try_from(fee).ok()
 }
 
-fn compare_fee_rate_values(fee_a: u64, size_a: usize, fee_b: u64, size_b: usize) -> Ordering {
-    if size_a == 0 || size_b == 0 {
+fn compare_fee_rate_values(fee_a: u64, weight_a: u64, fee_b: u64, weight_b: u64) -> Ordering {
+    if weight_a == 0 || weight_b == 0 {
         return Ordering::Equal;
     }
-    let left = u128::from(fee_a) * (size_b as u128);
-    let right = u128::from(fee_b) * (size_a as u128);
+    let left = u128::from(fee_a) * u128::from(weight_b);
+    let right = u128::from(fee_b) * u128::from(weight_a);
     left.cmp(&right)
 }
 
@@ -1520,7 +1512,45 @@ mod tests {
         );
 
         let selected = pool.select_transactions(3, 40);
-        assert_eq!(selected, vec![vec![0x33], vec![0x22], vec![0x11]]);
+        assert_eq!(selected, vec![vec![0x11], vec![0x33], vec![0x22]]);
+    }
+
+    #[test]
+    fn txpool_fee_rate_uses_weight_not_size() {
+        let size_favored = TxPoolEntry {
+            raw: vec![0x41],
+            inputs: Vec::new(),
+            fee: 4,
+            weight: 4,
+            size: 1,
+        };
+        let weight_favored = TxPoolEntry {
+            raw: vec![0x21],
+            inputs: Vec::new(),
+            fee: 2,
+            weight: 1,
+            size: 1,
+        };
+
+        assert_eq!(
+            compare_fee_rate(&size_favored, &weight_favored),
+            Ordering::Less,
+            "fee/weight must rank 2/1 above 4/4 even when fee/size favors 4/1",
+        );
+        assert_eq!(
+            compare_admit_priority([0x41; 32], &size_favored, [0x21; 32], &weight_favored),
+            Ordering::Less,
+        );
+
+        let size_favored_txid: [u8; 32] = [0x41; 32];
+        let weight_favored_txid: [u8; 32] = [0x21; 32];
+        assert_eq!(
+            compare_entries_for_mining(
+                &(&weight_favored_txid, &weight_favored),
+                &(&size_favored_txid, &size_favored),
+            ),
+            Ordering::Less,
+        );
     }
 
     #[test]
@@ -1633,13 +1663,13 @@ mod tests {
     }
 
     #[test]
-    fn mining_sort_helpers_cover_zero_size_and_tiebreaks() {
+    fn mining_sort_helpers_cover_zero_weight_and_tiebreaks() {
         let zero = TxPoolEntry {
             raw: vec![0x00],
             inputs: Vec::new(),
             fee: 10,
-            weight: 10,
-            size: 0,
+            weight: 0,
+            size: 10,
         };
         let normal = TxPoolEntry {
             raw: vec![0x01],

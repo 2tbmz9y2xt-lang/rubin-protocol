@@ -163,7 +163,7 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 	t.Run("MempoolAcceptsActiveCoreExtOutput", func(t *testing.T) {
 		fromKey := mustNodeMLDSA87Keypair(t)
 		fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-		st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
 
 		// activation_height = 0 makes the profile ACTIVE from genesis, so the
 		// next-block height passes the activation gate.
@@ -176,7 +176,7 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 			t.Fatalf("NewMempoolWithConfig: %v", err)
 		}
 
-		txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 90, 1, 1, fromKey, fromAddress, extID)
+		txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 100_000, 100_000, 1, fromKey, fromAddress, extID)
 		if err := mp.AddTx(txBytes); err != nil {
 			t.Fatalf("expected ACTIVE-profile CORE_EXT output admission, got %v", err)
 		}
@@ -345,7 +345,7 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 
 		fromKey := mustNodeMLDSA87Keypair(t)
 		fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-		st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
 		st.HasTip = true
 		st.Height = 100
 		st.TipHash = tipHash
@@ -373,7 +373,7 @@ func TestRuntimeCoreExtPolicyFromStaticProfileProvider(t *testing.T) {
 		}
 		syncEngine.SetMempool(mp)
 
-		txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 90, 1, 1, fromKey, fromAddress, extID)
+		txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 100_000, 100_000, 1, fromKey, fromAddress, extID)
 		if err := mp.AddTx(txBytes); err != nil {
 			t.Fatalf("mp.AddTx (ACTIVE CORE_EXT): %v", err)
 		}

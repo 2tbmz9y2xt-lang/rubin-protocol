@@ -82,14 +82,14 @@ func TestCoverage_MempoolHelpers(t *testing.T) {
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000, 1_000_000})
 
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}
-	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
-	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 2, 2, fromKey, fromAddress, toAddress)
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 100_000, 200_000, 2, fromKey, fromAddress, toAddress)
 	if err := mp.AddTx(tx1); err != nil {
 		t.Fatalf("AddTx(tx1): %v", err)
 	}
@@ -101,11 +101,11 @@ func TestCoverage_MempoolHelpers(t *testing.T) {
 		existingTxID = txid
 		break
 	}
-	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: existingTxID, size: 1}); err == nil {
+	if err := mp.validateNonCapacityAdmissionLocked(&mempoolEntry{txid: existingTxID, weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected duplicate tx rejection")
 	}
 	mp.maxTxs = len(mp.txs)
-	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0xaa}, fee: 0, weight: 1, size: 1}); err == nil {
+	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0xaa}, fee: 1, weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected mempool full")
 	}
 	if got := pickEntries(mp.snapshotEntries(), 1, 1<<20); len(got) != 1 {

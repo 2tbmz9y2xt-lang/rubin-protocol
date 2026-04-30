@@ -29,16 +29,16 @@ func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	if err := (*Mempool)(nil).RemoveConflictingParsed(&consensus.ParsedBlock{}); err == nil {
 		t.Fatalf("expected nil mempool parsed conflict rejection")
 	}
-	if got := compareFeeRate(nil, &mempoolEntry{fee: 1, size: 1}); got != 0 {
+	if got := compareFeeRate(nil, &mempoolEntry{fee: 1, weight: 1, size: 1}); got != 0 {
 		t.Fatalf("compareFeeRate(nil)= %d", got)
 	}
-	if got := compareFeeRate(&mempoolEntry{fee: 2, size: 1}, &mempoolEntry{fee: 1, size: 1}); got <= 0 {
+	if got := compareFeeRate(&mempoolEntry{fee: 2, weight: 1, size: 1}, &mempoolEntry{fee: 1, weight: 1, size: 1}); got <= 0 {
 		t.Fatalf("expected first feerate to win")
 	}
-	if got := compareFeeRate(&mempoolEntry{fee: 1, size: 2}, &mempoolEntry{fee: 1, size: 1}); got >= 0 {
+	if got := compareFeeRate(&mempoolEntry{fee: 1, weight: 2, size: 1}, &mempoolEntry{fee: 1, weight: 1, size: 2}); got >= 0 {
 		t.Fatalf("expected second feerate to win")
 	}
-	entries := []*mempoolEntry{{txid: [32]byte{0x02}, fee: 10, size: 1}, {txid: [32]byte{0x01}, fee: 10, size: 1}}
+	entries := []*mempoolEntry{{txid: [32]byte{0x02}, fee: 10, weight: 1, size: 1}, {txid: [32]byte{0x01}, fee: 10, weight: 1, size: 1}}
 	sortMempoolEntries(entries)
 	if entries[0].txid[0] != 0x01 {
 		t.Fatalf("expected deterministic txid tie-break")
@@ -58,7 +58,7 @@ func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	if err := mp.RemoveConflictingParsed(nil); err == nil {
 		t.Fatalf("expected nil parsed block conflict rejection")
 	}
-	if err := mp.validateAdmissionLocked(nil); err == nil {
+	if err := mp.validateNonCapacityAdmissionLocked(nil); err == nil {
 		t.Fatalf("expected nil mempool entry rejection")
 	}
 	if err := mp.EvictConfirmed([]byte{0x00}); err == nil {
@@ -74,14 +74,14 @@ func TestCoverageResidual_RemoveConflictingParsesBlockBytes(t *testing.T) {
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
 
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}
-	txPool := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
-	txBlock := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 89, 2, 2, fromKey, fromAddress, toAddress)
+	txPool := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddress, toAddress)
+	txBlock := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 200_000, 2, fromKey, fromAddress, toAddress)
 	if err := mp.AddTx(txPool); err != nil {
 		t.Fatalf("AddTx(txPool): %v", err)
 	}
@@ -106,14 +106,14 @@ func TestCoverageResidual_MempoolLimitBranches(t *testing.T) {
 		t.Fatalf("NewMempool: %v", err)
 	}
 	mp.mu.Lock()
-	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x01}, size: 0}); err == nil {
+	if err := mp.validateNonCapacityAdmissionLocked(&mempoolEntry{txid: [32]byte{0x01}, size: 0}); err == nil {
 		t.Fatalf("expected invalid size rejection")
 	}
-	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x02}, size: 1}); err != nil {
+	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x02}, fee: 1, weight: 1, size: 1}); err != nil {
 		t.Fatalf("addEntryLocked(count seed): %v", err)
 	}
-	if err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x03}, size: 1}); err == nil {
-		t.Fatalf("expected count-limit rejection")
+	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x03}, fee: 1, weight: 1, size: 1}); err == nil {
+		t.Fatalf("expected capacity rejection")
 	}
 	mp.mu.Unlock()
 
@@ -125,11 +125,11 @@ func TestCoverageResidual_MempoolLimitBranches(t *testing.T) {
 		t.Fatalf("NewMempool(bytes): %v", err)
 	}
 	mpBytes.mu.Lock()
-	if err := mpBytes.addEntryLocked(&mempoolEntry{txid: [32]byte{0x04}, size: 1}); err != nil {
+	if err := mpBytes.addEntryLocked(&mempoolEntry{txid: [32]byte{0x04}, fee: 1, weight: 1, size: 1}); err != nil {
 		t.Fatalf("addEntryLocked(byte seed): %v", err)
 	}
-	if err := mpBytes.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x05}, size: 2}); err == nil {
-		t.Fatalf("expected byte-limit rejection")
+	if err := mpBytes.addEntryLocked(&mempoolEntry{txid: [32]byte{0x05}, fee: 1, weight: 1, size: 2}); err == nil {
+		t.Fatalf("expected byte-capacity rejection")
 	}
 	mpBytes.usedBytes = 1
 	mpBytes.deleteEntryLocked([32]byte{0x06}, &mempoolEntry{size: 2})

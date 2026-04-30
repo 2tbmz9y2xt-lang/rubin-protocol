@@ -9,8 +9,9 @@ import (
 )
 
 type mempoolSnapshot struct {
-	entries          []mempoolEntry
-	lastAdmissionSeq uint64
+	entries           []mempoolEntry
+	lastAdmissionSeq  uint64
+	currentMinFeeRate uint64
 }
 
 func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
@@ -26,7 +27,11 @@ func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
 	sort.Slice(entries, func(i, j int) bool {
 		return bytes.Compare(entries[i].txid[:], entries[j].txid[:]) < 0
 	})
-	return mempoolSnapshot{entries: entries, lastAdmissionSeq: m.lastAdmissionSeq}, nil
+	currentMinFeeRate := m.currentMinFeeRate
+	if currentMinFeeRate < DefaultMempoolMinFeeRate {
+		currentMinFeeRate = DefaultMempoolMinFeeRate
+	}
+	return mempoolSnapshot{entries: entries, lastAdmissionSeq: m.lastAdmissionSeq, currentMinFeeRate: currentMinFeeRate}, nil
 }
 
 func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
@@ -89,12 +94,17 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	m.spenders = spenders
 	m.usedBytes = usedBytes
 	m.lastAdmissionSeq = snapshot.lastAdmissionSeq
+	m.currentMinFeeRate = snapshot.currentMinFeeRate
+	m.ensureMinFeeRateLocked()
 	return nil
 }
 
 func validateMempoolSnapshotEntry(entry mempoolEntry) error {
 	if entry.size <= 0 {
 		return fmt.Errorf("invalid mempool snapshot entry size for txid %x: size=%d raw_len=%d", entry.txid, entry.size, len(entry.raw))
+	}
+	if entry.weight == 0 {
+		return fmt.Errorf("invalid mempool snapshot entry weight for txid %x: weight=0", entry.txid)
 	}
 	if entry.size != len(entry.raw) {
 		return fmt.Errorf("mempool snapshot entry size mismatch for txid %x: size=%d raw_len=%d", entry.txid, entry.size, len(entry.raw))
@@ -111,6 +121,13 @@ func validateMempoolSnapshotEntry(entry mempoolEntry) error {
 	}
 	if wtxid != entry.wtxid {
 		return fmt.Errorf("mempool snapshot entry wtxid mismatch: entry=%x raw=%x", entry.wtxid, wtxid)
+	}
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		return fmt.Errorf("invalid mempool snapshot entry weight for txid %x: %w", entry.txid, err)
+	}
+	if entry.weight != weight {
+		return fmt.Errorf("mempool snapshot entry weight mismatch: entry=%d computed=%d txid=%x", entry.weight, weight, entry.txid)
 	}
 	if entry.admissionSeq == 0 {
 		return fmt.Errorf("invalid mempool snapshot entry admission_seq for txid %x: seq=0", entry.txid)

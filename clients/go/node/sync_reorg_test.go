@@ -530,7 +530,7 @@ func TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool(t *testi
 		engine.chainState.Utxos,
 		[]consensus.Outpoint{sourceOutpoint},
 		700,
-		50,
+		100_000,
 		1,
 		sourceKP,
 		sourceAddress,
@@ -547,7 +547,7 @@ func TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool(t *testi
 		prevHash,
 		target,
 		202,
-		reorgTestCoinbaseForWtxids(t, 101, subsidyA101+50, sourceAddress, [][32]byte{{}, spendWtxid}),
+		reorgTestCoinbaseForWtxids(t, 101, subsidyA101+100_000, sourceAddress, [][32]byte{{}, spendWtxid}),
 		spendTx,
 	)
 	summaryA101, err := engine.ApplyBlock(blockA101, nil)
@@ -588,6 +588,98 @@ func TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool(t *testi
 	}
 }
 
+func TestApplyBlockDecaysMempoolFloorAfterConflictRemoval(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+
+	sourceKP := mustReorgMLDSA87Keypair(t)
+	destKP := mustReorgMLDSA87Keypair(t)
+	sourceAddress := consensus.P2PKCovenantDataForPubkey(sourceKP.PubkeyBytes())
+	destAddress := consensus.P2PKCovenantDataForPubkey(destKP.PubkeyBytes())
+
+	prevHash := devnetGenesisBlockHash
+	alreadyGenerated := uint64(0)
+	var sourceOutpoint consensus.Outpoint
+	for height := uint64(1); height <= 100; height++ {
+		subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+		coinbase := reorgTestCoinbaseForAddress(t, height, subsidy, sourceAddress)
+		block := buildSingleTxBlock(t, prevHash, target, height+1, coinbase)
+		summary, err := engine.ApplyBlock(block, nil)
+		if err != nil {
+			t.Fatalf("ApplyBlock(height=%d): %v", height, err)
+		}
+		if height == 1 {
+			_, coinbaseTxid, _, _, err := consensus.ParseTx(coinbase)
+			if err != nil {
+				t.Fatalf("ParseTx(coinbase height1): %v", err)
+			}
+			sourceOutpoint = consensus.Outpoint{Txid: coinbaseTxid, Vout: 0}
+		}
+		prevHash = summary.BlockHash
+		alreadyGenerated += subsidy
+	}
+
+	blockTx := mustBuildSignedTransferTxForSyncTest(
+		t,
+		engine.chainState.Utxos,
+		[]consensus.Outpoint{sourceOutpoint},
+		700,
+		100_000,
+		1,
+		sourceKP,
+		sourceAddress,
+		destAddress,
+	)
+	conflictingTx := mustBuildSignedTransferTxForSyncTest(
+		t,
+		engine.chainState.Utxos,
+		[]consensus.Outpoint{sourceOutpoint},
+		690,
+		100_000,
+		2,
+		sourceKP,
+		sourceAddress,
+		destAddress,
+	)
+	mempool, err := NewMempoolWithConfig(engine.chainState, store, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 10,
+		MaxBytes:        len(conflictingTx),
+	})
+	if err != nil {
+		t.Fatalf("NewMempoolWithConfig: %v", err)
+	}
+	engine.SetMempool(mempool)
+	if err := mempool.AddTx(conflictingTx); err != nil {
+		t.Fatalf("AddTx(conflicting): %v", err)
+	}
+	mempool.currentMinFeeRate = 8
+	if mempool.usedBytes < mempool.effectiveLowWaterBytesLocked() {
+		t.Fatalf("test setup usedBytes=%d below lowWater=%d before block apply", mempool.usedBytes, mempool.effectiveLowWaterBytesLocked())
+	}
+
+	_, _, blockWtxid, _, err := consensus.ParseTx(blockTx)
+	if err != nil {
+		t.Fatalf("ParseTx(blockTx): %v", err)
+	}
+	subsidy := consensus.BlockSubsidy(101, alreadyGenerated)
+	block := buildMultiTxBlock(
+		t,
+		prevHash,
+		target,
+		202,
+		reorgTestCoinbaseForWtxids(t, 101, subsidy+100_000, sourceAddress, [][32]byte{{}, blockWtxid}),
+		blockTx,
+	)
+	if _, err := engine.ApplyBlock(block, nil); err != nil {
+		t.Fatalf("ApplyBlock(conflicting connected block): %v", err)
+	}
+	if got := mempool.Len(); got != 0 {
+		t.Fatalf("mempool len after conflict removal=%d, want 0", got)
+	}
+	if got := mempool.currentMinFeeRate; got != 4 {
+		t.Fatalf("currentMinFeeRate after connected block conflict removal=%d, want 4", got)
+	}
+}
+
 type countingRotationProvider struct {
 	suiteID    uint8
 	spendCalls int
@@ -617,14 +709,14 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 	sourceOutpointB := consensus.Outpoint{Txid: [32]byte{0x22}, Vout: 0}
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		sourceOutpointA: {
-			Value:             750,
+			Value:             1_000_000,
 			CovenantType:      consensus.COV_TYPE_P2PK,
 			CovenantData:      append([]byte(nil), sourceAddressA...),
 			CreationHeight:    0,
 			CreatedByCoinbase: false,
 		},
 		sourceOutpointB: {
-			Value:             730,
+			Value:             1_000_000,
 			CovenantType:      consensus.COV_TYPE_P2PK,
 			CovenantData:      append([]byte(nil), sourceAddressB...),
 			CreationHeight:    0,
@@ -637,7 +729,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		utxos,
 		[]consensus.Outpoint{sourceOutpointA},
 		680,
-		50,
+		100_000,
 		1,
 		sourceKPA,
 		sourceAddressA,
@@ -648,7 +740,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		utxos,
 		[]consensus.Outpoint{sourceOutpointB},
 		665,
-		50,
+		100_000,
 		2,
 		sourceKPB,
 		sourceAddressB,
@@ -690,7 +782,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		devnetGenesisBlockHash,
 		target,
 		reorgTestTimestamp(1),
-		reorgTestCoinbaseForWtxids(t, 1, subsidy1+50, sourceAddressA, [][32]byte{{}, blockASpendWtxid}),
+		reorgTestCoinbaseForWtxids(t, 1, subsidy1+100_000, sourceAddressA, [][32]byte{{}, blockASpendWtxid}),
 		blockASpend,
 	)
 	summaryA1, err := engine.ApplyBlock(blockA1, nil)
@@ -707,7 +799,7 @@ func TestNativeSuitesCacheInvalidatedOnReorg(t *testing.T) {
 		devnetGenesisBlockHash,
 		target,
 		reorgTestTimestamp(2),
-		reorgTestCoinbaseForWtxids(t, 1, subsidy1+50, destAddressB, [][32]byte{{}, blockBSpendWtxid}),
+		reorgTestCoinbaseForWtxids(t, 1, subsidy1+100_000, destAddressB, [][32]byte{{}, blockBSpendWtxid}),
 		blockBSpend,
 	)
 	if _, err := engine.ApplyBlockWithReorg(blockB1, nil); err != nil {
@@ -790,7 +882,7 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 		engine.chainState.Utxos,
 		[]consensus.Outpoint{sourceOutpoint},
 		700,
-		50,
+		100_000,
 		1,
 		sourceKP,
 		sourceAddress,
@@ -820,7 +912,7 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 		prevHash,
 		target,
 		203,
-		reorgTestCoinbaseForWtxids(t, 101, subsidyB101+50, destAddress, [][32]byte{{}, spendWtxid}),
+		reorgTestCoinbaseForWtxids(t, 101, subsidyB101+100_000, destAddress, [][32]byte{{}, spendWtxid}),
 		spendTx,
 	)
 	if _, err := engine.ApplyBlockWithReorg(blockB101, nil); err != nil {

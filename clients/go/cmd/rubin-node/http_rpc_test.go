@@ -89,18 +89,38 @@ func mustRPCStateWithSpendableUTXOAndMempoolConfig(
 	mempoolConfig node.MempoolConfig,
 ) (*devnetRPCState, consensus.Outpoint, map[consensus.Outpoint]consensus.UtxoEntry) {
 	t.Helper()
+	state, outpoints, utxos := mustRPCStateWithSpendableUTXOsAndMempoolConfig(t, fromAddress, []uint64{1_000_000}, announceTx, mempoolConfig)
+	return state, outpoints[0], utxos
+}
+
+func mustRPCStateWithSpendableUTXOsAndMempoolConfig(
+	t *testing.T,
+	fromAddress []byte,
+	values []uint64,
+	announceTx func([]byte) error,
+	mempoolConfig node.MempoolConfig,
+) (*devnetRPCState, []consensus.Outpoint, map[consensus.Outpoint]consensus.UtxoEntry) {
+	t.Helper()
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
 	chainState := node.NewChainState()
-	var prevTxid [32]byte
-	prevTxid[0] = 0x44
-	outpoint := consensus.Outpoint{Txid: prevTxid, Vout: 0}
-	chainState.Utxos[outpoint] = consensus.UtxoEntry{
-		Value:             100,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      append([]byte(nil), fromAddress...),
-		CreationHeight:    0,
-		CreatedByCoinbase: false,
+	if len(values) == 0 {
+		t.Fatalf("mustRPCStateWithSpendableUTXOsAndMempoolConfig requires at least one value")
+	}
+	outpoints := make([]consensus.Outpoint, 0, len(values))
+	for i, value := range values {
+		var prevTxid [32]byte
+		prevTxid[0] = 0x44
+		prevTxid[31] = byte(i)
+		outpoint := consensus.Outpoint{Txid: prevTxid, Vout: 0}
+		outpoints = append(outpoints, outpoint)
+		chainState.Utxos[outpoint] = consensus.UtxoEntry{
+			Value:             value,
+			CovenantType:      consensus.COV_TYPE_P2PK,
+			CovenantData:      append([]byte(nil), fromAddress...),
+			CreationHeight:    0,
+			CreatedByCoinbase: false,
+		}
 	}
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -122,7 +142,7 @@ func mustRPCStateWithSpendableUTXOAndMempoolConfig(
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, nil, io.Discard, nil)
 	state.nowUnix = func() uint64 { return 0 }
-	return state, outpoint, chainState.Utxos
+	return state, outpoints, chainState.Utxos
 }
 
 func mustRPCSignedTransferTx(
@@ -133,11 +153,33 @@ func mustRPCSignedTransferTx(
 	toAddress []byte,
 ) ([]byte, string) {
 	t.Helper()
+	return mustRPCSignedTransferTxWithFee(t, utxos, input, 100_000, 100_000, 1, signer, toAddress)
+}
+
+func mustRPCSignedTransferTxWithFee(
+	t *testing.T,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	input consensus.Outpoint,
+	amount uint64,
+	fee uint64,
+	nonce uint64,
+	signer *consensus.MLDSA87Keypair,
+	toAddress []byte,
+) ([]byte, string) {
+	t.Helper()
+	entry, ok := utxos[input]
+	if !ok {
+		t.Fatalf("missing utxo for %x:%d", input.Txid, input.Vout)
+	}
+	if amount > entry.Value || fee > entry.Value-amount {
+		t.Fatalf("utxo value=%d, want at least amount=%d plus fee=%d", entry.Value, amount, fee)
+	}
 	changeAddress := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	change := entry.Value - amount - fee
 	tx := &consensus.Tx{
 		Version: 1,
 		TxKind:  0x00,
-		TxNonce: 1,
+		TxNonce: nonce,
 		Inputs: []consensus.TxInput{{
 			PrevTxid: input.Txid,
 			PrevVout: input.Vout,
@@ -145,17 +187,21 @@ func mustRPCSignedTransferTx(
 		}},
 		Outputs: []consensus.TxOutput{
 			{
-				Value:        90,
+				Value:        amount,
 				CovenantType: consensus.COV_TYPE_P2PK,
 				CovenantData: append([]byte(nil), toAddress...),
 			},
-			{
-				Value:        9,
+		},
+		Locktime: 0,
+	}
+	if change > 0 {
+		tx.Outputs = append(tx.Outputs,
+			consensus.TxOutput{
+				Value:        change,
 				CovenantType: consensus.COV_TYPE_P2PK,
 				CovenantData: append([]byte(nil), changeAddress...),
 			},
-		},
-		Locktime: 0,
+		)
 	}
 	if err := consensus.SignTransaction(tx, utxos, node.DevnetGenesisChainID(), signer); err != nil {
 		t.Fatalf("SignTransaction: %v", err)
@@ -889,7 +935,7 @@ func TestDevnetRPCSubmitTxAcceptsDaCommitUnderDefaultPolicy(t *testing.T) {
 		announced = append(announced, append([]byte(nil), tx...))
 		return nil
 	})
-	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 10, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
+	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 100_000, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	defer server.Close()
 
@@ -997,6 +1043,83 @@ func TestDevnetRPCSubmitTxRejectsDuplicateMempoolEntry(t *testing.T) {
 	metrics := renderPrometheusMetrics(state)
 	if !strings.Contains(metrics, `rubin_node_submit_tx_total{result="conflict"} 1`) {
 		t.Fatalf("missing conflict metric in %q", metrics)
+	}
+}
+
+func TestDevnetRPCSubmitTxBelowRollingFloorReturnsUnavailable(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	var announceCalled bool
+	cfg := node.DefaultMempoolConfig()
+	cfg.MaxTransactions = 1
+	state, inputs, utxos := mustRPCStateWithSpendableUTXOsAndMempoolConfig(t, fromAddress, []uint64{1_000_000, 1_000_000, 1_000_000}, func(tx []byte) error {
+		announceCalled = true
+		return nil
+	}, cfg)
+	seedTx, _ := mustRPCSignedTransferTxWithFee(t, utxos, inputs[0], 100_000, 100_000, 1, fromKey, toAddress)
+	betterTx, _ := mustRPCSignedTransferTxWithFee(t, utxos, inputs[1], 100_000, 700_000, 2, fromKey, toAddress)
+	belowFloorTx, _ := mustRPCSignedTransferTxWithFee(t, utxos, inputs[2], 100_000, 1, 3, fromKey, toAddress)
+	if err := state.mempool.AddTx(seedTx); err != nil {
+		t.Fatalf("AddTx(seed): %v", err)
+	}
+	if err := state.mempool.AddTx(betterTx); err != nil {
+		t.Fatalf("AddTx(better): %v", err)
+	}
+	if got := state.mempool.Len(); got != 1 {
+		t.Fatalf("mempool len=%d after rolling-floor seed, want 1", got)
+	}
+
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(belowFloorTx)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", resp.StatusCode)
+	}
+
+	var got submitTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Accepted {
+		t.Fatalf("accepted=true, want false")
+	}
+	if got.TxID != "" {
+		t.Fatalf("txid=%q, want empty unavailable response", got.TxID)
+	}
+	if !strings.Contains(got.Error, "mempool fee below rolling minimum") {
+		t.Fatalf("error=%q, want rolling minimum message", got.Error)
+	}
+	if announceCalled {
+		t.Fatalf("announceTx was called for unavailable below-floor tx")
+	}
+	if got := state.mempool.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want unchanged 1", got)
+	}
+	admission := state.mempool.AdmissionCounts()
+	if admission.Accepted != 2 || admission.Unavailable != 1 || admission.Conflict != 0 || admission.Rejected != 0 {
+		t.Fatalf("admission counts=%+v, want two accepted and one unavailable", admission)
+	}
+	metrics := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		`rubin_node_submit_tx_total{result="unavailable"} 1`,
+		`rubin_node_mempool_admit_total{result="accepted"} 2`,
+		`rubin_node_mempool_admit_total{result="unavailable"} 1`,
+		`rubin_node_mempool_txs 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("missing %q in metrics %q", want, metrics)
+		}
 	}
 }
 
@@ -1650,6 +1773,7 @@ func TestClassifySubmitErrVariants(t *testing.T) {
 		{name: "conflict already present", err: &node.TxAdmitError{Kind: node.TxAdmitConflict, Message: "already in mempool"}, wantStatus: http.StatusConflict, wantResult: "conflict"},
 		{name: "conflict double spend", err: &node.TxAdmitError{Kind: node.TxAdmitConflict, Message: "double-spend conflict"}, wantStatus: http.StatusConflict, wantResult: "conflict"},
 		{name: "unavailable mempool full", err: &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "mempool full"}, wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
+		{name: "unavailable rolling floor", err: &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "mempool fee below rolling minimum"}, wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
 		{name: "unavailable blockstore", err: &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "blockstore unavailable"}, wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
 		{name: "rejected consensus", err: &node.TxAdmitError{Kind: node.TxAdmitRejected, Message: "transaction rejected"}, wantStatus: http.StatusUnprocessableEntity, wantResult: "rejected"},
 		{name: "fallback unknown error", err: errors.New("something unexpected"), wantStatus: http.StatusUnprocessableEntity, wantResult: "rejected"},

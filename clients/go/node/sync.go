@@ -697,11 +697,8 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 
 	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
 	if s.mempool != nil {
-		if err := s.mempool.EvictConfirmedParsed(pb); err != nil {
-			_, _ = fmt.Fprintf(s.stderr, "mempool: evict-confirmed: %v\n", err)
-		}
-		if err := s.mempool.RemoveConflictingParsed(pb); err != nil {
-			_, _ = fmt.Fprintf(s.stderr, "mempool: remove-conflicting: %v\n", err)
+		if err := s.mempool.applyConnectedBlockParsed(pb); err != nil {
+			_, _ = fmt.Fprintf(s.stderr, "mempool: apply-connected-block: %v\n", err)
 		}
 	}
 	return summary, blockApplyMetricAccepted, nil
