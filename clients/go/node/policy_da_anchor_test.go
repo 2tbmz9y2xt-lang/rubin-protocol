@@ -253,6 +253,48 @@ func TestRejectDaAnchorTxPolicy_DaRequiredAdditionOverflowFailsClosed(t *testing
 	}
 }
 
+// Hostile matrix #5 (continued): force daBytes * minDaFeeRate overflow
+// independently. Surcharge=0 isolates the daFloor multiplication branch
+// so a future patch that only guards the relay-floor or addition branches
+// cannot silently ship.
+func TestRejectDaAnchorTxPolicy_DaFloorMultiplicationOverflowFailsClosed(t *testing.T) {
+	tx, utxos, weight := daTestTx(t, 0x1B, 100, 0, 4)
+	// daBytes=4; minDaFee=^uint64(0) overflows daBytes*minDaFee while
+	// relayFloor (weight*currentMin) does not. surcharge=0 so the helper
+	// reaches the daFloor multiplication branch before any addition.
+	const minDaFee = ^uint64(0)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, 1, minDaFee, 0)
+	if !reject {
+		t.Fatalf("expected reject on da_fee_floor multiplication overflow; reason=%q", reason)
+	}
+	if err == nil {
+		t.Fatalf("expected error on overflow")
+	}
+	if !strings.Contains(reason, "DA fee floor overflow") {
+		t.Fatalf("reason missing DA-floor multiplication overflow diagnostic: %q", reason)
+	}
+}
+
+// Hostile matrix #5 (continued): force daBytes * daSurchargePerByte overflow
+// independently. minDaFee=0 lets the daFloor multiplication succeed (= 0);
+// the helper must still reject when daSurcharge multiplication overflows.
+func TestRejectDaAnchorTxPolicy_DaSurchargeMultiplicationOverflowFailsClosed(t *testing.T) {
+	tx, utxos, weight := daTestTx(t, 0x1C, 100, 0, 4)
+	// daBytes=4; surcharge=^uint64(0) overflows on multiplication while
+	// daFloor (daBytes*0) is zero.
+	const surcharge = ^uint64(0)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, 1, 0, surcharge)
+	if !reject {
+		t.Fatalf("expected reject on da_surcharge multiplication overflow; reason=%q", reason)
+	}
+	if err == nil {
+		t.Fatalf("expected error on overflow")
+	}
+	if !strings.Contains(reason, "DA surcharge overflow") {
+		t.Fatalf("reason missing DA-surcharge multiplication overflow diagnostic: %q", reason)
+	}
+}
+
 // All-zero policy + non-DA tx: helper short-circuits without computing fee.
 func TestRejectDaAnchorTxPolicy_AllZeroNonDaShortCircuits(t *testing.T) {
 	tx, utxos, weight := nonDaTestTx(t, 0x19, 50, 0)

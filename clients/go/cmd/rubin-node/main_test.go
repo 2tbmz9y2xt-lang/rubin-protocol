@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -1957,6 +1958,19 @@ func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
 	if captured.MineAddress[0] != consensus.SUITE_ID_ML_DSA_87 {
 		t.Fatalf("mine address suite=%d, want %d", captured.MineAddress[0], consensus.SUITE_ID_ML_DSA_87)
 	}
+	// Pin T-D production wiring at the offline-mining miner instantiation
+	// site (cmd/rubin-node/main.go around the `if *mineBlocks > 0` block):
+	// the miner template MUST receive a non-nil
+	// CurrentMempoolMinFeeRateFn so relay_fee_floor reads the rolling
+	// local floor exposed by the live mempool, not the static baseline.
+	// A future edit that drops this wiring would let the miner template
+	// admit DA candidates the mempool admit path would reject.
+	if captured.CurrentMempoolMinFeeRateFn == nil {
+		t.Fatal("offline-mining miner cfg missing CurrentMempoolMinFeeRateFn; T-D production wiring regressed")
+	}
+	if got := captured.CurrentMempoolMinFeeRateFn(); got < node.DefaultMempoolMinFeeRate {
+		t.Fatalf("provider returned %d below DefaultMempoolMinFeeRate=%d before clamp; expected mempool snapshot", got, node.DefaultMempoolMinFeeRate)
+	}
 }
 
 func TestRunMainnetFailsWithoutGenesisFileBeforeExplicitTargetCheck(t *testing.T) {
@@ -2462,6 +2476,75 @@ func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
 	s := stderr.String()
 	if !strings.Contains(s, "rpc: live mining disabled (invalid --mine-address)") {
 		t.Fatalf("stderr=%q, want invalid mine-address log", s)
+	}
+}
+
+// TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn pins the
+// T-D production wiring at the live RPC mining miner instantiation site
+// (cmd/rubin-node/main.go inside the `if cfg.Network == "devnet" && ... &&
+// rpcBindHostIsLoopback(...)` block). The captured MinerConfig MUST carry
+// a non-nil CurrentMempoolMinFeeRateFn that returns the live mempool
+// rolling local floor, otherwise the miner template silently falls back
+// to the static baseline and a DA candidate paying above
+// DefaultMempoolMinFeeRate=1 but below the live floor would be admitted
+// by the miner even when the mempool admit path would reject it.
+//
+// The check runs in a child process because the live mining branch only
+// executes when the full devnet RPC path constructs the miner; we
+// override newMinerFn to assert the cfg invariant, then SIGINT the child
+// to unblock its lifecycle ctx and let it exit cleanly.
+func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T) {
+	if os.Getenv("RUBIN_NODE_TEST_LIVE_MINER_FN_CHILD") == "1" {
+		prev := newMinerFn
+		newMinerFn = func(_ *node.ChainState, _ *node.BlockStore, _ *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
+			if cfg.CurrentMempoolMinFeeRateFn == nil {
+				_, _ = fmt.Fprintln(os.Stderr, "T-D regression: live miner cfg.CurrentMempoolMinFeeRateFn=nil")
+				os.Exit(33)
+			}
+			if got := cfg.CurrentMempoolMinFeeRateFn(); got < node.DefaultMempoolMinFeeRate {
+				_, _ = fmt.Fprintf(os.Stderr, "T-D regression: provider returned %d below DefaultMempoolMinFeeRate=%d\n", got, node.DefaultMempoolMinFeeRate)
+				os.Exit(34)
+			}
+			return nil, errors.New("test deliberate miner init abort to unblock SIGINT")
+		}
+		dir := t.TempDir()
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			p, _ := os.FindProcess(os.Getpid())
+			_ = p.Signal(syscall.SIGINT)
+		}()
+		code := run(
+			[]string{
+				"--datadir", dir,
+				"--bind", "127.0.0.1:0",
+				"--rpc-bind", "127.0.0.1:0",
+				"--mine-address", strings.Repeat("11", 32),
+			},
+			io.Discard,
+			os.Stderr,
+		)
+		newMinerFn = prev
+		os.Exit(code)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn")
+	cmd.Env = append(os.Environ(), "RUBIN_NODE_TEST_LIVE_MINER_FN_CHILD=1")
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 33 {
+			t.Fatalf("T-D regression: live miner cfg.CurrentMempoolMinFeeRateFn is nil; production wiring missing in main.go around `liveMiner, err = newMinerFn(...)` (stderr=%s)", stderr.String())
+		}
+		if errors.As(err, &ee) && ee.ExitCode() == 34 {
+			t.Fatalf("T-D regression: provider returned below baseline (stderr=%s)", stderr.String())
+		}
+		t.Fatalf("unexpected child error: %v (stderr=%s)", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "rpc: live mining disabled:") {
+		t.Fatalf("stderr=%q, want 'rpc: live mining disabled:' (deliberate abort marker)", stderr.String())
 	}
 }
 
