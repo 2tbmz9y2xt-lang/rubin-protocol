@@ -699,23 +699,6 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 	m.deleteEntryLocked(txid, entry)
 }
 
-func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
-	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
-		return err
-	}
-	if err := m.validateFeeFloorLocked(entry); err != nil {
-		return err
-	}
-	_, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
-	if err != nil {
-		return err
-	}
-	if candidateEvicted {
-		return txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering")
-	}
-	return nil
-}
-
 func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error {
 	if err := validateBasicMempoolEntry(entry); err != nil {
 		return err

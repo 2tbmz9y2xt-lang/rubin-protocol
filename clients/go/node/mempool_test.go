@@ -252,7 +252,7 @@ func TestMempoolAddEntryLockedDefaultsUnsetWtxid(t *testing.T) {
 	if got, ok := mp.wtxids[[32]byte{}]; ok {
 		t.Fatalf("zero wtxid key unexpectedly indexed txid %x", got)
 	}
-	err := mp.validateAdmissionLocked(&mempoolEntry{txid: [32]byte{0x0b}, fee: 1, weight: 1, size: 1})
+	err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x0b}, fee: 1, weight: 1, size: 1})
 	if err == nil || !strings.Contains(err.Error(), "mempool capacity candidate rejected by eviction ordering") {
 		t.Fatalf("expected candidate-worst rejection after zero-wtxid default, got %v", err)
 	}
@@ -275,7 +275,7 @@ func TestMempoolAddEntryLockedRejectsZeroTxidWithoutMutation(t *testing.T) {
 		t.Fatalf("lastAdmissionSeq=%d, want 0 after zero txid reject", mp.lastAdmissionSeq)
 	}
 
-	err = mp.validateAdmissionLocked(&mempoolEntry{weight: 1, size: 1})
+	err = mp.validateNonCapacityAdmissionLocked(&mempoolEntry{weight: 1, size: 1})
 	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry txid") {
 		t.Fatalf("expected validate invalid txid rejection, got %v", err)
 	}
@@ -720,7 +720,7 @@ func TestMempoolAddEntryLockedCandidateWorstRejectsWithoutMutation(t *testing.T)
 
 func TestMempoolRejectsZeroWeightMetadata(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100}
-	err := mp.validateAdmissionLocked(&mempoolEntry{
+	err := mp.validateNonCapacityAdmissionLocked(&mempoolEntry{
 		txid: [32]byte{0x21},
 		fee:  1,
 		size: 1,
@@ -1743,23 +1743,23 @@ func TestMempoolRollingFloorRejectsBelowCapacityWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestMempoolRollingFloorDirectHelperRejectsBelowCapacity(t *testing.T) {
+func TestMempoolAddEntryLockedRejectsBelowFloor(t *testing.T) {
 	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: 8}
-	err := mp.validateAdmissionLocked(&mempoolEntry{
+	err := mp.addEntryLocked(&mempoolEntry{
 		txid:   [32]byte{0x51},
 		fee:    7,
 		weight: 1,
 		size:   1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
-		t.Fatalf("expected direct below-floor rejection, got %v", err)
+		t.Fatalf("expected addEntryLocked below-floor rejection, got %v", err)
 	}
 	var txErr *TxAdmitError
 	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable {
-		t.Fatalf("direct floor err=%v, want TxAdmitUnavailable", err)
+		t.Fatalf("addEntryLocked floor err=%v, want TxAdmitUnavailable", err)
 	}
 	if len(mp.txs) != 0 || mp.usedBytes != 0 || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 8 {
-		t.Fatalf("direct floor reject mutated mempool: len=%d used=%d seq=%d floor=%d", len(mp.txs), mp.usedBytes, mp.lastAdmissionSeq, mp.currentMinFeeRate)
+		t.Fatalf("addEntryLocked floor reject mutated mempool: len=%d used=%d seq=%d floor=%d", len(mp.txs), mp.usedBytes, mp.lastAdmissionSeq, mp.currentMinFeeRate)
 	}
 }
 
