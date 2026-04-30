@@ -336,15 +336,23 @@ func TestMempoolAddEntryLockedRejectsInvalidSourceAndDuplicateAdmissionSeq(t *te
 	if err := mp.addEntryLocked(first); err != nil {
 		t.Fatalf("addEntryLocked(first): %v", err)
 	}
-	if err := mp.addEntryLocked(&mempoolEntry{
+	err := mp.addEntryLocked(&mempoolEntry{
 		txid:         [32]byte{0x12},
 		fee:          1,
 		weight:       1,
 		size:         1,
 		admissionSeq: 7,
 		source:       mempoolTxSourceRemote,
-	}); err == nil || !strings.Contains(err.Error(), "mempool admission sequence conflict") {
+	})
+	if err == nil || !strings.Contains(err.Error(), "mempool admission sequence conflict") {
 		t.Fatalf("expected admission sequence conflict, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected TxAdmitError for admission sequence conflict, got %T: %v", err, err)
+	}
+	if txErr.Kind != TxAdmitRejected {
+		t.Fatalf("admission sequence conflict kind=%v, want %v", txErr.Kind, TxAdmitRejected)
 	}
 	if err := mp.addEntryLocked(&mempoolEntry{
 		txid:   [32]byte{0x13},

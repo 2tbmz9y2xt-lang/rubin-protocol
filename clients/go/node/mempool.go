@@ -775,7 +775,7 @@ func (m *Mempool) validateAdmissionSeqLocked(entry *mempoolEntry) error {
 	if entry.admissionSeq != 0 {
 		for existingTxid, existing := range m.txs {
 			if existing != nil && existing.admissionSeq == entry.admissionSeq {
-				return txAdmitConflict(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid))
+				return txAdmitRejected(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid))
 			}
 		}
 	}
