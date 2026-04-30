@@ -538,28 +538,103 @@ func TestMempoolCapacityPlanRejectsInvalidExistingMetadata(t *testing.T) {
 }
 
 func TestMempoolEntryFloorRateUsesSatisfiableFloor(t *testing.T) {
-	entry := &mempoolEntry{
-		txid:   [32]byte{0x71},
-		fee:    3,
-		weight: 2,
-		size:   1,
-	}
+	for _, tc := range []struct {
+		name   string
+		fee    uint64
+		weight uint64
+		want   uint64
+	}{
+		{name: "C1_non_div_even_3_over_2", fee: 3, weight: 2, want: 1},
+		{name: "C2_non_div_odd_5_over_3", fee: 5, weight: 3, want: 1},
+		{name: "C3_non_div_big_7_over_4", fee: 7, weight: 4, want: 1},
+		{name: "C4_divisible_4_over_2", fee: 4, weight: 2, want: 2},
+		{name: "C5_divisible_9_over_3", fee: 9, weight: 3, want: 3},
+		{name: "C6_fee_equals_weight", fee: 1, weight: 1, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := &mempoolEntry{
+				txid:   [32]byte{0x71},
+				fee:    tc.fee,
+				weight: tc.weight,
+				size:   1,
+			}
 
-	floor, ok := entryFloorRate(entry)
-	if !ok {
-		t.Fatal("entryFloorRate returned !ok for valid entry")
-	}
-	if floor != 1 {
-		t.Fatalf("entryFloorRate=%d, want 1 for fee=3 weight=2", floor)
-	}
-	if feeRateBelowFloor(entry.fee, entry.weight, floor) {
-		t.Fatalf("entry is below its satisfiable floor: fee=%d weight=%d floor=%d", entry.fee, entry.weight, floor)
-	}
-	if !feeRateBelowFloor(entry.fee, entry.weight, floor+DefaultMempoolMinFeeRate) {
-		t.Fatalf("entry unexpectedly satisfies raised floor: fee=%d weight=%d floor=%d", entry.fee, entry.weight, floor+DefaultMempoolMinFeeRate)
+			floor, ok := entryFloorRate(entry)
+			if !ok {
+				t.Fatal("entryFloorRate returned !ok for valid entry")
+			}
+			if floor != tc.want {
+				t.Fatalf("entryFloorRate=%d, want %d for fee=%d weight=%d", floor, tc.want, tc.fee, tc.weight)
+			}
+			if feeRateBelowFloor(entry.fee, entry.weight, floor) {
+				t.Fatalf("entry is below its satisfiable floor: fee=%d weight=%d floor=%d", entry.fee, entry.weight, floor)
+			}
+			if !feeRateBelowFloor(entry.fee, entry.weight, floor+DefaultMempoolMinFeeRate) {
+				t.Fatalf("entry unexpectedly satisfies raised floor: fee=%d weight=%d floor=%d", entry.fee, entry.weight, floor+DefaultMempoolMinFeeRate)
+			}
+		})
 	}
 	if floor, ok := entryFloorRate(&mempoolEntry{txid: [32]byte{0x72}, fee: 3}); ok || floor != 0 {
 		t.Fatalf("zero-weight entryFloorRate=(%d,%v), want (0,false)", floor, ok)
+	}
+}
+
+func TestMempoolRaiseMinFeeRateUsesHighestSatisfiableEvictedFloor(t *testing.T) {
+	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: DefaultMempoolMinFeeRate}
+	mp.raiseMinFeeRateAfterEvictionLocked([]*mempoolEntry{
+		{txid: [32]byte{0x81}, fee: 3, weight: 2, size: 1},
+		{txid: [32]byte{0x82}, fee: 10, weight: 2, size: 1},
+		{txid: [32]byte{0x83}, fee: 7, weight: 4, size: 1},
+	})
+
+	wantFloor := uint64(5) + DefaultMempoolMinFeeRate
+	if got := mp.currentMinFeeRate; got != wantFloor {
+		t.Fatalf("currentMinFeeRate=%d, want %d after mixed non-divisible/divisible eviction", got, wantFloor)
+	}
+	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x84}, fee: 12, weight: 2, size: 1}); err != nil {
+		t.Fatalf("candidate at raised floor was rejected: %v", err)
+	}
+	for _, entry := range []*mempoolEntry{
+		{txid: [32]byte{0x85}, fee: 10, weight: 2, size: 1},
+		{txid: [32]byte{0x86}, fee: 8, weight: 2, size: 1},
+	} {
+		if err := mp.validateFeeFloorLocked(entry); err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+			t.Fatalf("candidate below raised floor was not rejected as below-floor: fee=%d weight=%d err=%v", entry.fee, entry.weight, err)
+		}
+	}
+}
+
+func TestMempoolRaiseMinFeeRateUsesHighestNonDivisibleEvictedFloor(t *testing.T) {
+	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: DefaultMempoolMinFeeRate}
+	mp.raiseMinFeeRateAfterEvictionLocked([]*mempoolEntry{
+		{txid: [32]byte{0xa1}, fee: 3, weight: 2, size: 1},
+		{txid: [32]byte{0xa2}, fee: 7, weight: 4, size: 1},
+	})
+
+	wantFloor := uint64(1) + DefaultMempoolMinFeeRate
+	if got := mp.currentMinFeeRate; got != wantFloor {
+		t.Fatalf("currentMinFeeRate=%d, want %d after all-non-divisible eviction", got, wantFloor)
+	}
+	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0xa3}, fee: 4, weight: 2, size: 1}); err != nil {
+		t.Fatalf("candidate at non-divisible raised floor was rejected: %v", err)
+	}
+}
+
+func TestMempoolRaiseMinFeeRatePreservesDivisibleEvictedFloor(t *testing.T) {
+	mp := &Mempool{maxTxs: 10, maxBytes: 100, currentMinFeeRate: DefaultMempoolMinFeeRate}
+	mp.raiseMinFeeRateAfterEvictionLocked([]*mempoolEntry{
+		{txid: [32]byte{0x91}, fee: 4, weight: 2, size: 1},
+	})
+
+	wantFloor := uint64(2) + DefaultMempoolMinFeeRate
+	if got := mp.currentMinFeeRate; got != wantFloor {
+		t.Fatalf("currentMinFeeRate=%d, want %d after divisible eviction", got, wantFloor)
+	}
+	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x92}, fee: 6, weight: 2, size: 1}); err != nil {
+		t.Fatalf("candidate at divisible raised floor was rejected: %v", err)
+	}
+	if err := mp.validateFeeFloorLocked(&mempoolEntry{txid: [32]byte{0x93}, fee: 4, weight: 2, size: 1}); err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+		t.Fatalf("candidate below divisible raised floor was not rejected as below-floor: %v", err)
 	}
 }
 
