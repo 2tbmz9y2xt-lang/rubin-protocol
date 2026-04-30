@@ -310,6 +310,10 @@ func TestMempoolEvictionComparatorTiers(t *testing.T) {
 	if !evictionPlanEntryWorse(local, remote) {
 		t.Fatal("source provenance unexpectedly affected eviction ordering before deterministic txid tie-break")
 	}
+	reorg := mempoolEvictionPlanEntry{entry: &mempoolEntry{txid: [32]byte{0x0a}, fee: 3, weight: 3, size: 1, admissionSeq: 7, source: mempoolTxSourceReorg}}
+	if !evictionPlanEntryWorse(reorg, remote) {
+		t.Fatal("reorg source provenance unexpectedly affected eviction ordering before deterministic txid tie-break")
+	}
 }
 
 func TestMempoolFeeRateComparatorUsesWeightAndDoesNotOverflow(t *testing.T) {
@@ -2107,6 +2111,100 @@ func TestMempoolAddReorgTxUsesRollingFloor(t *testing.T) {
 	}
 	if got := mp.currentMinFeeRate; got != 8 {
 		t.Fatalf("currentMinFeeRate after reorg floor reject=%d, want 8", got)
+	}
+}
+
+func TestMempoolAddReorgTxUsesNormalCapacityAdmission(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000, 1_000_000})
+
+	resident := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 300_000, 1, fromKey, fromAddress, toAddress)
+	lowerReorg := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 100_000, 100_000, 2, fromKey, fromAddress, toAddress)
+	betterReorg := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 100_000, 400_000, 3, fromKey, fromAddress, toAddress)
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 1, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if err := mp.AddTx(resident); err != nil {
+		t.Fatalf("AddTx(resident): %v", err)
+	}
+	before, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshot before lower reorg: %v", err)
+	}
+
+	err = mp.AddReorgTx(lowerReorg)
+	var admitErr *TxAdmitError
+	if !errors.As(err, &admitErr) || admitErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("lower AddReorgTx err=%T %v, want TxAdmitUnavailable", err, err)
+	}
+	if !strings.Contains(err.Error(), "mempool capacity candidate rejected by eviction ordering") {
+		t.Fatalf("lower AddReorgTx error=%v, want capacity candidate rejection", err)
+	}
+	afterReject, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshot after lower reorg: %v", err)
+	}
+	if !reflect.DeepEqual(afterReject, before) {
+		t.Fatalf("lower reorg candidate mutated mempool: before=%+v after=%+v", before, afterReject)
+	}
+	if mp.Contains(txID(t, lowerReorg)) {
+		t.Fatalf("lower reorg candidate entered mempool")
+	}
+
+	if err := mp.AddReorgTx(betterReorg); err != nil {
+		t.Fatalf("AddReorgTx(better): %v", err)
+	}
+	if mp.Contains(txID(t, resident)) {
+		t.Fatalf("normal capacity admission kept lower-priority resident")
+	}
+	betterEntry := mp.txs[txID(t, betterReorg)]
+	if betterEntry == nil {
+		t.Fatalf("better reorg candidate missing after normal admission")
+	}
+	if betterEntry.source != mempoolTxSourceReorg {
+		t.Fatalf("better reorg source=%q, want %q", betterEntry.source, mempoolTxSourceReorg)
+	}
+}
+
+func TestMempoolAddReorgTxRejectsConflictBeforeEviction(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	resident := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 200_000, 1, fromKey, fromAddress, toAddress)
+	conflictingReorg := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 400_000, 2, fromKey, fromAddress, toAddress)
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 1, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if err := mp.AddTx(resident); err != nil {
+		t.Fatalf("AddTx(resident): %v", err)
+	}
+	before, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshot before conflicting reorg: %v", err)
+	}
+
+	err = mp.AddReorgTx(conflictingReorg)
+	var admitErr *TxAdmitError
+	if !errors.As(err, &admitErr) || admitErr.Kind != TxAdmitConflict {
+		t.Fatalf("conflicting AddReorgTx err=%T %v, want TxAdmitConflict", err, err)
+	}
+	after, err := snapshotMempool(mp)
+	if err != nil {
+		t.Fatalf("snapshot after conflicting reorg: %v", err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("conflicting reorg tx mutated mempool: before=%+v after=%+v", before, after)
+	}
+	if mp.Contains(txID(t, conflictingReorg)) {
+		t.Fatalf("conflicting reorg tx entered mempool")
 	}
 }
 
