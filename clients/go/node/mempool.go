@@ -716,24 +716,27 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 	}
 	// Stage C DA fee policy: only enter the helper when the DA-side floor
 	// is configured (MinDaFeeRate > 0) or a per-byte surcharge applies.
-	// validateFeeFloorLocked already enforces the rolling relay-fee floor
-	// for every admitted entry — DA or non-DA — so the helper is purely
-	// the DA-half (`max(relay, da_floor + surcharge)`) and recomputing the
-	// relay floor here would only add a snapshot dependency. With both DA
-	// terms zero, RejectDaAnchorTxPolicy would still call computeFeeNoVerify
-	// for any DA-bearing tx because CurrentMinFeeRateSnapshot is floored
-	// to DefaultMempoolMinFeeRate=1; passing utxos=nil from a config that
-	// legitimately omits MinDaFeeRate would surface as "nil utxo set" instead
-	// of a Stage C verdict. Skipping the helper cleanly when there is nothing
-	// for it to enforce keeps relay-fee admission delegated to
-	// validateFeeFloorLocked and matches policyNeedsInputSnapshot's gate.
+	// The mempool admit path enforces the rolling relay-fee floor through
+	// validateFeeFloorLocked (TxAdmitUnavailable — transient/retryable),
+	// so this caller intentionally passes currentMempoolMinFeeRate=0 so
+	// max(relay_fee_floor, da_required_fee) collapses to da_required_fee.
+	// Without the zero override, a DA tx that pays the DA-side floor but
+	// not the rolling relay floor would surface here as TxAdmitRejected
+	// ("DA fee below Stage C floor ... relay_fee_floor=...") instead of
+	// the symmetric TxAdmitUnavailable that non-DA tx receive from
+	// validateFeeFloorLocked. With currentMin=0 the helper enforces only
+	// the DA-specific terms and validateFeeFloorLocked owns relay-floor
+	// classification uniformly for both DA and non-DA admissions.
+	//
+	// The miner caller (rejectCandidate) keeps using the live rolling
+	// floor because it has no validateFeeFloorLocked equivalent — the
+	// miner template needs to skip a tx whenever it fails any floor.
 	if policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0 {
-		currentMin := m.CurrentMinFeeRateSnapshot()
 		reject, _, reason, err := RejectDaAnchorTxPolicy(
 			checked.Tx,
 			utxos,
 			checked.Weight,
-			currentMin,
+			0,
 			policy.MinDaFeeRate,
 			policy.PolicyDaSurchargePerByte,
 		)
@@ -1287,7 +1290,16 @@ func (m *Mempool) currentMinFeeRateLocked() uint64 {
 // loop in cmd/rubin-node) can wire MinerConfig.CurrentMempoolMinFeeRateFn
 // directly to it and keep the relay-fee half of the Stage C admission
 // contract aligned with the rolling floor.
+//
+// Nil-safe like the other exported Mempool accessors (BytesUsed,
+// AdmissionCounts, Contains): a nil receiver returns
+// DefaultMempoolMinFeeRate so test-time wiring or fail-closed paths
+// that never construct a Mempool see the documented baseline floor
+// instead of a panic from m.mu.RLock().
 func (m *Mempool) CurrentMinFeeRateSnapshot() uint64 {
+	if m == nil {
+		return DefaultMempoolMinFeeRate
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.currentMinFeeRateLocked()

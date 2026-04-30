@@ -1189,6 +1189,81 @@ func TestMempoolAdmitsDaTxUnderAllZeroDaConfigViaRelayFloor(t *testing.T) {
 	}
 }
 
+// TestMempoolNilReceiverCurrentMinFeeRateSnapshotReturnsBaseline pins the
+// nil-receiver guard on `(*Mempool).CurrentMinFeeRateSnapshot()`. Other
+// exported accessors (BytesUsed, AdmissionCounts, Contains) are
+// nil-safe; this method MUST be too because it is also exported and
+// used as a production callback (MinerConfig.CurrentMempoolMinFeeRateFn
+// = mempool.CurrentMinFeeRateSnapshot). A nil receiver path would
+// otherwise panic at m.mu.RLock() during unusual fail-closed wiring or
+// test-time fixtures that hold a nil mempool reference.
+//
+// Proof assertion: a typed-nil call returns DefaultMempoolMinFeeRate
+// without panicking.
+func TestMempoolNilReceiverCurrentMinFeeRateSnapshotReturnsBaseline(t *testing.T) {
+	var nilMempool *Mempool
+	if got := nilMempool.CurrentMinFeeRateSnapshot(); got != DefaultMempoolMinFeeRate {
+		t.Fatalf("nil receiver returned %d, want DefaultMempoolMinFeeRate=%d", got, DefaultMempoolMinFeeRate)
+	}
+}
+
+// TestMempoolDaTxBelowRelayFloorReturnsUnavailable pins the wave-6 fix
+// for PR #1368: relay-floor failures on DA-bearing tx must surface as
+// TxAdmitUnavailable (transient — the rolling local floor will decay)
+// the same way non-DA tx do, NOT as TxAdmitRejected from the Stage C
+// helper. The mempool admit caller passes currentMempoolMinFeeRate=0 to
+// RejectDaAnchorTxPolicy so the helper enforces only the DA-side terms;
+// validateFeeFloorLocked owns relay-floor classification uniformly for
+// both DA and non-DA admissions.
+//
+// Proof assertion: AddTx returns *TxAdmitError with Kind=TxAdmitUnavailable
+// when the DA tx pays at or above the DA-side floor but below the
+// inflated rolling relay floor. A future edit that drops the
+// `currentMin=0` override would surface the same input as
+// TxAdmitRejected with a "DA fee below Stage C floor ... relay_fee_floor=..."
+// reason and fail this assertion.
+func TestMempoolDaTxBelowRelayFloorReturnsUnavailable(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000_000})
+
+	// Config has DA-side floor (so the Stage C helper runs) but no
+	// surcharge. Inflate the rolling local floor to a level the test tx
+	// cannot match so validateFeeFloorLocked fires; the helper itself
+	// passes (DA floor = daBytes * 1 is tiny).
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MinDaFeeRate: 1,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	mp.mu.Lock()
+	mp.currentMinFeeRate = 1_000_000 // inflated rolling relay floor
+	mp.mu.Unlock()
+
+	// Build a DA tx that pays well above DA-side floor (daBytes*1) but
+	// far below weight*1_000_000. With the wave-6 fix the helper passes
+	// (currentMin=0 → max collapses to daRequired) and validateFeeFloorLocked
+	// fails the entry as TxAdmitUnavailable.
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 999_950_000, 1, fromKey, toAddress, []byte("0123456789"))
+	err = mp.AddTx(txBytes)
+	if err == nil {
+		t.Fatalf("expected admit error, got nil (tx admitted under inflated relay floor?)")
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected *TxAdmitError, got %T: %v", err, err)
+	}
+	if txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("got Kind=%s, want TxAdmitUnavailable; reason=%q", txErr.Kind, txErr.Message)
+	}
+	if !strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+		t.Fatalf("reason %q does not match validateFeeFloorLocked wording", txErr.Message)
+	}
+}
+
 func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)

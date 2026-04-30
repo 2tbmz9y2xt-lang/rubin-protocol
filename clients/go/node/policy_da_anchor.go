@@ -35,8 +35,10 @@ func RejectNonCoinbaseAnchorOutputs(tx *consensus.Tx) (reject bool, reason strin
 //	reject if fee(tx) < required_fee(tx)
 //
 // Arithmetic is checked widening; any overflow rejects fail-closed as a
-// policy error. The helper does not change consensus validity. Non-DA
-// transactions (da_payload_len == 0) keep the relay-fee floor only.
+// policy error. The helper does not change consensus validity. For non-DA
+// transactions (da_payload_len == 0), this helper applies no DA-specific
+// fee policy; relay-fee-floor enforcement remains the caller/mempool's
+// responsibility (for example via validateFeeFloorLocked).
 //
 // Inputs:
 //   - weight: consensus tx weight; supplied by the caller because callers
