@@ -1011,6 +1011,9 @@ func (m *Mempool) capacityStateLocked(candidate *mempoolEntry) (mempoolCapacityS
 	targetBytes := maxBytes
 	if bytePressure {
 		targetBytes = uint64(m.effectiveLowWaterBytesLocked()) // #nosec G115 -- effectiveLowWaterBytesLocked returns 0 or a positive value derived from positive maxBytes.
+		if targetBytes < candidateSize {
+			targetBytes = candidateSize
+		}
 	}
 	return mempoolCapacityState{
 		maxBytes:      maxBytes,

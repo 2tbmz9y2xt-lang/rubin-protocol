@@ -1883,6 +1883,36 @@ func TestMempoolSmallByteCapKeepsFittingCandidateAfterLowWaterTrim(t *testing.T)
 	}
 }
 
+func TestMempoolBytePressureAdmitsCandidateLargerThanLowWaterWhenFitsHardCap(t *testing.T) {
+	residentID := [32]byte{0x80}
+	candidateID := [32]byte{0x81}
+	mp := &Mempool{maxTxs: 10, maxBytes: 100}
+	resident := &mempoolEntry{txid: residentID, fee: 1, weight: 1, size: 95}
+	if err := mp.addEntryLocked(resident); err != nil {
+		t.Fatalf("addEntryLocked(resident): %v", err)
+	}
+	if got, want := mp.effectiveLowWaterBytesLocked(), 90; got != want {
+		t.Fatalf("lowWater=%d, want %d", got, want)
+	}
+
+	candidate := &mempoolEntry{txid: candidateID, fee: 100, weight: 1, size: 95}
+	if err := mp.addEntryLocked(candidate); err != nil {
+		t.Fatalf("addEntryLocked(candidate): %v", err)
+	}
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1 after byte-pressure replacement", got)
+	}
+	if got := mp.usedBytes; got != 95 {
+		t.Fatalf("usedBytes=%d, want candidate hard-cap size 95", got)
+	}
+	if !mp.Contains(candidateID) {
+		t.Fatal("candidate fitting maxBytes was not admitted")
+	}
+	if mp.Contains(residentID) {
+		t.Fatal("byte-pressure replacement kept lower-priority resident")
+	}
+}
+
 func TestMempoolDuplicateRejectsBeforeEviction(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
