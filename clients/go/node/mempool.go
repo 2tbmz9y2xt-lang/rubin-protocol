@@ -794,7 +794,7 @@ func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
 	}
 	currentMinFeeRate := m.currentMinFeeRateLocked()
 	if feeRateBelowFloor(entry.fee, entry.weight, currentMinFeeRate) {
-		return txAdmitRejected(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, currentMinFeeRate))
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, currentMinFeeRate))
 	}
 	return nil
 }
@@ -1143,6 +1143,7 @@ func compareMempoolEvictionPriority(a, b mempoolEvictionPlanEntry) int {
 
 func evictionAdmissionSeq(entry mempoolEvictionPlanEntry) uint64 {
 	if entry.candidate {
+		// Treat the candidate as oldest on exact fee ties so capacity pressure is no-RBF.
 		return 0
 	}
 	if entry.entry == nil {
@@ -1233,14 +1234,7 @@ func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {
 	if a == nil || b == nil {
 		return 0
 	}
-	return compareFeeRateValues(a.fee, a.size, b.fee, b.size)
-}
-
-func compareFeeRateValues(feeA uint64, sizeA int, feeB uint64, sizeB int) int {
-	if sizeA <= 0 || sizeB <= 0 {
-		return 0
-	}
-	return compareFeeRateWeightValues(feeA, uint64(sizeA), feeB, uint64(sizeB))
+	return compareFeeRateWeightValues(a.fee, a.weight, b.fee, b.weight)
 }
 
 func compareEvictionFeeRate(a *mempoolEntry, b *mempoolEntry) int {

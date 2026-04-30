@@ -638,6 +638,24 @@ func TestMempoolRaiseMinFeeRatePreservesDivisibleEvictedFloor(t *testing.T) {
 	}
 }
 
+func TestMempoolSortAndEvictionUseWeightFeeRate(t *testing.T) {
+	feeSizeWinner := &mempoolEntry{txid: [32]byte{0xb1}, fee: 4, weight: 4, size: 1}
+	feeWeightWinner := &mempoolEntry{txid: [32]byte{0xb2}, fee: 2, weight: 1, size: 1}
+
+	entries := []*mempoolEntry{feeSizeWinner, feeWeightWinner}
+	sortMempoolEntries(entries)
+	if entries[0] != feeWeightWinner {
+		t.Fatalf("sortMempoolEntries picked txid %x first, want fee/weight winner %x", entries[0].txid, feeWeightWinner.txid)
+	}
+
+	if !evictionPlanEntryWorse(
+		mempoolEvictionPlanEntry{entry: feeSizeWinner},
+		mempoolEvictionPlanEntry{entry: feeWeightWinner},
+	) {
+		t.Fatal("eviction priority did not mark lower fee/weight entry as worse")
+	}
+}
+
 func TestMempoolAddEntryLockedCapacityPlanRejectsWithoutMutation(t *testing.T) {
 	badResidentID := [32]byte{0x30}
 	mp := &Mempool{
@@ -1668,8 +1686,13 @@ func TestMempoolCapacityRejectsBelowRollingFloorWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot before below-floor: %v", err)
 	}
-	if err := mp.AddTx(txBelowFloor); err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+	err = mp.AddTx(txBelowFloor)
+	if err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
 		t.Fatalf("expected below-floor rejection, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("below-floor err=%v, want TxAdmitUnavailable", err)
 	}
 	after, err := snapshotMempool(mp)
 	if err != nil {
@@ -1700,8 +1723,13 @@ func TestMempoolRollingFloorRejectsBelowCapacityWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot before below-capacity below-floor: %v", err)
 	}
-	if err := mp.AddTx(txBelowFloor); err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+	err = mp.AddTx(txBelowFloor)
+	if err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
 		t.Fatalf("expected below-capacity below-floor rejection, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("below-capacity floor err=%v, want TxAdmitUnavailable", err)
 	}
 	after, err := snapshotMempool(mp)
 	if err != nil {
@@ -1725,6 +1753,10 @@ func TestMempoolRollingFloorDirectHelperRejectsBelowCapacity(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
 		t.Fatalf("expected direct below-floor rejection, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("direct floor err=%v, want TxAdmitUnavailable", err)
 	}
 	if len(mp.txs) != 0 || mp.usedBytes != 0 || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 8 {
 		t.Fatalf("direct floor reject mutated mempool: len=%d used=%d seq=%d floor=%d", len(mp.txs), mp.usedBytes, mp.lastAdmissionSeq, mp.currentMinFeeRate)
@@ -1813,31 +1845,41 @@ func TestMempoolByteCapEvictsToLowWater(t *testing.T) {
 }
 
 func TestMempoolSmallByteCapKeepsFittingCandidateAfterLowWaterTrim(t *testing.T) {
-	mp := &Mempool{maxTxs: 10, maxBytes: 2}
-	for _, entry := range []*mempoolEntry{
-		{txid: [32]byte{0x61}, fee: 1, weight: 1, size: 1},
-		{txid: [32]byte{0x62}, fee: 1, weight: 1, size: 1},
+	for _, tc := range []struct {
+		name     string
+		maxBytes int
+	}{
+		{name: "one", maxBytes: 1},
+		{name: "two", maxBytes: 2},
+		{name: "five", maxBytes: 5},
+		{name: "nine", maxBytes: 9},
 	} {
-		if err := mp.addEntryLocked(entry); err != nil {
-			t.Fatalf("addEntryLocked(resident %x): %v", entry.txid, err)
-		}
-	}
+		t.Run(tc.name, func(t *testing.T) {
+			residentID := [32]byte{byte(0x60 + tc.maxBytes)}
+			candidateID := [32]byte{byte(0x70 + tc.maxBytes)}
+			mp := &Mempool{maxTxs: 10, maxBytes: tc.maxBytes}
+			resident := &mempoolEntry{txid: residentID, fee: 1, weight: 1, size: tc.maxBytes}
+			if err := mp.addEntryLocked(resident); err != nil {
+				t.Fatalf("addEntryLocked(resident): %v", err)
+			}
 
-	candidate := &mempoolEntry{txid: [32]byte{0x63}, fee: 10, weight: 1, size: 1}
-	if err := mp.addEntryLocked(candidate); err != nil {
-		t.Fatalf("addEntryLocked(candidate): %v", err)
-	}
-	if got := mp.Len(); got != 1 {
-		t.Fatalf("mempool len=%d, want 1 after tiny-cap low-water trim", got)
-	}
-	if got := mp.usedBytes; got != 1 {
-		t.Fatalf("usedBytes=%d, want 1 after tiny-cap low-water trim", got)
-	}
-	if !mp.Contains(candidate.txid) {
-		t.Fatal("candidate fitting the hard byte cap was not admitted")
-	}
-	if mp.Contains([32]byte{0x61}) || mp.Contains([32]byte{0x62}) {
-		t.Fatal("tiny-cap low-water trim kept lower-priority residents")
+			candidate := &mempoolEntry{txid: candidateID, fee: 10, weight: 1, size: 1}
+			if err := mp.addEntryLocked(candidate); err != nil {
+				t.Fatalf("addEntryLocked(candidate): %v", err)
+			}
+			if got := mp.Len(); got != 1 {
+				t.Fatalf("mempool len=%d, want 1 after small-cap low-water trim", got)
+			}
+			if got := mp.usedBytes; got != 1 {
+				t.Fatalf("usedBytes=%d, want 1 after small-cap low-water trim", got)
+			}
+			if !mp.Contains(candidate.txid) {
+				t.Fatal("candidate fitting the hard byte cap was not admitted")
+			}
+			if mp.Contains(resident.txid) {
+				t.Fatal("small-cap low-water trim kept lower-priority resident")
+			}
+		})
 	}
 }
 
@@ -2923,6 +2965,18 @@ func TestTxAdmitErrorKinds(t *testing.T) {
 			t.Fatalf("first AddTx: %v", err)
 		}
 		err = mp.AddTx(tx2)
+		assertKind(t, err, TxAdmitUnavailable)
+	})
+
+	t.Run("rolling floor unavailable", func(t *testing.T) {
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+		mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 10, MaxBytes: 1 << 20})
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		mp.currentMinFeeRate = 8
+		tx := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 1, 1, fromKey, fromAddress, toAddress)
+		err = mp.AddTx(tx)
 		assertKind(t, err, TxAdmitUnavailable)
 	})
 

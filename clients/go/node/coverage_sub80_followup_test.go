@@ -35,7 +35,7 @@ func TestCoverageResidual_MempoolBranches(t *testing.T) {
 	if got := compareFeeRate(&mempoolEntry{fee: 2, weight: 1, size: 1}, &mempoolEntry{fee: 1, weight: 1, size: 1}); got <= 0 {
 		t.Fatalf("expected first feerate to win")
 	}
-	if got := compareFeeRate(&mempoolEntry{fee: 1, size: 2}, &mempoolEntry{fee: 1, size: 1}); got >= 0 {
+	if got := compareFeeRate(&mempoolEntry{fee: 1, weight: 2, size: 1}, &mempoolEntry{fee: 1, weight: 1, size: 2}); got >= 0 {
 		t.Fatalf("expected second feerate to win")
 	}
 	entries := []*mempoolEntry{{txid: [32]byte{0x02}, fee: 10, weight: 1, size: 1}, {txid: [32]byte{0x01}, fee: 10, weight: 1, size: 1}}
