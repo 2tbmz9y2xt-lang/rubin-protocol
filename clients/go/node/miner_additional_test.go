@@ -589,9 +589,10 @@ func TestMinerRejectCandidateFallbackUsesStaticCurrentMempoolMinFeeRate(t *testi
 // clamp the helper computes required_fee = max(weight*0, 0+0) = 0 and
 // admits the fee=0 candidate. With the clamp, currentMin is raised to
 // DefaultMempoolMinFeeRate=1 and required_fee = weight*1 > 0 forces a
-// reject. Removing the clamp at miner.go:506-508 therefore makes this
-// test go green-to-red on the same input — proving the clamp is the
-// only thing keeping the candidate out.
+// reject. Removing the clamp inside rejectCandidate at
+// clients/go/node/miner.go therefore makes this test go green-to-red on
+// the same input — proving the clamp is the only thing keeping the
+// candidate out.
 func TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate(t *testing.T) {
 	cfg := DefaultMinerConfig()
 	cfg.PolicyDaAnchorAntiAbuse = true
