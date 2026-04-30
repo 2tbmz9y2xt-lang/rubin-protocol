@@ -409,7 +409,7 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 			// generic waitFor helper drops. waitFor's existing 25 ms
 			// cadence is preserved.
 			syncStart := time.Now()
-			syncDeadline := time.Now().Add(syncBudget)
+			syncDeadline := syncStart.Add(syncBudget)
 			for {
 				state, stateErr := node.LoadChainState(nodeC.chainStatePath)
 				if stateErr == nil && state.HasTip && state.Height == wantHeight {
