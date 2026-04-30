@@ -377,8 +377,69 @@ func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
 			if err := nodeC.restartWithPeers(ctx, []string{nodeA.service.Addr()}); err != nil {
 				t.Fatalf("restart node C at height %d: %v", wantHeight, err)
 			}
-			waitForHeightWithTimeout(t, nodeC, wantHeight, 30*time.Second)
-			waitForPeerCountWithTimeout(t, nodeC, 1, 10*time.Second)
+			// Order: peer link first, then header/block sync. A node
+			// with zero peers cannot make sync progress, so checking
+			// height before peer count produces a misleading
+			// "height not reached" failure when the real cause is
+			// the peer-connect handshake not yet complete. Both
+			// timeouts are scaled for cargo-tarpaulin / Go coverage
+			// instrumentation, which adds ~2-3x overhead on the
+			// 200-block (killAt..restartAt) post-restart sync window.
+			peerConnectStart := time.Now()
+			waitForPeerCountWithTimeout(t, nodeC, 1, 30*time.Second)
+			peerConnectElapsed := time.Since(peerConnectStart)
+			// Peer-elapsed is logged BEFORE the sync wait so the
+			// operator sees this number even if the sync wait fatals
+			// out next. Subsequent t.Fatalf inside the inline sync
+			// loop also includes peer-elapsed in its message so the
+			// failure log carries both timings.
+			syncBudget := 90 * time.Second
+			t.Logf(
+				"[restart-sync] node-c reconnected to node-a in %s; starting %d-block sync (h=%d -> h=%d, budget %s)",
+				peerConnectElapsed.Round(time.Millisecond),
+				wantHeight-killAt,
+				killAt,
+				wantHeight,
+				syncBudget,
+			)
+
+			// Inline poll instead of waitForHeightWithTimeout so the
+			// timeout-fatal path can include the actual elapsed
+			// duration and the last observed height — info that the
+			// generic waitFor helper drops. waitFor's existing 25 ms
+			// cadence is preserved.
+			syncStart := time.Now()
+			syncDeadline := time.Now().Add(syncBudget)
+			for {
+				state, stateErr := node.LoadChainState(nodeC.chainStatePath)
+				if stateErr == nil && state.HasTip && state.Height == wantHeight {
+					t.Logf(
+						"[restart-sync] node-c synced %d blocks (h=%d -> h=%d) in %s",
+						wantHeight-killAt,
+						killAt,
+						wantHeight,
+						time.Since(syncStart).Round(time.Millisecond),
+					)
+					break
+				}
+				if time.Now().After(syncDeadline) {
+					var lastHeight uint64
+					if stateErr == nil && state.HasTip {
+						lastHeight = state.Height
+					}
+					t.Fatalf(
+						"[restart-sync] node-c sync %d->%d FAILED after %s: last_height=%d/%d (peer reconnected in %s, sync budget %s)",
+						killAt,
+						wantHeight,
+						time.Since(syncStart).Round(time.Millisecond),
+						lastHeight,
+						wantHeight,
+						peerConnectElapsed.Round(time.Millisecond),
+						syncBudget,
+					)
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
 			cNodeDown = false
 		}
 
