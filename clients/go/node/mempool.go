@@ -622,10 +622,19 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 }
 
 func policyNeedsInputSnapshot(policy MempoolConfig) bool {
-	// Stage C admission may require fee computation against the input
-	// UTXO set whenever the relay-fee floor or the DA-side floor can be
-	// non-zero. Conservatively require the snapshot any time the DA
-	// floor (min_da_fee_rate or surcharge) or the core-ext gate is on.
+	// applyPolicyAgainstState invokes RejectDaAnchorTxPolicy unconditionally:
+	// the helper short-circuits cheaply for non-DA tx (daBytes == 0) without
+	// touching utxos, but for any DA-bearing tx it computes fee against the
+	// inputs and therefore needs a non-nil utxo map. The Stage C predicate
+	// `required_fee = max(relay_fee_floor, da_fee_floor + da_surcharge)` can
+	// produce a non-zero floor whenever any of the per-byte rates is set, so
+	// the input snapshot must exist whenever the DA path is exercisable
+	// (MinDaFeeRate > 0 OR PolicyDaSurchargePerByte > 0). The CORE_EXT
+	// pre-activation gate also reads the input state, so include it too.
+	// Mirrors the conservative gating in (*Miner).policyNeedsReadonlyUtxoSnapshot
+	// so custom configs cannot accidentally call the policy path with a nil
+	// utxo map and produce confusing "nil utxo set" admission errors instead
+	// of a Stage C predicate verdict.
 	return policy.PolicyDaSurchargePerByte > 0 || policy.MinDaFeeRate > 0 || policy.PolicyRejectCoreExtPreActivation
 }
 
@@ -662,7 +671,7 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 			return errors.New(reason)
 		}
 	}
-	currentMin := m.currentMinFeeRateSnapshot()
+	currentMin := m.CurrentMinFeeRateSnapshot()
 	reject, _, reason, err := RejectDaAnchorTxPolicy(
 		checked.Tx,
 		utxos,
@@ -1211,11 +1220,16 @@ func (m *Mempool) currentMinFeeRateLocked() uint64 {
 	return m.currentMinFeeRate
 }
 
-// currentMinFeeRateSnapshot returns the rolling local floor without
+// CurrentMinFeeRateSnapshot returns the rolling local floor without
 // requiring the caller to already hold m.mu. It briefly takes a read
 // lock so that race-free Stage C admission helpers (which run under a
 // chainstate-side lock, not m.mu) can read the value safely.
-func (m *Mempool) currentMinFeeRateSnapshot() uint64 {
+//
+// It is exported so that external callers (e.g. the miner template
+// loop in cmd/rubin-node) can wire MinerConfig.CurrentMempoolMinFeeRateFn
+// directly to it and keep the relay-fee half of the Stage C admission
+// contract aligned with the rolling floor.
+func (m *Mempool) CurrentMinFeeRateSnapshot() uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.currentMinFeeRateLocked()

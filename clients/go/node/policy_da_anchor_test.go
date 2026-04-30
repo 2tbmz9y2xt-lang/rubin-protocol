@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -49,6 +50,9 @@ func daTestTx(t *testing.T, marker byte, inValue uint64, feePaid uint64, daPaylo
 
 func nonDaTestTx(t *testing.T, marker byte, inValue uint64, feePaid uint64) (*consensus.Tx, map[consensus.Outpoint]consensus.UtxoEntry, uint64) {
 	t.Helper()
+	if feePaid > inValue {
+		t.Fatalf("test setup: feePaid=%d > inValue=%d", feePaid, inValue)
+	}
 	var prev [32]byte
 	prev[0] = marker
 	op := consensus.Outpoint{Txid: prev, Vout: 0}
@@ -130,15 +134,17 @@ func TestRejectDaAnchorTxPolicy_RelayFloorDominanceSelectsRelay(t *testing.T) {
 		t.Fatalf("expected reject: fee below relay floor; reason=%q", reason)
 	}
 	relayFloor := weight * currentMin
-	if !strings.Contains(reason, "relay_fee_floor=") || !strings.Contains(reason, "required_fee=") {
-		t.Fatalf("reason missing diagnostic fields: %q", reason)
+	daFloor := uint64(10) * minDaFee
+	daSurcharge := uint64(10) * surcharge
+	wantRelay := fmt.Sprintf("relay_fee_floor=%d", relayFloor)
+	wantDaFloor := fmt.Sprintf("da_fee_floor=%d", daFloor)
+	wantDaSurcharge := fmt.Sprintf("da_surcharge=%d", daSurcharge)
+	wantRequired := fmt.Sprintf("required_fee=%d", relayFloor)
+	for _, want := range []string{wantRelay, wantDaFloor, wantDaSurcharge, wantRequired} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason=%q missing expected substring %q", reason, want)
+		}
 	}
-	// Sanity: required_fee in reason must equal relay_fee_floor when relay dominates.
-	wantSubstr := "required_fee="
-	if !strings.Contains(reason, wantSubstr) {
-		t.Fatalf("reason missing required_fee field")
-	}
-	_ = relayFloor // diagnostics validated via substring check above
 }
 
 func TestRejectDaAnchorTxPolicy_DaFloorDominanceSelectsDa(t *testing.T) {

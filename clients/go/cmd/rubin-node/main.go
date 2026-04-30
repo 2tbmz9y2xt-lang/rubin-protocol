@@ -454,6 +454,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			minerCfg.MineAddress = addrBytes
 		}
 		minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
+		minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
 		miner, err := newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "miner init failed: %v\n", err)
@@ -511,6 +512,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		if mineAddrErr == nil {
 			minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
+			minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
 			var err error
 			liveMiner, err = newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 			if err != nil {

@@ -49,15 +49,22 @@ type MinerConfig struct {
 	// still applies when PolicyDaSurchargePerByte > 0.
 	MinDaFeeRate uint64
 
-	// CurrentMempoolMinFeeRate is the rolling local floor source used by
-	// the miner template for the relay-fee half of the Stage C admission
-	// contract:
-	//   relay_fee_floor(tx) = weight(tx) * CurrentMempoolMinFeeRate
-	// Live nodes propagate Mempool.currentMinFeeRateLocked() into this
-	// field. Standalone miner builds may leave it at the
-	// DefaultMempoolMinFeeRate baseline; this is the documented default
-	// of the rolling floor exposed by #1336, not a parallel floor.
+	// CurrentMempoolMinFeeRate is the static fallback for the rolling
+	// local floor when CurrentMempoolMinFeeRateFn is nil. Standalone
+	// miner builds with no live mempool keep this at
+	// DefaultMempoolMinFeeRate (the #1336 baseline). Live nodes SHOULD
+	// set CurrentMempoolMinFeeRateFn instead so the miner template
+	// reflects the rolling floor as it rises and decays.
 	CurrentMempoolMinFeeRate uint64
+
+	// CurrentMempoolMinFeeRateFn returns the live rolling local floor
+	// for the relay-fee half of the Stage C admission contract:
+	//   relay_fee_floor(tx) = weight(tx) * <floor returned by Fn>
+	// Production wiring sets this to Mempool.CurrentMinFeeRateSnapshot
+	// so the miner template stays aligned with the admission predicate
+	// as the rolling floor changes. When nil the miner falls back to
+	// CurrentMempoolMinFeeRate above.
+	CurrentMempoolMinFeeRateFn func() uint64
 
 	// PolicyRejectCoreExtPreActivation controls non-consensus guardrails for CORE_EXT (COV_TYPE_CORE_EXT).
 	// When enabled, the miner will exclude transactions that create or spend CORE_EXT outputs
@@ -490,7 +497,12 @@ func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
 
 func (m *Miner) rejectCandidate(tx *consensus.Tx, weight uint64, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
 	if m.cfg.PolicyDaAnchorAntiAbuse {
-		currentMin := m.cfg.CurrentMempoolMinFeeRate
+		var currentMin uint64
+		if fn := m.cfg.CurrentMempoolMinFeeRateFn; fn != nil {
+			currentMin = fn()
+		} else {
+			currentMin = m.cfg.CurrentMempoolMinFeeRate
+		}
 		if currentMin < DefaultMempoolMinFeeRate {
 			currentMin = DefaultMempoolMinFeeRate
 		}

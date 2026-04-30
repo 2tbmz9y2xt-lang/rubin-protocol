@@ -1446,6 +1446,52 @@ func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
 	}
 }
 
+func TestPolicyNeedsInputSnapshotCoversStageCDaPath(t *testing.T) {
+	// Stage C predicate: required_fee = max(relay_fee_floor, da_fee_floor +
+	// da_surcharge). A DA-bearing tx exercises computeFeeNoVerify, which
+	// requires a non-nil utxo map. policyNeedsInputSnapshot MUST trigger
+	// for any config that can produce a non-zero DA-side floor, otherwise
+	// the admit path returns "nil utxo set" instead of a Stage C verdict.
+	cases := []struct {
+		name string
+		cfg  MempoolConfig
+		want bool
+	}{
+		{
+			name: "all_zero_no_core_ext",
+			cfg:  MempoolConfig{},
+			want: false,
+		},
+		{
+			name: "min_da_fee_rate_only",
+			cfg:  MempoolConfig{MinDaFeeRate: 1},
+			want: true,
+		},
+		{
+			name: "surcharge_only",
+			cfg:  MempoolConfig{PolicyDaSurchargePerByte: 1},
+			want: true,
+		},
+		{
+			name: "core_ext_only",
+			cfg:  MempoolConfig{PolicyRejectCoreExtPreActivation: true},
+			want: true,
+		},
+		{
+			name: "min_da_fee_rate_without_core_ext",
+			cfg:  MempoolConfig{MinDaFeeRate: 1, PolicyRejectCoreExtPreActivation: false},
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := policyNeedsInputSnapshot(tc.cfg); got != tc.want {
+				t.Fatalf("policyNeedsInputSnapshot(%+v)=%v, want %v", tc.cfg, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPolicyInputSnapshotCopiesOnlySpentInputs(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
