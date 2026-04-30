@@ -493,7 +493,6 @@ func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
 		for _, txid := range block.Txids {
 			m.removeTxLocked(txid)
 		}
-		m.decayMinFeeRateAfterConnectedBlockLocked()
 	})
 }
 
@@ -803,27 +802,53 @@ func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.O
 	}
 }
 
-func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
-	if entry != nil && entry.source == "" {
+func normalizeMempoolEntryDefaults(entry *mempoolEntry) {
+	if entry == nil {
+		return
+	}
+	if entry.source == "" {
 		entry.source = mempoolTxSourceLocal
 	}
-	if entry != nil && entry.wtxid == ([32]byte{}) {
+	if entry.wtxid == ([32]byte{}) {
 		entry.wtxid = entry.txid
 	}
+}
+
+func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
+	normalizeMempoolEntryDefaults(entry)
 	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
 		return err
 	}
-	if err := m.validateFeeFloorLocked(entry); err != nil {
-		return err
-	}
-	evictedEntries, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
+	evictedEntries, err := m.validateCapacityAdmissionLocked(entry)
 	if err != nil {
 		return err
 	}
-	if candidateEvicted {
-		return txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering")
-	}
 	m.ensureMinFeeRateLocked()
+	m.ensureIndexesLocked()
+	for _, evicted := range evictedEntries {
+		m.deleteEntryLocked(evicted.txid, evicted)
+	}
+	m.assignAdmissionSeqLocked(entry)
+	m.insertEntryIndexesLocked(entry)
+	m.raiseMinFeeRateAfterEvictionLocked(evictedEntries)
+	return nil
+}
+
+func (m *Mempool) validateCapacityAdmissionLocked(entry *mempoolEntry) ([]*mempoolEntry, error) {
+	if err := m.validateFeeFloorLocked(entry); err != nil {
+		return nil, err
+	}
+	evictedEntries, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
+	if err != nil {
+		return nil, err
+	}
+	if candidateEvicted {
+		return nil, txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering")
+	}
+	return evictedEntries, nil
+}
+
+func (m *Mempool) ensureIndexesLocked() {
 	if m.txs == nil {
 		m.txs = make(map[[32]byte]*mempoolEntry)
 	}
@@ -833,23 +858,24 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 	if m.spenders == nil {
 		m.spenders = make(map[consensus.Outpoint][32]byte)
 	}
-	for _, evicted := range evictedEntries {
-		m.deleteEntryLocked(evicted.txid, evicted)
-	}
+}
+
+func (m *Mempool) assignAdmissionSeqLocked(entry *mempoolEntry) {
 	if entry.admissionSeq == 0 {
 		m.lastAdmissionSeq++
 		entry.admissionSeq = m.lastAdmissionSeq
 	} else if entry.admissionSeq > m.lastAdmissionSeq {
 		m.lastAdmissionSeq = entry.admissionSeq
 	}
+}
+
+func (m *Mempool) insertEntryIndexesLocked(entry *mempoolEntry) {
 	m.txs[entry.txid] = entry
 	m.wtxids[entry.wtxid] = entry.txid
 	m.usedBytes += entry.size
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
 	}
-	m.raiseMinFeeRateAfterEvictionLocked(evictedEntries)
-	return nil
 }
 
 func (m *Mempool) snapshotEntries() []*mempoolEntry {

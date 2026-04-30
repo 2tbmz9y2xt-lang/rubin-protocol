@@ -1996,21 +1996,27 @@ func TestMempoolRollingMinFeeDecaysOnlyOnConnectedBlockLowWater(t *testing.T) {
 	if err := mp.EvictConfirmedParsed(&consensus.ParsedBlock{}); err != nil {
 		t.Fatalf("EvictConfirmedParsed: %v", err)
 	}
+	if got := mp.currentMinFeeRate; got != 8 {
+		t.Fatalf("EvictConfirmedParsed decayed floor to %d, want 8", got)
+	}
+	if err := mp.applyConnectedBlockParsed(&consensus.ParsedBlock{}); err != nil {
+		t.Fatalf("applyConnectedBlockParsed: %v", err)
+	}
 	if got := mp.currentMinFeeRate; got != 4 {
 		t.Fatalf("connected block low-water decay=%d, want 4", got)
 	}
 	mp.currentMinFeeRate = 8
 	mp.usedBytes = mp.effectiveLowWaterBytesLocked()
-	if err := mp.EvictConfirmedParsed(&consensus.ParsedBlock{}); err != nil {
-		t.Fatalf("EvictConfirmedParsed at low-water boundary: %v", err)
+	if err := mp.applyConnectedBlockParsed(&consensus.ParsedBlock{}); err != nil {
+		t.Fatalf("applyConnectedBlockParsed at low-water boundary: %v", err)
 	}
 	if got := mp.currentMinFeeRate; got != 8 {
 		t.Fatalf("boundary usedBytes decayed floor to %d, want 8", got)
 	}
 	mp.currentMinFeeRate = DefaultMempoolMinFeeRate
 	mp.usedBytes = 0
-	if err := mp.EvictConfirmedParsed(&consensus.ParsedBlock{}); err != nil {
-		t.Fatalf("EvictConfirmedParsed at base floor: %v", err)
+	if err := mp.applyConnectedBlockParsed(&consensus.ParsedBlock{}); err != nil {
+		t.Fatalf("applyConnectedBlockParsed at base floor: %v", err)
 	}
 	if got := mp.currentMinFeeRate; got != DefaultMempoolMinFeeRate {
 		t.Fatalf("base floor decayed to %d, want %d", got, DefaultMempoolMinFeeRate)
