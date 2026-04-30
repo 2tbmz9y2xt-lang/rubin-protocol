@@ -622,19 +622,18 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 }
 
 func policyNeedsInputSnapshot(policy MempoolConfig) bool {
-	// applyPolicyAgainstState invokes RejectDaAnchorTxPolicy unconditionally:
-	// the helper short-circuits cheaply for non-DA tx (daBytes == 0) without
-	// touching utxos, but for any DA-bearing tx it computes fee against the
-	// inputs and therefore needs a non-nil utxo map. The Stage C predicate
-	// `required_fee = max(relay_fee_floor, da_fee_floor + da_surcharge)` can
-	// produce a non-zero floor whenever any of the per-byte rates is set, so
-	// the input snapshot must exist whenever the DA path is exercisable
-	// (MinDaFeeRate > 0 OR PolicyDaSurchargePerByte > 0). The CORE_EXT
-	// pre-activation gate also reads the input state, so include it too.
-	// Mirrors the conservative gating in (*Miner).policyNeedsReadonlyUtxoSnapshot
-	// so custom configs cannot accidentally call the policy path with a nil
-	// utxo map and produce confusing "nil utxo set" admission errors instead
-	// of a Stage C predicate verdict.
+	// applyPolicyAgainstState only invokes RejectDaAnchorTxPolicy when the
+	// DA-side floor is configured (MinDaFeeRate > 0) or a per-byte surcharge
+	// applies; for all-zero DA config the rolling relay-fee floor is enforced
+	// by validateFeeFloorLocked instead, which does not need a UTXO snapshot.
+	// The CORE_EXT pre-activation gate reads input state for spend
+	// classification, so it is the third trigger.
+	//
+	// This gate must stay aligned with the helper-call guard in
+	// applyPolicyAgainstState: if either path widens, the other must widen
+	// too, otherwise a config that satisfies one but not the other re-opens
+	// the "nil utxo set" admission failure that this gate was designed to
+	// prevent.
 	return policy.PolicyDaSurchargePerByte > 0 || policy.MinDaFeeRate > 0 || policy.PolicyRejectCoreExtPreActivation
 }
 
@@ -671,20 +670,35 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 			return errors.New(reason)
 		}
 	}
-	currentMin := m.CurrentMinFeeRateSnapshot()
-	reject, _, reason, err := RejectDaAnchorTxPolicy(
-		checked.Tx,
-		utxos,
-		checked.Weight,
-		currentMin,
-		policy.MinDaFeeRate,
-		policy.PolicyDaSurchargePerByte,
-	)
-	if err != nil {
-		return txAdmitRejected(fmt.Sprintf("%s: %v", reason, err))
-	}
-	if reject {
-		return txAdmitRejected(reason)
+	// Stage C DA fee policy: only enter the helper when the DA-side floor
+	// is configured (MinDaFeeRate > 0) or a per-byte surcharge applies.
+	// validateFeeFloorLocked already enforces the rolling relay-fee floor
+	// for every admitted entry — DA or non-DA — so the helper is purely
+	// the DA-half (`max(relay, da_floor + surcharge)`) and recomputing the
+	// relay floor here would only add a snapshot dependency. With both DA
+	// terms zero, RejectDaAnchorTxPolicy would still call computeFeeNoVerify
+	// for any DA-bearing tx because CurrentMinFeeRateSnapshot is floored
+	// to DefaultMempoolMinFeeRate=1; passing utxos=nil from a config that
+	// legitimately omits MinDaFeeRate would surface as "nil utxo set" instead
+	// of a Stage C verdict. Skipping the helper cleanly when there is nothing
+	// for it to enforce keeps relay-fee admission delegated to
+	// validateFeeFloorLocked and matches policyNeedsInputSnapshot's gate.
+	if policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0 {
+		currentMin := m.CurrentMinFeeRateSnapshot()
+		reject, _, reason, err := RejectDaAnchorTxPolicy(
+			checked.Tx,
+			utxos,
+			checked.Weight,
+			currentMin,
+			policy.MinDaFeeRate,
+			policy.PolicyDaSurchargePerByte,
+		)
+		if err != nil {
+			return txAdmitRejected(fmt.Sprintf("%s: %v", reason, err))
+		}
+		if reject {
+			return txAdmitRejected(reason)
+		}
 	}
 	if policy.PolicyRejectCoreExtPreActivation {
 		reject, reason, err := RejectCoreExtTxPreActivation(checked.Tx, utxos, nextHeight, policy.CoreExtProfiles)

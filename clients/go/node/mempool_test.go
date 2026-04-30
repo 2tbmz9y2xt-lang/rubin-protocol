@@ -1140,6 +1140,55 @@ func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
 	}
 }
 
+// TestMempoolAdmitsDaTxUnderAllZeroDaConfigViaRelayFloor pins the wave-3
+// fix for PR #1368: when MempoolConfig leaves the DA-side terms at zero
+// (MinDaFeeRate=0, PolicyDaSurchargePerByte=0) and the CORE_EXT gate is
+// off, a DA-bearing transaction that pays at least the rolling relay-fee
+// floor MUST admit through the public AddTx path, NOT fail with
+// "nil utxo set" because the Stage C helper saw policyUtxos=nil. The
+// rolling relay floor is enforced by validateFeeFloorLocked instead, and
+// applyPolicyAgainstState guards the DA helper call with the same boolean
+// that policyNeedsInputSnapshot uses, so the snapshot gate and helper-call
+// stay in sync.
+//
+// Proof assertion: mp.AddTx returns nil and the entry appears in the
+// mempool. A future edit that removes the DA-helper guard or widens
+// policyNeedsInputSnapshot independently would re-introduce the
+// "nil utxo set" admission path and fail this assertion.
+func TestMempoolAdmitsDaTxUnderAllZeroDaConfigViaRelayFloor(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	// Custom config literal that legitimately omits MinDaFeeRate and
+	// PolicyDaSurchargePerByte (zero defaults) and disables the CORE_EXT
+	// gate. policyNeedsInputSnapshot returns false for this config, so
+	// policyUtxos stays nil; the test proves the DA helper call is now
+	// guarded so the absent snapshot does not cause "nil utxo set".
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MinDaFeeRate:                     0,
+		PolicyDaSurchargePerByte:         0,
+		PolicyRejectCoreExtPreActivation: false,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	// Pay a generous fee well above weight*DefaultMempoolMinFeeRate=1 so
+	// validateFeeFloorLocked admits cleanly. The DA payload contributes
+	// to weight and to feeRateBelowFloor input, which is the only relay
+	// gate; no Stage C DA-side floor applies under all-zero DA config.
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, []byte("0123456789"))
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx for DA tx under all-zero DA config: %v", err)
+	}
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1", got)
+	}
+}
+
 func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
