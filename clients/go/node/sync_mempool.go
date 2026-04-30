@@ -131,7 +131,7 @@ func validateMempoolSnapshotEntry(entry mempoolEntry) error {
 	}
 	if entry.admissionSeq == 0 {
 		return fmt.Errorf("invalid mempool snapshot entry admission_seq for txid %x: seq=0", entry.txid)
-		}
+	}
 	if !validMempoolTxSource(entry.source) {
 		return fmt.Errorf("invalid mempool snapshot entry source for txid %x: source=%q", entry.txid, entry.source)
 	}

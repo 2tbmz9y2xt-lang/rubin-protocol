@@ -363,10 +363,6 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	defer m.mu.Unlock()
 
 	entry := newMempoolEntry(checked, inputs, source)
-	if err := m.validateAdmissionLocked(entry); err != nil {
-		return err
-	}
-
 	return m.addEntryLocked(entry)
 }
 
@@ -704,10 +700,20 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 }
 
 func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
-	// Keep this helper limited to non-capacity checks so callers that
-	// immediately proceed to addEntryLocked do not duplicate the fee-floor
-	// and eviction-plan scan work under the same lock.
-	return m.validateNonCapacityAdmissionLocked(entry)
+	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
+		return err
+	}
+	if err := m.validateFeeFloorLocked(entry); err != nil {
+		return err
+	}
+	_, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
+	if err != nil {
+		return err
+	}
+	if candidateEvicted {
+		return txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering")
+	}
+	return nil
 }
 
 func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error {
