@@ -46,6 +46,7 @@ jobs:
           path: |
             .artifacts/fuzz-stage2/**
             clients/go/consensus/testdata/fuzz/**
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
@@ -76,10 +77,41 @@ jobs:
         env:
           RUST_FUZZ_TIME: ${{ github.event.inputs.rust_fuzz_time || '60' }}
         run: |
+          quote_env_value() {
+            local value="$1"
+            printf "'"
+            printf '%s' "$value" | sed "s/'/'\"'\"'/g"
+            printf "'"
+          }
+
+          write_env_field() {
+            local key="$1"
+            local value="$2"
+            printf '%s=%s\n' "$key" "$(quote_env_value "$value")"
+          }
+
+          RUST_ARTIFACTS_DIR="$GITHUB_WORKSPACE/.artifacts/fuzz-rust"
+          mkdir -p "$RUST_ARTIFACTS_DIR"
           cd clients/rust
           TARGETS=(merkle_determinism retarget_no_panic biguint_roundtrip sighash parse_tx parse_block_bytes compactsize validate_block_basic pow_check compact_shortid parse_htlc parse_vault parse_multisig fork_work block_subsidy covenant_genesis p2p_wire_message p2p_version_payload sig_verify_openssl sig_cache_structural connect_block_inmem da_chunk_hash_verify tx_dep_graph da_payload_commit_verify tx_relay_announce tx_relay_receive)
+          {
+            write_env_field "commit_sha" "${GITHUB_SHA}"
+            write_env_field "workflow_run_id" "${GITHUB_RUN_ID}"
+            write_env_field "workflow_run_attempt" "${GITHUB_RUN_ATTEMPT}"
+            write_env_field "rust_fuzz_time" "${RUST_FUZZ_TIME}"
+            write_env_field "artifact_dir" ".artifacts/fuzz-rust"
+            write_env_field "mutation_policy" "manual-only; ci does not commit, push, regenerate tracked fixtures, or open issues"
+            write_env_field "promotion_docs" "conformance/README.md#fuzz-crash-promotion-manual-only"
+          } > "$RUST_ARTIFACTS_DIR/run-metadata.env"
           STATUS=0
           for target in "${TARGETS[@]}"; do
+            {
+              write_env_field "commit_sha" "${GITHUB_SHA}"
+              write_env_field "target" "${target}"
+              write_env_field "artifacts_path" "clients/rust/fuzz/artifacts/${target}"
+              write_env_field "corpus_path" "clients/rust/fuzz/corpus/${target}"
+              write_env_field "command" "cd clients/rust && cargo fuzz run \"${target}\" -- -max_total_time=\"${RUST_FUZZ_TIME}\""
+            } > "$RUST_ARTIFACTS_DIR/${target}.metadata.env"
             echo "==> fuzzing $target for ${RUST_FUZZ_TIME}s"
             if ! cargo fuzz run "$target" -- -max_total_time="${RUST_FUZZ_TIME}"; then
               STATUS=1
@@ -95,6 +127,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fuzz-rust-${{ github.run_id }}
-          path: clients/rust/fuzz/artifacts/
+          path: |
+            .artifacts/fuzz-rust/**
+            clients/rust/fuzz/artifacts/
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14

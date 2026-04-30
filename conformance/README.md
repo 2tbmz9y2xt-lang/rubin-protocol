@@ -100,3 +100,60 @@ Guard-проверка (CI):
 ```bash
 scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_policy.py
 ```
+
+## Fuzz crash promotion (manual-only)
+
+Nightly fuzz jobs are discovery jobs only. They upload crash artifacts and
+metadata for manual triage; CI MUST NOT commit, push, regenerate fixtures, or
+open issues automatically.
+
+Each fuzz artifact bundle must include enough metadata to reproduce a crash:
+
+- target name;
+- seed, corpus, or crash artifact path;
+- exact local command;
+- commit SHA;
+- workflow run id/attempt when produced by GitHub Actions.
+
+Per-target metadata uses explicit path keys:
+
+- Go metadata includes `corpus_path`, `artifacts_path`, and legacy `seed_path`.
+  The Go fuzz engine stores committed corpus inputs and crash/minimized outputs
+  under the same target directory, so all three keys point to
+  `clients/go/<package>/testdata/fuzz/<FuzzTarget>/`.
+- Rust metadata includes `corpus_path` for committed seed promotion and
+  `artifacts_path` for crash artifacts under `clients/rust/fuzz/artifacts/`.
+
+Manual promotion flow:
+
+1. Download the failed workflow artifact and read its `run-metadata.env` plus the
+   matching `<target>.metadata.env`.
+   Metadata files are shell-quoted dotenv files, so they can be inspected as
+   text or sourced by a local shell without executing command field contents.
+   Go consensus fuzz files are uploaded directly under
+   `clients/go/consensus/testdata/fuzz/**`. Go `node/p2p` fuzz files are in
+   `.artifacts/fuzz-stage2/go-fuzz-testdata.tgz`; extract that archive before
+   following a `clients/go/node/p2p/testdata/fuzz/<FuzzTarget>/` metadata path.
+2. Reproduce the crash at the recorded commit SHA using the recorded command.
+   For Go targets this is the `go test -run=^$ -fuzz=...` command under
+   `clients/go`; for Rust targets this is the `cargo fuzz run ...` command under
+   `clients/rust`.
+3. Dedup before opening or updating an issue: check existing committed fuzz
+   seeds/tests, open issues, and recent nightly failures for the same target and
+   crash signature.
+4. Promote only a reproduced protocol crash. Add the minimized input as a
+   committed regression seed or a focused regression test in the target's normal
+   test surface. Do not promote one-off infrastructure flakes.
+5. Close the issue only after the PR contains either the committed seed/test that
+   fails before the fix and passes after it, or explicit false-positive evidence
+   explaining why no protocol regression exists.
+
+Manual seed destinations:
+
+- Go fuzz seeds: `clients/go/<package>/testdata/fuzz/<FuzzTarget>/`
+- Rust fuzz seeds: `clients/rust/fuzz/corpus/<target>/`. That corpus directory
+  is gitignored by default, so commit selected regression seeds with
+  `git add -f clients/rust/fuzz/corpus/<target>/<seed-file>`.
+
+Fuzz artifact upload alone is not a regression closeout. It is only triage
+evidence until a human reproduction and seed/test promotion decision exists.
