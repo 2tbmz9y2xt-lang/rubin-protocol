@@ -273,7 +273,8 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
 		return
 	}
-	for blockIndex := len(disconnectedBlocks) - 1; blockIndex >= 0; blockIndex-- {
+	// Disconnect helpers append blocks tip-down, matching h_max -> h_min requeue order.
+	for blockIndex := 0; blockIndex < len(disconnectedBlocks); blockIndex++ {
 		txs, err := nonCoinbaseBlockTransactions(disconnectedBlocks[blockIndex])
 		if err != nil {
 			continue
