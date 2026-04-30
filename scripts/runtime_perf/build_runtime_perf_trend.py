@@ -115,10 +115,11 @@ def collect_go_or_rust(
     payload: dict[str, Any],
     metadata: dict[str, str | None],
     trend: dict[str, dict[str, dict[str, list[dict[str, Any]]]]],
-) -> None:
+) -> int:
+    collected = 0
     metrics = payload.get("metrics")
     if not isinstance(metrics, dict):
-        return
+        return collected
     for benchmark, metric_values in metrics.items():
         if not isinstance(metric_values, dict):
             continue
@@ -129,16 +130,19 @@ def collect_go_or_rust(
             trend.setdefault(suite, {}).setdefault(benchmark, {}).setdefault(metric_name, []).append(
                 {"value": float(value), **metadata}
             )
+            collected += 1
+    return collected
 
 
 def collect_combined_load(
     payload: dict[str, Any],
     metadata: dict[str, str | None],
     trend: dict[str, dict[str, dict[str, list[dict[str, Any]]]]],
-) -> None:
+) -> int:
+    collected = 0
     benchmark = payload.get("benchmark")
     if not isinstance(benchmark, str) or not benchmark:
-        return
+        return collected
     for metric_name in DEFAULT_METRICS["combined_load"]:
         value = payload.get(metric_name)
         if value is None:
@@ -146,6 +150,8 @@ def collect_combined_load(
         trend.setdefault("combined_load", {}).setdefault(benchmark, {}).setdefault(metric_name, []).append(
             {"value": float(value), **metadata}
         )
+        collected += 1
+    return collected
 
 
 def build_trend(args: argparse.Namespace) -> dict[str, Any]:
@@ -157,6 +163,7 @@ def build_trend(args: argparse.Namespace) -> dict[str, Any]:
         metadata = run_metadata(args, run_dir)
         suites_present: list[str] = []
         missing_suites: list[str] = []
+        invalid_suites: list[dict[str, str]] = []
 
         for suite, filename in METRIC_FILES.items():
             path = run_dir / filename
@@ -167,17 +174,29 @@ def build_trend(args: argparse.Namespace) -> dict[str, Any]:
             if payload is None:
                 missing_suites.append(suite)
                 continue
-            suites_present.append(suite)
             if suite in {"go", "rust"}:
-                collect_go_or_rust(suite, payload, metadata, trend_samples)
+                collected = collect_go_or_rust(suite, payload, metadata, trend_samples)
             elif suite == "combined_load":
-                collect_combined_load(payload, metadata, trend_samples)
+                collected = collect_combined_load(payload, metadata, trend_samples)
+            else:
+                collected = 0
+            if collected:
+                suites_present.append(suite)
+            else:
+                invalid_suites.append(
+                    {
+                        "suite": suite,
+                        "path": str(path),
+                        "reason": "metric JSON file exists but contains no collectable metric rows",
+                    }
+                )
 
         source_runs.append(
             {
                 **metadata,
                 "suites_present": suites_present,
                 "missing_suites": missing_suites,
+                "invalid_suites": invalid_suites,
             }
         )
 
