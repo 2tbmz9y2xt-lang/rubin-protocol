@@ -5,7 +5,7 @@ import argparse
 import json
 import math
 import statistics
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -68,13 +68,19 @@ DEFAULT_METRICS = {
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def load_json(path: Path) -> dict[str, Any] | None:
+def load_metric_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8", errors="strict"))
+        return None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
+    except json.JSONDecodeError as exc:
+        return None, f"malformed metric JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"metric JSON root is {type(payload).__name__}, expected object"
+    return payload, None
 
 
 def percentile_nearest_rank(values: list[float], percentile: float) -> float | None:
@@ -167,10 +173,16 @@ def build_trend(args: argparse.Namespace) -> dict[str, Any]:
 
         for suite, filename in METRIC_FILES.items():
             path = run_dir / filename
-            try:
-                payload = load_json(path)
-            except json.JSONDecodeError as exc:
-                raise SystemExit(f"ERROR: malformed metric JSON: {path}: {exc}") from exc
+            payload, invalid_reason = load_metric_json(path)
+            if invalid_reason is not None:
+                invalid_suites.append(
+                    {
+                        "suite": suite,
+                        "path": str(path),
+                        "reason": invalid_reason,
+                    }
+                )
+                continue
             if payload is None:
                 missing_suites.append(suite)
                 continue

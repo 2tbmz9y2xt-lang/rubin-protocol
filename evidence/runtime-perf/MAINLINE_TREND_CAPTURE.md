@@ -28,9 +28,9 @@ The script reads existing metric JSON files when present:
 Missing metric files are recorded in `source_runs[*].missing_suites` and do not
 become a regression decision.
 
-Metric JSON files that exist but do not contain any collectable metric rows are
-recorded in `source_runs[*].invalid_suites` and are not listed in
-`suites_present`.
+Metric JSON files that exist but are malformed, have a non-object JSON root, or
+do not contain any collectable metric rows are recorded in
+`source_runs[*].invalid_suites` and are not listed in `suites_present`.
 
 ## Artifact Retention
 
@@ -46,8 +46,8 @@ to reconstruct trend rows by run id, attempt, workflow, ref, SHA, and event.
 
 - `source_runs`: artifact directory plus GitHub run metadata.
 - `source_runs[*].missing_suites`: metric JSON files that were absent.
-- `source_runs[*].invalid_suites`: metric JSON files that were present but did
-  not contain collectable metric rows.
+- `source_runs[*].invalid_suites`: metric JSON files that were present but
+  malformed, non-object, or without collectable metric rows.
 - `low_noise_benchmark_candidates`: the documented candidate set for future
   low-noise analysis.
 - `required_trend_fields`: `sample_count`, `median`, `p90`, `variance`,
