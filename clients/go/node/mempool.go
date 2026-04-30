@@ -331,7 +331,7 @@ func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
 
 // addTxWithSource validates and admits a transaction while recording the
 // caller-declared origin in the mempool entry. Source provenance does not
-// grant admission priority or bypasses; invalid source values reject.
+// grant admission priority or bypass; invalid source values reject.
 func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retErr error) {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
