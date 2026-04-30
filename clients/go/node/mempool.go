@@ -330,8 +330,8 @@ func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
 }
 
 // addTxWithSource validates and admits a transaction while recording the
-// caller-declared origin in the mempool entry. The source is metadata only in
-// this foundation slice; it must not influence admission or eviction behavior.
+// caller-declared origin in the mempool entry. Source provenance does not
+// grant admission priority or bypasses; invalid source values reject.
 func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retErr error) {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
@@ -495,6 +495,18 @@ func (m *Mempool) EvictConfirmed(blockBytes []byte) error {
 func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
 	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
 		for _, txid := range block.Txids {
+			m.removeTxLocked(txid)
+		}
+		m.decayMinFeeRateAfterConnectedBlockLocked()
+	})
+}
+
+func (m *Mempool) applyConnectedBlockParsed(block *consensus.ParsedBlock) error {
+	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
+		for _, txid := range block.Txids {
+			m.removeTxLocked(txid)
+		}
+		for txid := range m.collectConflictsLocked(block) {
 			m.removeTxLocked(txid)
 		}
 		m.decayMinFeeRateAfterConnectedBlockLocked()
@@ -1238,10 +1250,8 @@ func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {
 }
 
 func compareEvictionFeeRate(a *mempoolEntry, b *mempoolEntry) int {
-	if a == nil || b == nil {
-		return 0
-	}
-	return compareFeeRateWeightValues(a.fee, a.weight, b.fee, b.weight)
+	// Eviction and miner selection intentionally share the fee/weight axis.
+	return compareFeeRate(a, b)
 }
 
 func compareFeeRateWeightValues(feeA uint64, weightA uint64, feeB uint64, weightB uint64) int {

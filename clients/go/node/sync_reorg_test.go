@@ -588,6 +588,98 @@ func TestApplyBlockWithReorgRequeuesDisconnectedTransactionsIntoMempool(t *testi
 	}
 }
 
+func TestApplyBlockDecaysMempoolFloorAfterConflictRemoval(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+
+	sourceKP := mustReorgMLDSA87Keypair(t)
+	destKP := mustReorgMLDSA87Keypair(t)
+	sourceAddress := consensus.P2PKCovenantDataForPubkey(sourceKP.PubkeyBytes())
+	destAddress := consensus.P2PKCovenantDataForPubkey(destKP.PubkeyBytes())
+
+	prevHash := devnetGenesisBlockHash
+	alreadyGenerated := uint64(0)
+	var sourceOutpoint consensus.Outpoint
+	for height := uint64(1); height <= 100; height++ {
+		subsidy := consensus.BlockSubsidy(height, alreadyGenerated)
+		coinbase := reorgTestCoinbaseForAddress(t, height, subsidy, sourceAddress)
+		block := buildSingleTxBlock(t, prevHash, target, height+1, coinbase)
+		summary, err := engine.ApplyBlock(block, nil)
+		if err != nil {
+			t.Fatalf("ApplyBlock(height=%d): %v", height, err)
+		}
+		if height == 1 {
+			_, coinbaseTxid, _, _, err := consensus.ParseTx(coinbase)
+			if err != nil {
+				t.Fatalf("ParseTx(coinbase height1): %v", err)
+			}
+			sourceOutpoint = consensus.Outpoint{Txid: coinbaseTxid, Vout: 0}
+		}
+		prevHash = summary.BlockHash
+		alreadyGenerated += subsidy
+	}
+
+	blockTx := mustBuildSignedTransferTxForSyncTest(
+		t,
+		engine.chainState.Utxos,
+		[]consensus.Outpoint{sourceOutpoint},
+		700,
+		100_000,
+		1,
+		sourceKP,
+		sourceAddress,
+		destAddress,
+	)
+	conflictingTx := mustBuildSignedTransferTxForSyncTest(
+		t,
+		engine.chainState.Utxos,
+		[]consensus.Outpoint{sourceOutpoint},
+		690,
+		100_000,
+		2,
+		sourceKP,
+		sourceAddress,
+		destAddress,
+	)
+	mempool, err := NewMempoolWithConfig(engine.chainState, store, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 10,
+		MaxBytes:        len(conflictingTx),
+	})
+	if err != nil {
+		t.Fatalf("NewMempoolWithConfig: %v", err)
+	}
+	engine.SetMempool(mempool)
+	if err := mempool.AddTx(conflictingTx); err != nil {
+		t.Fatalf("AddTx(conflicting): %v", err)
+	}
+	mempool.currentMinFeeRate = 8
+	if mempool.usedBytes < mempool.effectiveLowWaterBytesLocked() {
+		t.Fatalf("test setup usedBytes=%d below lowWater=%d before block apply", mempool.usedBytes, mempool.effectiveLowWaterBytesLocked())
+	}
+
+	_, _, blockWtxid, _, err := consensus.ParseTx(blockTx)
+	if err != nil {
+		t.Fatalf("ParseTx(blockTx): %v", err)
+	}
+	subsidy := consensus.BlockSubsidy(101, alreadyGenerated)
+	block := buildMultiTxBlock(
+		t,
+		prevHash,
+		target,
+		202,
+		reorgTestCoinbaseForWtxids(t, 101, subsidy+100_000, sourceAddress, [][32]byte{{}, blockWtxid}),
+		blockTx,
+	)
+	if _, err := engine.ApplyBlock(block, nil); err != nil {
+		t.Fatalf("ApplyBlock(conflicting connected block): %v", err)
+	}
+	if got := mempool.Len(); got != 0 {
+		t.Fatalf("mempool len after conflict removal=%d, want 0", got)
+	}
+	if got := mempool.currentMinFeeRate; got != 4 {
+		t.Fatalf("currentMinFeeRate after connected block conflict removal=%d, want 4", got)
+	}
+}
+
 type countingRotationProvider struct {
 	suiteID    uint8
 	spendCalls int
