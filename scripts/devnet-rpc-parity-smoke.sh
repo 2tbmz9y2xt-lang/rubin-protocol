@@ -21,6 +21,7 @@ KEYGEN_JSON="${TMP_ROOT}/key_material.json"
 
 GO_RPC_ADDR="${GO_RPC_ADDR:-127.0.0.1:0}"
 RUST_RPC_ADDR="${RUST_RPC_ADDR:-127.0.0.1:0}"
+DETERMINISTIC_TX_FEE=10000
 
 PIDS=()
 
@@ -265,8 +266,12 @@ GO_TX_HEX="$("${GO_TXGEN_BIN}" \
   --from-key "${FROM_DER_HEX}" \
   --to-key "${TO_ADDRESS_HEX}" \
   --amount 1 \
-  --fee 1 \
+  --fee "${DETERMINISTIC_TX_FEE}" \
   --submit-to "${GO_RPC_ADDR}")"
+if [[ -z "${GO_TX_HEX}" ]]; then
+  echo "go txgen produced empty tx hex" >&2
+  exit 1
+fi
 
 echo "Submitting deterministic tx against Rust RPC"
 RUST_TX_HEX="$("${GO_TXGEN_BIN}" \
@@ -274,8 +279,12 @@ RUST_TX_HEX="$("${GO_TXGEN_BIN}" \
   --from-key "${FROM_DER_HEX}" \
   --to-key "${TO_ADDRESS_HEX}" \
   --amount 1 \
-  --fee 1 \
+  --fee "${DETERMINISTIC_TX_FEE}" \
   --submit-to "${RUST_RPC_ADDR}")"
+if [[ -z "${RUST_TX_HEX}" ]]; then
+  echo "rust txgen produced empty tx hex" >&2
+  exit 1
+fi
 
 check_metrics "${GO_RPC_ADDR}"
 check_metrics "${RUST_RPC_ADDR}"
