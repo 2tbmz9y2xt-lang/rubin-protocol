@@ -52,3 +52,18 @@ the project wants it later, is:
 2. pick only the low-noise subset of benchmarks;
 3. define soft thresholds per benchmark family;
 4. keep threshold breaches advisory first, not merge-blocking.
+
+## Mainline trend capture
+
+`Q-PERF-MAINLINE-TREND-CAPTURE-01` adds reconstructable trend artifacts for
+future low-noise calibration:
+
+- `artifacts/runtime-perf/trend.json`
+- `artifacts/runtime-perf/trend.md`
+
+The schema and selected low-noise candidate list are documented in:
+
+- `evidence/runtime-perf/MAINLINE_TREND_CAPTURE.md`
+
+This does not change the current policy: runtime-perf remains informational only
+and does not define hard regression thresholds.
