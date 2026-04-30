@@ -185,6 +185,9 @@ func defaultMempoolLowWaterBytes(maxBytes int) int {
 	}
 	lowWater := (maxBytes/mempoolLowWaterDenominator)*mempoolLowWaterNumerator +
 		((maxBytes % mempoolLowWaterDenominator) * mempoolLowWaterNumerator / mempoolLowWaterDenominator)
+	if lowWater == 0 {
+		return 1
+	}
 	return lowWater
 }
 
@@ -1216,11 +1219,7 @@ func entryFloorRate(entry *mempoolEntry) (uint64, bool) {
 	if entry == nil || entry.weight == 0 {
 		return 0, false
 	}
-	floor := entry.fee / entry.weight
-	if entry.fee%entry.weight != 0 {
-		floor++
-	}
-	return floor, true
+	return entry.fee / entry.weight, true
 }
 
 func saturatingAddMinRelayFeeStep(v uint64) uint64 {

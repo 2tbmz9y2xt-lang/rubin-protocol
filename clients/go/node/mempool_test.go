@@ -376,7 +376,8 @@ func TestDefaultMempoolLowWaterBytes(t *testing.T) {
 	}{
 		{name: "zero", maxBytes: 0, want: 0},
 		{name: "negative", maxBytes: -1, want: 0},
-		{name: "one", maxBytes: 1, want: 0},
+		{name: "one", maxBytes: 1, want: 1},
+		{name: "small", maxBytes: 9, want: 8},
 		{name: "ten", maxBytes: 10, want: 9},
 		{name: "remainder", maxBytes: 11, want: 9},
 	} {
@@ -533,6 +534,32 @@ func TestMempoolCapacityPlanRejectsInvalidExistingMetadata(t *testing.T) {
 				t.Fatalf("expected %q rejection, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestMempoolEntryFloorRateUsesSatisfiableFloor(t *testing.T) {
+	entry := &mempoolEntry{
+		txid:   [32]byte{0x71},
+		fee:    3,
+		weight: 2,
+		size:   1,
+	}
+
+	floor, ok := entryFloorRate(entry)
+	if !ok {
+		t.Fatal("entryFloorRate returned !ok for valid entry")
+	}
+	if floor != 1 {
+		t.Fatalf("entryFloorRate=%d, want 1 for fee=3 weight=2", floor)
+	}
+	if feeRateBelowFloor(entry.fee, entry.weight, floor) {
+		t.Fatalf("entry is below its satisfiable floor: fee=%d weight=%d floor=%d", entry.fee, entry.weight, floor)
+	}
+	if !feeRateBelowFloor(entry.fee, entry.weight, floor+DefaultMempoolMinFeeRate) {
+		t.Fatalf("entry unexpectedly satisfies raised floor: fee=%d weight=%d floor=%d", entry.fee, entry.weight, floor+DefaultMempoolMinFeeRate)
+	}
+	if floor, ok := entryFloorRate(&mempoolEntry{txid: [32]byte{0x72}, fee: 3}); ok || floor != 0 {
+		t.Fatalf("zero-weight entryFloorRate=(%d,%v), want (0,false)", floor, ok)
 	}
 }
 
@@ -1707,6 +1734,35 @@ func TestMempoolByteCapEvictsToLowWater(t *testing.T) {
 	}
 	if !mp.Contains(txID(t, txHigh)) || !mp.Contains(txID(t, txBest)) {
 		t.Fatal("byte-pressure low-water trim removed expected survivors")
+	}
+}
+
+func TestMempoolSmallByteCapKeepsFittingCandidateAfterLowWaterTrim(t *testing.T) {
+	mp := &Mempool{maxTxs: 10, maxBytes: 2}
+	for _, entry := range []*mempoolEntry{
+		{txid: [32]byte{0x61}, fee: 1, weight: 1, size: 1},
+		{txid: [32]byte{0x62}, fee: 1, weight: 1, size: 1},
+	} {
+		if err := mp.addEntryLocked(entry); err != nil {
+			t.Fatalf("addEntryLocked(resident %x): %v", entry.txid, err)
+		}
+	}
+
+	candidate := &mempoolEntry{txid: [32]byte{0x63}, fee: 10, weight: 1, size: 1}
+	if err := mp.addEntryLocked(candidate); err != nil {
+		t.Fatalf("addEntryLocked(candidate): %v", err)
+	}
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1 after tiny-cap low-water trim", got)
+	}
+	if got := mp.usedBytes; got != 1 {
+		t.Fatalf("usedBytes=%d, want 1 after tiny-cap low-water trim", got)
+	}
+	if !mp.Contains(candidate.txid) {
+		t.Fatal("candidate fitting the hard byte cap was not admitted")
+	}
+	if mp.Contains([32]byte{0x61}) || mp.Contains([32]byte{0x62}) {
+		t.Fatal("tiny-cap low-water trim kept lower-priority residents")
 	}
 }
 
