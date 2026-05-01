@@ -1209,6 +1209,24 @@ func TestMempoolPartialConfigBackfillsMinDaFeeRateForLowFeeDaCommit(t *testing.T
 	}
 }
 
+func TestMempoolConfigZeroMinDaFeeRateMeansDefault(t *testing.T) {
+	st, _ := testSpendableChainState(nil, nil)
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MinDaFeeRate:             0,
+		PolicyDaSurchargePerByte: 2,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if got := mp.policy.MinDaFeeRate; got != DefaultMinDaFeeRate {
+		t.Fatalf("MinDaFeeRate=%d, want DefaultMinDaFeeRate=%d", got, DefaultMinDaFeeRate)
+	}
+	if got := mp.policy.PolicyDaSurchargePerByte; got != 2 {
+		t.Fatalf("PolicyDaSurchargePerByte=%d, want 2", got)
+	}
+}
+
 // TestMempoolSetCurrentMinFeeRateForTestRoundTrips pins the test-only
 // rolling-floor setter contract: values at or above
 // DefaultMempoolMinFeeRate are observed exactly by
@@ -1684,8 +1702,11 @@ func TestMempoolPolicySkipsDaHelperForNonDaCheckedTx(t *testing.T) {
 // admit path.
 //
 // Proof assertion: for each (config, tx-DA-flag) pair, the function
-// returns the documented value. Adding a new policy lane that reads
-// input state without updating this matrix breaks the build.
+// returns the documented value. This direct helper matrix uses raw
+// MempoolConfig literals; NewMempoolWithConfig separately normalizes a
+// zero MinDaFeeRate to DefaultMinDaFeeRate for public mempool callers.
+// Adding a new policy lane that reads input state without updating this
+// matrix breaks the build.
 func TestPolicyNeedsInputSnapshotForTxMatrix(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)

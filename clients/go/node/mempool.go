@@ -96,8 +96,10 @@ type MempoolConfig struct {
 	PolicyDaSurchargePerByte uint64
 	// MinDaFeeRate is the spec-side per-byte DA fee floor
 	// (POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C `min_da_fee_rate`,
-	// default 1). Setting it to 0 disables only the spec floor; the
-	// surcharge term still applies when PolicyDaSurchargePerByte > 0.
+	// default 1). NewMempoolWithConfig treats 0 as omitted and normalizes
+	// it to DefaultMinDaFeeRate; callers cannot disable the spec floor
+	// through the public mempool config. Direct policy-helper tests may
+	// still pass 0 to isolate surcharge-only helper semantics.
 	MinDaFeeRate                         uint64
 	PolicyRejectNonCoinbaseAnchorOutputs bool
 	PolicyRejectCoreExtPreActivation     bool
@@ -656,9 +658,10 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 //     `RejectDaAnchorTxPolicy`, so non-DA tx never consume the snapshot or
 //     enter the DA helper.
 //
-// All-zero DA config + non-CORE_EXT routing relies on
+// A raw all-zero DA policy snapshot + non-CORE_EXT routing relies on
 // `validateFeeFloorLocked` to enforce the rolling relay-fee floor; that
-// path does not need a UTXO snapshot.
+// path does not need a UTXO snapshot. Public NewMempoolWithConfig callers
+// get DefaultMinDaFeeRate when MinDaFeeRate is left at zero.
 //
 // The function takes the parsed `*consensus.Tx` (not the post-validation
 // `*CheckedTransaction`) on purpose: the caller must build the snapshot
