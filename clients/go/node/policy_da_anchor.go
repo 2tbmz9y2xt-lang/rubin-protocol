@@ -167,3 +167,11 @@ func mulU64NoOverflow(a uint64, b uint64) (uint64, error) {
 	}
 	return a * b, nil
 }
+
+func addU64NoOverflow(dst *uint64, value uint64) error {
+	if value > ^uint64(0)-*dst {
+		return errors.New("u64 overflow")
+	}
+	*dst += value
+	return nil
+}

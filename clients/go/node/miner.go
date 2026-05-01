@@ -387,14 +387,6 @@ func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress
 	return finalizeCoinbaseWeight(strippedSize, witnessSize, daSize)
 }
 
-func addU64NoOverflow(dst *uint64, value uint64) error {
-	if value > math.MaxUint64-*dst {
-		return errors.New("u64 overflow")
-	}
-	*dst += value
-	return nil
-}
-
 func addCoinbaseBaseSize(dst *uint64, values ...uint64) error {
 	for _, value := range values {
 		if err := addU64NoOverflow(dst, value); err != nil {
