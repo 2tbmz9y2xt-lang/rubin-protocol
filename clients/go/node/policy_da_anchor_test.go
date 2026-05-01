@@ -78,11 +78,11 @@ func nonDaTestTx(t *testing.T, marker byte, inValue uint64, feePaid uint64) (*co
 
 // Hostile matrix #1 + matrix R2#2 + accepted_cases p3:
 // PolicyDaSurchargePerByte=0 must NOT bypass min_da_fee_rate.
-// Old surcharge-only path returned non-reject on this fee level; new helper
-// must reject because fee < da_fee_floor.
+// Disable the relay floor so the test is fail-sensitive to da_fee_floor
+// itself, not to max(relay_fee_floor, da_required_fee) selecting relay.
 func TestRejectDaAnchorTxPolicy_ZeroSurchargeStillEnforcesDaFloor(t *testing.T) {
 	tx, utxos, _ := daTestTx(t, 0x10, 100, 0 /* fee */, 10 /* da bytes */)
-	const currentMin = uint64(1)
+	const currentMin = uint64(0)
 	const minDaFee = uint64(1)
 	const surcharge = uint64(0)
 	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
@@ -95,24 +95,48 @@ func TestRejectDaAnchorTxPolicy_ZeroSurchargeStillEnforcesDaFloor(t *testing.T) 
 	if !reject {
 		t.Fatalf("expected reject: zero surcharge must not bypass DA floor; reason=%q", reason)
 	}
-	if !strings.Contains(reason, "DA fee below Stage C floor") {
-		t.Fatalf("expected Stage C reject reason; got %q", reason)
+	for _, want := range []string{
+		"DA fee below Stage C floor",
+		"required_fee=10",
+		"relay_fee_floor=0",
+		"da_fee_floor=10",
+		"da_surcharge=0",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason=%q missing expected substring %q", reason, want)
+		}
 	}
 }
 
 // accepted_cases p4: min_da_fee_rate=0 still enforces surcharge when
 // PolicyDaSurchargePerByte > 0.
+// Disable the relay floor so the reject proof is fail-sensitive to
+// da_surcharge itself.
 func TestRejectDaAnchorTxPolicy_ZeroMinDaFeeRateStillEnforcesSurcharge(t *testing.T) {
 	tx, utxos, _ := daTestTx(t, 0x11, 100, 5 /* fee */, 10 /* da bytes */)
-	const currentMin = uint64(1)
+	const currentMin = uint64(0)
 	const minDaFee = uint64(0)
 	const surcharge = uint64(2) // da_required = 10 * 2 = 20; fee=5 < 20 → reject
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
+	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
+	if daBytes != 10 {
+		t.Fatalf("daBytes=%d want=10", daBytes)
+	}
 	if !reject {
 		t.Fatalf("expected reject: surcharge floor not satisfied; reason=%q", reason)
+	}
+	for _, want := range []string{
+		"DA fee below Stage C floor",
+		"required_fee=20",
+		"relay_fee_floor=0",
+		"da_fee_floor=0",
+		"da_surcharge=20",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason=%q missing expected substring %q", reason, want)
+		}
 	}
 }
 
