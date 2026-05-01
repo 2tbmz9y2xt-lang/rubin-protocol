@@ -81,11 +81,11 @@ func nonDaTestTx(t *testing.T, marker byte, inValue uint64, feePaid uint64) (*co
 // Old surcharge-only path returned non-reject on this fee level; new helper
 // must reject because fee < da_fee_floor.
 func TestRejectDaAnchorTxPolicy_ZeroSurchargeStillEnforcesDaFloor(t *testing.T) {
-	tx, utxos, weight := daTestTx(t, 0x10, 100, 0 /* fee */, 10 /* da bytes */)
+	tx, utxos, _ := daTestTx(t, 0x10, 100, 0 /* fee */, 10 /* da bytes */)
 	const currentMin = uint64(1)
 	const minDaFee = uint64(1)
 	const surcharge = uint64(0)
-	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, currentMin, minDaFee, surcharge)
+	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -103,11 +103,11 @@ func TestRejectDaAnchorTxPolicy_ZeroSurchargeStillEnforcesDaFloor(t *testing.T) 
 // accepted_cases p4: min_da_fee_rate=0 still enforces surcharge when
 // PolicyDaSurchargePerByte > 0.
 func TestRejectDaAnchorTxPolicy_ZeroMinDaFeeRateStillEnforcesSurcharge(t *testing.T) {
-	tx, utxos, weight := daTestTx(t, 0x11, 100, 5 /* fee */, 10 /* da bytes */)
+	tx, utxos, _ := daTestTx(t, 0x11, 100, 5 /* fee */, 10 /* da bytes */)
 	const currentMin = uint64(1)
 	const minDaFee = uint64(0)
 	const surcharge = uint64(2) // da_required = 10 * 2 = 20; fee=5 < 20 → reject
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, currentMin, minDaFee, surcharge)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestRejectDaAnchorTxPolicy_RelayFloorDominanceSelectsRelay(t *testing.T) {
 	const currentMin = uint64(10)
 	const minDaFee = uint64(1)
 	const surcharge = uint64(0)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, currentMin, minDaFee, surcharge)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -150,11 +150,11 @@ func TestRejectDaAnchorTxPolicy_RelayFloorDominanceSelectsRelay(t *testing.T) {
 func TestRejectDaAnchorTxPolicy_DaFloorDominanceSelectsDa(t *testing.T) {
 	// Big payload, small weight: choose currentMin=1, minDaFee=1000,
 	// surcharge=0. Payload=10 -> da_required=10000. weight*1 << 10000.
-	tx, utxos, weight := daTestTx(t, 0x13, 1<<32, 9999, 10)
+	tx, utxos, _ := daTestTx(t, 0x13, 1<<32, 9999, 10)
 	const currentMin = uint64(1)
 	const minDaFee = uint64(1000)
 	const surcharge = uint64(0)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, currentMin, minDaFee, surcharge)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -177,8 +177,8 @@ func TestRejectDaAnchorTxPolicy_BoundaryEqualAdmitsAndOneBelowRejects(t *testing
 	required := daBytes * (minDaFee + surcharge) // = 70
 
 	// fee == required must admit.
-	txOK, utxosOK, weightOK := daTestTx(t, 0x14, 1<<20, required, int(daBytes))
-	reject, _, reason, err := RejectDaAnchorTxPolicy(txOK, utxosOK, weightOK, currentMin, minDaFee, surcharge)
+	txOK, utxosOK, _ := daTestTx(t, 0x14, 1<<20, required, int(daBytes))
+	reject, _, reason, err := RejectDaAnchorTxPolicy(txOK, utxosOK, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -187,8 +187,8 @@ func TestRejectDaAnchorTxPolicy_BoundaryEqualAdmitsAndOneBelowRejects(t *testing
 	}
 
 	// fee == required - 1 must reject.
-	txBad, utxosBad, weightBad := daTestTx(t, 0x15, 1<<20, required-1, int(daBytes))
-	reject2, _, reason2, err2 := RejectDaAnchorTxPolicy(txBad, utxosBad, weightBad, currentMin, minDaFee, surcharge)
+	txBad, utxosBad, _ := daTestTx(t, 0x15, 1<<20, required-1, int(daBytes))
+	reject2, _, reason2, err2 := RejectDaAnchorTxPolicy(txBad, utxosBad, currentMin, minDaFee, surcharge)
 	if err2 != nil {
 		t.Fatalf("unexpected err: %v", err2)
 	}
@@ -200,11 +200,11 @@ func TestRejectDaAnchorTxPolicy_BoundaryEqualAdmitsAndOneBelowRejects(t *testing
 // Non-DA tx must not be charged DA-specific floor/surcharge by Stage C.
 // false_positive p2 + accepted_cases p5.
 func TestRejectDaAnchorTxPolicy_NonDaTxNotCharged(t *testing.T) {
-	tx, utxos, weight := nonDaTestTx(t, 0x16, 100, 0)
+	tx, utxos, _ := nonDaTestTx(t, 0x16, 100, 0)
 	const currentMin = uint64(0)  // no relay floor
 	const minDaFee = uint64(1000) // would dominate if applied
 	const surcharge = uint64(1000)
-	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, currentMin, minDaFee, surcharge)
+	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -219,11 +219,11 @@ func TestRejectDaAnchorTxPolicy_NonDaTxNotCharged(t *testing.T) {
 // Hostile matrix #5: overflow in any term must reject fail-closed,
 // not silently fall through with a zero floor.
 func TestRejectDaAnchorTxPolicy_RelayFloorOverflowFailsClosed(t *testing.T) {
-	tx, utxos, weight := daTestTx(t, 0x17, 100, 0, 10)
-	_ = weight
-	// weight ~tens-of-bytes; force overflow via extreme currentMin.
+	tx, utxos, _ := daTestTx(t, 0x17, 100, 0, 10)
+	// weight is recomputed internally by RejectDaAnchorTxPolicy from tx;
+	// pairing it with currentMin=^uint64(0) overflows the multiplication.
 	const currentMin = ^uint64(0)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, 1<<33, currentMin, 1, 0)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, 1, 0)
 	if !reject {
 		t.Fatalf("expected reject on overflow; reason=%q err=%v", reason, err)
 	}
@@ -236,12 +236,12 @@ func TestRejectDaAnchorTxPolicy_RelayFloorOverflowFailsClosed(t *testing.T) {
 }
 
 func TestRejectDaAnchorTxPolicy_DaRequiredAdditionOverflowFailsClosed(t *testing.T) {
-	tx, utxos, weight := daTestTx(t, 0x18, 100, 0, 1)
+	tx, utxos, _ := daTestTx(t, 0x18, 100, 0, 1)
 	// daBytes=1; pick minDaFee and surcharge so each multiplication fits
 	// uint64 but their sum overflows.
 	const minDaFee = uint64(1<<63) | 1
 	const surcharge = uint64(1<<63) | 1
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, 1, minDaFee, surcharge)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, 1, minDaFee, surcharge)
 	if !reject {
 		t.Fatalf("expected reject on da_required addition overflow; reason=%q", reason)
 	}
@@ -258,12 +258,12 @@ func TestRejectDaAnchorTxPolicy_DaRequiredAdditionOverflowFailsClosed(t *testing
 // so a future patch that only guards the relay-floor or addition branches
 // cannot silently ship.
 func TestRejectDaAnchorTxPolicy_DaFloorMultiplicationOverflowFailsClosed(t *testing.T) {
-	tx, utxos, weight := daTestTx(t, 0x1B, 100, 0, 4)
+	tx, utxos, _ := daTestTx(t, 0x1B, 100, 0, 4)
 	// daBytes=4; minDaFee=^uint64(0) overflows daBytes*minDaFee while
 	// relayFloor (weight*currentMin) does not. surcharge=0 so the helper
 	// reaches the daFloor multiplication branch before any addition.
 	const minDaFee = ^uint64(0)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, 1, minDaFee, 0)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, 1, minDaFee, 0)
 	if !reject {
 		t.Fatalf("expected reject on da_fee_floor multiplication overflow; reason=%q", reason)
 	}
@@ -279,11 +279,11 @@ func TestRejectDaAnchorTxPolicy_DaFloorMultiplicationOverflowFailsClosed(t *test
 // independently. minDaFee=0 lets the daFloor multiplication succeed (= 0);
 // the helper must still reject when daSurcharge multiplication overflows.
 func TestRejectDaAnchorTxPolicy_DaSurchargeMultiplicationOverflowFailsClosed(t *testing.T) {
-	tx, utxos, weight := daTestTx(t, 0x1C, 100, 0, 4)
+	tx, utxos, _ := daTestTx(t, 0x1C, 100, 0, 4)
 	// daBytes=4; surcharge=^uint64(0) overflows on multiplication while
 	// daFloor (daBytes*0) is zero.
 	const surcharge = ^uint64(0)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, 1, 0, surcharge)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, 1, 0, surcharge)
 	if !reject {
 		t.Fatalf("expected reject on da_surcharge multiplication overflow; reason=%q", reason)
 	}
@@ -297,8 +297,8 @@ func TestRejectDaAnchorTxPolicy_DaSurchargeMultiplicationOverflowFailsClosed(t *
 
 // All-zero policy + non-DA tx: helper short-circuits without computing fee.
 func TestRejectDaAnchorTxPolicy_AllZeroNonDaShortCircuits(t *testing.T) {
-	tx, utxos, weight := nonDaTestTx(t, 0x19, 50, 0)
-	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, 0, 0, 0)
+	tx, utxos, _ := nonDaTestTx(t, 0x19, 50, 0)
+	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, 0, 0, 0)
 	if err != nil || reject {
 		t.Fatalf("expected admit (all-zero policy + non-DA); reject=%v err=%v reason=%q", reject, err, reason)
 	}
@@ -314,8 +314,8 @@ func TestRejectDaAnchorTxPolicy_AllZeroNonDaShortCircuits(t *testing.T) {
 func TestRejectDaAnchorTxPolicy_SurchargeOnlyRegressionCovered(t *testing.T) {
 	// Old behavior reproduction: surcharge-only check would admit fee==daBytes*1.
 	// New helper with minDaFee=1 gates on da_payload_len*(1+1)=20; fee=10 must reject.
-	tx, utxos, weight := daTestTx(t, 0x1A, 100, 10, 10)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, weight, 0, 1, 1)
+	tx, utxos, _ := daTestTx(t, 0x1A, 100, 10, 10)
+	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, 0, 1, 1)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestRejectDaAnchorTxPolicy_SurchargeOnlyRegressionCovered(t *testing.T) {
 
 // nil tx guard.
 func TestRejectDaAnchorTxPolicy_NilTxRejects(t *testing.T) {
-	reject, _, _, err := RejectDaAnchorTxPolicy(nil, nil, 0, 0, 0, 0)
+	reject, _, _, err := RejectDaAnchorTxPolicy(nil, nil, 0, 0, 0)
 	if !reject || err == nil {
 		t.Fatalf("expected nil tx rejection")
 	}

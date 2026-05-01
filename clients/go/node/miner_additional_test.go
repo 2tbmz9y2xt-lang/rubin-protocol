@@ -530,7 +530,7 @@ func TestMinerRejectCandidateUsesCurrentMempoolMinFeeRateFnProvider(t *testing.T
 	}
 	tx, utxos, _ := daTestTx(t, 0x40, 1_000_000, feePaid, 10)
 
-	reject, _, err := miner.rejectCandidate(tx, weight, utxos, 1, 0)
+	reject, _, err := miner.rejectCandidate(tx, utxos, 1, 0)
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
@@ -568,7 +568,7 @@ func TestMinerRejectCandidateFallbackUsesStaticCurrentMempoolMinFeeRate(t *testi
 	}
 	tx, utxos, _ := daTestTx(t, 0x41, 1_000_000, feePaid, 10)
 
-	reject, _, err := miner.rejectCandidate(tx, weight, utxos, 1, 0)
+	reject, _, err := miner.rejectCandidate(tx, utxos, 1, 0)
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate(t *testing.T) {
 		t.Fatalf("test setup: weight=0")
 	}
 
-	reject, _, err := miner.rejectCandidate(tx, weight, utxos, 1, 0)
+	reject, _, err := miner.rejectCandidate(tx, utxos, 1, 0)
 	if err != nil {
 		t.Fatalf("rejectCandidate: %v", err)
 	}

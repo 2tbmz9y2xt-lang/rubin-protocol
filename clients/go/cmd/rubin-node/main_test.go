@@ -1932,14 +1932,36 @@ func TestRunMineBlocksFailsWhenMinerInitFails(t *testing.T) {
 	}
 }
 
+// offlineMinerSentinelFloor is a distinctive rolling-floor value injected
+// into the mempool BEFORE the offline-mining miner is constructed in
+// TestRunMineBlocksPassesMineAddressToMiner. Picked far above
+// DefaultMempoolMinFeeRate=1 and not equal to any other floor value the
+// mempool might compute organically (DefaultMempoolMaxBytes, etc.) so
+// `captured.CurrentMempoolMinFeeRateFn() == offlineMinerSentinelFloor`
+// is a deterministic proof of liveness — a constant closure returning
+// any other value would fail the check.
+const offlineMinerSentinelFloor uint64 = 0xCAFEF00DDEAD
+
 func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
-	prev := newMinerFn
+	prevMiner := newMinerFn
+	prevMempool := newMempoolFn
 	var captured node.MinerConfig
 	newMinerFn = func(_ *node.ChainState, _ *node.BlockStore, _ *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
 		captured = cfg
 		return nil, errors.New("boom")
 	}
-	t.Cleanup(func() { newMinerFn = prev })
+	newMempoolFn = func(st *node.ChainState, store *node.BlockStore, chainID [32]byte, cfg node.MempoolConfig) (*node.Mempool, error) {
+		mp, err := node.NewMempoolWithConfig(st, store, chainID, cfg)
+		if err != nil {
+			return nil, err
+		}
+		mp.SetCurrentMinFeeRateForTest(offlineMinerSentinelFloor)
+		return mp, nil
+	}
+	t.Cleanup(func() {
+		newMinerFn = prevMiner
+		newMempoolFn = prevMempool
+	})
 
 	dir := t.TempDir()
 	var out bytes.Buffer
@@ -1959,17 +1981,25 @@ func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
 		t.Fatalf("mine address suite=%d, want %d", captured.MineAddress[0], consensus.SUITE_ID_ML_DSA_87)
 	}
 	// Pin T-D production wiring at the offline-mining miner instantiation
-	// site (cmd/rubin-node/main.go around the `if *mineBlocks > 0` block):
-	// the miner template MUST receive a non-nil
-	// CurrentMempoolMinFeeRateFn so relay_fee_floor reads the rolling
-	// local floor exposed by the live mempool, not the static baseline.
-	// A future edit that drops this wiring would let the miner template
-	// admit DA candidates the mempool admit path would reject.
+	// site (cmd/rubin-node/main.go around the `if *mineBlocks > 0` block).
+	// The miner template MUST receive a non-nil CurrentMempoolMinFeeRateFn
+	// so relay_fee_floor reads the rolling local floor exposed by the live
+	// mempool, not the static baseline. A future edit that drops this
+	// wiring would let the miner template admit DA candidates the mempool
+	// admit path would reject.
+	//
+	// The captured non-nil + >= DefaultMempoolMinFeeRate sanity check is
+	// not enough on its own — a constant closure that returns
+	// DefaultMempoolMinFeeRate would pass it while reintroducing the
+	// original T-D bug. Only the second assertion below proves liveness:
+	// a distinctive sentinel was injected into the mempool's rolling
+	// floor BEFORE the miner was constructed, and the captured closure
+	// MUST observe that exact value.
 	if captured.CurrentMempoolMinFeeRateFn == nil {
 		t.Fatal("offline-mining miner cfg missing CurrentMempoolMinFeeRateFn; T-D production wiring regressed")
 	}
-	if got := captured.CurrentMempoolMinFeeRateFn(); got < node.DefaultMempoolMinFeeRate {
-		t.Fatalf("provider returned %d below DefaultMempoolMinFeeRate=%d before clamp; expected mempool snapshot", got, node.DefaultMempoolMinFeeRate)
+	if got := captured.CurrentMempoolMinFeeRateFn(); got != offlineMinerSentinelFloor {
+		t.Fatalf("offline-mining provider returned %d, want sentinel %d; closure is not bound to the live mempool snapshot", got, offlineMinerSentinelFloor)
 	}
 }
 
@@ -2495,15 +2525,31 @@ func TestRunDevnetWithRPCBindInvalidMineAddressLogsStderr(t *testing.T) {
 // to unblock its lifecycle ctx and let it exit cleanly.
 func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T) {
 	if os.Getenv("RUBIN_NODE_TEST_LIVE_MINER_FN_CHILD") == "1" {
-		prev := newMinerFn
+		// Sentinel rolling-floor value injected into the mempool BEFORE
+		// the live miner is constructed. The non-nil + >= baseline check
+		// alone would silently accept a constant closure returning
+		// DefaultMempoolMinFeeRate; the sentinel proves liveness — only
+		// a closure actually bound to the live mempool snapshot returns
+		// this exact value.
+		const liveMinerSentinelFloor uint64 = 0xDEADBEEFCAFE
+		prevMiner := newMinerFn
+		prevMempool := newMempoolFn
+		newMempoolFn = func(st *node.ChainState, store *node.BlockStore, chainID [32]byte, cfg node.MempoolConfig) (*node.Mempool, error) {
+			mp, err := node.NewMempoolWithConfig(st, store, chainID, cfg)
+			if err != nil {
+				return nil, err
+			}
+			mp.SetCurrentMinFeeRateForTest(liveMinerSentinelFloor)
+			return mp, nil
+		}
 		newMinerFn = func(_ *node.ChainState, _ *node.BlockStore, _ *node.SyncEngine, cfg node.MinerConfig) (*node.Miner, error) {
 			if cfg.CurrentMempoolMinFeeRateFn == nil {
 				_, _ = fmt.Fprintln(os.Stderr, "T-D regression: live miner cfg.CurrentMempoolMinFeeRateFn=nil")
 				os.Exit(33)
 			}
-			if got := cfg.CurrentMempoolMinFeeRateFn(); got < node.DefaultMempoolMinFeeRate {
-				_, _ = fmt.Fprintf(os.Stderr, "T-D regression: provider returned %d below DefaultMempoolMinFeeRate=%d\n", got, node.DefaultMempoolMinFeeRate)
-				os.Exit(34)
+			if got := cfg.CurrentMempoolMinFeeRateFn(); got != liveMinerSentinelFloor {
+				_, _ = fmt.Fprintf(os.Stderr, "T-D regression: provider returned %d, want sentinel %d (closure not bound to live mempool snapshot)\n", got, liveMinerSentinelFloor)
+				os.Exit(35)
 			}
 			return nil, errors.New("test deliberate miner init abort to unblock SIGINT")
 		}
@@ -2523,7 +2569,8 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 			io.Discard,
 			os.Stderr,
 		)
-		newMinerFn = prev
+		newMinerFn = prevMiner
+		newMempoolFn = prevMempool
 		os.Exit(code)
 	}
 
@@ -2538,8 +2585,8 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 		if errors.As(err, &ee) && ee.ExitCode() == 33 {
 			t.Fatalf("T-D regression: live miner cfg.CurrentMempoolMinFeeRateFn is nil; production wiring missing in main.go around `liveMiner, err = newMinerFn(...)` (stderr=%s)", stderr.String())
 		}
-		if errors.As(err, &ee) && ee.ExitCode() == 34 {
-			t.Fatalf("T-D regression: provider returned below baseline (stderr=%s)", stderr.String())
+		if errors.As(err, &ee) && ee.ExitCode() == 35 {
+			t.Fatalf("T-D regression: live miner CurrentMempoolMinFeeRateFn does not observe the live mempool snapshot (sentinel mismatch); the closure may be a static fallback that bypasses the rolling rolling-floor source (stderr=%s)", stderr.String())
 		}
 		t.Fatalf("unexpected child error: %v (stderr=%s)", err, stderr.String())
 	}

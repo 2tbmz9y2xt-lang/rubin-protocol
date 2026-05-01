@@ -55,10 +55,14 @@ func RejectNonCoinbaseAnchorOutputs(tx *consensus.Tx) (reject bool, reason strin
 //     not the DA floor.
 //
 // Miner template budget capping is enforced by the caller (needs running sum).
+//
+// The helper recomputes both `weight` and `daBytes` from `tx` via
+// consensus.TxWeightAndStats. This avoids trusting any caller-supplied
+// weight value (a stale or zero weight would otherwise silently
+// under-enforce the relay-fee half of the Stage C predicate).
 func RejectDaAnchorTxPolicy(
 	tx *consensus.Tx,
 	utxos map[consensus.Outpoint]consensus.UtxoEntry,
-	weight uint64,
 	currentMempoolMinFeeRate uint64,
 	minDaFeeRate uint64,
 	daSurchargePerByte uint64,
@@ -66,7 +70,7 @@ func RejectDaAnchorTxPolicy(
 	if tx == nil {
 		return true, 0, "nil tx", errors.New("nil tx")
 	}
-	_, daBytes, _, err = consensus.TxWeightAndStats(tx)
+	weight, daBytes, _, err := consensus.TxWeightAndStats(tx)
 	if err != nil {
 		return true, 0, "tx weight/stats error", err
 	}

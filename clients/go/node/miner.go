@@ -451,7 +451,7 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 		if err != nil {
 			return nil, err
 		}
-		reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, candidate.minedCandidate.weight, utxos, nextHeight, policyDaIncluded)
+		reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, policyDaIncluded)
 		if err != nil {
 			// Policy checks should never abort block construction.
 			// Treat policy evaluation errors as a rejected candidate and continue.
@@ -495,7 +495,7 @@ func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
 	}, nil
 }
 
-func (m *Miner) rejectCandidate(tx *consensus.Tx, weight uint64, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
+func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
 	if m.cfg.PolicyDaAnchorAntiAbuse {
 		var currentMin uint64
 		if fn := m.cfg.CurrentMempoolMinFeeRateFn; fn != nil {
@@ -509,7 +509,6 @@ func (m *Miner) rejectCandidate(tx *consensus.Tx, weight uint64, utxos map[conse
 		reject, daBytes, _, err := RejectDaAnchorTxPolicy(
 			tx,
 			utxos,
-			weight,
 			currentMin,
 			m.cfg.MinDaFeeRate,
 			m.cfg.PolicyDaSurchargePerByte,

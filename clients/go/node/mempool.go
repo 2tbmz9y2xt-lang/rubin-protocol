@@ -735,7 +735,6 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 		reject, _, reason, err := RejectDaAnchorTxPolicy(
 			checked.Tx,
 			utxos,
-			checked.Weight,
 			0,
 			policy.MinDaFeeRate,
 			policy.PolicyDaSurchargePerByte,
@@ -1303,6 +1302,21 @@ func (m *Mempool) CurrentMinFeeRateSnapshot() uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.currentMinFeeRateLocked()
+}
+
+// SetCurrentMinFeeRateForTest overrides the rolling local floor. Test-only:
+// bypasses the admit-path eviction logic that normally raises the floor.
+// cmd/rubin-node tests use this to inject a distinctive sentinel and
+// prove that MinerConfig.CurrentMempoolMinFeeRateFn observes the live
+// mempool state, not a constant closure that would silently reintroduce
+// the wave-1 T-D bug class. Nil-safe like the other accessors.
+func (m *Mempool) SetCurrentMinFeeRateForTest(floor uint64) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentMinFeeRate = floor
 }
 
 func (m *Mempool) effectiveLowWaterBytesLocked() int {
