@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -29,6 +31,7 @@ func TestMustJSONUint32RejectsNonIntegralAndOverflow(t *testing.T) {
 }
 
 func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
+	skipIfMLDSA87DERUnavailable(t)
 	tmp := t.TempDir()
 	repoRoot := tmp
 
@@ -279,6 +282,7 @@ func TestGenConformanceFixturesGenerator_WritesToTempRepo(t *testing.T) {
 // rejection proves the signature is bound to the devnet domain and
 // not a zero-chain tx coincidentally routed.
 func TestDevnetVaultCreateArtifactSignedUnderDevnetChainID(t *testing.T) {
+	skipIfMLDSA87DERUnavailable(t)
 	// Locate the committed fixture relative to this test file (which
 	// lives at clients/go/cmd/gen-conformance-fixtures/runtime_test.go).
 	wd, err := os.Getwd()
@@ -457,6 +461,7 @@ func TestDevnetVaultCreateArtifactSignedUnderDevnetChainID(t *testing.T) {
 // chainID == node.DevnetGenesisChainID() AND non-nil under
 // chainID == [32]byte{} zero. Issue #1241 prerequisite.
 func TestDevnetHTLCClaimArtifactSignedUnderDevnetChainID(t *testing.T) {
+	skipIfMLDSA87DERUnavailable(t)
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -623,6 +628,7 @@ func TestDevnetHTLCClaimArtifactSignedUnderDevnetChainID(t *testing.T) {
 // chainID == node.DevnetGenesisChainID() AND non-nil under
 // chainID == [32]byte{} zero. Issue #1242 prerequisite.
 func TestDevnetMultisigSpendArtifactSignedUnderDevnetChainID(t *testing.T) {
+	skipIfMLDSA87DERUnavailable(t)
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -769,4 +775,360 @@ func TestDevnetMultisigSpendArtifactSignedUnderDevnetChainID(t *testing.T) {
 	if _, err := consensus.ApplyNonCoinbaseTxBasic(parsedTx2, txid, utxoSet, height, blockTimestamp, zeroChainID); err == nil {
 		t.Fatalf("ApplyNonCoinbaseTxBasic(zero chain_id) unexpectedly accepted — artifact signature must NOT verify under zero chain_id, otherwise it is not exclusively devnet-domain-bound")
 	}
+}
+
+// TestGenerator_DeterministicOutputDir proves the core determinism
+// contract for #1366: two consecutive runGeneratorCLIWithArgs
+// invocations with --output-dir pointing at distinct temp directories
+// produce byte-identical fixture output for every generator-owned
+// file. Reads source fixtures from the real worktree
+// conformance/fixtures/** at the repo's current HEAD and writes
+// candidates only into the temp directories.
+//
+// Proof assertion: walking the two temp dirs file-by-file, every
+// regular file pair has equal bytes. If OpenSSL ML-DSA hedged signing
+// leaked into the conformance fixture path, signatures would differ
+// per run and the byte-equality assertion would fail.
+func TestGenerator_DeterministicOutputDir(t *testing.T) {
+	skipIfMLDSA87DERUnavailable(t)
+	tmpA := t.TempDir()
+	tmpB := t.TempDir()
+
+	runGeneratorCLIWithArgs([]string{"-output-dir", tmpA})
+	runGeneratorCLIWithArgs([]string{"-output-dir", tmpB})
+
+	// Walk tmpA and verify every file matches the byte content of the
+	// corresponding file in tmpB. Also verify every file in tmpB has a
+	// counterpart in tmpA (no missing-on-A, missing-on-B drift).
+	pathsA := collectGeneratorOutput(t, tmpA)
+	pathsB := collectGeneratorOutput(t, tmpB)
+	if len(pathsA) == 0 {
+		t.Fatalf("tmpA produced no files")
+	}
+	if len(pathsA) != len(pathsB) {
+		t.Fatalf("file count mismatch: tmpA=%d tmpB=%d", len(pathsA), len(pathsB))
+	}
+	for rel, bytesA := range pathsA {
+		bytesB, ok := pathsB[rel]
+		if !ok {
+			t.Fatalf("%s present in tmpA but missing from tmpB", rel)
+		}
+		if !bytes.Equal(bytesA, bytesB) {
+			t.Fatalf("%s bytes differ between two generator runs (deterministic-mode contract violated)", rel)
+		}
+	}
+}
+
+// TestGenerator_OutputDirContainmentNoCommittedWrite proves that
+// --output-dir mode never mutates conformance/fixtures/** in the
+// committed worktree. The contract for #1358 (drift gate) depends on
+// this: the gate compares candidate bytes to committed bytes, so the
+// candidate path must be physically isolated.
+//
+// Proof assertion: capture full file bytes for a representative set
+// of committed generator-owned fixtures, run the generator with
+// --output-dir, re-read bytes and compare with bytes.Equal — none
+// changed. Bytes-based comparison is robust against filesystems with
+// coarse mtime resolution where a write may not advance ModTime;
+// the earlier mtime-based assertion would silently pass on such
+// runners.
+func TestGenerator_OutputDirContainmentNoCommittedWrite(t *testing.T) {
+	skipIfMLDSA87DERUnavailable(t)
+	tmp := t.TempDir()
+
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	committedFixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	committedSamples := []string{
+		"CV-UTXO-BASIC.json",
+		"CV-MULTISIG.json",
+		"CV-EXT.json",
+		"CV-VAULT.json",
+		"CV-HTLC.json",
+		"CV-SUBSIDY.json",
+		filepath.Join("devnet", "devnet-vault-create-01.json"),
+		filepath.Join("devnet", "devnet-htlc-claim-01.json"),
+		filepath.Join("devnet", "devnet-multisig-spend-01.json"),
+	}
+	beforeContents := make(map[string][]byte, len(committedSamples))
+	for _, rel := range committedSamples {
+		full := filepath.Join(committedFixturesRoot, rel)
+		// #nosec G304 -- path is repo-rooted, joined from a static
+		// allowlist of committed fixture sample names.
+		data, readErr := os.ReadFile(full)
+		if readErr != nil {
+			t.Fatalf("read %s before generator: %v", rel, readErr)
+		}
+		beforeContents[rel] = data
+	}
+
+	runGeneratorCLIWithArgs([]string{"-output-dir", tmp})
+
+	for _, rel := range committedSamples {
+		full := filepath.Join(committedFixturesRoot, rel)
+		// #nosec G304 -- same allowlist; second read covers the
+		// post-generator containment assertion.
+		afterData, readErr := os.ReadFile(full)
+		if readErr != nil {
+			t.Fatalf("read %s after generator: %v", rel, readErr)
+		}
+		if !bytes.Equal(afterData, beforeContents[rel]) {
+			t.Fatalf("--output-dir mode mutated committed fixture %s (file contents changed) — containment broken", rel)
+		}
+	}
+	// Sanity: candidate fixtures DID land under the temp output dir.
+	if got := collectGeneratorOutput(t, tmp); len(got) == 0 {
+		t.Fatalf("generator produced no candidate output under --output-dir=%s", tmp)
+	}
+}
+
+// TestGenerator_CwdIndependence proves that --output-dir produces
+// byte-identical results regardless of which directory inside the
+// clients/go module the generator is invoked from. The
+// cwd-independence claim is bounded by the existing
+// repoRootFromGoModule walk-up: cwd MUST be somewhere under
+// clients/go so the helper can find clients/go/go.mod by walking up.
+//
+// Proof assertion: running the generator from one directory in
+// clients/go and then again from another directory within that same
+// module (for example, clients/go/consensus) produces equal candidate
+// bytes for the same absolute --output-dir family. Embedded DER keys
+// load from the binary regardless of cwd; deterministic ML-DSA sign
+// yields stable signatures; remap of the absolute --output-dir is
+// cwd-free.
+func TestGenerator_CwdIndependence(t *testing.T) {
+	skipIfMLDSA87DERUnavailable(t)
+	tmpA := t.TempDir()
+	tmpB := t.TempDir()
+
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWd)
+	})
+
+	// Run #1: from the existing test cwd (clients/go/cmd/gen-conformance-fixtures).
+	runGeneratorCLIWithArgs([]string{"-output-dir", tmpA})
+
+	// Run #2: from a sibling directory inside the same Go module
+	// (clients/go). repoRootFromGoModule walks up looking for go.mod;
+	// any cwd inside clients/go satisfies the walk regardless of how
+	// nested it is. We chdir to the consensus package directory which
+	// is a real, stable, sibling-to-cmd subdirectory.
+	clientsGoModuleRoot := filepath.Join(originalWd, "..", "..") // clients/go
+	siblingCwd := filepath.Join(clientsGoModuleRoot, "consensus")
+	if _, err := os.Stat(siblingCwd); err != nil {
+		t.Fatalf("sibling cwd %q stat: %v", siblingCwd, err)
+	}
+	if err := os.Chdir(siblingCwd); err != nil {
+		t.Fatalf("chdir to %q: %v", siblingCwd, err)
+	}
+	runGeneratorCLIWithArgs([]string{"-output-dir", tmpB})
+
+	pathsA := collectGeneratorOutput(t, tmpA)
+	pathsB := collectGeneratorOutput(t, tmpB)
+	if len(pathsA) == 0 {
+		t.Fatalf("tmpA produced no files")
+	}
+	if len(pathsA) != len(pathsB) {
+		t.Fatalf("file count mismatch across cwd: tmpA=%d tmpB=%d", len(pathsA), len(pathsB))
+	}
+	for rel, bytesA := range pathsA {
+		bytesB, ok := pathsB[rel]
+		if !ok {
+			t.Fatalf("%s present in tmpA but missing from tmpB (run from unrelated cwd)", rel)
+		}
+		if !bytes.Equal(bytesA, bytesB) {
+			t.Fatalf("%s bytes differ across cwd (cwd-independence contract violated)", rel)
+		}
+	}
+}
+
+// TestGenerator_ResolveWriteRootRejectsRelative exercises the
+// reject branch for relative --output-dir; the testable variant
+// returns an error so the assertion does not require subprocess
+// wrapping around fatalf.
+func TestGenerator_ResolveWriteRootRejectsRelative(t *testing.T) {
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	committedFixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	if _, err := resolveWriteRoot("relative/path", committedFixturesRoot); err == nil {
+		t.Fatalf("resolveWriteRoot accepted relative path")
+	} else if !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("resolveWriteRoot relative err=%q, want substring %q", err.Error(), "must be absolute")
+	}
+}
+
+// TestGenerator_ResolveWriteRootRejectsCommittedRootAlias exercises
+// the reject branch for --output-dir that equals the committed root.
+func TestGenerator_ResolveWriteRootRejectsCommittedRootAlias(t *testing.T) {
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	committedFixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	if _, err := resolveWriteRoot(committedFixturesRoot, committedFixturesRoot); err == nil {
+		t.Fatalf("resolveWriteRoot accepted committed root alias")
+	} else if !strings.Contains(err.Error(), "must not equal the committed fixtures root") &&
+		!strings.Contains(err.Error(), "aliases the committed fixtures root") {
+		t.Fatalf("resolveWriteRoot alias err=%q, want substring naming committed fixtures root", err.Error())
+	}
+}
+
+// TestGenerator_ResolveWriteRootRejectsInsideCommittedRoot exercises
+// the reject branch for --output-dir that is inside the committed
+// root.
+func TestGenerator_ResolveWriteRootRejectsInsideCommittedRoot(t *testing.T) {
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	committedFixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	insidePath := filepath.Join(committedFixturesRoot, "candidate-inside")
+	if _, err := resolveWriteRoot(insidePath, committedFixturesRoot); err == nil {
+		t.Fatalf("resolveWriteRoot accepted path inside committed root")
+	} else if !strings.Contains(err.Error(), "is inside committed fixtures root") {
+		t.Fatalf("resolveWriteRoot inside err=%q, want substring %q", err.Error(), "is inside committed fixtures root")
+	}
+}
+
+// TestGenerator_ResolveWriteRootRejectsSymlinkedAncestor exercises
+// the reject branch for --output-dir whose parent chain contains a
+// symlink pointing into conformance/fixtures/**, even when the leaf
+// component does not exist on disk yet.
+//
+// Proof assertion: a temp directory contains a symlink "link"
+// pointing at the real committed fixtures root. resolveWriteRoot
+// called with /tmp/<tmp>/link/newdir (a not-yet-created leaf under
+// the symlink) walks up to the existing "link" ancestor, resolves
+// it via filepath.EvalSymlinks to the committed fixtures root, and
+// re-attaches "newdir" so the containment rule sees the real target
+// and rejects.
+func TestGenerator_ResolveWriteRootRejectsSymlinkedAncestor(t *testing.T) {
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	committedFixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	tmp := t.TempDir()
+	linkPath := filepath.Join(tmp, "link")
+	if err := os.Symlink(committedFixturesRoot, linkPath); err != nil {
+		// Skip on platforms where symlink creation is not supported
+		// or requires elevated privileges (notably Windows without
+		// Developer Mode, which surfaces "A required privilege is
+		// not held by the client" / "operation not supported"). The
+		// generator logic this test guards is platform-independent;
+		// the symlink scenario is only exercisable where the OS
+		// allows the test harness to create one.
+		msg := err.Error()
+		if strings.Contains(msg, "operation not supported") ||
+			strings.Contains(msg, "permission denied") ||
+			strings.Contains(msg, "A required privilege") ||
+			strings.Contains(msg, "not implemented") ||
+			strings.Contains(msg, "not permitted") {
+			t.Skipf("os.Symlink unsupported in this environment: %v", err)
+		}
+		t.Fatalf("symlink: %v", err)
+	}
+	candidate := filepath.Join(linkPath, "newdir")
+	if _, err := resolveWriteRoot(candidate, committedFixturesRoot); err == nil {
+		t.Fatalf("resolveWriteRoot accepted symlinked-ancestor path %q (resolves into committed root)", candidate)
+	} else if !strings.Contains(err.Error(), "is inside committed fixtures root") {
+		t.Fatalf("resolveWriteRoot symlink-ancestor err=%q, want substring %q", err.Error(), "is inside committed fixtures root")
+	}
+}
+
+// TestGenerator_MustResolveWriteRootPositivePaths exercises the
+// accept paths for mustResolveWriteRoot — the absolute-cleaned
+// pass-through and the empty-string fall-back to the committed root.
+//
+// The reject paths (relative --output-dir, alias of committed root,
+// symlink-resolved alias of committed root) all go through fatalf
+// which calls os.Exit and cannot be exercised from the same process
+// without subprocess wrapping. Those paths are documented in the
+// mustResolveWriteRoot docstring in runtime.go and exercised via
+// manual operator smoke; the documented contract is also enforced by
+// TestGenerator_OutputDirContainmentNoCommittedWrite, which verifies
+// committed fixtures are not mutated when --output-dir is supplied.
+func TestGenerator_MustResolveWriteRootPositivePaths(t *testing.T) {
+	tmp := t.TempDir()
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	committedFixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	got := mustResolveWriteRoot(tmp, committedFixturesRoot)
+	if got != filepath.Clean(tmp) {
+		t.Fatalf("mustResolveWriteRoot(%q)=%q, want %q", tmp, got, filepath.Clean(tmp))
+	}
+	// Empty string falls back to committed root (default mutating mode).
+	if got := mustResolveWriteRoot("", committedFixturesRoot); got != committedFixturesRoot {
+		t.Fatalf("mustResolveWriteRoot(\"\")=%q, want %q (default mode)", got, committedFixturesRoot)
+	}
+}
+
+// collectGeneratorOutput walks root and returns a map keyed by the
+// path RELATIVE TO root, with file bytes as values. Used by
+// determinism / cwd-independence assertions to compare two output
+// trees byte-for-byte.
+func collectGeneratorOutput(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	out := make(map[string][]byte)
+	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		// #nosec G304 -- path comes from filepath.Walk under test-owned root.
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		out[rel] = raw
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk %s: %v", root, walkErr)
+	}
+	return out
+}
+
+// skipIfMLDSA87DERUnavailable probes whether the runtime OpenSSL
+// build can decode the embedded ML-DSA-87 PKCS#8 DER format used by
+// the conformance fixture generator. On builds where the ML-DSA
+// provider is missing or the OID decoder is not registered (observed
+// on OpenSSL 3.0.x), `consensus.NewMLDSA87KeypairFromDER` returns an
+// error containing `unsupported` / `DECODER`; this helper turns that
+// failure mode into a `t.Skipf` so the test suite stays clean across
+// supported toolchains. Mirrors the package-wide `mustMLDSA87Keypair`
+// skip convention used by `clients/go/consensus` capability-dependent
+// tests.
+func skipIfMLDSA87DERUnavailable(t *testing.T) {
+	t.Helper()
+	der, err := embeddedTestKeysFS.ReadFile(filepath.ToSlash(filepath.Join("testdata", "keys", "owner.der")))
+	if err != nil {
+		t.Fatalf("embedded testdata/keys/owner.der missing: %v", err)
+	}
+	kp, err := consensus.NewMLDSA87KeypairFromDER(der)
+	if err == nil {
+		kp.Close()
+		return
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "unsupported") || strings.Contains(msg, "DECODER") {
+		t.Skipf("ML-DSA-87 DER decoder unavailable in this OpenSSL build (OpenSSL ≥3.5 with ML-DSA provider required): %v", err)
+	}
+	t.Fatalf("NewMLDSA87KeypairFromDER (probe) unexpected error: %v", err)
 }

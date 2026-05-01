@@ -1,0 +1,7 @@
+# Force ML-DSA-87 PKCS#8 DER private keys to be treated as binary.
+# Without this, core.autocrlf=true on Windows checkouts can rewrite
+# 0x0A bytes to 0x0D 0x0A inside the DER blobs, silently corrupting
+# them. The conformance fixture generator relies on these blobs being
+# byte-identical across checkouts to produce byte-reproducible
+# fixtures (Q-CONF-FIXTURE-GENERATOR-DETERMINISM-01).
+*.der binary
