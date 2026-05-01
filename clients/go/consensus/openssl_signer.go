@@ -163,11 +163,10 @@ func openSSLPublicKeyBytesWithErrBuf(pkey *C.EVP_PKEY, expectedPubkeyLen int, er
 	if pkey == nil {
 		return nil, fmt.Errorf("nil openssl key")
 	}
-	// Fail closed before allocating the pubkey buffer and taking the
-	// first-element address below: a non-positive expected length would
-	// cause an index-out-of-range panic at the C-pointer boundary instead
-	// of a clean error. Public callers route through validateOpenSSLAlgorithm,
-	// but this helper is package-local and must guard its own boundary.
+	// Reject non-positive expectedPubkeyLen at this package-local helper
+	// boundary so a degenerate caller cannot reach the make([]byte, ...)
+	// allocation or the C-pointer take-address site with an unusable
+	// length. Public callers already route through validateOpenSSLAlgorithm.
 	// Covered by TestOpenSSLPublicKeyBytes_NonPositivePubkeyLenErrors.
 	if expectedPubkeyLen <= 0 {
 		return nil, fmt.Errorf("openssl pubkey length must be positive, got %d", expectedPubkeyLen)
@@ -246,13 +245,14 @@ func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exa
 	if err := ensureOpenSSLBootstrap(); err != nil {
 		return nil, err
 	}
-	// Fail closed at the FFI boundary before allocating the signature
-	// buffer and taking its first-element address below. A nil pkey would
-	// dereference inside the C helper; a non-positive maxSigBytes would
-	// panic on the signature-buffer first-element address; an
-	// exactSigBytes greater than maxSigBytes can never be satisfied by
-	// the C call because the C helper writes at most maxSigBytes and the
-	// post-call length check would always reject. Mirrors the
+	// Reject three classes of unusable inputs at this package-local FFI
+	// boundary so a degenerate caller cannot reach the make([]byte, ...)
+	// allocation, the C-pointer take-address site, or the C helper with
+	// inputs the call cannot satisfy: nil pkey (which the C helper would
+	// dereference), non-positive maxSigBytes (which the take-address site
+	// cannot index), and exactSigBytes greater than maxSigBytes (which
+	// the C helper cannot satisfy because it writes at most maxSigBytes
+	// and the post-call length check then rejects). Mirrors the
 	// conformance-only path's nil/zero-receiver guard. Covered by
 	// TestSignOpenSSLDigest32_NilPKeyErrors,
 	// TestSignOpenSSLDigest32_NonPositiveMaxSigBytesErrors, and
