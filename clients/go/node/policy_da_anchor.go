@@ -34,6 +34,12 @@ func RejectNonCoinbaseAnchorOutputs(tx *consensus.Tx) (reject bool, reason strin
 //	required_fee(tx)    = max(relay_fee_floor(tx), da_required_fee(tx))
 //	reject if fee(tx) < required_fee(tx)
 //
+// TODO(rust-parity,#1352): Go implements Stage C required_fee =
+// max(relay_fee_floor, da_fee_floor + da_surcharge). Rust is still tracked
+// as surcharge-only per #1352; do not roll this policy out in any
+// multi-client relay/miner deployment until Rust matches this behavior or a
+// release gate explicitly prevents mixed-client divergence.
+//
 // Arithmetic is checked widening; any overflow rejects fail-closed as a
 // policy error. The helper does not change consensus validity. For non-DA
 // transactions (da_payload_len == 0), this helper applies no DA-specific
