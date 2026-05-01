@@ -329,7 +329,7 @@ func (s *ChainState) Save(path string) error {
 		return fmt.Errorf("encode chainstate: %w", err)
 	}
 	raw = append(raw, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	return writeFileAtomic(path, raw, 0o600)

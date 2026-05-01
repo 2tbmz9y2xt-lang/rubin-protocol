@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +24,17 @@ func mustOpenBlockStore(t *testing.T, path string) *BlockStore {
 	return store
 }
 
+func assertNodePathMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("mode %s = %04o, want %04o", path, got, want)
+	}
+}
+
 func mustHeaderHash(t *testing.T, header []byte) [32]byte {
 	t.Helper()
 	hash, err := consensus.BlockHash(header)
@@ -40,6 +52,38 @@ func mustPutBlock(t *testing.T, store *BlockStore, height uint64, seed byte, non
 		t.Fatalf("put block height=%d: %v", height, err)
 	}
 	return hash, header
+}
+
+func TestOpenBlockStoreCreatesPrivateDirsAndFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "blockstore")
+	store := mustOpenBlockStore(t, root)
+
+	assertNodePathMode(t, root, 0o700)
+	assertNodePathMode(t, store.blocksDir, 0o700)
+	assertNodePathMode(t, store.headersDir, 0o700)
+	assertNodePathMode(t, store.undoDir, 0o700)
+
+	header := testHeaderBytes(31, 31)
+	hash := mustHeaderHash(t, header)
+	blockBytes := []byte("private block payload")
+	if err := store.CommitCanonicalBlock(0, hash, header, blockBytes, &BlockUndo{}); err != nil {
+		t.Fatalf("commit canonical block: %v", err)
+	}
+
+	hashHex := hex.EncodeToString(hash[:])
+	assertNodePathMode(t, filepath.Join(root, "index.json"), 0o600)
+	assertNodePathMode(t, filepath.Join(store.blocksDir, hashHex+".bin"), 0o600)
+	assertNodePathMode(t, filepath.Join(store.headersDir, hashHex+".bin"), 0o600)
+	assertNodePathMode(t, filepath.Join(store.undoDir, hashHex+".json"), 0o600)
+
+	reopened := mustOpenBlockStore(t, root)
+	tipHeight, tipHash, ok, err := reopened.Tip()
+	if err != nil {
+		t.Fatalf("reopened tip: %v", err)
+	}
+	if !ok || tipHeight != 0 || tipHash != hash {
+		t.Fatalf("reopened tip = ok=%v height=%d hash=%x, want height 0 hash %x", ok, tipHeight, tipHash, hash)
+	}
 }
 
 func TestBlockStorePutGetAndTip(t *testing.T) {

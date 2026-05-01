@@ -329,7 +329,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "mainnet genesis guard failed: %v\n", err)
 		return 2
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
 		return 2
 	}
