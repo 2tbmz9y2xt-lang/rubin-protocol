@@ -155,7 +155,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 2
 
-    output_dir = Path(tempfile.mkdtemp(prefix="rubin-fixture-drift-")).resolve()
+    try:
+        output_dir = Path(tempfile.mkdtemp(prefix="rubin-fixture-drift-")).resolve()
+    except OSError as exc:
+        print(f"ERROR: failed to create candidate output dir: {exc}", file=sys.stderr)
+        return 2
     try:
         assert_committed_untouched(repo_root, output_dir)
         run_generator(repo_root, output_dir)
@@ -213,7 +217,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for rel in differing:
                 print(f"  ~ {rel}", file=sys.stderr)
         return 1
-    except RuntimeError as exc:
+    except (RuntimeError, FileNotFoundError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     finally:
