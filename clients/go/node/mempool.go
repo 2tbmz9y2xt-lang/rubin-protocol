@@ -186,6 +186,9 @@ func normalizeMempoolConfig(cfg MempoolConfig) MempoolConfig {
 	if cfg.MaxBytes <= 0 {
 		cfg.MaxBytes = DefaultMempoolMaxBytes
 	}
+	if cfg.MinDaFeeRate == 0 {
+		cfg.MinDaFeeRate = DefaultMinDaFeeRate
+	}
 	return cfg
 }
 
@@ -661,8 +664,9 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 // `*CheckedTransaction`) on purpose: the caller must build the snapshot
 // BEFORE invoking `CheckTransaction*WithOwnedUtxoSet`, which takes
 // ownership of the supplied utxo map and removes spent inputs as it
-// validates. Computing daBytes via `consensus.TxWeightAndStats` is a
-// readonly structural walk and is therefore safe to run pre-check.
+// validates. The DA-bearing decision is a cheap structural predicate, not
+// a full weight/stat walk; malformed tx kinds are still rejected by the
+// later consensus validation path.
 func policyNeedsInputSnapshotForTx(tx *consensus.Tx, policy MempoolConfig) (bool, error) {
 	if policy.PolicyRejectCoreExtPreActivation {
 		return true, nil
@@ -673,11 +677,7 @@ func policyNeedsInputSnapshotForTx(tx *consensus.Tx, policy MempoolConfig) (bool
 	if tx == nil {
 		return false, errors.New("nil transaction")
 	}
-	_, daBytes, _, err := consensus.TxWeightAndStats(tx)
-	if err != nil {
-		return false, err
-	}
-	return daBytes > 0, nil
+	return tx.TxKind != 0x00 && len(tx.DaPayload) > 0, nil
 }
 
 func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (map[consensus.Outpoint]consensus.UtxoEntry, error) {

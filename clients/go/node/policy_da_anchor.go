@@ -108,8 +108,9 @@ func RejectDaAnchorTxPolicy(
 		required = daRequired
 	}
 	if required == 0 {
-		// DA tx but every Stage C term is zero (zero weight + zero DA
-		// constants). Nothing to enforce; admit without fee compute.
+		// DA tx but every Stage C rate-derived fee term is zero: the
+		// relay-floor term is zero and both DA-side terms are zero.
+		// Nothing to enforce; admit without fee compute.
 		return false, daBytes, "", nil
 	}
 	fee, err := computeFeeNoVerify(tx, utxos)
