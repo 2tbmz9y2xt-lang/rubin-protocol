@@ -99,6 +99,26 @@ func TestChainStateSaveLoadRoundTripDeterministic(t *testing.T) {
 	}
 }
 
+func TestChainStateSaveCreatesPrivateParentAndFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-parent", "chainstate.json")
+	st := NewChainState()
+
+	if err := st.Save(path); err != nil {
+		t.Fatalf("save chainstate: %v", err)
+	}
+
+	assertNodePathMode(t, filepath.Dir(path), 0o700)
+	assertNodePathMode(t, path, 0o600)
+
+	loaded, err := LoadChainState(path)
+	if err != nil {
+		t.Fatalf("load saved chainstate: %v", err)
+	}
+	if loaded.HasTip || loaded.Height != 0 || len(loaded.Utxos) != 0 {
+		t.Fatalf("unexpected loaded empty chainstate: has_tip=%v height=%d utxos=%d", loaded.HasTip, loaded.Height, len(loaded.Utxos))
+	}
+}
+
 func TestChainStateConnectBlockDeterministicUpdate(t *testing.T) {
 	target := consensus.POW_LIMIT
 

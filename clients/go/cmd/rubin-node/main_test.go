@@ -31,6 +31,17 @@ type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
+func assertPathMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("mode %s = %04o, want %04o", path, got, want)
+	}
+}
+
 type legacyExposureReportJSON struct {
 	ReportVersion         uint64  `json:"report_version"`
 	MeasurementScope      string  `json:"measurement_scope"`
@@ -364,6 +375,32 @@ func TestRunNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *test
 	}
 	if _, err := os.Stat(node.ChainStatePath(escaped)); !os.IsNotExist(err) {
 		t.Fatalf("raw symlink traversal path was used; stat err=%v path=%s", err, node.ChainStatePath(escaped))
+	}
+}
+
+func TestRunCreatesPrivatePersistencePaths(t *testing.T) {
+	datadir := filepath.Join(t.TempDir(), "data")
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", datadir}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+
+	assertPathMode(t, datadir, 0o700)
+	assertPathMode(t, node.ChainStatePath(datadir), 0o600)
+	blockstore := node.BlockStorePath(datadir)
+	assertPathMode(t, blockstore, 0o700)
+	assertPathMode(t, filepath.Join(blockstore, "blocks"), 0o700)
+	assertPathMode(t, filepath.Join(blockstore, "headers"), 0o700)
+	assertPathMode(t, filepath.Join(blockstore, "undo"), 0o700)
+
+	var reopenOut bytes.Buffer
+	var reopenErr bytes.Buffer
+	reopenCode := run([]string{"--dry-run", "--datadir", datadir}, &reopenOut, &reopenErr)
+	if reopenCode != 0 {
+		t.Fatalf("reopen dry-run exit code %d (stderr=%q)", reopenCode, reopenErr.String())
 	}
 }
 
