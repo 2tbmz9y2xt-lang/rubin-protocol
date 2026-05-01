@@ -283,7 +283,18 @@ jobs:
           RUBIN_OPENSSL_CONF: ${{ env.OPENSSL_CONF }}
           RUBIN_OPENSSL_FIPS_MODE: only
         run: |
-          scripts/dev-env.sh -- bash -lc "cd clients/go && go test ./consensus -run '^TestSignDigest32ForConformanceFixture_Deterministic$' -count=1 -v"
+          set -euo pipefail
+          TEST_NAME=TestSignDigest32ForConformanceFixture_Deterministic
+          OUT="$(mktemp)"
+          scripts/dev-env.sh -- bash -lc "cd clients/go && go test -json -run '^${TEST_NAME}$' ./consensus -count=1" | tee "$OUT"
+          if jq -e --arg t "$TEST_NAME" 'select(.Test == $t and .Action == "skip")' < "$OUT" >/dev/null; then
+            echo "ERROR: ${TEST_NAME} was SKIPPED; the OpenSSL runtime/provider does not expose ML-DSA-87 deterministic-mode signing on this lane" >&2
+            exit 1
+          fi
+          if ! jq -e --arg t "$TEST_NAME" 'select(.Test == $t and .Action == "pass")' < "$OUT" >/dev/null; then
+            echo "ERROR: ${TEST_NAME} did not emit a PASS event; deterministic-mode runtime evidence is missing" >&2
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
