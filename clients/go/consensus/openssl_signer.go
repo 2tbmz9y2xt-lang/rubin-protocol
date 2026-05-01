@@ -168,6 +168,7 @@ func openSSLPublicKeyBytesWithErrBuf(pkey *C.EVP_PKEY, expectedPubkeyLen int, er
 	// cause an index-out-of-range panic at the C-pointer boundary instead
 	// of a clean error. Public callers route through validateOpenSSLAlgorithm,
 	// but this helper is package-local and must guard its own boundary.
+	// Covered by TestOpenSSLPublicKeyBytes_NonPositivePubkeyLenErrors.
 	if expectedPubkeyLen <= 0 {
 		return nil, fmt.Errorf("openssl pubkey length must be positive, got %d", expectedPubkeyLen)
 	}
@@ -252,7 +253,10 @@ func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exa
 	// exactSigBytes greater than maxSigBytes can never be satisfied by
 	// the C call because the C helper writes at most maxSigBytes and the
 	// post-call length check would always reject. Mirrors the
-	// conformance-only path's nil/zero-receiver guard.
+	// conformance-only path's nil/zero-receiver guard. Covered by
+	// TestSignOpenSSLDigest32_NilPKeyErrors,
+	// TestSignOpenSSLDigest32_NonPositiveMaxSigBytesErrors, and
+	// TestSignOpenSSLDigest32_ExactGreaterThanMaxErrors.
 	if pkey == nil {
 		return nil, fmt.Errorf("nil openssl key")
 	}
