@@ -81,7 +81,7 @@ func nonDaTestTx(t *testing.T, marker byte, inValue uint64, feePaid uint64) (*co
 // Disable the relay floor so the test is fail-sensitive to da_fee_floor
 // itself, not to max(relay_fee_floor, da_required_fee) selecting relay.
 func TestRejectDaAnchorTxPolicy_ZeroSurchargeStillEnforcesDaFloor(t *testing.T) {
-	tx, utxos, _ := daTestTx(t, 0x10, 100, 0 /* fee */, 10 /* da bytes */)
+	tx, utxos, weight := daTestTx(t, 0x10, 100, 0 /* fee */, 10 /* da bytes */)
 	const currentMin = uint64(0)
 	const minDaFee = uint64(1)
 	const surcharge = uint64(0)
@@ -95,16 +95,9 @@ func TestRejectDaAnchorTxPolicy_ZeroSurchargeStillEnforcesDaFloor(t *testing.T) 
 	if !reject {
 		t.Fatalf("expected reject: zero surcharge must not bypass DA floor; reason=%q", reason)
 	}
-	for _, want := range []string{
-		"DA fee below Stage C floor",
-		"required_fee=10",
-		"relay_fee_floor=0",
-		"da_fee_floor=10",
-		"da_surcharge=0",
-	} {
-		if !strings.Contains(reason, want) {
-			t.Fatalf("reason=%q missing expected substring %q", reason, want)
-		}
+	wantReason := fmt.Sprintf("DA fee below Stage C floor (fee=0 required_fee=10 relay_fee_floor=0 da_fee_floor=10 da_surcharge=0 weight=%d da_payload_len=10)", weight)
+	if reason != wantReason {
+		t.Fatalf("reason=%q, want exact %q", reason, wantReason)
 	}
 }
 
@@ -113,7 +106,7 @@ func TestRejectDaAnchorTxPolicy_ZeroSurchargeStillEnforcesDaFloor(t *testing.T) 
 // Disable the relay floor so the reject proof is fail-sensitive to
 // da_surcharge itself.
 func TestRejectDaAnchorTxPolicy_ZeroMinDaFeeRateStillEnforcesSurcharge(t *testing.T) {
-	tx, utxos, _ := daTestTx(t, 0x11, 100, 5 /* fee */, 10 /* da bytes */)
+	tx, utxos, weight := daTestTx(t, 0x11, 100, 5 /* fee */, 10 /* da bytes */)
 	const currentMin = uint64(0)
 	const minDaFee = uint64(0)
 	const surcharge = uint64(2) // da_required = 10 * 2 = 20; fee=5 < 20 → reject
@@ -127,16 +120,9 @@ func TestRejectDaAnchorTxPolicy_ZeroMinDaFeeRateStillEnforcesSurcharge(t *testin
 	if !reject {
 		t.Fatalf("expected reject: surcharge floor not satisfied; reason=%q", reason)
 	}
-	for _, want := range []string{
-		"DA fee below Stage C floor",
-		"required_fee=20",
-		"relay_fee_floor=0",
-		"da_fee_floor=0",
-		"da_surcharge=20",
-	} {
-		if !strings.Contains(reason, want) {
-			t.Fatalf("reason=%q missing expected substring %q", reason, want)
-		}
+	wantReason := fmt.Sprintf("DA fee below Stage C floor (fee=5 required_fee=20 relay_fee_floor=0 da_fee_floor=0 da_surcharge=20 weight=%d da_payload_len=10)", weight)
+	if reason != wantReason {
+		t.Fatalf("reason=%q, want exact %q", reason, wantReason)
 	}
 }
 
