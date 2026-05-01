@@ -594,11 +594,11 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	}
 	// Policy checks consume an immutable pre-validation snapshot of only the
 	// transaction inputs they inspect, avoiding both live-state mutation and
-	// whole-chainstate copying on mempool admission. The snapshot is built
-	// only when a policy lane that actually reads input state will fire on
-	// this specific tx (CORE_EXT pre-activation gate, or a DA-bearing tx
-	// under any non-zero DA-side fee term); non-DA tx with no CORE_EXT gate
-	// skip the map-copy entirely. The snapshot must be built BEFORE
+	// whole-chainstate copying on mempool admission. Build the snapshot only
+	// when a policy lane that actually reads input state will fire on this
+	// specific tx (CORE_EXT pre-activation gate, or a DA-bearing tx under
+	// any non-zero DA-side fee term); non-DA tx with no CORE_EXT gate skip
+	// the map-copy entirely. Build the snapshot BEFORE
 	// CheckTransaction*WithOwnedUtxoSet, because that helper takes ownership
 	// of the supplied utxo map and removes spent inputs as it validates.
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
@@ -1306,10 +1306,10 @@ func (m *Mempool) CurrentMinFeeRateSnapshot() uint64 {
 
 // SetCurrentMinFeeRateForTest overrides the rolling local floor. Test-only:
 // bypasses the admit-path eviction logic that normally raises the floor.
-// cmd/rubin-node tests use this to inject a distinctive sentinel and
-// prove that MinerConfig.CurrentMempoolMinFeeRateFn observes the live
-// mempool state, not a constant closure that would silently reintroduce
-// the wave-1 T-D bug class. Nil-safe like the other accessors.
+// cmd/rubin-node tests inject a distinctive sentinel through this setter so
+// the live miner wiring tests bind on the exact value, instead of admitting
+// any closure returning the documented baseline. Nil-safe like the other
+// accessors.
 func (m *Mempool) SetCurrentMinFeeRateForTest(floor uint64) {
 	if m == nil {
 		return

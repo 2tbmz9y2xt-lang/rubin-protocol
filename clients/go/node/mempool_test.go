@@ -1189,6 +1189,45 @@ func TestMempoolAdmitsDaTxUnderAllZeroDaConfigViaRelayFloor(t *testing.T) {
 	}
 }
 
+// TestMempoolSetCurrentMinFeeRateForTestRoundTrips pins the test-only
+// rolling-floor setter contract: the value passed to
+// SetCurrentMinFeeRateForTest is observed by CurrentMinFeeRateSnapshot
+// without any clamping or normalisation. The same setter is consumed by
+// the cmd/rubin-node sentinel-floor wiring tests
+// (TestRunMineBlocksPassesMineAddressToMiner /
+// TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn) but
+// those tests live in package main and do not contribute to per-package
+// node coverage; this same-package test pins the helper for the diff
+// coverage gate.
+//
+// Proof assertion: a fresh mempool with a sentinel injected via
+// SetCurrentMinFeeRateForTest returns that exact sentinel from
+// CurrentMinFeeRateSnapshot, and a second sentinel overrides the first.
+// A nil receiver is a no-op.
+func TestMempoolSetCurrentMinFeeRateForTestRoundTrips(t *testing.T) {
+	st := NewChainState()
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	const sentinelA uint64 = 0x1234_5678_9ABC_DEF0
+	const sentinelB uint64 = 0xFEDC_BA98_7654_3210
+	mp.SetCurrentMinFeeRateForTest(sentinelA)
+	if got := mp.CurrentMinFeeRateSnapshot(); got != sentinelA {
+		t.Fatalf("after first set: got=%#x want=%#x", got, sentinelA)
+	}
+	mp.SetCurrentMinFeeRateForTest(sentinelB)
+	if got := mp.CurrentMinFeeRateSnapshot(); got != sentinelB {
+		t.Fatalf("after second set: got=%#x want=%#x", got, sentinelB)
+	}
+
+	var nilMempool *Mempool
+	nilMempool.SetCurrentMinFeeRateForTest(sentinelA) // must not panic
+	if got := nilMempool.CurrentMinFeeRateSnapshot(); got != DefaultMempoolMinFeeRate {
+		t.Fatalf("nil receiver after no-op set: got=%d want=%d", got, DefaultMempoolMinFeeRate)
+	}
+}
+
 // TestMempoolNilReceiverCurrentMinFeeRateSnapshotReturnsBaseline pins the
 // nil-receiver guard on `(*Mempool).CurrentMinFeeRateSnapshot()`. Other
 // exported accessors (BytesUsed, AdmissionCounts, Contains) are
