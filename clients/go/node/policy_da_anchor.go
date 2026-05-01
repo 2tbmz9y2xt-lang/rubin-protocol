@@ -41,8 +41,6 @@ func RejectNonCoinbaseAnchorOutputs(tx *consensus.Tx) (reject bool, reason strin
 // responsibility (for example via validateFeeFloorLocked).
 //
 // Inputs:
-//   - weight: consensus tx weight; supplied by the caller because callers
-//     already compute weight via consensus.TxWeightAndStats.
 //   - currentMempoolMinFeeRate: rolling local mempool floor exposed by
 //     #1336 (e.g. Mempool.currentMinFeeRateLocked()). Callers without a
 //     live mempool may use DefaultMempoolMinFeeRate as the documented
