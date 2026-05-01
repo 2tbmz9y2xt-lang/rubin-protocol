@@ -127,9 +127,18 @@ scripts/dev-env.sh -- bash -lc \
   `conformance/fixtures` или путь под ним;
 - production signing path (`SignDigest32`, hedged ML-DSA) **не** меняется.
 
-Использование: предусмотрено для будущей CI-only drift gate
-(`Q-CONF-FIXTURE-DRIFT-CHECK-01`), которая сравнит candidate bytes
-с committed bytes без мутации репо.
+CI drift gate (`Q-CONF-FIXTURE-DRIFT-CHECK-01`):
+
+```bash
+scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_drift.py
+```
+
+Скрипт запускает `gen-conformance-fixtures --output-dir <isolated-temp>`,
+а затем побайтово сравнивает каждый сгенерированный файл с committed
+`conformance/fixtures/**`. Exit `0` — без drift, exit `1` — drift, exit
+`2` — usage / environment ошибка. Скрипт **никогда** не пишет под
+`conformance/fixtures/**` (auto-regen в CI запрещён); ручная
+регенерация остаётся authoritative path.
 
 ## Fuzz crash promotion (manual-only)
 
