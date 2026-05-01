@@ -275,6 +275,16 @@ jobs:
           go-version: '1.25.9'
           cache: true
           cache-dependency-path: clients/go/go.mod
+
+      - name: OpenSSL deterministic ML-DSA-87 signing smoke
+        env:
+          RUBIN_OPENSSL_PREFIX: ${{ env.OPENSSL_DIR }}
+          RUBIN_OPENSSL_MODULES: ${{ env.OPENSSL_MODULES }}
+          RUBIN_OPENSSL_CONF: ${{ env.OPENSSL_CONF }}
+          RUBIN_OPENSSL_FIPS_MODE: only
+        run: |
+          scripts/dev-env.sh -- bash -lc "cd clients/go && go test ./consensus -run '^TestSignDigest32ForConformanceFixture_Deterministic$' -count=1 -v"
+
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: rustfmt, clippy
@@ -465,6 +475,11 @@ jobs:
             echo "OPENSSL_MODULES=$MODULES_DIR"
             echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
           } >> "$GITHUB_ENV"
+
+      - name: Verify OpenSSL PQ algorithms
+        run: |
+          openssl version
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
@@ -667,6 +682,12 @@ jobs:
             echo "OPENSSL_MODULES=$MODULES_DIR"
             echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
           } >> "$GITHUB_ENV"
+
+      - name: Verify OpenSSL PQ algorithms
+        run: |
+          openssl version
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
+
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: clients/go/go.mod
