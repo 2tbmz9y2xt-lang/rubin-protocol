@@ -785,11 +785,37 @@ func updateCoreExtRealBindingVector(
 // mustJSONUint32 pattern and lets unit tests exercise every guard
 // branch without subprocess-wrapping a CLI fatalf.
 func coreExtAllowedSuiteID(id string, v map[string]any) (byte, error) {
-	profiles := anyToSliceMap(v["core_ext_profiles"])
-	if len(profiles) != 1 {
-		return 0, fmt.Errorf("%s: core_ext_profiles must have exactly one bound profile, got %d", id, len(profiles))
+	rawProfiles, hasProfiles := v["core_ext_profiles"]
+	if !hasProfiles || rawProfiles == nil {
+		return 0, fmt.Errorf("%s: core_ext_profiles is missing or null; expected a JSON array with exactly one bound profile", id)
 	}
-	allowedAny, ok := profiles[0]["allowed_suite_ids"].([]any)
+	// Accept both shapes the generator produces in-process:
+	//   - []any (json.Unmarshal default for generic JSON arrays — what the
+	//     test reads back from disk after mustWriteFixture round-trips
+	//     the vector through encoding/json), and
+	//   - []map[string]any (what setCoreExtOpenSSLDigest32Binding writes
+	//     back via anyToSliceMap before the marshal step).
+	// Anything else is a contract violation and surfaces a typed error.
+	var profile map[string]any
+	switch profiles := rawProfiles.(type) {
+	case []any:
+		if len(profiles) != 1 {
+			return 0, fmt.Errorf("%s: core_ext_profiles must have exactly one bound profile, got %d", id, len(profiles))
+		}
+		got, ok := profiles[0].(map[string]any)
+		if !ok {
+			return 0, fmt.Errorf("%s: core_ext_profiles[0] must be a JSON object, got %T", id, profiles[0])
+		}
+		profile = got
+	case []map[string]any:
+		if len(profiles) != 1 {
+			return 0, fmt.Errorf("%s: core_ext_profiles must have exactly one bound profile, got %d", id, len(profiles))
+		}
+		profile = profiles[0]
+	default:
+		return 0, fmt.Errorf("%s: core_ext_profiles must be a JSON array, got %T", id, rawProfiles)
+	}
+	allowedAny, ok := profile["allowed_suite_ids"].([]any)
 	if !ok || len(allowedAny) == 0 {
 		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids must be a non-empty JSON array", id)
 	}

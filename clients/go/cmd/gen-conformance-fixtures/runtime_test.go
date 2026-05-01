@@ -1133,6 +1133,26 @@ func TestCoreExtAllowedSuiteID_Contract(t *testing.T) {
 			wantSuite: 0x03,
 		},
 		{
+			name:        "missing core_ext_profiles key",
+			input:       map[string]any{"id": "synthetic"},
+			wantErrSubs: "core_ext_profiles is missing or null",
+		},
+		{
+			name:        "nil core_ext_profiles",
+			input:       mkVector(nil),
+			wantErrSubs: "core_ext_profiles is missing or null",
+		},
+		{
+			name:        "non-array core_ext_profiles",
+			input:       mkVector("not-an-array"),
+			wantErrSubs: "core_ext_profiles must be a JSON array",
+		},
+		{
+			name:        "non-map core_ext_profiles[0]",
+			input:       mkVector([]any{"not-an-object"}),
+			wantErrSubs: "core_ext_profiles[0] must be a JSON object",
+		},
+		{
 			name:        "zero bound profiles",
 			input:       mkVector([]any{}),
 			wantErrSubs: "exactly one bound profile",
@@ -1268,7 +1288,10 @@ func TestGenerator_CoreExtRealBindingWitnessSuiteFromVectorContract(t *testing.T
 		t.Fatalf("unmarshal candidate %s: %v", candidatePath, err)
 	}
 	v := findVector(&candidate, "CV-U-EXT-05")
-	wantSuite := mustCoreExtAllowedSuiteID("CV-U-EXT-05", v)
+	wantSuite, err := coreExtAllowedSuiteID("CV-U-EXT-05", v)
+	if err != nil {
+		t.Fatalf("coreExtAllowedSuiteID(CV-U-EXT-05): %v", err)
+	}
 	if wantSuite != 0x03 {
 		t.Fatalf("CV-U-EXT-05 vector contract changed: allowed_suite_ids[0]=%d, want 3 (test premise)", wantSuite)
 	}
