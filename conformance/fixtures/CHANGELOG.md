@@ -11,6 +11,32 @@ Policy:
 
 ---
 
+## 2026-05-01 — One-time deterministic-key fixture regeneration (Q-CONF-FIXTURE-CONTENT-REGEN-01)
+
+Причина:
+- предшественник `Q-CONF-FIXTURE-GENERATOR-DETERMINISM-01` (rubin-protocol#1374, merge `d483e90`) перевёл генератор на committed DER private keys + детерминированную ML-DSA-87 подпись через `(*consensus.MLDSA87Keypair).SignDigest32ForConformanceFixture` (FFI helper из rubin-protocol#1381, merge `27c23ba`);
+- предшественник `Q-CONF-GENERATOR-CORE-EXT-SUITE-BINDING-01` (rubin-protocol#1383, merge `ccfa5f2`) починил `updateCoreExtRealBindingVector`: witness suite_id для CORE_EXT real-binding теперь берётся из `core_ext_profiles[0].allowed_suite_ids[0]` вместо hardcoded `SUITE_ID_ML_DSA_87`, что позволило `CV-U-EXT-05` пройти replay после регенерации;
+- ранее закоммиченные generator-owned fixtures всё ещё содержали ключи и подписи от прежних случайно-сгенерированных runs, поэтому первый прогон детерминированного генератора давал ненулевой diff;
+- этот PR — один-разовое выравнивание байтов под детерминированный output, чтобы drift gate (`Q-CONF-FIXTURE-DRIFT-CHECK-01`, rubin-protocol#1358) мог пройти на чистом дереве.
+
+Инструменты:
+- `clients/go/cmd/gen-conformance-fixtures` в default-mode (без `--output-dir`) против `origin/main` SHA `ccfa5f2`,
+- проверка через `tools/check_conformance_fixtures_policy.py` (PASS), `conformance/runner/run_cv_bundle.py` (PASS: 573 vectors), `tools/gen_conformance_matrix.py --check` (OK), `go test ./conformance/...` (PASS),
+- идемпотентность: повторный запуск генератора после коммита даёт пустой `diff -r` между двумя последовательными snapshot'ами.
+
+Изменённые fixtures:
+- `CV-UTXO-BASIC.json`
+- `CV-MULTISIG.json`
+- `CV-EXT.json`
+- `CV-VAULT.json`
+- `CV-HTLC.json`
+- `CV-SUBSIDY.json`
+- `devnet/devnet-vault-create-01.json`
+- `devnet/devnet-htlc-claim-01.json`
+- `devnet/devnet-multisig-spend-01.json`
+
+Не затронуто: `protocol/*` fixtures, manually-authored fixtures, schema, vector ops, `expect_err` payloads.
+
 ## 2026-04-12 — Live binding policy artifact (Q-IMPL-ROTATION-SUITESET-BINDING-CLOSURE-01)
 
 Причина:
