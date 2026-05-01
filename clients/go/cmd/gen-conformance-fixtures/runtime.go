@@ -25,9 +25,11 @@ import (
 // PrivateKeyDER()) and committed under testdata/keys/. Loading from
 // embed.FS instead of calling NewMLDSA87Keypair() at runtime makes the
 // (label -> keypair) mapping byte-stable across runs and across CI cwd
-// contexts; together with consensus.SignDigest32ForConformanceFixture
-// (FIPS 204 deterministic ML-DSA signing) it makes generator output
-// byte-reproducible from the same origin/main input.
+// contexts; together with deterministic signing via
+// (*consensus.MLDSA87Keypair).SignDigest32ForConformanceFixture
+// (reached in this generator through the conformanceFixtureKeypair.SignDigest32
+// override), it makes generator output byte-reproducible from the same
+// origin/main input.
 //
 // These DER blobs are conformance-only test material. They are NOT
 // production keys, NOT used by the node, wallet, or any signing-rpc
