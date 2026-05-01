@@ -1287,7 +1287,16 @@ func TestGenerator_CoreExtRealBindingWitnessSuiteFromVectorContract(t *testing.T
 	if err := json.Unmarshal(candidateBytes, &candidate); err != nil {
 		t.Fatalf("unmarshal candidate %s: %v", candidatePath, err)
 	}
-	v := findVector(&candidate, "CV-U-EXT-05")
+	var v map[string]any
+	for _, vector := range candidate.Vectors {
+		if id, ok := vector["id"].(string); ok && id == "CV-U-EXT-05" {
+			v = vector
+			break
+		}
+	}
+	if v == nil {
+		t.Fatalf("candidate %s missing vector %q", candidatePath, "CV-U-EXT-05")
+	}
 	wantSuite, err := coreExtAllowedSuiteID("CV-U-EXT-05", v)
 	if err != nil {
 		t.Fatalf("coreExtAllowedSuiteID(CV-U-EXT-05): %v", err)
