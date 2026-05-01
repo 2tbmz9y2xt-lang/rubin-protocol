@@ -1105,6 +1105,196 @@ func collectGeneratorOutput(t *testing.T, root string) map[string][]byte {
 	return out
 }
 
+// TestCoreExtAllowedSuiteID_Contract exercises the error-returning
+// helper across the full happy / negative case matrix without
+// subprocess-wrapping the CLI fatalf path. It pins the contract that
+// the helper rejects every shape that is not "exactly one bound
+// profile with exactly one allowed suite that fits in a byte and is
+// not SENTINEL". The CLI-boundary fatalf wrapper
+// (mustCoreExtAllowedSuiteID) is exercised separately by the
+// generator-output integration test below.
+func TestCoreExtAllowedSuiteID_Contract(t *testing.T) {
+	t.Parallel()
+	mkVector := func(profiles any) map[string]any {
+		return map[string]any{
+			"id":                "synthetic",
+			"core_ext_profiles": profiles,
+		}
+	}
+	cases := []struct {
+		name        string
+		input       map[string]any
+		wantSuite   byte
+		wantErrSubs string // substring expected in error; empty = no error
+	}{
+		{
+			name:      "happy single bound profile, single allowed suite",
+			input:     mkVector([]any{map[string]any{"allowed_suite_ids": []any{float64(3)}}}),
+			wantSuite: 0x03,
+		},
+		{
+			name:        "zero bound profiles",
+			input:       mkVector([]any{}),
+			wantErrSubs: "exactly one bound profile",
+		},
+		{
+			name: "two bound profiles",
+			input: mkVector([]any{
+				map[string]any{"allowed_suite_ids": []any{float64(3)}},
+				map[string]any{"allowed_suite_ids": []any{float64(4)}},
+			}),
+			wantErrSubs: "exactly one bound profile",
+		},
+		{
+			name:        "missing allowed_suite_ids",
+			input:       mkVector([]any{map[string]any{}}),
+			wantErrSubs: "non-empty JSON array",
+		},
+		{
+			name:        "empty allowed_suite_ids",
+			input:       mkVector([]any{map[string]any{"allowed_suite_ids": []any{}}}),
+			wantErrSubs: "non-empty JSON array",
+		},
+		{
+			name:        "multi-element allowed_suite_ids",
+			input:       mkVector([]any{map[string]any{"allowed_suite_ids": []any{float64(3), float64(4)}}}),
+			wantErrSubs: "exactly one suite",
+		},
+		{
+			name:        "out-of-byte allowed_suite_ids[0]",
+			input:       mkVector([]any{map[string]any{"allowed_suite_ids": []any{float64(256)}}}),
+			wantErrSubs: "single suite_id byte",
+		},
+		{
+			name:        "sentinel allowed_suite_ids[0]",
+			input:       mkVector([]any{map[string]any{"allowed_suite_ids": []any{float64(0)}}}),
+			wantErrSubs: "SENTINEL",
+		},
+		{
+			name:        "non-integral allowed_suite_ids[0]",
+			input:       mkVector([]any{map[string]any{"allowed_suite_ids": []any{1.5}}}),
+			wantErrSubs: "uint32-compatible JSON number",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := coreExtAllowedSuiteID("synthetic", tc.input)
+			if tc.wantErrSubs == "" {
+				if err != nil {
+					t.Fatalf("happy path err=%v, want nil", err)
+				}
+				if got != tc.wantSuite {
+					t.Fatalf("happy path got=0x%02x, want 0x%02x", got, tc.wantSuite)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil (suite=0x%02x)", tc.wantErrSubs, got)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSubs) {
+				t.Fatalf("err=%q, want substring %q", err.Error(), tc.wantErrSubs)
+			}
+		})
+	}
+}
+
+// TestGenerator_CoreExtRealBindingWitnessSuiteFromVectorContract
+// is the focused regression test for rubin-protocol#1382. It proves
+// that `updateCoreExtRealBindingVector` emits a witness suite_id
+// that matches the vector's `core_ext_profiles[0].allowed_suite_ids`
+// contract instead of a hardcoded ML-DSA-87 default. Concretely,
+// CV-U-EXT-05 in the committed CV-UTXO-BASIC.json pins
+// `allowed_suite_ids: [3]`, so the regenerated tx_hex MUST encode a
+// witness with suite_id byte == 0x03; the prior generator
+// hardcoded 0x01, which the runtime rejects with
+// TX_ERR_SIG_ALG_INVALID once deterministic regen brings the bytes
+// back to current generator output.
+//
+// The test runs the generator under --output-dir against a temp
+// directory so the committed fixture tree under
+// conformance/fixtures/** is NEVER touched, satisfying issue
+// #1382's "no fixture content regeneration in this PR" boundary.
+func TestGenerator_CoreExtRealBindingWitnessSuiteFromVectorContract(t *testing.T) {
+	skipIfMLDSA87DERUnavailable(t)
+	tmp := t.TempDir()
+
+	repoRoot, err := repoRootFromGoModule()
+	if err != nil {
+		t.Fatalf("repoRoot: %v", err)
+	}
+	committedFixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	committedSamples := []string{"CV-UTXO-BASIC.json"}
+	beforeContents := make(map[string][]byte, len(committedSamples))
+	for _, rel := range committedSamples {
+		full := filepath.Join(committedFixturesRoot, rel)
+		// #nosec G304 -- repo-rooted, static allowlist.
+		data, readErr := os.ReadFile(full)
+		if readErr != nil {
+			t.Fatalf("read %s before generator: %v", rel, readErr)
+		}
+		beforeContents[rel] = data
+	}
+
+	runGeneratorCLIWithArgs([]string{"-output-dir", tmp})
+
+	// Containment: committed CV-UTXO-BASIC.json must remain
+	// byte-identical (no fixture regen in this PR).
+	for _, rel := range committedSamples {
+		full := filepath.Join(committedFixturesRoot, rel)
+		// #nosec G304 -- same allowlist.
+		afterData, readErr := os.ReadFile(full)
+		if readErr != nil {
+			t.Fatalf("read %s after generator: %v", rel, readErr)
+		}
+		if !bytes.Equal(afterData, beforeContents[rel]) {
+			t.Fatalf("--output-dir mode mutated committed %s", rel)
+		}
+	}
+
+	// Read the candidate CV-UTXO-BASIC.json from the temp output
+	// and assert CV-U-EXT-05's witness suite_id matches the
+	// vector's allowed_suite_ids contract (0x03). Decoding the
+	// witness from tx_hex avoids a brittle hex-byte scan: parse the
+	// candidate JSON, locate CV-U-EXT-05, decode the tx, read the
+	// first witness item's SuiteID field.
+	candidatePath := filepath.Join(tmp, "CV-UTXO-BASIC.json")
+	// #nosec G304 -- candidate path under t.TempDir().
+	candidateBytes, err := os.ReadFile(candidatePath)
+	if err != nil {
+		t.Fatalf("read candidate %s: %v", candidatePath, err)
+	}
+	var candidate fixtureFile
+	if err := json.Unmarshal(candidateBytes, &candidate); err != nil {
+		t.Fatalf("unmarshal candidate %s: %v", candidatePath, err)
+	}
+	v := findVector(&candidate, "CV-U-EXT-05")
+	wantSuite := mustCoreExtAllowedSuiteID("CV-U-EXT-05", v)
+	if wantSuite != 0x03 {
+		t.Fatalf("CV-U-EXT-05 vector contract changed: allowed_suite_ids[0]=%d, want 3 (test premise)", wantSuite)
+	}
+	txHex, ok := v["tx_hex"].(string)
+	if !ok {
+		t.Fatalf("CV-U-EXT-05 candidate missing tx_hex")
+	}
+	txBytes, err := hex.DecodeString(txHex)
+	if err != nil {
+		t.Fatalf("CV-U-EXT-05 candidate tx_hex decode: %v", err)
+	}
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("CV-U-EXT-05 candidate consensus.ParseTx: %v", err)
+	}
+	if len(tx.Witness) != 1 {
+		t.Fatalf("CV-U-EXT-05 candidate must have exactly one witness item, got %d", len(tx.Witness))
+	}
+	if got := tx.Witness[0].SuiteID; got != wantSuite {
+		t.Fatalf(
+			"CV-U-EXT-05 candidate witness suite_id mismatch: got 0x%02x, want 0x%02x (vector pins allowed_suite_ids=[%d])",
+			got, wantSuite, wantSuite,
+		)
+	}
+}
+
 // skipIfMLDSA87DERUnavailable probes whether the runtime OpenSSL
 // build can decode the embedded ML-DSA-87 PKCS#8 DER format used by
 // the conformance fixture generator. On builds where the ML-DSA
