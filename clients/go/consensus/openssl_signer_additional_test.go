@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -281,6 +282,50 @@ func TestMLDSA87Keypair_PrivateKeyDER_NilKeypairErrors(t *testing.T) {
 	kp = &MLDSA87Keypair{}
 	if _, err := kp.PrivateKeyDER(); err == nil {
 		t.Fatalf("expected nil keypair error")
+	}
+}
+
+func TestValidatePrivateKeyDERPostC_NilPointerErrors(t *testing.T) {
+	err := validatePrivateKeyDERPostC(true, 1)
+	if err == nil {
+		t.Fatalf("expected error for nil DER pointer")
+	}
+	if !strings.Contains(err.Error(), "nil DER pointer") {
+		t.Fatalf("missing nil-pointer marker in error: %v", err)
+	}
+}
+
+func TestValidatePrivateKeyDERPostC_ZeroLengthErrors(t *testing.T) {
+	err := validatePrivateKeyDERPostC(false, 0)
+	if err == nil {
+		t.Fatalf("expected error for zero DER length")
+	}
+	if !strings.Contains(err.Error(), "zero DER length") {
+		t.Fatalf("missing zero-length marker in error: %v", err)
+	}
+}
+
+func TestValidatePrivateKeyDERPostC_OverflowErrors(t *testing.T) {
+	for _, derLen := range []uint64{
+		uint64(math.MaxInt32) + 1,
+		uint64(math.MaxInt32) + 1024,
+		math.MaxUint64,
+	} {
+		err := validatePrivateKeyDERPostC(false, derLen)
+		if err == nil {
+			t.Fatalf("derLen=%d: expected overflow error", derLen)
+		}
+		if !strings.Contains(err.Error(), "exceeds C.int range") {
+			t.Fatalf("derLen=%d: missing overflow marker in error: %v", derLen, err)
+		}
+	}
+}
+
+func TestValidatePrivateKeyDERPostC_AcceptsValidLengths(t *testing.T) {
+	for _, derLen := range []uint64{1, 32, 4096, uint64(math.MaxInt32)} {
+		if err := validatePrivateKeyDERPostC(false, derLen); err != nil {
+			t.Fatalf("derLen=%d: unexpected error: %v", derLen, err)
+		}
 	}
 }
 

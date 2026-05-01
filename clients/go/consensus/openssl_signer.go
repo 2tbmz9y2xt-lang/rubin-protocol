@@ -382,27 +382,48 @@ func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
 	}
 	defer C.rubin_free_der(der)
 
-	// Defensive post-C success checks before the byte-copy return. The
-	// C helper already returns -1 on every internal failure, but a
-	// degenerate runtime that signaled success (rc=0) yet left
-	// out=nil/out_len=0 would otherwise turn into an empty/silent DER
-	// copy. derLen also must fit into C.int because the byte-copy below
-	// takes a C.int length and silently truncates on overflow on 64-bit
-	// hosts.
-	if der == nil {
-		return nil, fmt.Errorf("openssl private key export returned nil DER pointer")
-	}
-	if derLen == 0 {
-		return nil, fmt.Errorf("openssl private key export returned zero DER length")
-	}
-	if uint64(derLen) > uint64(math.MaxInt32) {
-		return nil, fmt.Errorf(
-			"openssl private key export DER length=%d exceeds C.int range",
-			uint64(derLen),
-		)
+	// Defensive post-C success checks before the byte-copy return.
+	// validatePrivateKeyDERPostC isolates the three crypto-defensive
+	// branches (rc==0 but degenerate runtime returned nil/zero/overflow
+	// outputs) so they can be unit-tested without a working OpenSSL
+	// fault injector. Mirrors validateConformanceSignResult at
+	// clients/go/consensus/openssl_signer_conformance_fixture.go:205.
+	if err := validatePrivateKeyDERPostC(der == nil, uint64(derLen)); err != nil {
+		return nil, err
 	}
 
 	return C.GoBytes(unsafe.Pointer(der), C.int(derLen)), nil
+}
+
+// validatePrivateKeyDERPostC inspects the post-success outputs of
+// rubin_private_key_to_der and returns a wrapped fmt.Errorf when any
+// degenerate case is observed:
+//
+//   - derNil == true    → wrapped error reporting the nil DER pointer
+//     even though the C helper signalled success (rc==0).
+//   - derLen == 0       → wrapped error reporting zero DER length
+//     even though the C helper signalled success.
+//   - derLen overflows  → wrapped error reporting that the length
+//     does not fit into C.int (which the byte-copy below takes as
+//     a C.int and silently truncates on overflow on 64-bit hosts).
+//
+// Extracted from PrivateKeyDER so the three crypto-defensive branches
+// remain unit-test-reachable through this helper. (No typed/sentinel
+// error type — callers match by string contains in tests.)
+func validatePrivateKeyDERPostC(derNil bool, derLen uint64) error {
+	if derNil {
+		return fmt.Errorf("openssl private key export returned nil DER pointer")
+	}
+	if derLen == 0 {
+		return fmt.Errorf("openssl private key export returned zero DER length")
+	}
+	if derLen > uint64(math.MaxInt32) {
+		return fmt.Errorf(
+			"openssl private key export DER length=%d exceeds C.int range",
+			derLen,
+		)
+	}
+	return nil
 }
 
 func cStringTrim0(b []byte) string {
