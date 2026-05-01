@@ -593,14 +593,14 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
 	}
 	// Policy checks consume an immutable pre-validation snapshot of only the
-	// transaction inputs they inspect, avoiding both live-state mutation and
-	// whole-chainstate copying on mempool admission. Build the snapshot only
-	// when a policy lane that actually reads input state will fire on this
-	// specific tx (CORE_EXT pre-activation gate, or a DA-bearing tx under
-	// any non-zero DA-side fee term); non-DA tx with no CORE_EXT gate skip
-	// the map-copy entirely. Build the snapshot BEFORE
-	// CheckTransaction*WithOwnedUtxoSet, because that helper takes ownership
-	// of the supplied utxo map and removes spent inputs as it validates.
+	// transaction inputs they inspect, avoiding both live-utxo mutation and
+	// whole-chainstate copying on mempool admission. The snapshot is needed
+	// only by policy lanes that read tx inputs from utxos (CORE_EXT
+	// pre-activation gate, or a DA-bearing tx under any non-zero DA-side
+	// fee term); non-DA tx with no CORE_EXT gate skip the map-copy entirely.
+	// Build the snapshot before CheckTransaction*WithOwnedUtxoSet because
+	// that helper takes ownership of the supplied utxo map and removes
+	// spent inputs as part of validation.
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
 	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
 	if err != nil {
