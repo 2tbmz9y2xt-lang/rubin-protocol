@@ -1019,6 +1019,21 @@ func TestGenerator_ResolveWriteRootRejectsSymlinkedAncestor(t *testing.T) {
 	tmp := t.TempDir()
 	linkPath := filepath.Join(tmp, "link")
 	if err := os.Symlink(committedFixturesRoot, linkPath); err != nil {
+		// Skip on platforms where symlink creation is not supported
+		// or requires elevated privileges (notably Windows without
+		// Developer Mode, which surfaces "A required privilege is
+		// not held by the client" / "operation not supported"). The
+		// generator logic this test guards is platform-independent;
+		// the symlink scenario is only exercisable where the OS
+		// allows the test harness to create one.
+		msg := err.Error()
+		if strings.Contains(msg, "operation not supported") ||
+			strings.Contains(msg, "permission denied") ||
+			strings.Contains(msg, "A required privilege") ||
+			strings.Contains(msg, "not implemented") ||
+			strings.Contains(msg, "not permitted") {
+			t.Skipf("os.Symlink unsupported in this environment: %v", err)
+		}
 		t.Fatalf("symlink: %v", err)
 	}
 	candidate := filepath.Join(linkPath, "newdir")
