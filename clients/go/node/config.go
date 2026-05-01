@@ -325,8 +325,7 @@ func DefaultDataDir() string {
 	return filepath.Join(home, ".rubin")
 }
 
-// NormalizeDataDir applies lexical path cleanup only. Callers must reject blank
-// datadir values before calling it when "." would be an invalid operator input.
+// NormalizeDataDir returns filepath.Clean(path) without filesystem resolution.
 func NormalizeDataDir(path string) string {
 	return filepath.Clean(path)
 }
