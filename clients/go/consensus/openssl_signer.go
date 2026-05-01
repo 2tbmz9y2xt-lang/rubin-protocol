@@ -365,11 +365,12 @@ func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
 	}
 
 	// Deferred runtime.KeepAlive(k) extends k's compiler-tracked liveness
-	// to function exit, which covers both the rubin_private_key_to_der
-	// FFI call below and the final byte-copy return expression. A finalizer
-	// that fired mid-call could free k.pkey while the C helper still holds
-	// it, or invalidate the C-owned DER buffer before its bytes are copied
-	// into the returned Go slice.
+	// to function exit, which covers the rubin_private_key_to_der C call
+	// below. A finalizer that fired during that call could free k.pkey
+	// (EVP_PKEY) while the C helper is still using it. The C-owned DER
+	// buffer that the C call writes to der is owned by the C allocation
+	// and freed by defer C.rubin_free_der(der) below; it is independent
+	// of k.pkey and KeepAlive(k) is not needed to keep der alive.
 	defer runtime.KeepAlive(k)
 
 	errBuf := newOpenSSLErrorBuffer()
@@ -400,16 +401,17 @@ func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
 }
 
 // validatePrivateKeyDERPostC inspects the post-success outputs of
-// rubin_private_key_to_der and returns a wrapped fmt.Errorf when any
-// degenerate case is observed:
+// rubin_private_key_to_der and returns a fmt.Errorf describing the
+// degenerate case observed (no inner cause is wrapped via %w; the
+// helper itself is the source of the diagnostic):
 //
-//   - derNil == true    → wrapped error reporting the nil DER pointer
-//     even though the C helper signaled success (rc==0).
-//   - derLen == 0       → wrapped error reporting zero DER length
-//     even though the C helper signaled success.
-//   - derLen overflows  → wrapped error reporting that the length
-//     does not fit into C.int (which the byte-copy below takes as
-//     a C.int and silently truncates on overflow on 64-bit hosts).
+//   - derNil == true    → error reporting the nil DER pointer even
+//     though the C helper signaled success (rc==0).
+//   - derLen == 0       → error reporting zero DER length even
+//     though the C helper signaled success.
+//   - derLen overflows  → error reporting that the length does not
+//     fit into C.int (which the byte-copy below takes as a C.int
+//     and silently truncates on overflow on 64-bit hosts).
 //
 // Extracted from PrivateKeyDER so the three crypto-defensive branches
 // remain unit-test-reachable through this helper. (No typed/sentinel
