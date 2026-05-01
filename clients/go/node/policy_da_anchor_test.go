@@ -76,6 +76,11 @@ func nonDaTestTx(t *testing.T, marker byte, inValue uint64, feePaid uint64) (*co
 	return tx, utxos, weight
 }
 
+func wantStageCFloorReason(fee, requiredFee, relayFloor, daFloor, daSurcharge, weight, daPayloadLen uint64) string {
+	return fmt.Sprintf("DA fee below Stage C floor (fee=%d required_fee=%d relay_fee_floor=%d da_fee_floor=%d da_surcharge=%d weight=%d da_payload_len=%d)",
+		fee, requiredFee, relayFloor, daFloor, daSurcharge, weight, daPayloadLen)
+}
+
 // Hostile matrix #1 + matrix R2#2 + accepted_cases p3:
 // PolicyDaSurchargePerByte=0 must NOT bypass min_da_fee_rate.
 // Disable the relay floor so the test is fail-sensitive to da_fee_floor
@@ -95,7 +100,7 @@ func TestRejectDaAnchorTxPolicy_ZeroSurchargeStillEnforcesDaFloor(t *testing.T) 
 	if !reject {
 		t.Fatalf("expected reject: zero surcharge must not bypass DA floor; reason=%q", reason)
 	}
-	wantReason := fmt.Sprintf("DA fee below Stage C floor (fee=0 required_fee=10 relay_fee_floor=0 da_fee_floor=10 da_surcharge=0 weight=%d da_payload_len=10)", weight)
+	wantReason := wantStageCFloorReason(0, 10, 0, 10, 0, weight, 10)
 	if reason != wantReason {
 		t.Fatalf("reason=%q, want exact %q", reason, wantReason)
 	}
@@ -120,7 +125,7 @@ func TestRejectDaAnchorTxPolicy_ZeroMinDaFeeRateStillEnforcesSurcharge(t *testin
 	if !reject {
 		t.Fatalf("expected reject: surcharge floor not satisfied; reason=%q", reason)
 	}
-	wantReason := fmt.Sprintf("DA fee below Stage C floor (fee=5 required_fee=20 relay_fee_floor=0 da_fee_floor=0 da_surcharge=20 weight=%d da_payload_len=10)", weight)
+	wantReason := wantStageCFloorReason(5, 20, 0, 0, 20, weight, 10)
 	if reason != wantReason {
 		t.Fatalf("reason=%q, want exact %q", reason, wantReason)
 	}
@@ -136,9 +141,12 @@ func TestRejectDaAnchorTxPolicy_RelayFloorDominanceSelectsRelay(t *testing.T) {
 	const currentMin = uint64(10)
 	const minDaFee = uint64(1)
 	const surcharge = uint64(0)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
+	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
+	}
+	if daBytes != 10 {
+		t.Fatalf("daBytes=%d want=10", daBytes)
 	}
 	if !reject {
 		t.Fatalf("expected reject: fee below relay floor; reason=%q", reason)
@@ -146,33 +154,35 @@ func TestRejectDaAnchorTxPolicy_RelayFloorDominanceSelectsRelay(t *testing.T) {
 	relayFloor := weight * currentMin
 	daFloor := uint64(10) * minDaFee
 	daSurcharge := uint64(10) * surcharge
-	wantRelay := fmt.Sprintf("relay_fee_floor=%d", relayFloor)
-	wantDaFloor := fmt.Sprintf("da_fee_floor=%d", daFloor)
-	wantDaSurcharge := fmt.Sprintf("da_surcharge=%d", daSurcharge)
-	wantRequired := fmt.Sprintf("required_fee=%d", relayFloor)
-	for _, want := range []string{wantRelay, wantDaFloor, wantDaSurcharge, wantRequired} {
-		if !strings.Contains(reason, want) {
-			t.Fatalf("reason=%q missing expected substring %q", reason, want)
-		}
+	wantReason := wantStageCFloorReason(1, relayFloor, relayFloor, daFloor, daSurcharge, weight, 10)
+	if reason != wantReason {
+		t.Fatalf("reason=%q, want exact %q", reason, wantReason)
 	}
 }
 
 func TestRejectDaAnchorTxPolicy_DaFloorDominanceSelectsDa(t *testing.T) {
 	// Big payload, small weight: choose currentMin=1, minDaFee=1000,
 	// surcharge=0. Payload=10 -> da_required=10000. weight*1 << 10000.
-	tx, utxos, _ := daTestTx(t, 0x13, 1<<32, 9999, 10)
+	tx, utxos, weight := daTestTx(t, 0x13, 1<<32, 9999, 10)
 	const currentMin = uint64(1)
 	const minDaFee = uint64(1000)
 	const surcharge = uint64(0)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
+	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, currentMin, minDaFee, surcharge)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
+	}
+	if daBytes != 10 {
+		t.Fatalf("daBytes=%d want=10", daBytes)
 	}
 	if !reject {
 		t.Fatalf("expected reject: fee below DA-dominated floor; reason=%q", reason)
 	}
-	if !strings.Contains(reason, "da_fee_floor=") {
-		t.Fatalf("reason missing da_fee_floor diagnostic: %q", reason)
+	relayFloor := weight * currentMin
+	const daFloor = uint64(10) * minDaFee
+	const daSurcharge = uint64(10) * surcharge
+	wantReason := wantStageCFloorReason(9999, daFloor, relayFloor, daFloor, daSurcharge, weight, 10)
+	if reason != wantReason {
+		t.Fatalf("reason=%q, want exact %q", reason, wantReason)
 	}
 }
 
@@ -197,13 +207,20 @@ func TestRejectDaAnchorTxPolicy_BoundaryEqualAdmitsAndOneBelowRejects(t *testing
 	}
 
 	// fee == required - 1 must reject.
-	txBad, utxosBad, _ := daTestTx(t, 0x15, 1<<20, required-1, int(daBytes))
-	reject2, _, reason2, err2 := RejectDaAnchorTxPolicy(txBad, utxosBad, currentMin, minDaFee, surcharge)
+	txBad, utxosBad, badWeight := daTestTx(t, 0x15, 1<<20, required-1, int(daBytes))
+	reject2, observedDaBytes, reason2, err2 := RejectDaAnchorTxPolicy(txBad, utxosBad, currentMin, minDaFee, surcharge)
 	if err2 != nil {
 		t.Fatalf("unexpected err: %v", err2)
 	}
+	if observedDaBytes != daBytes {
+		t.Fatalf("daBytes=%d want=%d", observedDaBytes, daBytes)
+	}
 	if !reject2 {
 		t.Fatalf("expected reject at required-1; reason=%q", reason2)
+	}
+	wantReason := wantStageCFloorReason(required-1, required, 0, required, 0, badWeight, daBytes)
+	if reason2 != wantReason {
+		t.Fatalf("reason=%q, want exact %q", reason2, wantReason)
 	}
 }
 
@@ -324,13 +341,20 @@ func TestRejectDaAnchorTxPolicy_AllZeroNonDaShortCircuits(t *testing.T) {
 func TestRejectDaAnchorTxPolicy_SurchargeOnlyRegressionCovered(t *testing.T) {
 	// Old behavior reproduction: surcharge-only check would admit fee==daBytes*1.
 	// New helper with minDaFee=1 gates on da_payload_len*(1+1)=20; fee=10 must reject.
-	tx, utxos, _ := daTestTx(t, 0x1A, 100, 10, 10)
-	reject, _, reason, err := RejectDaAnchorTxPolicy(tx, utxos, 0, 1, 1)
+	tx, utxos, weight := daTestTx(t, 0x1A, 100, 10, 10)
+	reject, daBytes, reason, err := RejectDaAnchorTxPolicy(tx, utxos, 0, 1, 1)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
+	if daBytes != 10 {
+		t.Fatalf("daBytes=%d want=10", daBytes)
+	}
 	if !reject {
 		t.Fatalf("expected reject under Stage C: fee=10 < da_required=20; reason=%q", reason)
+	}
+	wantReason := wantStageCFloorReason(10, 20, 0, 10, 10, weight, 10)
+	if reason != wantReason {
+		t.Fatalf("reason=%q, want exact %q", reason, wantReason)
 	}
 }
 
