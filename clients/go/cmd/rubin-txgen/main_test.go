@@ -190,7 +190,7 @@ func TestRunRejectsBlankDataDir(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("blank datadir exit=%d", code)
 	}
-	if !strings.Contains(stderr.String(), "data_dir is required") {
+	if !strings.Contains(stderr.String(), "missing required --datadir") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }

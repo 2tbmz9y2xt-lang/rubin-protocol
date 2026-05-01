@@ -58,7 +58,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if strings.TrimSpace(*datadir) == "" {
-		_, _ = fmt.Fprintln(stderr, "data_dir is required")
+		_, _ = fmt.Fprintln(stderr, "missing required --datadir")
 		return 2
 	}
 	dataDir := node.NormalizeDataDir(*datadir)
