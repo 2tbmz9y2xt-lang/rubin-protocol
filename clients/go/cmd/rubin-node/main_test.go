@@ -316,6 +316,57 @@ func TestRunDryRunOK(t *testing.T) {
 	}
 }
 
+func symlinkTraversalDataDir(t *testing.T) (raw string, cleaned string, escaped string) {
+	t.Helper()
+	root := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	raw = filepath.Join(link, "..", "chain")
+	cleaned = node.NormalizeDataDir(raw)
+	escaped = filepath.Join(outside, "chain")
+	if cleaned == escaped {
+		t.Fatalf("invalid fixture: cleaned path equals symlink-resolved escape path %q", cleaned)
+	}
+	return raw, cleaned, escaped
+}
+
+func TestRunNormalizesDataDirBeforeChainStateAndBlockStorePathDerivation(t *testing.T) {
+	raw, cleaned, escaped := symlinkTraversalDataDir(t)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := run([]string{"--dry-run", "--datadir", raw}, &out, &errOut)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, errOut.String())
+	}
+
+	var printed node.Config
+	if err := json.NewDecoder(strings.NewReader(out.String())).Decode(&printed); err != nil {
+		t.Fatalf("decode printed config: %v\nstdout=%q", err, out.String())
+	}
+	if printed.DataDir != cleaned {
+		t.Fatalf("printed data_dir=%q, want normalized %q", printed.DataDir, cleaned)
+	}
+	if _, err := os.Stat(node.ChainStatePath(cleaned)); err != nil {
+		t.Fatalf("expected chainstate under normalized datadir: %v", err)
+	}
+	if info, err := os.Stat(node.BlockStorePath(cleaned)); err != nil {
+		t.Fatalf("expected blockstore under normalized datadir: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("blockstore path is not a directory: %s", node.BlockStorePath(cleaned))
+	}
+	if _, err := os.Stat(node.ChainStatePath(escaped)); !os.IsNotExist(err) {
+		t.Fatalf("raw symlink traversal path was used; stat err=%v path=%s", err, node.ChainStatePath(escaped))
+	}
+}
+
 func testLegacyExposureP2PKCovenantData(suiteID uint8) []byte {
 	cov := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
 	cov[0] = suiteID

@@ -325,6 +325,11 @@ func DefaultDataDir() string {
 	return filepath.Join(home, ".rubin")
 }
 
+// NormalizeDataDir returns filepath.Clean(path) without filesystem resolution.
+func NormalizeDataDir(path string) string {
+	return filepath.Clean(path)
+}
+
 func DefaultConfig() Config {
 	mempoolDefaults := DefaultMempoolConfig()
 	return Config{
