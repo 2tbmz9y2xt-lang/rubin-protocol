@@ -648,11 +648,10 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 //     reads input state for any candidate, so the snapshot is required
 //     regardless of tx shape.
 //  2. The DA path is exercisable AND the tx is DA-bearing
-//     (`daBytes > 0`). `applyPolicyAgainstState` invokes
-//     `RejectDaAnchorTxPolicy` only when `MinDaFeeRate > 0` or
-//     `PolicyDaSurchargePerByte > 0`, and the helper itself short-circuits
-//     for `daBytes == 0` without touching utxos. Non-DA tx therefore
-//     never consume the snapshot.
+//     (`daBytes > 0`). `applyPolicyAgainstState` repeats the DA-bearing
+//     check from the post-validation metadata before invoking
+//     `RejectDaAnchorTxPolicy`, so non-DA tx never consume the snapshot or
+//     enter the DA helper.
 //
 // All-zero DA config + non-CORE_EXT routing relies on
 // `validateFeeFloorLocked` to enforce the rolling relay-fee floor; that
@@ -714,8 +713,12 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 			return errors.New(reason)
 		}
 	}
-	// Stage C DA fee policy: only enter the helper when the DA-side floor
-	// is configured (MinDaFeeRate > 0) or a per-byte surcharge applies.
+	// Stage C DA fee policy: only enter the helper for DA-bearing tx when
+	// the DA-side floor is configured (MinDaFeeRate > 0) or a per-byte
+	// surcharge applies. Non-DA tx skip the helper entirely on the hot
+	// admit path; their relay-floor handling remains in
+	// validateFeeFloorLocked.
+	//
 	// The mempool admit path enforces the rolling relay-fee floor through
 	// validateFeeFloorLocked (TxAdmitUnavailable — transient/retryable),
 	// so this caller intentionally passes currentMempoolMinFeeRate=0 so
@@ -731,7 +734,7 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 	// The miner caller (rejectCandidate) keeps using the live rolling
 	// floor because it has no validateFeeFloorLocked equivalent — the
 	// miner template needs to skip a tx whenever it fails any floor.
-	if policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0 {
+	if checked.DaBytes > 0 && (policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0) {
 		reject, _, reason, err := RejectDaAnchorTxPolicy(
 			checked.Tx,
 			utxos,

@@ -1190,9 +1190,10 @@ func TestMempoolAdmitsDaTxUnderAllZeroDaConfigViaRelayFloor(t *testing.T) {
 }
 
 // TestMempoolSetCurrentMinFeeRateForTestRoundTrips pins the test-only
-// rolling-floor setter contract: the value passed to
-// SetCurrentMinFeeRateForTest is observed by CurrentMinFeeRateSnapshot
-// without any clamping or normalisation. The same setter is consumed by
+// rolling-floor setter contract: values at or above
+// DefaultMempoolMinFeeRate are observed exactly by
+// CurrentMinFeeRateSnapshot, while below-default values still pass
+// through the production baseline clamp. The same setter is consumed by
 // the cmd/rubin-node sentinel-floor wiring tests
 // (TestRunMineBlocksPassesMineAddressToMiner /
 // TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn) but
@@ -1202,8 +1203,9 @@ func TestMempoolAdmitsDaTxUnderAllZeroDaConfigViaRelayFloor(t *testing.T) {
 //
 // Proof assertion: a fresh mempool with a sentinel injected via
 // SetCurrentMinFeeRateForTest returns that exact sentinel from
-// CurrentMinFeeRateSnapshot, and a second sentinel overrides the first.
-// A nil receiver is a no-op.
+// CurrentMinFeeRateSnapshot, a second sentinel overrides the first,
+// below-default values are clamped to DefaultMempoolMinFeeRate, and a nil
+// receiver is a no-op.
 func TestMempoolSetCurrentMinFeeRateForTestRoundTrips(t *testing.T) {
 	st := NewChainState()
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{})
@@ -1219,6 +1221,10 @@ func TestMempoolSetCurrentMinFeeRateForTestRoundTrips(t *testing.T) {
 	mp.SetCurrentMinFeeRateForTest(sentinelB)
 	if got := mp.CurrentMinFeeRateSnapshot(); got != sentinelB {
 		t.Fatalf("after second set: got=%#x want=%#x", got, sentinelB)
+	}
+	mp.SetCurrentMinFeeRateForTest(0)
+	if got := mp.CurrentMinFeeRateSnapshot(); got != DefaultMempoolMinFeeRate {
+		t.Fatalf("after below-default set: got=%d want DefaultMempoolMinFeeRate=%d", got, DefaultMempoolMinFeeRate)
 	}
 
 	var nilMempool *Mempool
@@ -1604,8 +1610,47 @@ func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
 			PolicyDaSurchargePerByte: 1,
 		},
 	}
-	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx}, 101, nil, mp.policySnapshot()); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
+	_, daBytes, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats(da): %v", err)
+	}
+	if daBytes == 0 {
+		t.Fatalf("test setup: DA fixture reported daBytes=0")
+	}
+
+	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx, DaBytes: daBytes}, 101, nil, mp.policySnapshot()); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
 		t.Fatalf("expected DA fee computation error, got %v", err)
+	}
+}
+
+func TestMempoolPolicySkipsDaHelperForNonDaCheckedTx(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 900_000, 1, fromKey, fromAddress, toAddress)
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(non-DA): %v", err)
+	}
+	_, daBytes, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats(non-DA): %v", err)
+	}
+	if daBytes != 0 {
+		t.Fatalf("test setup: non-DA fixture reported daBytes=%d", daBytes)
+	}
+
+	mp := &Mempool{
+		chainState: &ChainState{},
+		policy: MempoolConfig{
+			MinDaFeeRate:             1,
+			PolicyDaSurchargePerByte: 1,
+		},
+	}
+	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx, DaBytes: daBytes}, 101, nil, mp.policySnapshot()); err != nil {
+		t.Fatalf("non-DA checked tx should skip DA helper despite nil policy utxos, got %v", err)
 	}
 }
 
