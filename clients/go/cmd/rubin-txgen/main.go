@@ -57,6 +57,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "missing or zero --amount")
 		return 2
 	}
+	if strings.TrimSpace(*datadir) == "" {
+		_, _ = fmt.Fprintln(stderr, "data_dir is required")
+		return 2
+	}
+	dataDir := node.NormalizeDataDir(*datadir)
 
 	fromDER, err := decodeHexFlag(*fromKeyHex)
 	if err != nil {
@@ -76,7 +81,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	st, err := node.LoadChainState(node.ChainStatePath(*datadir))
+	st, err := node.LoadChainState(node.ChainStatePath(dataDir))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "chainstate load failed: %v\n", err)
 		return 2

@@ -9,6 +9,8 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -83,6 +85,72 @@ func TestTxGenCreateValidTx(t *testing.T) {
 	}
 }
 
+func symlinkTraversalDataDir(t *testing.T) (raw string, cleaned string, escaped string) {
+	t.Helper()
+	root := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "target")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	raw = filepath.Join(link, "..", "chain")
+	cleaned = node.NormalizeDataDir(raw)
+	escaped = filepath.Join(outside, "chain")
+	if cleaned == escaped {
+		t.Fatalf("invalid fixture: cleaned path equals symlink-resolved escape path %q", cleaned)
+	}
+	return raw, cleaned, escaped
+}
+
+func TestRunNormalizesDataDirBeforeChainStateLoad(t *testing.T) {
+	fromKey := mustTxGenKeypair(t)
+	toKey := mustTxGenKeypair(t)
+	fromDER, err := fromKey.PrivateKeyDER()
+	if err != nil {
+		t.Fatalf("PrivateKeyDER: %v", err)
+	}
+	rawDataDir, normalizedDataDir, escapedDataDir := symlinkTraversalDataDir(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	st := node.NewChainState()
+	st.HasTip = true
+	st.Height = 100
+	st.TipHash[0] = 0x44
+	var prevTxid [32]byte
+	prevTxid[0] = 0x99
+	st.Utxos[consensus.Outpoint{Txid: prevTxid, Vout: 0}] = consensus.UtxoEntry{
+		Value:             100,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      fromAddress,
+		CreationHeight:    1,
+		CreatedByCoinbase: true,
+	}
+	if err := st.Save(node.ChainStatePath(normalizedDataDir)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--datadir", rawDataDir,
+		"--from-key", hex.EncodeToString(fromDER),
+		"--to-key", hex.EncodeToString(toAddress),
+		"--amount", "90",
+		"--fee", "1",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run exit=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Stat(node.ChainStatePath(escapedDataDir)); !os.IsNotExist(err) {
+		t.Fatalf("raw symlink traversal path was used; stat err=%v path=%s", err, node.ChainStatePath(escapedDataDir))
+	}
+}
+
 func TestRunRejectsMissingRequiredFlags(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -106,6 +174,23 @@ func TestRunRejectsMissingRequiredFlags(t *testing.T) {
 		t.Fatalf("zero amount exit=%d", code)
 	}
 	if !strings.Contains(stderr.String(), "missing or zero --amount") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunRejectsBlankDataDir(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--datadir", " \t ",
+		"--from-key", "00",
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("blank datadir exit=%d", code)
+	}
+	if !strings.Contains(stderr.String(), "data_dir is required") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }

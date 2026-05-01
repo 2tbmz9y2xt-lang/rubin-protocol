@@ -273,6 +273,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "invalid config: %v\n", err)
 		return 2
 	}
+	cfg.DataDir = node.NormalizeDataDir(cfg.DataDir)
 	if canonicalNetwork, ok := node.CanonicalNetworkName(cfg.Network); ok {
 		cfg.Network = canonicalNetwork
 	}
