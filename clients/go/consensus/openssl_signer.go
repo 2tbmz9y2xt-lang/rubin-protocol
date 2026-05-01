@@ -400,9 +400,9 @@ func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
 // degenerate case is observed:
 //
 //   - derNil == true    → wrapped error reporting the nil DER pointer
-//     even though the C helper signalled success (rc==0).
+//     even though the C helper signaled success (rc==0).
 //   - derLen == 0       → wrapped error reporting zero DER length
-//     even though the C helper signalled success.
+//     even though the C helper signaled success.
 //   - derLen overflows  → wrapped error reporting that the length
 //     does not fit into C.int (which the byte-copy below takes as
 //     a C.int and silently truncates on overflow on 64-bit hosts).
