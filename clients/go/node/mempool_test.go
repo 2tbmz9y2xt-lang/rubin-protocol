@@ -1112,11 +1112,11 @@ func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
 	}
 
 	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 99, 1, 1, fromKey, toAddress, []byte("0123456789"))
-	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
-		t.Fatalf("expected DA surcharge rejection, got %v", err)
+	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below Stage C floor") {
+		t.Fatalf("expected DA Stage C floor rejection, got %v", err)
 	}
-	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
-		t.Fatalf("expected relay metadata DA surcharge rejection, got %v", err)
+	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below Stage C floor") {
+		t.Fatalf("expected relay metadata DA Stage C floor rejection, got %v", err)
 	}
 }
 
@@ -1140,12 +1140,224 @@ func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
 	}
 }
 
-func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
+// TestMempoolPartialConfigBackfillsMinDaFeeRateAndAdmitsSufficientDaTx
+// pins the default-config path for PR #1368: a partial MempoolConfig
+// literal is interpreted as defaults plus overrides, so an omitted
+// MinDaFeeRate backfills to DefaultMinDaFeeRate and a DA-bearing tx that
+// pays both the DA-side floor and relay floor still admits.
+//
+// Proof assertion: mp.AddTx returns nil and the entry appears in the
+// mempool. The test also pins mp.policy.MinDaFeeRate so partial configs
+// cannot silently fall back to the old surcharge-only behavior.
+func TestMempoolPartialConfigBackfillsMinDaFeeRateAndAdmitsSufficientDaTx(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions:          10,
+		MaxBytes:                 1 << 20,
+		PolicyDaSurchargePerByte: 0,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if got := mp.policy.MinDaFeeRate; got != DefaultMinDaFeeRate {
+		t.Fatalf("MinDaFeeRate=%d, want DefaultMinDaFeeRate=%d", got, DefaultMinDaFeeRate)
+	}
+
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, []byte("0123456789"))
+	if err := mp.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx for sufficient-fee DA tx under partial config: %v", err)
+	}
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1", got)
+	}
+}
+
+func TestMempoolPartialConfigBackfillsMinDaFeeRateForLowFeeDaCommit(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
 	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MaxTransactions: 10,
+		MaxBytes:        1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if got := mp.policy.MinDaFeeRate; got != DefaultMinDaFeeRate {
+		t.Fatalf("MinDaFeeRate=%d, want DefaultMinDaFeeRate=%d", got, DefaultMinDaFeeRate)
+	}
+
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 99, 1, 1, fromKey, toAddress, []byte("0123456789"))
+	err = mp.AddTx(txBytes)
+	if err == nil || !strings.Contains(err.Error(), "DA fee below Stage C floor") {
+		t.Fatalf("expected Stage C DA floor rejection from default MinDaFeeRate, got %v", err)
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitRejected {
+		t.Fatalf("low-fee DA err=%v, want TxAdmitRejected", err)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
+	}
+}
+
+func TestMempoolConfigZeroMinDaFeeRateMeansDefault(t *testing.T) {
+	st, _ := testSpendableChainState(nil, nil)
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MinDaFeeRate:             0,
+		PolicyDaSurchargePerByte: 2,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	if got := mp.policy.MinDaFeeRate; got != DefaultMinDaFeeRate {
+		t.Fatalf("MinDaFeeRate=%d, want DefaultMinDaFeeRate=%d", got, DefaultMinDaFeeRate)
+	}
+	if got := mp.policy.PolicyDaSurchargePerByte; got != 2 {
+		t.Fatalf("PolicyDaSurchargePerByte=%d, want 2", got)
+	}
+}
+
+// TestMempoolSetCurrentMinFeeRateForTestRoundTrips pins the test-only
+// rolling-floor setter contract: values at or above
+// DefaultMempoolMinFeeRate are observed exactly by
+// CurrentMinFeeRateSnapshot, while below-default values still pass
+// through the production baseline clamp. The same setter is consumed by
+// the cmd/rubin-node sentinel-floor wiring tests
+// (TestRunMineBlocksPassesMineAddressToMiner /
+// TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn) but
+// those tests live in package main and do not contribute to per-package
+// node coverage; this same-package test pins the helper for the diff
+// coverage gate.
+//
+// Proof assertion: a fresh mempool with a sentinel injected via
+// SetCurrentMinFeeRateForTest returns that exact sentinel from
+// CurrentMinFeeRateSnapshot, a second sentinel overrides the first,
+// below-default values are clamped to DefaultMempoolMinFeeRate, and a nil
+// receiver is a no-op.
+func TestMempoolSetCurrentMinFeeRateForTestRoundTrips(t *testing.T) {
+	st := NewChainState()
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	const sentinelA uint64 = 0x1234_5678_9ABC_DEF0
+	const sentinelB uint64 = 0xFEDC_BA98_7654_3210
+	mp.SetCurrentMinFeeRateForTest(sentinelA)
+	if got := mp.CurrentMinFeeRateSnapshot(); got != sentinelA {
+		t.Fatalf("after first set: got=%#x want=%#x", got, sentinelA)
+	}
+	mp.SetCurrentMinFeeRateForTest(sentinelB)
+	if got := mp.CurrentMinFeeRateSnapshot(); got != sentinelB {
+		t.Fatalf("after second set: got=%#x want=%#x", got, sentinelB)
+	}
+	mp.SetCurrentMinFeeRateForTest(0)
+	if got := mp.CurrentMinFeeRateSnapshot(); got != DefaultMempoolMinFeeRate {
+		t.Fatalf("after below-default set: got=%d want DefaultMempoolMinFeeRate=%d", got, DefaultMempoolMinFeeRate)
+	}
+
+	var nilMempool *Mempool
+	nilMempool.SetCurrentMinFeeRateForTest(sentinelA) // must not panic
+	if got := nilMempool.CurrentMinFeeRateSnapshot(); got != DefaultMempoolMinFeeRate {
+		t.Fatalf("nil receiver after no-op set: got=%d want=%d", got, DefaultMempoolMinFeeRate)
+	}
+}
+
+// TestMempoolNilReceiverCurrentMinFeeRateSnapshotReturnsBaseline pins the
+// nil-receiver guard on `(*Mempool).CurrentMinFeeRateSnapshot()`. Other
+// exported accessors (BytesUsed, AdmissionCounts, Contains) are
+// nil-safe; this method MUST be too because it is also exported and
+// used as a production callback (MinerConfig.CurrentMempoolMinFeeRateFn
+// = mempool.CurrentMinFeeRateSnapshot). A nil receiver path would
+// otherwise panic at m.mu.RLock() during unusual fail-closed wiring or
+// test-time fixtures that hold a nil mempool reference.
+//
+// Proof assertion: a typed-nil call returns DefaultMempoolMinFeeRate
+// without panicking.
+func TestMempoolNilReceiverCurrentMinFeeRateSnapshotReturnsBaseline(t *testing.T) {
+	var nilMempool *Mempool
+	if got := nilMempool.CurrentMinFeeRateSnapshot(); got != DefaultMempoolMinFeeRate {
+		t.Fatalf("nil receiver returned %d, want DefaultMempoolMinFeeRate=%d", got, DefaultMempoolMinFeeRate)
+	}
+}
+
+// TestMempoolDaTxBelowRelayFloorReturnsUnavailable pins the wave-6 fix
+// for PR #1368: relay-floor failures on DA-bearing tx must surface as
+// TxAdmitUnavailable (transient — the rolling local floor will decay)
+// the same way non-DA tx do, NOT as TxAdmitRejected from the Stage C
+// helper. The mempool admit caller passes currentMempoolMinFeeRate=0 to
+// RejectDaAnchorTxPolicy so the helper enforces only the DA-side terms;
+// validateFeeFloorLocked owns relay-floor classification uniformly for
+// both DA and non-DA admissions.
+//
+// Proof assertion: AddTx returns *TxAdmitError with Kind=TxAdmitUnavailable
+// when the DA tx pays at or above the DA-side floor but below the
+// inflated rolling relay floor. A future edit that drops the
+// `currentMin=0` override would surface the same input as
+// TxAdmitRejected with a "DA fee below Stage C floor ... relay_fee_floor=..."
+// reason and fail this assertion.
+func TestMempoolDaTxBelowRelayFloorReturnsUnavailable(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000_000})
+
+	// Config has DA-side floor (so the Stage C helper runs) but no
+	// surcharge. Inflate the rolling local floor to a level the test tx
+	// cannot match so validateFeeFloorLocked fires; the helper itself
+	// passes (DA floor = daBytes * 1 is tiny).
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
+		MinDaFeeRate: 1,
+	})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	mp.mu.Lock()
+	mp.currentMinFeeRate = 1_000_000 // inflated rolling relay floor
+	mp.mu.Unlock()
+
+	// Build a DA tx that pays well above DA-side floor (daBytes*1) but
+	// far below weight*1_000_000. With the wave-6 fix the helper passes
+	// (currentMin=0 → max collapses to daRequired) and validateFeeFloorLocked
+	// fails the entry as TxAdmitUnavailable.
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 999_950_000, 1, fromKey, toAddress, []byte("0123456789"))
+	err = mp.AddTx(txBytes)
+	if err == nil {
+		t.Fatalf("expected admit error, got nil (tx admitted under inflated relay floor?)")
+	}
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("expected *TxAdmitError, got %T: %v", err, err)
+	}
+	if txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("got Kind=%s, want TxAdmitUnavailable; reason=%q", txErr.Kind, txErr.Message)
+	}
+	if !strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+		t.Fatalf("reason %q does not match validateFeeFloorLocked wording", txErr.Message)
+	}
+}
+
+func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	// Stage C admission requires the input value to cover both the
+	// relay-fee floor (weight * current_mempool_min_fee_rate) and the DA
+	// floor (da_payload_len * (min_da_fee_rate + surcharge_per_byte)),
+	// so this snapshot-mutation regression test has to provide enough
+	// value for the admission path to actually exercise the DA helper.
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyDaSurchargePerByte: 1,
@@ -1154,7 +1366,7 @@ func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 80, 10, 1, fromKey, toAddress, []byte("0123456789"))
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, []byte("0123456789"))
 	nextHeight, _, err := nextBlockContext(st)
 	if err != nil {
 		t.Fatalf("nextBlockContext: %v", err)
@@ -1436,8 +1648,130 @@ func TestMempoolPolicyPropagatesDaFeeComputationErrors(t *testing.T) {
 			PolicyDaSurchargePerByte: 1,
 		},
 	}
-	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx}, 101, nil, mp.policySnapshot()); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
+	_, daBytes, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats(da): %v", err)
+	}
+	if daBytes == 0 {
+		t.Fatalf("test setup: DA fixture reported daBytes=0")
+	}
+
+	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx, DaBytes: daBytes}, 101, nil, mp.policySnapshot()); err == nil || !strings.Contains(err.Error(), "nil utxo set") {
 		t.Fatalf("expected DA fee computation error, got %v", err)
+	}
+}
+
+func TestMempoolPolicySkipsDaHelperForNonDaCheckedTx(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 900_000, 1, fromKey, fromAddress, toAddress)
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(non-DA): %v", err)
+	}
+	_, daBytes, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats(non-DA): %v", err)
+	}
+	if daBytes != 0 {
+		t.Fatalf("test setup: non-DA fixture reported daBytes=%d", daBytes)
+	}
+
+	mp := &Mempool{
+		chainState: &ChainState{},
+		policy: MempoolConfig{
+			MinDaFeeRate:             1,
+			PolicyDaSurchargePerByte: 1,
+		},
+	}
+	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{Tx: tx, DaBytes: daBytes}, 101, nil, mp.policySnapshot()); err != nil {
+		t.Fatalf("non-DA checked tx should skip DA helper despite nil policy utxos, got %v", err)
+	}
+}
+
+// TestPolicyNeedsInputSnapshotForTxMatrix pins the tx-aware snapshot
+// gate semantics. The decision depends on BOTH the policy config AND
+// the tx shape (DA-bearing or not). This avoids building the per-tx
+// input snapshot for non-DA admissions when only the DA-side floor is
+// configured — the prior policy-only gate built it unconditionally for
+// any `MinDaFeeRate > 0` config and the helper short-circuited without
+// using the snapshot, which is wasted map-copy on the hot non-DA
+// admit path.
+//
+// Proof assertion: for each (config, tx-DA-flag) pair, the function
+// returns the documented value. This direct helper matrix uses raw
+// MempoolConfig literals; NewMempoolWithConfig separately normalizes a
+// zero MinDaFeeRate to DefaultMinDaFeeRate for public mempool callers.
+// Adding a new policy lane that reads input state without updating this
+// matrix breaks the build.
+func TestPolicyNeedsInputSnapshotForTxMatrix(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	parseFor := func(t *testing.T, txBytes []byte) *consensus.Tx {
+		t.Helper()
+		tx, _, _, _, err := consensus.ParseTx(txBytes)
+		if err != nil {
+			t.Fatalf("ParseTx: %v", err)
+		}
+		return tx
+	}
+
+	daBytesPayload := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, []byte("0123456789"))
+	nonDaBytesPayload := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 900_000, 1, fromKey, fromAddress, toAddress)
+	daTx := parseFor(t, daBytesPayload)
+	nonDaTx := parseFor(t, nonDaBytesPayload)
+
+	cases := []struct {
+		name string
+		cfg  MempoolConfig
+		tx   *consensus.Tx
+		want bool
+	}{
+		{name: "all_zero_no_core_ext_non_da", cfg: MempoolConfig{}, tx: nonDaTx, want: false},
+		{name: "all_zero_no_core_ext_da", cfg: MempoolConfig{}, tx: daTx, want: false},
+		{name: "min_da_fee_rate_only_non_da", cfg: MempoolConfig{MinDaFeeRate: 1}, tx: nonDaTx, want: false},
+		{name: "min_da_fee_rate_only_da", cfg: MempoolConfig{MinDaFeeRate: 1}, tx: daTx, want: true},
+		{name: "surcharge_only_non_da", cfg: MempoolConfig{PolicyDaSurchargePerByte: 1}, tx: nonDaTx, want: false},
+		{name: "surcharge_only_da", cfg: MempoolConfig{PolicyDaSurchargePerByte: 1}, tx: daTx, want: true},
+		{name: "core_ext_non_da", cfg: MempoolConfig{PolicyRejectCoreExtPreActivation: true}, tx: nonDaTx, want: true},
+		{name: "core_ext_da", cfg: MempoolConfig{PolicyRejectCoreExtPreActivation: true}, tx: daTx, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := policyNeedsInputSnapshotForTx(tc.tx, tc.cfg)
+			if err != nil {
+				t.Fatalf("policyNeedsInputSnapshotForTx error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPolicyNeedsInputSnapshotForTxUsesCheapNonDaShape(t *testing.T) {
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0xff, // unsupported, but no DA payload bytes.
+		Inputs:  []consensus.TxInput{{}},
+		Outputs: []consensus.TxOutput{{}},
+	}
+	if _, _, _, err := consensus.TxWeightAndStats(tx); err == nil {
+		t.Fatal("test setup: TxWeightAndStats unexpectedly accepted unsupported tx kind")
+	}
+	got, err := policyNeedsInputSnapshotForTx(tx, MempoolConfig{MinDaFeeRate: 1})
+	if err != nil {
+		t.Fatalf("policyNeedsInputSnapshotForTx should not run full weight stats for non-DA shape, got %v", err)
+	}
+	if got {
+		t.Fatal("policyNeedsInputSnapshotForTx returned true for tx with no DA payload bytes")
 	}
 }
 

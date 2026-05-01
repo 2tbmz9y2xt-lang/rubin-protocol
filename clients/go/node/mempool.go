@@ -17,6 +17,10 @@ const (
 	DefaultMempoolMaxBytes        = consensus.MAX_RELAY_MSG_BYTES
 	DefaultMempoolMinFeeRate      = uint64(1)
 
+	// DefaultMinDaFeeRate is the spec-side per-byte DA fee floor from
+	// POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C (`min_da_fee_rate`).
+	DefaultMinDaFeeRate = uint64(1)
+
 	mempoolLowWaterNumerator   = 9
 	mempoolLowWaterDenominator = 10
 )
@@ -87,9 +91,16 @@ type MempoolAdmissionCounts struct {
 }
 
 type MempoolConfig struct {
-	MaxTransactions                      int
-	MaxBytes                             int
-	PolicyDaSurchargePerByte             uint64
+	MaxTransactions          int
+	MaxBytes                 int
+	PolicyDaSurchargePerByte uint64
+	// MinDaFeeRate is the spec-side per-byte DA fee floor
+	// (POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C `min_da_fee_rate`,
+	// default 1). NewMempoolWithConfig treats 0 as omitted and normalizes
+	// it to DefaultMinDaFeeRate; callers cannot disable the spec floor
+	// through the public mempool config. Direct policy-helper tests may
+	// still pass 0 to isolate surcharge-only helper semantics.
+	MinDaFeeRate                         uint64
 	PolicyRejectNonCoinbaseAnchorOutputs bool
 	PolicyRejectCoreExtPreActivation     bool
 	PolicyMaxExtPayloadBytes             int
@@ -144,6 +155,7 @@ func DefaultMempoolConfig() MempoolConfig {
 		MaxTransactions:                      DefaultMempoolMaxTransactions,
 		MaxBytes:                             DefaultMempoolMaxBytes,
 		PolicyDaSurchargePerByte:             minerDefaults.PolicyDaSurchargePerByte,
+		MinDaFeeRate:                         DefaultMinDaFeeRate,
 		PolicyRejectNonCoinbaseAnchorOutputs: minerDefaults.PolicyRejectNonCoinbaseAnchorOutputs,
 		PolicyRejectCoreExtPreActivation:     minerDefaults.PolicyRejectCoreExtPreActivation,
 	}
@@ -175,6 +187,9 @@ func normalizeMempoolConfig(cfg MempoolConfig) MempoolConfig {
 	}
 	if cfg.MaxBytes <= 0 {
 		cfg.MaxBytes = DefaultMempoolMaxBytes
+	}
+	if cfg.MinDaFeeRate == 0 {
+		cfg.MinDaFeeRate = DefaultMinDaFeeRate
 	}
 	return cfg
 }
@@ -441,7 +456,11 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	}
 
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	if policyNeedsInputSnapshot(policy) {
+	needs, err := policyNeedsInputSnapshotForTx(tx, policy)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	if needs {
 		policyUtxos, err = policyInputSnapshot(tx, snapshot.utxos)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
@@ -578,8 +597,21 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if consumed != len(txBytes) {
 		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
 	}
+	// Policy checks consume an immutable pre-validation snapshot of only the
+	// transaction inputs they inspect, avoiding both live-utxo mutation and
+	// whole-chainstate copying on mempool admission. The snapshot is needed
+	// only by policy lanes that read tx inputs from utxos (CORE_EXT
+	// pre-activation gate, or a DA-bearing tx under any non-zero DA-side
+	// fee term); non-DA tx with no CORE_EXT gate skip the map-copy entirely.
+	// Build the snapshot before CheckTransaction*WithOwnedUtxoSet because
+	// that helper takes ownership of the supplied utxo map and removes
+	// spent inputs as part of validation.
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	if policyNeedsInputSnapshot(policy) {
+	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	if needs {
 		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.utxos)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
@@ -598,9 +630,6 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
-	// Policy checks consume an immutable pre-validation snapshot of only the
-	// transaction inputs they inspect, avoiding both live-state mutation and
-	// whole-chainstate copying on mempool admission.
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
@@ -611,8 +640,47 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	return checked, inputs, nil
 }
 
-func policyNeedsInputSnapshot(policy MempoolConfig) bool {
-	return policy.PolicyDaSurchargePerByte > 0 || policy.PolicyRejectCoreExtPreActivation
+// policyNeedsInputSnapshotForTx returns true if applying policy to the
+// already-parsed transaction will read input UTXOs. The decision is
+// tx-aware so admissions of non-DA transactions under the default
+// config (`MinDaFeeRate=DefaultMinDaFeeRate=1`,
+// `PolicyDaSurchargePerByte=0`, `PolicyRejectCoreExtPreActivation=false`)
+// skip the per-tx map copy entirely.
+//
+// Trigger conditions:
+//
+//  1. `PolicyRejectCoreExtPreActivation` is on — the CORE_EXT classifier
+//     reads input state for any candidate, so the snapshot is required
+//     regardless of tx shape.
+//  2. The DA path is exercisable AND the tx is DA-bearing
+//     (`daBytes > 0`). `applyPolicyAgainstState` repeats the DA-bearing
+//     check from the post-validation metadata before invoking
+//     `RejectDaAnchorTxPolicy`, so non-DA tx never consume the snapshot or
+//     enter the DA helper.
+//
+// A raw all-zero DA policy snapshot + non-CORE_EXT routing relies on
+// `validateFeeFloorLocked` to enforce the rolling relay-fee floor; that
+// path does not need a UTXO snapshot. Public NewMempoolWithConfig callers
+// get DefaultMinDaFeeRate when MinDaFeeRate is left at zero.
+//
+// The function takes the parsed `*consensus.Tx` (not the post-validation
+// `*CheckedTransaction`) on purpose: the caller must build the snapshot
+// BEFORE invoking `CheckTransaction*WithOwnedUtxoSet`, which takes
+// ownership of the supplied utxo map and removes spent inputs as it
+// validates. The DA-bearing decision is a cheap structural predicate, not
+// a full weight/stat walk; malformed tx kinds are still rejected by the
+// later consensus validation path.
+func policyNeedsInputSnapshotForTx(tx *consensus.Tx, policy MempoolConfig) (bool, error) {
+	if policy.PolicyRejectCoreExtPreActivation {
+		return true, nil
+	}
+	if policy.MinDaFeeRate == 0 && policy.PolicyDaSurchargePerByte == 0 {
+		return false, nil
+	}
+	if tx == nil {
+		return false, errors.New("nil transaction")
+	}
+	return tx.TxKind != 0x00 && len(tx.DaPayload) > 0, nil
 }
 
 func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
@@ -648,12 +716,41 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 			return errors.New(reason)
 		}
 	}
-	reject, _, reason, err := RejectDaAnchorTxPolicy(checked.Tx, utxos, policy.PolicyDaSurchargePerByte)
-	if err != nil {
-		return err
-	}
-	if reject {
-		return errors.New(reason)
+	// Stage C DA fee policy: only enter the helper for DA-bearing tx when
+	// the DA-side floor is configured (MinDaFeeRate > 0) or a per-byte
+	// surcharge applies. Non-DA tx skip the helper entirely on the hot
+	// admit path; their relay-floor handling remains in
+	// validateFeeFloorLocked.
+	//
+	// The mempool admit path enforces the rolling relay-fee floor through
+	// validateFeeFloorLocked (TxAdmitUnavailable — transient/retryable),
+	// so this caller intentionally passes currentMempoolMinFeeRate=0 so
+	// max(relay_fee_floor, da_required_fee) collapses to da_required_fee.
+	// Without the zero override, a DA tx that pays the DA-side floor but
+	// not the rolling relay floor would surface here as TxAdmitRejected
+	// ("DA fee below Stage C floor ... relay_fee_floor=...") instead of
+	// the symmetric TxAdmitUnavailable that non-DA tx receive from
+	// validateFeeFloorLocked. With currentMin=0 the helper enforces only
+	// the DA-specific terms and validateFeeFloorLocked owns relay-floor
+	// classification uniformly for both DA and non-DA admissions.
+	//
+	// The miner caller (rejectCandidate) keeps using the live rolling
+	// floor because it has no validateFeeFloorLocked equivalent — the
+	// miner template needs to skip a tx whenever it fails any floor.
+	if checked.DaBytes > 0 && (policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0) {
+		reject, _, reason, err := RejectDaAnchorTxPolicy(
+			checked.Tx,
+			utxos,
+			0,
+			policy.MinDaFeeRate,
+			policy.PolicyDaSurchargePerByte,
+		)
+		if err != nil {
+			return txAdmitRejected(fmt.Sprintf("%s: %v", reason, err))
+		}
+		if reject {
+			return txAdmitRejected(reason)
+		}
 	}
 	if policy.PolicyRejectCoreExtPreActivation {
 		reject, reason, err := RejectCoreExtTxPreActivation(checked.Tx, utxos, nextHeight, policy.CoreExtProfiles)
@@ -1187,6 +1284,45 @@ func (m *Mempool) currentMinFeeRateLocked() uint64 {
 		return DefaultMempoolMinFeeRate
 	}
 	return m.currentMinFeeRate
+}
+
+// CurrentMinFeeRateSnapshot returns the rolling local floor without
+// requiring the caller to already hold m.mu. It briefly takes a read
+// lock so that race-free Stage C admission helpers (which run under a
+// chainstate-side lock, not m.mu) can read the value safely.
+//
+// It is exported so that external callers (e.g. the miner template
+// loop in cmd/rubin-node) can wire MinerConfig.CurrentMempoolMinFeeRateFn
+// directly to it and keep the relay-fee half of the Stage C admission
+// contract aligned with the rolling floor.
+//
+// Nil-safe like the other exported Mempool accessors (BytesUsed,
+// AdmissionCounts, Contains): a nil receiver returns
+// DefaultMempoolMinFeeRate so test-time wiring or fail-closed paths
+// that never construct a Mempool see the documented baseline floor
+// instead of a panic from m.mu.RLock().
+func (m *Mempool) CurrentMinFeeRateSnapshot() uint64 {
+	if m == nil {
+		return DefaultMempoolMinFeeRate
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentMinFeeRateLocked()
+}
+
+// SetCurrentMinFeeRateForTest overrides the rolling local floor. Test-only:
+// bypasses the admit-path eviction logic that normally raises the floor.
+// cmd/rubin-node tests inject a distinctive sentinel through this setter so
+// the live miner wiring tests bind on the exact value, instead of admitting
+// any closure returning the documented baseline. Nil-safe like the other
+// accessors.
+func (m *Mempool) SetCurrentMinFeeRateForTest(floor uint64) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentMinFeeRate = floor
 }
 
 func (m *Mempool) effectiveLowWaterBytesLocked() int {
