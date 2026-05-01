@@ -825,9 +825,13 @@ func TestGenerator_DeterministicOutputDir(t *testing.T) {
 // this: the gate compares candidate bytes to committed bytes, so the
 // candidate path must be physically isolated.
 //
-// Proof assertion: capture mtimes for a representative set of
-// committed generator-owned fixtures, run the generator with
-// --output-dir, re-read mtimes — none changed.
+// Proof assertion: capture full file bytes for a representative set
+// of committed generator-owned fixtures, run the generator with
+// --output-dir, re-read bytes and compare with bytes.Equal — none
+// changed. Bytes-based comparison is robust against filesystems with
+// coarse mtime resolution where a write may not advance ModTime;
+// the earlier mtime-based assertion would silently pass on such
+// runners.
 func TestGenerator_OutputDirContainmentNoCommittedWrite(t *testing.T) {
 	skipIfMLDSA87DERUnavailable(t)
 	tmp := t.TempDir()
@@ -848,26 +852,30 @@ func TestGenerator_OutputDirContainmentNoCommittedWrite(t *testing.T) {
 		filepath.Join("devnet", "devnet-htlc-claim-01.json"),
 		filepath.Join("devnet", "devnet-multisig-spend-01.json"),
 	}
-	beforeMtimes := make(map[string]int64, len(committedSamples))
+	beforeContents := make(map[string][]byte, len(committedSamples))
 	for _, rel := range committedSamples {
 		full := filepath.Join(committedFixturesRoot, rel)
-		st, statErr := os.Stat(full)
-		if statErr != nil {
-			t.Fatalf("stat %s before generator: %v", rel, statErr)
+		// #nosec G304 -- path is repo-rooted, joined from a static
+		// allowlist of committed fixture sample names.
+		data, readErr := os.ReadFile(full)
+		if readErr != nil {
+			t.Fatalf("read %s before generator: %v", rel, readErr)
 		}
-		beforeMtimes[rel] = st.ModTime().UnixNano()
+		beforeContents[rel] = data
 	}
 
 	runGeneratorCLIWithArgs([]string{"-output-dir", tmp})
 
 	for _, rel := range committedSamples {
 		full := filepath.Join(committedFixturesRoot, rel)
-		st, statErr := os.Stat(full)
-		if statErr != nil {
-			t.Fatalf("stat %s after generator: %v", rel, statErr)
+		// #nosec G304 -- same allowlist; second read covers the
+		// post-generator containment assertion.
+		afterData, readErr := os.ReadFile(full)
+		if readErr != nil {
+			t.Fatalf("read %s after generator: %v", rel, readErr)
 		}
-		if got := st.ModTime().UnixNano(); got != beforeMtimes[rel] {
-			t.Fatalf("--output-dir mode mutated committed fixture %s (mtime before=%d after=%d) — containment broken", rel, beforeMtimes[rel], got)
+		if !bytes.Equal(afterData, beforeContents[rel]) {
+			t.Fatalf("--output-dir mode mutated committed fixture %s (file contents changed) — containment broken", rel)
 		}
 	}
 	// Sanity: candidate fixtures DID land under the temp output dir.
