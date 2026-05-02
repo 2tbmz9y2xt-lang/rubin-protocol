@@ -3926,3 +3926,158 @@ func TestMempoolAdmissionCountsNilReceiver(t *testing.T) {
 		t.Fatalf("AdmissionCounts nil receiver=%+v, want zero struct", got)
 	}
 }
+
+// TestMempoolStatsNilReceiver pins the nil-safety contract used by
+// /metrics rendering: a nil mempool returns the zero-value
+// MempoolStats struct without panicking, so the standard-mempool
+// gauges below render as 0 on a node fixture without a wired
+// mempool.
+func TestMempoolStatsNilReceiver(t *testing.T) {
+	var mp *Mempool
+	if got := mp.Stats(); got != (MempoolStats{}) {
+		t.Fatalf("Stats nil receiver=%+v, want zero struct", got)
+	}
+}
+
+// TestMempoolStatsReadsLiveStateNotConfigDefaults asserts that
+// MaxBytes / LowWaterBytes / MinFeeRate are read from the mempool's
+// current struct fields, not from MempoolConfig defaults. This is the
+// Linear "max_bytes, low_water_bytes, and min_fee_rate are reported
+// from current mempool state, not hardcoded duplicates" invariant.
+func TestMempoolStatsReadsLiveStateNotConfigDefaults(t *testing.T) {
+	mp := &Mempool{
+		maxTxs:            5,
+		maxBytes:          12345,
+		lowWaterBytes:     6789,
+		currentMinFeeRate: 42,
+	}
+	got := mp.Stats()
+	if got.MaxBytes != 12345 {
+		t.Fatalf("MaxBytes=%d, want 12345", got.MaxBytes)
+	}
+	if got.LowWaterBytes != 6789 {
+		t.Fatalf("LowWaterBytes=%d, want 6789", got.LowWaterBytes)
+	}
+	if got.MinFeeRate != 42 {
+		t.Fatalf("MinFeeRate=%d, want 42", got.MinFeeRate)
+	}
+	if got.TxCount != 0 {
+		t.Fatalf("TxCount=%d, want 0", got.TxCount)
+	}
+	if got.BytesUsed != 0 {
+		t.Fatalf("BytesUsed=%d, want 0", got.BytesUsed)
+	}
+	if got.EvictedResidentTotal != 0 {
+		t.Fatalf("EvictedResidentTotal=%d, want 0", got.EvictedResidentTotal)
+	}
+}
+
+// TestMempoolStatsScrapePurity asserts that two consecutive Stats()
+// calls observe the same EvictedResidentTotal: reading the snapshot
+// must not mutate any underlying counter or gauge. This protects the
+// /metrics endpoint contract that scraping is a pure observation.
+func TestMempoolStatsScrapePurity(t *testing.T) {
+	mp := &Mempool{maxTxs: 5, maxBytes: 12345}
+	mp.evictedResidentTotal.Store(7)
+	first := mp.Stats()
+	second := mp.Stats()
+	if first != second {
+		t.Fatalf("Stats() not pure: first=%+v second=%+v", first, second)
+	}
+	if first.EvictedResidentTotal != 7 {
+		t.Fatalf("EvictedResidentTotal=%d, want 7", first.EvictedResidentTotal)
+	}
+}
+
+// TestMempoolStatsResidentEvictionIncrementsExactlyOnce force-runs
+// the eviction code path: a 1-slot mempool with one resident, then
+// addEntryLocked with a higher-fee candidate that displaces the
+// resident. EvictedResidentTotal must increase by exactly one.
+// Mirrors the Linear invariant "A resident-entry capacity eviction
+// increments the eviction counter exactly once."
+func TestMempoolStatsResidentEvictionIncrementsExactlyOnce(t *testing.T) {
+	mp := &Mempool{maxTxs: 1, maxBytes: 100}
+	resident := &mempoolEntry{
+		txid:   [32]byte{0x01},
+		fee:    10,
+		weight: 1,
+		size:   1,
+	}
+	if err := mp.addEntryLocked(resident); err != nil {
+		t.Fatalf("addEntryLocked(resident): %v", err)
+	}
+	if got := mp.Stats().EvictedResidentTotal; got != 0 {
+		t.Fatalf("EvictedResidentTotal after first admit=%d, want 0", got)
+	}
+	candidate := &mempoolEntry{
+		txid:   [32]byte{0x02},
+		fee:    100,
+		weight: 1,
+		size:   1,
+	}
+	if err := mp.addEntryLocked(candidate); err != nil {
+		t.Fatalf("addEntryLocked(displacing candidate): %v", err)
+	}
+	if got := mp.Stats().EvictedResidentTotal; got != 1 {
+		t.Fatalf("EvictedResidentTotal after eviction=%d, want 1", got)
+	}
+}
+
+// TestMempoolStatsCandidateWorstRejectionDoesNotCount asserts that
+// rejecting an incoming candidate at capacity (because it is the
+// worst entry per eviction ordering) MUST NOT increment the
+// resident-eviction counter. No resident is removed in that path.
+// Mirrors Linear "Candidate rejection at capacity ... is not counted
+// as a resident eviction."
+func TestMempoolStatsCandidateWorstRejectionDoesNotCount(t *testing.T) {
+	mp := &Mempool{maxTxs: 1, maxBytes: 100}
+	resident := &mempoolEntry{
+		txid:   [32]byte{0x10},
+		fee:    100,
+		weight: 1,
+		size:   1,
+	}
+	if err := mp.addEntryLocked(resident); err != nil {
+		t.Fatalf("addEntryLocked(resident): %v", err)
+	}
+	worstCandidate := &mempoolEntry{
+		txid:   [32]byte{0x11},
+		fee:    1,
+		weight: 1,
+		size:   1,
+	}
+	err := mp.addEntryLocked(worstCandidate)
+	if err == nil || !strings.Contains(err.Error(), "mempool capacity candidate rejected by eviction ordering") {
+		t.Fatalf("expected candidate-worst rejection, got %v", err)
+	}
+	if got := mp.Stats().EvictedResidentTotal; got != 0 {
+		t.Fatalf("EvictedResidentTotal after candidate-worst rejection=%d, want 0", got)
+	}
+}
+
+// TestMempoolStatsFeeFloorRejectionDoesNotCount asserts that
+// rejecting an incoming candidate below the rolling minimum fee rate
+// MUST NOT increment the resident-eviction counter. Fee-floor
+// rejection happens in validateFeeFloorLocked before the eviction
+// plan is consulted, so no resident is touched. Mirrors Linear
+// "fee-floor rejection is not counted as a resident eviction."
+func TestMempoolStatsFeeFloorRejectionDoesNotCount(t *testing.T) {
+	mp := &Mempool{
+		maxTxs:            10,
+		maxBytes:          1000,
+		currentMinFeeRate: 1000,
+	}
+	tooCheap := &mempoolEntry{
+		txid:   [32]byte{0x21},
+		fee:    1,
+		weight: 1,
+		size:   1,
+	}
+	err := mp.addEntryLocked(tooCheap)
+	if err == nil || !strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+		t.Fatalf("expected fee-floor rejection, got %v", err)
+	}
+	if got := mp.Stats().EvictedResidentTotal; got != 0 {
+		t.Fatalf("EvictedResidentTotal after fee-floor rejection=%d, want 0", got)
+	}
+}

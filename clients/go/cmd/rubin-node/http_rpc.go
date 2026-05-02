@@ -1167,6 +1167,7 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		mempoolTxs         float64
 		mempoolBytes       float64
 		mempoolAdmit       node.MempoolAdmissionCounts
+		mempoolStats       node.MempoolStats
 		peerLifecycleExits uint64
 		routeStatus        map[string]uint64
 		submitByResult     map[string]uint64
@@ -1196,6 +1197,14 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		// repeatedly cannot perturb the counters.
 		mempoolBytes = float64(state.mempool.BytesUsed())
 		mempoolAdmit = state.mempool.AdmissionCounts()
+		// Stats is a read-only snapshot: Load() of the resident-eviction
+		// atomic counter plus an RLock-protected read of max_bytes /
+		// low_water_bytes / current min fee rate / tx count / bytes
+		// used. Repeated /metrics scrapes never mutate any of those.
+		// On a nil-mempool state path this branch is skipped and
+		// mempoolStats keeps its zero value, so the standard-mempool
+		// gauges below render as 0 without panicking.
+		mempoolStats = state.mempool.Stats()
 	}
 	if state != nil && state.peerLifecycleExits != nil {
 		// Pure atomic.Load behind the closure — repeated /metrics
@@ -1249,6 +1258,28 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		fmt.Sprintf(`rubin_node_mempool_admit_total{result="conflict"} %d`, mempoolAdmit.Conflict),
 		fmt.Sprintf(`rubin_node_mempool_admit_total{result="rejected"} %d`, mempoolAdmit.Rejected),
 		fmt.Sprintf(`rubin_node_mempool_admit_total{result="unavailable"} %d`, mempoolAdmit.Unavailable),
+		// Standard mempool capacity / fee-floor / eviction telemetry.
+		// max_bytes and low_water_bytes are read live from the mempool
+		// (NOT from MempoolConfig defaults) so they reflect any
+		// per-instance override; min_fee_rate reflects the rolling
+		// post-eviction floor maintained by raiseMinFeeRateAfterEvictionLocked
+		// and decayMinFeeRateAfterConnectedBlockLocked. The eviction
+		// counter increments exactly once per resident-entry capacity
+		// eviction (deleteEntryLocked loop in addEntryLocked); candidate-
+		// worst rejection at capacity and fee-floor rejection do not
+		// increment it.
+		"# HELP rubin_node_mempool_max_bytes Configured byte cap for the standard mempool.",
+		"# TYPE rubin_node_mempool_max_bytes gauge",
+		fmt.Sprintf("rubin_node_mempool_max_bytes %d", mempoolStats.MaxBytes),
+		"# HELP rubin_node_mempool_low_water_bytes Capacity low-water byte threshold used during eviction planning for the standard mempool.",
+		"# TYPE rubin_node_mempool_low_water_bytes gauge",
+		fmt.Sprintf("rubin_node_mempool_low_water_bytes %d", mempoolStats.LowWaterBytes),
+		"# HELP rubin_node_mempool_min_fee_rate Current rolling minimum fee rate (per-weight units) enforced at standard mempool admission.",
+		"# TYPE rubin_node_mempool_min_fee_rate gauge",
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", mempoolStats.MinFeeRate),
+		"# HELP rubin_node_mempool_evicted_resident_total Cumulative resident-entry capacity evictions; candidate-worst rejection and fee-floor rejection are not counted here.",
+		"# TYPE rubin_node_mempool_evicted_resident_total counter",
+		fmt.Sprintf("rubin_node_mempool_evicted_resident_total %d", mempoolStats.EvictedResidentTotal),
 		// Unlabeled lifecycle-exit counter; the underlying exit cause
 		// (remote close, protocol error, local Service.Close) is not
 		// available at the unregisterPeer site without plumbing it
