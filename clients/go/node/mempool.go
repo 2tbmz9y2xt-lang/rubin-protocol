@@ -286,16 +286,28 @@ func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
 // min_fee_rate reflect the rolling state including the post-eviction
 // adjustments performed by raiseMinFeeRateAfterEvictionLocked and
 // decayMinFeeRateAfterConnectedBlockLocked. EvictedResidentTotal is
-// loaded outside the lock from the atomic counter; the other fields
-// are read under m.mu.RLock to keep them mutually consistent. A nil
-// receiver returns a zero MempoolStats so /metrics scraping a node
-// without a wired mempool emits zero-valued lines instead of
-// panicking.
+// loaded INSIDE the read-lock window (writers bump the counter under
+// m.mu.Lock in addEntryLocked's deleteEntryLocked loop, so taking
+// the read lock first means a concurrent admit-and-evict either
+// completed before this Load — counter and gauges both reflect the
+// post-eviction state — or is blocked behind the writer's Lock.
+// Loading before RLock would let the reader observe a pre-eviction
+// counter together with post-eviction gauges).
+//
+// Nil-safety follows the existing exported-accessor convention used
+// by CurrentMinFeeRateSnapshot, BytesUsed, AdmissionCounts: a nil
+// receiver returns counters/sizes 0, but MinFeeRate defaults to
+// DefaultMempoolMinFeeRate. This keeps /metrics rendering on an
+// uninitialized state agreeing with the rest of the Mempool API
+// instead of advertising rubin_node_mempool_min_fee_rate = 0, which
+// would disagree with CurrentMinFeeRateSnapshot's nil return and
+// the documented baseline floor.
 func (m *Mempool) Stats() MempoolStats {
 	if m == nil {
-		return MempoolStats{}
+		return MempoolStats{
+			MinFeeRate: DefaultMempoolMinFeeRate,
+		}
 	}
-	evicted := m.evictedResidentTotal.Load()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return MempoolStats{
@@ -304,7 +316,7 @@ func (m *Mempool) Stats() MempoolStats {
 		MaxBytes:             m.maxBytes,
 		LowWaterBytes:        m.effectiveLowWaterBytesLocked(),
 		MinFeeRate:           m.currentMinFeeRateLocked(),
-		EvictedResidentTotal: evicted,
+		EvictedResidentTotal: m.evictedResidentTotal.Load(),
 	}
 }
 

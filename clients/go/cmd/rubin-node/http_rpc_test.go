@@ -1337,7 +1337,7 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
 		"rubin_node_mempool_max_bytes 0",
 		"rubin_node_mempool_low_water_bytes 0",
-		"rubin_node_mempool_min_fee_rate 0",
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", node.DefaultMempoolMinFeeRate),
 		"rubin_node_mempool_evicted_resident_total 0",
 		"rubin_node_p2p_peer_lifecycle_exits_total 0",
 	} {

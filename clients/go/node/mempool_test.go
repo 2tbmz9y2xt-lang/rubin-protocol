@@ -3928,14 +3928,16 @@ func TestMempoolAdmissionCountsNilReceiver(t *testing.T) {
 }
 
 // TestMempoolStatsNilReceiver pins the nil-safety contract used by
-// /metrics rendering: a nil mempool returns the zero-value
-// MempoolStats struct without panicking, so the standard-mempool
-// gauges below render as 0 on a node fixture without a wired
-// mempool.
+// /metrics rendering: a nil mempool returns counters/sizes 0 and
+// MinFeeRate=DefaultMempoolMinFeeRate, mirroring the existing
+// CurrentMinFeeRateSnapshot nil-safe convention so /metrics on an
+// uninitialized state advertises the baseline floor instead of 0.
+// Without panicking either way.
 func TestMempoolStatsNilReceiver(t *testing.T) {
 	var mp *Mempool
-	if got := mp.Stats(); got != (MempoolStats{}) {
-		t.Fatalf("Stats nil receiver=%+v, want zero struct", got)
+	want := MempoolStats{MinFeeRate: DefaultMempoolMinFeeRate}
+	if got := mp.Stats(); got != want {
+		t.Fatalf("Stats nil receiver=%+v, want %+v", got, want)
 	}
 }
 

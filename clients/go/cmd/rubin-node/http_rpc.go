@@ -1167,11 +1167,17 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		mempoolTxs         float64
 		mempoolBytes       float64
 		mempoolAdmit       node.MempoolAdmissionCounts
-		mempoolStats       node.MempoolStats
 		peerLifecycleExits uint64
 		routeStatus        map[string]uint64
 		submitByResult     map[string]uint64
 	)
+	// Default mempool snapshot for the state==nil branch matches what
+	// (*node.Mempool)(nil).Stats() returns: counters/sizes 0 with
+	// MinFeeRate=DefaultMempoolMinFeeRate. Keeping this consistent with
+	// the nil-receiver convention means /metrics on a state==nil
+	// fixture and a state!=nil/state.mempool==nil fixture render the
+	// same baseline floor instead of differing by 0 vs 1.
+	mempoolStats := node.MempoolStats{MinFeeRate: node.DefaultMempoolMinFeeRate}
 	if state != nil && state.syncEngine != nil {
 		bestKnownHeight = float64(state.syncEngine.BestKnownHeight())
 		reorgCount = state.syncEngine.ReorgCount()
@@ -1188,23 +1194,22 @@ func renderPrometheusMetrics(state *devnetRPCState) string {
 		peerCount = float64(len(state.peerManager.Snapshot()))
 	}
 	if state != nil && state.mempool != nil {
-		mempoolTxs = float64(state.mempool.Len())
-		// BytesUsed is a scrape-time read of the mempool's existing
-		// usedBytes accounting (already maintained on every AddTx /
-		// RemoveTx). AdmissionCounts is a snapshot of the per-outcome
-		// counters that AddTx bumps at the final return path — read
-		// here is purely a Load(), no increment, so rendering /metrics
-		// repeatedly cannot perturb the counters.
-		mempoolBytes = float64(state.mempool.BytesUsed())
-		mempoolAdmit = state.mempool.AdmissionCounts()
-		// Stats is a read-only snapshot: Load() of the resident-eviction
-		// atomic counter plus an RLock-protected read of max_bytes /
-		// low_water_bytes / current min fee rate / tx count / bytes
-		// used. Repeated /metrics scrapes never mutate any of those.
-		// On a nil-mempool state path this branch is skipped and
-		// mempoolStats keeps its zero value, so the standard-mempool
-		// gauges below render as 0 without panicking.
+		// Stats is a read-only snapshot taken under m.mu.RLock; it
+		// covers tx count, bytes used, capacity caps, rolling fee
+		// floor, and the resident-eviction counter coherently. We
+		// reuse its TxCount/BytesUsed for the existing gauges so
+		// rubin_node_mempool_txs / rubin_node_mempool_bytes come from
+		// the SAME instant as rubin_node_mempool_max_bytes /
+		// low_water_bytes / min_fee_rate / evicted_resident_total —
+		// avoiding a split-snapshot publication where independent
+		// Len()/BytesUsed()/Stats() calls observe different states.
+		// AdmissionCounts is the closed-enum atomic.Load surface
+		// (accepted/conflict/rejected/unavailable); reading it here
+		// is purely a Load() and does not perturb the counters.
 		mempoolStats = state.mempool.Stats()
+		mempoolTxs = float64(mempoolStats.TxCount)
+		mempoolBytes = float64(mempoolStats.BytesUsed)
+		mempoolAdmit = state.mempool.AdmissionCounts()
 	}
 	if state != nil && state.peerLifecycleExits != nil {
 		// Pure atomic.Load behind the closure — repeated /metrics
