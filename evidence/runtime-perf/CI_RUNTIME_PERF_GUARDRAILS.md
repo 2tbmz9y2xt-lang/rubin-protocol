@@ -46,8 +46,10 @@ Rust:
 ## Future soft-threshold path
 
 This lane is intentionally non-blocking. Advisory regression detection may emit
-`warn` in summaries and artifacts for selected low-noise benchmark deltas, but
-that warning is not a merge-blocking status.
+`warn` in summaries and artifacts for selected low-noise `ns/op` benchmark
+deltas, but that warning is not a merge-blocking status. Allocation and byte
+metrics remain reported for context unless a later task adds explicit advisory
+thresholds for them.
 
 Further threshold hardening, if the project wants it later, is:
 

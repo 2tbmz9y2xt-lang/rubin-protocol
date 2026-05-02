@@ -253,7 +253,8 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
             summary = root / "summary.md"
             raw.write_text(
                 "setup banner from wrapper\n"
-                "BenchmarkValidateBlockBasicCombinedLoad-8 1 4000000000 ns/op 900000000 B/op 4000000 allocs/op\n",
+                "BenchmarkValidateBlockBasicCombinedLoad-8 1 4000000000 ns/op "
+                "12 custom/op 900000000 B/op 4000000 allocs/op 99 verifies/op\n",
                 encoding="utf-8",
             )
             # The command is a repo-local script through sys.executable with temp file arguments only.
@@ -282,6 +283,46 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertTrue(doc["advisory"])
         self.assertIn("workflow remains non-blocking", doc["reason"])
         self.assertIn("Status: `warn`", summary_text)
+
+    def test_non_numeric_selected_metric_is_no_data_not_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            write_json(
+                base / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": {
+                            "iterations": 1,
+                            "ns_per_op": "n/a",
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        }
+                    },
+                },
+            )
+            write_json(
+                head / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": {
+                            "iterations": 1,
+                            "ns_per_op": 130.0,
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        }
+                    },
+                },
+            )
+
+            doc = self.run_compare(base, head, root / "out")
+
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "no_data")
+        self.assertIn("non-numeric", add_tx["reason"])
 
     def test_missing_combined_load_line_is_no_data_not_regression(self):
         with tempfile.TemporaryDirectory() as td:

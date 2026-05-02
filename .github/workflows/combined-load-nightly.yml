@@ -85,9 +85,9 @@ jobs:
             {
               echo "# Combined-Load Advisory SLO"
               echo
-              echo "Status: \`error\`."
+              echo "Status: \`no_data\`."
               echo
-              echo "Combined-load summary artifact was not produced; the benchmark wrapper failed before advisory summary emission or the summary write failed."
+              echo "Combined-load summary artifact was not produced; the benchmark wrapper failed before advisory summary emission or the summary write failed. This is not classified as an advisory regression."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 

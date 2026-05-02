@@ -67,6 +67,22 @@ THRESHOLD_INDEX = {
 }
 
 
+def validate_threshold_registry() -> None:
+    unknown_suites = sorted({item["suite"] for item in ADVISORY_THRESHOLDS} - set(METRIC_FILES))
+    if unknown_suites:
+        joined = ", ".join(unknown_suites)
+        raise ValueError(f"advisory threshold suite(s) not configured in METRIC_FILES: {joined}")
+
+
+def coerce_metric(value: Any) -> tuple[float | None, str | None]:
+    if isinstance(value, bool) or value is None:
+        return None, f"non-numeric metric value: {value!r}"
+    try:
+        return float(value), None
+    except (TypeError, ValueError):
+        return None, f"non-numeric metric value: {value!r}"
+
+
 def load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return None, f"missing artifact: {path}"
@@ -135,7 +151,14 @@ def classify_delta(
     if base_value is None or head_value is None:
         entry["reason"] = "baseline or observed metric missing; no advisory decision"
         return entry
-    delta = pct_delta(float(base_value), float(head_value))
+    base_float, base_float_issue = coerce_metric(base_value)
+    head_float, head_float_issue = coerce_metric(head_value)
+    if base_float_issue or head_float_issue:
+        entry["reason"] = "baseline or observed metric is non-numeric: " + "; ".join(
+            issue for issue in [base_float_issue, head_float_issue] if issue
+        )
+        return entry
+    delta = pct_delta(base_float, head_float)
     entry["delta_pct"] = delta
     if delta is None:
         entry["reason"] = "baseline metric is zero; percent delta unavailable"
@@ -171,7 +194,10 @@ def build_rows(
         if base and head:
             for field in fields:
                 if field in base and field in head:
-                    row["deltas"][field] = pct_delta(float(base[field]), float(head[field]))
+                    base_float, base_float_issue = coerce_metric(base[field])
+                    head_float, head_float_issue = coerce_metric(head[field])
+                    if base_float_issue is None and head_float_issue is None:
+                        row["deltas"][field] = pct_delta(base_float, head_float)
         for field in fields:
             threshold = THRESHOLD_INDEX.get((suite, name, field))
             row["advisory"][field] = classify_delta(
@@ -231,6 +257,13 @@ def render_value(value: Any) -> str:
     return str(value)
 
 
+def render_markdown_cell(value: Any, limit: int = 240) -> str:
+    text = render_value(value).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
+
+
 def render_table(title: str, rows: list[dict[str, Any]]) -> list[str]:
     lines = [f"### {title}", "", "| Benchmark | Base ns/op | Head ns/op | Delta | Advisory |", "|---|---:|---:|---:|---|"]
     for row in rows:
@@ -272,7 +305,7 @@ def render_advisory_summary(decisions: list[dict[str, Any]]) -> list[str]:
         lines.append(
             f"| `{item['suite']}` | `{item['benchmark']}` | `{item['metric']}` | "
             f"{render_value(item.get('baseline'))} | {render_value(item.get('observed'))} | "
-            f"{delta_str} | {threshold_str} | `{item['status']}` | {item['reason']} |"
+            f"{delta_str} | {threshold_str} | `{item['status']}` | {render_markdown_cell(item['reason'])} |"
         )
     lines.append("")
     return lines
@@ -285,6 +318,7 @@ def main() -> int:
     parser.add_argument("--summary", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
+    validate_threshold_registry()
 
     base_dir = Path(args.base_dir)
     head_dir = Path(args.head_dir)
@@ -341,7 +375,8 @@ def main() -> int:
             "- this lane is informational only;",
             "- advisory threshold warnings must not block merge;",
             "- missing or malformed benchmark data is reported as `no_data`, not as a regression;",
-            "- thresholds apply only to selected low-noise candidates documented in trend-capture evidence.",
+            "- thresholds apply only to selected low-noise `ns_per_op` candidates documented in trend-capture evidence;",
+            "- byte and allocation metrics remain reported but unthresholded in this advisory slice.",
             "",
         ]
     )
@@ -351,7 +386,7 @@ def main() -> int:
         "head_exit_code": head_rc,
         "input_issues": input_issues,
         "advisory_status": advisory_status(advisory),
-        "advisory_thresholds": ADVISORY_THRESHOLDS,
+        "advisory_thresholds": [dict(item) for item in ADVISORY_THRESHOLDS],
         "advisory": advisory,
         "go": suite_rows["go"],
         "rust": suite_rows["rust"],

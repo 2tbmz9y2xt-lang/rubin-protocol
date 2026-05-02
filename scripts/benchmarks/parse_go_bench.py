@@ -9,14 +9,12 @@ from pathlib import Path
 from typing import Any
 
 
-BENCH_LINE_RE = re.compile(
-    r"^(?P<name>BenchmarkValidateBlockBasicCombinedLoad(?:-\d+)?)\s+"
-    r"(?P<n>\d+)\s+"
-    r"(?P<ns>[\d.]+)\s+ns/op\s+"
-    r"(?:(?P<mbps>[\d.]+)\s+MB/s\s+)?"
-    r"(?P<bop>[\d.]+)\s+B/op\s+"
-    r"(?P<allocs>[\d.]+)\s+allocs/op$"
-)
+CORE_METRIC_PATTERNS = {
+    "ns_per_op": re.compile(r"\b(?P<value>[\d.]+)\s+ns/op\b"),
+    "mb_per_s": re.compile(r"\b(?P<value>[\d.]+)\s+MB/s\b"),
+    "b_per_op": re.compile(r"\b(?P<value>[\d.]+)\s+B/op\b"),
+    "allocs_per_op": re.compile(r"\b(?P<value>[\d.]+)\s+allocs/op\b"),
+}
 
 
 METRIC_CHECKS = [
@@ -28,6 +26,29 @@ METRIC_CHECKS = [
 
 def parse_metric(raw: str) -> float:
     return float(raw.strip())
+
+
+def parse_benchmark_line(line: str, benchmark: str) -> dict[str, Any] | None:
+    prefix = re.match(
+        rf"^(?P<name>{re.escape(benchmark)}(?:-\d+)?)\s+(?P<n>\d+)\s+(?P<metrics>.*)$",
+        line.strip(),
+    )
+    if prefix is None:
+        return None
+    metrics = prefix.group("metrics")
+    parsed: dict[str, Any] = {
+        "benchmark": prefix.group("name").split("-")[0],
+        "iterations": int(prefix.group("n")),
+    }
+    for key, pattern in CORE_METRIC_PATTERNS.items():
+        match = pattern.search(metrics)
+        if match is None:
+            if key == "mb_per_s":
+                parsed[key] = None
+                continue
+            return None
+        parsed[key] = parse_metric(match.group("value"))
+    return parsed
 
 
 def load_slo(path: Path) -> dict[str, Any]:
@@ -57,23 +78,22 @@ def no_data_result(slo: dict[str, Any] | None, reason: str) -> dict[str, Any]:
 
 
 def parse_benchmark(lines: list[str], slo: dict[str, Any]) -> dict[str, Any]:
-    match = None
+    benchmark = str(slo["benchmark"])
+    parsed = None
     for line in lines:
-        parsed = BENCH_LINE_RE.match(line.strip())
-        if parsed:
-            match = parsed
+        parsed = parse_benchmark_line(line, benchmark)
+        if parsed is not None:
             break
-    if match is None:
-        return no_data_result(slo, "benchmark line for BenchmarkValidateBlockBasicCombinedLoad not found")
+    if parsed is None:
+        return no_data_result(slo, f"benchmark line for {benchmark} not found")
 
-    benchmark_name = match.group("name").split("-")[0]
     result: dict[str, Any] = {
-        "benchmark": benchmark_name,
-        "iterations": int(match.group("n")),
-        "ns_per_op": parse_metric(match.group("ns")),
-        "mb_per_s": parse_metric(match.group("mbps")) if match.group("mbps") else None,
-        "b_per_op": parse_metric(match.group("bop")),
-        "allocs_per_op": parse_metric(match.group("allocs")),
+        "benchmark": parsed["benchmark"],
+        "iterations": parsed["iterations"],
+        "ns_per_op": parsed["ns_per_op"],
+        "mb_per_s": parsed["mb_per_s"],
+        "b_per_op": parsed["b_per_op"],
+        "allocs_per_op": parsed["allocs_per_op"],
         "slo": slo,
         "status": "pass",
         "violations": [],
@@ -81,10 +101,10 @@ def parse_benchmark(lines: list[str], slo: dict[str, Any]) -> dict[str, Any]:
         "advisory": True,
     }
 
-    if benchmark_name != slo.get("benchmark"):
+    if result["benchmark"] != slo.get("benchmark"):
         return no_data_result(
             slo,
-            f"benchmark mismatch: got {benchmark_name!r}, expected {slo.get('benchmark')!r}",
+            f"benchmark mismatch: got {result['benchmark']!r}, expected {slo.get('benchmark')!r}",
         )
 
     for metric_key, limit_key in METRIC_CHECKS:
