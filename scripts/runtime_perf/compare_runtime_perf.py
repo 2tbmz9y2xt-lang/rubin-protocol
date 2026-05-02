@@ -89,6 +89,16 @@ def coerce_metric(value: Any) -> tuple[float | None, str | None]:
     return metric, None
 
 
+def json_safe_value(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe_value(item) for item in value]
+    return value
+
+
 def load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return None, f"missing artifact: {path}"
@@ -190,8 +200,8 @@ def classify_delta(
         "suite": suite,
         "benchmark": benchmark,
         "metric": metric,
-        "baseline": base_value,
-        "observed": head_value,
+        "baseline": json_safe_value(base_value),
+        "observed": json_safe_value(head_value),
         "delta_pct": None,
         "threshold_pct": threshold["max_regression_pct"],
         "status": "no_data",
@@ -246,7 +256,14 @@ def build_rows(
     for name in sorted(row_names):
         base = base_metrics.get(name)
         head = head_metrics.get(name)
-        row: dict[str, Any] = {"suite": suite, "name": name, "base": base, "head": head, "deltas": {}, "advisory": {}}
+        row: dict[str, Any] = {
+            "suite": suite,
+            "name": name,
+            "base": json_safe_value(base),
+            "head": json_safe_value(head),
+            "deltas": {},
+            "advisory": {},
+        }
         if base and head:
             for field in fields:
                 if field in base and field in head:
@@ -499,7 +516,7 @@ def main() -> int:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
-    output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0
 
 

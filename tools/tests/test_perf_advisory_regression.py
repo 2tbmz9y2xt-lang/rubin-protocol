@@ -58,7 +58,12 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue(summary.exists())
         self.assertTrue(delta.exists())
-        return json.loads(delta.read_text(encoding="utf-8"))
+        raw_delta = delta.read_text(encoding="utf-8")
+
+        def reject_non_standard_json_constant(token: str):
+            raise AssertionError(f"delta.json contains non-standard JSON constant {token}")
+
+        return json.loads(raw_delta, parse_constant=reject_non_standard_json_constant)
 
     def test_all_selected_low_noise_metrics_pass_when_within_thresholds(self):
         with tempfile.TemporaryDirectory() as td:
@@ -510,7 +515,10 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
         self.assertEqual(add_tx["status"], "no_data")
         self.assertIn("non-finite", add_tx["reason"])
+        self.assertIsNone(add_tx["observed"])
         self.assertIsNone(add_tx["delta_pct"])
+        row = next(item for item in doc["go"] if item["name"] == "BenchmarkMempoolAddTx")
+        self.assertIsNone(row["head"]["ns_per_op"])
 
     def test_negative_selected_metric_is_no_data_not_pass(self):
         with tempfile.TemporaryDirectory() as td:
@@ -968,6 +976,38 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertEqual(doc["status"], "no_data")
         self.assertEqual(doc["violations"], [])
         self.assertIn("not found", doc["reason"])
+
+    def test_unmatched_combined_load_slo_benchmark_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            raw = root / "bench.txt"
+            out = root / "combined.json"
+            raw.write_text(
+                "BenchmarkDifferentCombinedLoad-8 1 400 ns/op 10 B/op 1 allocs/op\n",
+                encoding="utf-8",
+            )
+            # The command is a repo-local script through sys.executable with temp file arguments only.
+            proc = subprocess.run(  # nosec B603
+                [
+                    sys.executable,
+                    str(PARSE_COMBINED),
+                    "--input",
+                    str(raw),
+                    "--slo",
+                    str(SLO),
+                    "--output",
+                    str(out),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse(out.exists())
+        self.assertIn("SLO benchmark", proc.stderr)
+        self.assertIn("BenchmarkDifferentCombinedLoad", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
 
     def test_advisory_threshold_registry_matches_trend_low_noise_candidates(self):
         compare = load_module(COMPARE, "compare_runtime_perf_for_test")

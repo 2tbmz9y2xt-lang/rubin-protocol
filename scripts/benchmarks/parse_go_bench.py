@@ -51,6 +51,13 @@ def strip_go_benchmark_suffix(name: str) -> str:
     return name
 
 
+def go_benchmark_line_name(line: str) -> str | None:
+    match = re.match(r"^(?P<name>Benchmark\S+(?:-\d+)?)\s+\d+\s+", line.strip())
+    if match is None:
+        return None
+    return strip_go_benchmark_suffix(match.group("name"))
+
+
 def parse_benchmark_line(line: str, benchmark: str) -> tuple[dict[str, Any] | None, str | None]:
     prefix = re.match(
         rf"^(?P<name>{re.escape(benchmark)}(?:-\d+)?)\s+(?P<n>\d+)\s+(?P<metrics>.*)$",
@@ -119,14 +126,23 @@ def parse_benchmark(lines: list[str], slo: dict[str, Any]) -> dict[str, Any]:
     benchmark = str(slo["benchmark"])
     parsed = None
     parse_issue = None
+    available_benchmarks: list[str] = []
     for line in lines:
+        line_name = go_benchmark_line_name(line)
+        if line_name is not None:
+            available_benchmarks.append(line_name)
         parsed, parse_issue = parse_benchmark_line(line, benchmark)
         if parse_issue is not None:
             break
         if parsed is not None:
             break
     if parsed is None:
-        return no_data_result(slo, parse_issue or f"benchmark line for {benchmark} not found")
+        if parse_issue is not None:
+            return no_data_result(slo, parse_issue)
+        if available_benchmarks:
+            available = ", ".join(sorted(set(available_benchmarks)))
+            raise ValueError(f"SLO benchmark {benchmark!r} not found in benchmark output; available benchmark(s): {available}")
+        return no_data_result(slo, f"benchmark line for {benchmark} not found")
 
     result: dict[str, Any] = {
         "benchmark": parsed["benchmark"],
@@ -184,7 +200,7 @@ def render_summary(result: dict[str, Any]) -> str:
 
 def write_outputs(output_path: Path, summary_path: Path | None, result: dict[str, Any]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output_path.write_text(json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if summary_path is not None:
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text(render_summary(result), encoding="utf-8")
@@ -240,7 +256,11 @@ def main() -> int:
         write_outputs(output_path, summary_path, result)
         print("WARN: combined-load benchmark data unavailable; wrote no_data advisory result.", file=sys.stderr)
         return 0
-    result = parse_benchmark(lines, slo)
+    try:
+        result = parse_benchmark(lines, slo)
+    except ValueError as exc:
+        print(f"ERROR: invalid combined-load SLO benchmark selection: {exc}", file=sys.stderr)
+        return 1
     write_outputs(output_path, summary_path, result)
 
     if result["status"] == "pass":
