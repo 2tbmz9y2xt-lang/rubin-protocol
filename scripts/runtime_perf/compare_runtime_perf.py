@@ -107,15 +107,40 @@ def pct_delta(base: float, head: float) -> float | None:
     return ((head - base) / base) * 100.0
 
 
-def metrics_from_payload(suite: str, payload: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]], str | None]:
+def missing_from_payload(suite: str, payload: dict[str, Any] | None) -> tuple[list[str], str | None]:
     if payload is None:
-        return {}, None
+        return [], None
+    raw_missing = payload.get("missing", [])
+    if raw_missing is None:
+        return [], None
+    if not isinstance(raw_missing, list):
+        return [], f"{suite} metrics artifact field 'missing' is {type(raw_missing).__name__}, expected list"
+    missing: list[str] = []
+    for item in raw_missing:
+        if not isinstance(item, str):
+            return [], f"{suite} metrics artifact field 'missing' contains {type(item).__name__}, expected string"
+        missing.append(item)
+    return sorted(set(missing)), None
+
+
+def metrics_from_payload(suite: str, payload: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    if payload is None:
+        return {}, []
     if suite in {"go", "rust"}:
         metrics = payload.get("metrics")
         if not isinstance(metrics, dict):
-            return {}, f"{suite} metrics artifact missing object field 'metrics'"
-        return metrics, None
-    return {}, f"unknown metrics suite: {suite}"
+            return {}, [f"{suite} metrics artifact missing object field 'metrics'"]
+        normalized: dict[str, dict[str, Any]] = {}
+        issues: list[str] = []
+        for benchmark, metric_values in metrics.items():
+            if not isinstance(metric_values, dict):
+                issues.append(
+                    f"{suite} metrics entry for {benchmark} is {type(metric_values).__name__}, expected object"
+                )
+                continue
+            normalized[benchmark] = metric_values
+        return normalized, issues
+    return {}, [f"unknown metrics suite: {suite}"]
 
 
 def classify_delta(
@@ -185,9 +210,11 @@ def build_rows(
     fields: list[str],
     base_issue: str | None,
     head_issue: str | None,
+    extra_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for name in sorted(set(base_metrics) | set(head_metrics)):
+    row_names = set(base_metrics) | set(head_metrics) | set(extra_names or [])
+    for name in sorted(row_names):
         base = base_metrics.get(name)
         head = head_metrics.get(name)
         row: dict[str, Any] = {"suite": suite, "name": name, "base": base, "head": head, "deltas": {}, "advisory": {}}
@@ -338,14 +365,28 @@ def main() -> int:
 
     metric_sets: dict[str, tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str | None, str | None]] = {}
     suite_rows: dict[str, list[dict[str, Any]]] = {}
+    missing_by_suite: dict[str, dict[str, list[str]]] = {}
     for suite, (base_payload, base_issue, head_payload, head_issue) in loaded.items():
-        base_metrics, base_shape_issue = metrics_from_payload(suite, base_payload)
-        head_metrics, head_shape_issue = metrics_from_payload(suite, head_payload)
-        base_data_issue = base_issue or base_shape_issue
-        head_data_issue = head_issue or head_shape_issue
-        input_issues.extend(issue for issue in [base_shape_issue, head_shape_issue] if issue)
+        base_metrics, base_shape_issues = metrics_from_payload(suite, base_payload)
+        head_metrics, head_shape_issues = metrics_from_payload(suite, head_payload)
+        base_missing, base_missing_issue = missing_from_payload(suite, base_payload)
+        head_missing, head_missing_issue = missing_from_payload(suite, head_payload)
+        base_data_issue = base_issue or "; ".join(base_shape_issues + ([base_missing_issue] if base_missing_issue else [])) or None
+        head_data_issue = head_issue or "; ".join(head_shape_issues + ([head_missing_issue] if head_missing_issue else [])) or None
+        input_issues.extend(base_shape_issues)
+        input_issues.extend(head_shape_issues)
+        input_issues.extend(issue for issue in [base_missing_issue, head_missing_issue] if issue)
+        missing_by_suite[suite] = {"base": base_missing, "head": head_missing}
         metric_sets[suite] = (base_metrics, head_metrics, base_data_issue, head_data_issue)
-        suite_rows[suite] = build_rows(suite, base_metrics, head_metrics, ROW_FIELDS[suite], base_data_issue, head_data_issue)
+        suite_rows[suite] = build_rows(
+            suite,
+            base_metrics,
+            head_metrics,
+            ROW_FIELDS[suite],
+            base_data_issue,
+            head_data_issue,
+            sorted(set(base_missing) | set(head_missing)),
+        )
 
     advisory = build_advisory_decisions(metric_sets)
 
@@ -388,6 +429,7 @@ def main() -> int:
         "advisory_status": advisory_status(advisory),
         "advisory_thresholds": [dict(item) for item in ADVISORY_THRESHOLDS],
         "advisory": advisory,
+        "missing": missing_by_suite,
         "go": suite_rows["go"],
         "rust": suite_rows["rust"],
     }

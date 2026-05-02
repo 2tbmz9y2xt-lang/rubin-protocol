@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 # Tests execute repo-local Python CLIs through argv lists only.
 import subprocess  # nosec B404
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPARE = REPO_ROOT / "scripts" / "runtime_perf" / "compare_runtime_perf.py"
 PARSE_COMBINED = REPO_ROOT / "scripts" / "benchmarks" / "parse_go_bench.py"
+RUN_COMBINED = REPO_ROOT / "scripts" / "benchmarks" / "run_combined_load_benchmark.sh"
 SLO = REPO_ROOT / "scripts" / "benchmarks" / "combined_load_slo.json"
 TREND = REPO_ROOT / "scripts" / "runtime_perf" / "build_runtime_perf_trend.py"
 
@@ -256,6 +258,70 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertIn("malformed JSON", go_row["advisory"]["ns_per_op"]["reason"])
         self.assertEqual(doc["rust"], [])
 
+    def test_non_object_metric_entry_is_no_data_not_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            write_json(
+                base / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": [],
+                    },
+                },
+            )
+            write_json(
+                head / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": {
+                            "iterations": 1,
+                            "ns_per_op": 130.0,
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        }
+                    },
+                },
+            )
+
+            doc = self.run_compare(base, head, root / "out")
+
+        self.assertIn("metrics entry for BenchmarkMempoolAddTx is list", "\n".join(doc["input_issues"]))
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "no_data")
+        self.assertIn("expected object", add_tx["reason"])
+
+    def test_rust_missing_list_surfaces_rows_and_no_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            for side in [base, head]:
+                write_json(
+                    side / "rust_metrics.json",
+                    {
+                        "suite": "rust",
+                        "metrics": {
+                            "rubin_node_txpool/admit": {"ns_per_op": 100.0},
+                        },
+                        "missing": ["rubin_node_txpool/relay_metadata"],
+                    },
+                )
+
+            doc = self.run_compare(base, head, root / "out")
+            summary_text = (root / "out" / "summary.md").read_text(encoding="utf-8")
+
+        self.assertEqual(doc["missing"]["rust"]["base"], ["rubin_node_txpool/relay_metadata"])
+        self.assertEqual(doc["missing"]["rust"]["head"], ["rubin_node_txpool/relay_metadata"])
+        missing_row = next(row for row in doc["rust"] if row["name"] == "rubin_node_txpool/relay_metadata")
+        self.assertIsNone(missing_row["base"])
+        self.assertIsNone(missing_row["head"])
+        self.assertEqual(missing_row["advisory"]["ns_per_op"]["status"], "no_data")
+        self.assertIn("rubin_node_txpool/relay_metadata", summary_text)
+
     def test_combined_load_slo_breach_is_advisory_warn_exit_zero(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -325,6 +391,32 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertEqual(doc["status"], "no_data")
         self.assertIn("benchmark output not found", doc["reason"])
         self.assertIn("Status: `no_data`", summary_text)
+
+    def test_combined_load_wrapper_emits_no_data_when_benchmark_command_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out_dir = root / "combined"
+            env = os.environ.copy()
+            env["RUBIN_OPENSSL_PREFIX"] = str(root / "missing-openssl")
+            # The command is a repo-local shell wrapper with temp artifact output only.
+            proc = subprocess.run(  # nosec B603
+                [str(RUN_COMBINED), str(out_dir)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            doc = json.loads((out_dir / "combined_load_metrics.json").read_text(encoding="utf-8"))
+            summary_text = (out_dir / "combined_load_summary.md").read_text(encoding="utf-8")
+            raw_exists = (out_dir / "combined_load_benchmark.txt").exists()
+
+        self.assertEqual(doc["status"], "no_data")
+        self.assertIn("benchmark line for BenchmarkValidateBlockBasicCombinedLoad not found", doc["reason"])
+        self.assertIn("Status: `no_data`", summary_text)
+        self.assertTrue(raw_exists)
+        self.assertIn("RUBIN_OPENSSL_PREFIX", proc.stderr)
+        self.assertIn("benchmark command failed", proc.stderr)
 
     def test_malformed_combined_load_metric_has_distinct_no_data_reason(self):
         with tempfile.TemporaryDirectory() as td:
