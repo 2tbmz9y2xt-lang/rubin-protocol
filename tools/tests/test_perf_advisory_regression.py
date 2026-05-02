@@ -586,6 +586,44 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
             self.assertIn("malformed ns_per_op", doc["reason"])
             self.assertNotIn("Traceback", proc.stderr)
 
+    def test_non_finite_combined_load_slo_threshold_fails_closed(self):
+        for limit_key in ["max_ns_per_op", "max_b_per_op", "max_allocs_per_op"]:
+            for value in [float("nan"), float("inf")]:
+                with self.subTest(limit_key=limit_key, value=str(value)), tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    raw = root / "bench.txt"
+                    slo = root / "slo.json"
+                    out = root / "combined.json"
+                    raw.write_text(
+                        "BenchmarkValidateBlockBasicCombinedLoad-8 1 4000000000 ns/op "
+                        "900000000 B/op 4000000 allocs/op\n",
+                        encoding="utf-8",
+                    )
+                    payload = json.loads(SLO.read_text(encoding="utf-8"))
+                    payload[limit_key] = value
+                    write_json(slo, payload)
+                    # The command is a repo-local script through sys.executable with temp file arguments only.
+                    proc = subprocess.run(  # nosec B603
+                        [
+                            sys.executable,
+                            str(PARSE_COMBINED),
+                            "--input",
+                            str(raw),
+                            "--slo",
+                            str(slo),
+                            "--output",
+                            str(out),
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertFalse(out.exists())
+                self.assertIn(f"SLO {limit_key} has non-finite numeric token", proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+
     def test_non_numeric_selected_metric_is_no_data_not_traceback(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

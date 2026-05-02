@@ -25,15 +25,20 @@ METRIC_CHECKS = [
 ]
 
 
-def parse_metric(raw: str) -> float:
-    token = raw.strip()
+def parse_finite_number(raw: Any, label: str) -> float:
+    if isinstance(raw, bool) or raw is None:
+        raise ValueError(f"{label} is not numeric: {raw!r}")
     try:
-        value = float(token)
-    except ValueError as exc:
-        raise ValueError(f"invalid numeric token {token!r}") from exc
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} has invalid numeric token {raw!r}") from exc
     if not math.isfinite(value):
-        raise ValueError(f"non-finite numeric token {token!r}")
+        raise ValueError(f"{label} has non-finite numeric token {raw!r}")
     return value
+
+
+def parse_metric(raw: str) -> float:
+    return parse_finite_number(raw.strip(), "metric")
 
 
 def strip_go_benchmark_suffix(name: str) -> str:
@@ -80,6 +85,8 @@ def load_slo(path: Path) -> dict[str, Any]:
     for key in ["benchmark", "max_ns_per_op", "max_b_per_op", "max_allocs_per_op"]:
         if key not in payload:
             raise ValueError(f"SLO missing required key {key!r}")
+    for _, limit_key in METRIC_CHECKS:
+        payload[limit_key] = parse_finite_number(payload[limit_key], f"SLO {limit_key}")
     return payload
 
 
