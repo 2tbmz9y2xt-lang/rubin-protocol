@@ -1405,6 +1405,35 @@ func TestRenderPrometheusMetricsStandardMempoolGaugesReflectLiveState(t *testing
 	}
 }
 
+// TestRenderPrometheusMetricsNilMempoolFieldRendersBaselineFloor
+// covers the second nil branch flagged by reviewer P2: state is
+// non-nil but state.mempool is nil. The renderer's default
+// mempoolStats seeded with MinFeeRate=DefaultMempoolMinFeeRate must
+// also reach this path so the baseline floor is reported here, not
+// 0. Without this assertion a regression that re-zeros the
+// initializer for the state.mempool==nil branch could pass through.
+func TestRenderPrometheusMetricsNilMempoolFieldRendersBaselineFloor(t *testing.T) {
+	state := mustRPCState(t, true)
+	state.mempool = nil
+	body := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		"rubin_node_mempool_txs 0",
+		"rubin_node_mempool_bytes 0",
+		`rubin_node_mempool_admit_total{result="accepted"} 0`,
+		`rubin_node_mempool_admit_total{result="conflict"} 0`,
+		`rubin_node_mempool_admit_total{result="rejected"} 0`,
+		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
+		"rubin_node_mempool_max_bytes 0",
+		"rubin_node_mempool_low_water_bytes 0",
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", node.DefaultMempoolMinFeeRate),
+		"rubin_node_mempool_evicted_resident_total 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics body %q", want, body)
+		}
+	}
+}
+
 func TestRenderPrometheusMetricsExposesBlockApplyCountersReadOnly(t *testing.T) {
 	state := mustRPCState(t, true)
 	initial := state.syncEngine.BlockApplyCounts()

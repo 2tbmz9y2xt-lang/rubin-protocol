@@ -4025,6 +4025,72 @@ func TestMempoolStatsResidentEvictionIncrementsExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestMempoolStatsResidentEvictionIncrementsByNOnMultiTrim asserts
+// the "+1 per evicted resident" contract under byte-pressure where
+// one admission removes more than one resident. Capacity-trimming
+// to low_water_bytes can evict multiple residents in a single
+// addEntryLocked call; the counter must track the actual number of
+// removed residents, not just "did at least one eviction happen".
+// Reviewer P2 finding on PR #1405: the prior single-eviction test
+// left this path uncovered.
+func TestMempoolStatsResidentEvictionIncrementsByNOnMultiTrim(t *testing.T) {
+	// Force byte-pressure trim with multiple evictions.
+	// maxBytes=20 → defaultMempoolLowWaterBytes(20) = (20/10)*9 = 18.
+	// maxTxs=10 keeps the count limit non-binding so every eviction
+	// here is byte-pressure-driven, not count-pressure-driven.
+	// 4 residents of size=5 each fill the pool to 20 bytes.
+	// A candidate of size=10 (fee=1000, evicts the worst residents
+	// per the eviction-ordering comparator) admits with target =
+	// mempoolBytePressureTarget(18, 10) = 18; capacity-trimming
+	// must drop residents until usedBytes+candidateSize <= 18,
+	// which after evicting 3 residents (15 bytes residents + 10
+	// candidate = 25 still over... actually after 3 evictions one
+	// resident remains: 5 bytes + 10 candidate = 15 <= 18 ✓).
+	mp := &Mempool{maxTxs: 10, maxBytes: 20}
+	residents := []*mempoolEntry{
+		{txid: [32]byte{0x01}, fee: 1, weight: 1, size: 5},
+		{txid: [32]byte{0x02}, fee: 2, weight: 1, size: 5},
+		{txid: [32]byte{0x03}, fee: 3, weight: 1, size: 5},
+		{txid: [32]byte{0x04}, fee: 4, weight: 1, size: 5},
+	}
+	for _, r := range residents {
+		if err := mp.addEntryLocked(r); err != nil {
+			t.Fatalf("addEntryLocked(resident=%x): %v", r.txid[0], err)
+		}
+	}
+	if got := mp.Stats().EvictedResidentTotal; got != 0 {
+		t.Fatalf("EvictedResidentTotal after seeding=%d, want 0", got)
+	}
+	candidate := &mempoolEntry{
+		txid:   [32]byte{0x10},
+		fee:    1000,
+		weight: 1,
+		size:   10,
+	}
+	if err := mp.addEntryLocked(candidate); err != nil {
+		t.Fatalf("addEntryLocked(displacing candidate): %v", err)
+	}
+	// Counter must reflect every evicted resident, not just one.
+	// After admission: TxCount = (4 - N_evicted) + 1; the test
+	// asserts the symmetric counter increment instead of hardcoding
+	// N because the exact eviction count depends on the eviction
+	// comparator's tie-breaking, but it must equal "len(residents) -
+	// (TxCount - 1)" by construction.
+	stats := mp.Stats()
+	wantEvicted := uint64(len(residents)) - uint64(stats.TxCount-1)
+	if stats.EvictedResidentTotal != wantEvicted {
+		t.Fatalf("EvictedResidentTotal=%d, want %d (one bump per evicted resident; TxCount=%d, started with %d residents)",
+			stats.EvictedResidentTotal, wantEvicted, stats.TxCount, len(residents))
+	}
+	// Sanity: at least 2 residents must have been evicted to make
+	// this a real multi-trim case, distinct from the single-evict
+	// test above.
+	if stats.EvictedResidentTotal < 2 {
+		t.Fatalf("EvictedResidentTotal=%d, want >=2 to exercise multi-resident trim",
+			stats.EvictedResidentTotal)
+	}
+}
+
 // TestMempoolStatsCandidateWorstRejectionDoesNotCount asserts that
 // rejecting an incoming candidate at capacity (because it is the
 // worst entry per eviction ordering) MUST NOT increment the

@@ -98,9 +98,14 @@ type Mempool struct {
 // state. Field order matches the /metrics rendering order in
 // renderPrometheusMetrics so the textual output is stable across
 // readings. Reading a snapshot does not mutate any mempool state.
-// A nil receiver returns the zero value, so callers do not need to
-// special-case uninitialized mempool wiring (mirrors the
-// AdmissionCounts nil-receiver convention).
+//
+// Nil-receiver contract (matches CurrentMinFeeRateSnapshot
+// convention): a nil *Mempool returns counters and sizes set to
+// zero (TxCount, BytesUsed, MaxBytes, LowWaterBytes,
+// EvictedResidentTotal) but MinFeeRate set to
+// DefaultMempoolMinFeeRate. Callers do not need to special-case
+// uninitialized mempool wiring; /metrics on an un-wired state
+// renders the documented baseline floor instead of 0.
 type MempoolStats struct {
 	TxCount              int
 	BytesUsed            int
