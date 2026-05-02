@@ -671,11 +671,50 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
             raw_exists = (out_dir / "combined_load_benchmark.txt").exists()
 
         self.assertEqual(doc["status"], "no_data")
-        self.assertIn("benchmark line for BenchmarkValidateBlockBasicCombinedLoad not found", doc["reason"])
+        self.assertIn("benchmark command failed", doc["reason"])
         self.assertIn("Status: `no_data`", summary_text)
         self.assertTrue(raw_exists)
         self.assertIn("RUBIN_OPENSSL_PREFIX", proc.stderr)
         self.assertIn("benchmark command failed", proc.stderr)
+
+    def test_combined_load_producer_failure_overrides_valid_stdout(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            raw = root / "bench.txt"
+            out = root / "combined.json"
+            summary = root / "summary.md"
+            raw.write_text(
+                "BenchmarkValidateBlockBasicCombinedLoad-8 1 4000000000 ns/op "
+                "900000000 B/op 4000000 allocs/op\n",
+                encoding="utf-8",
+            )
+            # The command is a repo-local script through sys.executable with temp file arguments only.
+            proc = subprocess.run(  # nosec B603
+                [
+                    sys.executable,
+                    str(PARSE_COMBINED),
+                    "--input",
+                    str(raw),
+                    "--slo",
+                    str(SLO),
+                    "--output",
+                    str(out),
+                    "--summary",
+                    str(summary),
+                    "--producer-exit-code",
+                    "1",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            doc = json.loads(out.read_text(encoding="utf-8"))
+            summary_text = summary.read_text(encoding="utf-8")
+
+        self.assertEqual(doc["status"], "no_data")
+        self.assertIn("benchmark command failed with status 1", doc["reason"])
+        self.assertIn("Status: `no_data`", summary_text)
 
     def test_malformed_combined_load_metric_has_distinct_no_data_reason(self):
         with tempfile.TemporaryDirectory() as td:
@@ -823,6 +862,7 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
             " BenchmarkValidateBlockBasicCombinedLoad ",
             "BenchmarkValidate BlockBasicCombinedLoad",
             "BenchmarkValidate\tBlockBasicCombinedLoad",
+            "BenchmarkValidateBlockBasicCombinedLoad-8",
             123,
         ]:
             with self.subTest(value=repr(value)), tempfile.TemporaryDirectory() as td:

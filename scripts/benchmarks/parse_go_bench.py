@@ -92,6 +92,8 @@ def load_slo(path: Path) -> dict[str, Any]:
         raise ValueError("SLO benchmark must be a non-empty string")
     if any(ch.isspace() for ch in payload["benchmark"]):
         raise ValueError("SLO benchmark must not contain whitespace")
+    if re.search(r"-\d+$", payload["benchmark"]):
+        raise ValueError("SLO benchmark must not include Go CPU suffix")
     for _, limit_key in METRIC_CHECKS:
         payload[limit_key] = parse_finite_number(payload[limit_key], f"SLO {limit_key}", allow_zero=False)
     return payload
@@ -194,7 +196,16 @@ def main() -> int:
     parser.add_argument("--slo", required=True, help="Path to JSON SLO config.")
     parser.add_argument("--output", required=True, help="Path to write parsed JSON metrics.")
     parser.add_argument("--summary", help="Optional path to write markdown advisory summary.")
+    parser.add_argument(
+        "--producer-exit-code",
+        type=int,
+        default=0,
+        help="Exit code from the benchmark producer; non-zero forces advisory no_data.",
+    )
     args = parser.parse_args()
+
+    if args.producer_exit_code < 0:
+        parser.error("--producer-exit-code must be non-negative")
 
     input_path = Path(args.input)
     slo_path = Path(args.slo)
@@ -209,6 +220,12 @@ def main() -> int:
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         print(f"ERROR: invalid SLO file {slo_path}: {exc}", file=sys.stderr)
         return 1
+
+    if args.producer_exit_code != 0:
+        result = no_data_result(slo, f"benchmark command failed with status {args.producer_exit_code}")
+        write_outputs(output_path, summary_path, result)
+        print("WARN: combined-load benchmark command failed; wrote no_data advisory result.", file=sys.stderr)
+        return 0
 
     if not input_path.exists():
         result = no_data_result(slo, f"benchmark output not found: {input_path}")

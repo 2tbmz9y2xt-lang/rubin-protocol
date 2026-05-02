@@ -36,14 +36,15 @@ if (( tee_status != 0 )); then
 fi
 
 if (( bench_status != 0 )); then
-  echo "[combined-load] benchmark command failed with status ${bench_status}; emitting advisory no_data artifact if parser cannot find benchmark data" >&2
+  echo "[combined-load] benchmark command failed with status ${bench_status}; emitting advisory no_data artifact" >&2
 fi
 
 python3 "$ROOT_DIR/scripts/benchmarks/parse_go_bench.py" \
   --input "$RAW_OUT" \
   --slo "$SLO_FILE" \
   --output "$JSON_OUT" \
-  --summary "$SUMMARY_OUT"
+  --summary "$SUMMARY_OUT" \
+  --producer-exit-code "$bench_status"
 
 echo "[combined-load] artifacts:"
 echo "  - $RAW_OUT"
