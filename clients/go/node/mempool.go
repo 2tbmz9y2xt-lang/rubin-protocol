@@ -286,13 +286,14 @@ func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
 // min_fee_rate reflect the rolling state including the post-eviction
 // adjustments performed by raiseMinFeeRateAfterEvictionLocked and
 // decayMinFeeRateAfterConnectedBlockLocked. EvictedResidentTotal is
-// loaded INSIDE the read-lock window (writers bump the counter under
-// m.mu.Lock in addEntryLocked's deleteEntryLocked loop, so taking
-// the read lock first means a concurrent admit-and-evict either
-// completed before this Load — counter and gauges both reflect the
-// post-eviction state — or is blocked behind the writer's Lock.
-// Loading before RLock would let the reader observe a pre-eviction
-// counter together with post-eviction gauges).
+// loaded INSIDE the read-lock window. Writers bump that counter
+// under m.mu.Lock inside addEntryLocked's deleteEntryLocked loop,
+// so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
+// the atomic.Load observes the same critical section as the gauge
+// fields read on the surrounding lines. Covered by
+// TestMempoolStatsScrapePurity and the
+// TestMempoolStatsResidentEvictionIncrementsExactlyOnce assertion
+// chain in clients/go/node/mempool_test.go.
 //
 // Nil-safety follows the existing exported-accessor convention used
 // by CurrentMinFeeRateSnapshot, BytesUsed, AdmissionCounts: a nil
