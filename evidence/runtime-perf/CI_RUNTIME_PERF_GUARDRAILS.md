@@ -45,13 +45,16 @@ Rust:
 
 ## Future soft-threshold path
 
-This lane is intentionally non-blocking for now. The next hardening step, if
-the project wants it later, is:
+This lane is intentionally non-blocking. Advisory regression detection may emit
+`warn` in summaries and artifacts for selected low-noise benchmark deltas, but
+that warning is not a merge-blocking status.
+
+Further threshold hardening, if the project wants it later, is:
 
 1. require several stable runs on `main`;
 2. pick only the low-noise subset of benchmarks;
-3. define soft thresholds per benchmark family;
-4. keep threshold breaches advisory first, not merge-blocking.
+3. refine soft thresholds per benchmark family;
+4. keep any promotion to a merge-blocking gate as a separate policy task.
 
 ## Mainline trend capture
 

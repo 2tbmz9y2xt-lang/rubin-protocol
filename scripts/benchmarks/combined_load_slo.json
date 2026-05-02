@@ -1,6 +1,12 @@
 {
   "benchmark": "BenchmarkValidateBlockBasicCombinedLoad",
+  "mode": "advisory",
   "max_ns_per_op": 3000000000,
   "max_b_per_op": 800000000,
-  "max_allocs_per_op": 3000000
+  "max_allocs_per_op": 3000000,
+  "calibration": {
+    "source": "evidence/runtime-perf/MAINLINE_TREND_CAPTURE.md",
+    "status": "broad_existing_limit_pending_multi_run_variance",
+    "reason": "The combined-load nightly lane now preserves trend artifacts, but the repository does not yet contain enough retained multi-run variance data to justify a tighter threshold. The existing broad SLO remains advisory-only."
+  }
 }

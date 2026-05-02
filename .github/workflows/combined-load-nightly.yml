@@ -76,6 +76,21 @@ jobs:
         run: |
           scripts/benchmarks/run_combined_load_benchmark.sh artifacts/combined-load
 
+      - name: Write combined-load advisory summary
+        if: always()
+        run: |
+          if [ -f artifacts/combined-load/combined_load_summary.md ]; then
+            cat artifacts/combined-load/combined_load_summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# Combined-Load Advisory SLO"
+              echo
+              echo "Status: \`no_data\`."
+              echo
+              echo "Combined-load summary artifact was not produced."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Build combined-load trend artifact
         if: always()
         run: |
