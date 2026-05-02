@@ -386,6 +386,63 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
         self.assertEqual(add_tx["status"], "warn")
 
+    def test_invalid_utf8_metric_artifact_is_no_data_not_traceback(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            base.mkdir(parents=True)
+            (base / "go_metrics.json").write_bytes(b"\xff\xfe")
+            write_json(
+                head / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": {
+                            "iterations": 1,
+                            "ns_per_op": 130.0,
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        }
+                    },
+                },
+            )
+
+            doc = self.run_compare(base, head, root / "out")
+
+        self.assertIn("invalid UTF-8", "\n".join(doc["input_issues"]))
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "no_data")
+
+    def test_invalid_utf8_exit_code_records_input_issue_without_masking_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            for side, add_tx_ns in [(base, 100.0), (head, 130.0)]:
+                write_json(
+                    side / "go_metrics.json",
+                    {
+                        "suite": "go",
+                        "metrics": {
+                            "BenchmarkMempoolAddTx": {
+                                "iterations": 1,
+                                "ns_per_op": add_tx_ns,
+                                "b_per_op": 10.0,
+                                "allocs_per_op": 1.0,
+                            },
+                        },
+                    },
+                )
+            (base / "exit_code.txt").write_bytes(b"\xff\xfe")
+
+            doc = self.run_compare(base, head, root / "out")
+
+        self.assertIsNone(doc["base_exit_code"])
+        self.assertIn("invalid UTF-8", "\n".join(doc["input_issues"]))
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "warn")
+
     def test_non_finite_selected_metric_is_no_data_not_pass(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -657,6 +714,40 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
             self.assertEqual(doc["status"], "no_data")
             self.assertIn("malformed ns_per_op", doc["reason"])
             self.assertNotIn("Traceback", proc.stderr)
+
+    def test_invalid_utf8_combined_load_input_writes_no_data_summary(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            raw = root / "bench.txt"
+            out = root / "combined.json"
+            summary = root / "summary.md"
+            raw.write_bytes(b"\xff\xfe")
+            # The command is a repo-local script through sys.executable with temp file arguments only.
+            proc = subprocess.run(  # nosec B603
+                [
+                    sys.executable,
+                    str(PARSE_COMBINED),
+                    "--input",
+                    str(raw),
+                    "--slo",
+                    str(SLO),
+                    "--output",
+                    str(out),
+                    "--summary",
+                    str(summary),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            doc = json.loads(out.read_text(encoding="utf-8"))
+            summary_text = summary.read_text(encoding="utf-8")
+
+        self.assertEqual(doc["status"], "no_data")
+        self.assertIn("benchmark output unreadable", doc["reason"])
+        self.assertIn("Status: `no_data`", summary_text)
+        self.assertNotIn("Traceback", proc.stderr)
 
     def test_invalid_combined_load_slo_threshold_fails_closed(self):
         for limit_key in ["max_ns_per_op", "max_b_per_op", "max_allocs_per_op"]:

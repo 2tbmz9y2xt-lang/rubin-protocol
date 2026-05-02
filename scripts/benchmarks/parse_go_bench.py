@@ -202,7 +202,7 @@ def main() -> int:
         return 1
     try:
         slo = load_slo(slo_path)
-    except (json.JSONDecodeError, ValueError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         print(f"ERROR: invalid SLO file {slo_path}: {exc}", file=sys.stderr)
         return 1
 
@@ -212,7 +212,13 @@ def main() -> int:
         print("WARN: combined-load benchmark data unavailable; wrote no_data advisory result.")
         return 0
 
-    lines = input_path.read_text(encoding="utf-8", errors="strict").splitlines()
+    try:
+        lines = input_path.read_text(encoding="utf-8", errors="strict").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        result = no_data_result(slo, f"benchmark output unreadable: {input_path}: {exc}")
+        write_outputs(output_path, summary_path, result)
+        print("WARN: combined-load benchmark data unavailable; wrote no_data advisory result.", file=sys.stderr)
+        return 0
     result = parse_benchmark(lines, slo)
     write_outputs(output_path, summary_path, result)
 

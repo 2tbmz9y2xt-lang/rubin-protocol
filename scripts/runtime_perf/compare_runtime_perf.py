@@ -93,7 +93,13 @@ def load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return None, f"missing artifact: {path}"
     try:
-        payload = json.loads(path.read_text(encoding="utf-8", errors="strict"))
+        raw = path.read_text(encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        return None, f"invalid UTF-8 in {path}: {exc}"
+    except OSError as exc:
+        return None, f"cannot read artifact {path}: {exc}"
+    try:
+        payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         return None, f"malformed JSON in {path}: {exc}"
     if not isinstance(payload, dict):
@@ -104,7 +110,12 @@ def load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
 def load_exit_code(path: Path) -> tuple[int | None, str | None]:
     if not path.exists():
         return None, None
-    raw = path.read_text(encoding="utf-8", errors="strict").strip()
+    try:
+        raw = path.read_text(encoding="utf-8", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        return None, f"invalid UTF-8 in {path}: {exc}"
+    except OSError as exc:
+        return None, f"cannot read exit code artifact {path}: {exc}"
     try:
         return int(raw), None
     except ValueError:
