@@ -355,6 +355,37 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
         self.assertEqual(add_tx["status"], "warn")
 
+    def test_malformed_exit_code_records_input_issue_without_masking_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            for side, add_tx_ns in [(base, 100.0), (head, 130.0)]:
+                write_json(
+                    side / "go_metrics.json",
+                    {
+                        "suite": "go",
+                        "metrics": {
+                            "BenchmarkMempoolAddTx": {
+                                "iterations": 1,
+                                "ns_per_op": add_tx_ns,
+                                "b_per_op": 10.0,
+                                "allocs_per_op": 1.0,
+                            },
+                        },
+                    },
+                )
+            (base / "exit_code.txt").write_text("not-an-int\n", encoding="utf-8")
+            (head / "exit_code.txt").write_text("0\n", encoding="utf-8")
+
+            doc = self.run_compare(base, head, root / "out")
+
+        self.assertIsNone(doc["base_exit_code"])
+        self.assertEqual(doc["head_exit_code"], 0)
+        self.assertIn("malformed exit code", "\n".join(doc["input_issues"]))
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "warn")
+
     def test_non_finite_selected_metric_is_no_data_not_pass(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

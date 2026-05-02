@@ -101,10 +101,14 @@ def load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return payload, None
 
 
-def load_exit_code(path: Path) -> int | None:
+def load_exit_code(path: Path) -> tuple[int | None, str | None]:
     if not path.exists():
-        return None
-    return int(path.read_text(encoding="utf-8", errors="strict").strip())
+        return None, None
+    raw = path.read_text(encoding="utf-8", errors="strict").strip()
+    try:
+        return int(raw), None
+    except ValueError:
+        return None, f"malformed exit code in {path}: {raw!r}"
 
 
 def pct_delta(base: float, head: float) -> float | None:
@@ -387,8 +391,9 @@ def main() -> int:
         loaded[suite] = (base_payload, base_issue, head_payload, head_issue)
         input_issues.extend(issue for issue in [base_issue, head_issue] if issue)
 
-    base_rc = load_exit_code(base_dir / "exit_code.txt")
-    head_rc = load_exit_code(head_dir / "exit_code.txt")
+    base_rc, base_rc_issue = load_exit_code(base_dir / "exit_code.txt")
+    head_rc, head_rc_issue = load_exit_code(head_dir / "exit_code.txt")
+    input_issues.extend(issue for issue in [base_rc_issue, head_rc_issue] if issue)
 
     metric_sets: dict[
         str,
