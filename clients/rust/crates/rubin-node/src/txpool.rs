@@ -12,6 +12,21 @@ use crate::{BlockStore, ChainState};
 
 const MAX_TX_POOL_TRANSACTIONS: usize = 300;
 
+/// Default rolling mempool minimum fee rate used by callers without a live
+/// rolling-floor source. Mirrors Go's `DefaultMempoolMinFeeRate` so the Rust
+/// DA Stage C predicate enforces the same baseline relay floor when no live
+/// mempool state is available; this is the documented Go pattern, not a
+/// parallel rolling-floor invention. Live rolling-floor wiring is tracked
+/// separately as the Rust standard mempool policy task.
+pub const DEFAULT_MEMPOOL_MIN_FEE_RATE: u64 = 1;
+
+/// Default spec-side DA per-byte floor used when a caller does not override
+/// `policy_min_da_fee_rate`. Mirrors Go's `DefaultMinDaFeeRate`
+/// (`POLICY_MEMPOOL_ADMISSION_GENESIS.md` Stage C `min_da_fee_rate`). Kept
+/// as a separate constant from `DEFAULT_MEMPOOL_MIN_FEE_RATE` so a future
+/// change to the relay floor cannot silently change the DA floor.
+pub const DEFAULT_MIN_DA_FEE_RATE: u64 = 1;
+
 #[derive(Debug, Clone)]
 pub struct TxPoolConfig {
     pub policy_da_surcharge_per_byte: u64,
@@ -20,6 +35,17 @@ pub struct TxPoolConfig {
     pub policy_max_ext_payload_bytes: usize,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
     pub suite_context: Option<SuiteContext>,
+    /// Rolling local mempool floor used by the Stage C relay-fee term.
+    /// Defaults to `DEFAULT_MEMPOOL_MIN_FEE_RATE`; a live rolling floor
+    /// source is wired in when the Rust standard mempool policy ships.
+    pub policy_current_mempool_min_fee_rate: u64,
+    /// Spec-side DA per-byte floor (`POLICY_MEMPOOL_ADMISSION_GENESIS.md`
+    /// Stage C `min_da_fee_rate`). Defaults to `DEFAULT_MIN_DA_FEE_RATE`,
+    /// kept separate from `DEFAULT_MEMPOOL_MIN_FEE_RATE` so a future
+    /// change to the relay floor cannot silently change the DA floor.
+    /// Zero disables only the `da_fee_floor` term; the surcharge term is
+    /// governed independently by `policy_da_surcharge_per_byte`.
+    pub policy_min_da_fee_rate: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,6 +531,8 @@ impl Default for TxPoolConfig {
             policy_max_ext_payload_bytes: 0,
             core_ext_deployments: CoreExtDeploymentProfiles::empty(),
             suite_context: None,
+            policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
+            policy_min_da_fee_rate: DEFAULT_MIN_DA_FEE_RATE,
         }
     }
 }
@@ -600,7 +628,13 @@ pub(crate) fn apply_policy(
     if cfg.policy_reject_non_coinbase_anchor_outputs {
         reject_non_coinbase_anchor_outputs(tx)?;
     }
-    reject_da_anchor_tx_policy(tx, utxos, cfg.policy_da_surcharge_per_byte)?;
+    reject_da_anchor_tx_policy(
+        tx,
+        utxos,
+        cfg.policy_current_mempool_min_fee_rate,
+        cfg.policy_min_da_fee_rate,
+        cfg.policy_da_surcharge_per_byte,
+    )?;
     if cfg.policy_reject_core_ext_pre_activation {
         reject_core_ext_tx_pre_activation(tx, utxos, next_height, &cfg.core_ext_deployments)?;
     }
@@ -650,22 +684,92 @@ pub(crate) fn reject_non_coinbase_anchor_outputs(tx: &rubin_consensus::Tx) -> Re
     Ok(())
 }
 
+/// Stage C DA fee policy aligned with Go's `RejectDaAnchorTxPolicy`
+/// (`POLICY_MEMPOOL_ADMISSION_GENESIS.md` Stage C):
+///
+/// ```text
+/// fee(tx)             = sum_inputs - sum_outputs
+/// relay_fee_floor(tx) = weight(tx) * current_mempool_min_fee_rate
+/// da_fee_floor(tx)    = da_payload_len(tx) * min_da_fee_rate
+/// da_surcharge(tx)    = da_payload_len(tx) * da_surcharge_per_byte
+/// da_required_fee(tx) = da_fee_floor(tx) + da_surcharge(tx)
+/// required_fee(tx)    = max(relay_fee_floor(tx), da_required_fee(tx))
+/// reject if fee(tx) < required_fee(tx)
+/// ```
+///
+/// Arithmetic is checked widening; any overflow rejects fail-closed as a
+/// policy error. The helper does not change consensus validity. For non-DA
+/// transactions (`da_payload_len == 0`) the helper short-circuits with
+/// `Ok(())` and applies no DA-specific term; relay-fee-floor enforcement
+/// for non-DA transactions remains the standard mempool admission path's
+/// responsibility.
+///
+/// Inputs:
+/// - `current_mempool_min_fee_rate`: rolling local mempool floor. Callers
+///   without a live rolling-floor source pass
+///   `DEFAULT_MEMPOOL_MIN_FEE_RATE` (mirrors Go's documented
+///   `DefaultMempoolMinFeeRate` pattern, not a parallel floor invention).
+/// - `min_da_fee_rate`: spec-side DA per-byte floor (Stage C
+///   `min_da_fee_rate`, default `1`).
+/// - `da_surcharge_per_byte`: operator-tunable DA per-byte surcharge
+///   added on top of the spec-side floor; `0` disables only the
+///   surcharge term, not `da_fee_floor`.
+///
+/// The helper recomputes both `weight` and `da_bytes` from `tx` via
+/// `tx_weight_and_stats_public`. This avoids trusting any caller-supplied
+/// weight value (a stale or zero weight would otherwise silently
+/// under-enforce the relay-fee half of the Stage C predicate).
 pub(crate) fn reject_da_anchor_tx_policy(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    current_mempool_min_fee_rate: u64,
+    min_da_fee_rate: u64,
     da_surcharge_per_byte: u64,
 ) -> Result<(), String> {
-    let (_, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|err| err.to_string())?;
-    if da_bytes == 0 || da_surcharge_per_byte == 0 {
+    let (weight, da_bytes, _) =
+        tx_weight_and_stats_public(tx).map_err(|err| format!("tx weight/stats error: {err}"))?;
+    if da_bytes == 0 {
+        // Non-DA transaction: the helper only enforces the DA half of the
+        // Stage C admission contract. Non-DA relay-fee floor enforcement
+        // is outside this helper and is the responsibility of a separate
+        // Rust standard mempool admission path (tracked as RUB-53);
+        // Rust does not yet ship a `validateFeeFloorLocked` analogue. The
+        // helper deliberately short-circuits here and does not compute fee
+        // or apply any DA-specific term to non-DA transactions.
         return Ok(());
     }
-    let min_fee = da_bytes
-        .checked_mul(da_surcharge_per_byte)
-        .ok_or_else(|| "min fee overflow".to_string())?;
-    let fee = compute_fee_no_verify(tx, utxos)?;
-    if fee < min_fee {
+    let relay_floor = weight.checked_mul(current_mempool_min_fee_rate).ok_or_else(|| {
+        format!(
+            "relay fee floor overflow (weight={weight} current_mempool_min_fee_rate={current_mempool_min_fee_rate}): u64 overflow"
+        )
+    })?;
+    let da_floor = da_bytes.checked_mul(min_da_fee_rate).ok_or_else(|| {
+        format!(
+            "DA fee floor overflow (da_payload_len={da_bytes} min_da_fee_rate={min_da_fee_rate}): u64 overflow"
+        )
+    })?;
+    let da_surcharge = da_bytes.checked_mul(da_surcharge_per_byte).ok_or_else(|| {
+        format!(
+            "DA surcharge overflow (da_payload_len={da_bytes} surcharge_per_byte={da_surcharge_per_byte}): u64 overflow"
+        )
+    })?;
+    let da_required = da_floor.checked_add(da_surcharge).ok_or_else(|| {
+        format!(
+            "DA required fee overflow (da_fee_floor={da_floor} da_surcharge={da_surcharge}): u64 overflow"
+        )
+    })?;
+    let required = relay_floor.max(da_required);
+    if required == 0 {
+        // DA tx but every Stage C rate-derived fee term is zero: the
+        // relay-floor term is zero and both DA-side terms are zero.
+        // Nothing to enforce; admit without fee compute.
+        return Ok(());
+    }
+    let fee = compute_fee_no_verify(tx, utxos)
+        .map_err(|err| format!("cannot compute fee for DA tx (policy): {err}"))?;
+    if fee < required {
         return Err(format!(
-            "DA fee below policy minimum (fee={fee} min_fee={min_fee})"
+            "DA fee below Stage C floor (fee={fee} required_fee={required} relay_fee_floor={relay_floor} da_fee_floor={da_floor} da_surcharge={da_surcharge} weight={weight} da_payload_len={da_bytes})"
         ));
     }
     Ok(())
@@ -855,15 +959,16 @@ mod tests {
     };
     use rubin_consensus::{
         marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction,
-        CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CoreExtVerificationBinding,
-        DaChunkCore, Mldsa87Keypair, Outpoint, Tx, TxInput, TxOutput, UtxoEntry, WitnessItem,
+        tx_weight_and_stats_public, CoreExtDeploymentProfile, CoreExtDeploymentProfiles,
+        CoreExtVerificationBinding, DaChunkCore, Mldsa87Keypair, Outpoint, Tx, TxInput, TxOutput,
+        UtxoEntry, WitnessItem,
     };
 
     use super::{
         compare_admit_priority, compare_entries_for_mining, compare_fee_rate, conflict, mtp_median,
-        next_block_height, next_block_mtp, reject_core_ext_tx_oversized_payload, rejected,
-        relay_metadata, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry,
-        MAX_TX_POOL_TRANSACTIONS,
+        next_block_height, next_block_mtp, reject_core_ext_tx_oversized_payload,
+        reject_da_anchor_tx_policy, rejected, relay_metadata, unavailable, TxPool,
+        TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -1847,7 +1952,11 @@ mod tests {
     }
 
     #[test]
-    fn admit_rejects_da_tx_below_policy_surcharge_minimum() {
+    fn admit_rejects_da_tx_below_policy_stage_c_floor() {
+        // Stage C: required_fee = max(relay_fee_floor, da_fee_floor + da_surcharge).
+        // With cfg defaults (current_mempool_min_fee_rate=1, min_da_fee_rate=1) and
+        // surcharge=1, the fee=1 (input=10, output=9) is below required, so admission
+        // rejects with the Stage C error message that names every term.
         let (state, raw) = signed_p2pk_state_and_tx(
             10,
             vec![TxOutput {
@@ -1867,7 +1976,20 @@ mod tests {
         pool.cfg.policy_da_surcharge_per_byte = 1;
         let err = pool.admit(&raw, &state, None, [0u8; 32]).unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("DA fee below policy minimum"));
+        assert!(
+            err.message.contains("DA fee below Stage C floor"),
+            "expected Stage C error, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("relay_fee_floor=")
+                && err.message.contains("da_fee_floor=")
+                && err.message.contains("da_surcharge=")
+                && err.message.contains("weight=")
+                && err.message.contains("da_payload_len="),
+            "expected debug fields in error, got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -2072,5 +2194,282 @@ mod tests {
             da_payload: vec![],
         };
         assert!(reject_core_ext_tx_oversized_payload(&tx, 1).is_ok());
+    }
+
+    // ----- Stage C DA fee policy parity tests (Linear RUB-122) -----
+    //
+    // These tests pin the Stage C admission predicate
+    //
+    //   required_fee = max(relay_fee_floor, da_fee_floor + da_surcharge)
+    //
+    // bit-for-bit against the merged Go reference
+    // (clients/go/node/policy_da_anchor.go::RejectDaAnchorTxPolicy) and prove
+    // that prior surcharge-only behavior, zero-surcharge bypass, relay/DA
+    // dominance, overflow fail-closed, and non-DA short-circuit all behave
+    // identically in Rust. Tests build a real signed DA transaction, then
+    // call `reject_da_anchor_tx_policy` directly with crafted rate inputs to
+    // exercise both accepted and rejected cases against the actual fee
+    // computed by `compute_fee_no_verify`.
+
+    fn build_signed_da_tx_with_fee(
+        fee: u64,
+        da_payload: Vec<u8>,
+    ) -> (ChainState, Vec<u8>, u64, u64) {
+        let output_value = 100u64;
+        let input_value = output_value
+            .checked_add(fee)
+            .expect("test fee + output_value must not overflow");
+        let (state, raw) = signed_p2pk_state_and_tx(
+            input_value,
+            vec![TxOutput {
+                value: output_value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+            }],
+            0x02,
+            Some(DaChunkCore {
+                da_id: [0x55; 32],
+                chunk_index: 0,
+                chunk_hash: [0x66; 32],
+            }),
+            da_payload,
+        );
+        let (tx, _, _, _) = parse_tx(&raw).expect("parse signed DA tx");
+        let (weight, da_bytes, _) =
+            tx_weight_and_stats_public(&tx).expect("tx_weight_and_stats_public");
+        assert!(da_bytes > 0, "test setup must produce DA tx");
+        assert!(weight > 0, "test setup must produce non-zero weight");
+        (state, raw, weight, da_bytes)
+    }
+
+    fn run_da_policy(
+        raw: &[u8],
+        state: &ChainState,
+        current_min: u64,
+        min_da: u64,
+        surcharge: u64,
+    ) -> Result<(), String> {
+        let (tx, _, _, _) = parse_tx(raw).expect("parse tx");
+        reject_da_anchor_tx_policy(&tx, &state.utxos, current_min, min_da, surcharge)
+    }
+
+    #[test]
+    fn stage_c_da_admit_with_fee_equal_required_da_dominant() {
+        // current_min=0 zeroes the relay term; min_da=1, surcharge=1 makes
+        // da_required = 2 * da_bytes the dominant term. Fee = 2*da_bytes
+        // exactly admits (Stage C accepts fee == required).
+        let (_, _, _, da_bytes) = build_signed_da_tx_with_fee(0, vec![0x77; 64]);
+        let required = da_bytes
+            .checked_mul(2)
+            .expect("test setup u64 mul not overflow");
+        let (state, raw, weight, da_bytes2) = build_signed_da_tx_with_fee(required, vec![0x77; 64]);
+        // weight/da_bytes are deterministic across reruns with the same shape.
+        assert_eq!(da_bytes2, da_bytes, "DA bytes deterministic");
+        assert!(weight > 0);
+        run_da_policy(&raw, &state, 0, 1, 1).expect("fee == required should admit");
+    }
+
+    #[test]
+    fn stage_c_da_reject_with_fee_one_below_required_da_dominant() {
+        let (_, _, _, da_bytes) = build_signed_da_tx_with_fee(0, vec![0x77; 64]);
+        let required = da_bytes
+            .checked_mul(2)
+            .expect("test setup u64 mul not overflow");
+        let (state, raw, _, _) = build_signed_da_tx_with_fee(required - 1, vec![0x77; 64]);
+        let err =
+            run_da_policy(&raw, &state, 0, 1, 1).expect_err("fee == required - 1 must reject");
+        assert!(
+            err.starts_with("DA fee below Stage C floor"),
+            "expected Stage C error, got: {err}"
+        );
+        assert!(err.contains(&format!("required_fee={required}")));
+        assert!(err.contains(&format!("da_fee_floor={da_bytes}")));
+        assert!(err.contains(&format!("da_surcharge={da_bytes}")));
+        assert!(err.contains(&format!("da_payload_len={da_bytes}")));
+    }
+
+    #[test]
+    fn stage_c_da_zero_surcharge_still_enforces_min_da_fee_rate() {
+        // Surcharge-zero regression: prior surcharge-only Rust returned Ok
+        // unconditionally when da_surcharge_per_byte == 0. Stage C requires
+        // da_floor (= da_bytes * min_da_fee_rate) to still bind.
+        let (_, _, _, da_bytes) = build_signed_da_tx_with_fee(0, vec![0x77; 64]);
+        let min_da_rate = 7u64;
+        let required = da_bytes
+            .checked_mul(min_da_rate)
+            .expect("test setup u64 mul not overflow");
+        // accept at exact floor
+        let (state_ok, raw_ok, _, _) = build_signed_da_tx_with_fee(required, vec![0x77; 64]);
+        run_da_policy(&raw_ok, &state_ok, 0, min_da_rate, 0)
+            .expect("fee == da_floor with surcharge=0 admits");
+        // reject one below
+        let (state_bad, raw_bad, _, _) = build_signed_da_tx_with_fee(required - 1, vec![0x77; 64]);
+        let err = run_da_policy(&raw_bad, &state_bad, 0, min_da_rate, 0)
+            .expect_err("fee == da_floor - 1 with surcharge=0 must reject");
+        assert!(err.contains("DA fee below Stage C floor"), "got: {err}");
+        assert!(err.contains("da_surcharge=0"));
+    }
+
+    #[test]
+    fn stage_c_da_zero_min_rate_still_enforces_surcharge() {
+        // Symmetric regression: prior Rust short-circuited when
+        // da_surcharge_per_byte == 0 but did not run da_floor at all. Stage C
+        // separates the two terms; zeroing min_da_fee_rate must still leave
+        // surcharge enforced.
+        let (_, _, _, da_bytes) = build_signed_da_tx_with_fee(0, vec![0x77; 64]);
+        let surcharge_rate = 5u64;
+        let required = da_bytes
+            .checked_mul(surcharge_rate)
+            .expect("test setup u64 mul not overflow");
+        let (state_bad, raw_bad, _, _) = build_signed_da_tx_with_fee(required - 1, vec![0x77; 64]);
+        let err = run_da_policy(&raw_bad, &state_bad, 0, 0, surcharge_rate)
+            .expect_err("fee == surcharge - 1 with min_da_fee_rate=0 must reject");
+        assert!(err.contains("DA fee below Stage C floor"), "got: {err}");
+        assert!(err.contains("da_fee_floor=0"));
+        assert!(err.contains(&format!("da_surcharge={required}")));
+    }
+
+    #[test]
+    fn stage_c_da_relay_floor_dominates_when_higher() {
+        let (_, _, weight, da_bytes) = build_signed_da_tx_with_fee(0, vec![0x77; 8]);
+        // Pick current_min so weight*current_min strictly > da_bytes*1 (min_da=1, surcharge=0).
+        // For typical signed P2PK + 8-byte DA payload, weight is several thousand and
+        // da_bytes is small (~10), so current_min=2 makes relay dominate.
+        let current_min = 2u64;
+        let relay_floor = weight
+            .checked_mul(current_min)
+            .expect("test setup u64 mul not overflow");
+        let da_required = da_bytes;
+        assert!(
+            relay_floor > da_required,
+            "test premise: relay_floor={relay_floor} must dominate da_required={da_required}"
+        );
+        let (state_bad, raw_bad, _, _) =
+            build_signed_da_tx_with_fee(relay_floor - 1, vec![0x77; 8]);
+        let err = run_da_policy(&raw_bad, &state_bad, current_min, 1, 0)
+            .expect_err("fee == relay_floor - 1 must reject when relay dominates");
+        assert!(err.contains("DA fee below Stage C floor"));
+        assert!(err.contains(&format!("required_fee={relay_floor}")));
+        assert!(err.contains(&format!("relay_fee_floor={relay_floor}")));
+        // exact-floor accept
+        let (state_ok, raw_ok, _, _) = build_signed_da_tx_with_fee(relay_floor, vec![0x77; 8]);
+        run_da_policy(&raw_ok, &state_ok, current_min, 1, 0).expect("fee == relay_floor admits");
+    }
+
+    #[test]
+    fn stage_c_da_floor_dominates_when_higher() {
+        let (_, _, weight, da_bytes) = build_signed_da_tx_with_fee(0, vec![0x77; 64]);
+        // Make da_required strictly larger than relay_floor: pick min_da_rate
+        // so da_bytes*min_da_rate > weight (with current_min=1, surcharge=0).
+        let min_da = (weight / da_bytes) + 2;
+        let da_required = da_bytes
+            .checked_mul(min_da)
+            .expect("test setup u64 mul not overflow");
+        assert!(
+            da_required > weight,
+            "test premise: da_required={da_required} must dominate weight={weight}"
+        );
+        let (state_bad, raw_bad, _, _) =
+            build_signed_da_tx_with_fee(da_required - 1, vec![0x77; 64]);
+        let err = run_da_policy(&raw_bad, &state_bad, 1, min_da, 0)
+            .expect_err("fee == da_required - 1 must reject when DA dominates");
+        assert!(err.contains("DA fee below Stage C floor"));
+        assert!(err.contains(&format!("required_fee={da_required}")));
+        assert!(err.contains(&format!("da_fee_floor={da_required}")));
+    }
+
+    #[test]
+    fn stage_c_da_overflow_relay_floor_rejects_fail_closed() {
+        let (state, raw, weight, _) = build_signed_da_tx_with_fee(1_000_000, vec![0x77; 8]);
+        let err = run_da_policy(&raw, &state, u64::MAX, 1, 1)
+            .expect_err("u64::MAX * weight must overflow");
+        assert!(err.starts_with("relay fee floor overflow"), "got: {err}");
+        assert!(err.contains(&format!("weight={weight}")));
+    }
+
+    #[test]
+    fn stage_c_da_overflow_da_floor_rejects_fail_closed() {
+        let (state, raw, _, da_bytes) = build_signed_da_tx_with_fee(1_000_000, vec![0x77; 8]);
+        let err = run_da_policy(&raw, &state, 1, u64::MAX, 1)
+            .expect_err("u64::MAX * da_bytes must overflow");
+        assert!(err.starts_with("DA fee floor overflow"), "got: {err}");
+        assert!(err.contains(&format!("da_payload_len={da_bytes}")));
+    }
+
+    #[test]
+    fn stage_c_da_overflow_da_surcharge_rejects_fail_closed() {
+        let (state, raw, _, da_bytes) = build_signed_da_tx_with_fee(1_000_000, vec![0x77; 8]);
+        let err = run_da_policy(&raw, &state, 1, 1, u64::MAX)
+            .expect_err("u64::MAX * da_bytes must overflow");
+        assert!(err.starts_with("DA surcharge overflow"), "got: {err}");
+        assert!(err.contains(&format!("da_payload_len={da_bytes}")));
+    }
+
+    #[test]
+    fn stage_c_da_overflow_da_required_addition_rejects_fail_closed() {
+        // Pick min_da and surcharge each just below u64::MAX/da_bytes so each
+        // mul stays in range, but their sum (da_floor + da_surcharge) overflows.
+        let (_, _, _, da_bytes) = build_signed_da_tx_with_fee(0, vec![0x77; 8]);
+        let half = u64::MAX / da_bytes;
+        let min_da = half;
+        let surcharge = half;
+        // da_floor = da_bytes * half; da_surcharge = da_bytes * half.
+        // Each fits. Sum = 2 * da_bytes * half ~ 2*u64::MAX/2 -> overflow on add.
+        let da_floor = da_bytes
+            .checked_mul(min_da)
+            .expect("test premise: each mul fits");
+        let da_surcharge = da_bytes
+            .checked_mul(surcharge)
+            .expect("test premise: each mul fits");
+        assert!(
+            da_floor.checked_add(da_surcharge).is_none(),
+            "test premise: addition must overflow"
+        );
+        let (state, raw, _, _) = build_signed_da_tx_with_fee(1_000_000, vec![0x77; 8]);
+        let err =
+            run_da_policy(&raw, &state, 0, min_da, surcharge).expect_err("addition must overflow");
+        assert!(err.starts_with("DA required fee overflow"), "got: {err}");
+    }
+
+    #[test]
+    fn stage_c_non_da_tx_short_circuits_admit() {
+        // Non-DA tx (tx_kind=0, no DaChunkCore, no da_payload) must be admitted
+        // by reject_da_anchor_tx_policy without applying any DA term, even with
+        // aggressive rate config. Non-DA relay-fee floor enforcement is outside
+        // this helper and is the responsibility of a separate Rust standard
+        // mempool admission path (tracked as RUB-53); Rust does not yet ship
+        // a `validateFeeFloorLocked` analogue.
+        let (state, raw) = signed_p2pk_state_and_tx(
+            10,
+            vec![TxOutput {
+                value: 9,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x23; 2592]),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        run_da_policy(&raw, &state, u64::MAX, u64::MAX, u64::MAX)
+            .expect("non-DA tx admits regardless of DA rate config");
+    }
+
+    #[test]
+    fn stage_c_da_zero_rates_admit_without_fee_compute() {
+        // DA tx with all three rates = 0: relay_floor=0, da_floor=0,
+        // da_surcharge=0, required=0. Stage C admits without computing fee.
+        //
+        // Proof assertion: state.utxos is cleared before run_da_policy is
+        // called, so compute_fee_no_verify (which dereferences each input
+        // outpoint via utxos.get(...) and returns Err("missing utxo") on
+        // None) would propagate that error. The test asserts run_da_policy
+        // returns Ok(()), which is reachable only through the
+        // `if required == 0 { return Ok(()); }` short-circuit branch in
+        // reject_da_anchor_tx_policy that bypasses compute_fee_no_verify
+        // entirely.
+        let (mut state, raw, _, _) = build_signed_da_tx_with_fee(1_000_000, vec![0x77; 8]);
+        state.utxos.clear(); // strip utxos so any fee compute would error
+        run_da_policy(&raw, &state, 0, 0, 0)
+            .expect("required=0 admits without compute_fee_no_verify");
     }
 }
