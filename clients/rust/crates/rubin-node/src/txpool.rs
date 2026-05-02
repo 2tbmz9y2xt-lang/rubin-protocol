@@ -740,21 +740,23 @@ pub(crate) fn reject_da_anchor_tx_policy(
     }
     let relay_floor = weight.checked_mul(current_mempool_min_fee_rate).ok_or_else(|| {
         format!(
-            "relay fee floor overflow (weight={weight} current_mempool_min_fee_rate={current_mempool_min_fee_rate})"
+            "relay fee floor overflow (weight={weight} current_mempool_min_fee_rate={current_mempool_min_fee_rate}): u64 overflow"
         )
     })?;
     let da_floor = da_bytes.checked_mul(min_da_fee_rate).ok_or_else(|| {
         format!(
-            "DA fee floor overflow (da_payload_len={da_bytes} min_da_fee_rate={min_da_fee_rate})"
+            "DA fee floor overflow (da_payload_len={da_bytes} min_da_fee_rate={min_da_fee_rate}): u64 overflow"
         )
     })?;
     let da_surcharge = da_bytes.checked_mul(da_surcharge_per_byte).ok_or_else(|| {
         format!(
-            "DA surcharge overflow (da_payload_len={da_bytes} surcharge_per_byte={da_surcharge_per_byte})"
+            "DA surcharge overflow (da_payload_len={da_bytes} surcharge_per_byte={da_surcharge_per_byte}): u64 overflow"
         )
     })?;
     let da_required = da_floor.checked_add(da_surcharge).ok_or_else(|| {
-        format!("DA required fee overflow (da_fee_floor={da_floor} da_surcharge={da_surcharge})")
+        format!(
+            "DA required fee overflow (da_fee_floor={da_floor} da_surcharge={da_surcharge}): u64 overflow"
+        )
     })?;
     let required = relay_floor.max(da_required);
     if required == 0 {
