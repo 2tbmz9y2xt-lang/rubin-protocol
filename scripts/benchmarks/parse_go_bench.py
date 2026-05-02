@@ -230,7 +230,7 @@ def main() -> int:
     if not input_path.exists():
         result = no_data_result(slo, f"benchmark output not found: {input_path}")
         write_outputs(output_path, summary_path, result)
-        print("WARN: combined-load benchmark data unavailable; wrote no_data advisory result.")
+        print("WARN: combined-load benchmark data unavailable; wrote no_data advisory result.", file=sys.stderr)
         return 0
 
     try:
