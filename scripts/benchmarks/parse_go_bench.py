@@ -28,27 +28,38 @@ def parse_metric(raw: str) -> float:
     return float(raw.strip())
 
 
-def parse_benchmark_line(line: str, benchmark: str) -> dict[str, Any] | None:
+def strip_go_benchmark_suffix(name: str) -> str:
+    parts = name.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return name
+
+
+def parse_benchmark_line(line: str, benchmark: str) -> tuple[dict[str, Any] | None, str | None]:
     prefix = re.match(
         rf"^(?P<name>{re.escape(benchmark)}(?:-\d+)?)\s+(?P<n>\d+)\s+(?P<metrics>.*)$",
         line.strip(),
     )
     if prefix is None:
-        return None
+        return None, None
     metrics = prefix.group("metrics")
     parsed: dict[str, Any] = {
-        "benchmark": prefix.group("name").split("-")[0],
+        "benchmark": strip_go_benchmark_suffix(prefix.group("name")),
         "iterations": int(prefix.group("n")),
     }
+    missing: list[str] = []
     for key, pattern in CORE_METRIC_PATTERNS.items():
         match = pattern.search(metrics)
         if match is None:
             if key == "mb_per_s":
                 parsed[key] = None
                 continue
-            return None
+            missing.append(key)
+            continue
         parsed[key] = parse_metric(match.group("value"))
-    return parsed
+    if missing:
+        return None, f"benchmark line for {benchmark} missing required metric(s): {', '.join(missing)}"
+    return parsed, None
 
 
 def load_slo(path: Path) -> dict[str, Any]:
@@ -80,12 +91,15 @@ def no_data_result(slo: dict[str, Any] | None, reason: str) -> dict[str, Any]:
 def parse_benchmark(lines: list[str], slo: dict[str, Any]) -> dict[str, Any]:
     benchmark = str(slo["benchmark"])
     parsed = None
+    parse_issue = None
     for line in lines:
-        parsed = parse_benchmark_line(line, benchmark)
+        parsed, parse_issue = parse_benchmark_line(line, benchmark)
+        if parse_issue is not None:
+            break
         if parsed is not None:
             break
     if parsed is None:
-        return no_data_result(slo, f"benchmark line for {benchmark} not found")
+        return no_data_result(slo, parse_issue or f"benchmark line for {benchmark} not found")
 
     result: dict[str, Any] = {
         "benchmark": parsed["benchmark"],

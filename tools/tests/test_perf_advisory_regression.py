@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import importlib.util
 import json
 # Tests execute repo-local Python CLIs through argv lists only.
 import subprocess  # nosec B404
@@ -13,11 +14,21 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPARE = REPO_ROOT / "scripts" / "runtime_perf" / "compare_runtime_perf.py"
 PARSE_COMBINED = REPO_ROOT / "scripts" / "benchmarks" / "parse_go_bench.py"
 SLO = REPO_ROOT / "scripts" / "benchmarks" / "combined_load_slo.json"
+TREND = REPO_ROOT / "scripts" / "runtime_perf" / "build_runtime_perf_trend.py"
 
 
 def write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class RuntimePerfAdvisoryTests(unittest.TestCase):
@@ -284,6 +295,69 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertIn("workflow remains non-blocking", doc["reason"])
         self.assertIn("Status: `warn`", summary_text)
 
+    def test_missing_combined_load_input_file_writes_no_data_summary(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            out = root / "combined.json"
+            summary = root / "summary.md"
+            # The command is a repo-local script through sys.executable with temp file arguments only.
+            proc = subprocess.run(  # nosec B603
+                [
+                    sys.executable,
+                    str(PARSE_COMBINED),
+                    "--input",
+                    str(root / "missing-benchmark.txt"),
+                    "--slo",
+                    str(SLO),
+                    "--output",
+                    str(out),
+                    "--summary",
+                    str(summary),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            doc = json.loads(out.read_text(encoding="utf-8"))
+            summary_text = summary.read_text(encoding="utf-8")
+
+        self.assertEqual(doc["status"], "no_data")
+        self.assertIn("benchmark output not found", doc["reason"])
+        self.assertIn("Status: `no_data`", summary_text)
+
+    def test_malformed_combined_load_metric_has_distinct_no_data_reason(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            raw = root / "bench.txt"
+            out = root / "combined.json"
+            raw.write_text(
+                "BenchmarkValidateBlockBasicCombinedLoad-8 1 4000000000 ns/op 4000000 allocs/op\n",
+                encoding="utf-8",
+            )
+            # The command is a repo-local script through sys.executable with temp file arguments only.
+            proc = subprocess.run(  # nosec B603
+                [
+                    sys.executable,
+                    str(PARSE_COMBINED),
+                    "--input",
+                    str(raw),
+                    "--slo",
+                    str(SLO),
+                    "--output",
+                    str(out),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            doc = json.loads(out.read_text(encoding="utf-8"))
+
+        self.assertEqual(doc["status"], "no_data")
+        self.assertIn("missing required metric", doc["reason"])
+        self.assertNotIn("not found", doc["reason"])
+
     def test_non_numeric_selected_metric_is_no_data_not_traceback(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -352,6 +426,22 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertEqual(doc["status"], "no_data")
         self.assertEqual(doc["violations"], [])
         self.assertIn("not found", doc["reason"])
+
+    def test_advisory_threshold_registry_matches_trend_low_noise_candidates(self):
+        compare = load_module(COMPARE, "compare_runtime_perf_for_test")
+        trend = load_module(TREND, "build_runtime_perf_trend_for_test")
+
+        threshold_keys = {
+            (item["suite"], item["benchmark"], item["metric"])
+            for item in compare.ADVISORY_THRESHOLDS
+        }
+        trend_keys = {
+            (item["suite"], item["benchmark"], item["metric"])
+            for item in trend.LOW_NOISE_CANDIDATES
+            if item["suite"] in {"go", "rust"}
+        }
+
+        self.assertEqual(threshold_keys, trend_keys)
 
 
 if __name__ == "__main__":
