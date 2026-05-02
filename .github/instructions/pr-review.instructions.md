@@ -47,6 +47,38 @@ This is a blockchain protocol repository containing:
 6. Does the change update ARCHITECTURE_MAP.md if structural changes are made?
 7. Are new error types properly propagated and tested?
 
+## Consensus Hazard Checklist (extended)
+
+For any change touching `clients/go/**` or `clients/rust/**`, verify:
+
+### Determinism (P0 if violated in consensus path)
+- [ ] No `map` iteration order reliance in Go without explicit `sort.Slice` of keys
+- [ ] No `HashMap` iteration in Rust consensus paths — use `BTreeMap` or sort
+- [ ] No `time.Now()`, `rand` without injected seed, or wall-clock comparisons in validation
+- [ ] No goroutines / `tokio::spawn` introducing ordering nondeterminism in block processing
+
+### Canonical encoding (P0)
+- [ ] Varints use minimal encoding (no leading zero continuation bytes)
+- [ ] Map/set serialization uses sorted keys
+- [ ] Floats are rejected or fixed-point only — no IEEE-754 in wire format
+- [ ] Round-trip property test exists: `decode(encode(x)) == x` AND `encode(decode(b)) == b`
+
+### Arithmetic safety (P0/P1)
+- [ ] All `amount`, `fee`, `height`, `weight` arithmetic uses checked/saturating ops
+- [ ] No `as` casts narrowing integers in Rust consensus code without bounds check
+- [ ] Go: no implicit `int`↔`int64` truncation across platforms
+
+### DoS surface (P1)
+- [ ] Deserialization has explicit max-size / max-depth limits
+- [ ] No unbounded `Vec::with_capacity(n)` or `make([]T, n)` from untrusted `n`
+- [ ] Loops over network input have iteration caps
+
+### Crypto correctness (P0)
+- [ ] Secret-dependent comparisons use constant-time primitives (`subtle.ConstantTimeCompare`, `subtle::ConstantTimeEq`)
+- [ ] ML-DSA-87 context strings match between Go and Rust byte-for-byte
+- [ ] No key material in `Debug`/`fmt.Stringer` output — use `Zeroize` / `redact`
+- [ ] RNG source is `crypto/rand` (Go) or `OsRng` (Rust), never `math/rand` / `thread_rng` for keys
+
 ## Language-Specific Rules
 
 ### Rust
