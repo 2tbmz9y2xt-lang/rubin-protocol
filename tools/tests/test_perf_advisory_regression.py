@@ -816,7 +816,7 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
                 self.assertNotIn("Traceback", proc.stderr)
 
     def test_invalid_combined_load_slo_benchmark_fails_closed(self):
-        for value in [None, "", "   ", 123]:
+        for value in [None, "", "   ", " BenchmarkValidateBlockBasicCombinedLoad ", 123]:
             with self.subTest(value=repr(value)), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 raw = root / "bench.txt"
@@ -849,7 +849,7 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
 
             self.assertNotEqual(proc.returncode, 0)
             self.assertFalse(out.exists())
-            self.assertIn("SLO benchmark must be a non-empty string", proc.stderr)
+            self.assertIn("SLO benchmark must", proc.stderr)
             self.assertNotIn("Traceback", proc.stderr)
 
     def test_non_numeric_selected_metric_is_no_data_not_traceback(self):

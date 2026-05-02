@@ -90,6 +90,8 @@ def load_slo(path: Path) -> dict[str, Any]:
             raise ValueError(f"SLO missing required key {key!r}")
     if not isinstance(payload["benchmark"], str) or not payload["benchmark"].strip():
         raise ValueError("SLO benchmark must be a non-empty string")
+    if payload["benchmark"] != payload["benchmark"].strip():
+        raise ValueError("SLO benchmark must not contain leading or trailing whitespace")
     for _, limit_key in METRIC_CHECKS:
         payload[limit_key] = parse_finite_number(payload[limit_key], f"SLO {limit_key}", allow_zero=False)
     return payload
