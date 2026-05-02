@@ -816,7 +816,15 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
                 self.assertNotIn("Traceback", proc.stderr)
 
     def test_invalid_combined_load_slo_benchmark_fails_closed(self):
-        for value in [None, "", "   ", " BenchmarkValidateBlockBasicCombinedLoad ", 123]:
+        for value in [
+            None,
+            "",
+            "   ",
+            " BenchmarkValidateBlockBasicCombinedLoad ",
+            "BenchmarkValidate BlockBasicCombinedLoad",
+            "BenchmarkValidate\tBlockBasicCombinedLoad",
+            123,
+        ]:
             with self.subTest(value=repr(value)), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 raw = root / "bench.txt"
