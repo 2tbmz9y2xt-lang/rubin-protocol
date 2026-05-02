@@ -76,6 +76,43 @@ type Mempool struct {
 	admitConflict    atomic.Uint64
 	admitRejected    atomic.Uint64
 	admitUnavailable atomic.Uint64
+
+	// evictedResidentTotal counts cumulative resident-entry capacity
+	// evictions since process start. It is bumped exactly once per
+	// already-admitted entry that is removed by capacity pressure
+	// (the deleteEntryLocked loop in addEntryLocked after
+	// validateCapacityAdmissionLocked classifies the candidate as
+	// admitted-and-evicting). Candidate-worst rejection — where the
+	// incoming candidate is rejected at capacity and no resident is
+	// evicted — does not increment this counter; that path returns
+	// txAdmitUnavailable before the deleteEntryLocked loop. Fee-floor
+	// rejection of an incoming transaction never reaches this counter
+	// either, because the fee-floor check happens before
+	// validateCapacityAdmissionLocked. Confirmed-block removals via
+	// EvictConfirmed/applyConnectedBlock are conflict resolution, not
+	// policy capacity eviction, and also do not increment this counter.
+	evictedResidentTotal atomic.Uint64
+}
+
+// MempoolStats is the snapshot view of standard mempool telemetry
+// state. Field order matches the /metrics rendering order in
+// renderPrometheusMetrics so the textual output is stable across
+// readings. Reading a snapshot does not mutate any mempool state.
+//
+// Nil-receiver contract (matches CurrentMinFeeRateSnapshot
+// convention): a nil *Mempool returns counters and sizes set to
+// zero (TxCount, BytesUsed, MaxBytes, LowWaterBytes,
+// EvictedResidentTotal) but MinFeeRate set to
+// DefaultMempoolMinFeeRate. Callers do not need to special-case
+// uninitialized mempool wiring; /metrics on an un-wired state
+// renders the documented baseline floor instead of 0.
+type MempoolStats struct {
+	TxCount              int
+	BytesUsed            int
+	MaxBytes             int
+	LowWaterBytes        int
+	MinFeeRate           uint64
+	EvictedResidentTotal uint64
 }
 
 // MempoolAdmissionCounts is the snapshot view of admission outcomes.
@@ -244,6 +281,48 @@ func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
 		Conflict:    m.admitConflict.Load(),
 		Rejected:    m.admitRejected.Load(),
 		Unavailable: m.admitUnavailable.Load(),
+	}
+}
+
+// Stats returns a current snapshot of standard mempool telemetry
+// state for the /metrics renderer. The snapshot reads live struct
+// fields under the read lock — values are NOT cached duplicates of
+// MempoolConfig defaults — so max_bytes, low_water_bytes, and
+// min_fee_rate reflect the rolling state including the post-eviction
+// adjustments performed by raiseMinFeeRateAfterEvictionLocked and
+// decayMinFeeRateAfterConnectedBlockLocked. EvictedResidentTotal is
+// loaded INSIDE the read-lock window. Writers bump that counter
+// under m.mu.Lock inside addEntryLocked's deleteEntryLocked loop,
+// so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
+// the atomic.Load observes the same critical section as the gauge
+// fields read on the surrounding lines. Covered by
+// TestMempoolStatsScrapePurity and the
+// TestMempoolStatsResidentEvictionIncrementsExactlyOnce assertion
+// chain in clients/go/node/mempool_test.go.
+//
+// Nil-safety follows the existing exported-accessor convention used
+// by CurrentMinFeeRateSnapshot, BytesUsed, AdmissionCounts: a nil
+// receiver returns counters/sizes 0, but MinFeeRate defaults to
+// DefaultMempoolMinFeeRate. This keeps /metrics rendering on an
+// uninitialized state agreeing with the rest of the Mempool API
+// instead of advertising rubin_node_mempool_min_fee_rate = 0, which
+// would disagree with CurrentMinFeeRateSnapshot's nil return and
+// the documented baseline floor.
+func (m *Mempool) Stats() MempoolStats {
+	if m == nil {
+		return MempoolStats{
+			MinFeeRate: DefaultMempoolMinFeeRate,
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return MempoolStats{
+		TxCount:              len(m.txs),
+		BytesUsed:            m.usedBytes,
+		MaxBytes:             m.maxBytes,
+		LowWaterBytes:        m.effectiveLowWaterBytesLocked(),
+		MinFeeRate:           m.currentMinFeeRateLocked(),
+		EvictedResidentTotal: m.evictedResidentTotal.Load(),
 	}
 }
 
@@ -924,6 +1003,13 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 	m.ensureIndexesLocked()
 	for _, evicted := range evictedEntries {
 		m.deleteEntryLocked(evicted.txid, evicted)
+		// Bump the resident-eviction counter exactly once per
+		// already-admitted entry that capacity pressure removes here.
+		// Candidate-worst rejection returned txAdmitUnavailable above
+		// without populating evictedEntries, so that path skips this
+		// loop entirely. Fee-floor rejection returned earlier from
+		// validateFeeFloorLocked and likewise never reaches here.
+		m.evictedResidentTotal.Add(1)
 	}
 	m.assignAdmissionSeqLocked(entry)
 	m.insertEntryIndexesLocked(entry)
