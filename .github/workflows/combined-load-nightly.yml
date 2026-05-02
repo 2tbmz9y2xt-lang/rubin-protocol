@@ -81,6 +81,38 @@ jobs:
         run: |
           if [ -f artifacts/combined-load/combined_load_summary.md ]; then
             cat artifacts/combined-load/combined_load_summary.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f artifacts/combined-load/combined_load_metrics.json ]; then
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          metrics_path = Path("artifacts/combined-load/combined_load_metrics.json")
+          status = "no_data"
+          reason = "combined-load summary artifact was not produced"
+          try:
+              payload = json.loads(metrics_path.read_text(encoding="utf-8", errors="strict"))
+              raw_status = payload.get("status")
+              if isinstance(raw_status, str) and raw_status:
+                  status = raw_status
+              raw_reason = payload.get("reason")
+              if isinstance(raw_reason, str) and raw_reason:
+                  reason = raw_reason
+          except Exception as exc:
+              reason = f"combined-load metrics artifact could not be read: {exc}"
+
+          reason = reason.replace("\r", " ").replace("\n", " ")
+          print("# Combined-Load Advisory SLO")
+          print()
+          print(f"Status: `{status}`.")
+          print()
+          print(
+              "Combined-load summary artifact was not produced; fallback status was derived "
+              "from `combined_load_metrics.json` to keep the GitHub summary aligned with "
+              "the uploaded JSON artifact."
+          )
+          print()
+          print(f"- reason: {reason}")
+          PY
           else
             {
               echo "# Combined-Load Advisory SLO"
