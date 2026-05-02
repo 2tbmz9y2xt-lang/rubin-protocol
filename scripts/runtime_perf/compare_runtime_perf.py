@@ -91,13 +91,15 @@ def pct_delta(base: float, head: float) -> float | None:
     return ((head - base) / base) * 100.0
 
 
-def metrics_from_payload(suite: str, payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+def metrics_from_payload(suite: str, payload: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]], str | None]:
     if payload is None:
-        return {}
+        return {}, None
     if suite in {"go", "rust"}:
         metrics = payload.get("metrics")
-        return metrics if isinstance(metrics, dict) else {}
-    return {}
+        if not isinstance(metrics, dict):
+            return {}, f"{suite} metrics artifact missing object field 'metrics'"
+        return metrics, None
+    return {}, f"unknown metrics suite: {suite}"
 
 
 def classify_delta(
@@ -158,6 +160,8 @@ def build_rows(
     base_metrics: dict[str, dict[str, Any]],
     head_metrics: dict[str, dict[str, Any]],
     fields: list[str],
+    base_issue: str | None,
+    head_issue: str | None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for name in sorted(set(base_metrics) | set(head_metrics)):
@@ -177,8 +181,8 @@ def build_rows(
                 base_value=base.get(field) if base else None,
                 head_value=head.get(field) if head else None,
                 threshold=threshold,
-                base_issue=None,
-                head_issue=None,
+                base_issue=base_issue,
+                head_issue=head_issue,
             )
         rows.append(row)
     return rows
@@ -203,8 +207,8 @@ def build_advisory_decisions(
                 base_value=base.get(metric),
                 head_value=head.get(metric),
                 threshold=threshold,
-                base_issue=base_issue if not base_metrics else None,
-                head_issue=head_issue if not head_metrics else None,
+                base_issue=base_issue,
+                head_issue=head_issue,
             )
         )
     return decisions
@@ -301,10 +305,13 @@ def main() -> int:
     metric_sets: dict[str, tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str | None, str | None]] = {}
     suite_rows: dict[str, list[dict[str, Any]]] = {}
     for suite, (base_payload, base_issue, head_payload, head_issue) in loaded.items():
-        base_metrics = metrics_from_payload(suite, base_payload)
-        head_metrics = metrics_from_payload(suite, head_payload)
-        metric_sets[suite] = (base_metrics, head_metrics, base_issue, head_issue)
-        suite_rows[suite] = build_rows(suite, base_metrics, head_metrics, ROW_FIELDS[suite])
+        base_metrics, base_shape_issue = metrics_from_payload(suite, base_payload)
+        head_metrics, head_shape_issue = metrics_from_payload(suite, head_payload)
+        base_data_issue = base_issue or base_shape_issue
+        head_data_issue = head_issue or head_shape_issue
+        input_issues.extend(issue for issue in [base_shape_issue, head_shape_issue] if issue)
+        metric_sets[suite] = (base_metrics, head_metrics, base_data_issue, head_data_issue)
+        suite_rows[suite] = build_rows(suite, base_metrics, head_metrics, ROW_FIELDS[suite], base_data_issue, head_data_issue)
 
     advisory = build_advisory_decisions(metric_sets)
 
@@ -325,7 +332,7 @@ def main() -> int:
         if rows:
             summary_lines.extend(render_table(title, rows))
         else:
-            summary_lines.extend([f"### {title}", "", f"{title} metrics missing in either base or head artifact.", ""])
+            summary_lines.extend([f"### {title}", "", f"{title} metrics unavailable or empty in either base or head artifact.", ""])
 
     summary_lines.extend(
         [
@@ -346,8 +353,8 @@ def main() -> int:
         "advisory_status": advisory_status(advisory),
         "advisory_thresholds": ADVISORY_THRESHOLDS,
         "advisory": advisory,
-        "go": suite_rows["go"] or None,
-        "rust": suite_rows["rust"] or None,
+        "go": suite_rows["go"],
+        "rust": suite_rows["rust"],
     }
 
     summary_path.parent.mkdir(parents=True, exist_ok=True)

@@ -239,7 +239,11 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertIn("malformed JSON", "\n".join(doc["input_issues"]))
         add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
         self.assertEqual(add_tx["status"], "no_data")
+        self.assertIn("malformed JSON", add_tx["reason"])
         self.assertNotEqual(add_tx["status"], "warn")
+        go_row = next(row for row in doc["go"] if row["name"] == "BenchmarkMempoolAddTx")
+        self.assertIn("malformed JSON", go_row["advisory"]["ns_per_op"]["reason"])
+        self.assertEqual(doc["rust"], [])
 
     def test_combined_load_slo_breach_is_advisory_warn_exit_zero(self):
         with tempfile.TemporaryDirectory() as td:

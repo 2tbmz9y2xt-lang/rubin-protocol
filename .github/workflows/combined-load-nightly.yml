@@ -76,7 +76,7 @@ jobs:
         run: |
           scripts/benchmarks/run_combined_load_benchmark.sh artifacts/combined-load
 
-      - name: Write combined-load advisory summary
+      - name: Append combined-load advisory summary to step summary
         if: always()
         run: |
           if [ -f artifacts/combined-load/combined_load_summary.md ]; then
@@ -85,9 +85,9 @@ jobs:
             {
               echo "# Combined-Load Advisory SLO"
               echo
-              echo "Status: \`no_data\`."
+              echo "Status: \`error\`."
               echo
-              echo "Combined-load summary artifact was not produced."
+              echo "Combined-load summary artifact was not produced; the benchmark wrapper failed before advisory summary emission or the summary write failed."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 

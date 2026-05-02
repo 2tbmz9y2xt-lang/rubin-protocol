@@ -52,4 +52,4 @@ Artifacts:
 - `combined_load_metrics.json`
 - `combined_load_summary.md`
 
-Both artifacts MUST be kept with workflow run metadata for audit evidence.
+These artifacts MUST be kept with workflow run metadata for audit evidence.
