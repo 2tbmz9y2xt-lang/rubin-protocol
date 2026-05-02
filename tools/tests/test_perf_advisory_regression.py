@@ -294,6 +294,108 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertEqual(add_tx["status"], "no_data")
         self.assertIn("expected object", add_tx["reason"])
 
+    def test_malformed_unselected_entry_does_not_mask_selected_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            for side, add_tx_ns in [(base, 100.0), (head, 130.0)]:
+                write_json(
+                    side / "go_metrics.json",
+                    {
+                        "suite": "go",
+                        "metrics": {
+                            "BenchmarkMempoolAddTx": {
+                                "iterations": 1,
+                                "ns_per_op": add_tx_ns,
+                                "b_per_op": 10.0,
+                                "allocs_per_op": 1.0,
+                            },
+                            "BenchmarkMinerBuildContext": [],
+                        },
+                    },
+                )
+
+            doc = self.run_compare(base, head, root / "out")
+
+        self.assertIn("metrics entry for BenchmarkMinerBuildContext is list", "\n".join(doc["input_issues"]))
+        self.assertEqual(doc["advisory_status"], "warn")
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "warn")
+        self.assertEqual(add_tx["baseline"], 100.0)
+        self.assertEqual(add_tx["observed"], 130.0)
+        miner = next(row for row in doc["go"] if row["name"] == "BenchmarkMinerBuildContext")
+        self.assertEqual(miner["advisory"]["ns_per_op"]["status"], "unselected")
+
+    def test_malformed_missing_list_does_not_mask_selected_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            for side, add_tx_ns in [(base, 100.0), (head, 130.0)]:
+                write_json(
+                    side / "go_metrics.json",
+                    {
+                        "suite": "go",
+                        "metrics": {
+                            "BenchmarkMempoolAddTx": {
+                                "iterations": 1,
+                                "ns_per_op": add_tx_ns,
+                                "b_per_op": 10.0,
+                                "allocs_per_op": 1.0,
+                            },
+                        },
+                        "missing": "not-a-list",
+                    },
+                )
+
+            doc = self.run_compare(base, head, root / "out")
+
+        self.assertIn("field 'missing' is str, expected list", "\n".join(doc["input_issues"]))
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "warn")
+
+    def test_non_finite_selected_metric_is_no_data_not_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            write_json(
+                base / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": {
+                            "iterations": 1,
+                            "ns_per_op": 100.0,
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        }
+                    },
+                },
+            )
+            write_json(
+                head / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": {
+                            "iterations": 1,
+                            "ns_per_op": float("nan"),
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        }
+                    },
+                },
+            )
+
+            doc = self.run_compare(base, head, root / "out")
+
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "no_data")
+        self.assertIn("non-finite", add_tx["reason"])
+        self.assertIsNone(add_tx["delta_pct"])
+
     def test_rust_missing_list_surfaces_rows_and_no_data(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -449,6 +551,40 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertEqual(doc["status"], "no_data")
         self.assertIn("missing required metric", doc["reason"])
         self.assertNotIn("not found", doc["reason"])
+
+    def test_malformed_combined_load_numeric_token_is_no_data_not_traceback(self):
+        for token in ["400..0", "NaN"]:
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                raw = root / "bench.txt"
+                out = root / "combined.json"
+                raw.write_text(
+                    f"BenchmarkValidateBlockBasicCombinedLoad-8 1 {token} ns/op "
+                    "900000000 B/op 4000000 allocs/op\n",
+                    encoding="utf-8",
+                )
+                # The command is a repo-local script through sys.executable with temp file arguments only.
+                proc = subprocess.run(  # nosec B603
+                    [
+                        sys.executable,
+                        str(PARSE_COMBINED),
+                        "--input",
+                        str(raw),
+                        "--slo",
+                        str(SLO),
+                        "--output",
+                        str(out),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                doc = json.loads(out.read_text(encoding="utf-8"))
+
+            self.assertEqual(doc["status"], "no_data")
+            self.assertIn("malformed ns_per_op", doc["reason"])
+            self.assertNotIn("Traceback", proc.stderr)
 
     def test_non_numeric_selected_metric_is_no_data_not_traceback(self):
         with tempfile.TemporaryDirectory() as td:

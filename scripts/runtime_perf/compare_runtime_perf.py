@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -78,9 +79,12 @@ def coerce_metric(value: Any) -> tuple[float | None, str | None]:
     if isinstance(value, bool) or value is None:
         return None, f"non-numeric metric value: {value!r}"
     try:
-        return float(value), None
+        metric = float(value)
     except (TypeError, ValueError):
         return None, f"non-numeric metric value: {value!r}"
+    if not math.isfinite(metric):
+        return None, f"non-finite metric value: {value!r}"
+    return metric, None
 
 
 def load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -123,24 +127,30 @@ def missing_from_payload(suite: str, payload: dict[str, Any] | None) -> tuple[li
     return sorted(set(missing)), None
 
 
-def metrics_from_payload(suite: str, payload: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]], list[str]]:
+def metrics_from_payload(
+    suite: str,
+    payload: dict[str, Any] | None,
+) -> tuple[dict[str, dict[str, Any]], str | None, dict[str, str], list[str]]:
     if payload is None:
-        return {}, []
+        return {}, None, {}, []
     if suite in {"go", "rust"}:
         metrics = payload.get("metrics")
         if not isinstance(metrics, dict):
-            return {}, [f"{suite} metrics artifact missing object field 'metrics'"]
+            issue = f"{suite} metrics artifact missing object field 'metrics'"
+            return {}, issue, {}, [issue]
         normalized: dict[str, dict[str, Any]] = {}
-        issues: list[str] = []
+        entry_issues: dict[str, str] = {}
+        input_issues: list[str] = []
         for benchmark, metric_values in metrics.items():
             if not isinstance(metric_values, dict):
-                issues.append(
-                    f"{suite} metrics entry for {benchmark} is {type(metric_values).__name__}, expected object"
-                )
+                issue = f"{suite} metrics entry for {benchmark} is {type(metric_values).__name__}, expected object"
+                entry_issues[benchmark] = issue
+                input_issues.append(issue)
                 continue
             normalized[benchmark] = metric_values
-        return normalized, issues
-    return {}, [f"unknown metrics suite: {suite}"]
+        return normalized, None, entry_issues, input_issues
+    issue = f"unknown metrics suite: {suite}"
+    return {}, issue, {}, [issue]
 
 
 def classify_delta(
@@ -208,12 +218,14 @@ def build_rows(
     base_metrics: dict[str, dict[str, Any]],
     head_metrics: dict[str, dict[str, Any]],
     fields: list[str],
-    base_issue: str | None,
-    head_issue: str | None,
+    base_suite_issue: str | None,
+    head_suite_issue: str | None,
+    base_entry_issues: dict[str, str],
+    head_entry_issues: dict[str, str],
     extra_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    row_names = set(base_metrics) | set(head_metrics) | set(extra_names or [])
+    row_names = set(base_metrics) | set(head_metrics) | set(base_entry_issues) | set(head_entry_issues) | set(extra_names or [])
     for name in sorted(row_names):
         base = base_metrics.get(name)
         head = head_metrics.get(name)
@@ -234,22 +246,35 @@ def build_rows(
                 base_value=base.get(field) if base else None,
                 head_value=head.get(field) if head else None,
                 threshold=threshold,
-                base_issue=base_issue,
-                head_issue=head_issue,
+                base_issue=base_suite_issue or base_entry_issues.get(name),
+                head_issue=head_suite_issue or head_entry_issues.get(name),
             )
         rows.append(row)
     return rows
 
 
 def build_advisory_decisions(
-    metric_sets: dict[str, tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str | None, str | None]]
+    metric_sets: dict[
+        str,
+        tuple[
+            dict[str, dict[str, Any]],
+            dict[str, dict[str, Any]],
+            str | None,
+            str | None,
+            dict[str, str],
+            dict[str, str],
+        ],
+    ]
 ) -> list[dict[str, Any]]:
     decisions: list[dict[str, Any]] = []
     for threshold in ADVISORY_THRESHOLDS:
         suite = threshold["suite"]
         benchmark = threshold["benchmark"]
         metric = threshold["metric"]
-        base_metrics, head_metrics, base_issue, head_issue = metric_sets.get(suite, ({}, {}, "missing suite", "missing suite"))
+        base_metrics, head_metrics, base_suite_issue, head_suite_issue, base_entry_issues, head_entry_issues = metric_sets.get(
+            suite,
+            ({}, {}, "missing suite", "missing suite", {}, {}),
+        )
         base = base_metrics.get(benchmark, {})
         head = head_metrics.get(benchmark, {})
         decisions.append(
@@ -260,8 +285,8 @@ def build_advisory_decisions(
                 base_value=base.get(metric),
                 head_value=head.get(metric),
                 threshold=threshold,
-                base_issue=base_issue,
-                head_issue=head_issue,
+                base_issue=base_suite_issue or base_entry_issues.get(benchmark),
+                head_issue=head_suite_issue or head_entry_issues.get(benchmark),
             )
         )
     return decisions
@@ -363,21 +388,38 @@ def main() -> int:
     base_rc = load_exit_code(base_dir / "exit_code.txt")
     head_rc = load_exit_code(head_dir / "exit_code.txt")
 
-    metric_sets: dict[str, tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str | None, str | None]] = {}
+    metric_sets: dict[
+        str,
+        tuple[
+            dict[str, dict[str, Any]],
+            dict[str, dict[str, Any]],
+            str | None,
+            str | None,
+            dict[str, str],
+            dict[str, str],
+        ],
+    ] = {}
     suite_rows: dict[str, list[dict[str, Any]]] = {}
     missing_by_suite: dict[str, dict[str, list[str]]] = {}
     for suite, (base_payload, base_issue, head_payload, head_issue) in loaded.items():
-        base_metrics, base_shape_issues = metrics_from_payload(suite, base_payload)
-        head_metrics, head_shape_issues = metrics_from_payload(suite, head_payload)
+        base_metrics, base_suite_issue, base_entry_issues, base_shape_issues = metrics_from_payload(suite, base_payload)
+        head_metrics, head_suite_issue, head_entry_issues, head_shape_issues = metrics_from_payload(suite, head_payload)
         base_missing, base_missing_issue = missing_from_payload(suite, base_payload)
         head_missing, head_missing_issue = missing_from_payload(suite, head_payload)
-        base_data_issue = base_issue or "; ".join(base_shape_issues + ([base_missing_issue] if base_missing_issue else [])) or None
-        head_data_issue = head_issue or "; ".join(head_shape_issues + ([head_missing_issue] if head_missing_issue else [])) or None
+        base_data_issue = base_issue or base_suite_issue
+        head_data_issue = head_issue or head_suite_issue
         input_issues.extend(base_shape_issues)
         input_issues.extend(head_shape_issues)
         input_issues.extend(issue for issue in [base_missing_issue, head_missing_issue] if issue)
         missing_by_suite[suite] = {"base": base_missing, "head": head_missing}
-        metric_sets[suite] = (base_metrics, head_metrics, base_data_issue, head_data_issue)
+        metric_sets[suite] = (
+            base_metrics,
+            head_metrics,
+            base_data_issue,
+            head_data_issue,
+            base_entry_issues,
+            head_entry_issues,
+        )
         suite_rows[suite] = build_rows(
             suite,
             base_metrics,
@@ -385,6 +427,8 @@ def main() -> int:
             ROW_FIELDS[suite],
             base_data_issue,
             head_data_issue,
+            base_entry_issues,
+            head_entry_issues,
             sorted(set(base_missing) | set(head_missing)),
         )
 

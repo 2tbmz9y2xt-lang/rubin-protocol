@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -10,10 +11,10 @@ from typing import Any
 
 
 CORE_METRIC_PATTERNS = {
-    "ns_per_op": re.compile(r"\b(?P<value>[\d.]+)\s+ns/op\b"),
-    "mb_per_s": re.compile(r"\b(?P<value>[\d.]+)\s+MB/s\b"),
-    "b_per_op": re.compile(r"\b(?P<value>[\d.]+)\s+B/op\b"),
-    "allocs_per_op": re.compile(r"\b(?P<value>[\d.]+)\s+allocs/op\b"),
+    "ns_per_op": re.compile(r"\b(?P<value>\S+)\s+ns/op\b"),
+    "mb_per_s": re.compile(r"\b(?P<value>\S+)\s+MB/s\b"),
+    "b_per_op": re.compile(r"\b(?P<value>\S+)\s+B/op\b"),
+    "allocs_per_op": re.compile(r"\b(?P<value>\S+)\s+allocs/op\b"),
 }
 
 
@@ -25,7 +26,14 @@ METRIC_CHECKS = [
 
 
 def parse_metric(raw: str) -> float:
-    return float(raw.strip())
+    token = raw.strip()
+    try:
+        value = float(token)
+    except ValueError as exc:
+        raise ValueError(f"invalid numeric token {token!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite numeric token {token!r}")
+    return value
 
 
 def strip_go_benchmark_suffix(name: str) -> str:
@@ -56,7 +64,10 @@ def parse_benchmark_line(line: str, benchmark: str) -> tuple[dict[str, Any] | No
                 continue
             missing.append(key)
             continue
-        parsed[key] = parse_metric(match.group("value"))
+        try:
+            parsed[key] = parse_metric(match.group("value"))
+        except ValueError as exc:
+            return None, f"benchmark line for {benchmark} has malformed {key}: {exc}"
     if missing:
         return None, f"benchmark line for {benchmark} missing required metric(s): {', '.join(missing)}"
     return parsed, None
