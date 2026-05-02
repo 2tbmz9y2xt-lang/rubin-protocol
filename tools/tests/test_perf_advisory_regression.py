@@ -396,6 +396,47 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertIn("non-finite", add_tx["reason"])
         self.assertIsNone(add_tx["delta_pct"])
 
+    def test_negative_selected_metric_is_no_data_not_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            write_json(
+                base / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": {
+                            "iterations": 1,
+                            "ns_per_op": 100.0,
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        }
+                    },
+                },
+            )
+            write_json(
+                head / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMempoolAddTx": {
+                            "iterations": 1,
+                            "ns_per_op": -1.0,
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        }
+                    },
+                },
+            )
+
+            doc = self.run_compare(base, head, root / "out")
+
+        add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
+        self.assertEqual(add_tx["status"], "no_data")
+        self.assertIn("negative metric value", add_tx["reason"])
+        self.assertIsNone(add_tx["delta_pct"])
+
     def test_rust_missing_list_surfaces_rows_and_no_data(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -553,7 +594,7 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         self.assertNotIn("not found", doc["reason"])
 
     def test_malformed_combined_load_numeric_token_is_no_data_not_traceback(self):
-        for token in ["400..0", "NaN"]:
+        for token in ["400..0", "NaN", "-400"]:
             with self.subTest(token=token), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 raw = root / "bench.txt"
@@ -586,9 +627,9 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
             self.assertIn("malformed ns_per_op", doc["reason"])
             self.assertNotIn("Traceback", proc.stderr)
 
-    def test_non_finite_combined_load_slo_threshold_fails_closed(self):
+    def test_invalid_combined_load_slo_threshold_fails_closed(self):
         for limit_key in ["max_ns_per_op", "max_b_per_op", "max_allocs_per_op"]:
-            for value in [float("nan"), float("inf")]:
+            for value in [float("nan"), float("inf"), -1.0, 0.0]:
                 with self.subTest(limit_key=limit_key, value=str(value)), tempfile.TemporaryDirectory() as td:
                     root = Path(td)
                     raw = root / "bench.txt"
@@ -621,7 +662,7 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
 
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertFalse(out.exists())
-                self.assertIn(f"SLO {limit_key} has non-finite numeric token", proc.stderr)
+                self.assertIn(f"SLO {limit_key}", proc.stderr)
                 self.assertNotIn("Traceback", proc.stderr)
 
     def test_non_numeric_selected_metric_is_no_data_not_traceback(self):

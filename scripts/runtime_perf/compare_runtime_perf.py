@@ -84,6 +84,8 @@ def coerce_metric(value: Any) -> tuple[float | None, str | None]:
         return None, f"non-numeric metric value: {value!r}"
     if not math.isfinite(metric):
         return None, f"non-finite metric value: {value!r}"
+    if metric < 0:
+        return None, f"negative metric value: {value!r}"
     return metric, None
 
 

@@ -11,10 +11,10 @@ from typing import Any
 
 
 CORE_METRIC_PATTERNS = {
-    "ns_per_op": re.compile(r"\b(?P<value>\S+)\s+ns/op\b"),
-    "mb_per_s": re.compile(r"\b(?P<value>\S+)\s+MB/s\b"),
-    "b_per_op": re.compile(r"\b(?P<value>\S+)\s+B/op\b"),
-    "allocs_per_op": re.compile(r"\b(?P<value>\S+)\s+allocs/op\b"),
+    "ns_per_op": re.compile(r"(?<!\S)(?P<value>\S+)\s+ns/op\b"),
+    "mb_per_s": re.compile(r"(?<!\S)(?P<value>\S+)\s+MB/s\b"),
+    "b_per_op": re.compile(r"(?<!\S)(?P<value>\S+)\s+B/op\b"),
+    "allocs_per_op": re.compile(r"(?<!\S)(?P<value>\S+)\s+allocs/op\b"),
 }
 
 
@@ -25,7 +25,7 @@ METRIC_CHECKS = [
 ]
 
 
-def parse_finite_number(raw: Any, label: str) -> float:
+def parse_finite_number(raw: Any, label: str, *, allow_zero: bool) -> float:
     if isinstance(raw, bool) or raw is None:
         raise ValueError(f"{label} is not numeric: {raw!r}")
     try:
@@ -34,11 +34,14 @@ def parse_finite_number(raw: Any, label: str) -> float:
         raise ValueError(f"{label} has invalid numeric token {raw!r}") from exc
     if not math.isfinite(value):
         raise ValueError(f"{label} has non-finite numeric token {raw!r}")
+    if value < 0 or (value == 0 and not allow_zero):
+        bound = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"{label} must be {bound}: {raw!r}")
     return value
 
 
 def parse_metric(raw: str) -> float:
-    return parse_finite_number(raw.strip(), "metric")
+    return parse_finite_number(raw.strip(), "metric", allow_zero=True)
 
 
 def strip_go_benchmark_suffix(name: str) -> str:
@@ -86,7 +89,7 @@ def load_slo(path: Path) -> dict[str, Any]:
         if key not in payload:
             raise ValueError(f"SLO missing required key {key!r}")
     for _, limit_key in METRIC_CHECKS:
-        payload[limit_key] = parse_finite_number(payload[limit_key], f"SLO {limit_key}")
+        payload[limit_key] = parse_finite_number(payload[limit_key], f"SLO {limit_key}", allow_zero=False)
     return payload
 
 
