@@ -338,15 +338,15 @@ def render_table(title: str, rows: list[dict[str, Any]]) -> list[str]:
     for row in rows:
         base = row["base"]
         head = row["head"]
+        advisory = row["advisory"].get("ns_per_op", {"status": "unselected"})["status"]
         if not base or not head:
             lines.append(
                 f"| `{row['name']}` | {'missing' if not base else render_value(base.get('ns_per_op'))} | "
-                f"{'missing' if not head else render_value(head.get('ns_per_op'))} | n/a | no_data |"
+                f"{'missing' if not head else render_value(head.get('ns_per_op'))} | n/a | {advisory} |"
             )
             continue
         delta = row["deltas"].get("ns_per_op")
         delta_str = "n/a" if delta is None else f"{delta:+.2f}%"
-        advisory = row["advisory"].get("ns_per_op", {"status": "unselected"})["status"]
         lines.append(
             f"| `{row['name']}` | {render_value(base.get('ns_per_op'))} | "
             f"{render_value(head.get('ns_per_op'))} | {delta_str} | {advisory} |"

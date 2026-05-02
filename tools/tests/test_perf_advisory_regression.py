@@ -355,6 +355,34 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
         add_tx = next(item for item in doc["advisory"] if item["benchmark"] == "BenchmarkMempoolAddTx")
         self.assertEqual(add_tx["status"], "warn")
 
+    def test_missing_unselected_row_summary_matches_json_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / "base"
+            head = root / "head"
+            write_json(
+                base / "go_metrics.json",
+                {
+                    "suite": "go",
+                    "metrics": {
+                        "BenchmarkMinerBuildContext": {
+                            "iterations": 1,
+                            "ns_per_op": 100.0,
+                            "b_per_op": 10.0,
+                            "allocs_per_op": 1.0,
+                        },
+                    },
+                },
+            )
+            write_json(head / "go_metrics.json", {"suite": "go", "metrics": {}})
+
+            doc = self.run_compare(base, head, root / "out")
+            summary_text = (root / "out" / "summary.md").read_text(encoding="utf-8")
+
+        miner = next(row for row in doc["go"] if row["name"] == "BenchmarkMinerBuildContext")
+        self.assertEqual(miner["advisory"]["ns_per_op"]["status"], "unselected")
+        self.assertIn("| `BenchmarkMinerBuildContext` | 100 | missing | n/a | unselected |", summary_text)
+
     def test_malformed_exit_code_records_input_issue_without_masking_warning(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -786,6 +814,43 @@ class RuntimePerfAdvisoryTests(unittest.TestCase):
                 self.assertFalse(out.exists())
                 self.assertIn(f"SLO {limit_key}", proc.stderr)
                 self.assertNotIn("Traceback", proc.stderr)
+
+    def test_invalid_combined_load_slo_benchmark_fails_closed(self):
+        for value in [None, "", "   ", 123]:
+            with self.subTest(value=repr(value)), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                raw = root / "bench.txt"
+                slo = root / "slo.json"
+                out = root / "combined.json"
+                raw.write_text(
+                    "BenchmarkValidateBlockBasicCombinedLoad-8 1 4000000000 ns/op "
+                    "900000000 B/op 4000000 allocs/op\n",
+                    encoding="utf-8",
+                )
+                payload = json.loads(SLO.read_text(encoding="utf-8"))
+                payload["benchmark"] = value
+                write_json(slo, payload)
+                # The command is a repo-local script through sys.executable with temp file arguments only.
+                proc = subprocess.run(  # nosec B603
+                    [
+                        sys.executable,
+                        str(PARSE_COMBINED),
+                        "--input",
+                        str(raw),
+                        "--slo",
+                        str(slo),
+                        "--output",
+                        str(out),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertFalse(out.exists())
+            self.assertIn("SLO benchmark must be a non-empty string", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
 
     def test_non_numeric_selected_metric_is_no_data_not_traceback(self):
         with tempfile.TemporaryDirectory() as td:
