@@ -80,7 +80,7 @@ type Mempool struct {
 	// evictedResidentTotal counts cumulative resident-entry capacity
 	// evictions since process start. It is bumped exactly once per
 	// already-admitted entry that is removed by capacity pressure
-	// (the deleteEntryLocked loop in addParsedTransactionLocked after
+	// (the deleteEntryLocked loop in addEntryLocked after
 	// validateCapacityAdmissionLocked classifies the candidate as
 	// admitted-and-evicting). Candidate-worst rejection — where the
 	// incoming candidate is rejected at capacity and no resident is
