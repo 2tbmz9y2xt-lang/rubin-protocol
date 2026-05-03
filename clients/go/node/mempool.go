@@ -676,14 +676,10 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if consumed != len(txBytes) {
 		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
 	}
-	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
-	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
-	}
-	// Only policy-inert candidates use the cheap floor reject. Transactions
-	// that may hit a configured semantic policy lane keep the existing
-	// policy-error precedence below.
-	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, policy, m.CurrentMinFeeRateSnapshot()); err != nil {
+	// Only plain P2PK candidates use the cheap floor reject. Transactions
+	// that may hit DA, CORE_ANCHOR, CORE_EXT, or missing-UTXO policy lanes
+	// keep the existing validation and policy-error precedence below.
+	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, m.CurrentMinFeeRateSnapshot()); err != nil {
 		return nil, nil, err
 	}
 	// Policy checks consume an immutable pre-validation snapshot of only the
@@ -696,6 +692,10 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	// that helper takes ownership of the supplied utxo map and removes
 	// spent inputs as part of validation.
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
+	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
 	if needs {
 		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.utxos)
 		if err != nil {
@@ -725,93 +725,47 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	return checked, inputs, nil
 }
 
-func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig, minFeeRate uint64) error {
-	if tx == nil || snapshot == nil || len(tx.Inputs) == 0 {
+func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64) error {
+	if tx.TxKind != 0x00 || len(tx.DaPayload) != 0 {
 		return nil
 	}
-	inputs, ok := feePrecheckInputs(tx, snapshot.utxos)
+	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos)
 	if !ok {
 		return nil
 	}
-	if feePrecheckPreservesPolicyPrecedence(tx, policy, inputs.hasCoreExt) {
+	outputValue, ok := feePrecheckP2PKOutputValue(tx.Outputs)
+	if !ok || outputValue > inputValue {
 		return nil
 	}
-	outputValue, ok := feePrecheckOutputValue(tx)
-	if !ok || outputValue > inputs.value {
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil || weight == 0 {
 		return nil
 	}
-	weight, ok := feePrecheckWeight(tx)
-	if !ok || weight == 0 {
-		return nil
-	}
-	fee := inputs.value - outputValue
+	fee := inputValue - outputValue
 	if feeRateBelowFloor(fee, weight, minFeeRate) {
-		return feeBelowRollingMinimumError(fee, weight, minFeeRate)
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", fee, weight, minFeeRate))
 	}
 	return nil
 }
 
-type feePrecheckInputSummary struct {
-	value      uint64
-	hasCoreExt bool
-}
-
-func feePrecheckInputs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (feePrecheckInputSummary, bool) {
-	if tx == nil || utxos == nil {
-		return feePrecheckInputSummary{}, false
-	}
-	var total uint64
-	hasCoreExt := false
-	for _, in := range tx.Inputs {
-		entry, ok := utxos[consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}]
-		if !ok {
-			return feePrecheckInputSummary{}, false
-		}
-		next, carry := bits.Add64(total, entry.Value, 0)
-		if carry != 0 {
-			return feePrecheckInputSummary{}, false
-		}
-		if entry.CovenantType == consensus.COV_TYPE_CORE_EXT {
-			hasCoreExt = true
-		}
-		total = next
-	}
-	return feePrecheckInputSummary{value: total, hasCoreExt: hasCoreExt}, true
-}
-
-func feePrecheckPreservesPolicyPrecedence(tx *consensus.Tx, policy MempoolConfig, hasCoreExtInput bool) bool {
-	if tx == nil {
-		return true
-	}
-	hasCoreExtOutput := false
-	for _, out := range tx.Outputs {
-		switch out.CovenantType {
-		case consensus.COV_TYPE_ANCHOR:
-			if policy.PolicyRejectNonCoinbaseAnchorOutputs {
-				return true
-			}
-		case consensus.COV_TYPE_CORE_EXT:
-			hasCoreExtOutput = true
-		}
-	}
-	if policy.PolicyRejectCoreExtPreActivation && (hasCoreExtOutput || hasCoreExtInput) {
-		return true
-	}
-	if policy.PolicyMaxExtPayloadBytes > 0 && hasCoreExtOutput {
-		return true
-	}
-	if tx.TxKind != 0x00 && len(tx.DaPayload) > 0 && (policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0) {
-		return true
-	}
-	return false
-}
-
-func feePrecheckOutputValue(tx *consensus.Tx) (uint64, bool) {
-	if tx == nil {
+func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, bool) {
+	if utxos == nil || len(tx.Inputs) != 1 {
 		return 0, false
 	}
+	in := tx.Inputs[0]
+	entry, ok := utxos[consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}]
+	if !ok || entry.CovenantType != consensus.COV_TYPE_P2PK {
+		return 0, false
+	}
+	return entry.Value, true
+}
+
+func feePrecheckP2PKOutputValue(outputs []consensus.TxOutput) (uint64, bool) {
 	var total uint64
-	for _, out := range tx.Outputs {
+	for _, out := range outputs {
+		if out.CovenantType != consensus.COV_TYPE_P2PK {
+			return 0, false
+		}
 		next, carry := bits.Add64(total, out.Value, 0)
 		if carry != 0 {
 			return 0, false
@@ -819,14 +773,6 @@ func feePrecheckOutputValue(tx *consensus.Tx) (uint64, bool) {
 		total = next
 	}
 	return total, true
-}
-
-func feePrecheckWeight(tx *consensus.Tx) (uint64, bool) {
-	weight, _, _, err := consensus.TxWeightAndStats(tx)
-	if err != nil {
-		return 0, false
-	}
-	return weight, true
 }
 
 // policyNeedsInputSnapshotForTx returns true if applying policy to the
@@ -1070,16 +1016,9 @@ func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
 	}
 	currentMinFeeRate := m.currentMinFeeRateLocked()
 	if feeRateBelowFloor(entry.fee, entry.weight, currentMinFeeRate) {
-		return feeBelowRollingMinimumError(entry.fee, entry.weight, currentMinFeeRate)
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, currentMinFeeRate))
 	}
 	return nil
-}
-
-func feeBelowRollingMinimumError(fee uint64, weight uint64, minFeeRate uint64) error {
-	if minFeeRate < DefaultMempoolMinFeeRate {
-		minFeeRate = DefaultMempoolMinFeeRate
-	}
-	return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", fee, weight, minFeeRate))
 }
 
 func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.Outpoint, source mempoolTxSource) *mempoolEntry {
