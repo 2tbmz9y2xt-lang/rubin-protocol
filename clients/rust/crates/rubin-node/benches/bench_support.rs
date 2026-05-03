@@ -277,7 +277,33 @@ pub fn engine_after_genesis(prefix: &str) -> SyncFixture {
 }
 
 pub fn fresh_txpool_fixture() -> (ChainState, Vec<u8>) {
-    let (state, outpoints, signer, from_address) = chain_state_with_spendable_utxos(1);
+    // RUB-162 Phase A migration rationale (per controller Path A
+    // approval 2026-05-03; fixture also exercised by
+    // tests/runtime_perf_guardrails.rs which goes through public
+    // TxPool::admit):
+    //   - old assumption: amount=90/fee=1 with weight ≈ 7829 admits
+    //     because pre-RUB-162 admit_with_metadata did not enforce the
+    //     rolling fee floor.
+    //   - new invariant: admit_with_metadata enforces the rolling fee
+    //     floor (DEFAULT_MEMPOOL_MIN_FEE_RATE=1) via
+    //     validate_fee_floor_locked.
+    //   - reachability: tx is well-formed; floor check is reached after
+    //     apply_policy. Both the integration test (admit) and
+    //     benchmarks (admit + relay metadata) traverse this path.
+    //   - replacement coverage: utxo bumped in-place to 20_000 (default
+    //     helper value 100 is preserved for other callers); fee bumped
+    //     to 8_000 so fee/weight ≈ 1.02 ≥ 1 (passes default floor with
+    //     headroom). Benchmark numbers measure the same operation; the
+    //     fee value is a fixture detail that doesn't materially affect
+    //     perf (admit's hot path is signature verification + index
+    //     insert, not the integer fee compare).
+    let (mut state, outpoints, signer, from_address) = chain_state_with_spendable_utxos(1);
+    // Bump only this fixture's UTXO so the helper's other callers
+    // (block_undo_fixture, runtime_baseline.rs::chain_state_clone) see
+    // the original value=100.
+    if let Some(entry) = state.utxos.get_mut(&outpoints[0]) {
+        entry.value = 20_000;
+    }
     let to_signer = Mldsa87Keypair::generate().expect("OpenSSL signer unavailable");
     let to_address = p2pk_covenant_data_for_pubkey(&to_signer.pubkey_bytes());
     let raw = signed_transfer_tx(
@@ -286,7 +312,7 @@ pub fn fresh_txpool_fixture() -> (ChainState, Vec<u8>) {
         &signer,
         SignedTransferSpec {
             amount: 90,
-            fee: 1,
+            fee: 8_000,
             nonce: 1,
             change_address: &from_address,
             to_address: &to_address,
