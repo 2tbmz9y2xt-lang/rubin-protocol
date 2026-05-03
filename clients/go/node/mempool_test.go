@@ -1347,6 +1347,107 @@ func TestMempoolDaTxBelowRelayFloorReturnsUnavailable(t *testing.T) {
 	}
 }
 
+func TestMempoolCheapFeeFloorPrecheckRejectsBeforeSignatureValidationForAllSources(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	cases := []struct {
+		name  string
+		admit func(*Mempool, []byte) error
+	}{
+		{name: "local", admit: func(mp *Mempool, tx []byte) error { return mp.AddTx(tx) }},
+		{name: "remote", admit: func(mp *Mempool, tx []byte) error { return mp.AddRemoteTx(tx) }},
+		{name: "reorg", admit: func(mp *Mempool, tx []byte) error { return mp.AddReorgTx(tx) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+			mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 10, MaxBytes: 1 << 20})
+			if err != nil {
+				t.Fatalf("new mempool: %v", err)
+			}
+			mp.currentMinFeeRate = 8
+			txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 1, 1, fromKey, fromAddress, toAddress)
+			txBytes = corruptFirstWitnessSignature(t, txBytes)
+
+			err = tc.admit(mp, txBytes)
+			var txErr *TxAdmitError
+			if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable {
+				t.Fatalf("below-floor invalid-signature admit err=%T %v, want TxAdmitUnavailable", err, err)
+			}
+			if !strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+				t.Fatalf("reason %q does not match rolling floor precheck", txErr.Message)
+			}
+			if strings.Contains(txErr.Message, string(consensus.TX_ERR_SIG_INVALID)) {
+				t.Fatalf("precheck reached signature validation: %q", txErr.Message)
+			}
+			if got := mp.Len(); got != 0 {
+				t.Fatalf("mempool len after below-floor reject=%d, want 0", got)
+			}
+			if mp.lastAdmissionSeq != 0 {
+				t.Fatalf("lastAdmissionSeq after below-floor reject=%d, want 0", mp.lastAdmissionSeq)
+			}
+		})
+	}
+
+	t.Run("default_policy_plain_p2pk", func(t *testing.T) {
+		st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+		mp, err := NewMempool(st, nil, devnetGenesisChainID)
+		if err != nil {
+			t.Fatalf("new mempool: %v", err)
+		}
+		mp.currentMinFeeRate = 8
+		txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 1, 1, fromKey, fromAddress, toAddress)
+		txBytes = corruptFirstWitnessSignature(t, txBytes)
+
+		err = mp.AddTx(txBytes)
+		var txErr *TxAdmitError
+		if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable {
+			t.Fatalf("default-policy below-floor err=%T %v, want TxAdmitUnavailable", err, err)
+		}
+		if !strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+			t.Fatalf("default-policy reason %q does not match rolling floor precheck", txErr.Message)
+		}
+	})
+}
+
+func TestMempoolCheapFeeFloorPrecheckPreservesMissingUTXOReject(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 1, 1, fromKey, fromAddress, toAddress)
+	delete(st.Utxos, outpoints[0])
+
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 10, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	mp.currentMinFeeRate = 8
+
+	err = mp.AddTx(txBytes)
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitRejected {
+		t.Fatalf("missing-utxo admit err=%T %v, want TxAdmitRejected", err, err)
+	}
+	if !strings.Contains(txErr.Message, string(consensus.TX_ERR_MISSING_UTXO)) {
+		t.Fatalf("missing-utxo error=%q, want %s", txErr.Message, consensus.TX_ERR_MISSING_UTXO)
+	}
+	if strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+		t.Fatalf("missing-utxo path was stolen by fee precheck: %q", txErr.Message)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len after missing-utxo reject=%d, want 0", got)
+	}
+	if mp.lastAdmissionSeq != 0 {
+		t.Fatalf("lastAdmissionSeq after missing-utxo reject=%d, want 0", mp.lastAdmissionSeq)
+	}
+}
+
 func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
@@ -3277,6 +3378,23 @@ func mustBuildSignedTransferTx(
 		t.Fatalf("MarshalTx: %v", err)
 	}
 	return txBytes
+}
+
+func corruptFirstWitnessSignature(t *testing.T, txBytes []byte) []byte {
+	t.Helper()
+	tx, _, _, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx before corrupt: %v", err)
+	}
+	if len(tx.Witness) == 0 || len(tx.Witness[0].Signature) == 0 {
+		t.Fatal("expected first witness signature")
+	}
+	tx.Witness[0].Signature[0] ^= 0xFF
+	out, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx after corrupt: %v", err)
+	}
+	return out
 }
 
 func mustBuildSignedAnchorOutputTx(

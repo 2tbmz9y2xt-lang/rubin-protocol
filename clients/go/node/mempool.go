@@ -676,6 +676,12 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if consumed != len(txBytes) {
 		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
 	}
+	// Only plain P2PK candidates use the cheap floor reject. Transactions
+	// that may hit DA, CORE_ANCHOR, CORE_EXT, or missing-UTXO policy lanes
+	// keep the existing validation and policy-error precedence below.
+	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, m.CurrentMinFeeRateSnapshot()); err != nil {
+		return nil, nil, err
+	}
 	// Policy checks consume an immutable pre-validation snapshot of only the
 	// transaction inputs they inspect, avoiding both live-utxo mutation and
 	// whole-chainstate copying on mempool admission. The snapshot is needed
@@ -717,6 +723,56 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
 	}
 	return checked, inputs, nil
+}
+
+func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64) error {
+	if tx.TxKind != 0x00 || len(tx.DaPayload) != 0 {
+		return nil
+	}
+	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos)
+	if !ok {
+		return nil
+	}
+	outputValue, ok := feePrecheckP2PKOutputValue(tx.Outputs)
+	if !ok || outputValue > inputValue {
+		return nil
+	}
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil || weight == 0 {
+		return nil
+	}
+	fee := inputValue - outputValue
+	if feeRateBelowFloor(fee, weight, minFeeRate) {
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", fee, weight, minFeeRate))
+	}
+	return nil
+}
+
+func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, bool) {
+	if utxos == nil || len(tx.Inputs) != 1 {
+		return 0, false
+	}
+	in := tx.Inputs[0]
+	entry, ok := utxos[consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}]
+	if !ok || entry.CovenantType != consensus.COV_TYPE_P2PK {
+		return 0, false
+	}
+	return entry.Value, true
+}
+
+func feePrecheckP2PKOutputValue(outputs []consensus.TxOutput) (uint64, bool) {
+	var total uint64
+	for _, out := range outputs {
+		if out.CovenantType != consensus.COV_TYPE_P2PK {
+			return 0, false
+		}
+		next, carry := bits.Add64(total, out.Value, 0)
+		if carry != 0 {
+			return 0, false
+		}
+		total = next
+	}
+	return total, true
 }
 
 // policyNeedsInputSnapshotForTx returns true if applying policy to the
