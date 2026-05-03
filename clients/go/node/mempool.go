@@ -15,6 +15,12 @@ import (
 const (
 	DefaultMempoolMaxTransactions = 300
 	DefaultMempoolMaxBytes        = consensus.MAX_RELAY_MSG_BYTES
+	// DefaultMinMempoolFeePerWeight is the default minimum fee-per-weight ratio
+	// (in satoshis per weight unit) required for mempool admission.
+	// Transactions below this floor are rejected early before expensive signature
+	// verification. This is a DoS protection mechanism.
+	// Value: 1 satoshi per weight unit (conservative floor for spam prevention).
+	DefaultMinMempoolFeePerWeight = 1
 )
 
 type mempoolEntry struct {
@@ -27,16 +33,17 @@ type mempoolEntry struct {
 }
 
 type Mempool struct {
-	mu         sync.RWMutex
-	chainState *ChainState
-	blockStore *BlockStore
-	chainID    [32]byte
-	policy     MempoolConfig
-	maxTxs     int
-	maxBytes   int
-	usedBytes  int
-	txs        map[[32]byte]*mempoolEntry
-	spenders   map[consensus.Outpoint][32]byte
+	mu                 sync.RWMutex
+	chainState         *ChainState
+	blockStore         *BlockStore
+	chainID            [32]byte
+	policy             MempoolConfig
+	maxTxs             int
+	maxBytes           int
+	usedBytes          int
+	minFeePerWeight    uint64 // minimum fee-per-weight for admission (0 = disabled)
+	txs                map[[32]byte]*mempoolEntry
+	spenders           map[consensus.Outpoint][32]byte
 	// Admission counters are bumped exactly once for each AddTx call on a
 	// non-nil Mempool that reaches the final outcome accounting path.
 	// Nil-receiver calls return before that defer is registered and are
@@ -70,6 +77,7 @@ type MempoolAdmissionCounts struct {
 type MempoolConfig struct {
 	MaxTransactions                      int
 	MaxBytes                             int
+	MinFeePerWeight                      uint64 // minimum fee-per-weight (0 = disabled, default = 1)
 	PolicyDaSurchargePerByte             uint64
 	PolicyRejectNonCoinbaseAnchorOutputs bool
 	PolicyRejectCoreExtPreActivation     bool
@@ -124,6 +132,7 @@ func DefaultMempoolConfig() MempoolConfig {
 	return MempoolConfig{
 		MaxTransactions:                      DefaultMempoolMaxTransactions,
 		MaxBytes:                             DefaultMempoolMaxBytes,
+		MinFeePerWeight:                      DefaultMinMempoolFeePerWeight,
 		PolicyDaSurchargePerByte:             minerDefaults.PolicyDaSurchargePerByte,
 		PolicyRejectNonCoinbaseAnchorOutputs: minerDefaults.PolicyRejectNonCoinbaseAnchorOutputs,
 		PolicyRejectCoreExtPreActivation:     minerDefaults.PolicyRejectCoreExtPreActivation,
@@ -136,14 +145,15 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 	}
 	cfg = normalizeMempoolConfig(cfg)
 	return &Mempool{
-		chainState: chainState,
-		blockStore: blockStore,
-		chainID:    chainID,
-		policy:     cfg,
-		maxTxs:     cfg.MaxTransactions,
-		maxBytes:   cfg.MaxBytes,
-		txs:        make(map[[32]byte]*mempoolEntry),
-		spenders:   make(map[consensus.Outpoint][32]byte),
+		chainState:      chainState,
+		blockStore:      blockStore,
+		chainID:         chainID,
+		policy:          cfg,
+		maxTxs:          cfg.MaxTransactions,
+		maxBytes:        cfg.MaxBytes,
+		minFeePerWeight: cfg.MinFeePerWeight,
+		txs:             make(map[[32]byte]*mempoolEntry),
+		spenders:        make(map[consensus.Outpoint][32]byte),
 	}, nil
 }
 
@@ -484,6 +494,106 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 	return m.policy
 }
 
+// cheapFeeFloorPrecheck performs a fast fee-floor check before expensive validation.
+// This is a DoS protection mechanism that rejects obviously below-floor spam without
+// invoking ML-DSA signature verification or full state processing.
+//
+// Returns nil if the transaction passes the cheap precheck or if the precheck cannot
+// be soundly performed (e.g., missing UTXOs). Returns a TxAdmitError if the transaction
+// is provably below the fee floor.
+//
+// This function MUST NOT mask earlier errors (malformed tx, missing inputs) that would
+// be caught by full validation. It only rejects when fee/weight can be soundly computed
+// and the ratio is below the configured minimum fee-per-weight.
+func (m *Mempool) cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot) error {
+	if tx == nil || snapshot == nil || m.minFeePerWeight == 0 {
+		// Cannot perform precheck or fee floor disabled; let full validation handle it
+		return nil
+	}
+
+	// Compute sum of input values. If any input is missing from UTXO set,
+	// we cannot soundly compute fee, so skip precheck and let full validation
+	// report TX_ERR_MISSING_UTXO.
+	var sumInputs uint64
+	for _, in := range tx.Inputs {
+		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+		entry, ok := snapshot.utxos[op]
+		if !ok {
+			// Missing UTXO: cannot compute fee soundly. Skip precheck.
+			// Full validation will report the proper error.
+			return nil
+		}
+		// Check for overflow in sumInputs
+		if sumInputs > ^uint64(0)-entry.Value {
+			// Overflow in input sum: this is malformed and will be caught
+			// by full validation. Skip precheck.
+			return nil
+		}
+		sumInputs += entry.Value
+	}
+
+	// Compute sum of output values
+	var sumOutputs uint64
+	for _, out := range tx.Outputs {
+		// Check for overflow in sumOutputs
+		if sumOutputs > ^uint64(0)-out.Value {
+			// Overflow in output sum: malformed, let full validation handle it
+			return nil
+		}
+		sumOutputs += out.Value
+	}
+
+	// Check if sumInputs < sumOutputs (invalid transaction)
+	if sumInputs < sumOutputs {
+		// Invalid: outputs exceed inputs. This is a consensus error that
+		// full validation will catch. Skip precheck.
+		return nil
+	}
+
+	// Compute fee (safe because sumInputs >= sumOutputs)
+	fee := sumInputs - sumOutputs
+
+	// Compute weight cheaply using the public weight function.
+	// This does NOT perform signature verification, just structural weight calculation.
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		// Weight computation failed (malformed tx). Let full validation handle it.
+		return nil
+	}
+
+	// Check fee-per-weight ratio against floor.
+	// To avoid floating point: fee / weight >= minFeePerWeight
+	// is equivalent to: fee >= minFeePerWeight * weight
+	//
+	// Check for overflow in multiplication
+	if weight > 0 && m.minFeePerWeight > ^uint64(0)/weight {
+		// Overflow in floor calculation: weight is extremely large.
+		// This is likely malformed. Skip precheck.
+		return nil
+	}
+
+	minFee := m.minFeePerWeight * weight
+
+	if fee < minFee {
+		// Transaction is provably below fee floor. Reject early.
+		return txAdmitRejected(fmt.Sprintf(
+			"transaction fee %d below minimum floor %d (fee-per-weight %d < %d)",
+			fee, minFee, fee/max(weight, 1), MinMempoolFeePerWeight,
+		))
+	}
+
+	// Passed cheap precheck
+	return nil
+}
+
+// max returns the maximum of two uint64 values
+func max(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // checkTransactionWithSnapshot validates a transaction against a consistent
 // owned admission snapshot plus an immutable mempool policy snapshot.
 func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
@@ -506,6 +616,15 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if consumed != len(txBytes) {
 		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
 	}
+
+	// RUB-165: Fast-reject spam with fee below floor BEFORE expensive signature verification.
+	// This cheap precheck only rejects when fee/weight can be soundly computed from available
+	// UTXO context. If inputs are missing or malformed, it returns nil and lets full validation
+	// report the proper error.
+	if err := m.cheapFeeFloorPrecheck(parsedTx, snapshot); err != nil {
+		return nil, nil, err
+	}
+
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
 	if policyNeedsInputSnapshot(policy) {
 		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.utxos)

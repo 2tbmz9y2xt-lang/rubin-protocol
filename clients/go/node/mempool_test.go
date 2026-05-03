@@ -16,17 +16,21 @@ import (
 )
 
 func TestMempoolAdd(t *testing.T) {
+	// Test classification: Basic mempool admission (unrelated to fee-floor policy).
+	// Intended branch: Successful AddTx and mempool length check.
+	// Fix: Fee bumped from 1 to 8000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Still reaches intended branch (successful admission).
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
-	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 2000, 8000, 1, fromKey, fromAddress, toAddress)
 	if err := mp.AddTx(txBytes); err != nil {
 		t.Fatalf("AddTx: %v", err)
 	}
@@ -36,17 +40,21 @@ func TestMempoolAdd(t *testing.T) {
 }
 
 func TestMempoolAddTxWaitsForChainStateWriter(t *testing.T) {
+	// Test classification: Concurrency/locking behavior (unrelated to fee-floor).
+	// Intended branch: AddTx waits for chainstate writer lock.
+	// Fix: Fee bumped from 1 to 8000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Still reaches intended branch (lock wait behavior).
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
-	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 2000, 8000, 1, fromKey, fromAddress, toAddress)
 
 	st.admissionMu.Lock()
 	done := make(chan error, 1)
@@ -76,17 +84,23 @@ func TestMempoolAddTxWaitsForChainStateWriter(t *testing.T) {
 }
 
 func TestMempoolAddTxRejectsWhenWriterInvalidatesSnapshotBeforeAdmission(t *testing.T) {
+	// Test classification: Snapshot invalidation behavior (unrelated to fee-floor).
+	// Intended branch: AddTx detects snapshot invalidation and rejects.
+	// Fix: Fee bumped from 1 to 8000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Still reaches intended branch (snapshot invalidation check).
+	// Note: cheapFeeFloorPrecheck returns nil when UTXO missing, so full validation
+	// will still report the proper missing UTXO error.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
-	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 2000, 8000, 1, fromKey, fromAddress, toAddress)
 
 	st.admissionMu.Lock()
 	st.mu.Lock()
@@ -121,17 +135,21 @@ func TestMempoolAddTxRejectsWhenWriterInvalidatesSnapshotBeforeAdmission(t *test
 }
 
 func TestMempoolAddTxWaitsForPolicyWriterBeforeSnapshot(t *testing.T) {
+	// Test classification: Policy locking behavior (unrelated to fee-floor).
+	// Intended branch: AddTx waits for policy writer lock, then rejects anchor output.
+	// Fix: Fee bumped from 1 to 8000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Still reaches intended branch (policy lock wait + anchor rejection).
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{})
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
-	txBytes := mustBuildSignedAnchorOutputTx(t, st.Utxos, outpoints[0], 0, 1, 1, fromKey, toAddress)
+	txBytes := mustBuildSignedAnchorOutputTx(t, st.Utxos, outpoints[0], 0, 8000, 1, fromKey, toAddress)
 
 	mp.mu.Lock()
 	mp.policy.PolicyRejectNonCoinbaseAnchorOutputs = true
@@ -213,11 +231,16 @@ func TestMempoolRelayMetadataNil(t *testing.T) {
 }
 
 func TestMempoolPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
+	// Test classification: Anchor output policy rejection (policy-specific test).
+	// Intended branch: Reject non-coinbase anchor outputs via policy.
+	// Fix: Fee bumped from 1 to 8000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Fast-reject passes (fee adequate), then policy rejects anchor output.
+	// This is correct: fee-floor check happens first, then policy checks.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyRejectNonCoinbaseAnchorOutputs: true,
@@ -226,7 +249,7 @@ func TestMempoolPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txBytes := mustBuildSignedAnchorOutputTx(t, st.Utxos, outpoints[0], 0, 1, 1, fromKey, toAddress)
+	txBytes := mustBuildSignedAnchorOutputTx(t, st.Utxos, outpoints[0], 0, 8000, 1, fromKey, toAddress)
 	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "non-coinbase CORE_ANCHOR") {
 		t.Fatalf("expected non-coinbase anchor policy rejection, got %v", err)
 	}
@@ -236,11 +259,16 @@ func TestMempoolPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
 }
 
 func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
+	// Test classification: DA surcharge policy rejection (policy-specific test).
+	// Intended branch: Reject DA commit with insufficient fee for DA surcharge.
+	// Fix: Fee bumped from 1 to 8500 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Fast-reject passes (fee adequate for weight), then DA policy
+	// rejects because fee is still below DA surcharge minimum (base + DA bytes).
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyDaSurchargePerByte: 1,
@@ -249,7 +277,7 @@ func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 99, 1, 1, fromKey, toAddress, []byte("0123456789"))
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 1500, 8500, 1, fromKey, toAddress, []byte("0123456789"))
 	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below policy minimum") {
 		t.Fatalf("expected DA surcharge rejection, got %v", err)
 	}
@@ -259,11 +287,16 @@ func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
 }
 
 func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
+	// Test classification: DA surcharge policy acceptance (policy-specific test).
+	// Intended branch: Accept DA commit with sufficient fee for DA surcharge.
+	// Fix: Fee bumped from 10 to 9000 to pass both MinMempoolFeePerWeight floor
+	// and DA surcharge policy (base fee + DA bytes * surcharge rate).
+	// Reachability: Fast-reject passes, DA policy passes, full validation passes.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyDaSurchargePerByte: 1,
@@ -272,7 +305,7 @@ func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 80, 10, 1, fromKey, toAddress, []byte("0123456789"))
+	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 1000, 9000, 1, fromKey, toAddress, []byte("0123456789"))
 	if err := mp.AddTx(txBytes); err != nil {
 		t.Fatalf("expected DA tx admission, got %v", err)
 	}
@@ -332,9 +365,13 @@ func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 }
 
 func TestMempoolPolicyRejectsCoreExtOutputPreActivation(t *testing.T) {
+	// Test classification: CORE_EXT pre-activation policy rejection (policy-specific test).
+	// Intended branch: Reject CORE_EXT output creation before profile activation.
+	// Fix: Fee bumped from 1 to 8000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Fast-reject passes, then CORE_EXT policy rejects pre-activation output.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyRejectCoreExtPreActivation: true,
@@ -343,7 +380,7 @@ func TestMempoolPolicyRejectsCoreExtOutputPreActivation(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 90, 1, 1, fromKey, fromAddress, 7)
+	txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 2000, 8000, 1, fromKey, fromAddress, 7)
 	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "CORE_EXT output pre-ACTIVE ext_id=7") {
 		t.Fatalf("expected CORE_EXT output rejection, got %v", err)
 	}
@@ -353,6 +390,10 @@ func TestMempoolPolicyRejectsCoreExtOutputPreActivation(t *testing.T) {
 }
 
 func TestMempoolPolicyRejectsCoreExtSpendPreActivation(t *testing.T) {
+	// Test classification: CORE_EXT pre-activation spend policy rejection (policy-specific test).
+	// Intended branch: Reject CORE_EXT spend before profile activation.
+	// Fix: Fee bumped from 1 to 8000, UTXO value increased to 10000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Fast-reject passes, then CORE_EXT policy rejects pre-activation spend.
 	toKey := mustNodeMLDSA87Keypair(t)
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
 
@@ -363,7 +404,7 @@ func TestMempoolPolicyRejectsCoreExtSpendPreActivation(t *testing.T) {
 	st.Height = 100
 	st.TipHash[0] = 0x11
 	st.Utxos[consensus.Outpoint{Txid: prev, Vout: 0}] = consensus.UtxoEntry{
-		Value:        100,
+		Value:        10000,
 		CovenantType: consensus.COV_TYPE_CORE_EXT,
 		CovenantData: coreExtCovenantDataForNodeTest(7, nil),
 	}
@@ -375,7 +416,7 @@ func TestMempoolPolicyRejectsCoreExtSpendPreActivation(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txBytes := mustBuildCoreExtSpendTx(t, prev, 99, 1, 1, toAddress)
+	txBytes := mustBuildCoreExtSpendTx(t, prev, 2000, 8000, 1, toAddress)
 	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "CORE_EXT spend pre-ACTIVE ext_id=7") {
 		t.Fatalf("expected CORE_EXT spend rejection, got %v", err)
 	}
@@ -385,9 +426,13 @@ func TestMempoolPolicyRejectsCoreExtSpendPreActivation(t *testing.T) {
 }
 
 func TestMempoolPolicyAllowsCoreExtWhenProfileActive(t *testing.T) {
+	// Test classification: CORE_EXT profile active acceptance (policy-specific test).
+	// Intended branch: Accept CORE_EXT output when profile is active.
+	// Fix: Fee bumped from 1 to 8000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Fast-reject passes, CORE_EXT policy passes (profile active), full validation passes.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyRejectCoreExtPreActivation: true,
@@ -397,7 +442,7 @@ func TestMempoolPolicyAllowsCoreExtWhenProfileActive(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 90, 1, 1, fromKey, fromAddress, 7)
+	txBytes := mustBuildSignedCoreExtOutputTx(t, st.Utxos, outpoints[0], 2000, 8000, 1, fromKey, fromAddress, 7)
 	if err := mp.AddTx(txBytes); err != nil {
 		t.Fatalf("expected CORE_EXT tx admission, got %v", err)
 	}
@@ -405,8 +450,8 @@ func TestMempoolPolicyAllowsCoreExtWhenProfileActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected relay metadata success, got %v", err)
 	}
-	if meta.Fee != 1 {
-		t.Fatalf("relay fee=%d, want 1", meta.Fee)
+	if meta.Fee != 8000 {
+		t.Fatalf("relay fee=%d, want 8000", meta.Fee)
 	}
 }
 
@@ -463,9 +508,13 @@ func TestMempoolPolicySnapshot_DoesNotMutateForCoreExtPolicy(t *testing.T) {
 }
 
 func TestMempoolPolicyRejectsOversizedCoreExtPayload(t *testing.T) {
+	// Test classification: CORE_EXT oversized payload policy rejection (policy-specific test).
+	// Intended branch: Reject CORE_EXT output with payload exceeding policy limit.
+	// Fix: Fee bumped from 1 to 8000, UTXO value increased to 10000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Fast-reject passes, then CORE_EXT payload size policy rejects.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyMaxExtPayloadBytes: 32,
@@ -487,8 +536,8 @@ func TestMempoolPolicyRejectsOversizedCoreExtPayload(t *testing.T) {
 			Sequence: 0,
 		}},
 		Outputs: []consensus.TxOutput{
-			{Value: 90, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantDataForNodeTest(7, make([]byte, 49))},
-			{Value: entry.Value - 91, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), fromAddress...)},
+			{Value: 2000, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantDataForNodeTest(7, make([]byte, 49))},
+			{Value: entry.Value - 2000 - 8000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), fromAddress...)},
 		},
 		Locktime: 0,
 	}
@@ -505,9 +554,13 @@ func TestMempoolPolicyRejectsOversizedCoreExtPayload(t *testing.T) {
 }
 
 func TestMempoolPolicyAllowsCoreExtPayloadUnderLimit(t *testing.T) {
+	// Test classification: CORE_EXT payload under limit acceptance (policy-specific test).
+	// Intended branch: Accept CORE_EXT output with payload under policy limit.
+	// Fix: Fee bumped from 1 to 8000, UTXO value increased to 10000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Fast-reject passes, CORE_EXT payload size policy passes, full validation passes.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{
 		PolicyMaxExtPayloadBytes: 48,
@@ -529,8 +582,8 @@ func TestMempoolPolicyAllowsCoreExtPayloadUnderLimit(t *testing.T) {
 			Sequence: 0,
 		}},
 		Outputs: []consensus.TxOutput{
-			{Value: 90, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantDataForNodeTest(7, make([]byte, 32))},
-			{Value: entry.Value - 91, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), fromAddress...)},
+			{Value: 2000, CovenantType: consensus.COV_TYPE_CORE_EXT, CovenantData: coreExtCovenantDataForNodeTest(7, make([]byte, 32))},
+			{Value: entry.Value - 2000 - 8000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), fromAddress...)},
 		},
 		Locktime: 0,
 	}
@@ -669,18 +722,22 @@ func TestPolicyInputSnapshotRejectsMissingInput(t *testing.T) {
 }
 
 func TestMempoolDoubleSpend(t *testing.T) {
+	// Test classification: Double-spend conflict detection (unrelated to fee-floor).
+	// Intended branch: Reject second transaction spending same input.
+	// Fix: Fees bumped from 1/2 to 8000/8000 to pass MinMempoolFeePerWeight floor.
+	// Reachability: Both txs pass fast-reject, first is admitted, second is rejected as double-spend.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{20000})
 
 	mp, err := NewMempool(st, nil, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
-	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
-	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 89, 2, 2, fromKey, fromAddress, toAddress)
+	tx1 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 4000, 8000, 1, fromKey, fromAddress, toAddress)
+	tx2 := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 4000, 8000, 2, fromKey, fromAddress, toAddress)
 	if err := mp.AddTx(tx1); err != nil {
 		t.Fatalf("AddTx(tx1): %v", err)
 	}
@@ -693,20 +750,24 @@ func TestMempoolDoubleSpend(t *testing.T) {
 }
 
 func TestMempoolFullRejectsWithoutEviction(t *testing.T) {
+	// Test classification: Mempool capacity limit (unrelated to fee-floor).
+	// Intended branch: Reject transaction when mempool is full (no eviction).
+	// Fix: Fees bumped from 1/4/2 to 8000/8100/8050 to pass MinMempoolFeePerWeight floor.
+	// Reachability: All txs pass fast-reject, first two admitted, third rejected due to capacity.
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	st, outpoints := testSpendableChainState(fromAddress, []uint64{100, 100, 100})
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{20000, 20000, 20000})
 
 	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 2})
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
 
-	txLow := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, 1, fromKey, fromAddress, toAddress)
-	txHigh := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 90, 4, 2, fromKey, fromAddress, toAddress)
-	txBetter := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[2]}, 90, 2, 3, fromKey, fromAddress, toAddress)
+	txLow := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 4000, 8000, 1, fromKey, fromAddress, toAddress)
+	txHigh := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 3900, 8100, 2, fromKey, fromAddress, toAddress)
+	txBetter := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[2]}, 3950, 8050, 3, fromKey, fromAddress, toAddress)
 
 	if err := mp.AddTx(txLow); err != nil {
 		t.Fatalf("AddTx(low): %v", err)
@@ -1983,5 +2044,187 @@ func TestMempoolAdmissionCountsNilReceiver(t *testing.T) {
 	var mp *Mempool
 	if got := mp.AdmissionCounts(); got != (MempoolAdmissionCounts{}) {
 		t.Fatalf("AdmissionCounts nil receiver=%+v, want zero struct", got)
+	}
+}
+
+// TestMempoolFastRejectBelowFeeFloor tests RUB-165: cheap fee-floor precheck
+// rejects spam before expensive signature verification.
+func TestMempoolFastRejectBelowFeeFloor(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	// Create UTXO with value 1000
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1000})
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	// Build a transaction with fee=0 (all value goes to output)
+	// This should be rejected by fast-reject before signature verification
+	zeroFeeTx := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 1000, 0, 1, fromKey, fromAddress, toAddress)
+
+	err = mp.AddTx(zeroFeeTx)
+	if err == nil {
+		t.Fatal("expected zero-fee tx to be rejected, but it was accepted")
+	}
+
+	// Verify it's a rejection error (not conflict or unavailable)
+	var admitErr *TxAdmitError
+	if !errors.As(err, &admitErr) {
+		t.Fatalf("expected TxAdmitError, got %T: %v", err, err)
+	}
+	if admitErr.Kind != TxAdmitRejected {
+		t.Fatalf("expected TxAdmitRejected, got %v", admitErr.Kind)
+	}
+
+	// Verify error message mentions fee floor
+	if !strings.Contains(err.Error(), "below minimum floor") {
+		t.Fatalf("expected error to mention fee floor, got: %v", err)
+	}
+
+	// Verify mempool is still empty (tx was rejected)
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d after rejection, want 0", got)
+	}
+}
+
+// TestMempoolFastRejectAtFeeFloorBoundary tests transactions with very low fees
+// are rejected by the fast-reject mechanism.
+func TestMempoolFastRejectAtFeeFloorBoundary(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	// Test case 1: Very low fee (fee=1) should be rejected
+	// Typical transaction weight is ~7000-8000, so fee=1 is well below floor
+	st1, outpoints1 := testSpendableChainState(fromAddress, []uint64{10000})
+	mp1, err := NewMempool(st1, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	lowFeeTx := mustBuildSignedTransferTx(t, st1.Utxos, []consensus.Outpoint{outpoints1[0]}, 9999, 1, 1, fromKey, fromAddress, toAddress)
+	err = mp1.AddTx(lowFeeTx)
+	if err == nil {
+		t.Fatal("tx with fee=1 should be rejected by fast-reject")
+	}
+	if !strings.Contains(err.Error(), "below minimum floor") {
+		t.Fatalf("expected fee floor error, got: %v", err)
+	}
+
+	// Test case 2: Reasonable fee (fee=10000) should pass
+	st2, outpoints2 := testSpendableChainState(fromAddress, []uint64{20000})
+	mp2, err := NewMempool(st2, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	goodFeeTx := mustBuildSignedTransferTx(t, st2.Utxos, []consensus.Outpoint{outpoints2[0]}, 10000, 10000, 2, fromKey, fromAddress, toAddress)
+	if err := mp2.AddTx(goodFeeTx); err != nil {
+		t.Fatalf("tx with reasonable fee should be accepted, got error: %v", err)
+	}
+}
+
+// TestMempoolFastRejectWithMissingUTXO verifies that fast-reject skips precheck
+// when UTXOs are missing, allowing full validation to report the proper error.
+func TestMempoolFastRejectWithMissingUTXO(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1000})
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	// Build a tx with zero fee
+	zeroFeeTx := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 1000, 0, 1, fromKey, fromAddress, toAddress)
+
+	// Remove the UTXO so it's missing
+	st.mu.Lock()
+	delete(st.Utxos, outpoints[0])
+	st.mu.Unlock()
+
+	// AddTx should fail, but with missing UTXO error, not fee floor error
+	err = mp.AddTx(zeroFeeTx)
+	if err == nil {
+		t.Fatal("expected error for missing UTXO")
+	}
+
+	// Should NOT be a fee floor error (precheck should have skipped)
+	if strings.Contains(err.Error(), "below minimum floor") {
+		t.Fatalf("fast-reject should skip when UTXO missing, but got fee floor error: %v", err)
+	}
+
+	// Should be a missing UTXO error from full validation
+	if !strings.Contains(err.Error(), "utxo not found") && !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("expected missing UTXO error, got: %v", err)
+	}
+}
+
+// TestMempoolFastRejectHighFeeStillAccepted verifies that transactions with
+// fees well above the floor are still accepted normally.
+func TestMempoolFastRejectHighFeeStillAccepted(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{10000})
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	// Build a transaction with high fee well above minimum floor
+	// For typical tx weight ~7653, we need fee >= 7653. Use 8000 to be safe.
+	highFeeTx := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 2000, 8000, 1, fromKey, fromAddress, toAddress)
+
+	if err := mp.AddTx(highFeeTx); err != nil {
+		t.Fatalf("high-fee tx should be accepted, got error: %v", err)
+	}
+
+	if got := mp.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want 1", got)
+	}
+}
+
+// TestMempoolFastRejectAdmissionCounters verifies that fast-rejected transactions
+// are counted in the rejection counter.
+func TestMempoolFastRejectAdmissionCounters(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1000, 10000})
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+
+	before := mp.AdmissionCounts()
+
+	// Reject a zero-fee tx
+	zeroFeeTx := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 1000, 0, 1, fromKey, fromAddress, toAddress)
+	_ = mp.AddTx(zeroFeeTx) // expect error
+
+	// Accept a high-fee tx with fee well above minimum floor
+	// For typical tx weight ~7653, we need fee >= 7653. Use 8000 to be safe.
+	highFeeTx := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[1]}, 2000, 8000, 2, fromKey, fromAddress, toAddress)
+	_ = mp.AddTx(highFeeTx) // expect success
+
+	after := mp.AdmissionCounts()
+
+	// Verify counters
+	if after.Rejected != before.Rejected+1 {
+		t.Fatalf("rejected counter: got %d, want %d", after.Rejected, before.Rejected+1)
+	}
+	if after.Accepted != before.Accepted+1 {
+		t.Fatalf("accepted counter: got %d, want %d", after.Accepted, before.Accepted+1)
 	}
 }
