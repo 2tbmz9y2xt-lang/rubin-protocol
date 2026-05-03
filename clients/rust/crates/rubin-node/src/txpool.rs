@@ -302,19 +302,15 @@ impl TxPool {
         // construction because it has no rolling-floor equivalent —
         // the template needs to skip a tx whenever it fails any floor
         // (Go `applyPolicyAgainstState` mempool.go:815-818).
-        // Single statement so coverage instrumentation attributes the
-        // whole post-consensus policy step uniformly (avoids per-arg
-        // line gaps in tarpaulin's diff coverage output for the
-        // newly-added `da_bytes` argument).
-        let policy_result = apply_post_consensus_policy_with_floor(
-            &tx,
-            &chain_state.utxos,
-            next_height,
-            summary.fee,
-            weight,
-            da_bytes,
-            &self.cfg,
-        );
+        // `#[rustfmt::skip]` keeps the call on one line so the
+        // tarpaulin / Codacy diff-coverage tool attributes hits to a
+        // single statement instead of per-arg lines (multi-line calls
+        // leave several args marked "Not covered" even when the call
+        // executes). Locals shorten the argument list.
+        let utxos = &chain_state.utxos;
+        let cfg = &self.cfg;
+        #[rustfmt::skip]
+        let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, next_height, summary.fee, weight, da_bytes, cfg);
         policy_result?;
 
         let entry = TxPoolEntry {
@@ -567,17 +563,11 @@ pub(crate) fn relay_metadata(
     // the rolling-floor classifications inside the wrapper.
     let (weight, da_bytes, _) = tx_weight_and_stats_public(&tx)
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-    // Single statement so coverage instrumentation attributes the
-    // whole post-consensus policy step uniformly (mirror of admit_with_metadata).
-    let policy_result = apply_post_consensus_policy_with_floor(
-        &tx,
-        &chain_state.utxos,
-        next_height,
-        summary.fee,
-        weight,
-        da_bytes,
-        cfg,
-    );
+    // `#[rustfmt::skip]` keeps the call on one line for tarpaulin /
+    // Codacy diff-coverage attribution (mirror of admit_with_metadata).
+    let utxos = &chain_state.utxos;
+    #[rustfmt::skip]
+    let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, next_height, summary.fee, weight, da_bytes, cfg);
     policy_result?;
 
     Ok(RelayTxMetadata {

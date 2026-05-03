@@ -275,14 +275,8 @@ impl<'a> Miner<'a> {
         // `apply_policy` recomputed weight/da_bytes internally and the
         // miner then walked again to read `da_bytes`.
         let (weight, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|e| e.to_string())?;
-        let policy_result = apply_policy(
-            tx,
-            weight,
-            da_bytes,
-            &self.sync.chain_state.utxos,
-            next_height,
-            &policy_cfg,
-        );
+        let utxos = &self.sync.chain_state.utxos;
+        let policy_result = apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg);
         if policy_result.is_err() {
             return Ok((true, policy_da_included));
         }
