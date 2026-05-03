@@ -257,7 +257,13 @@ impl TxPool {
             }
         }
 
-        let (weight, _, _) = tx_weight_and_stats_public(&tx)
+        // RUB-167 single-walk invariant: extract weight + da_bytes once
+        // here and reuse via `apply_post_consensus_policy_with_floor`
+        // (which forwards to `apply_policy` -> `reject_da_anchor_tx_policy`)
+        // and `validate_fee_floor`. The same `(weight, da_bytes)` tuple
+        // anchors both the DA-side classification and the rolling-floor
+        // classification so they cannot diverge.
+        let (weight, da_bytes, _) = tx_weight_and_stats_public(&tx)
             .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
 
         let next_height = next_block_height(chain_state)?;
@@ -296,14 +302,16 @@ impl TxPool {
         // construction because it has no rolling-floor equivalent —
         // the template needs to skip a tx whenever it fails any floor
         // (Go `applyPolicyAgainstState` mempool.go:815-818).
-        apply_post_consensus_policy_with_floor(
-            &tx,
-            &chain_state.utxos,
-            next_height,
-            summary.fee,
-            weight,
-            &self.cfg,
-        )?;
+        // `#[rustfmt::skip]` keeps the call on one line so the
+        // tarpaulin / Codacy diff-coverage tool attributes hits to a
+        // single statement instead of per-arg lines (multi-line calls
+        // leave several args marked "Not covered" even when the call
+        // executes). Locals shorten the argument list.
+        let utxos = &chain_state.utxos;
+        let cfg = &self.cfg;
+        #[rustfmt::skip]
+        let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, next_height, summary.fee, weight, da_bytes, cfg);
+        policy_result?;
 
         let entry = TxPoolEntry {
             raw: tx_bytes.to_vec(),
@@ -550,16 +558,17 @@ pub(crate) fn relay_metadata(
     // skipped the rolling-floor check entirely while admit enforced it
     // via `validate_fee_floor`); the shared helper makes that
     // class of drift impossible by construction.
-    let (weight, _, _) = tx_weight_and_stats_public(&tx)
+    // RUB-167 single-walk invariant (mirrors admit_with_metadata): one
+    // `tx_weight_and_stats_public` call here feeds both the DA-side and
+    // the rolling-floor classifications inside the wrapper.
+    let (weight, da_bytes, _) = tx_weight_and_stats_public(&tx)
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-    apply_post_consensus_policy_with_floor(
-        &tx,
-        &chain_state.utxos,
-        next_height,
-        summary.fee,
-        weight,
-        cfg,
-    )?;
+    // `#[rustfmt::skip]` keeps the call on one line for tarpaulin /
+    // Codacy diff-coverage attribution (mirror of admit_with_metadata).
+    let utxos = &chain_state.utxos;
+    #[rustfmt::skip]
+    let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, next_height, summary.fee, weight, da_bytes, cfg);
+    policy_result?;
 
     Ok(RelayTxMetadata {
         fee: summary.fee,
@@ -592,25 +601,36 @@ pub(crate) fn relay_metadata(
 ///   - parse_tx + canonical bytes check + apply_non_coinbase_tx_basic_update
 ///     must complete BEFORE this helper (signature verification +
 ///     consensus state validation are upstream).
-///   - `fee` and `weight` are extracted by the caller (admit reads
-///     them at the start of the function; relay extracts weight
-///     between apply_non_coinbase and this helper).
+///   - `weight` and `da_bytes` are extracted by the caller from a
+///     single `tx_weight_and_stats_public(tx)` call (admit reads them
+///     at the start of the function; relay extracts them between
+///     apply_non_coinbase and this helper). `fee` is computed
+///     separately by the upstream `apply_non_coinbase_tx_basic_update_*`
+///     step (admit/relay receive it as `summary.fee`). The same
+///     `(weight, da_bytes)` pair is passed straight through to
+///     `apply_policy` and the same `weight` is reused by
+///     `validate_fee_floor`, so the DA-side and rolling-floor
+///     classifications operate on identical `weight` values (RUB-167
+///     single-walk invariant).
 ///   - The miner caller (`reject_candidate`) deliberately does NOT
 ///     use this helper; miner has its own policy_cfg construction
 ///     because it has no rolling-floor equivalent (Go
 ///     `applyPolicyAgainstState` mempool.go:815-818 documents this
-///     same exception).
+///     same exception). Miner reuses the same single-walk pattern by
+///     calling `tx_weight_and_stats_public` once before invoking
+///     `apply_policy`.
 fn apply_post_consensus_policy_with_floor(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
     next_height: u64,
     fee: u64,
     weight: u64,
+    da_bytes: u64,
     cfg: &TxPoolConfig,
 ) -> Result<(), TxPoolAdmitError> {
     let mut policy_cfg = cfg.clone();
     policy_cfg.policy_current_mempool_min_fee_rate = 0;
-    apply_policy(tx, utxos, next_height, &policy_cfg).map_err(rejected)?;
+    apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg).map_err(rejected)?;
     validate_fee_floor(fee, weight, cfg.policy_current_mempool_min_fee_rate)
 }
 
@@ -761,8 +781,14 @@ fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoo
     Ok(())
 }
 
+/// `weight` and `da_bytes` MUST be the result of one
+/// `tx_weight_and_stats_public(tx)` call performed by the caller before
+/// invoking this function (see `reject_da_anchor_tx_policy` docstring
+/// for the full RUB-167 single-walk invariant).
 pub(crate) fn apply_policy(
     tx: &rubin_consensus::Tx,
+    weight: u64,
+    da_bytes: u64,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
     next_height: u64,
     cfg: &TxPoolConfig,
@@ -772,6 +798,8 @@ pub(crate) fn apply_policy(
     }
     reject_da_anchor_tx_policy(
         tx,
+        weight,
+        da_bytes,
         utxos,
         cfg.policy_current_mempool_min_fee_rate,
         cfg.policy_min_da_fee_rate,
@@ -857,19 +885,37 @@ pub(crate) fn reject_non_coinbase_anchor_outputs(tx: &rubin_consensus::Tx) -> Re
 ///   added on top of the spec-side floor; `0` disables only the
 ///   surcharge term, not `da_fee_floor`.
 ///
-/// The helper recomputes both `weight` and `da_bytes` from `tx` via
-/// `tx_weight_and_stats_public`. This avoids trusting any caller-supplied
-/// weight value (a stale or zero weight would otherwise silently
-/// under-enforce the relay-fee half of the Stage C predicate).
+/// `weight` and `da_bytes` are passed in by the caller, computed once
+/// per admission/relay decision via `tx_weight_and_stats_public(tx)`.
+/// Callers MUST pass values from a single `tx_weight_and_stats_public`
+/// call performed AFTER `parse_tx` succeeds and BEFORE invoking
+/// `apply_policy`; the same `weight` MUST be reused by any sibling
+/// rolling-fee-floor check (`validate_fee_floor`) so the DA-side
+/// classification and rolling-floor classification operate on identical
+/// values.
+///
+/// This is the deliberate INVERSE of Go's `RejectDaAnchorTxPolicy`
+/// (`clients/go/node/policy_da_anchor.go:77`), which recomputes
+/// `weight, daBytes, _, err := consensus.TxWeightAndStats(tx)`
+/// internally and explicitly distrusts caller-supplied values. The
+/// Rust helper trusts the caller because (a) it stays `pub(crate)` so
+/// every callsite is audited in-crate (`admit_with_metadata`,
+/// `relay_metadata`, `apply_post_consensus_policy_with_floor`,
+/// `miner::reject_candidate`, and the `run_da_policy` test helper all
+/// walk weight at the call site), and (b) reusing one `weight` value
+/// across both `reject_da_anchor_tx_policy` (which also consumes
+/// `da_bytes`) and `validate_fee_floor` removes the drift class where
+/// the DA and rolling-floor halves could otherwise see different
+/// `weight` values.
 pub(crate) fn reject_da_anchor_tx_policy(
     tx: &rubin_consensus::Tx,
+    weight: u64,
+    da_bytes: u64,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
     current_mempool_min_fee_rate: u64,
     min_da_fee_rate: u64,
     da_surcharge_per_byte: u64,
 ) -> Result<(), String> {
-    let (weight, da_bytes, _) =
-        tx_weight_and_stats_public(tx).map_err(|err| format!("tx weight/stats error: {err}"))?;
     if da_bytes == 0 {
         // Non-DA transaction: the helper only enforces the DA half of the
         // Stage C admission contract. Non-DA relay-fee floor enforcement
@@ -2691,7 +2737,20 @@ mod tests {
         surcharge: u64,
     ) -> Result<(), String> {
         let (tx, _, _, _) = parse_tx(raw).expect("parse tx");
-        reject_da_anchor_tx_policy(&tx, &state.utxos, current_min, min_da, surcharge)
+        // RUB-167 single-walk invariant: tests mirror production callers
+        // by passing pre-computed weight/da_bytes from one
+        // tx_weight_and_stats_public call into reject_da_anchor_tx_policy.
+        let (weight, da_bytes, _) =
+            tx_weight_and_stats_public(&tx).expect("tx_weight_and_stats_public");
+        reject_da_anchor_tx_policy(
+            &tx,
+            weight,
+            da_bytes,
+            &state.utxos,
+            current_min,
+            min_da,
+            surcharge,
+        )
     }
 
     #[test]
