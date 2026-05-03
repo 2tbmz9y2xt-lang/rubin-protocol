@@ -268,10 +268,25 @@ impl<'a> Miner<'a> {
                 0
             },
         };
-        if apply_policy(tx, &self.sync.chain_state.utxos, next_height, &policy_cfg).is_err() {
+        // RUB-167 single-walk invariant: extract weight + da_bytes once
+        // here and reuse via `apply_policy` (which forwards into
+        // `reject_da_anchor_tx_policy`) AND in the policy_da_included
+        // budget update below. Avoids the previous double walk where
+        // `apply_policy` recomputed weight/da_bytes internally and the
+        // miner then walked again to read `da_bytes`.
+        let (weight, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|e| e.to_string())?;
+        if apply_policy(
+            tx,
+            weight,
+            da_bytes,
+            &self.sync.chain_state.utxos,
+            next_height,
+            &policy_cfg,
+        )
+        .is_err()
+        {
             return Ok((true, policy_da_included));
         }
-        let (_, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|e| e.to_string())?;
         if self.cfg.policy_da_anchor_anti_abuse {
             let next_da = updated_policy_da_bytes(
                 policy_da_included,
