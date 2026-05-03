@@ -268,30 +268,6 @@ impl TxPool {
 
         let next_height = next_block_height(chain_state)?;
         let block_mtp = next_block_mtp(block_store, next_height)?;
-
-        // RUB-166 fast-reject: cheap fee-floor precheck for plain P2PK
-        // spam BEFORE expensive ML-DSA signature verification in
-        // `apply_non_coinbase_tx_basic_update_*` below, but AFTER
-        // `next_block_height` / `next_block_mtp` so chain-context
-        // failures (height overflow, missing tip MTP, etc.) keep their
-        // existing error precedence. Mirrors Go's `cheapFeeFloorPrecheck`
-        // call site inside `checkTransactionWithSnapshot` at
-        // `clients/go/node/mempool.go:663-682` (RUB-165 PR #1415):
-        // Go also resolves `nextBlockContext`/`nextBlockMTP` first and
-        // only then runs the precheck. The helper bails (`Ok(())`) for
-        // any tx shape it cannot soundly classify (DA / multi-input /
-        // non-P2PK covenant / overspend) and the existing expensive
-        // path keeps its error precedence. Reuses the RUB-167
-        // pre-computed `weight`. Same `Unavailable` error class + same
-        // message format as `validate_fee_floor`, so the rolling-floor
-        // classification stays uniform across the fast-reject path and
-        // the post-consensus path.
-        cheap_fee_floor_precheck(
-            &tx,
-            &chain_state.utxos,
-            weight,
-            self.cfg.policy_current_mempool_min_fee_rate,
-        )?;
         let active_profiles = self
             .cfg
             .core_ext_deployments
@@ -302,6 +278,43 @@ impl TxPool {
                 Some(ctx) => (Some(ctx.rotation.as_ref()), Some(ctx.registry.as_ref())),
                 None => (None, None),
             };
+
+        // RUB-166 fast-reject: cheap fee-floor precheck for plain P2PK
+        // spam BEFORE expensive ML-DSA signature verification in
+        // `apply_non_coinbase_tx_basic_update_*` below, but AFTER all
+        // chain-context resolution (`next_block_height`,
+        // `next_block_mtp`, `active_profiles_at_height`,
+        // `suite_context` lookup). Chain-context failures (height
+        // overflow, missing tip MTP, invalid CORE_EXT deployment
+        // config) keep their existing error precedence so
+        // `admit_with_metadata` does NOT diverge from `relay_metadata`
+        // on the (chain-context-error vs fee-floor-fail) precedence.
+        // Mirrors Go's `cheapFeeFloorPrecheck` call site inside
+        // `checkTransactionWithSnapshot` at
+        // `clients/go/node/mempool.go:663-682` (RUB-165 PR #1415):
+        // Go runs the precheck after `nextBlockContext`/`nextBlockMTP`
+        // and immediately before the expensive
+        // `CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext`
+        // call. Note: Go's `policy.CoreExtProfiles` /
+        // `policy.SuiteRegistry` are resolved at policy-snapshot time
+        // outside admission, so they cannot error mid-admission in Go.
+        // Rust's per-admission `active_profiles_at_height` lookup adds
+        // a chain-context error path Go does not have; running precheck
+        // after it preserves the admit/relay endpoint precedence
+        // consistency. The helper bails (`Ok(())`) for any tx shape it
+        // cannot soundly classify (DA / multi-input / non-P2PK
+        // covenant / overspend) and the existing expensive path keeps
+        // its error precedence. Reuses the RUB-167 pre-computed
+        // `weight`. Same `Unavailable` error class + same message
+        // format as `validate_fee_floor`, so the rolling-floor
+        // classification stays uniform across the fast-reject path and
+        // the post-consensus path.
+        cheap_fee_floor_precheck(
+            &tx,
+            &chain_state.utxos,
+            weight,
+            self.cfg.policy_current_mempool_min_fee_rate,
+        )?;
         let (_, summary) =
             apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
                 &tx,
@@ -3916,26 +3929,17 @@ mod tests {
         );
     }
 
-    /// `relay_metadata` (the relay-cache surface) must NOT call the new
-    /// fast-reject precheck. Go RUB-165 routes `Mempool.RelayMetadata`
-    /// (clients/go/node/mempool.go:472+) through
-    /// `checkParsedTransactionWithSnapshot` (mempool.go:516+), which
-    /// does not invoke `cheapFeeFloorPrecheck`; only the admit path
-    /// (`checkTransactionWithSnapshot` at mempool.go:659+ line 682) does.
-    /// Rust mirrors that boundary: only `admit_with_metadata` calls
-    /// `cheap_fee_floor_precheck`. Observable parity at the floor reject
-    /// is preserved through DIFFERENT code paths — admit hits the new
-    /// precheck, relay hits the existing post-consensus
-    /// `validate_fee_floor` inside `apply_post_consensus_policy_with_floor`
-    /// (RUB-162 wave-3 shared helper). This test pins that both paths
-    /// still produce the same `Unavailable` + verbatim floor message for
-    /// the same below-floor P2PK input.
-    /// Mirrors Go's `TestMempoolCheapFeeFloorPrecheckPreservesMissingUTXOReject`
-    /// (clients/go/node/mempool_test.go:1417+). When the input UTXO is
-    /// missing from chainstate, `fee_precheck_p2pk_input_value` returns
-    /// `None` and the precheck defers to `Ok(())`; the expensive path
-    /// then surfaces the missing-UTXO failure as `Rejected`. The
-    /// precheck must NOT mask it as a rolling-floor `Unavailable`.
+    /// Missing-UTXO defer: when the input UTXO is missing from
+    /// chainstate, `fee_precheck_p2pk_input_value` returns `None` and
+    /// the precheck defers to `Ok(())` so the expensive admission path
+    /// runs and surfaces the missing-UTXO failure as `Rejected`. The
+    /// precheck must NOT mask the missing-UTXO failure as a
+    /// rolling-floor `Unavailable`. Mirrors Go's
+    /// `TestMempoolCheapFeeFloorPrecheckPreservesMissingUTXOReject`
+    /// (clients/go/node/mempool_test.go:1417+). The relay-path
+    /// no-precheck boundary is covered by the dedicated
+    /// `rub162_relay_metadata_*` tests further up — this test scope is
+    /// strictly the missing-UTXO defer branch on the admit path.
     #[test]
     fn rub166_admit_below_floor_with_missing_utxo_keeps_expensive_reject_class() {
         let (mut state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
