@@ -317,20 +317,41 @@ impl TxPool {
         };
 
         // Go-parity capacity admission (`capacityEvictionPlanLocked`,
-        // clients/go/node/mempool.go:1024) — runs AFTER both
+        // clients/go/node/mempool.go:1024-1030) — runs AFTER both
         // `apply_policy` and the rolling relay-fee floor check above, so
         // sub-floor / DA-rejected transactions never reach this branch
         // and the worst-entry comparison only considers floor-compliant
-        // candidates.
+        // candidates. The two distinct rejection classes are split into
+        // separate error messages so callers/operators can distinguish
+        // legitimate eviction-ordering rejection from internal heap
+        // invariant violation:
+        //   1. `current_worst_txid()` returns None or the txid resolves
+        //      to no entry → MAP-vs-HEAP corruption invariant: the
+        //      `worst_heap` lookup said there's a worst entry, but the
+        //      live `txs` map disagrees. Surfaced with a distinct
+        //      "tx pool capacity invariant violated" message so an
+        //      operator/log scraper can tell internal corruption from
+        //      a routine eviction-ordering rejection.
+        //   2. `compare_admit_priority` reports candidate is NOT strictly
+        //      greater than worst → routine eviction-ordering rejection
+        //      matching Go's
+        //      `"mempool capacity candidate rejected by eviction ordering"`
+        //      at clients/go/node/mempool.go:1028-1030.
         if self.txs.len() >= MAX_TX_POOL_TRANSACTIONS {
             let Some(worst_txid) = self.current_worst_txid() else {
-                return Err(unavailable("tx pool full"));
+                return Err(unavailable(
+                    "tx pool capacity invariant violated: worst_heap empty while txs at MAX",
+                ));
             };
             let Some(worst_entry) = self.txs.get(&worst_txid) else {
-                return Err(unavailable("tx pool full"));
+                return Err(unavailable(
+                    "tx pool capacity invariant violated: worst_heap entry missing from txs map",
+                ));
             };
             if compare_admit_priority(txid, &entry, worst_txid, worst_entry) != Ordering::Greater {
-                return Err(unavailable("tx pool full"));
+                return Err(unavailable(
+                    "mempool capacity candidate rejected by eviction ordering",
+                ));
             }
             self.remove_entry(&worst_txid);
         }
@@ -431,23 +452,10 @@ impl TxPool {
     /// has no `validate_fee_floor_locked` equivalent — see
     /// `clients/go/node/mempool.go:815-818`.
     fn validate_fee_floor_locked(&self, fee: u64, weight: u64) -> Result<(), TxPoolAdmitError> {
-        // Mirrors Go validateFeeFloorLocked
-        // (clients/go/node/mempool.go:957-967). The
-        // DEFAULT_MEMPOOL_MIN_FEE_RATE clamp lives inside
-        // fee_rate_below_floor itself (Go-parity at
-        // clients/go/node/mempool.go:1425-1427); this caller passes the
-        // cfg field as-is. The error message surfaces the post-clamp
-        // value for operator clarity by recomputing the same .max()
-        // locally so the message stays consistent with the predicate's
-        // actual decision basis.
-        let cfg_floor = self.cfg.policy_current_mempool_min_fee_rate;
-        if fee_rate_below_floor(fee, weight, cfg_floor) {
-            let surfaced_floor = cfg_floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
-            return Err(unavailable(format!(
-                "mempool fee below rolling minimum: fee={fee} weight={weight} min_fee_rate={surfaced_floor}"
-            )));
-        }
-        Ok(())
+        // Delegate to free `validate_fee_floor` so both the impl-method
+        // caller (`admit_with_metadata`) and the free-function caller
+        // (`relay_metadata`) share one source-of-truth predicate.
+        validate_fee_floor(fee, weight, self.cfg.policy_current_mempool_min_fee_rate)
     }
 
     fn seed_worst_heap(&mut self) {
@@ -513,6 +521,9 @@ pub(crate) fn relay_metadata(
         return Err(rejected("transaction rejected: non-canonical tx bytes"));
     }
 
+    let (weight, _, _) = tx_weight_and_stats_public(&tx)
+        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+
     let next_height = next_block_height(chain_state)?;
     let block_mtp = next_block_mtp(block_store, next_height)?;
     let active_profiles = cfg
@@ -547,14 +558,29 @@ pub(crate) fn relay_metadata(
     // clients/go/node/mempool.go:823. Without the same zero override, a DA tx that pays
     // the DA-side floor but is below the rolling relay floor surfaces
     // here as `Rejected("DA fee below Stage C floor ... relay_fee_floor=...")`
-    // diverging from Go's relay-metadata contract. The relay path does
-    // NOT enforce the rolling relay floor (Go RelayMetadata extracts
-    // metadata after the policy helper has enforced only DA-side
-    // terms), so we do not call `validate_fee_floor_locked` here — only
-    // the DA-helper invocation gets the cfg-zero override.
+    // diverging from Go's relay-metadata contract.
     let mut policy_cfg = cfg.clone();
     policy_cfg.policy_current_mempool_min_fee_rate = 0;
     apply_policy(&tx, &chain_state.utxos, next_height, &policy_cfg).map_err(rejected)?;
+
+    // RUB-162 PR-1410 wave-2 fix — Rolling relay-floor enforcement on
+    // the relay path so `relay_metadata` is NOT weaker than `admit`.
+    // Without this, the cfg-zero override above lets a DA tx that pays
+    // the DA-side floor but is below the rolling relay floor pass the
+    // relay-metadata gate, while `TxPool::admit` rejects the same tx
+    // as `Unavailable`. Production peer relay (`tx_relay::handle_received_tx`)
+    // uses `relay_metadata` as the gate before re-announcing, so the
+    // mismatch would mean we propagate sub-floor DA tx through the
+    // network even though the local mempool refuses to admit them. Go
+    // avoids the divergence in the full node by re-running mempool
+    // admission via `CanonicalMempoolRelayMetadata` +
+    // `CanonicalMempoolTxPool.Put` — the equivalent here is to call
+    // the same `validate_fee_floor` predicate inline so the matrix is:
+    //   - DA tx fee < DA-required → Rejected (DA helper, above)
+    //   - DA tx fee >= DA-required, fee/weight < rolling floor → Unavailable
+    //   - DA tx fee >= both → Ok (relay metadata returned)
+    // mirroring `admit_with_metadata`.
+    validate_fee_floor(summary.fee, weight, cfg.policy_current_mempool_min_fee_rate)?;
 
     Ok(RelayTxMetadata {
         fee: summary.fee,
@@ -688,6 +714,26 @@ fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
     let floor = floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
     let required = (weight as u128) * (floor as u128);
     (fee as u128) < required
+}
+
+/// Free-function wrapper around the rolling-relay-floor predicate so
+/// both `TxPool::validate_fee_floor_locked` (impl-method on the admit
+/// path) and `relay_metadata` (free function on the relay path) share
+/// one source-of-truth check. Returns `Unavailable` (transient /
+/// retryable) on rolling-floor failure, mirroring Go
+/// `validateFeeFloorLocked` at clients/go/node/mempool.go:957-967. The
+/// `DEFAULT_MEMPOOL_MIN_FEE_RATE` clamp lives inside
+/// `fee_rate_below_floor` (Go-parity at
+/// clients/go/node/mempool.go:1425-1427); the error message surfaces
+/// the post-clamp value for operator clarity.
+fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
+    if fee_rate_below_floor(fee, weight, cfg_floor) {
+        let surfaced_floor = cfg_floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
+        return Err(unavailable(format!(
+            "mempool fee below rolling minimum: fee={fee} weight={weight} min_fee_rate={surfaced_floor}"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_policy(
@@ -1339,23 +1385,36 @@ mod tests {
         assert_eq!(pool.heap_seqs.len(), 0, "no heap state on Err");
     }
 
+    /// PR-1410 wave-2 migration: this test previously asserted that
+    /// `relay_metadata` Ok'd the conformance fixture (fee=10 / weight≈
+    /// 7653 ⇒ fee/weight ≈ 0.0013, far below DEFAULT_MEMPOOL_MIN_FEE_RATE).
+    /// After the wave-2 fix `relay_metadata` enforces the same rolling
+    /// floor as `admit_with_metadata`, so the conformance fixture is
+    /// now sub-floor and rejects with Unavailable from the new floor
+    /// check inside `relay_metadata`. The polarity-accurate name
+    /// (`relay_metadata_rejects_sub_floor_conformance_tx_as_unavailable`)
+    /// reflects the asserted behaviour.
     #[test]
-    fn relay_metadata_accepts_valid_conformance_tx() {
+    fn relay_metadata_rejects_sub_floor_conformance_tx_as_unavailable() {
         let vector = positive_fixture_vector();
         let raw = hex::decode(&vector.tx_hex).expect("tx hex");
         let state = chain_state_from_positive_fixture(&vector);
 
-        let meta = relay_metadata(
+        let err = relay_metadata(
             &raw,
             &state,
             None,
             fixture_chain_id(vector.chain_id.as_deref()),
             &TxPoolConfig::default(),
         )
-        .expect("relay metadata");
+        .expect_err("conformance fixture has fee_rate well below DEFAULT_MEMPOOL_MIN_FEE_RATE");
 
-        assert_eq!(meta.size, raw.len());
-        assert!(meta.fee > 0, "relay metadata should derive non-zero fee");
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(
+            err.message.contains("mempool fee below rolling minimum"),
+            "expected rolling-floor message, got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -1529,7 +1588,77 @@ mod tests {
         }
         let err = pool.admit(&raw, &state, None, [0u8; 32]).unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
-        assert!(err.message.contains("tx pool full"));
+        // PR-1410 wave-2 — error message split per Go-parity at
+        // clients/go/node/mempool.go:1028-1030. Eviction-ordering
+        // rejection is now distinct from internal capacity invariant
+        // failure.
+        assert!(
+            err.message
+                .contains("mempool capacity candidate rejected by eviction ordering"),
+            "expected eviction-ordering message, got: {}",
+            err.message
+        );
+    }
+
+    /// PR-1410 wave-2 — direct `insert_entry` populates the worst_heap
+    /// without going through admit_with_metadata, so this test
+    /// exercises the routine eviction-ordering rejection path with a
+    /// fully populated heap (not the corruption invariants). Pinning
+    /// the new error-message format prevents future regressions that
+    /// would collapse this case back into a generic "tx pool full"
+    /// message and lose Go-parity at clients/go/node/mempool.go:1028-1030.
+    #[test]
+    fn rub162_admit_pool_full_eviction_ordering_message_distinct_from_invariant() {
+        let (state, raw) = signed_p2pk_state_and_tx(
+            7700,
+            vec![TxOutput {
+                value: 10,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x77; 2592]),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        let (_tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
+        assert_eq!(consumed, raw.len());
+
+        let mut pool = TxPool::new();
+        // Populate via the production `insert_entry` path so worst_heap +
+        // heap_seqs + spenders are all coherent — exercises the
+        // legitimate eviction-ordering rejection branch (NOT corruption).
+        for idx in 0..MAX_TX_POOL_TRANSACTIONS {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(idx as u64 + 1).to_le_bytes());
+            if key == txid {
+                key[8] = 1;
+            }
+            pool.insert_entry(
+                key,
+                TxPoolEntry {
+                    raw: vec![0xff],
+                    inputs: Vec::new(),
+                    fee: 10,
+                    weight: 1,
+                    size: 1,
+                },
+            );
+        }
+        let err = pool.admit(&raw, &state, None, [0u8; 32]).unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(
+            err.message
+                .contains("mempool capacity candidate rejected by eviction ordering"),
+            "expected eviction-ordering message (Go-parity mempool.go:1028-1030), got: {}",
+            err.message
+        );
+        // Pin: legitimate eviction-ordering rejection MUST NOT collapse
+        // into the internal invariant-violation message.
+        assert!(
+            !err.message.contains("invariant violated"),
+            "eviction-ordering rejection must not surface as invariant violation; got: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -3152,29 +3281,32 @@ mod tests {
             .expect("exact floor passes");
     }
 
-    /// P1 #1 fix — relay_metadata path also passes
-    /// `policy_current_mempool_min_fee_rate=0` to apply_policy ->
-    /// reject_da_anchor_tx_policy, mirroring Go RelayMetadata's
-    /// applyPolicyAgainstState invocation
-    /// (clients/go/node/mempool.go:472-495 -> 785-853 with the
-    /// hardcoded 0 at clients/go/node/mempool.go:823). A DA tx that
-    /// pays the DA-side floor but is below the rolling relay floor
-    /// must NOT surface as `Rejected("DA fee below Stage C floor")`
-    /// from relay_metadata; the relay path's contract (per
-    /// clients/go/node/mempool.go:472-495) extracts metadata after
-    /// DA-only enforcement, with no rolling-floor classification.
-    /// admit_with_metadata still rejects the same tx with Unavailable
-    /// (validate_fee_floor_locked enforces the rolling floor on the
-    /// admit path).
+    /// PR-1410 wave-2 fix — relay_metadata must NOT be weaker than
+    /// admit_with_metadata. The cfg-zero override before apply_policy
+    /// (clients/go/node/mempool.go:823) preserves DA-side error class
+    /// isolation, but Rust's prior implementation skipped the rolling
+    /// relay floor entirely on the relay path. That created a real
+    /// production divergence: `tx_relay::handle_received_tx` uses
+    /// `relay_metadata` as the gate before re-announcing, so a DA tx
+    /// that pays the DA-side floor but is below the rolling relay
+    /// floor was propagated through the network even though
+    /// `TxPool::admit` rejected the same tx. Go avoids the divergence
+    /// in the full node by re-running mempool admission via
+    /// `CanonicalMempoolRelayMetadata` + `CanonicalMempoolTxPool.Put`;
+    /// the equivalent here is to call the same `validate_fee_floor`
+    /// predicate inside `relay_metadata` after `apply_policy` succeeds
+    /// (controller decision option-c per PR #1410 thread fix).
     ///
     /// Proof assertion: same DA tx, same TxPoolConfig with non-zero
     /// rolling floor + DA-side terms; admit returns Unavailable; relay
-    /// metadata returns Ok with the extracted fee/size.
+    /// metadata ALSO returns Unavailable with the same message — they
+    /// must surface the same classification for the same tx so peer
+    /// relay never propagates a tx the local mempool refuses to admit.
     #[test]
-    fn rub162_relay_metadata_da_below_rolling_floor_returns_ok_not_rejected() {
+    fn rub162_relay_metadata_da_below_rolling_floor_returns_unavailable_matching_admit() {
         // weight ≈ 7653; DA-required = 2 * da_bytes (≈ 70 bytes ⇒ 140);
         // pick fee that beats DA-required but is well below relay floor
-        // (fee=1000 < weight=7653 ⇒ relay-floor reject on admit path).
+        // (fee=1000 < weight=7653 ⇒ relay-floor reject on both paths).
         let (state, raw, weight, da_bytes) = build_signed_da_tx_with_fee(1_000, vec![0x77; 64]);
         assert!(
             1_000 >= 2 * da_bytes,
@@ -3199,10 +3331,79 @@ mod tests {
         assert!(admit_err
             .message
             .contains("mempool fee below rolling minimum"));
-        // relay_metadata must succeed (Go-parity: relay path does not
-        // enforce relay floor, only DA-side terms).
+        // relay_metadata MUST also reject with Unavailable — same
+        // classification as admit so peer relay does not propagate a
+        // tx the local mempool refuses.
+        let relay_err = relay_metadata(&raw, &state, None, [0u8; 32], &cfg)
+            .expect_err("relay_metadata must reject below rolling floor (matching admit)");
+        assert_eq!(relay_err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(relay_err
+            .message
+            .contains("mempool fee below rolling minimum"));
+    }
+
+    /// PR-1410 wave-2 — DA tx whose DA fee fails the DA-side floor
+    /// must surface as Rejected (DA helper class, terminal) from
+    /// relay_metadata, NOT collapsed into the new rolling-floor
+    /// Unavailable class. Preserves DA-side error class isolation
+    /// while the new validate_fee_floor call sits AFTER apply_policy.
+    #[test]
+    fn rub162_relay_metadata_da_below_da_floor_returns_rejected_not_unavailable() {
+        // weight ≈ 7653; with min_da=200 + surcharge=200 + da_bytes≈70,
+        // DA-required ≈ 28000 ≫ fee=8000. The fee=8000 also passes the
+        // rolling floor (fee/weight ≈ 1.04 ≥ 1) so the DA-side reject
+        // is the ONLY rejection path — proves DA classification
+        // survives the new floor check.
+        let (state, raw, weight, da_bytes) = build_signed_da_tx_with_fee(8_000, vec![0x77; 64]);
+        let min_da = 200u64;
+        let surcharge = 200u64;
+        let required_da = da_bytes
+            .checked_mul(min_da + surcharge)
+            .expect("test arithmetic");
+        assert!(
+            8_000 < required_da,
+            "test setup must put fee below DA-required: 8000 < {required_da}"
+        );
+        assert!(
+            8_000 >= weight,
+            "test setup must put fee above rolling floor: 8000 >= weight={weight}"
+        );
+        let cfg = TxPoolConfig {
+            policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
+            policy_min_da_fee_rate: min_da,
+            policy_da_surcharge_per_byte: surcharge,
+            ..TxPoolConfig::default()
+        };
+        let err = relay_metadata(&raw, &state, None, [0u8; 32], &cfg)
+            .expect_err("relay_metadata must reject DA tx below DA-side floor");
+        assert_eq!(
+            err.kind,
+            TxPoolAdmitErrorKind::Rejected,
+            "DA-side rejection must remain terminal Rejected, NOT new rolling-floor Unavailable; got {:?}",
+            err
+        );
+        assert!(
+            err.message.contains("DA fee below Stage C floor"),
+            "error must come from DA helper, not floor check; got: {}",
+            err.message
+        );
+    }
+
+    /// PR-1410 wave-2 — DA tx whose fee passes BOTH floors must yield
+    /// relay metadata (Ok). Smoke for the post-fix happy path.
+    #[test]
+    fn rub162_relay_metadata_da_above_both_floors_returns_ok() {
+        // fee = 30000; DA-required = da_bytes(70)*1*2 = 140; weight≈7653,
+        // fee/weight ≈ 3.92 ≥ 1. Both floors pass.
+        let (state, raw, _weight, _da_bytes) = build_signed_da_tx_with_fee(30_000, vec![0x77; 64]);
+        let cfg = TxPoolConfig {
+            policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
+            policy_min_da_fee_rate: 1,
+            policy_da_surcharge_per_byte: 1,
+            ..TxPoolConfig::default()
+        };
         let meta = relay_metadata(&raw, &state, None, [0u8; 32], &cfg)
-            .expect("relay_metadata should succeed when DA-side terms pass");
+            .expect("relay_metadata should succeed when both floors pass");
         assert!(meta.fee > 0);
         assert_eq!(meta.size, raw.len());
     }

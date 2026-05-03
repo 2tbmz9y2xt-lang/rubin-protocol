@@ -394,110 +394,40 @@ mod tests {
     use super::*;
     use crate::{default_sync_config, ChainState, SyncEngine};
 
-    #[derive(serde::Deserialize)]
-    struct FixtureFile<T> {
-        vectors: Vec<T>,
-    }
-
-    #[derive(Clone, serde::Deserialize)]
-    struct FixtureUtxo {
-        txid: String,
-        vout: u32,
-        value: u64,
-        covenant_type: u16,
-        covenant_data: String,
-        creation_height: u64,
-        created_by_coinbase: bool,
-    }
-
-    #[derive(Clone, serde::Deserialize)]
-    struct PositiveTxVector {
-        id: String,
-        tx_hex: String,
-        #[serde(default)]
-        chain_id: Option<String>,
-        height: u64,
-        expect_ok: bool,
-        utxos: Vec<FixtureUtxo>,
-    }
-
-    fn parse_hex32_test(name: &str, value: &str) -> [u8; 32] {
-        let raw = hex::decode(value).unwrap_or_else(|err| panic!("{name} hex: {err}"));
-        assert_eq!(raw.len(), 32, "{name} must be 32 bytes");
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&raw);
-        out
-    }
-
-    fn fixture_utxos_to_map(
-        items: &[FixtureUtxo],
-    ) -> HashMap<rubin_consensus::Outpoint, rubin_consensus::UtxoEntry> {
-        let mut out = HashMap::with_capacity(items.len());
-        for item in items {
-            out.insert(
-                rubin_consensus::Outpoint {
-                    txid: parse_hex32_test("fixture utxo txid", &item.txid),
-                    vout: item.vout,
-                },
-                rubin_consensus::UtxoEntry {
-                    value: item.value,
-                    covenant_type: item.covenant_type,
-                    covenant_data: hex::decode(&item.covenant_data)
-                        .expect("fixture covenant_data hex"),
-                    creation_height: item.creation_height,
-                    created_by_coinbase: item.created_by_coinbase,
-                },
-            );
-        }
-        out
-    }
-
-    fn positive_fixture_vector() -> PositiveTxVector {
-        const UTXO_BASIC_FIXTURE_JSON: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../conformance/fixtures/CV-UTXO-BASIC.json"
-        ));
-        let fixture: FixtureFile<PositiveTxVector> =
-            serde_json::from_str(UTXO_BASIC_FIXTURE_JSON).expect("parse positive fixture");
-        fixture
-            .vectors
-            .into_iter()
-            .find(|vector| vector.id == "CV-U-06")
-            .expect("positive fixture vector")
-    }
-
-    fn fixture_chain_id(chain_id: Option<&str>) -> [u8; 32] {
-        chain_id
-            .map(|value| parse_hex32_test("chain_id", value))
-            .unwrap_or([0u8; 32])
-    }
-
-    fn chain_state_from_positive_fixture(vector: &PositiveTxVector) -> ChainState {
-        let mut state = ChainState::new();
-        state.has_tip = vector.height > 0;
-        state.height = vector.height.saturating_sub(1);
-        state.utxos = fixture_utxos_to_map(&vector.utxos);
-        state
-    }
-
-    fn sync_engine_from_positive_fixture(vector: &PositiveTxVector) -> SyncEngine {
-        let mut cfg = default_sync_config(None, fixture_chain_id(vector.chain_id.as_deref()), None);
-        cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
-        SyncEngine::new(chain_state_from_positive_fixture(vector), None, cfg).expect("sync engine")
-    }
+    // PR-1410 wave-2 — removed unused conformance-fixture types and
+    // helpers (`FixtureFile`, `FixtureUtxo`, `PositiveTxVector`,
+    // `parse_hex32_test`, `fixture_utxos_to_map`,
+    // `positive_fixture_vector`, `fixture_chain_id`,
+    // `chain_state_from_positive_fixture`,
+    // `sync_engine_from_positive_fixture`).
+    // The two consumer tests (`positive_fixture_tx_and_meta` builder
+    // and `handle_received_tx_with_valid_floor_compliant_tx_stores_and_relays`)
+    // now build a floor-compliant signed P2PK fixture inline via the
+    // public `signed_conflicting_p2pk_state_and_txs` helper because the
+    // conformance fixture's pre-signed tx (fee=10/weight≈7653) is
+    // sub-floor under the wave-2 `relay_metadata` rolling-floor check.
 
     fn positive_fixture_tx_and_meta() -> (Vec<u8>, crate::txpool::RelayTxMetadata) {
-        let vector = positive_fixture_vector();
-        let tx_bytes = hex::decode(&vector.tx_hex).expect("tx hex");
-        let state = chain_state_from_positive_fixture(&vector);
+        // PR-1410 wave-2 fixture migration: relay_metadata now enforces
+        // the same rolling fee floor as admit_with_metadata (see
+        // rub162_relay_metadata_da_below_rolling_floor_returns_unavailable_matching_admit).
+        // The conformance fixture (fee=10/weight≈7653 ⇒ fee_rate ≈ 0.0013)
+        // is sub-floor under DEFAULT_MEMPOOL_MIN_FEE_RATE=1, and bumping
+        // UTXO values inside the conformance state invalidates the
+        // signature baked into the fixture's pre-signed tx hex. Build
+        // a floor-compliant signed P2PK tx + matching state inline via
+        // the public test_helpers helper (mirrors the admit_* test
+        // migrations); fee = 20_000 - 10 = 19_990 ≫ weight*1.
+        let (state, tx_bytes, _second_tx_unused) =
+            crate::test_helpers::signed_conflicting_p2pk_state_and_txs(20_000, 10, 9);
         let meta = crate::txpool::relay_metadata(
             &tx_bytes,
             &state,
             None,
-            fixture_chain_id(vector.chain_id.as_deref()),
+            crate::genesis::devnet_genesis_chain_id(),
             &crate::txpool::TxPoolConfig::default(),
         )
-        .expect("positive fixture relay metadata");
+        .expect("positive fixture relay metadata (floor-compliant signed P2PK)");
         (tx_bytes, meta)
     }
 
@@ -1040,11 +970,20 @@ mod tests {
     }
 
     #[test]
-    fn handle_received_tx_with_valid_fixture_stores_and_relays() {
-        let vector = positive_fixture_vector();
-        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
-        let tx_bytes = hex::decode(&vector.tx_hex).expect("tx hex");
-        let sync_engine = sync_engine_from_positive_fixture(&vector);
+    fn handle_received_tx_with_valid_floor_compliant_tx_stores_and_relays() {
+        // PR-1410 wave-2 fixture migration: relay_metadata now enforces
+        // the same rolling fee floor as admit_with_metadata. The
+        // conformance fixture (fee=10/weight≈7653) is sub-floor and
+        // would now reject. Use a floor-compliant signed P2PK tx +
+        // matching SyncEngine inline (mirrors the admit_* migration
+        // pattern in txpool.rs); the test purpose (handle_received_tx
+        // stores + relays a valid tx, skips sender, broadcasts to
+        // other) is preserved.
+        let (chain_state, tx_bytes, _second_tx_unused) =
+            crate::test_helpers::signed_conflicting_p2pk_state_and_txs(20_000, 10, 9);
+        let mut cfg = default_sync_config(None, crate::genesis::devnet_genesis_chain_id(), None);
+        cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
+        let sync_engine = SyncEngine::new(chain_state, None, cfg).expect("sync engine");
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
