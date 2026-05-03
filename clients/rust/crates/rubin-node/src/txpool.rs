@@ -2060,16 +2060,20 @@ mod tests {
         //     pool-full / capacity branches.
         //   - reachability: test's goal is the header_lookup failure
         //     path (block_store.get_header_by_hash → Err propagated
-        //     as Unavailable). Need a floor-compliant tx + matching
-        //     state with has_tip=true / height=0 + canonical tip at a
-        //     hash whose header is NOT in the block_store. (header
-        //     lookup happens inside next_block_mtp BEFORE apply_policy
-        //     → BEFORE the post-apply floor check, so a floor-compliant
-        //     fixture is required to reach the header path.)
-        //   - replacement coverage: build a floor-compliant signed
-        //     P2PK tx (input=7700) inline and use chain_state with the
-        //     same has_tip=true / height=0 setup as the original; the
-        //     header_lookup-failure invariant remains under test.
+        //     as Unavailable). header_lookup happens inside
+        //     next_block_mtp which runs BEFORE both apply_policy and
+        //     validate_fee_floor_locked, so floor-compliance is NOT a
+        //     reachability requirement for this branch — any well-formed
+        //     tx with chain_state has_tip=true / height=0 and a
+        //     canonical tip whose header is missing from the
+        //     block_store reaches the header_lookup branch.
+        //   - replacement coverage: build a signed P2PK tx (input=7700)
+        //     inline with chain_state has_tip=true / height=0; the
+        //     input value is left at 7700 only for consistency with the
+        //     general RUB-162 floor-compliant fixture policy across the
+        //     test module (harmless here because reachability does not
+        //     depend on it). The header_lookup-failure invariant remains
+        //     under test.
         let (mut state, raw) = signed_p2pk_state_and_tx(
             7700,
             vec![TxOutput {
