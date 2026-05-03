@@ -2806,15 +2806,14 @@ mod tests {
 
     #[test]
     fn submit_tx_accepts_floor_compliant_p2pk_tx() {
-        let vector = positive_fixture_vector();
-        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
         // RUB-162 Phase A migration rationale (per controller Q2 / Path A
-        // approval 2026-05-03):
+        // approval 2026-05-03; PR-1410 wave-3 Copilot Thread C update):
         //   - old assumption: positive_fixture_vector tx (fee=10/weight=
         //     7653) admits via /submit_tx; pre-RUB-162 admit_with_metadata
         //     did not enforce the rolling fee floor.
         //   - new invariant: admit_with_metadata enforces the rolling fee
-        //     floor (DEFAULT=1) via validate_fee_floor_locked. The
+        //     floor (DEFAULT=1) via the
+        //     `apply_post_consensus_policy_with_floor` helper. The
         //     conformance fixture is sub-floor and admits Unavailable.
         //   - reachability: the test pins /submit_tx returning 200 +
         //     duplicate detection + metrics increment — all of which require
@@ -2829,6 +2828,12 @@ mod tests {
         //     covered by relay_metadata +
         //     admit_rejects_sub_floor_conformance_tx_as_unavailable_with_atomicity
         //     (which asserts Unavailable in txpool.rs).
+        //   - PR-1410 wave-3 Copilot Thread C: removed the
+        //     `let vector = positive_fixture_vector(); assert!(vector.expect_ok, ...);`
+        //     prelude that was vestigial after the migration to
+        //     `floor_compliant_signed_tx_and_state()`. The test no longer
+        //     consumes the conformance fixture, so coupling its assertions
+        //     to CV-U-06 churn would be a stale-fixture coupling bug.
         let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
         let (_tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
         assert_eq!(consumed, raw.len());
