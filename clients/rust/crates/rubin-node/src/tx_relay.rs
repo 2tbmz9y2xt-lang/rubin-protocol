@@ -427,7 +427,7 @@ mod tests {
             crate::genesis::devnet_genesis_chain_id(),
             &crate::txpool::TxPoolConfig::default(),
         )
-        .expect("positive fixture relay metadata (floor-compliant signed P2PK)");
+        .expect("relay_metadata for floor-compliant signed P2PK tx");
         (tx_bytes, meta)
     }
 
