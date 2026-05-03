@@ -435,15 +435,15 @@ impl TxPool {
         self.compact_worst_heap_if_needed();
     }
 
-    // PR-1410 wave-3 — removed `TxPool::validate_fee_floor_locked`
-    // impl-method. After the wave-3 drift-prevention helper extraction
-    // (`apply_post_consensus_policy_with_floor`), both
-    // `admit_with_metadata` and `relay_metadata` go through that helper,
-    // and the free `validate_fee_floor` predicate is the single
-    // source-of-truth call. The impl-method's `_locked` suffix was a
-    // historical TxPool-state convenience that no longer carries
-    // meaning (the predicate is stateless on the cfg field). Tests
-    // call the free `validate_fee_floor` directly.
+    // PR-1410 wave-3 — the historical TxPool impl-method that performed
+    // the rolling-floor check (the `_locked` suffix referred to its
+    // TxPool-state lock convenience) was removed. After the wave-3
+    // drift-prevention helper extraction (`apply_post_consensus_policy_with_floor`),
+    // both `admit_with_metadata` and `relay_metadata` go through that
+    // helper, and the free `validate_fee_floor` predicate is the single
+    // source-of-truth call. The historical `_locked` suffix no longer
+    // carries meaning — the predicate is stateless on the cfg field.
+    // Tests call the free `validate_fee_floor` directly.
 
     fn seed_worst_heap(&mut self) {
         let max_stale_tail = self.txs.len().saturating_add(1);
@@ -540,7 +540,7 @@ pub(crate) fn relay_metadata(
     // and the admit path (`admit_with_metadata`) cannot drift again.
     // Wave-2 already fixed one drift instance (relay_metadata had
     // skipped the rolling-floor check entirely while admit enforced it
-    // via `validate_fee_floor_locked`); the shared helper makes that
+    // via `validate_fee_floor`); the shared helper makes that
     // class of drift impossible by construction.
     let (weight, _, _) = tx_weight_and_stats_public(&tx)
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
@@ -734,14 +734,13 @@ fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
     (fee as u128) < required
 }
 
-/// Free-function wrapper around the rolling-relay-floor predicate so
-/// both `TxPool::validate_fee_floor_locked` (impl-method on the admit
-/// path) and `relay_metadata` (free function on the relay path) share
-/// one source-of-truth check. Returns `Unavailable` (transient /
-/// retryable) on rolling-floor failure, mirroring Go
-/// `validateFeeFloorLocked` at clients/go/node/mempool.go:957-967. The
-/// `DEFAULT_MEMPOOL_MIN_FEE_RATE` clamp lives inside
-/// `fee_rate_below_floor` (Go-parity at
+/// Free-function predicate enforcing the rolling-relay-floor invariant
+/// shared by `admit_with_metadata` and `relay_metadata` via
+/// `apply_post_consensus_policy_with_floor` so both paths use one
+/// source-of-truth check. Returns `Unavailable` (transient / retryable)
+/// on rolling-floor failure, mirroring Go `validateFeeFloorLocked` at
+/// clients/go/node/mempool.go:957-967. The `DEFAULT_MEMPOOL_MIN_FEE_RATE`
+/// clamp lives inside `fee_rate_below_floor` (Go-parity at
 /// clients/go/node/mempool.go:1425-1427); the error message surfaces
 /// the post-clamp value for operator clarity.
 fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
@@ -866,9 +865,11 @@ pub(crate) fn reject_da_anchor_tx_policy(
     if da_bytes == 0 {
         // Non-DA transaction: the helper only enforces the DA half of the
         // Stage C admission contract. Non-DA relay-fee floor enforcement
-        // is now performed by `TxPool::validate_fee_floor_locked` (defined
-        // below), invoked from `TxPool::admit_with_metadata` AFTER this
-        // helper's `apply_policy` returns Ok — mirroring Go's
+        // is now performed by the free `validate_fee_floor` predicate
+        // (defined below), invoked inside
+        // `apply_post_consensus_policy_with_floor` which both
+        // `TxPool::admit_with_metadata` and `relay_metadata` call AFTER
+        // this helper's `apply_policy` returns Ok — mirroring Go's
         // `validateCapacityAdmissionLocked` calling `validateFeeFloorLocked`
         // at clients/go/node/mempool.go:1018-1024. Both `admit_with_metadata`
         // and `relay_metadata` zero-out the rolling floor before invoking
@@ -1360,10 +1361,10 @@ mod tests {
         //     tx; pre-RUB-162 admit_with_metadata did not enforce the rolling
         //     fee floor as a separate Unavailable classifier.
         //   - new invariant: admit_with_metadata classifies relay-floor
-        //     failure as Unavailable via validate_fee_floor_locked (mirrors
+        //     failure as Unavailable via validate_fee_floor (mirrors
         //     Go validateFeeFloorLocked). The conformance fixture has fee=10
         //     weight=7653 (fee_rate ≈ 0.0013, far below DEFAULT=1) and the
-        //     floor cannot be lowered via cfg because validate_fee_floor_locked
+        //     floor cannot be lowered via cfg because validate_fee_floor
         //     clamps to DEFAULT (Go parity).
         //   - why it reaches policy path: tx is well-formed; floor check is
         //     after apply_policy.
@@ -1557,7 +1558,7 @@ mod tests {
         //     reaches the pool-full ordering check and admit returns
         //     Unavailable("tx pool full") because the pre-RUB-162
         //     admit_with_metadata had no rolling-floor classification.
-        //   - new invariant: validate_fee_floor_locked runs BEFORE the
+        //   - new invariant: validate_fee_floor runs BEFORE the
         //     pool-full check (Go validateCapacityAdmissionLocked order
         //     at clients/go/node/mempool.go:1020-1024). Sub-floor
         //     candidates fail the floor check first.
@@ -1687,14 +1688,14 @@ mod tests {
         //     the rolling fee floor; the test exercised eviction-ordering.
         //   - new invariant: admit_with_metadata enforces the rolling fee
         //     floor (DEFAULT_MEMPOOL_MIN_FEE_RATE=1) via
-        //     validate_fee_floor_locked → Unavailable when fee/weight < 1.
+        //     validate_fee_floor → Unavailable when fee/weight < 1.
         //   - why it reaches policy path: tx is well-formed; floor check
         //     is after apply_policy, before eviction.
         //   - replacement coverage: input bumped to 7661 so fee = 7661 - 8
         //     = 7653 ≥ weight (≈7653) ⇒ fee/weight ≥ 1 ⇒ passes the
         //     default floor; eviction-ordering invariant remains under test.
         //     Cfg-zero opt-out is impossible because the floor is clamped
-        //     to DEFAULT inside validate_fee_floor_locked (Go parity).
+        //     to DEFAULT inside validate_fee_floor (Go parity).
         let (state, raw) = signed_p2pk_state_and_tx(
             7661,
             vec![TxOutput {
@@ -1755,7 +1756,7 @@ mod tests {
         //     the rolling fee floor; the test exercised heap-state
         //     preservation across reject + admit cycle.
         //   - new invariant: admit_with_metadata enforces the rolling fee
-        //     floor via validate_fee_floor_locked → Unavailable.
+        //     floor via validate_fee_floor → Unavailable.
         //   - why it reaches policy path: txs are well-formed; floor check
         //     is after apply_policy.
         //   - replacement coverage: input_value bumped to make fee_rate ≥ 1
@@ -1780,7 +1781,7 @@ mod tests {
             Vec::new(),
         );
         // Worse candidate: fee = 7662 - 9 = 7653; weight ≈ 7653 → fee_rate
-        // = 1.0. Above floor (passes validate_fee_floor_locked) but below
+        // = 1.0. Above floor (passes validate_fee_floor) but below
         // worst pool entry's fee_rate (2.0); pool-full eviction comparator
         // rejects with Unavailable.
         let (state_worse, raw_worse) = signed_p2pk_state_and_tx(
@@ -1979,7 +1980,7 @@ mod tests {
         //     did not enforce the rolling fee floor on non-DA txs.
         //   - new invariant: admit_with_metadata enforces the rolling fee
         //     floor (DEFAULT_MEMPOOL_MIN_FEE_RATE=1) for every admission
-        //     via validate_fee_floor_locked.
+        //     via validate_fee_floor.
         //   - reachability: tx is well-formed (parses, basic checks pass);
         //     floor check is after apply_policy. Original test goal is to
         //     exercise remove_conflicting_inputs via a previously-admitted
@@ -2196,7 +2197,7 @@ mod tests {
         //     7653) reaches next_block_mtp -> get_header_by_hash which
         //     fails with "read header"; pre-RUB-162 admit_with_metadata
         //     did not enforce the rolling fee floor at all.
-        //   - new invariant: validate_fee_floor_locked runs AFTER
+        //   - new invariant: validate_fee_floor runs AFTER
         //     apply_policy as the post-apply Go-parity placement
         //     (mirrors clients/go/node/mempool.go:1020-1024
         //     validateCapacityAdmissionLocked called from
@@ -2209,7 +2210,7 @@ mod tests {
         //     path (block_store.get_header_by_hash → Err propagated
         //     as Unavailable). header_lookup happens inside
         //     next_block_mtp which runs BEFORE both apply_policy and
-        //     validate_fee_floor_locked, so floor-compliance is NOT a
+        //     validate_fee_floor, so floor-compliance is NOT a
         //     reachability requirement for this branch — any well-formed
         //     tx with chain_state has_tip=true / height=0 and a
         //     canonical tip whose header is missing from the
@@ -2318,7 +2319,7 @@ mod tests {
         //     fee < relay-floor-or-DA-required (whichever was higher).
         //   - new invariant: apply_policy (containing the DA helper
         //     with cfg-zero override) runs BEFORE
-        //     validate_fee_floor_locked. With cfg-zero the DA helper
+        //     validate_fee_floor. With cfg-zero the DA helper
         //     checks fee >= max(0, da_required) = da_required, leaving
         //     DA-side classification intact while the rolling relay
         //     floor is enforced separately AFTER apply_policy. To pin
@@ -2868,8 +2869,9 @@ mod tests {
         // Non-DA tx (tx_kind=0, no DaChunkCore, no da_payload) must be admitted
         // by reject_da_anchor_tx_policy without applying any DA term, even with
         // aggressive rate config. Non-DA relay-fee floor enforcement now lives
-        // in TxPool::validate_fee_floor_locked (defined above) and runs from
-        // admit_with_metadata AFTER apply_policy returns Ok — mirroring Go's
+        // in the free validate_fee_floor predicate, invoked inside
+        // apply_post_consensus_policy_with_floor (called from admit_with_metadata
+        // AFTER apply_policy returns Ok) — mirroring Go's
         // validateCapacityAdmissionLocked → validateFeeFloorLocked split at
         // clients/go/node/mempool.go:1018-1024. This helper only validates the
         // DA half of the Stage C contract and intentionally short-circuits for
@@ -2922,7 +2924,7 @@ mod tests {
     use super::{fee_rate_below_floor, validate_fee_floor};
 
     /// P1 #4 fix — DA tx whose DA fee passes but rolling relay floor fails
-    /// must return Unavailable from validate_fee_floor_locked, NOT Rejected
+    /// must return Unavailable from validate_fee_floor, NOT Rejected
     /// from reject_da_anchor_tx_policy. Mirrors Go applyPolicyAgainstState
     /// behaviour (clients/go/node/mempool.go:798-833): mempool admit passes
     /// currentMempoolMinFeeRate=0 to the DA helper so the relay-floor
@@ -2931,10 +2933,10 @@ mod tests {
     ///
     /// Reachability: tx is well-formed (parses, basic+canonical checks pass,
     /// inputs not double-spent), DA-side floor configured to 0 so DA helper
-    /// short-circuits Ok, then validate_fee_floor_locked rejects on the
+    /// short-circuits Ok, then validate_fee_floor rejects on the
     /// rolling floor. The TxPoolConfig used has policy_min_da_fee_rate=0 and
     /// policy_da_surcharge_per_byte=0, so the DA helper's required term
-    /// is 0 — the only failing path is the new validate_fee_floor_locked.
+    /// is 0 — the only failing path is the new validate_fee_floor.
     #[test]
     fn rub162_admit_da_below_rolling_floor_returns_unavailable_not_rejected() {
         // Build a DA tx with low fee_rate (fee=1, weight ≈ 7653 from ML-DSA
@@ -2960,7 +2962,7 @@ mod tests {
         );
         assert!(
             err.message.contains("mempool fee below rolling minimum"),
-            "error message must come from validate_fee_floor_locked, not DA helper; got: {}",
+            "error message must come from validate_fee_floor, not DA helper; got: {}",
             err.message
         );
     }
@@ -2972,12 +2974,12 @@ mod tests {
     ///
     /// Reachability: tx is well-formed; DA-side terms force a non-zero
     /// required fee that the tx fails. apply_policy returns Err mapped
-    /// to Rejected before validate_fee_floor_locked is reached.
+    /// to Rejected before validate_fee_floor is reached.
     #[test]
     fn rub162_admit_da_below_da_floor_returns_rejected() {
         // Per RUB-162 RESP P1 #4 ordering: apply_policy (containing the
         // DA helper with cfg-zero override) runs BEFORE
-        // validate_fee_floor_locked. To pin the DA-side rejection path,
+        // validate_fee_floor. To pin the DA-side rejection path,
         // build a fixture that FAILS the DA-side terms
         // (fee < da_bytes * (min_da + surcharge)). The fixture also
         // PASSES the relay floor (fee >= weight) defensively — under
@@ -3276,7 +3278,7 @@ mod tests {
         assert!(!fee_rate_below_floor(7653, 7653, 1));
     }
 
-    /// P1 #4 + clamp regression — `validate_fee_floor_locked` propagates
+    /// P1 #4 + clamp regression — `validate_fee_floor` propagates
     /// a cfg-seeded zero into `fee_rate_below_floor`, which itself clamps
     /// to DEFAULT_MEMPOOL_MIN_FEE_RATE per Go `feeRateBelowFloor`
     /// (clients/go/node/mempool.go:1421-1434, with the in-helper clamp
@@ -3335,7 +3337,7 @@ mod tests {
             policy_da_surcharge_per_byte: 1,
             ..TxPoolConfig::default()
         };
-        // admit must reject with Unavailable from validate_fee_floor_locked.
+        // admit must reject with Unavailable from validate_fee_floor.
         let mut pool = TxPool::new_with_config(cfg.clone());
         let admit_err = pool
             .admit(&raw, &state, None, [0u8; 32])
@@ -3518,7 +3520,7 @@ mod tests {
         assert_eq!(
             err.kind,
             TxPoolAdmitErrorKind::Rejected,
-            "DA-rejection class must win when apply_policy runs before validate_fee_floor_locked; got kind={:?} message={}",
+            "DA-rejection class must win when apply_policy runs before validate_fee_floor; got kind={:?} message={}",
             err.kind,
             err.message
         );
@@ -3567,7 +3569,7 @@ mod tests {
         assert_eq!(
             err.kind,
             TxPoolAdmitErrorKind::Rejected,
-            "CORE_EXT pre-activation class must win when apply_policy runs before validate_fee_floor_locked; got kind={:?} message={}",
+            "CORE_EXT pre-activation class must win when apply_policy runs before validate_fee_floor; got kind={:?} message={}",
             err.kind,
             err.message
         );

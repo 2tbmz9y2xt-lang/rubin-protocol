@@ -286,7 +286,7 @@ pub fn fresh_txpool_fixture() -> (ChainState, Vec<u8>) {
     //     rolling fee floor.
     //   - new invariant: admit_with_metadata enforces the rolling fee
     //     floor (DEFAULT_MEMPOOL_MIN_FEE_RATE=1) via
-    //     validate_fee_floor_locked.
+    //     validate_fee_floor.
     //   - reachability: tx is well-formed; floor check is reached after
     //     apply_policy. Both the integration test (admit) and
     //     benchmarks (admit + relay metadata) traverse this path.

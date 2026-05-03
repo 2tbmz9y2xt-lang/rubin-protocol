@@ -2361,7 +2361,7 @@ mod tests {
         //     pre-RUB-162 admit_with_metadata did not enforce the rolling
         //     fee floor.
         //   - new invariant: admit_with_metadata enforces the rolling fee
-        //     floor (DEFAULT=1) via validate_fee_floor_locked.
+        //     floor (DEFAULT=1) via validate_fee_floor.
         //   - reachability: pool.admit reaches the txpool admission path;
         //     the test then asserts handle_block evicts the confirmed tx
         //     from the shared runtime pool.

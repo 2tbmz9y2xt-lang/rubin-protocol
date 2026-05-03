@@ -667,7 +667,7 @@ mod tests {
         //     with weight ≈ 7653 admits because pre-RUB-162
         //     admit_with_metadata did not enforce the rolling fee floor.
         //   - new invariant: admit_with_metadata enforces the rolling fee
-        //     floor (DEFAULT=1) via validate_fee_floor_locked.
+        //     floor (DEFAULT=1) via validate_fee_floor.
         //   - reachability: tx is well-formed; pool.admit reaches the
         //     txpool admission path. Mine_n then confirms blocks and
         //     evicts confirmed txs from the pool.

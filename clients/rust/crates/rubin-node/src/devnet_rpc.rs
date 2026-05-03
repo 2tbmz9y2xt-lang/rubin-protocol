@@ -2211,7 +2211,7 @@ mod tests {
     /// chain_state for /submit_tx tests. Pre-RUB-162 tests used the
     /// conformance fixture (fee=10/weight=7653, fee_rate ≪ 1) which the
     /// post-RUB-162 admit_with_metadata correctly rejects with Unavailable
-    /// from validate_fee_floor_locked.
+    /// from validate_fee_floor.
     ///
     /// Returns (chain_state, raw_tx_bytes, chain_id). chain_id is the
     /// devnet genesis chain id — same as the production call site uses.

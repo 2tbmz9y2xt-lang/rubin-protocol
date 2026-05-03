@@ -400,14 +400,14 @@ mod tests {
     // `positive_fixture_vector`, `fixture_chain_id`,
     // `chain_state_from_positive_fixture`,
     // `sync_engine_from_positive_fixture`).
-    // The two consumer tests (`positive_fixture_tx_and_meta` builder
+    // The two consumer tests (`floor_compliant_tx_and_meta` builder
     // and `handle_received_tx_with_valid_floor_compliant_tx_stores_and_relays`)
     // now build a floor-compliant signed P2PK fixture inline via the
     // public `signed_conflicting_p2pk_state_and_txs` helper because the
     // conformance fixture's pre-signed tx (fee=10/weight≈7653) is
     // sub-floor under the wave-2 `relay_metadata` rolling-floor check.
 
-    fn positive_fixture_tx_and_meta() -> (Vec<u8>, crate::txpool::RelayTxMetadata) {
+    fn floor_compliant_tx_and_meta() -> (Vec<u8>, crate::txpool::RelayTxMetadata) {
         // PR-1410 wave-2 fixture migration: relay_metadata now enforces
         // the same rolling fee floor as admit_with_metadata (see
         // rub162_relay_metadata_da_below_rolling_floor_returns_unavailable_matching_admit).
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn announce_tx_with_real_tx_stores_and_broadcasts() {
-        let (tx_bytes, meta) = positive_fixture_tx_and_meta();
+        let (tx_bytes, meta) = floor_compliant_tx_and_meta();
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
             "devnet", 64,
@@ -936,7 +936,7 @@ mod tests {
 
     #[test]
     fn announce_tx_uses_real_metadata_for_relay_pool_priority() {
-        let (tx_bytes, meta) = positive_fixture_tx_and_meta();
+        let (tx_bytes, meta) = floor_compliant_tx_and_meta();
         let incoming_txid = canonical_txid(&tx_bytes).unwrap();
         let existing_txid = [0xEE; 32];
         let relay = TxRelayState {
