@@ -322,27 +322,35 @@ impl TxPool {
         // into separate error messages so callers/operators can
         // distinguish legitimate eviction-ordering rejection from
         // internal heap invariant violation:
-        //   1a. `current_worst_txid()` returns None while txs.len()
-        //       >= MAX → MAP-vs-HEAP corruption invariant: live `txs`
-        //       at capacity but `worst_heap` lookup yields nothing.
-        //       Surfaced as
-        //       `"tx pool capacity invariant violated: worst_heap empty while txs at MAX"`.
-        //   1b. `current_worst_txid()` returns a txid that does NOT
-        //       resolve to a live `txs` entry → second MAP-vs-HEAP
-        //       corruption invariant: heap pointed at a stale txid the
-        //       map no longer has. Surfaced as
+        //   1.  `current_worst_txid()` returns a txid that does NOT
+        //       resolve to a live `txs` entry → MAP-vs-HEAP corruption
+        //       invariant: heap pointed at a stale txid the map no
+        //       longer has. Surfaced as
         //       `"tx pool capacity invariant violated: worst_heap entry missing from txs map"`.
         //   2.  `compare_admit_priority` reports candidate is NOT
         //       strictly greater than worst → routine eviction-ordering
         //       rejection matching Go's
         //       `"mempool capacity candidate rejected by eviction ordering"`
         //       at clients/go/node/mempool.go:1028-1030 verbatim.
+        //
+        // The historical `current_worst_txid()` returns None production
+        // error branch has been removed: it was unreachable by
+        // construction in this caller. `current_worst_txid()` always
+        // invokes `seed_worst_heap()`, which rebuilds `worst_heap` from
+        // `self.txs` whenever the heap is empty or out of sync; we only
+        // enter this block when `self.txs.len() >= MAX_TX_POOL_TRANSACTIONS > 0`.
+        // After the rebuild every heap entry pairs with a fresh
+        // `heap_seqs` entry, so the peek/pop loop inside
+        // `current_worst_txid()` cannot exhaust the heap to None. The
+        // `expect()` below documents that internal invariant; a panic
+        // here would indicate a regression in `seed_worst_heap()`
+        // itself.
         if self.txs.len() >= MAX_TX_POOL_TRANSACTIONS {
-            let Some(worst_txid) = self.current_worst_txid() else {
-                return Err(unavailable(
-                    "tx pool capacity invariant violated: worst_heap empty while txs at MAX",
-                ));
-            };
+            let worst_txid = self.current_worst_txid().expect(
+                "current_worst_txid is None only when self.txs is empty; \
+                 this branch is gated on self.txs.len() >= MAX_TX_POOL_TRANSACTIONS \
+                 and seed_worst_heap rebuilds worst_heap from non-empty txs",
+            );
             let Some(worst_entry) = self.txs.get(&worst_txid) else {
                 return Err(unavailable(
                     "tx pool capacity invariant violated: worst_heap entry missing from txs map",
