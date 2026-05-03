@@ -603,14 +603,16 @@ pub(crate) fn relay_metadata(
 ///   - parse_tx + canonical bytes check + apply_non_coinbase_tx_basic_update
 ///     must complete BEFORE this helper (signature verification +
 ///     consensus state validation are upstream).
-///   - `fee`, `weight`, and `da_bytes` are extracted by the caller
-///     from a single `tx_weight_and_stats_public(tx)` call (admit
-///     reads them at the start of the function; relay extracts them
-///     between apply_non_coinbase and this helper). The same
-///     `(weight, da_bytes)` tuple is passed straight through to
+///   - `weight` and `da_bytes` are extracted by the caller from a
+///     single `tx_weight_and_stats_public(tx)` call (admit reads them
+///     at the start of the function; relay extracts them between
+///     apply_non_coinbase and this helper). `fee` is computed
+///     separately by the upstream `apply_non_coinbase_tx_basic_update_*`
+///     step (admit/relay receive it as `summary.fee`). The same
+///     `(weight, da_bytes)` pair is passed straight through to
 ///     `apply_policy` and the same `weight` is reused by
-///     `validate_fee_floor`, so DA-side and rolling-floor
-///     classifications operate on identical values (RUB-167
+///     `validate_fee_floor`, so the DA-side and rolling-floor
+///     classifications operate on identical `weight` values (RUB-167
 ///     single-walk invariant).
 ///   - The miner caller (`reject_candidate`) deliberately does NOT
 ///     use this helper; miner has its own policy_cfg construction
