@@ -3061,6 +3061,31 @@ mod tests {
             .expect("DA tx above both floors must admit");
         assert_eq!(pool.len(), 1);
         assert!(pool.txs.contains_key(&txid));
+        // PR-1410 wave-7 — prove the `_with_indexes` claim in the test
+        // name. Admit must populate ALL FOUR secondary indexes per the
+        // Phase A atomicity invariant (`insert_entry` at txpool.rs:420-434
+        // populates `spenders` / `heap_seqs` / `worst_heap` / `txs`
+        // together). Without these assertions the test would still pass
+        // even if `insert_entry` silently stopped updating one of the
+        // secondary indexes — leaving the atomicity / index-invariant
+        // path unpinned. The fixture is single-input single-output
+        // (`signed_p2pk_state_and_tx` at txpool.rs:1249-1275 inserts one
+        // outpoint), so every index size is exactly 1 after admit.
+        assert_eq!(
+            pool.spenders.len(),
+            1,
+            "single-input tx must populate exactly one spenders entry"
+        );
+        assert_eq!(
+            pool.heap_seqs.len(),
+            1,
+            "tx must be tracked in heap_seqs after insert_entry"
+        );
+        assert_eq!(
+            pool.worst_heap.len(),
+            1,
+            "tx must be pushed to worst_heap after insert_entry"
+        );
     }
 
     /// P1 #2 atomicity through public admit — Unavailable on relay-floor
@@ -3497,9 +3522,15 @@ mod tests {
     /// `mempool fee below rolling minimum` message).
     #[test]
     fn rub162_admit_sub_floor_da_anchor_classifies_as_da_rejected_not_floor_unavailable() {
-        // fee=10 ≪ weight (≈70 = MIN witness for DA tx) ⇒ sub-floor.
-        // Default conformance da_bytes ≈ 70. DA-required = da_bytes *
-        // (min_da=200 + surcharge=200) = ~28_000 ≫ fee=10 ⇒ sub-DA.
+        // weight ≈ 7600 from ML-DSA-87 witness + 64-byte da_payload
+        // (same shape as `rub162_admit_da_above_both_floors_admits_with_indexes`
+        // at lines 3037-3051). fee=10 ≪ weight ⇒ sub-floor under
+        // DEFAULT_MEMPOOL_MIN_FEE_RATE=1. da_bytes ≈ 70 (DA chunk core
+        // + 64-byte payload). DA-required = da_bytes * (min_da=200 +
+        // surcharge=200) ≈ 28_000 ≫ fee=10 ⇒ sub-DA. The asserts
+        // below pin only the test-relevant inequalities (10 < weight,
+        // 10 < required_da) — the ≈ values are illustrative bounds
+        // for the sub-floor / sub-DA classification reasoning.
         let (state, raw, weight, da_bytes) = build_signed_da_tx_with_fee(10, vec![0x55; 64]);
         assert!(
             10 < weight,
