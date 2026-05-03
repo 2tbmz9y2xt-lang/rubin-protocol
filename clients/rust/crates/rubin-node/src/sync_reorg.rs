@@ -755,6 +755,20 @@ mod tests {
 
     #[test]
     fn apply_block_with_reorg_tip_extension_removes_conflicting_pool_spends() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: signed_conflicting_p2pk_state_and_txs(20,10,9)
+        //     produces tx with fee=10/weight≈7653 that admits because
+        //     pre-RUB-162 admit_with_metadata did not enforce the rolling
+        //     fee floor.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor.
+        //   - reachability: pool.admit reaches the txpool admission path;
+        //     apply_block_with_reorg's tx_pool_cleanup then exercises the
+        //     conflict-removal path on tip-extension.
+        //   - replacement coverage: input bumped to 7700 so both txs have
+        //     floor-compliant fees. Conflict-removal-on-tip-extension
+        //     invariant remains under test.
         let (mut engine, dir) = engine_with_store("rubin-reorg-tip-conflict");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
         engine
@@ -762,7 +776,7 @@ mod tests {
             .expect("genesis");
         engine.cfg.chain_id = devnet_genesis_chain_id();
 
-        let (state, admitted_raw, block_raw) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let (state, admitted_raw, block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
         engine.chain_state.utxos = state.utxos.clone();
 
         let mut pool = TxPool::new();
@@ -907,6 +921,24 @@ mod tests {
 
     #[test]
     fn native_suites_cache_invalidated_on_reorg() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: UTXO value=20, tx output_value=10 → fee=10,
+        //     weight ≈ 7653 admits because pre-RUB-162 admit_with_metadata
+        //     did not enforce the rolling fee floor.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor (DEFAULT=1) via validate_fee_floor.
+        //   - reachability: tx is well-formed (signed_a/signed_b); admitted
+        //     to the pool before reorg. The reorg test then exercises
+        //     native suite cache invalidation when the canonical chain
+        //     swaps.
+        //   - replacement coverage: both UTXOs bumped from value=20 to
+        //     value=20_000 so each tx fee = 20000-10 = 19990 (and
+        //     20000-9 = 19991) ≥ weight (~7653) — extra headroom over
+        //     the minimal floor-compliant value (~7700) to keep the
+        //     rotated-suite-witness fees comfortably above the floor
+        //     across both branches of the reorg path. Native-suite-
+        //     cache-invalidation-on-reorg invariant remains under test.
         let (mut engine, dir) = engine_with_store("rubin-reorg-native-suite");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
         engine
@@ -929,7 +961,7 @@ mod tests {
         state.utxos.insert(
             outpoint_a.clone(),
             UtxoEntry {
-                value: 20,
+                value: 20_000,
                 covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
                 covenant_data: p2pk_covenant_data_for_pubkey(&signer_a.pubkey_bytes()),
                 creation_height: 0,
@@ -939,7 +971,7 @@ mod tests {
         state.utxos.insert(
             outpoint_b.clone(),
             UtxoEntry {
-                value: 20,
+                value: 20_000,
                 covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
                 covenant_data: p2pk_covenant_data_for_pubkey(&signer_b.pubkey_bytes()),
                 creation_height: 0,

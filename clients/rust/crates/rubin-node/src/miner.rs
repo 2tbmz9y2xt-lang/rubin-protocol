@@ -661,8 +661,21 @@ mod tests {
 
     #[test]
     fn mine_n_evicts_confirmed_pool_transactions_between_blocks() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: signed_p2pk_state_and_tx(20, 10) → fee=10
+        //     with weight ≈ 7653 admits because pre-RUB-162
+        //     admit_with_metadata did not enforce the rolling fee floor.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor (DEFAULT=1) via validate_fee_floor.
+        //   - reachability: tx is well-formed; pool.admit reaches the
+        //     txpool admission path. Mine_n then confirms blocks and
+        //     evicts confirmed txs from the pool.
+        //   - replacement coverage: input bumped to 7700 so fee = 7700 - 10
+        //     = 7690 ≥ weight (≈7653). The mine-then-evict invariant
+        //     remains under test.
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-pool-evict");
-        let (state, raw) = signed_p2pk_state_and_tx(20, 10);
+        let (state, raw) = signed_p2pk_state_and_tx(7700, 10);
         sync.chain_state.utxos = state.utxos;
 
         let mut pool = TxPool::new();
@@ -687,9 +700,23 @@ mod tests {
 
     #[test]
     fn mine_one_evicts_conflicting_pool_transaction_for_explicit_candidate() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: signed_conflicting_p2pk_state_and_txs(20,10,9)
+        //     produced two txs with fee=10/fee=11 that admitted because
+        //     pre-RUB-162 admit_with_metadata did not enforce the rolling
+        //     fee floor.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor.
+        //   - reachability: pool.admit on the conflicting_raw reaches the
+        //     txpool admission path; mine_one then includes the explicit
+        //     candidate which conflicts with the pool entry, evicting it.
+        //   - replacement coverage: input bumped to 7700 so both txs have
+        //     fees ≥ weight (~7653). The conflicting-eviction-on-explicit-
+        //     candidate invariant remains under test.
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-explicit-conflict");
         let (state, explicit_raw, conflicting_raw) =
-            signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+            signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
         sync.chain_state.utxos = state.utxos.clone();
 
         let mut pool = TxPool::new();
