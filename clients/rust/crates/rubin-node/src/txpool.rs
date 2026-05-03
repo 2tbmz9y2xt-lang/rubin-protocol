@@ -302,7 +302,11 @@ impl TxPool {
         // construction because it has no rolling-floor equivalent —
         // the template needs to skip a tx whenever it fails any floor
         // (Go `applyPolicyAgainstState` mempool.go:815-818).
-        apply_post_consensus_policy_with_floor(
+        // Single statement so coverage instrumentation attributes the
+        // whole post-consensus policy step uniformly (avoids per-arg
+        // line gaps in tarpaulin's diff coverage output for the
+        // newly-added `da_bytes` argument).
+        let policy_result = apply_post_consensus_policy_with_floor(
             &tx,
             &chain_state.utxos,
             next_height,
@@ -310,7 +314,8 @@ impl TxPool {
             weight,
             da_bytes,
             &self.cfg,
-        )?;
+        );
+        policy_result?;
 
         let entry = TxPoolEntry {
             raw: tx_bytes.to_vec(),
@@ -562,7 +567,9 @@ pub(crate) fn relay_metadata(
     // the rolling-floor classifications inside the wrapper.
     let (weight, da_bytes, _) = tx_weight_and_stats_public(&tx)
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-    apply_post_consensus_policy_with_floor(
+    // Single statement so coverage instrumentation attributes the
+    // whole post-consensus policy step uniformly (mirror of admit_with_metadata).
+    let policy_result = apply_post_consensus_policy_with_floor(
         &tx,
         &chain_state.utxos,
         next_height,
@@ -570,7 +577,8 @@ pub(crate) fn relay_metadata(
         weight,
         da_bytes,
         cfg,
-    )?;
+    );
+    policy_result?;
 
     Ok(RelayTxMetadata {
         fee: summary.fee,
