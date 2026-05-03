@@ -286,27 +286,24 @@ impl TxPool {
                 registry,
             )
             .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-        // RUB-162 P1 #4 — DA error class ordering parity with Go
-        // `applyPolicyAgainstState` (clients/go/node/mempool.go:798-833):
-        // the mempool admit path passes `currentMempoolMinFeeRate=0` to the
-        // DA helper so that `max(relay_fee_floor, da_required_fee)` collapses
-        // to `da_required_fee`, leaving DA-side classification intact while
-        // delegating rolling relay-fee floor classification to a separate
-        // `validate_fee_floor_locked` call below that returns the symmetric
-        // `Unavailable` (transient/retryable) outcome non-DA tx receive. The
-        // miner caller (`reject_candidate`) keeps the live floor in its own
-        // policy_cfg construction because it has no `validate_fee_floor_locked`
-        // equivalent — the template needs to skip a tx whenever it fails any
-        // floor.
-        let mut policy_cfg = self.cfg.clone();
-        policy_cfg.policy_current_mempool_min_fee_rate = 0;
-        apply_policy(&tx, &chain_state.utxos, next_height, &policy_cfg).map_err(rejected)?;
-        // Rolling relay-floor classification: returns `Unavailable` so the
-        // failure class matches what non-DA tx receive (Go
-        // `validateFeeFloorLocked` clients/go/node/mempool.go:957-967) and
-        // so callers can back off rather than treating the rejection as
-        // terminal.
-        self.validate_fee_floor_locked(summary.fee, weight)?;
+        // RUB-162 PR-1410 wave-3 drift-prevention: delegate the
+        // post-consensus policy sequence (cfg-clone with cfg-zero
+        // override → apply_policy → rolling-floor enforcement) to the
+        // shared `apply_post_consensus_policy_with_floor` helper so
+        // both `admit_with_metadata` and `relay_metadata` cannot drift
+        // again (Copilot PR-1410 wave-2 Thread 4 finding). The miner
+        // caller (`reject_candidate`) keeps its own policy_cfg
+        // construction because it has no rolling-floor equivalent —
+        // the template needs to skip a tx whenever it fails any floor
+        // (Go `applyPolicyAgainstState` mempool.go:815-818).
+        apply_post_consensus_policy_with_floor(
+            &tx,
+            &chain_state.utxos,
+            next_height,
+            summary.fee,
+            weight,
+            &self.cfg,
+        )?;
 
         let entry = TxPoolEntry {
             raw: tx_bytes.to_vec(),
@@ -438,28 +435,15 @@ impl TxPool {
         self.compact_worst_heap_if_needed();
     }
 
-    /// Rejects entries whose fee/weight rate is below the rolling minimum
-    /// fee rate. Mirrors Go `validateFeeFloorLocked`
-    /// (clients/go/node/mempool.go:957-967). Returns `Unavailable`
-    /// (transient/retryable) so callers can back off rather than treating
-    /// the relay-floor rejection as terminal. This is the Phase A fix for
-    /// the RUB-162 / hostile RESP P1 #4 finding: relay-floor rejection is
-    /// classified separately from DA-side rejection. The corresponding Go
-    /// source path is documented above (clients/go/node/mempool.go:957-967).
-    ///
-    /// Reads the live floor from `cfg.policy_current_mempool_min_fee_rate`.
-    /// Production callers using `TxPool::admit` / `admit_with_metadata` go
-    /// through this check after `apply_policy` so the rolling floor is
-    /// enforced independent of the DA helper. The miner template caller
-    /// (`miner::reject_candidate`) keeps its own floor handling because it
-    /// has no `validate_fee_floor_locked` equivalent — see
-    /// `clients/go/node/mempool.go:815-818`.
-    fn validate_fee_floor_locked(&self, fee: u64, weight: u64) -> Result<(), TxPoolAdmitError> {
-        // Delegate to free `validate_fee_floor` so both the impl-method
-        // caller (`admit_with_metadata`) and the free-function caller
-        // (`relay_metadata`) share one source-of-truth predicate.
-        validate_fee_floor(fee, weight, self.cfg.policy_current_mempool_min_fee_rate)
-    }
+    // PR-1410 wave-3 — removed `TxPool::validate_fee_floor_locked`
+    // impl-method. After the wave-3 drift-prevention helper extraction
+    // (`apply_post_consensus_policy_with_floor`), both
+    // `admit_with_metadata` and `relay_metadata` go through that helper,
+    // and the free `validate_fee_floor` predicate is the single
+    // source-of-truth call. The impl-method's `_locked` suffix was a
+    // historical TxPool-state convenience that no longer carries
+    // meaning (the predicate is stateless on the cfg field). Tests
+    // call the free `validate_fee_floor` directly.
 
     fn seed_worst_heap(&mut self) {
         let max_stale_tail = self.txs.len().saturating_add(1);
@@ -549,45 +533,77 @@ pub(crate) fn relay_metadata(
             registry,
         )
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-    // RUB-162 P1 #1 — DA error class ordering parity for the relay
-    // metadata path. Go `RelayMetadata` routes through
-    // `checkParsedTransactionWithSnapshot` -> `applyPolicyAgainstState`
-    // (clients/go/node/mempool.go:472-495 -> 785-853), and
-    // `applyPolicyAgainstState` always passes
-    // `currentMempoolMinFeeRate=0` to `RejectDaAnchorTxPolicy` at
-    // clients/go/node/mempool.go:823. Without the same zero override, a DA tx that pays
-    // the DA-side floor but is below the rolling relay floor surfaces
-    // here as `Rejected("DA fee below Stage C floor ... relay_fee_floor=...")`
-    // diverging from Go's relay-metadata contract.
-    let mut policy_cfg = cfg.clone();
-    policy_cfg.policy_current_mempool_min_fee_rate = 0;
-    apply_policy(&tx, &chain_state.utxos, next_height, &policy_cfg).map_err(rejected)?;
-
-    // RUB-162 PR-1410 wave-2 fix — Rolling relay-floor enforcement on
-    // the relay path so `relay_metadata` is NOT weaker than `admit`.
-    // Without this, the cfg-zero override above lets a DA tx that pays
-    // the DA-side floor but is below the rolling relay floor pass the
-    // relay-metadata gate, while `TxPool::admit` rejects the same tx
-    // as `Unavailable`. Production peer relay (`tx_relay::handle_received_tx`)
-    // uses `relay_metadata` as the gate before re-announcing, so the
-    // mismatch would mean we propagate sub-floor DA tx through the
-    // network even though the local mempool refuses to admit them. Go
-    // avoids the divergence in the full node by re-running mempool
-    // admission via `CanonicalMempoolRelayMetadata` +
-    // `CanonicalMempoolTxPool.Put` — the equivalent here is to call
-    // the same `validate_fee_floor` predicate inline so the matrix is:
-    //   - DA tx fee < DA-required → Rejected (DA helper, above)
-    //   - DA tx fee >= DA-required, fee/weight < rolling floor → Unavailable
-    //   - DA tx fee >= both → Ok (relay metadata returned)
-    // mirroring `admit_with_metadata`.
+    // RUB-162 PR-1410 wave-3 drift-prevention: delegate the
+    // post-consensus policy sequence (cfg-clone with cfg-zero override
+    // → apply_policy → rolling-floor enforcement) to the shared
+    // `apply_post_consensus_policy_with_floor` helper so the relay path
+    // and the admit path (`admit_with_metadata`) cannot drift again.
+    // Wave-2 already fixed one drift instance (relay_metadata had
+    // skipped the rolling-floor check entirely while admit enforced it
+    // via `validate_fee_floor_locked`); the shared helper makes that
+    // class of drift impossible by construction.
     let (weight, _, _) = tx_weight_and_stats_public(&tx)
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-    validate_fee_floor(summary.fee, weight, cfg.policy_current_mempool_min_fee_rate)?;
+    apply_post_consensus_policy_with_floor(
+        &tx,
+        &chain_state.utxos,
+        next_height,
+        summary.fee,
+        weight,
+        cfg,
+    )?;
 
     Ok(RelayTxMetadata {
         fee: summary.fee,
         size: tx_bytes.len(),
     })
+}
+
+/// Shared post-consensus policy sequence used by both
+/// `TxPool::admit_with_metadata` (admit gate) and `relay_metadata`
+/// (relay gate). Mirrors Go's `applyPolicyAgainstState` plus
+/// `validateFeeFloorLocked` pair (clients/go/node/mempool.go:798-833
+/// and mempool.go:957-967). Centralising the cfg-clone, cfg-zero
+/// override, `apply_policy` invocation and rolling-floor enforcement
+/// in one private helper prevents the public-gate-drift class that
+/// PR #1410 wave-2 fixed once already (relay_metadata had skipped the
+/// floor check while admit enforced it).
+///
+/// Order is mandatory and must NOT be changed without updating the
+/// matching Go reference: apply_policy(cfg-zero) runs first to
+/// classify DA-side rejections as Rejected (terminal), then
+/// validate_fee_floor with the original cfg's
+/// `policy_current_mempool_min_fee_rate` runs to classify rolling-
+/// relay-floor rejections as Unavailable (transient/retryable). Both
+/// public callers must use the same predicate so peer relay
+/// (`tx_relay::handle_received_tx`, which gates on `relay_metadata`)
+/// never propagates a tx that local `admit` would reject.
+///
+/// Caller responsibilities (kept out of this helper to preserve
+/// existing call-site semantics):
+///   - parse_tx + canonical bytes check + apply_non_coinbase_tx_basic_update
+///     must complete BEFORE this helper (signature verification +
+///     consensus state validation are upstream).
+///   - `fee` and `weight` are extracted by the caller (admit reads
+///     them at the start of the function; relay extracts weight
+///     between apply_non_coinbase and this helper).
+///   - The miner caller (`reject_candidate`) deliberately does NOT
+///     use this helper; miner has its own policy_cfg construction
+///     because it has no rolling-floor equivalent (Go
+///     `applyPolicyAgainstState` mempool.go:815-818 documents this
+///     same exception).
+fn apply_post_consensus_policy_with_floor(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    next_height: u64,
+    fee: u64,
+    weight: u64,
+    cfg: &TxPoolConfig,
+) -> Result<(), TxPoolAdmitError> {
+    let mut policy_cfg = cfg.clone();
+    policy_cfg.policy_current_mempool_min_fee_rate = 0;
+    apply_policy(tx, utxos, next_height, &policy_cfg).map_err(rejected)?;
+    validate_fee_floor(fee, weight, cfg.policy_current_mempool_min_fee_rate)
 }
 
 impl Default for TxPool {
@@ -2903,7 +2919,7 @@ mod tests {
     // see the `rub162_*` test functions for specifics.
     // ====================================================================
 
-    use super::fee_rate_below_floor;
+    use super::{fee_rate_below_floor, validate_fee_floor};
 
     /// P1 #4 fix — DA tx whose DA fee passes but rolling relay floor fails
     /// must return Unavailable from validate_fee_floor_locked, NOT Rejected
@@ -3267,20 +3283,15 @@ mod tests {
     /// at lines 1425-1427). The error message surfaces the post-clamp
     /// value so operators see the actual decision basis.
     #[test]
-    fn rub162_validate_fee_floor_locked_clamps_cfg_zero_to_default() {
-        let pool = TxPool::new_with_config(TxPoolConfig {
-            policy_current_mempool_min_fee_rate: 0,
-            ..TxPoolConfig::default()
-        });
-        // fee=0 weight=1: helper clamps floor 0 → DEFAULT (1); required = 1*1 = 1; fee<1 → reject.
-        let err = pool
-            .validate_fee_floor_locked(0, 1)
+    fn rub162_validate_fee_floor_clamps_cfg_zero_to_default() {
+        // fee=0 weight=1 cfg_floor=0: helper clamps floor 0 → DEFAULT (1);
+        // required = 1*1 = 1; fee<1 → reject.
+        let err = validate_fee_floor(0, 1, 0)
             .expect_err("helper clamp must enforce DEFAULT even when cfg=0");
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert!(err.message.contains("min_fee_rate=1"));
-        // fee=1 weight=1: exact floor passes.
-        pool.validate_fee_floor_locked(1, 1)
-            .expect("exact floor passes");
+        // fee=1 weight=1 cfg_floor=0: exact floor passes after clamp.
+        validate_fee_floor(1, 1, 0).expect("exact floor passes");
     }
 
     /// PR-1410 wave-2 fix — relay_metadata must NOT be weaker than
