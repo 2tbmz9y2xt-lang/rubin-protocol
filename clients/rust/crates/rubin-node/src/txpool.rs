@@ -266,16 +266,24 @@ impl TxPool {
         let (weight, da_bytes, _) = tx_weight_and_stats_public(&tx)
             .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
 
+        let next_height = next_block_height(chain_state)?;
+        let block_mtp = next_block_mtp(block_store, next_height)?;
+
         // RUB-166 fast-reject: cheap fee-floor precheck for plain P2PK
         // spam BEFORE expensive ML-DSA signature verification in
-        // `apply_non_coinbase_tx_basic_update_*` below. Mirrors Go's
-        // `cheapFeeFloorPrecheck` (clients/go/node/mempool.go:728-749,
-        // RUB-165 PR #1415). The helper bails (`Ok(())`) for any tx
-        // shape it cannot soundly classify (DA / multi-input / non-P2PK
-        // covenant / overspend) and the existing expensive path keeps
-        // its error precedence. Reuses the RUB-167 pre-computed
-        // `weight`. Same `Unavailable` error class + same message
-        // format as `validate_fee_floor`, so the rolling-floor
+        // `apply_non_coinbase_tx_basic_update_*` below, but AFTER
+        // `next_block_height` / `next_block_mtp` so chain-context
+        // failures (height overflow, missing tip MTP, etc.) keep their
+        // existing error precedence. Mirrors Go's `cheapFeeFloorPrecheck`
+        // call site inside `checkTransactionWithSnapshot` at
+        // `clients/go/node/mempool.go:663-682` (RUB-165 PR #1415):
+        // Go also resolves `nextBlockContext`/`nextBlockMTP` first and
+        // only then runs the precheck. The helper bails (`Ok(())`) for
+        // any tx shape it cannot soundly classify (DA / multi-input /
+        // non-P2PK covenant / overspend) and the existing expensive
+        // path keeps its error precedence. Reuses the RUB-167
+        // pre-computed `weight`. Same `Unavailable` error class + same
+        // message format as `validate_fee_floor`, so the rolling-floor
         // classification stays uniform across the fast-reject path and
         // the post-consensus path.
         cheap_fee_floor_precheck(
@@ -284,9 +292,6 @@ impl TxPool {
             weight,
             self.cfg.policy_current_mempool_min_fee_rate,
         )?;
-
-        let next_height = next_block_height(chain_state)?;
-        let block_mtp = next_block_mtp(block_store, next_height)?;
         let active_profiles = self
             .cfg
             .core_ext_deployments
@@ -1265,10 +1270,11 @@ mod tests {
 
     use super::{
         cheap_fee_floor_precheck, compare_admit_priority, compare_entries_for_mining,
-        compare_fee_rate, conflict, fee_precheck_p2pk_input_value, mtp_median, next_block_height,
-        next_block_mtp, reject_core_ext_tx_oversized_payload, reject_da_anchor_tx_policy, rejected,
-        relay_metadata, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry,
-        DEFAULT_MEMPOOL_MIN_FEE_RATE, MAX_TX_POOL_TRANSACTIONS,
+        compare_fee_rate, conflict, fee_precheck_p2pk_input_value, fee_precheck_p2pk_output_value,
+        mtp_median, next_block_height, next_block_mtp, reject_core_ext_tx_oversized_payload,
+        reject_da_anchor_tx_policy, rejected, relay_metadata, unavailable, TxPool,
+        TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, DEFAULT_MEMPOOL_MIN_FEE_RATE,
+        MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -3956,35 +3962,69 @@ mod tests {
         assert_eq!(pool.len(), 0);
     }
 
-    /// Multi-input P2PK below floor: precheck guard
-    /// `tx.inputs.len() != 1` returns `None` from
-    /// `fee_precheck_p2pk_input_value`; precheck defers to expensive
-    /// path. Pins the conservatism rule and exercises the multi-input
-    /// branch (otherwise uncovered by the single-input fixture in tests
-    /// 1/2). Build a tx with 2 inputs by extending the conflict-tx
-    /// fixture's chain state with a second UTXO and assembling a tx
-    /// that consumes both. Without precheck this would still go to the
-    /// expensive path; with precheck it MUST also go there (no
-    /// fast-reject for multi-input shape).
+    /// Conservatism guard `tx.inputs.len() != 1` in
+    /// `fee_precheck_p2pk_input_value` defers BOTH `len == 0` and
+    /// `len > 1` cases. Direct-helper exercise of both branches with
+    /// the single-input fixture mutated in-place. Building a real
+    /// multi-input signed P2PK fixture requires a second-keypair +
+    /// second-UTXO setup that is heavier than the helper-direct branch
+    /// pin and adds no additional safety beyond what this test
+    /// already proves: any non-1 input count returns None, so the
+    /// precheck defers and the expensive path classifies the tx.
     #[test]
-    fn rub166_admit_multi_input_p2pk_skips_precheck() {
-        // Build a 2-input tx via signed_p2pk_state_and_tx using the
-        // existing helper that supports custom inputs. Easier: reuse
-        // the conflict fixture (has 2 candidate txs sharing one input)
-        // and craft state + manual tx with 2 inputs. Skipped — instead
-        // exercise the helper directly for branch coverage.
-        let (mut state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
-        state.has_tip = true;
-        state.height = 1;
+    fn rub166_precheck_defers_when_input_count_not_exactly_one() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
         let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
-        // Direct helper exercise: an artificial 0-input tx mimics the
-        // "len != 1" defer path without needing a multi-input fixture.
-        let mut multi = parsed.clone();
-        multi.inputs.clear();
-        let result = fee_precheck_p2pk_input_value(&multi, &state.utxos);
+        // Branch 1: zero inputs.
+        let mut zero_inputs = parsed.clone();
+        zero_inputs.inputs.clear();
+        let zero_result = fee_precheck_p2pk_input_value(&zero_inputs, &state.utxos);
+        assert!(
+            zero_result.is_none(),
+            "len == 0 must return None so precheck defers; got {:?}",
+            zero_result
+        );
+        // Branch 2: two inputs (duplicate the single input). The second
+        // outpoint may not resolve in utxos but that is irrelevant —
+        // the `len != 1` guard short-circuits before any lookup.
+        let mut two_inputs = parsed.clone();
+        let dup = two_inputs.inputs[0].clone();
+        two_inputs.inputs.push(dup);
+        let multi_result = fee_precheck_p2pk_input_value(&two_inputs, &state.utxos);
+        assert!(
+            multi_result.is_none(),
+            "len > 1 must return None so precheck defers; got {:?}",
+            multi_result
+        );
+    }
+
+    /// Output sum overflow defer: `fee_precheck_p2pk_output_value` uses
+    /// `checked_add` and returns `None` when summing P2PK outputs
+    /// overflows `u64`. The precheck must defer (`Ok(())`) so the
+    /// expensive admission path classifies the tx — fast-rejecting an
+    /// overflow as "below floor" would be wrong (the tx may be
+    /// massively over-funded by an attacker-controlled sum). Direct-
+    /// helper exercise constructs two P2PK outputs whose sum exceeds
+    /// `u64::MAX`.
+    #[test]
+    fn rub166_precheck_defers_on_output_sum_overflow() {
+        use rubin_consensus::TxOutput;
+        let outputs = vec![
+            TxOutput {
+                value: u64::MAX,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: vec![],
+            },
+            TxOutput {
+                value: 1,
+                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
+                covenant_data: vec![],
+            },
+        ];
+        let result = fee_precheck_p2pk_output_value(&outputs);
         assert!(
             result.is_none(),
-            "len != 1 must return None so precheck defers; got {:?}",
+            "u64-overflow output sum must return None so precheck defers; got {:?}",
             result
         );
     }
