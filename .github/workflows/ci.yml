@@ -275,6 +275,34 @@ jobs:
           go-version: '1.25.9'
           cache: true
           cache-dependency-path: clients/go/go.mod
+
+      - name: OpenSSL deterministic ML-DSA-87 signing smoke
+        env:
+          RUBIN_OPENSSL_PREFIX: ${{ env.OPENSSL_DIR }}
+          RUBIN_OPENSSL_MODULES: ${{ env.OPENSSL_MODULES }}
+          RUBIN_OPENSSL_CONF: ${{ env.OPENSSL_CONF }}
+          RUBIN_OPENSSL_FIPS_MODE: only
+          # Preflight already enforced in a dedicated earlier step; skipping
+          # the dev-env.sh re-guard here keeps the wrapper's banner/preflight
+          # chatter out of stdout, so jq parses pure go test -json NDJSON.
+          RUBIN_OPENSSL_SKIP_FIPS_GUARD: '1'
+        run: |
+          set -euo pipefail
+          TEST_NAME=TestSignDigest32ForConformanceFixture_Deterministic
+          OUT="$(mktemp)"
+          scripts/dev-env.sh -- bash -lc "cd clients/go && go test -json -run '^${TEST_NAME}$' ./consensus -count=1" | tee "$OUT"
+          # jq -R 'fromjson?' tolerates any non-JSON line that might appear on
+          # stdout (defense in depth against future wrapper noise) and only
+          # parses well-formed event lines.
+          if jq -Re --arg t "$TEST_NAME" 'fromjson? | select(.Test == $t and .Action == "skip")' < "$OUT" >/dev/null; then
+            echo "ERROR: ${TEST_NAME} was SKIPPED; the OpenSSL runtime/provider does not expose ML-DSA-87 deterministic-mode signing on this lane" >&2
+            exit 1
+          fi
+          if ! jq -Re --arg t "$TEST_NAME" 'fromjson? | select(.Test == $t and .Action == "pass")' < "$OUT" >/dev/null; then
+            echo "ERROR: ${TEST_NAME} did not emit a PASS event; deterministic-mode runtime evidence is missing" >&2
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: rustfmt, clippy
@@ -466,6 +494,11 @@ jobs:
             echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
           } >> "$GITHUB_ENV"
 
+      - name: Verify OpenSSL PQ algorithms
+        run: |
+          openssl version
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
+
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version: '1.25.9'
@@ -625,9 +658,66 @@ jobs:
           cd rubin-formal
           lake env lean --run RubinFormal/Refinement/Main.lean
 
+  conformance_fixtures_drift:
+    name: Conformance fixtures drift check
+    needs: policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Cache OpenSSL 3.5 bundle
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: |
+            ~/.cache/rubin-openssl/bundle-3.5.5
+            ~/.cache/rubin-openssl/work/openssl-3.5.5.tar.gz
+          key: openssl-bundle-${{ runner.os }}-3.5.5-v2
+      - name: Build OpenSSL 3.5.5 bundle
+        run: |
+          set -euo pipefail
+          PREFIX="$HOME/.cache/rubin-openssl/bundle-3.5.5"
+          MODULES_DIR="$PREFIX/lib/ossl-modules"
+          if [ ! -d "$MODULES_DIR" ] && [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          fi
+          if [ ! -x "$PREFIX/bin/openssl" ] || [ ! -f "$PREFIX/ssl/openssl-fips.cnf" ] || [ ! -d "$MODULES_DIR" ]; then
+            OPENSSL_VERSION=3.5.5 PREFIX="$PREFIX" bash scripts/crypto/openssl/build-openssl-bundle.sh
+          fi
+          if [ -d "$PREFIX/lib/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib/ossl-modules"
+          elif [ -d "$PREFIX/lib64/ossl-modules" ]; then
+            MODULES_DIR="$PREFIX/lib64/ossl-modules"
+          else
+            echo "ERROR: OpenSSL modules directory not found under $PREFIX/lib*/ossl-modules" >&2
+            exit 1
+          fi
+          {
+            echo "$PREFIX/bin"
+          } >> "$GITHUB_PATH"
+          {
+            echo "OPENSSL_DIR=$PREFIX"
+            echo "PKG_CONFIG_PATH=$PREFIX/lib64/pkgconfig:$PREFIX/lib/pkgconfig"
+            echo "LD_LIBRARY_PATH=$PREFIX/lib64:$PREFIX/lib"
+            echo "OPENSSL_MODULES=$MODULES_DIR"
+            echo "OPENSSL_CONF=$PREFIX/ssl/openssl-fips.cnf"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify OpenSSL PQ algorithms
+        run: |
+          openssl version
+          openssl list -signature-algorithms | grep -E 'ML-DSA-87'
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: clients/go/go.mod
+          cache: true
+          cache-dependency-path: |
+            clients/go/go.sum
+      - name: Run conformance fixtures drift check
+        run: scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_drift.py
+
   validator:
     name: validator
-    needs: [policy, security_ai, formal, test, formal_refinement]
+    needs: [policy, security_ai, formal, test, formal_refinement, conformance_fixtures_drift]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -639,9 +729,10 @@ jobs:
             [formal]="${{ needs.formal.result }}"
             [test]="${{ needs.test.result }}"
             [formal_refinement]="${{ needs.formal_refinement.result }}"
+            [conformance_fixtures_drift]="${{ needs.conformance_fixtures_drift.result }}"
           )
           failed=0
-          for key in policy security_ai formal test formal_refinement; do
+          for key in policy security_ai formal test formal_refinement conformance_fixtures_drift; do
             value="${results[$key]}"
             echo "$key=$value"
             if [ "$value" != "success" ]; then

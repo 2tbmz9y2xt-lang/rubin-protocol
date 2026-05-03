@@ -132,6 +132,7 @@ import "C"
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"unsafe"
 )
@@ -161,6 +162,14 @@ func newOpenSSLErrorBuffer() []byte {
 func openSSLPublicKeyBytesWithErrBuf(pkey *C.EVP_PKEY, expectedPubkeyLen int, errBuf []byte) ([]byte, error) {
 	if pkey == nil {
 		return nil, fmt.Errorf("nil openssl key")
+	}
+	// Reject non-positive expectedPubkeyLen at this package-local helper
+	// boundary so a degenerate caller cannot reach the make([]byte, ...)
+	// allocation or the C-pointer take-address site with an unusable
+	// length. Public callers already route through validateOpenSSLAlgorithm.
+	// Covered by TestOpenSSLPublicKeyBytes_NonPositivePubkeyLenErrors.
+	if expectedPubkeyLen <= 0 {
+		return nil, fmt.Errorf("openssl pubkey length must be positive, got %d", expectedPubkeyLen)
 	}
 	if len(errBuf) == 0 {
 		errBuf = newOpenSSLErrorBuffer()
@@ -235,6 +244,30 @@ func newOpenSSLRawKeypairFromDER(alg string, der []byte, expectedPubkeyLen int) 
 func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exactSigBytes int) ([]byte, error) {
 	if err := ensureOpenSSLBootstrap(); err != nil {
 		return nil, err
+	}
+	// Reject three classes of unusable inputs at this package-local FFI
+	// boundary so a degenerate caller cannot reach the make([]byte, ...)
+	// allocation, the C-pointer take-address site, or the C helper with
+	// inputs the call cannot satisfy: nil pkey (which the C helper would
+	// dereference), non-positive maxSigBytes (which the take-address site
+	// cannot index), and exactSigBytes greater than maxSigBytes (which
+	// the C helper cannot satisfy because it writes at most maxSigBytes
+	// and the post-call length check then rejects). Mirrors the
+	// conformance-only path's nil/zero-receiver guard. Covered by
+	// TestSignOpenSSLDigest32_NilPKeyErrors,
+	// TestSignOpenSSLDigest32_NonPositiveMaxSigBytesErrors, and
+	// TestSignOpenSSLDigest32_ExactGreaterThanMaxErrors.
+	if pkey == nil {
+		return nil, fmt.Errorf("nil openssl key")
+	}
+	if maxSigBytes <= 0 {
+		return nil, fmt.Errorf("openssl maxSigBytes must be positive, got %d", maxSigBytes)
+	}
+	if exactSigBytes > maxSigBytes {
+		return nil, fmt.Errorf(
+			"openssl exactSigBytes=%d exceeds maxSigBytes=%d",
+			exactSigBytes, maxSigBytes,
+		)
 	}
 
 	errBuf := newOpenSSLErrorBuffer()
@@ -314,7 +347,13 @@ func (k *MLDSA87Keypair) SignDigest32(digest [32]byte) ([]byte, error) {
 	if k == nil || k.pkey == nil {
 		return nil, fmt.Errorf("nil keypair")
 	}
-	return signOpenSSLDigest32(k.pkey, digest, ML_DSA_87_SIG_BYTES, ML_DSA_87_SIG_BYTES)
+	sig, err := signOpenSSLDigest32(k.pkey, digest, ML_DSA_87_SIG_BYTES, ML_DSA_87_SIG_BYTES)
+	// runtime.KeepAlive(k) AFTER signOpenSSLDigest32 returns so the
+	// finalizer cannot free k.pkey while the underlying C call is still
+	// using it. A pre-call KeepAlive would not cover the C call window.
+	// Mirrors the conformance-only helper at clients/go/consensus/openssl_signer_conformance_fixture.go:174.
+	runtime.KeepAlive(k)
+	return sig, err
 }
 
 func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
@@ -324,6 +363,15 @@ func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
 	if k == nil || k.pkey == nil {
 		return nil, fmt.Errorf("nil keypair")
 	}
+
+	// Deferred runtime.KeepAlive(k) extends k's compiler-tracked liveness
+	// to function exit, which covers the rubin_private_key_to_der C call
+	// below. A finalizer that fired during that call could free k.pkey
+	// (EVP_PKEY) while the C helper is still using it. The C-owned DER
+	// buffer that the C call writes to der is owned by the C allocation
+	// and freed by defer C.rubin_free_der(der) below; it is independent
+	// of k.pkey and KeepAlive(k) is not needed to keep der alive.
+	defer runtime.KeepAlive(k)
 
 	errBuf := newOpenSSLErrorBuffer()
 	var der *C.uchar
@@ -339,7 +387,49 @@ func (k *MLDSA87Keypair) PrivateKeyDER() ([]byte, error) {
 	}
 	defer C.rubin_free_der(der)
 
+	// Defensive post-C success checks before the byte-copy return.
+	// validatePrivateKeyDERPostC isolates the three crypto-defensive
+	// branches (rc==0 but degenerate runtime returned nil/zero/overflow
+	// outputs) so they can be unit-tested without a working OpenSSL
+	// fault injector. Mirrors validateConformanceSignResult at
+	// clients/go/consensus/openssl_signer_conformance_fixture.go:205.
+	if err := validatePrivateKeyDERPostC(der == nil, uint64(derLen)); err != nil {
+		return nil, err
+	}
+
 	return C.GoBytes(unsafe.Pointer(der), C.int(derLen)), nil
+}
+
+// validatePrivateKeyDERPostC inspects the post-success outputs of
+// rubin_private_key_to_der and returns a fmt.Errorf describing the
+// degenerate case observed (no inner cause is wrapped via %w; the
+// helper itself is the source of the diagnostic):
+//
+//   - derNil == true    → error reporting the nil DER pointer even
+//     though the C helper signaled success (rc==0).
+//   - derLen == 0       → error reporting zero DER length even
+//     though the C helper signaled success.
+//   - derLen overflows  → error reporting that the length does not
+//     fit into C.int (which the byte-copy below takes as a C.int
+//     and silently truncates on overflow on 64-bit hosts).
+//
+// Extracted from PrivateKeyDER so the three crypto-defensive branches
+// remain unit-test-reachable through this helper. (No typed/sentinel
+// error type — callers match by string contains in tests.)
+func validatePrivateKeyDERPostC(derNil bool, derLen uint64) error {
+	if derNil {
+		return fmt.Errorf("openssl private key export returned nil DER pointer")
+	}
+	if derLen == 0 {
+		return fmt.Errorf("openssl private key export returned zero DER length")
+	}
+	if derLen > uint64(math.MaxInt32) {
+		return fmt.Errorf(
+			"openssl private key export DER length=%d exceeds C.int range",
+			derLen,
+		)
+	}
+	return nil
 }
 
 func cStringTrim0(b []byte) string {

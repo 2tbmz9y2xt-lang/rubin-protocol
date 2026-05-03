@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"crypto/sha3"
+	"embed"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -17,6 +19,27 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
+// embeddedTestKeysFS holds deterministic ML-DSA-87 private keys in DER
+// form, one per label used by the conformance fixture generator. The
+// keys were generated once offline (via consensus.NewMLDSA87Keypair() +
+// PrivateKeyDER()) and committed under testdata/keys/. Loading from
+// embed.FS instead of calling NewMLDSA87Keypair() at runtime makes the
+// (label -> keypair) mapping byte-stable across runs and across CI cwd
+// contexts; together with deterministic signing via
+// (*consensus.MLDSA87Keypair).SignDigest32ForConformanceFixture
+// (reached in this generator through the conformanceFixtureKeypair.SignDigest32
+// override), it makes generator output byte-reproducible from the same
+// origin/main input.
+//
+// These DER blobs are conformance-only test material. They are NOT
+// production keys, NOT used by the node, wallet, or any signing-rpc
+// path. The selection mapping (label -> committed DER) is the
+// documented determinism interface for #1366; it is not a runtime
+// label->seed->keypair derivation API.
+//
+//go:embed testdata/keys/*.der
+var embeddedTestKeysFS embed.FS
+
 // This generator updates a small set of conformance fixtures to use *real* ML-DSA
 // witness signatures (OpenSSL backend) so that spend-path crypto verification is
 // exercised end-to-end.
@@ -24,13 +47,76 @@ import (
 // It intentionally mutates only the vectors that previously used a dummy suite_id=0
 // witness item and now fail with TX_ERR_SIG_ALG_INVALID after Q-R006.
 
+// runGeneratorCLI parses CLI flags and runs the conformance fixture
+// generator. The --output-dir flag selects between two write surfaces:
+//
+//   - Default (no --output-dir): writes to repoRoot/conformance/fixtures/**
+//     (the legacy manual-update flow). Existing committed paths.
+//   - --output-dir=/abs/path: writes ONLY under /abs/path, never under
+//     conformance/fixtures/**. Used by the conformance fixture drift
+//     check (Q-CONF-FIXTURE-DRIFT-CHECK-01 / #1358) to compare candidate
+//     bytes against committed bytes without mutating the repo.
+//
+// --output-dir must be absolute. A relative value would be implicitly
+// resolved against the process cwd, which contradicts the cwd
+// independence contract proven by TestGenerator_CwdIndependence.
 func runGeneratorCLI() {
+	runGeneratorCLIWithArgs(stripGoTestFlags(os.Args[1:]))
+}
+
+// stripGoTestFlags removes -test.* arguments inserted by the Go test
+// harness so a `go test` invocation that calls main() (e.g. for
+// coverage) does not feed them into the generator's FlagSet. Real
+// command-line invocations never carry -test.* arguments, so this
+// stripping is a no-op for production usage.
+func stripGoTestFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if strings.HasPrefix(a, "-test.") || strings.HasPrefix(a, "--test.") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// runGeneratorCLIWithArgs runs the generator with an explicit args
+// slice. The exported runGeneratorCLI wrapper reads os.Args[1:]; tests
+// pass an explicit slice (typically empty for default mutating mode or
+// {"-output-dir", absPath} for check-only mode) so the generator's
+// FlagSet does not inherit `go test` flags such as -test.paniconexit0.
+func runGeneratorCLIWithArgs(args []string) {
+	fs := flag.NewFlagSet("gen-conformance-fixtures", flag.ContinueOnError)
+	outputDir := fs.String("output-dir", "", "absolute path to write candidate fixtures into; if set, conformance/fixtures/** is NOT mutated")
+	if err := fs.Parse(args); err != nil {
+		fatalf("flag parse: %v", err)
+	}
+
 	repoRoot, err := repoRootFromGoModule()
 	if err != nil {
 		fatalf("repo root: %v", err)
 	}
 
-	// Key material (generated once per run, then baked into fixtures).
+	committedFixturesRoot := filepath.Join(repoRoot, "conformance", "fixtures")
+	writeRoot := mustResolveWriteRoot(*outputDir, committedFixturesRoot)
+
+	// remapWritePath maps a committed-tree fixture path to the active
+	// write root. In default (mutating) mode writeRoot == committedFixturesRoot
+	// and remapWritePath is identity. In --output-dir mode it relocates
+	// writes under the user-supplied absolute path while LOAD paths
+	// continue to read from the committed tree.
+	remapWritePath := func(committedPath string) string {
+		rel, relErr := filepath.Rel(committedFixturesRoot, committedPath)
+		if relErr != nil {
+			fatalf("internal: filepath.Rel(%q, %q): %v", committedFixturesRoot, committedPath, relErr)
+		}
+		if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
+			fatalf("internal: write path %q escapes committed fixtures root %q", committedPath, committedFixturesRoot)
+		}
+		return filepath.Join(writeRoot, rel)
+	}
+
+	// Key material (loaded from embedded testdata; deterministic per label).
 	ownerKP := mustKeypair("owner")
 	defer ownerKP.Close()
 	vaultKP := mustKeypair("vault")
@@ -64,7 +150,7 @@ func runGeneratorCLI() {
 			path := filepath.Join(repoRoot, "conformance/fixtures/CV-MULTISIG.json")
 			fm := mustLoadFixture(path)
 			updateMultisigVector1of1(fm, "CV-M-01", zeroChainID, multisigKP, 100, 90)
-			mustWriteFixture(path, fm)
+			mustWriteFixture(remapWritePath(path), fm)
 		}
 
 		updateVaultSpendVectorsUTXO(
@@ -81,7 +167,7 @@ func runGeneratorCLI() {
 		updateP2PKBurnToFeeVector(f, "CV-U-19", zeroChainID, ownerKP, 100) // burn-to-fee, output_count=0
 		updateCoreExtRealBindingVector(f, "CV-U-EXT-05", zeroChainID, ownerKP, 100, 90)
 
-		mustWriteFixture(path, f)
+		mustWriteFixture(remapWritePath(path), f)
 	}
 
 	// CV-EXT metadata update for strict real binding ingestion.
@@ -89,7 +175,7 @@ func runGeneratorCLI() {
 		path := filepath.Join(repoRoot, "conformance/fixtures/CV-EXT.json")
 		f := mustLoadFixture(path)
 		updateCoreExtEnforcementVector(f, "CV-EXT-ENF-04")
-		mustWriteFixture(path, f)
+		mustWriteFixture(remapWritePath(path), f)
 	}
 
 	// CV-VAULT updates.
@@ -121,7 +207,7 @@ func runGeneratorCLI() {
 			10,  // sponsor_input_value
 		)
 
-		mustWriteFixture(path, f)
+		mustWriteFixture(remapWritePath(path), f)
 	}
 
 	// CV-HTLC updates (single vector that needs real signature witness).
@@ -129,7 +215,7 @@ func runGeneratorCLI() {
 		path := filepath.Join(repoRoot, "conformance/fixtures/CV-HTLC.json")
 		f := mustLoadFixture(path)
 		updateHTLCVector(f, "CV-HTLC-13", zeroChainID, htlcClaimKP, htlcRefundKP, destKP)
-		mustWriteFixture(path, f)
+		mustWriteFixture(remapWritePath(path), f)
 	}
 
 	// Devnet-signed CORE_VAULT operator-evidence artifact for live
@@ -155,7 +241,7 @@ func runGeneratorCLI() {
 			100, // input_value
 			90,  // vault_output_value (fee=10)
 		)
-		mustWriteFixture(path, f)
+		mustWriteFixture(remapWritePath(path), f)
 	}
 
 	// Devnet-signed CORE_HTLC claim operator-evidence artifact for live
@@ -178,7 +264,7 @@ func runGeneratorCLI() {
 		// Pin chain_id_hex on the vector so the artifact carries
 		// explicit metadata matching the chainID just used to sign.
 		findVector(f, "DEVNET-HTLC-CLAIM-01")["chain_id_hex"] = hex.EncodeToString(devnetChainID[:])
-		mustWriteFixture(path, f)
+		mustWriteFixture(remapWritePath(path), f)
 	}
 
 	// Devnet-signed CORE_MULTISIG 1-of-1 spend operator-evidence
@@ -202,7 +288,7 @@ func runGeneratorCLI() {
 		// Pin chain_id_hex on the vector so the artifact carries
 		// explicit metadata matching the chainID just used to sign.
 		findVector(f, "DEVNET-MULTISIG-SPEND-01")["chain_id_hex"] = hex.EncodeToString(devnetChainID[:])
-		mustWriteFixture(path, f)
+		mustWriteFixture(remapWritePath(path), f)
 	}
 
 	// CV-SUBSIDY updates (block-level coinbase bound; requires valid non-coinbase sig).
@@ -210,7 +296,7 @@ func runGeneratorCLI() {
 		path := filepath.Join(repoRoot, "conformance/fixtures/CV-SUBSIDY.json")
 		f := mustLoadFixture(path)
 		updateSubsidyBlocks(f, zeroChainID, ownerKP, destKP)
-		mustWriteFixture(path, f)
+		mustWriteFixture(remapWritePath(path), f)
 	}
 
 	fmt.Println("ok: updated fixtures with real ML-DSA signatures")
@@ -278,8 +364,123 @@ func mustWriteFixture(path string, f *fixtureFile) {
 		fatalf("marshal %s: %v", path, err)
 	}
 	b = append(b, '\n')
+	// MkdirAll the parent so --output-dir writes can land in nested
+	// targets (e.g. devnet/) without requiring the caller to pre-create
+	// them. In default mutating mode the parent always already exists,
+	// so MkdirAll is a no-op.
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		fatalf("write %s: %v", path, err)
+	}
+}
+
+// mustResolveWriteRoot is the CLI-boundary wrapper around
+// resolveWriteRoot: it validates --output-dir via the testable
+// error-returning function and converts a rejection into a fatalf so
+// the generator process exits non-zero with a clear operator message.
+// Tests should exercise resolveWriteRoot directly so the containment
+// rules can be asserted by error string without subprocess wrapping.
+func mustResolveWriteRoot(outputDir string, committedFixturesRoot string) string {
+	root, err := resolveWriteRoot(outputDir, committedFixturesRoot)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	return root
+}
+
+// resolveWriteRoot validates the --output-dir CLI value and returns
+// the canonical write root for this generator run.
+//
+// Behavior:
+//   - empty string (no --output-dir) returns committedFixturesRoot,
+//     preserving the legacy mutating manual-update flow.
+//   - non-empty string MUST be absolute (filepath.IsAbs == true) so the
+//     resolved write target does not depend on the process cwd. A
+//     relative value returns an error.
+//   - non-empty string MUST NOT alias the committed fixtures root or
+//     any path under it; allowing this would let --output-dir
+//     accidentally mutate conformance/fixtures/**, defeating the
+//     check-only contract for #1358. The containment check is run
+//     against four (output, committed) variants — lexical-vs-lexical,
+//     resolved-vs-resolved, and the two cross combinations — so a
+//     symlink that points an out-of-tree path back into
+//     conformance/fixtures/** is rejected regardless of which side
+//     carries the symlink. EvalSymlinks errors are tolerated: an
+//     absent --output-dir path falls back to its lexical clean form
+//     (which is still subject to the same containment rule), and the
+//     committed fixtures root always exists in the working tree.
+func resolveWriteRoot(outputDir string, committedFixturesRoot string) (string, error) {
+	if outputDir == "" {
+		return committedFixturesRoot, nil
+	}
+	if !filepath.IsAbs(outputDir) {
+		return "", fmt.Errorf("--output-dir must be absolute, got %q", outputDir)
+	}
+	cleanOutput := filepath.Clean(outputDir)
+	cleanCommitted := filepath.Clean(committedFixturesRoot)
+	// resolveAncestorOrSelf handles the case where --output-dir does
+	// not yet exist on disk (typical for a freshly created temp
+	// directory) but its parent chain may contain a symlink that
+	// points back into conformance/fixtures/**. Plain
+	// filepath.EvalSymlinks on the full path returns an error in
+	// that case; we instead walk up to the deepest existing ancestor,
+	// resolve its symlink target, and re-attach the unresolved
+	// remainder so the containment check sees the real on-disk
+	// target the eventual MkdirAll / WriteFile would follow.
+	resolvedOutput := resolveAncestorOrSelf(cleanOutput)
+	resolvedCommitted := cleanCommitted
+	if r, evalErr := filepath.EvalSymlinks(cleanCommitted); evalErr == nil {
+		resolvedCommitted = r
+	}
+	for _, pair := range [...][2]string{
+		{cleanOutput, cleanCommitted},
+		{resolvedOutput, resolvedCommitted},
+		{resolvedOutput, cleanCommitted},
+		{cleanOutput, resolvedCommitted},
+	} {
+		out, committed := pair[0], pair[1]
+		if out == committed {
+			return "", fmt.Errorf("--output-dir must not equal the committed fixtures root %q (input %q resolved to %q); this is the check-only contract for issue #1358", cleanCommitted, cleanOutput, resolvedOutput)
+		}
+		rel, err := filepath.Rel(committed, out)
+		if err != nil {
+			continue
+		}
+		if rel == "." || rel == "" {
+			return "", fmt.Errorf("--output-dir %q (resolved %q) aliases the committed fixtures root %q", cleanOutput, resolvedOutput, cleanCommitted)
+		}
+		if !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
+			return "", fmt.Errorf("--output-dir %q (resolved %q) is inside committed fixtures root %q (rel=%q); refusing to mutate conformance/fixtures/**", cleanOutput, resolvedOutput, cleanCommitted, rel)
+		}
+	}
+	return cleanOutput, nil
+}
+
+// resolveAncestorOrSelf walks up the directory chain of p looking
+// for the deepest existing ancestor; when found it runs
+// filepath.EvalSymlinks on that ancestor and re-attaches the
+// previously-unresolved remainder so the on-disk target an eventual
+// MkdirAll / WriteFile would land on becomes visible to containment
+// checks. If no ancestor resolves cleanly (extremely unusual on a
+// running system because root always exists) the function returns p
+// unchanged and the lexical containment check applies.
+func resolveAncestorOrSelf(p string) string {
+	cur := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			rel, relErr := filepath.Rel(cur, p)
+			if relErr != nil || rel == "." || rel == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, rel)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		cur = parent
 	}
 }
 
@@ -293,12 +494,53 @@ func findVector(f *fixtureFile, id string) map[string]any {
 	return nil
 }
 
-func mustKeypair(label string) *consensus.MLDSA87Keypair {
-	kp, err := consensus.NewMLDSA87Keypair()
+// conformanceFixtureKeypair wraps consensus.MLDSA87Keypair so the
+// generator's existing digestSigner interface delegates to the
+// deterministic conformance-fixture signing path. PubkeyBytes and
+// Close are inherited via embedded promotion; SignDigest32 is
+// overridden to call SignDigest32ForConformanceFixture so the
+// generator's emitted signatures are byte-reproducible.
+//
+// This wrapper is the only mechanism by which the deterministic
+// signing helper is reached — see TestSignDigest32ForConformanceFixture_ConformanceOnlyCallerGuard
+// in clients/go/consensus for the static caller-grep enforcing this
+// boundary.
+type conformanceFixtureKeypair struct {
+	*consensus.MLDSA87Keypair
+}
+
+func (k *conformanceFixtureKeypair) SignDigest32(digest [32]byte) ([]byte, error) {
+	// Promoted method from the embedded *consensus.MLDSA87Keypair;
+	// the wrapper's own SignDigest32 (this method) shadows the
+	// embedded promotion, so calling SignDigest32ForConformanceFixture
+	// directly here goes to the deterministic helper without
+	// recursing through the wrapper.
+	return k.SignDigest32ForConformanceFixture(digest)
+}
+
+func mustKeypair(label string) *conformanceFixtureKeypair {
+	der, err := embeddedTestKeysFS.ReadFile(filepath.ToSlash(filepath.Join("testdata", "keys", label+".der")))
 	if err != nil {
-		fatalf("keygen %s: %v", label, err)
+		fatalf("conformance fixture key %q: embedded testdata/keys/%s.der not available: %v", label, label, err)
 	}
-	return kp
+	kp, err := consensus.NewMLDSA87KeypairFromDER(der)
+	if err != nil {
+		// "DECODER routines::unsupported" / "unsupported" surfaces
+		// when the runtime OpenSSL build does not expose an ML-DSA
+		// DER decoder (e.g. OpenSSL 3.0.x without the ML-DSA
+		// provider OIDs registered for d2i_AutoPrivateKey). The
+		// generator's byte-reproducibility contract requires the
+		// committed DER blobs to round-trip identically, so falling
+		// back to runtime keygen is not a valid option. Surface a
+		// clear operator message instead so the toolchain
+		// requirement is visible at the failure site.
+		msg := err.Error()
+		if strings.Contains(msg, "unsupported") || strings.Contains(msg, "DECODER") {
+			fatalf("conformance fixture key %q: NewMLDSA87KeypairFromDER reports the runtime OpenSSL build cannot decode ML-DSA-87 PKCS#8 DER (OpenSSL ≥3.5 with ML-DSA provider required). Original error: %v", label, err)
+		}
+		fatalf("conformance fixture key %q: NewMLDSA87KeypairFromDER: %v", label, err)
+	}
+	return &conformanceFixtureKeypair{MLDSA87Keypair: kp}
 }
 
 func sha3_256(b []byte) [32]byte { return sha3.Sum256(b) }
@@ -418,7 +660,7 @@ func updateSingleInputSignedVector(
 	v["utxos"] = utxos
 }
 
-func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64, outValue uint64) {
+func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer digestSigner, inValue uint64, outValue uint64) {
 	pub := signer.PubkeyBytes()
 	cov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
 	updateSingleInputSignedVector(
@@ -434,7 +676,7 @@ func updateP2PKVector(f *fixtureFile, id string, chainID [32]byte, signer *conse
 	)
 }
 
-func updateMultisigVector1of1(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64, outValue uint64) {
+func updateMultisigVector1of1(f *fixtureFile, id string, chainID [32]byte, signer digestSigner, inValue uint64, outValue uint64) {
 	pub := signer.PubkeyBytes()
 	inCov := multisigCovenantData1of1(pub)
 	outCov := p2pkCovenantData(pub) // any valid output
@@ -451,7 +693,7 @@ func updateMultisigVector1of1(f *fixtureFile, id string, chainID [32]byte, signe
 	)
 }
 
-func updateP2PKBurnToFeeVector(f *fixtureFile, id string, chainID [32]byte, signer *consensus.MLDSA87Keypair, inValue uint64) {
+func updateP2PKBurnToFeeVector(f *fixtureFile, id string, chainID [32]byte, signer digestSigner, inValue uint64) {
 	v := findVector(f, id)
 	pub := signer.PubkeyBytes()
 	cov := p2pkCovenantDataWithSuite(consensus.SUITE_ID_ML_DSA_87, pub)
@@ -486,7 +728,7 @@ func updateCoreExtRealBindingVector(
 	f *fixtureFile,
 	id string,
 	chainID [32]byte,
-	signer *consensus.MLDSA87Keypair,
+	signer digestSigner,
 	inValue uint64,
 	outValue uint64,
 ) {
@@ -503,6 +745,17 @@ func updateCoreExtRealBindingVector(
 	pub := signer.PubkeyBytes()
 	outCov := p2pkCovenantData(pub)
 
+	// CORE_EXT real-binding witnesses must carry the suite_id that
+	// the vector's core_ext_profiles binding actually allows, NOT a
+	// generic ML-DSA default. The vector pins exactly one allowed
+	// suite for the bound profile (see CV-U-EXT-05.allowed_suite_ids
+	// = [3]); emitting consensus.SUITE_ID_ML_DSA_87 (= 0x01) silently
+	// produced a witness that fails replay with TX_ERR_SIG_ALG_INVALID
+	// once deterministic regen brought the bytes back to current
+	// generator output. Read the suite from the vector contract
+	// directly and assert it is the single allowed suite.
+	witnessSuiteID := mustCoreExtAllowedSuiteID(id, v)
+
 	tx := &consensus.Tx{
 		Version:  1,
 		TxKind:   0x00,
@@ -514,13 +767,87 @@ func updateCoreExtRealBindingVector(
 
 	sig := mustSignInputDigest(id, "input0", signer, tx, 0, inValue, chainID)
 	tx.Witness = []consensus.WitnessItem{{
-		SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		SuiteID:   witnessSuiteID,
 		Pubkey:    pub,
 		Signature: sig,
 	}}
 
 	v["tx_hex"] = hex.EncodeToString(mustTxBytes(tx))
 	v["utxos"] = utxos
+}
+
+// coreExtAllowedSuiteID is the error-returning core of the witness
+// suite-id derivation: given a CORE_EXT real-binding vector, extract
+// the single allowed suite from `core_ext_profiles[0].allowed_suite_ids`
+// after asserting the contract shape (one bound profile, one allowed
+// suite, fits in a byte, not SENTINEL). Splitting the error path off
+// from the fatalf wrapper mirrors the existing parseJSONUint32 vs
+// mustJSONUint32 pattern and lets unit tests exercise every guard
+// branch without subprocess-wrapping a CLI fatalf.
+func coreExtAllowedSuiteID(id string, v map[string]any) (byte, error) {
+	rawProfiles, hasProfiles := v["core_ext_profiles"]
+	if !hasProfiles || rawProfiles == nil {
+		return 0, fmt.Errorf("%s: core_ext_profiles is missing or null; expected a JSON array with exactly one bound profile", id)
+	}
+	// Accept both shapes the generator produces in-process:
+	//   - []any (json.Unmarshal default for generic JSON arrays — what the
+	//     test reads back from disk after mustWriteFixture round-trips
+	//     the vector through encoding/json), and
+	//   - []map[string]any (what setCoreExtOpenSSLDigest32Binding writes
+	//     back via anyToSliceMap before the marshal step).
+	// Anything else is a contract violation and surfaces a typed error.
+	var profile map[string]any
+	switch profiles := rawProfiles.(type) {
+	case []any:
+		if len(profiles) != 1 {
+			return 0, fmt.Errorf("%s: core_ext_profiles must have exactly one bound profile, got %d", id, len(profiles))
+		}
+		got, ok := profiles[0].(map[string]any)
+		if !ok {
+			return 0, fmt.Errorf("%s: core_ext_profiles[0] must be a JSON object, got %T", id, profiles[0])
+		}
+		profile = got
+	case []map[string]any:
+		if len(profiles) != 1 {
+			return 0, fmt.Errorf("%s: core_ext_profiles must have exactly one bound profile, got %d", id, len(profiles))
+		}
+		profile = profiles[0]
+	default:
+		return 0, fmt.Errorf("%s: core_ext_profiles must be a JSON array, got %T", id, rawProfiles)
+	}
+	allowedAny, ok := profile["allowed_suite_ids"].([]any)
+	if !ok || len(allowedAny) == 0 {
+		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids must be a non-empty JSON array", id)
+	}
+	if len(allowedAny) != 1 {
+		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids must pin exactly one suite for the real-binding witness, got %d entries", id, len(allowedAny))
+	}
+	suite32, err := parseJSONUint32(id+".core_ext_profiles[0].allowed_suite_ids[0]", allowedAny[0])
+	if err != nil {
+		return 0, err
+	}
+	if suite32 > 0xff {
+		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids[0]=%d does not fit in a single suite_id byte", id, suite32)
+	}
+	if suite32 == uint32(consensus.SUITE_ID_SENTINEL) {
+		return 0, fmt.Errorf("%s: core_ext_profiles[0].allowed_suite_ids[0]=0x00 (SENTINEL) is not a valid witness suite", id)
+	}
+	return byte(suite32), nil
+}
+
+// mustCoreExtAllowedSuiteID is the CLI-boundary fatalf wrapper around
+// coreExtAllowedSuiteID. The contract for the vectors this helper
+// supports is exactly one bound profile with exactly one allowed
+// suite — that suite is what the witness must carry, otherwise the
+// runtime verifier rejects with TX_ERR_SIG_ALG_INVALID before any
+// signature work happens. This stays purely vector-driven; no new
+// magic constant lives in the generator.
+func mustCoreExtAllowedSuiteID(id string, v map[string]any) byte {
+	suite, err := coreExtAllowedSuiteID(id, v)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	return suite
 }
 
 func updateCoreExtEnforcementVector(f *fixtureFile, id string) {
@@ -532,10 +859,10 @@ func updateCoreExtEnforcementVector(f *fixtureFile, id string) {
 func updateVaultSpendVectorsUTXO(
 	f *fixtureFile,
 	chainID [32]byte,
-	ownerKP *consensus.MLDSA87Keypair,
-	vaultKP *consensus.MLDSA87Keypair,
-	destKP *consensus.MLDSA87Keypair,
-	dest2KP *consensus.MLDSA87Keypair,
+	ownerKP digestSigner,
+	vaultKP digestSigner,
+	destKP digestSigner,
+	dest2KP digestSigner,
 	vaultValue uint64,
 	ownerFeeInValue uint64,
 ) {
@@ -609,10 +936,10 @@ func updateVaultSpendVectorsUTXO(
 func updateVaultCreateVectors(
 	f *fixtureFile,
 	chainID [32]byte,
-	ownerKP *consensus.MLDSA87Keypair,
-	nonOwnerKP *consensus.MLDSA87Keypair,
-	vaultKP *consensus.MLDSA87Keypair,
-	destKP *consensus.MLDSA87Keypair,
+	ownerKP digestSigner,
+	nonOwnerKP digestSigner,
+	vaultKP digestSigner,
+	destKP digestSigner,
 	inValue uint64,
 	vaultOutValue uint64,
 ) {
@@ -703,9 +1030,9 @@ func updateVaultCreateVectors(
 func updateDevnetVaultCreateVector(
 	f *fixtureFile,
 	devnetChainID [32]byte,
-	ownerKP *consensus.MLDSA87Keypair,
-	vaultKP *consensus.MLDSA87Keypair,
-	destKP *consensus.MLDSA87Keypair,
+	ownerKP digestSigner,
+	vaultKP digestSigner,
+	destKP digestSigner,
 	inValue uint64,
 	vaultOutValue uint64,
 ) {
@@ -756,11 +1083,11 @@ func updateDevnetVaultCreateVector(
 func updateVaultSpendVectorsVaultFixture(
 	f *fixtureFile,
 	chainID [32]byte,
-	ownerKP *consensus.MLDSA87Keypair,
-	sponsorKP *consensus.MLDSA87Keypair,
-	vaultKP *consensus.MLDSA87Keypair,
-	destKP *consensus.MLDSA87Keypair,
-	dest2KP *consensus.MLDSA87Keypair,
+	ownerKP digestSigner,
+	sponsorKP digestSigner,
+	vaultKP digestSigner,
+	destKP digestSigner,
+	dest2KP digestSigner,
 	vaultValue uint64,
 	ownerFeeInValue uint64,
 	sponsorInValue uint64,
@@ -876,9 +1203,9 @@ func updateHTLCVector(
 	f *fixtureFile,
 	id string,
 	chainID [32]byte,
-	claimKP *consensus.MLDSA87Keypair,
-	refundKP *consensus.MLDSA87Keypair,
-	destKP *consensus.MLDSA87Keypair,
+	claimKP digestSigner,
+	refundKP digestSigner,
+	destKP digestSigner,
 ) {
 	v := findVector(f, id)
 	utxos := anyToSliceMap(v["utxos"])
@@ -956,8 +1283,8 @@ func updateHTLCVector(
 func updateSubsidyBlocks(
 	f *fixtureFile,
 	chainID [32]byte,
-	spendKP *consensus.MLDSA87Keypair,
-	coinbaseDestKP *consensus.MLDSA87Keypair,
+	spendKP digestSigner,
+	coinbaseDestKP digestSigner,
 ) {
 	// Both vectors use the same header prev hash/target in the fixtures.
 	sub1 := findVector(f, "CV-SUB-01")

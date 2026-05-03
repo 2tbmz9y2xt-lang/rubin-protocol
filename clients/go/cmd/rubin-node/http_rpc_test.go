@@ -89,18 +89,38 @@ func mustRPCStateWithSpendableUTXOAndMempoolConfig(
 	mempoolConfig node.MempoolConfig,
 ) (*devnetRPCState, consensus.Outpoint, map[consensus.Outpoint]consensus.UtxoEntry) {
 	t.Helper()
+	state, outpoints, utxos := mustRPCStateWithSpendableUTXOsAndMempoolConfig(t, fromAddress, []uint64{1_000_000}, announceTx, mempoolConfig)
+	return state, outpoints[0], utxos
+}
+
+func mustRPCStateWithSpendableUTXOsAndMempoolConfig(
+	t *testing.T,
+	fromAddress []byte,
+	values []uint64,
+	announceTx func([]byte) error,
+	mempoolConfig node.MempoolConfig,
+) (*devnetRPCState, []consensus.Outpoint, map[consensus.Outpoint]consensus.UtxoEntry) {
+	t.Helper()
 	dir := t.TempDir()
 	chainStatePath := node.ChainStatePath(dir)
 	chainState := node.NewChainState()
-	var prevTxid [32]byte
-	prevTxid[0] = 0x44
-	outpoint := consensus.Outpoint{Txid: prevTxid, Vout: 0}
-	chainState.Utxos[outpoint] = consensus.UtxoEntry{
-		Value:             100,
-		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      append([]byte(nil), fromAddress...),
-		CreationHeight:    0,
-		CreatedByCoinbase: false,
+	if len(values) == 0 {
+		t.Fatalf("mustRPCStateWithSpendableUTXOsAndMempoolConfig requires at least one value")
+	}
+	outpoints := make([]consensus.Outpoint, 0, len(values))
+	for i, value := range values {
+		var prevTxid [32]byte
+		prevTxid[0] = 0x44
+		prevTxid[31] = byte(i)
+		outpoint := consensus.Outpoint{Txid: prevTxid, Vout: 0}
+		outpoints = append(outpoints, outpoint)
+		chainState.Utxos[outpoint] = consensus.UtxoEntry{
+			Value:             value,
+			CovenantType:      consensus.COV_TYPE_P2PK,
+			CovenantData:      append([]byte(nil), fromAddress...),
+			CreationHeight:    0,
+			CreatedByCoinbase: false,
+		}
 	}
 	if err := chainState.Save(chainStatePath); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -122,7 +142,7 @@ func mustRPCStateWithSpendableUTXOAndMempoolConfig(
 	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, announceTx, nil, io.Discard, nil)
 	state.nowUnix = func() uint64 { return 0 }
-	return state, outpoint, chainState.Utxos
+	return state, outpoints, chainState.Utxos
 }
 
 func mustRPCSignedTransferTx(
@@ -133,11 +153,33 @@ func mustRPCSignedTransferTx(
 	toAddress []byte,
 ) ([]byte, string) {
 	t.Helper()
+	return mustRPCSignedTransferTxWithFee(t, utxos, input, 100_000, 100_000, 1, signer, toAddress)
+}
+
+func mustRPCSignedTransferTxWithFee(
+	t *testing.T,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	input consensus.Outpoint,
+	amount uint64,
+	fee uint64,
+	nonce uint64,
+	signer *consensus.MLDSA87Keypair,
+	toAddress []byte,
+) ([]byte, string) {
+	t.Helper()
+	entry, ok := utxos[input]
+	if !ok {
+		t.Fatalf("missing utxo for %x:%d", input.Txid, input.Vout)
+	}
+	if amount > entry.Value || fee > entry.Value-amount {
+		t.Fatalf("utxo value=%d, want at least amount=%d plus fee=%d", entry.Value, amount, fee)
+	}
 	changeAddress := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	change := entry.Value - amount - fee
 	tx := &consensus.Tx{
 		Version: 1,
 		TxKind:  0x00,
-		TxNonce: 1,
+		TxNonce: nonce,
 		Inputs: []consensus.TxInput{{
 			PrevTxid: input.Txid,
 			PrevVout: input.Vout,
@@ -145,17 +187,21 @@ func mustRPCSignedTransferTx(
 		}},
 		Outputs: []consensus.TxOutput{
 			{
-				Value:        90,
+				Value:        amount,
 				CovenantType: consensus.COV_TYPE_P2PK,
 				CovenantData: append([]byte(nil), toAddress...),
 			},
-			{
-				Value:        9,
+		},
+		Locktime: 0,
+	}
+	if change > 0 {
+		tx.Outputs = append(tx.Outputs,
+			consensus.TxOutput{
+				Value:        change,
 				CovenantType: consensus.COV_TYPE_P2PK,
 				CovenantData: append([]byte(nil), changeAddress...),
 			},
-		},
-		Locktime: 0,
+		)
 	}
 	if err := consensus.SignTransaction(tx, utxos, node.DevnetGenesisChainID(), signer); err != nil {
 		t.Fatalf("SignTransaction: %v", err)
@@ -889,7 +935,7 @@ func TestDevnetRPCSubmitTxAcceptsDaCommitUnderDefaultPolicy(t *testing.T) {
 		announced = append(announced, append([]byte(nil), tx...))
 		return nil
 	})
-	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 10, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
+	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 100_000, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	defer server.Close()
 
@@ -1000,6 +1046,83 @@ func TestDevnetRPCSubmitTxRejectsDuplicateMempoolEntry(t *testing.T) {
 	}
 }
 
+func TestDevnetRPCSubmitTxBelowRollingFloorReturnsUnavailable(t *testing.T) {
+	fromKey := mustRPCMLDSA87Keypair(t)
+	toKey := mustRPCMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+
+	var announceCalled bool
+	cfg := node.DefaultMempoolConfig()
+	cfg.MaxTransactions = 1
+	state, inputs, utxos := mustRPCStateWithSpendableUTXOsAndMempoolConfig(t, fromAddress, []uint64{1_000_000, 1_000_000, 1_000_000}, func(tx []byte) error {
+		announceCalled = true
+		return nil
+	}, cfg)
+	seedTx, _ := mustRPCSignedTransferTxWithFee(t, utxos, inputs[0], 100_000, 100_000, 1, fromKey, toAddress)
+	betterTx, _ := mustRPCSignedTransferTxWithFee(t, utxos, inputs[1], 100_000, 700_000, 2, fromKey, toAddress)
+	belowFloorTx, _ := mustRPCSignedTransferTxWithFee(t, utxos, inputs[2], 100_000, 1, 3, fromKey, toAddress)
+	if err := state.mempool.AddTx(seedTx); err != nil {
+		t.Fatalf("AddTx(seed): %v", err)
+	}
+	if err := state.mempool.AddTx(betterTx); err != nil {
+		t.Fatalf("AddTx(better): %v", err)
+	}
+	if got := state.mempool.Len(); got != 1 {
+		t.Fatalf("mempool len=%d after rolling-floor seed, want 1", got)
+	}
+
+	server := httptest.NewServer(newDevnetRPCHandler(state))
+	defer server.Close()
+	body, err := json.Marshal(submitTxRequest{TxHex: hex.EncodeToString(belowFloorTx)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := http.Post(server.URL+"/submit_tx", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503", resp.StatusCode)
+	}
+
+	var got submitTxResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Accepted {
+		t.Fatalf("accepted=true, want false")
+	}
+	if got.TxID != "" {
+		t.Fatalf("txid=%q, want empty unavailable response", got.TxID)
+	}
+	if !strings.Contains(got.Error, "mempool fee below rolling minimum") {
+		t.Fatalf("error=%q, want rolling minimum message", got.Error)
+	}
+	if announceCalled {
+		t.Fatalf("announceTx was called for unavailable below-floor tx")
+	}
+	if got := state.mempool.Len(); got != 1 {
+		t.Fatalf("mempool len=%d, want unchanged 1", got)
+	}
+	admission := state.mempool.AdmissionCounts()
+	if admission.Accepted != 2 || admission.Unavailable != 1 || admission.Conflict != 0 || admission.Rejected != 0 {
+		t.Fatalf("admission counts=%+v, want two accepted and one unavailable", admission)
+	}
+	metrics := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		`rubin_node_submit_tx_total{result="unavailable"} 1`,
+		`rubin_node_mempool_admit_total{result="accepted"} 2`,
+		`rubin_node_mempool_admit_total{result="unavailable"} 1`,
+		`rubin_node_mempool_txs 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("missing %q in metrics %q", want, metrics)
+		}
+	}
+}
+
 func TestDevnetRPCSubmitTxRejectsLowFeeDaCommitWhenSurchargePolicyEnabled(t *testing.T) {
 	fromKey := mustRPCMLDSA87Keypair(t)
 	toKey := mustRPCMLDSA87Keypair(t)
@@ -1040,8 +1163,8 @@ func TestDevnetRPCSubmitTxRejectsLowFeeDaCommitWhenSurchargePolicyEnabled(t *tes
 	if got.TxID != "" {
 		t.Fatalf("txid=%q, want empty rejected response", got.TxID)
 	}
-	if !strings.Contains(got.Error, "DA fee below policy minimum") {
-		t.Fatalf("error=%q, want DA surcharge policy reject", got.Error)
+	if !strings.Contains(got.Error, "DA fee below Stage C floor") {
+		t.Fatalf("error=%q, want DA Stage C floor reject", got.Error)
 	}
 	if announceCalled {
 		t.Fatalf("announceTx was called for rejected DA_COMMIT tx")
@@ -1166,6 +1289,12 @@ func TestRenderPrometheusMetricsIncludesV1Names(t *testing.T) {
 		"rubin_node_block_apply_total",
 		"rubin_node_peer_count",
 		"rubin_node_mempool_txs",
+		"rubin_node_mempool_bytes",
+		"rubin_node_mempool_admit_total",
+		"rubin_node_mempool_max_bytes",
+		"rubin_node_mempool_low_water_bytes",
+		"rubin_node_mempool_min_fee_rate",
+		"rubin_node_mempool_evicted_resident_total",
 		"rubin_node_rpc_requests_total",
 		"rubin_node_submit_tx_total",
 	} {
@@ -1206,7 +1335,98 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 		`rubin_node_mempool_admit_total{result="conflict"} 0`,
 		`rubin_node_mempool_admit_total{result="rejected"} 0`,
 		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
+		"rubin_node_mempool_max_bytes 0",
+		"rubin_node_mempool_low_water_bytes 0",
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", node.DefaultMempoolMinFeeRate),
+		"rubin_node_mempool_evicted_resident_total 0",
 		"rubin_node_p2p_peer_lifecycle_exits_total 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics body %q", want, body)
+		}
+	}
+}
+
+// TestRenderPrometheusMetricsScrapePurity asserts that two consecutive
+// scrapes of the same wired state return byte-identical output. This
+// pins the Linear "Scraping /metrics is read-only: two consecutive
+// scrapes do not increment counters" invariant for the standard
+// mempool gauges and the resident-eviction counter.
+func TestRenderPrometheusMetricsScrapePurity(t *testing.T) {
+	state := mustRPCState(t, true)
+	state.metrics.note("/get_tip", http.StatusOK)
+	state.metrics.noteSubmit("accepted")
+	first := renderPrometheusMetrics(state)
+	second := renderPrometheusMetrics(state)
+	if first != second {
+		t.Fatalf("scrape not pure: first vs second differ\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+	for _, want := range []string{
+		"rubin_node_mempool_max_bytes",
+		"rubin_node_mempool_low_water_bytes",
+		"rubin_node_mempool_min_fee_rate",
+		"rubin_node_mempool_evicted_resident_total",
+	} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("scrape-purity body missing standard-mempool metric %q in %q", want, first)
+		}
+	}
+}
+
+// TestRenderPrometheusMetricsStandardMempoolGaugesReflectLiveState
+// asserts that max_bytes, low_water_bytes, and min_fee_rate render
+// from the wired mempool's current struct fields, not from
+// MempoolConfig defaults.
+func TestRenderPrometheusMetricsStandardMempoolGaugesReflectLiveState(t *testing.T) {
+	state := mustRPCState(t, true)
+	got := state.mempool.Stats()
+	body := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		fmt.Sprintf("rubin_node_mempool_max_bytes %d", got.MaxBytes),
+		fmt.Sprintf("rubin_node_mempool_low_water_bytes %d", got.LowWaterBytes),
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", got.MinFeeRate),
+		fmt.Sprintf("rubin_node_mempool_evicted_resident_total %d", got.EvictedResidentTotal),
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics body %q", want, body)
+		}
+	}
+	if got.MaxBytes <= 0 {
+		t.Fatalf("MaxBytes=%d, want positive default for wired devnet state", got.MaxBytes)
+	}
+	if got.LowWaterBytes <= 0 || got.LowWaterBytes >= got.MaxBytes {
+		t.Fatalf("LowWaterBytes=%d, want 0<x<MaxBytes(%d)", got.LowWaterBytes, got.MaxBytes)
+	}
+	if got.MinFeeRate < node.DefaultMempoolMinFeeRate {
+		t.Fatalf("MinFeeRate=%d, want >= DefaultMempoolMinFeeRate %d", got.MinFeeRate, node.DefaultMempoolMinFeeRate)
+	}
+	if got.EvictedResidentTotal != 0 {
+		t.Fatalf("EvictedResidentTotal=%d on a freshly-wired state, want 0", got.EvictedResidentTotal)
+	}
+}
+
+// TestRenderPrometheusMetricsNilMempoolFieldRendersBaselineFloor
+// covers the second nil branch flagged by reviewer P2: state is
+// non-nil but state.mempool is nil. The renderer's default
+// mempoolStats seeded with MinFeeRate=DefaultMempoolMinFeeRate must
+// also reach this path so the baseline floor is reported here, not
+// 0. Without this assertion a regression that re-zeros the
+// initializer for the state.mempool==nil branch could pass through.
+func TestRenderPrometheusMetricsNilMempoolFieldRendersBaselineFloor(t *testing.T) {
+	state := mustRPCState(t, true)
+	state.mempool = nil
+	body := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		"rubin_node_mempool_txs 0",
+		"rubin_node_mempool_bytes 0",
+		`rubin_node_mempool_admit_total{result="accepted"} 0`,
+		`rubin_node_mempool_admit_total{result="conflict"} 0`,
+		`rubin_node_mempool_admit_total{result="rejected"} 0`,
+		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
+		"rubin_node_mempool_max_bytes 0",
+		"rubin_node_mempool_low_water_bytes 0",
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", node.DefaultMempoolMinFeeRate),
+		"rubin_node_mempool_evicted_resident_total 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics body %q", want, body)
@@ -1650,6 +1870,7 @@ func TestClassifySubmitErrVariants(t *testing.T) {
 		{name: "conflict already present", err: &node.TxAdmitError{Kind: node.TxAdmitConflict, Message: "already in mempool"}, wantStatus: http.StatusConflict, wantResult: "conflict"},
 		{name: "conflict double spend", err: &node.TxAdmitError{Kind: node.TxAdmitConflict, Message: "double-spend conflict"}, wantStatus: http.StatusConflict, wantResult: "conflict"},
 		{name: "unavailable mempool full", err: &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "mempool full"}, wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
+		{name: "unavailable rolling floor", err: &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "mempool fee below rolling minimum"}, wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
 		{name: "unavailable blockstore", err: &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "blockstore unavailable"}, wantStatus: http.StatusServiceUnavailable, wantResult: "unavailable"},
 		{name: "rejected consensus", err: &node.TxAdmitError{Kind: node.TxAdmitRejected, Message: "transaction rejected"}, wantStatus: http.StatusUnprocessableEntity, wantResult: "rejected"},
 		{name: "fallback unknown error", err: errors.New("something unexpected"), wantStatus: http.StatusUnprocessableEntity, wantResult: "rejected"},

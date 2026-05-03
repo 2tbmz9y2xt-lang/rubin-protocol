@@ -486,6 +486,140 @@ func TestPolicyNeedsReadonlyUtxoSnapshotMatrix(t *testing.T) {
 	}
 }
 
+// TestMinerRejectCandidateUsesCurrentMempoolMinFeeRateFnProvider pins the
+// T-D fix for PR #1368 wave-1: rejectCandidate MUST consult
+// MinerConfig.CurrentMempoolMinFeeRateFn (when non-nil) on every candidate
+// so the relay-fee half of Stage C tracks the live mempool rolling floor,
+// not a static baseline. The earlier wave-0 code only read the static
+// CurrentMempoolMinFeeRate field, which would let DA candidates paying
+// above DefaultMempoolMinFeeRate=1 but below the live floor sneak through
+// the miner template even when the mempool admit path would reject them.
+//
+// Test setup picks feePaid based on the observed daTestTx weight so that
+// fee > weight*1 (would admit on baseline) but fee < weight*providerFloor
+// (rejects under provider). Proof assertion: rejectCandidate returns
+// reject==true AND providerCalls>0 (the closure increments a counter on
+// every invocation); a future edit that drops the provider call leaves
+// providerCalls==0 and fails the assertion.
+func TestMinerRejectCandidateUsesCurrentMempoolMinFeeRateFnProvider(t *testing.T) {
+	var providerCalls int
+	const providerFloor = uint64(100)
+	cfg := DefaultMinerConfig()
+	cfg.PolicyDaAnchorAntiAbuse = true
+	cfg.PolicyRejectCoreExtPreActivation = false
+	cfg.MinDaFeeRate = 1
+	cfg.PolicyDaSurchargePerByte = 0
+	cfg.CurrentMempoolMinFeeRate = 1
+	cfg.CurrentMempoolMinFeeRateFn = func() uint64 {
+		providerCalls++
+		return providerFloor
+	}
+	miner := &Miner{cfg: cfg}
+
+	// Two-pass: first build a tx to learn the fixture's actual weight, then
+	// rebuild with a feePaid in the (weight*1, weight*providerFloor) window.
+	// The exact size is determined at runtime from daTestTx so this test
+	// stays correct if the fixture's serialized weight changes.
+	_, _, weight := daTestTx(t, 0x40, 1_000_000, 0, 10)
+	if weight == 0 {
+		t.Fatalf("test setup: weight=0")
+	}
+	feePaid := weight * 5 // safely between weight*1 and weight*100
+	if feePaid <= weight || feePaid >= weight*providerFloor {
+		t.Fatalf("test setup: feePaid=%d not in window (weight*1=%d, weight*provider=%d)", feePaid, weight, weight*providerFloor)
+	}
+	tx, utxos, _ := daTestTx(t, 0x40, 1_000_000, feePaid, 10)
+
+	reject, _, err := miner.rejectCandidate(tx, utxos, 1, 0)
+	if err != nil {
+		t.Fatalf("rejectCandidate: %v", err)
+	}
+	if !reject {
+		t.Fatalf("expected reject under provider floor=%d * weight=%d > fee=%d; reject=false", providerFloor, weight, feePaid)
+	}
+	if providerCalls == 0 {
+		t.Fatalf("CurrentMempoolMinFeeRateFn never called; rejectCandidate read static CurrentMempoolMinFeeRate=1 instead of the live provider")
+	}
+}
+
+// TestMinerRejectCandidateFallbackUsesStaticCurrentMempoolMinFeeRate pins
+// the T-D contract for the standalone-miner case: when
+// CurrentMempoolMinFeeRateFn is nil, rejectCandidate falls back to the
+// static CurrentMempoolMinFeeRate field. This is the documented contract
+// for builds that have no live mempool to bind into the miner template.
+func TestMinerRejectCandidateFallbackUsesStaticCurrentMempoolMinFeeRate(t *testing.T) {
+	const staticFloor = uint64(100)
+	cfg := DefaultMinerConfig()
+	cfg.PolicyDaAnchorAntiAbuse = true
+	cfg.PolicyRejectCoreExtPreActivation = false
+	cfg.MinDaFeeRate = 1
+	cfg.PolicyDaSurchargePerByte = 0
+	cfg.CurrentMempoolMinFeeRate = staticFloor
+	cfg.CurrentMempoolMinFeeRateFn = nil
+	miner := &Miner{cfg: cfg}
+
+	_, _, weight := daTestTx(t, 0x41, 1_000_000, 0, 10)
+	if weight == 0 {
+		t.Fatalf("test setup: weight=0")
+	}
+	feePaid := weight * 5 // pays above weight*1 baseline but below weight*staticFloor
+	if feePaid >= weight*staticFloor {
+		t.Fatalf("test setup: feePaid=%d >= weight*staticFloor=%d", feePaid, weight*staticFloor)
+	}
+	tx, utxos, _ := daTestTx(t, 0x41, 1_000_000, feePaid, 10)
+
+	reject, _, err := miner.rejectCandidate(tx, utxos, 1, 0)
+	if err != nil {
+		t.Fatalf("rejectCandidate: %v", err)
+	}
+	if !reject {
+		t.Fatalf("expected reject under static floor=%d * weight=%d > fee=%d; reject=false", staticFloor, weight, feePaid)
+	}
+}
+
+// TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate pins the
+// T-D clamp at clients/go/node/miner.go inside rejectCandidate: a
+// provider that returns a value below DefaultMempoolMinFeeRate is
+// clamped up to that baseline before being fed into
+// RejectDaAnchorTxPolicy, so a misconfigured provider cannot silently
+// disable the relay-fee floor.
+//
+// The test is intentionally fail-sensitive on the clamp ALONE. Both the
+// DA floor (MinDaFeeRate) and the DA surcharge are zero, so without the
+// clamp the helper computes required_fee = max(weight*0, 0+0) = 0 and
+// admits the fee=0 candidate. With the clamp, currentMin is raised to
+// DefaultMempoolMinFeeRate=1 and required_fee = weight*1 > 0 forces a
+// reject. Removing the clamp inside rejectCandidate at
+// clients/go/node/miner.go therefore makes this test go green-to-red on
+// the same input — proving the clamp is the only thing keeping the
+// candidate out.
+func TestMinerRejectCandidateClampsBelowDefaultMempoolMinFeeRate(t *testing.T) {
+	cfg := DefaultMinerConfig()
+	cfg.PolicyDaAnchorAntiAbuse = true
+	cfg.PolicyRejectCoreExtPreActivation = false
+	cfg.MinDaFeeRate = 0
+	cfg.PolicyDaSurchargePerByte = 0
+	cfg.CurrentMempoolMinFeeRate = 1
+	cfg.CurrentMempoolMinFeeRateFn = func() uint64 { return 0 } // below DefaultMempoolMinFeeRate=1; clamped up
+	miner := &Miner{cfg: cfg}
+
+	// With the clamp, relay floor = weight * DefaultMempoolMinFeeRate=1 > 0
+	// and DA-side terms are zero, so required_fee = weight*1 and fee=0
+	// rejects. Without the clamp, currentMin stays 0 → required_fee=0 → admit.
+	tx, utxos, weight := daTestTx(t, 0x42, 1_000_000, 0, 10)
+	if weight == 0 {
+		t.Fatalf("test setup: weight=0")
+	}
+
+	reject, _, err := miner.rejectCandidate(tx, utxos, 1, 0)
+	if err != nil {
+		t.Fatalf("rejectCandidate: %v", err)
+	}
+	if !reject {
+		t.Fatalf("expected reject after clamp to DefaultMempoolMinFeeRate=1: weight=%d * 1 > fee=0; reject=false", weight)
+	}
+}
+
 func TestSnapshotBuildContextStateHandlesNilAndNoPolicyPaths(t *testing.T) {
 	t.Parallel()
 

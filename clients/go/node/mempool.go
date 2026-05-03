@@ -15,35 +15,51 @@ import (
 const (
 	DefaultMempoolMaxTransactions = 300
 	DefaultMempoolMaxBytes        = consensus.MAX_RELAY_MSG_BYTES
-	// DefaultMinMempoolFeePerWeight is the default minimum fee-per-weight ratio
-	// (in satoshis per weight unit) required for mempool admission.
-	// Transactions below this floor are rejected early before expensive signature
-	// verification. This is a DoS protection mechanism.
-	// Value: 1 satoshi per weight unit (conservative floor for spam prevention).
-	DefaultMinMempoolFeePerWeight = 1
+	DefaultMempoolMinFeeRate      = uint64(1)
+
+	// DefaultMinDaFeeRate is the spec-side per-byte DA fee floor from
+	// POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C (`min_da_fee_rate`).
+	DefaultMinDaFeeRate = uint64(1)
+
+	mempoolLowWaterNumerator   = 9
+	mempoolLowWaterDenominator = 10
+)
+
+type mempoolTxSource string
+
+const (
+	mempoolTxSourceRemote mempoolTxSource = "remote"
+	mempoolTxSourceLocal  mempoolTxSource = "local"
+	mempoolTxSourceReorg  mempoolTxSource = "reorg"
 )
 
 type mempoolEntry struct {
-	raw    []byte
-	txid   [32]byte
-	inputs []consensus.Outpoint
-	fee    uint64
-	weight uint64
-	size   int
+	raw          []byte
+	txid         [32]byte
+	wtxid        [32]byte
+	inputs       []consensus.Outpoint
+	fee          uint64
+	weight       uint64
+	size         int
+	admissionSeq uint64
+	source       mempoolTxSource
 }
 
 type Mempool struct {
-	mu                 sync.RWMutex
-	chainState         *ChainState
-	blockStore         *BlockStore
-	chainID            [32]byte
-	policy             MempoolConfig
-	maxTxs             int
-	maxBytes           int
-	usedBytes          int
-	minFeePerWeight    uint64 // minimum fee-per-weight for admission (0 = disabled)
-	txs                map[[32]byte]*mempoolEntry
-	spenders           map[consensus.Outpoint][32]byte
+	mu                sync.RWMutex
+	chainState        *ChainState
+	blockStore        *BlockStore
+	chainID           [32]byte
+	policy            MempoolConfig
+	maxTxs            int
+	maxBytes          int
+	lowWaterBytes     int
+	usedBytes         int
+	lastAdmissionSeq  uint64
+	currentMinFeeRate uint64
+	txs               map[[32]byte]*mempoolEntry
+	wtxids            map[[32]byte][32]byte
+	spenders          map[consensus.Outpoint][32]byte
 	// Admission counters are bumped exactly once for each AddTx call on a
 	// non-nil Mempool that reaches the final outcome accounting path.
 	// Nil-receiver calls return before that defer is registered and are
@@ -60,6 +76,43 @@ type Mempool struct {
 	admitConflict    atomic.Uint64
 	admitRejected    atomic.Uint64
 	admitUnavailable atomic.Uint64
+
+	// evictedResidentTotal counts cumulative resident-entry capacity
+	// evictions since process start. It is bumped exactly once per
+	// already-admitted entry that is removed by capacity pressure
+	// (the deleteEntryLocked loop in addEntryLocked after
+	// validateCapacityAdmissionLocked classifies the candidate as
+	// admitted-and-evicting). Candidate-worst rejection — where the
+	// incoming candidate is rejected at capacity and no resident is
+	// evicted — does not increment this counter; that path returns
+	// txAdmitUnavailable before the deleteEntryLocked loop. Fee-floor
+	// rejection of an incoming transaction never reaches this counter
+	// either, because the fee-floor check happens before
+	// validateCapacityAdmissionLocked. Confirmed-block removals via
+	// EvictConfirmed/applyConnectedBlock are conflict resolution, not
+	// policy capacity eviction, and also do not increment this counter.
+	evictedResidentTotal atomic.Uint64
+}
+
+// MempoolStats is the snapshot view of standard mempool telemetry
+// state. Field order matches the /metrics rendering order in
+// renderPrometheusMetrics so the textual output is stable across
+// readings. Reading a snapshot does not mutate any mempool state.
+//
+// Nil-receiver contract (matches CurrentMinFeeRateSnapshot
+// convention): a nil *Mempool returns counters and sizes set to
+// zero (TxCount, BytesUsed, MaxBytes, LowWaterBytes,
+// EvictedResidentTotal) but MinFeeRate set to
+// DefaultMempoolMinFeeRate. Callers do not need to special-case
+// uninitialized mempool wiring; /metrics on an un-wired state
+// renders the documented baseline floor instead of 0.
+type MempoolStats struct {
+	TxCount              int
+	BytesUsed            int
+	MaxBytes             int
+	LowWaterBytes        int
+	MinFeeRate           uint64
+	EvictedResidentTotal uint64
 }
 
 // MempoolAdmissionCounts is the snapshot view of admission outcomes.
@@ -75,10 +128,16 @@ type MempoolAdmissionCounts struct {
 }
 
 type MempoolConfig struct {
-	MaxTransactions                      int
-	MaxBytes                             int
-	MinFeePerWeight                      uint64 // minimum fee-per-weight (0 = disabled, default = 1)
-	PolicyDaSurchargePerByte             uint64
+	MaxTransactions          int
+	MaxBytes                 int
+	PolicyDaSurchargePerByte uint64
+	// MinDaFeeRate is the spec-side per-byte DA fee floor
+	// (POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C `min_da_fee_rate`,
+	// default 1). NewMempoolWithConfig treats 0 as omitted and normalizes
+	// it to DefaultMinDaFeeRate; callers cannot disable the spec floor
+	// through the public mempool config. Direct policy-helper tests may
+	// still pass 0 to isolate surcharge-only helper semantics.
+	MinDaFeeRate                         uint64
 	PolicyRejectNonCoinbaseAnchorOutputs bool
 	PolicyRejectCoreExtPreActivation     bool
 	PolicyMaxExtPayloadBytes             int
@@ -132,8 +191,8 @@ func DefaultMempoolConfig() MempoolConfig {
 	return MempoolConfig{
 		MaxTransactions:                      DefaultMempoolMaxTransactions,
 		MaxBytes:                             DefaultMempoolMaxBytes,
-		MinFeePerWeight:                      DefaultMinMempoolFeePerWeight,
 		PolicyDaSurchargePerByte:             minerDefaults.PolicyDaSurchargePerByte,
+		MinDaFeeRate:                         DefaultMinDaFeeRate,
 		PolicyRejectNonCoinbaseAnchorOutputs: minerDefaults.PolicyRejectNonCoinbaseAnchorOutputs,
 		PolicyRejectCoreExtPreActivation:     minerDefaults.PolicyRejectCoreExtPreActivation,
 	}
@@ -145,15 +204,17 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 	}
 	cfg = normalizeMempoolConfig(cfg)
 	return &Mempool{
-		chainState:      chainState,
-		blockStore:      blockStore,
-		chainID:         chainID,
-		policy:          cfg,
-		maxTxs:          cfg.MaxTransactions,
-		maxBytes:        cfg.MaxBytes,
-		minFeePerWeight: cfg.MinFeePerWeight,
-		txs:             make(map[[32]byte]*mempoolEntry),
-		spenders:        make(map[consensus.Outpoint][32]byte),
+		chainState:        chainState,
+		blockStore:        blockStore,
+		chainID:           chainID,
+		policy:            cfg,
+		maxTxs:            cfg.MaxTransactions,
+		maxBytes:          cfg.MaxBytes,
+		lowWaterBytes:     defaultMempoolLowWaterBytes(cfg.MaxBytes),
+		currentMinFeeRate: DefaultMempoolMinFeeRate,
+		txs:               make(map[[32]byte]*mempoolEntry),
+		wtxids:            make(map[[32]byte][32]byte),
+		spenders:          make(map[consensus.Outpoint][32]byte),
 	}, nil
 }
 
@@ -164,7 +225,22 @@ func normalizeMempoolConfig(cfg MempoolConfig) MempoolConfig {
 	if cfg.MaxBytes <= 0 {
 		cfg.MaxBytes = DefaultMempoolMaxBytes
 	}
+	if cfg.MinDaFeeRate == 0 {
+		cfg.MinDaFeeRate = DefaultMinDaFeeRate
+	}
 	return cfg
+}
+
+func defaultMempoolLowWaterBytes(maxBytes int) int {
+	if maxBytes <= 0 {
+		return 0
+	}
+	lowWater := (maxBytes/mempoolLowWaterDenominator)*mempoolLowWaterNumerator +
+		((maxBytes % mempoolLowWaterDenominator) * mempoolLowWaterNumerator / mempoolLowWaterDenominator)
+	if lowWater == 0 {
+		return 1
+	}
+	return lowWater
 }
 
 func (m *Mempool) Len() int {
@@ -205,6 +281,48 @@ func (m *Mempool) AdmissionCounts() MempoolAdmissionCounts {
 		Conflict:    m.admitConflict.Load(),
 		Rejected:    m.admitRejected.Load(),
 		Unavailable: m.admitUnavailable.Load(),
+	}
+}
+
+// Stats returns a current snapshot of standard mempool telemetry
+// state for the /metrics renderer. The snapshot reads live struct
+// fields under the read lock — values are NOT cached duplicates of
+// MempoolConfig defaults — so max_bytes, low_water_bytes, and
+// min_fee_rate reflect the rolling state including the post-eviction
+// adjustments performed by raiseMinFeeRateAfterEvictionLocked and
+// decayMinFeeRateAfterConnectedBlockLocked. EvictedResidentTotal is
+// loaded INSIDE the read-lock window. Writers bump that counter
+// under m.mu.Lock inside addEntryLocked's deleteEntryLocked loop,
+// so the reader's m.mu.RLock pairs with the writer's m.mu.Lock and
+// the atomic.Load observes the same critical section as the gauge
+// fields read on the surrounding lines. Covered by
+// TestMempoolStatsScrapePurity and the
+// TestMempoolStatsResidentEvictionIncrementsExactlyOnce assertion
+// chain in clients/go/node/mempool_test.go.
+//
+// Nil-safety follows the existing exported-accessor convention used
+// by CurrentMinFeeRateSnapshot, BytesUsed, AdmissionCounts: a nil
+// receiver returns counters/sizes 0, but MinFeeRate defaults to
+// DefaultMempoolMinFeeRate. This keeps /metrics rendering on an
+// uninitialized state agreeing with the rest of the Mempool API
+// instead of advertising rubin_node_mempool_min_fee_rate = 0, which
+// would disagree with CurrentMinFeeRateSnapshot's nil return and
+// the documented baseline floor.
+func (m *Mempool) Stats() MempoolStats {
+	if m == nil {
+		return MempoolStats{
+			MinFeeRate: DefaultMempoolMinFeeRate,
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return MempoolStats{
+		TxCount:              len(m.txs),
+		BytesUsed:            m.usedBytes,
+		MaxBytes:             m.maxBytes,
+		LowWaterBytes:        m.effectiveLowWaterBytesLocked(),
+		MinFeeRate:           m.currentMinFeeRateLocked(),
+		EvictedResidentTotal: m.evictedResidentTotal.Load(),
 	}
 }
 
@@ -290,6 +408,25 @@ func (m *Mempool) Contains(txid [32]byte) bool {
 }
 
 func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
+	return m.addTxWithSource(txBytes, mempoolTxSourceLocal)
+}
+
+// AddRemoteTx admits a transaction received from a peer while preserving the
+// same validation and admission policy as AddTx. The source is metadata only.
+func (m *Mempool) AddRemoteTx(txBytes []byte) (retErr error) {
+	return m.addTxWithSource(txBytes, mempoolTxSourceRemote)
+}
+
+// AddReorgTx admits a transaction requeued from a disconnected canonical block
+// while preserving the same validation and admission policy as AddTx.
+func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
+	return m.addTxWithSource(txBytes, mempoolTxSourceReorg)
+}
+
+// addTxWithSource validates and admits a transaction while recording the
+// caller-declared origin in the mempool entry. Source provenance does not
+// grant admission priority or bypass; invalid source values reject.
+func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retErr error) {
 	if m == nil {
 		return txAdmitUnavailable("nil mempool")
 	}
@@ -301,6 +438,9 @@ func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
 	defer func() { m.noteAdmissionResult(retErr) }()
 	if m.chainState == nil {
 		return txAdmitUnavailable("nil chainstate")
+	}
+	if !validMempoolTxSource(source) {
+		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
 	}
 
 	m.chainState.admissionMu.RLock()
@@ -316,13 +456,17 @@ func (m *Mempool) AddTx(txBytes []byte) (retErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	entry := newMempoolEntry(checked, inputs)
-	if err := m.validateAdmissionLocked(entry); err != nil {
-		return err
-	}
+	entry := newMempoolEntry(checked, inputs, source)
+	return m.addEntryLocked(entry)
+}
 
-	m.addEntryLocked(entry)
-	return nil
+func validMempoolTxSource(source mempoolTxSource) bool {
+	switch source {
+	case mempoolTxSourceRemote, mempoolTxSourceLocal, mempoolTxSourceReorg:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
@@ -391,7 +535,11 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	}
 
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	if policyNeedsInputSnapshot(policy) {
+	needs, err := policyNeedsInputSnapshotForTx(tx, policy)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	if needs {
 		policyUtxos, err = policyInputSnapshot(tx, snapshot.utxos)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
@@ -446,6 +594,18 @@ func (m *Mempool) EvictConfirmedParsed(block *consensus.ParsedBlock) error {
 	})
 }
 
+func (m *Mempool) applyConnectedBlockParsed(block *consensus.ParsedBlock) error {
+	return m.withLockedParsedBlock(block, func(block *consensus.ParsedBlock) {
+		for _, txid := range block.Txids {
+			m.removeTxLocked(txid)
+		}
+		for txid := range m.collectConflictsLocked(block) {
+			m.removeTxLocked(txid)
+		}
+		m.decayMinFeeRateAfterConnectedBlockLocked()
+	})
+}
+
 func (m *Mempool) RemoveConflicting(blockBytes []byte) error {
 	return m.withParsedBlock(blockBytes, m.RemoveConflictingParsed)
 }
@@ -494,106 +654,6 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 	return m.policy
 }
 
-// cheapFeeFloorPrecheck performs a fast fee-floor check before expensive validation.
-// This is a DoS protection mechanism that rejects obviously below-floor spam without
-// invoking ML-DSA signature verification or full state processing.
-//
-// Returns nil if the transaction passes the cheap precheck or if the precheck cannot
-// be soundly performed (e.g., missing UTXOs). Returns a TxAdmitError if the transaction
-// is provably below the fee floor.
-//
-// This function MUST NOT mask earlier errors (malformed tx, missing inputs) that would
-// be caught by full validation. It only rejects when fee/weight can be soundly computed
-// and the ratio is below the configured minimum fee-per-weight.
-func (m *Mempool) cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot) error {
-	if tx == nil || snapshot == nil || m.minFeePerWeight == 0 {
-		// Cannot perform precheck or fee floor disabled; let full validation handle it
-		return nil
-	}
-
-	// Compute sum of input values. If any input is missing from UTXO set,
-	// we cannot soundly compute fee, so skip precheck and let full validation
-	// report TX_ERR_MISSING_UTXO.
-	var sumInputs uint64
-	for _, in := range tx.Inputs {
-		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-		entry, ok := snapshot.utxos[op]
-		if !ok {
-			// Missing UTXO: cannot compute fee soundly. Skip precheck.
-			// Full validation will report the proper error.
-			return nil
-		}
-		// Check for overflow in sumInputs
-		if sumInputs > ^uint64(0)-entry.Value {
-			// Overflow in input sum: this is malformed and will be caught
-			// by full validation. Skip precheck.
-			return nil
-		}
-		sumInputs += entry.Value
-	}
-
-	// Compute sum of output values
-	var sumOutputs uint64
-	for _, out := range tx.Outputs {
-		// Check for overflow in sumOutputs
-		if sumOutputs > ^uint64(0)-out.Value {
-			// Overflow in output sum: malformed, let full validation handle it
-			return nil
-		}
-		sumOutputs += out.Value
-	}
-
-	// Check if sumInputs < sumOutputs (invalid transaction)
-	if sumInputs < sumOutputs {
-		// Invalid: outputs exceed inputs. This is a consensus error that
-		// full validation will catch. Skip precheck.
-		return nil
-	}
-
-	// Compute fee (safe because sumInputs >= sumOutputs)
-	fee := sumInputs - sumOutputs
-
-	// Compute weight cheaply using the public weight function.
-	// This does NOT perform signature verification, just structural weight calculation.
-	weight, _, _, err := consensus.TxWeightAndStats(tx)
-	if err != nil {
-		// Weight computation failed (malformed tx). Let full validation handle it.
-		return nil
-	}
-
-	// Check fee-per-weight ratio against floor.
-	// To avoid floating point: fee / weight >= minFeePerWeight
-	// is equivalent to: fee >= minFeePerWeight * weight
-	//
-	// Check for overflow in multiplication
-	if weight > 0 && m.minFeePerWeight > ^uint64(0)/weight {
-		// Overflow in floor calculation: weight is extremely large.
-		// This is likely malformed. Skip precheck.
-		return nil
-	}
-
-	minFee := m.minFeePerWeight * weight
-
-	if fee < minFee {
-		// Transaction is provably below fee floor. Reject early.
-		return txAdmitRejected(fmt.Sprintf(
-			"transaction fee %d below minimum floor %d (fee-per-weight %d < %d)",
-			fee, minFee, fee/max(weight, 1), MinMempoolFeePerWeight,
-		))
-	}
-
-	// Passed cheap precheck
-	return nil
-}
-
-// max returns the maximum of two uint64 values
-func max(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // checkTransactionWithSnapshot validates a transaction against a consistent
 // owned admission snapshot plus an immutable mempool policy snapshot.
 func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
@@ -616,17 +676,27 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if consumed != len(txBytes) {
 		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
 	}
-
-	// RUB-165: Fast-reject spam with fee below floor BEFORE expensive signature verification.
-	// This cheap precheck only rejects when fee/weight can be soundly computed from available
-	// UTXO context. If inputs are missing or malformed, it returns nil and lets full validation
-	// report the proper error.
-	if err := m.cheapFeeFloorPrecheck(parsedTx, snapshot); err != nil {
+	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
+	if err != nil {
+		return nil, nil, txAdmitRejected(err.Error())
+	}
+	// Only policy-inert candidates use the cheap floor reject. Transactions
+	// that may hit a configured semantic policy lane keep the existing
+	// policy-error precedence below.
+	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, policy, m.CurrentMinFeeRateSnapshot()); err != nil {
 		return nil, nil, err
 	}
-
+	// Policy checks consume an immutable pre-validation snapshot of only the
+	// transaction inputs they inspect, avoiding both live-utxo mutation and
+	// whole-chainstate copying on mempool admission. The snapshot is needed
+	// only by policy lanes that read tx inputs from utxos (CORE_EXT
+	// pre-activation gate, or a DA-bearing tx under any non-zero DA-side
+	// fee term); non-DA tx with no CORE_EXT gate skip the map-copy entirely.
+	// Build the snapshot before CheckTransaction*WithOwnedUtxoSet because
+	// that helper takes ownership of the supplied utxo map and removes
+	// spent inputs as part of validation.
 	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	if policyNeedsInputSnapshot(policy) {
+	if needs {
 		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.utxos)
 		if err != nil {
 			return nil, nil, txAdmitRejected(err.Error())
@@ -645,9 +715,6 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
-	// Policy checks consume an immutable pre-validation snapshot of only the
-	// transaction inputs they inspect, avoiding both live-state mutation and
-	// whole-chainstate copying on mempool admission.
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
@@ -658,8 +725,151 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	return checked, inputs, nil
 }
 
-func policyNeedsInputSnapshot(policy MempoolConfig) bool {
-	return policy.PolicyDaSurchargePerByte > 0 || policy.PolicyRejectCoreExtPreActivation
+func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig, minFeeRate uint64) error {
+	if tx == nil || snapshot == nil || len(tx.Inputs) == 0 {
+		return nil
+	}
+	inputs, ok := feePrecheckInputs(tx, snapshot.utxos)
+	if !ok {
+		return nil
+	}
+	if feePrecheckPreservesPolicyPrecedence(tx, policy, inputs.hasCoreExt) {
+		return nil
+	}
+	outputValue, ok := feePrecheckOutputValue(tx)
+	if !ok || outputValue > inputs.value {
+		return nil
+	}
+	weight, ok := feePrecheckWeight(tx)
+	if !ok || weight == 0 {
+		return nil
+	}
+	fee := inputs.value - outputValue
+	if feeRateBelowFloor(fee, weight, minFeeRate) {
+		return feeBelowRollingMinimumError(fee, weight, minFeeRate)
+	}
+	return nil
+}
+
+type feePrecheckInputSummary struct {
+	value      uint64
+	hasCoreExt bool
+}
+
+func feePrecheckInputs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (feePrecheckInputSummary, bool) {
+	if tx == nil || utxos == nil {
+		return feePrecheckInputSummary{}, false
+	}
+	var total uint64
+	hasCoreExt := false
+	for _, in := range tx.Inputs {
+		entry, ok := utxos[consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}]
+		if !ok {
+			return feePrecheckInputSummary{}, false
+		}
+		next, carry := bits.Add64(total, entry.Value, 0)
+		if carry != 0 {
+			return feePrecheckInputSummary{}, false
+		}
+		if entry.CovenantType == consensus.COV_TYPE_CORE_EXT {
+			hasCoreExt = true
+		}
+		total = next
+	}
+	return feePrecheckInputSummary{value: total, hasCoreExt: hasCoreExt}, true
+}
+
+func feePrecheckPreservesPolicyPrecedence(tx *consensus.Tx, policy MempoolConfig, hasCoreExtInput bool) bool {
+	if tx == nil {
+		return true
+	}
+	hasCoreExtOutput := false
+	for _, out := range tx.Outputs {
+		switch out.CovenantType {
+		case consensus.COV_TYPE_ANCHOR:
+			if policy.PolicyRejectNonCoinbaseAnchorOutputs {
+				return true
+			}
+		case consensus.COV_TYPE_CORE_EXT:
+			hasCoreExtOutput = true
+		}
+	}
+	if policy.PolicyRejectCoreExtPreActivation && (hasCoreExtOutput || hasCoreExtInput) {
+		return true
+	}
+	if policy.PolicyMaxExtPayloadBytes > 0 && hasCoreExtOutput {
+		return true
+	}
+	if tx.TxKind != 0x00 && len(tx.DaPayload) > 0 && (policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0) {
+		return true
+	}
+	return false
+}
+
+func feePrecheckOutputValue(tx *consensus.Tx) (uint64, bool) {
+	if tx == nil {
+		return 0, false
+	}
+	var total uint64
+	for _, out := range tx.Outputs {
+		next, carry := bits.Add64(total, out.Value, 0)
+		if carry != 0 {
+			return 0, false
+		}
+		total = next
+	}
+	return total, true
+}
+
+func feePrecheckWeight(tx *consensus.Tx) (uint64, bool) {
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		return 0, false
+	}
+	return weight, true
+}
+
+// policyNeedsInputSnapshotForTx returns true if applying policy to the
+// already-parsed transaction will read input UTXOs. The decision is
+// tx-aware so admissions of non-DA transactions under the default
+// config (`MinDaFeeRate=DefaultMinDaFeeRate=1`,
+// `PolicyDaSurchargePerByte=0`, `PolicyRejectCoreExtPreActivation=false`)
+// skip the per-tx map copy entirely.
+//
+// Trigger conditions:
+//
+//  1. `PolicyRejectCoreExtPreActivation` is on — the CORE_EXT classifier
+//     reads input state for any candidate, so the snapshot is required
+//     regardless of tx shape.
+//  2. The DA path is exercisable AND the tx is DA-bearing
+//     (`daBytes > 0`). `applyPolicyAgainstState` repeats the DA-bearing
+//     check from the post-validation metadata before invoking
+//     `RejectDaAnchorTxPolicy`, so non-DA tx never consume the snapshot or
+//     enter the DA helper.
+//
+// A raw all-zero DA policy snapshot + non-CORE_EXT routing relies on
+// `validateFeeFloorLocked` to enforce the rolling relay-fee floor; that
+// path does not need a UTXO snapshot. Public NewMempoolWithConfig callers
+// get DefaultMinDaFeeRate when MinDaFeeRate is left at zero.
+//
+// The function takes the parsed `*consensus.Tx` (not the post-validation
+// `*CheckedTransaction`) on purpose: the caller must build the snapshot
+// BEFORE invoking `CheckTransaction*WithOwnedUtxoSet`, which takes
+// ownership of the supplied utxo map and removes spent inputs as it
+// validates. The DA-bearing decision is a cheap structural predicate, not
+// a full weight/stat walk; malformed tx kinds are still rejected by the
+// later consensus validation path.
+func policyNeedsInputSnapshotForTx(tx *consensus.Tx, policy MempoolConfig) (bool, error) {
+	if policy.PolicyRejectCoreExtPreActivation {
+		return true, nil
+	}
+	if policy.MinDaFeeRate == 0 && policy.PolicyDaSurchargePerByte == 0 {
+		return false, nil
+	}
+	if tx == nil {
+		return false, errors.New("nil transaction")
+	}
+	return tx.TxKind != 0x00 && len(tx.DaPayload) > 0, nil
 }
 
 func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
@@ -695,12 +905,41 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 			return errors.New(reason)
 		}
 	}
-	reject, _, reason, err := RejectDaAnchorTxPolicy(checked.Tx, utxos, policy.PolicyDaSurchargePerByte)
-	if err != nil {
-		return err
-	}
-	if reject {
-		return errors.New(reason)
+	// Stage C DA fee policy: only enter the helper for DA-bearing tx when
+	// the DA-side floor is configured (MinDaFeeRate > 0) or a per-byte
+	// surcharge applies. Non-DA tx skip the helper entirely on the hot
+	// admit path; their relay-floor handling remains in
+	// validateFeeFloorLocked.
+	//
+	// The mempool admit path enforces the rolling relay-fee floor through
+	// validateFeeFloorLocked (TxAdmitUnavailable — transient/retryable),
+	// so this caller intentionally passes currentMempoolMinFeeRate=0 so
+	// max(relay_fee_floor, da_required_fee) collapses to da_required_fee.
+	// Without the zero override, a DA tx that pays the DA-side floor but
+	// not the rolling relay floor would surface here as TxAdmitRejected
+	// ("DA fee below Stage C floor ... relay_fee_floor=...") instead of
+	// the symmetric TxAdmitUnavailable that non-DA tx receive from
+	// validateFeeFloorLocked. With currentMin=0 the helper enforces only
+	// the DA-specific terms and validateFeeFloorLocked owns relay-floor
+	// classification uniformly for both DA and non-DA admissions.
+	//
+	// The miner caller (rejectCandidate) keeps using the live rolling
+	// floor because it has no validateFeeFloorLocked equivalent — the
+	// miner template needs to skip a tx whenever it fails any floor.
+	if checked.DaBytes > 0 && (policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0) {
+		reject, _, reason, err := RejectDaAnchorTxPolicy(
+			checked.Tx,
+			utxos,
+			0,
+			policy.MinDaFeeRate,
+			policy.PolicyDaSurchargePerByte,
+		)
+		if err != nil {
+			return txAdmitRejected(fmt.Sprintf("%s: %v", reason, err))
+		}
+		if reject {
+			return txAdmitRejected(reason)
+		}
 	}
 	if policy.PolicyRejectCoreExtPreActivation {
 		reject, reason, err := RejectCoreExtTxPreActivation(checked.Tx, utxos, nextHeight, policy.CoreExtProfiles)
@@ -745,44 +984,194 @@ func (m *Mempool) removeTxLocked(txid [32]byte) {
 	m.deleteEntryLocked(txid, entry)
 }
 
-func (m *Mempool) validateAdmissionLocked(entry *mempoolEntry) error {
+func (m *Mempool) validateNonCapacityAdmissionLocked(entry *mempoolEntry) error {
+	if err := validateBasicMempoolEntry(entry); err != nil {
+		return err
+	}
+	if err := m.validateEntryIdentityLocked(entry); err != nil {
+		return err
+	}
+	if err := validateMempoolEntrySource(entry.source); err != nil {
+		return err
+	}
+	if err := m.validateEntryInputsLocked(entry); err != nil {
+		return err
+	}
+	return m.validateAdmissionSeqLocked(entry)
+}
+
+func validateBasicMempoolEntry(entry *mempoolEntry) error {
 	if entry == nil {
 		return txAdmitRejected("nil mempool entry")
 	}
 	if entry.size <= 0 {
 		return txAdmitRejected("invalid mempool entry size")
 	}
+	if entry.weight == 0 {
+		return txAdmitRejected("invalid mempool entry weight")
+	}
+	return nil
+}
+
+func (m *Mempool) validateEntryIdentityLocked(entry *mempoolEntry) error {
 	txid := entry.txid
+	if txid == ([32]byte{}) {
+		return txAdmitRejected("invalid mempool entry txid")
+	}
 	if _, exists := m.txs[txid]; exists {
 		return txAdmitConflict("tx already in mempool")
 	}
+	wtxid := entry.wtxid
+	if wtxid == ([32]byte{}) {
+		wtxid = entry.txid
+	}
+	if existing, exists := m.wtxids[wtxid]; exists {
+		return txAdmitConflict(fmt.Sprintf("mempool wtxid conflict with %x", existing))
+	}
+	return nil
+}
+
+func validateMempoolEntrySource(source mempoolTxSource) error {
+	if source == "" {
+		source = mempoolTxSourceLocal
+	}
+	if !validMempoolTxSource(source) {
+		return txAdmitRejected(fmt.Sprintf("invalid mempool tx source %q", source))
+	}
+	return nil
+}
+
+func (m *Mempool) validateEntryInputsLocked(entry *mempoolEntry) error {
 	for _, op := range entry.inputs {
 		if existing, ok := m.spenders[op]; ok {
 			return txAdmitConflict(fmt.Sprintf("mempool double-spend conflict with %x", existing))
 		}
 	}
-	if len(m.txs) >= m.maxTxs {
-		return txAdmitUnavailable(fmt.Sprintf("mempool transaction count limit reached: current=%d max=%d", len(m.txs), m.maxTxs))
+	return nil
+}
+
+func (m *Mempool) validateAdmissionSeqLocked(entry *mempoolEntry) error {
+	if entry.admissionSeq != 0 {
+		for existingTxid, existing := range m.txs {
+			if existing != nil && existing.admissionSeq == entry.admissionSeq {
+				return txAdmitRejected(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid))
+			}
+		}
 	}
-	if entry.size > m.maxBytes || m.usedBytes > m.maxBytes-entry.size {
-		return txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, entry.size, m.maxBytes))
+	if m.lastAdmissionSeq == ^uint64(0) {
+		return txAdmitUnavailable("mempool admission sequence exhausted")
 	}
 	return nil
 }
 
-func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.Outpoint) *mempoolEntry {
+func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
+	if entry == nil {
+		return txAdmitRejected("nil mempool entry")
+	}
+	currentMinFeeRate := m.currentMinFeeRateLocked()
+	if feeRateBelowFloor(entry.fee, entry.weight, currentMinFeeRate) {
+		return feeBelowRollingMinimumError(entry.fee, entry.weight, currentMinFeeRate)
+	}
+	return nil
+}
+
+func feeBelowRollingMinimumError(fee uint64, weight uint64, minFeeRate uint64) error {
+	if minFeeRate < DefaultMempoolMinFeeRate {
+		minFeeRate = DefaultMempoolMinFeeRate
+	}
+	return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", fee, weight, minFeeRate))
+}
+
+func newMempoolEntry(checked *consensus.CheckedTransaction, inputs []consensus.Outpoint, source mempoolTxSource) *mempoolEntry {
 	return &mempoolEntry{
 		raw:    append([]byte(nil), checked.Bytes...),
 		txid:   checked.TxID,
+		wtxid:  checked.WTxID,
 		inputs: append([]consensus.Outpoint(nil), inputs...),
 		fee:    checked.Fee,
 		weight: checked.Weight,
 		size:   checked.SerializedSize,
+		source: source,
 	}
 }
 
-func (m *Mempool) addEntryLocked(entry *mempoolEntry) {
+func normalizeMempoolEntryDefaults(entry *mempoolEntry) {
+	if entry == nil {
+		return
+	}
+	if entry.source == "" {
+		entry.source = mempoolTxSourceLocal
+	}
+	if entry.wtxid == ([32]byte{}) {
+		entry.wtxid = entry.txid
+	}
+}
+
+func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
+	normalizeMempoolEntryDefaults(entry)
+	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
+		return err
+	}
+	evictedEntries, err := m.validateCapacityAdmissionLocked(entry)
+	if err != nil {
+		return err
+	}
+	m.ensureMinFeeRateLocked()
+	m.ensureIndexesLocked()
+	for _, evicted := range evictedEntries {
+		m.deleteEntryLocked(evicted.txid, evicted)
+		// Bump the resident-eviction counter exactly once per
+		// already-admitted entry that capacity pressure removes here.
+		// Candidate-worst rejection returned txAdmitUnavailable above
+		// without populating evictedEntries, so that path skips this
+		// loop entirely. Fee-floor rejection returned earlier from
+		// validateFeeFloorLocked and likewise never reaches here.
+		m.evictedResidentTotal.Add(1)
+	}
+	m.assignAdmissionSeqLocked(entry)
+	m.insertEntryIndexesLocked(entry)
+	m.raiseMinFeeRateAfterEvictionLocked(evictedEntries)
+	return nil
+}
+
+func (m *Mempool) validateCapacityAdmissionLocked(entry *mempoolEntry) ([]*mempoolEntry, error) {
+	if err := m.validateFeeFloorLocked(entry); err != nil {
+		return nil, err
+	}
+	evictedEntries, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
+	if err != nil {
+		return nil, err
+	}
+	if candidateEvicted {
+		return nil, txAdmitUnavailable("mempool capacity candidate rejected by eviction ordering")
+	}
+	return evictedEntries, nil
+}
+
+func (m *Mempool) ensureIndexesLocked() {
+	if m.txs == nil {
+		m.txs = make(map[[32]byte]*mempoolEntry)
+	}
+	if m.wtxids == nil {
+		m.wtxids = make(map[[32]byte][32]byte)
+	}
+	if m.spenders == nil {
+		m.spenders = make(map[consensus.Outpoint][32]byte)
+	}
+}
+
+func (m *Mempool) assignAdmissionSeqLocked(entry *mempoolEntry) {
+	if entry.admissionSeq == 0 {
+		m.lastAdmissionSeq++
+		entry.admissionSeq = m.lastAdmissionSeq
+	} else if entry.admissionSeq > m.lastAdmissionSeq {
+		m.lastAdmissionSeq = entry.admissionSeq
+	}
+}
+
+func (m *Mempool) insertEntryIndexesLocked(entry *mempoolEntry) {
 	m.txs[entry.txid] = entry
+	m.wtxids[entry.wtxid] = entry.txid
 	m.usedBytes += entry.size
 	for _, op := range entry.inputs {
 		m.spenders[op] = entry.txid
@@ -864,21 +1253,364 @@ func (m *Mempool) deleteEntryLocked(txid [32]byte, entry *mempoolEntry) {
 	for _, op := range entry.inputs {
 		delete(m.spenders, op)
 	}
+	if existing, ok := m.wtxids[entry.wtxid]; ok && existing == txid {
+		delete(m.wtxids, entry.wtxid)
+	}
+}
+
+type mempoolEvictionPlanEntry struct {
+	entry     *mempoolEntry
+	candidate bool
+}
+
+type mempoolCapacityState struct {
+	maxBytes      uint64
+	candidateSize uint64
+	usedBytes     uint64
+	targetBytes   uint64
+	totalBytes    uint64
+	totalCount    int
+	countPressure bool
+	bytePressure  bool
+}
+
+func (m *Mempool) capacityEvictionPlanLocked(candidate *mempoolEntry) ([]*mempoolEntry, bool, error) {
+	if candidate == nil {
+		return nil, false, txAdmitRejected("nil mempool entry")
+	}
+	state, err := m.capacityStateLocked(candidate)
+	if err != nil {
+		return nil, false, err
+	}
+	if !state.underPressure() {
+		return nil, false, nil
+	}
+	planPool, err := m.evictionPlanPoolLocked(candidate)
+	if err != nil {
+		return nil, false, err
+	}
+	return dryRunCapacityEvictions(planPool, state, m.maxTxs)
+}
+
+func (m *Mempool) capacityStateLocked(candidate *mempoolEntry) (mempoolCapacityState, error) {
+	maxBytes, err := nonNegativeMempoolIntToUint64("max_bytes", m.maxBytes)
+	if err != nil {
+		return mempoolCapacityState{}, err
+	}
+	if m.maxTxs <= 0 || maxBytes == 0 {
+		return mempoolCapacityState{}, txAdmitUnavailable(fmt.Sprintf("invalid mempool capacity limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes))
+	}
+	candidateSize, err := nonNegativeMempoolIntToUint64("candidate_size", candidate.size)
+	if err != nil {
+		return mempoolCapacityState{}, err
+	}
+	usedBytes, err := nonNegativeMempoolIntToUint64("used_bytes", m.usedBytes)
+	if err != nil {
+		return mempoolCapacityState{}, err
+	}
+	if candidateSize > maxBytes {
+		return mempoolCapacityState{}, txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, candidate.size, m.maxBytes))
+	}
+	countPressure := len(m.txs) >= m.maxTxs
+	bytePressure := usedBytes > maxBytes-candidateSize
+	targetBytes := maxBytes
+	if bytePressure {
+		targetBytes = mempoolBytePressureTarget(uint64(m.effectiveLowWaterBytesLocked()), candidateSize) // #nosec G115 -- effectiveLowWaterBytesLocked returns 0 or a positive value derived from positive maxBytes.
+	}
+	return mempoolCapacityState{
+		maxBytes:      maxBytes,
+		candidateSize: candidateSize,
+		usedBytes:     usedBytes,
+		targetBytes:   targetBytes,
+		totalBytes:    usedBytes + candidateSize,
+		totalCount:    len(m.txs) + 1,
+		countPressure: countPressure,
+		bytePressure:  bytePressure,
+	}, nil
+}
+
+func mempoolBytePressureTarget(lowWaterBytes uint64, candidateSize uint64) uint64 {
+	if lowWaterBytes < candidateSize {
+		return candidateSize
+	}
+	return lowWaterBytes
+}
+
+func (state mempoolCapacityState) underPressure() bool {
+	return state.countPressure || state.bytePressure
+}
+
+func (m *Mempool) evictionPlanPoolLocked(candidate *mempoolEntry) ([]mempoolEvictionPlanEntry, error) {
+	planPool := make([]mempoolEvictionPlanEntry, 0, len(m.txs)+1)
+	admissionSeqs := make(map[uint64][32]byte, len(m.txs))
+	for _, entry := range m.txs {
+		if err := validateEvictionMetadata(entry); err != nil {
+			return nil, err
+		}
+		if existing, exists := admissionSeqs[entry.admissionSeq]; exists {
+			return nil, txAdmitRejected(fmt.Sprintf("duplicate mempool entry admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid))
+		}
+		admissionSeqs[entry.admissionSeq] = entry.txid
+		planPool = append(planPool, mempoolEvictionPlanEntry{entry: entry})
+	}
+	planPool = append(planPool, mempoolEvictionPlanEntry{entry: candidate, candidate: true})
+	return planPool, nil
+}
+
+func dryRunCapacityEvictions(planPool []mempoolEvictionPlanEntry, state mempoolCapacityState, maxTxs int) ([]*mempoolEntry, bool, error) {
+	evictedEntries := make([]*mempoolEntry, 0)
+	for state.exceedsEvictionTarget(maxTxs) && len(planPool) > 0 {
+		worstIndex := worstEvictionPlanIndex(planPool)
+		worst := planPool[worstIndex]
+		if worst.candidate {
+			return nil, true, nil
+		}
+		evictedEntries = append(evictedEntries, worst.entry)
+		if err := state.applyDryRunEviction(worst.entry); err != nil {
+			return nil, false, err
+		}
+		planPool = append(planPool[:worstIndex], planPool[worstIndex+1:]...)
+	}
+	if state.exceedsHardCapacity(maxTxs) {
+		return nil, false, txAdmitUnavailable(fmt.Sprintf("mempool capacity remains exceeded after dry-run eviction: count=%d/%d bytes=%d/%d", state.totalCount, maxTxs, state.totalBytes, state.maxBytes))
+	}
+	return evictedEntries, false, nil
+}
+
+func (state mempoolCapacityState) exceedsEvictionTarget(maxTxs int) bool {
+	return state.totalCount > maxTxs || state.totalBytes > state.targetBytes
+}
+
+func (state mempoolCapacityState) exceedsHardCapacity(maxTxs int) bool {
+	return state.totalCount > maxTxs || state.totalBytes > state.maxBytes
+}
+
+func (state *mempoolCapacityState) applyDryRunEviction(entry *mempoolEntry) error {
+	worstSize := uint64(entry.size) // #nosec G115 -- validateEvictionMetadata rejects non-positive entry sizes before this helper.
+	if state.totalBytes < worstSize {
+		return txAdmitUnavailable("mempool eviction byte accounting underflow")
+	}
+	state.totalBytes -= worstSize
+	state.totalCount--
+	return nil
+}
+
+func worstEvictionPlanIndex(planPool []mempoolEvictionPlanEntry) int {
+	worstIndex := 0
+	for i := 1; i < len(planPool); i++ {
+		if evictionPlanEntryWorse(planPool[i], planPool[worstIndex]) {
+			worstIndex = i
+		}
+	}
+	return worstIndex
+}
+
+func nonNegativeMempoolIntToUint64(label string, value int) (uint64, error) {
+	if value < 0 {
+		return 0, txAdmitUnavailable(fmt.Sprintf("invalid mempool %s: %d", label, value))
+	}
+	return uint64(value), nil
+}
+
+func validateEvictionMetadata(entry *mempoolEntry) error {
+	if entry == nil {
+		return txAdmitRejected("nil mempool entry")
+	}
+	if entry.txid == ([32]byte{}) {
+		return txAdmitRejected("invalid mempool entry txid")
+	}
+	if entry.size <= 0 {
+		return txAdmitRejected("invalid mempool entry size")
+	}
+	if entry.weight == 0 {
+		return txAdmitRejected("invalid mempool entry weight")
+	}
+	if entry.admissionSeq == 0 {
+		return txAdmitRejected(fmt.Sprintf("invalid mempool entry admission_seq for txid %x", entry.txid))
+	}
+	return nil
+}
+
+func evictionPlanEntryWorse(a, b mempoolEvictionPlanEntry) bool {
+	if a.entry == nil || b.entry == nil {
+		return a.entry != nil && b.entry == nil
+	}
+	if cmp := compareMempoolEvictionPriority(a, b); cmp != 0 {
+		return cmp < 0
+	}
+	return bytes.Compare(a.entry.txid[:], b.entry.txid[:]) > 0
+}
+
+func compareMempoolEvictionPriority(a, b mempoolEvictionPlanEntry) int {
+	if a.entry == nil || b.entry == nil {
+		return 0
+	}
+	if cmp := compareEvictionFeeRate(a.entry, b.entry); cmp != 0 {
+		return cmp
+	}
+	if a.entry.fee != b.entry.fee {
+		if a.entry.fee > b.entry.fee {
+			return 1
+		}
+		return -1
+	}
+	aSeq := evictionAdmissionSeq(a)
+	bSeq := evictionAdmissionSeq(b)
+	if aSeq != bSeq {
+		if aSeq > bSeq {
+			return 1
+		}
+		return -1
+	}
+	return 0
+}
+
+func evictionAdmissionSeq(entry mempoolEvictionPlanEntry) uint64 {
+	if entry.candidate {
+		// Treat the candidate as oldest on exact fee ties so capacity pressure is no-RBF.
+		return 0
+	}
+	if entry.entry == nil {
+		return 0
+	}
+	return entry.entry.admissionSeq
+}
+
+func (m *Mempool) ensureMinFeeRateLocked() {
+	if m.currentMinFeeRate < DefaultMempoolMinFeeRate {
+		m.currentMinFeeRate = DefaultMempoolMinFeeRate
+	}
+}
+
+func (m *Mempool) currentMinFeeRateLocked() uint64 {
+	if m.currentMinFeeRate < DefaultMempoolMinFeeRate {
+		return DefaultMempoolMinFeeRate
+	}
+	return m.currentMinFeeRate
+}
+
+// CurrentMinFeeRateSnapshot returns the rolling local floor without
+// requiring the caller to already hold m.mu. It briefly takes a read
+// lock so that race-free Stage C admission helpers (which run under a
+// chainstate-side lock, not m.mu) can read the value safely.
+//
+// It is exported so that external callers (e.g. the miner template
+// loop in cmd/rubin-node) can wire MinerConfig.CurrentMempoolMinFeeRateFn
+// directly to it and keep the relay-fee half of the Stage C admission
+// contract aligned with the rolling floor.
+//
+// Nil-safe like the other exported Mempool accessors (BytesUsed,
+// AdmissionCounts, Contains): a nil receiver returns
+// DefaultMempoolMinFeeRate so test-time wiring or fail-closed paths
+// that never construct a Mempool see the documented baseline floor
+// instead of a panic from m.mu.RLock().
+func (m *Mempool) CurrentMinFeeRateSnapshot() uint64 {
+	if m == nil {
+		return DefaultMempoolMinFeeRate
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentMinFeeRateLocked()
+}
+
+// SetCurrentMinFeeRateForTest overrides the rolling local floor. Test-only:
+// bypasses the admit-path eviction logic that normally raises the floor.
+// cmd/rubin-node tests inject a distinctive sentinel through this setter so
+// the live miner wiring tests bind on the exact value, instead of admitting
+// any closure returning the documented baseline. Nil-safe like the other
+// accessors.
+func (m *Mempool) SetCurrentMinFeeRateForTest(floor uint64) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.currentMinFeeRate = floor
+}
+
+func (m *Mempool) effectiveLowWaterBytesLocked() int {
+	if m.lowWaterBytes > 0 || m.maxBytes <= 0 {
+		return m.lowWaterBytes
+	}
+	return defaultMempoolLowWaterBytes(m.maxBytes)
+}
+
+func feeRateBelowFloor(fee uint64, weight uint64, floor uint64) bool {
+	if weight == 0 {
+		return true
+	}
+	if floor < DefaultMempoolMinFeeRate {
+		floor = DefaultMempoolMinFeeRate
+	}
+	hi, lo := bits.Mul64(weight, floor)
+	if hi != 0 {
+		return true
+	}
+	return fee < lo
+}
+
+func (m *Mempool) raiseMinFeeRateAfterEvictionLocked(evictedEntries []*mempoolEntry) {
+	if len(evictedEntries) == 0 {
+		return
+	}
+	m.ensureMinFeeRateLocked()
+	var highestEvictedFloor uint64
+	for _, entry := range evictedEntries {
+		floor, ok := entryFloorRate(entry)
+		if ok && floor > highestEvictedFloor {
+			highestEvictedFloor = floor
+		}
+	}
+	raised := saturatingAddMinRelayFeeStep(highestEvictedFloor)
+	if raised > m.currentMinFeeRate {
+		m.currentMinFeeRate = raised
+	}
+}
+
+func (m *Mempool) decayMinFeeRateAfterConnectedBlockLocked() {
+	m.ensureMinFeeRateLocked()
+	if m.usedBytes >= m.effectiveLowWaterBytesLocked() {
+		return
+	}
+	decayed := m.currentMinFeeRate / 2
+	if decayed < DefaultMempoolMinFeeRate {
+		decayed = DefaultMempoolMinFeeRate
+	}
+	m.currentMinFeeRate = decayed
+}
+
+func entryFloorRate(entry *mempoolEntry) (uint64, bool) {
+	if entry == nil || entry.weight == 0 {
+		return 0, false
+	}
+	return entry.fee / entry.weight, true
+}
+
+func saturatingAddMinRelayFeeStep(v uint64) uint64 {
+	if v > ^uint64(0)-DefaultMempoolMinFeeRate {
+		return ^uint64(0)
+	}
+	return v + DefaultMempoolMinFeeRate
 }
 
 func compareFeeRate(a *mempoolEntry, b *mempoolEntry) int {
 	if a == nil || b == nil {
 		return 0
 	}
-	return compareFeeRateValues(a.fee, a.size, b.fee, b.size)
+	return compareFeeRateWeightValues(a.fee, a.weight, b.fee, b.weight)
 }
 
-func compareFeeRateValues(feeA uint64, sizeA int, feeB uint64, sizeB int) int {
-	if sizeA <= 0 || sizeB <= 0 {
+func compareEvictionFeeRate(a *mempoolEntry, b *mempoolEntry) int {
+	// Eviction and miner selection intentionally share the fee/weight axis.
+	return compareFeeRate(a, b)
+}
+
+func compareFeeRateWeightValues(feeA uint64, weightA uint64, feeB uint64, weightB uint64) int {
+	if weightA == 0 || weightB == 0 {
 		return 0
 	}
-	ahi, alo := bits.Mul64(feeA, uint64(sizeB))
-	bhi, blo := bits.Mul64(feeB, uint64(sizeA))
+	ahi, alo := bits.Mul64(feeA, weightB)
+	bhi, blo := bits.Mul64(feeB, weightA)
 	if ahi != bhi {
 		if ahi > bhi {
 			return 1

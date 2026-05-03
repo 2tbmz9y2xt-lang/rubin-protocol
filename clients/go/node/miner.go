@@ -32,11 +32,39 @@ type MinerConfig struct {
 	// This is independent from the consensus DA byte cap.
 	PolicyMaxDaBytesPerBlock uint64
 
-	// PolicyDaSurchargePerByte enforces a minimum fee for DA-bearing transactions:
-	//   fee(tx) MUST be >= da_bytes(tx) * PolicyDaSurchargePerByte
-	// where da_bytes(tx) is the canonical DA payload length counted by consensus weight accounting.
-	// Set to 0 to disable the fee surcharge check.
+	// PolicyDaSurchargePerByte is the operator-tunable DA per-byte surcharge
+	// added on top of the spec-side DA floor in
+	// POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C:
+	//   da_required_fee(tx) = da_payload_len(tx) * (MinDaFeeRate + PolicyDaSurchargePerByte)
+	// Setting it to 0 disables only the surcharge term, not the DA floor;
+	// the DA floor still uses MinDaFeeRate.
 	PolicyDaSurchargePerByte uint64
+
+	// MinDaFeeRate is the spec-side per-byte DA fee floor
+	// (POLICY_MEMPOOL_ADMISSION_GENESIS.md Stage C `min_da_fee_rate`,
+	// default 1). Together with PolicyDaSurchargePerByte it composes the
+	// DA half of the Stage C admission contract:
+	//   da_required_fee(tx) = da_payload_len(tx) * (MinDaFeeRate + PolicyDaSurchargePerByte)
+	// Setting it to 0 disables only the spec floor; the surcharge term
+	// still applies when PolicyDaSurchargePerByte > 0.
+	MinDaFeeRate uint64
+
+	// CurrentMempoolMinFeeRate is the static fallback for the rolling
+	// local floor when CurrentMempoolMinFeeRateFn is nil. Standalone
+	// miner builds with no live mempool keep this at
+	// DefaultMempoolMinFeeRate (the #1336 baseline). Live nodes SHOULD
+	// set CurrentMempoolMinFeeRateFn instead so the miner template
+	// reflects the rolling floor as it rises and decays.
+	CurrentMempoolMinFeeRate uint64
+
+	// CurrentMempoolMinFeeRateFn returns the live rolling local floor
+	// for the relay-fee half of the Stage C admission contract:
+	//   relay_fee_floor(tx) = weight(tx) * <floor returned by Fn>
+	// Production wiring sets this to Mempool.CurrentMinFeeRateSnapshot
+	// so the miner template stays aligned with the admission predicate
+	// as the rolling floor changes. When nil the miner falls back to
+	// CurrentMempoolMinFeeRate above.
+	CurrentMempoolMinFeeRateFn func() uint64
 
 	// PolicyRejectCoreExtPreActivation controls non-consensus guardrails for CORE_EXT (COV_TYPE_CORE_EXT).
 	// When enabled, the miner will exclude transactions that create or spend CORE_EXT outputs
@@ -102,6 +130,8 @@ func DefaultMinerConfig() MinerConfig {
 		PolicyRejectNonCoinbaseAnchorOutputs: true,
 		PolicyMaxDaBytesPerBlock:             consensus.MAX_DA_BYTES_PER_BLOCK / 4, // 25% policy budget (issue #353 draft)
 		PolicyDaSurchargePerByte:             0,                                    // controller-tunable; disabled by default
+		MinDaFeeRate:                         DefaultMinDaFeeRate,                  // Stage C spec-side per-byte DA floor
+		CurrentMempoolMinFeeRate:             DefaultMempoolMinFeeRate,             // baseline for the rolling floor when no live mempool is bound
 		PolicyRejectCoreExtPreActivation:     true,
 	}
 }
@@ -357,14 +387,6 @@ func canonicalCoinbaseWeight(height uint64, alreadyGenerated uint64, mineAddress
 	return finalizeCoinbaseWeight(strippedSize, witnessSize, daSize)
 }
 
-func addU64NoOverflow(dst *uint64, value uint64) error {
-	if value > math.MaxUint64-*dst {
-		return errors.New("u64 overflow")
-	}
-	*dst += value
-	return nil
-}
-
 func addCoinbaseBaseSize(dst *uint64, values ...uint64) error {
 	for _, value := range values {
 		if err := addU64NoOverflow(dst, value); err != nil {
@@ -467,7 +489,22 @@ func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
 
 func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
 	if m.cfg.PolicyDaAnchorAntiAbuse {
-		reject, daBytes, _, err := RejectDaAnchorTxPolicy(tx, utxos, m.cfg.PolicyDaSurchargePerByte)
+		var currentMin uint64
+		if fn := m.cfg.CurrentMempoolMinFeeRateFn; fn != nil {
+			currentMin = fn()
+		} else {
+			currentMin = m.cfg.CurrentMempoolMinFeeRate
+		}
+		if currentMin < DefaultMempoolMinFeeRate {
+			currentMin = DefaultMempoolMinFeeRate
+		}
+		reject, daBytes, _, err := RejectDaAnchorTxPolicy(
+			tx,
+			utxos,
+			currentMin,
+			m.cfg.MinDaFeeRate,
+			m.cfg.PolicyDaSurchargePerByte,
+		)
 		if err != nil {
 			return false, policyDaIncluded, err
 		}

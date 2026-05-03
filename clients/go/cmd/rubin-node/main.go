@@ -273,6 +273,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "invalid config: %v\n", err)
 		return 2
 	}
+	cfg.DataDir = node.NormalizeDataDir(cfg.DataDir)
 	if canonicalNetwork, ok := node.CanonicalNetworkName(cfg.Network); ok {
 		cfg.Network = canonicalNetwork
 	}
@@ -328,7 +329,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "mainnet genesis guard failed: %v\n", err)
 		return 2
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		_, _ = fmt.Fprintf(stderr, "datadir create failed: %v\n", err)
 		return 2
 	}
@@ -454,6 +455,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			minerCfg.MineAddress = addrBytes
 		}
 		minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
+		minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
 		miner, err := newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "miner init failed: %v\n", err)
@@ -511,6 +513,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		if mineAddrErr == nil {
 			minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
+			minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
 			var err error
 			liveMiner, err = newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 			if err != nil {

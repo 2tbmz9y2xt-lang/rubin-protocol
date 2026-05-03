@@ -13,7 +13,9 @@ use crate::coinbase::{
     build_coinbase_tx, default_mine_address, normalize_mine_address, parse_mine_address,
 };
 use crate::sync::SyncEngine;
-use crate::txpool::{apply_policy, TxPool, TxPoolConfig};
+use crate::txpool::{
+    apply_policy, TxPool, TxPoolConfig, DEFAULT_MEMPOOL_MIN_FEE_RATE, DEFAULT_MIN_DA_FEE_RATE,
+};
 
 fn current_unix() -> u64 {
     SystemTime::now()
@@ -32,6 +34,17 @@ pub struct MinerConfig {
     pub policy_reject_non_coinbase_anchor_outputs: bool,
     pub policy_max_da_bytes_per_block: u64,
     pub policy_da_surcharge_per_byte: u64,
+    /// Stage C `current_mempool_min_fee_rate` input forwarded to the DA
+    /// fee policy when `policy_da_anchor_anti_abuse` is on. Defaults to
+    /// `DEFAULT_MEMPOOL_MIN_FEE_RATE` (mirrors Go's documented pattern
+    /// for callers without a live rolling-floor source).
+    pub policy_current_mempool_min_fee_rate: u64,
+    /// Stage C `min_da_fee_rate` input forwarded to the DA fee policy
+    /// when `policy_da_anchor_anti_abuse` is on. Defaults to
+    /// `DEFAULT_MIN_DA_FEE_RATE`, kept separate from
+    /// `DEFAULT_MEMPOOL_MIN_FEE_RATE` so a future change to the relay
+    /// floor cannot silently change the DA floor.
+    pub policy_min_da_fee_rate: u64,
     pub policy_reject_core_ext_pre_activation: bool,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
 }
@@ -71,6 +84,8 @@ impl Default for MinerConfig {
             policy_reject_non_coinbase_anchor_outputs: true,
             policy_max_da_bytes_per_block: MAX_DA_BYTES_PER_BLOCK / 4,
             policy_da_surcharge_per_byte: 0,
+            policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
+            policy_min_da_fee_rate: DEFAULT_MIN_DA_FEE_RATE,
             policy_reject_core_ext_pre_activation: true,
             core_ext_deployments: CoreExtDeploymentProfiles::empty(),
         }
@@ -242,6 +257,16 @@ impl<'a> Miner<'a> {
             policy_max_ext_payload_bytes: 0,
             core_ext_deployments: self.cfg.core_ext_deployments.clone(),
             suite_context: self.sync.cfg.suite_context.clone(),
+            policy_current_mempool_min_fee_rate: if self.cfg.policy_da_anchor_anti_abuse {
+                self.cfg.policy_current_mempool_min_fee_rate
+            } else {
+                0
+            },
+            policy_min_da_fee_rate: if self.cfg.policy_da_anchor_anti_abuse {
+                self.cfg.policy_min_da_fee_rate
+            } else {
+                0
+            },
         };
         if apply_policy(tx, &self.sync.chain_state.utxos, next_height, &policy_cfg).is_err() {
             return Ok((true, policy_da_included));

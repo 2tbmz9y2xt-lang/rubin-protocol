@@ -57,13 +57,13 @@ func OpenBlockStore(rootPath string) (*BlockStore, error) {
 	headersDir := filepath.Join(rootPath, "headers")
 	undoDir := filepath.Join(rootPath, "undo")
 
-	if err := os.MkdirAll(blocksDir, 0o750); err != nil {
+	if err := os.MkdirAll(blocksDir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(headersDir, 0o750); err != nil {
+	if err := os.MkdirAll(headersDir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(undoDir, 0o750); err != nil {
+	if err := os.MkdirAll(undoDir, 0o700); err != nil {
 		return nil, err
 	}
 

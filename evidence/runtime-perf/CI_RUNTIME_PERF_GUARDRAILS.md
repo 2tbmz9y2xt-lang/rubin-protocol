@@ -45,10 +45,30 @@ Rust:
 
 ## Future soft-threshold path
 
-This lane is intentionally non-blocking for now. The next hardening step, if
-the project wants it later, is:
+This lane is intentionally non-blocking. Advisory regression detection may emit
+`warn` in summaries and artifacts for selected low-noise `ns/op` benchmark
+deltas, but that warning is not a merge-blocking status. Allocation and byte
+metrics remain reported for context unless a later task adds explicit advisory
+thresholds for them.
+
+Further threshold hardening, if the project wants it later, is:
 
 1. require several stable runs on `main`;
 2. pick only the low-noise subset of benchmarks;
-3. define soft thresholds per benchmark family;
-4. keep threshold breaches advisory first, not merge-blocking.
+3. refine soft thresholds per benchmark family;
+4. keep any promotion to a merge-blocking gate as a separate policy task.
+
+## Mainline trend capture
+
+`Q-PERF-MAINLINE-TREND-CAPTURE-01` adds reconstructable trend artifacts for
+future low-noise calibration:
+
+- `artifacts/runtime-perf/trend.json`
+- `artifacts/runtime-perf/trend.md`
+
+The schema and selected low-noise candidate list are documented in:
+
+- `evidence/runtime-perf/MAINLINE_TREND_CAPTURE.md`
+
+This does not change the current policy: runtime-perf remains informational only
+and does not define hard regression thresholds.

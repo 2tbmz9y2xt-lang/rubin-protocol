@@ -87,13 +87,13 @@ func signedCanonicalP2PTxWithoutSeeding(t *testing.T, nonce uint64) ([]byte, [32
 	toKey := mustP2PMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	utxos, outpoints := testP2PUtxoSet(fromAddress, []uint64{100})
+	utxos, outpoints := testP2PUtxoSet(fromAddress, []uint64{1_000_000})
 	for op, entry := range utxos {
 		entry.CreatedByCoinbase = false
 		entry.CreationHeight = 0
 		utxos[op] = entry
 	}
-	txBytes := mustBuildSignedP2PTx(t, utxos, []consensus.Outpoint{outpoints[0]}, 90, 1, nonce, fromKey, fromAddress, toAddress)
+	txBytes := mustBuildSignedP2PTx(t, utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, nonce, fromKey, fromAddress, toAddress)
 	txid, err := canonicalTxID(txBytes)
 	if err != nil {
 		t.Fatalf("canonicalTxID: %v", err)

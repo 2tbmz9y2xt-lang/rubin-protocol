@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -78,6 +79,35 @@ func TestValidateConfigRejectsEmptyDataDir(t *testing.T) {
 	cfg.DataDir = ""
 	if err := ValidateConfig(cfg); err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+func TestValidateConfigRejectsWhitespaceDataDir(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DataDir = " \t "
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestNormalizeDataDir(t *testing.T) {
+	abs := t.TempDir()
+	for _, tc := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "parent", input: filepath.Join("a", "..", "b"), want: "b"},
+		{name: "dot-prefix", input: "." + string(filepath.Separator) + "a", want: "a"},
+		{name: "dot-middle", input: filepath.Join("a", ".", "b"), want: filepath.Join("a", "b")},
+		{name: "clean-absolute", input: abs, want: abs},
+		{name: "clean-relative", input: filepath.Join("clean", "path"), want: filepath.Join("clean", "path")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NormalizeDataDir(tc.input); got != tc.want {
+				t.Fatalf("NormalizeDataDir(%q)=%q, want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }
 
