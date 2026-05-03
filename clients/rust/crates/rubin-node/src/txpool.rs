@@ -321,22 +321,25 @@ impl TxPool {
         // `apply_policy` and the rolling relay-fee floor check above, so
         // sub-floor / DA-rejected transactions never reach this branch
         // and the worst-entry comparison only considers floor-compliant
-        // candidates. The two distinct rejection classes are split into
-        // separate error messages so callers/operators can distinguish
-        // legitimate eviction-ordering rejection from internal heap
-        // invariant violation:
-        //   1. `current_worst_txid()` returns None or the txid resolves
-        //      to no entry → MAP-vs-HEAP corruption invariant: the
-        //      `worst_heap` lookup said there's a worst entry, but the
-        //      live `txs` map disagrees. Surfaced with a distinct
-        //      "tx pool capacity invariant violated" message so an
-        //      operator/log scraper can tell internal corruption from
-        //      a routine eviction-ordering rejection.
-        //   2. `compare_admit_priority` reports candidate is NOT strictly
-        //      greater than worst → routine eviction-ordering rejection
-        //      matching Go's
-        //      `"mempool capacity candidate rejected by eviction ordering"`
-        //      at clients/go/node/mempool.go:1028-1030.
+        // candidates. The three distinct rejection causes are split
+        // into separate error messages so callers/operators can
+        // distinguish legitimate eviction-ordering rejection from
+        // internal heap invariant violation:
+        //   1a. `current_worst_txid()` returns None while txs.len()
+        //       >= MAX → MAP-vs-HEAP corruption invariant: live `txs`
+        //       at capacity but `worst_heap` lookup yields nothing.
+        //       Surfaced as
+        //       `"tx pool capacity invariant violated: worst_heap empty while txs at MAX"`.
+        //   1b. `current_worst_txid()` returns a txid that does NOT
+        //       resolve to a live `txs` entry → second MAP-vs-HEAP
+        //       corruption invariant: heap pointed at a stale txid the
+        //       map no longer has. Surfaced as
+        //       `"tx pool capacity invariant violated: worst_heap entry missing from txs map"`.
+        //   2.  `compare_admit_priority` reports candidate is NOT
+        //       strictly greater than worst → routine eviction-ordering
+        //       rejection matching Go's
+        //       `"mempool capacity candidate rejected by eviction ordering"`
+        //       at clients/go/node/mempool.go:1028-1030 verbatim.
         if self.txs.len() >= MAX_TX_POOL_TRANSACTIONS {
             let Some(worst_txid) = self.current_worst_txid() else {
                 return Err(unavailable(
@@ -521,9 +524,6 @@ pub(crate) fn relay_metadata(
         return Err(rejected("transaction rejected: non-canonical tx bytes"));
     }
 
-    let (weight, _, _) = tx_weight_and_stats_public(&tx)
-        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-
     let next_height = next_block_height(chain_state)?;
     let block_mtp = next_block_mtp(block_store, next_height)?;
     let active_profiles = cfg
@@ -580,6 +580,8 @@ pub(crate) fn relay_metadata(
     //   - DA tx fee >= DA-required, fee/weight < rolling floor → Unavailable
     //   - DA tx fee >= both → Ok (relay metadata returned)
     // mirroring `admit_with_metadata`.
+    let (weight, _, _) = tx_weight_and_stats_public(&tx)
+        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
     validate_fee_floor(summary.fee, weight, cfg.policy_current_mempool_min_fee_rate)?;
 
     Ok(RelayTxMetadata {
