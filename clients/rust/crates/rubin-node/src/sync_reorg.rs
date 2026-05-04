@@ -7,7 +7,7 @@ use std::ops::Deref;
 use crate::blockstore::BlockStore;
 use crate::chainstate::ChainStateConnectSummary;
 use crate::sync::SyncEngine;
-use crate::txpool::TxPool;
+use crate::txpool::{TxPool, TxSource};
 
 pub(crate) const PARENT_BLOCK_NOT_FOUND_ERR: &str = "parent block not found";
 
@@ -74,8 +74,26 @@ impl TxPoolCleanupPlan {
                 let Ok(txs) = non_coinbase_tx_bytes(&block_bytes) else {
                     continue;
                 };
+                // Reorg requeue: route through source-aware admission so the
+                // resulting `TxPoolEntry.source` records `TxSource::Reorg`,
+                // matching Go `Mempool.AddReorgTx` (clients/go/node/mempool.go)
+                // which delegates to `addTxWithSource(_, mempoolTxSourceReorg)`.
+                // Source provenance is observability metadata only — it does
+                // not affect admission validation or ordering (see
+                // `compare_entries_for_mining` and the source-blind hostile
+                // test `source_does_not_affect_admission_ordering` in
+                // `txpool.rs`). The cleanup-only paths above
+                // (`pool.evict_txids` and `pool.remove_conflicting_outpoints`)
+                // intentionally remain unchanged: they remove entries from
+                // existing state and must not mutate any source counter.
                 for tx_bytes in txs {
-                    let _ = pool.admit(&tx_bytes, chain_state, Some(block_store), chain_id);
+                    let _ = pool.add_tx_with_source(
+                        &tx_bytes,
+                        chain_state,
+                        Some(block_store),
+                        chain_id,
+                        TxSource::Reorg,
+                    );
                 }
             }
         }
@@ -1235,5 +1253,134 @@ mod tests {
         assert_eq!(got.len(), 11);
         assert_eq!(got[0], 200);
         assert_eq!(got[10], 20);
+    }
+
+    /// RUB-169: reorg requeue path admits transactions through the
+    /// source-aware admission entry, recording `TxSource::Reorg` on the
+    /// resulting `TxPoolEntry`. Mirrors Go `Mempool.AddReorgTx` →
+    /// `addTxWithSource(_, mempoolTxSourceReorg)` behavior.
+    ///
+    /// Coverage axes (LAYER 4.4d test sufficiency):
+    ///   - Reachability: builds a real reorg scenario where the heavier
+    ///     branch wins, the disconnected canonical block contains a tx,
+    ///     and `TxPoolCleanupPlan::apply` runs the requeue loop with
+    ///     `block_store` Some.
+    ///   - Mutation distinguishing: asserts the requeued entry's
+    ///     `source` is `TxSource::Reorg` via `entry_source`. A parallel
+    ///     control admission of the same tx via legacy `pool.admit()`
+    ///     records `TxSource::Local`. A regression that wired `Local`
+    ///     in `sync_reorg.rs` would yield matching sources between the
+    ///     two pools and FAIL this assertion.
+    ///   - Cleanup-only paths source-neutrality: separately verified by
+    ///     the existing `apply_block_with_reorg_tip_extension_removes_conflicting_pool_spends`
+    ///     test which exercises `evict_txids` / `remove_conflicting_outpoints`
+    ///     and asserts the pool is empty (no source counter mutated).
+    #[test]
+    fn reorg_requeue_records_reorg_source_provenance() {
+        use crate::txpool::TxSource;
+
+        let (mut engine, dir) = engine_with_store("rubin-reorg-source-provenance");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+        engine.cfg.chain_id = devnet_genesis_chain_id();
+
+        let (state, admitted_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        engine.chain_state.utxos = state.utxos.clone();
+
+        let block1 = block_with_txs(
+            1,
+            0,
+            genesis_hash,
+            gen_ts + 1,
+            std::slice::from_ref(&admitted_raw),
+        );
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("apply block 1");
+        let block1_hash =
+            rubin_consensus::block_hash(&block1[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("hash block 1");
+
+        // Heavier alt branch: 2 blocks of work vs 1 → triggers reorg,
+        // disconnects block1, requeues admitted tx via cleanup.apply.
+        let block1_alt = coinbase_only_block(1, genesis_hash, gen_ts + 2);
+        let block1_alt_hash =
+            rubin_consensus::block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("hash block 1'");
+        engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .store_block(
+                block1_alt_hash,
+                &block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &block1_alt,
+            )
+            .expect("store block 1'");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+
+        let mut pool = TxPool::new();
+        let outcome = engine
+            .apply_block_with_reorg(&block2_alt, None)
+            .expect("reorg to heavier branch");
+        outcome.tx_pool_cleanup.apply(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
+        assert_ne!(
+            engine.chain_state.tip_hash, block1_hash,
+            "reorg must switch tip away from block 1"
+        );
+
+        let (_, requeued_txid, _, consumed) =
+            rubin_consensus::parse_tx(&admitted_raw).expect("parse admitted");
+        assert_eq!(consumed, admitted_raw.len());
+        assert!(
+            pool.all_txids().contains(&requeued_txid),
+            "requeued txid must be in pool after reorg"
+        );
+
+        // Load-bearing mutation-distinguishing assertion: source must
+        // be Reorg, not Local. A regression that wired
+        // `add_tx_with_source(_, TxSource::Local)` in sync_reorg would
+        // FAIL this assertion.
+        assert_eq!(
+            pool.entry_source(&requeued_txid),
+            Some(TxSource::Reorg),
+            "reorg requeue must record TxSource::Reorg, not Local or any other variant"
+        );
+
+        // Control: legacy admit() of the SAME tx records Local — proves
+        // the source field is observably DIFFERENT between the two
+        // admission entries (so the Reorg assertion above is meaningful,
+        // not trivially satisfied).
+        let (mut engine2, dir2) = engine_with_store("rubin-reorg-source-control");
+        engine2
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis ctrl");
+        engine2.cfg.chain_id = devnet_genesis_chain_id();
+        engine2.chain_state.utxos = state.utxos.clone();
+        let mut pool_ctrl = TxPool::new();
+        pool_ctrl
+            .admit(
+                &admitted_raw,
+                &engine2.chain_state,
+                engine2.block_store.as_ref(),
+                engine2.cfg.chain_id,
+            )
+            .expect("legacy admit ctrl");
+        assert_eq!(
+            pool_ctrl.entry_source(&requeued_txid),
+            Some(TxSource::Local),
+            "legacy admit() must record Local source (control)"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup primary");
+        std::fs::remove_dir_all(&dir2).expect("cleanup ctrl");
     }
 }
