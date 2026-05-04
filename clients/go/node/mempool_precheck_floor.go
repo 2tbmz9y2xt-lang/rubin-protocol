@@ -23,11 +23,11 @@ import (
 // `txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for
 // non-coinbase")` at `clients/go/consensus/connect_block_parallel.go:290`
 // and `clients/go/consensus/utxo_basic.go:161`.
-func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64, nextHeight uint64, rotation consensus.RotationProvider) error {
+func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64, nextHeight uint64, rotation consensus.RotationProvider, registry *consensus.SuiteRegistry) error {
 	if precheckEarlyDefer(tx) {
 		return nil
 	}
-	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos, nextHeight)
+	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos, nextHeight, rotation, registry)
 	if !ok {
 		return nil
 	}

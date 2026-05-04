@@ -1462,7 +1462,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenTxNonceIsZero(t *testing.T) {
 		TxNonce: 0, // wave-4 defer trigger
 	}
 	snapshot := &chainStateAdmissionSnapshot{utxos: map[consensus.Outpoint]consensus.UtxoEntry{}}
-	if err := cheapFeeFloorPrecheck(tx, snapshot, 1, 1, nil); err != nil {
+	if err := cheapFeeFloorPrecheck(tx, snapshot, 1, 1, nil, nil); err != nil {
 		t.Fatalf("tx_nonce==0 must defer (nil) so the slow path returns the permanent TxErrTxNonceInvalid; got %v", err)
 	}
 }
@@ -1561,7 +1561,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputScriptSigNonEmpty(t *testing
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
 	}
-	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1); ok {
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1, nil, nil); ok {
 		t.Fatalf("non-empty ScriptSig must return ok=false so precheck defers")
 	}
 }
@@ -1585,7 +1585,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange(t *testin
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
 	}
-	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1); ok {
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1, nil, nil); ok {
 		t.Fatalf("Sequence > 0x7fffffff must return ok=false so precheck defers")
 	}
 }
@@ -1614,11 +1614,11 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne(t *test
 		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
 	}
 	// Branch 1: zero witness slots.
-	if _, ok := feePrecheckP2PKInputValue(makeTx(0), utxos /* nextHeight */, 1); ok {
+	if _, ok := feePrecheckP2PKInputValue(makeTx(0), utxos /* nextHeight */, 1, nil, nil); ok {
 		t.Fatalf("len(Witness) == 0 must return ok=false so precheck defers")
 	}
 	// Branch 2: two witness slots.
-	if _, ok := feePrecheckP2PKInputValue(makeTx(2), utxos /* nextHeight */, 1); ok {
+	if _, ok := feePrecheckP2PKInputValue(makeTx(2), utxos /* nextHeight */, 1, nil, nil); ok {
 		t.Fatalf("len(Witness) == 2 must return ok=false so precheck defers")
 	}
 }
@@ -1644,7 +1644,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUsesCoinbasePrevoutMarker(t 
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: zeroTxid, Vout: 0xffffffff}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
 	}
-	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1); ok {
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1, nil, nil); ok {
 		t.Fatalf("coinbase-prevout marker on non-coinbase input must return ok=false so precheck defers")
 	}
 }
@@ -1681,12 +1681,27 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase(t *te
 	}
 	// nextHeight < COINBASE_MATURITY threshold => immature.
 	immatureHeight := uint64(consensus.COINBASE_MATURITY) - 1
-	if _, ok := feePrecheckP2PKInputValue(tx, utxos, immatureHeight); ok {
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, immatureHeight, nil, nil); ok {
 		t.Fatalf("immature coinbase spend must return ok=false so precheck defers")
 	}
-	// At maturity threshold the defer no longer fires.
+	// At maturity threshold the defer no longer fires (sanity-pin requires
+	// a registered ML-DSA-87 witness item — wave-14 added witness-item
+	// structural validation; below we synthesize the minimum-valid witness
+	// shape so this branch reaches the Some(value) return).
+	utxos[consensus.Outpoint{Txid: [32]byte{0x11}, Vout: 0}] = consensus.UtxoEntry{
+		Value:             100,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      append([]byte{consensus.SUITE_ID_ML_DSA_87}, make([]byte, 32)...),
+		CreatedByCoinbase: true,
+		CreationHeight:    0,
+	}
+	tx.Witness = []consensus.WitnessItem{{
+		SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		Pubkey:    make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, consensus.ML_DSA_87_SIG_BYTES+1),
+	}}
 	matureHeight := uint64(consensus.COINBASE_MATURITY)
-	if _, ok := feePrecheckP2PKInputValue(tx, utxos, matureHeight); !ok {
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, matureHeight, nil, nil); !ok {
 		t.Fatalf("mature coinbase spend must NOT defer (precheck returns ok=true)")
 	}
 }

@@ -64,12 +64,13 @@ func (m *Mempool) checkTxParseAndContext(txBytes []byte, snapshot *chainStateAdm
 //
 // `snappedFloor` is the rolling-relay-floor value snapped ONCE in the
 // caller (`addTxWithSource`) before either the precheck or the locked
-// admission path runs. Wave-6 (PR #1422): both `cheapFeeFloorPrecheck`
-// here AND the downstream `validateFeeFloorLocked` inside
-// `addEntryLocked` use this exact value, so a concurrent
-// `decayMinFeeRateAfterConnectedBlockLocked` cannot cause the precheck
-// to reject on stale-higher floor while the locked path would have
-// accepted on fresh-lower floor (per-admission consistency).
+// admission path runs. The precheck uses this snapped value directly
+// (wave-6); the locked admission path enforces
+// `max(snappedFloor, m.currentMinFeeRateLocked())` (wave-8) so newer
+// HIGHER floors raised by `raiseMinFeeRateAfterEvictionLocked` win,
+// while spurious-reject under `decayMinFeeRateAfterConnectedBlockLocked`
+// remains the lesser evil (caller can retry against the fresher
+// snapshot). Bidirectional race protection biased toward strict.
 func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig, snappedFloor uint64) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
 	parsedTx, nextHeight, blockMTP, err := m.checkTxParseAndContext(txBytes, snapshot)
 	if err != nil {
@@ -85,7 +86,7 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	// (terminal). Without these passes a below-floor + malformed tx
 	// would be misclassified as transient Unavailable instead of
 	// Rejected (terminal).
-	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, snappedFloor, nextHeight, policy.RotationProvider); err != nil {
+	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, snappedFloor, nextHeight, policy.RotationProvider, policy.SuiteRegistry); err != nil {
 		return nil, nil, err
 	}
 	policyUtxos, err := buildPolicyInputSnapshotIfNeeded(parsedTx, snapshot, policy)

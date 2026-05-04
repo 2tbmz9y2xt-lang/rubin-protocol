@@ -26,7 +26,7 @@ import (
 // fast-reject is designed to avoid. Below-floor txs with invalid
 // signatures may surface as rolling-floor Unavailable until the fee
 // floor no longer applies; this is intentional.
-func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) (uint64, bool) {
+func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, rotation consensus.RotationProvider, registry *consensus.SuiteRegistry) (uint64, bool) {
 	if utxos == nil || len(tx.Inputs) != 1 || len(tx.Witness) != 1 {
 		return 0, false
 	}
@@ -41,7 +41,39 @@ func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]co
 	if precheckCoinbaseImmature(entry, nextHeight) {
 		return 0, false
 	}
+	if !precheckP2PKWitnessItemValid(&tx.Witness[0], entry, nextHeight, rotation, registry) {
+		return 0, false
+	}
 	return entry.Value, true
+}
+
+// precheckP2PKWitnessItemValid returns true iff the single P2PK witness
+// item is structurally valid for the cheap precheck. Wave-14 mirrors
+// terminal-reject branches in slow-path validate_p2pk_spend_q at
+// clients/go/consensus/spend_verify.go (suite in NativeSpendSuites,
+// registry lookup, canonical pubkey/signature lengths, suite consistency
+// with input UTXO covenant_data[0]). ML-DSA signature verification and
+// pubkey key-binding sha3 stay out of the precheck by design (those are
+// the expensive operations this fast-reject is built to skip).
+func precheckP2PKWitnessItemValid(w *consensus.WitnessItem, entry consensus.UtxoEntry, nextHeight uint64, rotation consensus.RotationProvider, registry *consensus.SuiteRegistry) bool {
+	if rotation == nil {
+		rotation = consensus.DefaultRotationProvider{}
+	}
+	if !rotation.NativeSpendSuites(nextHeight).Contains(w.SuiteID) {
+		return false
+	}
+	if registry == nil {
+		registry = consensus.DefaultSuiteRegistry()
+	}
+	params, ok := registry.Lookup(w.SuiteID)
+	if !ok {
+		return false
+	}
+	if len(w.Pubkey) != params.PubkeyLen ||
+		len(w.Signature) != params.SigLen+1 {
+		return false
+	}
+	return entry.CovenantData[0] == w.SuiteID
 }
 
 // precheckP2PKInputStructurallyValid returns true iff the input is
