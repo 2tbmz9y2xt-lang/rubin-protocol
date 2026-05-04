@@ -54,11 +54,5 @@ func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapsh
 // cheapFeeFloorPrecheck to keep cyclomatic complexity within the
 // repository's lint budget.
 func precheckEarlyDefer(tx *consensus.Tx) bool {
-	if tx.TxKind != 0x00 {
-		return true
-	}
-	if len(tx.DaPayload) != 0 {
-		return true
-	}
-	return tx.TxNonce == 0
+	return tx.TxKind != 0x00 || len(tx.DaPayload) != 0 || tx.TxNonce == 0
 }

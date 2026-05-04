@@ -52,16 +52,8 @@ func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]co
 // on any structural defect so the caller defers to the slow path.
 func precheckP2PKInputStructurallyValid(in consensus.TxInput) bool {
 	var zeroTxid [32]byte
-	if in.PrevTxid == zeroTxid && in.PrevVout == 0xffffffff {
-		return false
-	}
-	if len(in.ScriptSig) != 0 {
-		return false
-	}
-	if in.Sequence > 0x7fffffff {
-		return false
-	}
-	return true
+	isCoinbasePrevout := in.PrevTxid == zeroTxid && in.PrevVout == 0xffffffff
+	return !isCoinbasePrevout && len(in.ScriptSig) == 0 && in.Sequence <= 0x7fffffff
 }
 
 // precheckCoinbaseImmature returns true iff the resolved P2PK input is
@@ -71,11 +63,7 @@ func precheckP2PKInputStructurallyValid(in consensus.TxInput) bool {
 // terminal-reject classification (different caller action than fee
 // floor: wait for COINBASE_MATURITY blocks vs retry-with-higher-fee).
 func precheckCoinbaseImmature(entry consensus.UtxoEntry, nextHeight uint64) bool {
-	if !entry.CreatedByCoinbase {
-		return false
-	}
-	if nextHeight < entry.CreationHeight {
-		return true
-	}
-	return nextHeight-entry.CreationHeight < consensus.COINBASE_MATURITY
+	return entry.CreatedByCoinbase &&
+		(nextHeight < entry.CreationHeight ||
+			nextHeight-entry.CreationHeight < consensus.COINBASE_MATURITY)
 }
