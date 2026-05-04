@@ -664,8 +664,36 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 	return m.policy
 }
 
-// checkTransactionWithSnapshot validates a transaction against a consistent
-// owned admission snapshot plus an immutable mempool policy snapshot.
+// checkTxParseAndContext resolves the chain-context inputs every
+// admission needs (next block height + MTP) and parses the candidate
+// transaction in canonical-bytes mode. Extracted from
+// checkTransactionWithSnapshot to keep cyclomatic complexity within
+// the repository's lint budget. Returns the parsed Tx, next-block
+// height, next-block MTP, or a typed admission error if any step
+// fails (Unavailable for chain-context failure, Rejected for parse
+// failure / trailing bytes).
+func (m *Mempool) checkTxParseAndContext(txBytes []byte, snapshot *chainStateAdmissionSnapshot) (*consensus.Tx, uint64, uint64, error) {
+	if snapshot == nil {
+		return nil, 0, 0, txAdmitUnavailable("nil chainstate")
+	}
+	nextHeight, _, err := nextBlockContextFromFields(snapshot.hasTip, snapshot.height, snapshot.tipHash)
+	if err != nil {
+		return nil, 0, 0, txAdmitUnavailable(err.Error())
+	}
+	blockMTP, err := m.nextBlockMTP(nextHeight)
+	if err != nil {
+		return nil, 0, 0, txAdmitUnavailable(err.Error())
+	}
+	parsedTx, _, _, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		return nil, 0, 0, txAdmitRejected(err.Error())
+	}
+	if consumed != len(txBytes) {
+		return nil, 0, 0, txAdmitRejected("trailing bytes after canonical tx")
+	}
+	return parsedTx, nextHeight, blockMTP, nil
+}
+
 // checkTransactionWithSnapshot validates a transaction against a consistent
 // owned admission snapshot plus an immutable mempool policy snapshot.
 //
@@ -678,24 +706,9 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 // to reject on stale-higher floor while the locked path would have
 // accepted on fresh-lower floor (per-admission consistency).
 func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig, snappedFloor uint64) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
-	if snapshot == nil {
-		return nil, nil, txAdmitUnavailable("nil chainstate")
-	}
-	nextHeight, _, err := nextBlockContextFromFields(snapshot.hasTip, snapshot.height, snapshot.tipHash)
+	parsedTx, nextHeight, blockMTP, err := m.checkTxParseAndContext(txBytes, snapshot)
 	if err != nil {
-		return nil, nil, txAdmitUnavailable(err.Error())
-	}
-
-	blockMTP, err := m.nextBlockMTP(nextHeight)
-	if err != nil {
-		return nil, nil, txAdmitUnavailable(err.Error())
-	}
-	parsedTx, _, _, consumed, err := consensus.ParseTx(txBytes)
-	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
-	}
-	if consumed != len(txBytes) {
-		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
+		return nil, nil, err
 	}
 	// Only plain P2PK candidates use the cheap floor reject. Transactions
 	// that may hit DA, CORE_ANCHOR, CORE_EXT, or missing-UTXO policy lanes
@@ -771,7 +784,7 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 // non-coinbase")` at `clients/go/consensus/connect_block_parallel.go:290`
 // and `clients/go/consensus/utxo_basic.go:161`.
 func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64, nextHeight uint64, rotation consensus.RotationProvider) error {
-	if tx.TxKind != 0x00 || len(tx.DaPayload) != 0 || tx.TxNonce == 0 {
+	if precheckEarlyDefer(tx) {
 		return nil
 	}
 	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos, nextHeight)
@@ -791,6 +804,23 @@ func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapsh
 		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", fee, weight, minFeeRate))
 	}
 	return nil
+}
+
+// precheckEarlyDefer returns true when the tx shape disqualifies it
+// from the cheap fast-reject path: non-plain tx_kind, DA-bearing
+// payload, or tx_nonce == 0 (slow path returns Rejected
+// TX_ERR_TX_NONCE_INVALID at clients/go/consensus/utxo_basic.go:160-162
+// — wave-4 class-closure conservatism). Extracted from
+// cheapFeeFloorPrecheck to keep cyclomatic complexity within the
+// repository's lint budget.
+func precheckEarlyDefer(tx *consensus.Tx) bool {
+	if tx.TxKind != 0x00 {
+		return true
+	}
+	if len(tx.DaPayload) != 0 {
+		return true
+	}
+	return tx.TxNonce == 0
 }
 
 // feePrecheckP2PKInputValue returns the P2PK input value when tx has
@@ -816,49 +846,57 @@ func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapsh
 // signatures may surface as rolling-floor Unavailable until the fee
 // floor no longer applies; this is intentional.
 func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) (uint64, bool) {
-	if utxos == nil || len(tx.Inputs) != 1 {
-		return 0, false
-	}
-	if len(tx.Witness) != 1 {
+	if utxos == nil || len(tx.Inputs) != 1 || len(tx.Witness) != 1 {
 		return 0, false
 	}
 	in := tx.Inputs[0]
-	// Coinbase-prevout marker on a non-coinbase input: slow path
-	// returns Rejected (terminal) via the parse-time check at
-	// `clients/go/consensus/utxo_basic.go:199-200`.
-	var zeroTxid [32]byte
-	if in.PrevTxid == zeroTxid && in.PrevVout == 0xffffffff {
-		return 0, false
-	}
-	// Non-empty ScriptSig on a P2PK input: slow path returns Rejected
-	// (terminal) via the parse-time check at `utxo_basic.go:193-194`.
-	if len(in.ScriptSig) != 0 {
-		return 0, false
-	}
-	// Out-of-range Sequence on a P2PK input: slow path returns Rejected
-	// (terminal) via the parse-time check at `utxo_basic.go:196-197`.
-	if in.Sequence > 0x7fffffff {
+	if !precheckP2PKInputStructurallyValid(in) {
 		return 0, false
 	}
 	entry, ok := utxos[consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}]
 	if !ok || entry.CovenantType != consensus.COV_TYPE_P2PK {
 		return 0, false
 	}
-	// Wave-5 class-closure conservatism: immature coinbase spend.
-	// Slow path returns Rejected `TX_ERR_COINBASE_IMMATURE` ("coinbase
-	// immature") via the overflow-safe maturity check at
-	// `clients/go/consensus/utxo_basic.go:217-219`. Without this
-	// defer a below-floor immature-coinbase spend would be
-	// misclassified as transient Unavailable("mempool fee below
-	// rolling minimum"), signalling caller to retry-with-higher-fee
-	// when the actual remedy is to wait for COINBASE_MATURITY blocks.
-	// Different caller action -> genuine class-leak (P1).
-	if entry.CreatedByCoinbase &&
-		(nextHeight < entry.CreationHeight ||
-			nextHeight-entry.CreationHeight < consensus.COINBASE_MATURITY) {
+	if precheckCoinbaseImmature(entry, nextHeight) {
 		return 0, false
 	}
 	return entry.Value, true
+}
+
+// precheckP2PKInputStructurallyValid returns true iff the input is
+// structurally valid for the cheap P2PK precheck. Wave-4 guards mirror
+// terminal-reject parse-time checks at clients/go/consensus/utxo_basic.go
+// for non-empty ScriptSig (193-194), out-of-range Sequence (196-197),
+// and coinbase-prevout marker on non-coinbase (199-200). Returns false
+// on any structural defect so the caller defers to the slow path.
+func precheckP2PKInputStructurallyValid(in consensus.TxInput) bool {
+	var zeroTxid [32]byte
+	if in.PrevTxid == zeroTxid && in.PrevVout == 0xffffffff {
+		return false
+	}
+	if len(in.ScriptSig) != 0 {
+		return false
+	}
+	if in.Sequence > 0x7fffffff {
+		return false
+	}
+	return true
+}
+
+// precheckCoinbaseImmature returns true iff the resolved P2PK input is
+// an immature coinbase spend (wave-5 class-closure: slow path returns
+// Rejected TX_ERR_COINBASE_IMMATURE at utxo_basic.go:217-219). Caller
+// defers when this returns true so the slow path preserves the
+// terminal-reject classification (different caller action than fee
+// floor: wait for COINBASE_MATURITY blocks vs retry-with-higher-fee).
+func precheckCoinbaseImmature(entry consensus.UtxoEntry, nextHeight uint64) bool {
+	if !entry.CreatedByCoinbase {
+		return false
+	}
+	if nextHeight < entry.CreationHeight {
+		return true
+	}
+	return nextHeight-entry.CreationHeight < consensus.COINBASE_MATURITY
 }
 
 // feePrecheckP2PKOutputValue returns the sum of P2PK output values when
