@@ -113,6 +113,11 @@ pub struct TxPoolEntry {
     pub fee: u64,
     pub weight: u64,
     pub size: usize,
+    /// Caller-declared admission origin. Mirrors Go `mempoolEntry.source`
+    /// (clients/go/node/mempool.go). Recorded for observability /
+    /// downstream filtering; NOT consulted by `compare_entries_for_mining`
+    /// or `compare_admit_priority` — admission ordering is source-blind.
+    pub source: TxSource,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +165,21 @@ impl PartialOrd for WorstEntryKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+/// Caller-declared origin of a mempool admission. Mirrors Go
+/// `mempoolTxSource` (clients/go/node/mempool.go) with three variants:
+/// `Local` (RPC submit), `Remote` (p2p relay), `Reorg` (sync-reorg
+/// requeue). Source is recorded on the admitted entry but does NOT
+/// grant admission priority or bypass any validation step. Closed enum
+/// gives compile-time exhaustiveness; Go's `validMempoolTxSource`
+/// runtime check has no Rust analog because invalid variants cannot be
+/// constructed (parity-improved).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TxSource {
+    Local,
+    Remote,
+    Reorg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +258,7 @@ impl TxPool {
                 fee: 0,
                 weight: size as u64,
                 size,
+                source: TxSource::Local,
             },
         );
     }
@@ -271,6 +292,13 @@ impl TxPool {
         selected
     }
 
+    /// Backward-compatible admission entry that defaults the caller-
+    /// declared source to `TxSource::Local`. New producer wiring should
+    /// call `add_tx_with_source` directly with the appropriate variant
+    /// so source provenance is recorded on the entry. Returns just the
+    /// txid (drops `RelayTxMetadata`); use `admit_with_metadata` or
+    /// `add_tx_with_source` directly to receive the `RelayTxMetadata`
+    /// alongside the txid.
     pub fn admit(
         &mut self,
         tx_bytes: &[u8],
@@ -282,12 +310,45 @@ impl TxPool {
             .map(|(txid, _)| txid)
     }
 
+    /// Backward-compatible metadata-returning admission entry that
+    /// defaults the caller-declared source to `TxSource::Local`. Mirrors
+    /// the legacy admission API surface; new code should call
+    /// `add_tx_with_source` instead with the appropriate variant.
     pub fn admit_with_metadata(
         &mut self,
         tx_bytes: &[u8],
         chain_state: &ChainState,
         block_store: Option<&BlockStore>,
         chain_id: [u8; 32],
+    ) -> Result<([u8; 32], RelayTxMetadata), TxPoolAdmitError> {
+        self.add_tx_with_source(
+            tx_bytes,
+            chain_state,
+            block_store,
+            chain_id,
+            TxSource::Local,
+        )
+    }
+
+    /// Canonical admission entry with caller-declared source provenance.
+    /// Mirrors Go `Mempool.addTxWithSource` (clients/go/node/mempool.go)
+    /// which is the shared body behind Go's `AddTx`/`AddRemoteTx`/
+    /// `AddReorgTx` public entries. The `source` argument is recorded
+    /// on the resulting `TxPoolEntry.source` for observability and
+    /// downstream filtering, but does NOT affect any validation,
+    /// admission ordering, or capacity-eviction priority — admission
+    /// is source-blind.
+    ///
+    /// Rust's closed `TxSource` enum makes Go's runtime
+    /// `validMempoolTxSource` check unnecessary; invalid variants
+    /// cannot be constructed (parity-improved).
+    pub fn add_tx_with_source(
+        &mut self,
+        tx_bytes: &[u8],
+        chain_state: &ChainState,
+        block_store: Option<&BlockStore>,
+        chain_id: [u8; 32],
+        source: TxSource,
     ) -> Result<([u8; 32], RelayTxMetadata), TxPoolAdmitError> {
         let (tx, txid, _wtxid, consumed) =
             parse_tx(tx_bytes).map_err(|err| rejected(format!("transaction rejected: {err}")))?;
@@ -417,6 +478,7 @@ impl TxPool {
             fee: summary.fee,
             weight,
             size: tx_bytes.len(),
+            source,
         };
 
         // Go-parity capacity admission: `validateCapacityAdmissionLocked`
@@ -1543,7 +1605,7 @@ mod tests {
         compare_fee_rate, conflict, fee_precheck_p2pk_input_value, fee_precheck_p2pk_output_value,
         mtp_median, next_block_height, next_block_mtp, reject_core_ext_tx_oversized_payload,
         reject_da_anchor_tx_policy, rejected, relay_metadata, unavailable, TxPool,
-        TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, DEFAULT_MEMPOOL_MIN_FEE_RATE,
+        TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE,
         MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
@@ -1962,6 +2024,7 @@ mod tests {
                 fee: 0,
                 weight: 0,
                 size: raw.len(),
+                source: TxSource::Local,
             },
         );
         let err = pool
@@ -2055,6 +2118,7 @@ mod tests {
                     fee: 10,
                     weight: 1,
                     size: 1,
+                    source: TxSource::Local,
                 },
             );
         }
@@ -2113,6 +2177,7 @@ mod tests {
                     fee: 10,
                     weight: 1,
                     size: 1,
+                    source: TxSource::Local,
                 },
             );
         }
@@ -2173,6 +2238,7 @@ mod tests {
                 fee: 0,
                 weight: 100,
                 size: 1,
+                source: TxSource::Local,
             },
         );
         for idx in 1..MAX_TX_POOL_TRANSACTIONS {
@@ -2189,6 +2255,7 @@ mod tests {
                     fee: 1,
                     weight: 1,
                     size: 1,
+                    source: TxSource::Local,
                 },
             );
         }
@@ -2264,6 +2331,7 @@ mod tests {
                 fee: 20_000,
                 weight: 10_000,
                 size: raw_worse.len(),
+                source: TxSource::Local,
             },
         );
         for idx in 1..MAX_TX_POOL_TRANSACTIONS {
@@ -2280,6 +2348,7 @@ mod tests {
                     fee: 3,
                     weight: 1,
                     size: 1,
+                    source: TxSource::Local,
                 },
             );
         }
@@ -2331,6 +2400,7 @@ mod tests {
                 fee: 20,
                 weight: 100,
                 size: 20,
+                source: TxSource::Local,
             },
         );
         pool.txs.insert(
@@ -2341,6 +2411,7 @@ mod tests {
                 fee: 15,
                 weight: 90,
                 size: 10,
+                source: TxSource::Local,
             },
         );
         pool.txs.insert(
@@ -2351,6 +2422,7 @@ mod tests {
                 fee: 15,
                 weight: 80,
                 size: 10,
+                source: TxSource::Local,
             },
         );
 
@@ -2366,6 +2438,7 @@ mod tests {
             fee: 4,
             weight: 4,
             size: 1,
+            source: TxSource::Local,
         };
         let weight_favored = TxPoolEntry {
             raw: vec![0x21],
@@ -2373,6 +2446,7 @@ mod tests {
             fee: 2,
             weight: 1,
             size: 1,
+            source: TxSource::Local,
         };
 
         assert_eq!(
@@ -2407,6 +2481,7 @@ mod tests {
                 fee: 5,
                 weight: 10,
                 size: 2,
+                source: TxSource::Local,
             },
         );
         pool.txs.insert(
@@ -2417,6 +2492,7 @@ mod tests {
                 fee: 100,
                 weight: 10,
                 size: 3,
+                source: TxSource::Local,
             },
         );
 
@@ -2469,6 +2545,7 @@ mod tests {
                     fee: idx as u64 + 1,
                     weight: idx as u64 + 1,
                     size: 1,
+                    source: TxSource::Local,
                 },
             );
         }
@@ -2496,6 +2573,7 @@ mod tests {
                     fee: idx as u64 + 10,
                     weight: idx as u64 + 10,
                     size: 1,
+                    source: TxSource::Local,
                 },
             );
         }
@@ -2509,6 +2587,7 @@ mod tests {
                 fee: 30,
                 weight: 30,
                 size: 1,
+                source: TxSource::Local,
             },
         );
 
@@ -2529,6 +2608,7 @@ mod tests {
             fee: 10,
             weight: 0,
             size: 10,
+            source: TxSource::Local,
         };
         let normal = TxPoolEntry {
             raw: vec![0x01],
@@ -2536,6 +2616,7 @@ mod tests {
             fee: 20,
             weight: 20,
             size: 10,
+            source: TxSource::Local,
         };
         assert_eq!(compare_fee_rate(&zero, &normal), Ordering::Equal);
 
@@ -2545,6 +2626,7 @@ mod tests {
             fee: 30,
             weight: 10,
             size: 10,
+            source: TxSource::Local,
         };
         let low_fee = TxPoolEntry {
             raw: vec![0x02],
@@ -2552,6 +2634,7 @@ mod tests {
             fee: 20,
             weight: 10,
             size: 10,
+            source: TxSource::Local,
         };
         assert_eq!(
             compare_admit_priority([0x03; 32], &high_fee, [0x02; 32], &low_fee),
@@ -2570,6 +2653,7 @@ mod tests {
             fee: 20,
             weight: 5,
             size: 10,
+            source: TxSource::Local,
         };
         let heavier = TxPoolEntry {
             raw: vec![0x05],
@@ -2577,6 +2661,7 @@ mod tests {
             fee: 20,
             weight: 8,
             size: 10,
+            source: TxSource::Local,
         };
         let lighter_txid: [u8; 32] = [0x04; 32];
         let heavier_txid: [u8; 32] = [0x05; 32];
@@ -2595,6 +2680,7 @@ mod tests {
             fee: 20,
             weight: 10,
             size: 10,
+            source: TxSource::Local,
         };
         let equal_b = TxPoolEntry {
             raw: vec![0xAA],
@@ -2602,6 +2688,7 @@ mod tests {
             fee: 20,
             weight: 10,
             size: 10,
+            source: TxSource::Local,
         };
         let lo_txid: [u8; 32] = [0x01; 32];
         let hi_txid: [u8; 32] = [0x02; 32];
@@ -3586,6 +3673,7 @@ mod tests {
                 fee: 100,
                 weight: 1,
                 size: 1,
+                source: TxSource::Local,
             },
         );
         let pool_len_before = pool.len();
@@ -3672,6 +3760,7 @@ mod tests {
                 fee: 100,
                 weight: 1,
                 size: 1,
+                source: TxSource::Local,
             },
         );
         assert!(pool.txs.contains_key(&txid));
@@ -3715,6 +3804,7 @@ mod tests {
                 fee: 100,
                 weight: 1,
                 size: 1,
+                source: TxSource::Local,
             },
         );
 
@@ -3952,6 +4042,7 @@ mod tests {
                     fee: 100,
                     weight: 1,
                     size: 1,
+                    source: TxSource::Local,
                 },
             );
         }
@@ -5039,6 +5130,241 @@ mod tests {
             err.message.contains("mempool fee below rolling minimum"),
             "relay-side message format must match admit; got: {}",
             err.message
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // RUB-174: source-aware admission API tests
+    //
+    // These tests cover the `add_tx_with_source` canonical entry mirroring
+    // Go's `addTxWithSource` (clients/go/node/mempool.go), and verify that
+    // the legacy `admit()` / `admit_with_metadata()` wrappers preserve
+    // backward-compat by defaulting `TxSource::Local`. The parity-invariant
+    // hostile case (`source_does_not_affect_admission_ordering`) asserts
+    // that admission is source-blind — recording source is observability
+    // metadata only and must not influence eviction or mining selection.
+    // -------------------------------------------------------------------
+
+    /// `add_tx_with_source(_, TxSource::Local)` admits successfully and
+    /// records `Local` on the resulting `TxPoolEntry.source`. Mirrors Go
+    /// `Mempool.AddTx` → `addTxWithSource(_, mempoolTxSourceLocal)`.
+    #[test]
+    fn add_tx_with_source_records_local_provenance() {
+        let (state, admitted_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let mut pool = TxPool::new();
+        let (txid, _) = pool
+            .add_tx_with_source(
+                &admitted_raw,
+                &state,
+                None,
+                devnet_genesis_chain_id(),
+                TxSource::Local,
+            )
+            .expect("add_tx_with_source Local");
+        let entry = pool
+            .txs
+            .get(&txid)
+            .expect("admitted entry must exist in pool");
+        assert_eq!(
+            entry.source,
+            TxSource::Local,
+            "Local source must be recorded on entry"
+        );
+    }
+
+    /// `add_tx_with_source(_, TxSource::Remote)` admits successfully and
+    /// records `Remote` on the resulting `TxPoolEntry.source`. Mirrors Go
+    /// `Mempool.AddRemoteTx` → `addTxWithSource(_, mempoolTxSourceRemote)`.
+    #[test]
+    fn add_tx_with_source_records_remote_provenance() {
+        let (state, admitted_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let mut pool = TxPool::new();
+        let (txid, _) = pool
+            .add_tx_with_source(
+                &admitted_raw,
+                &state,
+                None,
+                devnet_genesis_chain_id(),
+                TxSource::Remote,
+            )
+            .expect("add_tx_with_source Remote");
+        let entry = pool
+            .txs
+            .get(&txid)
+            .expect("admitted entry must exist in pool");
+        assert_eq!(
+            entry.source,
+            TxSource::Remote,
+            "Remote source must be recorded on entry"
+        );
+    }
+
+    /// `add_tx_with_source(_, TxSource::Reorg)` admits successfully and
+    /// records `Reorg` on the resulting `TxPoolEntry.source`. Mirrors Go
+    /// `Mempool.AddReorgTx` → `addTxWithSource(_, mempoolTxSourceReorg)`.
+    #[test]
+    fn add_tx_with_source_records_reorg_provenance() {
+        let (state, admitted_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let mut pool = TxPool::new();
+        let (txid, _) = pool
+            .add_tx_with_source(
+                &admitted_raw,
+                &state,
+                None,
+                devnet_genesis_chain_id(),
+                TxSource::Reorg,
+            )
+            .expect("add_tx_with_source Reorg");
+        let entry = pool
+            .txs
+            .get(&txid)
+            .expect("admitted entry must exist in pool");
+        assert_eq!(
+            entry.source,
+            TxSource::Reorg,
+            "Reorg source must be recorded on entry"
+        );
+    }
+
+    /// Backward-compat: `admit()` defaults the recorded source to `Local`
+    /// (Go parity: `AddTx` is the legacy entry that maps to
+    /// `mempoolTxSourceLocal`). Existing producers calling `admit()`
+    /// continue to work and their admissions are recorded as `Local`.
+    #[test]
+    fn admit_records_local_source_for_backward_compat() {
+        let (state, admitted_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let mut pool = TxPool::new();
+        let txid = pool
+            .admit(&admitted_raw, &state, None, devnet_genesis_chain_id())
+            .expect("legacy admit");
+        let entry = pool
+            .txs
+            .get(&txid)
+            .expect("admitted entry must exist in pool");
+        assert_eq!(
+            entry.source,
+            TxSource::Local,
+            "legacy admit() must record Local source for backward compat"
+        );
+    }
+
+    /// Hostile case: source variant must NOT influence admission
+    /// ordering, eviction priority, or mining selection. Mirrors Go
+    /// invariant where `mempoolEntry.source` is observability metadata
+    /// only and is never consulted by `validateCapacityAdmissionLocked`,
+    /// `capacityEvictionPlanLocked`, or block-template selection.
+    ///
+    /// Coverage axes:
+    ///   1. Admission produces source-independent txid (same tx bytes
+    ///      under different sources → identical txid; recorded source
+    ///      varies).
+    ///   2. Selection ordering across MULTIPLE entries with equal
+    ///      (fee, weight) but different txids must be byte-identical
+    ///      between two pools that differ ONLY in source assignment
+    ///      (Pool A: ent1=Local + ent2=Reorg; Pool B: ent1=Reorg +
+    ///      ent2=Local). This catches regressions where source
+    ///      accidentally enters the comparator (Copilot-2026-05-04 P2:
+    ///      single-entry selection is trivially identical, so the
+    ///      multi-entry leg is the load-bearing assertion).
+    ///
+    /// Test design note: `signed_conflicting_p2pk_state_and_txs`
+    /// produces fresh ML-DSA signatures per call, so the admit-path
+    /// leg admits the SAME `admitted_raw` to two pools to isolate the
+    /// source-difference variable. The selection-ordering leg uses
+    /// `insert_entry` to side-step admission's input-conflict /
+    /// fee-floor / signature-verify pipeline (which is source-blind by
+    /// construction at the admission API level — see leg 1) and
+    /// directly exercise the selection-time comparator
+    /// (`compare_entries_for_mining`, sorting `self.txs` in
+    /// `select_transactions`) with equal-priority distinct-txid entries
+    /// that production admission would not normally produce together
+    /// (because they would double-spend the same input). The injected
+    /// entries' `inputs` field is empty so no spender-index conflict.
+    /// Worst-heap source-blindness is exercised by the capacity tests
+    /// elsewhere in this module; this leg focuses on the selection
+    /// comparator.
+    #[test]
+    fn source_does_not_affect_admission_ordering() {
+        // Leg 1: admit-path source-independence (same tx bytes, two pools,
+        // different recorded source on entry, identical txid).
+        let (state, admitted_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+
+        let mut pool_local = TxPool::new();
+        let (txid_local, _) = pool_local
+            .add_tx_with_source(
+                &admitted_raw,
+                &state,
+                None,
+                devnet_genesis_chain_id(),
+                TxSource::Local,
+            )
+            .expect("local admit");
+
+        let mut pool_reorg = TxPool::new();
+        let (txid_reorg, _) = pool_reorg
+            .add_tx_with_source(
+                &admitted_raw,
+                &state,
+                None,
+                devnet_genesis_chain_id(),
+                TxSource::Reorg,
+            )
+            .expect("reorg admit");
+
+        assert_eq!(
+            txid_local, txid_reorg,
+            "txid must be source-independent (computed from tx bytes only)"
+        );
+
+        assert_eq!(
+            pool_local.txs.get(&txid_local).expect("local entry").source,
+            TxSource::Local
+        );
+        assert_eq!(
+            pool_reorg.txs.get(&txid_reorg).expect("reorg entry").source,
+            TxSource::Reorg
+        );
+
+        // Leg 2: multi-entry selection-ordering source-blindness
+        // (Pool A: ent1=Local + ent2=Reorg; Pool B: ent1=Reorg + ent2=Local).
+        // Equal (fee, weight) but distinct txids → comparator must produce
+        // identical order between pools that differ ONLY in source labels.
+        // Use insert_entry to bypass the admission pipeline (signature
+        // verify, fee floor, input-conflict check) and directly exercise
+        // the selection-time comparator (compare_entries_for_mining
+        // sorting self.txs in select_transactions). The worst-heap path
+        // is exercised separately by the capacity tests above; this leg
+        // focuses on the selection comparator's source-blindness.
+        let txid_aaa = [0xaa; 32];
+        let txid_bbb = [0xbb; 32];
+        let make_entry = |raw: Vec<u8>, source: TxSource| TxPoolEntry {
+            raw,
+            inputs: Vec::new(),
+            fee: 100,
+            weight: 1,
+            size: 1,
+            source,
+        };
+
+        let mut pool_a_b = TxPool::new();
+        pool_a_b.insert_entry(txid_aaa, make_entry(vec![0x01], TxSource::Local));
+        pool_a_b.insert_entry(txid_bbb, make_entry(vec![0x02], TxSource::Reorg));
+
+        let mut pool_b_a = TxPool::new();
+        pool_b_a.insert_entry(txid_aaa, make_entry(vec![0x01], TxSource::Reorg));
+        pool_b_a.insert_entry(txid_bbb, make_entry(vec![0x02], TxSource::Local));
+
+        let selected_a_b = pool_a_b.select_transactions(10, usize::MAX);
+        let selected_b_a = pool_b_a.select_transactions(10, usize::MAX);
+        assert_eq!(
+            selected_a_b.len(),
+            2,
+            "both injected entries must be selected (size budget non-binding)"
+        );
+        assert_eq!(
+            selected_a_b, selected_b_a,
+            "multi-entry selection order must be byte-identical between pools \
+             that differ ONLY in source assignment (comparator must be source-blind)"
         );
     }
 }
