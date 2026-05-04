@@ -1848,6 +1848,112 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenPubkeyKeyBindingMismatch(t *testi
 	}
 }
 
+// emptySpendRotationProvider returns DefaultRotationProvider's create
+// set (so output-side checks still see a populated set), but reports an
+// EMPTY native-spend set, which forces the wave-14 input-side rotation
+// guard to defer.
+type emptySpendRotationProvider struct{}
+
+func (emptySpendRotationProvider) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {
+	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
+}
+
+func (emptySpendRotationProvider) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
+	// Empty set rejects ALL spend suites.
+	return consensus.NewNativeSuiteSet()
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteNotInNativeSpendSet
+// pins the wave-14 input-side class-closure rotation guard: a P2PK
+// input whose witness suite_id is not in the active
+// NativeSpendSuites(nextHeight) set is rejected by the slow path at
+// clients/go/consensus/spend_verify.go (SigAlgInvalid). Without this
+// guard a below-floor tx with an out-of-rotation suite would be
+// misclassified as transient Unavailable instead of terminal Rejected
+// (different caller action: rotation does not retry vs floor does).
+// Closes Copilot wave-17 P1 (TestMempoolCheap* regression coverage gap).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteNotInNativeSpendSet(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    pubkey,
+			Signature: signature,
+		}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, emptySpendRotationProvider{}, nil); ok {
+		t.Fatalf("rotation with empty NativeSpendSuites must defer (ok=false)")
+	}
+	// Sanity (negative-branch pin): default rotation accepts
+	// SUITE_ID_ML_DSA_87 in the spend set, so the same fixture with
+	// rotation=nil must NOT defer. Confirms the rotation provider is
+	// the only difference exercised by this test.
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil); !ok {
+		t.Fatalf("default rotation must NOT defer on valid P2PK fixture (ok=true)")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteRegistryLookupMisses
+// pins the wave-14 input-side class-closure registry guard: a P2PK
+// input whose witness suite_id has no entry in the active SuiteRegistry
+// (Lookup returns ok=false) is rejected by the slow path at
+// clients/go/consensus/spend_verify.go (SigAlgInvalid). Without this
+// guard a below-floor tx with an unregistered suite would be
+// misclassified as transient Unavailable instead of terminal Rejected.
+// Closes Copilot wave-17 P1 (TestMempoolCheap* regression coverage gap).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteRegistryLookupMisses(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    pubkey,
+			Signature: signature,
+		}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	// Empty registry: Lookup of any suite_id (including the witness
+	// SUITE_ID_ML_DSA_87) returns ok=false, so the wave-14 registry
+	// guard fires.
+	emptyRegistry := consensus.NewSuiteRegistryFromParams(nil)
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, emptyRegistry); ok {
+		t.Fatalf("empty registry must defer (Lookup miss returns ok=false)")
+	}
+	// Sanity (negative-branch pin): default registry has
+	// SUITE_ID_ML_DSA_87 with canonical params, so the same fixture
+	// with registry=nil must NOT defer. Confirms the registry is the
+	// only difference exercised by this test.
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil); !ok {
+		t.Fatalf("default registry must NOT defer on valid P2PK fixture (ok=true)")
+	}
+}
+
 // TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive
 // pins the wave-8 race-fix: validateFeeFloorLockedWithFloor uses
 // MAX(snappedFloor, m.currentMinFeeRateLocked()) so newer higher

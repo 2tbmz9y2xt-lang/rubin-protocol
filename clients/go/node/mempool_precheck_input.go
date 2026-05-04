@@ -57,7 +57,11 @@ func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]co
 // (wave-14), registry lookup (wave-14), canonical pubkey/signature
 // lengths (wave-14), covenant_data length + suite consistency with
 // input UTXO covenant_data[0] (wave-15 panic-safety + wave-14),
-// sighash trailer SIGHASH_ALL (wave-15), and key-binding
+// sighash trailer accepted by IsValidSighashType (wave-16: defers only
+// when the trailer is NOT one of the six canonical sighash types
+// SIGHASH_ALL/NONE/SINGLE × ANYONECANPAY; wave-15's literal
+// `!= SIGHASH_ALL` over-deferred 5/6 valid types and let attackers
+// flip the trailer byte to bypass the cheap reject), and key-binding
 // SHA3(pubkey)==CovenantData[1:33] (wave-15). ML-DSA signature
 // verification stays out of the precheck by design (the only
 // documented scope-cap; SHA3 and byte compare are CHEAP and in scope).

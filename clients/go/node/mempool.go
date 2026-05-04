@@ -448,15 +448,21 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 
 	snapshot := m.chainState.admissionSnapshot()
 	policy := m.policySnapshot()
-	// Wave-6 (PR #1422): snap currentMinFeeRate ONCE so the cheap
-	// precheck and the locked addEntryLocked path use the SAME floor
-	// value. Without this, applyConnectedBlockParsed +
-	// decayMinFeeRateAfterConnectedBlockLocked could lower the floor
-	// between the snapshot read and the lock acquisition, causing the
-	// precheck to reject on the stale-higher floor while the locked
-	// admission path would have accepted on the fresh-lower floor.
-	// Per-admission consistency: precheck and addEntryLocked agree on
-	// the same input.
+	// Wave-6/8 (PR #1422): snap currentMinFeeRate ONCE so the cheap
+	// precheck has a stable floor input for its accept/reject decision.
+	// The locked path (validateFeeFloorLockedWithFloor below) then
+	// enforces max(snappedFloor, live currentMinFeeRate) so the
+	// admission decision is bidirectionally race-safe:
+	//   - decay race: if decayMinFeeRateAfterConnectedBlockLocked fires
+	//     between snap and lock, snappedFloor (higher) wins → spurious
+	//     reject is the lesser evil, caller may retry (acceptable per
+	//     Copilot wave-7 recommendation).
+	//   - raise race: if raiseMinFeeRateAfterEvictionLocked fires
+	//     between snap and lock, live currentMinFeeRate (higher) wins →
+	//     tx correctly rejected against the current rolling floor;
+	//     never admits below the live congestion-control level.
+	// Wave-7's snap-once-pass-through fixed only the decay direction
+	// and reopened the opposite race; wave-8 closes both.
 	snappedFloor := m.CurrentMinFeeRateSnapshot()
 	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy, snappedFloor)
 	if err != nil {
@@ -980,14 +986,17 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 	return m.addEntryLockedWithFloor(entry, m.currentMinFeeRateLocked())
 }
 
-// addEntryLockedWithFloor is the wave-6 race-safe entry point. The
+// addEntryLockedWithFloor is the wave-6/8 race-safe entry point. The
 // caller MUST pass the `snappedFloor` value that was captured ONCE
-// before the cheap precheck fired (wave-6 race fix: see
-// addTxWithSource for rationale). The snapped floor is plumbed down
-// to validateFeeFloorLocked so that the precheck's accept/reject
-// decision and the locked admission's accept/reject decision use the
-// same input even if decayMinFeeRateAfterConnectedBlockLocked has
-// fired between the two.
+// before the cheap precheck fired (see addTxWithSource for rationale).
+// The snapped floor is plumbed down to validateFeeFloorLockedWithFloor
+// which enforces max(snappedFloor, live currentMinFeeRate) on the
+// admission decision: the precheck owns the snap, the locked path
+// owns the live re-read, and the strict-of-the-two wins. This blocks
+// the raise race (Codex+Copilot wave-7) where
+// raiseMinFeeRateAfterEvictionLocked could fire between snap and lock
+// and a stale-lower snap would otherwise admit a transaction below
+// the current rolling floor.
 func (m *Mempool) addEntryLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	normalizeMempoolEntryDefaults(entry)
 	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {

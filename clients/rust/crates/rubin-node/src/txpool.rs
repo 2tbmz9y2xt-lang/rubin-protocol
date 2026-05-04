@@ -4711,6 +4711,87 @@ mod tests {
         );
     }
 
+    /// Wave-14 input-side rotation guard: defer when the witness
+    /// `suite_id` is not in the active `native_spend_suites(next_height)`
+    /// set. Mirrors slow-path reject at
+    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs:122-128`
+    /// (`SigAlgInvalid`). Without this guard, a below-floor tx whose
+    /// suite is consensus-rejected at spend time would be misclassified
+    /// as transient `Unavailable` instead of terminal `Rejected`.
+    /// Closes Copilot wave-17 P1 (`rub166_*` regression coverage gap).
+    #[test]
+    fn rub166_precheck_defers_when_input_suite_not_in_native_spend_set() {
+        use rubin_consensus::constants::SUITE_ID_ML_DSA_87;
+        use rubin_consensus::{NativeSuiteSet, RotationProvider};
+        struct EmptySpendRotation;
+        impl RotationProvider for EmptySpendRotation {
+            fn native_create_suites(&self, _h: u64) -> NativeSuiteSet {
+                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
+            }
+            fn native_spend_suites(&self, _h: u64) -> NativeSuiteSet {
+                // Empty set rejects ALL spend suites.
+                NativeSuiteSet::new(&[])
+            }
+        }
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        let rotation = EmptySpendRotation;
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, Some(&rotation), None);
+        assert!(
+            result.is_none(),
+            "rotation with empty native_spend_suites must defer (None); got {:?}",
+            result
+        );
+        // Sanity (negative-branch pin): default rotation accepts
+        // SUITE_ID_ML_DSA_87 in the spend set, so the same fixture with
+        // `rotation=None` must NOT defer. Confirms the rotation
+        // provider is the only difference exercised by this test.
+        let baseline = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, None);
+        assert!(
+            baseline.is_some(),
+            "default rotation must NOT defer on signed valid P2PK fixture; got {:?}",
+            baseline
+        );
+    }
+
+    /// Wave-14 input-side registry guard: defer when the
+    /// `SuiteRegistry::lookup(suite_id)` returns `None` (the active
+    /// registry has no entry for the witness suite). Mirrors slow-path
+    /// reject at
+    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs:130-135`
+    /// (`SigAlgInvalid`). Without this guard, a below-floor tx with an
+    /// unregistered suite would be misclassified as transient
+    /// `Unavailable` instead of terminal `Rejected`. Closes Copilot
+    /// wave-17 P1 (`rub166_*` regression coverage gap).
+    #[test]
+    fn rub166_precheck_defers_when_input_suite_registry_lookup_misses() {
+        use rubin_consensus::SuiteRegistry;
+        use std::collections::BTreeMap;
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        // Empty registry: lookup of any suite_id (including
+        // SUITE_ID_ML_DSA_87 carried by the signed fixture witness)
+        // returns None, so the wave-14 registry guard fires.
+        let empty_registry = SuiteRegistry::with_suites(BTreeMap::new());
+        let result =
+            fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, Some(&empty_registry));
+        assert!(
+            result.is_none(),
+            "empty registry must defer (lookup miss returns None); got {:?}",
+            result
+        );
+        // Sanity (negative-branch pin): default registry has
+        // SUITE_ID_ML_DSA_87 with canonical params, so the same fixture
+        // with `registry=None` must NOT defer. Confirms the registry
+        // provider is the only difference exercised by this test.
+        let baseline = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, None);
+        assert!(
+            baseline.is_some(),
+            "default registry must NOT defer on signed valid P2PK fixture; got {:?}",
+            baseline
+        );
+    }
+
     #[test]
     fn rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit() {
         let (mut state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);

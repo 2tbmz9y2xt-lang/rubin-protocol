@@ -54,10 +54,11 @@ exclude_paths:
   #      after Copilot/Codex flagged the missing class).
   #   3. Coverage is enforced by the 21 rub166_* (Rust) + 13
   #      TestMempoolCheap* (Go) tests that exercise each defer branch.
-  #   4. Future changes to these files SHOULD be reviewed by
-  #      pre-push-reviewer LAYER 4 (class-leak / TOCTOU / panic-safety /
-  #      per-branch test enumeration) per /Users/gpt/.claude/agents/pre-push-reviewer.md
-  #      so the Codacy exclusion does not silently relax review quality.
+  #   4. Future changes to these files SHOULD be reviewed against the
+  #      class-leak / TOCTOU / panic-safety / per-branch-test-enumeration
+  #      lenses (see review-thread chains on PR #1422 waves 4..16 for
+  #      worked examples) so the Codacy exclusion does not silently
+  #      relax review quality.
   # If Codacy adds per-rule exclude-paths in the future, narrow this to
   # complexity rule only (issue id 73247 / "Method has cyclomatic
   # complexity > 8"). Today (.codacy.yml v3) supports only per-tool
