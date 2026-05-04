@@ -551,6 +551,21 @@ impl TxPool {
     }
 }
 
+/// Returns the metadata a relay peer needs to forward the transaction
+/// (fee + serialized size). Runs full structural + chainstate validation
+/// AND enforces the rolling-relay-fee floor inline via
+/// `apply_post_consensus_policy_with_floor` -> `validate_fee_floor`.
+///
+/// Cross-client divergence (Hard Rule 2026-05-04 wave-20 thread #5):
+/// Go `RelayMetadata` (clients/go/node/mempool.go:488) does NOT enforce
+/// relay-floor inline; Go delegates floor enforcement to per-peer
+/// relay-policy + the admit-time `validateFeeFloorLockedWithFloor`.
+/// The Rust relay path enforces inline at relay-time; the Go relay path
+/// admits below-floor txs whose Rust counterpart would
+/// `Unavailable`-reject. This asymmetry is INTENTIONAL pending a future
+/// cross-client unification slice (RUB-NNN). The pinning test
+/// `rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit`
+/// (txpool.rs:4795) documents the Rust side of the divergence.
 pub(crate) fn relay_metadata(
     tx_bytes: &[u8],
     chain_state: &ChainState,
@@ -619,8 +634,9 @@ pub(crate) fn relay_metadata(
 /// Shared post-consensus policy sequence used by both
 /// `TxPool::admit_with_metadata` (admit gate) and `relay_metadata`
 /// (relay gate). Mirrors Go's `applyPolicyAgainstState` plus
-/// `validateFeeFloorLocked` pair (clients/go/node/mempool.go:907-948
-/// and mempool.go:957-967). Centralising the cfg-clone, cfg-zero
+/// `validateFeeFloorLocked` pair (clients/go/node/mempool.go:913-915
+/// `validateFeeFloorLocked` and :940-952
+/// `validateFeeFloorLockedWithFloor`). Centralising the cfg-clone, cfg-zero
 /// override, `apply_policy` invocation and rolling-floor enforcement
 /// in one private helper prevents the public-gate-drift class that
 /// PR #1410 wave-2 fixed once already (relay_metadata had skipped the
@@ -778,7 +794,7 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
 }
 
 /// Returns true if `fee` is below the rolling fee floor for `weight`.
-/// Mirrors Go `feeRateBelowFloor` (clients/go/node/mempool.go:1419-1432)
+/// Mirrors Go `feeRateBelowFloor` (clients/go/node/mempool.go:1428-1440 `feeRateBelowFloor`)
 /// using full-precision u128 cross-multiplication (`fee < weight * floor`).
 /// u128 holds any `u64 * u64` product losslessly, so the comparison is
 /// well-defined at every input including `weight == u64::MAX` and
@@ -790,7 +806,7 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
 ///
 /// Floor argument is clamped up to `DEFAULT_MEMPOOL_MIN_FEE_RATE` if
 /// smaller, mirroring Go `feeRateBelowFloor`'s in-helper clamp at
-/// clients/go/node/mempool.go:1423-1425. Callers therefore always
+/// clients/go/node/mempool.go:1432-1434 (in-helper clamp inside `feeRateBelowFloor`). Callers therefore always
 /// receive at-least-DEFAULT enforcement even if cfg-static or
 /// rolling-floor sources zero the field.
 fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
@@ -809,7 +825,7 @@ fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
 /// on rolling-floor failure, mirroring Go `validateFeeFloorLocked` at
 /// clients/go/node/mempool.go:907-918. The `DEFAULT_MEMPOOL_MIN_FEE_RATE`
 /// clamp lives inside `fee_rate_below_floor` (Go-parity at
-/// clients/go/node/mempool.go:1423-1425); the error message surfaces
+/// clients/go/node/mempool.go:1432-1434 (in-helper clamp inside `feeRateBelowFloor`)); the error message surfaces
 /// the post-clamp value for operator clarity.
 fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
     if fee_rate_below_floor(fee, weight, cfg_floor) {
@@ -3297,10 +3313,11 @@ mod tests {
     /// P1 #4 fix — DA tx whose DA fee passes but rolling relay floor fails
     /// must return Unavailable from validate_fee_floor, NOT Rejected
     /// from reject_da_anchor_tx_policy. Mirrors Go applyPolicyAgainstState
-    /// behaviour (clients/go/node/mempool.go:907-948): mempool admit passes
-    /// currentMempoolMinFeeRate=0 to the DA helper so the relay-floor
-    /// classification is owned uniformly by validateFeeFloorLocked
-    /// (Unavailable, transient/retryable).
+    /// behaviour (clients/go/node/mempool.go:913-915 `validateFeeFloorLocked`
+    /// and :940-952 `validateFeeFloorLockedWithFloor`): mempool admit
+    /// passes currentMempoolMinFeeRate=0 to the DA helper so the
+    /// relay-floor classification is owned uniformly by
+    /// validateFeeFloorLocked (Unavailable, transient/retryable).
     ///
     /// Reachability: tx is well-formed (parses, basic+canonical checks pass,
     /// inputs not double-spent), DA-side floor configured to 0 so DA helper
@@ -3640,9 +3657,9 @@ mod tests {
 
     /// P1 #4 helper unit test — `fee_rate_below_floor` is a u128 cross-mul
     /// predicate matching Go `feeRateBelowFloor`
-    /// (clients/go/node/mempool.go:1419-1432), including the in-helper
+    /// (clients/go/node/mempool.go:1428-1440 `feeRateBelowFloor`), including the in-helper
     /// `floor < DefaultMempoolMinFeeRate` clamp at
-    /// clients/go/node/mempool.go:1423-1425. Calling with floor=0
+    /// clients/go/node/mempool.go:1432-1434 (in-helper clamp inside `feeRateBelowFloor`). Calling with floor=0
     /// promotes to DEFAULT_MEMPOOL_MIN_FEE_RATE
     /// before the cross-mul, so a fee=0 / weight=100 / floor=0 input
     /// rejects (required becomes 100*1=100 post-clamp, fee<100).
@@ -3677,7 +3694,7 @@ mod tests {
     /// P1 #4 + clamp regression — `validate_fee_floor` propagates
     /// a cfg-seeded zero into `fee_rate_below_floor`, which itself clamps
     /// to DEFAULT_MEMPOOL_MIN_FEE_RATE per Go `feeRateBelowFloor`
-    /// (clients/go/node/mempool.go:1419-1432, with the in-helper clamp
+    /// (clients/go/node/mempool.go:1428-1440 `feeRateBelowFloor`, with the in-helper clamp
     /// at lines 1425-1427). The error message surfaces the post-clamp
     /// value so operators see the actual decision basis.
     #[test]
@@ -4836,6 +4853,43 @@ mod tests {
             baseline.is_some(),
             "canonical pubkey/signature lengths must NOT defer; got {:?}",
             baseline
+        );
+    }
+
+    /// Wave-15 panic-safety + suite-consistency guard (line 1006-1008):
+    /// defer when `entry.covenant_data[0] != witness.suite_id` even when
+    /// length is canonical 33 bytes. Mirrors slow-path
+    /// `CovenantTypeInvalid` at spend_verify.rs:144-151. Combined-coverage
+    /// rationale via the length test (rub166_precheck_defers_when_input_utxo_covenant_data_length_invalid)
+    /// was insufficient — wave-20 pre-push-reviewer LAYER 4.1 caught the
+    /// gap. Closes pre-push-reviewer wave-20 P1 finding #1.
+    #[test]
+    fn rub166_precheck_defers_when_input_utxo_covenant_data_suite_mismatch() {
+        use rubin_consensus::constants::MAX_P2PK_COVENANT_DATA;
+        let (mut state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        let outpoint = Outpoint {
+            txid: parsed.inputs[0].prev_txid,
+            vout: parsed.inputs[0].prev_vout,
+        };
+        // Mutate covenant_data[0] to a value != witness.suite_id while
+        // keeping length canonical (33 bytes) and SHA3-binding intact for
+        // bytes [1..33]. The wave-15 guard at line 1006 must defer.
+        let entry = state.utxos.get_mut(&outpoint).expect("test utxo present");
+        // Witness suite is SUITE_ID_ML_DSA_87 (0x01); set covenant_data[0] = 0xFE.
+        let mut new_cov = entry.covenant_data.clone();
+        assert_eq!(
+            new_cov.len(),
+            MAX_P2PK_COVENANT_DATA as usize,
+            "fixture covenant_data must be canonical length"
+        );
+        new_cov[0] = 0xFE;
+        entry.covenant_data = new_cov;
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, None);
+        assert!(
+            result.is_none(),
+            "covenant_data[0] != witness.suite_id must defer (None); got {:?}",
+            result
         );
     }
 

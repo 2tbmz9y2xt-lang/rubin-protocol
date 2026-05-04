@@ -485,6 +485,25 @@ func validMempoolTxSource(source mempoolTxSource) bool {
 	}
 }
 
+// RelayMetadata returns the metadata a relay peer needs to forward the
+// transaction (fee + serialized size). It runs full structural +
+// chainstate validation via checkParsedTransactionWithSnapshot but
+// intentionally DOES NOT enforce the rolling-relay-fee floor: the
+// admit-path policy (see addTxWithSource at line 466 → addEntryLockedWithFloor
+// at line 1028 → validateFeeFloorLockedWithFloor at :940-952) is the
+// uniform owner of relay-floor classification (see applyPolicyAgainstState
+// docstring at :753-768 for the matching admit-path rationale).
+//
+// Cross-client divergence (Hard Rule 2026-05-04 wave-20 thread #5):
+// Rust `relay_metadata` (clients/rust/crates/rubin-node/src/txpool.rs:554)
+// DOES enforce relay-floor inline via apply_post_consensus_policy_with_floor
+// → validate_fee_floor. The Go relay path delegates floor enforcement to
+// per-peer relay-policy + the admit-time check; the Rust relay path enforces
+// inline at relay-time. This asymmetry is INTENTIONAL pending a future
+// cross-client unification slice (RUB-NNN). Below-floor txs admitted via
+// Go RelayMetadata that Rust RelayMetadata would `Unavailable`-reject is
+// the documented expected delta — see the Rust pinning test
+// `rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit`.
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m == nil {
 		return RelayTxMetadata{}, txAdmitUnavailable("nil mempool")
