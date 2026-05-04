@@ -679,7 +679,14 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	// Only plain P2PK candidates use the cheap floor reject. Transactions
 	// that may hit DA, CORE_ANCHOR, CORE_EXT, or missing-UTXO policy lanes
 	// keep the existing validation and policy-error precedence below.
-	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, m.CurrentMinFeeRateSnapshot()); err != nil {
+	// Wave-4 (PR #1422): pass nextHeight + policy.RotationProvider so the
+	// precheck can defer on consensus-invalid P2PK output shapes
+	// (value==0, wrong covenant_data length, suite outside native create
+	// set) that ValidateTxCovenantsGenesis would return Rejected
+	// (terminal). Without these passes a below-floor + malformed tx
+	// would be misclassified as transient Unavailable instead of
+	// Rejected (terminal).
+	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, m.CurrentMinFeeRateSnapshot(), nextHeight, policy.RotationProvider); err != nil {
 		return nil, nil, err
 	}
 	// Policy checks consume an immutable pre-validation snapshot of only the
@@ -725,15 +732,32 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	return checked, inputs, nil
 }
 
-func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64) error {
-	if tx.TxKind != 0x00 || len(tx.DaPayload) != 0 {
+// cheapFeeFloorPrecheck fast-rejects below-floor plain P2PK transactions
+// before the expensive ML-DSA signature verification, mirroring Rust
+// `cheap_fee_floor_precheck` at
+// `clients/rust/crates/rubin-node/src/txpool.rs`.
+//
+// Wave-4 class-closure conservatism: defer when the slow path
+// (`ValidateTxCovenantsGenesis` and the per-tx nonce/UTXO checks
+// inside `applyNonCoinbaseTxBasic*`) would return Rejected (terminal).
+// Without these defers a below-floor tx that ALSO has a structural
+// defect would be misclassified as transient Unavailable instead of
+// Rejected (terminal), masking the structural error and allowing
+// callers to retry forever.
+//
+// tx_nonce == 0 for non-coinbase: slow path returns
+// `txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for
+// non-coinbase")` at `clients/go/consensus/connect_block_parallel.go:290`
+// and `clients/go/consensus/utxo_basic.go:161`.
+func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64, nextHeight uint64, rotation consensus.RotationProvider) error {
+	if tx.TxKind != 0x00 || len(tx.DaPayload) != 0 || tx.TxNonce == 0 {
 		return nil
 	}
 	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos)
 	if !ok {
 		return nil
 	}
-	outputValue, ok := feePrecheckP2PKOutputValue(tx.Outputs)
+	outputValue, ok := feePrecheckP2PKOutputValue(tx.Outputs, nextHeight, rotation)
 	if !ok || outputValue > inputValue {
 		return nil
 	}
@@ -748,11 +772,53 @@ func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapsh
 	return nil
 }
 
+// feePrecheckP2PKInputValue returns the P2PK input value when tx has
+// exactly one input AND that input is BOTH structurally valid
+// (witness count == 1, no coinbase-prevout marker, empty ScriptSig,
+// Sequence in standard range) AND resolves in utxos to a
+// COV_TYPE_P2PK entry. Returns (0, false) for any other shape so the
+// caller defers to the expensive admission path.
+//
+// Wave-4 class-closure conservatism: each input-side guard mirrors a
+// terminal-reject branch in the slow path
+// `applyNonCoinbaseTxBasic*` at
+// `clients/go/consensus/utxo_basic.go:193-200`. Without these defers
+// a below-floor tx with structurally-defective input would be
+// misclassified as transient Unavailable instead of terminal
+// Rejected, masking the structural error and allowing callers to
+// retry forever. Mirrors Rust `fee_precheck_p2pk_input_value` in
+// `clients/rust/crates/rubin-node/src/txpool.rs`.
+//
+// Scope-cap: P2PK signature-verification failure is NOT classified
+// here. Verifying ML-DSA signatures is the expensive operation this
+// fast-reject is designed to avoid. Below-floor txs with invalid
+// signatures may surface as rolling-floor Unavailable until the fee
+// floor no longer applies; this is intentional.
 func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, bool) {
 	if utxos == nil || len(tx.Inputs) != 1 {
 		return 0, false
 	}
+	if len(tx.Witness) != 1 {
+		return 0, false
+	}
 	in := tx.Inputs[0]
+	// Coinbase-prevout marker on a non-coinbase input: slow path
+	// returns Rejected (terminal) via the parse-time check at
+	// `clients/go/consensus/utxo_basic.go:199-200`.
+	var zeroTxid [32]byte
+	if in.PrevTxid == zeroTxid && in.PrevVout == 0xffffffff {
+		return 0, false
+	}
+	// Non-empty ScriptSig on a P2PK input: slow path returns Rejected
+	// (terminal) via the parse-time check at `utxo_basic.go:193-194`.
+	if len(in.ScriptSig) != 0 {
+		return 0, false
+	}
+	// Out-of-range Sequence on a P2PK input: slow path returns Rejected
+	// (terminal) via the parse-time check at `utxo_basic.go:196-197`.
+	if in.Sequence > 0x7fffffff {
+		return 0, false
+	}
 	entry, ok := utxos[consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}]
 	if !ok || entry.CovenantType != consensus.COV_TYPE_P2PK {
 		return 0, false
@@ -760,10 +826,41 @@ func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]co
 	return entry.Value, true
 }
 
-func feePrecheckP2PKOutputValue(outputs []consensus.TxOutput) (uint64, bool) {
+// feePrecheckP2PKOutputValue returns the sum of P2PK output values when
+// every output is a CONSENSUS-VALID `COV_TYPE_P2PK` (non-zero value,
+// exactly `MAX_P2PK_COVENANT_DATA == 33` byte covenant_data, and a
+// suite_id in the active `NativeCreateSuites(nextHeight)` set) and the
+// running sum does not overflow `uint64`. Returns `(0, false)` for any
+// other shape so the caller defers to the expensive admission path.
+//
+// Wave-4 class-closure conservatism: each guard mirrors a permanent-
+// reject branch in `ValidateTxCovenantsGenesis` at
+// `clients/go/consensus/covenant_genesis.go:19-26`. Without them a
+// below-floor tx with consensus-invalid P2PK outputs would be
+// misclassified as transient Unavailable instead of permanent Rejected.
+// Mirrors Rust `fee_precheck_p2pk_output_value` at
+// `clients/rust/crates/rubin-node/src/txpool.rs`.
+func feePrecheckP2PKOutputValue(outputs []consensus.TxOutput, nextHeight uint64, rotation consensus.RotationProvider) (uint64, bool) {
+	if rotation == nil {
+		rotation = consensus.DefaultRotationProvider{}
+	}
+	nativeSuites := rotation.NativeCreateSuites(nextHeight)
 	var total uint64
 	for _, out := range outputs {
 		if out.CovenantType != consensus.COV_TYPE_P2PK {
+			return 0, false
+		}
+		// Wave-4 class-closure conservatism: each guard mirrors a
+		// permanent-reject branch in ValidateTxCovenantsGenesis
+		// (covenant_genesis.go:19-26).
+		if out.Value == 0 {
+			return 0, false
+		}
+		if uint64(len(out.CovenantData)) != consensus.MAX_P2PK_COVENANT_DATA {
+			return 0, false
+		}
+		suiteID := out.CovenantData[0]
+		if !nativeSuites.Contains(suiteID) {
 			return 0, false
 		}
 		next, carry := bits.Add64(total, out.Value, 0)

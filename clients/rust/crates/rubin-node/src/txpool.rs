@@ -4,7 +4,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     parse_block_header_bytes, parse_core_ext_covenant_data, parse_tx, tx_weight_and_stats_public,
-    CoreExtDeploymentProfiles, Outpoint, RotationProvider, SuiteRegistry,
+    CoreExtDeploymentProfiles, DefaultRotationProvider, Outpoint, RotationProvider, SuiteRegistry,
 };
 
 use crate::sync::SuiteContext;
@@ -314,6 +314,8 @@ impl TxPool {
             &chain_state.utxos,
             weight,
             self.cfg.policy_current_mempool_min_fee_rate,
+            next_height,
+            rotation,
         )?;
         let (_, summary) =
             apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
@@ -862,14 +864,30 @@ fn cheap_fee_floor_precheck(
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
     weight: u64,
     current_min_fee_rate: u64,
+    next_height: u64,
+    rotation: Option<&dyn RotationProvider>,
 ) -> Result<(), TxPoolAdmitError> {
-    if tx.tx_kind != 0x00 || !tx.da_payload.is_empty() {
+    // Wave-4 class-closure conservatism: defer when the slow path
+    // (`apply_non_coinbase_tx_basic_update_*` + `validate_tx_covenants_genesis`)
+    // would return `Rejected` (terminal). Without these defers a
+    // below-floor tx that ALSO has a structural defect would be
+    // misclassified as transient `Unavailable` instead of `Rejected`
+    // (terminal), masking the structural error and allowing callers to
+    // retry forever.
+    //
+    // tx_nonce == 0 for non-coinbase: the slow path returns
+    // `Rejected("tx_nonce must be >= 1 for non-coinbase")` at
+    // `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:232-237`.
+    // Same defer added in Go's `cheapFeeFloorPrecheck` so admit/relay
+    // endpoints behave identically across clients.
+    if tx.tx_kind != 0x00 || !tx.da_payload.is_empty() || tx.tx_nonce == 0 {
         return Ok(());
     }
     let Some(input_value) = fee_precheck_p2pk_input_value(tx, utxos) else {
         return Ok(());
     };
-    let Some(output_value) = fee_precheck_p2pk_output_value(&tx.outputs) else {
+    let Some(output_value) = fee_precheck_p2pk_output_value(&tx.outputs, next_height, rotation)
+    else {
         return Ok(());
     };
     if output_value > input_value {
@@ -882,11 +900,29 @@ fn cheap_fee_floor_precheck(
     validate_fee_floor(fee, weight, current_min_fee_rate)
 }
 
-/// Returns the P2PK input value when `tx` has exactly one input and
-/// that input resolves in `utxos` to a `COV_TYPE_P2PK` entry. Returns
+/// Returns the P2PK input value when `tx` has exactly one input AND
+/// that input is BOTH structurally valid (witness count == 1, no
+/// coinbase-prevout marker, empty script_sig, sequence in standard
+/// range) AND resolves in `utxos` to a `COV_TYPE_P2PK` entry. Returns
 /// `None` for any other shape so the caller defers to the expensive
-/// admission path. Mirrors Go's `feePrecheckP2PKInputValue` at
-/// `clients/go/node/mempool.go:751-761`.
+/// admission path.
+///
+/// Wave-4 class-closure conservatism: each input-side guard mirrors a
+/// terminal-reject branch in the slow path
+/// `apply_non_coinbase_tx_basic_update_*` at
+/// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs`. Without
+/// these defers a below-floor tx with a structurally-defective input
+/// would be misclassified as transient `Unavailable` instead of
+/// terminal `Rejected`, masking the structural error and allowing
+/// callers to retry forever. Mirrors Go's `feePrecheckP2PKInputValue`
+/// in `clients/go/node/mempool.go` (Go gets the same wave-4 guard set
+/// in this PR).
+///
+/// Scope-cap: P2PK signature-verification failure is NOT classified
+/// here. Verifying ML-DSA signatures is the expensive operation this
+/// fast-reject is designed to avoid. Below-floor txs with invalid
+/// signatures may surface as rolling-floor `Unavailable` until the
+/// fee floor no longer applies; this is intentional.
 fn fee_precheck_p2pk_input_value(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
@@ -894,7 +930,26 @@ fn fee_precheck_p2pk_input_value(
     if tx.inputs.len() != 1 {
         return None;
     }
+    if tx.witness.len() != 1 {
+        return None;
+    }
     let input = &tx.inputs[0];
+    // Coinbase-prevout marker on a non-coinbase input: slow path
+    // returns Rejected (terminal) via the parse-time check at
+    // `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:276-281`.
+    if input.prev_txid == [0u8; 32] && input.prev_vout == 0xffff_ffff {
+        return None;
+    }
+    // Non-empty script_sig on a P2PK input: slow path returns Rejected
+    // (terminal) via the parse-time check at `utxo_basic.rs:264-269`.
+    if !input.script_sig.is_empty() {
+        return None;
+    }
+    // Out-of-range sequence on a P2PK input: slow path returns Rejected
+    // (terminal) via the parse-time check at `utxo_basic.rs:270-275`.
+    if input.sequence > 0x7fff_ffff {
+        return None;
+    }
     let outpoint = Outpoint {
         txid: input.prev_txid,
         vout: input.prev_vout,
@@ -906,15 +961,44 @@ fn fee_precheck_p2pk_input_value(
     Some(entry.value)
 }
 
-/// Returns the sum of P2PK output values when every output is
-/// `COV_TYPE_P2PK` and the running sum does not overflow `u64`.
-/// Returns `None` for any other shape so the caller defers to the
-/// expensive admission path. Mirrors Go's `feePrecheckP2PKOutputValue`
-/// at `clients/go/node/mempool.go:763-776`.
-fn fee_precheck_p2pk_output_value(outputs: &[rubin_consensus::TxOutput]) -> Option<u64> {
+/// Returns the sum of P2PK output values when every output is a
+/// CONSENSUS-VALID `COV_TYPE_P2PK` (non-zero value, exactly
+/// `MAX_P2PK_COVENANT_DATA == 33` byte covenant_data, and a suite_id
+/// in the active `native_create_suites(next_height)` set) and the
+/// running sum does not overflow `u64`. Returns `None` for any other
+/// shape so the caller defers to the expensive admission path. The
+/// extra structural guards mirror the slow-path checks at
+/// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs:29-47`
+/// — without them a below-floor tx with consensus-invalid P2PK
+/// outputs would be misclassified as transient `Unavailable` instead
+/// of permanent `Rejected`. Mirrors Go's `feePrecheckP2PKOutputValue`
+/// at `clients/go/node/mempool.go:763-776` (Go gets the same wave-4
+/// guard set in this PR).
+fn fee_precheck_p2pk_output_value(
+    outputs: &[rubin_consensus::TxOutput],
+    next_height: u64,
+    rotation: Option<&dyn RotationProvider>,
+) -> Option<u64> {
+    use rubin_consensus::constants::MAX_P2PK_COVENANT_DATA;
+    let default_rp = DefaultRotationProvider;
+    let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
+    let native_suites = rp.native_create_suites(next_height);
     let mut total: u64 = 0;
     for output in outputs {
         if output.covenant_type != rubin_consensus::constants::COV_TYPE_P2PK {
+            return None;
+        }
+        // Wave-4 class-closure conservatism: each guard mirrors a
+        // permanent-reject branch in `validate_tx_covenants_genesis`
+        // (covenant_genesis.rs:29-47).
+        if output.value == 0 {
+            return None;
+        }
+        if output.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA {
+            return None;
+        }
+        let suite_id = output.covenant_data[0];
+        if !native_suites.contains(suite_id) {
             return None;
         }
         total = total.checked_add(output.value)?;
@@ -4012,20 +4096,27 @@ mod tests {
     /// `u64::MAX`.
     #[test]
     fn rub166_precheck_defers_on_output_sum_overflow() {
+        use rubin_consensus::constants::{COV_TYPE_P2PK, SUITE_ID_ML_DSA_87};
         use rubin_consensus::TxOutput;
+        // Wave-4: outputs need a valid 33-byte P2PK covenant_data (suite +
+        // 32-byte payload) so the new wave-4 conservatism guards
+        // (cov_data_len, suite_id) do NOT fire before the overflow branch.
+        // This keeps the test scoped to the `checked_add` overflow path.
+        let mut cov_data = vec![SUITE_ID_ML_DSA_87];
+        cov_data.extend_from_slice(&[0u8; 32]);
         let outputs = vec![
             TxOutput {
                 value: u64::MAX,
-                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
-                covenant_data: vec![],
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov_data.clone(),
             },
             TxOutput {
                 value: 1,
-                covenant_type: rubin_consensus::constants::COV_TYPE_P2PK,
-                covenant_data: vec![],
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov_data,
             },
         ];
-        let result = fee_precheck_p2pk_output_value(&outputs);
+        let result = fee_precheck_p2pk_output_value(&outputs, /* next_height */ 1, None);
         assert!(
             result.is_none(),
             "u64-overflow output sum must return None so precheck defers; got {:?}",
@@ -4043,7 +4134,14 @@ mod tests {
     fn rub166_precheck_defers_when_weight_is_zero() {
         let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
         let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
-        let result = cheap_fee_floor_precheck(&parsed, &state.utxos, /* weight */ 0, 1);
+        let result = cheap_fee_floor_precheck(
+            &parsed,
+            &state.utxos,
+            /* weight */ 0,
+            /* min_fee_rate */ 1,
+            /* next_height */ 1,
+            /* rotation */ None,
+        );
         assert!(
             result.is_ok(),
             "weight==0 must defer (Ok); got {:?}",
@@ -4079,10 +4177,243 @@ mod tests {
             &state.utxos,
             /* weight */ 1,
             /* min_fee_rate */ 1,
+            /* next_height */ 1,
+            /* rotation */ None,
         );
         assert!(
             result.is_ok(),
             "overspend must defer (Ok); got {:?}",
+            result
+        );
+    }
+
+    /// Wave-4 class-closure conservatism guard: `tx_nonce == 0` for a
+    /// non-coinbase tx is permanently rejected by
+    /// `apply_non_coinbase_tx_basic_update_*` (slow path) at
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:232-237`
+    /// with `TxErrTxNonceInvalid`. Without the wave-4 early-defer
+    /// guard, a below-floor tx with `tx_nonce == 0` would be
+    /// fast-rejected as transient `Unavailable("mempool fee below
+    /// rolling minimum")`, masking the permanent reject class.
+    /// Direct-helper exercise pins the early-defer branch.
+    #[test]
+    fn rub166_precheck_defers_when_tx_nonce_is_zero() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let (mut parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        // Mutate parsed tx to set tx_nonce = 0 while keeping shape valid.
+        parsed.tx_nonce = 0;
+        let result = cheap_fee_floor_precheck(
+            &parsed,
+            &state.utxos,
+            /* weight */ 1,
+            /* min_fee_rate */ 1,
+            /* next_height */ 1,
+            /* rotation */ None,
+        );
+        assert!(
+            result.is_ok(),
+            "tx_nonce==0 must defer (Ok) so the slow path returns the \
+             permanent TxErrTxNonceInvalid; got {:?}",
+            result
+        );
+    }
+
+    /// Wave-4 class-closure conservatism guard: a P2PK output with
+    /// `value == 0` is permanently rejected by
+    /// `validate_tx_covenants_genesis` (slow path) at
+    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs:29-34`
+    /// with `"CORE_P2PK value must be > 0"`. Without the wave-4 defer
+    /// guard, a below-floor tx with a zero-value P2PK output would be
+    /// fast-rejected as transient `Unavailable`, masking the
+    /// permanent reject class. Direct-helper exercise on
+    /// `fee_precheck_p2pk_output_value` pins the value==0 branch.
+    #[test]
+    fn rub166_precheck_defers_when_p2pk_output_value_is_zero() {
+        use rubin_consensus::constants::{COV_TYPE_P2PK, SUITE_ID_ML_DSA_87};
+        use rubin_consensus::TxOutput;
+        let mut cov_data = vec![SUITE_ID_ML_DSA_87];
+        cov_data.extend_from_slice(&[0u8; 32]);
+        let outputs = vec![TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }];
+        let result = fee_precheck_p2pk_output_value(&outputs, /* next_height */ 1, None);
+        assert!(
+            result.is_none(),
+            "P2PK output value==0 must return None so precheck defers; got {:?}",
+            result
+        );
+    }
+
+    /// Wave-4 class-closure conservatism guard: a P2PK output whose
+    /// `covenant_data` length is not exactly `MAX_P2PK_COVENANT_DATA`
+    /// (33 = 1-byte suite_id + 32-byte payload) is permanently
+    /// rejected by `validate_tx_covenants_genesis` at
+    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs:35-40`
+    /// with `"invalid CORE_P2PK covenant_data length"`. Without the
+    /// wave-4 defer guard, a below-floor tx with a wrong-length P2PK
+    /// covenant_data would be fast-rejected as transient
+    /// `Unavailable`, masking the permanent reject class. Both `len <
+    /// 33` (empty) and `len > 33` (oversized) branches pinned.
+    #[test]
+    fn rub166_precheck_defers_when_p2pk_covenant_data_length_invalid() {
+        use rubin_consensus::constants::COV_TYPE_P2PK;
+        use rubin_consensus::TxOutput;
+        // Branch 1: empty covenant_data (len == 0, < 33).
+        let outputs_empty = vec![TxOutput {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: vec![],
+        }];
+        let result_empty =
+            fee_precheck_p2pk_output_value(&outputs_empty, /* next_height */ 1, None);
+        assert!(
+            result_empty.is_none(),
+            "empty covenant_data must return None so precheck defers; got {:?}",
+            result_empty
+        );
+        // Branch 2: oversized covenant_data (len > 33).
+        let outputs_oversized = vec![TxOutput {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: vec![0u8; 64],
+        }];
+        let result_oversized =
+            fee_precheck_p2pk_output_value(&outputs_oversized, /* next_height */ 1, None);
+        assert!(
+            result_oversized.is_none(),
+            "oversized covenant_data must return None so precheck defers; got {:?}",
+            result_oversized
+        );
+    }
+
+    /// Wave-4 class-closure conservatism guard: a P2PK output whose
+    /// `covenant_data[0]` (suite_id) is not in the active
+    /// `native_create_suites(next_height)` set is permanently rejected
+    /// by `validate_tx_covenants_genesis` at
+    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs:41-47`
+    /// with `"CORE_P2PK suite not in native create set"`. Without the
+    /// wave-4 defer guard, a below-floor tx with an invalid suite
+    /// would be fast-rejected as transient `Unavailable`, masking the
+    /// permanent reject class. Default rotation provider
+    /// (`DefaultRotationProvider`) accepts only `SUITE_ID_ML_DSA_87`
+    /// (0x01); any other byte value triggers the defer.
+    #[test]
+    fn rub166_precheck_defers_when_p2pk_suite_not_in_native_create_set() {
+        use rubin_consensus::constants::{COV_TYPE_P2PK, SUITE_ID_ML_DSA_87};
+        use rubin_consensus::TxOutput;
+        // Use suite_id = 0xFE (non-native, definitely not in default set).
+        // Sanity: 0xFE != SUITE_ID_ML_DSA_87 (0x01).
+        assert_ne!(0xFEu8, SUITE_ID_ML_DSA_87);
+        let mut cov_data = vec![0xFEu8];
+        cov_data.extend_from_slice(&[0u8; 32]);
+        let outputs = vec![TxOutput {
+            value: 100,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: cov_data,
+        }];
+        let result = fee_precheck_p2pk_output_value(&outputs, /* next_height */ 1, None);
+        assert!(
+            result.is_none(),
+            "non-native suite_id must return None so precheck defers; got {:?}",
+            result
+        );
+    }
+
+    /// Wave-4 input-side class-closure: a non-empty `script_sig` on a
+    /// P2PK input is rejected by the slow path
+    /// (`apply_non_coinbase_tx_basic_update_*` at
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:264-269`)
+    /// with `TxErrParse "script_sig must be empty under genesis
+    /// covenant set"`. Without the wave-4 defer guard, a below-floor
+    /// tx with non-empty `script_sig` would be misclassified as
+    /// transient `Unavailable` instead of `Rejected` (terminal).
+    #[test]
+    fn rub166_precheck_defers_when_input_script_sig_non_empty() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let (mut parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        parsed.inputs[0].script_sig = vec![0x01];
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos);
+        assert!(
+            result.is_none(),
+            "non-empty script_sig must return None so precheck defers; got {:?}",
+            result
+        );
+    }
+
+    /// Wave-4 input-side class-closure: a `sequence > 0x7fffffff` on a
+    /// P2PK input is rejected by the slow path at
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:270-275`
+    /// with `TxErrSequenceInvalid "sequence exceeds 0x7fffffff"`.
+    /// Without the wave-4 defer guard, a below-floor tx with
+    /// out-of-range sequence would be misclassified as transient
+    /// `Unavailable` instead of `Rejected` (terminal).
+    #[test]
+    fn rub166_precheck_defers_when_input_sequence_out_of_range() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let (mut parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        parsed.inputs[0].sequence = 0x8000_0000;
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos);
+        assert!(
+            result.is_none(),
+            "sequence > 0x7fffffff must return None so precheck defers; got {:?}",
+            result
+        );
+    }
+
+    /// Wave-4 input-side class-closure: a tx with `witness.len() != 1`
+    /// (zero or more than one witness slot) on a single-P2PK-input tx
+    /// is rejected by the slow path at
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:329-343`
+    /// with `TxErrParse` ("invalid witness slots" / "witness
+    /// underflow"). Without the wave-4 defer guard, a below-floor tx
+    /// with mismatched witness count would be misclassified as
+    /// transient `Unavailable` instead of `Rejected` (terminal). Both
+    /// `len == 0` and `len == 2` branches pinned.
+    #[test]
+    fn rub166_precheck_defers_when_witness_count_not_exactly_one() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        // Branch 1: zero witness slots.
+        let mut zero_witness = parsed.clone();
+        zero_witness.witness.clear();
+        let zero_result = fee_precheck_p2pk_input_value(&zero_witness, &state.utxos);
+        assert!(
+            zero_result.is_none(),
+            "witness.len() == 0 must return None so precheck defers; got {:?}",
+            zero_result
+        );
+        // Branch 2: two witness slots.
+        let mut two_witness = parsed.clone();
+        let dup = two_witness.witness[0].clone();
+        two_witness.witness.push(dup);
+        let two_result = fee_precheck_p2pk_input_value(&two_witness, &state.utxos);
+        assert!(
+            two_result.is_none(),
+            "witness.len() == 2 must return None so precheck defers; got {:?}",
+            two_result
+        );
+    }
+
+    /// Wave-4 input-side class-closure: a non-coinbase tx whose input
+    /// uses the coinbase-prevout marker (`prev_txid == [0u8; 32]` AND
+    /// `prev_vout == 0xffff_ffff`) is rejected by the slow path at
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:276-281`
+    /// with `TxErrParse "coinbase prevout encoding forbidden in
+    /// non-coinbase"`. Without the wave-4 defer guard, a below-floor
+    /// tx with the coinbase marker would be misclassified as transient
+    /// `Unavailable` instead of `Rejected` (terminal).
+    #[test]
+    fn rub166_precheck_defers_when_input_uses_coinbase_prevout_marker() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let (mut parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        parsed.inputs[0].prev_txid = [0u8; 32];
+        parsed.inputs[0].prev_vout = 0xffff_ffff;
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos);
+        assert!(
+            result.is_none(),
+            "coinbase-prevout marker on non-coinbase input must return None so precheck defers; got {:?}",
             result
         );
     }

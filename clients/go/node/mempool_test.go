@@ -1448,6 +1448,207 @@ func TestMempoolCheapFeeFloorPrecheckPreservesMissingUTXOReject(t *testing.T) {
 	}
 }
 
+// TestMempoolCheapFeeFloorPrecheckDefersWhenTxNonceIsZero pins the
+// wave-4 class-closure guard: tx_nonce == 0 for non-coinbase is
+// permanently rejected by the slow path
+// (clients/go/consensus/connect_block_parallel.go:290 +
+// clients/go/consensus/utxo_basic.go:161 with TX_ERR_TX_NONCE_INVALID).
+// Without the wave-4 early-defer guard, a below-floor tx with
+// TxNonce==0 would be fast-rejected as transient Unavailable("mempool
+// fee below rolling minimum"), masking the permanent reject class.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenTxNonceIsZero(t *testing.T) {
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 0, // wave-4 defer trigger
+	}
+	snapshot := &chainStateAdmissionSnapshot{utxos: map[consensus.Outpoint]consensus.UtxoEntry{}}
+	if err := cheapFeeFloorPrecheck(tx, snapshot, 1, 1, nil); err != nil {
+		t.Fatalf("tx_nonce==0 must defer (nil) so the slow path returns the permanent TxErrTxNonceInvalid; got %v", err)
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKOutputValueIsZero pins
+// the wave-4 class-closure guard: a P2PK output with Value==0 is
+// permanently rejected by ValidateTxCovenantsGenesis at
+// clients/go/consensus/covenant_genesis.go:19 with "CORE_P2PK value
+// must be > 0". Without the wave-4 defer guard, a below-floor tx with
+// a zero-value P2PK output would be fast-rejected as transient
+// Unavailable, masking the permanent reject class.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKOutputValueIsZero(t *testing.T) {
+	covData := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	covData[0] = consensus.SUITE_ID_ML_DSA_87
+	outputs := []consensus.TxOutput{{
+		Value:        0, // wave-4 defer trigger
+		CovenantType: consensus.COV_TYPE_P2PK,
+		CovenantData: covData,
+	}}
+	if _, ok := feePrecheckP2PKOutputValue(outputs, 1, nil); ok {
+		t.Fatalf("P2PK output Value==0 must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKCovenantDataLengthInvalid
+// pins the wave-4 class-closure guard: a P2PK output whose
+// CovenantData length is not exactly MAX_P2PK_COVENANT_DATA (33 =
+// 1-byte suite_id + 32-byte payload) is permanently rejected by
+// ValidateTxCovenantsGenesis at
+// clients/go/consensus/covenant_genesis.go:22 with "invalid CORE_P2PK
+// covenant_data length". Both len < 33 (empty) and len > 33
+// (oversized) branches pinned.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKCovenantDataLengthInvalid(t *testing.T) {
+	emptyOutputs := []consensus.TxOutput{{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_P2PK,
+		CovenantData: nil,
+	}}
+	if _, ok := feePrecheckP2PKOutputValue(emptyOutputs, 1, nil); ok {
+		t.Fatalf("empty CovenantData (len=0) must return ok=false so precheck defers")
+	}
+	oversizedOutputs := []consensus.TxOutput{{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_P2PK,
+		CovenantData: make([]byte, 64),
+	}}
+	if _, ok := feePrecheckP2PKOutputValue(oversizedOutputs, 1, nil); ok {
+		t.Fatalf("oversized CovenantData (len=64) must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKSuiteNotInNativeCreateSet
+// pins the wave-4 class-closure guard: a P2PK output whose
+// CovenantData[0] (suite_id) is not in the active
+// NativeCreateSuites(nextHeight) set is permanently rejected by
+// ValidateTxCovenantsGenesis at
+// clients/go/consensus/covenant_genesis.go:26 with "CORE_P2PK suite
+// not in native create set". DefaultRotationProvider accepts only
+// SUITE_ID_ML_DSA_87 (0x01); any other byte triggers the defer.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKSuiteNotInNativeCreateSet(t *testing.T) {
+	if 0xFE == consensus.SUITE_ID_ML_DSA_87 {
+		t.Fatalf("test fixture sanity: 0xFE must differ from SUITE_ID_ML_DSA_87")
+	}
+	covData := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	covData[0] = 0xFE // wave-4 defer trigger: non-native suite
+	outputs := []consensus.TxOutput{{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_P2PK,
+		CovenantData: covData,
+	}}
+	if _, ok := feePrecheckP2PKOutputValue(outputs, 1, nil); ok {
+		t.Fatalf("non-native suite_id must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputScriptSigNonEmpty pins
+// the wave-4 input-side class-closure guard: a non-empty ScriptSig on
+// a P2PK input is rejected by the slow path
+// (clients/go/consensus/utxo_basic.go:193-194 with TX_ERR_PARSE
+// "script_sig must be empty under genesis covenant set"). Without the
+// wave-4 defer guard, a below-floor tx with non-empty ScriptSig would
+// be misclassified as transient Unavailable instead of Rejected
+// (terminal).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputScriptSigNonEmpty(t *testing.T) {
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid:  [32]byte{0x11},
+			PrevVout:  0,
+			ScriptSig: []byte{0x01}, // wave-4 defer trigger
+			Sequence:  0,
+		}},
+		Witness: []consensus.WitnessItem{{}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos); ok {
+		t.Fatalf("non-empty ScriptSig must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange
+// pins the wave-4 input-side class-closure guard: a Sequence >
+// 0x7fffffff on a P2PK input is rejected by the slow path at
+// clients/go/consensus/utxo_basic.go:196-197 with
+// TX_ERR_SEQUENCE_INVALID "sequence exceeds 0x7fffffff".
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange(t *testing.T) {
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: [32]byte{0x11},
+			PrevVout: 0,
+			Sequence: 0x80000000, // wave-4 defer trigger
+		}},
+		Witness: []consensus.WitnessItem{{}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos); ok {
+		t.Fatalf("Sequence > 0x7fffffff must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne
+// pins the wave-4 input-side class-closure guard: a tx with
+// len(Witness) != 1 on a single-P2PK-input tx is rejected by the slow
+// path (`applyNonCoinbaseTxBasic*` witness-slots check, mirror of
+// Rust utxo_basic.rs:329-343). Both len == 0 and len == 2 branches
+// pinned.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne(t *testing.T) {
+	makeTx := func(witnessCount int) *consensus.Tx {
+		w := make([]consensus.WitnessItem, witnessCount)
+		return &consensus.Tx{
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs: []consensus.TxInput{{
+				PrevTxid: [32]byte{0x11},
+				PrevVout: 0,
+				Sequence: 0,
+			}},
+			Witness: w,
+		}
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	// Branch 1: zero witness slots.
+	if _, ok := feePrecheckP2PKInputValue(makeTx(0), utxos); ok {
+		t.Fatalf("len(Witness) == 0 must return ok=false so precheck defers")
+	}
+	// Branch 2: two witness slots.
+	if _, ok := feePrecheckP2PKInputValue(makeTx(2), utxos); ok {
+		t.Fatalf("len(Witness) == 2 must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputUsesCoinbasePrevoutMarker
+// pins the wave-4 input-side class-closure guard: a non-coinbase tx
+// whose input uses the coinbase-prevout marker (PrevTxid == zero AND
+// PrevVout == 0xffffffff) is rejected by the slow path at
+// clients/go/consensus/utxo_basic.go:199-200 with TX_ERR_PARSE
+// "coinbase prevout encoding forbidden in non-coinbase".
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUsesCoinbasePrevoutMarker(t *testing.T) {
+	var zeroTxid [32]byte
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: zeroTxid,   // wave-4 defer trigger
+			PrevVout: 0xffffffff, // wave-4 defer trigger
+			Sequence: 0,
+		}},
+		Witness: []consensus.WitnessItem{{}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: zeroTxid, Vout: 0xffffffff}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos); ok {
+		t.Fatalf("coinbase-prevout marker on non-coinbase input must return ok=false so precheck defers")
+	}
+}
+
 func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
