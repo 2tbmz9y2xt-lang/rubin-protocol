@@ -664,6 +664,31 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 	return m.policy
 }
 
+// buildPolicyInputSnapshotIfNeeded returns the immutable pre-validation
+// snapshot of only the transaction inputs that policy lanes inspect.
+// The snapshot is needed only by policy lanes that read tx inputs from
+// utxos (CORE_EXT pre-activation gate, or a DA-bearing tx under any
+// non-zero DA-side fee term); non-DA tx with no CORE_EXT gate skip the
+// map-copy entirely (returns nil, nil). Built before
+// CheckTransaction*WithOwnedUtxoSet because that helper takes
+// ownership of the supplied utxo map and removes spent inputs as part
+// of validation. Extracted from checkTransactionWithSnapshot to keep
+// cyclomatic complexity within the repository's lint budget.
+func buildPolicyInputSnapshotIfNeeded(parsedTx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
+	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
+	if err != nil {
+		return nil, txAdmitRejected(err.Error())
+	}
+	if !needs {
+		return nil, nil
+	}
+	policyUtxos, err := policyInputSnapshot(parsedTx, snapshot.utxos)
+	if err != nil {
+		return nil, txAdmitRejected(err.Error())
+	}
+	return policyUtxos, nil
+}
+
 // checkTxParseAndContext resolves the chain-context inputs every
 // admission needs (next block height + MTP) and parses the candidate
 // transaction in canonical-bytes mode. Extracted from
@@ -723,25 +748,9 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, snappedFloor, nextHeight, policy.RotationProvider); err != nil {
 		return nil, nil, err
 	}
-	// Policy checks consume an immutable pre-validation snapshot of only the
-	// transaction inputs they inspect, avoiding both live-utxo mutation and
-	// whole-chainstate copying on mempool admission. The snapshot is needed
-	// only by policy lanes that read tx inputs from utxos (CORE_EXT
-	// pre-activation gate, or a DA-bearing tx under any non-zero DA-side
-	// fee term); non-DA tx with no CORE_EXT gate skip the map-copy entirely.
-	// Build the snapshot before CheckTransaction*WithOwnedUtxoSet because
-	// that helper takes ownership of the supplied utxo map and removes
-	// spent inputs as part of validation.
-	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
+	policyUtxos, err := buildPolicyInputSnapshotIfNeeded(parsedTx, snapshot, policy)
 	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
-	}
-	if needs {
-		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.utxos)
-		if err != nil {
-			return nil, nil, txAdmitRejected(err.Error())
-		}
+		return nil, nil, err
 	}
 	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 		txBytes,
@@ -1189,22 +1198,39 @@ func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
 	return m.validateFeeFloorLockedWithFloor(entry, m.currentMinFeeRateLocked())
 }
 
-// validateFeeFloorLockedWithFloor is the wave-6 race-safe entry point.
+// validateFeeFloorLockedWithFloor is the wave-8 race-safe entry point.
 // `snappedFloor` is the floor value captured ONCE in `addTxWithSource`
-// before the cheap precheck fired. Using the snapped value here
-// instead of re-reading `m.currentMinFeeRate` under lock guarantees
-// that the precheck's accept/reject decision and the locked
-// admission's accept/reject decision use the same input — without
-// this, `decayMinFeeRateAfterConnectedBlockLocked` running between
-// the two reads could cause the precheck to reject on a stale-higher
-// floor while the locked path would have accepted on the fresh-lower
-// floor (per-admission consistency).
+// before the cheap precheck fired. The locked check enforces the
+// MAXIMUM of (snappedFloor, live currentMinFeeRate) so newer higher
+// floors always win.
+//
+// Bidirectional race protection:
+//   - decay race (Copilot wave-5): if `decayMinFeeRateAfterConnectedBlockLocked`
+//     fires between snap and lock, snappedFloor (higher) wins → tx
+//     rejected here too. Caller may retry against the new lower
+//     snapshot and admit — spurious reject is the lesser evil
+//     (acceptable per Copilot's wave-7 recommendation).
+//   - raise race (Codex + Copilot wave-7): if
+//     `raiseMinFeeRateAfterEvictionLocked` fires between snap and
+//     lock, live `currentMinFeeRate` (higher) wins → tx correctly
+//     rejected against the current congestion-control policy. NEVER
+//     admits a transaction below the current rolling floor.
+//
+// Wave-7 (snap-once-pass-through) closed the decay race in one
+// direction but introduced the raise race in the opposite direction
+// (both Codex PRRT_TRxc and Copilot PRRT_TYQt found this). Wave-8
+// adds the locked re-read with max-of-(snap, live) per Copilot's
+// explicit wave-7 fix recommendation.
 func (m *Mempool) validateFeeFloorLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	if entry == nil {
 		return txAdmitRejected("nil mempool entry")
 	}
-	if feeRateBelowFloor(entry.fee, entry.weight, snappedFloor) {
-		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, snappedFloor))
+	floor := snappedFloor
+	if live := m.currentMinFeeRateLocked(); live > floor {
+		floor = live
+	}
+	if feeRateBelowFloor(entry.fee, entry.weight, floor) {
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, floor))
 	}
 	return nil
 }

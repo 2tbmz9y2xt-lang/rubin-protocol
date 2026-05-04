@@ -1691,23 +1691,22 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase(t *te
 	}
 }
 
-// TestMempoolValidateFeeFloorLockedWithFloorUsesSnappedValue pins the
-// wave-6 race fix: addTxWithSource snaps currentMinFeeRate ONCE before
-// the cheap precheck, then plumbs that snappedFloor through to
-// validateFeeFloorLocked via addEntryLockedWithFloor so both the
-// precheck's accept/reject decision and the locked admission's
-// accept/reject decision use the SAME input. Without this,
-// applyConnectedBlockParsed +
-// decayMinFeeRateAfterConnectedBlockLocked could lower the live
-// floor between the snapshot read and the lock acquisition, causing
-// the precheck to reject on stale-higher floor while the locked path
-// would have accepted on fresh-lower floor.
+// TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive
+// pins the wave-8 race-fix: validateFeeFloorLockedWithFloor uses
+// MAX(snappedFloor, m.currentMinFeeRateLocked()) so newer higher
+// floors always win.
 //
-// This test directly exercises validateFeeFloorLockedWithFloor with
-// two different floor values (high snapped vs low live) on the same
-// entry to verify that the snapped value is what drives the decision,
-// independent of any concurrent mutation of m.currentMinFeeRate.
-func TestMempoolValidateFeeFloorLockedWithFloorUsesSnappedValue(t *testing.T) {
+// Bidirectional race protection:
+//   - decay race: snap-high & live-low → max=snap-high → reject
+//     (acceptable spurious reject; caller retries against new snap).
+//   - raise race: snap-low & live-high → max=live-high → reject
+//     (correctly enforces current floor; never admits below it).
+//
+// Wave-6 used pure snap (closed decay race, opened raise race).
+// Wave-8 takes the max so both Copilot wave-5 (decay) AND Codex/
+// Copilot wave-7 (raise) findings are addressed simultaneously per
+// Copilot's wave-7 fix recommendation.
+func TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	st, _ := testSpendableChainState(fromAddress, []uint64{1_000_000})
@@ -1715,37 +1714,45 @@ func TestMempoolValidateFeeFloorLockedWithFloorUsesSnappedValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
-	// Set the LIVE floor to a value that would accept a cheap
-	// fee-rate (mp.currentMinFeeRate <= entry.fee/entry.weight).
-	mp.mu.Lock()
-	mp.currentMinFeeRate = 1
-	mp.mu.Unlock()
-	// Construct an entry whose fee_rate would be REJECTED by the
-	// snapped-high floor (10) but ACCEPTED by the live-low floor (1).
 	entry := &mempoolEntry{
 		txid:   [32]byte{0x77},
 		fee:    5,
-		weight: 1, // fee_rate = 5; <10 (snap rejects); >=1 (live would accept)
+		weight: 1, // fee_rate = 5
 		size:   1,
 	}
-	// The wave-6 fix guarantees: validateFeeFloorLockedWithFloor uses
-	// the passed snappedFloor (10), not m.currentMinFeeRate (1). So
-	// admission rejects.
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
+
+	// Case 1 — decay race direction (snap-HIGH, live-LOW):
+	// max(snap=10, live=1) = 10 → reject. Spurious reject acceptable;
+	// caller retries against new lower snap.
+	mp.currentMinFeeRate = 1
 	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 10); err == nil ||
 		!strings.Contains(err.Error(), "mempool fee below rolling minimum") {
-		t.Fatalf("snappedFloor=10 must reject fee_rate=5 entry; got err=%v", err)
+		t.Fatalf("snap=10 + live=1 must reject (max-floor=10 > fee_rate=5); got err=%v", err)
 	}
-	// Inverse: snappedFloor=1 (matches live) accepts the same entry.
+
+	// Case 2 — raise race direction (snap-LOW, live-HIGH):
+	// max(snap=1, live=10) = 10 → reject. NEVER admits below current
+	// floor — closes the wave-7 Codex+Copilot raise-race finding.
+	mp.currentMinFeeRate = 10
+	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 1); err == nil ||
+		!strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+		t.Fatalf("snap=1 + live=10 must reject (max-floor=10 > fee_rate=5); got err=%v", err)
+	}
+
+	// Case 3 — both low (steady state, no decay/raise during admission):
+	// max(snap=1, live=1) = 1 → accept fee_rate=5.
+	mp.currentMinFeeRate = 1
 	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 1); err != nil {
-		t.Fatalf("snappedFloor=1 must accept fee_rate=5 entry; got err=%v", err)
+		t.Fatalf("snap=1 + live=1 must accept fee_rate=5 (max-floor=1 <= 5); got err=%v", err)
 	}
-	// Inverse 2: snappedFloor=0 falls back to DefaultMempoolMinFeeRate
-	// inside feeRateBelowFloor (clamp). With Default=1 and fee_rate=5,
-	// the post-clamp comparison still accepts.
+
+	// Case 4 — snap=0 falls through to live (post-clamp Default=1).
+	// max(snap=0, live=1) = 1 → accept fee_rate=5.
+	mp.currentMinFeeRate = 1
 	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 0); err != nil {
-		t.Fatalf("snappedFloor=0 (post-clamp Default=1) must accept fee_rate=5 entry; got err=%v", err)
+		t.Fatalf("snap=0 + live=1 must accept fee_rate=5 (max-floor post-clamp=1 <= 5); got err=%v", err)
 	}
 }
 
