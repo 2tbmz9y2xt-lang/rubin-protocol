@@ -448,7 +448,23 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 
 	snapshot := m.chainState.admissionSnapshot()
 	policy := m.policySnapshot()
-	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy)
+	// Wave-6/8 (PR #1422): snap currentMinFeeRate ONCE so the cheap
+	// precheck has a stable floor input for its accept/reject decision.
+	// The locked path (validateFeeFloorLockedWithFloor below) then
+	// enforces max(snappedFloor, live currentMinFeeRate) so the
+	// admission decision is bidirectionally race-safe:
+	//   - decay race: if decayMinFeeRateAfterConnectedBlockLocked fires
+	//     between snap and lock, snappedFloor (higher) wins → spurious
+	//     reject is the lesser evil, caller may retry (acceptable per
+	//     Copilot wave-7 recommendation).
+	//   - raise race: if raiseMinFeeRateAfterEvictionLocked fires
+	//     between snap and lock, live currentMinFeeRate (higher) wins →
+	//     tx correctly rejected against the current rolling floor;
+	//     never admits below the live congestion-control level.
+	// Wave-7's snap-once-pass-through fixed only the decay direction
+	// and reopened the opposite race; wave-8 closes both.
+	snappedFloor := m.CurrentMinFeeRateSnapshot()
+	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy, snappedFloor)
 	if err != nil {
 		return err
 	}
@@ -457,7 +473,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	defer m.mu.Unlock()
 
 	entry := newMempoolEntry(checked, inputs, source)
-	return m.addEntryLocked(entry)
+	return m.addEntryLockedWithFloor(entry, snappedFloor)
 }
 
 func validMempoolTxSource(source mempoolTxSource) bool {
@@ -469,6 +485,26 @@ func validMempoolTxSource(source mempoolTxSource) bool {
 	}
 }
 
+// RelayMetadata returns the metadata a relay peer needs to forward the
+// transaction (fee + serialized size). It runs full structural +
+// chainstate validation via checkParsedTransactionWithSnapshot but
+// intentionally DOES NOT enforce the rolling-relay-fee floor: the
+// admit-path policy (see `addTxWithSource` → `addEntryLockedWithFloor`
+// → `validateFeeFloorLockedWithFloor` in this file) is the uniform
+// owner of relay-floor classification (see `applyPolicyAgainstState`
+// docstring in this file for the matching admit-path rationale).
+//
+// Cross-client divergence between Go RelayMetadata and Rust relay_metadata:
+// Rust `relay_metadata` (clients/rust/crates/rubin-node/src/txpool.rs)
+// DOES enforce relay-floor inline via `apply_post_consensus_policy_with_floor`
+// → `validate_fee_floor`. The Go relay path delegates floor enforcement to
+// per-peer relay-policy + the admit-time check. RelayMetadata is a
+// read-only metadata fetcher and does NOT insert into the mempool. The
+// documented expected delta is: below-floor txs whose Go RelayMetadata
+// returns metadata while Rust relay_metadata returns `Unavailable`. This
+// asymmetry is INTENTIONAL pending a future cross-client unification slice
+// (separate follow-up — TBD). See the Rust pinning test
+// `rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit`.
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m == nil {
 		return RelayTxMetadata{}, txAdmitUnavailable("nil mempool")
@@ -652,127 +688,6 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.policy
-}
-
-// checkTransactionWithSnapshot validates a transaction against a consistent
-// owned admission snapshot plus an immutable mempool policy snapshot.
-func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
-	if snapshot == nil {
-		return nil, nil, txAdmitUnavailable("nil chainstate")
-	}
-	nextHeight, _, err := nextBlockContextFromFields(snapshot.hasTip, snapshot.height, snapshot.tipHash)
-	if err != nil {
-		return nil, nil, txAdmitUnavailable(err.Error())
-	}
-
-	blockMTP, err := m.nextBlockMTP(nextHeight)
-	if err != nil {
-		return nil, nil, txAdmitUnavailable(err.Error())
-	}
-	parsedTx, _, _, consumed, err := consensus.ParseTx(txBytes)
-	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
-	}
-	if consumed != len(txBytes) {
-		return nil, nil, txAdmitRejected("trailing bytes after canonical tx")
-	}
-	// Only plain P2PK candidates use the cheap floor reject. Transactions
-	// that may hit DA, CORE_ANCHOR, CORE_EXT, or missing-UTXO policy lanes
-	// keep the existing validation and policy-error precedence below.
-	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, m.CurrentMinFeeRateSnapshot()); err != nil {
-		return nil, nil, err
-	}
-	// Policy checks consume an immutable pre-validation snapshot of only the
-	// transaction inputs they inspect, avoiding both live-utxo mutation and
-	// whole-chainstate copying on mempool admission. The snapshot is needed
-	// only by policy lanes that read tx inputs from utxos (CORE_EXT
-	// pre-activation gate, or a DA-bearing tx under any non-zero DA-side
-	// fee term); non-DA tx with no CORE_EXT gate skip the map-copy entirely.
-	// Build the snapshot before CheckTransaction*WithOwnedUtxoSet because
-	// that helper takes ownership of the supplied utxo map and removes
-	// spent inputs as part of validation.
-	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	needs, err := policyNeedsInputSnapshotForTx(parsedTx, policy)
-	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
-	}
-	if needs {
-		policyUtxos, err = policyInputSnapshot(parsedTx, snapshot.utxos)
-		if err != nil {
-			return nil, nil, txAdmitRejected(err.Error())
-		}
-	}
-	checked, err := consensus.CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
-		txBytes,
-		snapshot.utxos,
-		nextHeight,
-		blockMTP,
-		m.chainID,
-		policy.CoreExtProfiles,
-		policy.RotationProvider,
-		policy.SuiteRegistry,
-	)
-	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
-	}
-	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
-	}
-	inputs := make([]consensus.Outpoint, 0, len(checked.Tx.Inputs))
-	for _, in := range checked.Tx.Inputs {
-		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
-	}
-	return checked, inputs, nil
-}
-
-func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64) error {
-	if tx.TxKind != 0x00 || len(tx.DaPayload) != 0 {
-		return nil
-	}
-	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos)
-	if !ok {
-		return nil
-	}
-	outputValue, ok := feePrecheckP2PKOutputValue(tx.Outputs)
-	if !ok || outputValue > inputValue {
-		return nil
-	}
-	weight, _, _, err := consensus.TxWeightAndStats(tx)
-	if err != nil || weight == 0 {
-		return nil
-	}
-	fee := inputValue - outputValue
-	if feeRateBelowFloor(fee, weight, minFeeRate) {
-		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", fee, weight, minFeeRate))
-	}
-	return nil
-}
-
-func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, bool) {
-	if utxos == nil || len(tx.Inputs) != 1 {
-		return 0, false
-	}
-	in := tx.Inputs[0]
-	entry, ok := utxos[consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}]
-	if !ok || entry.CovenantType != consensus.COV_TYPE_P2PK {
-		return 0, false
-	}
-	return entry.Value, true
-}
-
-func feePrecheckP2PKOutputValue(outputs []consensus.TxOutput) (uint64, bool) {
-	var total uint64
-	for _, out := range outputs {
-		if out.CovenantType != consensus.COV_TYPE_P2PK {
-			return 0, false
-		}
-		next, carry := bits.Add64(total, out.Value, 0)
-		if carry != 0 {
-			return 0, false
-		}
-		total = next
-	}
-	return total, true
 }
 
 // policyNeedsInputSnapshotForTx returns true if applying policy to the
@@ -1010,13 +925,48 @@ func (m *Mempool) validateAdmissionSeqLocked(entry *mempoolEntry) error {
 	return nil
 }
 
+// validateFeeFloorLocked enforces the rolling-relay-floor invariant
+// using the live `m.currentMinFeeRate` value. Production callers
+// SHOULD use `validateFeeFloorLockedWithFloor` to thread a snapped
+// floor value through (see wave-6 race fix); this wrapper exists for
+// test callers that drive the helper in isolation.
 func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
+	return m.validateFeeFloorLockedWithFloor(entry, m.currentMinFeeRateLocked())
+}
+
+// validateFeeFloorLockedWithFloor is the wave-8 race-safe entry point.
+// `snappedFloor` is the floor value captured ONCE in `addTxWithSource`
+// before the cheap precheck fired. The locked check enforces the
+// MAXIMUM of (snappedFloor, live currentMinFeeRate) so newer higher
+// floors always win.
+//
+// Bidirectional race protection:
+//   - decay race (Copilot wave-5): if `decayMinFeeRateAfterConnectedBlockLocked`
+//     fires between snap and lock, snappedFloor (higher) wins → tx
+//     rejected here too. Caller may retry against the new lower
+//     snapshot and admit — spurious reject is the lesser evil
+//     (acceptable per Copilot's wave-7 recommendation).
+//   - raise race (Codex + Copilot wave-7): if
+//     `raiseMinFeeRateAfterEvictionLocked` fires between snap and
+//     lock, live `currentMinFeeRate` (higher) wins → tx correctly
+//     rejected against the current congestion-control policy. NEVER
+//     admits a transaction below the current rolling floor.
+//
+// Wave-7 (snap-once-pass-through) closed the decay race in one
+// direction but introduced the raise race in the opposite direction
+// (both Codex PRRT_TRxc and Copilot PRRT_TYQt found this). Wave-8
+// adds the locked re-read with max-of-(snap, live) per Copilot's
+// explicit wave-7 fix recommendation.
+func (m *Mempool) validateFeeFloorLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	if entry == nil {
 		return txAdmitRejected("nil mempool entry")
 	}
-	currentMinFeeRate := m.currentMinFeeRateLocked()
-	if feeRateBelowFloor(entry.fee, entry.weight, currentMinFeeRate) {
-		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, currentMinFeeRate))
+	floor := snappedFloor
+	if live := m.currentMinFeeRateLocked(); live > floor {
+		floor = live
+	}
+	if feeRateBelowFloor(entry.fee, entry.weight, floor) {
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, floor))
 	}
 	return nil
 }
@@ -1046,12 +996,33 @@ func normalizeMempoolEntryDefaults(entry *mempoolEntry) {
 	}
 }
 
+// addEntryLocked admits `entry` under `m.mu`, using the live
+// `m.currentMinFeeRate` value for the fee-floor check. Production
+// callers SHOULD use `addEntryLockedWithFloor` (see wave-6 race fix
+// in addTxWithSource); this wrapper exists for test callers that
+// drive the locked admission path in isolation and accept whatever
+// floor is in effect at call time.
 func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
+	return m.addEntryLockedWithFloor(entry, m.currentMinFeeRateLocked())
+}
+
+// addEntryLockedWithFloor is the wave-6/8 race-safe entry point. The
+// caller MUST pass the `snappedFloor` value that was captured ONCE
+// before the cheap precheck fired (see addTxWithSource for rationale).
+// The snapped floor is plumbed down to validateFeeFloorLockedWithFloor
+// which enforces max(snappedFloor, live currentMinFeeRate) on the
+// admission decision: the precheck owns the snap, the locked path
+// owns the live re-read, and the strict-of-the-two wins. This blocks
+// the raise race (Codex+Copilot wave-7) where
+// raiseMinFeeRateAfterEvictionLocked could fire between snap and lock
+// and a stale-lower snap would otherwise admit a transaction below
+// the current rolling floor.
+func (m *Mempool) addEntryLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	normalizeMempoolEntryDefaults(entry)
 	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
 		return err
 	}
-	evictedEntries, err := m.validateCapacityAdmissionLocked(entry)
+	evictedEntries, err := m.validateCapacityAdmissionLocked(entry, snappedFloor)
 	if err != nil {
 		return err
 	}
@@ -1073,8 +1044,8 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 	return nil
 }
 
-func (m *Mempool) validateCapacityAdmissionLocked(entry *mempoolEntry) ([]*mempoolEntry, error) {
-	if err := m.validateFeeFloorLocked(entry); err != nil {
+func (m *Mempool) validateCapacityAdmissionLocked(entry *mempoolEntry, snappedFloor uint64) ([]*mempoolEntry, error) {
+	if err := m.validateFeeFloorLockedWithFloor(entry, snappedFloor); err != nil {
 		return nil, err
 	}
 	evictedEntries, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)

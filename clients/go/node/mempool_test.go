@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/sha3"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1445,6 +1446,829 @@ func TestMempoolCheapFeeFloorPrecheckPreservesMissingUTXOReject(t *testing.T) {
 	}
 	if mp.lastAdmissionSeq != 0 {
 		t.Fatalf("lastAdmissionSeq after missing-utxo reject=%d, want 0", mp.lastAdmissionSeq)
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenTxNonceIsZero pins the
+// wave-4 class-closure guard: tx_nonce == 0 for non-coinbase is
+// permanently rejected by the slow path
+// (clients/go/consensus/connect_block_parallel.go +
+// clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with TX_ERR_TX_NONCE_INVALID).
+// Without the wave-4 early-defer guard, a below-floor tx with
+// TxNonce==0 would be fast-rejected as transient Unavailable("mempool
+// fee below rolling minimum"), masking the permanent reject class.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenTxNonceIsZero(t *testing.T) {
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 0, // wave-4 defer trigger
+	}
+	snapshot := &chainStateAdmissionSnapshot{utxos: map[consensus.Outpoint]consensus.UtxoEntry{}}
+	if err := cheapFeeFloorPrecheck(tx, snapshot, 1, 1, nil, nil); err != nil {
+		t.Fatalf("tx_nonce==0 must defer (nil) so the slow path returns the permanent TxErrTxNonceInvalid; got %v", err)
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKOutputValueIsZero pins
+// the wave-4 class-closure guard: a P2PK output with Value==0 is
+// permanently rejected by ValidateTxCovenantsGenesis at
+// clients/go/consensus/covenant_genesis.go (`ValidateTxCovenantsGenesis`) with "CORE_P2PK value
+// must be > 0". Without the wave-4 defer guard, a below-floor tx with
+// a zero-value P2PK output would be fast-rejected as transient
+// Unavailable, masking the permanent reject class.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKOutputValueIsZero(t *testing.T) {
+	covData := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	covData[0] = consensus.SUITE_ID_ML_DSA_87
+	outputs := []consensus.TxOutput{{
+		Value:        0, // wave-4 defer trigger
+		CovenantType: consensus.COV_TYPE_P2PK,
+		CovenantData: covData,
+	}}
+	if _, ok := feePrecheckP2PKOutputValue(outputs, 1, nil); ok {
+		t.Fatalf("P2PK output Value==0 must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKCovenantDataLengthInvalid
+// pins the wave-4 class-closure guard: a P2PK output whose
+// CovenantData length is not exactly MAX_P2PK_COVENANT_DATA (33 =
+// 1-byte suite_id + 32-byte payload) is permanently rejected by
+// ValidateTxCovenantsGenesis at
+// clients/go/consensus/covenant_genesis.go (`ValidateTxCovenantsGenesis`) with "invalid CORE_P2PK
+// covenant_data length". Both len < 33 (empty) and len > 33
+// (oversized) branches pinned.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKCovenantDataLengthInvalid(t *testing.T) {
+	emptyOutputs := []consensus.TxOutput{{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_P2PK,
+		CovenantData: nil,
+	}}
+	if _, ok := feePrecheckP2PKOutputValue(emptyOutputs, 1, nil); ok {
+		t.Fatalf("empty CovenantData (len=0) must return ok=false so precheck defers")
+	}
+	oversizedOutputs := []consensus.TxOutput{{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_P2PK,
+		CovenantData: make([]byte, 64),
+	}}
+	if _, ok := feePrecheckP2PKOutputValue(oversizedOutputs, 1, nil); ok {
+		t.Fatalf("oversized CovenantData (len=64) must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKSuiteNotInNativeCreateSet
+// pins the wave-4 class-closure guard: a P2PK output whose
+// CovenantData[0] (suite_id) is not in the active
+// NativeCreateSuites(nextHeight) set is permanently rejected by
+// ValidateTxCovenantsGenesis at
+// clients/go/consensus/covenant_genesis.go (`ValidateTxCovenantsGenesis`) with "CORE_P2PK suite
+// not in native create set". DefaultRotationProvider accepts only
+// SUITE_ID_ML_DSA_87 (0x01); any other byte triggers the defer.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKSuiteNotInNativeCreateSet(t *testing.T) {
+	if 0xFE == consensus.SUITE_ID_ML_DSA_87 {
+		t.Fatalf("test fixture sanity: 0xFE must differ from SUITE_ID_ML_DSA_87")
+	}
+	covData := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	covData[0] = 0xFE // wave-4 defer trigger: non-native suite
+	outputs := []consensus.TxOutput{{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_P2PK,
+		CovenantData: covData,
+	}}
+	if _, ok := feePrecheckP2PKOutputValue(outputs, 1, nil); ok {
+		t.Fatalf("non-native suite_id must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputScriptSigNonEmpty pins
+// the wave-4 input-side class-closure guard: a non-empty ScriptSig on
+// a P2PK input is rejected by the slow path
+// (clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with TX_ERR_PARSE
+// "script_sig must be empty under genesis covenant set"). Without the
+// wave-4 defer guard, a below-floor tx with non-empty ScriptSig would
+// be misclassified as transient Unavailable instead of Rejected
+// (terminal).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputScriptSigNonEmpty(t *testing.T) {
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid:  [32]byte{0x11},
+			PrevVout:  0,
+			ScriptSig: []byte{0x01}, // wave-4 defer trigger
+			Sequence:  0,
+		}},
+		Witness: []consensus.WitnessItem{{}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1, nil, nil); ok {
+		t.Fatalf("non-empty ScriptSig must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange
+// pins the wave-4 input-side class-closure guard: a Sequence >
+// 0x7fffffff on a P2PK input is rejected by the slow path at
+// clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with
+// TX_ERR_SEQUENCE_INVALID "sequence exceeds 0x7fffffff".
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange(t *testing.T) {
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: [32]byte{0x11},
+			PrevVout: 0,
+			Sequence: 0x80000000, // wave-4 defer trigger
+		}},
+		Witness: []consensus.WitnessItem{{}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1, nil, nil); ok {
+		t.Fatalf("Sequence > 0x7fffffff must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne
+// pins the wave-4 input-side class-closure guard: a tx with
+// len(Witness) != 1 on a single-P2PK-input tx is rejected by the slow
+// path (`applyNonCoinbaseTxBasic*` witness-slots check, mirror of
+// Rust utxo_basic.rs `apply_non_coinbase_tx_basic_update_*`. Both len == 0 and len == 2 branches
+// pinned.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne(t *testing.T) {
+	makeTx := func(witnessCount int) *consensus.Tx {
+		w := make([]consensus.WitnessItem, witnessCount)
+		return &consensus.Tx{
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs: []consensus.TxInput{{
+				PrevTxid: [32]byte{0x11},
+				PrevVout: 0,
+				Sequence: 0,
+			}},
+			Witness: w,
+		}
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	// Branch 1: zero witness slots.
+	if _, ok := feePrecheckP2PKInputValue(makeTx(0), utxos /* nextHeight */, 1, nil, nil); ok {
+		t.Fatalf("len(Witness) == 0 must return ok=false so precheck defers")
+	}
+	// Branch 2: two witness slots.
+	if _, ok := feePrecheckP2PKInputValue(makeTx(2), utxos /* nextHeight */, 1, nil, nil); ok {
+		t.Fatalf("len(Witness) == 2 must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputUsesCoinbasePrevoutMarker
+// pins the wave-4 input-side class-closure guard: a non-coinbase tx
+// whose input uses the coinbase-prevout marker (PrevTxid == zero AND
+// PrevVout == 0xffffffff) is rejected by the slow path at
+// clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with TX_ERR_PARSE
+// "coinbase prevout encoding forbidden in non-coinbase".
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUsesCoinbasePrevoutMarker(t *testing.T) {
+	var zeroTxid [32]byte
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: zeroTxid,   // wave-4 defer trigger
+			PrevVout: 0xffffffff, // wave-4 defer trigger
+			Sequence: 0,
+		}},
+		Witness: []consensus.WitnessItem{{}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: zeroTxid, Vout: 0xffffffff}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1, nil, nil); ok {
+		t.Fatalf("coinbase-prevout marker on non-coinbase input must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase
+// pins the wave-5 input-side class-closure guard: an immature
+// coinbase P2PK spend (CreatedByCoinbase && nextHeight -
+// CreationHeight < COINBASE_MATURITY) is rejected by the slow path at
+// clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with
+// TX_ERR_COINBASE_IMMATURE "coinbase immature". Without the wave-5
+// defer guard, a below-floor immature-coinbase spend would be
+// misclassified as transient Unavailable("mempool fee below rolling
+// minimum"), signalling caller to retry-with-higher-fee when the
+// actual remedy is to wait for COINBASE_MATURITY blocks. Different
+// caller action means real class-leak (P1).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase(t *testing.T) {
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: [32]byte{0x11},
+			PrevVout: 0,
+			Sequence: 0,
+		}},
+		Witness: []consensus.WitnessItem{{}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:             100,
+			CovenantType:      consensus.COV_TYPE_P2PK,
+			CreatedByCoinbase: true,
+			CreationHeight:    0,
+		},
+	}
+	// nextHeight < COINBASE_MATURITY threshold => immature.
+	immatureHeight := uint64(consensus.COINBASE_MATURITY) - 1
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, immatureHeight, nil, nil); ok {
+		t.Fatalf("immature coinbase spend must return ok=false so precheck defers")
+	}
+	// At maturity threshold the defer no longer fires (sanity-pin
+	// requires a registered ML-DSA-87 witness item — wave-14 added
+	// witness-item structural validation, wave-15 added SHA3
+	// key-binding + SIGHASH_ALL trailer; synthesize the minimum-valid
+	// witness shape so this branch reaches the (value, true) return).
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	utxos[consensus.Outpoint{Txid: [32]byte{0x11}, Vout: 0}] = consensus.UtxoEntry{
+		Value:             100,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      covData,
+		CreatedByCoinbase: true,
+		CreationHeight:    0,
+	}
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	tx.Witness = []consensus.WitnessItem{{
+		SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+		Pubkey:    pubkey,
+		Signature: signature,
+	}}
+	matureHeight := uint64(consensus.COINBASE_MATURITY)
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, matureHeight, nil, nil); !ok {
+		t.Fatalf("mature coinbase spend must NOT defer (precheck returns ok=true)")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataLengthInvalid
+// pins the wave-15 panic-safety guard: defer when entry.CovenantData
+// length is not exactly MAX_P2PK_COVENANT_DATA (33). Without this
+// guard a corrupted on-disk UTXO entry (chainStateFromDisk accepts
+// arbitrary CovenantData bytes) would panic the admission loop on
+// the [0] / [1:33] indexing. Mirrors slow-path covenant_data length
+// check at clients/go/consensus/spend_verify.go counterpart.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataLengthInvalid(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    pubkey,
+			Signature: signature,
+		}},
+	}
+	// Branch 1: empty CovenantData (len 0 < 33) — panic-safety case.
+	emptyUtxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: nil,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, emptyUtxos, 1, nil, nil); ok {
+		t.Fatalf("empty CovenantData must defer (ok=false) — guards [0] index against panic")
+	}
+	// Branch 2: oversized CovenantData (len 64 > 33).
+	oversizedUtxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: make([]byte, 64),
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, oversizedUtxos, 1, nil, nil); ok {
+		t.Fatalf("oversized CovenantData must defer (ok=false)")
+	}
+	// Sanity: correct 33-byte CovenantData with valid SHA3 binding accepts.
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	goodUtxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, goodUtxos, 1, nil, nil); !ok {
+		t.Fatalf("valid CovenantData (len=33, valid SHA3) must NOT defer")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersOnlyOnInvalidSighashTrailer
+// pins the wave-16 sighash trailer guard: defer when last sig byte
+// is NOT one of the six valid sighash types accepted by
+// IsValidSighashType (clients/go/consensus/sighash.go (`IsValidSighashType`)). Verifies
+// (a) invalid trailer 0x05 defers and (b) valid non-ALL trailer
+// SIGHASH_NONE (0x02) does NOT defer (closes wave-15 over-defer P1).
+func TestMempoolCheapFeeFloorPrecheckDefersOnlyOnInvalidSighashTrailer(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	makeTx := func(trailer byte) *consensus.Tx {
+		signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+		signature[len(signature)-1] = trailer
+		return &consensus.Tx{
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+			Witness: []consensus.WitnessItem{{
+				SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+				Pubkey:    pubkey,
+				Signature: signature,
+			}},
+		}
+	}
+	// Branch 1: invalid trailer 0x05 (not in 6-element accept set) defers.
+	if _, ok := feePrecheckP2PKInputValue(makeTx(0x05), utxos, 1, nil, nil); ok {
+		t.Fatalf("invalid sighash trailer 0x05 must defer (ok=false)")
+	}
+	// Branch 2: valid SIGHASH_NONE (0x02) trailer does NOT defer (wave-15 over-defer fix).
+	if _, ok := feePrecheckP2PKInputValue(makeTx(consensus.SIGHASH_NONE), utxos, 1, nil, nil); !ok {
+		t.Fatalf("valid SIGHASH_NONE trailer must NOT defer")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenPubkeyKeyBindingMismatch
+// pins the wave-15 SHA3 key-binding guard: defer when SHA3(pubkey)
+// does not match entry.CovenantData[1:33]. Mirrors slow-path
+// validate_p2pk_spend_q key-binding check.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenPubkeyKeyBindingMismatch(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	// Mutate first byte of pubkey so SHA3(pubkey) diverges from
+	// covenant_data[1:33] (which still binds the original all-zero pubkey).
+	mutatedPubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	mutatedPubkey[0] = 0xFF
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    mutatedPubkey,
+			Signature: signature,
+		}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil); ok {
+		t.Fatalf("pubkey key-binding mismatch must defer (ok=false)")
+	}
+}
+
+// emptySpendRotationProvider returns DefaultRotationProvider's create
+// set (so output-side checks still see a populated set), but reports an
+// EMPTY native-spend set, which forces the wave-14 input-side rotation
+// guard to defer.
+type emptySpendRotationProvider struct{}
+
+func (emptySpendRotationProvider) NativeCreateSuites(uint64) *consensus.NativeSuiteSet {
+	return consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)
+}
+
+func (emptySpendRotationProvider) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
+	// Empty set rejects ALL spend suites.
+	return consensus.NewNativeSuiteSet()
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteNotInNativeSpendSet
+// pins the wave-14 input-side class-closure rotation guard: a P2PK
+// input whose witness suite_id is not in the active
+// NativeSpendSuites(nextHeight) set is rejected by the slow path at
+// clients/go/consensus/spend_verify.go (SigAlgInvalid). Without this
+// guard a below-floor tx with an out-of-rotation suite would be
+// misclassified as transient Unavailable instead of terminal Rejected
+// (different caller action: rotation does not retry vs floor does).
+// Closes Copilot wave-17 P1 (TestMempoolCheap* regression coverage gap).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteNotInNativeSpendSet(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    pubkey,
+			Signature: signature,
+		}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, emptySpendRotationProvider{}, nil); ok {
+		t.Fatalf("rotation with empty NativeSpendSuites must defer (ok=false)")
+	}
+	// Sanity (negative-branch pin): default rotation accepts
+	// SUITE_ID_ML_DSA_87 in the spend set, so the same fixture with
+	// rotation=nil must NOT defer. Confirms the rotation provider is
+	// the only difference exercised by this test.
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil); !ok {
+		t.Fatalf("default rotation must NOT defer on valid P2PK fixture (ok=true)")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteRegistryLookupMisses
+// pins the wave-14 input-side class-closure registry guard: a P2PK
+// input whose witness suite_id has no entry in the active SuiteRegistry
+// (Lookup returns ok=false) is rejected by the slow path at
+// clients/go/consensus/spend_verify.go (SigAlgInvalid). Without this
+// guard a below-floor tx with an unregistered suite would be
+// misclassified as transient Unavailable instead of terminal Rejected.
+// Closes Copilot wave-17 P1 (TestMempoolCheap* regression coverage gap).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteRegistryLookupMisses(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    pubkey,
+			Signature: signature,
+		}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	// Empty registry: Lookup of any suite_id (including the witness
+	// SUITE_ID_ML_DSA_87) returns ok=false, so the wave-14 registry
+	// guard fires.
+	emptyRegistry := consensus.NewSuiteRegistryFromParams(nil)
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, emptyRegistry); ok {
+		t.Fatalf("empty registry must defer (Lookup miss returns ok=false)")
+	}
+	// Sanity (negative-branch pin): default registry has
+	// SUITE_ID_ML_DSA_87 with canonical params, so the same fixture
+	// with registry=nil must NOT defer. Confirms the registry is the
+	// only difference exercised by this test.
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil); !ok {
+		t.Fatalf("default registry must NOT defer on valid P2PK fixture (ok=true)")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessPubkeyOrSignatureLengthNoncanonical
+// pins the wave-14 input-side witness-length guard: a P2PK input
+// whose witness Pubkey or Signature length does not match the
+// SuiteParams (PubkeyLen, SigLen+1) is rejected by the slow path at
+// clients/go/consensus/spend_verify.go (TX_ERR_SIG_NONCANONICAL).
+// Without this guard a below-floor tx with a malformed witness would
+// be misclassified as transient Unavailable instead of terminal
+// Rejected. Closes Copilot wave-19 P1 (TestMempoolCheap* coverage gap).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessPubkeyOrSignatureLengthNoncanonical(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	makeTx := func(pk, sig []byte) *consensus.Tx {
+		return &consensus.Tx{
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+			Witness: []consensus.WitnessItem{{
+				SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+				Pubkey:    pk,
+				Signature: sig,
+			}},
+		}
+	}
+	// Branch 1: pubkey too short (truncated by 1 byte).
+	if _, ok := feePrecheckP2PKInputValue(makeTx(pubkey[:len(pubkey)-1], signature), utxos, 1, nil, nil); ok {
+		t.Fatalf("truncated pubkey must defer (ok=false)")
+	}
+	// Branch 2: signature too long (extended by 1 byte beyond SigLen+1).
+	{
+		oversize := append([]byte{}, signature...)
+		oversize = append(oversize, 0)
+		if _, ok := feePrecheckP2PKInputValue(makeTx(pubkey, oversize), utxos, 1, nil, nil); ok {
+			t.Fatalf("oversized signature must defer (ok=false)")
+		}
+	}
+	// Sanity (negative-branch pin): canonical lengths must NOT defer.
+	if _, ok := feePrecheckP2PKInputValue(makeTx(pubkey, signature), utxos, 1, nil, nil); !ok {
+		t.Fatalf("canonical pubkey/signature lengths must NOT defer (ok=true)")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersOnOutputSumOverflow pins the
+// wave-4 output-side overflow guard: when the sum of P2PK output
+// values overflows uint64 (bits.Add64 carry != 0), defer to the
+// expensive admission path instead of returning a spurious accept on
+// the wrapped value. Mirrors Rust
+// rub166_precheck_defers_on_output_sum_overflow. Closes Copilot
+// wave-19 P1 (TestMempoolCheap* coverage gap).
+func TestMempoolCheapFeeFloorPrecheckDefersOnOutputSumOverflow(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	// Two outputs whose values sum to > uint64.MaxValue.
+	outputs := []consensus.TxOutput{
+		{Value: ^uint64(0) - 5, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData},
+		{Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData},
+	}
+	if _, ok := feePrecheckP2PKOutputValue(outputs, 1, nil); ok {
+		t.Fatalf("output sum overflow must defer (ok=false)")
+	}
+	// Sanity (negative-branch pin): non-overflowing two-output sum
+	// must NOT defer. Confirms the overflow branch is the only
+	// difference exercised by this test.
+	okOutputs := []consensus.TxOutput{
+		{Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData},
+		{Value: 200, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData},
+	}
+	if total, ok := feePrecheckP2PKOutputValue(okOutputs, 1, nil); !ok || total != 300 {
+		t.Fatalf("non-overflowing sum must NOT defer; got total=%d ok=%v", total, ok)
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataSuiteMismatch
+// pins the wave-15 panic-safety + suite-consistency guard
+// (mempool_precheck_input.go (`feePrecheckP2PKInputValue`)): defer when entry.CovenantData[0]
+// != witness.SuiteID even when length is canonical 33 bytes. Mirrors
+// slow-path TX_ERR_COVENANT_TYPE_INVALID at clients/go/consensus/spend_verify.go.
+// Closes pre-push-reviewer wave-20 P1 finding #1 (Go counterpart of
+// rub166_precheck_defers_when_input_utxo_covenant_data_suite_mismatch).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataSuiteMismatch(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	// covenant_data[0] = 0xFE (mismatched), bytes [1:33] = SHA3(pubkey).
+	covData := append([]byte{0xFE}, pubkeyHash[:]...)
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    pubkey,
+			Signature: signature,
+		}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil); ok {
+		t.Fatalf("covenant_data[0] != witness.SuiteID must defer (ok=false)")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputCountNotExactlyOne
+// pins the input-count == 1 guard (mempool_precheck_input.go (`feePrecheckP2PKInputValue`)).
+// Mirrors Rust rub166_precheck_defers_when_input_count_not_exactly_one.
+// Closes pre-push-reviewer wave-20 P1 finding #2 (Go parity gap).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputCountNotExactlyOne(t *testing.T) {
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
+	}
+	makeTx := func(n int) *consensus.Tx {
+		ins := make([]consensus.TxInput, n)
+		for i := range ins {
+			ins[i] = consensus.TxInput{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}
+		}
+		return &consensus.Tx{TxKind: 0x00, TxNonce: 1, Inputs: ins, Witness: []consensus.WitnessItem{{}}}
+	}
+	if _, ok := feePrecheckP2PKInputValue(makeTx(0), utxos, 1, nil, nil); ok {
+		t.Fatalf("len(Inputs)==0 must defer (ok=false)")
+	}
+	if _, ok := feePrecheckP2PKInputValue(makeTx(2), utxos, 1, nil, nil); ok {
+		t.Fatalf("len(Inputs)==2 must defer (ok=false)")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenOutputExceedsInput pins the
+// `outputValue > inputValue` defer in cheapFeeFloorPrecheck
+// (mempool_precheck_floor.go (`cheapFeeFloorPrecheck`)). Mirrors Rust
+// rub166_precheck_defers_when_output_exceeds_input. Closes wave-20 P1
+// finding #2 (Go parity gap).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenOutputExceedsInput(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value: 50, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData,
+		},
+	}
+	// Output value 100 > input value 50 → cheap precheck defers.
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Outputs: []consensus.TxOutput{{Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData}},
+		Witness: []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: pubkey, Signature: signature}},
+	}
+	// Sanity: helper-level pre-conditions must be reachable.
+	inputValue, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil)
+	if !ok {
+		t.Fatalf("input precheck should accept; got ok=false")
+	}
+	outputValue, ok := feePrecheckP2PKOutputValue(tx.Outputs, 1, nil)
+	if !ok {
+		t.Fatalf("output precheck should accept; got ok=false")
+	}
+	if outputValue <= inputValue {
+		t.Fatalf("test fixture sanity: outputValue (%d) must exceed inputValue (%d)", outputValue, inputValue)
+	}
+	// Wave-21 fix: actually call cheapFeeFloorPrecheck to exercise the
+	// `outputValue > inputValue` defer at mempool_precheck_floor.go.
+	// nil error = "deferred to slow path" (the precheck contract).
+	snap := &chainStateAdmissionSnapshot{utxos: utxos}
+	if err := cheapFeeFloorPrecheck(tx, snap, 1, 1, nil, nil); err != nil {
+		t.Fatalf("output > input must defer (no error returned); got %v", err)
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckWeightZeroIsUnreachableViaPublicSurface
+// documents that the `weight == 0` defer at mempool_precheck_floor.go
+// (`err != nil || weight == 0`) is structurally unreachable through any
+// public Go API: `consensus.TxWeightAndStats` returns weight > 0 for
+// every structurally-valid tx, and weight==0 inputs would already fail
+// the upstream input-count and witness guards. Rust counterpart
+// `rub166_precheck_defers_when_weight_is_zero` exercises the branch
+// directly because Rust's `cheap_fee_floor_precheck` accepts weight as
+// a function parameter (RUB-167 single-walk); Go computes weight
+// internally so the branch is defense-in-depth only. Renamed from
+// the wave-20 `DefersWhenWeightIsZero` (which fictionally claimed
+// reachable coverage) per pre-push-reviewer wave-20 finding #2 fix
+// option (b).
+func TestMempoolCheapFeeFloorPrecheckWeightZeroIsUnreachableViaPublicSurface(t *testing.T) {
+	// emptyTx triggers the upstream `len(tx.Inputs) != 1` defer at
+	// mempool_precheck_input.go BEFORE the weight check — confirming the
+	// upstream guard is the actual gate.
+	emptyTx := &consensus.Tx{TxKind: 0x00, TxNonce: 1, Inputs: []consensus.TxInput{}, Witness: []consensus.WitnessItem{}}
+	snap := &chainStateAdmissionSnapshot{utxos: map[consensus.Outpoint]consensus.UtxoEntry{}}
+	if err := cheapFeeFloorPrecheck(emptyTx, snap, 0, 1, nil, nil); err != nil {
+		t.Fatalf("emptyTx should defer to slow path (input-count guard fires before weight check); got %v", err)
+	}
+	// Defense-in-depth assertion: even if a future change removes the
+	// input-count guard, a structurally-malformed tx whose
+	// TxWeightAndStats returns err would also defer at the
+	// `err != nil` clause. Without injecting a fault into TxWeightAndStats
+	// from the test (which would require a stub or test-only signature),
+	// this branch cannot be exercised end-to-end. Documenting the
+	// limitation here is the correct closure per parity-checker wave-20
+	// finding option (b) ("rename to acknowledge unreachability").
+}
+
+// TestMempoolCheapPrecheckCachedDefaultRegistryIdentityAndCanonicalManifest
+// pins Wave-22 cache invariants (Copilot wave-21 P2 #1+#2 follow-up):
+// (a) the package-level cache pointer is stable across reads (no
+// rebuild), (b) cached value satisfies IsCanonicalDefaultLiveManifest,
+// (c) ML-DSA-87 lookup returns canonical params. Future change that
+// swaps the cache to a non-canonical builder fails this test.
+func TestMempoolCheapPrecheckCachedDefaultRegistryIdentityAndCanonicalManifest(t *testing.T) {
+	if !cachedDefaultPrecheckSuiteRegistry.IsCanonicalDefaultLiveManifest() {
+		t.Fatalf("cachedDefaultPrecheckSuiteRegistry must satisfy IsCanonicalDefaultLiveManifest")
+	}
+	params, ok := cachedDefaultPrecheckSuiteRegistry.Lookup(consensus.SUITE_ID_ML_DSA_87)
+	if !ok {
+		t.Fatalf("ML-DSA-87 must be present in cached default registry")
+	}
+	if params.SuiteID != consensus.SUITE_ID_ML_DSA_87 {
+		t.Fatalf("expected SuiteID=%d, got %d", consensus.SUITE_ID_ML_DSA_87, params.SuiteID)
+	}
+	if params.AlgName != "ML-DSA-87" {
+		t.Fatalf("expected AlgName=ML-DSA-87, got %s", params.AlgName)
+	}
+}
+
+// TestMempoolCheapPrecheckCachedDefaultNativeSetsContainCanonicalSuite
+// pins the Wave-22 native_spend / native_create cache invariants.
+// Same rationale as the registry test: ensure the cached
+// NativeSuiteSet is the canonical singleton (contains ML-DSA-87).
+func TestMempoolCheapPrecheckCachedDefaultNativeSetsContainCanonicalSuite(t *testing.T) {
+	if !cachedDefaultPrecheckNativeSpendSet.Contains(consensus.SUITE_ID_ML_DSA_87) {
+		t.Fatalf("cachedDefaultPrecheckNativeSpendSet must contain SUITE_ID_ML_DSA_87")
+	}
+	if !cachedDefaultPrecheckNativeCreateSet.Contains(consensus.SUITE_ID_ML_DSA_87) {
+		t.Fatalf("cachedDefaultPrecheckNativeCreateSet must contain SUITE_ID_ML_DSA_87")
+	}
+}
+
+// TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive
+// pins the wave-8 race-fix: validateFeeFloorLockedWithFloor uses
+// MAX(snappedFloor, m.currentMinFeeRateLocked()) so newer higher
+// floors always win.
+//
+// Bidirectional race protection:
+//   - decay race: snap-high & live-low → max=snap-high → reject
+//     (acceptable spurious reject; caller retries against new snap).
+//   - raise race: snap-low & live-high → max=live-high → reject
+//     (correctly enforces current floor; never admits below it).
+//
+// Wave-6 used pure snap (closed decay race, opened raise race).
+// Wave-8 takes the max so both Copilot wave-5 (decay) AND Codex/
+// Copilot wave-7 (raise) findings are addressed simultaneously per
+// Copilot's wave-7 fix recommendation.
+func TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, _ := testSpendableChainState(fromAddress, []uint64{1_000_000})
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 10, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	entry := &mempoolEntry{
+		txid:   [32]byte{0x77},
+		fee:    5,
+		weight: 1, // fee_rate = 5
+		size:   1,
+	}
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+
+	// Case 1 — decay race direction (snap-HIGH, live-LOW):
+	// max(snap=10, live=1) = 10 → reject. Spurious reject acceptable;
+	// caller retries against new lower snap.
+	mp.currentMinFeeRate = 1
+	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 10); err == nil ||
+		!strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+		t.Fatalf("snap=10 + live=1 must reject (max-floor=10 > fee_rate=5); got err=%v", err)
+	}
+
+	// Case 2 — raise race direction (snap-LOW, live-HIGH):
+	// max(snap=1, live=10) = 10 → reject. NEVER admits below current
+	// floor — closes the wave-7 Codex+Copilot raise-race finding.
+	mp.currentMinFeeRate = 10
+	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 1); err == nil ||
+		!strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+		t.Fatalf("snap=1 + live=10 must reject (max-floor=10 > fee_rate=5); got err=%v", err)
+	}
+
+	// Case 3 — both low (steady state, no decay/raise during admission):
+	// max(snap=1, live=1) = 1 → accept fee_rate=5.
+	mp.currentMinFeeRate = 1
+	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 1); err != nil {
+		t.Fatalf("snap=1 + live=1 must accept fee_rate=5 (max-floor=1 <= 5); got err=%v", err)
+	}
+
+	// Case 4 — snap=0 falls through to live (post-clamp Default=1).
+	// max(snap=0, live=1) = 1 → accept fee_rate=5.
+	mp.currentMinFeeRate = 1
+	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 0); err != nil {
+		t.Fatalf("snap=0 + live=1 must accept fee_rate=5 (max-floor post-clamp=1 <= 5); got err=%v", err)
 	}
 }
 
