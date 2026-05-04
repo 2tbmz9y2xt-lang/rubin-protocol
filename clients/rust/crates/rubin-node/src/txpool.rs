@@ -32,11 +32,16 @@ fn cached_default_registry() -> &'static SuiteRegistry {
     REG.get_or_init(|| {
         let r = SuiteRegistry::default_registry();
         // Drift fail-closed: panic at process init (not per-tx) if the
-        // canonical manifest invariant is violated. Same pattern as
-        // `verify_sig_openssl::default_runtime_suite_registry` (which
-        // returns a typed error on drift; precheck is allowed to panic
-        // because a drift would already break consensus elsewhere).
-        debug_assert!(
+        // canonical manifest invariant is violated. Uses `assert!`
+        // (NOT `debug_assert!`): the check MUST run in release builds
+        // too, otherwise the cached precheck registry could silently
+        // ship drifted SuiteParams in production while the slow
+        // verification path (`verify_sig_openssl::default_runtime_suite_registry`)
+        // returns a typed error — creating a release-only
+        // classification split. Mirrors Go's package-init `panic()`
+        // in `cachedDefaultPrecheckSuiteRegistry`. Closes Copilot
+        // wave-22 P1 + Codex wave-22 P2.
+        assert!(
             r.is_canonical_default_live_manifest(),
             "cached_default_registry: SuiteRegistry::default_registry() drifted from canonical live manifest"
         );
