@@ -17,7 +17,7 @@ import (
 // Wave-4 class-closure conservatism: each input-side guard mirrors a
 // terminal-reject branch in the slow path
 // `applyNonCoinbaseTxBasic*` at
-// `clients/go/consensus/utxo_basic.go:193-200`. Without these defers
+// `clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`)`. Without these defers
 // a below-floor tx with structurally-defective input would be
 // misclassified as transient Unavailable instead of terminal
 // Rejected, masking the structural error and allowing callers to
@@ -96,7 +96,7 @@ func precheckP2PKWitnessItemValid(w *consensus.WitnessItem, entry consensus.Utxo
 		return false
 	}
 	// Wave-16 sighash trailer: defer only on INVALID sighash type. The
-	// slow path's IsValidSighashType (sighash.go:12+) accepts six
+	// slow path's IsValidSighashType (sighash.go (`IsValidSighashType`)) accepts six
 	// canonical trailers (SIGHASH_ALL/NONE/SINGLE × ANYONECANPAY); only
 	// bytes outside that set are terminal-rejected. Wave-15's literal
 	// `!= SIGHASH_ALL` check over-deferred 5/6 valid types and let
@@ -127,7 +127,7 @@ func precheckP2PKInputStructurallyValid(in consensus.TxInput) bool {
 
 // precheckCoinbaseImmature returns true iff the resolved P2PK input is
 // an immature coinbase spend (wave-5 class-closure: slow path returns
-// Rejected TX_ERR_COINBASE_IMMATURE at utxo_basic.go:217-219). Caller
+// Rejected TX_ERR_COINBASE_IMMATURE at utxo_basic.go (`applyNonCoinbaseTxBasic*`)). Caller
 // defers when this returns true so the slow path preserves the
 // terminal-reject classification (different caller action than fee
 // floor: wait for COINBASE_MATURITY blocks vs retry-with-higher-fee).

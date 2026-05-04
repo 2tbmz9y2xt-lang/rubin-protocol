@@ -21,8 +21,8 @@ import (
 //
 // tx_nonce == 0 for non-coinbase: slow path returns
 // `txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for
-// non-coinbase")` at `clients/go/consensus/connect_block_parallel.go:290`
-// and `clients/go/consensus/utxo_basic.go:161`.
+// non-coinbase")` at `clients/go/consensus/connect_block_parallel.go`
+// and `clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`)`.
 func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapshot, minFeeRate uint64, nextHeight uint64, rotation consensus.RotationProvider, registry *consensus.SuiteRegistry) error {
 	if precheckEarlyDefer(tx) {
 		return nil
@@ -49,7 +49,7 @@ func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapsh
 // precheckEarlyDefer returns true when the tx shape disqualifies it
 // from the cheap fast-reject path: non-plain tx_kind, DA-bearing
 // payload, or tx_nonce == 0 (slow path returns Rejected
-// TX_ERR_TX_NONCE_INVALID at clients/go/consensus/utxo_basic.go:160-162
+// TX_ERR_TX_NONCE_INVALID at clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`)
 // — wave-4 class-closure conservatism). Extracted from
 // cheapFeeFloorPrecheck to keep cyclomatic complexity within the
 // repository's lint budget.

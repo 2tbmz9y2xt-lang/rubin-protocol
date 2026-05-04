@@ -15,7 +15,7 @@ import (
 //
 // Wave-4 class-closure conservatism: each guard mirrors a permanent-
 // reject branch in `ValidateTxCovenantsGenesis` at
-// `clients/go/consensus/covenant_genesis.go:19-26`. Without them a
+// `clients/go/consensus/covenant_genesis.go (`ValidateTxCovenantsGenesis`)`. Without them a
 // below-floor tx with consensus-invalid P2PK outputs would be
 // misclassified as transient Unavailable instead of permanent Rejected.
 // Mirrors Rust `fee_precheck_p2pk_output_value` at
@@ -32,7 +32,7 @@ func feePrecheckP2PKOutputValue(outputs []consensus.TxOutput, nextHeight uint64,
 		}
 		// Wave-4 class-closure conservatism: each guard mirrors a
 		// permanent-reject branch in ValidateTxCovenantsGenesis
-		// (covenant_genesis.go:19-26).
+		// (covenant_genesis.go (`ValidateTxCovenantsGenesis`)).
 		if out.Value == 0 {
 			return 0, false
 		}

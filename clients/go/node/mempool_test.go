@@ -1452,8 +1452,8 @@ func TestMempoolCheapFeeFloorPrecheckPreservesMissingUTXOReject(t *testing.T) {
 // TestMempoolCheapFeeFloorPrecheckDefersWhenTxNonceIsZero pins the
 // wave-4 class-closure guard: tx_nonce == 0 for non-coinbase is
 // permanently rejected by the slow path
-// (clients/go/consensus/connect_block_parallel.go:290 +
-// clients/go/consensus/utxo_basic.go:161 with TX_ERR_TX_NONCE_INVALID).
+// (clients/go/consensus/connect_block_parallel.go +
+// clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with TX_ERR_TX_NONCE_INVALID).
 // Without the wave-4 early-defer guard, a below-floor tx with
 // TxNonce==0 would be fast-rejected as transient Unavailable("mempool
 // fee below rolling minimum"), masking the permanent reject class.
@@ -1471,7 +1471,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenTxNonceIsZero(t *testing.T) {
 // TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKOutputValueIsZero pins
 // the wave-4 class-closure guard: a P2PK output with Value==0 is
 // permanently rejected by ValidateTxCovenantsGenesis at
-// clients/go/consensus/covenant_genesis.go:19 with "CORE_P2PK value
+// clients/go/consensus/covenant_genesis.go (`ValidateTxCovenantsGenesis`) with "CORE_P2PK value
 // must be > 0". Without the wave-4 defer guard, a below-floor tx with
 // a zero-value P2PK output would be fast-rejected as transient
 // Unavailable, masking the permanent reject class.
@@ -1493,7 +1493,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKOutputValueIsZero(t *testing.
 // CovenantData length is not exactly MAX_P2PK_COVENANT_DATA (33 =
 // 1-byte suite_id + 32-byte payload) is permanently rejected by
 // ValidateTxCovenantsGenesis at
-// clients/go/consensus/covenant_genesis.go:22 with "invalid CORE_P2PK
+// clients/go/consensus/covenant_genesis.go (`ValidateTxCovenantsGenesis`) with "invalid CORE_P2PK
 // covenant_data length". Both len < 33 (empty) and len > 33
 // (oversized) branches pinned.
 func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKCovenantDataLengthInvalid(t *testing.T) {
@@ -1520,7 +1520,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKCovenantDataLengthInvalid(t *
 // CovenantData[0] (suite_id) is not in the active
 // NativeCreateSuites(nextHeight) set is permanently rejected by
 // ValidateTxCovenantsGenesis at
-// clients/go/consensus/covenant_genesis.go:26 with "CORE_P2PK suite
+// clients/go/consensus/covenant_genesis.go (`ValidateTxCovenantsGenesis`) with "CORE_P2PK suite
 // not in native create set". DefaultRotationProvider accepts only
 // SUITE_ID_ML_DSA_87 (0x01); any other byte triggers the defer.
 func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKSuiteNotInNativeCreateSet(t *testing.T) {
@@ -1542,7 +1542,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKSuiteNotInNativeCreateSet(t *
 // TestMempoolCheapFeeFloorPrecheckDefersWhenInputScriptSigNonEmpty pins
 // the wave-4 input-side class-closure guard: a non-empty ScriptSig on
 // a P2PK input is rejected by the slow path
-// (clients/go/consensus/utxo_basic.go:193-194 with TX_ERR_PARSE
+// (clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with TX_ERR_PARSE
 // "script_sig must be empty under genesis covenant set"). Without the
 // wave-4 defer guard, a below-floor tx with non-empty ScriptSig would
 // be misclassified as transient Unavailable instead of Rejected
@@ -1570,7 +1570,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputScriptSigNonEmpty(t *testing
 // TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange
 // pins the wave-4 input-side class-closure guard: a Sequence >
 // 0x7fffffff on a P2PK input is rejected by the slow path at
-// clients/go/consensus/utxo_basic.go:196-197 with
+// clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with
 // TX_ERR_SEQUENCE_INVALID "sequence exceeds 0x7fffffff".
 func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange(t *testing.T) {
 	tx := &consensus.Tx{
@@ -1595,7 +1595,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange(t *testin
 // pins the wave-4 input-side class-closure guard: a tx with
 // len(Witness) != 1 on a single-P2PK-input tx is rejected by the slow
 // path (`applyNonCoinbaseTxBasic*` witness-slots check, mirror of
-// Rust utxo_basic.rs:329-343). Both len == 0 and len == 2 branches
+// Rust utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)). Both len == 0 and len == 2 branches
 // pinned.
 func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne(t *testing.T) {
 	makeTx := func(witnessCount int) *consensus.Tx {
@@ -1628,7 +1628,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne(t *test
 // pins the wave-4 input-side class-closure guard: a non-coinbase tx
 // whose input uses the coinbase-prevout marker (PrevTxid == zero AND
 // PrevVout == 0xffffffff) is rejected by the slow path at
-// clients/go/consensus/utxo_basic.go:199-200 with TX_ERR_PARSE
+// clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with TX_ERR_PARSE
 // "coinbase prevout encoding forbidden in non-coinbase".
 func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUsesCoinbasePrevoutMarker(t *testing.T) {
 	var zeroTxid [32]byte
@@ -1654,7 +1654,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUsesCoinbasePrevoutMarker(t 
 // pins the wave-5 input-side class-closure guard: an immature
 // coinbase P2PK spend (CreatedByCoinbase && nextHeight -
 // CreationHeight < COINBASE_MATURITY) is rejected by the slow path at
-// clients/go/consensus/utxo_basic.go:217-219 with
+// clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`) with
 // TX_ERR_COINBASE_IMMATURE "coinbase immature". Without the wave-5
 // defer guard, a below-floor immature-coinbase spend would be
 // misclassified as transient Unavailable("mempool fee below rolling
@@ -1774,7 +1774,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataLengthInvali
 // TestMempoolCheapFeeFloorPrecheckDefersOnlyOnInvalidSighashTrailer
 // pins the wave-16 sighash trailer guard: defer when last sig byte
 // is NOT one of the six valid sighash types accepted by
-// IsValidSighashType (clients/go/consensus/sighash.go:12+). Verifies
+// IsValidSighashType (clients/go/consensus/sighash.go (`IsValidSighashType`)). Verifies
 // (a) invalid trailer 0x05 defers and (b) valid non-ALL trailer
 // SIGHASH_NONE (0x02) does NOT defer (closes wave-15 over-defer P1).
 func TestMempoolCheapFeeFloorPrecheckDefersOnlyOnInvalidSighashTrailer(t *testing.T) {
@@ -2038,7 +2038,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersOnOutputSumOverflow(t *testing.T) {
 
 // TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataSuiteMismatch
 // pins the wave-15 panic-safety + suite-consistency guard
-// (mempool_precheck_input.go:95-97): defer when entry.CovenantData[0]
+// (mempool_precheck_input.go (`feePrecheckP2PKInputValue`)): defer when entry.CovenantData[0]
 // != witness.SuiteID even when length is canonical 33 bytes. Mirrors
 // slow-path TX_ERR_COVENANT_TYPE_INVALID at clients/go/consensus/spend_verify.go.
 // Closes pre-push-reviewer wave-20 P1 finding #1 (Go counterpart of
@@ -2073,7 +2073,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataSuiteMismatc
 }
 
 // TestMempoolCheapFeeFloorPrecheckDefersWhenInputCountNotExactlyOne
-// pins the input-count == 1 guard (mempool_precheck_input.go:33).
+// pins the input-count == 1 guard (mempool_precheck_input.go (`feePrecheckP2PKInputValue`)).
 // Mirrors Rust rub166_precheck_defers_when_input_count_not_exactly_one.
 // Closes pre-push-reviewer wave-20 P1 finding #2 (Go parity gap).
 func TestMempoolCheapFeeFloorPrecheckDefersWhenInputCountNotExactlyOne(t *testing.T) {
@@ -2097,7 +2097,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputCountNotExactlyOne(t *testin
 
 // TestMempoolCheapFeeFloorPrecheckDefersWhenOutputExceedsInput pins the
 // `outputValue > inputValue` defer in cheapFeeFloorPrecheck
-// (mempool_precheck_floor.go:35). Mirrors Rust
+// (mempool_precheck_floor.go (`cheapFeeFloorPrecheck`)). Mirrors Rust
 // rub166_precheck_defers_when_output_exceeds_input. Closes wave-20 P1
 // finding #2 (Go parity gap).
 func TestMempoolCheapFeeFloorPrecheckDefersWhenOutputExceedsInput(t *testing.T) {
@@ -2119,6 +2119,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenOutputExceedsInput(t *testing.T) 
 		Outputs: []consensus.TxOutput{{Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData}},
 		Witness: []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: pubkey, Signature: signature}},
 	}
+	// Sanity: helper-level pre-conditions must be reachable.
 	inputValue, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil)
 	if !ok {
 		t.Fatalf("input precheck should accept; got ok=false")
@@ -2130,38 +2131,45 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenOutputExceedsInput(t *testing.T) 
 	if outputValue <= inputValue {
 		t.Fatalf("test fixture sanity: outputValue (%d) must exceed inputValue (%d)", outputValue, inputValue)
 	}
-	// The combined cheapFeeFloorPrecheck would defer because output > input.
-	// Pin the precondition explicitly.
+	// Wave-21 fix: actually call cheapFeeFloorPrecheck to exercise the
+	// `outputValue > inputValue` defer at mempool_precheck_floor.go.
+	// nil error = "deferred to slow path" (the precheck contract).
+	snap := &chainStateAdmissionSnapshot{utxos: utxos}
+	if err := cheapFeeFloorPrecheck(tx, snap, 1, 1, nil, nil); err != nil {
+		t.Fatalf("output > input must defer (no error returned); got %v", err)
+	}
 }
 
-// TestMempoolCheapFeeFloorPrecheckDefersWhenWeightIsZero pins the
-// `weight == 0` defer in cheapFeeFloorPrecheck (mempool_precheck_floor.go:39).
-// Mirrors Rust rub166_precheck_defers_when_weight_is_zero. Closes
-// wave-20 P1 finding #2 (Go parity gap). The cheap precheck sees
-// weight=0 only if TxWeightAndStats returns zero on a structurally-OK
-// tx — pin the predicate at helper-call level.
-func TestMempoolCheapFeeFloorPrecheckDefersWhenWeightIsZero(t *testing.T) {
-	// Build minimal tx; the cheap precheck early-defers tx_kind!=0,
-	// tx_nonce==0, da_payload non-empty BEFORE reaching the input/output
-	// path; weight==0 is then checked AFTER input+output sums.
-	// Constructing a real tx with weight==0 requires a no-input no-output
-	// tx, which tx_kind=0 + tx_nonce=1 + Inputs=[] would fail at
-	// `len(tx.Inputs) != 1` defer earlier. So directly assert the
-	// PRECONDITION via the cheapFeeFloorPrecheck top-level.
+// TestMempoolCheapFeeFloorPrecheckWeightZeroIsUnreachableViaPublicSurface
+// documents that the `weight == 0` defer at mempool_precheck_floor.go
+// (`err != nil || weight == 0`) is structurally unreachable through any
+// public Go API: `consensus.TxWeightAndStats` returns weight > 0 for
+// every structurally-valid tx, and weight==0 inputs would already fail
+// the upstream input-count and witness guards. Rust counterpart
+// `rub166_precheck_defers_when_weight_is_zero` exercises the branch
+// directly because Rust's `cheap_fee_floor_precheck` accepts weight as
+// a function parameter (RUB-167 single-walk); Go computes weight
+// internally so the branch is defense-in-depth only. Renamed from
+// the wave-20 `DefersWhenWeightIsZero` (which fictionally claimed
+// reachable coverage) per pre-push-reviewer wave-20 finding #2 fix
+// option (b).
+func TestMempoolCheapFeeFloorPrecheckWeightZeroIsUnreachableViaPublicSurface(t *testing.T) {
+	// emptyTx triggers the upstream `len(tx.Inputs) != 1` defer at
+	// mempool_precheck_input.go BEFORE the weight check — confirming the
+	// upstream guard is the actual gate.
 	emptyTx := &consensus.Tx{TxKind: 0x00, TxNonce: 1, Inputs: []consensus.TxInput{}, Witness: []consensus.WitnessItem{}}
-	// emptyTx fails the input-count==1 guard, returns nil (defer) without
-	// reaching weight check; this is acceptable — the universe-row in the
-	// branch-to-test table is "weight==0 reachable", and the answer is
-	// "weight==0 is unreachable through legitimate fixture; precondition
-	// pinned via input-count guard at structurally upstream level".
 	snap := &chainStateAdmissionSnapshot{utxos: map[consensus.Outpoint]consensus.UtxoEntry{}}
 	if err := cheapFeeFloorPrecheck(emptyTx, snap, 0, 1, nil, nil); err != nil {
-		t.Fatalf("emptyTx should defer to slow path (no error); got %v", err)
+		t.Fatalf("emptyTx should defer to slow path (input-count guard fires before weight check); got %v", err)
 	}
-	// Sanity (negative-branch pin): a tx that reaches the weight check
-	// is the same as wave-19 sanity baselines — covered indirectly by
-	// TestMempoolCheapFeeFloorPrecheckRejectsBeforeSignatureValidationForAllSources
-	// which requires non-zero weight to reach the floor check.
+	// Defense-in-depth assertion: even if a future change removes the
+	// input-count guard, a structurally-malformed tx whose
+	// TxWeightAndStats returns err would also defer at the
+	// `err != nil` clause. Without injecting a fault into TxWeightAndStats
+	// from the test (which would require a stub or test-only signature),
+	// this branch cannot be exercised end-to-end. Documenting the
+	// limitation here is the correct closure per parity-checker wave-20
+	// finding option (b) ("rename to acknowledge unreachability").
 }
 
 // TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive
