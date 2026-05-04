@@ -753,7 +753,7 @@ func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapsh
 	if tx.TxKind != 0x00 || len(tx.DaPayload) != 0 || tx.TxNonce == 0 {
 		return nil
 	}
-	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos)
+	inputValue, ok := feePrecheckP2PKInputValue(tx, snapshot.utxos, nextHeight)
 	if !ok {
 		return nil
 	}
@@ -794,7 +794,7 @@ func cheapFeeFloorPrecheck(tx *consensus.Tx, snapshot *chainStateAdmissionSnapsh
 // fast-reject is designed to avoid. Below-floor txs with invalid
 // signatures may surface as rolling-floor Unavailable until the fee
 // floor no longer applies; this is intentional.
-func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, bool) {
+func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) (uint64, bool) {
 	if utxos == nil || len(tx.Inputs) != 1 {
 		return 0, false
 	}
@@ -821,6 +821,20 @@ func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]co
 	}
 	entry, ok := utxos[consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}]
 	if !ok || entry.CovenantType != consensus.COV_TYPE_P2PK {
+		return 0, false
+	}
+	// Wave-5 class-closure conservatism: immature coinbase spend.
+	// Slow path returns Rejected `TX_ERR_COINBASE_IMMATURE` ("coinbase
+	// immature") via the overflow-safe maturity check at
+	// `clients/go/consensus/utxo_basic.go:217-219`. Without this
+	// defer a below-floor immature-coinbase spend would be
+	// misclassified as transient Unavailable("mempool fee below
+	// rolling minimum"), signalling caller to retry-with-higher-fee
+	// when the actual remedy is to wait for COINBASE_MATURITY blocks.
+	// Different caller action -> genuine class-leak (P1).
+	if entry.CreatedByCoinbase &&
+		(nextHeight < entry.CreationHeight ||
+			nextHeight-entry.CreationHeight < consensus.COINBASE_MATURITY) {
 		return 0, false
 	}
 	return entry.Value, true

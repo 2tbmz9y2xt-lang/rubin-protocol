@@ -1561,7 +1561,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputScriptSigNonEmpty(t *testing
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
 	}
-	if _, ok := feePrecheckP2PKInputValue(tx, utxos); ok {
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1); ok {
 		t.Fatalf("non-empty ScriptSig must return ok=false so precheck defers")
 	}
 }
@@ -1585,7 +1585,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange(t *testin
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
 	}
-	if _, ok := feePrecheckP2PKInputValue(tx, utxos); ok {
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1); ok {
 		t.Fatalf("Sequence > 0x7fffffff must return ok=false so precheck defers")
 	}
 }
@@ -1614,11 +1614,11 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne(t *test
 		{Txid: [32]byte{0x11}, Vout: 0}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
 	}
 	// Branch 1: zero witness slots.
-	if _, ok := feePrecheckP2PKInputValue(makeTx(0), utxos); ok {
+	if _, ok := feePrecheckP2PKInputValue(makeTx(0), utxos /* nextHeight */, 1); ok {
 		t.Fatalf("len(Witness) == 0 must return ok=false so precheck defers")
 	}
 	// Branch 2: two witness slots.
-	if _, ok := feePrecheckP2PKInputValue(makeTx(2), utxos); ok {
+	if _, ok := feePrecheckP2PKInputValue(makeTx(2), utxos /* nextHeight */, 1); ok {
 		t.Fatalf("len(Witness) == 2 must return ok=false so precheck defers")
 	}
 }
@@ -1644,8 +1644,50 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUsesCoinbasePrevoutMarker(t 
 	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
 		{Txid: zeroTxid, Vout: 0xffffffff}: {Value: 100, CovenantType: consensus.COV_TYPE_P2PK},
 	}
-	if _, ok := feePrecheckP2PKInputValue(tx, utxos); ok {
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos /* nextHeight */, 1); ok {
 		t.Fatalf("coinbase-prevout marker on non-coinbase input must return ok=false so precheck defers")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase
+// pins the wave-5 input-side class-closure guard: an immature
+// coinbase P2PK spend (CreatedByCoinbase && nextHeight -
+// CreationHeight < COINBASE_MATURITY) is rejected by the slow path at
+// clients/go/consensus/utxo_basic.go:217-219 with
+// TX_ERR_COINBASE_IMMATURE "coinbase immature". Without the wave-5
+// defer guard, a below-floor immature-coinbase spend would be
+// misclassified as transient Unavailable("mempool fee below rolling
+// minimum"), signalling caller to retry-with-higher-fee when the
+// actual remedy is to wait for COINBASE_MATURITY blocks. Different
+// caller action means real class-leak (P1).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase(t *testing.T) {
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: [32]byte{0x11},
+			PrevVout: 0,
+			Sequence: 0,
+		}},
+		Witness: []consensus.WitnessItem{{}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:             100,
+			CovenantType:      consensus.COV_TYPE_P2PK,
+			CreatedByCoinbase: true,
+			CreationHeight:    0,
+		},
+	}
+	// nextHeight < COINBASE_MATURITY threshold => immature.
+	immatureHeight := uint64(consensus.COINBASE_MATURITY) - 1
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, immatureHeight); ok {
+		t.Fatalf("immature coinbase spend must return ok=false so precheck defers")
+	}
+	// At maturity threshold the defer no longer fires.
+	matureHeight := uint64(consensus.COINBASE_MATURITY)
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, matureHeight); !ok {
+		t.Fatalf("mature coinbase spend must NOT defer (precheck returns ok=true)")
 	}
 }
 

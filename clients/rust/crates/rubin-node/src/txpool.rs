@@ -883,7 +883,7 @@ fn cheap_fee_floor_precheck(
     if tx.tx_kind != 0x00 || !tx.da_payload.is_empty() || tx.tx_nonce == 0 {
         return Ok(());
     }
-    let Some(input_value) = fee_precheck_p2pk_input_value(tx, utxos) else {
+    let Some(input_value) = fee_precheck_p2pk_input_value(tx, utxos, next_height) else {
         return Ok(());
     };
     let Some(output_value) = fee_precheck_p2pk_output_value(&tx.outputs, next_height, rotation)
@@ -926,7 +926,9 @@ fn cheap_fee_floor_precheck(
 fn fee_precheck_p2pk_input_value(
     tx: &rubin_consensus::Tx,
     utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    next_height: u64,
 ) -> Option<u64> {
+    use rubin_consensus::constants::COINBASE_MATURITY;
     if tx.inputs.len() != 1 {
         return None;
     }
@@ -956,6 +958,23 @@ fn fee_precheck_p2pk_input_value(
     };
     let entry = utxos.get(&outpoint)?;
     if entry.covenant_type != rubin_consensus::constants::COV_TYPE_P2PK {
+        return None;
+    }
+    // Wave-5 class-closure conservatism: immature coinbase spend.
+    // Slow path returns Rejected `TxErrCoinbaseImmature` ("coinbase
+    // immature") via the overflow-safe maturity check at
+    // `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:305-314`.
+    // Without this defer a below-floor immature-coinbase spend would
+    // be misclassified as transient `Unavailable("mempool fee below
+    // rolling minimum")`, signalling caller to retry-with-higher-fee
+    // when the actual remedy is to wait for COINBASE_MATURITY blocks.
+    // Different caller action → genuine class-leak (P1), NOT P2 — the
+    // class-leak-auditor wave-4 P2 rating was wrong because it
+    // conflated time-eventual maturity with transient-fee semantics.
+    if entry.created_by_coinbase
+        && (next_height < entry.creation_height
+            || next_height - entry.creation_height < COINBASE_MATURITY)
+    {
         return None;
     }
     Some(entry.value)
@@ -4066,7 +4085,8 @@ mod tests {
         // Branch 1: zero inputs.
         let mut zero_inputs = parsed.clone();
         zero_inputs.inputs.clear();
-        let zero_result = fee_precheck_p2pk_input_value(&zero_inputs, &state.utxos);
+        let zero_result =
+            fee_precheck_p2pk_input_value(&zero_inputs, &state.utxos, /* next_height */ 1);
         assert!(
             zero_result.is_none(),
             "len == 0 must return None so precheck defers; got {:?}",
@@ -4078,7 +4098,8 @@ mod tests {
         let mut two_inputs = parsed.clone();
         let dup = two_inputs.inputs[0].clone();
         two_inputs.inputs.push(dup);
-        let multi_result = fee_precheck_p2pk_input_value(&two_inputs, &state.utxos);
+        let multi_result =
+            fee_precheck_p2pk_input_value(&two_inputs, &state.utxos, /* next_height */ 1);
         assert!(
             multi_result.is_none(),
             "len > 1 must return None so precheck defers; got {:?}",
@@ -4334,7 +4355,7 @@ mod tests {
         let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
         let (mut parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
         parsed.inputs[0].script_sig = vec![0x01];
-        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos);
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, /* next_height */ 1);
         assert!(
             result.is_none(),
             "non-empty script_sig must return None so precheck defers; got {:?}",
@@ -4354,7 +4375,7 @@ mod tests {
         let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
         let (mut parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
         parsed.inputs[0].sequence = 0x8000_0000;
-        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos);
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, /* next_height */ 1);
         assert!(
             result.is_none(),
             "sequence > 0x7fffffff must return None so precheck defers; got {:?}",
@@ -4378,7 +4399,8 @@ mod tests {
         // Branch 1: zero witness slots.
         let mut zero_witness = parsed.clone();
         zero_witness.witness.clear();
-        let zero_result = fee_precheck_p2pk_input_value(&zero_witness, &state.utxos);
+        let zero_result =
+            fee_precheck_p2pk_input_value(&zero_witness, &state.utxos, /* next_height */ 1);
         assert!(
             zero_result.is_none(),
             "witness.len() == 0 must return None so precheck defers; got {:?}",
@@ -4388,7 +4410,8 @@ mod tests {
         let mut two_witness = parsed.clone();
         let dup = two_witness.witness[0].clone();
         two_witness.witness.push(dup);
-        let two_result = fee_precheck_p2pk_input_value(&two_witness, &state.utxos);
+        let two_result =
+            fee_precheck_p2pk_input_value(&two_witness, &state.utxos, /* next_height */ 1);
         assert!(
             two_result.is_none(),
             "witness.len() == 2 must return None so precheck defers; got {:?}",
@@ -4410,11 +4433,56 @@ mod tests {
         let (mut parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
         parsed.inputs[0].prev_txid = [0u8; 32];
         parsed.inputs[0].prev_vout = 0xffff_ffff;
-        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos);
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, /* next_height */ 1);
         assert!(
             result.is_none(),
             "coinbase-prevout marker on non-coinbase input must return None so precheck defers; got {:?}",
             result
+        );
+    }
+
+    /// Wave-5 input-side class-closure: an immature coinbase P2PK
+    /// spend (`entry.created_by_coinbase && next_height -
+    /// entry.creation_height < COINBASE_MATURITY`) is rejected by the
+    /// slow path at
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs:305-314`
+    /// with `TxErrCoinbaseImmature` "coinbase immature". Without the
+    /// wave-5 defer guard, a below-floor immature-coinbase spend
+    /// would be misclassified as transient `Unavailable("mempool fee
+    /// below rolling minimum")`, signalling caller to retry-with-
+    /// higher-fee when the actual remedy is to wait for
+    /// COINBASE_MATURITY blocks. Different caller action means real
+    /// class-leak (P1) — the wave-4 class-leak-auditor severity
+    /// rating of P2 ("transient -> transient") was wrong.
+    #[test]
+    fn rub166_precheck_defers_when_p2pk_input_is_immature_coinbase() {
+        use rubin_consensus::constants::COINBASE_MATURITY;
+        let (mut state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        // Mark the input UTXO as a coinbase output created at height 0.
+        let outpoint = Outpoint {
+            txid: parsed.inputs[0].prev_txid,
+            vout: parsed.inputs[0].prev_vout,
+        };
+        let entry = state.utxos.get_mut(&outpoint).expect("test utxo present");
+        entry.created_by_coinbase = true;
+        entry.creation_height = 0;
+        // next_height < COINBASE_MATURITY threshold => immature.
+        let immature_height = COINBASE_MATURITY - 1;
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, immature_height);
+        assert!(
+            result.is_none(),
+            "immature coinbase spend must return None so precheck defers; got {:?}",
+            result
+        );
+        // At maturity threshold the defer no longer fires (sanity
+        // pin for the negative branch).
+        let mature_height = COINBASE_MATURITY;
+        let result_mature = fee_precheck_p2pk_input_value(&parsed, &state.utxos, mature_height);
+        assert!(
+            result_mature.is_some(),
+            "mature coinbase spend must NOT defer (precheck returns Some); got {:?}",
+            result_mature
         );
     }
 
