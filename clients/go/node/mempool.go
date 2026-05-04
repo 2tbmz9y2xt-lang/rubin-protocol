@@ -494,15 +494,16 @@ func validMempoolTxSource(source mempoolTxSource) bool {
 // owner of relay-floor classification (see `applyPolicyAgainstState`
 // docstring in this file for the matching admit-path rationale).
 //
-// Cross-client divergence (Hard Rule 2026-05-04 wave-20 thread #5):
+// Cross-client divergence between Go RelayMetadata and Rust relay_metadata:
 // Rust `relay_metadata` (clients/rust/crates/rubin-node/src/txpool.rs)
 // DOES enforce relay-floor inline via `apply_post_consensus_policy_with_floor`
 // → `validate_fee_floor`. The Go relay path delegates floor enforcement to
-// per-peer relay-policy + the admit-time check; the Rust relay path enforces
-// inline at relay-time. This asymmetry is INTENTIONAL pending a future
-// cross-client unification slice (RUB-NNN). Below-floor txs admitted via
-// Go RelayMetadata that Rust RelayMetadata would `Unavailable`-reject is
-// the documented expected delta — see the Rust pinning test
+// per-peer relay-policy + the admit-time check. RelayMetadata is a
+// read-only metadata fetcher and does NOT insert into the mempool. The
+// documented expected delta is: below-floor txs whose Go RelayMetadata
+// returns metadata while Rust relay_metadata returns `Unavailable`. This
+// asymmetry is INTENTIONAL pending a future cross-client unification slice
+// (separate follow-up — TBD). See the Rust pinning test
 // `rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit`.
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m == nil {

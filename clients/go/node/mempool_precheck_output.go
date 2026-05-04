@@ -15,16 +15,22 @@ import (
 //
 // Wave-4 class-closure conservatism: each guard mirrors a permanent-
 // reject branch in `ValidateTxCovenantsGenesis` at
-// `clients/go/consensus/covenant_genesis.go (`ValidateTxCovenantsGenesis`)`. Without them a
+// `clients/go/consensus/covenant_genesis.go` `ValidateTxCovenantsGenesis`. Without them a
 // below-floor tx with consensus-invalid P2PK outputs would be
 // misclassified as transient Unavailable instead of permanent Rejected.
 // Mirrors Rust `fee_precheck_p2pk_output_value` at
 // `clients/rust/crates/rubin-node/src/txpool.rs`.
 func feePrecheckP2PKOutputValue(outputs []consensus.TxOutput, nextHeight uint64, rotation consensus.RotationProvider) (uint64, bool) {
+	// Wave-22 hot-path cache (Copilot wave-21 P2 #1+#2): when caller
+	// passes rotation=nil, reuse the cached default native_create set
+	// instead of allocating a fresh map via
+	// `consensus.DefaultRotationProvider{}.NativeCreateSuites(...)`.
+	var nativeSuites *consensus.NativeSuiteSet
 	if rotation == nil {
-		rotation = consensus.DefaultRotationProvider{}
+		nativeSuites = cachedDefaultPrecheckNativeCreateSet
+	} else {
+		nativeSuites = rotation.NativeCreateSuites(nextHeight)
 	}
-	nativeSuites := rotation.NativeCreateSuites(nextHeight)
 	var total uint64
 	for _, out := range outputs {
 		if out.CovenantType != consensus.COV_TYPE_P2PK {
@@ -32,7 +38,7 @@ func feePrecheckP2PKOutputValue(outputs []consensus.TxOutput, nextHeight uint64,
 		}
 		// Wave-4 class-closure conservatism: each guard mirrors a
 		// permanent-reject branch in ValidateTxCovenantsGenesis
-		// (covenant_genesis.go (`ValidateTxCovenantsGenesis`)).
+		// (covenant_genesis.go `ValidateTxCovenantsGenesis`).
 		if out.Value == 0 {
 			return 0, false
 		}

@@ -7,6 +7,42 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+// cachedDefaultPrecheckSuiteRegistry is initialised once at process
+// start to avoid per-tx allocation in the spam-reject hot path
+// (Wave-22 fix per Copilot wave-21 P2 #2). The cheap precheck
+// previously called `consensus.DefaultSuiteRegistry()` on every
+// plain P2PK candidate when `RotationProvider`/`SuiteRegistry` were
+// nil in `TxPoolConfig`, allocating a fresh map per tx. Mirror of
+// Rust `cached_default_registry()` in
+// `clients/rust/crates/rubin-node/src/txpool.rs`.
+//
+// Defense-in-depth: panic at process init (not per-tx) if the
+// canonical-default-live-manifest invariant is violated, so a future
+// constants drift fail-closes here instead of silently shipping wrong
+// SuiteParams. Mirrors the verify_sig_openssl `runtimeVerificationRegistry`
+// drift fail-closed pattern.
+var cachedDefaultPrecheckSuiteRegistry = func() *consensus.SuiteRegistry {
+	r := consensus.DefaultSuiteRegistry()
+	if !r.IsCanonicalDefaultLiveManifest() {
+		panic("cachedDefaultPrecheckSuiteRegistry: DefaultSuiteRegistry() drifted from canonical live manifest")
+	}
+	return r
+}()
+
+// cachedDefaultPrecheckNativeSpendSet is the canonical default
+// native-spend set used by `precheckP2PKWitnessItemValid` when the
+// caller passes `rotation=nil`. `consensus.DefaultRotationProvider{}.NativeSpendSuites(_)`
+// is height-independent and returns the same set; cache once at
+// process init to avoid per-tx `defaultNativeSuiteSet.Clone()` map
+// allocation. Mirror of Rust `cached_default_native_spend_set()`.
+var cachedDefaultPrecheckNativeSpendSet = consensus.DefaultRotationProvider{}.NativeSpendSuites(0)
+
+// cachedDefaultPrecheckNativeCreateSet is the canonical default
+// native-create set used by `feePrecheckP2PKOutputValue` when the
+// caller passes `rotation=nil`. Same rationale as the spend set.
+// Mirror of Rust `cached_default_native_create_set()`.
+var cachedDefaultPrecheckNativeCreateSet = consensus.DefaultRotationProvider{}.NativeCreateSuites(0)
+
 // feePrecheckP2PKInputValue returns the P2PK input value when tx has
 // exactly one input AND that input is BOTH structurally valid
 // (witness count == 1, no coinbase-prevout marker, empty ScriptSig,
@@ -17,7 +53,7 @@ import (
 // Wave-4 class-closure conservatism: each input-side guard mirrors a
 // terminal-reject branch in the slow path
 // `applyNonCoinbaseTxBasic*` at
-// `clients/go/consensus/utxo_basic.go (`applyNonCoinbaseTxBasic*`)`. Without these defers
+// `clients/go/consensus/utxo_basic.go` `applyNonCoinbaseTxBasic*`. Without these defers
 // a below-floor tx with structurally-defective input would be
 // misclassified as transient Unavailable instead of terminal
 // Rejected, masking the structural error and allowing callers to
@@ -66,14 +102,21 @@ func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]co
 // verification stays out of the precheck by design (the only
 // documented scope-cap; SHA3 and byte compare are CHEAP and in scope).
 func precheckP2PKWitnessItemValid(w *consensus.WitnessItem, entry consensus.UtxoEntry, nextHeight uint64, rotation consensus.RotationProvider, registry *consensus.SuiteRegistry) bool {
+	// Wave-22 hot-path cache (Copilot wave-21 P2 #1+#2): when caller
+	// passes rotation=nil, reuse the cached default native_spend set
+	// instead of allocating a fresh map via
+	// `consensus.DefaultRotationProvider{}.NativeSpendSuites(...)`.
+	var inNativeSpend bool
 	if rotation == nil {
-		rotation = consensus.DefaultRotationProvider{}
+		inNativeSpend = cachedDefaultPrecheckNativeSpendSet.Contains(w.SuiteID)
+	} else {
+		inNativeSpend = rotation.NativeSpendSuites(nextHeight).Contains(w.SuiteID)
 	}
-	if !rotation.NativeSpendSuites(nextHeight).Contains(w.SuiteID) {
+	if !inNativeSpend {
 		return false
 	}
 	if registry == nil {
-		registry = consensus.DefaultSuiteRegistry()
+		registry = cachedDefaultPrecheckSuiteRegistry
 	}
 	params, ok := registry.Lookup(w.SuiteID)
 	if !ok {
@@ -127,7 +170,7 @@ func precheckP2PKInputStructurallyValid(in consensus.TxInput) bool {
 
 // precheckCoinbaseImmature returns true iff the resolved P2PK input is
 // an immature coinbase spend (wave-5 class-closure: slow path returns
-// Rejected TX_ERR_COINBASE_IMMATURE at utxo_basic.go (`applyNonCoinbaseTxBasic*`)). Caller
+// Rejected TX_ERR_COINBASE_IMMATURE at utxo_basic.go `applyNonCoinbaseTxBasic*`. Caller
 // defers when this returns true so the slow path preserves the
 // terminal-reject classification (different caller action than fee
 // floor: wait for COINBASE_MATURITY blocks vs retry-with-higher-fee).

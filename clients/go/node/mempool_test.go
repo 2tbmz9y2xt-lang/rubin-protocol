@@ -1595,7 +1595,7 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSequenceOutOfRange(t *testin
 // pins the wave-4 input-side class-closure guard: a tx with
 // len(Witness) != 1 on a single-P2PK-input tx is rejected by the slow
 // path (`applyNonCoinbaseTxBasic*` witness-slots check, mirror of
-// Rust utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)). Both len == 0 and len == 2 branches
+// Rust utxo_basic.rs `apply_non_coinbase_tx_basic_update_*`. Both len == 0 and len == 2 branches
 // pinned.
 func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessCountNotExactlyOne(t *testing.T) {
 	makeTx := func(witnessCount int) *consensus.Tx {
@@ -2170,6 +2170,41 @@ func TestMempoolCheapFeeFloorPrecheckWeightZeroIsUnreachableViaPublicSurface(t *
 	// this branch cannot be exercised end-to-end. Documenting the
 	// limitation here is the correct closure per parity-checker wave-20
 	// finding option (b) ("rename to acknowledge unreachability").
+}
+
+// TestMempoolCheapPrecheckCachedDefaultRegistryIdentityAndCanonicalManifest
+// pins Wave-22 cache invariants (Copilot wave-21 P2 #1+#2 follow-up):
+// (a) the package-level cache pointer is stable across reads (no
+// rebuild), (b) cached value satisfies IsCanonicalDefaultLiveManifest,
+// (c) ML-DSA-87 lookup returns canonical params. Future change that
+// swaps the cache to a non-canonical builder fails this test.
+func TestMempoolCheapPrecheckCachedDefaultRegistryIdentityAndCanonicalManifest(t *testing.T) {
+	if !cachedDefaultPrecheckSuiteRegistry.IsCanonicalDefaultLiveManifest() {
+		t.Fatalf("cachedDefaultPrecheckSuiteRegistry must satisfy IsCanonicalDefaultLiveManifest")
+	}
+	params, ok := cachedDefaultPrecheckSuiteRegistry.Lookup(consensus.SUITE_ID_ML_DSA_87)
+	if !ok {
+		t.Fatalf("ML-DSA-87 must be present in cached default registry")
+	}
+	if params.SuiteID != consensus.SUITE_ID_ML_DSA_87 {
+		t.Fatalf("expected SuiteID=%d, got %d", consensus.SUITE_ID_ML_DSA_87, params.SuiteID)
+	}
+	if params.AlgName != "ML-DSA-87" {
+		t.Fatalf("expected AlgName=ML-DSA-87, got %s", params.AlgName)
+	}
+}
+
+// TestMempoolCheapPrecheckCachedDefaultNativeSetsContainCanonicalSuite
+// pins the Wave-22 native_spend / native_create cache invariants.
+// Same rationale as the registry test: ensure the cached
+// NativeSuiteSet is the canonical singleton (contains ML-DSA-87).
+func TestMempoolCheapPrecheckCachedDefaultNativeSetsContainCanonicalSuite(t *testing.T) {
+	if !cachedDefaultPrecheckNativeSpendSet.Contains(consensus.SUITE_ID_ML_DSA_87) {
+		t.Fatalf("cachedDefaultPrecheckNativeSpendSet must contain SUITE_ID_ML_DSA_87")
+	}
+	if !cachedDefaultPrecheckNativeCreateSet.Contains(consensus.SUITE_ID_ML_DSA_87) {
+		t.Fatalf("cachedDefaultPrecheckNativeCreateSet must contain SUITE_ID_ML_DSA_87")
+	}
 }
 
 // TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive

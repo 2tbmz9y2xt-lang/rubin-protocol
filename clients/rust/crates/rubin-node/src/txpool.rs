@@ -1,16 +1,69 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::OnceLock;
 
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
     parse_block_header_bytes, parse_core_ext_covenant_data, parse_tx, tx_weight_and_stats_public,
-    CoreExtDeploymentProfiles, DefaultRotationProvider, Outpoint, RotationProvider, SuiteRegistry,
+    CoreExtDeploymentProfiles, DefaultRotationProvider, NativeSuiteSet, Outpoint, RotationProvider,
+    SuiteRegistry,
 };
 
 use crate::sync::SuiteContext;
 use crate::{BlockStore, ChainState};
 
 const MAX_TX_POOL_TRANSACTIONS: usize = 300;
+
+/// Hot-path cache for the canonical default-fallback `SuiteRegistry`
+/// used by `fee_precheck_p2pk_input_value` when the caller passes
+/// `registry=None`. Fast-reject path is the spam-flood path; without
+/// the cache, every plain P2PK candidate allocated a fresh
+/// `BTreeMap<u8, SuiteParams>`. Mirror of Go
+/// `cachedDefaultPrecheckSuiteRegistry` in
+/// `clients/go/node/mempool_precheck_input.go`.
+///
+/// Defense-in-depth: the cached registry is verified to satisfy
+/// `is_canonical_default_live_manifest()` on first init so a future
+/// constants drift fail-closes here instead of silently shipping wrong
+/// SuiteParams to the precheck. Mirrors the
+/// `default_runtime_suite_registry` pattern in `verify_sig_openssl.rs`.
+fn cached_default_registry() -> &'static SuiteRegistry {
+    static REG: OnceLock<SuiteRegistry> = OnceLock::new();
+    REG.get_or_init(|| {
+        let r = SuiteRegistry::default_registry();
+        // Drift fail-closed: panic at process init (not per-tx) if the
+        // canonical manifest invariant is violated. Same pattern as
+        // `verify_sig_openssl::default_runtime_suite_registry` (which
+        // returns a typed error on drift; precheck is allowed to panic
+        // because a drift would already break consensus elsewhere).
+        debug_assert!(
+            r.is_canonical_default_live_manifest(),
+            "cached_default_registry: SuiteRegistry::default_registry() drifted from canonical live manifest"
+        );
+        r
+    })
+}
+
+/// Hot-path cache for the canonical default-fallback
+/// `native_spend_suites` set used by `fee_precheck_p2pk_input_value`
+/// when the caller passes `rotation=None`.
+/// `DefaultRotationProvider::native_spend_suites` returns the SAME set
+/// for every height (`{SUITE_ID_ML_DSA_87}`); without the cache, every
+/// plain P2PK candidate allocated a fresh `BTreeSet<u8>`. Mirror of Go
+/// package-level cached set in `clients/go/node/mempool_precheck_input.go`.
+fn cached_default_native_spend_set() -> &'static NativeSuiteSet {
+    static SET: OnceLock<NativeSuiteSet> = OnceLock::new();
+    SET.get_or_init(|| DefaultRotationProvider.native_spend_suites(0))
+}
+
+/// Hot-path cache for the canonical default-fallback
+/// `native_create_suites` set used by `fee_precheck_p2pk_output_value`
+/// when the caller passes `rotation=None`. Same rationale as
+/// `cached_default_native_spend_set`.
+fn cached_default_native_create_set() -> &'static NativeSuiteSet {
+    static SET: OnceLock<NativeSuiteSet> = OnceLock::new();
+    SET.get_or_init(|| DefaultRotationProvider.native_create_suites(0))
+}
 
 /// Default rolling mempool minimum fee rate used by callers without a live
 /// rolling-floor source. Mirrors Go's `DefaultMempoolMinFeeRate` so the Rust
@@ -291,7 +344,7 @@ impl TxPool {
         // on the (chain-context-error vs fee-floor-fail) precedence.
         // Mirrors Go's `cheapFeeFloorPrecheck` call site inside
         // `checkTransactionWithSnapshot` at
-        // `clients/go/node/mempool_precheck.go (`checkTransactionWithSnapshot`)` (RUB-165 PR #1415):
+        // `clients/go/node/mempool_precheck.go` `checkTransactionWithSnapshot` (RUB-165 PR #1415):
         // Go runs the precheck after `nextBlockContext`/`nextBlockMTP`
         // and immediately before the expensive
         // `CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext`
@@ -361,8 +414,9 @@ impl TxPool {
             size: tx_bytes.len(),
         };
 
-        // Go-parity capacity admission (`capacityEvictionPlanLocked`,
-        // clients/go/node/mempool.go (`validateCapacityAdmissionLocked` capacity-admission entry; calls `capacityEvictionPlanLocked` helper)) — runs AFTER both
+        // Go-parity capacity admission: `validateCapacityAdmissionLocked`
+        // entry calls `capacityEvictionPlanLocked` helper in
+        // clients/go/node/mempool.go — runs AFTER both
         // `apply_policy` and the rolling relay-fee floor check above, so
         // sub-floor / DA-rejected transactions never reach this branch
         // and the worst-entry comparison only considers floor-compliant
@@ -556,17 +610,19 @@ impl TxPool {
 /// AND enforces the rolling-relay-fee floor inline via
 /// `apply_post_consensus_policy_with_floor` -> `validate_fee_floor`.
 ///
-/// Cross-client divergence (Hard Rule 2026-05-04 wave-20 thread #5):
+/// Cross-client divergence between Go RelayMetadata and Rust relay_metadata:
 /// Go `RelayMetadata` (`clients/go/node/mempool.go`) does NOT enforce
 /// relay-floor inline; Go delegates floor enforcement to per-peer
 /// relay-policy + the admit-time `validateFeeFloorLockedWithFloor`.
-/// The Rust relay path enforces inline at relay-time; the Go relay path
-/// admits below-floor txs whose Rust counterpart would
-/// `Unavailable`-reject. This asymmetry is INTENTIONAL pending a future
-/// cross-client unification slice (RUB-NNN). The pinning test
+/// The Rust relay path enforces inline at relay-time. Go's
+/// `RelayMetadata` is a read-only metadata fetcher and does NOT insert
+/// into the mempool. The documented expected delta is: below-floor txs
+/// whose Go `RelayMetadata` returns metadata while Rust `relay_metadata`
+/// returns `Unavailable`. This asymmetry is INTENTIONAL pending a
+/// future cross-client unification slice (separate follow-up — TBD).
+/// The pinning test
 /// `rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit`
-/// (`rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit`
-/// in this file) documents the Rust side of the divergence.
+/// in this file documents the Rust side of the divergence.
 pub(crate) fn relay_metadata(
     tx_bytes: &[u8],
     chain_state: &ChainState,
@@ -634,9 +690,9 @@ pub(crate) fn relay_metadata(
 
 /// Shared post-consensus policy sequence used by both
 /// `TxPool::admit_with_metadata` (admit gate) and `relay_metadata`
-/// (relay gate). Mirrors Go's `applyPolicyAgainstState` plus
-/// `validateFeeFloorLocked` pair (clients/go/node/mempool.go (`validateFeeFloorLocked`)
-/// `validateFeeFloorLocked` and `validateFeeFloorLockedWithFloor`). Centralising the cfg-clone, cfg-zero
+/// (relay gate). Mirrors Go's `applyPolicyAgainstState` plus the
+/// `validateFeeFloorLocked` + `validateFeeFloorLockedWithFloor` pair
+/// in clients/go/node/mempool.go. Centralising the cfg-clone, cfg-zero
 /// override, `apply_policy` invocation and rolling-floor enforcement
 /// in one private helper prevents the public-gate-drift class that
 /// PR #1410 wave-2 fixed once already (relay_metadata had skipped the
@@ -794,7 +850,7 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
 }
 
 /// Returns true if `fee` is below the rolling fee floor for `weight`.
-/// Mirrors Go `feeRateBelowFloor` (clients/go/node/mempool.go (`feeRateBelowFloor`))
+/// Mirrors Go `feeRateBelowFloor` in clients/go/node/mempool.go
 /// using full-precision u128 cross-multiplication (`fee < weight * floor`).
 /// u128 holds any `u64 * u64` product losslessly, so the comparison is
 /// well-defined at every input including `weight == u64::MAX` and
@@ -825,7 +881,7 @@ fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
 /// on rolling-floor failure, mirroring Go `validateFeeFloorLocked` at
 /// clients/go/node/mempool.go (`validateFeeFloorLocked` wrapper + `validateFeeFloorLockedWithFloor` body). The `DEFAULT_MEMPOOL_MIN_FEE_RATE`
 /// clamp lives inside `fee_rate_below_floor` (Go-parity at
-/// clients/go/node/mempool.go (in-helper clamp inside `feeRateBelowFloor`; grep `DefaultMempoolMinFeeRate` in fn body)); the error message surfaces
+/// clients/go/node/mempool.go in-helper clamp inside `feeRateBelowFloor` — grep `DefaultMempoolMinFeeRate` in fn body. The error message surfaces
 /// the post-clamp value for operator clarity.
 fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
     if fee_rate_below_floor(fee, weight, cfg_floor) {
@@ -839,7 +895,7 @@ fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoo
 
 /// RUB-166 cheap fee-floor precheck for plain P2PK spam fast-reject.
 /// Mirrors Go's `cheapFeeFloorPrecheck` at
-/// `clients/go/node/mempool_precheck_floor.go (`cheapFeeFloorPrecheck`)` (RUB-165, PR #1415, merge SHA
+/// `clients/go/node/mempool_precheck_floor.go` `cheapFeeFloorPrecheck` (RUB-165, PR #1415, merge SHA
 /// `ed3be97`).
 ///
 /// Conservatism (verbatim Go logic): only fast-rejects when ALL of:
@@ -895,7 +951,7 @@ fn cheap_fee_floor_precheck(
     //
     // tx_nonce == 0 for non-coinbase: the slow path returns
     // `Rejected("tx_nonce must be >= 1 for non-coinbase")` at
-    // `clients/rust/crates/rubin-consensus/src/utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`.
+    // `clients/rust/crates/rubin-consensus/src/utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`.
     // Same defer added in Go's `cheapFeeFloorPrecheck` so admit/relay
     // endpoints behave identically across clients.
     if tx.tx_kind != 0x00 || !tx.da_payload.is_empty() || tx.tx_nonce == 0 {
@@ -963,17 +1019,17 @@ fn fee_precheck_p2pk_input_value(
     let input = &tx.inputs[0];
     // Coinbase-prevout marker on a non-coinbase input: slow path
     // returns Rejected (terminal) via the parse-time check at
-    // `clients/rust/crates/rubin-consensus/src/utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`.
+    // `clients/rust/crates/rubin-consensus/src/utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`.
     if input.prev_txid == [0u8; 32] && input.prev_vout == 0xffff_ffff {
         return None;
     }
     // Non-empty script_sig on a P2PK input: slow path returns Rejected
-    // (terminal) via the parse-time check at `utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`.
+    // (terminal) via the parse-time check at `utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`.
     if !input.script_sig.is_empty() {
         return None;
     }
     // Out-of-range sequence on a P2PK input: slow path returns Rejected
-    // (terminal) via the parse-time check at `utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`.
+    // (terminal) via the parse-time check at `utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`.
     if input.sequence > 0x7fff_ffff {
         return None;
     }
@@ -993,19 +1049,34 @@ fn fee_precheck_p2pk_input_value(
     }
     // Wave-14 witness-item structural validation. Each defer mirrors a
     // terminal-reject branch in the slow-path `validate_p2pk_spend_q`
-    // at `clients/rust/crates/rubin-consensus/src/spend_verify.rs (`validate_p2pk_spend_q`)`.
+    // at `clients/rust/crates/rubin-consensus/src/spend_verify.rs` `validate_p2pk_spend_q`.
     // ML-DSA signature verification itself stays out of the precheck by
     // design (it is the expensive operation this fast-reject is built to
     // skip); cheap structural checks below exercise everything except
     // the cryptographic verify step + key-binding sha3.
     let w = &tx.witness[0];
-    let default_rp = DefaultRotationProvider;
-    let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
-    if !rp.native_spend_suites(next_height).contains(w.suite_id) {
-        return None; // mirrors spend_verify.rs (`validate_p2pk_spend_q`) SigAlgInvalid
+    // Wave-22 hot-path cache (Copilot wave-21 P2 #1+#2): when the
+    // caller passes `rotation=None`, reuse the cached default
+    // native_spend set instead of allocating a fresh `BTreeSet<u8>`
+    // per tx via `DefaultRotationProvider::native_spend_suites`. The
+    // default set is height-independent so a single static instance
+    // is correct for all heights.
+    let in_native_spend = match rotation {
+        Some(rp) => rp.native_spend_suites(next_height).contains(w.suite_id),
+        None => cached_default_native_spend_set().contains(w.suite_id),
+    };
+    if !in_native_spend {
+        return None; // mirrors spend_verify.rs `validate_p2pk_spend_q` SigAlgInvalid
     }
-    let default_reg = SuiteRegistry::default_registry();
-    let reg: &SuiteRegistry = registry.unwrap_or(&default_reg);
+    // Wave-22 fix per Copilot wave-21 P2 #1: cached static fallback
+    // (no per-tx BTreeMap construction in the spam-reject hot path).
+    // Closure (not bare fn-ptr) is required: lifetime variance of
+    // `&'static SuiteRegistry` vs `&'1 SuiteRegistry` (the inferred
+    // lifetime of `registry: Option<&SuiteRegistry>`) means
+    // `unwrap_or_else(cached_default_registry)` fails type-check
+    // (E0521). Allowing `clippy::redundant_closure` for this site.
+    #[allow(clippy::redundant_closure)]
+    let reg: &SuiteRegistry = registry.unwrap_or_else(|| cached_default_registry());
     let params = reg.lookup(w.suite_id)?; // mirrors `validate_p2pk_spend_q` SigAlgInvalid
     if w.pubkey.len() as u64 != params.pubkey_len || w.signature.len() as u64 != params.sig_len + 1
     {
@@ -1060,23 +1131,26 @@ fn fee_precheck_p2pk_input_value(
 /// running sum does not overflow `u64`. Returns `None` for any other
 /// shape so the caller defers to the expensive admission path. The
 /// extra structural guards mirror the slow-path checks at
-/// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs (`validate_tx_covenants_genesis`)`
+/// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs` `validate_tx_covenants_genesis`
 /// — without them a below-floor tx with consensus-invalid P2PK
 /// outputs would be misclassified as transient `Unavailable` instead
 /// of permanent `Rejected`. Mirrors Go's `feePrecheckP2PKOutputValue`
-/// at `clients/go/node/mempool_precheck_output.go (`feePrecheckP2PKOutputValue` full body, including `bits.Add64` overflow defer)` (full
-/// function span including the `bits.Add64` overflow defer at
-/// — Go got the same wave-4 guard set in this PR; helper was
-/// extracted from `mempool.go` in the wave-9..11 file split).
+/// in `clients/go/node/mempool_precheck_output.go` (full function
+/// body including the `bits.Add64` overflow defer; Go got the same
+/// wave-4 guard set in this PR; helper was extracted from
+/// `mempool.go` in the wave-9..11 file split).
 fn fee_precheck_p2pk_output_value(
     outputs: &[rubin_consensus::TxOutput],
     next_height: u64,
     rotation: Option<&dyn RotationProvider>,
 ) -> Option<u64> {
     use rubin_consensus::constants::MAX_P2PK_COVENANT_DATA;
-    let default_rp = DefaultRotationProvider;
-    let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
-    let native_suites = rp.native_create_suites(next_height);
+    // Wave-22 hot-path cache: same rationale as input-side helper.
+    let owned_create_set: Option<NativeSuiteSet> =
+        rotation.map(|rp| rp.native_create_suites(next_height));
+    let native_suites: &NativeSuiteSet = owned_create_set
+        .as_ref()
+        .unwrap_or_else(|| cached_default_native_create_set());
     let mut total: u64 = 0;
     for output in outputs {
         if output.covenant_type != rubin_consensus::constants::COV_TYPE_P2PK {
@@ -1084,7 +1158,7 @@ fn fee_precheck_p2pk_output_value(
         }
         // Wave-4 class-closure conservatism: each guard mirrors a
         // permanent-reject branch in `validate_tx_covenants_genesis`
-        // (covenant_genesis.rs (`validate_tx_covenants_genesis`)).
+        // (covenant_genesis.rs `validate_tx_covenants_genesis`).
         if output.value == 0 {
             return None;
         }
@@ -1934,7 +2008,7 @@ mod tests {
         //     admit_with_metadata had no rolling-floor classification.
         //   - new invariant: validate_fee_floor runs BEFORE the
         //     pool-full check (Go validateCapacityAdmissionLocked order
-        //     at clients/go/node/mempool.go (`addEntryLockedWithFloor` capacity-eviction block)). Sub-floor
+        //     at clients/go/node/mempool.go `addEntryLockedWithFloor` capacity-eviction block. Sub-floor
         //     candidates fail the floor check first.
         //   - reachability: tx is well-formed; the pool-full ordering
         //     branch is the test goal.
@@ -3657,7 +3731,7 @@ mod tests {
 
     /// P1 #4 helper unit test — `fee_rate_below_floor` is a u128 cross-mul
     /// predicate matching Go `feeRateBelowFloor`
-    /// (clients/go/node/mempool.go (`feeRateBelowFloor`)), including the in-helper
+    /// (`feeRateBelowFloor` in clients/go/node/mempool.go), including the in-helper
     /// `floor < DefaultMempoolMinFeeRate` clamp at
     /// clients/go/node/mempool.go (in-helper clamp inside `feeRateBelowFloor`; grep `DefaultMempoolMinFeeRate` in fn body). Calling with floor=0
     /// promotes to DEFAULT_MEMPOOL_MIN_FEE_RATE
@@ -3694,7 +3768,7 @@ mod tests {
     /// P1 #4 + clamp regression — `validate_fee_floor` propagates
     /// a cfg-seeded zero into `fee_rate_below_floor`, which itself clamps
     /// to DEFAULT_MEMPOOL_MIN_FEE_RATE per Go `feeRateBelowFloor`
-    /// (clients/go/node/mempool.go (`feeRateBelowFloor`), with the in-helper clamp
+    /// (`feeRateBelowFloor` in clients/go/node/mempool.go, with the in-helper clamp
     /// inside the function body — `if floor < DefaultMempoolMinFeeRate` block). The error message surfaces the post-clamp
     /// value so operators see the actual decision basis.
     #[test]
@@ -3711,7 +3785,7 @@ mod tests {
 
     /// PR-1410 wave-2 fix — relay_metadata must NOT be weaker than
     /// admit_with_metadata. The cfg-zero override before apply_policy
-    /// (clients/go/node/mempool.go (`applyPolicyAgainstState`)) preserves DA-side error class
+    /// (`applyPolicyAgainstState` in clients/go/node/mempool.go) preserves DA-side error class
     /// isolation, but Rust's prior implementation skipped the rolling
     /// relay floor entirely on the relay path. That created a real
     /// production divergence: `tx_relay::handle_received_tx` uses
@@ -4115,7 +4189,7 @@ mod tests {
     /// precheck must NOT mask the missing-UTXO failure as a
     /// rolling-floor `Unavailable`. Mirrors Go's
     /// `TestMempoolCheapFeeFloorPrecheckPreservesMissingUTXOReject`
-    /// (clients/go/node/mempool_test.go (`TestMempoolCheapFeeFloorPrecheckRejectsBeforeSignatureValidationForAllSources`)). The relay-path
+    /// in clients/go/node/mempool_test.go. The relay-path
     /// no-precheck boundary is covered by the dedicated
     /// `rub162_relay_metadata_*` tests further up — this test scope is
     /// strictly the missing-UTXO defer branch on the admit path.
@@ -4299,7 +4373,7 @@ mod tests {
     /// Wave-4 class-closure conservatism guard: `tx_nonce == 0` for a
     /// non-coinbase tx is permanently rejected by
     /// `apply_non_coinbase_tx_basic_update_*` (slow path) at
-    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`
     /// with `TxErrTxNonceInvalid`. Without the wave-4 early-defer
     /// guard, a below-floor tx with `tx_nonce == 0` would be
     /// fast-rejected as transient `Unavailable("mempool fee below
@@ -4331,7 +4405,7 @@ mod tests {
     /// Wave-4 class-closure conservatism guard: a P2PK output with
     /// `value == 0` is permanently rejected by
     /// `validate_tx_covenants_genesis` (slow path) at
-    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs (`validate_tx_covenants_genesis`)`
+    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs` `validate_tx_covenants_genesis`
     /// with `"CORE_P2PK value must be > 0"`. Without the wave-4 defer
     /// guard, a below-floor tx with a zero-value P2PK output would be
     /// fast-rejected as transient `Unavailable`, masking the
@@ -4360,7 +4434,7 @@ mod tests {
     /// `covenant_data` length is not exactly `MAX_P2PK_COVENANT_DATA`
     /// (33 = 1-byte suite_id + 32-byte payload) is permanently
     /// rejected by `validate_tx_covenants_genesis` at
-    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs (`validate_tx_covenants_genesis`)`
+    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs` `validate_tx_covenants_genesis`
     /// with `"invalid CORE_P2PK covenant_data length"`. Without the
     /// wave-4 defer guard, a below-floor tx with a wrong-length P2PK
     /// covenant_data would be fast-rejected as transient
@@ -4402,7 +4476,7 @@ mod tests {
     /// `covenant_data[0]` (suite_id) is not in the active
     /// `native_create_suites(next_height)` set is permanently rejected
     /// by `validate_tx_covenants_genesis` at
-    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs (`validate_tx_covenants_genesis`)`
+    /// `clients/rust/crates/rubin-consensus/src/covenant_genesis.rs` `validate_tx_covenants_genesis`
     /// with `"CORE_P2PK suite not in native create set"`. Without the
     /// wave-4 defer guard, a below-floor tx with an invalid suite
     /// would be fast-rejected as transient `Unavailable`, masking the
@@ -4434,7 +4508,7 @@ mod tests {
     /// Wave-4 input-side class-closure: a non-empty `script_sig` on a
     /// P2PK input is rejected by the slow path
     /// (`apply_non_coinbase_tx_basic_update_*` at
-    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`)
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`)
     /// with `TxErrParse "script_sig must be empty under genesis
     /// covenant set"`. Without the wave-4 defer guard, a below-floor
     /// tx with non-empty `script_sig` would be misclassified as
@@ -4460,7 +4534,7 @@ mod tests {
 
     /// Wave-4 input-side class-closure: a `sequence > 0x7fffffff` on a
     /// P2PK input is rejected by the slow path at
-    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`
     /// with `TxErrSequenceInvalid "sequence exceeds 0x7fffffff"`.
     /// Without the wave-4 defer guard, a below-floor tx with
     /// out-of-range sequence would be misclassified as transient
@@ -4487,7 +4561,7 @@ mod tests {
     /// Wave-4 input-side class-closure: a tx with `witness.len() != 1`
     /// (zero or more than one witness slot) on a single-P2PK-input tx
     /// is rejected by the slow path at
-    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`
     /// with `TxErrParse` ("invalid witness slots" / "witness
     /// underflow"). Without the wave-4 defer guard, a below-floor tx
     /// with mismatched witness count would be misclassified as
@@ -4533,7 +4607,7 @@ mod tests {
     /// Wave-4 input-side class-closure: a non-coinbase tx whose input
     /// uses the coinbase-prevout marker (`prev_txid == [0u8; 32]` AND
     /// `prev_vout == 0xffff_ffff`) is rejected by the slow path at
-    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`
     /// with `TxErrParse "coinbase prevout encoding forbidden in
     /// non-coinbase"`. Without the wave-4 defer guard, a below-floor
     /// tx with the coinbase marker would be misclassified as transient
@@ -4562,7 +4636,7 @@ mod tests {
     /// spend (`entry.created_by_coinbase && next_height -
     /// entry.creation_height < COINBASE_MATURITY`) is rejected by the
     /// slow path at
-    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs (`apply_non_coinbase_tx_basic_update_*`)`
+    /// `clients/rust/crates/rubin-consensus/src/utxo_basic.rs` `apply_non_coinbase_tx_basic_update_*`
     /// with `TxErrCoinbaseImmature` "coinbase immature". Without the
     /// wave-5 defer guard, a below-floor immature-coinbase spend
     /// would be misclassified as transient `Unavailable("mempool fee
@@ -4611,7 +4685,7 @@ mod tests {
     /// arbitrary covenant_data bytes per chain_state_from_disk)
     /// would panic the admission loop on the `[0]` / `[1..33]`
     /// indexing. Mirrors slow-path covenant_data length check at
-    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs (`validate_p2pk_spend_q`)`.
+    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs` `validate_p2pk_spend_q`.
     /// Direct-helper exercise pins both `len < 33` and `len > 33`.
     #[test]
     fn rub166_precheck_defers_when_input_utxo_covenant_data_length_invalid() {
@@ -4666,7 +4740,7 @@ mod tests {
     /// Wave-16 sighash trailer: defer when `signature[-1]` is NOT one
     /// of the six valid sighash types accepted by `is_valid_sighash_type`
     /// (`SIGHASH_ALL/NONE/SINGLE × ANYONECANPAY`). Mirrors slow-path
-    /// reject at `clients/rust/crates/rubin-consensus/src/sighash.rs (`is_valid_sighash_type`)`.
+    /// reject at `clients/rust/crates/rubin-consensus/src/sighash.rs` `is_valid_sighash_type`.
     /// Verifies BOTH (a) invalid trailer (e.g. 0x05) defers and
     /// (b) valid non-ALL trailer (e.g. SIGHASH_NONE = 0x02) is
     /// accepted by the precheck (closes wave-15 over-defer P1).
@@ -4713,7 +4787,7 @@ mod tests {
     /// Wave-15 key-binding: defer when `SHA3(witness.pubkey)` does
     /// not match `entry.covenant_data[1..33]`. Mirrors slow-path key-
     /// binding check at
-    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs (`validate_p2pk_spend_q`)`.
+    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs` `validate_p2pk_spend_q`.
     /// Direct-helper exercise mutates the witness pubkey first byte so
     /// the SHA3 hash diverges from the covenant_data binding.
     #[test]
@@ -4734,7 +4808,7 @@ mod tests {
     /// Wave-14 input-side rotation guard: defer when the witness
     /// `suite_id` is not in the active `native_spend_suites(next_height)`
     /// set. Mirrors slow-path reject at
-    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs (`validate_p2pk_spend_q`)`
+    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs` `validate_p2pk_spend_q`
     /// (`SigAlgInvalid`). Without this guard, a below-floor tx whose
     /// suite is consensus-rejected at spend time would be misclassified
     /// as transient `Unavailable` instead of terminal `Rejected`.
@@ -4778,7 +4852,7 @@ mod tests {
     /// `SuiteRegistry::lookup(suite_id)` returns `None` (the active
     /// registry has no entry for the witness suite). Mirrors slow-path
     /// reject at
-    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs (`validate_p2pk_spend_q`)`
+    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs` `validate_p2pk_spend_q`
     /// (`SigAlgInvalid`). Without this guard, a below-floor tx with an
     /// unregistered suite would be misclassified as transient
     /// `Unavailable` instead of terminal `Rejected`. Closes Copilot
@@ -4816,7 +4890,7 @@ mod tests {
     /// `witness.pubkey.len()` does not match `params.pubkey_len` OR
     /// `witness.signature.len()` does not match `params.sig_len + 1`
     /// (the +1 is the trailing sighash byte). Mirrors slow-path reject
-    /// at `clients/rust/crates/rubin-consensus/src/spend_verify.rs (`validate_p2pk_spend_q`)`
+    /// at `clients/rust/crates/rubin-consensus/src/spend_verify.rs` `validate_p2pk_spend_q`
     /// (`SigNoncanonical`). Without this guard a below-floor tx with a
     /// malformed witness (truncated pubkey or oversized signature)
     /// would be misclassified as transient `Unavailable` instead of
@@ -4897,6 +4971,50 @@ mod tests {
             "covenant_data[0] != witness.suite_id must defer (None); got {:?}",
             result
         );
+    }
+
+    /// Wave-22 cache identity + canonical-manifest pin (Copilot
+    /// wave-21 P2 #1+#2 follow-up). Asserts: (a) repeated calls to
+    /// `cached_default_registry()` return the SAME pointer (no
+    /// rebuild), (b) cached value matches `is_canonical_default_live_manifest`,
+    /// (c) cached registry contains `SUITE_ID_ML_DSA_87` lookup with
+    /// canonical params. Future change that swaps the cache to a
+    /// non-canonical builder fails this test.
+    #[test]
+    fn rub166_cached_default_registry_identity_and_canonical_manifest() {
+        use rubin_consensus::constants::SUITE_ID_ML_DSA_87;
+        let r1 = super::cached_default_registry();
+        let r2 = super::cached_default_registry();
+        assert!(
+            std::ptr::eq(r1, r2),
+            "cached_default_registry must return identical pointer (no rebuild per call)"
+        );
+        assert!(
+            r1.is_canonical_default_live_manifest(),
+            "cached_default_registry must satisfy IsCanonicalDefaultLiveManifest"
+        );
+        let params = r1
+            .lookup(SUITE_ID_ML_DSA_87)
+            .expect("ML-DSA-87 must be present in cached default registry");
+        assert_eq!(params.suite_id, SUITE_ID_ML_DSA_87);
+        assert_eq!(params.alg_name, "ML-DSA-87");
+    }
+
+    /// Wave-22 cache identity for native_spend / native_create sets.
+    /// Same rationale as registry-identity test: ensure the cached
+    /// `NativeSuiteSet` is reused, not rebuilt per call.
+    #[test]
+    fn rub166_cached_default_native_sets_identity() {
+        use rubin_consensus::constants::SUITE_ID_ML_DSA_87;
+        let s1 = super::cached_default_native_spend_set();
+        let s2 = super::cached_default_native_spend_set();
+        assert!(std::ptr::eq(s1, s2), "spend set cache identity");
+        assert!(s1.contains(SUITE_ID_ML_DSA_87));
+
+        let c1 = super::cached_default_native_create_set();
+        let c2 = super::cached_default_native_create_set();
+        assert!(std::ptr::eq(c1, c2), "create set cache identity");
+        assert!(c1.contains(SUITE_ID_ML_DSA_87));
     }
 
     #[test]
