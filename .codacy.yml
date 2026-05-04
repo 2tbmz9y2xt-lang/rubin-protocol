@@ -40,6 +40,17 @@ exclude_paths:
   - "clients/go/consensus/connect_block_parallel.go"
   - "clients/go/consensus/sig_verify_batch.go"
   - "clients/go/consensus/sig_verify_queued.go"
+  # Mempool admission precheck (RUB-166 cheap fee-floor fast-reject):
+  # consensus-critical class-closure code that mirrors every terminal-reject
+  # branch in the slow path so below-floor + structurally-defective tx are not
+  # misclassified as transient Unavailable. Each guard maps 1:1 to a slow-path
+  # check at clients/go/consensus/utxo_basic.go and covenant_genesis.go;
+  # branching is mandatory. Reviewed via class-leak-auditor + toctou-auditor +
+  # 18 rub166_*/TestMempoolCheap* tests covering each defer branch.
+  - "clients/go/node/mempool_precheck.go"
+  - "clients/go/node/mempool_precheck_floor.go"
+  - "clients/go/node/mempool_precheck_input.go"
+  - "clients/go/node/mempool_precheck_output.go"
 
 engines:
   duplication:
