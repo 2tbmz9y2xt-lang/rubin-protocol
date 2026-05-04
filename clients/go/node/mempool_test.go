@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/sha3"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1684,21 +1685,27 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase(t *te
 	if _, ok := feePrecheckP2PKInputValue(tx, utxos, immatureHeight, nil, nil); ok {
 		t.Fatalf("immature coinbase spend must return ok=false so precheck defers")
 	}
-	// At maturity threshold the defer no longer fires (sanity-pin requires
-	// a registered ML-DSA-87 witness item — wave-14 added witness-item
-	// structural validation; below we synthesize the minimum-valid witness
-	// shape so this branch reaches the Some(value) return).
+	// At maturity threshold the defer no longer fires (sanity-pin
+	// requires a registered ML-DSA-87 witness item — wave-14 added
+	// witness-item structural validation, wave-15 added SHA3
+	// key-binding + SIGHASH_ALL trailer; synthesize the minimum-valid
+	// witness shape so this branch reaches the (value, true) return).
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
 	utxos[consensus.Outpoint{Txid: [32]byte{0x11}, Vout: 0}] = consensus.UtxoEntry{
 		Value:             100,
 		CovenantType:      consensus.COV_TYPE_P2PK,
-		CovenantData:      append([]byte{consensus.SUITE_ID_ML_DSA_87}, make([]byte, 32)...),
+		CovenantData:      covData,
 		CreatedByCoinbase: true,
 		CreationHeight:    0,
 	}
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
 	tx.Witness = []consensus.WitnessItem{{
 		SuiteID:   consensus.SUITE_ID_ML_DSA_87,
-		Pubkey:    make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES),
-		Signature: make([]byte, consensus.ML_DSA_87_SIG_BYTES+1),
+		Pubkey:    pubkey,
+		Signature: signature,
 	}}
 	matureHeight := uint64(consensus.COINBASE_MATURITY)
 	if _, ok := feePrecheckP2PKInputValue(tx, utxos, matureHeight, nil, nil); !ok {

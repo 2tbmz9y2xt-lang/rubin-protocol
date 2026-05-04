@@ -934,7 +934,8 @@ fn fee_precheck_p2pk_input_value(
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Option<u64> {
-    use rubin_consensus::constants::COINBASE_MATURITY;
+    use rubin_consensus::constants::{COINBASE_MATURITY, MAX_P2PK_COVENANT_DATA};
+    use rubin_consensus::{is_valid_sighash_type, sha3_256};
     if tx.inputs.len() != 1 {
         return None;
     }
@@ -992,8 +993,39 @@ fn fee_precheck_p2pk_input_value(
     {
         return None; // mirrors :137-143 SigNoncanonical
     }
+    // Wave-15 panic-safety + suite consistency. The covenant_data length
+    // check MUST precede the [0] / [1..33] indexing because
+    // `chain_state_from_disk` accepts arbitrary persisted covenant_data
+    // bytes without per-covenant structure validation, so a corrupted
+    // on-disk UTXO entry could otherwise panic the admission loop on the
+    // next spend. Mirror of slow-path spend_verify.rs:144-151.
+    if entry.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA {
+        return None; // panic-safety + mirrors :144-151 CovenantTypeInvalid
+    }
     if entry.covenant_data[0] != w.suite_id {
         return None; // mirrors :144-151 CovenantTypeInvalid
+    }
+    // Wave-16 sighash trailer: defer only on INVALID sighash type. The
+    // slow path's `is_valid_sighash_type` (sighash.rs:18-25) accepts six
+    // canonical trailers (SIGHASH_ALL/NONE/SINGLE × ANYONECANPAY); only
+    // bytes outside that set are terminal-rejected. Wave-15's literal
+    // `== SIGHASH_ALL` check over-deferred 5/6 valid types and let
+    // attackers flip the trailer byte to bypass the cheap reject —
+    // hostile-reviewer P1. Free check (single byte compare).
+    let Some(&trailer) = w.signature.last() else {
+        return None;
+    };
+    if !is_valid_sighash_type(trailer) {
+        return None;
+    }
+    // Wave-15 key-binding: SHA3(pubkey) must match covenant_data[1..33].
+    // Cost: one SHA3 hash on a ~2.6KB pubkey ≪ ML-DSA verify (the
+    // documented scope-cap). Slow path's `verify_mldsa_key_and_sig_q`
+    // at spend_verify.rs:155-166 returns
+    // `SigInvalid("CORE_P2PK key binding mismatch")`.
+    let pubkey_hash = sha3_256(&w.pubkey);
+    if pubkey_hash[..] != entry.covenant_data[1..33] {
+        return None;
     }
     Some(entry.value)
 }

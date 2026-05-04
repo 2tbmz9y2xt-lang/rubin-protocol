@@ -1,6 +1,9 @@
 package node
 
 import (
+	"bytes"
+	"crypto/sha3"
+
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
@@ -48,13 +51,16 @@ func feePrecheckP2PKInputValue(tx *consensus.Tx, utxos map[consensus.Outpoint]co
 }
 
 // precheckP2PKWitnessItemValid returns true iff the single P2PK witness
-// item is structurally valid for the cheap precheck. Wave-14 mirrors
-// terminal-reject branches in slow-path validate_p2pk_spend_q at
-// clients/go/consensus/spend_verify.go (suite in NativeSpendSuites,
-// registry lookup, canonical pubkey/signature lengths, suite consistency
-// with input UTXO covenant_data[0]). ML-DSA signature verification and
-// pubkey key-binding sha3 stay out of the precheck by design (those are
-// the expensive operations this fast-reject is built to skip).
+// item is structurally valid for the cheap precheck. Mirrors terminal-
+// reject branches in slow-path validate_p2pk_spend_q at
+// clients/go/consensus/spend_verify.go: suite in NativeSpendSuites
+// (wave-14), registry lookup (wave-14), canonical pubkey/signature
+// lengths (wave-14), covenant_data length + suite consistency with
+// input UTXO covenant_data[0] (wave-15 panic-safety + wave-14),
+// sighash trailer SIGHASH_ALL (wave-15), and key-binding
+// SHA3(pubkey)==CovenantData[1:33] (wave-15). ML-DSA signature
+// verification stays out of the precheck by design (the only
+// documented scope-cap; SHA3 and byte compare are CHEAP and in scope).
 func precheckP2PKWitnessItemValid(w *consensus.WitnessItem, entry consensus.UtxoEntry, nextHeight uint64, rotation consensus.RotationProvider, registry *consensus.SuiteRegistry) bool {
 	if rotation == nil {
 		rotation = consensus.DefaultRotationProvider{}
@@ -73,7 +79,34 @@ func precheckP2PKWitnessItemValid(w *consensus.WitnessItem, entry consensus.Utxo
 		len(w.Signature) != params.SigLen+1 {
 		return false
 	}
-	return entry.CovenantData[0] == w.SuiteID
+	// Wave-15 panic-safety + suite consistency. The covenant_data length
+	// check MUST precede the [0] / [1:33] indexing because
+	// chainStateFromDisk accepts arbitrary persisted covenant_data
+	// bytes without per-covenant structure validation, so a corrupted
+	// on-disk UTXO entry could otherwise panic the admission loop on
+	// the next spend. Mirror of slow-path spend_verify.go counterpart.
+	if len(entry.CovenantData) != int(consensus.MAX_P2PK_COVENANT_DATA) {
+		return false
+	}
+	if entry.CovenantData[0] != w.SuiteID {
+		return false
+	}
+	// Wave-16 sighash trailer: defer only on INVALID sighash type. The
+	// slow path's IsValidSighashType (sighash.go:12+) accepts six
+	// canonical trailers (SIGHASH_ALL/NONE/SINGLE × ANYONECANPAY); only
+	// bytes outside that set are terminal-rejected. Wave-15's literal
+	// `!= SIGHASH_ALL` check over-deferred 5/6 valid types and let
+	// attackers flip the trailer byte to bypass the cheap reject —
+	// hostile-reviewer P1. Free check (single byte compare).
+	if !consensus.IsValidSighashType(w.Signature[len(w.Signature)-1]) {
+		return false
+	}
+	// Wave-15 key-binding: SHA3(pubkey) must match CovenantData[1:33].
+	// Cost: one SHA3 hash on a ~2.6KB pubkey, ≪ ML-DSA verify (the
+	// documented scope-cap). Slow-path counterpart returns SigInvalid
+	// "CORE_P2PK key binding mismatch".
+	pubkeyHash := sha3.Sum256(w.Pubkey)
+	return bytes.Equal(pubkeyHash[:], entry.CovenantData[1:33])
 }
 
 // precheckP2PKInputStructurallyValid returns true iff the input is
