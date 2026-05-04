@@ -246,6 +246,16 @@ impl TxPool {
         self.txs.get(txid).map(|entry| entry.raw.clone())
     }
 
+    /// Returns the caller-declared `TxSource` recorded on the pool entry
+    /// with the given txid. Returns `None` if no matching entry is
+    /// present. Source is observability metadata only and does not
+    /// affect admission ordering or eviction priority. Intended for
+    /// downstream observability / source-counter telemetry / parity
+    /// tests in producer-wiring slices (RUB-169..173).
+    pub fn entry_source(&self, txid: &[u8; 32]) -> Option<TxSource> {
+        self.txs.get(txid).map(|entry| entry.source)
+    }
+
     /// Inject a raw entry for testing without full transaction validation.
     #[cfg(test)]
     pub fn inject_test_entry(&mut self, txid: [u8; 32], raw: Vec<u8>) {
