@@ -5248,20 +5248,40 @@ mod tests {
     }
 
     /// Hostile case: source variant must NOT influence admission
-    /// ordering, eviction priority, or mining selection. The SAME tx
-    /// bytes admitted to two pools with different sources produce
-    /// byte-identical selection output. Mirrors Go invariant where
-    /// `mempoolEntry.source` is observability metadata only and is
-    /// never consulted by `validateCapacityAdmissionLocked`,
+    /// ordering, eviction priority, or mining selection. Mirrors Go
+    /// invariant where `mempoolEntry.source` is observability metadata
+    /// only and is never consulted by `validateCapacityAdmissionLocked`,
     /// `capacityEvictionPlanLocked`, or block-template selection.
     ///
+    /// Coverage axes:
+    ///   1. Admission produces source-independent txid (same tx bytes
+    ///      under different sources → identical txid; recorded source
+    ///      varies).
+    ///   2. Selection ordering across MULTIPLE entries with equal
+    ///      (fee, weight) but different txids must be byte-identical
+    ///      between two pools that differ ONLY in source assignment
+    ///      (Pool A: ent1=Local + ent2=Reorg; Pool B: ent1=Reorg +
+    ///      ent2=Local). This catches regressions where source
+    ///      accidentally enters the comparator (Copilot-2026-05-04 P2:
+    ///      single-entry selection is trivially identical, so the
+    ///      multi-entry leg is the load-bearing assertion).
+    ///
     /// Test design note: `signed_conflicting_p2pk_state_and_txs`
-    /// produces fresh ML-DSA signatures per call, so two independent
-    /// generations would yield byte-different raw txs even with
-    /// identical (fee, weight, size). Admit the SAME `admitted_raw` to
-    /// two pools to isolate the source-difference variable.
+    /// produces fresh ML-DSA signatures per call, so the admit-path
+    /// leg admits the SAME `admitted_raw` to two pools to isolate the
+    /// source-difference variable. The selection-ordering leg uses
+    /// `inject_test_entry` to side-step admission's input-conflict /
+    /// fee-floor / signature-verify pipeline (which is source-blind by
+    /// construction at the admission API level — see leg 1) and
+    /// directly exercise the comparator + worst-heap path with
+    /// equal-priority distinct-txid entries that production admission
+    /// would not normally produce together (because they would
+    /// double-spend the same input). The injected entries' `inputs`
+    /// field is empty so no spender-index conflict.
     #[test]
     fn source_does_not_affect_admission_ordering() {
+        // Leg 1: admit-path source-independence (same tx bytes, two pools,
+        // different recorded source on entry, identical txid).
         let (state, admitted_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
 
         let mut pool_local = TxPool::new();
@@ -5300,12 +5320,42 @@ mod tests {
             TxSource::Reorg
         );
 
-        let selected_local = pool_local.select_transactions(10, usize::MAX);
-        let selected_reorg = pool_reorg.select_transactions(10, usize::MAX);
+        // Leg 2: multi-entry selection-ordering source-blindness
+        // (Pool A: ent1=Local + ent2=Reorg; Pool B: ent1=Reorg + ent2=Local).
+        // Equal (fee, weight) but distinct txids → comparator must produce
+        // identical order between pools that differ ONLY in source labels.
+        // Use inject_test_entry to bypass admission (no double-spend) and
+        // exercise the comparator + worst-heap path directly.
+        let txid_aaa = [0xaa; 32];
+        let txid_bbb = [0xbb; 32];
+        let make_entry = |raw: Vec<u8>, source: TxSource| TxPoolEntry {
+            raw,
+            inputs: Vec::new(),
+            fee: 100,
+            weight: 1,
+            size: 1,
+            source,
+        };
+
+        let mut pool_a_b = TxPool::new();
+        pool_a_b.insert_entry(txid_aaa, make_entry(vec![0x01], TxSource::Local));
+        pool_a_b.insert_entry(txid_bbb, make_entry(vec![0x02], TxSource::Reorg));
+
+        let mut pool_b_a = TxPool::new();
+        pool_b_a.insert_entry(txid_aaa, make_entry(vec![0x01], TxSource::Reorg));
+        pool_b_a.insert_entry(txid_bbb, make_entry(vec![0x02], TxSource::Local));
+
+        let selected_a_b = pool_a_b.select_transactions(10, usize::MAX);
+        let selected_b_a = pool_b_a.select_transactions(10, usize::MAX);
         assert_eq!(
-            selected_local, selected_reorg,
-            "selection output must be byte-identical across source variants \
-             (admission ordering is source-blind)"
+            selected_a_b.len(),
+            2,
+            "both injected entries must be selected (size budget non-binding)"
+        );
+        assert_eq!(
+            selected_a_b, selected_b_a,
+            "multi-entry selection order must be byte-identical between pools \
+             that differ ONLY in source assignment (comparator must be source-blind)"
         );
     }
 }
