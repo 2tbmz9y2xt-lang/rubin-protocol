@@ -1691,6 +1691,64 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase(t *te
 	}
 }
 
+// TestMempoolValidateFeeFloorLockedWithFloorUsesSnappedValue pins the
+// wave-6 race fix: addTxWithSource snaps currentMinFeeRate ONCE before
+// the cheap precheck, then plumbs that snappedFloor through to
+// validateFeeFloorLocked via addEntryLockedWithFloor so both the
+// precheck's accept/reject decision and the locked admission's
+// accept/reject decision use the SAME input. Without this,
+// applyConnectedBlockParsed +
+// decayMinFeeRateAfterConnectedBlockLocked could lower the live
+// floor between the snapshot read and the lock acquisition, causing
+// the precheck to reject on stale-higher floor while the locked path
+// would have accepted on fresh-lower floor.
+//
+// This test directly exercises validateFeeFloorLockedWithFloor with
+// two different floor values (high snapped vs low live) on the same
+// entry to verify that the snapped value is what drives the decision,
+// independent of any concurrent mutation of m.currentMinFeeRate.
+func TestMempoolValidateFeeFloorLockedWithFloorUsesSnappedValue(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	st, _ := testSpendableChainState(fromAddress, []uint64{1_000_000})
+	mp, err := NewMempoolWithConfig(st, nil, devnetGenesisChainID, MempoolConfig{MaxTransactions: 10, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	// Set the LIVE floor to a value that would accept a cheap
+	// fee-rate (mp.currentMinFeeRate <= entry.fee/entry.weight).
+	mp.mu.Lock()
+	mp.currentMinFeeRate = 1
+	mp.mu.Unlock()
+	// Construct an entry whose fee_rate would be REJECTED by the
+	// snapped-high floor (10) but ACCEPTED by the live-low floor (1).
+	entry := &mempoolEntry{
+		txid:   [32]byte{0x77},
+		fee:    5,
+		weight: 1, // fee_rate = 5; <10 (snap rejects); >=1 (live would accept)
+		size:   1,
+	}
+	// The wave-6 fix guarantees: validateFeeFloorLockedWithFloor uses
+	// the passed snappedFloor (10), not m.currentMinFeeRate (1). So
+	// admission rejects.
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 10); err == nil ||
+		!strings.Contains(err.Error(), "mempool fee below rolling minimum") {
+		t.Fatalf("snappedFloor=10 must reject fee_rate=5 entry; got err=%v", err)
+	}
+	// Inverse: snappedFloor=1 (matches live) accepts the same entry.
+	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 1); err != nil {
+		t.Fatalf("snappedFloor=1 must accept fee_rate=5 entry; got err=%v", err)
+	}
+	// Inverse 2: snappedFloor=0 falls back to DefaultMempoolMinFeeRate
+	// inside feeRateBelowFloor (clamp). With Default=1 and fee_rate=5,
+	// the post-clamp comparison still accepts.
+	if err := mp.validateFeeFloorLockedWithFloor(entry /* snappedFloor */, 0); err != nil {
+		t.Fatalf("snappedFloor=0 (post-clamp Default=1) must accept fee_rate=5 entry; got err=%v", err)
+	}
+}
+
 func TestMempoolPolicySnapshot_DoesNotMutateForDaPolicy(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)

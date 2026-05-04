@@ -448,7 +448,17 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 
 	snapshot := m.chainState.admissionSnapshot()
 	policy := m.policySnapshot()
-	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy)
+	// Wave-6 (PR #1422): snap currentMinFeeRate ONCE so the cheap
+	// precheck and the locked addEntryLocked path use the SAME floor
+	// value. Without this, applyConnectedBlockParsed +
+	// decayMinFeeRateAfterConnectedBlockLocked could lower the floor
+	// between the snapshot read and the lock acquisition, causing the
+	// precheck to reject on the stale-higher floor while the locked
+	// admission path would have accepted on the fresh-lower floor.
+	// Per-admission consistency: precheck and addEntryLocked agree on
+	// the same input.
+	snappedFloor := m.CurrentMinFeeRateSnapshot()
+	checked, inputs, err := m.checkTransactionWithSnapshot(txBytes, snapshot, policy, snappedFloor)
 	if err != nil {
 		return err
 	}
@@ -457,7 +467,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource) (retEr
 	defer m.mu.Unlock()
 
 	entry := newMempoolEntry(checked, inputs, source)
-	return m.addEntryLocked(entry)
+	return m.addEntryLockedWithFloor(entry, snappedFloor)
 }
 
 func validMempoolTxSource(source mempoolTxSource) bool {
@@ -656,7 +666,18 @@ func (m *Mempool) policySnapshot() MempoolConfig {
 
 // checkTransactionWithSnapshot validates a transaction against a consistent
 // owned admission snapshot plus an immutable mempool policy snapshot.
-func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
+// checkTransactionWithSnapshot validates a transaction against a consistent
+// owned admission snapshot plus an immutable mempool policy snapshot.
+//
+// `snappedFloor` is the rolling-relay-floor value snapped ONCE in the
+// caller (`addTxWithSource`) before either the precheck or the locked
+// admission path runs. Wave-6 (PR #1422): both `cheapFeeFloorPrecheck`
+// here AND the downstream `validateFeeFloorLocked` inside
+// `addEntryLocked` use this exact value, so a concurrent
+// `decayMinFeeRateAfterConnectedBlockLocked` cannot cause the precheck
+// to reject on stale-higher floor while the locked path would have
+// accepted on fresh-lower floor (per-admission consistency).
+func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainStateAdmissionSnapshot, policy MempoolConfig, snappedFloor uint64) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
 	if snapshot == nil {
 		return nil, nil, txAdmitUnavailable("nil chainstate")
 	}
@@ -686,7 +707,7 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	// (terminal). Without these passes a below-floor + malformed tx
 	// would be misclassified as transient Unavailable instead of
 	// Rejected (terminal).
-	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, m.CurrentMinFeeRateSnapshot(), nextHeight, policy.RotationProvider); err != nil {
+	if err := cheapFeeFloorPrecheck(parsedTx, snapshot, snappedFloor, nextHeight, policy.RotationProvider); err != nil {
 		return nil, nil, err
 	}
 	// Policy checks consume an immutable pre-validation snapshot of only the
@@ -1121,13 +1142,31 @@ func (m *Mempool) validateAdmissionSeqLocked(entry *mempoolEntry) error {
 	return nil
 }
 
+// validateFeeFloorLocked enforces the rolling-relay-floor invariant
+// using the live `m.currentMinFeeRate` value. Production callers
+// SHOULD use `validateFeeFloorLockedWithFloor` to thread a snapped
+// floor value through (see wave-6 race fix); this wrapper exists for
+// test callers that drive the helper in isolation.
 func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
+	return m.validateFeeFloorLockedWithFloor(entry, m.currentMinFeeRateLocked())
+}
+
+// validateFeeFloorLockedWithFloor is the wave-6 race-safe entry point.
+// `snappedFloor` is the floor value captured ONCE in `addTxWithSource`
+// before the cheap precheck fired. Using the snapped value here
+// instead of re-reading `m.currentMinFeeRate` under lock guarantees
+// that the precheck's accept/reject decision and the locked
+// admission's accept/reject decision use the same input — without
+// this, `decayMinFeeRateAfterConnectedBlockLocked` running between
+// the two reads could cause the precheck to reject on a stale-higher
+// floor while the locked path would have accepted on the fresh-lower
+// floor (per-admission consistency).
+func (m *Mempool) validateFeeFloorLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	if entry == nil {
 		return txAdmitRejected("nil mempool entry")
 	}
-	currentMinFeeRate := m.currentMinFeeRateLocked()
-	if feeRateBelowFloor(entry.fee, entry.weight, currentMinFeeRate) {
-		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, currentMinFeeRate))
+	if feeRateBelowFloor(entry.fee, entry.weight, snappedFloor) {
+		return txAdmitUnavailable(fmt.Sprintf("mempool fee below rolling minimum: fee=%d weight=%d min_fee_rate=%d", entry.fee, entry.weight, snappedFloor))
 	}
 	return nil
 }
@@ -1157,12 +1196,30 @@ func normalizeMempoolEntryDefaults(entry *mempoolEntry) {
 	}
 }
 
+// addEntryLocked admits `entry` under `m.mu`, using the live
+// `m.currentMinFeeRate` value for the fee-floor check. Production
+// callers SHOULD use `addEntryLockedWithFloor` (see wave-6 race fix
+// in addTxWithSource); this wrapper exists for test callers that
+// drive the locked admission path in isolation and accept whatever
+// floor is in effect at call time.
 func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
+	return m.addEntryLockedWithFloor(entry, m.currentMinFeeRateLocked())
+}
+
+// addEntryLockedWithFloor is the wave-6 race-safe entry point. The
+// caller MUST pass the `snappedFloor` value that was captured ONCE
+// before the cheap precheck fired (wave-6 race fix: see
+// addTxWithSource for rationale). The snapped floor is plumbed down
+// to validateFeeFloorLocked so that the precheck's accept/reject
+// decision and the locked admission's accept/reject decision use the
+// same input even if decayMinFeeRateAfterConnectedBlockLocked has
+// fired between the two.
+func (m *Mempool) addEntryLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	normalizeMempoolEntryDefaults(entry)
 	if err := m.validateNonCapacityAdmissionLocked(entry); err != nil {
 		return err
 	}
-	evictedEntries, err := m.validateCapacityAdmissionLocked(entry)
+	evictedEntries, err := m.validateCapacityAdmissionLocked(entry, snappedFloor)
 	if err != nil {
 		return err
 	}
@@ -1184,8 +1241,8 @@ func (m *Mempool) addEntryLocked(entry *mempoolEntry) error {
 	return nil
 }
 
-func (m *Mempool) validateCapacityAdmissionLocked(entry *mempoolEntry) ([]*mempoolEntry, error) {
-	if err := m.validateFeeFloorLocked(entry); err != nil {
+func (m *Mempool) validateCapacityAdmissionLocked(entry *mempoolEntry, snappedFloor uint64) ([]*mempoolEntry, error) {
+	if err := m.validateFeeFloorLockedWithFloor(entry, snappedFloor); err != nil {
 		return nil, err
 	}
 	evictedEntries, candidateEvicted, err := m.capacityEvictionPlanLocked(entry)
