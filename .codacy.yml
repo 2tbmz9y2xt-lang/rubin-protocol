@@ -52,8 +52,12 @@ exclude_paths:
   #   2. The branch density CANNOT be lowered without re-introducing
   #      class-leak gaps (waves 4..16 of PR #1422 added each guard
   #      after Copilot/Codex flagged the missing class).
-  #   3. Coverage is enforced by the 21 rub166_* (Rust) + 13
-  #      TestMempoolCheap* (Go) tests that exercise each defer branch.
+  #   3. Coverage is enforced by the comprehensive `rub166_*` (Rust)
+  #      and `TestMempoolCheap*` (Go) test suites that exercise each
+  #      defer branch — counts are intentionally not pinned here so
+  #      this comment does not drift on every test addition; current
+  #      counts are `cargo test -p rubin-node --lib rub166_ -- --list`
+  #      and `go test -count=1 -v ./node -run TestMempoolCheap | grep -c "^=== RUN"`.
   #   4. Future changes to these files SHOULD be reviewed against the
   #      class-leak / TOCTOU / panic-safety / per-branch-test-enumeration
   #      lenses (see review-thread chains on PR #1422 waves 4..16 for

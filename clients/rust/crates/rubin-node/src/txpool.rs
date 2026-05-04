@@ -919,8 +919,9 @@ fn cheap_fee_floor_precheck(
 /// would be misclassified as transient `Unavailable` instead of
 /// terminal `Rejected`, masking the structural error and allowing
 /// callers to retry forever. Mirrors Go's `feePrecheckP2PKInputValue`
-/// in `clients/go/node/mempool.go` (Go gets the same wave-4 guard set
-/// in this PR).
+/// in `clients/go/node/mempool_precheck_input.go` (Go got the same
+/// wave-4 guard set in this PR; helpers were extracted from
+/// `mempool.go` in the wave-9..11 file split).
 ///
 /// Scope-cap: P2PK signature-verification failure is NOT classified
 /// here. Verifying ML-DSA signatures is the expensive operation this
@@ -1047,8 +1048,10 @@ fn fee_precheck_p2pk_input_value(
 /// — without them a below-floor tx with consensus-invalid P2PK
 /// outputs would be misclassified as transient `Unavailable` instead
 /// of permanent `Rejected`. Mirrors Go's `feePrecheckP2PKOutputValue`
-/// at `clients/go/node/mempool_precheck_output.go:23-43` (Go gets the same wave-4
-/// guard set in this PR).
+/// at `clients/go/node/mempool_precheck_output.go:23-53` (full
+/// function span including the `bits.Add64` overflow defer at
+/// :46-49 — Go got the same wave-4 guard set in this PR; helper was
+/// extracted from `mempool.go` in the wave-9..11 file split).
 fn fee_precheck_p2pk_output_value(
     outputs: &[rubin_consensus::TxOutput],
     next_height: u64,
@@ -4788,6 +4791,50 @@ mod tests {
         assert!(
             baseline.is_some(),
             "default registry must NOT defer on signed valid P2PK fixture; got {:?}",
+            baseline
+        );
+    }
+
+    /// Wave-14 input-side witness-length guard: defer when
+    /// `witness.pubkey.len()` does not match `params.pubkey_len` OR
+    /// `witness.signature.len()` does not match `params.sig_len + 1`
+    /// (the +1 is the trailing sighash byte). Mirrors slow-path reject
+    /// at `clients/rust/crates/rubin-consensus/src/spend_verify.rs:137-143`
+    /// (`SigNoncanonical`). Without this guard a below-floor tx with a
+    /// malformed witness (truncated pubkey or oversized signature)
+    /// would be misclassified as transient `Unavailable` instead of
+    /// terminal `Rejected`. Closes Copilot wave-19 P1.
+    #[test]
+    fn rub166_precheck_defers_when_witness_pubkey_or_signature_length_noncanonical() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        // Branch 1: pubkey too short (truncated by 1 byte).
+        {
+            let mut p = parsed.clone();
+            p.witness[0].pubkey.pop().expect("witness pubkey non-empty");
+            let result = fee_precheck_p2pk_input_value(&p, &state.utxos, 1, None, None);
+            assert!(
+                result.is_none(),
+                "truncated pubkey must defer (None); got {:?}",
+                result
+            );
+        }
+        // Branch 2: signature too long (extended by 1 byte beyond sig_len+1).
+        {
+            let mut p = parsed.clone();
+            p.witness[0].signature.push(0u8);
+            let result = fee_precheck_p2pk_input_value(&p, &state.utxos, 1, None, None);
+            assert!(
+                result.is_none(),
+                "oversized signature must defer (None); got {:?}",
+                result
+            );
+        }
+        // Sanity (negative-branch pin): canonical lengths must NOT defer.
+        let baseline = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, None);
+        assert!(
+            baseline.is_some(),
+            "canonical pubkey/signature lengths must NOT defer; got {:?}",
             baseline
         );
     }

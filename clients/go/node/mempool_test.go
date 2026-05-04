@@ -1954,6 +1954,88 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenInputSuiteRegistryLookupMisses(t 
 	}
 }
 
+// TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessPubkeyOrSignatureLengthNoncanonical
+// pins the wave-14 input-side witness-length guard: a P2PK input
+// whose witness Pubkey or Signature length does not match the
+// SuiteParams (PubkeyLen, SigLen+1) is rejected by the slow path at
+// clients/go/consensus/spend_verify.go (TX_ERR_SIG_NONCANONICAL).
+// Without this guard a below-floor tx with a malformed witness would
+// be misclassified as transient Unavailable instead of terminal
+// Rejected. Closes Copilot wave-19 P1 (TestMempoolCheap* coverage gap).
+func TestMempoolCheapFeeFloorPrecheckDefersWhenWitnessPubkeyOrSignatureLengthNoncanonical(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	makeTx := func(pk, sig []byte) *consensus.Tx {
+		return &consensus.Tx{
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+			Witness: []consensus.WitnessItem{{
+				SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+				Pubkey:    pk,
+				Signature: sig,
+			}},
+		}
+	}
+	// Branch 1: pubkey too short (truncated by 1 byte).
+	if _, ok := feePrecheckP2PKInputValue(makeTx(pubkey[:len(pubkey)-1], signature), utxos, 1, nil, nil); ok {
+		t.Fatalf("truncated pubkey must defer (ok=false)")
+	}
+	// Branch 2: signature too long (extended by 1 byte beyond SigLen+1).
+	{
+		oversize := append([]byte{}, signature...)
+		oversize = append(oversize, 0)
+		if _, ok := feePrecheckP2PKInputValue(makeTx(pubkey, oversize), utxos, 1, nil, nil); ok {
+			t.Fatalf("oversized signature must defer (ok=false)")
+		}
+	}
+	// Sanity (negative-branch pin): canonical lengths must NOT defer.
+	if _, ok := feePrecheckP2PKInputValue(makeTx(pubkey, signature), utxos, 1, nil, nil); !ok {
+		t.Fatalf("canonical pubkey/signature lengths must NOT defer (ok=true)")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersOnOutputSumOverflow pins the
+// wave-4 output-side overflow guard: when the sum of P2PK output
+// values overflows uint64 (bits.Add64 carry != 0), defer to the
+// expensive admission path instead of returning a spurious accept on
+// the wrapped value. Mirrors Rust
+// rub166_precheck_defers_on_output_sum_overflow. Closes Copilot
+// wave-19 P1 (TestMempoolCheap* coverage gap).
+func TestMempoolCheapFeeFloorPrecheckDefersOnOutputSumOverflow(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	// Two outputs whose values sum to > uint64.MaxValue.
+	outputs := []consensus.TxOutput{
+		{Value: ^uint64(0) - 5, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData},
+		{Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData},
+	}
+	if _, ok := feePrecheckP2PKOutputValue(outputs, 1, nil); ok {
+		t.Fatalf("output sum overflow must defer (ok=false)")
+	}
+	// Sanity (negative-branch pin): non-overflowing two-output sum
+	// must NOT defer. Confirms the overflow branch is the only
+	// difference exercised by this test.
+	okOutputs := []consensus.TxOutput{
+		{Value: 100, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData},
+		{Value: 200, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: covData},
+	}
+	if total, ok := feePrecheckP2PKOutputValue(okOutputs, 1, nil); !ok || total != 300 {
+		t.Fatalf("non-overflowing sum must NOT defer; got total=%d ok=%v", total, ok)
+	}
+}
+
 // TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive
 // pins the wave-8 race-fix: validateFeeFloorLockedWithFloor uses
 // MAX(snappedFloor, m.currentMinFeeRateLocked()) so newer higher
