@@ -296,8 +296,9 @@ impl TxPool {
     /// declared source to `TxSource::Local`. New producer wiring should
     /// call `add_tx_with_source` directly with the appropriate variant
     /// so source provenance is recorded on the entry. Returns just the
-    /// txid (drops `RelayTxMetadata`); the metadata-returning variant
-    /// is `admit_with_metadata`.
+    /// txid (drops `RelayTxMetadata`); use `admit_with_metadata` or
+    /// `add_tx_with_source` directly to receive the `RelayTxMetadata`
+    /// alongside the txid.
     pub fn admit(
         &mut self,
         tx_bytes: &[u8],
@@ -5270,14 +5271,18 @@ mod tests {
     /// produces fresh ML-DSA signatures per call, so the admit-path
     /// leg admits the SAME `admitted_raw` to two pools to isolate the
     /// source-difference variable. The selection-ordering leg uses
-    /// `inject_test_entry` to side-step admission's input-conflict /
+    /// `insert_entry` to side-step admission's input-conflict /
     /// fee-floor / signature-verify pipeline (which is source-blind by
     /// construction at the admission API level — see leg 1) and
-    /// directly exercise the comparator + worst-heap path with
-    /// equal-priority distinct-txid entries that production admission
-    /// would not normally produce together (because they would
-    /// double-spend the same input). The injected entries' `inputs`
-    /// field is empty so no spender-index conflict.
+    /// directly exercise the selection-time comparator
+    /// (`compare_entries_for_mining`, sorting `self.txs` in
+    /// `select_transactions`) with equal-priority distinct-txid entries
+    /// that production admission would not normally produce together
+    /// (because they would double-spend the same input). The injected
+    /// entries' `inputs` field is empty so no spender-index conflict.
+    /// Worst-heap source-blindness is exercised by the capacity tests
+    /// elsewhere in this module; this leg focuses on the selection
+    /// comparator.
     #[test]
     fn source_does_not_affect_admission_ordering() {
         // Leg 1: admit-path source-independence (same tx bytes, two pools,
@@ -5324,8 +5329,12 @@ mod tests {
         // (Pool A: ent1=Local + ent2=Reorg; Pool B: ent1=Reorg + ent2=Local).
         // Equal (fee, weight) but distinct txids → comparator must produce
         // identical order between pools that differ ONLY in source labels.
-        // Use inject_test_entry to bypass admission (no double-spend) and
-        // exercise the comparator + worst-heap path directly.
+        // Use insert_entry to bypass the admission pipeline (signature
+        // verify, fee floor, input-conflict check) and directly exercise
+        // the selection-time comparator (compare_entries_for_mining
+        // sorting self.txs in select_transactions). The worst-heap path
+        // is exercised separately by the capacity tests above; this leg
+        // focuses on the selection comparator's source-blindness.
         let txid_aaa = [0xaa; 32];
         let txid_bbb = [0xbb; 32];
         let make_entry = |raw: Vec<u8>, source: TxSource| TxPoolEntry {
