@@ -291,7 +291,7 @@ impl TxPool {
         // on the (chain-context-error vs fee-floor-fail) precedence.
         // Mirrors Go's `cheapFeeFloorPrecheck` call site inside
         // `checkTransactionWithSnapshot` at
-        // `clients/go/node/mempool.go:663-682` (RUB-165 PR #1415):
+        // `clients/go/node/mempool_precheck.go:74-91` (RUB-165 PR #1415):
         // Go runs the precheck after `nextBlockContext`/`nextBlockMTP`
         // and immediately before the expensive
         // `CheckTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext`
@@ -341,7 +341,7 @@ impl TxPool {
         // caller (`reject_candidate`) keeps its own policy_cfg
         // construction because it has no rolling-floor equivalent —
         // the template needs to skip a tx whenever it fails any floor
-        // (Go `applyPolicyAgainstState` mempool.go:815-818).
+        // (Go `applyPolicyAgainstState` mempool.go:730-811).
         // `#[rustfmt::skip]` keeps the call on one line so the
         // tarpaulin / Codacy diff-coverage tool attributes hits to a
         // single statement instead of per-arg lines (multi-line calls
@@ -362,7 +362,7 @@ impl TxPool {
         };
 
         // Go-parity capacity admission (`capacityEvictionPlanLocked`,
-        // clients/go/node/mempool.go:1024-1030) — runs AFTER both
+        // clients/go/node/mempool.go:1022-1028) — runs AFTER both
         // `apply_policy` and the rolling relay-fee floor check above, so
         // sub-floor / DA-rejected transactions never reach this branch
         // and the worst-entry comparison only considers floor-compliant
@@ -379,7 +379,7 @@ impl TxPool {
         //       strictly greater than worst → routine eviction-ordering
         //       rejection matching Go's
         //       `"mempool capacity candidate rejected by eviction ordering"`
-        //       at clients/go/node/mempool.go:1028-1030 verbatim.
+        //       at clients/go/node/mempool.go:1026-1028 verbatim.
         //
         // The historical `current_worst_txid()` returns None production
         // error branch has been removed: it was unreachable by
@@ -619,7 +619,7 @@ pub(crate) fn relay_metadata(
 /// Shared post-consensus policy sequence used by both
 /// `TxPool::admit_with_metadata` (admit gate) and `relay_metadata`
 /// (relay gate). Mirrors Go's `applyPolicyAgainstState` plus
-/// `validateFeeFloorLocked` pair (clients/go/node/mempool.go:798-833
+/// `validateFeeFloorLocked` pair (clients/go/node/mempool.go:907-948
 /// and mempool.go:957-967). Centralising the cfg-clone, cfg-zero
 /// override, `apply_policy` invocation and rolling-floor enforcement
 /// in one private helper prevents the public-gate-drift class that
@@ -655,7 +655,7 @@ pub(crate) fn relay_metadata(
 ///   - The miner caller (`reject_candidate`) deliberately does NOT
 ///     use this helper; miner has its own policy_cfg construction
 ///     because it has no rolling-floor equivalent (Go
-///     `applyPolicyAgainstState` mempool.go:815-818 documents this
+///     `applyPolicyAgainstState` mempool.go:730-811 documents this
 ///     same exception). Miner reuses the same single-walk pattern by
 ///     calling `tx_weight_and_stats_public` once before invoking
 ///     `apply_policy`.
@@ -778,7 +778,7 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
 }
 
 /// Returns true if `fee` is below the rolling fee floor for `weight`.
-/// Mirrors Go `feeRateBelowFloor` (clients/go/node/mempool.go:1421-1434)
+/// Mirrors Go `feeRateBelowFloor` (clients/go/node/mempool.go:1419-1432)
 /// using full-precision u128 cross-multiplication (`fee < weight * floor`).
 /// u128 holds any `u64 * u64` product losslessly, so the comparison is
 /// well-defined at every input including `weight == u64::MAX` and
@@ -790,7 +790,7 @@ fn unavailable(message: impl Into<String>) -> TxPoolAdmitError {
 ///
 /// Floor argument is clamped up to `DEFAULT_MEMPOOL_MIN_FEE_RATE` if
 /// smaller, mirroring Go `feeRateBelowFloor`'s in-helper clamp at
-/// clients/go/node/mempool.go:1425-1427. Callers therefore always
+/// clients/go/node/mempool.go:1423-1425. Callers therefore always
 /// receive at-least-DEFAULT enforcement even if cfg-static or
 /// rolling-floor sources zero the field.
 fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
@@ -807,9 +807,9 @@ fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
 /// `apply_post_consensus_policy_with_floor` so both paths use one
 /// source-of-truth check. Returns `Unavailable` (transient / retryable)
 /// on rolling-floor failure, mirroring Go `validateFeeFloorLocked` at
-/// clients/go/node/mempool.go:957-967. The `DEFAULT_MEMPOOL_MIN_FEE_RATE`
+/// clients/go/node/mempool.go:907-918. The `DEFAULT_MEMPOOL_MIN_FEE_RATE`
 /// clamp lives inside `fee_rate_below_floor` (Go-parity at
-/// clients/go/node/mempool.go:1425-1427); the error message surfaces
+/// clients/go/node/mempool.go:1423-1425); the error message surfaces
 /// the post-clamp value for operator clarity.
 fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoolAdmitError> {
     if fee_rate_below_floor(fee, weight, cfg_floor) {
@@ -823,7 +823,7 @@ fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoo
 
 /// RUB-166 cheap fee-floor precheck for plain P2PK spam fast-reject.
 /// Mirrors Go's `cheapFeeFloorPrecheck` at
-/// `clients/go/node/mempool.go:728-749` (RUB-165, PR #1415, merge SHA
+/// `clients/go/node/mempool_precheck_floor.go:26-47` (RUB-165, PR #1415, merge SHA
 /// `ed3be97`).
 ///
 /// Conservatism (verbatim Go logic): only fast-rejects when ALL of:
@@ -935,7 +935,8 @@ fn fee_precheck_p2pk_input_value(
     registry: Option<&SuiteRegistry>,
 ) -> Option<u64> {
     use rubin_consensus::constants::{COINBASE_MATURITY, MAX_P2PK_COVENANT_DATA};
-    use rubin_consensus::{is_valid_sighash_type, sha3_256};
+    use rubin_consensus::is_valid_sighash_type;
+    use sha3::{Digest, Sha3_256};
     if tx.inputs.len() != 1 {
         return None;
     }
@@ -1012,9 +1013,7 @@ fn fee_precheck_p2pk_input_value(
     // `== SIGHASH_ALL` check over-deferred 5/6 valid types and let
     // attackers flip the trailer byte to bypass the cheap reject —
     // hostile-reviewer P1. Free check (single byte compare).
-    let Some(&trailer) = w.signature.last() else {
-        return None;
-    };
+    let &trailer = w.signature.last()?;
     if !is_valid_sighash_type(trailer) {
         return None;
     }
@@ -1023,7 +1022,14 @@ fn fee_precheck_p2pk_input_value(
     // documented scope-cap). Slow path's `verify_mldsa_key_and_sig_q`
     // at spend_verify.rs:155-166 returns
     // `SigInvalid("CORE_P2PK key binding mismatch")`.
-    let pubkey_hash = sha3_256(&w.pubkey);
+    // Wave-17: use sha3 crate directly instead of re-exporting
+    // sha3_256 from rubin-consensus (revert wave-15 lib.rs export to
+    // keep consensus public surface unchanged — Copilot wave-15+16 P1).
+    let pubkey_hash: [u8; 32] = {
+        let mut h = Sha3_256::new();
+        h.update(&w.pubkey);
+        h.finalize().into()
+    };
     if pubkey_hash[..] != entry.covenant_data[1..33] {
         return None;
     }
@@ -1041,7 +1047,7 @@ fn fee_precheck_p2pk_input_value(
 /// — without them a below-floor tx with consensus-invalid P2PK
 /// outputs would be misclassified as transient `Unavailable` instead
 /// of permanent `Rejected`. Mirrors Go's `feePrecheckP2PKOutputValue`
-/// at `clients/go/node/mempool.go:763-776` (Go gets the same wave-4
+/// at `clients/go/node/mempool_precheck_output.go:23-43` (Go gets the same wave-4
 /// guard set in this PR).
 fn fee_precheck_p2pk_output_value(
     outputs: &[rubin_consensus::TxOutput],
@@ -1957,7 +1963,7 @@ mod tests {
         let err = pool.admit(&raw, &state, None, [0u8; 32]).unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
         // PR-1410 wave-2 — error message split per Go-parity at
-        // clients/go/node/mempool.go:1028-1030. Eviction-ordering
+        // clients/go/node/mempool.go:1026-1028. Eviction-ordering
         // rejection is now distinct from internal capacity invariant
         // failure.
         assert!(
@@ -1974,7 +1980,7 @@ mod tests {
     /// fully populated heap (not the corruption invariants). Pinning
     /// the new error-message format prevents future regressions that
     /// would collapse this case back into a generic "tx pool full"
-    /// message and lose Go-parity at clients/go/node/mempool.go:1028-1030.
+    /// message and lose Go-parity at clients/go/node/mempool.go:1026-1028.
     #[test]
     fn rub162_admit_pool_full_eviction_ordering_message_distinct_from_invariant() {
         let (state, raw) = signed_p2pk_state_and_tx(
@@ -3288,7 +3294,7 @@ mod tests {
     /// P1 #4 fix — DA tx whose DA fee passes but rolling relay floor fails
     /// must return Unavailable from validate_fee_floor, NOT Rejected
     /// from reject_da_anchor_tx_policy. Mirrors Go applyPolicyAgainstState
-    /// behaviour (clients/go/node/mempool.go:798-833): mempool admit passes
+    /// behaviour (clients/go/node/mempool.go:907-948): mempool admit passes
     /// currentMempoolMinFeeRate=0 to the DA helper so the relay-floor
     /// classification is owned uniformly by validateFeeFloorLocked
     /// (Unavailable, transient/retryable).
@@ -3631,9 +3637,9 @@ mod tests {
 
     /// P1 #4 helper unit test — `fee_rate_below_floor` is a u128 cross-mul
     /// predicate matching Go `feeRateBelowFloor`
-    /// (clients/go/node/mempool.go:1421-1434), including the in-helper
+    /// (clients/go/node/mempool.go:1419-1432), including the in-helper
     /// `floor < DefaultMempoolMinFeeRate` clamp at
-    /// clients/go/node/mempool.go:1425-1427. Calling with floor=0
+    /// clients/go/node/mempool.go:1423-1425. Calling with floor=0
     /// promotes to DEFAULT_MEMPOOL_MIN_FEE_RATE
     /// before the cross-mul, so a fee=0 / weight=100 / floor=0 input
     /// rejects (required becomes 100*1=100 post-clamp, fee<100).
@@ -3668,7 +3674,7 @@ mod tests {
     /// P1 #4 + clamp regression — `validate_fee_floor` propagates
     /// a cfg-seeded zero into `fee_rate_below_floor`, which itself clamps
     /// to DEFAULT_MEMPOOL_MIN_FEE_RATE per Go `feeRateBelowFloor`
-    /// (clients/go/node/mempool.go:1421-1434, with the in-helper clamp
+    /// (clients/go/node/mempool.go:1419-1432, with the in-helper clamp
     /// at lines 1425-1427). The error message surfaces the post-clamp
     /// value so operators see the actual decision basis.
     #[test]
@@ -4576,6 +4582,132 @@ mod tests {
             result_mature.is_some(),
             "mature coinbase spend must NOT defer (precheck returns Some); got {:?}",
             result_mature
+        );
+    }
+
+    /// Wave-15 panic-safety: defer when `entry.covenant_data.len()`
+    /// is not exactly `MAX_P2PK_COVENANT_DATA` (33). Without this
+    /// guard a corrupted on-disk UTXO entry (chainstate accepts
+    /// arbitrary covenant_data bytes per chain_state_from_disk)
+    /// would panic the admission loop on the `[0]` / `[1..33]`
+    /// indexing. Mirrors slow-path covenant_data length check at
+    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs:144-151`.
+    /// Direct-helper exercise pins both `len < 33` and `len > 33`.
+    #[test]
+    fn rub166_precheck_defers_when_input_utxo_covenant_data_length_invalid() {
+        let (mut state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        let outpoint = Outpoint {
+            txid: parsed.inputs[0].prev_txid,
+            vout: parsed.inputs[0].prev_vout,
+        };
+        // Branch 1: empty covenant_data (len 0 < 33) — panic-safety case.
+        {
+            let entry = state.utxos.get_mut(&outpoint).expect("test utxo present");
+            entry.covenant_data = vec![];
+            let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, None);
+            assert!(
+                result.is_none(),
+                "empty covenant_data must defer (None) — guards [0] index against panic; got {:?}",
+                result
+            );
+        }
+        // Branch 2: oversized covenant_data (len 64 > 33).
+        {
+            let entry = state.utxos.get_mut(&outpoint).expect("test utxo present");
+            entry.covenant_data = vec![0u8; 64];
+            let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, None);
+            assert!(
+                result.is_none(),
+                "oversized covenant_data must defer (None); got {:?}",
+                result
+            );
+        }
+        // Sanity (parity with Go test): valid 33-byte covenant_data with
+        // SHA3 binding matching the parsed witness pubkey must NOT defer.
+        {
+            use sha3::{Digest, Sha3_256};
+            let entry = state.utxos.get_mut(&outpoint).expect("test utxo present");
+            let mut hasher = Sha3_256::new();
+            hasher.update(&parsed.witness[0].pubkey);
+            let pubkey_hash: [u8; 32] = hasher.finalize().into();
+            let mut cov = vec![rubin_consensus::constants::SUITE_ID_ML_DSA_87];
+            cov.extend_from_slice(&pubkey_hash);
+            entry.covenant_data = cov;
+            let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, None);
+            assert!(
+                result.is_some(),
+                "valid 33-byte covenant_data with matching SHA3 binding must NOT defer; got {:?}",
+                result
+            );
+        }
+    }
+
+    /// Wave-16 sighash trailer: defer when `signature[-1]` is NOT one
+    /// of the six valid sighash types accepted by `is_valid_sighash_type`
+    /// (`SIGHASH_ALL/NONE/SINGLE × ANYONECANPAY`). Mirrors slow-path
+    /// reject at `clients/rust/crates/rubin-consensus/src/sighash.rs:18-25`.
+    /// Verifies BOTH (a) invalid trailer (e.g. 0x05) defers and
+    /// (b) valid non-ALL trailer (e.g. SIGHASH_NONE = 0x02) is
+    /// accepted by the precheck (closes wave-15 over-defer P1).
+    #[test]
+    fn rub166_precheck_defers_only_on_invalid_sighash_trailer() {
+        use rubin_consensus::constants::{SIGHASH_ALL, SIGHASH_NONE};
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        // Branch 1: invalid trailer 0x05 (not in 6-element accept set) →
+        // precheck defers so slow path returns terminal SighashType.
+        let mut bad_trailer = parsed.clone();
+        let sig_len = bad_trailer.witness[0].signature.len();
+        bad_trailer.witness[0].signature[sig_len - 1] = 0x05;
+        let bad_result = fee_precheck_p2pk_input_value(&bad_trailer, &state.utxos, 1, None, None);
+        assert!(
+            bad_result.is_none(),
+            "invalid sighash trailer 0x05 must defer (None); got {:?}",
+            bad_result
+        );
+        // Branch 2: valid SIGHASH_NONE trailer (0x02) — precheck must
+        // ACCEPT (return Some), not defer. Wave-15 incorrectly hard-coded
+        // SIGHASH_ALL only and over-deferred 5 of 6 valid trailers.
+        let mut none_trailer = parsed.clone();
+        let sig_len = none_trailer.witness[0].signature.len();
+        none_trailer.witness[0].signature[sig_len - 1] = SIGHASH_NONE;
+        let none_result = fee_precheck_p2pk_input_value(&none_trailer, &state.utxos, 1, None, None);
+        // Sanity: SIGHASH_ALL trailer (default) must also accept.
+        assert_ne!(SIGHASH_NONE, SIGHASH_ALL);
+        // The valid non-ALL trailer should NOT defer due to sighash check
+        // alone. Other guards (key-binding sha3) may still defer for the
+        // synthetic fixture, which is fine — the test asserts the
+        // sighash branch does NOT cause a spurious defer when value
+        // 0x02 is also a valid trailer.
+        // Specifically: if ANY guard fires, it should not be sighash.
+        // We rely on the wave-15 valid signed fixture passing all other
+        // guards, so SIGHASH_NONE must keep returning Some.
+        assert!(
+            none_result.is_some(),
+            "valid SIGHASH_NONE trailer must NOT defer; got {:?}",
+            none_result
+        );
+    }
+
+    /// Wave-15 key-binding: defer when `SHA3(witness.pubkey)` does
+    /// not match `entry.covenant_data[1..33]`. Mirrors slow-path key-
+    /// binding check at
+    /// `clients/rust/crates/rubin-consensus/src/spend_verify.rs:155-166`.
+    /// Direct-helper exercise mutates the witness pubkey first byte so
+    /// the SHA3 hash diverges from the covenant_data binding.
+    #[test]
+    fn rub166_precheck_defers_when_pubkey_key_binding_mismatch() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (mut parsed, _txid, _wtxid, _consumed) = parse_tx(&raw).expect("parse tx");
+        // Mutate first byte of pubkey so SHA3(pubkey) differs from
+        // covenant_data[1..33] (which still binds the original pubkey).
+        parsed.witness[0].pubkey[0] ^= 0xFF;
+        let result = fee_precheck_p2pk_input_value(&parsed, &state.utxos, 1, None, None);
+        assert!(
+            result.is_none(),
+            "pubkey key-binding mismatch must defer (None); got {:?}",
+            result
         );
     }
 

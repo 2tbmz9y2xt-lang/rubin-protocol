@@ -40,13 +40,29 @@ exclude_paths:
   - "clients/go/consensus/connect_block_parallel.go"
   - "clients/go/consensus/sig_verify_batch.go"
   - "clients/go/consensus/sig_verify_queued.go"
-  # Mempool admission precheck (RUB-166 cheap fee-floor fast-reject):
-  # consensus-critical class-closure code that mirrors every terminal-reject
-  # branch in the slow path so below-floor + structurally-defective tx are not
-  # misclassified as transient Unavailable. Each guard maps 1:1 to a slow-path
-  # check at clients/go/consensus/utxo_basic.go and covenant_genesis.go;
-  # branching is mandatory. Reviewed via class-leak-auditor + toctou-auditor +
-  # 18 rub166_*/TestMempoolCheap* tests covering each defer branch.
+  # Mempool admission precheck (RUB-166 cheap fee-floor fast-reject,
+  # PR #1422). SCOPE-CAVEAT: the per-file exclusion below disables ALL
+  # Codacy analyses (complexity, code-style, duplication, coverage)
+  # for these four files — not just the specific complexity warning
+  # that motivated it. Accepted because:
+  #   1. Each file is consensus-critical class-closure code that
+  #      mirrors every terminal-reject branch in the slow path
+  #      (clients/go/consensus/utxo_basic.go and covenant_genesis.go
+  #      and spend_verify.go); branching is mandatory.
+  #   2. The branch density CANNOT be lowered without re-introducing
+  #      class-leak gaps (waves 4..16 of PR #1422 added each guard
+  #      after Copilot/Codex flagged the missing class).
+  #   3. Coverage is enforced by the 21 rub166_* (Rust) + 13
+  #      TestMempoolCheap* (Go) tests that exercise each defer branch.
+  #   4. Future changes to these files SHOULD be reviewed by
+  #      pre-push-reviewer LAYER 4 (class-leak / TOCTOU / panic-safety /
+  #      per-branch test enumeration) per /Users/gpt/.claude/agents/pre-push-reviewer.md
+  #      so the Codacy exclusion does not silently relax review quality.
+  # If Codacy adds per-rule exclude-paths in the future, narrow this to
+  # complexity rule only (issue id 73247 / "Method has cyclomatic
+  # complexity > 8"). Today (.codacy.yml v3) supports only per-tool
+  # exclusions (engines.duplication.exclude_paths) and top-level
+  # exclude_paths.
   - "clients/go/node/mempool_precheck.go"
   - "clients/go/node/mempool_precheck_floor.go"
   - "clients/go/node/mempool_precheck_input.go"

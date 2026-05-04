@@ -12,7 +12,6 @@ pub mod featurebits;
 pub mod flagday;
 mod fork_choice;
 mod hash;
-pub use hash::sha3_256;
 mod htlc;
 mod live_binding_policy;
 pub mod merkle;

@@ -1713,6 +1713,141 @@ func TestMempoolCheapFeeFloorPrecheckDefersWhenP2PKInputIsImmatureCoinbase(t *te
 	}
 }
 
+// TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataLengthInvalid
+// pins the wave-15 panic-safety guard: defer when entry.CovenantData
+// length is not exactly MAX_P2PK_COVENANT_DATA (33). Without this
+// guard a corrupted on-disk UTXO entry (chainStateFromDisk accepts
+// arbitrary CovenantData bytes) would panic the admission loop on
+// the [0] / [1:33] indexing. Mirrors slow-path covenant_data length
+// check at clients/go/consensus/spend_verify.go counterpart.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenInputUTXOCovenantDataLengthInvalid(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    pubkey,
+			Signature: signature,
+		}},
+	}
+	// Branch 1: empty CovenantData (len 0 < 33) — panic-safety case.
+	emptyUtxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: nil,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, emptyUtxos, 1, nil, nil); ok {
+		t.Fatalf("empty CovenantData must defer (ok=false) — guards [0] index against panic")
+	}
+	// Branch 2: oversized CovenantData (len 64 > 33).
+	oversizedUtxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: make([]byte, 64),
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, oversizedUtxos, 1, nil, nil); ok {
+		t.Fatalf("oversized CovenantData must defer (ok=false)")
+	}
+	// Sanity: correct 33-byte CovenantData with valid SHA3 binding accepts.
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	goodUtxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, goodUtxos, 1, nil, nil); !ok {
+		t.Fatalf("valid CovenantData (len=33, valid SHA3) must NOT defer")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersOnlyOnInvalidSighashTrailer
+// pins the wave-16 sighash trailer guard: defer when last sig byte
+// is NOT one of the six valid sighash types accepted by
+// IsValidSighashType (clients/go/consensus/sighash.go:12+). Verifies
+// (a) invalid trailer 0x05 defers and (b) valid non-ALL trailer
+// SIGHASH_NONE (0x02) does NOT defer (closes wave-15 over-defer P1).
+func TestMempoolCheapFeeFloorPrecheckDefersOnlyOnInvalidSighashTrailer(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	makeTx := func(trailer byte) *consensus.Tx {
+		signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+		signature[len(signature)-1] = trailer
+		return &consensus.Tx{
+			TxKind:  0x00,
+			TxNonce: 1,
+			Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+			Witness: []consensus.WitnessItem{{
+				SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+				Pubkey:    pubkey,
+				Signature: signature,
+			}},
+		}
+	}
+	// Branch 1: invalid trailer 0x05 (not in 6-element accept set) defers.
+	if _, ok := feePrecheckP2PKInputValue(makeTx(0x05), utxos, 1, nil, nil); ok {
+		t.Fatalf("invalid sighash trailer 0x05 must defer (ok=false)")
+	}
+	// Branch 2: valid SIGHASH_NONE (0x02) trailer does NOT defer (wave-15 over-defer fix).
+	if _, ok := feePrecheckP2PKInputValue(makeTx(consensus.SIGHASH_NONE), utxos, 1, nil, nil); !ok {
+		t.Fatalf("valid SIGHASH_NONE trailer must NOT defer")
+	}
+}
+
+// TestMempoolCheapFeeFloorPrecheckDefersWhenPubkeyKeyBindingMismatch
+// pins the wave-15 SHA3 key-binding guard: defer when SHA3(pubkey)
+// does not match entry.CovenantData[1:33]. Mirrors slow-path
+// validate_p2pk_spend_q key-binding check.
+func TestMempoolCheapFeeFloorPrecheckDefersWhenPubkeyKeyBindingMismatch(t *testing.T) {
+	pubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	pubkeyHash := sha3.Sum256(pubkey)
+	covData := append([]byte{consensus.SUITE_ID_ML_DSA_87}, pubkeyHash[:]...)
+	signature := make([]byte, consensus.ML_DSA_87_SIG_BYTES+1)
+	signature[len(signature)-1] = consensus.SIGHASH_ALL
+	// Mutate first byte of pubkey so SHA3(pubkey) diverges from
+	// covenant_data[1:33] (which still binds the original all-zero pubkey).
+	mutatedPubkey := make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES)
+	mutatedPubkey[0] = 0xFF
+	tx := &consensus.Tx{
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{PrevTxid: [32]byte{0x11}, PrevVout: 0, Sequence: 0}},
+		Witness: []consensus.WitnessItem{{
+			SuiteID:   consensus.SUITE_ID_ML_DSA_87,
+			Pubkey:    mutatedPubkey,
+			Signature: signature,
+		}},
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: [32]byte{0x11}, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: covData,
+		},
+	}
+	if _, ok := feePrecheckP2PKInputValue(tx, utxos, 1, nil, nil); ok {
+		t.Fatalf("pubkey key-binding mismatch must defer (ok=false)")
+	}
+}
+
 // TestMempoolValidateFeeFloorLockedWithFloorUsesMaxOfSnapAndLive
 // pins the wave-8 race-fix: validateFeeFloorLockedWithFloor uses
 // MAX(snappedFloor, m.currentMinFeeRateLocked()) so newer higher
