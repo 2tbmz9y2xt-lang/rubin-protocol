@@ -576,6 +576,38 @@
         "tx_weight_and_da_bytes_computed",
         "policy_utxo_fee_skipped_non_da"
       ]
+    },
+    {
+      "id": "CV-DA-FEE-FLOOR-19-OMITTED-CURRENT-FLOOR-DEFAULT",
+      "op": "da_fee_floor_policy",
+      "scenario": {
+        "kind": "da_commit",
+        "tx_nonce": 19,
+        "manifest_len": 10,
+        "fee": 1127
+      },
+      "min_da_fee_rate": 0,
+      "da_surcharge_per_byte": 0,
+      "expect_ok": true,
+      "expect_admit": false,
+      "expect_admit_class": "unavailable",
+      "expect_reject_reason": "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM",
+      "expect_dominant_floor": "relay",
+      "expect_fee": 1127,
+      "expect_weight": 1128,
+      "expect_da_bytes": 10,
+      "expect_relay_fee_floor": 1128,
+      "expect_da_fee_floor": 0,
+      "expect_da_surcharge": 0,
+      "expect_da_required_fee": 0,
+      "expect_required_fee": 1128,
+      "policy_branch": "omitted_current_relay_floor_under",
+      "early_guards_passed": [
+        "scenario_tx_materialized",
+        "tx_parse_full_consumed",
+        "tx_weight_and_da_bytes_computed",
+        "policy_utxo_fee_computed"
+      ]
     }
   ]
 }

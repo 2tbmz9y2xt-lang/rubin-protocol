@@ -60,7 +60,7 @@ structure DaIntegrityOut where
   ok : Bool
   err : String
 
-def goTraceFixturesDigestSHA3_256 : String := "387e98e4da3689ddfe2b9918bd8643ce6e824b8af75574a84791d4b65d5e623e"
+def goTraceFixturesDigestSHA3_256 : String := "bebb616a7286833a5691d6dcf926f07bf59cb9923923a33ea45b4c3c2c5fa99f"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },

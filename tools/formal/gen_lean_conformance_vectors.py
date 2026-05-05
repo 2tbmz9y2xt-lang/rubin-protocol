@@ -1622,6 +1622,12 @@ def _optional_int(v: dict[str, Any], key: str, vid: str) -> int | None:
     return _require_int(v, key, vid)
 
 
+def _int_default(v: dict[str, Any], key: str, default: int, vid: str) -> int:
+    if key not in v:
+        return default
+    return _require_int(v, key, vid)
+
+
 def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("gate") != "CV-DA-FEE-FLOOR":
@@ -1644,7 +1650,7 @@ def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
                 fee=_optional_int(raw, "expect_fee", vid),
                 weight=_require_int(raw, "expect_weight", vid),
                 da_bytes=_require_int(raw, "expect_da_bytes", vid),
-                current_mempool_min_fee_rate=_require_int(raw, "current_mempool_min_fee_rate", vid),
+                current_mempool_min_fee_rate=_int_default(raw, "current_mempool_min_fee_rate", 1, vid),
                 min_da_fee_rate=_require_int(raw, "min_da_fee_rate", vid),
                 da_surcharge_per_byte=_require_int(raw, "da_surcharge_per_byte", vid),
                 expect_admit=bool(raw.get("expect_admit")),
