@@ -823,6 +823,13 @@ func dominantFeeFloor(relayFeeFloor, daRequiredFee uint64) string {
 	}
 }
 
+func feeFloorUnderflowClass(dominantFloor string) (string, string) {
+	if dominantFloor == "da" {
+		return "rejected", "DA_FEE_BELOW_STAGE_C_FLOOR"
+	}
+	return "unavailable", "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM"
+}
+
 func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
 	var totalIn uint64
 	for _, input := range tx.Inputs {
@@ -947,16 +954,10 @@ func daFeeFloorPolicyResp(req Request) Response {
 		resp.DaRequiredFee = daRequiredFee
 		resp.RequiredFee = maxU64(relayFeeFloor, daRequiredFee)
 		resp.DominantFloor = dominantFeeFloor(relayFeeFloor, daRequiredFee)
-		if fee < daRequiredFee {
-			resp.AdmitClass = "rejected"
-			resp.RejectReason = "DA_FEE_BELOW_STAGE_C_FLOOR"
-			return resp
-		}
 	}
 
-	if fee < relayFeeFloor {
-		resp.AdmitClass = "unavailable"
-		resp.RejectReason = "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM"
+	if resp.RequiredFee > 0 && fee < resp.RequiredFee {
+		resp.AdmitClass, resp.RejectReason = feeFloorUnderflowClass(resp.DominantFloor)
 		return resp
 	}
 

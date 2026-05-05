@@ -1141,6 +1141,14 @@ fn dominant_fee_floor(relay_fee_floor: u64, da_required_fee: u64) -> &'static st
     }
 }
 
+fn fee_floor_underflow_class(dominant_floor: &str) -> (&'static str, &'static str) {
+    if dominant_floor == "da" {
+        ("rejected", "DA_FEE_BELOW_STAGE_C_FLOOR")
+    } else {
+        ("unavailable", "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM")
+    }
+}
+
 fn policy_utxo_map(items: &[UtxoJson]) -> Result<HashMap<Outpoint, UtxoEntry>, String> {
     let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::with_capacity(items.len());
     for u in items {
@@ -1326,16 +1334,14 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
         resp.required_fee = Some(max_u64(relay_fee_floor, da_required_fee));
         resp.dominant_floor =
             Some(dominant_fee_floor(relay_fee_floor, da_required_fee).to_string());
-        if fee < da_required_fee {
-            resp.reject_reason = Some("DA_FEE_BELOW_STAGE_C_FLOOR".to_string());
-            resp.admit_class = Some("rejected".to_string());
-            return resp;
-        }
     }
 
-    if fee < relay_fee_floor {
-        resp.reject_reason = Some("MEMPOOL_FEE_BELOW_ROLLING_MINIMUM".to_string());
-        resp.admit_class = Some("unavailable".to_string());
+    let required_fee = resp.required_fee.unwrap_or(0);
+    if required_fee > 0 && fee < required_fee {
+        let dominant_floor = resp.dominant_floor.as_deref().unwrap_or("none");
+        let (admit_class, reject_reason) = fee_floor_underflow_class(dominant_floor);
+        resp.admit_class = Some(admit_class.to_string());
+        resp.reject_reason = Some(reject_reason.to_string());
         return resp;
     }
 
