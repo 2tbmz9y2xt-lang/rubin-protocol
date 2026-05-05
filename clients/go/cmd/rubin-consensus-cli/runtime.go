@@ -6,12 +6,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
 	"math/big"
-	"math/bits"
 	"os"
 	"sort"
 	"strings"
@@ -132,9 +130,6 @@ type Request struct {
 	Nonce1                uint64                         `json:"nonce1,omitempty"`
 	BlockTimestamp        uint64                         `json:"block_timestamp,omitempty"`
 	CommitFee             int                            `json:"commit_fee,omitempty"`
-	CurrentMempoolMinFee  *uint64                        `json:"current_mempool_min_fee_rate,omitempty"`
-	MinDAFeeRate          *uint64                        `json:"min_da_fee_rate,omitempty"`
-	DASurchargePerByte    uint64                         `json:"da_surcharge_per_byte,omitempty"`
 	VaultInputCount       int                            `json:"vault_input_count,omitempty"`
 	CurrentPinnedBytes    int                            `json:"current_pinned_payload_bytes,omitempty"`
 	IncomingPayload       int                            `json:"incoming_payload_bytes,omitempty"`
@@ -615,14 +610,6 @@ type Response struct {
 	SumFees            uint64         `json:"sum_fees,omitempty"`
 	Mode               int            `json:"mode,omitempty"`
 	TotalFee           int            `json:"total_fee,omitempty"`
-	RelayFeeFloor      *uint64        `json:"relay_fee_floor,omitempty"`
-	DaFeeFloor         *uint64        `json:"da_fee_floor,omitempty"`
-	DaSurcharge        *uint64        `json:"da_surcharge,omitempty"`
-	DaRequiredFee      *uint64        `json:"da_required_fee,omitempty"`
-	RequiredFee        *uint64        `json:"required_fee,omitempty"`
-	AdmitClass         string         `json:"admit_class,omitempty"`
-	DominantFloor      string         `json:"dominant_floor,omitempty"`
-	RejectReason       string         `json:"reject_reason,omitempty"`
 	Consumed           int            `json:"consumed,omitempty"`
 	AlreadyGenerated   uint64         `json:"already_generated,omitempty"`
 	AlreadyGeneratedN1 uint64         `json:"already_generated_n1,omitempty"`
@@ -665,8 +652,7 @@ func writeResp(w io.Writer, resp Response) {
 }
 
 func writeConsensusErr(w io.Writer, err error) {
-	var te *consensus.TxError
-	if errors.As(err, &te) {
+	if te, ok := err.(*consensus.TxError); ok {
 		writeResp(w, Response{Ok: false, Err: string(te.Code)})
 		return
 	}
@@ -782,231 +768,6 @@ func buildUtxoMap(items []UtxoJSON) (map[consensus.Outpoint]consensus.UtxoEntry,
 		}
 	}
 	return utxos, nil
-}
-
-// Conformance replay mirrors the current standard mempool default without importing node runtime.
-const conformanceDefaultMempoolMinFeeRate uint64 = 1
-const conformanceDefaultMinDAFeeRate uint64 = 1
-
-func addU64Policy(a, b uint64) (uint64, bool) {
-	if a > ^uint64(0)-b {
-		return 0, false
-	}
-	return a + b, true
-}
-
-func mulU64Policy(a, b uint64) (uint64, bool) {
-	if a == 0 || b == 0 {
-		return 0, true
-	}
-	if a > ^uint64(0)/b {
-		return 0, false
-	}
-	return a * b, true
-}
-
-func maxU64(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func u64Ptr(v uint64) *uint64 {
-	return &v
-}
-
-func dominantFeeFloor(relayFeeFloor, daRequiredFee uint64) string {
-	switch {
-	case daRequiredFee > relayFeeFloor:
-		return "da"
-	case relayFeeFloor > daRequiredFee:
-		return "relay"
-	case relayFeeFloor == 0:
-		return "none"
-	default:
-		return "tie"
-	}
-}
-
-func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
-	if tx == nil {
-		return 0, fmt.Errorf("nil tx")
-	}
-	if len(tx.Inputs) == 0 {
-		return 0, fmt.Errorf("missing inputs")
-	}
-	if utxos == nil {
-		return 0, fmt.Errorf("nil utxo set")
-	}
-	var totalIn uint64
-	for _, input := range tx.Inputs {
-		entry, ok := utxos[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}]
-		if !ok {
-			return 0, fmt.Errorf("missing utxo")
-		}
-		next, ok := addU64Policy(totalIn, entry.Value)
-		if !ok {
-			return 0, fmt.Errorf("sum_in overflow")
-		}
-		totalIn = next
-	}
-
-	var totalOut uint64
-	for _, output := range tx.Outputs {
-		next, ok := addU64Policy(totalOut, output.Value)
-		if !ok {
-			return 0, fmt.Errorf("sum_out overflow")
-		}
-		totalOut = next
-	}
-	if totalOut > totalIn {
-		return 0, fmt.Errorf("overspend")
-	}
-	return totalIn - totalOut, nil
-}
-
-func feeBelowRollingFloorPolicy(fee, weight, floor uint64) bool {
-	if weight == 0 {
-		return true
-	}
-	if floor < conformanceDefaultMempoolMinFeeRate {
-		floor = conformanceDefaultMempoolMinFeeRate
-	}
-	hi, required := bits.Mul64(weight, floor)
-	if hi != 0 {
-		return true
-	}
-	return fee < required
-}
-
-func daFeeFloorPolicyResp(req Request) Response {
-	txBytes, err := hex.DecodeString(req.TxHex)
-	if err != nil {
-		return Response{Ok: false, Err: "bad hex"}
-	}
-	tx, _, _, consumed, err := consensus.ParseTx(txBytes)
-	if err != nil {
-		var te *consensus.TxError
-		if errors.As(err, &te) {
-			return Response{Ok: false, Err: string(te.Code)}
-		}
-		return Response{Ok: false, Err: err.Error()}
-	}
-	if consumed != len(txBytes) {
-		return Response{Ok: false, Err: string(consensus.TX_ERR_PARSE)}
-	}
-	weight, daBytes, _, err := consensus.TxWeightAndStats(tx)
-	if err != nil {
-		var te *consensus.TxError
-		if errors.As(err, &te) {
-			return Response{Ok: false, Err: string(te.Code)}
-		}
-		return Response{Ok: false, Err: err.Error()}
-	}
-
-	minFeeRate := conformanceDefaultMempoolMinFeeRate
-	if req.CurrentMempoolMinFee != nil {
-		minFeeRate = *req.CurrentMempoolMinFee
-	}
-	minDAFeeRate := conformanceDefaultMinDAFeeRate
-	if req.MinDAFeeRate != nil {
-		minDAFeeRate = *req.MinDAFeeRate
-	}
-
-	relayFeeFloor, relayFeeFloorOK := mulU64Policy(weight, minFeeRate)
-
-	resp := Response{
-		Ok:            true,
-		Weight:        weight,
-		DaBytes:       daBytes,
-		RelayFeeFloor: u64Ptr(relayFeeFloor),
-		AdmitClass:    "accepted",
-		RequiredFee:   u64Ptr(relayFeeFloor),
-		DominantFloor: dominantFeeFloor(relayFeeFloor, 0),
-		DaFeeFloor:    u64Ptr(0),
-		DaSurcharge:   u64Ptr(0),
-		DaRequiredFee: u64Ptr(0),
-	}
-	if !relayFeeFloorOK {
-		resp.RelayFeeFloor = nil
-		resp.RequiredFee = nil
-		resp.DominantFloor = "relay"
-	}
-
-	var daRequiredFee uint64
-	if daBytes > 0 {
-		daFeeFloor, ok := mulU64Policy(daBytes, minDAFeeRate)
-		if !ok {
-			resp.AdmitClass = "rejected"
-			resp.DominantFloor = "da"
-			resp.RejectReason = "DA_FEE_FLOOR_OVERFLOW"
-			return resp
-		}
-		daSurcharge, ok := mulU64Policy(daBytes, req.DASurchargePerByte)
-		if !ok {
-			resp.AdmitClass = "rejected"
-			resp.DominantFloor = "da"
-			resp.DaFeeFloor = u64Ptr(daFeeFloor)
-			resp.RejectReason = "DA_SURCHARGE_OVERFLOW"
-			return resp
-		}
-		daRequiredFee, ok = addU64Policy(daFeeFloor, daSurcharge)
-		if !ok {
-			resp.AdmitClass = "rejected"
-			resp.DominantFloor = "da"
-			resp.DaFeeFloor = u64Ptr(daFeeFloor)
-			resp.DaSurcharge = u64Ptr(daSurcharge)
-			resp.RejectReason = "DA_REQUIRED_FEE_OVERFLOW"
-			return resp
-		}
-		resp.DaFeeFloor = u64Ptr(daFeeFloor)
-		resp.DaSurcharge = u64Ptr(daSurcharge)
-		resp.DaRequiredFee = u64Ptr(daRequiredFee)
-		if relayFeeFloorOK {
-			resp.RequiredFee = u64Ptr(maxU64(relayFeeFloor, daRequiredFee))
-			resp.DominantFloor = dominantFeeFloor(relayFeeFloor, daRequiredFee)
-		} else {
-			resp.RequiredFee = u64Ptr(daRequiredFee)
-			resp.DominantFloor = "relay"
-		}
-	}
-
-	if (daBytes == 0 || daRequiredFee == 0) && relayFeeFloorOK && relayFeeFloor == 0 {
-		resp.Admit = true
-		return resp
-	}
-
-	utxos, err := buildUtxoMap(req.Utxos)
-	if err != nil {
-		return Response{Ok: false, Err: err.Error()}
-	}
-	fee, err := feeFromPolicyUTXOs(tx, utxos)
-	if err != nil {
-		return Response{Ok: false, Err: err.Error()}
-	}
-	resp.Fee = fee
-
-	if daBytes > 0 && daRequiredFee > 0 && fee < daRequiredFee {
-		resp.AdmitClass = "rejected"
-		resp.RequiredFee = u64Ptr(daRequiredFee)
-		resp.DominantFloor = "da"
-		resp.RejectReason = "DA_FEE_BELOW_STAGE_C_FLOOR"
-		return resp
-	}
-
-	if feeBelowRollingFloorPolicy(fee, weight, minFeeRate) {
-		resp.AdmitClass = "unavailable"
-		resp.DominantFloor = "relay"
-		resp.RejectReason = "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM"
-		if relayFeeFloorOK {
-			resp.RequiredFee = u64Ptr(relayFeeFloor)
-		}
-		return resp
-	}
-
-	resp.Admit = true
-	return resp
 }
 
 func boolOrDefault(v *bool, def bool) bool {
@@ -1433,10 +1194,6 @@ func runFromStdin() {
 			return
 		}
 		writeResp(os.Stdout, Response{Ok: true, Weight: w, DaBytes: da, AnchorBytes: anchor})
-		return
-
-	case "da_fee_floor_policy":
-		writeResp(os.Stdout, daFeeFloorPolicyResp(req))
 		return
 
 	case "rotation_create_suite_check":
