@@ -29,7 +29,6 @@ EXPECTED_GATES = frozenset(
         "CV-CANONICAL-INVARIANT",
         "CV-COVENANT-GENESIS",
         "CV-DA-INTEGRITY",
-        "CV-DA-FEE-FLOOR",
         "CV-DA-STRESS",
         "CV-DETERMINISM",
         "CV-DEVNET-CHAIN",

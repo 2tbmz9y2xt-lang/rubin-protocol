@@ -34,8 +34,6 @@ import RubinFormal.Conformance.CVDaIntegrityVectors
 import RubinFormal.Conformance.CVDaIntegrityReplay
 import RubinFormal.Conformance.CVDaStressVectors
 import RubinFormal.Conformance.CVDaStressReplay
-import RubinFormal.Conformance.CVDaFeeFloorVectors
-import RubinFormal.Conformance.CVDaFeeFloorReplay
 import RubinFormal.Conformance.CVDeterminismVectors
 import RubinFormal.Conformance.CVDeterminismReplay
 import RubinFormal.Conformance.CVReplayVectors

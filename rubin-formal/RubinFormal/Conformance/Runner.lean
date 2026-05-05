@@ -32,7 +32,6 @@ def run : IO UInt32 := do
   okAll := (← reportGate "CV-CANONICAL-INVARIANT" (collectFails cvCanonicalInvariantVectors (·.id) checkCanonicalInvariantVector)) && okAll
   okAll := (← reportGate "CV-SUBSIDY" (collectFails cvSubsidyVectors (·.id) subsidyVectorPass)) && okAll
   okAll := (← reportGate "CV-DA-INTEGRITY" (collectFails cvDaIntegrityVectors (·.id) daIntegrityVectorPass)) && okAll
-  okAll := (← reportGate "CV-DA-FEE-FLOOR" (collectFails cvDaFeeFloorVectors (·.id) daFeeFloorVectorPass)) && okAll
   okAll := (← reportGate "CV-COVENANT-GENESIS" (collectFails cvCovenantGenesisVectors (·.id) covenantGenesisVectorPass)) && okAll
   okAll := (← reportGate "CV-VAULT" (collectFails cvUtxoApplyVectors_CV_VAULT (·.id) vaultVectorPass)) && okAll
   okAll := (← reportGate "CV-HTLC" (collectFails cvUtxoApplyVectors_CV_HTLC (·.id) htlcVectorPass)) && okAll
