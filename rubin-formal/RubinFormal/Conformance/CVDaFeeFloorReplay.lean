@@ -36,6 +36,9 @@ def feeBelowRollingFloor (fee weight floor : Nat) : Bool :=
     let f := floorMax floor defaultMempoolMinFeeRate
     fee < weight * f
 
+def feeValue (v : CVDaFeeFloorVector) : Nat :=
+  v.fee.getD 0
+
 structure EvalOut where
   admit : Bool
   admitClass : String
@@ -49,7 +52,7 @@ structure EvalOut where
   deriving BEq
 
 def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
-  let minFeeRate := floorMax v.currentMempoolMinFeeRate defaultMempoolMinFeeRate
+  let minFeeRate := v.currentMempoolMinFeeRate
   let minDaFeeRate := v.minDaFeeRate
   let relayFloor? := checkedMul? v.weight minFeeRate
   let relayDominant :=
@@ -81,24 +84,25 @@ def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
               | none => some { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_REQUIRED_FEE_OVERFLOW", daFeeFloor := some daFloor, daSurcharge := some daSurcharge }
               | some daRequired =>
                   let withDa := { acceptedBase with daFeeFloor := some daFloor, daSurcharge := some daSurcharge, daRequiredFee := some daRequired }
-                  if daRequired > 0 && v.fee < daRequired then
-                    some { withDa with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", requiredFee := some daRequired }
-                  else
-                    let required? :=
-                      match relayFloor? with
-                      | some rf => some (floorMax rf daRequired)
-                      | none => some daRequired
-                    let dom :=
-                      match relayFloor? with
-                      | some rf => dominantFeeFloor rf daRequired
-                      | none => "relay"
-                    some { withDa with requiredFee := required?, dominantFloor := dom }
+                  let required? :=
+                    match relayFloor? with
+                    | some rf => some (floorMax rf daRequired)
+                    | none => some daRequired
+                  let dom :=
+                    match relayFloor? with
+                    | some rf => dominantFeeFloor rf daRequired
+                    | none => "relay"
+                  some { withDa with requiredFee := required?, dominantFloor := dom }
   match afterDa? with
   | none => acceptedBase
   | some out =>
       if out.rejectReason.isSome then
         out
-      else if feeBelowRollingFloor v.fee v.weight minFeeRate then
+      else if (v.daBytes == 0 || out.daRequiredFee == some 0) && relayFloor? == some 0 then
+        { out with admit := true }
+      else if v.daBytes > 0 && out.daRequiredFee.isSome && out.daRequiredFee.get! > 0 && feeValue v < out.daRequiredFee.get! then
+        { out with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", requiredFee := out.daRequiredFee }
+      else if feeBelowRollingFloor (feeValue v) v.weight minFeeRate then
         let required? :=
           match relayFloor? with
           | some rf => some rf

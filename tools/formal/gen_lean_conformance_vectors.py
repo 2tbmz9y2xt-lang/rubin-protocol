@@ -1592,7 +1592,7 @@ def render_cv_da_stress_lean(vectors: list[DaStressVector]) -> str:
 @dataclass(frozen=True)
 class DaFeeFloorVector:
     vid: str
-    fee: int
+    fee: int | None
     weight: int
     da_bytes: int
     current_mempool_min_fee_rate: int
@@ -1641,7 +1641,7 @@ def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
         out.append(
             DaFeeFloorVector(
                 vid=vid,
-                fee=_require_int(raw, "expect_fee", vid),
+                fee=_optional_int(raw, "expect_fee", vid),
                 weight=_require_int(raw, "expect_weight", vid),
                 da_bytes=_require_int(raw, "expect_da_bytes", vid),
                 current_mempool_min_fee_rate=_require_int(raw, "current_mempool_min_fee_rate", vid),
@@ -1671,7 +1671,7 @@ def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
         rows.append(
             "  { "
             + f'id := "{v.vid}", '
-            + f"fee := {v.fee}, "
+            + f"fee := {_lean_opt_nat(v.fee)}, "
             + f"weight := {v.weight}, "
             + f"daBytes := {v.da_bytes}, "
             + f"currentMempoolMinFeeRate := {v.current_mempool_min_fee_rate}, "
@@ -1691,7 +1691,7 @@ def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
     module_body = (
         "structure CVDaFeeFloorVector where\n"
         "  id : String\n"
-        "  fee : Nat\n"
+        "  fee : Option Nat\n"
         "  weight : Nat\n"
         "  daBytes : Nat\n"
         "  currentMempoolMinFeeRate : Nat\n"

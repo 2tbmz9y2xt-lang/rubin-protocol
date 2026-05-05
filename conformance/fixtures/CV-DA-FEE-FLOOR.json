@@ -213,7 +213,6 @@
       "expect_admit_class": "rejected",
       "expect_reject_reason": "DA_FEE_FLOOR_OVERFLOW",
       "expect_dominant_floor": "da",
-      "expect_fee": 18446744073709551615,
       "expect_weight": 1128,
       "expect_da_bytes": 10,
       "expect_relay_fee_floor": 1128,
@@ -221,7 +220,6 @@
       "early_guards_passed": [
         "scenario_tx_materialized",
         "tx_parse_full_consumed",
-        "policy_utxo_fee_computed",
         "tx_weight_and_da_bytes_computed"
       ],
       "expect_da_fee_floor": 0,
@@ -407,7 +405,6 @@
       "expect_admit_class": "rejected",
       "expect_reject_reason": "DA_SURCHARGE_OVERFLOW",
       "expect_dominant_floor": "da",
-      "expect_fee": 18446744073709551615,
       "expect_weight": 1128,
       "expect_da_bytes": 10,
       "expect_relay_fee_floor": 1128,
@@ -416,7 +413,6 @@
       "early_guards_passed": [
         "scenario_tx_materialized",
         "tx_parse_full_consumed",
-        "policy_utxo_fee_computed",
         "tx_weight_and_da_bytes_computed"
       ],
       "expect_da_surcharge": 0,
@@ -440,7 +436,6 @@
       "expect_admit_class": "rejected",
       "expect_reject_reason": "DA_REQUIRED_FEE_OVERFLOW",
       "expect_dominant_floor": "da",
-      "expect_fee": 18446744073709551615,
       "expect_weight": 1128,
       "expect_da_bytes": 10,
       "expect_relay_fee_floor": 1128,
@@ -450,7 +445,6 @@
       "early_guards_passed": [
         "scenario_tx_materialized",
         "tx_parse_full_consumed",
-        "policy_utxo_fee_computed",
         "tx_weight_and_da_bytes_computed"
       ],
       "expect_da_required_fee": 0,
@@ -518,6 +512,69 @@
         "tx_parse_full_consumed",
         "policy_utxo_fee_computed",
         "tx_weight_and_da_bytes_computed"
+      ]
+    },
+    {
+      "id": "CV-DA-FEE-FLOOR-17-DA-ZERO-REQUIRED-SKIPS-FEE",
+      "op": "da_fee_floor_policy",
+      "scenario": {
+        "kind": "da_commit",
+        "tx_nonce": 17,
+        "manifest_len": 10,
+        "fee": 0
+      },
+      "utxos": [],
+      "current_mempool_min_fee_rate": 0,
+      "min_da_fee_rate": 0,
+      "da_surcharge_per_byte": 0,
+      "expect_ok": true,
+      "expect_admit": true,
+      "expect_admit_class": "accepted",
+      "expect_dominant_floor": "none",
+      "expect_weight": 1128,
+      "expect_da_bytes": 10,
+      "expect_relay_fee_floor": 0,
+      "expect_da_fee_floor": 0,
+      "expect_da_surcharge": 0,
+      "expect_da_required_fee": 0,
+      "expect_required_fee": 0,
+      "policy_branch": "da_zero_required_fee_short_circuit",
+      "early_guards_passed": [
+        "scenario_tx_materialized",
+        "tx_parse_full_consumed",
+        "tx_weight_and_da_bytes_computed",
+        "policy_utxo_fee_skipped_required_fee_zero"
+      ]
+    },
+    {
+      "id": "CV-DA-FEE-FLOOR-18-NON-DA-SKIPS-FEE",
+      "op": "da_fee_floor_policy",
+      "scenario": {
+        "kind": "non_da",
+        "tx_nonce": 18,
+        "fee": 0
+      },
+      "utxos": [],
+      "current_mempool_min_fee_rate": 0,
+      "min_da_fee_rate": 200,
+      "da_surcharge_per_byte": 200,
+      "expect_ok": true,
+      "expect_admit": true,
+      "expect_admit_class": "accepted",
+      "expect_dominant_floor": "none",
+      "expect_weight": 418,
+      "expect_da_bytes": 0,
+      "expect_relay_fee_floor": 0,
+      "expect_da_fee_floor": 0,
+      "expect_da_surcharge": 0,
+      "expect_da_required_fee": 0,
+      "expect_required_fee": 0,
+      "policy_branch": "non_da_stage_c_short_circuit",
+      "early_guards_passed": [
+        "scenario_tx_materialized",
+        "tx_parse_full_consumed",
+        "tx_weight_and_da_bytes_computed",
+        "policy_utxo_fee_skipped_non_da"
       ]
     }
   ]

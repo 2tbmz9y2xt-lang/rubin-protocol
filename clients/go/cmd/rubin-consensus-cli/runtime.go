@@ -896,14 +896,6 @@ func daFeeFloorPolicyResp(req Request) Response {
 	if consumed != len(txBytes) {
 		return Response{Ok: false, Err: string(consensus.TX_ERR_PARSE)}
 	}
-	utxos, err := buildUtxoMap(req.Utxos)
-	if err != nil {
-		return Response{Ok: false, Err: err.Error()}
-	}
-	fee, err := feeFromPolicyUTXOs(tx, utxos)
-	if err != nil {
-		return Response{Ok: false, Err: err.Error()}
-	}
 	weight, daBytes, _, err := consensus.TxWeightAndStats(tx)
 	if err != nil {
 		var te *consensus.TxError
@@ -914,9 +906,6 @@ func daFeeFloorPolicyResp(req Request) Response {
 	}
 
 	minFeeRate := req.CurrentMempoolMinFee
-	if minFeeRate < conformanceDefaultMempoolMinFeeRate {
-		minFeeRate = conformanceDefaultMempoolMinFeeRate
-	}
 	minDAFeeRate := conformanceDefaultMinDAFeeRate
 	if req.MinDAFeeRate != nil {
 		minDAFeeRate = *req.MinDAFeeRate
@@ -926,7 +915,6 @@ func daFeeFloorPolicyResp(req Request) Response {
 
 	resp := Response{
 		Ok:            true,
-		Fee:           fee,
 		Weight:        weight,
 		DaBytes:       daBytes,
 		RelayFeeFloor: u64Ptr(relayFeeFloor),
@@ -972,13 +960,6 @@ func daFeeFloorPolicyResp(req Request) Response {
 		resp.DaFeeFloor = u64Ptr(daFeeFloor)
 		resp.DaSurcharge = u64Ptr(daSurcharge)
 		resp.DaRequiredFee = u64Ptr(daRequiredFee)
-		if daRequiredFee > 0 && fee < daRequiredFee {
-			resp.AdmitClass = "rejected"
-			resp.RequiredFee = u64Ptr(daRequiredFee)
-			resp.DominantFloor = "da"
-			resp.RejectReason = "DA_FEE_BELOW_STAGE_C_FLOOR"
-			return resp
-		}
 		if relayFeeFloorOK {
 			resp.RequiredFee = u64Ptr(maxU64(relayFeeFloor, daRequiredFee))
 			resp.DominantFloor = dominantFeeFloor(relayFeeFloor, daRequiredFee)
@@ -986,6 +967,29 @@ func daFeeFloorPolicyResp(req Request) Response {
 			resp.RequiredFee = u64Ptr(daRequiredFee)
 			resp.DominantFloor = "relay"
 		}
+	}
+
+	if (daBytes == 0 || daRequiredFee == 0) && relayFeeFloorOK && relayFeeFloor == 0 {
+		resp.Admit = true
+		return resp
+	}
+
+	utxos, err := buildUtxoMap(req.Utxos)
+	if err != nil {
+		return Response{Ok: false, Err: err.Error()}
+	}
+	fee, err := feeFromPolicyUTXOs(tx, utxos)
+	if err != nil {
+		return Response{Ok: false, Err: err.Error()}
+	}
+	resp.Fee = fee
+
+	if daBytes > 0 && daRequiredFee > 0 && fee < daRequiredFee {
+		resp.AdmitClass = "rejected"
+		resp.RequiredFee = u64Ptr(daRequiredFee)
+		resp.DominantFloor = "da"
+		resp.RejectReason = "DA_FEE_BELOW_STAGE_C_FLOOR"
+		return resp
 	}
 
 	if feeBelowRollingFloorPolicy(fee, weight, minFeeRate) {

@@ -1246,26 +1246,6 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
             ..Default::default()
         };
     }
-    let utxos = match policy_utxo_map(&req.utxos) {
-        Ok(v) => v,
-        Err(e) => {
-            return Response {
-                ok: false,
-                err: Some(e),
-                ..Default::default()
-            }
-        }
-    };
-    let fee = match fee_from_policy_utxos(&tx, &utxos) {
-        Ok(v) => v,
-        Err(e) => {
-            return Response {
-                ok: false,
-                err: Some(e),
-                ..Default::default()
-            }
-        }
-    };
     let (weight, da_bytes, _anchor_bytes) = match tx_weight_and_stats_public(&tx) {
         Ok(v) => v,
         Err(e) => {
@@ -1277,9 +1257,7 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
         }
     };
 
-    let min_fee_rate = req
-        .current_mempool_min_fee_rate
-        .max(CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE);
+    let min_fee_rate = req.current_mempool_min_fee_rate;
     let min_da_fee_rate = req
         .min_da_fee_rate
         .unwrap_or(CONFORMANCE_DEFAULT_MIN_DA_FEE_RATE);
@@ -1287,7 +1265,6 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
 
     let mut resp = Response {
         ok: true,
-        fee: Some(fee),
         weight: Some(weight),
         da_bytes: Some(da_bytes),
         relay_fee_floor,
@@ -1340,13 +1317,6 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
         resp.da_fee_floor = Some(da_fee_floor);
         resp.da_surcharge = Some(da_surcharge);
         resp.da_required_fee = Some(da_required_fee);
-        if da_required_fee > 0 && fee < da_required_fee {
-            resp.reject_reason = Some("DA_FEE_BELOW_STAGE_C_FLOOR".to_string());
-            resp.admit_class = Some("rejected".to_string());
-            resp.required_fee = Some(da_required_fee);
-            resp.dominant_floor = Some("da".to_string());
-            return resp;
-        }
         if let Some(relay_fee_floor) = relay_fee_floor {
             resp.required_fee = Some(max_u64(relay_fee_floor, da_required_fee));
             resp.dominant_floor =
@@ -1354,6 +1324,45 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
         } else {
             resp.required_fee = Some(da_required_fee);
             resp.dominant_floor = Some("relay".to_string());
+        }
+    }
+
+    if (da_bytes == 0 || resp.da_required_fee == Some(0)) && relay_fee_floor == Some(0) {
+        resp.admit = Some(true);
+        return resp;
+    }
+
+    let utxos = match policy_utxo_map(&req.utxos) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response {
+                ok: false,
+                err: Some(e),
+                ..Default::default()
+            }
+        }
+    };
+    let fee = match fee_from_policy_utxos(&tx, &utxos) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response {
+                ok: false,
+                err: Some(e),
+                ..Default::default()
+            }
+        }
+    };
+    resp.fee = Some(fee);
+
+    if da_bytes > 0 {
+        if let Some(da_required_fee) = resp.da_required_fee {
+            if da_required_fee > 0 && fee < da_required_fee {
+                resp.reject_reason = Some("DA_FEE_BELOW_STAGE_C_FLOOR".to_string());
+                resp.admit_class = Some("rejected".to_string());
+                resp.required_fee = Some(da_required_fee);
+                resp.dominant_floor = Some("da".to_string());
+                return resp;
+            }
         }
     }
 
