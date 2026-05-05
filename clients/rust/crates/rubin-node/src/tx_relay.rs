@@ -1412,19 +1412,33 @@ mod tests {
             }
         }
 
-        // Returns true iff the `Item` carries the EXACT literal
-        // attribute `#[cfg(test)]` — that is, an attribute whose path
-        // is `cfg` and whose `Meta::List` parses as a single `Path`
-        // identifier `test`. Every other shape (`cfg(any(test, X))`,
-        // `cfg(all(test, X))`, `cfg(not(test))`, `cfg(target_os =
-        // "linux")`, `cfg_attr(...)`, multiple cfg attributes) returns
-        // false and the carrier is scanned as production. The narrow
-        // shape is the only skip class supported by RUB-176 / GitHub
-        // issue #1432; broader `ConfigurationPredicate` reachability
-        // is explicit non-scope per the issue's
-        // `class_change_stop_rule`.
+        // Returns true iff the `Item` carries EXACTLY ONE `#[cfg(...)]`
+        // attribute and that attribute is the EXACT literal
+        // `#[cfg(test)]` — `Meta::List` whose path is `cfg` and whose
+        // inner tokens parse as a single `Path` identifier `test`.
+        // Every other shape returns false and the carrier is scanned
+        // as production:
+        //
+        //  - `cfg(any(test, X))`, `cfg(all(test, X))`, `cfg(not(test))`,
+        //    `cfg(target_os = "linux")`, `cfg_attr(...)` — non-exact
+        //    inner shape;
+        //  - `#[cfg(test)] #[cfg(other)]` (or any other multi-`#[cfg]`
+        //    stack) — even with the literal `#[cfg(test)]` present,
+        //    the conjunction with another `#[cfg]` pushes the carrier
+        //    out of the single-attribute skip class.
+        //
+        // Non-cfg attributes (`#[derive(...)]`, `#[allow(...)]`, etc.)
+        // do not gate compilation and are ignored when counting cfg
+        // attributes. The narrow single-attribute shape is the only
+        // skip class supported by RUB-176 / GitHub issue #1432; broader
+        // `ConfigurationPredicate` reachability is explicit non-scope
+        // per the issue's `class_change_stop_rule`.
         fn item_is_exact_cfg_test(item: &Item) -> bool {
-            item_attrs(item).iter().any(attr_is_exact_cfg_test)
+            let cfg_attrs: Vec<&Attribute> = item_attrs(item)
+                .iter()
+                .filter(|a| a.path().is_ident("cfg"))
+                .collect();
+            cfg_attrs.len() == 1 && attr_is_exact_cfg_test(cfg_attrs[0])
         }
 
         fn attr_is_exact_cfg_test(attr: &Attribute) -> bool {
@@ -2094,8 +2108,12 @@ pub trait Foo {
     #[test]
     fn impl_item_without_cfg_test_inside_production_impl_admission_is_detected() {
         // Negative control: an ordinary production impl-fn with an
-        // admission call must STILL be detected — the per-ImplItem
-        // skip applies only when `cfg(test)` attribute is present.
+        // admission call must be detected. The conservative scope
+        // walks every `ImplItem` body inside a production `impl`
+        // unconditionally — there is no `ImplItem`-level cfg-skip,
+        // so this case is identical in handling to a `#[cfg(test)]`
+        // impl-fn (both fire the checker; the latter is pinned by
+        // `cfg_test_on_impl_item_is_production_under_conservative_scope`).
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2131,6 +2149,33 @@ fn cross_platform_helper() {
             Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
             other => panic!(
                 "expected admission detection inside cfg(unix|windows) ∧ cfg(64-bit) helper, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn multi_cfg_attrs_test_first_other_second_is_production_under_conservative_scope() {
+        // `#[cfg(test)] #[cfg(other)]` — even though one of the two
+        // cfg attributes is the EXACT literal `#[cfg(test)]`, the
+        // multi-`#[cfg]` stack pushes the carrier out of the
+        // single-attribute skip class. The conservative scope
+        // requires exactly one cfg attribute and that attribute be
+        // the literal shape; any additional cfg attribute makes the
+        // carrier production. Pins the contract↔code alignment after
+        // tightening `item_is_exact_cfg_test` to count cfg attrs.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(test)]
+#[cfg(other)]
+fn helper() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside #[cfg(test)] + #[cfg(other)] stack under conservative scope, got {other:?}"
             ),
         }
     }
@@ -2295,9 +2340,13 @@ pub fn handle_received_tx() {
 
     #[test]
     fn struct_literal_field_value_without_cfg_test_admission_is_detected() {
-        // Negative control: an ordinary FieldValue with an admission
-        // call must STILL be detected — the per-FieldValue skip
-        // applies only when `cfg(test)` is present.
+        // Negative control: an ordinary FieldValue initialiser with
+        // an admission call must be detected. The conservative scope
+        // walks every `FieldValue` unconditionally — there is no
+        // `FieldValue`-level cfg-skip, so this case is identical in
+        // handling to a `#[cfg(test)]` FieldValue (both fire; the
+        // latter is pinned by
+        // `cfg_test_on_struct_literal_field_value_is_production_under_conservative_scope`).
         let src = "\
 pub fn handle_received_tx() {
     let _ = Foo {
@@ -2334,9 +2383,13 @@ pub fn handle_received_tx() {
 
     #[test]
     fn block_expression_without_cfg_test_inside_production_fn_admission_is_detected() {
-        // Negative control for visit_expr-level cfg-skip: an
-        // ordinary block expression with an admission call inside a
-        // production function MUST still be detected.
+        // Negative control: an ordinary block expression with an
+        // admission call inside a production function must be
+        // detected. The conservative scope walks every `Expr`
+        // unconditionally — there is no `Expr`-level cfg-skip, so
+        // this case is identical in handling to a `#[cfg(test)]`
+        // block expr (both fire; the latter is pinned by
+        // `cfg_test_on_block_expression_is_production_under_conservative_scope`).
         let src = "\
 pub fn handle_received_tx() {
     {
@@ -2354,10 +2407,12 @@ pub fn handle_received_tx() {
 
     #[test]
     fn cfg_not_test_predicate_is_production_and_admission_is_detected() {
-        // `#[cfg(not(test))]` is production code under `cfg(test)`
-        // configuration — it is visible during normal builds but
-        // disabled during test compilation. The checker treats it as
-        // production scope and detects admission calls inside it.
+        // `#[cfg(not(test))]` is enabled exactly when `test` is NOT
+        // in the active config set — i.e. visible during normal
+        // builds and disabled during test compilation, the opposite
+        // gate of `#[cfg(test)]`. It is also not the EXACT literal
+        // `#[cfg(test)]`, so the conservative scope scans it as
+        // production and detects admission calls inside it.
         let src = "\
 pub fn handle_received_tx() {}
 
