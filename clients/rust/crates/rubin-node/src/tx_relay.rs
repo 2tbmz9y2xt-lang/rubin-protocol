@@ -1248,8 +1248,8 @@ mod tests {
         use syn::parse::{Parse, ParseStream};
         use syn::visit::Visit;
         use syn::{
-            Attribute, Expr, ExprCall, ExprMethodCall, ExprPath, File, Ident, ImplItem, Item,
-            ItemFn, Lit, LitBool, Path, QSelf, Token, TraitItem, Type,
+            Arm, Attribute, Expr, ExprCall, ExprMethodCall, ExprPath, File, Ident, ImplItem, Item,
+            ItemFn, Lit, LitBool, Path, QSelf, Stmt, Token, TraitItem, Type,
         };
 
         /// Method idents that constitute canonical `TxPool` admission per
@@ -1390,45 +1390,109 @@ mod tests {
             attrs_imply_test(attrs)
         }
 
-        fn attrs_imply_test(attrs: &[Attribute]) -> bool {
-            attrs.iter().any(attr_implies_test)
-        }
-
-        // Returns true iff this `#[cfg(...)]` attribute's predicate
-        // logically implies `test ∈ C` for every config C that
-        // satisfies it. Skip-from-production rule:
-        //   skip(I) ⇔ ∀C. P(I)(C) ⇒ test ∈ C
+        // Returns true iff the conjunction of every `#[cfg(...)]`
+        // attribute on the carrier (Item / ImplItem / TraitItem /
+        // Expr / Stmt / Arm) logically implies `test ∈ C` for every
+        // config C that satisfies all of them. Multiple
+        // `#[cfg(P1)] #[cfg(P2)]` attributes on the same carrier are
+        // AND-ed by Rust, so the carrier is enabled iff `P1 ∧ P2 ∧ …`,
+        // and `(P1 ∧ P2 ∧ …) ⇒ test` is the right skip predicate.
+        //
+        // Skip-from-production rule:
+        //   skip(I) ⇔ ∀C. (∧ᵢ Pᵢ(I)(C)) ⇒ test ∈ C
         // per the Rust reference's ConfigurationPredicate grammar
         // (`all` / `any` / `not` / option / `true` / `false`).
         //
-        // Algorithm: parse the attribute body into a `CfgPred` AST
-        // and evaluate it symbolically with `test = false` and every
-        // other identifier left as a free Boolean variable. The
-        // predicate `P` implies test iff `P` is decidably-
-        // unsatisfiable in the world where test is absent.
-        // `value_under_test_absent` returns:
+        // Algorithm: parse each cfg attribute body into a `CfgPred`
+        // AST, wrap the parsed list in `CfgPred::All` (semantic
+        // conjunction), and evaluate it symbolically with
+        // `test = false` and every other identifier left as a free
+        // Boolean variable. The conjoined predicate implies test iff
+        // it is decidably-unsatisfiable in the world where test is
+        // absent. `value_under_test_absent` returns:
         //   `Some(false)`  decidably-unsatisfiable     ⇒ skip
         //   `Some(true)`   decidably-true on test ∉ C  ⇒ NOT skip
         //   `None`         depends on free identifiers ⇒ NOT skip
-        fn attr_implies_test(attr: &Attribute) -> bool {
-            if !attr.path().is_ident("cfg") {
+        // Non-cfg attributes (e.g. `#[derive(...)]`) do not gate
+        // compilation and are ignored.
+        fn attrs_imply_test(attrs: &[Attribute]) -> bool {
+            let cfg_preds: Vec<CfgPred> = attrs
+                .iter()
+                .filter(|a| a.path().is_ident("cfg"))
+                .filter_map(|a| a.parse_args::<CfgPred>().ok())
+                .collect();
+            if cfg_preds.is_empty() {
                 return false;
             }
-            match attr.parse_args::<CfgPred>() {
-                Ok(pred) => matches!(value_under_test_absent(&pred), Some(false)),
-                Err(_) => false,
+            // skip iff the conjoined predicate is unsatisfiable when
+            // test is absent. SAT enumerates assignments to all
+            // distinct free variables, so multi-cfg cases that
+            // collapse to `test` are correctly identified even when
+            // no single attribute implies test.
+            !satisfiable_under_test_absent(&CfgPred::All(cfg_preds))
+        }
+
+        // Returns the attribute slice attached to an `Expr`. Almost
+        // every `Expr` variant carries its own `attrs` field; the
+        // catch-all `_` returns an empty slice for non-attribute-
+        // carrying variants (forward-compatibility with future syn
+        // additions).
+        fn expr_attrs(expr: &Expr) -> &[Attribute] {
+            match expr {
+                Expr::Array(e) => &e.attrs,
+                Expr::Assign(e) => &e.attrs,
+                Expr::Async(e) => &e.attrs,
+                Expr::Await(e) => &e.attrs,
+                Expr::Binary(e) => &e.attrs,
+                Expr::Block(e) => &e.attrs,
+                Expr::Break(e) => &e.attrs,
+                Expr::Call(e) => &e.attrs,
+                Expr::Cast(e) => &e.attrs,
+                Expr::Closure(e) => &e.attrs,
+                Expr::Const(e) => &e.attrs,
+                Expr::Continue(e) => &e.attrs,
+                Expr::Field(e) => &e.attrs,
+                Expr::ForLoop(e) => &e.attrs,
+                Expr::Group(e) => &e.attrs,
+                Expr::If(e) => &e.attrs,
+                Expr::Index(e) => &e.attrs,
+                Expr::Infer(e) => &e.attrs,
+                Expr::Let(e) => &e.attrs,
+                Expr::Lit(e) => &e.attrs,
+                Expr::Loop(e) => &e.attrs,
+                Expr::Macro(e) => &e.attrs,
+                Expr::Match(e) => &e.attrs,
+                Expr::MethodCall(e) => &e.attrs,
+                Expr::Paren(e) => &e.attrs,
+                Expr::Path(e) => &e.attrs,
+                Expr::Range(e) => &e.attrs,
+                Expr::Reference(e) => &e.attrs,
+                Expr::Repeat(e) => &e.attrs,
+                Expr::Return(e) => &e.attrs,
+                Expr::Struct(e) => &e.attrs,
+                Expr::Try(e) => &e.attrs,
+                Expr::TryBlock(e) => &e.attrs,
+                Expr::Tuple(e) => &e.attrs,
+                Expr::Unary(e) => &e.attrs,
+                Expr::Unsafe(e) => &e.attrs,
+                Expr::While(e) => &e.attrs,
+                Expr::Yield(e) => &e.attrs,
+                _ => &[],
             }
         }
 
         // Surface form of a Rust `ConfigurationPredicate` we model.
-        // `Other` covers any non-`test` identifier predicate, any
-        // `name = "value"` option, and any unknown function-call
-        // form; these evaluate to the unknown truth value.
+        // `Var(name)` covers any non-`test` identifier predicate,
+        // any `name = "value"` option (encoded as `name="..."`), and
+        // any unknown function-call form. Variables with the same
+        // surface name resolve to the same Boolean variable during
+        // SAT search — so `cfg(any(test, foo))` ∧ `cfg(any(test, not(foo)))`
+        // collapses to `test` because `foo ∧ ¬foo` is unsatisfiable.
         enum CfgPred {
             Test,
             True,
             False,
-            Other,
+            Var(String),
             All(Vec<CfgPred>),
             Any(Vec<CfgPred>),
             Not(Box<CfgPred>),
@@ -1474,73 +1538,99 @@ mod tests {
                             }
                             Ok(CfgPred::Not(Box::new(pred)))
                         }
-                        _ => Ok(CfgPred::Other),
+                        // Unknown function-call form (e.g.
+                        // `version("1.0")`) — keyed by the surface
+                        // ident only. Sufficient for SAT correctness
+                        // because two unknown calls with the same
+                        // ident collide as the same variable.
+                        _ => Ok(CfgPred::Var(name)),
                     }
                 } else if input.peek(Token![=]) {
                     input.parse::<Token![=]>()?;
-                    let _: Lit = input.parse()?;
-                    Ok(CfgPred::Other)
+                    let lit: Lit = input.parse()?;
+                    let value_repr = match &lit {
+                        Lit::Str(s) => format!("\"{}\"", s.value()),
+                        Lit::Int(i) => i.token().to_string(),
+                        Lit::Bool(b) => b.value.to_string(),
+                        _ => String::from("?"),
+                    };
+                    Ok(CfgPred::Var(format!("{name}={value_repr}")))
                 } else if name == "test" {
                     Ok(CfgPred::Test)
                 } else {
-                    Ok(CfgPred::Other)
+                    Ok(CfgPred::Var(name))
                 }
             }
         }
 
-        // Evaluates `P` with `test = false` and every other identifier
-        // left as a free Boolean variable. Returns:
-        //   `Some(false)` if `P` is decidably-unsatisfiable when
-        //                 `test` is absent (⇒ `P ⇒ test`)
-        //   `Some(true)`  if `P` is decidably-true on every test-absent
-        //                 config (⇒ `P ⇏ test`)
-        //   `None`        if the truth value depends on free identifiers
-        //                 (caller treats `None` as not-implying-test)
-        fn value_under_test_absent(p: &CfgPred) -> Option<bool> {
+        // Returns `true` iff `P` has a satisfying assignment to its
+        // free Boolean variables when `test` is forced to `false`.
+        // Equivalently: `¬satisfiable_under_test_absent(P)` is the
+        // skip predicate (`P ⇒ test` iff no model satisfies `P` with
+        // `test ∉ C`).
+        //
+        // Implementation: collect the set of distinct `Var(name)`
+        // identifiers reachable from `P`, then enumerate all
+        // 2^|vars| assignments and short-circuit on the first
+        // satisfying one. Capped at 16 distinct vars (real-world cfg
+        // predicates are far smaller) — beyond the cap the function
+        // conservatively returns `true` (caller treats unknown as
+        // not-implying-test, leaving the carrier in production scope).
+        fn satisfiable_under_test_absent(p: &CfgPred) -> bool {
+            let mut vars: Vec<String> = Vec::new();
+            collect_vars(p, &mut vars);
+            let n = vars.len();
+            if n > 16 {
+                return true;
+            }
+            let total: u64 = 1u64 << n;
+            for mask in 0..total {
+                let env: Vec<(&str, bool)> = vars
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| (name.as_str(), (mask >> i) & 1 == 1))
+                    .collect();
+                if evaluate_under_test_absent(p, &env) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        fn collect_vars(p: &CfgPred, vars: &mut Vec<String>) {
             match p {
-                CfgPred::Test => Some(false),
-                CfgPred::True => Some(true),
-                CfgPred::False => Some(false),
-                CfgPred::Other => None,
-                CfgPred::All(children) => {
-                    // Empty `all()` is the empty conjunction = top.
-                    if children.is_empty() {
-                        return Some(true);
+                CfgPred::Var(name) => {
+                    if !vars.iter().any(|v| v == name) {
+                        vars.push(name.clone());
                     }
-                    let mut any_unknown = false;
+                }
+                CfgPred::All(children) | CfgPred::Any(children) => {
                     for c in children {
-                        match value_under_test_absent(c) {
-                            Some(false) => return Some(false),
-                            Some(true) => continue,
-                            None => any_unknown = true,
-                        }
+                        collect_vars(c, vars);
                     }
-                    if any_unknown {
-                        None
-                    } else {
-                        Some(true)
-                    }
+                }
+                CfgPred::Not(inner) => collect_vars(inner, vars),
+                CfgPred::Test | CfgPred::True | CfgPred::False => {}
+            }
+        }
+
+        fn evaluate_under_test_absent(p: &CfgPred, env: &[(&str, bool)]) -> bool {
+            match p {
+                CfgPred::Test => false,
+                CfgPred::True => true,
+                CfgPred::False => false,
+                CfgPred::Var(name) => env
+                    .iter()
+                    .find(|(v, _)| *v == name.as_str())
+                    .map(|(_, val)| *val)
+                    .unwrap_or(false),
+                CfgPred::All(children) => {
+                    children.iter().all(|c| evaluate_under_test_absent(c, env))
                 }
                 CfgPred::Any(children) => {
-                    // Empty `any()` is the empty disjunction = bottom.
-                    if children.is_empty() {
-                        return Some(false);
-                    }
-                    let mut any_unknown = false;
-                    for c in children {
-                        match value_under_test_absent(c) {
-                            Some(true) => return Some(true),
-                            Some(false) => continue,
-                            None => any_unknown = true,
-                        }
-                    }
-                    if any_unknown {
-                        None
-                    } else {
-                        Some(false)
-                    }
+                    children.iter().any(|c| evaluate_under_test_absent(c, env))
                 }
-                CfgPred::Not(inner) => value_under_test_absent(inner).map(|b| !b),
+                CfgPred::Not(inner) => !evaluate_under_test_absent(inner, env),
             }
         }
 
@@ -1580,6 +1670,45 @@ mod tests {
                     return;
                 }
                 syn::visit::visit_trait_item(self, item);
+            }
+
+            fn visit_expr(&mut self, expr: &'ast Expr) {
+                // Below-item-level cfg-skip: Rust allows `#[cfg(...)]`
+                // on any expression form (`ExprBlock`, `ExprIf`,
+                // `ExprMatch`, etc.). The attribute set on the
+                // expression itself gates whether the expression is
+                // compiled in non-test builds.
+                if attrs_imply_test(expr_attrs(expr)) {
+                    return;
+                }
+                syn::visit::visit_expr(self, expr);
+            }
+
+            fn visit_arm(&mut self, arm: &'ast Arm) {
+                // `match x { #[cfg(test)] _ => TxPool::admit(tx) }` —
+                // the arm is gated independently of the match
+                // expression as a whole.
+                if attrs_imply_test(&arm.attrs) {
+                    return;
+                }
+                syn::visit::visit_arm(self, arm);
+            }
+
+            fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+                // `let`-bindings and standalone macro statements
+                // carry their own attribute set. Inner expression /
+                // item statements have attrs on the wrapped node and
+                // are filtered through `visit_expr` / `visit_item`
+                // already.
+                let attrs: &[Attribute] = match stmt {
+                    Stmt::Local(local) => &local.attrs,
+                    Stmt::Macro(m) => &m.attrs,
+                    Stmt::Expr(_, _) | Stmt::Item(_) => &[][..],
+                };
+                if attrs_imply_test(attrs) {
+                    return;
+                }
+                syn::visit::visit_stmt(self, stmt);
             }
 
             fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
@@ -2226,6 +2355,122 @@ impl Foo {
             other => {
                 panic!("expected admission detection inside production impl-fn body, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn multi_cfg_attrs_combine_via_conjunction_implies_test() {
+        // `#[cfg(any(test, foo))] #[cfg(any(test, not(foo)))]`
+        // ≡ `(test ∨ foo) ∧ (test ∨ ¬foo)` ≡ `test ∨ (foo ∧ ¬foo)`
+        // ≡ `test`. Conjunction implies test even though no single
+        // attribute does. Skip rule MUST treat the carrier as
+        // test-only.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(any(test, foo))]
+#[cfg(any(test, not(foo)))]
+fn test_only_via_conjunction() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src).expect(
+            "conjunction of two cfg attrs collapses to test; item must be skipped per-conjunction",
+        );
+    }
+
+    #[test]
+    fn multi_cfg_attrs_unrelated_to_test_remain_production() {
+        // Negative control for the conjunction logic: two cfg
+        // attributes neither of which involves test should leave the
+        // item in production scope.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(any(unix, windows))]
+#[cfg(target_pointer_width = \"64\")]
+fn cross_platform_helper() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside cfg(unix|windows) ∧ cfg(64-bit) helper, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn cfg_test_on_block_expression_inside_production_fn_is_skipped() {
+        // Below-item-level cfg-skip: `#[cfg(test)] { ... }` block
+        // expression inside a production function body. Without the
+        // visit_expr override the admission call inside would be
+        // walked and reported.
+        let src = "\
+pub fn handle_received_tx() {
+    #[cfg(test)]
+    {
+        crate::txpool::TxPool::admit(tx);
+    }
+}
+";
+        check_tx_relay_boundary_source(src)
+            .expect("#[cfg(test)] block expression inside production fn must be skipped");
+    }
+
+    #[test]
+    fn cfg_test_on_match_arm_inside_production_fn_is_skipped() {
+        // Below-item-level cfg-skip: `match x { #[cfg(test)] _ => ... }`
+        // arm inside a production fn. Default visit_expr_match
+        // descends into arms; without the visit_arm override the
+        // admission call in the test-only arm body would be reported.
+        let src = "\
+pub fn handle_received_tx() {
+    let x = 0;
+    match x {
+        #[cfg(test)]
+        _ => { crate::txpool::TxPool::admit(tx); }
+        _ => (),
+    }
+}
+";
+        check_tx_relay_boundary_source(src)
+            .expect("#[cfg(test)] match arm inside production fn must be skipped");
+    }
+
+    #[test]
+    fn cfg_test_on_let_stmt_inside_production_fn_is_skipped() {
+        // Below-item-level cfg-skip: `#[cfg(test)] let _ = ...;`
+        // statement inside a production fn body. The Stmt::Local
+        // attrs are checked via the visit_stmt override.
+        let src = "\
+pub fn handle_received_tx() {
+    #[cfg(test)]
+    let _ = crate::txpool::TxPool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src)
+            .expect("#[cfg(test)] let-stmt inside production fn must be skipped");
+    }
+
+    #[test]
+    fn block_expression_without_cfg_test_inside_production_fn_admission_is_detected() {
+        // Negative control for visit_expr-level cfg-skip: an
+        // ordinary block expression with an admission call inside a
+        // production function MUST still be detected.
+        let src = "\
+pub fn handle_received_tx() {
+    {
+        crate::txpool::TxPool::admit(tx);
+    }
+}
+";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside ordinary block expression, got {other:?}"
+            ),
         }
     }
 
