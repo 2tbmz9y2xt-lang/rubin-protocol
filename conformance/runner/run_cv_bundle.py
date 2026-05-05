@@ -2158,11 +2158,38 @@ def validate_vector(
         if "expect_anchor_bytes" in v and go_resp.get("anchor_bytes") != v["expect_anchor_bytes"]:
             problems.append(f"{gate}/{vid}: expect_anchor_bytes mismatch")
     elif op == "da_fee_floor_policy":
-        def policy_value(resp: Dict[str, Any], key: str, default: Any) -> Any:
-            value = resp.get(key, default)
+        def policy_has(resp: Dict[str, Any], key: str) -> bool:
+            return key in resp
+
+        def policy_value(resp: Dict[str, Any], key: str) -> Any:
+            return resp[key]
+
+        def policy_int(resp: Dict[str, Any], key: str, side: str) -> Optional[int]:
+            if not policy_has(resp, key):
+                return None
+            value = policy_value(resp, key)
             if value is None:
+                problems.append(f"{gate}/{vid}: {side}.{key} is null")
+                return None
+            return int(value)
+
+        def policy_bool(resp: Dict[str, Any], key: str, default: bool) -> bool:
+            if not policy_has(resp, key):
                 return default
-            return value
+            value = policy_value(resp, key)
+            if value is None:
+                problems.append(f"{gate}/{vid}: {key} is null")
+                return default
+            return bool(value)
+
+        def policy_str(resp: Dict[str, Any], key: str, default: str, side: str) -> str:
+            if not policy_has(resp, key):
+                return default
+            value = policy_value(resp, key)
+            if value is None:
+                problems.append(f"{gate}/{vid}: {side}.{key} is null")
+                return default
+            return str(value)
 
         int_fields = [
             "fee",
@@ -2176,44 +2203,62 @@ def validate_vector(
         ]
         str_fields = ["admit_class", "dominant_floor", "reject_reason"]
         for key in int_fields:
-            if int(policy_value(go_resp, key, 0)) != int(policy_value(rust_resp, key, 0)):
+            go_has = policy_has(go_resp, key)
+            rust_has = policy_has(rust_resp, key)
+            if go_has != rust_has:
+                problems.append(
+                    f"{gate}/{vid}: {key} presence mismatch go={go_has} rust={rust_has}"
+                )
+                continue
+            if not go_has:
+                continue
+            go_value = policy_int(go_resp, key, "go")
+            rust_value = policy_int(rust_resp, key, "rust")
+            if go_value != rust_value:
                 problems.append(
                     f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
                 )
-        if bool(policy_value(go_resp, "admit", False)) != bool(policy_value(rust_resp, "admit", False)):
+        if policy_bool(go_resp, "admit", False) != policy_bool(rust_resp, "admit", False):
             problems.append(f"{gate}/{vid}: admit mismatch go={go_resp.get('admit')} rust={rust_resp.get('admit')}")
-        if bool(policy_value(go_resp, "ok", False)) != bool(policy_value(rust_resp, "ok", False)):
+        if policy_bool(go_resp, "ok", False) != policy_bool(rust_resp, "ok", False):
             problems.append(f"{gate}/{vid}: ok mismatch go={go_resp.get('ok')} rust={rust_resp.get('ok')}")
-        if "expect_ok" in v and bool(policy_value(go_resp, "ok", False)) != bool(v["expect_ok"]):
+        if "expect_ok" in v and policy_bool(go_resp, "ok", False) != bool(v["expect_ok"]):
             problems.append(f"{gate}/{vid}: expect_ok mismatch")
-        if str(policy_value(go_resp, "err", "")) != str(policy_value(rust_resp, "err", "")):
+        if policy_str(go_resp, "err", "", "go") != policy_str(rust_resp, "err", "", "rust"):
             problems.append(f"{gate}/{vid}: err mismatch go={go_resp.get('err')} rust={rust_resp.get('err')}")
         for key in str_fields:
-            if str(policy_value(go_resp, key, "")) != str(policy_value(rust_resp, key, "")):
+            if policy_str(go_resp, key, "", "go") != policy_str(rust_resp, key, "", "rust"):
                 problems.append(
                     f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
                 )
 
-        if "expect_admit" in v and bool(policy_value(go_resp, "admit", False)) != bool(v["expect_admit"]):
+        if "expect_admit" in v and policy_bool(go_resp, "admit", False) != bool(v["expect_admit"]):
             problems.append(f"{gate}/{vid}: expect_admit mismatch")
-        if "expect_admit_class" in v and str(policy_value(go_resp, "admit_class", "")) != str(v["expect_admit_class"]):
+        if "expect_admit_class" in v and policy_str(go_resp, "admit_class", "", "go") != str(v["expect_admit_class"]):
             problems.append(f"{gate}/{vid}: expect_admit_class mismatch")
-        if "expect_dominant_floor" in v and str(policy_value(go_resp, "dominant_floor", "")) != str(v["expect_dominant_floor"]):
+        if "expect_dominant_floor" in v and policy_str(go_resp, "dominant_floor", "", "go") != str(v["expect_dominant_floor"]):
             problems.append(f"{gate}/{vid}: expect_dominant_floor mismatch")
-        if "expect_reject_reason" in v and str(policy_value(go_resp, "reject_reason", "")) != str(v["expect_reject_reason"]):
+        if "expect_reject_reason" in v and policy_str(go_resp, "reject_reason", "", "go") != str(v["expect_reject_reason"]):
             problems.append(f"{gate}/{vid}: expect_reject_reason mismatch")
-        if "expect_reject_reason" not in v and str(policy_value(go_resp, "reject_reason", "")) != "":
+        if "expect_reject_reason" not in v and policy_str(go_resp, "reject_reason", "", "go") != "":
             problems.append(f"{gate}/{vid}: unexpected reject_reason={go_resp.get('reject_reason')}")
-        if "expect_err" in v and str(policy_value(go_resp, "err", "")) != str(v["expect_err"]):
+        if "expect_err" in v and policy_str(go_resp, "err", "", "go") != str(v["expect_err"]):
             problems.append(f"{gate}/{vid}: expect_err mismatch")
         if "expect_err" not in v:
             for side, resp in (("go", go_resp), ("rust", rust_resp)):
-                if str(policy_value(resp, "err", "")) != "":
+                if policy_str(resp, "err", "", side) != "":
                     problems.append(f"{gate}/{vid}: unexpected {side} replay err={resp.get('err')}")
         for key in int_fields:
             expect_key = f"expect_{key}"
-            if expect_key in v and int(policy_value(go_resp, key, 0)) != int(v[expect_key]):
-                problems.append(f"{gate}/{vid}: {expect_key} mismatch")
+            if expect_key in v:
+                if not policy_has(go_resp, key):
+                    problems.append(f"{gate}/{vid}: missing {key} for {expect_key}")
+                    continue
+                go_value = policy_int(go_resp, key, "go")
+                if go_value != int(v[expect_key]):
+                    problems.append(f"{gate}/{vid}: {expect_key} mismatch")
+            elif policy_has(go_resp, key):
+                problems.append(f"{gate}/{vid}: unexpected {key}={go_resp.get(key)}")
     elif op.startswith("compact_") and op != "compact_shortid":
         def normalize_compact_response(resp: Dict[str, Any]) -> Dict[str, Any]:
             normalized = dict(resp or {})

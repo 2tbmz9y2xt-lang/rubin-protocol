@@ -487,6 +487,38 @@
         "policy_utxo_fee_computed",
         "tx_weight_and_da_bytes_computed"
       ]
+    },
+    {
+      "id": "CV-DA-FEE-FLOOR-16-TIE-EXACT",
+      "op": "da_fee_floor_policy",
+      "scenario": {
+        "kind": "da_commit",
+        "tx_nonce": 16,
+        "manifest_len": 13,
+        "fee": 1131
+      },
+      "current_mempool_min_fee_rate": 1,
+      "min_da_fee_rate": 87,
+      "da_surcharge_per_byte": 0,
+      "expect_ok": true,
+      "expect_admit": true,
+      "expect_admit_class": "accepted",
+      "expect_dominant_floor": "tie",
+      "expect_fee": 1131,
+      "expect_weight": 1131,
+      "expect_da_bytes": 13,
+      "expect_relay_fee_floor": 1131,
+      "expect_da_fee_floor": 1131,
+      "expect_da_surcharge": 0,
+      "expect_da_required_fee": 1131,
+      "expect_required_fee": 1131,
+      "policy_branch": "tie_floor_accepted",
+      "early_guards_passed": [
+        "scenario_tx_materialized",
+        "tx_parse_full_consumed",
+        "policy_utxo_fee_computed",
+        "tx_weight_and_da_bytes_computed"
+      ]
     }
   ]
 }

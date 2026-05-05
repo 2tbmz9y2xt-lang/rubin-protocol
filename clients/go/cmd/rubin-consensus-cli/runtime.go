@@ -615,11 +615,11 @@ type Response struct {
 	SumFees            uint64         `json:"sum_fees,omitempty"`
 	Mode               int            `json:"mode,omitempty"`
 	TotalFee           int            `json:"total_fee,omitempty"`
-	RelayFeeFloor      uint64         `json:"relay_fee_floor,omitempty"`
-	DaFeeFloor         uint64         `json:"da_fee_floor,omitempty"`
-	DaSurcharge        uint64         `json:"da_surcharge,omitempty"`
-	DaRequiredFee      uint64         `json:"da_required_fee,omitempty"`
-	RequiredFee        uint64         `json:"required_fee,omitempty"`
+	RelayFeeFloor      *uint64        `json:"relay_fee_floor,omitempty"`
+	DaFeeFloor         *uint64        `json:"da_fee_floor,omitempty"`
+	DaSurcharge        *uint64        `json:"da_surcharge,omitempty"`
+	DaRequiredFee      *uint64        `json:"da_required_fee,omitempty"`
+	RequiredFee        *uint64        `json:"required_fee,omitempty"`
 	AdmitClass         string         `json:"admit_class,omitempty"`
 	DominantFloor      string         `json:"dominant_floor,omitempty"`
 	RejectReason       string         `json:"reject_reason,omitempty"`
@@ -812,6 +812,10 @@ func maxU64(a, b uint64) uint64 {
 	return b
 }
 
+func u64Ptr(v uint64) *uint64 {
+	return &v
+}
+
 func dominantFeeFloor(relayFeeFloor, daRequiredFee uint64) string {
 	switch {
 	case daRequiredFee > relayFeeFloor:
@@ -925,17 +929,17 @@ func daFeeFloorPolicyResp(req Request) Response {
 		Fee:           fee,
 		Weight:        weight,
 		DaBytes:       daBytes,
-		RelayFeeFloor: relayFeeFloor,
+		RelayFeeFloor: u64Ptr(relayFeeFloor),
 		AdmitClass:    "accepted",
-		RequiredFee:   relayFeeFloor,
+		RequiredFee:   u64Ptr(relayFeeFloor),
 		DominantFloor: dominantFeeFloor(relayFeeFloor, 0),
-		DaFeeFloor:    0,
-		DaSurcharge:   0,
-		DaRequiredFee: 0,
+		DaFeeFloor:    u64Ptr(0),
+		DaSurcharge:   u64Ptr(0),
+		DaRequiredFee: u64Ptr(0),
 	}
 	if !relayFeeFloorOK {
-		resp.RelayFeeFloor = 0
-		resp.RequiredFee = 0
+		resp.RelayFeeFloor = nil
+		resp.RequiredFee = nil
 		resp.DominantFloor = "relay"
 	}
 
@@ -952,7 +956,7 @@ func daFeeFloorPolicyResp(req Request) Response {
 		if !ok {
 			resp.AdmitClass = "rejected"
 			resp.DominantFloor = "da"
-			resp.DaFeeFloor = daFeeFloor
+			resp.DaFeeFloor = u64Ptr(daFeeFloor)
 			resp.RejectReason = "DA_SURCHARGE_OVERFLOW"
 			return resp
 		}
@@ -960,26 +964,26 @@ func daFeeFloorPolicyResp(req Request) Response {
 		if !ok {
 			resp.AdmitClass = "rejected"
 			resp.DominantFloor = "da"
-			resp.DaFeeFloor = daFeeFloor
-			resp.DaSurcharge = daSurcharge
+			resp.DaFeeFloor = u64Ptr(daFeeFloor)
+			resp.DaSurcharge = u64Ptr(daSurcharge)
 			resp.RejectReason = "DA_REQUIRED_FEE_OVERFLOW"
 			return resp
 		}
-		resp.DaFeeFloor = daFeeFloor
-		resp.DaSurcharge = daSurcharge
-		resp.DaRequiredFee = daRequiredFee
+		resp.DaFeeFloor = u64Ptr(daFeeFloor)
+		resp.DaSurcharge = u64Ptr(daSurcharge)
+		resp.DaRequiredFee = u64Ptr(daRequiredFee)
 		if daRequiredFee > 0 && fee < daRequiredFee {
 			resp.AdmitClass = "rejected"
-			resp.RequiredFee = daRequiredFee
+			resp.RequiredFee = u64Ptr(daRequiredFee)
 			resp.DominantFloor = "da"
 			resp.RejectReason = "DA_FEE_BELOW_STAGE_C_FLOOR"
 			return resp
 		}
 		if relayFeeFloorOK {
-			resp.RequiredFee = maxU64(relayFeeFloor, daRequiredFee)
+			resp.RequiredFee = u64Ptr(maxU64(relayFeeFloor, daRequiredFee))
 			resp.DominantFloor = dominantFeeFloor(relayFeeFloor, daRequiredFee)
 		} else {
-			resp.RequiredFee = daRequiredFee
+			resp.RequiredFee = u64Ptr(daRequiredFee)
 			resp.DominantFloor = "relay"
 		}
 	}
@@ -989,7 +993,7 @@ func daFeeFloorPolicyResp(req Request) Response {
 		resp.DominantFloor = "relay"
 		resp.RejectReason = "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM"
 		if relayFeeFloorOK {
-			resp.RequiredFee = relayFeeFloor
+			resp.RequiredFee = u64Ptr(relayFeeFloor)
 		}
 		return resp
 	}

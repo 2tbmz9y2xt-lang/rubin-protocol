@@ -971,6 +971,21 @@ fn parse_hex_u256_to_32(s: &str) -> Result<[u8; 32], ()> {
     Ok(out)
 }
 
+fn parse_exact_hex32(s: &str) -> Result<[u8; 32], ()> {
+    let stripped = s
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| s.trim().strip_prefix("0X"))
+        .unwrap_or_else(|| s.trim());
+    let b = hex::decode(stripped).map_err(|_| ())?;
+    if b.len() != 32 {
+        return Err(());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&b);
+    Ok(out)
+}
+
 fn key_bytes(value: &Value) -> Result<Vec<u8>, ()> {
     if let Some(s) = value.as_str() {
         let stripped = s.trim().to_lowercase();
@@ -1145,14 +1160,9 @@ fn dominant_fee_floor(relay_fee_floor: u64, da_required_fee: u64) -> &'static st
 fn policy_utxo_map(items: &[UtxoJson]) -> Result<HashMap<Outpoint, UtxoEntry>, String> {
     let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::with_capacity(items.len());
     for u in items {
-        let txid_raw = hex::decode(&u.txid).map_err(|_| "bad utxo txid".to_string())?;
-        if txid_raw.len() != 32 {
-            return Err("bad utxo txid".to_string());
-        }
+        let op_txid = parse_exact_hex32(&u.txid).map_err(|_| "bad utxo txid".to_string())?;
         let cov_data =
             hex::decode(&u.covenant_data).map_err(|_| "bad utxo covenant_data".to_string())?;
-        let mut op_txid = [0u8; 32];
-        op_txid.copy_from_slice(&txid_raw);
         utxos.insert(
             Outpoint {
                 txid: op_txid,
