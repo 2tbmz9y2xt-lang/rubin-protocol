@@ -1203,7 +1203,24 @@ mod tests {
             ".admit(",
             ".admit_with_metadata(",
             ".add_tx_with_source(",
-            // UFCS plain form `TxPool::method(...)`
+            // UFCS plain form `TxPool::method(...)` — the literal
+            // substring `TxPool::admit(` etc. ALSO catches every
+            // non-angle-bracket module-prefixed spelling via
+            // substring spillover, because the prefix concatenates
+            // directly with `TxPool::admit(` without any separator
+            // that breaks the substring match. Examples confirmed
+            // caught by these three entries: `crate::TxPool::admit(`,
+            // `crate::TxPool::admit_with_metadata(`,
+            // `crate::TxPool::add_tx_with_source(`,
+            // `crate::txpool::TxPool::admit(`,
+            // `super::TxPool::admit(`,
+            // `super::txpool::TxPool::admit(`,
+            // `txpool::TxPool::admit(`, and any future
+            // re-export/alias path that ends in `TxPool::admit(`-
+            // shaped text. Angle-bracket UFCS spellings (e.g.
+            // `<crate::TxPool>::admit(`) need separate explicit
+            // entries below because the closing `>` between the
+            // type and `::` breaks the substring spillover.
             "TxPool::admit(",
             "TxPool::admit_with_metadata(",
             "TxPool::add_tx_with_source(",
