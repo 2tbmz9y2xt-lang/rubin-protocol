@@ -462,6 +462,15 @@ struct Request {
     commit_fee: i64,
 
     #[serde(default)]
+    current_mempool_min_fee_rate: Option<u64>,
+
+    #[serde(default)]
+    min_da_fee_rate: Option<u64>,
+
+    #[serde(default)]
+    da_surcharge_per_byte: u64,
+
+    #[serde(default)]
     chunk_fees: Vec<i64>,
 
     #[serde(default)]
@@ -902,6 +911,30 @@ struct Response {
     total_fee: Option<i64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    relay_fee_floor: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    da_fee_floor: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    da_surcharge: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    da_required_fee: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    required_fee: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admit_class: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dominant_floor: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reject_reason: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     counted_bytes: Option<i64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -935,6 +968,21 @@ fn parse_hex_u256_to_32(s: &str) -> Result<[u8; 32], ()> {
         return Err(());
     }
     out[32 - b.len()..].copy_from_slice(&b);
+    Ok(out)
+}
+
+fn parse_exact_hex32(s: &str) -> Result<[u8; 32], ()> {
+    let stripped = s
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| s.trim().strip_prefix("0X"))
+        .unwrap_or_else(|| s.trim());
+    let b = hex::decode(stripped).map_err(|_| ())?;
+    if b.len() != 32 {
+        return Err(());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&b);
     Ok(out)
 }
 
@@ -1075,6 +1123,263 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
     Ok(out)
+}
+
+// Conformance replay mirrors the current standard mempool default without importing node runtime.
+const CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE: u64 = 1;
+const CONFORMANCE_DEFAULT_MIN_DA_FEE_RATE: u64 = 1;
+
+fn checked_add_policy(a: u64, b: u64) -> Option<u64> {
+    a.checked_add(b)
+}
+
+fn checked_mul_policy(a: u64, b: u64) -> Option<u64> {
+    a.checked_mul(b)
+}
+
+fn max_u64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn dominant_fee_floor(relay_fee_floor: u64, da_required_fee: u64) -> &'static str {
+    if da_required_fee > relay_fee_floor {
+        "da"
+    } else if relay_fee_floor > da_required_fee {
+        "relay"
+    } else if relay_fee_floor == 0 {
+        "none"
+    } else {
+        "tie"
+    }
+}
+
+fn policy_utxo_map(items: &[UtxoJson]) -> Result<HashMap<Outpoint, UtxoEntry>, String> {
+    let mut utxos: HashMap<Outpoint, UtxoEntry> = HashMap::with_capacity(items.len());
+    for u in items {
+        let op_txid = parse_exact_hex32(&u.txid).map_err(|_| "bad utxo txid".to_string())?;
+        let cov_data =
+            hex::decode(&u.covenant_data).map_err(|_| "bad utxo covenant_data".to_string())?;
+        utxos.insert(
+            Outpoint {
+                txid: op_txid,
+                vout: u.vout,
+            },
+            UtxoEntry {
+                value: u.value,
+                covenant_type: u.covenant_type,
+                covenant_data: cov_data,
+                creation_height: u.creation_height,
+                created_by_coinbase: u.created_by_coinbase,
+            },
+        );
+    }
+    Ok(utxos)
+}
+
+fn fee_from_policy_utxos(
+    tx: &rubin_consensus::tx::Tx,
+    utxos: &HashMap<Outpoint, UtxoEntry>,
+) -> Result<u64, String> {
+    let mut total_in = 0u64;
+    if tx.inputs.is_empty() {
+        return Err("missing inputs".to_string());
+    }
+    for input in &tx.inputs {
+        let entry = utxos
+            .get(&Outpoint {
+                txid: input.prev_txid,
+                vout: input.prev_vout,
+            })
+            .ok_or_else(|| "missing utxo".to_string())?;
+        total_in = checked_add_policy(total_in, entry.value)
+            .ok_or_else(|| "sum_in overflow".to_string())?;
+    }
+
+    let mut total_out = 0u64;
+    for output in &tx.outputs {
+        total_out = checked_add_policy(total_out, output.value)
+            .ok_or_else(|| "sum_out overflow".to_string())?;
+    }
+    if total_out > total_in {
+        return Err("overspend".to_string());
+    }
+    Ok(total_in - total_out)
+}
+
+fn fee_below_rolling_floor_policy(fee: u64, weight: u64, floor: u64) -> bool {
+    if weight == 0 {
+        return true;
+    }
+    let floor = floor.max(CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE);
+    (fee as u128) < (weight as u128) * (floor as u128)
+}
+
+fn da_fee_floor_policy_response(req: &Request) -> Response {
+    let tx_bytes = match hex::decode(&req.tx_hex) {
+        Ok(v) => v,
+        Err(_) => {
+            return Response {
+                ok: false,
+                err: Some("bad hex".to_string()),
+                ..Default::default()
+            }
+        }
+    };
+    let (tx, _txid, _wtxid, consumed) = match parse_tx(&tx_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response {
+                ok: false,
+                err: Some(err_code(e.code)),
+                ..Default::default()
+            }
+        }
+    };
+    if consumed != tx_bytes.len() {
+        return Response {
+            ok: false,
+            err: Some(ErrorCode::TxErrParse.as_str().to_string()),
+            ..Default::default()
+        };
+    }
+    let (weight, da_bytes, _anchor_bytes) = match tx_weight_and_stats_public(&tx) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response {
+                ok: false,
+                err: Some(err_code(e.code)),
+                ..Default::default()
+            }
+        }
+    };
+
+    let min_fee_rate = req
+        .current_mempool_min_fee_rate
+        .unwrap_or(CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE);
+    let min_da_fee_rate = req
+        .min_da_fee_rate
+        .unwrap_or(CONFORMANCE_DEFAULT_MIN_DA_FEE_RATE);
+    let relay_fee_floor = checked_mul_policy(weight, min_fee_rate);
+
+    let mut resp = Response {
+        ok: true,
+        weight: Some(weight),
+        da_bytes: Some(da_bytes),
+        relay_fee_floor,
+        da_fee_floor: Some(0),
+        da_surcharge: Some(0),
+        da_required_fee: Some(0),
+        required_fee: relay_fee_floor,
+        admit_class: Some("accepted".to_string()),
+        dominant_floor: Some(
+            match relay_fee_floor {
+                Some(floor) => dominant_fee_floor(floor, 0),
+                None => "relay",
+            }
+            .to_string(),
+        ),
+        ..Default::default()
+    };
+
+    if da_bytes > 0 {
+        let da_fee_floor = match checked_mul_policy(da_bytes, min_da_fee_rate) {
+            Some(v) => v,
+            None => {
+                resp.reject_reason = Some("DA_FEE_FLOOR_OVERFLOW".to_string());
+                resp.admit_class = Some("rejected".to_string());
+                resp.dominant_floor = Some("da".to_string());
+                return resp;
+            }
+        };
+        let da_surcharge = match checked_mul_policy(da_bytes, req.da_surcharge_per_byte) {
+            Some(v) => v,
+            None => {
+                resp.reject_reason = Some("DA_SURCHARGE_OVERFLOW".to_string());
+                resp.admit_class = Some("rejected".to_string());
+                resp.dominant_floor = Some("da".to_string());
+                resp.da_fee_floor = Some(da_fee_floor);
+                return resp;
+            }
+        };
+        let da_required_fee = match checked_add_policy(da_fee_floor, da_surcharge) {
+            Some(v) => v,
+            None => {
+                resp.reject_reason = Some("DA_REQUIRED_FEE_OVERFLOW".to_string());
+                resp.admit_class = Some("rejected".to_string());
+                resp.dominant_floor = Some("da".to_string());
+                resp.da_fee_floor = Some(da_fee_floor);
+                resp.da_surcharge = Some(da_surcharge);
+                return resp;
+            }
+        };
+        resp.da_fee_floor = Some(da_fee_floor);
+        resp.da_surcharge = Some(da_surcharge);
+        resp.da_required_fee = Some(da_required_fee);
+        if let Some(relay_fee_floor) = relay_fee_floor {
+            resp.required_fee = Some(max_u64(relay_fee_floor, da_required_fee));
+            resp.dominant_floor =
+                Some(dominant_fee_floor(relay_fee_floor, da_required_fee).to_string());
+        } else {
+            resp.required_fee = Some(da_required_fee);
+            resp.dominant_floor = Some("relay".to_string());
+        }
+    }
+
+    if (da_bytes == 0 || resp.da_required_fee == Some(0)) && relay_fee_floor == Some(0) {
+        resp.admit = Some(true);
+        return resp;
+    }
+
+    let utxos = match policy_utxo_map(&req.utxos) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response {
+                ok: false,
+                err: Some(e),
+                ..Default::default()
+            }
+        }
+    };
+    let fee = match fee_from_policy_utxos(&tx, &utxos) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response {
+                ok: false,
+                err: Some(e),
+                ..Default::default()
+            }
+        }
+    };
+    resp.fee = Some(fee);
+
+    if da_bytes > 0 {
+        if let Some(da_required_fee) = resp.da_required_fee {
+            if da_required_fee > 0 && fee < da_required_fee {
+                resp.reject_reason = Some("DA_FEE_BELOW_STAGE_C_FLOOR".to_string());
+                resp.admit_class = Some("rejected".to_string());
+                resp.required_fee = Some(da_required_fee);
+                resp.dominant_floor = Some("da".to_string());
+                return resp;
+            }
+        }
+    }
+
+    if fee_below_rolling_floor_policy(fee, weight, min_fee_rate) {
+        resp.admit_class = Some("unavailable".to_string());
+        resp.dominant_floor = Some("relay".to_string());
+        resp.reject_reason = Some("MEMPOOL_FEE_BELOW_ROLLING_MINIMUM".to_string());
+        if let Some(relay_fee_floor) = relay_fee_floor {
+            resp.required_fee = Some(relay_fee_floor);
+        }
+        return resp;
+    }
+
+    resp.admit = Some(true);
+    resp
 }
 
 fn core_ext_profiles_from_json(
@@ -1841,6 +2146,10 @@ fn main() {
                     let _ = serde_json::to_writer(std::io::stdout(), &resp);
                 }
             }
+        }
+        "da_fee_floor_policy" => {
+            let resp = da_fee_floor_policy_response(&req);
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "rotation_create_suite_check" => {
             let rd = match &req.rotation_descriptor {
