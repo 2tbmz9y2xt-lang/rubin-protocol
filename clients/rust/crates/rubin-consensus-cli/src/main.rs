@@ -462,7 +462,7 @@ struct Request {
     commit_fee: i64,
 
     #[serde(default)]
-    current_mempool_min_fee_rate: u64,
+    current_mempool_min_fee_rate: Option<u64>,
 
     #[serde(default)]
     min_da_fee_rate: Option<u64>,
@@ -1257,7 +1257,9 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
         }
     };
 
-    let min_fee_rate = req.current_mempool_min_fee_rate;
+    let min_fee_rate = req
+        .current_mempool_min_fee_rate
+        .unwrap_or(CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE);
     let min_da_fee_rate = req
         .min_da_fee_rate
         .unwrap_or(CONFORMANCE_DEFAULT_MIN_DA_FEE_RATE);

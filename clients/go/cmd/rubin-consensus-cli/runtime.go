@@ -132,7 +132,7 @@ type Request struct {
 	Nonce1                uint64                         `json:"nonce1,omitempty"`
 	BlockTimestamp        uint64                         `json:"block_timestamp,omitempty"`
 	CommitFee             int                            `json:"commit_fee,omitempty"`
-	CurrentMempoolMinFee  uint64                         `json:"current_mempool_min_fee_rate,omitempty"`
+	CurrentMempoolMinFee  *uint64                        `json:"current_mempool_min_fee_rate,omitempty"`
 	MinDAFeeRate          *uint64                        `json:"min_da_fee_rate,omitempty"`
 	DASurchargePerByte    uint64                         `json:"da_surcharge_per_byte,omitempty"`
 	VaultInputCount       int                            `json:"vault_input_count,omitempty"`
@@ -905,7 +905,10 @@ func daFeeFloorPolicyResp(req Request) Response {
 		return Response{Ok: false, Err: err.Error()}
 	}
 
-	minFeeRate := req.CurrentMempoolMinFee
+	minFeeRate := conformanceDefaultMempoolMinFeeRate
+	if req.CurrentMempoolMinFee != nil {
+		minFeeRate = *req.CurrentMempoolMinFee
+	}
 	minDAFeeRate := conformanceDefaultMinDAFeeRate
 	if req.MinDAFeeRate != nil {
 		minDAFeeRate = *req.MinDAFeeRate
