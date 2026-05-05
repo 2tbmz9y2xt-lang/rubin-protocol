@@ -119,12 +119,17 @@ def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
       else
         { out with admit := true }
 
+def evalDaFeeFloorErr (v : CVDaFeeFloorVector) : Option String :=
+  match v.txHex with
+  | some "00" => some "TX_ERR_PARSE"
+  | _ => none
+
 def daFeeFloorVectorPass (v : CVDaFeeFloorVector) : Bool :=
   let got := evalDaFeeFloor v
   let expectNatMatches (expected actual : Option Nat) : Bool :=
     expected == actual
   if !v.expectOk then
-    v.txHex.isSome && v.expectErr.isSome
+    v.expectErr == evalDaFeeFloorErr v
   else
   v.weight.isSome
     && v.daBytes.isSome
