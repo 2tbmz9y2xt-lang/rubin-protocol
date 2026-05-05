@@ -1590,6 +1590,150 @@ def render_cv_da_stress_lean(vectors: list[DaStressVector]) -> str:
 
 
 @dataclass(frozen=True)
+class DaFeeFloorVector:
+    vid: str
+    tx_hex: str | None
+    expect_ok: bool
+    expect_err: str | None
+    fee: int | None
+    weight: int | None
+    da_bytes: int | None
+    current_mempool_min_fee_rate: int
+    min_da_fee_rate: int
+    da_surcharge_per_byte: int
+    expect_admit: bool
+    expect_admit_class: str
+    expect_dominant_floor: str
+    expect_reject_reason: str | None
+    expect_relay_fee_floor: int | None
+    expect_da_fee_floor: int | None
+    expect_da_surcharge: int | None
+    expect_da_required_fee: int | None
+    expect_required_fee: int | None
+
+
+def _require_int(v: dict[str, Any], key: str, vid: str) -> int:
+    value = v.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{vid}: {key} must be an integer")
+    return value
+
+
+def _optional_int(v: dict[str, Any], key: str, vid: str) -> int | None:
+    if key not in v:
+        return None
+    return _require_int(v, key, vid)
+
+
+def _int_default(v: dict[str, Any], key: str, default: int, vid: str) -> int:
+    if key not in v:
+        return default
+    return _require_int(v, key, vid)
+
+
+def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("gate") != "CV-DA-FEE-FLOOR":
+        raise ValueError(f"expected gate=CV-DA-FEE-FLOOR, got {data.get('gate')!r}")
+    vectors = data.get("vectors")
+    if not isinstance(vectors, list):
+        raise ValueError("vectors must be a list")
+    out: list[DaFeeFloorVector] = []
+    for idx, raw in enumerate(vectors):
+        if not isinstance(raw, dict):
+            raise ValueError(f"vector[{idx}] must be an object")
+        if raw.get("op") != "da_fee_floor_policy":
+            continue
+        vid = str(raw.get("id", ""))
+        if not vid:
+            raise ValueError("CV-DA-FEE-FLOOR vector missing id")
+        out.append(
+            DaFeeFloorVector(
+                vid=vid,
+                tx_hex=(str(raw["tx_hex"]) if "tx_hex" in raw else None),
+                expect_ok=bool(raw.get("expect_ok", True)),
+                expect_err=(str(raw["expect_err"]) if "expect_err" in raw else None),
+                fee=_optional_int(raw, "expect_fee", vid),
+                weight=_optional_int(raw, "expect_weight", vid),
+                da_bytes=_optional_int(raw, "expect_da_bytes", vid),
+                current_mempool_min_fee_rate=_int_default(raw, "current_mempool_min_fee_rate", 1, vid),
+                min_da_fee_rate=_require_int(raw, "min_da_fee_rate", vid),
+                da_surcharge_per_byte=_require_int(raw, "da_surcharge_per_byte", vid),
+                expect_admit=bool(raw.get("expect_admit")),
+                expect_admit_class=str(raw.get("expect_admit_class", "")),
+                expect_dominant_floor=str(raw.get("expect_dominant_floor", "")),
+                expect_reject_reason=(
+                    str(raw["expect_reject_reason"]) if "expect_reject_reason" in raw else None
+                ),
+                expect_relay_fee_floor=_optional_int(raw, "expect_relay_fee_floor", vid),
+                expect_da_fee_floor=_optional_int(raw, "expect_da_fee_floor", vid),
+                expect_da_surcharge=_optional_int(raw, "expect_da_surcharge", vid),
+                expect_da_required_fee=_optional_int(raw, "expect_da_required_fee", vid),
+                expect_required_fee=_optional_int(raw, "expect_required_fee", vid),
+            )
+        )
+    if not out:
+        raise ValueError("no DA fee-floor vectors found")
+    return out
+
+
+def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
+    rows: list[str] = []
+    for v in vectors:
+        rows.append(
+            "  { "
+            + f'id := "{v.vid}", '
+            + f"txHex := {_lean_opt_str(v.tx_hex)}, "
+            + f"expectOk := {'true' if v.expect_ok else 'false'}, "
+            + f"expectErr := {_lean_opt_str(v.expect_err)}, "
+            + f"fee := {_lean_opt_nat(v.fee)}, "
+            + f"weight := {_lean_opt_nat(v.weight)}, "
+            + f"daBytes := {_lean_opt_nat(v.da_bytes)}, "
+            + f"currentMempoolMinFeeRate := {v.current_mempool_min_fee_rate}, "
+            + f"minDaFeeRate := {v.min_da_fee_rate}, "
+            + f"daSurchargePerByte := {v.da_surcharge_per_byte}, "
+            + f"expectAdmit := {'true' if v.expect_admit else 'false'}, "
+            + f'expectAdmitClass := "{v.expect_admit_class}", '
+            + f'expectDominantFloor := "{v.expect_dominant_floor}", '
+            + f"expectRejectReason := {_lean_opt_str(v.expect_reject_reason)}, "
+            + f"expectRelayFeeFloor := {_lean_opt_nat(v.expect_relay_fee_floor)}, "
+            + f"expectDaFeeFloor := {_lean_opt_nat(v.expect_da_fee_floor)}, "
+            + f"expectDaSurcharge := {_lean_opt_nat(v.expect_da_surcharge)}, "
+            + f"expectDaRequiredFee := {_lean_opt_nat(v.expect_da_required_fee)}, "
+            + f"expectRequiredFee := {_lean_opt_nat(v.expect_required_fee)}"
+            + " }"
+        )
+    module_body = (
+        "structure CVDaFeeFloorVector where\n"
+        "  id : String\n"
+        "  txHex : Option String\n"
+        "  expectOk : Bool := true\n"
+        "  expectErr : Option String := none\n"
+        "  fee : Option Nat\n"
+        "  weight : Option Nat\n"
+        "  daBytes : Option Nat\n"
+        "  currentMempoolMinFeeRate : Nat\n"
+        "  minDaFeeRate : Nat\n"
+        "  daSurchargePerByte : Nat\n"
+        "  expectAdmit : Bool\n"
+        "  expectAdmitClass : String\n"
+        "  expectDominantFloor : String\n"
+        "  expectRejectReason : Option String\n"
+        "  expectRelayFeeFloor : Option Nat\n"
+        "  expectDaFeeFloor : Option Nat\n"
+        "  expectDaSurcharge : Option Nat\n"
+        "  expectDaRequiredFee : Option Nat\n"
+        "  expectRequiredFee : Option Nat\n"
+        "\n"
+        "def cvDaFeeFloorVectors : List CVDaFeeFloorVector := [\n"
+        + ",\n".join(rows)
+        + "\n]\n"
+        "\n"
+    )
+    return _render_lean_namespace("CV-DA-FEE-FLOOR", module_body)
+
+
+@dataclass(frozen=True)
 class CovenantGenesisVector:
     vid: str
     tx_hex: str
@@ -2841,6 +2985,15 @@ def main() -> int:
     dsv = load_cv_da_stress(in_da_stress)
     out_da_stress.write_text(_inject_perf_options(render_cv_da_stress_lean(dsv)), encoding="utf-8")
     print(f"WROTE: {out_da_stress}")
+
+    in_da_fee_floor = repo_root / "conformance" / "fixtures" / "CV-DA-FEE-FLOOR.json"
+    out_da_fee_floor = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVDaFeeFloorVectors.lean"
+    dffv = load_cv_da_fee_floor(in_da_fee_floor)
+    out_da_fee_floor.write_text(
+        _inject_perf_options(render_cv_da_fee_floor_lean(dffv)),
+        encoding="utf-8",
+    )
+    print(f"WROTE: {out_da_fee_floor}")
 
     in_cov_gen = repo_root / "conformance" / "fixtures" / "CV-COVENANT-GENESIS.json"
     out_cov_gen = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVCovenantGenesisVectors.lean"
