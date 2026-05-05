@@ -39,6 +39,12 @@ def feeBelowRollingFloor (fee weight floor : Nat) : Bool :=
 def feeValue (v : CVDaFeeFloorVector) : Nat :=
   v.fee.getD 0
 
+def weightValue (v : CVDaFeeFloorVector) : Nat :=
+  v.weight.getD 0
+
+def daBytesValue (v : CVDaFeeFloorVector) : Nat :=
+  v.daBytes.getD 0
+
 structure EvalOut where
   admit : Bool
   admitClass : String
@@ -54,7 +60,9 @@ structure EvalOut where
 def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
   let minFeeRate := v.currentMempoolMinFeeRate
   let minDaFeeRate := v.minDaFeeRate
-  let relayFloor? := checkedMul? v.weight minFeeRate
+  let weight := weightValue v
+  let daBytes := daBytesValue v
+  let relayFloor? := checkedMul? weight minFeeRate
   let relayDominant :=
     match relayFloor? with
     | some rf => dominantFeeFloor rf 0
@@ -71,13 +79,13 @@ def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
     requiredFee := relayFloor?
   }
   let afterDa? : Option EvalOut :=
-    if v.daBytes == 0 then
+    if daBytes == 0 then
       some acceptedBase
     else
-      match checkedMul? v.daBytes minDaFeeRate with
+      match checkedMul? daBytes minDaFeeRate with
       | none => some { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_FLOOR_OVERFLOW" }
       | some daFloor =>
-          match checkedMul? v.daBytes v.daSurchargePerByte with
+          match checkedMul? daBytes v.daSurchargePerByte with
           | none => some { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_SURCHARGE_OVERFLOW", daFeeFloor := some daFloor }
           | some daSurcharge =>
               match checkedAdd? daFloor daSurcharge with
@@ -98,11 +106,11 @@ def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
   | some out =>
       if out.rejectReason.isSome then
         out
-      else if (v.daBytes == 0 || out.daRequiredFee == some 0) && relayFloor? == some 0 then
+      else if (daBytes == 0 || out.daRequiredFee == some 0) && relayFloor? == some 0 then
         { out with admit := true }
-      else if v.daBytes > 0 && out.daRequiredFee.isSome && out.daRequiredFee.get! > 0 && feeValue v < out.daRequiredFee.get! then
+      else if daBytes > 0 && out.daRequiredFee.isSome && out.daRequiredFee.get! > 0 && feeValue v < out.daRequiredFee.get! then
         { out with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", requiredFee := out.daRequiredFee }
-      else if feeBelowRollingFloor (feeValue v) v.weight minFeeRate then
+      else if feeBelowRollingFloor (feeValue v) weight minFeeRate then
         let required? :=
           match relayFloor? with
           | some rf => some rf
@@ -115,7 +123,12 @@ def daFeeFloorVectorPass (v : CVDaFeeFloorVector) : Bool :=
   let got := evalDaFeeFloor v
   let expectNatMatches (expected actual : Option Nat) : Bool :=
     expected == actual
-  got.admit == v.expectAdmit
+  if !v.expectOk then
+    v.txHex.isSome && v.expectErr.isSome
+  else
+  v.weight.isSome
+    && v.daBytes.isSome
+    && got.admit == v.expectAdmit
     && got.admitClass == v.expectAdmitClass
     && got.dominantFloor == v.expectDominantFloor
     && got.rejectReason == v.expectRejectReason

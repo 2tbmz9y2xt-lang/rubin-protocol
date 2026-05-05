@@ -1592,9 +1592,12 @@ def render_cv_da_stress_lean(vectors: list[DaStressVector]) -> str:
 @dataclass(frozen=True)
 class DaFeeFloorVector:
     vid: str
+    tx_hex: str | None
+    expect_ok: bool
+    expect_err: str | None
     fee: int | None
-    weight: int
-    da_bytes: int
+    weight: int | None
+    da_bytes: int | None
     current_mempool_min_fee_rate: int
     min_da_fee_rate: int
     da_surcharge_per_byte: int
@@ -1647,9 +1650,12 @@ def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
         out.append(
             DaFeeFloorVector(
                 vid=vid,
+                tx_hex=(str(raw["tx_hex"]) if "tx_hex" in raw else None),
+                expect_ok=bool(raw.get("expect_ok", True)),
+                expect_err=(str(raw["expect_err"]) if "expect_err" in raw else None),
                 fee=_optional_int(raw, "expect_fee", vid),
-                weight=_require_int(raw, "expect_weight", vid),
-                da_bytes=_require_int(raw, "expect_da_bytes", vid),
+                weight=_optional_int(raw, "expect_weight", vid),
+                da_bytes=_optional_int(raw, "expect_da_bytes", vid),
                 current_mempool_min_fee_rate=_int_default(raw, "current_mempool_min_fee_rate", 1, vid),
                 min_da_fee_rate=_require_int(raw, "min_da_fee_rate", vid),
                 da_surcharge_per_byte=_require_int(raw, "da_surcharge_per_byte", vid),
@@ -1677,9 +1683,12 @@ def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
         rows.append(
             "  { "
             + f'id := "{v.vid}", '
+            + f"txHex := {_lean_opt_str(v.tx_hex)}, "
+            + f"expectOk := {'true' if v.expect_ok else 'false'}, "
+            + f"expectErr := {_lean_opt_str(v.expect_err)}, "
             + f"fee := {_lean_opt_nat(v.fee)}, "
-            + f"weight := {v.weight}, "
-            + f"daBytes := {v.da_bytes}, "
+            + f"weight := {_lean_opt_nat(v.weight)}, "
+            + f"daBytes := {_lean_opt_nat(v.da_bytes)}, "
             + f"currentMempoolMinFeeRate := {v.current_mempool_min_fee_rate}, "
             + f"minDaFeeRate := {v.min_da_fee_rate}, "
             + f"daSurchargePerByte := {v.da_surcharge_per_byte}, "
@@ -1697,9 +1706,12 @@ def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
     module_body = (
         "structure CVDaFeeFloorVector where\n"
         "  id : String\n"
+        "  txHex : Option String\n"
+        "  expectOk : Bool := true\n"
+        "  expectErr : Option String := none\n"
         "  fee : Option Nat\n"
-        "  weight : Nat\n"
-        "  daBytes : Nat\n"
+        "  weight : Option Nat\n"
+        "  daBytes : Option Nat\n"
         "  currentMempoolMinFeeRate : Nat\n"
         "  minDaFeeRate : Nat\n"
         "  daSurchargePerByte : Nat\n"

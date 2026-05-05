@@ -2226,6 +2226,14 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_ok mismatch")
         if policy_str(go_resp, "err", "", "go") != policy_str(rust_resp, "err", "", "rust"):
             problems.append(f"{gate}/{vid}: err mismatch go={go_resp.get('err')} rust={rust_resp.get('err')}")
+        if not policy_bool(go_resp, "ok", False) or not policy_bool(rust_resp, "ok", False):
+            if "expect_err" in v and policy_str(go_resp, "err", "", "go") != str(v["expect_err"]):
+                problems.append(f"{gate}/{vid}: expect_err mismatch")
+            if "expect_err" not in v:
+                for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                    if policy_str(resp, "err", "", side) != "":
+                        problems.append(f"{gate}/{vid}: unexpected {side} replay err={resp.get('err')}")
+            return
         for key in str_fields:
             if policy_str(go_resp, key, "", "go") != policy_str(rust_resp, key, "", "rust"):
                 problems.append(

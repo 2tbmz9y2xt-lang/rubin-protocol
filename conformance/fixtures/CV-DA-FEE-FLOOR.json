@@ -608,6 +608,23 @@
         "tx_weight_and_da_bytes_computed",
         "policy_utxo_fee_computed"
       ]
+    },
+    {
+      "id": "CV-DA-FEE-FLOOR-20-MALFORMED-TX-PARSE-FIRST",
+      "op": "da_fee_floor_policy",
+      "tx_hex": "00",
+      "utxos": [],
+      "current_mempool_min_fee_rate": 1,
+      "min_da_fee_rate": 1,
+      "da_surcharge_per_byte": 1,
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE",
+      "policy_branch": "tx_parse_rejected_before_fee_floor_policy",
+      "early_guards_passed": [
+        "tx_parse_rejected",
+        "policy_utxo_fee_not_computed",
+        "tx_weight_and_da_bytes_not_computed"
+      ]
     }
   ]
 }
