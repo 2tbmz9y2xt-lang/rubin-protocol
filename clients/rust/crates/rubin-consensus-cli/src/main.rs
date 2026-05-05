@@ -465,7 +465,7 @@ struct Request {
     current_mempool_min_fee_rate: u64,
 
     #[serde(default)]
-    min_da_fee_rate: u64,
+    min_da_fee_rate: Option<u64>,
 
     #[serde(default)]
     da_surcharge_per_byte: u64,
@@ -1175,6 +1175,9 @@ fn fee_from_policy_utxos(
     utxos: &HashMap<Outpoint, UtxoEntry>,
 ) -> Result<u64, String> {
     let mut total_in = 0u64;
+    if tx.inputs.is_empty() {
+        return Err("missing inputs".to_string());
+    }
     for input in &tx.inputs {
         let entry = utxos
             .get(&Outpoint {
@@ -1183,16 +1186,16 @@ fn fee_from_policy_utxos(
             })
             .ok_or_else(|| "missing utxo".to_string())?;
         total_in = checked_add_policy(total_in, entry.value)
-            .ok_or_else(|| "input value overflow".to_string())?;
+            .ok_or_else(|| "sum_in overflow".to_string())?;
     }
 
     let mut total_out = 0u64;
     for output in &tx.outputs {
         total_out = checked_add_policy(total_out, output.value)
-            .ok_or_else(|| "output value overflow".to_string())?;
+            .ok_or_else(|| "sum_out overflow".to_string())?;
     }
     if total_out > total_in {
-        return Err("fee underflow".to_string());
+        return Err("overspend".to_string());
     }
     Ok(total_in - total_out)
 }
@@ -1267,11 +1270,9 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
     let min_fee_rate = req
         .current_mempool_min_fee_rate
         .max(CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE);
-    let min_da_fee_rate = if req.min_da_fee_rate == 0 {
-        CONFORMANCE_DEFAULT_MIN_DA_FEE_RATE
-    } else {
-        req.min_da_fee_rate
-    };
+    let min_da_fee_rate = req
+        .min_da_fee_rate
+        .unwrap_or(CONFORMANCE_DEFAULT_MIN_DA_FEE_RATE);
     let relay_fee_floor = checked_mul_policy(weight, min_fee_rate);
 
     let mut resp = Response {

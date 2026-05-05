@@ -2182,6 +2182,12 @@ def validate_vector(
                 )
         if bool(policy_value(go_resp, "admit", False)) != bool(policy_value(rust_resp, "admit", False)):
             problems.append(f"{gate}/{vid}: admit mismatch go={go_resp.get('admit')} rust={rust_resp.get('admit')}")
+        if bool(policy_value(go_resp, "ok", False)) != bool(policy_value(rust_resp, "ok", False)):
+            problems.append(f"{gate}/{vid}: ok mismatch go={go_resp.get('ok')} rust={rust_resp.get('ok')}")
+        if "expect_ok" in v and bool(policy_value(go_resp, "ok", False)) != bool(v["expect_ok"]):
+            problems.append(f"{gate}/{vid}: expect_ok mismatch")
+        if str(policy_value(go_resp, "err", "")) != str(policy_value(rust_resp, "err", "")):
+            problems.append(f"{gate}/{vid}: err mismatch go={go_resp.get('err')} rust={rust_resp.get('err')}")
         for key in str_fields:
             if str(policy_value(go_resp, key, "")) != str(policy_value(rust_resp, key, "")):
                 problems.append(
@@ -2198,8 +2204,12 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_reject_reason mismatch")
         if "expect_reject_reason" not in v and str(policy_value(go_resp, "reject_reason", "")) != "":
             problems.append(f"{gate}/{vid}: unexpected reject_reason={go_resp.get('reject_reason')}")
-        if str(policy_value(go_resp, "err", "")) != "":
-            problems.append(f"{gate}/{vid}: unexpected replay err={go_resp.get('err')}")
+        if "expect_err" in v and str(policy_value(go_resp, "err", "")) != str(v["expect_err"]):
+            problems.append(f"{gate}/{vid}: expect_err mismatch")
+        if "expect_err" not in v:
+            for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                if str(policy_value(resp, "err", "")) != "":
+                    problems.append(f"{gate}/{vid}: unexpected {side} replay err={resp.get('err')}")
         for key in int_fields:
             expect_key = f"expect_{key}"
             if expect_key in v and int(policy_value(go_resp, key, 0)) != int(v[expect_key]):

@@ -50,7 +50,7 @@ structure EvalOut where
 
 def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
   let minFeeRate := floorMax v.currentMempoolMinFeeRate defaultMempoolMinFeeRate
-  let minDaFeeRate := if v.minDaFeeRate == 0 then defaultMinDaFeeRate else v.minDaFeeRate
+  let minDaFeeRate := v.minDaFeeRate
   let relayFloor? := checkedMul? v.weight minFeeRate
   let relayDominant :=
     match relayFloor? with
@@ -84,7 +84,10 @@ def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
                   if daRequired > 0 && v.fee < daRequired then
                     some { withDa with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", requiredFee := some daRequired }
                   else
-                    let required? := relayFloor?.map (fun rf => floorMax rf daRequired)
+                    let required? :=
+                      match relayFloor? with
+                      | some rf => some (floorMax rf daRequired)
+                      | none => some daRequired
                     let dom :=
                       match relayFloor? with
                       | some rf => dominantFeeFloor rf daRequired
@@ -96,16 +99,18 @@ def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
       if out.rejectReason.isSome then
         out
       else if feeBelowRollingFloor v.fee v.weight minFeeRate then
-        { out with admitClass := "unavailable", dominantFloor := "relay", rejectReason := some "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM", requiredFee := relayFloor? }
+        let required? :=
+          match relayFloor? with
+          | some rf => some rf
+          | none => out.requiredFee
+        { out with admitClass := "unavailable", dominantFloor := "relay", rejectReason := some "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM", requiredFee := required? }
       else
         { out with admit := true }
 
 def daFeeFloorVectorPass (v : CVDaFeeFloorVector) : Bool :=
   let got := evalDaFeeFloor v
   let expectNatMatches (expected actual : Option Nat) : Bool :=
-    match expected with
-    | none => true
-    | some n => actual.getD 0 == n
+    expected == actual
   got.admit == v.expectAdmit
     && got.admitClass == v.expectAdmitClass
     && got.dominantFloor == v.expectDominantFloor

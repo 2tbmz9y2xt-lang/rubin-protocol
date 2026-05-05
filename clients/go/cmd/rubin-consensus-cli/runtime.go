@@ -133,7 +133,7 @@ type Request struct {
 	BlockTimestamp        uint64                         `json:"block_timestamp,omitempty"`
 	CommitFee             int                            `json:"commit_fee,omitempty"`
 	CurrentMempoolMinFee  uint64                         `json:"current_mempool_min_fee_rate,omitempty"`
-	MinDAFeeRate          uint64                         `json:"min_da_fee_rate,omitempty"`
+	MinDAFeeRate          *uint64                        `json:"min_da_fee_rate,omitempty"`
 	DASurchargePerByte    uint64                         `json:"da_surcharge_per_byte,omitempty"`
 	VaultInputCount       int                            `json:"vault_input_count,omitempty"`
 	CurrentPinnedBytes    int                            `json:"current_pinned_payload_bytes,omitempty"`
@@ -826,6 +826,15 @@ func dominantFeeFloor(relayFeeFloor, daRequiredFee uint64) string {
 }
 
 func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
+	if tx == nil {
+		return 0, fmt.Errorf("nil tx")
+	}
+	if len(tx.Inputs) == 0 {
+		return 0, fmt.Errorf("missing inputs")
+	}
+	if utxos == nil {
+		return 0, fmt.Errorf("nil utxo set")
+	}
 	var totalIn uint64
 	for _, input := range tx.Inputs {
 		entry, ok := utxos[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}]
@@ -834,7 +843,7 @@ func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus
 		}
 		next, ok := addU64Policy(totalIn, entry.Value)
 		if !ok {
-			return 0, fmt.Errorf("input value overflow")
+			return 0, fmt.Errorf("sum_in overflow")
 		}
 		totalIn = next
 	}
@@ -843,12 +852,12 @@ func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus
 	for _, output := range tx.Outputs {
 		next, ok := addU64Policy(totalOut, output.Value)
 		if !ok {
-			return 0, fmt.Errorf("output value overflow")
+			return 0, fmt.Errorf("sum_out overflow")
 		}
 		totalOut = next
 	}
 	if totalOut > totalIn {
-		return 0, fmt.Errorf("fee underflow")
+		return 0, fmt.Errorf("overspend")
 	}
 	return totalIn - totalOut, nil
 }
@@ -904,9 +913,9 @@ func daFeeFloorPolicyResp(req Request) Response {
 	if minFeeRate < conformanceDefaultMempoolMinFeeRate {
 		minFeeRate = conformanceDefaultMempoolMinFeeRate
 	}
-	minDAFeeRate := req.MinDAFeeRate
-	if minDAFeeRate == 0 {
-		minDAFeeRate = conformanceDefaultMinDAFeeRate
+	minDAFeeRate := conformanceDefaultMinDAFeeRate
+	if req.MinDAFeeRate != nil {
+		minDAFeeRate = *req.MinDAFeeRate
 	}
 
 	relayFeeFloor, relayFeeFloorOK := mulU64Policy(weight, minFeeRate)

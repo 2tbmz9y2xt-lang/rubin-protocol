@@ -15,7 +15,8 @@ Policy:
 
 Причина:
 - добавить executable conformance gate для Stage C DA fee-floor arithmetic после появления Go и Rust policy behavior на `origin/main`;
-- зафиксировать 14 boundary cases: `fee == required`, `fee == required - 1`, `fee > required`, relay-dominant floor, DA-dominant floor, tie floor, min-rate/surcharge composition, relay-overflow-as-rolling-floor-unavailable, DA/surcharge/required overflow fail-closed и non-DA relay-floor pass.
+- зафиксировать 15 boundary cases: `fee == required`, `fee == required - 1`, `fee > required`, relay-dominant floor, DA-dominant floor, tie floor, min-rate/surcharge composition, explicit `min_da_fee_rate=0` with surcharge-only enforcement, relay-overflow-as-rolling-floor-unavailable, DA/surcharge/required overflow fail-closed и non-DA relay-floor pass;
+- добавить per-vector branch reachability fields для `CV-DA-FEE-FLOOR-*`: `policy_branch` и `early_guards_passed`.
 
 Инструменты:
 - ручное добавление нового gate `CV-DA-FEE-FLOOR`,

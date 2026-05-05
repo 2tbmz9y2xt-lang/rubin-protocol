@@ -1626,8 +1626,13 @@ def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("gate") != "CV-DA-FEE-FLOOR":
         raise ValueError(f"expected gate=CV-DA-FEE-FLOOR, got {data.get('gate')!r}")
+    vectors = data.get("vectors")
+    if not isinstance(vectors, list):
+        raise ValueError("vectors must be a list")
     out: list[DaFeeFloorVector] = []
-    for raw in data.get("vectors", []):
+    for idx, raw in enumerate(vectors):
+        if not isinstance(raw, dict):
+            raise ValueError(f"vector[{idx}] must be an object")
         if raw.get("op") != "da_fee_floor_policy":
             continue
         vid = str(raw.get("id", ""))
