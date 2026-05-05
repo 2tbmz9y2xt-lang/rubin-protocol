@@ -1667,7 +1667,7 @@ def validate_vector(
             except Exception as exc:
                 return [f"{gate}/{vid}: {exc}"], False
         req["current_mempool_min_fee_rate"] = int(v.get("current_mempool_min_fee_rate", 0))
-        req["min_da_fee_rate"] = int(v.get("min_da_fee_rate", 0))
+        req["min_da_fee_rate"] = int(v.get("min_da_fee_rate", 1))
         req["da_surcharge_per_byte"] = int(v.get("da_surcharge_per_byte", 0))
     elif op in ("rotation_create_suite_check", "rotation_native_create_suites"):
         include_rotation_network()

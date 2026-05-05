@@ -104,7 +104,7 @@
       "expect_required_fee": 3384
     },
     {
-      "id": "CV-DA-FEE-FLOOR-05-SURCHARGE-ONLY-EXACT",
+      "id": "CV-DA-FEE-FLOOR-05-MIN-PLUS-SURCHARGE-EXACT",
       "op": "da_fee_floor_policy",
       "scenario": {
         "kind": "da_commit",
@@ -113,8 +113,8 @@
         "fee": 2000
       },
       "current_mempool_min_fee_rate": 1,
-      "min_da_fee_rate": 0,
-      "da_surcharge_per_byte": 200,
+      "min_da_fee_rate": 1,
+      "da_surcharge_per_byte": 199,
       "expect_ok": true,
       "expect_admit": true,
       "expect_admit_class": "accepted",
@@ -123,8 +123,8 @@
       "expect_weight": 1128,
       "expect_da_bytes": 10,
       "expect_relay_fee_floor": 1128,
-      "expect_da_fee_floor": 0,
-      "expect_da_surcharge": 2000,
+      "expect_da_fee_floor": 10,
+      "expect_da_surcharge": 1990,
       "expect_da_required_fee": 2000,
       "expect_required_fee": 2000
     },
@@ -214,9 +214,9 @@
       "da_surcharge_per_byte": 0,
       "expect_ok": true,
       "expect_admit": false,
-      "expect_admit_class": "unavailable",
-      "expect_reject_reason": "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM",
-      "expect_dominant_floor": "relay",
+      "expect_admit_class": "rejected",
+      "expect_reject_reason": "DA_FEE_BELOW_STAGE_C_FLOOR",
+      "expect_dominant_floor": "da",
       "expect_fee": 1999,
       "expect_weight": 1128,
       "expect_da_bytes": 10,
@@ -224,7 +224,7 @@
       "expect_da_fee_floor": 2000,
       "expect_da_surcharge": 0,
       "expect_da_required_fee": 2000,
-      "expect_required_fee": 3384
+      "expect_required_fee": 2000
     },
     {
       "id": "CV-DA-FEE-FLOOR-10-RELAY-DOMINANT-EXACT",
@@ -265,9 +265,9 @@
       "da_surcharge_per_byte": 0,
       "expect_ok": true,
       "expect_admit": false,
-      "expect_admit_class": "unavailable",
-      "expect_reject_reason": "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM",
-      "expect_dominant_floor": "tie",
+      "expect_admit_class": "rejected",
+      "expect_reject_reason": "DA_FEE_BELOW_STAGE_C_FLOOR",
+      "expect_dominant_floor": "da",
       "expect_fee": 1130,
       "expect_weight": 1131,
       "expect_da_bytes": 13,
@@ -287,12 +287,12 @@
         "fee": 18446744073709551615
       },
       "current_mempool_min_fee_rate": 18446744073709551615,
-      "min_da_fee_rate": 0,
+      "min_da_fee_rate": 1,
       "da_surcharge_per_byte": 0,
       "expect_ok": true,
       "expect_admit": false,
       "expect_admit_class": "unavailable",
-      "expect_reject_reason": "MEMPOOL_FEE_FLOOR_OVERFLOW",
+      "expect_reject_reason": "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM",
       "expect_dominant_floor": "relay",
       "expect_fee": 18446744073709551615,
       "expect_weight": 1128,
@@ -308,7 +308,7 @@
         "fee": 18446744073709551615
       },
       "current_mempool_min_fee_rate": 1,
-      "min_da_fee_rate": 0,
+      "min_da_fee_rate": 1,
       "da_surcharge_per_byte": 18446744073709551615,
       "expect_ok": true,
       "expect_admit": false,
@@ -319,7 +319,7 @@
       "expect_weight": 1128,
       "expect_da_bytes": 10,
       "expect_relay_fee_floor": 1128,
-      "expect_da_fee_floor": 0
+      "expect_da_fee_floor": 10
     },
     {
       "id": "CV-DA-FEE-FLOOR-14-DA-REQUIRED-FEE-OVERFLOW",

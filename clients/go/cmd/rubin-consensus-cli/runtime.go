@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"math/bits"
 	"os"
 	"sort"
 	"strings"
@@ -785,6 +786,7 @@ func buildUtxoMap(items []UtxoJSON) (map[consensus.Outpoint]consensus.UtxoEntry,
 
 // Conformance replay mirrors the current standard mempool default without importing node runtime.
 const conformanceDefaultMempoolMinFeeRate uint64 = 1
+const conformanceDefaultMinDAFeeRate uint64 = 1
 
 func addU64Policy(a, b uint64) (uint64, bool) {
 	if a > ^uint64(0)-b {
@@ -823,13 +825,6 @@ func dominantFeeFloor(relayFeeFloor, daRequiredFee uint64) string {
 	}
 }
 
-func feeFloorUnderflowClass(dominantFloor string) (string, string) {
-	if dominantFloor == "da" {
-		return "rejected", "DA_FEE_BELOW_STAGE_C_FLOOR"
-	}
-	return "unavailable", "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM"
-}
-
 func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
 	var totalIn uint64
 	for _, input := range tx.Inputs {
@@ -856,6 +851,20 @@ func feeFromPolicyUTXOs(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus
 		return 0, fmt.Errorf("fee underflow")
 	}
 	return totalIn - totalOut, nil
+}
+
+func feeBelowRollingFloorPolicy(fee, weight, floor uint64) bool {
+	if weight == 0 {
+		return true
+	}
+	if floor < conformanceDefaultMempoolMinFeeRate {
+		floor = conformanceDefaultMempoolMinFeeRate
+	}
+	hi, required := bits.Mul64(weight, floor)
+	if hi != 0 {
+		return true
+	}
+	return fee < required
 }
 
 func daFeeFloorPolicyResp(req Request) Response {
@@ -895,19 +904,12 @@ func daFeeFloorPolicyResp(req Request) Response {
 	if minFeeRate < conformanceDefaultMempoolMinFeeRate {
 		minFeeRate = conformanceDefaultMempoolMinFeeRate
 	}
-
-	relayFeeFloor, ok := mulU64Policy(weight, minFeeRate)
-	if !ok {
-		return Response{
-			Ok:            true,
-			Fee:           fee,
-			Weight:        weight,
-			DaBytes:       daBytes,
-			AdmitClass:    "unavailable",
-			DominantFloor: "relay",
-			RejectReason:  "MEMPOOL_FEE_FLOOR_OVERFLOW",
-		}
+	minDAFeeRate := req.MinDAFeeRate
+	if minDAFeeRate == 0 {
+		minDAFeeRate = conformanceDefaultMinDAFeeRate
 	}
+
+	relayFeeFloor, relayFeeFloorOK := mulU64Policy(weight, minFeeRate)
 
 	resp := Response{
 		Ok:            true,
@@ -922,10 +924,15 @@ func daFeeFloorPolicyResp(req Request) Response {
 		DaSurcharge:   0,
 		DaRequiredFee: 0,
 	}
+	if !relayFeeFloorOK {
+		resp.RelayFeeFloor = 0
+		resp.RequiredFee = 0
+		resp.DominantFloor = "relay"
+	}
 
 	var daRequiredFee uint64
-	if daBytes > 0 && (req.MinDAFeeRate > 0 || req.DASurchargePerByte > 0) {
-		daFeeFloor, ok := mulU64Policy(daBytes, req.MinDAFeeRate)
+	if daBytes > 0 {
+		daFeeFloor, ok := mulU64Policy(daBytes, minDAFeeRate)
 		if !ok {
 			resp.AdmitClass = "rejected"
 			resp.DominantFloor = "da"
@@ -952,12 +959,29 @@ func daFeeFloorPolicyResp(req Request) Response {
 		resp.DaFeeFloor = daFeeFloor
 		resp.DaSurcharge = daSurcharge
 		resp.DaRequiredFee = daRequiredFee
-		resp.RequiredFee = maxU64(relayFeeFloor, daRequiredFee)
-		resp.DominantFloor = dominantFeeFloor(relayFeeFloor, daRequiredFee)
+		if daRequiredFee > 0 && fee < daRequiredFee {
+			resp.AdmitClass = "rejected"
+			resp.RequiredFee = daRequiredFee
+			resp.DominantFloor = "da"
+			resp.RejectReason = "DA_FEE_BELOW_STAGE_C_FLOOR"
+			return resp
+		}
+		if relayFeeFloorOK {
+			resp.RequiredFee = maxU64(relayFeeFloor, daRequiredFee)
+			resp.DominantFloor = dominantFeeFloor(relayFeeFloor, daRequiredFee)
+		} else {
+			resp.RequiredFee = daRequiredFee
+			resp.DominantFloor = "relay"
+		}
 	}
 
-	if resp.RequiredFee > 0 && fee < resp.RequiredFee {
-		resp.AdmitClass, resp.RejectReason = feeFloorUnderflowClass(resp.DominantFloor)
+	if feeBelowRollingFloorPolicy(fee, weight, minFeeRate) {
+		resp.AdmitClass = "unavailable"
+		resp.DominantFloor = "relay"
+		resp.RejectReason = "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM"
+		if relayFeeFloorOK {
+			resp.RequiredFee = relayFeeFloor
+		}
 		return resp
 	}
 

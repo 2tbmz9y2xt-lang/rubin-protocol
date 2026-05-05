@@ -1,0 +1,43 @@
+-- Manual Lean mirror for conformance/fixtures/CV-DA-FEE-FLOOR.json added by RUB-123 fix-pass.
+
+set_option maxHeartbeats 10000000
+set_option maxRecDepth 50000
+
+namespace RubinFormal.Conformance
+
+structure CVDaFeeFloorVector where
+  id : String
+  fee : Nat
+  weight : Nat
+  daBytes : Nat
+  currentMempoolMinFeeRate : Nat
+  minDaFeeRate : Nat
+  daSurchargePerByte : Nat
+  expectAdmit : Bool
+  expectAdmitClass : String
+  expectDominantFloor : String
+  expectRejectReason : Option String
+  expectRelayFeeFloor : Option Nat
+  expectDaFeeFloor : Option Nat
+  expectDaSurcharge : Option Nat
+  expectDaRequiredFee : Option Nat
+  expectRequiredFee : Option Nat
+
+def cvDaFeeFloorVectors : List CVDaFeeFloorVector := [
+  { id := "CV-DA-FEE-FLOOR-01-DA-EXACT", fee := 2000, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 1, minDaFeeRate := 200, daSurchargePerByte := 0, expectAdmit := true, expectAdmitClass := "accepted", expectDominantFloor := "da", expectRejectReason := none, expectRelayFeeFloor := some 1128, expectDaFeeFloor := some 2000, expectDaSurcharge := some 0, expectDaRequiredFee := some 2000, expectRequiredFee := some 2000 },
+  { id := "CV-DA-FEE-FLOOR-02-DA-UNDER", fee := 1999, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 1, minDaFeeRate := 200, daSurchargePerByte := 0, expectAdmit := false, expectAdmitClass := "rejected", expectDominantFloor := "da", expectRejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", expectRelayFeeFloor := some 1128, expectDaFeeFloor := some 2000, expectDaSurcharge := some 0, expectDaRequiredFee := some 2000, expectRequiredFee := some 2000 },
+  { id := "CV-DA-FEE-FLOOR-03-DA-ABOVE", fee := 2001, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 1, minDaFeeRate := 200, daSurchargePerByte := 0, expectAdmit := true, expectAdmitClass := "accepted", expectDominantFloor := "da", expectRejectReason := none, expectRelayFeeFloor := some 1128, expectDaFeeFloor := some 2000, expectDaSurcharge := some 0, expectDaRequiredFee := some 2000, expectRequiredFee := some 2000 },
+  { id := "CV-DA-FEE-FLOOR-04-RELAY-DOMINANT-UNDER", fee := 3383, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 3, minDaFeeRate := 1, daSurchargePerByte := 0, expectAdmit := false, expectAdmitClass := "unavailable", expectDominantFloor := "relay", expectRejectReason := some "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM", expectRelayFeeFloor := some 3384, expectDaFeeFloor := some 10, expectDaSurcharge := some 0, expectDaRequiredFee := some 10, expectRequiredFee := some 3384 },
+  { id := "CV-DA-FEE-FLOOR-05-MIN-PLUS-SURCHARGE-EXACT", fee := 2000, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 1, minDaFeeRate := 1, daSurchargePerByte := 199, expectAdmit := true, expectAdmitClass := "accepted", expectDominantFloor := "da", expectRejectReason := none, expectRelayFeeFloor := some 1128, expectDaFeeFloor := some 10, expectDaSurcharge := some 1990, expectDaRequiredFee := some 2000, expectRequiredFee := some 2000 },
+  { id := "CV-DA-FEE-FLOOR-06-MIN-PLUS-SURCHARGE-UNDER", fee := 2099, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 1, minDaFeeRate := 120, daSurchargePerByte := 90, expectAdmit := false, expectAdmitClass := "rejected", expectDominantFloor := "da", expectRejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", expectRelayFeeFloor := some 1128, expectDaFeeFloor := some 1200, expectDaSurcharge := some 900, expectDaRequiredFee := some 2100, expectRequiredFee := some 2100 },
+  { id := "CV-DA-FEE-FLOOR-07-DA-FLOOR-OVERFLOW", fee := 18446744073709551615, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 1, minDaFeeRate := 18446744073709551615, daSurchargePerByte := 0, expectAdmit := false, expectAdmitClass := "rejected", expectDominantFloor := "da", expectRejectReason := some "DA_FEE_FLOOR_OVERFLOW", expectRelayFeeFloor := some 1128, expectDaFeeFloor := none, expectDaSurcharge := none, expectDaRequiredFee := none, expectRequiredFee := none },
+  { id := "CV-DA-FEE-FLOOR-08-NON-DA-RELAY-PASS", fee := 419, weight := 418, daBytes := 0, currentMempoolMinFeeRate := 1, minDaFeeRate := 200, daSurchargePerByte := 200, expectAdmit := true, expectAdmitClass := "accepted", expectDominantFloor := "relay", expectRejectReason := none, expectRelayFeeFloor := some 418, expectDaFeeFloor := some 0, expectDaSurcharge := some 0, expectDaRequiredFee := some 0, expectRequiredFee := some 418 },
+  { id := "CV-DA-FEE-FLOOR-09-RELAY-DOMINANT-BELOW-BOTH", fee := 1999, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 3, minDaFeeRate := 200, daSurchargePerByte := 0, expectAdmit := false, expectAdmitClass := "rejected", expectDominantFloor := "da", expectRejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", expectRelayFeeFloor := some 3384, expectDaFeeFloor := some 2000, expectDaSurcharge := some 0, expectDaRequiredFee := some 2000, expectRequiredFee := some 2000 },
+  { id := "CV-DA-FEE-FLOOR-10-RELAY-DOMINANT-EXACT", fee := 3384, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 3, minDaFeeRate := 200, daSurchargePerByte := 0, expectAdmit := true, expectAdmitClass := "accepted", expectDominantFloor := "relay", expectRejectReason := none, expectRelayFeeFloor := some 3384, expectDaFeeFloor := some 2000, expectDaSurcharge := some 0, expectDaRequiredFee := some 2000, expectRequiredFee := some 3384 },
+  { id := "CV-DA-FEE-FLOOR-11-TIE-UNDER", fee := 1130, weight := 1131, daBytes := 13, currentMempoolMinFeeRate := 1, minDaFeeRate := 87, daSurchargePerByte := 0, expectAdmit := false, expectAdmitClass := "rejected", expectDominantFloor := "da", expectRejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", expectRelayFeeFloor := some 1131, expectDaFeeFloor := some 1131, expectDaSurcharge := some 0, expectDaRequiredFee := some 1131, expectRequiredFee := some 1131 },
+  { id := "CV-DA-FEE-FLOOR-12-RELAY-FLOOR-OVERFLOW", fee := 18446744073709551615, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 18446744073709551615, minDaFeeRate := 1, daSurchargePerByte := 0, expectAdmit := false, expectAdmitClass := "unavailable", expectDominantFloor := "relay", expectRejectReason := some "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM", expectRelayFeeFloor := none, expectDaFeeFloor := none, expectDaSurcharge := none, expectDaRequiredFee := none, expectRequiredFee := none },
+  { id := "CV-DA-FEE-FLOOR-13-DA-SURCHARGE-OVERFLOW", fee := 18446744073709551615, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 1, minDaFeeRate := 1, daSurchargePerByte := 18446744073709551615, expectAdmit := false, expectAdmitClass := "rejected", expectDominantFloor := "da", expectRejectReason := some "DA_SURCHARGE_OVERFLOW", expectRelayFeeFloor := some 1128, expectDaFeeFloor := some 10, expectDaSurcharge := none, expectDaRequiredFee := none, expectRequiredFee := none },
+  { id := "CV-DA-FEE-FLOOR-14-DA-REQUIRED-FEE-OVERFLOW", fee := 18446744073709551615, weight := 1128, daBytes := 10, currentMempoolMinFeeRate := 1, minDaFeeRate := 922337203685477580, daSurchargePerByte := 922337203685477582, expectAdmit := false, expectAdmitClass := "rejected", expectDominantFloor := "da", expectRejectReason := some "DA_REQUIRED_FEE_OVERFLOW", expectRelayFeeFloor := some 1128, expectDaFeeFloor := some 9223372036854775800, expectDaSurcharge := some 9223372036854775820, expectDaRequiredFee := none, expectRequiredFee := none },
+]
+
+end RubinFormal.Conformance

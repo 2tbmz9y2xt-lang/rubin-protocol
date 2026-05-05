@@ -1112,6 +1112,7 @@ fn parse_optional_chain_id_hex(chain_id: &str) -> Result<[u8; 32], String> {
 
 // Conformance replay mirrors the current standard mempool default without importing node runtime.
 const CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE: u64 = 1;
+const CONFORMANCE_DEFAULT_MIN_DA_FEE_RATE: u64 = 1;
 
 fn checked_add_policy(a: u64, b: u64) -> Option<u64> {
     a.checked_add(b)
@@ -1138,14 +1139,6 @@ fn dominant_fee_floor(relay_fee_floor: u64, da_required_fee: u64) -> &'static st
         "none"
     } else {
         "tie"
-    }
-}
-
-fn fee_floor_underflow_class(dominant_floor: &str) -> (&'static str, &'static str) {
-    if dominant_floor == "da" {
-        ("rejected", "DA_FEE_BELOW_STAGE_C_FLOOR")
-    } else {
-        ("unavailable", "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM")
     }
 }
 
@@ -1202,6 +1195,14 @@ fn fee_from_policy_utxos(
         return Err("fee underflow".to_string());
     }
     Ok(total_in - total_out)
+}
+
+fn fee_below_rolling_floor_policy(fee: u64, weight: u64, floor: u64) -> bool {
+    if weight == 0 {
+        return true;
+    }
+    let floor = floor.max(CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE);
+    (fee as u128) < (weight as u128) * (floor as u128)
 }
 
 fn da_fee_floor_policy_response(req: &Request) -> Response {
@@ -1266,39 +1267,36 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
     let min_fee_rate = req
         .current_mempool_min_fee_rate
         .max(CONFORMANCE_DEFAULT_MEMPOOL_MIN_FEE_RATE);
-    let relay_fee_floor = match checked_mul_policy(weight, min_fee_rate) {
-        Some(v) => v,
-        None => {
-            return Response {
-                ok: true,
-                fee: Some(fee),
-                weight: Some(weight),
-                da_bytes: Some(da_bytes),
-                admit_class: Some("unavailable".to_string()),
-                dominant_floor: Some("relay".to_string()),
-                reject_reason: Some("MEMPOOL_FEE_FLOOR_OVERFLOW".to_string()),
-                ..Default::default()
-            }
-        }
+    let min_da_fee_rate = if req.min_da_fee_rate == 0 {
+        CONFORMANCE_DEFAULT_MIN_DA_FEE_RATE
+    } else {
+        req.min_da_fee_rate
     };
+    let relay_fee_floor = checked_mul_policy(weight, min_fee_rate);
 
     let mut resp = Response {
         ok: true,
         fee: Some(fee),
         weight: Some(weight),
         da_bytes: Some(da_bytes),
-        relay_fee_floor: Some(relay_fee_floor),
+        relay_fee_floor,
         da_fee_floor: Some(0),
         da_surcharge: Some(0),
         da_required_fee: Some(0),
-        required_fee: Some(relay_fee_floor),
+        required_fee: relay_fee_floor,
         admit_class: Some("accepted".to_string()),
-        dominant_floor: Some(dominant_fee_floor(relay_fee_floor, 0).to_string()),
+        dominant_floor: Some(
+            match relay_fee_floor {
+                Some(floor) => dominant_fee_floor(floor, 0),
+                None => "relay",
+            }
+            .to_string(),
+        ),
         ..Default::default()
     };
 
-    if da_bytes > 0 && (req.min_da_fee_rate > 0 || req.da_surcharge_per_byte > 0) {
-        let da_fee_floor = match checked_mul_policy(da_bytes, req.min_da_fee_rate) {
+    if da_bytes > 0 {
+        let da_fee_floor = match checked_mul_policy(da_bytes, min_da_fee_rate) {
             Some(v) => v,
             None => {
                 resp.reject_reason = Some("DA_FEE_FLOOR_OVERFLOW".to_string());
@@ -1331,17 +1329,30 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
         resp.da_fee_floor = Some(da_fee_floor);
         resp.da_surcharge = Some(da_surcharge);
         resp.da_required_fee = Some(da_required_fee);
-        resp.required_fee = Some(max_u64(relay_fee_floor, da_required_fee));
-        resp.dominant_floor =
-            Some(dominant_fee_floor(relay_fee_floor, da_required_fee).to_string());
+        if da_required_fee > 0 && fee < da_required_fee {
+            resp.reject_reason = Some("DA_FEE_BELOW_STAGE_C_FLOOR".to_string());
+            resp.admit_class = Some("rejected".to_string());
+            resp.required_fee = Some(da_required_fee);
+            resp.dominant_floor = Some("da".to_string());
+            return resp;
+        }
+        if let Some(relay_fee_floor) = relay_fee_floor {
+            resp.required_fee = Some(max_u64(relay_fee_floor, da_required_fee));
+            resp.dominant_floor =
+                Some(dominant_fee_floor(relay_fee_floor, da_required_fee).to_string());
+        } else {
+            resp.required_fee = Some(da_required_fee);
+            resp.dominant_floor = Some("relay".to_string());
+        }
     }
 
-    let required_fee = resp.required_fee.unwrap_or(0);
-    if required_fee > 0 && fee < required_fee {
-        let dominant_floor = resp.dominant_floor.as_deref().unwrap_or("none");
-        let (admit_class, reject_reason) = fee_floor_underflow_class(dominant_floor);
-        resp.admit_class = Some(admit_class.to_string());
-        resp.reject_reason = Some(reject_reason.to_string());
+    if fee_below_rolling_floor_policy(fee, weight, min_fee_rate) {
+        resp.admit_class = Some("unavailable".to_string());
+        resp.dominant_floor = Some("relay".to_string());
+        resp.reject_reason = Some("MEMPOOL_FEE_BELOW_ROLLING_MINIMUM".to_string());
+        if let Some(relay_fee_floor) = relay_fee_floor {
+            resp.required_fee = Some(relay_fee_floor);
+        }
         return resp;
     }
 
