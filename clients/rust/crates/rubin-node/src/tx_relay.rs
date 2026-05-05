@@ -13,7 +13,15 @@
 //! structural defense for the shared canonical pool is the
 //! function signature: NONE of `handle_received_tx`'s
 //! non-primitive arguments carry a canonical `TxPool` handle
-//! today. Verified field-by-field at HEAD:
+//! today. This is a HEAD-snapshot observation, NOT a maintained
+//! invariant — neither the docstring nor the source-grep tripwire
+//! below scans `sync.rs`, `p2p_runtime.rs`, or any other carrier
+//! file, so a future PR could add a canonical-pool field to one
+//! of these structs in another file and both would silently stay
+//! green. Sound cross-file structural enforcement (e.g. a
+//! token-aware checker over the carrier struct definitions) is
+//! tracked in RUB-176 / GitHub issue #1431. Observed at HEAD,
+//! field-by-field:
 //!  - `relay_state: &TxRelayState` (this file) — fields are
 //!    `tx_seen`, `relay_pool` (`RelayTxPool`), `tx_relay_fanout`,
 //!    `network`. No canonical `TxPool` field.
@@ -32,10 +40,11 @@
 //!    `TxPool` field.
 //!
 //! Any future producer that wires a canonical pool through any
-//! of these surfaces MUST re-verify this boundary explicitly.
-//! With this exhaustive per-argument verification in place, the
-//! application's shared pool is unreachable from this module's
-//! call graph through these surfaces.
+//! of these surfaces MUST re-verify this boundary explicitly,
+//! both in this docstring and in the carrier file (this snapshot
+//! goes stale silently otherwise). At HEAD with these structural
+//! facts in place, the application's shared pool is unreachable
+//! from this module's call graph through these surfaces.
 //!
 //! The advisory source-level tripwire below scans the production
 //! section for a non-exhaustive list of obvious canonical-
@@ -1163,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn tx_relay_production_source_contains_no_canonical_txpool_admission() {
+    fn tx_relay_production_source_substring_tripwire_advisory_only() {
         // RUB-172 advisory boundary tripwire. NOT a sound Rust
         // parser and NOT exhaustive — see module docstring at the
         // top of this file for scope, the comment/string-blind
