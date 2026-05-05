@@ -1312,12 +1312,15 @@ mod tests {
         /// `Err(BoundaryCheckError)` describing the first violation or
         /// fail-closed condition.
         ///
-        /// "Production scope" excludes any `Item` whose attributes
-        /// contain a `#[cfg(test)]`, `#[cfg(any(test, ...))]`, or
-        /// `#[cfg(all(test, ...))]` predicate, recursively. The
-        /// exclusion is established by walking `syn::Attribute` nodes
-        /// via `Attribute::parse_nested_meta`, NOT by textual
-        /// `split_once("#[cfg(test)]")` on the source string.
+        /// "Production scope" excludes any carrier (`Item`,
+        /// `ImplItem`, `TraitItem`, `Expr`, `Stmt::Local`,
+        /// `Stmt::Macro`, `Arm`) whose `#[cfg(...)]` attribute
+        /// conjunction logically implies `test ∈ C`. The exclusion
+        /// is established by parsing each cfg attribute body via
+        /// `attr.parse_args::<CfgPred>()` into a structural AST and
+        /// evaluating the conjunction via `satisfiable_under_test_absent`,
+        /// NOT by textual `split_once("#[cfg(test)]")` on the source
+        /// string.
         pub fn check_tx_relay_boundary_source(source: &str) -> Result<(), BoundaryCheckError> {
             let file: File = syn::parse_file(source)
                 .map_err(|e| BoundaryCheckError::ParseFailed(e.to_string()))?;
@@ -1569,22 +1572,47 @@ mod tests {
         // skip predicate (`P ⇒ test` iff no model satisfies `P` with
         // `test ∉ C`).
         //
-        // Implementation: collect the set of distinct `Var(name)`
-        // identifiers reachable from `P`, then enumerate all
-        // 2^|vars| assignments and short-circuit on the first
-        // satisfying one. Capped at 16 distinct vars (real-world cfg
-        // predicates are far smaller) — beyond the cap the function
-        // conservatively returns `true` (caller treats unknown as
-        // not-implying-test, leaving the carrier in production scope).
+        // Implementation: first attempt structural simplification —
+        // a recursive walk that propagates `Some(false)` for `Test`,
+        // empty `any()`, and `False`, and `Some(true)` for empty
+        // `all()` and `True`, through `all`/`any`/`not`. The
+        // simplification short-circuits on decidable trees (e.g.
+        // `all(test, …)` resolves to `Some(false)` because one
+        // conjunct is unsatisfiable when test is absent, regardless
+        // of how many free vars the other conjuncts contain). Only
+        // when simplification cannot decide does the function fall
+        // back to SAT enumeration over distinct `Var(name)`
+        // identifiers (capped at 16 vars; beyond the cap returns
+        // `true` — conservative-not-skip — which is the safe
+        // direction for a boundary checker because under-skipping
+        // produces false positives, not false negatives).
+        //
+        // SAT enumeration honours mutual-exclusion of `name=value`
+        // options sharing the same `name`: at most one
+        // `name="value1"`, `name="value2"`, … can be true in any
+        // real config, so assignments that turn on multiple values
+        // for the same key are skipped (treated as physically
+        // impossible, not "satisfying"). This handles the
+        // `cfg(all(target_os="linux", target_os="windows"))`
+        // unsatisfiability case correctly.
         fn satisfiable_under_test_absent(p: &CfgPred) -> bool {
+            if let Some(value) = simplify_under_test_absent(p) {
+                return value;
+            }
             let mut vars: Vec<String> = Vec::new();
             collect_vars(p, &mut vars);
             let n = vars.len();
             if n > 16 {
                 return true;
             }
+            // Pre-compute same-key var groups (indices in `vars`)
+            // for mutual-exclusion enforcement during enumeration.
+            let groups = group_indices_by_key(&vars);
             let total: u64 = 1u64 << n;
             for mask in 0..total {
+                if violates_key_exclusivity(mask, &groups) {
+                    continue;
+                }
                 let env: Vec<(&str, bool)> = vars
                     .iter()
                     .enumerate()
@@ -1592,6 +1620,98 @@ mod tests {
                     .collect();
                 if evaluate_under_test_absent(p, &env) {
                     return true;
+                }
+            }
+            false
+        }
+
+        // Three-valued structural simplification with `test = false`.
+        // Returns `Some(b)` when `P` is decidable from grammar alone
+        // (no SAT search over free Var assignments needed) and
+        // `None` when the value depends on free identifiers. Cures
+        // the >16-var cap problem for predicates whose `test`
+        // appearance forces a structural shortcut.
+        fn simplify_under_test_absent(p: &CfgPred) -> Option<bool> {
+            match p {
+                CfgPred::Test => Some(false),
+                CfgPred::True => Some(true),
+                CfgPred::False => Some(false),
+                CfgPred::Var(_) => None,
+                CfgPred::All(children) => {
+                    if children.is_empty() {
+                        return Some(true);
+                    }
+                    let mut all_true = true;
+                    for c in children {
+                        match simplify_under_test_absent(c) {
+                            Some(false) => return Some(false),
+                            Some(true) => continue,
+                            None => all_true = false,
+                        }
+                    }
+                    if all_true {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                }
+                CfgPred::Any(children) => {
+                    if children.is_empty() {
+                        return Some(false);
+                    }
+                    let mut all_false = true;
+                    for c in children {
+                        match simplify_under_test_absent(c) {
+                            Some(true) => return Some(true),
+                            Some(false) => continue,
+                            None => all_false = false,
+                        }
+                    }
+                    if all_false {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                }
+                CfgPred::Not(inner) => simplify_under_test_absent(inner).map(|b| !b),
+            }
+        }
+
+        // Returns groups of indices in `vars` that share the same
+        // `name=` prefix. Two `name=value1` and `name=value2` Vars
+        // for the same key are mutually exclusive in any real Rust
+        // build configuration (e.g. `target_os` is exactly one of
+        // {"linux","windows","macos",…}), so SAT enumeration must
+        // skip assignments that turn on more than one of them.
+        fn group_indices_by_key(vars: &[String]) -> Vec<Vec<usize>> {
+            let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+            for (i, v) in vars.iter().enumerate() {
+                let key = match v.find('=') {
+                    Some(eq) => &v[..eq],
+                    None => continue,
+                };
+                if let Some(g) = groups.iter_mut().find(|(k, _)| k == key) {
+                    g.1.push(i);
+                } else {
+                    groups.push((key.to_string(), vec![i]));
+                }
+            }
+            groups
+                .into_iter()
+                .filter_map(|(_, idx)| if idx.len() > 1 { Some(idx) } else { None })
+                .collect()
+        }
+
+        fn violates_key_exclusivity(mask: u64, groups: &[Vec<usize>]) -> bool {
+            for g in groups {
+                let mut on = 0;
+                for &i in g {
+                    if (mask >> i) & 1 == 1 {
+                        on += 1;
+                        if on > 1 {
+                            return true;
+                        }
+                    }
                 }
             }
             false
@@ -2508,6 +2628,47 @@ pub fn handle_received_tx() {
                 "expected QSelfPath for parenthesised <crate::txpool::TxPool>::admit_with_metadata, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn mutually_exclusive_target_os_values_via_two_cfg_attrs_skipped() {
+        // `cfg(any(test, target_os="linux")) ∧ cfg(any(test, target_os="windows"))`
+        // — combined: `(test ∨ linux) ∧ (test ∨ windows)`. Under
+        // `target_os` mutual-exclusivity (a config has exactly one
+        // value), the only way both clauses hold without test is
+        // `linux ∧ windows`, which is impossible. Conjunction
+        // therefore implies test → SKIP.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(any(test, target_os = \"linux\"))]
+#[cfg(any(test, target_os = \"windows\"))]
+fn cross_os_test_only() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src).expect(
+            "mutually-exclusive target_os values across two cfg attrs implies test; must skip",
+        );
+    }
+
+    #[test]
+    fn many_distinct_vars_with_test_in_all_uses_structural_fast_path() {
+        // 17 free identifiers exceed the SAT cap (16), but the
+        // structural simplifier resolves `all(test, …)` to `false`
+        // under `test = absent` immediately — predicate implies test
+        // regardless of how many other free vars accompany it.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(all(test, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17))]
+fn many_var_helper() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src).expect(
+            "all(test, …17 distinct free vars) implies test via structural fast-path despite cap",
+        );
     }
 
     #[test]
