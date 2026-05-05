@@ -14,7 +14,7 @@ RUNNER_DIR = pathlib.Path(__file__).resolve().parent
 if str(RUNNER_DIR) not in sys.path:
     sys.path.insert(0, str(RUNNER_DIR))
 
-from txctx_case import (
+from txctx_case import (  # noqa: E402
     build_txctx_case,
     build_txctx_governance_request,
     validate_txctx_governance_responses,
@@ -318,6 +318,49 @@ def _da_chunk_tx(tx_nonce: int, da_id: bytes, payload: bytes) -> Dict[str, Any]:
     return _weight_tx_parts(core, encode_compact_size(0), payload, tx_kind=0x02)
 
 
+def _da_fee_floor_policy_tx(scenario: Dict[str, Any]) -> Dict[str, Any]:
+    kind = str(scenario.get("kind", ""))
+    tx_nonce = int(scenario.get("tx_nonce", 1))
+    if kind == "da_commit":
+        manifest_len = int(scenario.get("manifest_len", 10))
+        if manifest_len <= 0:
+            raise ValueError("da_fee_floor da_commit requires positive manifest_len")
+        fill = int(scenario.get("manifest_fill", 0x4D)) & 0xFF
+        seed = int(scenario.get("da_id_fill", 0x53)) & 0xFF
+        manifest = bytes([fill]) * manifest_len
+        return _da_commit_tx(tx_nonce, bytes([seed]) * 32, sha3_256(manifest), manifest)
+    if kind == "non_da":
+        return _non_da_tx_with_outputs(tx_nonce, [(0, 0x0000, _p2pk_covenant_data())])
+    raise ValueError(f"unsupported da_fee_floor scenario kind={kind!r}")
+
+
+def _da_fee_floor_policy_utxos(v: Dict[str, Any]) -> List[Dict[str, Any]]:
+    scenario = v.get("scenario")
+    if not isinstance(scenario, dict):
+        raise ValueError("da_fee_floor_policy requires scenario or explicit utxos")
+    fee = int(scenario.get("fee", -1))
+    if fee < 0:
+        raise ValueError("da_fee_floor_policy scenario requires non-negative fee")
+    kind = str(scenario.get("kind", ""))
+    if kind == "da_commit":
+        prev_txid = "a1" * 32
+    elif kind == "non_da":
+        prev_txid = "00" * 32
+    else:
+        raise ValueError(f"unsupported da_fee_floor scenario kind={kind!r}")
+    return [
+        {
+            "txid": prev_txid,
+            "vout": 0,
+            "value": fee,
+            "covenant_type": 0,
+            "covenant_data": "",
+            "creation_height": 1,
+            "created_by_coinbase": False,
+        }
+    ]
+
+
 def _block_weight(parts: List[Dict[str, Any]]) -> int:
     return sum((4 * int(tx["base_size"])) + int(tx["witness_size"]) + int(tx["da_size"]) for tx in parts)
 
@@ -455,6 +498,10 @@ def materialize_tx_hex(
     tx_hex = v.get("tx_hex")
     if isinstance(tx_hex, str) and tx_hex.strip() != "":
         return tx_hex.strip()
+
+    scenario = v.get("scenario")
+    if isinstance(scenario, dict) and v.get("op") == "da_fee_floor_policy":
+        return _da_fee_floor_policy_tx(scenario)["full"].hex()
 
     tx_hex_from = v.get("tx_hex_from")
     if isinstance(tx_hex_from, str) and tx_hex_from.strip() != "":
@@ -1608,6 +1655,20 @@ def validate_vector(
             req["rotation_descriptor"] = v["rotation_descriptor"]
         if "suite_registry" in v:
             req["suite_registry"] = v.get("suite_registry", [])
+    elif op == "da_fee_floor_policy":
+        if tx_hex == "":
+            return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
+        req["tx_hex"] = tx_hex
+        if "utxos" in v:
+            req["utxos"] = v["utxos"]
+        else:
+            try:
+                req["utxos"] = _da_fee_floor_policy_utxos(v)
+            except Exception as exc:
+                return [f"{gate}/{vid}: {exc}"], False
+        req["current_mempool_min_fee_rate"] = int(v.get("current_mempool_min_fee_rate", 0))
+        req["min_da_fee_rate"] = int(v.get("min_da_fee_rate", 0))
+        req["da_surcharge_per_byte"] = int(v.get("da_surcharge_per_byte", 0))
     elif op in ("rotation_create_suite_check", "rotation_native_create_suites"):
         include_rotation_network()
         if "height" not in v:
@@ -2096,6 +2157,53 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_da_bytes mismatch")
         if "expect_anchor_bytes" in v and go_resp.get("anchor_bytes") != v["expect_anchor_bytes"]:
             problems.append(f"{gate}/{vid}: expect_anchor_bytes mismatch")
+    elif op == "da_fee_floor_policy":
+        def policy_value(resp: Dict[str, Any], key: str, default: Any) -> Any:
+            value = resp.get(key, default)
+            if value is None:
+                return default
+            return value
+
+        int_fields = [
+            "fee",
+            "weight",
+            "da_bytes",
+            "relay_fee_floor",
+            "da_fee_floor",
+            "da_surcharge",
+            "da_required_fee",
+            "required_fee",
+        ]
+        str_fields = ["admit_class", "dominant_floor", "reject_reason"]
+        for key in int_fields:
+            if int(policy_value(go_resp, key, 0)) != int(policy_value(rust_resp, key, 0)):
+                problems.append(
+                    f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
+                )
+        if bool(policy_value(go_resp, "admit", False)) != bool(policy_value(rust_resp, "admit", False)):
+            problems.append(f"{gate}/{vid}: admit mismatch go={go_resp.get('admit')} rust={rust_resp.get('admit')}")
+        for key in str_fields:
+            if str(policy_value(go_resp, key, "")) != str(policy_value(rust_resp, key, "")):
+                problems.append(
+                    f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
+                )
+
+        if "expect_admit" in v and bool(policy_value(go_resp, "admit", False)) != bool(v["expect_admit"]):
+            problems.append(f"{gate}/{vid}: expect_admit mismatch")
+        if "expect_admit_class" in v and str(policy_value(go_resp, "admit_class", "")) != str(v["expect_admit_class"]):
+            problems.append(f"{gate}/{vid}: expect_admit_class mismatch")
+        if "expect_dominant_floor" in v and str(policy_value(go_resp, "dominant_floor", "")) != str(v["expect_dominant_floor"]):
+            problems.append(f"{gate}/{vid}: expect_dominant_floor mismatch")
+        if "expect_reject_reason" in v and str(policy_value(go_resp, "reject_reason", "")) != str(v["expect_reject_reason"]):
+            problems.append(f"{gate}/{vid}: expect_reject_reason mismatch")
+        if "expect_reject_reason" not in v and str(policy_value(go_resp, "reject_reason", "")) != "":
+            problems.append(f"{gate}/{vid}: unexpected reject_reason={go_resp.get('reject_reason')}")
+        if str(policy_value(go_resp, "err", "")) != "":
+            problems.append(f"{gate}/{vid}: unexpected replay err={go_resp.get('err')}")
+        for key in int_fields:
+            expect_key = f"expect_{key}"
+            if expect_key in v and int(policy_value(go_resp, key, 0)) != int(v[expect_key]):
+                problems.append(f"{gate}/{vid}: {expect_key} mismatch")
     elif op.startswith("compact_") and op != "compact_shortid":
         def normalize_compact_response(resp: Dict[str, Any]) -> Dict[str, Any]:
             normalized = dict(resp or {})
