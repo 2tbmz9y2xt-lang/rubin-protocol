@@ -1,3 +1,166 @@
+//! P2P transaction-relay surface — RELAY-CACHE ONLY, not canonical txpool.
+//!
+//! # RUB-172 boundary (RUB-163 producer-wiring track child)
+//!
+//! On the success path (`RelayTxOutcome::Relayed`),
+//! `handle_received_tx` writes to `relay_state.relay_pool`
+//! (`RelayTxPool`, defined in `crate::relay_pool`) and attempts
+//! inventory broadcast. Other outcomes (`Oversized`,
+//! `MalformedParse`, `DuplicateSeen`, `MetadataRejected`,
+//! `PoolRejected`) return at their respective branch with
+//! partial-or-no relay-cache side effects. None of the outcomes
+//! admit to a canonical `TxPool` supplied by the caller. The
+//! structural defense for the shared canonical pool is the
+//! function signature: NONE of `handle_received_tx`'s
+//! non-primitive arguments carry a canonical `TxPool` handle
+//! today. This is a HEAD-snapshot observation, NOT a maintained
+//! invariant — neither the docstring nor the source-grep tripwire
+//! below scans `sync.rs`, `p2p_runtime.rs`, or any other carrier
+//! file, so a future PR could add a canonical-pool field to one
+//! of these structs in another file and both would silently stay
+//! green. RUB-176 / GitHub issue #1431 tracks a syntactic
+//! token-aware checker scoped to `tx_relay.rs` only — it does
+//! NOT inspect `sync.rs`, `p2p_runtime.rs`, or any other carrier
+//! file, so cross-file drift over carrier struct definitions
+//! remains an open gap not tracked by any current follow-up.
+//! Observed at HEAD, field-by-field:
+//!  - `relay_state: &TxRelayState` (this file) — fields are
+//!    `tx_seen`, `relay_pool` (`RelayTxPool`), `tx_relay_fanout`,
+//!    `network`. No canonical `TxPool` field.
+//!  - `sync_engine: &SyncEngine`
+//!    (`crate::sync::SyncEngine`) — fields are `chain_state`,
+//!    `block_store`, `cfg`, `tip_timestamp`, `best_known_height`,
+//!    parallel-validation state. No canonical `TxPool` field.
+//!  - `peer_manager: &PeerManager`
+//!    (`crate::p2p_runtime::PeerManager`) — fields are
+//!    `peers: RwLock<HashMap<String, PeerState>>` and `cfg`;
+//!    `PeerState` carries connection metadata only. No canonical
+//!    `TxPool` field.
+//!  - `peer_writers: &Mutex<HashMap<String, PeerOutbox>>`
+//!    (`PeerOutbox` defined in this file) — fields are
+//!    `frames: Vec<Vec<u8>>` and `total_bytes`. No canonical
+//!    `TxPool` field.
+//!
+//! Any future producer that wires a canonical pool through any
+//! of these surfaces MUST re-verify this boundary explicitly,
+//! both in this docstring and in the carrier file (this snapshot
+//! goes stale silently otherwise). At HEAD with these structural
+//! facts in place, the application's shared pool is unreachable
+//! from this module's call graph through these surfaces.
+//!
+//! The advisory source-level tripwire below scans the production
+//! section for a non-exhaustive list of obvious canonical-
+//! admission substrings; it is NOT a sound Rust parser, NOT an
+//! exhaustive proof, and NOT a guarantee that the boundary is
+//! enforced. Many spellings bypass it (see Known bypass classes
+//! below). RUB-176 / GitHub issue #1431 tracks a syntactic
+//! token-aware checker for direct admission call expressions in
+//! `tx_relay.rs`; it explicitly excludes alias wrappers, macro
+//! expansions, type-resolution completeness, and any cross-file
+//! inspection from its scope.
+//!
+//! `Relayed` indicates the dedup, metadata, and relay-pool storage
+//! steps completed successfully and `broadcast_inventory` was
+//! invoked. Per-peer broadcast errors are swallowed inside
+//! `broadcast_inventory` to match Go's per-peer fire-and-forget
+//! relay behaviour, so `Relayed` is not a guarantee that any
+//! specific peer received the inventory.
+//!
+//! Canonical source-aware admission (`TxSource::Local` /
+//! `TxSource::Remote` / `TxSource::Reorg`) is owned by the
+//! per-producer slices. The currently merged producers are RUB-169
+//! reorg requeue (`TxSource::Reorg`) and RUB-171 RPC submit
+//! (`TxSource::Local`). The `TxSource::Remote` p2p producer
+//! wiring is planned (RUB-173) and not yet landed in production;
+//! when it lands, that slice MUST NOT treat a successful relay
+//! outcome here as proof of canonical admission.
+//!
+//! # Go counterpart (API/sequence parity ONLY — NOT production-boundary parity)
+//!
+//! Note: this section describes API/sequence parity only. Current
+//! Go production wiring at
+//! `clients/go/cmd/rubin-node/main.go::run` configures `handleTx`
+//! by passing `TxPool: p2p.NewCanonicalMempoolTxPool(mempool)` and
+//! `TxMetadataFunc: p2p.CanonicalMempoolRelayMetadata` into the
+//! p2p service config struct literal — so Go production is NOT a
+//! relay-cache/canonical split — it admits to the canonical pool
+//! from inside `handleTx`. The relay-cache/canonical split
+//! described in this docstring is currently a Rust-only structural
+//! choice; the `TxSource::Remote` p2p producer wiring planned for
+//! RUB-173 will introduce the canonical-admission counterpart on
+//! the Rust side.
+//!
+//! `clients/go/node/p2p/handlers_tx.go::handleTx` runs the same
+//! sequence (oversize → parse → tx_seen → relayTxMetadata →
+//! TxPool.Put → broadcastInventory). Go's `p2p.TxPool` interface
+//! accepts both `*CanonicalMempoolTxPool` and `MemoryTxPool`
+//! backings as a TYPE-SYSTEM property (current production picks
+//! the canonical backing per the wiring cited above); the Rust
+//! analogue is hard-wired to the relay-only `RelayTxPool` here.
+//! Go's `CanonicalMempoolRelayMetadata`
+//! (`clients/go/node/p2p/tx_metadata.go:12`) returns only
+//! `Size: len(txBytes)` and defers fee-floor validation; Rust's
+//! `crate::txpool::relay_metadata` enforces the rolling fee floor
+//! inline (matching `admit_with_metadata` on the canonical pool)
+//! but remains standalone non-admitting.
+//!
+//! # Boundary tripwire (advisory only)
+//!
+//! The test at the bottom of this file is an advisory
+//! defense-in-depth source-level substring scan on this file's
+//! production section, not a sound Rust parser and not an
+//! exhaustive proof. It splits this file's `include_str!`
+//! contents at the exact `mod tests` attribute marker (CRLF-
+//! normalized, marker_count == 1, fail-closed via `.expect`),
+//! runs a comment/string-blind line-equality check on the relay
+//! handler's signature opener (intended only to fail loudly if
+//! the handler is renamed in a careless rewrite — NOT a
+//! declaration anchor; a block comment, `///` doc line, or raw
+//! string line equal to the signature would also satisfy it),
+//! then scans for the dotted-method and UFCS forms (including
+//! module-path qualified) named after the three canonical-
+//! admission entries on `TxPool` (`admit`, `admit_with_metadata`,
+//! `add_tx_with_source`). The forbidden-substring list lives in
+//! the test; the docstring above does not embed those substrings
+//! or the signature-opener literal. A syntactic token-aware
+//! checker is split to RUB-176 / GitHub issue #1431; it is not
+//! sound (no alias/macro/type-resolution coverage) and its scope
+//! is `tx_relay.rs` only.
+//!
+//! False-positive surface (intentional, fail-closed): the dotted-
+//! method tokens scanned by the tripwire are receiver-agnostic —
+//! they match by literal substring, not by type — so the tripwire
+//! would also fire on similarly-named methods on any other
+//! receiver type that may live in this module in the future, on
+//! commented-out admission code left in production source, and on
+//! string literals containing those substrings. This is a
+//! deliberate defense-in-depth bias toward false-alarm over miss;
+//! if a future producer needs a similarly-named method on a
+//! different receiver inside this module, that producer either
+//! renames the surface here or replaces the tripwire with an
+//! AST-aware checker.
+//!
+//! Known bypass classes (NOT exhaustive — the canonical defense
+//! remains structural, per the function signature above; RUB-176
+//! / GitHub issue #1431 tracks only a syntactic checker scoped
+//! to `tx_relay.rs`, not sound and not cross-file):
+//!  - alias wrappers, function-pointer indirection, trait-object
+//!    dispatch, or any path that does not write a matching literal
+//!    substring in this file's source;
+//!  - macro expansions that hide the call;
+//!  - UFCS angle-bracket path spellings not in the catalog —
+//!    for example `<super::TxPool>::` or
+//!    `<super::txpool::TxPool>::` (which compile from this module
+//!    today, since `super` from `crate::tx_relay` resolves to
+//!    `crate`), and any future re-export or path alias that
+//!    introduces a new angle-bracket-qualified form. The closing
+//!    `>` separator breaks the substring spillover that catches
+//!    non-angle-bracket prefixed forms. (Note: `<self::TxPool>::`
+//!    would also bypass the substring scan if it compiled, but
+//!    `tx_relay.rs` does not import `TxPool` into `self::`, so
+//!    that exact spelling does not compile from this module
+//!    today.)
+
 use std::collections::HashMap;
 use std::io;
 use std::sync::Mutex;
@@ -1021,6 +1184,100 @@ mod tests {
         let boxes = outboxes.lock().unwrap();
         assert!(boxes["sender:8333"].is_empty());
         assert_eq!(boxes["other:8333"].len(), 1);
+    }
+
+    #[test]
+    fn tx_relay_production_source_substring_tripwire_advisory_only() {
+        // RUB-172 advisory boundary tripwire. NOT a sound Rust
+        // parser and NOT exhaustive — see module docstring at the
+        // top of this file for scope, the comment/string-blind
+        // line-equality semantics, known bypass classes, and the
+        // RUB-176 / GitHub issue #1431 follow-up for a syntactic
+        // token-aware checker scoped to tx_relay.rs (not sound;
+        // no alias/macro/type-resolution coverage).
+        const TX_RELAY_SOURCE_RAW: &str = include_str!("tx_relay.rs");
+        let tx_relay_source = TX_RELAY_SOURCE_RAW.replace("\r\n", "\n");
+        const TEST_MOD_MARKER: &str = "\n#[cfg(test)]\nmod tests {";
+        let marker_count = tx_relay_source.matches(TEST_MOD_MARKER).count();
+        assert_eq!(
+            marker_count, 1,
+            "tx_relay.rs must contain the test-module marker exactly \
+             once; found {marker_count}",
+        );
+        let (production_section, _) = tx_relay_source
+            .split_once(TEST_MOD_MARKER)
+            .expect("tx_relay.rs must contain the exact test-module marker");
+        // Comment/string/raw-string-blind line-equality check:
+        // intended only to fail loudly if the relay handler is
+        // renamed in a careless rewrite. This is NOT a declaration
+        // anchor — a block comment, `///` doc line, or `r"..."`
+        // raw-string line whose trim_start equals the signature
+        // opener would also satisfy it. A syntactic token-aware
+        // anchor is split to RUB-176 / GitHub issue #1431.
+        let sanity_signature = concat!("pub", " fn handle_received_tx(");
+        assert!(
+            production_section
+                .lines()
+                .any(|line| line.trim_start() == sanity_signature),
+            "tx_relay.rs production section must contain a line whose \
+             trim_start equals the relay handler signature opener \
+             (advisory rename-detection check, not a declaration anchor)",
+        );
+        const FORBIDDEN: &[&str] = &[
+            // Dotted-method form
+            ".admit(",
+            ".admit_with_metadata(",
+            ".add_tx_with_source(",
+            // UFCS plain form `TxPool::method(...)` — the literal
+            // substring `TxPool::admit(` etc. ALSO catches every
+            // non-angle-bracket module-prefixed spelling via
+            // substring spillover, because the prefix concatenates
+            // directly with `TxPool::admit(` without any separator
+            // that breaks the substring match. Examples confirmed
+            // caught by these three entries: `crate::TxPool::admit(`,
+            // `crate::TxPool::admit_with_metadata(`,
+            // `crate::TxPool::add_tx_with_source(`,
+            // `crate::txpool::TxPool::admit(`,
+            // `super::TxPool::admit(`,
+            // `super::txpool::TxPool::admit(`,
+            // `txpool::TxPool::admit(`, and any future
+            // re-export/alias path that ends in `TxPool::admit(`-
+            // shaped text. Angle-bracket UFCS spellings (e.g.
+            // `<crate::TxPool>::admit(`) need separate explicit
+            // entries below because the closing `>` between the
+            // type and `::` breaks the substring spillover.
+            "TxPool::admit(",
+            "TxPool::admit_with_metadata(",
+            "TxPool::add_tx_with_source(",
+            // UFCS angle-bracket-qualified form `<TxPool>::method(...)`,
+            // `<crate::TxPool>::method(...)`, and the canonical full
+            // module path `<crate::txpool::TxPool>::method(...)`.
+            "<TxPool>::admit(",
+            "<TxPool>::admit_with_metadata(",
+            "<TxPool>::add_tx_with_source(",
+            "<crate::TxPool>::admit(",
+            "<crate::TxPool>::admit_with_metadata(",
+            "<crate::TxPool>::add_tx_with_source(",
+            "<crate::txpool::TxPool>::admit(",
+            "<crate::txpool::TxPool>::admit_with_metadata(",
+            "<crate::txpool::TxPool>::add_tx_with_source(",
+            // UFCS trait-qualified form `<TxPool as SomeTrait>::method(...)`
+            // catalog for bare, single-crate-prefix, and full-module-path
+            // qualified forms only. Does NOT cover `<self::*>` /
+            // `<super::*>` path qualifiers or other future spellings —
+            // those belong to the RUB-176 / GitHub issue #1431
+            // token-aware checker.
+            "<TxPool as ",
+            "<crate::TxPool as ",
+            "<crate::txpool::TxPool as ",
+        ];
+        for forbidden in FORBIDDEN {
+            assert!(
+                !production_section.contains(forbidden),
+                "tx_relay.rs production code must not contain canonical \
+                 TxPool admission token `{forbidden}` — RUB-172 boundary",
+            );
+        }
     }
 
     #[test]
