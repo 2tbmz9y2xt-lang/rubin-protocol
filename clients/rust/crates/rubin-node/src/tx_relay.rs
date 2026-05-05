@@ -18,7 +18,7 @@
 //! below scans `sync.rs`, `p2p_runtime.rs`, or any other carrier
 //! file, so a future PR could add a canonical-pool field to one
 //! of these structs in another file and both would silently stay
-//! green. RUB-176 / GitHub issue #1431 tracks a syntactic
+//! green. RUB-176 / GitHub issue #1432 tracks a syntactic
 //! token-aware checker scoped to `tx_relay.rs` only — it does
 //! NOT inspect `sync.rs`, `p2p_runtime.rs`, or any other carrier
 //! file, so cross-file drift over carrier struct definitions
@@ -53,7 +53,7 @@
 //! admission substrings; it is NOT a sound Rust parser, NOT an
 //! exhaustive proof, and NOT a guarantee that the boundary is
 //! enforced. Many spellings bypass it (see Known bypass classes
-//! below). RUB-176 / GitHub issue #1431 tracks a syntactic
+//! below). RUB-176 / GitHub issue #1432 tracks a syntactic
 //! token-aware checker for direct admission call expressions in
 //! `tx_relay.rs`; it explicitly excludes alias wrappers, macro
 //! expansions, type-resolution completeness, and any cross-file
@@ -123,7 +123,7 @@
 //! `add_tx_with_source`). The forbidden-substring list lives in
 //! the test; the docstring above does not embed those substrings
 //! or the signature-opener literal. A syntactic token-aware
-//! checker is split to RUB-176 / GitHub issue #1431; it is not
+//! checker is split to RUB-176 / GitHub issue #1432; it is not
 //! sound (no alias/macro/type-resolution coverage) and its scope
 //! is `tx_relay.rs` only.
 //!
@@ -142,7 +142,7 @@
 //!
 //! Known bypass classes (NOT exhaustive — the canonical defense
 //! remains structural, per the function signature above; RUB-176
-//! / GitHub issue #1431 tracks only a syntactic checker scoped
+//! / GitHub issue #1432 tracks only a syntactic checker scoped
 //! to `tx_relay.rs`, not sound and not cross-file):
 //!  - alias wrappers, function-pointer indirection, trait-object
 //!    dispatch, or any path that does not write a matching literal
@@ -1192,7 +1192,7 @@ mod tests {
         // parser and NOT exhaustive — see module docstring at the
         // top of this file for scope, the comment/string-blind
         // line-equality semantics, known bypass classes, and the
-        // RUB-176 / GitHub issue #1431 follow-up for a syntactic
+        // RUB-176 / GitHub issue #1432 follow-up for a syntactic
         // token-aware checker scoped to tx_relay.rs (not sound;
         // no alias/macro/type-resolution coverage).
         const TX_RELAY_SOURCE_RAW: &str = include_str!("tx_relay.rs");
@@ -1213,7 +1213,7 @@ mod tests {
         // anchor — a block comment, `///` doc line, or `r"..."`
         // raw-string line whose trim_start equals the signature
         // opener would also satisfy it. A syntactic token-aware
-        // anchor is split to RUB-176 / GitHub issue #1431.
+        // anchor is split to RUB-176 / GitHub issue #1432.
         let sanity_signature = concat!("pub", " fn handle_received_tx(");
         assert!(
             production_section
@@ -1265,7 +1265,7 @@ mod tests {
             // catalog for bare, single-crate-prefix, and full-module-path
             // qualified forms only. Does NOT cover `<self::*>` /
             // `<super::*>` path qualifiers or other future spellings —
-            // those belong to the RUB-176 / GitHub issue #1431
+            // those belong to the RUB-176 / GitHub issue #1432
             // token-aware checker.
             "<TxPool as ",
             "<crate::TxPool as ",
