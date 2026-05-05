@@ -11,17 +11,39 @@
 //! partial-or-no relay-cache side effects. None of the outcomes
 //! admit to a canonical `TxPool` supplied by the caller. The
 //! structural defense for the shared canonical pool is the
-//! function signature: `TxRelayState` carries no canonical
-//! `TxPool` reference and the relay handler takes no canonical
-//! `TxPool` argument, so the application's shared pool is
-//! unreachable from this module's call graph through these
-//! surfaces. The advisory source-level tripwire below scans the
-//! production section for a non-exhaustive list of obvious
-//! canonical-admission substrings; it is NOT a sound Rust parser,
-//! NOT an exhaustive proof, and NOT a guarantee that the boundary
-//! is enforced. Many spellings bypass it (see Known bypass
-//! classes below). Sound token-aware enforcement is tracked in
-//! RUB-176 (GitHub issue #1431).
+//! function signature: NONE of `handle_received_tx`'s
+//! non-primitive arguments carry a canonical `TxPool` handle
+//! today. Verified field-by-field at HEAD:
+//!  - `relay_state: &TxRelayState` (this file) — fields are
+//!    `tx_seen`, `relay_pool` (`RelayTxPool`), `tx_relay_fanout`,
+//!    `network`. No canonical `TxPool` field.
+//!  - `sync_engine: &SyncEngine`
+//!    (`crate::sync::SyncEngine`) — fields are `chain_state`,
+//!    `block_store`, `cfg`, `tip_timestamp`, `best_known_height`,
+//!    parallel-validation state. No canonical `TxPool` field.
+//!  - `peer_manager: &PeerManager`
+//!    (`crate::p2p_runtime::PeerManager`) — fields are
+//!    `peers: RwLock<HashMap<String, PeerState>>` and `cfg`;
+//!    `PeerState` carries connection metadata only. No canonical
+//!    `TxPool` field.
+//!  - `peer_writers: &Mutex<HashMap<String, PeerOutbox>>`
+//!    (`PeerOutbox` defined in this file) — fields are
+//!    `frames: Vec<Vec<u8>>` and `total_bytes`. No canonical
+//!    `TxPool` field.
+//!
+//! Any future producer that wires a canonical pool through any
+//! of these surfaces MUST re-verify this boundary explicitly.
+//! With this exhaustive per-argument verification in place, the
+//! application's shared pool is unreachable from this module's
+//! call graph through these surfaces.
+//!
+//! The advisory source-level tripwire below scans the production
+//! section for a non-exhaustive list of obvious canonical-
+//! admission substrings; it is NOT a sound Rust parser, NOT an
+//! exhaustive proof, and NOT a guarantee that the boundary is
+//! enforced. Many spellings bypass it (see Known bypass classes
+//! below). Sound token-aware enforcement is tracked in RUB-176
+//! (GitHub issue #1431).
 //!
 //! `Relayed` indicates the dedup, metadata, and relay-pool storage
 //! steps completed successfully and `broadcast_inventory` was
@@ -39,14 +61,29 @@
 //! when it lands, that slice MUST NOT treat a successful relay
 //! outcome here as proof of canonical admission.
 //!
-//! # Go counterpart (parity)
+//! # Go counterpart (API/sequence parity ONLY — NOT production-boundary parity)
+//!
+//! Note: this section describes API/sequence parity only. Current
+//! Go production wiring at
+//! `clients/go/cmd/rubin-node/main.go::run` configures `handleTx`
+//! by passing `TxPool: p2p.NewCanonicalMempoolTxPool(mempool)` and
+//! `TxMetadataFunc: p2p.CanonicalMempoolRelayMetadata` into the
+//! p2p service config struct literal — so Go production is NOT a
+//! relay-cache/canonical split — it admits to the canonical pool
+//! from inside `handleTx`. The relay-cache/canonical split
+//! described in this docstring is currently a Rust-only structural
+//! choice; the `TxSource::Remote` p2p producer wiring planned for
+//! RUB-173 will introduce the canonical-admission counterpart on
+//! the Rust side.
 //!
 //! `clients/go/node/p2p/handlers_tx.go::handleTx` runs the same
 //! sequence (oversize → parse → tx_seen → relayTxMetadata →
 //! TxPool.Put → broadcastInventory). Go's `p2p.TxPool` interface
 //! accepts both `*CanonicalMempoolTxPool` and `MemoryTxPool`
-//! backings; the Rust analogue is hard-wired to the relay-only
-//! `RelayTxPool` here. Go's `CanonicalMempoolRelayMetadata`
+//! backings as a TYPE-SYSTEM property (current production picks
+//! the canonical backing per the wiring cited above); the Rust
+//! analogue is hard-wired to the relay-only `RelayTxPool` here.
+//! Go's `CanonicalMempoolRelayMetadata`
 //! (`clients/go/node/p2p/tx_metadata.go:12`) returns only
 //! `Size: len(txBytes)` and defers fee-floor validation; Rust's
 //! `crate::txpool::relay_metadata` enforces the rolling fee floor
