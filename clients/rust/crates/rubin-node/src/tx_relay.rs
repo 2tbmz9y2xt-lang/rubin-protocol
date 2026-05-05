@@ -126,23 +126,35 @@
 //!    `<self::TxPool>::method`, plus all `<X as Trait>::method`
 //!    trait-qualified variants).
 //!
-//! Production scope is established by structural recursion over the
-//! Rust `ConfigurationPredicate` grammar
-//! (<https://doc.rust-lang.org/reference/conditional-compilation.html>):
-//! an item is skipped from production scan iff its `#[cfg(...)]`
-//! predicate logically implies `test ∈ C` for every config `C`
-//! that satisfies it (`skip(I) ⇔ ∀C. P(I)(C) ⇒ test ∈ C`). The
-//! attribute body is parsed via `attr.parse_args::<CfgPred>()` into a
-//! recursive `CfgPred` AST and evaluated symbolically with `test`
-//! forced to `false`. The grammar's six productions (`test`, `true`,
-//! `false`, identifier-or-name=value option, `all(P*)`, `any(P*)`,
-//! `not(P)`) are all handled. Empty `all()` is the empty conjunction
-//! (always-true → not skipped); empty `any()` is the empty
-//! disjunction (always-false → vacuously skipped). The skip rule is
-//! applied per `Item`, per `ImplItem` (members of `impl` blocks),
-//! and per `TraitItem` (members of `trait` declarations); the
-//! boundary is NOT established by textual `split_once("#[cfg(test)]")`
-//! on the source.
+//! Production scope is established by a deliberately conservative
+//! rule: a top-level [`Item`] is skipped from production scan iff
+//! its attribute set contains the EXACT literal `#[cfg(test)]` —
+//! that is, an attribute whose path is `cfg` and whose `Meta::List`
+//! parses as a single `Path` identifier `test`. Every other carrier
+//! shape is scanned as production. The skip rule is applied via
+//! `Visit::visit_item` and so handles top-level items as well as
+//! nested items reachable through the visitor. The boundary is NOT
+//! established by textual `split_once("#[cfg(test)]")` on the
+//! source.
+//!
+//! Conservative-scope rationale: general
+//! `ConfigurationPredicate` reachability — deciding whether a
+//! `cfg(any(test, X))`, `cfg(all(test, X))`, `cfg(not(test))`,
+//! `cfg(target_os = "linux")`, `cfg(false)`, multi-`#[cfg]` stack,
+//! or below-item-level cfg gate (on `ImplItem`, `TraitItem`,
+//! `Expr`, `Arm`, `Stmt`, `FieldValue`) is enabled in production
+//! builds — requires modelling the Rust `ConfigurationPredicate`
+//! grammar
+//! (<https://doc.rust-lang.org/reference/conditional-compilation.html>)
+//! and is explicit non-scope per RUB-176 / GitHub issue #1432's
+//! `class_change_stop_rule`. The conservative scope flags such
+//! carriers as production (false-positive over false-negative): a
+//! production-only admission introduced under any non-exact cfg
+//! shape will fire the checker, with the false-positive remediated
+//! by either rewriting the cfg to the exact `#[cfg(test)]` form,
+//! moving the admission to the canonical-pool surface, or escalating
+//! to a sounder `ConfigurationPredicate` reachability engine via
+//! a separate task. A standalone task tracks that engine.
 //!
 //! Allowed claim language for this checker (matches RUB-176 /
 //! GitHub issue #1432):
@@ -150,16 +162,21 @@
 //!  - syntactic direct-call checker;
 //!  - token-aware over `tx_relay.rs` only;
 //!  - no comments / line-comments / block-comments / doc-comments /
-//!    string-literal / raw-string-literal / `#[cfg(test)]`-test-code
-//!    false positives — `syn` discards line and block comments
+//!    string-literal / raw-string-literal / exact-`#[cfg(test)]`
+//!    item false positives — `syn` discards line and block comments
 //!    during parse; doc comments live in attribute nodes and are
 //!    not visited as expression-callable tokens; string and raw-
 //!    string literals are `Lit::Str` AST nodes and are not visited
-//!    as call callables; `#[cfg(test)]` items are skipped via the
-//!    AST attribute walk;
+//!    as call callables; items carrying the EXACT literal
+//!    `#[cfg(test)]` attribute are skipped via the AST attribute
+//!    walk;
 //!  - no type-resolution completeness;
 //!  - no macro-expansion completeness;
 //!  - no cross-file carrier inspection;
+//!  - no general `ConfigurationPredicate` reachability — only the
+//!    EXACT literal `#[cfg(test)]` shape is a skip class, every
+//!    other cfg shape and every below-item-level cfg gate is
+//!    scanned as production;
 //!  - alias wrappers out of scope (`use crate::txpool::TxPool as
 //!    Pool` followed by `Pool::admit(...)` will not match because
 //!    the path's penultimate segment is `Pool`, not `TxPool`).
@@ -205,6 +222,16 @@
 //!    `<&TxPool>::admit`, `<(TxPool)>::admit`, `<Box<TxPool>>::admit`,
 //!    or any `Wrapper<TxPool>` whose `Type::Path` terminal segment
 //!    is `Wrapper`, not `TxPool`);
+//!  - general `ConfigurationPredicate` reachability — `cfg(any(...))`,
+//!    `cfg(all(...))`, `cfg(not(...))`, `cfg(name = "value")`,
+//!    `cfg(true)`, `cfg(false)`, multi-`#[cfg]` stacks, and
+//!    below-item-level cfg gates (on `ImplItem`, `TraitItem`,
+//!    `Expr`, `Arm`, `Stmt`, `FieldValue`) are scanned as
+//!    production. False-positive remediation is either rewriting
+//!    the gate to the exact `#[cfg(test)]` shape on a top-level
+//!    `Item`, removing the admission from production scope, or
+//!    escalating to a sounder reachability engine via a separate
+//!    task;
 //!  - cross-file structural drift — a future PR could add a
 //!    canonical `TxPool` field to `SyncEngine`, `PeerManager`,
 //!    `PeerOutbox`, or `TxRelayState` in another file and the
@@ -1245,11 +1272,10 @@ mod tests {
     /// and known non-scope (alias wrappers, macro expansion, type
     /// resolution, cross-file analysis are explicit non-scope).
     mod boundary_checker {
-        use syn::parse::{Parse, ParseStream};
         use syn::visit::Visit;
         use syn::{
-            Arm, Attribute, Expr, ExprCall, ExprMethodCall, ExprPath, File, Ident, ImplItem, Item,
-            ItemFn, Lit, LitBool, Path, QSelf, Stmt, Token, TraitItem, Type,
+            Attribute, Expr, ExprCall, ExprMethodCall, ExprPath, File, Item, ItemFn, Meta, Path,
+            QSelf, Type,
         };
 
         /// Method idents that constitute canonical `TxPool` admission per
@@ -1312,15 +1338,32 @@ mod tests {
         /// `Err(BoundaryCheckError)` describing the first violation or
         /// fail-closed condition.
         ///
-        /// "Production scope" excludes any carrier (`Item`,
-        /// `ImplItem`, `TraitItem`, `Expr`, `Stmt::Local`,
-        /// `Stmt::Macro`, `Arm`) whose `#[cfg(...)]` attribute
-        /// conjunction logically implies `test ∈ C`. The exclusion
-        /// is established by parsing each cfg attribute body via
-        /// `attr.parse_args::<CfgPred>()` into a structural AST and
-        /// evaluating the conjunction via `satisfiable_under_test_absent`,
-        /// NOT by textual `split_once("#[cfg(test)]")` on the source
-        /// string.
+        /// "Production scope" excludes only [`Item`]s that carry the
+        /// EXACT literal attribute `#[cfg(test)]` — that is, an
+        /// attribute whose path is `cfg` and whose `Meta::List` parses
+        /// as a single `Path` identifier `test`. Every other carrier
+        /// shape is scanned as production:
+        ///
+        ///  - `#[cfg(any(test, X))]` items, `#[cfg(all(test, X))]`
+        ///    items, `#[cfg(not(test))]` items, `#[cfg(target_os =
+        ///    "linux")]` items, `#[cfg(false)]` items, multi-`#[cfg]`
+        ///    stacks — production;
+        ///  - `#[cfg(test)]` `ImplItem`s (associated `fn`s inside a
+        ///    production `impl`), `#[cfg(test)]` `TraitItem`s
+        ///    (default-method bodies inside a production `trait`),
+        ///    `#[cfg(test)]` `Expr`s (block / match / if / etc.),
+        ///    `#[cfg(test)]` `Arm`s (match arms), `#[cfg(test)]`
+        ///    `FieldValue`s (struct-literal initialisers),
+        ///    `#[cfg(test)]` `Stmt`s (`let` / standalone-macro
+        ///    statements) — production.
+        ///
+        /// The skip predicate is intentionally conservative
+        /// (false-positive over false-negative): general
+        /// `ConfigurationPredicate` reachability and below-item-level
+        /// cfg gating are explicit non-scope per RUB-176 / GitHub
+        /// issue #1432's `class_change_stop_rule`. A fully sound
+        /// reachability engine for cfg predicates is tracked
+        /// separately and is not part of this slice.
         pub fn check_tx_relay_boundary_source(source: &str) -> Result<(), BoundaryCheckError> {
             let file: File = syn::parse_file(source)
                 .map_err(|e| BoundaryCheckError::ParseFailed(e.to_string()))?;
@@ -1330,7 +1373,7 @@ mod tests {
             let mut found_handler = false;
             let mut visitor = AdmissionFinder::default();
             for item in &file.items {
-                if item_is_cfg_test(item) {
+                if item_is_exact_cfg_test(item) {
                     continue;
                 }
                 if let Item::Fn(ItemFn { sig, .. }) = item {
@@ -1349,8 +1392,12 @@ mod tests {
             Ok(())
         }
 
-        fn item_is_cfg_test(item: &Item) -> bool {
-            let attrs: &[Attribute] = match item {
+        // Returns the attribute slice attached to a top-level `Item`.
+        // Item variants outside this list (e.g. `Item::Verbatim`) do
+        // not carry attributes the checker can read — return an empty
+        // slice for those.
+        fn item_attrs(item: &Item) -> &[Attribute] {
+            match item {
                 Item::Const(i) => &i.attrs,
                 Item::Enum(i) => &i.attrs,
                 Item::ExternCrate(i) => &i.attrs,
@@ -1366,392 +1413,42 @@ mod tests {
                 Item::Type(i) => &i.attrs,
                 Item::Union(i) => &i.attrs,
                 Item::Use(i) => &i.attrs,
-                _ => return false,
-            };
-            attrs_imply_test(attrs)
-        }
-
-        fn impl_item_is_cfg_test(item: &ImplItem) -> bool {
-            let attrs: &[Attribute] = match item {
-                ImplItem::Const(c) => &c.attrs,
-                ImplItem::Fn(f) => &f.attrs,
-                ImplItem::Type(t) => &t.attrs,
-                ImplItem::Macro(m) => &m.attrs,
-                _ => return false,
-            };
-            attrs_imply_test(attrs)
-        }
-
-        fn trait_item_is_cfg_test(item: &TraitItem) -> bool {
-            let attrs: &[Attribute] = match item {
-                TraitItem::Const(c) => &c.attrs,
-                TraitItem::Fn(f) => &f.attrs,
-                TraitItem::Type(t) => &t.attrs,
-                TraitItem::Macro(m) => &m.attrs,
-                _ => return false,
-            };
-            attrs_imply_test(attrs)
-        }
-
-        // Returns true iff the conjunction of every `#[cfg(...)]`
-        // attribute on the carrier (Item / ImplItem / TraitItem /
-        // Expr / Stmt / Arm) logically implies `test ∈ C` for every
-        // config C that satisfies all of them. Multiple
-        // `#[cfg(P1)] #[cfg(P2)]` attributes on the same carrier are
-        // AND-ed by Rust, so the carrier is enabled iff `P1 ∧ P2 ∧ …`,
-        // and `(P1 ∧ P2 ∧ …) ⇒ test` is the right skip predicate.
-        //
-        // Skip-from-production rule:
-        //   skip(I) ⇔ ∀C. (∧ᵢ Pᵢ(I)(C)) ⇒ test ∈ C
-        // per the Rust reference's ConfigurationPredicate grammar
-        // (`all` / `any` / `not` / option / `true` / `false`).
-        //
-        // Algorithm: parse each cfg attribute body into a `CfgPred`
-        // AST, wrap the parsed list in `CfgPred::All` (semantic
-        // conjunction), and evaluate it symbolically with
-        // `test = false` and every other identifier left as a free
-        // Boolean variable. The conjoined predicate implies test iff
-        // it is decidably-unsatisfiable in the world where test is
-        // absent. `value_under_test_absent` returns:
-        //   `Some(false)`  decidably-unsatisfiable     ⇒ skip
-        //   `Some(true)`   decidably-true on test ∉ C  ⇒ NOT skip
-        //   `None`         depends on free identifiers ⇒ NOT skip
-        // Non-cfg attributes (e.g. `#[derive(...)]`) do not gate
-        // compilation and are ignored.
-        fn attrs_imply_test(attrs: &[Attribute]) -> bool {
-            let cfg_preds: Vec<CfgPred> = attrs
-                .iter()
-                .filter(|a| a.path().is_ident("cfg"))
-                .filter_map(|a| a.parse_args::<CfgPred>().ok())
-                .collect();
-            if cfg_preds.is_empty() {
-                return false;
-            }
-            // skip iff the conjoined predicate is unsatisfiable when
-            // test is absent. SAT enumerates assignments to all
-            // distinct free variables, so multi-cfg cases that
-            // collapse to `test` are correctly identified even when
-            // no single attribute implies test.
-            !satisfiable_under_test_absent(&CfgPred::All(cfg_preds))
-        }
-
-        // Returns the attribute slice attached to an `Expr`. Almost
-        // every `Expr` variant carries its own `attrs` field; the
-        // catch-all `_` returns an empty slice for non-attribute-
-        // carrying variants (forward-compatibility with future syn
-        // additions).
-        fn expr_attrs(expr: &Expr) -> &[Attribute] {
-            match expr {
-                Expr::Array(e) => &e.attrs,
-                Expr::Assign(e) => &e.attrs,
-                Expr::Async(e) => &e.attrs,
-                Expr::Await(e) => &e.attrs,
-                Expr::Binary(e) => &e.attrs,
-                Expr::Block(e) => &e.attrs,
-                Expr::Break(e) => &e.attrs,
-                Expr::Call(e) => &e.attrs,
-                Expr::Cast(e) => &e.attrs,
-                Expr::Closure(e) => &e.attrs,
-                Expr::Const(e) => &e.attrs,
-                Expr::Continue(e) => &e.attrs,
-                Expr::Field(e) => &e.attrs,
-                Expr::ForLoop(e) => &e.attrs,
-                Expr::Group(e) => &e.attrs,
-                Expr::If(e) => &e.attrs,
-                Expr::Index(e) => &e.attrs,
-                Expr::Infer(e) => &e.attrs,
-                Expr::Let(e) => &e.attrs,
-                Expr::Lit(e) => &e.attrs,
-                Expr::Loop(e) => &e.attrs,
-                Expr::Macro(e) => &e.attrs,
-                Expr::Match(e) => &e.attrs,
-                Expr::MethodCall(e) => &e.attrs,
-                Expr::Paren(e) => &e.attrs,
-                Expr::Path(e) => &e.attrs,
-                Expr::Range(e) => &e.attrs,
-                Expr::Reference(e) => &e.attrs,
-                Expr::Repeat(e) => &e.attrs,
-                Expr::Return(e) => &e.attrs,
-                Expr::Struct(e) => &e.attrs,
-                Expr::Try(e) => &e.attrs,
-                Expr::TryBlock(e) => &e.attrs,
-                Expr::Tuple(e) => &e.attrs,
-                Expr::Unary(e) => &e.attrs,
-                Expr::Unsafe(e) => &e.attrs,
-                Expr::While(e) => &e.attrs,
-                Expr::Yield(e) => &e.attrs,
                 _ => &[],
             }
         }
 
-        // Surface form of a Rust `ConfigurationPredicate` we model.
-        // `Var(name)` covers any non-`test` identifier predicate,
-        // any `name = "value"` option (encoded as `name="..."`), and
-        // any unknown function-call form. Variables with the same
-        // surface name resolve to the same Boolean variable during
-        // SAT search — so `cfg(any(test, foo))` ∧ `cfg(any(test, not(foo)))`
-        // collapses to `test` because `foo ∧ ¬foo` is unsatisfiable.
-        enum CfgPred {
-            Test,
-            True,
-            False,
-            Var(String),
-            All(Vec<CfgPred>),
-            Any(Vec<CfgPred>),
-            Not(Box<CfgPred>),
+        // Returns true iff the `Item` carries the EXACT literal
+        // attribute `#[cfg(test)]` — that is, an attribute whose path
+        // is `cfg` and whose `Meta::List` parses as a single `Path`
+        // identifier `test`. Every other shape (`cfg(any(test, X))`,
+        // `cfg(all(test, X))`, `cfg(not(test))`, `cfg(target_os =
+        // "linux")`, `cfg_attr(...)`, multiple cfg attributes) returns
+        // false and the carrier is scanned as production. The narrow
+        // shape is the only skip class supported by RUB-176 / GitHub
+        // issue #1432; broader `ConfigurationPredicate` reachability
+        // is explicit non-scope per the issue's
+        // `class_change_stop_rule`.
+        fn item_is_exact_cfg_test(item: &Item) -> bool {
+            item_attrs(item).iter().any(attr_is_exact_cfg_test)
         }
 
-        impl Parse for CfgPred {
-            fn parse(input: ParseStream) -> syn::Result<Self> {
-                // Boolean literals (`true` / `false`) come first
-                // because they are reserved keywords and would
-                // otherwise be rejected by the `Ident` branch below.
-                if input.peek(LitBool) {
-                    let b: LitBool = input.parse()?;
-                    return Ok(if b.value {
-                        CfgPred::True
-                    } else {
-                        CfgPred::False
-                    });
-                }
-                let ident: Ident = input.parse()?;
-                let name = ident.to_string();
-                if input.peek(syn::token::Paren) {
-                    let inner;
-                    syn::parenthesized!(inner in input);
-                    match name.as_str() {
-                        "all" => {
-                            let preds = inner.parse_terminated(CfgPred::parse, Token![,])?;
-                            Ok(CfgPred::All(preds.into_iter().collect()))
-                        }
-                        "any" => {
-                            let preds = inner.parse_terminated(CfgPred::parse, Token![,])?;
-                            Ok(CfgPred::Any(preds.into_iter().collect()))
-                        }
-                        "not" => {
-                            let pred: CfgPred = inner.parse()?;
-                            // `cfg(not(...))` accepts at most one
-                            // predicate; allow an optional trailing
-                            // comma but reject extra predicates.
-                            if inner.peek(Token![,]) {
-                                inner.parse::<Token![,]>()?;
-                            }
-                            if !inner.is_empty() {
-                                return Err(inner.error("not() takes one predicate"));
-                            }
-                            Ok(CfgPred::Not(Box::new(pred)))
-                        }
-                        // Unknown function-call form (e.g.
-                        // `version("1.0")`) — keyed by the surface
-                        // ident only. Sufficient for SAT correctness
-                        // because two unknown calls with the same
-                        // ident collide as the same variable.
-                        _ => Ok(CfgPred::Var(name)),
-                    }
-                } else if input.peek(Token![=]) {
-                    input.parse::<Token![=]>()?;
-                    let lit: Lit = input.parse()?;
-                    let value_repr = match &lit {
-                        Lit::Str(s) => format!("\"{}\"", s.value()),
-                        Lit::Int(i) => i.token().to_string(),
-                        Lit::Bool(b) => b.value.to_string(),
-                        _ => String::from("?"),
-                    };
-                    Ok(CfgPred::Var(format!("{name}={value_repr}")))
-                } else if name == "test" {
-                    Ok(CfgPred::Test)
-                } else {
-                    Ok(CfgPred::Var(name))
-                }
+        fn attr_is_exact_cfg_test(attr: &Attribute) -> bool {
+            let Meta::List(list) = &attr.meta else {
+                return false;
+            };
+            if !list.path.is_ident("cfg") {
+                return false;
             }
-        }
-
-        // Returns `true` iff `P` has a satisfying assignment to its
-        // free Boolean variables when `test` is forced to `false`.
-        // Equivalently: `¬satisfiable_under_test_absent(P)` is the
-        // skip predicate (`P ⇒ test` iff no model satisfies `P` with
-        // `test ∉ C`).
-        //
-        // Implementation: first attempt structural simplification —
-        // a recursive walk that propagates `Some(false)` for `Test`,
-        // empty `any()`, and `False`, and `Some(true)` for empty
-        // `all()` and `True`, through `all`/`any`/`not`. The
-        // simplification short-circuits on decidable trees (e.g.
-        // `all(test, …)` resolves to `Some(false)` because one
-        // conjunct is unsatisfiable when test is absent, regardless
-        // of how many free vars the other conjuncts contain). Only
-        // when simplification cannot decide does the function fall
-        // back to SAT enumeration over distinct `Var(name)`
-        // identifiers (capped at 16 vars; beyond the cap returns
-        // `true` — conservative-not-skip — which is the safe
-        // direction for a boundary checker because under-skipping
-        // produces false positives, not false negatives).
-        //
-        // SAT enumeration honours mutual-exclusion of `name=value`
-        // options sharing the same `name`: at most one
-        // `name="value1"`, `name="value2"`, … can be true in any
-        // real config, so assignments that turn on multiple values
-        // for the same key are skipped (treated as physically
-        // impossible, not "satisfying"). This handles the
-        // `cfg(all(target_os="linux", target_os="windows"))`
-        // unsatisfiability case correctly.
-        fn satisfiable_under_test_absent(p: &CfgPred) -> bool {
-            if let Some(value) = simplify_under_test_absent(p) {
-                return value;
-            }
-            let mut vars: Vec<String> = Vec::new();
-            collect_vars(p, &mut vars);
-            let n = vars.len();
-            if n > 16 {
-                return true;
-            }
-            // Pre-compute same-key var groups (indices in `vars`)
-            // for mutual-exclusion enforcement during enumeration.
-            let groups = group_indices_by_key(&vars);
-            let total: u64 = 1u64 << n;
-            for mask in 0..total {
-                if violates_key_exclusivity(mask, &groups) {
-                    continue;
-                }
-                let env: Vec<(&str, bool)> = vars
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| (name.as_str(), (mask >> i) & 1 == 1))
-                    .collect();
-                if evaluate_under_test_absent(p, &env) {
-                    return true;
-                }
-            }
-            false
-        }
-
-        // Three-valued structural simplification with `test = false`.
-        // Returns `Some(b)` when `P` is decidable from grammar alone
-        // (no SAT search over free Var assignments needed) and
-        // `None` when the value depends on free identifiers. Cures
-        // the >16-var cap problem for predicates whose `test`
-        // appearance forces a structural shortcut.
-        fn simplify_under_test_absent(p: &CfgPred) -> Option<bool> {
-            match p {
-                CfgPred::Test => Some(false),
-                CfgPred::True => Some(true),
-                CfgPred::False => Some(false),
-                CfgPred::Var(_) => None,
-                CfgPred::All(children) => {
-                    if children.is_empty() {
-                        return Some(true);
-                    }
-                    let mut all_true = true;
-                    for c in children {
-                        match simplify_under_test_absent(c) {
-                            Some(false) => return Some(false),
-                            Some(true) => continue,
-                            None => all_true = false,
-                        }
-                    }
-                    if all_true {
-                        Some(true)
-                    } else {
-                        None
-                    }
-                }
-                CfgPred::Any(children) => {
-                    if children.is_empty() {
-                        return Some(false);
-                    }
-                    let mut all_false = true;
-                    for c in children {
-                        match simplify_under_test_absent(c) {
-                            Some(true) => return Some(true),
-                            Some(false) => continue,
-                            None => all_false = false,
-                        }
-                    }
-                    if all_false {
-                        Some(false)
-                    } else {
-                        None
-                    }
-                }
-                CfgPred::Not(inner) => simplify_under_test_absent(inner).map(|b| !b),
-            }
-        }
-
-        // Returns groups of indices in `vars` that share the same
-        // `name=` prefix. Two `name=value1` and `name=value2` Vars
-        // for the same key are mutually exclusive in any real Rust
-        // build configuration (e.g. `target_os` is exactly one of
-        // {"linux","windows","macos",…}), so SAT enumeration must
-        // skip assignments that turn on more than one of them.
-        fn group_indices_by_key(vars: &[String]) -> Vec<Vec<usize>> {
-            let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-            for (i, v) in vars.iter().enumerate() {
-                let key = match v.find('=') {
-                    Some(eq) => &v[..eq],
-                    None => continue,
-                };
-                if let Some(g) = groups.iter_mut().find(|(k, _)| k == key) {
-                    g.1.push(i);
-                } else {
-                    groups.push((key.to_string(), vec![i]));
-                }
-            }
-            groups
-                .into_iter()
-                .filter_map(|(_, idx)| if idx.len() > 1 { Some(idx) } else { None })
-                .collect()
-        }
-
-        fn violates_key_exclusivity(mask: u64, groups: &[Vec<usize>]) -> bool {
-            for g in groups {
-                let mut on = 0;
-                for &i in g {
-                    if (mask >> i) & 1 == 1 {
-                        on += 1;
-                        if on > 1 {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
-        }
-
-        fn collect_vars(p: &CfgPred, vars: &mut Vec<String>) {
-            match p {
-                CfgPred::Var(name) => {
-                    if !vars.iter().any(|v| v == name) {
-                        vars.push(name.clone());
-                    }
-                }
-                CfgPred::All(children) | CfgPred::Any(children) => {
-                    for c in children {
-                        collect_vars(c, vars);
-                    }
-                }
-                CfgPred::Not(inner) => collect_vars(inner, vars),
-                CfgPred::Test | CfgPred::True | CfgPred::False => {}
-            }
-        }
-
-        fn evaluate_under_test_absent(p: &CfgPred, env: &[(&str, bool)]) -> bool {
-            match p {
-                CfgPred::Test => false,
-                CfgPred::True => true,
-                CfgPred::False => false,
-                CfgPred::Var(name) => env
-                    .iter()
-                    .find(|(v, _)| *v == name.as_str())
-                    .map(|(_, val)| *val)
-                    .unwrap_or(false),
-                CfgPred::All(children) => {
-                    children.iter().all(|c| evaluate_under_test_absent(c, env))
-                }
-                CfgPred::Any(children) => {
-                    children.iter().any(|c| evaluate_under_test_absent(c, env))
-                }
-                CfgPred::Not(inner) => !evaluate_under_test_absent(inner, env),
-            }
+            // Parse the inner tokens as a single `Path` and require
+            // its sole ident to be `test`. Any other shape (e.g.
+            // `all(...)`, `any(...)`, `not(...)`, `name = "value"`)
+            // either fails to parse as a `Path` or has more than one
+            // segment, returning false — and the carrier is scanned
+            // as production.
+            let Ok(inner_path) = list.parse_args::<Path>() else {
+                return false;
+            };
+            inner_path.is_ident("test")
         }
 
         #[derive(Default)]
@@ -1761,74 +1458,20 @@ mod tests {
 
         impl<'ast> Visit<'ast> for AdmissionFinder {
             fn visit_item(&mut self, item: &'ast Item) {
-                // Skip nested `#[cfg(test)]` items (e.g. inline
-                // `#[cfg(test)] mod inner_tests { ... }` inside a
-                // production `mod` block).
-                if item_is_cfg_test(item) {
+                // Skip nested `#[cfg(test)] mod ...` (or any other
+                // nested `#[cfg(test)]` `Item`) — the same exact
+                // literal-attribute rule applied to top-level items
+                // applies here. Any other cfg shape (`any`, `all`,
+                // `not`, `name = "value"`, multi-cfg) on a nested
+                // item is scanned as production. Below-item-level
+                // cfg attributes (on `Expr`, `Arm`, `Stmt`,
+                // `FieldValue`, `ImplItem`, `TraitItem`) are also
+                // scanned as production — see the module docstring's
+                // "Known non-scope" section for the explicit list.
+                if item_is_exact_cfg_test(item) {
                     return;
                 }
                 syn::visit::visit_item(self, item);
-            }
-
-            fn visit_impl_item(&mut self, item: &'ast ImplItem) {
-                // Per-item cfg-skip applied to associated items
-                // inside a production `impl` block. Without this
-                // override the default visitor descends into
-                // `#[cfg(test)] fn ...` bodies declared inside an
-                // otherwise-production impl.
-                if impl_item_is_cfg_test(item) {
-                    return;
-                }
-                syn::visit::visit_impl_item(self, item);
-            }
-
-            fn visit_trait_item(&mut self, item: &'ast TraitItem) {
-                // Per-item cfg-skip applied to associated items
-                // inside a production `trait` declaration (default-
-                // method bodies can contain expressions).
-                if trait_item_is_cfg_test(item) {
-                    return;
-                }
-                syn::visit::visit_trait_item(self, item);
-            }
-
-            fn visit_expr(&mut self, expr: &'ast Expr) {
-                // Below-item-level cfg-skip: Rust allows `#[cfg(...)]`
-                // on any expression form (`ExprBlock`, `ExprIf`,
-                // `ExprMatch`, etc.). The attribute set on the
-                // expression itself gates whether the expression is
-                // compiled in non-test builds.
-                if attrs_imply_test(expr_attrs(expr)) {
-                    return;
-                }
-                syn::visit::visit_expr(self, expr);
-            }
-
-            fn visit_arm(&mut self, arm: &'ast Arm) {
-                // `match x { #[cfg(test)] _ => TxPool::admit(tx) }` —
-                // the arm is gated independently of the match
-                // expression as a whole.
-                if attrs_imply_test(&arm.attrs) {
-                    return;
-                }
-                syn::visit::visit_arm(self, arm);
-            }
-
-            fn visit_stmt(&mut self, stmt: &'ast Stmt) {
-                // `let`-bindings and standalone macro statements
-                // carry their own attribute set. Inner expression /
-                // item statements have attrs on the wrapped node and
-                // are filtered through `visit_expr` / `visit_item`
-                // already.
-                let attrs: &[Attribute] = match stmt {
-                    Stmt::Local(local) => &local.attrs,
-                    Stmt::Macro(m) => &m.attrs,
-                    Stmt::Expr(_, _) | Stmt::Item(_) => &[][..],
-                };
-                if attrs_imply_test(attrs) {
-                    return;
-                }
-                syn::visit::visit_stmt(self, stmt);
             }
 
             fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
@@ -2305,10 +1948,15 @@ fn experimental_helper() {
     }
 
     #[test]
-    fn cfg_all_test_with_other_conjunct_is_skipped() {
-        // `cfg(all(test, target_os = "linux"))` requires test ∈ C for
-        // the predicate to hold on any C, so it implies test and the
-        // item must be skipped from production scan.
+    fn cfg_all_test_x_is_production_under_conservative_scope() {
+        // `cfg(all(test, target_os = "linux"))` is NOT the exact
+        // literal `#[cfg(test)]`, so the carrier is scanned as
+        // production under the conservative scope. The fact that the
+        // predicate logically implies `test` (every config that
+        // satisfies it has `test ∈ C`) is irrelevant — general
+        // `ConfigurationPredicate` reachability is explicit non-scope
+        // per RUB-176 / GitHub issue #1432's `class_change_stop_rule`.
+        // Conservative direction: false-positive over false-negative.
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2317,31 +1965,19 @@ fn linux_test_helper() {
     crate::txpool::TxPool::admit(tx);
 }
 ";
-        check_tx_relay_boundary_source(src)
-            .expect("#[cfg(all(test, ...))] implies test and must be skipped");
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside cfg(all(test, target_os)) under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
-    fn cfg_any_with_only_test_disjuncts_is_skipped() {
-        // `cfg(any(test, test))` — every disjunct implies test, so the
-        // whole predicate implies test. Skip.
-        let src = "\
-pub fn handle_received_tx() {}
-
-#[cfg(any(test, test))]
-fn redundant_helper() {
-    crate::txpool::TxPool::admit(tx);
-}
-";
-        check_tx_relay_boundary_source(src)
-            .expect("any(test, test) implies test (every disjunct does)");
-    }
-
-    #[test]
-    fn cfg_any_with_one_test_and_one_non_test_is_production() {
-        // Adversarial depth-2: `cfg(any(test, foo))` with `foo` a bare
-        // identifier — config with `foo` enabled and test disabled
-        // satisfies the predicate, so the predicate does NOT imply test.
+    fn cfg_any_test_x_is_production_under_conservative_scope() {
+        // `cfg(any(test, foo))` — config with `foo` enabled and test
+        // disabled satisfies the predicate, so the carrier is genuinely
+        // production-reachable. Conservative scope flags it correctly.
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2359,50 +1995,12 @@ fn helper() {
     }
 
     #[test]
-    fn cfg_nested_any_all_depth_3_skipped_when_every_branch_implies_test() {
-        // Depth-3: `cfg(any(all(test, foo), all(test, bar)))` —
-        // outer `any` requires every branch to imply test; both inner
-        // `all` branches contain a `test` conjunct, so each implies
-        // test. The whole predicate implies test → skip.
-        let src = "\
-pub fn handle_received_tx() {}
-
-#[cfg(any(all(test, foo), all(test, bar)))]
-fn deep_helper() {
-    crate::txpool::TxPool::admit(tx);
-}
-";
-        check_tx_relay_boundary_source(src)
-            .expect("cfg(any(all(test, foo), all(test, bar))) implies test at depth 3 — must skip");
-    }
-
-    #[test]
-    fn cfg_nested_all_any_depth_3_production_when_inner_any_does_not_imply_test() {
-        // Depth-3: `cfg(all(any(test, foo), bar))` — outer `all`
-        // implies test iff some conjunct implies test; the only `test`
-        // appearance is inside `any(test, foo)` whose `foo` disjunct
-        // breaks the implication; the `bar` conjunct has no test. So
-        // the whole predicate does NOT imply test → production.
-        let src = "\
-pub fn handle_received_tx() {}
-
-#[cfg(all(any(test, foo), bar))]
-fn deep_helper() {
-    crate::txpool::TxPool::admit(tx);
-}
-";
-        match check_tx_relay_boundary_source(src) {
-            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
-            other => panic!(
-                "expected admission detection inside cfg(all(any(test, foo), bar)), got {other:?}"
-            ),
-        }
-    }
-
-    #[test]
-    fn cfg_double_negation_of_test_implies_test_and_is_skipped() {
-        // `cfg(not(not(test)))` is logically equivalent to `cfg(test)`
-        // — implies test, must skip.
+    fn cfg_double_negation_of_test_is_production_under_conservative_scope() {
+        // `cfg(not(not(test)))` is logically equivalent to
+        // `cfg(test)`, but it is not the EXACT literal `#[cfg(test)]`,
+        // so the conservative scope scans it as production. General
+        // `ConfigurationPredicate` reachability is explicit non-scope
+        // per RUB-176 / GitHub issue #1432's `class_change_stop_rule`.
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2411,14 +2009,22 @@ fn helper() {
     crate::txpool::TxPool::admit(tx);
 }
 ";
-        check_tx_relay_boundary_source(src)
-            .expect("not(not(test)) collapses to test and must be skipped");
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside cfg(not(not(test))) under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
-    fn cfg_false_literal_predicate_is_unsatisfiable_and_skipped() {
-        // `cfg(false)` is never enabled — the implication
-        // `predicate(C) ⇒ test ∈ C` holds vacuously. Skip.
+    fn cfg_false_literal_is_production_under_conservative_scope() {
+        // `cfg(false)` is logically never-enabled, but it is not the
+        // EXACT literal `#[cfg(test)]`, so the conservative scope
+        // scans it as production. Detecting `cfg(false)` as
+        // unconditionally-disabled requires the same general
+        // `ConfigurationPredicate` reachability that is explicit
+        // non-scope.
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2427,14 +2033,23 @@ fn never_compiled_helper() {
     crate::txpool::TxPool::admit(tx);
 }
 ";
-        check_tx_relay_boundary_source(src)
-            .expect("cfg(false) is unsatisfiable; vacuously implies test; must skip");
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside cfg(false) under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
-    fn cfg_test_on_impl_item_inside_production_impl_is_skipped() {
-        // ImplItem-level cfg-skip: `impl Foo { #[cfg(test)] fn helper() {...} }`
-        // inside a production impl block must be skipped per-item.
+    fn cfg_test_on_impl_item_is_production_under_conservative_scope() {
+        // `impl Foo { #[cfg(test)] fn ... }` carries the `#[cfg(test)]`
+        // attribute at the `ImplItem` level, NOT at the surrounding
+        // `Item::Impl` level. Below-item-level cfg gating is explicit
+        // non-scope per RUB-176 / GitHub issue #1432's
+        // `class_change_stop_rule`, so the conservative scope walks
+        // every `ImplItem` body inside a production `impl` and
+        // detects the admission call.
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2448,15 +2063,19 @@ impl Foo {
     }
 }
 ";
-        check_tx_relay_boundary_source(src).expect(
-            "ImplItem with #[cfg(test)] inside production impl block must be skipped per-item",
-        );
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside #[cfg(test)] ImplItem under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
-    fn cfg_test_on_trait_item_default_method_inside_production_trait_is_skipped() {
-        // TraitItem-level cfg-skip: a default method body in a trait
-        // declaration with `#[cfg(test)]` must be skipped per-item.
+    fn cfg_test_on_trait_item_default_method_is_production_under_conservative_scope() {
+        // Same below-item-level non-scope rule applies to `TraitItem`
+        // default-method bodies inside a production `trait`
+        // declaration.
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2469,9 +2088,12 @@ pub trait Foo {
     }
 }
 ";
-        check_tx_relay_boundary_source(src).expect(
-            "TraitItem default-method body with #[cfg(test)] inside production trait must be skipped per-item",
-        );
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside #[cfg(test)] TraitItem under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
@@ -2498,31 +2120,9 @@ impl Foo {
     }
 
     #[test]
-    fn multi_cfg_attrs_combine_via_conjunction_implies_test() {
-        // `#[cfg(any(test, foo))] #[cfg(any(test, not(foo)))]`
-        // ≡ `(test ∨ foo) ∧ (test ∨ ¬foo)` ≡ `test ∨ (foo ∧ ¬foo)`
-        // ≡ `test`. Conjunction implies test even though no single
-        // attribute does. Skip rule MUST treat the carrier as
-        // test-only.
-        let src = "\
-pub fn handle_received_tx() {}
-
-#[cfg(any(test, foo))]
-#[cfg(any(test, not(foo)))]
-fn test_only_via_conjunction() {
-    crate::txpool::TxPool::admit(tx);
-}
-";
-        check_tx_relay_boundary_source(src).expect(
-            "conjunction of two cfg attrs collapses to test; item must be skipped per-conjunction",
-        );
-    }
-
-    #[test]
     fn multi_cfg_attrs_unrelated_to_test_remain_production() {
-        // Negative control for the conjunction logic: two cfg
-        // attributes neither of which involves test should leave the
-        // item in production scope.
+        // Two cfg attributes neither of which is the exact literal
+        // `#[cfg(test)]` leave the item in production scope.
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2541,11 +2141,39 @@ fn cross_platform_helper() {
     }
 
     #[test]
-    fn cfg_test_on_block_expression_inside_production_fn_is_skipped() {
-        // Below-item-level cfg-skip: `#[cfg(test)] { ... }` block
-        // expression inside a production function body. Without the
-        // visit_expr override the admission call inside would be
-        // walked and reported.
+    fn multi_cfg_attrs_with_test_disjunct_is_production_under_conservative_scope() {
+        // Two cfg attributes whose conjunction logically implies
+        // `test` — `(test ∨ foo) ∧ (test ∨ ¬foo)` ≡ `test`. The
+        // conservative scope does NOT decode multi-attribute
+        // conjunctions; neither single attribute is the exact literal
+        // `#[cfg(test)]`, so the carrier is scanned as production.
+        // Multi-attribute `ConfigurationPredicate` reachability is
+        // explicit non-scope per RUB-176 / GitHub issue #1432's
+        // `class_change_stop_rule`.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(any(test, foo))]
+#[cfg(any(test, not(foo)))]
+fn test_only_via_conjunction() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside multi-cfg(any(test,...)) under conservative scope, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn cfg_test_on_block_expression_is_production_under_conservative_scope() {
+        // `#[cfg(test)] { ... }` block expression inside a production
+        // function body. Below-item-level cfg gating is explicit
+        // non-scope per RUB-176 / GitHub issue #1432's
+        // `class_change_stop_rule`, so the conservative scope walks
+        // the block body and detects the admission call.
         let src = "\
 pub fn handle_received_tx() {
     #[cfg(test)]
@@ -2554,16 +2182,21 @@ pub fn handle_received_tx() {
     }
 }
 ";
-        check_tx_relay_boundary_source(src)
-            .expect("#[cfg(test)] block expression inside production fn must be skipped");
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside #[cfg(test)] block expr under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
-    fn cfg_test_on_match_arm_inside_production_fn_is_skipped() {
-        // Below-item-level cfg-skip: `match x { #[cfg(test)] _ => ... }`
-        // arm inside a production fn. Default visit_expr_match
-        // descends into arms; without the visit_arm override the
-        // admission call in the test-only arm body would be reported.
+    fn cfg_test_on_match_arm_is_production_under_conservative_scope() {
+        // `match x { #[cfg(test)] _ => TxPool::admit(tx); ... }` —
+        // the `#[cfg(test)]` is on the `Arm`, not on a top-level
+        // `Item`. Below-item-level cfg gating is non-scope per
+        // RUB-176 / GitHub issue #1432, so the conservative scope
+        // walks the arm body and detects the admission call.
         let src = "\
 pub fn handle_received_tx() {
     let x = 0;
@@ -2574,23 +2207,33 @@ pub fn handle_received_tx() {
     }
 }
 ";
-        check_tx_relay_boundary_source(src)
-            .expect("#[cfg(test)] match arm inside production fn must be skipped");
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside #[cfg(test)] match arm under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
-    fn cfg_test_on_let_stmt_inside_production_fn_is_skipped() {
-        // Below-item-level cfg-skip: `#[cfg(test)] let _ = ...;`
-        // statement inside a production fn body. The Stmt::Local
-        // attrs are checked via the visit_stmt override.
+    fn cfg_test_on_let_stmt_is_production_under_conservative_scope() {
+        // `#[cfg(test)] let _ = TxPool::admit(tx);` — `Stmt::Local`
+        // attribute. Below-item-level cfg gating is non-scope per
+        // RUB-176 / GitHub issue #1432, so the conservative scope
+        // walks the let-binding initialiser and detects the
+        // admission call.
         let src = "\
 pub fn handle_received_tx() {
     #[cfg(test)]
     let _ = crate::txpool::TxPool::admit(tx);
 }
 ";
-        check_tx_relay_boundary_source(src)
-            .expect("#[cfg(test)] let-stmt inside production fn must be skipped");
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside #[cfg(test)] let-stmt under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
@@ -2631,44 +2274,49 @@ pub fn handle_received_tx() {
     }
 
     #[test]
-    fn mutually_exclusive_target_os_values_via_two_cfg_attrs_skipped() {
-        // `cfg(any(test, target_os="linux")) ∧ cfg(any(test, target_os="windows"))`
-        // — combined: `(test ∨ linux) ∧ (test ∨ windows)`. Under
-        // `target_os` mutual-exclusivity (a config has exactly one
-        // value), the only way both clauses hold without test is
-        // `linux ∧ windows`, which is impossible. Conjunction
-        // therefore implies test → SKIP.
+    fn cfg_test_on_struct_literal_field_value_is_production_under_conservative_scope() {
+        // `Foo { #[cfg(test)] bad: TxPool::admit(tx), good: 0 }` —
+        // the `#[cfg(test)]` is on the `FieldValue`, not on a
+        // top-level `Item`. Below-item-level cfg gating is non-scope
+        // per RUB-176 / GitHub issue #1432, so the conservative
+        // scope walks the initialiser expression and detects the
+        // admission call.
         let src = "\
-pub fn handle_received_tx() {}
-
-#[cfg(any(test, target_os = \"linux\"))]
-#[cfg(any(test, target_os = \"windows\"))]
-fn cross_os_test_only() {
-    crate::txpool::TxPool::admit(tx);
+pub fn handle_received_tx() {
+    let _ = Foo {
+        #[cfg(test)]
+        bad: crate::txpool::TxPool::admit(tx),
+        good: 0,
+    };
 }
 ";
-        check_tx_relay_boundary_source(src).expect(
-            "mutually-exclusive target_os values across two cfg attrs implies test; must skip",
-        );
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside #[cfg(test)] FieldValue under conservative scope, got {other:?}"
+            ),
+        }
     }
 
     #[test]
-    fn many_distinct_vars_with_test_in_all_uses_structural_fast_path() {
-        // 17 free identifiers exceed the SAT cap (16), but the
-        // structural simplifier resolves `all(test, …)` to `false`
-        // under `test = absent` immediately — predicate implies test
-        // regardless of how many other free vars accompany it.
+    fn struct_literal_field_value_without_cfg_test_admission_is_detected() {
+        // Negative control: an ordinary FieldValue with an admission
+        // call must STILL be detected — the per-FieldValue skip
+        // applies only when `cfg(test)` is present.
         let src = "\
-pub fn handle_received_tx() {}
-
-#[cfg(all(test, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17))]
-fn many_var_helper() {
-    crate::txpool::TxPool::admit(tx);
+pub fn handle_received_tx() {
+    let _ = Foo {
+        bad: crate::txpool::TxPool::admit(tx),
+        good: 0,
+    };
 }
 ";
-        check_tx_relay_boundary_source(src).expect(
-            "all(test, …17 distinct free vars) implies test via structural fast-path despite cap",
-        );
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside ordinary FieldValue initialiser, got {other:?}"
+            ),
+        }
     }
 
     #[test]
