@@ -1666,9 +1666,13 @@ def validate_vector(
                 req["utxos"] = _da_fee_floor_policy_utxos(v)
             except Exception as exc:
                 return [f"{gate}/{vid}: {exc}"], False
-        req["current_mempool_min_fee_rate"] = int(v.get("current_mempool_min_fee_rate", 1))
-        req["min_da_fee_rate"] = int(v.get("min_da_fee_rate", 1))
-        req["da_surcharge_per_byte"] = int(v.get("da_surcharge_per_byte", 0))
+        for key in (
+            "current_mempool_min_fee_rate",
+            "min_da_fee_rate",
+            "da_surcharge_per_byte",
+        ):
+            if key in v:
+                req[key] = int(v[key])
     elif op in ("rotation_create_suite_check", "rotation_native_create_suites"):
         include_rotation_network()
         if "height" not in v:
@@ -2202,22 +2206,6 @@ def validate_vector(
             "required_fee",
         ]
         str_fields = ["admit_class", "dominant_floor", "reject_reason"]
-        for key in int_fields:
-            go_has = policy_has(go_resp, key)
-            rust_has = policy_has(rust_resp, key)
-            if go_has != rust_has:
-                problems.append(
-                    f"{gate}/{vid}: {key} presence mismatch go={go_has} rust={rust_has}"
-                )
-                continue
-            if not go_has:
-                continue
-            go_value = policy_int(go_resp, key, "go")
-            rust_value = policy_int(rust_resp, key, "rust")
-            if go_value != rust_value:
-                problems.append(
-                    f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
-                )
         if policy_bool(go_resp, "admit", False) != policy_bool(rust_resp, "admit", False):
             problems.append(f"{gate}/{vid}: admit mismatch go={go_resp.get('admit')} rust={rust_resp.get('admit')}")
         if policy_bool(go_resp, "ok", False) != policy_bool(rust_resp, "ok", False):
@@ -2234,6 +2222,22 @@ def validate_vector(
                     if policy_str(resp, "err", "", side) != "":
                         problems.append(f"{gate}/{vid}: unexpected {side} replay err={resp.get('err')}")
             return
+        for key in int_fields:
+            go_has = policy_has(go_resp, key)
+            rust_has = policy_has(rust_resp, key)
+            if go_has != rust_has:
+                problems.append(
+                    f"{gate}/{vid}: {key} presence mismatch go={go_has} rust={rust_has}"
+                )
+                continue
+            if not go_has:
+                continue
+            go_value = policy_int(go_resp, key, "go")
+            rust_value = policy_int(rust_resp, key, "rust")
+            if go_value != rust_value:
+                problems.append(
+                    f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
+                )
         for key in str_fields:
             if policy_str(go_resp, key, "", "go") != policy_str(rust_resp, key, "", "rust"):
                 problems.append(
