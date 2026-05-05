@@ -1723,7 +1723,14 @@ mod tests {
             }
 
             fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-                if let Expr::Path(ExprPath { qself, path, .. }) = node.func.as_ref() {
+                // Peel `Expr::Paren` and `Expr::Group` wrappers around
+                // the callee so that parenthesised forms like
+                // `(TxPool::admit)(tx)` and
+                // `(<crate::txpool::TxPool>::admit_with_metadata)(tx)`
+                // are still detected. The default visitor would
+                // otherwise descend into the paren'd expression and
+                // never re-enter `visit_expr_call` on the inner path.
+                if let Some(ExprPath { qself, path, .. }) = unwrap_path_expr(node.func.as_ref()) {
                     if let Some(kind) = match_admission_call(path, qself.as_ref()) {
                         if self.found.is_none() {
                             self.found = Some(BoundaryCheckError::ProductionAdmissionCall(kind));
@@ -1732,6 +1739,18 @@ mod tests {
                     }
                 }
                 syn::visit::visit_expr_call(self, node);
+            }
+        }
+
+        // Strips `Expr::Paren` and `Expr::Group` wrappers and returns
+        // the inner `ExprPath` if any. Returns `None` for callees
+        // that are not (eventually) a path expression.
+        fn unwrap_path_expr(expr: &Expr) -> Option<&ExprPath> {
+            match expr {
+                Expr::Path(p) => Some(p),
+                Expr::Paren(p) => unwrap_path_expr(&p.expr),
+                Expr::Group(g) => unwrap_path_expr(&g.expr),
+                _ => None,
             }
         }
 
@@ -2452,6 +2471,61 @@ pub fn handle_received_tx() {
 ";
         check_tx_relay_boundary_source(src)
             .expect("#[cfg(test)] let-stmt inside production fn must be skipped");
+    }
+
+    #[test]
+    fn parenthesised_direct_path_call_is_detected() {
+        // `(TxPool::admit)(tx)` — parens around a path callee. The
+        // default Expr::Path match in visit_expr_call would skip this
+        // form because the immediate callee is Expr::Paren. The
+        // unwrap_path_expr helper peels Paren/Group to expose the
+        // inner ExprPath.
+        let src = make_source_with_production_admission_body("let _ = (TxPool::admit)(tx);");
+        match check_tx_relay_boundary_source(&src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(AdmissionCallKind::DirectPath {
+                path,
+            })) => assert_eq!(path, "TxPool::admit"),
+            other => panic!("expected DirectPath for parenthesised TxPool::admit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parenthesised_qself_path_call_is_detected() {
+        // `(<crate::txpool::TxPool>::admit_with_metadata)(tx)` — parens
+        // around a UFCS callee. Same Paren-unwrap fix applies.
+        let src = make_source_with_production_admission_body(
+            "let _ = (<crate::txpool::TxPool>::admit_with_metadata)(tx);",
+        );
+        match check_tx_relay_boundary_source(&src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(AdmissionCallKind::QSelfPath {
+                qself_ty,
+                method,
+            })) => {
+                assert_eq!(qself_ty, "crate::txpool::TxPool");
+                assert_eq!(method, "admit_with_metadata");
+            }
+            other => panic!(
+                "expected QSelfPath for parenthesised <crate::txpool::TxPool>::admit_with_metadata, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn doubly_parenthesised_direct_path_call_is_detected() {
+        // `((TxPool::add_tx_with_source))(tx)` — two layers of parens
+        // around the callee. The unwrap_path_expr recursion peels
+        // them one at a time.
+        let src = make_source_with_production_admission_body(
+            "let _ = ((TxPool::add_tx_with_source))(tx);",
+        );
+        match check_tx_relay_boundary_source(&src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(AdmissionCallKind::DirectPath {
+                path,
+            })) => assert_eq!(path, "TxPool::add_tx_with_source"),
+            other => panic!(
+                "expected DirectPath for doubly parenthesised TxPool::add_tx_with_source, got {other:?}"
+            ),
+        }
     }
 
     #[test]
