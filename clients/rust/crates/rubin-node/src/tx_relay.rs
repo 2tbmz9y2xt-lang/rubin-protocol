@@ -14,15 +14,15 @@
 //! function signature: NONE of `handle_received_tx`'s
 //! non-primitive arguments carry a canonical `TxPool` handle
 //! today. This is a HEAD-snapshot observation, NOT a maintained
-//! invariant — neither the docstring nor the source-grep tripwire
-//! below scans `sync.rs`, `p2p_runtime.rs`, or any other carrier
-//! file, so a future PR could add a canonical-pool field to one
-//! of these structs in another file and both would silently stay
-//! green. RUB-176 / GitHub issue #1432 tracks a syntactic
-//! token-aware checker scoped to `tx_relay.rs` only — it does
-//! NOT inspect `sync.rs`, `p2p_runtime.rs`, or any other carrier
-//! file, so cross-file drift over carrier struct definitions
-//! remains an open gap not tracked by any current follow-up.
+//! invariant — neither the docstring nor the token-aware
+//! `boundary_checker` test module below scans `sync.rs`,
+//! `p2p_runtime.rs`, or any other carrier file, so a future PR
+//! could add a canonical-pool field to one of these structs in
+//! another file and both would silently stay green. The
+//! syntactic checker described under `# Boundary check` below is
+//! scoped to `tx_relay.rs` source only; cross-file drift over
+//! carrier struct definitions remains an open gap not tracked by
+//! any current follow-up.
 //! Observed at HEAD, field-by-field:
 //!  - `relay_state: &TxRelayState` (this file) — fields are
 //!    `tx_seen`, `relay_pool` (`RelayTxPool`), `tx_relay_fanout`,
@@ -48,16 +48,14 @@
 //! facts in place, the application's shared pool is unreachable
 //! from this module's call graph through these surfaces.
 //!
-//! The advisory source-level tripwire below scans the production
-//! section for a non-exhaustive list of obvious canonical-
-//! admission substrings; it is NOT a sound Rust parser, NOT an
-//! exhaustive proof, and NOT a guarantee that the boundary is
-//! enforced. Many spellings bypass it (see Known bypass classes
-//! below). RUB-176 / GitHub issue #1432 tracks a syntactic
-//! token-aware checker for direct admission call expressions in
-//! `tx_relay.rs`; it explicitly excludes alias wrappers, macro
-//! expansions, type-resolution completeness, and any cross-file
-//! inspection from its scope.
+//! The `boundary_checker` test module below uses `syn::parse_file`
+//! to walk this file's production AST and detect direct syntactic
+//! canonical-`TxPool` admission call expressions. It is a token-
+//! aware syntactic direct-call checker scoped to `tx_relay.rs`
+//! only. It does not perform Rust type or name resolution, does
+//! not expand macros, does not inspect any other file, and does
+//! not detect alias wrappers (see `# Boundary check` and
+//! `# Known non-scope` below for the full scope contract).
 //!
 //! `Relayed` indicates the dedup, metadata, and relay-pool storage
 //! steps completed successfully and `broadcast_inventory` was
@@ -104,62 +102,103 @@
 //! inline (matching `admit_with_metadata` on the canonical pool)
 //! but remains standalone non-admitting.
 //!
-//! # Boundary tripwire (advisory only)
+//! # Boundary check (RUB-176 / GitHub issue #1432 token-aware AST walk via `syn`)
 //!
-//! The test at the bottom of this file is an advisory
-//! defense-in-depth source-level substring scan on this file's
-//! production section, not a sound Rust parser and not an
-//! exhaustive proof. It splits this file's `include_str!`
-//! contents at the exact `mod tests` attribute marker (CRLF-
-//! normalized, marker_count == 1, fail-closed via `.expect`),
-//! runs a comment/string-blind line-equality check on the relay
-//! handler's signature opener (intended only to fail loudly if
-//! the handler is renamed in a careless rewrite — NOT a
-//! declaration anchor; a block comment, `///` doc line, or raw
-//! string line equal to the signature would also satisfy it),
-//! then scans for the dotted-method and UFCS forms (including
-//! module-path qualified) named after the three canonical-
-//! admission entries on `TxPool` (`admit`, `admit_with_metadata`,
-//! `add_tx_with_source`). The forbidden-substring list lives in
-//! the test; the docstring above does not embed those substrings
-//! or the signature-opener literal. A syntactic token-aware
-//! checker is split to RUB-176 / GitHub issue #1432; it is not
-//! sound (no alias/macro/type-resolution coverage) and its scope
-//! is `tx_relay.rs` only.
+//! The `boundary_checker` test module below uses `syn::parse_file`
+//! to parse this file's source and walks the production AST via
+//! `syn::visit::Visit`. It detects direct syntactic canonical-
+//! `TxPool` admission call expressions:
 //!
-//! False-positive surface (intentional, fail-closed): the dotted-
-//! method tokens scanned by the tripwire are receiver-agnostic —
-//! they match by literal substring, not by type — so the tripwire
-//! would also fire on similarly-named methods on any other
-//! receiver type that may live in this module in the future, on
-//! commented-out admission code left in production source, and on
-//! string literals containing those substrings. This is a
-//! deliberate defense-in-depth bias toward false-alarm over miss;
-//! if a future producer needs a similarly-named method on a
-//! different receiver inside this module, that producer either
-//! renames the surface here or replaces the tripwire with an
-//! AST-aware checker.
+//!  - `Expr::MethodCall` with method ident in {`admit`,
+//!    `admit_with_metadata`, `add_tx_with_source`};
+//!  - `Expr::Call` with `Expr::Path` (`qself: None`) whose path
+//!    terminal segment is one of those method idents AND whose
+//!    penultimate segment ident is `TxPool` (covers plain UFCS
+//!    `TxPool::method`, the leading-`::` absolute path
+//!    `::TxPool::method`, and module-qualified forms with prefixes
+//!    `crate`, `self`, `super`, `txpool`, `crate::txpool`,
+//!    `self::txpool`, `super::txpool`);
+//!  - `Expr::Call` with `Expr::Path` carrying `qself: Some(...)`
+//!    where the `qself.ty` is a `Type::Path` whose terminal segment
+//!    ident is `TxPool` (covers `<TxPool>::method`,
+//!    `<crate::TxPool>::method`, `<crate::txpool::TxPool>::method`,
+//!    `<super::TxPool>::method`, `<super::txpool::TxPool>::method`,
+//!    `<self::TxPool>::method`, plus all `<X as Trait>::method`
+//!    trait-qualified variants).
 //!
-//! Known bypass classes (NOT exhaustive — the canonical defense
-//! remains structural, per the function signature above; RUB-176
-//! / GitHub issue #1432 tracks only a syntactic checker scoped
-//! to `tx_relay.rs`, not sound and not cross-file):
-//!  - alias wrappers, function-pointer indirection, trait-object
-//!    dispatch, or any path that does not write a matching literal
-//!    substring in this file's source;
-//!  - macro expansions that hide the call;
-//!  - UFCS angle-bracket path spellings not in the catalog —
-//!    for example `<super::TxPool>::` or
-//!    `<super::txpool::TxPool>::` (which compile from this module
-//!    today, since `super` from `crate::tx_relay` resolves to
-//!    `crate`), and any future re-export or path alias that
-//!    introduces a new angle-bracket-qualified form. The closing
-//!    `>` separator breaks the substring spillover that catches
-//!    non-angle-bracket prefixed forms. (Note: `<self::TxPool>::`
-//!    would also bypass the substring scan if it compiled, but
-//!    `tx_relay.rs` does not import `TxPool` into `self::`, so
-//!    that exact spelling does not compile from this module
-//!    today.)
+//! Production scope is established via
+//! `Attribute::parse_nested_meta` over each item's attributes —
+//! items carrying `#[cfg(test)]`, `#[cfg(any(test, ...))]`, or
+//! `#[cfg(all(test, ...))]` are skipped recursively. The boundary
+//! is established by AST attribute walk, NOT by textual
+//! `split_once("#[cfg(test)]")` on the source string.
+//!
+//! Allowed claim language for this checker (matches RUB-176 /
+//! GitHub issue #1432):
+//!
+//!  - syntactic direct-call checker;
+//!  - token-aware over `tx_relay.rs` only;
+//!  - no comments / line-comments / block-comments / doc-comments /
+//!    string-literal / raw-string-literal / `#[cfg(test)]`-test-code
+//!    false positives — `syn` discards line and block comments
+//!    during parse; doc comments live in attribute nodes and are
+//!    not visited as expression-callable tokens; string and raw-
+//!    string literals are `Lit::Str` AST nodes and are not visited
+//!    as call callables; `#[cfg(test)]` items are skipped via the
+//!    AST attribute walk;
+//!  - no type-resolution completeness;
+//!  - no macro-expansion completeness;
+//!  - no cross-file carrier inspection;
+//!  - alias wrappers out of scope (`use crate::txpool::TxPool as
+//!    Pool` followed by `Pool::admit(...)` will not match because
+//!    the path's penultimate segment is `Pool`, not `TxPool`).
+//!
+//! Receiver-agnostic dotted-method detection: `.admit(...)` /
+//! `.admit_with_metadata(...)` / `.add_tx_with_source(...)` fire
+//! regardless of receiver type, since dotted-method calls do not
+//! resolve to a path with a known receiver type at the AST level.
+//! This is a deliberate defense-in-depth bias toward false-alarm
+//! over miss; if a future producer introduces a similarly-named
+//! method on a different receiver inside this module, that
+//! producer either renames the surface or escalates to a sounder
+//! checker via a separate Q-*.
+//!
+//! Fail-closed conditions (the checker returns `Err`):
+//!
+//!  - `syn::parse_file` fails on this file's source
+//!    (`BoundaryCheckError::ParseFailed`);
+//!  - the production handler `handle_received_tx` is not located
+//!    in production scope — renamed, removed, or accidentally
+//!    moved under `#[cfg(test)]`
+//!    (`BoundaryCheckError::HandlerMissing`);
+//!  - the file has no top-level items
+//!    (`BoundaryCheckError::EmptyFile`).
+//!
+//! # Known non-scope (bypass classes NOT detected — escalation requires class change)
+//!
+//! These bypass classes remain not detected by the token-aware
+//! checker; if any becomes a real concern, escalating to detection
+//! requires a class change beyond the syntactic-direct-call scope:
+//!
+//!  - alias wrappers via `use crate::txpool::TxPool as Pool;`
+//!    followed by `Pool::admit(...)` — name resolution beyond
+//!    syntactic paths is explicit non-scope;
+//!  - function-pointer indirection (`let f = TxPool::admit; f(tx)`),
+//!    trait-object dispatch, local type aliases, generic helpers
+//!    that hide the receiver type;
+//!  - macro invocations whose body contains admission calls —
+//!    `syn` treats macro bodies as unparsed token streams and the
+//!    visitor does not descend into them;
+//!  - type-level constructs whose `qself.ty` is not a plain
+//!    `Type::Path` ending in `TxPool` (for example,
+//!    `<&TxPool>::admit`, `<(TxPool)>::admit`, `<Box<TxPool>>::admit`,
+//!    or any `Wrapper<TxPool>` whose `Type::Path` terminal segment
+//!    is `Wrapper`, not `TxPool`);
+//!  - cross-file structural drift — a future PR could add a
+//!    canonical `TxPool` field to `SyncEngine`, `PeerManager`,
+//!    `PeerOutbox`, or `TxRelayState` in another file and the
+//!    checker would not detect that drift, since its surface is
+//!    `tx_relay.rs` source only.
 
 use std::collections::HashMap;
 use std::io;
@@ -1186,97 +1225,716 @@ mod tests {
         assert_eq!(boxes["other:8333"].len(), 1);
     }
 
+    /// RUB-176 / GitHub issue #1432 token-aware boundary checker.
+    ///
+    /// `syn`-based AST walk over `tx_relay.rs` production source
+    /// detecting direct syntactic canonical-`TxPool` admission call
+    /// expressions. See the module-level docstring under `# Boundary
+    /// check` for the full scope contract, allowed claim language,
+    /// and known non-scope (alias wrappers, macro expansion, type
+    /// resolution, cross-file analysis are explicit non-scope).
+    mod boundary_checker {
+        use syn::visit::Visit;
+        use syn::{
+            Attribute, Expr, ExprCall, ExprMethodCall, ExprPath, File, Item, ItemFn, Path, QSelf,
+            Type,
+        };
+
+        /// Method idents that constitute canonical `TxPool` admission per
+        /// RUB-174 / RUB-176.
+        pub const CANONICAL_ADMISSION_METHODS: &[&str] =
+            &["admit", "admit_with_metadata", "add_tx_with_source"];
+
+        /// Receiver type name used to disambiguate path-call detection
+        /// from methods on `RelayTxPool` and other receivers.
+        pub const TXPOOL_TYPE_NAME: &str = "TxPool";
+
+        /// Production handler name whose presence the checker requires.
+        pub const HANDLER_NAME: &str = "handle_received_tx";
+
+        /// Errors returned by [`check_tx_relay_boundary_source`].
+        #[derive(Debug, PartialEq, Eq)]
+        pub enum BoundaryCheckError {
+            /// `syn::parse_file` failed on the supplied source.
+            ParseFailed(String),
+            /// File has no top-level items — production/test boundary
+            /// cannot be established.
+            EmptyFile,
+            /// Production handler item is missing from the AST. Either
+            /// the file no longer contains `handle_received_tx`, or the
+            /// item was renamed or moved under `#[cfg(test)]` and is
+            /// therefore excluded from production scope.
+            HandlerMissing,
+            /// A direct syntactic canonical-admission call was found in
+            /// production scope.
+            ProductionAdmissionCall(AdmissionCallKind),
+        }
+
+        /// Direct-syntactic call families detected by
+        /// [`check_tx_relay_boundary_source`].
+        #[derive(Debug, PartialEq, Eq)]
+        pub enum AdmissionCallKind {
+            /// `<receiver>.admit(...)` / `.admit_with_metadata(...)` /
+            /// `.add_tx_with_source(...)`. Receiver-agnostic by design;
+            /// see the module-level docstring's note on receiver-agnostic
+            /// detection as deliberate defense-in-depth bias.
+            DottedMethod { method: String },
+            /// `TxPool::method(...)` /
+            /// `[crate|self|super|txpool|...]::TxPool::method(...)`.
+            /// Direct path call where the path's terminal segment is a
+            /// canonical admission method ident and the penultimate
+            /// segment ident is `TxPool`.
+            DirectPath { path: String },
+            /// `<TxPool>::method(...)` /
+            /// `<TxPool as Trait>::method(...)` /
+            /// `<crate::txpool::TxPool>::method(...)` etc. UFCS form
+            /// whose `qself.ty` terminal segment is `TxPool` and whose
+            /// path's terminal segment is a canonical admission method
+            /// ident.
+            QSelfPath { qself_ty: String, method: String },
+        }
+
+        /// Walks `source` as a Rust file via `syn::parse_file` and
+        /// returns `Ok(())` if no direct syntactic canonical-`TxPool`
+        /// admission call is present in production scope, or
+        /// `Err(BoundaryCheckError)` describing the first violation or
+        /// fail-closed condition.
+        ///
+        /// "Production scope" excludes any `Item` whose attributes
+        /// contain a `#[cfg(test)]`, `#[cfg(any(test, ...))]`, or
+        /// `#[cfg(all(test, ...))]` predicate, recursively. The
+        /// exclusion is established by walking `syn::Attribute` nodes
+        /// via `Attribute::parse_nested_meta`, NOT by textual
+        /// `split_once("#[cfg(test)]")` on the source string.
+        pub fn check_tx_relay_boundary_source(source: &str) -> Result<(), BoundaryCheckError> {
+            let file: File = syn::parse_file(source)
+                .map_err(|e| BoundaryCheckError::ParseFailed(e.to_string()))?;
+            if file.items.is_empty() {
+                return Err(BoundaryCheckError::EmptyFile);
+            }
+            let mut found_handler = false;
+            let mut visitor = AdmissionFinder::default();
+            for item in &file.items {
+                if item_is_cfg_test(item) {
+                    continue;
+                }
+                if let Item::Fn(ItemFn { sig, .. }) = item {
+                    if sig.ident == HANDLER_NAME {
+                        found_handler = true;
+                    }
+                }
+                visitor.visit_item(item);
+                if let Some(err) = visitor.found.take() {
+                    return Err(err);
+                }
+            }
+            if !found_handler {
+                return Err(BoundaryCheckError::HandlerMissing);
+            }
+            Ok(())
+        }
+
+        fn item_is_cfg_test(item: &Item) -> bool {
+            let attrs: &[Attribute] = match item {
+                Item::Const(i) => &i.attrs,
+                Item::Enum(i) => &i.attrs,
+                Item::ExternCrate(i) => &i.attrs,
+                Item::Fn(i) => &i.attrs,
+                Item::ForeignMod(i) => &i.attrs,
+                Item::Impl(i) => &i.attrs,
+                Item::Macro(i) => &i.attrs,
+                Item::Mod(i) => &i.attrs,
+                Item::Static(i) => &i.attrs,
+                Item::Struct(i) => &i.attrs,
+                Item::Trait(i) => &i.attrs,
+                Item::TraitAlias(i) => &i.attrs,
+                Item::Type(i) => &i.attrs,
+                Item::Union(i) => &i.attrs,
+                Item::Use(i) => &i.attrs,
+                _ => return false,
+            };
+            attrs_have_cfg_test(attrs)
+        }
+
+        fn attrs_have_cfg_test(attrs: &[Attribute]) -> bool {
+            attrs.iter().any(attr_has_cfg_test_predicate)
+        }
+
+        fn attr_has_cfg_test_predicate(attr: &Attribute) -> bool {
+            if !attr.path().is_ident("cfg") {
+                return false;
+            }
+            let mut found = false;
+            // `parse_nested_meta` returns `Err` if the attribute body is
+            // malformed (e.g. `#[cfg]` with no parentheses); for our
+            // purposes a malformed cfg cannot establish a `test`
+            // predicate, so the `Err` branch is silently ignored.
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("test") {
+                    found = true;
+                    return Ok(());
+                }
+                // `#[cfg(any(test, ...))]` and `#[cfg(all(test, ...))]`
+                // are conservatively treated as test-gated when `test`
+                // appears anywhere inside `any` / `all`. `#[cfg(not(test))]`
+                // does NOT match this branch and falls through unmatched —
+                // it is production code under the `cfg(test)` configuration
+                // and remains in scope for the checker.
+                if meta.path.is_ident("any") || meta.path.is_ident("all") {
+                    let _ = meta.parse_nested_meta(|inner| {
+                        if inner.path.is_ident("test") {
+                            found = true;
+                        }
+                        Ok(())
+                    });
+                }
+                Ok(())
+            });
+            found
+        }
+
+        #[derive(Default)]
+        struct AdmissionFinder {
+            found: Option<BoundaryCheckError>,
+        }
+
+        impl<'ast> Visit<'ast> for AdmissionFinder {
+            fn visit_item(&mut self, item: &'ast Item) {
+                // Skip nested `#[cfg(test)]` items (e.g. inline
+                // `#[cfg(test)] mod inner_tests { ... }` inside a
+                // production `mod` block).
+                if item_is_cfg_test(item) {
+                    return;
+                }
+                syn::visit::visit_item(self, item);
+            }
+
+            fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+                let method = node.method.to_string();
+                if CANONICAL_ADMISSION_METHODS.contains(&method.as_str()) && self.found.is_none() {
+                    self.found = Some(BoundaryCheckError::ProductionAdmissionCall(
+                        AdmissionCallKind::DottedMethod { method },
+                    ));
+                    return;
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+
+            fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+                if let Expr::Path(ExprPath { qself, path, .. }) = node.func.as_ref() {
+                    if let Some(kind) = match_admission_call(path, qself.as_ref()) {
+                        if self.found.is_none() {
+                            self.found = Some(BoundaryCheckError::ProductionAdmissionCall(kind));
+                            return;
+                        }
+                    }
+                }
+                syn::visit::visit_expr_call(self, node);
+            }
+        }
+
+        fn match_admission_call(path: &Path, qself: Option<&QSelf>) -> Option<AdmissionCallKind> {
+            let terminal = path.segments.last()?;
+            let method = terminal.ident.to_string();
+            if !CANONICAL_ADMISSION_METHODS.contains(&method.as_str()) {
+                return None;
+            }
+            match qself {
+                None => {
+                    if path.segments.len() < 2 {
+                        return None;
+                    }
+                    let prev = &path.segments[path.segments.len() - 2];
+                    if prev.ident == TXPOOL_TYPE_NAME {
+                        Some(AdmissionCallKind::DirectPath {
+                            path: path_to_string(path),
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Some(qself) => {
+                    // `qself.ty` is `Box<Type>`; only `Type::Path` whose
+                    // terminal segment is `TxPool` qualifies. Other type
+                    // forms (Type::Reference, Type::TraitObject, generic
+                    // wrappers, etc.) are explicit non-scope per the
+                    // module docstring and are documented as not
+                    // detected by this checker.
+                    let Type::Path(type_path) = qself.ty.as_ref() else {
+                        return None;
+                    };
+                    let qself_terminal = type_path.path.segments.last()?;
+                    if qself_terminal.ident != TXPOOL_TYPE_NAME {
+                        return None;
+                    }
+                    Some(AdmissionCallKind::QSelfPath {
+                        qself_ty: path_to_string(&type_path.path),
+                        method,
+                    })
+                }
+            }
+        }
+
+        fn path_to_string(path: &Path) -> String {
+            let mut s = String::new();
+            if path.leading_colon.is_some() {
+                s.push_str("::");
+            }
+            for (i, seg) in path.segments.iter().enumerate() {
+                if i > 0 {
+                    s.push_str("::");
+                }
+                s.push_str(&seg.ident.to_string());
+            }
+            s
+        }
+    }
+
+    use boundary_checker::{
+        check_tx_relay_boundary_source, AdmissionCallKind, BoundaryCheckError,
+        CANONICAL_ADMISSION_METHODS,
+    };
+
+    /// Wrap a snippet body inside a minimal production-scope
+    /// `handle_received_tx` for snippet tests. `syn::parse_file` parses
+    /// the result without name-resolution, so unresolved identifiers
+    /// (e.g. `tx`, `pool`, `self::TxPool`) are accepted as long as the
+    /// surface syntax is valid Rust.
+    fn make_source_with_production_admission_body(body: &str) -> String {
+        format!("pub fn handle_received_tx() {{\n    {body}\n}}\n")
+    }
+
     #[test]
-    fn tx_relay_production_source_substring_tripwire_advisory_only() {
-        // RUB-172 advisory boundary tripwire. NOT a sound Rust
-        // parser and NOT exhaustive — see module docstring at the
-        // top of this file for scope, the comment/string-blind
-        // line-equality semantics, known bypass classes, and the
-        // RUB-176 / GitHub issue #1432 follow-up for a syntactic
-        // token-aware checker scoped to tx_relay.rs (not sound;
-        // no alias/macro/type-resolution coverage).
-        const TX_RELAY_SOURCE_RAW: &str = include_str!("tx_relay.rs");
-        let tx_relay_source = TX_RELAY_SOURCE_RAW.replace("\r\n", "\n");
-        const TEST_MOD_MARKER: &str = "\n#[cfg(test)]\nmod tests {";
-        let marker_count = tx_relay_source.matches(TEST_MOD_MARKER).count();
-        assert_eq!(
-            marker_count, 1,
-            "tx_relay.rs must contain the test-module marker exactly \
-             once; found {marker_count}",
+    fn live_source_token_aware_boundary_passes() {
+        const SRC: &str = include_str!("tx_relay.rs");
+        check_tx_relay_boundary_source(SRC).expect(
+            "current tx_relay.rs production source must pass the \
+             token-aware boundary checker — RUB-176 / GitHub issue #1432",
         );
-        let (production_section, _) = tx_relay_source
-            .split_once(TEST_MOD_MARKER)
-            .expect("tx_relay.rs must contain the exact test-module marker");
-        // Comment/string/raw-string-blind line-equality check:
-        // intended only to fail loudly if the relay handler is
-        // renamed in a careless rewrite. This is NOT a declaration
-        // anchor — a block comment, `///` doc line, or `r"..."`
-        // raw-string line whose trim_start equals the signature
-        // opener would also satisfy it. A syntactic token-aware
-        // anchor is split to RUB-176 / GitHub issue #1432.
-        let sanity_signature = concat!("pub", " fn handle_received_tx(");
-        assert!(
-            production_section
-                .lines()
-                .any(|line| line.trim_start() == sanity_signature),
-            "tx_relay.rs production section must contain a line whose \
-             trim_start equals the relay handler signature opener \
-             (advisory rename-detection check, not a declaration anchor)",
-        );
-        const FORBIDDEN: &[&str] = &[
-            // Dotted-method form
-            ".admit(",
-            ".admit_with_metadata(",
-            ".add_tx_with_source(",
-            // UFCS plain form `TxPool::method(...)` — the literal
-            // substring `TxPool::admit(` etc. ALSO catches every
-            // non-angle-bracket module-prefixed spelling via
-            // substring spillover, because the prefix concatenates
-            // directly with `TxPool::admit(` without any separator
-            // that breaks the substring match. Examples confirmed
-            // caught by these three entries: `crate::TxPool::admit(`,
-            // `crate::TxPool::admit_with_metadata(`,
-            // `crate::TxPool::add_tx_with_source(`,
-            // `crate::txpool::TxPool::admit(`,
-            // `super::TxPool::admit(`,
-            // `super::txpool::TxPool::admit(`,
-            // `txpool::TxPool::admit(`, and any future
-            // re-export/alias path that ends in `TxPool::admit(`-
-            // shaped text. Angle-bracket UFCS spellings (e.g.
-            // `<crate::TxPool>::admit(`) need separate explicit
-            // entries below because the closing `>` between the
-            // type and `::` breaks the substring spillover.
-            "TxPool::admit(",
-            "TxPool::admit_with_metadata(",
-            "TxPool::add_tx_with_source(",
-            // UFCS angle-bracket-qualified form `<TxPool>::method(...)`,
-            // `<crate::TxPool>::method(...)`, and the canonical full
-            // module path `<crate::txpool::TxPool>::method(...)`.
-            "<TxPool>::admit(",
-            "<TxPool>::admit_with_metadata(",
-            "<TxPool>::add_tx_with_source(",
-            "<crate::TxPool>::admit(",
-            "<crate::TxPool>::admit_with_metadata(",
-            "<crate::TxPool>::add_tx_with_source(",
-            "<crate::txpool::TxPool>::admit(",
-            "<crate::txpool::TxPool>::admit_with_metadata(",
-            "<crate::txpool::TxPool>::add_tx_with_source(",
-            // UFCS trait-qualified form `<TxPool as SomeTrait>::method(...)`
-            // catalog for bare, single-crate-prefix, and full-module-path
-            // qualified forms only. Does NOT cover `<self::*>` /
-            // `<super::*>` path qualifiers or other future spellings —
-            // those belong to the RUB-176 / GitHub issue #1432
-            // token-aware checker.
-            "<TxPool as ",
-            "<crate::TxPool as ",
-            "<crate::txpool::TxPool as ",
+    }
+
+    #[test]
+    fn negative_dotted_method_calls_all_three_methods_detected() {
+        for method in CANONICAL_ADMISSION_METHODS {
+            let src =
+                make_source_with_production_admission_body(&format!("let _ = pool.{method}(tx);"));
+            match check_tx_relay_boundary_source(&src) {
+                Err(BoundaryCheckError::ProductionAdmissionCall(
+                    AdmissionCallKind::DottedMethod { method: m },
+                )) => assert_eq!(m, *method),
+                other => panic!("expected DottedMethod for `pool.{method}(tx)`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn negative_direct_path_calls_for_all_prefixes_and_methods() {
+        // Includes a leading-`::` absolute path (`::TxPool::method`) to
+        // exercise `path_to_string`'s `path.leading_colon.is_some()` branch
+        // in addition to all module-relative path prefixes.
+        let prefixes = [
+            "TxPool",
+            "::TxPool",
+            "crate::TxPool",
+            "crate::txpool::TxPool",
+            "self::TxPool",
+            "self::txpool::TxPool",
+            "super::TxPool",
+            "super::txpool::TxPool",
+            "txpool::TxPool",
         ];
-        for forbidden in FORBIDDEN {
-            assert!(
-                !production_section.contains(forbidden),
-                "tx_relay.rs production code must not contain canonical \
-                 TxPool admission token `{forbidden}` — RUB-172 boundary",
-            );
+        for prefix in prefixes {
+            for method in CANONICAL_ADMISSION_METHODS {
+                let src = make_source_with_production_admission_body(&format!(
+                    "let _ = {prefix}::{method}(tx);"
+                ));
+                match check_tx_relay_boundary_source(&src) {
+                    Err(BoundaryCheckError::ProductionAdmissionCall(
+                        AdmissionCallKind::DirectPath { path },
+                    )) => assert_eq!(
+                        path,
+                        format!("{prefix}::{method}"),
+                        "DirectPath text mismatch for prefix={prefix} method={method}"
+                    ),
+                    other => panic!("expected DirectPath for `{prefix}::{method}`, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_qself_path_calls_for_all_qself_types_and_methods() {
+        let qself_types = [
+            "TxPool",
+            "crate::TxPool",
+            "crate::txpool::TxPool",
+            "self::TxPool",
+            "self::txpool::TxPool",
+            "super::TxPool",
+            "super::txpool::TxPool",
+        ];
+        for qty in qself_types {
+            for method in CANONICAL_ADMISSION_METHODS {
+                // Without trait qualifier: `<T>::method(tx)`.
+                let src_no_trait = make_source_with_production_admission_body(&format!(
+                    "let _ = <{qty}>::{method}(tx);"
+                ));
+                match check_tx_relay_boundary_source(&src_no_trait) {
+                    Err(BoundaryCheckError::ProductionAdmissionCall(
+                        AdmissionCallKind::QSelfPath {
+                            qself_ty,
+                            method: m,
+                        },
+                    )) => {
+                        assert_eq!(qself_ty, qty);
+                        assert_eq!(m, *method);
+                    }
+                    other => panic!("expected QSelfPath for `<{qty}>::{method}`, got {other:?}"),
+                }
+
+                // With trait qualifier: `<T as Trait>::method(tx)`.
+                let src_with_trait = make_source_with_production_admission_body(&format!(
+                    "let _ = <{qty} as TxPoolAdmit>::{method}(tx);"
+                ));
+                match check_tx_relay_boundary_source(&src_with_trait) {
+                    Err(BoundaryCheckError::ProductionAdmissionCall(
+                        AdmissionCallKind::QSelfPath {
+                            qself_ty,
+                            method: m,
+                        },
+                    )) => {
+                        assert_eq!(qself_ty, qty);
+                        assert_eq!(m, *method);
+                    }
+                    other => {
+                        panic!("expected QSelfPath for `<{qty} as Trait>::{method}`, got {other:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn old_substring_tripwire_would_have_missed_self_qualifier_form() {
+        // Documentation evidence: the RUB-172 substring tripwire's
+        // catalog included `<TxPool as`, `<crate::TxPool as`,
+        // `<crate::txpool::TxPool as` but did not list
+        // `<self::TxPool>` / `<self::TxPool as Trait>` /
+        // `<super::TxPool>` / `<super::txpool::TxPool>`. The
+        // token-aware checker catches all of them via the
+        // `qself.ty` terminal-segment match.
+        for snippet in [
+            "let _ = <self::TxPool>::admit(tx);",
+            "let _ = <self::TxPool as Trait>::admit_with_metadata(tx);",
+            "let _ = <super::TxPool>::add_tx_with_source(tx);",
+            "let _ = <super::txpool::TxPool>::admit(tx);",
+        ] {
+            let src = make_source_with_production_admission_body(snippet);
+            match check_tx_relay_boundary_source(&src) {
+                Err(BoundaryCheckError::ProductionAdmissionCall(
+                    AdmissionCallKind::QSelfPath { .. },
+                )) => {}
+                other => panic!("expected QSelfPath for `{snippet}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn dotted_method_check_is_receiver_agnostic_by_design() {
+        // The dotted-method check matches by method ident only — it
+        // cannot distinguish receiver types without name/type
+        // resolution. If a future `RelayTxPool` method were named
+        // `admit`, the checker would still fire on it. This is the
+        // deliberate defense-in-depth bias documented in the module
+        // docstring; the cure is renaming the method on `RelayTxPool`
+        // or escalating to a sounder checker via a separate Q-*.
+        let src = make_source_with_production_admission_body(
+            "let _ = some_relay_cache.admit_with_metadata(tx);",
+        );
+        match check_tx_relay_boundary_source(&src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(AdmissionCallKind::DottedMethod {
+                method,
+            })) => assert_eq!(method, "admit_with_metadata"),
+            other => panic!("expected DottedMethod, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn false_positive_module_doc_with_admission_text_passes() {
+        let src = "\
+//! Example: pool.admit(tx) is the canonical admission entrypoint, and
+//! `crate::txpool::TxPool::admit_with_metadata` is the metadata-bearing
+//! variant. `<super::txpool::TxPool as Trait>::add_tx_with_source` exists
+//! too. None of these examples should fire the boundary checker — they
+//! live in module docs.
+
+pub fn handle_received_tx() {}
+";
+        check_tx_relay_boundary_source(src).expect("module doc admission text must pass");
+    }
+
+    #[test]
+    fn false_positive_doc_comment_on_item_passes() {
+        let src = "\
+/// This handler does NOT call `TxPool::admit(tx)` or
+/// `crate::txpool::TxPool::add_tx_with_source(tx)`. Doc comments are
+/// attribute nodes, not expression-callable tokens.
+pub fn handle_received_tx() {}
+";
+        check_tx_relay_boundary_source(src).expect("doc comment admission text must pass");
+    }
+
+    #[test]
+    fn false_positive_line_comments_pass() {
+        let src = "\
+pub fn handle_received_tx() {
+    // pool.admit(tx);
+    // TxPool::admit(tx);
+    // crate::txpool::TxPool::admit_with_metadata(tx);
+    // <super::txpool::TxPool as Trait>::add_tx_with_source(tx);
+}
+";
+        check_tx_relay_boundary_source(src).expect("line comments must pass");
+    }
+
+    #[test]
+    fn false_positive_block_comments_pass() {
+        let src = "\
+pub fn handle_received_tx() {
+    /* pool.admit(tx); TxPool::admit_with_metadata(tx); */
+    /*
+     * <crate::txpool::TxPool>::admit(tx);
+     * <super::txpool::TxPool as Trait>::add_tx_with_source(tx);
+     */
+}
+";
+        check_tx_relay_boundary_source(src).expect("block comments must pass");
+    }
+
+    #[test]
+    fn false_positive_string_literals_pass() {
+        let src = r#"
+pub fn handle_received_tx() {
+    let _ = "pool.admit(tx)";
+    let _ = "TxPool::admit(tx)";
+    let _ = "<crate::txpool::TxPool as Trait>::add_tx_with_source(tx)";
+}
+"#;
+        check_tx_relay_boundary_source(src).expect("string literals must pass");
+    }
+
+    #[test]
+    fn false_positive_raw_string_literals_pass() {
+        // Constructed via concat! to avoid the nested raw-string trap
+        // (an outer `r##"..."##` would terminate inside an inner
+        // `r###"..."###` at the first `"##` boundary).
+        let src = concat!(
+            "pub fn handle_received_tx() {\n",
+            "    let _ = r\"<crate::TxPool>::admit(tx)\";\n",
+            "    let _ = r#\"<super::txpool::TxPool>::admit_with_metadata(tx)\"#;\n",
+            "    let _ = r##\"pool.add_tx_with_source(tx)\"##;\n",
+            "}\n",
+        );
+        check_tx_relay_boundary_source(src).expect("raw string literals must pass");
+    }
+
+    #[test]
+    fn false_positive_cfg_test_module_with_admission_calls_passes() {
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(test)]
+mod tests {
+    fn t() {
+        pool.admit(tx);
+        TxPool::admit_with_metadata(tx);
+        crate::txpool::TxPool::add_tx_with_source(tx);
+        <super::txpool::TxPool as Trait>::admit(tx);
+    }
+}
+";
+        check_tx_relay_boundary_source(src).expect("#[cfg(test)] mod admission calls must pass");
+    }
+
+    #[test]
+    fn false_positive_cfg_test_function_with_admission_calls_passes() {
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(test)]
+fn helper() {
+    pool.admit(tx);
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src).expect("#[cfg(test)] fn admission calls must pass");
+    }
+
+    #[test]
+    fn false_positive_relay_pool_put_call_passes() {
+        let src = "\
+pub fn handle_received_tx() {
+    relay_state.relay_pool.put(txid, tx_bytes, fee, size);
+    relay_pool.has(&txid);
+    relay_state.tx_seen.add(txid);
+}
+";
+        check_tx_relay_boundary_source(src)
+            .expect("RelayTxPool put/has/add methods must not fire admission check");
+    }
+
+    #[test]
+    fn false_positive_alias_wrapper_via_use_rename_is_explicit_non_scope() {
+        // `use crate::txpool::TxPool as Pool; Pool::admit(tx);` — the
+        // path's penultimate segment is `Pool`, not `TxPool`, so the
+        // syntactic checker does NOT match. This is documented explicit
+        // non-scope per the boundary_checker module docstring; a sounder
+        // check would require name-resolution which is a class change
+        // blocked by issue #1432 / RUB-176.
+        let src = "\
+use crate::txpool::TxPool as Pool;
+
+pub fn handle_received_tx() {
+    let _ = Pool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src)
+            .expect("alias wrapper must pass — explicit non-scope per RUB-176 design note");
+    }
+
+    #[test]
+    fn false_positive_macro_invocation_hiding_admission_call_is_explicit_non_scope() {
+        // Macro bodies are unparsed token streams — `syn::Expr::Macro`
+        // does not expose them as visit-able expressions. A diff that
+        // hides admission behind a macro will silently pass the checker.
+        // Explicit non-scope per the boundary_checker module docstring.
+        let src = "\
+pub fn handle_received_tx() {
+    txpool_admit!(tx);
+}
+";
+        check_tx_relay_boundary_source(src)
+            .expect("macro invocation hiding admission must pass — explicit non-scope per RUB-176");
+    }
+
+    #[test]
+    fn nested_cfg_test_module_inside_production_mod_is_skipped() {
+        let src = "\
+pub fn handle_received_tx() {}
+
+pub mod production_helpers {
+    pub fn helper() {}
+
+    #[cfg(test)]
+    mod inner_tests {
+        fn negative_case() {
+            crate::txpool::TxPool::admit(tx);
+        }
+    }
+}
+";
+        check_tx_relay_boundary_source(src).expect(
+            "nested #[cfg(test)] mod inside production mod must be skipped via AST attribute walk",
+        );
+    }
+
+    #[test]
+    fn cfg_any_test_predicate_is_skipped() {
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(any(test, feature = \"experimental\"))]
+fn experimental_helper() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src)
+            .expect("#[cfg(any(test, ...))] is treated as test-gated");
+    }
+
+    #[test]
+    fn cfg_all_test_predicate_is_skipped() {
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(all(test, target_os = \"linux\"))]
+fn linux_test_helper() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src)
+            .expect("#[cfg(all(test, ...))] is treated as test-gated");
+    }
+
+    #[test]
+    fn cfg_not_test_predicate_is_production_and_admission_is_detected() {
+        // `#[cfg(not(test))]` is production code under `cfg(test)`
+        // configuration — it is visible during normal builds but
+        // disabled during test compilation. The checker treats it as
+        // production scope and detects admission calls inside it.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(not(test))]
+fn prod_only_helper() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(AdmissionCallKind::DirectPath {
+                path,
+            })) => assert_eq!(path, "crate::txpool::TxPool::admit"),
+            other => {
+                panic!("expected DirectPath for cfg(not(test)) production helper, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn fail_closed_on_invalid_rust_syntax() {
+        let src = "this is not valid rust syntax !!! @@@ <<< >>>";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ParseFailed(_)) => {}
+            other => panic!("expected ParseFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fail_closed_on_empty_file() {
+        match check_tx_relay_boundary_source("") {
+            Err(BoundaryCheckError::EmptyFile) => {}
+            other => panic!("expected EmptyFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fail_closed_on_renamed_handler() {
+        let src = "\
+pub fn handle_received_tx_renamed() {
+    let _ = pool.put(tx);
+}
+";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::HandlerMissing) => {}
+            other => panic!("expected HandlerMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fail_closed_when_handler_is_only_under_cfg_test() {
+        // Production handler accidentally moved under `#[cfg(test)]` —
+        // checker must fail closed because it cannot see a
+        // production-scope handler item.
+        let src = "\
+pub fn other_production_fn() {}
+
+#[cfg(test)]
+fn handle_received_tx() {
+}
+";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::HandlerMissing) => {}
+            other => panic!("expected HandlerMissing, got {other:?}"),
         }
     }
 
