@@ -6,8 +6,6 @@ def maxU64 : Nat := 18446744073709551615
 
 def defaultMempoolMinFeeRate : Nat := 1
 
-def defaultMinDaFeeRate : Nat := 1
-
 def checkedMul? (a b : Nat) : Option Nat :=
   let p := a * b
   if p <= maxU64 then some p else none
@@ -78,18 +76,18 @@ def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
     daRequiredFee := some 0,
     requiredFee := relayFloor?
   }
-  let afterDa? : Option EvalOut :=
+  let afterDa : EvalOut :=
     if daBytes == 0 then
-      some acceptedBase
+      acceptedBase
     else
       match checkedMul? daBytes minDaFeeRate with
-      | none => some { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_FLOOR_OVERFLOW" }
+      | none => { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_FLOOR_OVERFLOW" }
       | some daFloor =>
           match checkedMul? daBytes v.daSurchargePerByte with
-          | none => some { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_SURCHARGE_OVERFLOW", daFeeFloor := some daFloor }
+          | none => { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_SURCHARGE_OVERFLOW", daFeeFloor := some daFloor }
           | some daSurcharge =>
               match checkedAdd? daFloor daSurcharge with
-              | none => some { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_REQUIRED_FEE_OVERFLOW", daFeeFloor := some daFloor, daSurcharge := some daSurcharge }
+              | none => { acceptedBase with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_REQUIRED_FEE_OVERFLOW", daFeeFloor := some daFloor, daSurcharge := some daSurcharge }
               | some daRequired =>
                   let withDa := { acceptedBase with daFeeFloor := some daFloor, daSurcharge := some daSurcharge, daRequiredFee := some daRequired }
                   let required? :=
@@ -100,24 +98,22 @@ def evalDaFeeFloor (v : CVDaFeeFloorVector) : EvalOut :=
                     match relayFloor? with
                     | some rf => dominantFeeFloor rf daRequired
                     | none => "relay"
-                  some { withDa with requiredFee := required?, dominantFloor := dom }
-  match afterDa? with
-  | none => acceptedBase
-  | some out =>
-      if out.rejectReason.isSome then
-        out
-      else if (daBytes == 0 || out.daRequiredFee == some 0) && relayFloor? == some 0 then
-        { out with admit := true }
-      else if daBytes > 0 && out.daRequiredFee.isSome && out.daRequiredFee.get! > 0 && feeValue v < out.daRequiredFee.get! then
-        { out with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", requiredFee := out.daRequiredFee }
-      else if feeBelowRollingFloor (feeValue v) weight minFeeRate then
-        let required? :=
-          match relayFloor? with
-          | some rf => some rf
-          | none => out.requiredFee
-        { out with admitClass := "unavailable", dominantFloor := "relay", rejectReason := some "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM", requiredFee := required? }
-      else
-        { out with admit := true }
+                  { withDa with requiredFee := required?, dominantFloor := dom }
+  let out := afterDa
+  if out.rejectReason.isSome then
+    out
+  else if (daBytes == 0 || out.daRequiredFee == some 0) && relayFloor? == some 0 then
+    { out with admit := true }
+  else if daBytes > 0 && out.daRequiredFee.isSome && out.daRequiredFee.get! > 0 && feeValue v < out.daRequiredFee.get! then
+    { out with admitClass := "rejected", dominantFloor := "da", rejectReason := some "DA_FEE_BELOW_STAGE_C_FLOOR", requiredFee := out.daRequiredFee }
+  else if feeBelowRollingFloor (feeValue v) weight minFeeRate then
+    let required? :=
+      match relayFloor? with
+      | some rf => some rf
+      | none => out.requiredFee
+    { out with admitClass := "unavailable", dominantFloor := "relay", rejectReason := some "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM", requiredFee := required? }
+  else
+    { out with admit := true }
 
 def evalDaFeeFloorErr (v : CVDaFeeFloorVector) : Option String :=
   match v.txHex with
