@@ -11,6 +11,23 @@ Policy:
 
 ---
 
+## 2026-05-05 — DA fee-floor executable vectors (Q-CONF-DA-FEE-FLOOR-VECTORS-01)
+
+Причина:
+- добавить executable conformance gate для Stage C DA fee-floor arithmetic после появления Go и Rust policy behavior на `origin/main`;
+- зафиксировать 20 boundary cases: `fee == required`, `fee == required - 1`, `fee > required`, relay-dominant floor, DA-dominant floor, DA-first tie-under, reachable exact tie floor, min-rate/surcharge composition, explicit `min_da_fee_rate=0` with surcharge-only enforcement, `required_fee == 0` short-circuit before fee lookup, non-DA Stage C short-circuit before fee lookup, omitted `current_mempool_min_fee_rate` defaulting to relay baseline `1`, malformed tx parse failure before fee-floor classification, relay-overflow-as-rolling-floor-unavailable, DA/surcharge/required overflow fail-closed и non-DA relay-floor pass;
+- добавить per-vector branch reachability fields для `CV-DA-FEE-FLOOR-*`: `policy_branch` и `early_guards_passed`.
+
+Инструменты:
+- ручное добавление нового gate `CV-DA-FEE-FLOOR`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-DA-FEE-FLOOR`,
+- проверка через `tools/gen_conformance_matrix.py --check`.
+
+Изменённые fixtures:
+- `CV-DA-FEE-FLOOR.json` (new)
+
+Не затронуто: runtime policy behavior, existing non-DA fixtures, protocol artifacts.
+
 ## 2026-05-01 — One-time deterministic-key fixture regeneration (Q-CONF-FIXTURE-CONTENT-REGEN-01)
 
 Причина:
