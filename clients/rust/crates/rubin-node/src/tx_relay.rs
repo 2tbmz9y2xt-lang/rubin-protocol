@@ -150,11 +150,10 @@
 //! `class_change_stop_rule`. The conservative scope flags such
 //! carriers as production (false-positive over false-negative): a
 //! production-only admission introduced under any non-exact cfg
-//! shape will fire the checker, with the false-positive remediated
-//! by either rewriting the cfg to the exact `#[cfg(test)]` form,
-//! moving the admission to the canonical-pool surface, or escalating
-//! to a sounder `ConfigurationPredicate` reachability engine via
-//! a separate task. A standalone task tracks that engine.
+//! shape will fire the checker; the false-positive is remediated by
+//! rewriting the cfg to the exact `#[cfg(test)]` form on a
+//! top-level `Item` or moving the admission off the production
+//! surface.
 //!
 //! Allowed claim language for this checker (matches RUB-176 /
 //! GitHub issue #1432):
@@ -227,11 +226,9 @@
 //!    `cfg(true)`, `cfg(false)`, multi-`#[cfg]` stacks, and
 //!    below-item-level cfg gates (on `ImplItem`, `TraitItem`,
 //!    `Expr`, `Arm`, `Stmt`, `FieldValue`) are scanned as
-//!    production. False-positive remediation is either rewriting
-//!    the gate to the exact `#[cfg(test)]` shape on a top-level
-//!    `Item`, removing the admission from production scope, or
-//!    escalating to a sounder reachability engine via a separate
-//!    task;
+//!    production. False-positive remediation is rewriting the gate
+//!    to the exact `#[cfg(test)]` shape on a top-level `Item` or
+//!    removing the admission from production scope;
 //!  - cross-file structural drift — a future PR could add a
 //!    canonical `TxPool` field to `SyncEngine`, `PeerManager`,
 //!    `PeerOutbox`, or `TxRelayState` in another file and the
@@ -1361,9 +1358,7 @@ mod tests {
         /// (false-positive over false-negative): general
         /// `ConfigurationPredicate` reachability and below-item-level
         /// cfg gating are explicit non-scope per RUB-176 / GitHub
-        /// issue #1432's `class_change_stop_rule`. A fully sound
-        /// reachability engine for cfg predicates is tracked
-        /// separately and is not part of this slice.
+        /// issue #1432's `class_change_stop_rule`.
         pub fn check_tx_relay_boundary_source(source: &str) -> Result<(), BoundaryCheckError> {
             let file: File = syn::parse_file(source)
                 .map_err(|e| BoundaryCheckError::ParseFailed(e.to_string()))?;
