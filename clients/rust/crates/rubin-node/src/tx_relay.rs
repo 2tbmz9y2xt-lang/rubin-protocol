@@ -15,13 +15,13 @@
 //! `TxPool` reference and the relay handler takes no canonical
 //! `TxPool` argument, so the application's shared pool is
 //! unreachable from this module's call graph through these
-//! surfaces. The defense-in-depth source-level tripwire below
-//! additionally scans the production section for known canonical-
-//! admission method-call substrings; it is NOT a sound Rust
-//! parser and NOT an exhaustive proof. Known bypasses remain:
-//! alias wrappers, macro expansion, function-pointer indirection,
-//! trait-object dispatch, and any spelling form that avoids the
-//! listed literals (e.g. an unforeseen UFCS path variant).
+//! surfaces. The advisory source-level tripwire below scans the
+//! production section for a non-exhaustive list of obvious
+//! canonical-admission substrings; it is NOT a sound Rust parser,
+//! NOT an exhaustive proof, and NOT a guarantee that the boundary
+//! is enforced. Many spellings bypass it (see Known bypass
+//! classes below). Sound token-aware enforcement is tracked in
+//! RUB-176 (GitHub issue #1431).
 //!
 //! `Relayed` indicates the dedup, metadata, and relay-pool storage
 //! steps completed successfully and `broadcast_inventory` was
@@ -53,21 +53,26 @@
 //! inline (matching `admit_with_metadata` on the canonical pool)
 //! but remains standalone non-admitting.
 //!
-//! # Boundary tripwire
+//! # Boundary tripwire (advisory only)
 //!
-//! The test at the bottom of this file is a defense-in-depth
-//! source-level substring tripwire on this file's production
-//! section, not a sound Rust parser and not an exhaustive proof.
-//! It splits this file's `include_str!` contents at the exact
-//! `mod tests` attribute marker (CRLF-normalized, marker_count ==
-//! 1, fail-closed via `.expect`), anchors a sanity check on a
-//! production-line declaration of the relay handler, then scans
-//! for the dotted-method and UFCS forms (including module-path
-//! qualified) named after the three canonical-admission entries
-//! on `TxPool` (`admit`, `admit_with_metadata`,
+//! The test at the bottom of this file is an advisory
+//! defense-in-depth source-level substring scan on this file's
+//! production section, not a sound Rust parser and not an
+//! exhaustive proof. It splits this file's `include_str!`
+//! contents at the exact `mod tests` attribute marker (CRLF-
+//! normalized, marker_count == 1, fail-closed via `.expect`),
+//! runs a comment/string-blind line-equality check on the relay
+//! handler's signature opener (intended only to fail loudly if
+//! the handler is renamed in a careless rewrite — NOT a
+//! declaration anchor; a block comment, `///` doc line, or raw
+//! string line equal to the signature would also satisfy it),
+//! then scans for the dotted-method and UFCS forms (including
+//! module-path qualified) named after the three canonical-
+//! admission entries on `TxPool` (`admit`, `admit_with_metadata`,
 //! `add_tx_with_source`). The forbidden-substring list lives in
 //! the test; the docstring above does not embed those substrings
-//! or the line-anchored sanity literal.
+//! or the signature-opener literal. Sound token-aware checking is
+//! split to RUB-176 / GitHub issue #1431.
 //!
 //! False-positive surface (intentional, fail-closed): the dotted-
 //! method tokens scanned by the tripwire are receiver-agnostic —
@@ -82,12 +87,18 @@
 //! renames the surface here or replaces the tripwire with an
 //! AST-aware checker.
 //!
-//! Known bypass classes (the canonical defense remains structural,
-//! per the function signature above):
+//! Known bypass classes (NOT exhaustive — the canonical defense
+//! remains structural, per the function signature above; sound
+//! token-aware enforcement is RUB-176 / GitHub issue #1431):
 //!  - alias wrappers, function-pointer indirection, trait-object
 //!    dispatch, or any path that does not write a matching literal
 //!    substring in this file's source;
-//!  - macro expansions that hide the call.
+//!  - macro expansions that hide the call;
+//!  - UFCS path spellings not in the catalog — for example
+//!    `<self::TxPool>::`, `<super::TxPool>::`, or
+//!    `<super::txpool::TxPool>::` (and any future re-export or
+//!    path alias) — compile from this module but are not caught
+//!    by the substring scan.
 
 use std::collections::HashMap;
 use std::io;
@@ -1116,9 +1127,12 @@ mod tests {
 
     #[test]
     fn tx_relay_production_source_contains_no_canonical_txpool_admission() {
-        // RUB-172 boundary tripwire. See module docstring at the top
-        // of this file for scope, fail-closed semantics, and known
-        // bypass classes.
+        // RUB-172 advisory boundary tripwire. NOT a sound Rust
+        // parser and NOT exhaustive — see module docstring at the
+        // top of this file for scope, the comment/string-blind
+        // line-equality semantics, known bypass classes, and the
+        // RUB-176 / GitHub issue #1431 follow-up for sound
+        // token-aware enforcement.
         const TX_RELAY_SOURCE_RAW: &str = include_str!("tx_relay.rs");
         let tx_relay_source = TX_RELAY_SOURCE_RAW.replace("\r\n", "\n");
         const TEST_MOD_MARKER: &str = "\n#[cfg(test)]\nmod tests {";
@@ -1131,19 +1145,21 @@ mod tests {
         let (production_section, _) = tx_relay_source
             .split_once(TEST_MOD_MARKER)
             .expect("tx_relay.rs must contain the exact test-module marker");
-        // Line-anchored sanity check: the production section must
-        // contain a top-level (whitespace-stripped) declaration line
-        // exactly equal to the relay handler's signature opener.
-        // This anchors to a real function declaration line rather
-        // than any free-text occurrence elsewhere in the section.
+        // Comment/string/raw-string-blind line-equality check:
+        // intended only to fail loudly if the relay handler is
+        // renamed in a careless rewrite. This is NOT a declaration
+        // anchor — a block comment, `///` doc line, or `r"..."`
+        // raw-string line whose trim_start equals the signature
+        // opener would also satisfy it. Sound token-aware anchoring
+        // is split to RUB-176 / GitHub issue #1431.
         let sanity_signature = concat!("pub", " fn handle_received_tx(");
         assert!(
             production_section
                 .lines()
                 .any(|line| line.trim_start() == sanity_signature),
-            "tx_relay.rs production section must contain a top-level \
-             declaration line for the relay handler signature; the \
-             tripwire anchors to a production function declaration line",
+            "tx_relay.rs production section must contain a line whose \
+             trim_start equals the relay handler signature opener \
+             (advisory rename-detection check, not a declaration anchor)",
         );
         const FORBIDDEN: &[&str] = &[
             // Dotted-method form
@@ -1167,9 +1183,11 @@ mod tests {
             "<crate::txpool::TxPool>::admit_with_metadata(",
             "<crate::txpool::TxPool>::add_tx_with_source(",
             // UFCS trait-qualified form `<TxPool as SomeTrait>::method(...)`
-            // catches any future trait impl on TxPool. Listed for
-            // bare, single-crate-prefix, and full-module-path
-            // qualified forms.
+            // catalog for bare, single-crate-prefix, and full-module-path
+            // qualified forms only. Does NOT cover `<self::*>` /
+            // `<super::*>` path qualifiers or other future spellings —
+            // those belong to the RUB-176 / GitHub issue #1431
+            // token-aware checker.
             "<TxPool as ",
             "<crate::TxPool as ",
             "<crate::txpool::TxPool as ",
