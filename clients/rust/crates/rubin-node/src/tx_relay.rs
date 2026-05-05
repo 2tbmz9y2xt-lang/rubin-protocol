@@ -1933,11 +1933,14 @@ pub mod production_helpers {
 
     #[test]
     fn cfg_any_test_with_feature_disjunct_is_production_admission_detected() {
-        // `cfg(any(test, feature = "x"))` is enabled when `feature="x"`
-        // is set in non-test builds, so the item IS production-reachable
-        // and the admission call inside MUST be detected. Skip rule
-        // requires the predicate to imply test on every config that
-        // satisfies it; disjunction with a non-test branch breaks that.
+        // `cfg(any(test, feature = "x"))` is not the EXACT literal
+        // `#[cfg(test)]` shape, so the conservative scope scans the
+        // carrier as production and the admission call inside is
+        // detected. The carrier is also genuinely production-reachable
+        // when `feature = "x"` is set in non-test builds, so the
+        // detection direction is sound. The checker reaches this
+        // verdict by shape match alone — it does not evaluate cfg
+        // predicate semantics.
         let src = "\
 pub fn handle_received_tx() {}
 
@@ -2149,6 +2152,59 @@ fn cross_platform_helper() {
             Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
             other => panic!(
                 "expected admission detection inside cfg(unix|windows) ∧ cfg(64-bit) helper, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn cfg_test_with_companion_non_cfg_attr_is_skipped_under_conservative_scope() {
+        // `#[cfg(test)] #[derive(Debug)]` — the `#[derive(...)]`
+        // attribute is a non-`cfg` attribute and does not gate
+        // compilation, so the cfg-attribute count remains 1 (the
+        // exact literal `#[cfg(test)]`) and the carrier is skipped.
+        // Pins the contract that `item_is_exact_cfg_test` filters
+        // attributes by `path().is_ident("cfg")` before counting,
+        // not by counting all attributes.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestOnlyHelper {
+    bad_field: u32,
+}
+
+#[cfg(test)]
+fn helper() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        check_tx_relay_boundary_source(src).expect(
+            "carrier with #[cfg(test)] + non-cfg companion attr (#[derive]) must be skipped",
+        );
+    }
+
+    #[test]
+    fn cfg_attr_form_does_not_count_as_exact_cfg_test_skip() {
+        // `#[cfg_attr(test, derive(Debug))]` — the attribute path
+        // is `cfg_attr`, not `cfg`. `item_is_exact_cfg_test`'s
+        // `path().is_ident("cfg")` filter excludes `cfg_attr`, so
+        // the cfg-attribute count is 0 and the carrier is scanned
+        // as production. `cfg_attr` evaluation is explicit non-scope
+        // per RUB-176 / GitHub issue #1432's `class_change_stop_rule`;
+        // any admission inside such a carrier fires the checker.
+        let src = "\
+pub fn handle_received_tx() {}
+
+#[cfg_attr(test, derive(Debug))]
+fn helper() {
+    crate::txpool::TxPool::admit(tx);
+}
+";
+        match check_tx_relay_boundary_source(src) {
+            Err(BoundaryCheckError::ProductionAdmissionCall(_)) => {}
+            other => panic!(
+                "expected admission detection inside cfg_attr(...) carrier under conservative scope, got {other:?}"
             ),
         }
     }
