@@ -2117,19 +2117,48 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         let payload = raw.to_vec();
+        // RUB-202 / GitHub #1467: bound the writer thread so a reader-side
+        // early reject (e.g., the body-too-large cap firing in
+        // `read_http_request_rejects_chunked_body_accumulation_over_cap`
+        // before the producer finishes pushing 2 MiB+) cannot block on
+        // `sendto` once the OS TCP send buffer fills. Production HTTP
+        // servers RST the connection on early reject, which surfaces as
+        // a write error on the client; the helper mirrors that semantic
+        // here by setting a bounded `set_write_timeout` and ignoring
+        // partial-write / TimedOut / BrokenPipe outcomes (issue
+        // contract: "Writer-side BrokenPipe/timeout after reader-side
+        // reject is acceptable and must not fail the test"). The
+        // half-shutdown is best-effort for the same reason.
         let writer = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(addr).expect("connect");
-            stream.write_all(&payload).expect("write payload");
-            stream
-                .shutdown(std::net::Shutdown::Write)
-                .expect("shutdown write");
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.write_all(&payload);
+            let _ = stream.shutdown(std::net::Shutdown::Write);
         });
         let (mut stream, _) = listener.accept().expect("accept");
         stream
             .set_read_timeout(Some(Duration::from_millis(200)))
             .expect("set read timeout");
         let result = read_http_request(&mut stream);
-        writer.join().expect("join writer");
+        // RUB-202: drain any residual bytes the parser left in the
+        // socket so the writer's `write_all` releases back-pressure and
+        // `writer.join()` returns deterministically. Without this
+        // drain, a reader that returned `Err("body too large")` after
+        // reading ~1 MiB would leave the OS send buffer full; the
+        // writer would remain blocked in `sendto` until its
+        // `set_write_timeout` (above) fires. Bounded by the per-read
+        // 100ms timeout + 2s writer-side timeout: total worst-case ~2s
+        // before the helper unwedges. Reads that hit the timeout
+        // return `Err`, which exits the `while let Ok(n) = ...` loop
+        // cleanly without surfacing into the test result.
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        let mut sink = [0u8; 4096];
+        while let Ok(n) = stream.read(&mut sink) {
+            if n == 0 {
+                break;
+            }
+        }
+        let _ = writer.join();
         result
     }
 
