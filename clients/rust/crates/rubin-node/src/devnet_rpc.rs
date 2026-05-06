@@ -56,10 +56,24 @@ pub struct DevnetRPCState {
     /// Mirrors Go's `clients/go/cmd/rubin-node/http_rpc.go::readinessGate`
     /// (type at line 125; methods 143-219). Three-state machine:
     /// `NotReady` -> `Ready` (one-shot via `try_mark_ready_on_startup`)
-    /// -> `Shutdown` (sticky terminal, via `mark_shutdown`). Mixed-client
-    /// devnet evidence consumers distinguish a starting node, a serving
-    /// node, and a shutting-down node by `/ready`'s 503/200 response
-    /// and the `{ready: bool}` body.
+    /// -> `Shutdown` (sticky terminal, via `mark_shutdown`).
+    ///
+    /// Production Rust delivers two states observable to mixed-client
+    /// devnet evidence consumers today: `NotReady` (pre-`start_devnet_rpc_server`
+    /// stamp) and `Ready` (post-stamp). The third state (`Shutdown`)
+    /// is reachable via `RunningDevnetRPCServer::close` and `Drop`
+    /// (which fire on normal `RunningDevnetRPCServer` lifetime end and
+    /// stack unwinding), but `clients/rust/crates/rubin-node/src/main.rs`
+    /// installs no SIGINT/SIGTERM handler, so a signal-driven kill
+    /// terminates the process before `close()` runs and consumers see
+    /// connection-refused rather than the 503+`{ready:false}` envelope.
+    /// Adding a signal handler that drives `mark_shutdown` is a
+    /// runtime-lifecycle change deliberately excluded from RUB-10 by
+    /// `class_change_stop_rule`; it is in scope for graceful-shutdown
+    /// follow-up work (RUB-21/RUB-22/RUB-23 own process-soak proof
+    /// per the issue's `non_goals`). Tests exercise all three states
+    /// (`ready_endpoint_reports_503_after_shutdown_sticky` drives the
+    /// gate through `Shutdown` via `RunningDevnetRPCServer::close`).
     readiness: Arc<ReadinessGate>,
 }
 
@@ -257,10 +271,15 @@ struct TxStatusResponse {
 
 /// RUB-10 / GitHub #1151: `/ready` JSON envelope.
 /// Mirrors Go's `readyResponse` struct in
-/// `clients/go/cmd/rubin-node/http_rpc.go`: a single boolean field
-/// describing whether the node is currently in the `Ready` state.
-/// Mixed-client devnet evidence consumers parse only `ready`; status
-/// code (200 vs 503) is the secondary signal.
+/// `clients/go/cmd/rubin-node/http_rpc.go:641-643`: a single boolean
+/// field describing whether the node is currently in the `Ready`
+/// state. Per Go's parity-reference comment (http_rpc.go:638-640):
+/// the response status code (200 vs 503) is the primary contract for
+/// orchestrators; the `{ready: bool}` body is the human-readable
+/// secondary signal. Mixed-client devnet evidence consumers parse
+/// both — the test
+/// `ready_endpoint_reports_503_after_shutdown_sticky` and its
+/// siblings assert both signals together.
 #[derive(Serialize)]
 struct ReadyResponse {
     ready: bool,
