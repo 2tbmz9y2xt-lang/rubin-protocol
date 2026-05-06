@@ -222,7 +222,7 @@ func TestMempoolRelayMetadataPreservesBaseChainState(t *testing.T) {
 	toKey := mustBenchmarkNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{100})
+	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{1_000_000})
 	before := snapshotChainState(t, state)
 	mp, err := NewMempool(state, nil, devnetGenesisChainID)
 	if err != nil {
@@ -232,8 +232,8 @@ func TestMempoolRelayMetadataPreservesBaseChainState(t *testing.T) {
 		t,
 		state.Utxos,
 		[]consensus.Outpoint{outpoints[0]},
-		90,
-		3,
+		100_000,
+		100_000,
 		5,
 		fromKey,
 		fromAddress,
@@ -342,13 +342,13 @@ func BenchmarkMempoolRelayMetadata(b *testing.B) {
 	toKey := mustBenchmarkNodeMLDSA87Keypair(b)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
 	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
-	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{100})
+	state, outpoints := benchmarkSpendableChainState(fromAddress, []uint64{1_000_000})
 	txBytes := mustBenchmarkSignedTransferTx(
 		b,
 		state.Utxos,
 		[]consensus.Outpoint{outpoints[0]},
-		90,
-		3,
+		100_000,
+		100_000,
 		5,
 		fromKey,
 		fromAddress,
