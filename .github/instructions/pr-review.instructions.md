@@ -90,7 +90,9 @@ responsibility of the conformance runner.
 - [ ] Secret/private key material uses redaction and constant-time handling
       where secrecy matters; public consensus IDs (`txid`, `wtxid`, `key_id`,
       hashes, pubkeys) may use ordinary deterministic byte comparison.
-- [ ] RNG source is `crypto/rand` (Go) or `OsRng` (Rust), never `math/rand` / `thread_rng` for keys
+- [ ] Key generation uses an OS-backed CSPRNG path (for example OpenSSL RNG or
+      getrandom-backed RNG), never `math/rand`, `thread_rng`, or another
+      non-cryptographic PRNG.
 
 ## Language-Specific Rules
 

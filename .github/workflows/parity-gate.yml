@@ -56,13 +56,41 @@ jobs:
 
           Path(sys.argv[2]).write_bytes(b"\0".join(paths) + (b"\0" if paths else b""))
           PY
+          python3 - /tmp/changed-paths.z /tmp/changed-impl-paths.z <<'PY'
+          import sys
+          from pathlib import Path
 
-          GO_CONSENSUS_CHANGED="$(grep -zEc '^clients/go/consensus/' /tmp/changed-paths.z || true)"
-          GO_CLI_CHANGED="$(grep -zEc '^clients/go/cmd/rubin-consensus-cli/' /tmp/changed-paths.z || true)"
-          RS_CONSENSUS_CHANGED="$(grep -zEc '^clients/rust/crates/rubin-consensus/' /tmp/changed-paths.z || true)"
-          RS_CLI_CHANGED="$(grep -zEc '^clients/rust/crates/rubin-consensus-cli/' /tmp/changed-paths.z || true)"
+          paths = Path(sys.argv[1]).read_bytes().split(b"\0")
+          if paths and paths[-1] == b"":
+              paths.pop()
+
+          test_dirs = {"benches", "testdata", "tests"}
+
+          def is_test_only(path: str) -> bool:
+              parts = path.split("/")
+              name = parts[-1] if parts else path
+              return (
+                  name.endswith("_test.go")
+                  or name.endswith("_test.rs")
+                  or name.endswith("_tests.rs")
+                  or any(part in test_dirs for part in parts)
+              )
+
+          impl_paths = [
+              raw for raw in paths
+              if not is_test_only(raw.decode("utf-8", "surrogateescape"))
+          ]
+          Path(sys.argv[2]).write_bytes(
+              b"\0".join(impl_paths) + (b"\0" if impl_paths else b"")
+          )
+          PY
+
+          GO_CONSENSUS_CHANGED="$(grep -zEc '^clients/go/consensus/' /tmp/changed-impl-paths.z || true)"
+          GO_CLI_CHANGED="$(grep -zEc '^clients/go/cmd/rubin-consensus-cli/' /tmp/changed-impl-paths.z || true)"
+          RS_CONSENSUS_CHANGED="$(grep -zEc '^clients/rust/crates/rubin-consensus/' /tmp/changed-impl-paths.z || true)"
+          RS_CLI_CHANGED="$(grep -zEc '^clients/rust/crates/rubin-consensus-cli/' /tmp/changed-impl-paths.z || true)"
           FIX_CHANGED="$(grep -zEc '^conformance/fixtures/' /tmp/changed-paths.z || true)"
-          ENC_CHANGED="$(grep -zEc '^(clients/go/consensus|clients/rust/crates/rubin-consensus)(/.*)?/[^/]*(encode|decode|serial|marshal|unmarshal|wire|txid|wtxid|hash|sighash|compact|parse|merkle)[^/]*' /tmp/changed-paths.z || true)"
+          ENC_CHANGED="$(grep -zEc '^(clients/go/consensus|clients/rust/crates/rubin-consensus)(/.*)?/[^/]*(encode|decode|serial|marshal|unmarshal|wire|txid|wtxid|hash|sighash|compact|parse|merkle)[^/]*' /tmp/changed-impl-paths.z || true)"
 
           {
             echo "go_consensus=$GO_CONSENSUS_CHANGED"
@@ -88,6 +116,30 @@ jobs:
             local heading="$1"
             local file="$2"
             awk -v heading="$heading" '
+              function strip_html_comments(s, start, tail, end) {
+                while (1) {
+                  if (in_comment) {
+                    end = index(s, "-->")
+                    if (end == 0) {
+                      return ""
+                    }
+                    s = substr(s, end + 3)
+                    in_comment = 0
+                    continue
+                  }
+                  start = index(s, "<!--")
+                  if (start == 0) {
+                    return s
+                  }
+                  tail = substr(s, start + 4)
+                  end = index(tail, "-->")
+                  if (end == 0) {
+                    in_comment = 1
+                    return substr(s, 1, start - 1)
+                  }
+                  s = substr(s, 1, start - 1) substr(s, start + 4 + end + 2)
+                }
+              }
               {
                 sub(/\r$/, "", $0)
                 trimmed = $0
@@ -102,21 +154,11 @@ jobs:
                 exit
               }
               in_block {
-                visible = trimmed
+                visible = strip_html_comments(trimmed)
+                sub(/^[[:space:]]+/, "", visible)
+                sub(/[[:space:]]+$/, "", visible)
                 lower = tolower(visible)
-                if (in_comment) {
-                  if (visible ~ /-->/) {
-                    in_comment = 0
-                  }
-                  next
-                }
                 if (visible == "") {
-                  next
-                }
-                if (visible ~ /^<!--/) {
-                  if (visible !~ /-->/) {
-                    in_comment = 1
-                  }
                   next
                 }
                 if (lower ~ /^(n\/a|na|none|null|todo|tbd|not applicable)([[:space:][:punct:]].*)?$/) {
