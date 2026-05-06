@@ -70,12 +70,15 @@
 //!
 //! Canonical source-aware admission (`TxSource::Local` /
 //! `TxSource::Remote` / `TxSource::Reorg`) is owned by the
-//! per-producer slices. The currently merged producers are RUB-169
-//! reorg requeue (`TxSource::Reorg`) and RUB-171 RPC submit
-//! (`TxSource::Local`). The `TxSource::Remote` p2p producer
-//! wiring is planned (RUB-173) and not yet landed in production;
-//! when it lands, that slice MUST NOT treat a successful relay
-//! outcome here as proof of canonical admission.
+//! per-producer slices. All three producer slices are merged:
+//! RUB-169 reorg requeue (`TxSource::Reorg`), RUB-171 RPC submit
+//! (`TxSource::Local`), and RUB-173 p2p relay (`TxSource::Remote`,
+//! at `p2p_runtime.rs::collect_live_responses` MESSAGE_TX via the
+//! `PeerRelayContext.tx_pool` carrier; gated by a successful
+//! `RelayTxOutcome::Relayed` from `handle_received_tx` here).
+//! None of those producer slices may treat a successful relay
+//! outcome here as proof of canonical admission — admission
+//! happens in the per-producer caller, not in this module.
 //!
 //! # Go counterpart (API/sequence parity ONLY — NOT production-boundary parity)
 //!
@@ -87,10 +90,11 @@
 //! p2p service config struct literal — so Go production is NOT a
 //! relay-cache/canonical split — it admits to the canonical pool
 //! from inside `handleTx`. The relay-cache/canonical split
-//! described in this docstring is currently a Rust-only structural
-//! choice; the `TxSource::Remote` p2p producer wiring planned for
-//! RUB-173 will introduce the canonical-admission counterpart on
-//! the Rust side.
+//! described in this docstring is a Rust-only structural choice;
+//! the `TxSource::Remote` p2p producer counterpart was introduced
+//! by RUB-173 / GitHub #1420 in
+//! `p2p_runtime.rs::collect_live_responses` MESSAGE_TX (after a
+//! `RelayTxOutcome::Relayed` outcome from this module).
 //!
 //! `clients/go/node/p2p/handlers_tx.go::handleTx` runs the same
 //! sequence (oversize → parse → tx_seen → relayTxMetadata →
