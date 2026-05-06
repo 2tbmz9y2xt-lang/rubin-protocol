@@ -47,6 +47,53 @@ This is a blockchain protocol repository containing:
 6. Does the change update ARCHITECTURE_MAP.md if structural changes are made?
 7. Are new error types properly propagated and tested?
 
+## Consensus Hazard Checklist (extended)
+
+This checklist is a Rubin-specific review aid. It is not executable proof; Go
+reference behavior, Rust behavior, and fixture expectations remain the
+responsibility of the conformance runner.
+
+### Determinism (P0 if violated in consensus path)
+- [ ] Consensus serialization and hashing do not rely on Go `map` or Rust
+      `HashMap` iteration order; sort keys or use deterministic containers.
+- [ ] Validation and parsing do not depend on wall-clock time, ambient RNG,
+      goroutine scheduling, async task ordering, or filesystem traversal order.
+- [ ] Consensus-visible iteration order is specified by canonical data order,
+      not by process-local collection behavior.
+
+### Canonical encoding (P0)
+- [ ] CompactSize uses Rubin canonical 1/3/5/9-byte minimal encoding.
+- [ ] Non-minimal CompactSize rejects as `TX_ERR_PARSE`.
+- [ ] `parse_tx` consumes exactly one canonical `TxBytes` payload and rejects
+      trailing bytes.
+- [ ] Transaction and block round trips check both object equality and canonical
+      byte equality when byte-equivalence is claimed.
+
+### Arithmetic safety (P0/P1)
+- [ ] `amount`, `fee`, `height`, `weight`, and size accounting are exact and
+      checked before use in consensus-validity decisions.
+- [ ] Saturating arithmetic is forbidden in consensus-validity decisions unless
+      CANONICAL explicitly defines clamping for that field.
+- [ ] Rust narrowing casts and Go `int`/fixed-width conversions have explicit
+      bounds checks at consensus boundaries.
+
+### DoS surface (P1)
+- [ ] Deserialization has explicit max-size / max-depth limits
+- [ ] No unbounded `Vec::with_capacity(n)` or `make([]T, n)` from untrusted `n`
+- [ ] Loops over network input have iteration caps
+
+### Crypto correctness (P0)
+- [ ] ML-DSA-87 verification uses exactly `(pubkey, crypto_sig, digest32)`.
+- [ ] ML-DSA verification adds no extra context, prehash, truncation, or domain
+      prefix unless CANONICAL explicitly requires it.
+- [ ] `crypto_sig` excludes the trailing `sighash_type` byte.
+- [ ] Secret/private key material uses redaction and constant-time handling
+      where secrecy matters; public consensus IDs (`txid`, `wtxid`, `key_id`,
+      hashes, pubkeys) may use ordinary deterministic byte comparison.
+- [ ] Key generation uses an OS-backed CSPRNG path (for example OpenSSL RNG or
+      getrandom-backed RNG), never `math/rand`, `thread_rng`, or another
+      non-cryptographic PRNG.
+
 ## Language-Specific Rules
 
 ### Rust

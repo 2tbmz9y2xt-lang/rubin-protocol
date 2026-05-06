@@ -1,0 +1,271 @@
+name: Go↔Rust Parity Smoke Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+    paths:
+      - 'clients/go/consensus/**'
+      - 'clients/go/cmd/rubin-consensus-cli/**'
+      - 'clients/rust/crates/rubin-consensus/**'
+      - 'clients/rust/crates/rubin-consensus-cli/**'
+      - 'conformance/fixtures/**'
+      - 'conformance/runner/**'
+      - '.github/workflows/parity-gate.yml'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  parity-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute changed consensus/reference paths
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE="$(jq -r '.pull_request.base.sha' "$GITHUB_EVENT_PATH")"
+          HEAD="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
+          git diff --name-status -z "$BASE...$HEAD" > /tmp/changed-status.z
+          python3 - /tmp/changed-status.z /tmp/changed-paths.z <<'PY'
+          import sys
+          from pathlib import Path
+
+          tokens = Path(sys.argv[1]).read_bytes().split(b"\0")
+          if tokens and tokens[-1] == b"":
+              tokens.pop()
+
+          paths = []
+          index = 0
+          while index < len(tokens):
+              status = tokens[index].decode("utf-8", "surrogateescape")
+              index += 1
+              if not status:
+                  continue
+              path_count = 2 if status[0] in {"R", "C"} else 1
+              if index + path_count > len(tokens):
+                  raise SystemExit(f"malformed git diff --name-status -z near {status!r}")
+              paths.extend(tokens[index:index + path_count])
+              index += path_count
+
+          Path(sys.argv[2]).write_bytes(b"\0".join(paths) + (b"\0" if paths else b""))
+          PY
+          python3 - /tmp/changed-paths.z /tmp/changed-impl-paths.z <<'PY'
+          import sys
+          from pathlib import Path
+
+          paths = Path(sys.argv[1]).read_bytes().split(b"\0")
+          if paths and paths[-1] == b"":
+              paths.pop()
+
+          test_dirs = {"benches", "testdata", "tests"}
+
+          def is_test_only(path: str) -> bool:
+              parts = path.split("/")
+              name = parts[-1] if parts else path
+              return (
+                  name.endswith("_test.go")
+                  or name.endswith("_test.rs")
+                  or name.endswith("_tests.rs")
+                  or any(part in test_dirs for part in parts)
+              )
+
+          impl_paths = [
+              raw for raw in paths
+              if not is_test_only(raw.decode("utf-8", "surrogateescape"))
+          ]
+          Path(sys.argv[2]).write_bytes(
+              b"\0".join(impl_paths) + (b"\0" if impl_paths else b"")
+          )
+          PY
+
+          GO_CONSENSUS_CHANGED="$(grep -zEc '^clients/go/consensus/' /tmp/changed-impl-paths.z || true)"
+          GO_CLI_CHANGED="$(grep -zEc '^clients/go/cmd/rubin-consensus-cli/' /tmp/changed-impl-paths.z || true)"
+          RS_CONSENSUS_CHANGED="$(grep -zEc '^clients/rust/crates/rubin-consensus/' /tmp/changed-impl-paths.z || true)"
+          RS_CLI_CHANGED="$(grep -zEc '^clients/rust/crates/rubin-consensus-cli/' /tmp/changed-impl-paths.z || true)"
+          FIX_CHANGED="$(grep -zEc '^conformance/fixtures/' /tmp/changed-paths.z || true)"
+          ENC_CHANGED="$(grep -zEc '^(clients/go/consensus|clients/rust/crates/rubin-consensus)(/.*)?/[^/]*(encode|decode|serial|marshal|unmarshal|wire|txid|wtxid|hash|sighash|compact|parse|merkle)[^/]*' /tmp/changed-impl-paths.z || true)"
+
+          {
+            echo "go_consensus=$GO_CONSENSUS_CHANGED"
+            echo "go_cli=$GO_CLI_CHANGED"
+            echo "rs_consensus=$RS_CONSENSUS_CHANGED"
+            echo "rs_cli=$RS_CLI_CHANGED"
+            echo "fixtures=$FIX_CHANGED"
+            echo "encoding=$ENC_CHANGED"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read PR exemption metadata
+        id: pr
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          labels_file="$(mktemp)"
+          body_file="$(mktemp)"
+          jq -r '.pull_request.labels[]?.name' "$GITHUB_EVENT_PATH" > "$labels_file"
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$body_file"
+
+          has_justification_block() {
+            local heading="$1"
+            local file="$2"
+            awk -v heading="$heading" '
+              function strip_html_comments(s, start, tail, end) {
+                while (1) {
+                  if (in_comment) {
+                    end = index(s, "-->")
+                    if (end == 0) {
+                      return ""
+                    }
+                    s = substr(s, end + 3)
+                    in_comment = 0
+                    continue
+                  }
+                  start = index(s, "<!--")
+                  if (start == 0) {
+                    return s
+                  }
+                  tail = substr(s, start + 4)
+                  end = index(tail, "-->")
+                  if (end == 0) {
+                    in_comment = 1
+                    return substr(s, 1, start - 1)
+                  }
+                  s = substr(s, 1, start - 1) substr(s, start + 4 + end + 2)
+                }
+              }
+              {
+                sub(/\r$/, "", $0)
+                trimmed = $0
+                sub(/^[[:space:]]+/, "", trimmed)
+                sub(/[[:space:]]+$/, "", trimmed)
+                visible = strip_html_comments(trimmed)
+                sub(/^[[:space:]]+/, "", visible)
+                sub(/[[:space:]]+$/, "", visible)
+              }
+              visible == "### " heading {
+                in_block = 1
+                next
+              }
+              in_block && visible ~ /^#{1,6}[[:space:]]+/ {
+                exit
+              }
+              in_block {
+                lower = tolower(visible)
+                if (visible == "") {
+                  next
+                }
+                if (lower ~ /^(n\/a|na|none|null|todo|tbd|not applicable)([[:space:][:punct:]].*)?$/) {
+                  next
+                }
+                found = 1
+              }
+              END {
+                exit found ? 0 : 1
+              }
+            ' "$file"
+          }
+
+          parity_label=false
+          fixture_label=false
+          parity_block=false
+          fixture_block=false
+          parity_exempt=false
+          fixture_exempt=false
+
+          if grep -Fxq 'parity-exempt' "$labels_file"; then
+            parity_label=true
+          fi
+          if grep -Fxq 'fixture-exempt' "$labels_file"; then
+            fixture_label=true
+          fi
+          if has_justification_block 'Parity exemption justification' "$body_file"; then
+            parity_block=true
+          fi
+          if has_justification_block 'Fixture exemption justification' "$body_file"; then
+            fixture_block=true
+          fi
+          if [[ "$parity_label" == "true" && "$parity_block" == "true" ]]; then
+            parity_exempt=true
+          fi
+          if [[ "$fixture_label" == "true" && "$fixture_block" == "true" ]]; then
+            fixture_exempt=true
+          fi
+
+          {
+            echo "parity_label=$parity_label"
+            echo "fixture_label=$fixture_label"
+            echo "parity_block=$parity_block"
+            echo "fixture_block=$fixture_block"
+            echo "parity_exempt=$parity_exempt"
+            echo "fixture_exempt=$fixture_exempt"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require justification for exemption labels
+        shell: bash
+        env:
+          PARITY_LABEL: ${{ steps.pr.outputs.parity_label }}
+          PARITY_BLOCK: ${{ steps.pr.outputs.parity_block }}
+          FIXTURE_LABEL: ${{ steps.pr.outputs.fixture_label }}
+          FIXTURE_BLOCK: ${{ steps.pr.outputs.fixture_block }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$PARITY_LABEL" == "true" && "$PARITY_BLOCK" != "true" ]]; then
+            echo "::error::The parity-exempt label requires a '### Parity exemption justification' block in the PR body."
+            exit 1
+          fi
+          if [[ "$FIXTURE_LABEL" == "true" && "$FIXTURE_BLOCK" != "true" ]]; then
+            echo "::error::The fixture-exempt label requires a '### Fixture exemption justification' block in the PR body."
+            exit 1
+          fi
+
+      - name: Enforce source-level Go↔Rust parity smoke
+        shell: bash
+        env:
+          GO_CONSENSUS_CHANGED: ${{ steps.diff.outputs.go_consensus }}
+          GO_CLI_CHANGED: ${{ steps.diff.outputs.go_cli }}
+          RS_CONSENSUS_CHANGED: ${{ steps.diff.outputs.rs_consensus }}
+          RS_CLI_CHANGED: ${{ steps.diff.outputs.rs_cli }}
+          PARITY_EXEMPT: ${{ steps.pr.outputs.parity_exempt }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$PARITY_EXEMPT" != "true" ]]; then
+            if [[ "$GO_CONSENSUS_CHANGED" -gt 0 && "$RS_CONSENSUS_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Go consensus implementation paths changed but Rust consensus implementation paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+              exit 1
+            fi
+            if [[ "$RS_CONSENSUS_CHANGED" -gt 0 && "$GO_CONSENSUS_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Rust consensus implementation paths changed but Go consensus implementation paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+              exit 1
+            fi
+            if [[ "$GO_CLI_CHANGED" -gt 0 && "$RS_CLI_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Go consensus CLI paths changed but Rust consensus CLI paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+              exit 1
+            fi
+            if [[ "$RS_CLI_CHANGED" -gt 0 && "$GO_CLI_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Rust consensus CLI paths changed but Go consensus CLI paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+              exit 1
+            fi
+          fi
+
+      - name: Enforce fixture smoke on encoding/hash/parse changes
+        shell: bash
+        env:
+          ENC_CHANGED: ${{ steps.diff.outputs.encoding }}
+          FIX_CHANGED: ${{ steps.diff.outputs.fixtures }}
+          FIXTURE_EXEMPT: ${{ steps.pr.outputs.fixture_exempt }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$FIXTURE_EXEMPT" != "true" && "$ENC_CHANGED" -gt 0 && "$FIX_CHANGED" -eq 0 ]]; then
+            echo "::error::Source-level fixture smoke failed: encoding/hash/parse consensus paths changed without conformance/fixtures updates. Add fixture updates or use fixture-exempt with a PR-body justification."
+            exit 1
+          fi
