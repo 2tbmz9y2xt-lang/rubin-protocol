@@ -610,7 +610,7 @@ impl TxPool {
     ) -> Result<Vec<[u8; 32]>, TxPoolAdmitError> {
         if self.max_transactions == 0 || self.max_bytes == 0 {
             return Err(unavailable(format!(
-                "invalid tx pool capacity limits: max_txs={} max_bytes={}",
+                "invalid mempool capacity limits: max_txs={} max_bytes={}",
                 self.max_transactions, self.max_bytes
             )));
         }
@@ -2656,7 +2656,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
-        assert!(err.message.contains("invalid tx pool capacity limits"));
+        assert!(err.message.contains("invalid mempool capacity limits"));
 
         let mut invalid_candidate = TxPool::new();
         invalid_candidate.set_capacity_for_test(10, 100);
