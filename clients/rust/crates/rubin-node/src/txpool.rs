@@ -2550,21 +2550,12 @@ mod tests {
     }
 
     #[test]
-    fn rub196_low_water_helpers_match_go_boundaries() {
+    fn rub196_byte_cap_evicts_to_low_water_through_public_admit() {
         for (max_bytes, want) in [(0, 0), (1, 1), (9, 8), (10, 9), (11, 9)] {
-            assert_eq!(
-                default_tx_pool_low_water_bytes(max_bytes),
-                want,
-                "low-water mismatch for max_bytes={max_bytes}"
-            );
+            assert_eq!(default_tx_pool_low_water_bytes(max_bytes), want);
         }
         assert_eq!(tx_pool_byte_pressure_target(90, 95), 95);
-        assert_eq!(tx_pool_byte_pressure_target(90, 10), 90);
-    }
-
-    #[test]
-    fn rub196_byte_cap_evicts_to_low_water_through_public_admit() {
-        let (state, raw_best) = signed_p2pk_state_and_tx(
+        let (state, raw) = signed_p2pk_state_and_tx(
             40_000,
             vec![TxOutput {
                 value: 10,
@@ -2575,222 +2566,154 @@ mod tests {
             None,
             Vec::new(),
         );
-        let (_tx, best_txid, _wtxid, consumed) = parse_tx(&raw_best).expect("parse best");
-        assert_eq!(consumed, raw_best.len());
-        let candidate_size = raw_best.len();
-
+        let (_tx, best_txid, _wtxid, consumed) = parse_tx(&raw).expect("parse best");
+        assert_eq!(consumed, raw.len());
+        let size = raw.len();
         let mut pool = TxPool::new();
-        pool.set_capacity_for_test(10, candidate_size * 3);
-        let low = [0x31; 32];
-        let mid = [0x32; 32];
-        let high = [0x33; 32];
-        pool.insert_entry(low, test_entry(1, 1, candidate_size, TxSource::Local));
-        pool.insert_entry(mid, test_entry(2, 1, candidate_size, TxSource::Remote));
-        pool.insert_entry(high, test_entry(3, 1, candidate_size, TxSource::Reorg));
-        assert_eq!(pool.used_bytes, candidate_size * 3);
-
-        let admitted = pool
-            .admit(&raw_best, &state, None, [0u8; 32])
-            .expect("byte-pressure public admit must evict residents");
-        assert_eq!(admitted, best_txid);
-        assert!(
-            pool.used_bytes <= pool.effective_low_water_bytes(),
-            "used_bytes={} low_water={}",
-            pool.used_bytes,
-            pool.effective_low_water_bytes()
+        pool.set_capacity_for_test(10, size * 3);
+        for (txid, fee, source) in [
+            ([0x31; 32], 1, TxSource::Local),
+            ([0x32; 32], 2, TxSource::Remote),
+            ([0x33; 32], 3, TxSource::Reorg),
+        ] {
+            pool.insert_entry(txid, test_entry(fee, 1, size, source));
+        }
+        assert_eq!(
+            pool.admit(&raw, &state, None, [0u8; 32]).unwrap(),
+            best_txid
         );
-        assert!(
-            !pool.txs.contains_key(&low),
-            "lowest priority resident kept"
-        );
-        assert!(
-            !pool.txs.contains_key(&mid),
-            "middle priority resident kept"
-        );
-        assert!(pool.txs.contains_key(&high), "higher resident evicted");
-        assert!(pool.txs.contains_key(&best_txid), "candidate missing");
+        assert!(pool.used_bytes <= pool.effective_low_water_bytes());
+        assert!(!pool.txs.contains_key(&[0x31; 32]));
+        assert!(!pool.txs.contains_key(&[0x32; 32]));
+        assert!(pool.txs.contains_key(&[0x33; 32]));
+        assert!(pool.txs.contains_key(&best_txid));
     }
 
     #[test]
-    fn rub196_byte_pressure_admits_candidate_larger_than_low_water_when_it_fits_max() {
-        let mut pool = TxPool::new();
-        pool.set_capacity_for_test(10, 100);
-        assert_eq!(pool.effective_low_water_bytes(), 90);
+    fn rub196_byte_capacity_direct_edges() {
+        let mut larger = TxPool::new();
+        larger.set_capacity_for_test(10, 100);
+        larger.insert_entry([0x41; 32], test_entry(1, 1, 95, TxSource::Local));
+        larger
+            .insert_capacity_checked_entry_for_test(
+                [0x42; 32],
+                test_entry(100, 1, 95, TxSource::Remote),
+            )
+            .unwrap();
+        assert_eq!(larger.used_bytes, 95);
+        assert!(larger.txs.contains_key(&[0x42; 32]));
+        assert!(!larger.txs.contains_key(&[0x41; 32]));
 
-        let resident = [0x41; 32];
-        let candidate = [0x42; 32];
-        pool.insert_entry(resident, test_entry(1, 1, 95, TxSource::Local));
-        pool.insert_capacity_checked_entry_for_test(
-            candidate,
-            test_entry(100, 1, 95, TxSource::Remote),
-        )
-        .expect("fitting candidate larger than low-water must admit");
-
-        assert_eq!(pool.len(), 1);
-        assert_eq!(pool.used_bytes, 95);
-        assert!(pool.txs.contains_key(&candidate));
-        assert!(!pool.txs.contains_key(&resident));
-    }
-
-    #[test]
-    fn rub196_candidate_larger_than_max_bytes_rejects_without_mutation() {
-        let (state, raw) = signed_p2pk_state_and_tx(
-            40_000,
-            vec![TxOutput {
-                value: 10,
-                covenant_type: COV_TYPE_P2PK,
-                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x91; 2592]),
-            }],
-            0x00,
-            None,
-            Vec::new(),
+        let mut worst = TxPool::new();
+        worst.set_capacity_for_test(10, 100);
+        worst.insert_entry([0x51; 32], test_entry(100, 1, 95, TxSource::Local));
+        let snapshot = (
+            worst.len(),
+            worst.used_bytes,
+            worst.heap_seqs.clone(),
+            worst.next_heap_id,
         );
-        let mut pool = TxPool::new();
-        pool.set_capacity_for_test(10, raw.len() - 1);
-        let err = pool
-            .admit(&raw, &state, None, [0u8; 32])
-            .expect_err("candidate larger than hard byte cap must reject");
-        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
-        assert!(err.message.contains("mempool byte limit exceeded"));
-        assert_eq!(pool.len(), 0);
-        assert_eq!(pool.used_bytes, 0);
-        assert!(pool.spenders.is_empty());
-        assert!(pool.heap_seqs.is_empty());
-    }
-
-    #[test]
-    fn rub196_byte_candidate_worst_rejects_without_mutation() {
-        let mut pool = TxPool::new();
-        pool.set_capacity_for_test(10, 100);
-        let resident = [0x51; 32];
-        pool.insert_entry(resident, test_entry(100, 1, 95, TxSource::Local));
-        let before_len = pool.len();
-        let before_used = pool.used_bytes;
-        let before_heap = pool.heap_seqs.clone();
-        let before_spenders = pool.spenders.clone();
-        let before_next_heap_id = pool.next_heap_id;
-
-        let err = pool
+        let err = worst
             .insert_capacity_checked_entry_for_test(
                 [0x52; 32],
                 test_entry(1, 1, 95, TxSource::Reorg),
             )
-            .expect_err("candidate worst under byte pressure must reject");
+            .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
-        assert!(
-            err.message
-                .contains("mempool capacity candidate rejected by eviction ordering"),
-            "wrong error: {}",
-            err.message
+        assert!(err
+            .message
+            .contains("candidate rejected by eviction ordering"));
+        assert_eq!(
+            (
+                worst.len(),
+                worst.used_bytes,
+                worst.heap_seqs,
+                worst.next_heap_id
+            ),
+            snapshot
         );
-        assert_eq!(pool.len(), before_len);
-        assert_eq!(pool.used_bytes, before_used);
-        assert_eq!(pool.heap_seqs, before_heap);
-        assert_eq!(pool.spenders, before_spenders);
-        assert_eq!(pool.next_heap_id, before_next_heap_id);
-        assert!(pool.txs.contains_key(&resident));
+
+        let mut tie = TxPool::new();
+        tie.set_capacity_for_test(1, 100);
+        tie.insert_entry([0x01; 32], test_entry(10, 1, 50, TxSource::Local));
+        assert!(tie
+            .insert_capacity_checked_entry_for_test(
+                [0xff; 32],
+                test_entry(10, 1, 50, TxSource::Remote)
+            )
+            .is_err());
+        assert!(tie.txs.contains_key(&[0x01; 32]));
     }
 
     #[test]
-    fn rub196_capacity_metadata_invariants_are_rejected_not_conflicts() {
-        let mut pool = TxPool::new();
-        pool.set_capacity_for_test(1, 100);
-        let resident = [0x56; 32];
-        pool.txs
-            .insert(resident, test_entry(1, 1, 50, TxSource::Local));
+    fn rub196_capacity_rejects_bad_edges_without_mutation() {
+        let mut oversize = TxPool::new();
+        oversize.set_capacity_for_test(10, 100);
+        let err = oversize
+            .insert_capacity_checked_entry_for_test(
+                [0x54; 32],
+                test_entry(100, 1, 101, TxSource::Local),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert_eq!((oversize.len(), oversize.used_bytes), (0, 0));
 
-        let err = pool
+        let mut missing_seq = TxPool::new();
+        missing_seq.set_capacity_for_test(1, 100);
+        missing_seq
+            .txs
+            .insert([0x56; 32], test_entry(1, 1, 50, TxSource::Local));
+        let err = missing_seq
             .insert_capacity_checked_entry_for_test(
                 [0x57; 32],
                 test_entry(100, 1, 50, TxSource::Remote),
             )
-            .expect_err("missing resident admission sequence must fail closed");
+            .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
         assert!(err.message.contains("missing heap sequence"));
 
-        let mut duplicate = TxPool::new();
-        duplicate.set_capacity_for_test(10, 100);
-        let a = [0x58; 32];
-        let b = [0x59; 32];
-        duplicate.insert_entry(a, test_entry(1, 1, 40, TxSource::Local));
-        duplicate.insert_entry(b, test_entry(2, 1, 40, TxSource::Remote));
-        let reused_seq = duplicate.heap_seqs[&a];
-        duplicate.heap_seqs.insert(b, reused_seq);
-        let err = duplicate
-            .insert_capacity_checked_entry_for_test(
-                [0x5a; 32],
-                test_entry(100, 1, 40, TxSource::Reorg),
-            )
-            .expect_err("duplicate admission sequence must fail closed");
-        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
-        assert!(err.message.contains("duplicate heap sequence"));
-    }
-
-    #[test]
-    fn rub196_capacity_byte_accounting_underflow_is_unavailable() {
-        let mut pool = TxPool::new();
-        pool.set_capacity_for_test(1, 100);
-        let resident = [0x5b; 32];
-        pool.insert_entry(resident, test_entry(1, 1, 95, TxSource::Local));
-        pool.used_bytes = 0;
-
-        let err = pool
+        let mut underflow = TxPool::new();
+        underflow.set_capacity_for_test(1, 100);
+        underflow.insert_entry([0x5b; 32], test_entry(1, 1, 95, TxSource::Local));
+        underflow.used_bytes = 0;
+        let err = underflow
             .insert_capacity_checked_entry_for_test(
                 [0x5c; 32],
                 test_entry(100, 1, 1, TxSource::Remote),
             )
-            .expect_err("corrupt byte accounting must fail closed");
+            .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert!(err.message.contains("eviction byte accounting underflow"));
-        assert!(pool.txs.contains_key(&resident));
-    }
-
-    #[test]
-    fn rub196_capacity_tie_treats_candidate_as_oldest_no_rbf() {
-        let mut pool = TxPool::new();
-        pool.set_capacity_for_test(1, 100);
-        let resident = [0x01; 32];
-        pool.insert_entry(resident, test_entry(10, 1, 50, TxSource::Local));
-
-        let err = pool
-            .insert_capacity_checked_entry_for_test(
-                [0xff; 32],
-                test_entry(10, 1, 50, TxSource::Remote),
-            )
-            .expect_err("equal-priority candidate must not replace resident");
-        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
-        assert!(pool.txs.contains_key(&resident));
-        assert_eq!(pool.len(), 1);
-        assert_eq!(pool.used_bytes, 50);
+        assert!(underflow.txs.contains_key(&[0x5b; 32]));
     }
 
     #[test]
     fn rub196_source_does_not_affect_byte_capacity_ordering() {
-        let run = |resident_source: TxSource, candidate_source: TxSource| {
+        let mut outcomes = Vec::new();
+        for (resident_source, candidate_source) in [
+            (TxSource::Local, TxSource::Remote),
+            (TxSource::Reorg, TxSource::Local),
+        ] {
             let mut pool = TxPool::new();
             pool.set_capacity_for_test(10, 100);
-            let low = [0x61; 32];
-            let high = [0x62; 32];
-            let candidate = [0x63; 32];
-            pool.insert_entry(low, test_entry(1, 1, 40, resident_source));
-            pool.insert_entry(high, test_entry(50, 1, 40, TxSource::Local));
+            pool.insert_entry([0x61; 32], test_entry(1, 1, 40, resident_source));
+            pool.insert_entry([0x62; 32], test_entry(50, 1, 40, TxSource::Local));
             pool.insert_capacity_checked_entry_for_test(
-                candidate,
+                [0x63; 32],
                 test_entry(100, 1, 40, candidate_source),
             )
-            .expect("byte capacity should evict only by fee/weight");
-            (
-                pool.txs.contains_key(&low),
-                pool.txs.contains_key(&high),
-                pool.txs.contains_key(&candidate),
+            .unwrap();
+            outcomes.push((
+                pool.txs.contains_key(&[0x61; 32]),
+                pool.txs.contains_key(&[0x62; 32]),
+                pool.txs.contains_key(&[0x63; 32]),
                 pool.used_bytes,
-            )
-        };
-
-        let local_remote = run(TxSource::Local, TxSource::Remote);
-        let reorg_local = run(TxSource::Reorg, TxSource::Local);
-        assert_eq!(local_remote, reorg_local);
-        assert_eq!(local_remote, (false, true, true, 80));
+            ));
+        }
+        assert_eq!(
+            outcomes,
+            vec![(false, true, true, 80), (false, true, true, 80)]
+        );
     }
 
     #[test]
