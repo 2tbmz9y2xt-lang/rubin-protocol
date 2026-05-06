@@ -137,8 +137,17 @@ pub struct PeerRelayContext<'a> {
     /// production block-apply cleanup path in `p2p_service.rs`) into the
     /// peer-tx live message dispatch so peer transactions admit through
     /// the canonical source-aware entry after relay-cache success. The
-    /// `Remote` provenance matches Go's `Mempool.AddRemoteTx` (called
-    /// from `clients/go/node/p2p/handlers_tx.go::handleTx`).
+    /// `Remote` provenance matches Go's `Mempool.AddRemoteTx`
+    /// (`clients/go/node/mempool.go:416`). Go's p2p production path
+    /// reaches `AddRemoteTx` through three indirections:
+    /// `clients/go/node/p2p/handlers_tx.go::handleTx` (line 45) calls
+    /// `cfg.TxPool.Put` against the `TxPool` interface, which
+    /// production wiring at
+    /// `clients/go/cmd/rubin-node/main.go:489`
+    /// (`p2p.NewCanonicalMempoolTxPool(mempool)`) routes through
+    /// `CanonicalMempoolTxPool.Put`
+    /// (`clients/go/node/p2p/mempool.go:45-54`); that method's last
+    /// statement (line 53) is `p.mempool.AddRemoteTx(raw)`.
     pub tx_pool: &'a std::sync::Mutex<crate::txpool::TxPool>,
 }
 
@@ -527,9 +536,16 @@ impl PeerSession {
                     // transactions admit via
                     // `add_tx_with_source(..., TxSource::Remote, ...)`,
                     // matching Go's `Mempool.AddRemoteTx`
-                    // (`clients/go/node/mempool.go`) which is the shared
-                    // body called from
-                    // `clients/go/node/p2p/handlers_tx.go::handleTx`.
+                    // (`clients/go/node/mempool.go:416`). Go's p2p
+                    // production path reaches `AddRemoteTx` indirectly:
+                    // `handlers_tx.go::handleTx` calls
+                    // `cfg.TxPool.Put` (the `TxPool` interface), which
+                    // production wiring
+                    // (`clients/go/cmd/rubin-node/main.go:489`,
+                    // `NewCanonicalMempoolTxPool(mempool)`) routes
+                    // through `CanonicalMempoolTxPool.Put`
+                    // (`clients/go/node/p2p/mempool.go:45-54`); line 53
+                    // is `p.mempool.AddRemoteTx(raw)`.
                     //
                     // Only fires after `handle_received_tx` returns
                     // `RelayTxOutcome::Relayed`, which means the peer tx
