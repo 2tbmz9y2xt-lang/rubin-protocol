@@ -2977,22 +2977,25 @@ mod tests {
     /// Why this is not helper-only:
     ///
     ///   - The test does NOT call `pool.admit(...)` directly. Admission
-    ///     happens through `PeerSession::handle_live_message`, which is the
-    ///     same public entrypoint used by the production message loop in
-    ///     `clients/rust/crates/rubin-node/src/p2p_service.rs::handle_peer`.
+    ///     happens through `PeerSession::collect_live_responses`, the
+    ///     exact public method used by the production message loop in
+    ///     `clients/rust/crates/rubin-node/src/p2p_service.rs::handle_peer`
+    ///     (see the `session.collect_live_responses(msg, &mut engine,
+    ///     Some(&relay_ctx))` call in `handle_peer`'s message-loop body).
     ///   - The test constructs a real `PeerRelayContext` whose `tx_pool`
     ///     field uses the same `Mutex<TxPool>` shape that
     ///     `p2p_service.rs::handle_peer` constructs from
     ///     `&shared.tx_pool` (the canonical pool that already drives the
     ///     production block-apply cleanup path).
     ///   - The canonical pool side effect is asserted from outside the
-    ///     dispatch: after `handle_live_message` returns, `tx_pool.lock()`
-    ///     is taken and `pool.has(&txid)` is checked. The seam is the only
-    ///     code path that could put the txid there in this scenario.
+    ///     dispatch: after `collect_live_responses` returns,
+    ///     `tx_pool.lock()` is taken and `pool.contains(&txid)` plus
+    ///     `pool.entry_source(&txid)` are checked. The seam is the
+    ///     only code path that could put the txid there in this scenario.
     ///   - No `TxSource::Remote` claim. The seam uses legacy `pool.admit`;
     ///     source-aware classification is RUB-173 / GitHub #1420 follow-up.
     #[test]
-    fn handle_live_message_message_tx_admits_through_canonical_pool_seam() {
+    fn collect_live_responses_message_tx_admits_through_canonical_pool_seam() {
         use std::collections::HashMap;
         use std::sync::Mutex;
 
@@ -3058,8 +3061,8 @@ mod tests {
             };
 
             let _ = session
-                .handle_live_message(msg, &mut engine, Some(&relay_ctx))
-                .expect("handle_live_message MESSAGE_TX must succeed for floor-compliant tx");
+                .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
+                .expect("collect_live_responses MESSAGE_TX must succeed for floor-compliant tx");
 
             let (_, txid, _, _consumed) = parse_tx(&tx_bytes).expect("parse tx for txid");
 
@@ -3113,7 +3116,8 @@ mod tests {
     }
 
     /// RUB-178 smoke test for the `relay_ctx = None` branch of
-    /// `MESSAGE_TX` dispatch.
+    /// `MESSAGE_TX` dispatch through the production dispatcher
+    /// `collect_live_responses`.
     ///
     /// The seam is structurally gated by `PeerRelayContext` itself:
     /// `ctx.tx_pool` is a field of `PeerRelayContext`, so absence of
@@ -3121,22 +3125,21 @@ mod tests {
     /// not through a runtime check that this test could observe. What
     /// this test DOES pin:
     ///
-    ///   - `handle_live_message(MESSAGE_TX, _, None)` returns `Ok`
-    ///     with an empty `TxPoolCleanupPlan` (no panic, no error,
-    ///     no spurious cleanup).
+    ///   - `collect_live_responses(MESSAGE_TX, _, None)` returns `Ok`
+    ///     with an empty `LiveMessageOutcome` (no responses, empty
+    ///     `tx_pool_cleanup`, no panic, no error).
     ///   - The dispatch does NOT depend on relay_ctx for parse/cap
     ///     handling — the `MESSAGE_TX` arm simply skips the
     ///     relay+canonical work block when `relay_ctx` is None.
     ///
-    /// What this test does NOT pin (and was previously overclaimed):
-    /// it does not observe absence-of-admission on a canonical pool,
-    /// because there is no canonical pool reachable in this
-    /// configuration — the type system makes the seam unreachable.
-    /// The seam-gated invariant is enforced by the
-    /// `PeerRelayContext.tx_pool: &Mutex<TxPool>` field's
-    /// non-optionality.
+    /// What this test does NOT pin: it does not observe
+    /// absence-of-admission on a canonical pool, because there is no
+    /// canonical pool reachable in this configuration — the type
+    /// system makes the seam unreachable. The seam-gated invariant
+    /// is enforced by the `PeerRelayContext.tx_pool: &Mutex<TxPool>`
+    /// field's non-optionality, not by a runtime check.
     #[test]
-    fn handle_live_message_message_tx_without_relay_ctx_does_not_admit() {
+    fn collect_live_responses_message_tx_without_relay_ctx_does_not_admit() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
 
@@ -3163,9 +3166,10 @@ mod tests {
 
             // No relay_ctx -> the seam never fires.
             let outcome = session
-                .handle_live_message(msg, &mut engine, None)
+                .collect_live_responses(msg, &mut engine, None)
                 .expect("MESSAGE_TX without relay_ctx is a no-op");
-            assert!(outcome.is_empty());
+            assert!(outcome.responses.is_empty());
+            assert!(outcome.tx_pool_cleanup.is_empty());
         });
 
         let _client = TcpStream::connect(addr).expect("connect");
