@@ -1495,8 +1495,8 @@ mod tests {
     #[test]
     fn validate_config_rejects_wrong_byte_count_mine_address_hex() {
         // 1-byte (2 hex chars): valid hex but neither 32-byte key_id
-        // nor 33-byte canonical — Go's ValidateConfig rejects with
-        // "must be 32 or 33 bytes" and Rust must do the same.
+        // nor 33-byte canonical. validate_config should reject it and
+        // surface the wrapped "invalid mine_address" prefix.
         let mut cfg =
             parse_args(&["--mine-address".to_string(), "aa".to_string()]).expect("parse args");
         let err = validate_config(&mut cfg).unwrap_err();
