@@ -1437,12 +1437,11 @@ mod tests {
     /// ~line 372), causing operators to discover the error after
     /// startup-side effects rather than at config-validation time.
     ///
-    /// Proof assertion: each malformed-input test below calls
-    /// `validate_config(&mut cfg)` (the public config-validation
-    /// entrypoint exercised by the binary's startup path) and asserts
-    /// the returned `Err(_)` carries the `invalid mine_address` prefix
-    /// produced by the new gate. The accept tests assert `Ok(())` for
-    /// 32-byte and 33-byte (canonical `suite_id||key_id`) hex.
+    /// Proof assertion: each `assert!(err.contains("invalid mine_address"))`
+    /// in the rejection tests below is the regression anchor; each
+    /// `validate_config(&mut cfg).expect(...)` in the accept tests
+    /// pins the 32-byte and 33-byte (canonical `suite_id||key_id`) hex
+    /// inputs as continuing to pass through `parse_mine_address_arg`.
     #[test]
     fn validate_config_accepts_32byte_mine_address_hex() {
         let mine_address = "11".repeat(32);
@@ -1481,9 +1480,7 @@ mod tests {
 
     #[test]
     fn validate_config_rejects_odd_length_mine_address_hex() {
-        // Odd-length hex: parse_mine_address rejects before decode; the
-        // existing miner-setup-time check would only catch this AFTER
-        // dry-run printed an effective config implying acceptance.
+        // Odd-length hex: parse_mine_address rejects before decode.
         // 63 hex chars is odd-length (canonical 32-byte form is 64 chars
         // and 33-byte canonical form is 66 chars).
         let mut cfg =
