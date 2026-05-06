@@ -13,7 +13,9 @@ use crate::coinbase::{
     build_coinbase_tx, default_mine_address, normalize_mine_address, parse_mine_address,
 };
 use crate::sync::SyncEngine;
-use crate::txpool::{apply_policy, TxPool, TxPoolConfig};
+use crate::txpool::{
+    apply_policy, TxPool, TxPoolConfig, DEFAULT_MEMPOOL_MIN_FEE_RATE, DEFAULT_MIN_DA_FEE_RATE,
+};
 
 fn current_unix() -> u64 {
     SystemTime::now()
@@ -32,6 +34,17 @@ pub struct MinerConfig {
     pub policy_reject_non_coinbase_anchor_outputs: bool,
     pub policy_max_da_bytes_per_block: u64,
     pub policy_da_surcharge_per_byte: u64,
+    /// Stage C `current_mempool_min_fee_rate` input forwarded to the DA
+    /// fee policy when `policy_da_anchor_anti_abuse` is on. Defaults to
+    /// `DEFAULT_MEMPOOL_MIN_FEE_RATE` (mirrors Go's documented pattern
+    /// for callers without a live rolling-floor source).
+    pub policy_current_mempool_min_fee_rate: u64,
+    /// Stage C `min_da_fee_rate` input forwarded to the DA fee policy
+    /// when `policy_da_anchor_anti_abuse` is on. Defaults to
+    /// `DEFAULT_MIN_DA_FEE_RATE`, kept separate from
+    /// `DEFAULT_MEMPOOL_MIN_FEE_RATE` so a future change to the relay
+    /// floor cannot silently change the DA floor.
+    pub policy_min_da_fee_rate: u64,
     pub policy_reject_core_ext_pre_activation: bool,
     pub core_ext_deployments: CoreExtDeploymentProfiles,
 }
@@ -71,6 +84,8 @@ impl Default for MinerConfig {
             policy_reject_non_coinbase_anchor_outputs: true,
             policy_max_da_bytes_per_block: MAX_DA_BYTES_PER_BLOCK / 4,
             policy_da_surcharge_per_byte: 0,
+            policy_current_mempool_min_fee_rate: DEFAULT_MEMPOOL_MIN_FEE_RATE,
+            policy_min_da_fee_rate: DEFAULT_MIN_DA_FEE_RATE,
             policy_reject_core_ext_pre_activation: true,
             core_ext_deployments: CoreExtDeploymentProfiles::empty(),
         }
@@ -242,11 +257,29 @@ impl<'a> Miner<'a> {
             policy_max_ext_payload_bytes: 0,
             core_ext_deployments: self.cfg.core_ext_deployments.clone(),
             suite_context: self.sync.cfg.suite_context.clone(),
+            policy_current_mempool_min_fee_rate: if self.cfg.policy_da_anchor_anti_abuse {
+                self.cfg.policy_current_mempool_min_fee_rate
+            } else {
+                0
+            },
+            policy_min_da_fee_rate: if self.cfg.policy_da_anchor_anti_abuse {
+                self.cfg.policy_min_da_fee_rate
+            } else {
+                0
+            },
         };
-        if apply_policy(tx, &self.sync.chain_state.utxos, next_height, &policy_cfg).is_err() {
+        // RUB-167 single-walk invariant: extract weight + da_bytes once
+        // here and reuse via `apply_policy` (which forwards into
+        // `reject_da_anchor_tx_policy`) AND in the policy_da_included
+        // budget update below. Avoids the previous double walk where
+        // `apply_policy` recomputed weight/da_bytes internally and the
+        // miner then walked again to read `da_bytes`.
+        let (weight, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|e| e.to_string())?;
+        let utxos = &self.sync.chain_state.utxos;
+        let policy_result = apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg);
+        if policy_result.is_err() {
             return Ok((true, policy_da_included));
         }
-        let (_, da_bytes, _) = tx_weight_and_stats_public(tx).map_err(|e| e.to_string())?;
         if self.cfg.policy_da_anchor_anti_abuse {
             let next_da = updated_policy_da_bytes(
                 policy_da_included,
@@ -396,6 +429,7 @@ mod tests {
     use rubin_consensus::constants::MAX_BLOCK_WEIGHT;
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
 
+    use crate::txpool::TxSource;
     use crate::{
         block_store_path, chain_state_path, default_sync_config, devnet_genesis_chain_id,
         test_helpers::signed_conflicting_p2pk_state_and_txs, BlockStore, ChainState, SyncEngine,
@@ -616,6 +650,23 @@ mod tests {
         (state, raw)
     }
 
+    fn admit_setup_pool_tx(
+        pool: &mut TxPool,
+        raw: &[u8],
+        state: &ChainState,
+        source: TxSource,
+    ) -> [u8; 32] {
+        let (txid, _) = pool
+            .add_tx_with_source(raw, state, None, devnet_genesis_chain_id(), source)
+            .expect("setup admit");
+        assert_eq!(
+            pool.entry_source(&txid),
+            Some(source),
+            "setup admission records its declared source before miner cleanup"
+        );
+        txid
+    }
+
     #[test]
     fn mine_one_includes_valid_explicit_tx() {
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-explicit-valid");
@@ -636,13 +687,27 @@ mod tests {
 
     #[test]
     fn mine_n_evicts_confirmed_pool_transactions_between_blocks() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: signed_p2pk_state_and_tx(20, 10) → fee=10
+        //     with weight ≈ 7653 admits because pre-RUB-162
+        //     admit_with_metadata did not enforce the rolling fee floor.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor (DEFAULT=1) via validate_fee_floor.
+        //   - reachability: tx is well-formed; setup admission reaches the
+        //     txpool admission path. Mine_n then confirms blocks and
+        //     evicts confirmed txs from the pool.
+        //   - producer boundary: the admission below is setup-only; miner
+        //     production code only selects and cleans up existing pool txs.
+        //   - replacement coverage: input bumped to 7700 so fee = 7700 - 10
+        //     = 7690 ≥ weight (≈7653). The mine-then-evict invariant
+        //     remains under test.
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-pool-evict");
-        let (state, raw) = signed_p2pk_state_and_tx(20, 10);
-        sync.chain_state.utxos = state.utxos;
+        let (state, raw) = signed_p2pk_state_and_tx(7700, 10);
+        sync.chain_state.utxos = state.utxos.clone();
 
         let mut pool = TxPool::new();
-        pool.admit(&raw, &sync.chain_state, None, devnet_genesis_chain_id())
-            .expect("admit");
+        let confirmed_txid = admit_setup_pool_tx(&mut pool, &raw, &state, TxSource::Remote);
 
         let mined = {
             let cfg = MinerConfig {
@@ -657,24 +722,46 @@ mod tests {
         assert_eq!(mined[0].tx_count, 2);
         assert_eq!(mined[1].tx_count, 1);
         assert!(pool.is_empty());
+        assert!(!pool.contains(&confirmed_txid));
+        assert_eq!(pool.entry_source(&confirmed_txid), None);
+        // Re-admit against the original setup state only as an index
+        // cleanup probe; this does not model post-confirmation runtime
+        // validity or a miner producer path.
+        let reaccepted_txid = admit_setup_pool_tx(&mut pool, &raw, &state, TxSource::Reorg);
+        assert_eq!(
+            reaccepted_txid, confirmed_txid,
+            "confirmed cleanup must remove txid/index state, not leave a stale producer marker"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn mine_one_evicts_conflicting_pool_transaction_for_explicit_candidate() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: signed_conflicting_p2pk_state_and_txs(20,10,9)
+        //     produced two txs with fee=10/fee=11 that admitted because
+        //     pre-RUB-162 admit_with_metadata did not enforce the rolling
+        //     fee floor.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor.
+        //   - reachability: setup admission on the conflicting_raw reaches
+        //     the txpool admission path; mine_one then includes the
+        //     explicit candidate which conflicts with the pool entry,
+        //     evicting it.
+        //   - producer boundary: the setup source is not a miner producer
+        //     claim; miner cleanup must remove it source-neutrally.
+        //   - replacement coverage: input bumped to 7700 so both txs have
+        //     fees ≥ weight (~7653). The conflicting-eviction-on-explicit-
+        //     candidate invariant remains under test.
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-explicit-conflict");
         let (state, explicit_raw, conflicting_raw) =
-            signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+            signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
         sync.chain_state.utxos = state.utxos.clone();
 
         let mut pool = TxPool::new();
-        pool.admit(
-            &conflicting_raw,
-            &sync.chain_state,
-            None,
-            devnet_genesis_chain_id(),
-        )
-        .expect("admit conflict");
+        let conflicting_txid =
+            admit_setup_pool_tx(&mut pool, &conflicting_raw, &state, TxSource::Reorg);
 
         {
             let cfg = MinerConfig {
@@ -687,6 +774,17 @@ mod tests {
         }
 
         assert!(pool.is_empty());
+        assert!(!pool.contains(&conflicting_txid));
+        assert_eq!(pool.entry_source(&conflicting_txid), None);
+        // Re-admit against the original setup state only as a spender-index
+        // cleanup probe; the miner remains a cleanup consumer, not a tx
+        // producer.
+        let reaccepted_txid =
+            admit_setup_pool_tx(&mut pool, &conflicting_raw, &state, TxSource::Remote);
+        assert_eq!(
+            reaccepted_txid, conflicting_txid,
+            "conflict cleanup must clear spender/index state before a new producer can admit"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -31,6 +31,15 @@ SLO thresholds are stored in:
 
 - `scripts/benchmarks/combined_load_slo.json`
 
+The SLO is advisory. A threshold breach is emitted as `status: "warn"` in the
+parsed JSON and workflow summary, but it must not fail the nightly workflow.
+Missing benchmark data is emitted as `status: "no_data"` instead of being
+classified as a regression.
+
+Current threshold calibration remains intentionally broad. The nightly workflow
+preserves `trend.json` / `trend.md` so a later task can tighten thresholds from
+retained multi-run median, p90, and variance data.
+
 ## Evidence Lane
 
 Nightly/manual workflow:
@@ -41,5 +50,6 @@ Artifacts:
 
 - `combined_load_benchmark.txt`
 - `combined_load_metrics.json`
+- `combined_load_summary.md`
 
-Both artifacts MUST be kept with workflow run metadata for audit evidence.
+These artifacts MUST be kept with workflow run metadata for audit evidence.

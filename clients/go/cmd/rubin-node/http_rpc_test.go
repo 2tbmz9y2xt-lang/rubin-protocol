@@ -1289,6 +1289,12 @@ func TestRenderPrometheusMetricsIncludesV1Names(t *testing.T) {
 		"rubin_node_block_apply_total",
 		"rubin_node_peer_count",
 		"rubin_node_mempool_txs",
+		"rubin_node_mempool_bytes",
+		"rubin_node_mempool_admit_total",
+		"rubin_node_mempool_max_bytes",
+		"rubin_node_mempool_low_water_bytes",
+		"rubin_node_mempool_min_fee_rate",
+		"rubin_node_mempool_evicted_resident_total",
 		"rubin_node_rpc_requests_total",
 		"rubin_node_submit_tx_total",
 	} {
@@ -1329,7 +1335,98 @@ func TestRenderPrometheusMetricsHandlesNilStateAndNilMetrics(t *testing.T) {
 		`rubin_node_mempool_admit_total{result="conflict"} 0`,
 		`rubin_node_mempool_admit_total{result="rejected"} 0`,
 		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
+		"rubin_node_mempool_max_bytes 0",
+		"rubin_node_mempool_low_water_bytes 0",
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", node.DefaultMempoolMinFeeRate),
+		"rubin_node_mempool_evicted_resident_total 0",
 		"rubin_node_p2p_peer_lifecycle_exits_total 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics body %q", want, body)
+		}
+	}
+}
+
+// TestRenderPrometheusMetricsScrapePurity asserts that two consecutive
+// scrapes of the same wired state return byte-identical output. This
+// pins the Linear "Scraping /metrics is read-only: two consecutive
+// scrapes do not increment counters" invariant for the standard
+// mempool gauges and the resident-eviction counter.
+func TestRenderPrometheusMetricsScrapePurity(t *testing.T) {
+	state := mustRPCState(t, true)
+	state.metrics.note("/get_tip", http.StatusOK)
+	state.metrics.noteSubmit("accepted")
+	first := renderPrometheusMetrics(state)
+	second := renderPrometheusMetrics(state)
+	if first != second {
+		t.Fatalf("scrape not pure: first vs second differ\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+	for _, want := range []string{
+		"rubin_node_mempool_max_bytes",
+		"rubin_node_mempool_low_water_bytes",
+		"rubin_node_mempool_min_fee_rate",
+		"rubin_node_mempool_evicted_resident_total",
+	} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("scrape-purity body missing standard-mempool metric %q in %q", want, first)
+		}
+	}
+}
+
+// TestRenderPrometheusMetricsStandardMempoolGaugesReflectLiveState
+// asserts that max_bytes, low_water_bytes, and min_fee_rate render
+// from the wired mempool's current struct fields, not from
+// MempoolConfig defaults.
+func TestRenderPrometheusMetricsStandardMempoolGaugesReflectLiveState(t *testing.T) {
+	state := mustRPCState(t, true)
+	got := state.mempool.Stats()
+	body := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		fmt.Sprintf("rubin_node_mempool_max_bytes %d", got.MaxBytes),
+		fmt.Sprintf("rubin_node_mempool_low_water_bytes %d", got.LowWaterBytes),
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", got.MinFeeRate),
+		fmt.Sprintf("rubin_node_mempool_evicted_resident_total %d", got.EvictedResidentTotal),
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in metrics body %q", want, body)
+		}
+	}
+	if got.MaxBytes <= 0 {
+		t.Fatalf("MaxBytes=%d, want positive default for wired devnet state", got.MaxBytes)
+	}
+	if got.LowWaterBytes <= 0 || got.LowWaterBytes >= got.MaxBytes {
+		t.Fatalf("LowWaterBytes=%d, want 0<x<MaxBytes(%d)", got.LowWaterBytes, got.MaxBytes)
+	}
+	if got.MinFeeRate < node.DefaultMempoolMinFeeRate {
+		t.Fatalf("MinFeeRate=%d, want >= DefaultMempoolMinFeeRate %d", got.MinFeeRate, node.DefaultMempoolMinFeeRate)
+	}
+	if got.EvictedResidentTotal != 0 {
+		t.Fatalf("EvictedResidentTotal=%d on a freshly-wired state, want 0", got.EvictedResidentTotal)
+	}
+}
+
+// TestRenderPrometheusMetricsNilMempoolFieldRendersBaselineFloor
+// covers the second nil branch flagged by reviewer P2: state is
+// non-nil but state.mempool is nil. The renderer's default
+// mempoolStats seeded with MinFeeRate=DefaultMempoolMinFeeRate must
+// also reach this path so the baseline floor is reported here, not
+// 0. Without this assertion a regression that re-zeros the
+// initializer for the state.mempool==nil branch could pass through.
+func TestRenderPrometheusMetricsNilMempoolFieldRendersBaselineFloor(t *testing.T) {
+	state := mustRPCState(t, true)
+	state.mempool = nil
+	body := renderPrometheusMetrics(state)
+	for _, want := range []string{
+		"rubin_node_mempool_txs 0",
+		"rubin_node_mempool_bytes 0",
+		`rubin_node_mempool_admit_total{result="accepted"} 0`,
+		`rubin_node_mempool_admit_total{result="conflict"} 0`,
+		`rubin_node_mempool_admit_total{result="rejected"} 0`,
+		`rubin_node_mempool_admit_total{result="unavailable"} 0`,
+		"rubin_node_mempool_max_bytes 0",
+		"rubin_node_mempool_low_water_bytes 0",
+		fmt.Sprintf("rubin_node_mempool_min_fee_rate %d", node.DefaultMempoolMinFeeRate),
+		"rubin_node_mempool_evicted_resident_total 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in metrics body %q", want, body)

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::miner::{Miner, MinerConfig};
 use crate::p2p_runtime::PeerManager;
+use crate::txpool::TxSource;
 use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -785,12 +786,25 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
             );
         }
     };
+    // RUB-171 producer-wiring slice (RUB-163 child). Devnet RPC submit_tx is
+    // the canonical Local producer entry into the txpool: it admits a
+    // user-submitted transaction on the local node, mirroring Go
+    // `handleSubmitTx` (clients/go/cmd/rubin-node/http_rpc.go:924) which
+    // calls `mempool.AddTx` -> `addTxWithSource(_, mempoolTxSourceLocal)`
+    // (clients/go/node/mempool.go:411). Tagging the admission as
+    // `TxSource::Local` is observability metadata only — admission ordering,
+    // eviction priority and consensus semantics remain source-blind (see
+    // `txpool.rs::compare_entries_for_mining` and the
+    // `source_does_not_affect_admission_ordering` test from RUB-174). Source
+    // is recorded on the resulting `TxPoolEntry` and surfaced via
+    // `TxPool::entry_source` for downstream parity tests.
     let admit_result = match state.tx_pool.lock() {
-        Ok(mut pool) => pool.admit_with_metadata(
+        Ok(mut pool) => pool.add_tx_with_source(
             &tx_bytes,
             &chain_state,
             fresh_block_store.as_ref(),
             chain_id,
+            TxSource::Local,
         ),
         Err(_) => Err(crate::TxPoolAdmitError {
             kind: TxPoolAdmitErrorKind::Unavailable,
@@ -2026,6 +2040,8 @@ mod tests {
     use serde_json::Value;
 
     use crate::io_utils::unique_temp_path;
+    use crate::test_helpers::signed_conflicting_p2pk_state_and_txs;
+    use crate::txpool::TxSource;
     use crate::{
         block_store_path, default_peer_runtime_config, default_sync_config,
         devnet_genesis_block_bytes, devnet_genesis_chain_id, BlockStore, ChainState, MinerConfig,
@@ -2203,6 +2219,25 @@ mod tests {
         state.height = vector.height.saturating_sub(1);
         state.utxos = fixture_utxos_to_map(&vector.utxos);
         state
+    }
+
+    /// RUB-162 Phase A test helper (per controller Q2 / Path A approval
+    /// 2026-05-03). Builds a fee-floor-compliant signed P2PK tx + matching
+    /// chain_state for /submit_tx tests. Pre-RUB-162 tests used the
+    /// conformance fixture (fee=10/weight=7653, fee_rate ≪ 1) which the
+    /// post-RUB-162 admit_with_metadata correctly rejects with Unavailable
+    /// from validate_fee_floor.
+    ///
+    /// Returns (chain_state, raw_tx_bytes, chain_id). chain_id is the
+    /// devnet genesis chain id — same as the production call site uses.
+    /// input_value=7700 / output=10 → fee=7690 ≥ weight≈7653 ⇒ admits.
+    /// chain_state is bumped to has_tip=true / height=1 so admit_with_metadata
+    /// reaches the policy path (not the coinbase-context branch).
+    fn floor_compliant_signed_tx_and_state() -> (ChainState, Vec<u8>, [u8; 32]) {
+        let (mut state, raw, _other) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        state.has_tip = true;
+        state.height = 1;
+        (state, raw, devnet_genesis_chain_id())
     }
 
     fn build_state_with_chain_state(
@@ -2785,18 +2820,41 @@ mod tests {
     }
 
     #[test]
-    fn submit_tx_accepts_valid_conformance_tx() {
-        let vector = positive_fixture_vector();
-        assert!(vector.expect_ok, "{} should be positive fixture", vector.id);
-        let raw = hex::decode(&vector.tx_hex).expect("tx hex");
+    fn submit_tx_accepts_floor_compliant_p2pk_tx() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03; PR-1410 wave-3 Copilot Thread C update):
+        //   - old assumption: positive_fixture_vector tx (fee=10/weight=
+        //     7653) admits via /submit_tx; pre-RUB-162 admit_with_metadata
+        //     did not enforce the rolling fee floor.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor (DEFAULT=1) via the
+        //     `apply_post_consensus_policy_with_floor` helper. The
+        //     conformance fixture is sub-floor and admits Unavailable.
+        //   - reachability: the test pins /submit_tx returning 200 +
+        //     duplicate detection + metrics increment — all of which require
+        //     a successful admit on the FIRST request. Reaches the txpool
+        //     admission path through DevnetRPC -> TxPool::admit.
+        //   - replacement coverage: floor_compliant_signed_tx_and_state()
+        //     builds a fee-floor-compliant signed tx (input=7700/output=10
+        //     ⇒ fee=7690 ≥ weight≈7653) using the in-tree
+        //     signed_conflicting_p2pk_state_and_txs helper. The test's
+        //     /submit_tx + duplicate + metrics invariants remain under
+        //     test. The conformance fixture's parsing/signature paths are
+        //     covered by relay_metadata +
+        //     admit_rejects_sub_floor_conformance_tx_as_unavailable_with_atomicity
+        //     (which asserts Unavailable in txpool.rs).
+        //   - PR-1410 wave-3 Copilot Thread C: removed the
+        //     `let vector = positive_fixture_vector(); assert!(vector.expect_ok, ...);`
+        //     prelude that was vestigial after the migration to
+        //     `floor_compliant_signed_tx_and_state()`. The test no longer
+        //     consumes the conformance fixture, so coupling its assertions
+        //     to CV-U-06 churn would be a stale-fixture coupling bug.
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
         let (_tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
-        assert_eq!(consumed, raw.len(), "{}", vector.id);
+        assert_eq!(consumed, raw.len());
         let expected_txid = hex::encode(txid);
 
-        let state = build_state_with_chain_state(
-            chain_state_from_positive_fixture(&vector),
-            fixture_chain_id(vector.chain_id.as_deref()),
-        );
+        let state = build_state_with_chain_state(chain_state, chain_id);
         let response = route_request(
             &state,
             HttpRequest {
@@ -2827,6 +2885,98 @@ mod tests {
         assert!(metrics.contains(r#"rubin_node_submit_tx_total{result="accepted"} 1"#));
         assert!(
             metrics.contains(r#"rubin_node_rpc_requests_total{route="/submit_tx",status="200"} 1"#)
+        );
+    }
+
+    #[test]
+    fn submit_tx_records_local_source_provenance_on_accepted_admission() {
+        // RUB-171 producer-wiring slice (RUB-163 child). Devnet RPC
+        // /submit_tx admits user-submitted transactions as the canonical
+        // Local txpool producer (mirrors Go handleSubmitTx ->
+        // mempool.AddTx -> addTxWithSource(_, mempoolTxSourceLocal)).
+        //
+        // Reachability: the test drives a real /submit_tx request through
+        // `route_request` (NOT via TxPool::add_tx_with_source helper) so
+        // the full RPC handler -> rpc_op lock -> tx_pool lock ->
+        // add_tx_with_source(_, TxSource::Local) chain runs end to end.
+        // Helper-only coverage of source recording is already exercised
+        // by RUB-174 baseline tests in txpool.rs; this slice's invariant
+        // is the runtime path through the RPC producer surface.
+        //
+        // Proof assertion: assert_eq!(pool.entry_source(&txid),
+        // Some(TxSource::Local)) below pins the producer-source variant
+        // recorded by handle_submit_tx for the admitted entry. Mutating
+        // the production line from TxSource::Local to TxSource::Remote
+        // or TxSource::Reorg makes this exact assertion fail with
+        // `left: Some(Remote|Reorg), right: Some(Local)`. Reverting to
+        // the legacy pool.admit_with_metadata wrapper still defaults to
+        // Local under the RUB-174 wrapper-chain, so that revert is a
+        // code-readability / grep-discoverability regression rather than
+        // a runtime-asserted regression.
+        //
+        // Proof assertion (control): assert_eq!(control_pool.entry_source(
+        // &control_txid), Some(TxSource::Reorg)) below admits a separate
+        // tx via add_tx_with_source(_, TxSource::Reorg) on a fresh
+        // TxPool::new() and pins the recorded variant. This proves the
+        // accessor is genuinely variant-discriminating: a regression
+        // that hardcoded entry_source to a single variant would still
+        // pass the primary Local assertion above but fail the Reorg
+        // assertion in the control branch below.
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
+        let (_tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
+        assert_eq!(consumed, raw.len());
+
+        let state = build_state_with_chain_state(chain_state, chain_id);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/submit_tx".to_string(),
+                body: format!(r#"{{"tx_hex":"{}"}}"#, hex::encode(&raw)).into_bytes(),
+            },
+        );
+
+        assert_eq!(response.status, 200);
+        let body = response_json(&response);
+        assert_eq!(body["accepted"].as_bool(), Some(true));
+
+        // Primary assertion: the entry admitted through the RPC submit
+        // path carries the Local source tag (would FAIL with Remote /
+        // Reorg / None on any mutation of the production line).
+        let pool = state.tx_pool.lock().expect("tx pool");
+        assert_eq!(
+            pool.entry_source(&txid),
+            Some(TxSource::Local),
+            "RPC /submit_tx must record TxSource::Local provenance on the admitted entry",
+        );
+        drop(pool);
+
+        // Mutation-distinguishing control: admit a SEPARATE tx into a
+        // FRESH pool (with its own state) directly via the source-aware
+        // API with TxSource::Reorg, and verify entry_source returns
+        // Reorg. This proves entry_source is genuinely variant-aware
+        // and is not silently returning a constant. If the accessor or
+        // recording was hardcoded to a single variant, the primary
+        // assertion above would still pass for that variant — this
+        // control catches that class of regression.
+        let (control_state, control_raw, control_chain_id) = floor_compliant_signed_tx_and_state();
+        let (_ctx, control_txid, _cwtxid, ccons) =
+            parse_tx(&control_raw).expect("parse control tx");
+        assert_eq!(ccons, control_raw.len());
+        let mut control_pool = TxPool::new();
+        control_pool
+            .add_tx_with_source(
+                &control_raw,
+                &control_state,
+                None,
+                control_chain_id,
+                TxSource::Reorg,
+            )
+            .expect("control admit");
+        assert_eq!(
+            control_pool.entry_source(&control_txid),
+            Some(TxSource::Reorg),
+            "TxPool::entry_source must return the variant recorded at admission time",
         );
     }
 
@@ -2891,16 +3041,24 @@ mod tests {
     fn submit_tx_calls_announce_callback_on_success() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let vector = positive_fixture_vector();
-        assert!(vector.expect_ok);
-        let raw = hex::decode(&vector.tx_hex).expect("decode tx hex");
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: positive_fixture_vector tx admits via
+        //     /submit_tx and triggers the announce_tx callback.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor; conformance fixture admits Unavailable and the
+        //     announce callback would never fire.
+        //   - reachability: test pins announce_tx invocation AFTER
+        //     successful admit. Reaches the txpool admission path through
+        //     DevnetRPC -> TxPool::admit success → announce side-effect.
+        //   - replacement coverage: same floor-compliant tx as the sibling
+        //     submit_tx_accepts_floor_compliant_p2pk_tx test; announce
+        //     side-effect on success invariant remains under test.
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
         let called = Arc::new(AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
 
-        let mut state = build_state_with_chain_state(
-            chain_state_from_positive_fixture(&vector),
-            fixture_chain_id(vector.chain_id.as_deref()),
-        );
+        let mut state = build_state_with_chain_state(chain_state, chain_id);
         state.announce_tx = Some(Arc::new(move |_tx_bytes: &[u8], _meta| {
             called_clone.store(true, Ordering::SeqCst);
             Ok(())
@@ -2923,14 +3081,23 @@ mod tests {
 
     #[test]
     fn submit_tx_logs_announce_error_without_failing_rpc() {
-        let vector = positive_fixture_vector();
-        assert!(vector.expect_ok);
-        let raw = hex::decode(&vector.tx_hex).expect("decode tx hex");
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: positive_fixture_vector tx admits via
+        //     /submit_tx and the announce_tx Err is logged but not
+        //     propagated; RPC still returns 200.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor; conformance fixture admits Unavailable and the RPC
+        //     would return 503 without ever invoking announce_tx.
+        //   - reachability: test pins /submit_tx returning 200 even when
+        //     announce_tx returns Err — requires successful admit AND
+        //     announce invocation.
+        //   - replacement coverage: same floor-compliant tx as the sibling
+        //     submit_tx_accepts_floor_compliant_p2pk_tx test; "RPC succeeds
+        //     even with announce Err" invariant remains under test.
+        let (chain_state, raw, chain_id) = floor_compliant_signed_tx_and_state();
 
-        let mut state = build_state_with_chain_state(
-            chain_state_from_positive_fixture(&vector),
-            fixture_chain_id(vector.chain_id.as_deref()),
-        );
+        let mut state = build_state_with_chain_state(chain_state, chain_id);
         state.announce_tx = Some(Arc::new(|_tx_bytes: &[u8], _meta| {
             Err("relay failure".to_string())
         }));
@@ -3726,13 +3893,24 @@ mod tests {
         let payload = raw.to_vec();
         let client = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(addr).expect("connect");
+            // RUB-171 wave-1 fix: set the read timeout BEFORE
+            // `shutdown(Write)`. On macOS, `setsockopt(SO_RCVTIMEO)` after
+            // a half-close transitions can return `EINVAL` (errno 22)
+            // because the socket leaves the state where `setsockopt` is
+            // accepted on the receive direction. Under regular `cargo
+            // test` the close completes after this call so the test races
+            // through; under `cargo tarpaulin` instrumentation the close
+            // serializes earlier and the call deterministically fails.
+            // Setting the timeout first preserves the read-timeout
+            // semantics needed below and is portable across macOS / Linux
+            // socket behaviour.
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
             stream.write_all(&payload).expect("write payload");
             stream
                 .shutdown(std::net::Shutdown::Write)
                 .expect("shutdown write");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .expect("set read timeout");
             let mut response = Vec::new();
             let _ = stream.read_to_end(&mut response);
             response

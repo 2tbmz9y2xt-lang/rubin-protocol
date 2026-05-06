@@ -2354,6 +2354,20 @@ mod tests {
 
     #[test]
     fn handle_block_evicts_confirmed_pool_transactions_when_pool_provided() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: signed_conflicting_p2pk_state_and_txs(20,10,9)
+        //     produces tx with fee=10/weight≈7653 that admits because
+        //     pre-RUB-162 admit_with_metadata did not enforce the rolling
+        //     fee floor.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor (DEFAULT=1) via validate_fee_floor.
+        //   - reachability: pool.admit reaches the txpool admission path;
+        //     the test then asserts handle_block evicts the confirmed tx
+        //     from the shared runtime pool.
+        //   - replacement coverage: input bumped to 7700 so fee=7690 ≥
+        //     weight (~7653). The handle_block-eviction-on-confirmation
+        //     invariant remains under test.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
 
@@ -2365,7 +2379,7 @@ mod tests {
             engine.cfg.chain_id = devnet_genesis_chain_id();
 
             let (state, admitted_raw, _block_raw) =
-                signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+                signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
             engine.chain_state.utxos = state.utxos.clone();
 
             let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
@@ -2408,6 +2422,19 @@ mod tests {
 
     #[test]
     fn handle_block_removes_conflicting_pool_transactions_when_pool_provided() {
+        // RUB-162 Phase A migration rationale (per controller Q2 / Path A
+        // approval 2026-05-03):
+        //   - old assumption: signed_conflicting_p2pk_state_and_txs(20,10,9)
+        //     admits the first tx and the test then verifies a conflicting
+        //     block tx triggers cleanup of the resident.
+        //   - new invariant: admit_with_metadata enforces the rolling fee
+        //     floor.
+        //   - reachability: pool.admit on admitted_raw reaches the
+        //     admission path; cleanup.apply then exercises the
+        //     remove_conflicting_outpoints path on the block-apply boundary.
+        //   - replacement coverage: input bumped to 7700 so both txs have
+        //     floor-compliant fees. Conflict-cleanup-on-block-apply
+        //     invariant remains under test.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
 
@@ -2418,7 +2445,8 @@ mod tests {
             let mut engine = test_sync_engine_with_genesis();
             engine.cfg.chain_id = devnet_genesis_chain_id();
 
-            let (state, admitted_raw, block_raw) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+            let (state, admitted_raw, block_raw) =
+                signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
             engine.chain_state.utxos = state.utxos.clone();
 
             let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");

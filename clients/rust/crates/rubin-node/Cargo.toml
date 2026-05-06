@@ -14,6 +14,13 @@ rubin-consensus = { path = "../rubin-consensus" }
 
 [dev-dependencies]
 criterion = "0.5"
+# RUB-176 / GitHub #1432: token-aware tx_relay canonical-admission boundary
+# checker. Test-only AST parser used by tx_relay.rs's boundary checker module
+# to walk the production AST and detect direct syntactic canonical TxPool
+# admission call expressions while ignoring comments, string literals, raw
+# strings, doc comments, and `#[cfg(test)]` items. Scoped to dev-dependencies
+# so it never enters the production binary or the runtime dependency graph.
+syn = { version = "2", features = ["full", "visit"] }
 
 [[bench]]
 name = "runtime_baseline"
