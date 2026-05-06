@@ -2957,8 +2957,7 @@ mod tests {
     ///   - The test does NOT call `pool.admit(...)` directly. Admission
     ///     happens through `PeerSession::handle_live_message`, which is the
     ///     same public entrypoint used by the production message loop in
-    ///     `p2p_service.rs::run_peer_session_loop` (see
-    ///     `p2p_service.rs:864`-ish wiring).
+    ///     `clients/rust/crates/rubin-node/src/p2p_service.rs::run_peer_session_loop`.
     ///   - The test constructs a real `PeerRelayContext` whose `tx_pool`
     ///     field uses the same `Mutex<TxPool>` shape that
     ///     `p2p_service.rs::run_peer_session_loop` constructs from
@@ -3001,8 +3000,9 @@ mod tests {
 
             // Production analogue of `shared.relay_state` /
             // `shared.peer_manager` / `shared.peer_outboxes` /
-            // `shared.tx_pool` — the same handles `p2p_service.rs:814`
-            // threads into `PeerRelayContext`.
+            // `shared.tx_pool` — same handles
+            // `clients/rust/crates/rubin-node/src/p2p_service.rs` threads
+            // into `PeerRelayContext`.
             let relay_state = crate::tx_relay::TxRelayState::new();
             let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64));
             let _ = peer_manager.add_peer(PeerState {
