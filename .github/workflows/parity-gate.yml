@@ -60,7 +60,7 @@ jobs:
           GO_CHANGED="$(grep -zEc '^clients/go/(consensus|cmd/rubin-consensus-cli)/' /tmp/changed-paths.z || true)"
           RS_CHANGED="$(grep -zEc '^clients/rust/crates/(rubin-consensus|rubin-consensus-cli)/' /tmp/changed-paths.z || true)"
           FIX_CHANGED="$(grep -zEc '^conformance/fixtures/' /tmp/changed-paths.z || true)"
-          ENC_CHANGED="$(grep -zEc '^(clients/go/consensus|clients/rust/crates/rubin-consensus)/.*(^|/)[^/]*(encode|decode|serial|wire|txid|wtxid|hash|sighash|compact|parse|merkle)[^/]*' /tmp/changed-paths.z || true)"
+          ENC_CHANGED="$(grep -zEc '^(clients/go/consensus|clients/rust/crates/rubin-consensus)(/.*)?/[^/]*(encode|decode|serial|marshal|unmarshal|wire|txid|wtxid|hash|sighash|compact|parse|merkle)[^/]*' /tmp/changed-paths.z || true)"
 
           {
             echo "go=$GO_CHANGED"
