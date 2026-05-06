@@ -793,6 +793,21 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     if cfg.max_peers > 4096 {
         return Err("max_peers must be <= 4096".to_string());
     }
+    // RUB-194 / GitHub #1458: mirror Go `ValidateConfig`
+    // (`clients/go/node/config.go::ValidateConfig` lines 407-415)
+    // mine_address inline validation. Without this, malformed
+    // `--mine-address` passes dry-run and only fails later inside
+    // miner setup at `miner_cfg.mine_address = parsed` (run() at
+    // ~line 319 / live RPC mining at ~line 369). Validating here
+    // through `parse_mine_address_arg` (already imported from
+    // `crate::miner`) makes startup, dry-run, and miner setup all
+    // share the same accept/reject contract — closing hostile-case
+    // matrix #2 in the issue contract.
+    if let Some(ref value) = cfg.mine_address {
+        if let Err(err) = parse_mine_address_arg(value) {
+            return Err(format!("invalid mine_address: {err}"));
+        }
+    }
     let pv_mode = cfg.pv_mode.trim().to_ascii_lowercase();
     if !["off", "shadow", "on"].contains(&pv_mode.as_str()) {
         return Err("pv_mode must be one of: off, shadow, on".to_string());
@@ -1399,6 +1414,86 @@ mod tests {
             parse_args(&["--pv-mode".to_string(), "bogus".to_string()]).expect("parse args");
         let err = validate_config(&mut cfg).unwrap_err();
         assert!(err.contains("pv_mode"), "unexpected error: {err}");
+    }
+
+    /// RUB-194 / GitHub #1458: validate_config must reject a malformed
+    /// `--mine-address` BEFORE dry-run completes, mirroring Go
+    /// `ValidateConfig` (`clients/go/node/config.go:407-415`). Without
+    /// this gate, a bad address slipped through dry-run and only failed
+    /// inside `Miner::new` setup (run() ~line 322 / live RPC mining
+    /// ~line 372), causing operators to discover the error after
+    /// startup-side effects rather than at config-validation time.
+    ///
+    /// Proof assertion: each malformed-input test below calls
+    /// `validate_config(&mut cfg)` (the public config-validation
+    /// entrypoint exercised by the binary's startup path) and asserts
+    /// the returned `Err(_)` carries the `invalid mine_address` prefix
+    /// produced by the new gate. The accept tests assert `Ok(())` for
+    /// 32-byte and 33-byte (canonical `suite_id||key_id`) hex.
+    #[test]
+    fn validate_config_accepts_32byte_mine_address_hex() {
+        let mine_address = "11".repeat(32);
+        let mut cfg =
+            parse_args(&["--mine-address".to_string(), mine_address]).expect("parse args");
+        validate_config(&mut cfg).expect("32-byte hex mine_address must be accepted");
+    }
+
+    #[test]
+    fn validate_config_accepts_33byte_canonical_mine_address_hex() {
+        // Canonical 33-byte form: suite_id (ML-DSA-87 = 0x01) || 32-byte key_id.
+        let mut canonical = String::with_capacity(66);
+        canonical.push_str(&format!(
+            "{:02x}",
+            rubin_consensus::constants::SUITE_ID_ML_DSA_87
+        ));
+        canonical.push_str(&"22".repeat(32));
+        let mut cfg = parse_args(&["--mine-address".to_string(), canonical]).expect("parse args");
+        validate_config(&mut cfg)
+            .expect("33-byte canonical (suite_id||key_id) mine_address must be accepted");
+    }
+
+    #[test]
+    fn validate_config_rejects_malformed_mine_address_hex() {
+        // Non-hex characters: parse_mine_address surfaces hex::FromHexError
+        // through parse_mine_address_arg; validate_config must wrap with
+        // the "invalid mine_address" prefix.
+        let mut cfg =
+            parse_args(&["--mine-address".to_string(), "zz".repeat(32)]).expect("parse args");
+        let err = validate_config(&mut cfg).unwrap_err();
+        assert!(
+            err.contains("invalid mine_address"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_odd_length_mine_address_hex() {
+        // Odd-length hex: parse_mine_address rejects before decode; the
+        // existing miner-setup-time check would only catch this AFTER
+        // dry-run printed an effective config implying acceptance.
+        // 63 hex chars is odd-length (canonical 32-byte form is 64 chars
+        // and 33-byte canonical form is 66 chars).
+        let mut cfg =
+            parse_args(&["--mine-address".to_string(), "1".repeat(63)]).expect("parse args");
+        let err = validate_config(&mut cfg).unwrap_err();
+        assert!(
+            err.contains("invalid mine_address"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_config_rejects_wrong_byte_count_mine_address_hex() {
+        // 1-byte (2 hex chars): valid hex but neither 32-byte key_id
+        // nor 33-byte canonical — Go's ValidateConfig rejects with
+        // "must be 32 or 33 bytes" and Rust must do the same.
+        let mut cfg =
+            parse_args(&["--mine-address".to_string(), "aa".to_string()]).expect("parse args");
+        let err = validate_config(&mut cfg).unwrap_err();
+        assert!(
+            err.contains("invalid mine_address"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
