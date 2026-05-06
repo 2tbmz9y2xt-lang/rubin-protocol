@@ -84,7 +84,7 @@ pub struct RunningDevnetRPCServer {
     /// RUB-10 / GitHub #1151: handle to the same `ReadinessGate` the
     /// `DevnetRPCState` references, kept on the server so `close()`
     /// can stamp `Shutdown` before stopping the accept loop. Mirrors
-    /// Go's `runningDevnetRPCServer.MarkShutdown` (http_rpc.go:308).
+    /// Go's `runningDevnetRPCServer.MarkShutdown` (`clients/go/cmd/rubin-node/http_rpc.go:308`).
     readiness: Arc<ReadinessGate>,
 }
 
@@ -119,7 +119,7 @@ impl Default for ReadyStateCell {
 impl ReadinessGate {
     /// RUB-10 / GitHub #1151: boot-time `NotReady` -> `Ready` transition.
     /// Mirrors Go `readinessGate.TryMarkReadyOnStartup`
-    /// (http_rpc.go:166-180). Returns true iff the gate WAS `NotReady`
+    /// (`clients/go/cmd/rubin-node/http_rpc.go:166-180`). Returns true iff the gate WAS `NotReady`
     /// at the moment of the call AND the transition won. Returns false
     /// if already `Ready` (idempotent re-call) or `Shutdown` (sticky;
     /// post-shutdown re-readiness is forbidden by design — operators
@@ -133,9 +133,10 @@ impl ReadinessGate {
     /// equivalent context cancellation channel, so the only paths
     /// into `Shutdown` are the explicit `mark_shutdown()` call (from
     /// `RunningDevnetRPCServer::close` and `Drop`). A poisoned mutex
-    /// is treated as failure (the function returns false without
-    /// flipping state) — defense-in-depth so a panicked operation
-    /// that left the gate inconsistent can't quietly succeed here.
+    /// is treated as not-ready (the function returns early without
+    /// flipping the cell value) — defense-in-depth so a panicked
+    /// operation that left the gate inconsistent cannot quietly
+    /// succeed here.
     fn try_mark_ready_on_startup(&self) -> bool {
         let Ok(mut cell) = self.state.lock() else {
             return false;
@@ -148,7 +149,7 @@ impl ReadinessGate {
     }
 
     /// RUB-10 / GitHub #1151: stamp the gate into the sticky `Shutdown`
-    /// state. Mirrors Go `readinessGate.MarkShutdown` (http_rpc.go:184-191).
+    /// state. Mirrors Go `readinessGate.MarkShutdown` (`clients/go/cmd/rubin-node/http_rpc.go:184-191`).
     /// Idempotent. Once `Shutdown` is set, `is_ready()` returns false
     /// permanently (matches Go's design: a draining node must not
     /// re-advertise readiness without a process restart).
@@ -160,13 +161,13 @@ impl ReadinessGate {
 
     /// RUB-10 / GitHub #1151: returns true iff the gate is currently in
     /// the `Ready` state. Mirrors Go `readinessGate.IsReady`
-    /// (http_rpc.go:198-208) without the `shutdownCtx` cancellation
+    /// (`clients/go/cmd/rubin-node/http_rpc.go:198-208`) without the `shutdownCtx` cancellation
     /// observation hook — Rust's RPC server does not expose a context
     /// cancellation channel, so the only paths into `Shutdown` are the
     /// explicit `mark_shutdown()` call from `RunningDevnetRPCServer::close`
     /// and `Drop`. A poisoned mutex is treated as not-ready
     /// (defense-in-depth: a panicked operation that left the gate in
-    /// inconsistent state should fail closed on readiness).
+    /// inconsistent state defaults to reporting not-ready).
     fn is_ready(&self) -> bool {
         self.state
             .lock()
@@ -273,7 +274,7 @@ struct TxStatusResponse {
 /// Mirrors Go's `readyResponse` struct in
 /// `clients/go/cmd/rubin-node/http_rpc.go:641-643`: a single boolean
 /// field describing whether the node is currently in the `Ready`
-/// state. Per Go's parity-reference comment (http_rpc.go:638-640):
+/// state. Per Go's parity-reference comment (`clients/go/cmd/rubin-node/http_rpc.go:638-640`):
 /// the response status code (200 vs 503) is the primary contract for
 /// orchestrators; the `{ready: bool}` body is the human-readable
 /// secondary signal. Mixed-client devnet evidence consumers parse
@@ -410,7 +411,7 @@ pub fn start_devnet_rpc_server(
     // RUB-10 / GitHub #1151: stamp `Ready` BEFORE the accept thread
     // spawns. The lifecycle position matches Go's stamp at
     // `clients/go/cmd/rubin-node/main.go:768` (called via
-    // `maybeFlipReadyOnStartup` from `main.go:572`) — both run after
+    // `maybeFlipReadyOnStartup` from `clients/go/cmd/rubin-node/main.go:572`) — both run after
     // the listener is bound but before the first request is served —
     // even though the call site differs structurally: Go's stamp
     // runs from the bin's main after `startDevnetRPCServer` returns
@@ -445,8 +446,8 @@ impl RunningDevnetRPCServer {
         // RUB-10 / GitHub #1151: stamp `Shutdown` BEFORE stopping the
         // accept loop so any in-flight `/ready` request that races the
         // close sees the sticky terminal state. Mirrors Go's
-        // `runningDevnetRPCServer.MarkShutdown` (http_rpc.go:308) which
-        // is called from `main.go:598` before the listener tear-down.
+        // `runningDevnetRPCServer.MarkShutdown` (`clients/go/cmd/rubin-node/http_rpc.go:308`) which
+        // is called from `clients/go/cmd/rubin-node/main.go:598` before the listener tear-down.
         // Idempotent: re-calling close (e.g., explicit close + Drop)
         // re-stamps Shutdown without effect.
         self.readiness.mark_shutdown();
@@ -999,7 +1000,7 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
     // RUB-171 producer-wiring slice (RUB-163 child). Devnet RPC submit_tx is
     // the canonical Local producer entry into the txpool: it admits a
     // user-submitted transaction on the local node, mirroring Go
-    // `handleSubmitTx` (clients/go/cmd/rubin-node/http_rpc.go:924) which
+    // `handleSubmitTx` (`clients/go/cmd/rubin-node/http_rpc.go:924`) which
     // calls `mempool.AddTx` -> `addTxWithSource(_, mempoolTxSourceLocal)`
     // (clients/go/node/mempool.go:411). Tagging the admission as
     // `TxSource::Local` is observability metadata only — admission ordering,
@@ -1024,7 +1025,8 @@ fn handle_submit_tx(state: &DevnetRPCState, method: &str, body: &[u8]) -> HttpRe
     // Release rpc_op_lock before announce: announce is p2p broadcast, not
     // chain/tx-pool mutation, so holding the RPC op lock across a slow
     // network callback would block concurrent /mine_next for no benefit.
-    // Matches the narrowed Go scope in handleSubmitTx (http_rpc.go).
+    // Matches the narrowed Go scope in
+    // `clients/go/cmd/rubin-node/http_rpc.go::handleSubmitTx`.
     drop(_rpc_op);
     match admit_result {
         Ok((txid, relay_meta)) => {
@@ -2229,7 +2231,7 @@ fn status_text(status: u16) -> &'static str {
         400 => "Bad Request",
         404 => "Not Found",
         // RUB-10 / GitHub #1151: 405 emitted by `/ready` for non-GET
-        // (mirrors Go's `handleReady` at http_rpc.go:659 which uses
+        // (mirrors Go's `handleReady` at `clients/go/cmd/rubin-node/http_rpc.go:659` which uses
         // `http.StatusMethodNotAllowed`). Not used by the existing
         // 6 query handlers (they emit 400 for non-GET; migrating
         // them to 405 is a separate concern outside RUB-10's scope).
@@ -5283,7 +5285,7 @@ mod tests {
 
     /// RUB-10 / GitHub #1151: `/ready` reports 200 + `{ready: true}`
     /// after `start_devnet_rpc_server` stamps the gate `Ready`.
-    /// Mirrors Go's `handleReady` 200 branch at http_rpc.go:666 and
+    /// Mirrors Go's `handleReady` 200 branch at `clients/go/cmd/rubin-node/http_rpc.go:666` and
     /// proves the production startup wiring (mark-ready post-bind in
     /// `start_devnet_rpc_server`) actually flips the state observable
     /// through the public RPC path.
@@ -5321,7 +5323,8 @@ mod tests {
     /// `/ready` reports 503 + `{ready: false}` permanently — mixed-
     /// client orchestrators must stop submitting work to a draining
     /// node. Mirrors Go's `MarkShutdown` semantics at
-    /// http_rpc.go:184-191 (sticky `readyStateShutdown`).
+    /// `clients/go/cmd/rubin-node/http_rpc.go:184-191` (sticky
+    /// `readyStateShutdown`).
     ///
     /// Proof assertion: after `close()`, `state.readiness.is_ready()`
     /// must be false AND a subsequent `try_mark_ready_on_startup`
@@ -5367,7 +5370,7 @@ mod tests {
     /// Method Not Allowed with the JSON-error envelope shared with
     /// `handle_submit_tx`/`handle_get_tip` (`{accepted:false,error:"GET required"}`)
     /// AND the RFC 9110 §15.5.6 `Allow: GET` header. Mirrors Go's
-    /// `handleReady` 405 branch at http_rpc.go:647-664.
+    /// `handleReady` 405 branch at `clients/go/cmd/rubin-node/http_rpc.go:647-664`.
     ///
     /// Proof assertion: `assert_eq!(response.status, 405)` and
     /// `assert!(response.extra_headers.iter().any(|(n,v)| *n == "Allow" && v == "GET"))`
@@ -5458,11 +5461,11 @@ mod tests {
     /// is one-shot. The first call from `NotReady` returns true; any
     /// subsequent call (whether re-entering from `Ready` or after
     /// `mark_shutdown` flipped to `Shutdown`) returns false. Mirrors
-    /// Go `readinessGate.TryMarkReadyOnStartup` at http_rpc.go:166-180.
+    /// Go `readinessGate.TryMarkReadyOnStartup` at `clients/go/cmd/rubin-node/http_rpc.go:166-180`.
     ///
     /// Proof assertion: this drives the gate through every documented
     /// transition (NotReady -> Ready, Ready -> Ready idempotent,
-    /// Ready -> Shutdown, Shutdown sticky) and asserts the boolean
+    /// Ready -> Shutdown, Shutdown sticky) and verifies the boolean
     /// returns + observable `is_ready()` reads at each step.
     #[test]
     fn readiness_gate_state_transitions_match_go_semantics() {
