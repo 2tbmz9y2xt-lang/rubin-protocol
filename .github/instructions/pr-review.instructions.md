@@ -49,24 +49,33 @@ This is a blockchain protocol repository containing:
 
 ## Consensus Hazard Checklist (extended)
 
-For any change touching `clients/go/**` or `clients/rust/**`, verify:
+This checklist is a Rubin-specific review aid. It is not executable proof; Go
+reference behavior, Rust behavior, and fixture expectations remain the
+responsibility of the conformance runner.
 
 ### Determinism (P0 if violated in consensus path)
-- [ ] No `map` iteration order reliance in Go without explicit `sort.Slice` of keys
-- [ ] No `HashMap` iteration in Rust consensus paths — use `BTreeMap` or sort
-- [ ] No `time.Now()`, `rand` without injected seed, or wall-clock comparisons in validation
-- [ ] No goroutines / `tokio::spawn` introducing ordering nondeterminism in block processing
+- [ ] Consensus serialization and hashing do not rely on Go `map` or Rust
+      `HashMap` iteration order; sort keys or use deterministic containers.
+- [ ] Validation and parsing do not depend on wall-clock time, ambient RNG,
+      goroutine scheduling, async task ordering, or filesystem traversal order.
+- [ ] Consensus-visible iteration order is specified by canonical data order,
+      not by process-local collection behavior.
 
 ### Canonical encoding (P0)
-- [ ] Varints use minimal encoding (no leading zero continuation bytes)
-- [ ] Map/set serialization uses sorted keys
-- [ ] Floats are rejected or fixed-point only — no IEEE-754 in wire format
-- [ ] Round-trip property test exists: `decode(encode(x)) == x` AND `encode(decode(b)) == b`
+- [ ] CompactSize uses Rubin canonical 1/3/5/9-byte minimal encoding.
+- [ ] Non-minimal CompactSize rejects as `TX_ERR_PARSE`.
+- [ ] `parse_tx` consumes exactly one canonical `TxBytes` payload and rejects
+      trailing bytes.
+- [ ] Transaction and block round trips check both object equality and canonical
+      byte equality when byte-equivalence is claimed.
 
 ### Arithmetic safety (P0/P1)
-- [ ] All `amount`, `fee`, `height`, `weight` arithmetic uses checked/saturating ops
-- [ ] No `as` casts narrowing integers in Rust consensus code without bounds check
-- [ ] Go: no implicit `int`↔`int64` truncation across platforms
+- [ ] `amount`, `fee`, `height`, `weight`, and size accounting are exact and
+      checked before use in consensus-validity decisions.
+- [ ] Saturating arithmetic is forbidden in consensus-validity decisions unless
+      CANONICAL explicitly defines clamping for that field.
+- [ ] Rust narrowing casts and Go `int`/fixed-width conversions have explicit
+      bounds checks at consensus boundaries.
 
 ### DoS surface (P1)
 - [ ] Deserialization has explicit max-size / max-depth limits
@@ -74,9 +83,13 @@ For any change touching `clients/go/**` or `clients/rust/**`, verify:
 - [ ] Loops over network input have iteration caps
 
 ### Crypto correctness (P0)
-- [ ] Secret-dependent comparisons use constant-time primitives (`subtle.ConstantTimeCompare`, `subtle::ConstantTimeEq`)
-- [ ] ML-DSA-87 context strings match between Go and Rust byte-for-byte
-- [ ] No key material in `Debug`/`fmt.Stringer` output — use `Zeroize` / `redact`
+- [ ] ML-DSA-87 verification uses exactly `(pubkey, crypto_sig, digest32)`.
+- [ ] ML-DSA verification adds no extra context, prehash, truncation, or domain
+      prefix unless CANONICAL explicitly requires it.
+- [ ] `crypto_sig` excludes the trailing `sighash_type` byte.
+- [ ] Secret/private key material uses redaction and constant-time handling
+      where secrecy matters; public consensus IDs (`txid`, `wtxid`, `key_id`,
+      hashes, pubkeys) may use ordinary deterministic byte comparison.
 - [ ] RNG source is `crypto/rand` (Go) or `OsRng` (Rust), never `math/rand` / `thread_rng` for keys
 
 ## Language-Specific Rules

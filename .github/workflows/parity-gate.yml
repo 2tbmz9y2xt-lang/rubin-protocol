@@ -1,71 +1,146 @@
-name: Go↔Rust Parity Gate
+name: Go↔Rust Parity Smoke Gate
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
     paths:
-      - 'clients/go/**'
-      - 'clients/rust/**'
+      - 'clients/go/consensus/**'
+      - 'clients/go/cmd/rubin-consensus-cli/**'
+      - 'clients/rust/crates/rubin-consensus/**'
+      - 'clients/rust/crates/rubin-consensus-cli/**'
       - 'conformance/fixtures/**'
+      - 'conformance/runner/**'
+      - '.github/workflows/parity-gate.yml'
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
 
 jobs:
-  parity-check:
+  parity-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
-      - name: Compute changed paths
+      - name: Compute changed consensus/reference paths
         id: diff
+        shell: bash
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
-          echo "$CHANGED" > /tmp/changed.txt
+          set -euo pipefail
 
-          GO_CHANGED=$(grep -c '^clients/go/'   /tmp/changed.txt || true)
-          RS_CHANGED=$(grep -c '^clients/rust/' /tmp/changed.txt || true)
-          ENC_CHANGED=$(grep -E '^clients/(go|rust)/.*(encode|decode|serial|wire|txid|wtxid|hash)' /tmp/changed.txt | wc -l || true)
-          FIX_CHANGED=$(grep -c '^conformance/fixtures/' /tmp/changed.txt || true)
+          BASE="$(jq -r '.pull_request.base.sha' "$GITHUB_EVENT_PATH")"
+          HEAD="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
+          git diff --name-only "$BASE" "$HEAD" > /tmp/changed.txt
 
-          echo "go=$GO_CHANGED"   >> "$GITHUB_OUTPUT"
-          echo "rs=$RS_CHANGED"   >> "$GITHUB_OUTPUT"
-          echo "enc=$ENC_CHANGED" >> "$GITHUB_OUTPUT"
-          echo "fix=$FIX_CHANGED" >> "$GITHUB_OUTPUT"
+          GO_CHANGED="$(grep -Ec '^clients/go/(consensus|cmd/rubin-consensus-cli)/' /tmp/changed.txt || true)"
+          RS_CHANGED="$(grep -Ec '^clients/rust/crates/(rubin-consensus|rubin-consensus-cli)/' /tmp/changed.txt || true)"
+          FIX_CHANGED="$(grep -Ec '^conformance/fixtures/' /tmp/changed.txt || true)"
+          ENC_CHANGED="$(grep -Ec '^(clients/go/consensus|clients/rust/crates/rubin-consensus)/.*(encode|decode|serial|wire|txid|wtxid|hash|sighash|compact|parse|merkle|pow|utxo|covenant|htlc|vault|multisig|stealth|block|tx)' /tmp/changed.txt || true)"
 
-      - name: Check parity-exempt label
-        id: label
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const labels = context.payload.pull_request.labels.map(l => l.name);
-            core.setOutput('exempt',  labels.includes('parity-exempt'));
-            core.setOutput('fixture', labels.includes('fixture-exempt'));
+          {
+            echo "go=$GO_CHANGED"
+            echo "rs=$RS_CHANGED"
+            echo "fixtures=$FIX_CHANGED"
+            echo "encoding=$ENC_CHANGED"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Enforce Go↔Rust parity
-        if: steps.label.outputs.exempt != 'true'
+      - name: Read PR exemption metadata
+        id: pr
+        shell: bash
         run: |
-          GO=${{ steps.diff.outputs.go }}
-          RS=${{ steps.diff.outputs.rs }}
-          if [ "$GO" -gt 0 ] && [ "$RS" -eq 0 ]; then
-            echo "::error::Go client changed but Rust client did not. Add a matching change or label PR with 'parity-exempt' and justify in the description."
+          set -euo pipefail
+
+          labels_file="$(mktemp)"
+          body_file="$(mktemp)"
+          jq -r '.pull_request.labels[]?.name' "$GITHUB_EVENT_PATH" > "$labels_file"
+          jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$body_file"
+
+          parity_label=false
+          fixture_label=false
+          parity_block=false
+          fixture_block=false
+          parity_exempt=false
+          fixture_exempt=false
+
+          if grep -Fxq 'parity-exempt' "$labels_file"; then
+            parity_label=true
+          fi
+          if grep -Fxq 'fixture-exempt' "$labels_file"; then
+            fixture_label=true
+          fi
+          if grep -Fq '### Parity exemption justification' "$body_file"; then
+            parity_block=true
+          fi
+          if grep -Fq '### Fixture exemption justification' "$body_file"; then
+            fixture_block=true
+          fi
+          if [[ "$parity_label" == "true" && "$parity_block" == "true" ]]; then
+            parity_exempt=true
+          fi
+          if [[ "$fixture_label" == "true" && "$fixture_block" == "true" ]]; then
+            fixture_exempt=true
+          fi
+
+          {
+            echo "parity_label=$parity_label"
+            echo "fixture_label=$fixture_label"
+            echo "parity_block=$parity_block"
+            echo "fixture_block=$fixture_block"
+            echo "parity_exempt=$parity_exempt"
+            echo "fixture_exempt=$fixture_exempt"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require justification for exemption labels
+        shell: bash
+        env:
+          PARITY_LABEL: ${{ steps.pr.outputs.parity_label }}
+          PARITY_BLOCK: ${{ steps.pr.outputs.parity_block }}
+          FIXTURE_LABEL: ${{ steps.pr.outputs.fixture_label }}
+          FIXTURE_BLOCK: ${{ steps.pr.outputs.fixture_block }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$PARITY_LABEL" == "true" && "$PARITY_BLOCK" != "true" ]]; then
+            echo "::error::The parity-exempt label requires a '### Parity exemption justification' block in the PR body."
             exit 1
           fi
-          if [ "$RS" -gt 0 ] && [ "$GO" -eq 0 ]; then
-            echo "::error::Rust client changed but Go client did not. Add a matching change or label PR with 'parity-exempt' and justify in the description."
+          if [[ "$FIXTURE_LABEL" == "true" && "$FIXTURE_BLOCK" != "true" ]]; then
+            echo "::error::The fixture-exempt label requires a '### Fixture exemption justification' block in the PR body."
             exit 1
           fi
 
-      - name: Enforce conformance fixture update on encoding changes
-        if: steps.label.outputs.fixture != 'true'
+      - name: Enforce source-level Go↔Rust parity smoke
+        shell: bash
+        env:
+          GO_CHANGED: ${{ steps.diff.outputs.go }}
+          RS_CHANGED: ${{ steps.diff.outputs.rs }}
+          PARITY_EXEMPT: ${{ steps.pr.outputs.parity_exempt }}
         run: |
-          ENC=${{ steps.diff.outputs.enc }}
-          FIX=${{ steps.diff.outputs.fix }}
-          if [ "$ENC" -gt 0 ] && [ "$FIX" -eq 0 ]; then
-            echo "::error::Encoding/hash code changed but no conformance/fixtures/** updates. Update vectors or label 'fixture-exempt' with justification."
+          set -euo pipefail
+
+          if [[ "$PARITY_EXEMPT" != "true" ]]; then
+            if [[ "$GO_CHANGED" -gt 0 && "$RS_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Go consensus/reference paths changed but Rust consensus/reference paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+              exit 1
+            fi
+            if [[ "$RS_CHANGED" -gt 0 && "$GO_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Rust consensus/reference paths changed but Go consensus/reference paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+              exit 1
+            fi
+          fi
+
+      - name: Enforce fixture smoke on encoding/hash/parse changes
+        shell: bash
+        env:
+          ENC_CHANGED: ${{ steps.diff.outputs.encoding }}
+          FIX_CHANGED: ${{ steps.diff.outputs.fixtures }}
+          FIXTURE_EXEMPT: ${{ steps.pr.outputs.fixture_exempt }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$FIXTURE_EXEMPT" != "true" && "$ENC_CHANGED" -gt 0 && "$FIX_CHANGED" -eq 0 ]]; then
+            echo "::error::Source-level fixture smoke failed: encoding/hash/parse consensus paths changed without conformance/fixtures updates. Add fixture updates or use fixture-exempt with a PR-body justification."
             exit 1
           fi
