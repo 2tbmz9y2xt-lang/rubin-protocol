@@ -32,12 +32,35 @@ jobs:
 
           BASE="$(jq -r '.pull_request.base.sha' "$GITHUB_EVENT_PATH")"
           HEAD="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
-          git diff --name-only "$BASE...$HEAD" > /tmp/changed.txt
+          git diff --name-status -z "$BASE...$HEAD" > /tmp/changed-status.z
+          python3 - /tmp/changed-status.z /tmp/changed-paths.z <<'PY'
+          import sys
+          from pathlib import Path
 
-          GO_CHANGED="$(grep -Ec '^clients/go/(consensus|cmd/rubin-consensus-cli)/' /tmp/changed.txt || true)"
-          RS_CHANGED="$(grep -Ec '^clients/rust/crates/(rubin-consensus|rubin-consensus-cli)/' /tmp/changed.txt || true)"
-          FIX_CHANGED="$(grep -Ec '^conformance/fixtures/' /tmp/changed.txt || true)"
-          ENC_CHANGED="$(grep -Ec '^(clients/go/consensus|clients/rust/crates/rubin-consensus)/.*(encode|decode|serial|wire|txid|wtxid|hash|sighash|compact|parse|merkle|pow|utxo|covenant|htlc|vault|multisig|stealth|block|tx)' /tmp/changed.txt || true)"
+          tokens = Path(sys.argv[1]).read_bytes().split(b"\0")
+          if tokens and tokens[-1] == b"":
+              tokens.pop()
+
+          paths = []
+          index = 0
+          while index < len(tokens):
+              status = tokens[index].decode("utf-8", "surrogateescape")
+              index += 1
+              if not status:
+                  continue
+              path_count = 2 if status[0] in {"R", "C"} else 1
+              if index + path_count > len(tokens):
+                  raise SystemExit(f"malformed git diff --name-status -z near {status!r}")
+              paths.extend(tokens[index:index + path_count])
+              index += path_count
+
+          Path(sys.argv[2]).write_bytes(b"\0".join(paths) + (b"\0" if paths else b""))
+          PY
+
+          GO_CHANGED="$(grep -zEc '^clients/go/(consensus|cmd/rubin-consensus-cli)/' /tmp/changed-paths.z || true)"
+          RS_CHANGED="$(grep -zEc '^clients/rust/crates/(rubin-consensus|rubin-consensus-cli)/' /tmp/changed-paths.z || true)"
+          FIX_CHANGED="$(grep -zEc '^conformance/fixtures/' /tmp/changed-paths.z || true)"
+          ENC_CHANGED="$(grep -zEc '^(clients/go/consensus|clients/rust/crates/rubin-consensus)/.*(^|/)[^/]*(encode|decode|serial|wire|txid|wtxid|hash|sighash|compact|parse|merkle)[^/]*' /tmp/changed-paths.z || true)"
 
           {
             echo "go=$GO_CHANGED"
@@ -61,14 +84,28 @@ jobs:
             local heading="$1"
             local file="$2"
             awk -v heading="$heading" '
-              $0 == heading {
+              {
+                sub(/\r$/, "", $0)
+                trimmed = $0
+                sub(/^[[:space:]]+/, "", trimmed)
+                sub(/[[:space:]]+$/, "", trimmed)
+              }
+              trimmed == "### " heading {
                 in_block = 1
                 next
               }
-              in_block && /^#{1,6}[[:space:]]+/ {
+              in_block && trimmed ~ /^#{1,6}[[:space:]]+/ {
                 exit
               }
-              in_block && $0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*N\/A([[:space:][:punct:]].*)?$/ {
+              in_block {
+                visible = trimmed
+                lower = tolower(visible)
+                if (visible == "" || visible ~ /^<!--.*-->$/) {
+                  next
+                }
+                if (lower ~ /^(n\/a|na|none|null|todo|tbd|not applicable)([[:space:][:punct:]].*)?$/) {
+                  next
+                }
                 found = 1
               }
               END {
@@ -90,10 +127,10 @@ jobs:
           if grep -Fxq 'fixture-exempt' "$labels_file"; then
             fixture_label=true
           fi
-          if has_justification_block '### Parity exemption justification' "$body_file"; then
+          if has_justification_block 'Parity exemption justification' "$body_file"; then
             parity_block=true
           fi
-          if has_justification_block '### Fixture exemption justification' "$body_file"; then
+          if has_justification_block 'Fixture exemption justification' "$body_file"; then
             fixture_block=true
           fi
           if [[ "$parity_label" == "true" && "$parity_block" == "true" ]]; then
