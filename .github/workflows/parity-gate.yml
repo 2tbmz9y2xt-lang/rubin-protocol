@@ -145,18 +145,18 @@ jobs:
                 trimmed = $0
                 sub(/^[[:space:]]+/, "", trimmed)
                 sub(/[[:space:]]+$/, "", trimmed)
-              }
-              trimmed == "### " heading {
-                in_block = 1
-                next
-              }
-              in_block && trimmed ~ /^#{1,6}[[:space:]]+/ {
-                exit
-              }
-              in_block {
                 visible = strip_html_comments(trimmed)
                 sub(/^[[:space:]]+/, "", visible)
                 sub(/[[:space:]]+$/, "", visible)
+              }
+              visible == "### " heading {
+                in_block = 1
+                next
+              }
+              in_block && visible ~ /^#{1,6}[[:space:]]+/ {
+                exit
+              }
+              in_block {
                 lower = tolower(visible)
                 if (visible == "") {
                   next
