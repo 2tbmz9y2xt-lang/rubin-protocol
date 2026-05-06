@@ -32,7 +32,7 @@ jobs:
 
           BASE="$(jq -r '.pull_request.base.sha' "$GITHUB_EVENT_PATH")"
           HEAD="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
-          git diff --name-only "$BASE" "$HEAD" > /tmp/changed.txt
+          git diff --name-only "$BASE...$HEAD" > /tmp/changed.txt
 
           GO_CHANGED="$(grep -Ec '^clients/go/(consensus|cmd/rubin-consensus-cli)/' /tmp/changed.txt || true)"
           RS_CHANGED="$(grep -Ec '^clients/rust/crates/(rubin-consensus|rubin-consensus-cli)/' /tmp/changed.txt || true)"
