@@ -1507,6 +1507,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_config_accepts_whitespace_only_mine_address() {
+        // Rust-vs-Go documented divergence (pre-existing in
+        // `crate::coinbase::parse_mine_address`, not introduced here):
+        // whitespace-only input trims to empty -> `parse_mine_address_arg`
+        // returns `Ok(None)` -> validate_config passes; run() then falls
+        // back to `default_mine_address()`. Go's `hex.DecodeString` would
+        // reject the same input as invalid hex. This test pins the Rust
+        // accept-path so the divergence is visible and cannot regress silently.
+        let mut cfg = parse_args(&["--mine-address".to_string(), "   ".to_string()])
+            .expect("parse args");
+        validate_config(&mut cfg)
+            .expect("whitespace-only mine_address must be accepted (Rust silent-default path)");
+    }
+
+    #[test]
     fn dry_run_emits_rpc_bind_when_present() {
         let dir = unique_temp_dir("rubin-node-bin-rpc-bind");
         let args = vec![
