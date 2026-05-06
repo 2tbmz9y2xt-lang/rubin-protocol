@@ -687,19 +687,11 @@ impl TxPool {
 /// AND enforces the rolling-relay-fee floor inline via
 /// `apply_post_consensus_policy_with_floor` -> `validate_fee_floor`.
 ///
-/// Cross-client divergence between Go RelayMetadata and Rust relay_metadata:
-/// Go `RelayMetadata` (`clients/go/node/mempool.go`) does NOT enforce
-/// relay-floor inline; Go delegates floor enforcement to per-peer
-/// relay-policy + the admit-time `validateFeeFloorLockedWithFloor`.
-/// The Rust relay path enforces inline at relay-time. Go's
-/// `RelayMetadata` is a read-only metadata fetcher and does NOT insert
-/// into the mempool. The documented expected delta is: below-floor txs
-/// whose Go `RelayMetadata` returns metadata while Rust `relay_metadata`
-/// returns `Unavailable`. This asymmetry is INTENTIONAL pending a
-/// future cross-client unification slice (separate follow-up — TBD).
-/// The pinning test
-/// `rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit`
-/// in this file documents the Rust side of the divergence.
+/// Cross-client parity: Go `RelayMetadata` (`clients/go/node/mempool.go`)
+/// also enforces the rolling floor read-only after structural + chainstate
+/// validation. Both relay metadata paths return `Unavailable` for otherwise
+/// valid below-floor txs. Neither path inserts into the mempool or performs
+/// duplicate, conflict, or capacity admission checks.
 pub(crate) fn relay_metadata(
     tx_bytes: &[u8],
     chain_state: &ChainState,
@@ -3891,18 +3883,10 @@ mod tests {
     /// PR-1410 wave-2 fix — relay_metadata must NOT be weaker than
     /// admit_with_metadata. The cfg-zero override before apply_policy
     /// (`applyPolicyAgainstState` in clients/go/node/mempool.go) preserves DA-side error class
-    /// isolation, but Rust's prior implementation skipped the rolling
-    /// relay floor entirely on the relay path. That created a real
-    /// production divergence: `tx_relay::handle_received_tx` uses
-    /// `relay_metadata` as the gate before re-announcing, so a DA tx
-    /// that pays the DA-side floor but is below the rolling relay
-    /// floor was propagated through the network even though
-    /// `TxPool::admit` rejected the same tx. Go avoids the divergence
-    /// in the full node by re-running mempool admission via
-    /// `CanonicalMempoolRelayMetadata` + `CanonicalMempoolTxPool.Put`;
-    /// the equivalent here is to call the same `validate_fee_floor`
-    /// predicate inside `relay_metadata` after `apply_policy` succeeds
-    /// (controller decision option-c per PR #1410 thread fix).
+    /// isolation. Both Rust `relay_metadata` and Go `RelayMetadata` enforce
+    /// the rolling relay floor after structural/chainstate/policy validation,
+    /// so relay metadata never propagates a tx the local mempool would reject
+    /// solely as below the rolling floor.
     ///
     /// Proof assertion: same DA tx, same TxPoolConfig with non-zero
     /// rolling floor + DA-side terms; admit returns Unavailable; relay
