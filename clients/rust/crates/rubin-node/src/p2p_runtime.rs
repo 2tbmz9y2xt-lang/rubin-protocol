@@ -3024,9 +3024,15 @@ mod tests {
 
     /// RUB-178 / GitHub #1438 introduced this production-path
     /// reachability proof for the canonical TxPool admission seam in
-    /// `PeerRelayContext`; RUB-173 / GitHub #1420 flipped the
-    /// `entry_source` assertion from `Local` to `Remote` after the seam
-    /// switched to `add_tx_with_source(_, _, _, _, TxSource::Remote)`.
+    /// `PeerRelayContext`; RUB-173 / GitHub #1420 paired the seam swap
+    /// to `add_tx_with_source(_, _, _, _, TxSource::Remote)` with an
+    /// `entry_source` parity update from `Local` to `Remote`.
+    ///
+    /// Proof assertion: the `assert_eq!(pool_guard.entry_source(&txid),
+    /// Some(crate::txpool::TxSource::Remote), ...)` near the end of
+    /// this test is the regression anchor that breaks if the seam
+    /// regresses to legacy `pool.admit` (Local) or any other source
+    /// variant.
     ///
     /// Why this is not helper-only:
     ///
