@@ -2647,6 +2647,28 @@ mod tests {
 
     #[test]
     fn rub196_capacity_rejects_bad_edges_without_mutation() {
+        let mut invalid_limits = TxPool::new();
+        invalid_limits.set_capacity_for_test(0, 100);
+        let err = invalid_limits
+            .insert_capacity_checked_entry_for_test(
+                [0x53; 32],
+                test_entry(100, 1, 1, TxSource::Local),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(err.message.contains("invalid tx pool capacity limits"));
+
+        let mut invalid_candidate = TxPool::new();
+        invalid_candidate.set_capacity_for_test(10, 100);
+        let err = invalid_candidate
+            .insert_capacity_checked_entry_for_test(
+                [0u8; 32],
+                test_entry(100, 1, 1, TxSource::Local),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("invalid candidate metadata"));
+
         let mut oversize = TxPool::new();
         oversize.set_capacity_for_test(10, 100);
         let err = oversize
@@ -2672,6 +2694,45 @@ mod tests {
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
         assert!(err.message.contains("missing heap sequence"));
 
+        let mut invalid_resident = TxPool::new();
+        invalid_resident.set_capacity_for_test(1, 100);
+        invalid_resident.insert_entry([0u8; 32], test_entry(1, 1, 50, TxSource::Local));
+        let err = invalid_resident
+            .insert_capacity_checked_entry_for_test(
+                [0x58; 32],
+                test_entry(100, 1, 50, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("invalid resident metadata"));
+
+        let mut duplicate_seq = TxPool::new();
+        duplicate_seq.set_capacity_for_test(2, 100);
+        duplicate_seq.insert_entry([0x59; 32], test_entry(1, 1, 50, TxSource::Local));
+        duplicate_seq.insert_entry([0x5a; 32], test_entry(2, 1, 50, TxSource::Local));
+        let first_seq = *duplicate_seq.heap_seqs.get(&[0x59; 32]).unwrap();
+        duplicate_seq.heap_seqs.insert([0x5a; 32], first_seq);
+        let err = duplicate_seq
+            .insert_capacity_checked_entry_for_test(
+                [0x5b; 32],
+                test_entry(100, 1, 1, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("duplicate heap sequence"));
+
+        let mut zero_weight = TxPool::new();
+        zero_weight.set_capacity_for_test(1, 100);
+        zero_weight.insert_entry([0x5c; 32], test_entry(1, 0, 50, TxSource::Local));
+        let err = zero_weight
+            .insert_capacity_checked_entry_for_test(
+                [0x5d; 32],
+                test_entry(100, 1, 50, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("invalid resident metadata"));
+
         let mut underflow = TxPool::new();
         underflow.set_capacity_for_test(1, 100);
         underflow.insert_entry([0x5b; 32], test_entry(1, 1, 95, TxSource::Local));
@@ -2685,6 +2746,31 @@ mod tests {
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
         assert!(err.message.contains("eviction byte accounting underflow"));
         assert!(underflow.txs.contains_key(&[0x5b; 32]));
+
+        let mut stale_low_water = TxPool::new();
+        stale_low_water.max_bytes = 100;
+        stale_low_water.low_water_bytes = 0;
+        assert_eq!(stale_low_water.effective_low_water_bytes(), 90);
+
+        let mut exceeded_after_plan = TxPool::new();
+        exceeded_after_plan.set_capacity_for_test(10, 100);
+        exceeded_after_plan.low_water_bytes = 200;
+        exceeded_after_plan.insert_entry([0x5e; 32], test_entry(1, 1, 95, TxSource::Local));
+        let err = exceeded_after_plan
+            .insert_capacity_checked_entry_for_test(
+                [0x5f; 32],
+                test_entry(100, 1, 10, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(err.message.contains("capacity remains exceeded"));
+
+        let mut rebuild = TxPool::new();
+        rebuild
+            .txs
+            .insert([0x60; 32], test_entry(1, 1, 1, TxSource::Local));
+        assert_eq!(rebuild.current_worst_txid(), Some([0x60; 32]));
+        assert!(rebuild.heap_seqs.contains_key(&[0x60; 32]));
     }
 
     #[test]
