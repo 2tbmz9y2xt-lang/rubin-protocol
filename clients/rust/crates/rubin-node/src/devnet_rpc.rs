@@ -52,12 +52,100 @@ pub struct DevnetRPCState {
     rpc_op_lock: Arc<Mutex<()>>,
     /// When set, POST `/mine_next` mines one block using this config (devnet + loopback RPC only).
     live_mining_cfg: Option<MinerConfig>,
+    /// RUB-10 / GitHub #1151: readiness gate driving `/ready` semantics.
+    /// Mirrors Go's `clients/go/cmd/rubin-node/http_rpc.go::readinessGate`
+    /// (lines 96-219). Three-state machine: `NotReady` -> `Ready` (one-shot
+    /// via `try_mark_ready_on_startup`) -> `Shutdown` (sticky terminal,
+    /// via `mark_shutdown`). Mixed-client devnet evidence consumers
+    /// distinguish a starting node, a serving node, and a shutting-down
+    /// node by `/ready`'s 503/200 response and the `{ready: bool}` body.
+    readiness: Arc<ReadinessGate>,
 }
 
 pub struct RunningDevnetRPCServer {
     addr: String,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+    /// RUB-10 / GitHub #1151: handle to the same `ReadinessGate` the
+    /// `DevnetRPCState` references, kept on the server so `close()`
+    /// can stamp `Shutdown` before stopping the accept loop. Mirrors
+    /// Go's `runningDevnetRPCServer.MarkShutdown` (http_rpc.go:308).
+    readiness: Arc<ReadinessGate>,
+}
+
+/// RUB-10 / GitHub #1151: three-state readiness machine mirroring Go's
+/// `readyState` constants in `clients/go/cmd/rubin-node/http_rpc.go`
+/// (lines 92-95). Transitions are monotone: `NotReady` is the initial
+/// boot state; `try_mark_ready_on_startup` flips it to `Ready` exactly
+/// once; `mark_shutdown` flips any state to the sticky terminal
+/// `Shutdown`. `Shutdown` is observable via `is_ready() == false` and
+/// is the operational signal mixed-client devnet evidence consumers
+/// use to stop submitting work to a draining node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadyState {
+    NotReady,
+    Ready,
+    Shutdown,
+}
+
+#[derive(Default)]
+struct ReadinessGate {
+    state: Mutex<ReadyStateCell>,
+}
+
+struct ReadyStateCell(ReadyState);
+
+impl Default for ReadyStateCell {
+    fn default() -> Self {
+        Self(ReadyState::NotReady)
+    }
+}
+
+impl ReadinessGate {
+    /// RUB-10 / GitHub #1151: boot-time `NotReady` -> `Ready` transition.
+    /// Mirrors Go `readinessGate.TryMarkReadyOnStartup`
+    /// (http_rpc.go:166-180). Returns true iff the gate WAS `NotReady`
+    /// at the moment of the call AND the transition won. Returns false
+    /// if already `Ready` (idempotent re-call) or `Shutdown` (sticky;
+    /// post-shutdown re-readiness is forbidden by design — operators
+    /// must restart the node, matching Go's contract).
+    fn try_mark_ready_on_startup(&self) -> bool {
+        let Ok(mut cell) = self.state.lock() else {
+            return false;
+        };
+        if cell.0 != ReadyState::NotReady {
+            return false;
+        }
+        cell.0 = ReadyState::Ready;
+        true
+    }
+
+    /// RUB-10 / GitHub #1151: stamp the gate into the sticky `Shutdown`
+    /// state. Mirrors Go `readinessGate.MarkShutdown` (http_rpc.go:184-191).
+    /// Idempotent. Once `Shutdown` is set, `is_ready()` returns false
+    /// permanently (matches Go's design: a draining node must not
+    /// re-advertise readiness without a process restart).
+    fn mark_shutdown(&self) {
+        if let Ok(mut cell) = self.state.lock() {
+            cell.0 = ReadyState::Shutdown;
+        }
+    }
+
+    /// RUB-10 / GitHub #1151: returns true iff the gate is currently in
+    /// the `Ready` state. Mirrors Go `readinessGate.IsReady`
+    /// (http_rpc.go:198-208) without the `shutdownCtx` cancellation
+    /// observation hook — Rust's RPC server does not expose a context
+    /// cancellation channel, so the only paths into `Shutdown` are the
+    /// explicit `mark_shutdown()` call from `RunningDevnetRPCServer::close`
+    /// and `Drop`. A poisoned mutex is treated as not-ready
+    /// (defense-in-depth: a panicked operation that left the gate in
+    /// inconsistent state should fail closed on readiness).
+    fn is_ready(&self) -> bool {
+        self.state
+            .lock()
+            .map(|cell| cell.0 == ReadyState::Ready)
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Default)]
@@ -154,6 +242,17 @@ struct TxStatusResponse {
     error: Option<String>,
 }
 
+/// RUB-10 / GitHub #1151: `/ready` JSON envelope.
+/// Mirrors Go's `readyResponse` struct in
+/// `clients/go/cmd/rubin-node/http_rpc.go`: a single boolean field
+/// describing whether the node is currently in the `Ready` state.
+/// Mixed-client devnet evidence consumers parse only `ready`; status
+/// code (200 vs 503) is the secondary signal.
+#[derive(Serialize)]
+struct ReadyResponse {
+    ready: bool,
+}
+
 /// True when the host in `host:port` is loopback-only (safe for devnet live mining RPC).
 /// Requires a non-empty, valid `u16` port (rejects `127.0.0.1:` and similar).
 pub fn rpc_bind_host_is_loopback(bind_addr: &str) -> bool {
@@ -234,6 +333,12 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         announce_tx,
         rpc_op_lock: Arc::new(Mutex::new(())),
         live_mining_cfg,
+        // RUB-10 / GitHub #1151: gate starts in `NotReady`. The
+        // `try_mark_ready_on_startup` transition runs inside
+        // `start_devnet_rpc_server` after the listener is bound, so
+        // `/ready` cannot report 200 before the node is actually
+        // serving requests.
+        readiness: Arc::new(ReadinessGate::default()),
     }
 }
 
@@ -270,6 +375,16 @@ pub fn start_devnet_rpc_server(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
     let state = Arc::new(state);
+    // RUB-10 / GitHub #1151: stamp `Ready` BEFORE the accept thread
+    // spawns. Mirrors Go's `main.go:768` `rpcServer.TryMarkReadyOnStartup()`
+    // call placement: it runs after the listener is bound but before
+    // (or concurrent with) the first request is served, so any
+    // observer hitting `/ready` after the listener is up sees the
+    // serving state, not the boot-time `NotReady` value. The
+    // `Arc::clone` keeps a handle past the move into the thread so
+    // `RunningDevnetRPCServer` can `mark_shutdown` on close.
+    let readiness = Arc::clone(&state.readiness);
+    readiness.try_mark_ready_on_startup();
     let join = thread::spawn(move || {
         run_accept_loop(listener, state, stop_flag);
     });
@@ -277,6 +392,7 @@ pub fn start_devnet_rpc_server(
         addr,
         stop,
         join: Some(join),
+        readiness,
     })
 }
 
@@ -286,6 +402,14 @@ impl RunningDevnetRPCServer {
     }
 
     pub fn close(&mut self) {
+        // RUB-10 / GitHub #1151: stamp `Shutdown` BEFORE stopping the
+        // accept loop so any in-flight `/ready` request that races the
+        // close sees the sticky terminal state. Mirrors Go's
+        // `runningDevnetRPCServer.MarkShutdown` (http_rpc.go:308) which
+        // is called from `main.go:598` before the listener tear-down.
+        // Idempotent: re-calling close (e.g., explicit close + Drop)
+        // re-stamps Shutdown without effect.
+        self.readiness.mark_shutdown();
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.addr);
         if let Some(join) = self.join.take() {
@@ -424,6 +548,7 @@ fn read_http_error_response(err: &str) -> HttpResponse {
 fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
     let (path, query) = split_target(&req.target);
     match path {
+        "/ready" => handle_ready(state, &req.method),
         "/get_tip" => handle_get_tip(state, &req.method),
         "/get_block" => handle_get_block(state, &req.method, &query),
         "/submit_tx" => handle_submit_tx(state, &req.method, &req.body),
@@ -443,6 +568,45 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
             },
         ),
     }
+}
+
+/// RUB-10 / GitHub #1151: `/ready` endpoint for mixed-client devnet
+/// evidence consumers. Returns one of:
+///   - 200 `{ready: true}` when the gate is in `Ready` state
+///     (post-`try_mark_ready_on_startup`, pre-`mark_shutdown`)
+///   - 503 `{ready: false}` when the gate is in `NotReady`
+///     (pre-startup) or `Shutdown` (post-shutdown) state
+///   - 405 `{accepted: false, error: "GET required"}` with
+///     `Allow: GET` header on non-GET methods, per RFC 9110 §15.5.6
+///
+/// Mirrors Go's `handleReady` at
+/// `clients/go/cmd/rubin-node/http_rpc.go:645-670` byte-for-byte at
+/// the JSON level (`{ready: bool}` shape; same 200/503 split; same
+/// 405+`Allow: GET` envelope shared with the rest of the surface
+/// via the `accepted/error` JSON shape).
+///
+/// Status code 405 (vs the 400 used by other Rust query handlers like
+/// `handle_get_tip` / `handle_get_block`) is intentional and matches
+/// Go's `/ready`-specific choice — readiness probes from monitoring
+/// systems rely on the standard 405+Allow contract for self-correction.
+/// Migrating the other query handlers from 400 to 405 is a separate
+/// concern outside RUB-10's scope (would change established endpoint
+/// behavior, class change risk).
+fn handle_ready(state: &DevnetRPCState, method: &str) -> HttpResponse {
+    const ROUTE: &str = "/ready";
+    if method != "GET" {
+        let body = serde_json::to_vec(&SubmitTxResponse {
+            accepted: false,
+            txid: None,
+            error: Some("GET required".to_string()),
+        })
+        .unwrap_or_else(|_| b"{\"accepted\":false,\"error\":\"GET required\"}".to_vec());
+        state.metrics.note(ROUTE, 405);
+        return HttpResponse::plain(405, "application/json", body).with_header("Allow", "GET");
+    }
+    let ready = state.readiness.is_ready();
+    let status: u16 = if ready { 200 } else { 503 };
+    json_response(state, ROUTE, status, &ReadyResponse { ready })
 }
 
 fn handle_get_tip(state: &DevnetRPCState, method: &str) -> HttpResponse {
@@ -1915,13 +2079,28 @@ fn is_field_vchar_or_ows(b: u8) -> bool {
 
 fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<(), String> {
     let status_text = status_text(response.status);
-    let headers = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    let mut headers = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         response.status,
         status_text,
         response.content_type,
         response.body.len()
     );
+    // RUB-10 / GitHub #1151: emit any opt-in headers attached via
+    // `HttpResponse::with_header` (currently used only by `/ready`'s
+    // 405 path for `Allow: GET`). Names are `&'static str` so they
+    // cannot carry runtime-injected CRLF; values are owned `String`
+    // and are sanitized at the caller — `with_header` callers in this
+    // file only pass static literals (e.g., `"GET"`), so no runtime
+    // injection vector currently exists, and adding one would
+    // require an upstream method change.
+    for (name, value) in &response.extra_headers {
+        headers.push_str(name);
+        headers.push_str(": ");
+        headers.push_str(value);
+        headers.push_str("\r\n");
+    }
+    headers.push_str("\r\n");
     stream
         .write_all(headers.as_bytes())
         .and_then(|_| stream.write_all(&response.body))
@@ -2002,6 +2181,12 @@ fn status_text(status: u16) -> &'static str {
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
+        // RUB-10 / GitHub #1151: 405 emitted by `/ready` for non-GET
+        // (mirrors Go's `handleReady` at http_rpc.go:659 which uses
+        // `http.StatusMethodNotAllowed`). Not used by the existing
+        // 6 query handlers (they emit 400 for non-GET; migrating
+        // them to 405 is a separate concern outside RUB-10's scope).
+        405 => "Method Not Allowed",
         409 => "Conflict",
         413 => "Request Entity Too Large",
         422 => "Unprocessable Entity",
@@ -2014,6 +2199,16 @@ struct HttpResponse {
     status: u16,
     content_type: &'static str,
     body: Vec<u8>,
+    /// RUB-10 / GitHub #1151: optional extra `name: value` header pairs.
+    /// Used by `/ready` to emit the RFC 9110 §15.5.6-required `Allow`
+    /// header on its 405 method-rejection response, matching Go's
+    /// `handleReady` at `clients/go/cmd/rubin-node/http_rpc.go:653`.
+    /// Default empty for every existing response (current callers go
+    /// through `HttpResponse::plain` which leaves this empty).
+    /// Names are `&'static str` to match the rest of the type's
+    /// reliance on static lifetimes; values are owned `String` to
+    /// allow runtime-shaped values when future endpoints need them.
+    extra_headers: Vec<(&'static str, String)>,
 }
 
 impl HttpResponse {
@@ -2022,7 +2217,17 @@ impl HttpResponse {
             status,
             content_type,
             body: body.into(),
+            extra_headers: Vec::new(),
         }
+    }
+
+    /// RUB-10 / GitHub #1151: chainable header setter. Used by
+    /// `handle_ready` to attach `Allow: GET` to its 405 response.
+    /// Each call appends; duplicates are not deduplicated (no current
+    /// caller writes the same header twice).
+    fn with_header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.extra_headers.push((name, value.into()));
+        self
     }
 }
 
@@ -2052,7 +2257,7 @@ mod tests {
         decode_hex_payload, handle_connection, new_devnet_rpc_state,
         new_devnet_rpc_state_with_tx_pool, new_shared_runtime_tx_pool, parse_hex32,
         parse_query_map, read_http_error_response, read_http_request, render_prometheus_metrics,
-        route_request, split_target, start_devnet_rpc_server, status_text, HttpRequest,
+        route_request, split_target, start_devnet_rpc_server, status_text, HttpRequest, ReadyState,
     };
 
     fn build_state(with_genesis: bool) -> (super::DevnetRPCState, PathBuf) {
@@ -2303,6 +2508,11 @@ mod tests {
             announce_tx: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
+            // RUB-10 / GitHub #1151: this helper bypasses the public
+            // constructor (`new_devnet_rpc_state*`) so it does not
+            // benefit from the default-NotReady wiring there. Keep
+            // the boot value explicit here for parity.
+            readiness: Arc::new(super::ReadinessGate::default()),
         }
     }
 
@@ -4074,6 +4284,9 @@ mod tests {
             announce_tx: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
+            // RUB-10 / GitHub #1151: render_prometheus_metrics test does
+            // not exercise `/ready`; default `NotReady` is fine.
+            readiness: Arc::new(super::ReadinessGate::default()),
         };
 
         let body = render_prometheus_metrics(&state);
@@ -4985,5 +5198,255 @@ mod tests {
         // Non-UTF-8 decoded bytes — preserved as raw bytes (Go parity).
         assert_eq!(super::percent_decode("%ff"), Some(vec![0xff]));
         assert_eq!(super::percent_decode("%c3%28"), Some(vec![0xc3, 0x28]));
+    }
+
+    /// RUB-10 / GitHub #1151: `/ready` endpoint reports 503 + body
+    /// `{ready: false}` when the readiness gate is in the initial
+    /// `NotReady` state (before `start_devnet_rpc_server` has stamped
+    /// it `Ready`). Mirrors Go's `handleReady` 503 branch at
+    /// `clients/go/cmd/rubin-node/http_rpc.go:669`.
+    ///
+    /// Proof assertion: the `assert_eq!(response.status, 503)` and
+    /// `assert_eq!(response_json(&response)["ready"], json!(false))`
+    /// below are the regression anchors — any future change that
+    /// silently advances `NotReady` to `Ready` (e.g., adding
+    /// `try_mark_ready_on_startup` to the constructor) breaks this
+    /// test.
+    #[test]
+    fn ready_endpoint_reports_503_when_not_ready() {
+        let (state, dir) = build_state(false);
+        // Constructor leaves the gate in `NotReady`. Drive `/ready`
+        // through `route_request` (the public dispatch entry the
+        // production accept loop uses) without going through
+        // `start_devnet_rpc_server`, so the gate stays at the boot
+        // value.
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        let body: Value = serde_json::from_slice(&response.body).expect("ready 503 json");
+        assert_eq!(body["ready"], serde_json::json!(false));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-10 / GitHub #1151: `/ready` reports 200 + `{ready: true}`
+    /// after `start_devnet_rpc_server` stamps the gate `Ready`.
+    /// Mirrors Go's `handleReady` 200 branch at http_rpc.go:666 and
+    /// proves the production startup wiring (mark-ready post-bind in
+    /// `start_devnet_rpc_server`) actually flips the state observable
+    /// through the public RPC path.
+    ///
+    /// Proof assertion: `assert!(state.readiness.is_ready())` after
+    /// the start call and the subsequent `200 + ready=true` body
+    /// pin both the gate state and the dispatch behavior.
+    #[test]
+    fn ready_endpoint_reports_200_after_start_devnet_rpc_server() {
+        let (state, dir) = build_state(false);
+        let server =
+            start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start_devnet_rpc_server");
+        // Production wiring should have stamped Ready before returning.
+        assert!(
+            state.readiness.is_ready(),
+            "start_devnet_rpc_server must stamp Ready before returning"
+        );
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).expect("ready 200 json");
+        assert_eq!(body["ready"], serde_json::json!(true));
+        drop(server);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-10 / GitHub #1151: shutdown is sticky. After
+    /// `RunningDevnetRPCServer::close` (or Drop) stamps `Shutdown`,
+    /// `/ready` reports 503 + `{ready: false}` permanently — mixed-
+    /// client orchestrators must stop submitting work to a draining
+    /// node. Mirrors Go's `MarkShutdown` semantics at
+    /// http_rpc.go:184-191 (sticky `readyStateShutdown`).
+    ///
+    /// Proof assertion: after `close()`, `state.readiness.is_ready()`
+    /// must be false AND a subsequent `try_mark_ready_on_startup`
+    /// must NOT flip the state back to ready (sticky terminal).
+    #[test]
+    fn ready_endpoint_reports_503_after_shutdown_sticky() {
+        let (state, dir) = build_state(false);
+        let mut server =
+            start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start_devnet_rpc_server");
+        assert!(state.readiness.is_ready());
+        server.close();
+        assert!(
+            !state.readiness.is_ready(),
+            "close() must flip readiness off"
+        );
+        // Sticky: try_mark_ready_on_startup after Shutdown must NOT
+        // re-enable readiness — operators must restart the process,
+        // matching Go's design.
+        let won = state.readiness.try_mark_ready_on_startup();
+        assert!(
+            !won,
+            "try_mark_ready_on_startup after Shutdown must return false"
+        );
+        assert!(
+            !state.readiness.is_ready(),
+            "Shutdown must remain sticky after re-attempt"
+        );
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        let body: Value = serde_json::from_slice(&response.body).expect("ready 503 json");
+        assert_eq!(body["ready"], serde_json::json!(false));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-10 / GitHub #1151: non-GET request to `/ready` returns 405
+    /// Method Not Allowed with the JSON-error envelope shared with
+    /// `handle_submit_tx`/`handle_get_tip` (`{accepted:false,error:"GET required"}`)
+    /// AND the RFC 9110 §15.5.6 `Allow: GET` header. Mirrors Go's
+    /// `handleReady` 405 branch at http_rpc.go:647-664.
+    ///
+    /// Proof assertion: `assert_eq!(response.status, 405)` and
+    /// `assert!(response.extra_headers.iter().any(|(n,v)| *n == "Allow" && v == "GET"))`
+    /// below pin both the status code (vs 400 used by other Rust
+    /// query handlers) and the Allow-header parity that mixed-client
+    /// monitoring tooling depends on.
+    #[test]
+    fn ready_endpoint_returns_405_with_allow_header_on_post() {
+        let (state, dir) = build_state(false);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 405);
+        let body: Value = serde_json::from_slice(&response.body).expect("ready 405 json");
+        assert_eq!(body["accepted"], serde_json::json!(false));
+        assert_eq!(body["error"], serde_json::json!("GET required"));
+        assert!(
+            response
+                .extra_headers
+                .iter()
+                .any(|(name, value)| *name == "Allow" && value == "GET"),
+            "405 response must include Allow: GET header (RFC 9110 §15.5.6); \
+             got headers: {:?}",
+            response.extra_headers
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-10 / GitHub #1151: end-to-end TCP roundtrip through
+    /// `handle_connection` exercising the full public path
+    /// (parser -> dispatcher -> `handle_ready` -> wire response).
+    /// This complements the route-level tests above by proving the
+    /// `Allow: GET` header lands in the actual HTTP wire bytes that
+    /// downstream HTTP clients parse.
+    ///
+    /// Proof assertion: the raw response head must contain the
+    /// `Allow: GET` line; the body must be the same JSON envelope.
+    #[test]
+    fn ready_endpoint_end_to_end_tcp_405_includes_allow_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (state, dir) = build_state(false);
+        let raw = b"POST /ready HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".to_vec();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            stream.write_all(&raw).expect("write");
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("shutdown write");
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf);
+            buf
+        });
+        let (server_stream, _) = listener.accept().expect("accept");
+        let _ = handle_connection(server_stream, &state);
+        let response_bytes = client.join().expect("join client");
+        let head_end = response_bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response head delimiter");
+        let head_text =
+            std::str::from_utf8(&response_bytes[..head_end]).expect("response head utf8");
+        assert!(
+            head_text.starts_with("HTTP/1.1 405 "),
+            "expected 405 status line; got: {head_text}"
+        );
+        assert!(
+            head_text
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("Allow: GET")),
+            "expected `Allow: GET` header in response head; got: {head_text}"
+        );
+        let body = &response_bytes[head_end + 4..];
+        let body_json: Value = serde_json::from_slice(body).expect("body json");
+        assert_eq!(body_json["error"], serde_json::json!("GET required"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-10 / GitHub #1151: `ReadinessGate::try_mark_ready_on_startup`
+    /// is one-shot. The first call from `NotReady` returns true; any
+    /// subsequent call (whether re-entering from `Ready` or after
+    /// `mark_shutdown` flipped to `Shutdown`) returns false. Mirrors
+    /// Go `readinessGate.TryMarkReadyOnStartup` at http_rpc.go:166-180.
+    ///
+    /// Proof assertion: this drives the gate through every documented
+    /// transition (NotReady -> Ready, Ready -> Ready idempotent,
+    /// Ready -> Shutdown, Shutdown sticky) and asserts the boolean
+    /// returns + observable `is_ready()` reads at each step.
+    #[test]
+    fn readiness_gate_state_transitions_match_go_semantics() {
+        // Use the public DevnetRPCState so this test exercises the
+        // exact gate the production constructor returns.
+        let (state, dir) = build_state(false);
+        // 1) NotReady -> Ready: first try wins.
+        assert!(!state.readiness.is_ready());
+        assert!(state.readiness.try_mark_ready_on_startup());
+        assert!(state.readiness.is_ready());
+        // 2) Ready -> Ready (idempotent re-call returns false; no flip).
+        assert!(!state.readiness.try_mark_ready_on_startup());
+        assert!(state.readiness.is_ready());
+        // 3) Ready -> Shutdown via mark_shutdown.
+        state.readiness.mark_shutdown();
+        assert!(!state.readiness.is_ready());
+        // 4) Shutdown sticky: try_mark_ready_on_startup must not flip
+        //    Shutdown back to Ready.
+        assert!(!state.readiness.try_mark_ready_on_startup());
+        assert!(!state.readiness.is_ready());
+        // 5) mark_shutdown idempotent on Shutdown.
+        state.readiness.mark_shutdown();
+        assert!(!state.readiness.is_ready());
+        // Compile-time anchor that ReadyState enum variants exist (the
+        // test itself doesn't read state internals; this prevents
+        // accidental enum reshape from making the assertions tautological).
+        let _states = [
+            ReadyState::NotReady,
+            ReadyState::Ready,
+            ReadyState::Shutdown,
+        ];
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 }
