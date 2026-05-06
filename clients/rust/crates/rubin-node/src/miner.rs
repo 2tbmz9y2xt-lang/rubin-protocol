@@ -429,6 +429,7 @@ mod tests {
     use rubin_consensus::constants::MAX_BLOCK_WEIGHT;
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
 
+    use crate::txpool::TxSource;
     use crate::{
         block_store_path, chain_state_path, default_sync_config, devnet_genesis_chain_id,
         test_helpers::signed_conflicting_p2pk_state_and_txs, BlockStore, ChainState, SyncEngine,
@@ -649,6 +650,23 @@ mod tests {
         (state, raw)
     }
 
+    fn admit_setup_pool_tx(
+        pool: &mut TxPool,
+        raw: &[u8],
+        state: &ChainState,
+        source: TxSource,
+    ) -> [u8; 32] {
+        let (txid, _) = pool
+            .add_tx_with_source(raw, state, None, devnet_genesis_chain_id(), source)
+            .expect("setup admit");
+        assert_eq!(
+            pool.entry_source(&txid),
+            Some(source),
+            "setup admission records its declared source before miner cleanup"
+        );
+        txid
+    }
+
     #[test]
     fn mine_one_includes_valid_explicit_tx() {
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-explicit-valid");
@@ -676,19 +694,20 @@ mod tests {
         //     admit_with_metadata did not enforce the rolling fee floor.
         //   - new invariant: admit_with_metadata enforces the rolling fee
         //     floor (DEFAULT=1) via validate_fee_floor.
-        //   - reachability: tx is well-formed; pool.admit reaches the
+        //   - reachability: tx is well-formed; setup admission reaches the
         //     txpool admission path. Mine_n then confirms blocks and
         //     evicts confirmed txs from the pool.
+        //   - producer boundary: the admission below is setup-only; miner
+        //     production code only selects and cleans up existing pool txs.
         //   - replacement coverage: input bumped to 7700 so fee = 7700 - 10
         //     = 7690 ≥ weight (≈7653). The mine-then-evict invariant
         //     remains under test.
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-pool-evict");
         let (state, raw) = signed_p2pk_state_and_tx(7700, 10);
-        sync.chain_state.utxos = state.utxos;
+        sync.chain_state.utxos = state.utxos.clone();
 
         let mut pool = TxPool::new();
-        pool.admit(&raw, &sync.chain_state, None, devnet_genesis_chain_id())
-            .expect("admit");
+        let confirmed_txid = admit_setup_pool_tx(&mut pool, &raw, &state, TxSource::Remote);
 
         let mined = {
             let cfg = MinerConfig {
@@ -703,6 +722,16 @@ mod tests {
         assert_eq!(mined[0].tx_count, 2);
         assert_eq!(mined[1].tx_count, 1);
         assert!(pool.is_empty());
+        assert!(!pool.contains(&confirmed_txid));
+        assert_eq!(pool.entry_source(&confirmed_txid), None);
+        // Re-admit against the original setup state only as an index
+        // cleanup probe; this does not model post-confirmation runtime
+        // validity or a miner producer path.
+        let reaccepted_txid = admit_setup_pool_tx(&mut pool, &raw, &state, TxSource::Reorg);
+        assert_eq!(
+            reaccepted_txid, confirmed_txid,
+            "confirmed cleanup must remove txid/index state, not leave a stale producer marker"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -716,9 +745,12 @@ mod tests {
         //     fee floor.
         //   - new invariant: admit_with_metadata enforces the rolling fee
         //     floor.
-        //   - reachability: pool.admit on the conflicting_raw reaches the
-        //     txpool admission path; mine_one then includes the explicit
-        //     candidate which conflicts with the pool entry, evicting it.
+        //   - reachability: setup admission on the conflicting_raw reaches
+        //     the txpool admission path; mine_one then includes the
+        //     explicit candidate which conflicts with the pool entry,
+        //     evicting it.
+        //   - producer boundary: the setup source is not a miner producer
+        //     claim; miner cleanup must remove it source-neutrally.
         //   - replacement coverage: input bumped to 7700 so both txs have
         //     fees ≥ weight (~7653). The conflicting-eviction-on-explicit-
         //     candidate invariant remains under test.
@@ -728,13 +760,8 @@ mod tests {
         sync.chain_state.utxos = state.utxos.clone();
 
         let mut pool = TxPool::new();
-        pool.admit(
-            &conflicting_raw,
-            &sync.chain_state,
-            None,
-            devnet_genesis_chain_id(),
-        )
-        .expect("admit conflict");
+        let conflicting_txid =
+            admit_setup_pool_tx(&mut pool, &conflicting_raw, &state, TxSource::Reorg);
 
         {
             let cfg = MinerConfig {
@@ -747,6 +774,17 @@ mod tests {
         }
 
         assert!(pool.is_empty());
+        assert!(!pool.contains(&conflicting_txid));
+        assert_eq!(pool.entry_source(&conflicting_txid), None);
+        // Re-admit against the original setup state only as a spender-index
+        // cleanup probe; the miner remains a cleanup consumer, not a tx
+        // producer.
+        let reaccepted_txid =
+            admit_setup_pool_tx(&mut pool, &conflicting_raw, &state, TxSource::Remote);
+        assert_eq!(
+            reaccepted_txid, conflicting_txid,
+            "conflict cleanup must clear spender/index state before a new producer can admit"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
