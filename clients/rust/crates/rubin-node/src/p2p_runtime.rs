@@ -542,14 +542,32 @@ impl PeerSession {
                     // so RUB-173 will see the assertion break and update
                     // it together with the source-aware switch.
                     //
-                    // Admission errors are intentionally discarded — they
-                    // do NOT change `RelayTxOutcome` and do NOT contribute
-                    // to ban-score policy (per issue's failure_modes:
-                    // "preserve existing txpool caller error class; no new
-                    // policy ordering"). No log/metric is emitted; if a
-                    // future maintainer needs to observe relay-cache vs
-                    // canonical-pool divergence, that is a separate
-                    // observability change.
+                    // Admission Result is intentionally discarded — it
+                    // does NOT change `RelayTxOutcome` and does NOT
+                    // contribute to ban-score policy (per issue's
+                    // failure_modes: "preserve existing txpool caller
+                    // error class; no new policy ordering"). The
+                    // relay-cache leg has already accepted the tx, and
+                    // RUB-178's invariant is "seam is reachable", not
+                    // "every peer tx admits". Future divergence
+                    // observability is a separate change.
+                    //
+                    // Lock poisoning is a separate concern from admission
+                    // failure: a poisoned `tx_pool` Mutex means a prior
+                    // panic mid-mutation leaves the pool's internal
+                    // invariants potentially broken. Per existing
+                    // production precedent in
+                    // `clients/rust/crates/rubin-node/src/devnet_rpc.rs`'s
+                    // `handle_submit_tx` (which surfaces
+                    // `TxPoolAdmitErrorKind::Unavailable` on poisoned
+                    // lock) and `handle_mine_next` (which returns 503),
+                    // poison must be observable rather than silently
+                    // swallowed. The seam therefore matches the lock
+                    // result explicitly: on `Err(_)` it records an
+                    // explicit signal on `self.peer.last_error` so the
+                    // condition is not silent, while still preserving
+                    // the relay-only path (no `Err(...)` is returned
+                    // from `collect_live_responses`).
                     //
                     // Lock-ordering precedent: this is engine→pool nested.
                     // The caller in
@@ -565,13 +583,20 @@ impl PeerSession {
                     // pattern in `apply_tx_pool_cleanup`. The seam does
                     // not re-acquire the engine, so no deadlock from self.
                     if matches!(outcome, crate::tx_relay::RelayTxOutcome::Relayed) {
-                        if let Ok(mut pool) = ctx.tx_pool.lock() {
-                            let _ = pool.admit(
-                                &msg.payload,
-                                &sync_engine.chain_state,
-                                sync_engine.block_store.as_ref(),
-                                sync_engine.cfg.chain_id,
-                            );
+                        match ctx.tx_pool.lock() {
+                            Ok(mut pool) => {
+                                let _ = pool.admit(
+                                    &msg.payload,
+                                    &sync_engine.chain_state,
+                                    sync_engine.block_store.as_ref(),
+                                    sync_engine.cfg.chain_id,
+                                );
+                            }
+                            Err(_) => {
+                                self.peer.last_error =
+                                    "canonical tx_pool poisoned; peer-tx admission skipped"
+                                        .to_string();
+                            }
                         }
                     }
                     // Mirror Go's `peer.handleTx` parse-fail policy: parse
@@ -3170,6 +3195,127 @@ mod tests {
                 .expect("MESSAGE_TX without relay_ctx is a no-op");
             assert!(outcome.responses.is_empty());
             assert!(outcome.tx_pool_cleanup.is_empty());
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+    }
+
+    /// RUB-178 / GitHub #1438: when `ctx.tx_pool` lock is poisoned,
+    /// the seam must produce an explicit signal on
+    /// `self.peer.last_error` rather than silently swallowing the
+    /// error. This matches the production precedent in
+    /// `clients/rust/crates/rubin-node/src/devnet_rpc.rs`'s
+    /// `handle_submit_tx` (which surfaces
+    /// `TxPoolAdmitErrorKind::Unavailable`) and `handle_mine_next`
+    /// (which returns 503).
+    ///
+    /// Proof assertion: the `assert!` calls below comparing
+    /// `session.state().last_error` to the poison-signal substring
+    /// and confirming `relay_state` still recorded the tx are the
+    /// regression anchors. Any change that re-introduces a silent
+    /// `if let Ok(...)` swallow on `tx_pool.lock()` will fail this
+    /// test.
+    #[test]
+    fn collect_live_responses_message_tx_signals_on_canonical_pool_poison() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+
+            let (chain_state, tx_bytes, _unused) =
+                signed_conflicting_p2pk_state_and_txs(20_000, 10, 9);
+            let mut sync_cfg = crate::sync::default_sync_config(
+                None,
+                crate::genesis::devnet_genesis_chain_id(),
+                None,
+            );
+            sync_cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
+            let mut engine =
+                crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine");
+
+            let relay_state = crate::tx_relay::TxRelayState::new();
+            let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64));
+            let _ = peer_manager.add_peer(PeerState {
+                addr: "other:8333".to_string(),
+                ..Default::default()
+            });
+            let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> =
+                Mutex::new(HashMap::new());
+            peer_outboxes.lock().unwrap().insert(
+                "sender:8333".to_string(),
+                crate::tx_relay::PeerOutbox::default(),
+            );
+            peer_outboxes.lock().unwrap().insert(
+                "other:8333".to_string(),
+                crate::tx_relay::PeerOutbox::default(),
+            );
+
+            // Poison the canonical TxPool Mutex by panicking inside a
+            // thread that holds the lock. After join, the Mutex is
+            // permanently poisoned for any subsequent `.lock()` call —
+            // mirrors the production failure mode where a panic during
+            // pool mutation leaves a poisoned shared handle.
+            let canonical_tx_pool: Arc<Mutex<TxPool>> = Arc::new(Mutex::new(TxPool::new()));
+            let poison_pool = Arc::clone(&canonical_tx_pool);
+            let _ = thread::spawn(move || {
+                let _guard = poison_pool.lock().unwrap();
+                panic!("intentional poison for RUB-178 poison-signal test");
+            })
+            .join();
+            assert!(
+                canonical_tx_pool.is_poisoned(),
+                "Mutex must be poisoned before exercising the seam"
+            );
+
+            let relay_ctx = PeerRelayContext {
+                relay_state: &relay_state,
+                peer_manager: &peer_manager,
+                local_addr: "local:8333",
+                peer_registered_addr: "sender:8333",
+                peer_writers: &peer_outboxes,
+                tx_pool: &canonical_tx_pool,
+            };
+
+            let msg = WireMessage {
+                command: MESSAGE_TX.to_string(),
+                payload: tx_bytes.clone(),
+            };
+
+            // Dispatch must NOT propagate the poison as an io::Error —
+            // the relay-only path is preserved per issue failure_modes.
+            let _ = session
+                .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
+                .expect("dispatch must succeed even when canonical pool is poisoned");
+
+            // 1) explicit poison signal on peer state — refutes the
+            //    silent-swallow operational hazard the bot reviewer
+            //    flagged on PR #1455.
+            let observed_last_error = session.state().last_error;
+            assert!(
+                observed_last_error.contains("canonical tx_pool poisoned"),
+                "peer.last_error must signal the poisoned pool; got: {observed_last_error:?}"
+            );
+
+            // 2) relay-cache-only path remains separate and intact —
+            //    relay_state still admitted the tx via tx_relay's
+            //    own RelayTxPool, even though canonical admission was
+            //    skipped.
+            let (_, txid, _, _consumed) = parse_tx(&tx_bytes).expect("parse tx for txid");
+            assert!(
+                relay_state.tx_seen.has(&txid),
+                "tx_relay relay-cache `tx_seen` must still record the tx"
+            );
+            assert!(
+                relay_state.relay_pool.has(&txid),
+                "tx_relay relay-cache `relay_pool` must still record the tx"
+            );
         });
 
         let _client = TcpStream::connect(addr).expect("connect");
