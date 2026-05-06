@@ -2117,19 +2117,66 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         let payload = raw.to_vec();
+        // RUB-202 / GitHub #1467: bound the writer thread so a reader-side
+        // early reject (e.g., the body-too-large cap firing in
+        // `read_http_request_rejects_chunked_body_accumulation_over_cap`
+        // before the producer finishes pushing 2 MiB+) cannot block on
+        // `sendto` once the OS TCP send buffer fills. Production HTTP
+        // servers RST the connection on early reject, which surfaces as
+        // a write error on the client; the helper mirrors that semantic
+        // here by setting a bounded `set_write_timeout` and ignoring
+        // partial-write / TimedOut / BrokenPipe outcomes (issue
+        // contract: "Writer-side BrokenPipe/timeout after reader-side
+        // reject is acceptable and must not fail the test"). The
+        // half-shutdown is best-effort for the same reason.
         let writer = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(addr).expect("connect");
-            stream.write_all(&payload).expect("write payload");
-            stream
-                .shutdown(std::net::Shutdown::Write)
-                .expect("shutdown write");
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.write_all(&payload);
+            let _ = stream.shutdown(std::net::Shutdown::Write);
         });
         let (mut stream, _) = listener.accept().expect("accept");
         stream
             .set_read_timeout(Some(Duration::from_millis(200)))
             .expect("set read timeout");
         let result = read_http_request(&mut stream);
-        writer.join().expect("join writer");
+        // RUB-202: drain residual bytes ONLY on the early-reject path.
+        // On the success path the parser already consumed exactly the
+        // bytes it needed and the writer's small payload + shutdown
+        // were issued before the parser returned, so dropping the
+        // socket at function exit is sufficient and avoids burning the
+        // 100ms read-timeout budget on the FIN-propagation race for
+        // every successful test. On the early-reject path (e.g.,
+        // `Err("body too large")` after the cap fires inside
+        // `read_chunked_body`) the parser stops draining mid-stream
+        // and the writer remains blocked in `sendto` until its
+        // 2s `set_write_timeout` (above) fires; this drain releases
+        // that back-pressure so the writer's `write_all` completes
+        // promptly and `writer.join()` returns. Bounded by the
+        // per-read 100ms timeout + 2s writer-side timeout: worst-case
+        // ~2s before the helper unwedges. Reads that hit the timeout
+        // return `Err`, which exits the `while let Ok(n) = ...` loop
+        // cleanly without surfacing into the test result.
+        if result.is_err() {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+            let mut sink = [0u8; 4096];
+            while let Ok(n) = stream.read(&mut sink) {
+                if n == 0 {
+                    break;
+                }
+            }
+        }
+        // RUB-202: propagate writer-thread panics (e.g., a failed
+        // `TcpStream::connect` — the only remaining `.expect` in the
+        // closure) so a broken test-infra environment surfaces loudly
+        // instead of letting tests pass on a never-attempted send.
+        // Writer-side `write_all` / `shutdown` / `set_write_timeout`
+        // errors are swallowed inside the closure (per issue contract:
+        // "Writer-side BrokenPipe/timeout after reader-side reject is
+        // acceptable and must not fail the test"), so this expect only
+        // fires when the closure panicked, not on the expected
+        // BrokenPipe / TimedOut paths.
+        writer.join().expect("writer thread panicked");
         result
     }
 
