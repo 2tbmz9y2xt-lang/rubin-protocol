@@ -162,6 +162,12 @@ struct CapacityPlanEntry<'a> {
     admission_seq: u64,
 }
 
+#[derive(Clone, Copy)]
+enum CapacityOrdering {
+    LegacyCountPressure,
+    BytePressure,
+}
+
 impl Ord for WorstEntryKey {
     fn cmp(&self, other: &Self) -> Ordering {
         compare_priority_values(
@@ -637,6 +643,11 @@ impl TxPool {
         } else {
             self.max_bytes
         };
+        let ordering = if byte_pressure {
+            CapacityOrdering::BytePressure
+        } else {
+            CapacityOrdering::LegacyCountPressure
+        };
         let mut total_count = self.txs.len().saturating_add(1);
         let mut total_bytes = self.used_bytes.saturating_add(candidate.size);
         let mut plan_pool = Vec::with_capacity(self.txs.len() + 1);
@@ -682,7 +693,7 @@ impl TxPool {
         while (total_count > self.max_transactions || total_bytes > target_bytes)
             && !plan_pool.is_empty()
         {
-            let worst_index = worst_capacity_plan_index(&plan_pool);
+            let worst_index = worst_capacity_plan_index(&plan_pool, ordering);
             let worst = plan_pool.remove(worst_index);
             if worst.candidate {
                 return Err(unavailable(
@@ -1713,22 +1724,51 @@ fn tx_pool_byte_pressure_target(low_water_bytes: usize, candidate_size: usize) -
     low_water_bytes.max(candidate_size)
 }
 
-fn worst_capacity_plan_index(plan_pool: &[CapacityPlanEntry<'_>]) -> usize {
+fn worst_capacity_plan_index(
+    plan_pool: &[CapacityPlanEntry<'_>],
+    ordering: CapacityOrdering,
+) -> usize {
     let mut worst_index = 0;
     for i in 1..plan_pool.len() {
-        if capacity_plan_entry_worse(&plan_pool[i], &plan_pool[worst_index]) {
+        if capacity_plan_entry_worse(&plan_pool[i], &plan_pool[worst_index], ordering) {
             worst_index = i;
         }
     }
     worst_index
 }
 
-fn capacity_plan_entry_worse(a: &CapacityPlanEntry<'_>, b: &CapacityPlanEntry<'_>) -> bool {
-    match compare_capacity_priority(a, b) {
+fn capacity_plan_entry_worse(
+    a: &CapacityPlanEntry<'_>,
+    b: &CapacityPlanEntry<'_>,
+    ordering: CapacityOrdering,
+) -> bool {
+    let priority = match ordering {
+        CapacityOrdering::LegacyCountPressure => compare_count_pressure_priority(a, b),
+        CapacityOrdering::BytePressure => compare_capacity_priority(a, b),
+    };
+    match priority {
         Ordering::Less => true,
         Ordering::Greater => false,
         Ordering::Equal => a.txid > b.txid,
     }
+}
+
+fn compare_count_pressure_priority(
+    a: &CapacityPlanEntry<'_>,
+    b: &CapacityPlanEntry<'_>,
+) -> Ordering {
+    compare_priority_values(
+        AdmitPriority {
+            fee: a.entry.fee,
+            weight: a.entry.weight,
+            tie: &a.txid,
+        },
+        AdmitPriority {
+            fee: b.entry.fee,
+            weight: b.entry.weight,
+            tie: &b.txid,
+        },
+    )
 }
 
 fn compare_capacity_priority(a: &CapacityPlanEntry<'_>, b: &CapacityPlanEntry<'_>) -> Ordering {
@@ -2643,6 +2683,18 @@ mod tests {
             )
             .is_err());
         assert!(tie.txs.contains_key(&[0x01; 32]));
+
+        let mut count_only_tie = TxPool::new();
+        count_only_tie.set_capacity_for_test(1, 1_000);
+        count_only_tie.insert_entry([0x80; 32], test_entry(10, 1, 50, TxSource::Local));
+        count_only_tie
+            .insert_capacity_checked_entry_for_test(
+                [0x01; 32],
+                test_entry(10, 1, 50, TxSource::Remote),
+            )
+            .expect("count-only pressure preserves legacy txid tie-break");
+        assert!(count_only_tie.txs.contains_key(&[0x01; 32]));
+        assert!(!count_only_tie.txs.contains_key(&[0x80; 32]));
     }
 
     #[test]
