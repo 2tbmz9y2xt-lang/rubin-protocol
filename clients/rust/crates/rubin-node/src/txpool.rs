@@ -4375,7 +4375,7 @@ mod tests {
         for idx in 0..MAX_TX_POOL_TRANSACTIONS {
             let mut key = [0u8; 32];
             key[..8].copy_from_slice(&(idx as u64 + 1).to_le_bytes());
-            pool.txs.insert(
+            pool.insert_entry(
                 key,
                 TxPoolEntry {
                     raw: vec![0xff],
