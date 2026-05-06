@@ -1111,7 +1111,7 @@ func TestMempoolRelayMetadataTrailingBytes(t *testing.T) {
 		t.Fatalf("new mempool: %v", err)
 	}
 	mp.SetCurrentMinFeeRateForTest(8)
-	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 300_000, 5, fromKey, fromAddress, toAddress)
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 1, 5, fromKey, fromAddress, toAddress)
 	txBytes = append(txBytes, 0x00)
 	_, err = mp.RelayMetadata(txBytes)
 	var txErr *TxAdmitError
