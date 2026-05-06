@@ -3213,9 +3213,7 @@ mod tests {
     /// Proof assertion: the `assert!` calls below comparing
     /// `session.state().last_error` to the poison-signal substring
     /// and confirming `relay_state` still recorded the tx are the
-    /// regression anchors. Any change that re-introduces a silent
-    /// `if let Ok(...)` swallow on `tx_pool.lock()` will fail this
-    /// test.
+    /// regression anchors for this case.
     #[test]
     fn collect_live_responses_message_tx_signals_on_canonical_pool_poison() {
         use std::collections::HashMap;
