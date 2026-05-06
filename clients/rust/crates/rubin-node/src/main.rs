@@ -793,16 +793,29 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     if cfg.max_peers > 4096 {
         return Err("max_peers must be <= 4096".to_string());
     }
-    // RUB-194 / GitHub #1458: mirror Go `ValidateConfig`
-    // (`clients/go/node/config.go::ValidateConfig` lines 407-415)
-    // mine_address inline validation. Without this, malformed
-    // `--mine-address` passes dry-run and only fails later inside
-    // miner setup at `miner_cfg.mine_address = parsed` (run() at
-    // ~line 319 / live RPC mining at ~line 369). Validating here
-    // through `parse_mine_address_arg` (already imported from
-    // `crate::miner`) makes startup, dry-run, and miner setup all
-    // share the same accept/reject contract — closing hostile-case
-    // matrix #2 in the issue contract.
+    // RUB-194 / GitHub #1458: validate `mine_address` here so startup,
+    // dry-run, and miner setup all share the same Rust accept/reject
+    // contract via `parse_mine_address_arg` (already imported from
+    // `crate::miner`). Without this gate, a malformed `--mine-address`
+    // slipped through dry-run and only failed later inside miner setup
+    // at `miner_cfg.mine_address = parsed` (run() ~line 327, CLI mining
+    // path) or `miner_cfg.mine_address = addr` (live RPC mining
+    // ~line 370). Closes hostile-case matrix #2 in the issue contract.
+    //
+    // Go counterpart anchor: `clients/go/node/config.go::ValidateConfig`
+    // lines 407-415 also gates mine_address at config-validation time
+    // before any startup side effects, but the parser semantics are NOT
+    // strictly identical — full Go/Rust mine_address parity is out of
+    // scope for this slice. Documented Rust-vs-Go divergences (all
+    // pre-existing in `crate::coinbase::parse_mine_address` /
+    // `validate_mine_address`, not introduced here):
+    //   * `0x` / `0X` hex prefix: Rust strips and decodes; Go's
+    //     `hex.DecodeString` rejects.
+    //   * whitespace-only input: Rust trims to empty -> `Ok(None)` ->
+    //     run() falls back to `default_mine_address()`; Go errors out.
+    //   * 33-byte hex with first byte != `SUITE_ID_ML_DSA_87` (0x01):
+    //     Rust rejects via `validate_mine_address`; Go accepts as
+    //     opaque length-33 bytes.
     if let Some(ref value) = cfg.mine_address {
         if let Err(err) = parse_mine_address_arg(value) {
             return Err(format!("invalid mine_address: {err}"));
