@@ -3079,10 +3079,12 @@ mod tests {
             // `pool.admit(...)` which delegates to `add_tx_with_source(_,
             // TxSource::Local, _)`. RUB-173 / GitHub #1420 will replace
             // the seam with `add_tx_with_source(_, TxSource::Remote, _)`
-            // and MUST update this assertion together with the source
-            // switch. The pin makes the source-attribution intermediate
-            // state explicit and regression-detectable: if anyone flips
-            // the seam to a different source variant, this test fails.
+            // and update this pin together with the source switch.
+            // Proof assertion: the `assert_eq!` below comparing
+            // `pool_guard.entry_source(&txid)` against
+            // `Some(crate::txpool::TxSource::Local)` is the regression
+            // anchor; any future seam-source flip without a paired
+            // update of this assertion produces a test failure here.
             assert_eq!(
                 pool_guard.entry_source(&txid),
                 Some(crate::txpool::TxSource::Local),
