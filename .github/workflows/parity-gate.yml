@@ -57,14 +57,18 @@ jobs:
           Path(sys.argv[2]).write_bytes(b"\0".join(paths) + (b"\0" if paths else b""))
           PY
 
-          GO_CHANGED="$(grep -zEc '^clients/go/(consensus|cmd/rubin-consensus-cli)/' /tmp/changed-paths.z || true)"
-          RS_CHANGED="$(grep -zEc '^clients/rust/crates/(rubin-consensus|rubin-consensus-cli)/' /tmp/changed-paths.z || true)"
+          GO_CONSENSUS_CHANGED="$(grep -zEc '^clients/go/consensus/' /tmp/changed-paths.z || true)"
+          GO_CLI_CHANGED="$(grep -zEc '^clients/go/cmd/rubin-consensus-cli/' /tmp/changed-paths.z || true)"
+          RS_CONSENSUS_CHANGED="$(grep -zEc '^clients/rust/crates/rubin-consensus/' /tmp/changed-paths.z || true)"
+          RS_CLI_CHANGED="$(grep -zEc '^clients/rust/crates/rubin-consensus-cli/' /tmp/changed-paths.z || true)"
           FIX_CHANGED="$(grep -zEc '^conformance/fixtures/' /tmp/changed-paths.z || true)"
           ENC_CHANGED="$(grep -zEc '^(clients/go/consensus|clients/rust/crates/rubin-consensus)(/.*)?/[^/]*(encode|decode|serial|marshal|unmarshal|wire|txid|wtxid|hash|sighash|compact|parse|merkle)[^/]*' /tmp/changed-paths.z || true)"
 
           {
-            echo "go=$GO_CHANGED"
-            echo "rs=$RS_CHANGED"
+            echo "go_consensus=$GO_CONSENSUS_CHANGED"
+            echo "go_cli=$GO_CLI_CHANGED"
+            echo "rs_consensus=$RS_CONSENSUS_CHANGED"
+            echo "rs_cli=$RS_CLI_CHANGED"
             echo "fixtures=$FIX_CHANGED"
             echo "encoding=$ENC_CHANGED"
           } >> "$GITHUB_OUTPUT"
@@ -183,19 +187,29 @@ jobs:
       - name: Enforce source-level Go↔Rust parity smoke
         shell: bash
         env:
-          GO_CHANGED: ${{ steps.diff.outputs.go }}
-          RS_CHANGED: ${{ steps.diff.outputs.rs }}
+          GO_CONSENSUS_CHANGED: ${{ steps.diff.outputs.go_consensus }}
+          GO_CLI_CHANGED: ${{ steps.diff.outputs.go_cli }}
+          RS_CONSENSUS_CHANGED: ${{ steps.diff.outputs.rs_consensus }}
+          RS_CLI_CHANGED: ${{ steps.diff.outputs.rs_cli }}
           PARITY_EXEMPT: ${{ steps.pr.outputs.parity_exempt }}
         run: |
           set -euo pipefail
 
           if [[ "$PARITY_EXEMPT" != "true" ]]; then
-            if [[ "$GO_CHANGED" -gt 0 && "$RS_CHANGED" -eq 0 ]]; then
-              echo "::error::Source-level parity smoke failed: Go consensus/reference paths changed but Rust consensus/reference paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+            if [[ "$GO_CONSENSUS_CHANGED" -gt 0 && "$RS_CONSENSUS_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Go consensus implementation paths changed but Rust consensus implementation paths did not. Add a matching change or use parity-exempt with a PR-body justification."
               exit 1
             fi
-            if [[ "$RS_CHANGED" -gt 0 && "$GO_CHANGED" -eq 0 ]]; then
-              echo "::error::Source-level parity smoke failed: Rust consensus/reference paths changed but Go consensus/reference paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+            if [[ "$RS_CONSENSUS_CHANGED" -gt 0 && "$GO_CONSENSUS_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Rust consensus implementation paths changed but Go consensus implementation paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+              exit 1
+            fi
+            if [[ "$GO_CLI_CHANGED" -gt 0 && "$RS_CLI_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Go consensus CLI paths changed but Rust consensus CLI paths did not. Add a matching change or use parity-exempt with a PR-body justification."
+              exit 1
+            fi
+            if [[ "$RS_CLI_CHANGED" -gt 0 && "$GO_CLI_CHANGED" -eq 0 ]]; then
+              echo "::error::Source-level parity smoke failed: Rust consensus CLI paths changed but Go consensus CLI paths did not. Add a matching change or use parity-exempt with a PR-body justification."
               exit 1
             fi
           fi
