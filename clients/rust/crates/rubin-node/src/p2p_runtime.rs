@@ -533,15 +533,37 @@ impl PeerSession {
                     // `shared.tx_pool` handle one level deeper and uses the
                     // legacy `pool.admit(...)` entrypoint — source
                     // classification (`TxSource::Remote`) is reserved for
-                    // RUB-173 / GitHub #1420 replacement.
+                    // RUB-173 / GitHub #1420 replacement. Until that lands,
+                    // the seam admits peer-relayed txs with the legacy
+                    // `pool.admit` default of `TxSource::Local`; the
+                    // production-path test below explicitly pins this
+                    // intermediate state via
+                    // `pool.entry_source(&txid) == Some(TxSource::Local)`
+                    // so RUB-173 will see the assertion break and update
+                    // it together with the source-aware switch.
                     //
-                    // Admission errors are observed but do NOT change
-                    // `RelayTxOutcome` or ban-score policy (per issue's
-                    // failure_modes: "preserve existing txpool caller error
-                    // class; no new policy ordering"). Lock acquisition
-                    // mirrors the existing block-apply cleanup path in
-                    // `p2p_service.rs::apply_tx_pool_cleanup` — lock,
-                    // operate, drop. No nested locks.
+                    // Admission errors are intentionally discarded — they
+                    // do NOT change `RelayTxOutcome` and do NOT contribute
+                    // to ban-score policy (per issue's failure_modes:
+                    // "preserve existing txpool caller error class; no new
+                    // policy ordering"). No log/metric is emitted; if a
+                    // future maintainer needs to observe relay-cache vs
+                    // canonical-pool divergence, that is a separate
+                    // observability change.
+                    //
+                    // Lock-ordering precedent: this is engine→pool nested.
+                    // The caller in
+                    // `clients/rust/crates/rubin-node/src/p2p_service.rs`
+                    // (`run_peer_session_loop`) holds
+                    // `shared.sync_engine.lock()` while calling
+                    // `collect_live_responses`, so the seam acquires
+                    // `ctx.tx_pool.lock()` while engine remains held; both
+                    // are dropped at the end of the caller's scope. This
+                    // matches the engine→pool nested ordering used by
+                    // `clients/rust/crates/rubin-node/src/devnet_rpc.rs`'s
+                    // `handle_mine_next`, NOT the engine-snapshot-then-drop
+                    // pattern in `apply_tx_pool_cleanup`. The seam does
+                    // not re-acquire the engine, so no deadlock from self.
                     if matches!(outcome, crate::tx_relay::RelayTxOutcome::Relayed) {
                         if let Ok(mut pool) = ctx.tx_pool.lock() {
                             let _ = pool.admit(
@@ -3053,6 +3075,21 @@ mod tests {
                 "canonical TxPool must contain the txid after MESSAGE_TX dispatch — \
                  the seam is the only code path that could place it there in this test"
             );
+            // RUB-178 intermediate-state pin: the seam uses legacy
+            // `pool.admit(...)` which delegates to `add_tx_with_source(_,
+            // TxSource::Local, _)`. RUB-173 / GitHub #1420 will replace
+            // the seam with `add_tx_with_source(_, TxSource::Remote, _)`
+            // and MUST update this assertion together with the source
+            // switch. The pin makes the source-attribution intermediate
+            // state explicit and regression-detectable: if anyone flips
+            // the seam to a different source variant, this test fails.
+            assert_eq!(
+                pool_guard.entry_source(&txid),
+                Some(crate::txpool::TxSource::Local),
+                "RUB-178 seam uses legacy pool.admit which records \
+                 TxSource::Local; RUB-173 / GitHub #1420 will switch to \
+                 TxSource::Remote and update this pin"
+            );
             drop(pool_guard);
 
             // 2) relay-cache-only path remains separate: tx_relay's
@@ -3073,11 +3110,29 @@ mod tests {
         server.join().expect("server join");
     }
 
-    /// RUB-178 negative control: when `handle_live_message` is called
-    /// WITHOUT a `PeerRelayContext` (`relay_ctx = None`), no canonical
-    /// admission happens. This pins that the seam is genuinely gated on
-    /// the production context being present, and that the relay-cache
-    /// branch (which also lives behind `Some(ctx)`) keeps the same gate.
+    /// RUB-178 smoke test for the `relay_ctx = None` branch of
+    /// `MESSAGE_TX` dispatch.
+    ///
+    /// The seam is structurally gated by `PeerRelayContext` itself:
+    /// `ctx.tx_pool` is a field of `PeerRelayContext`, so absence of
+    /// the context makes the seam unreachable through the type system,
+    /// not through a runtime check that this test could observe. What
+    /// this test DOES pin:
+    ///
+    ///   - `handle_live_message(MESSAGE_TX, _, None)` returns `Ok`
+    ///     with an empty `TxPoolCleanupPlan` (no panic, no error,
+    ///     no spurious cleanup).
+    ///   - The dispatch does NOT depend on relay_ctx for parse/cap
+    ///     handling — the `MESSAGE_TX` arm simply skips the
+    ///     relay+canonical work block when `relay_ctx` is None.
+    ///
+    /// What this test does NOT pin (and was previously overclaimed):
+    /// it does not observe absence-of-admission on a canonical pool,
+    /// because there is no canonical pool reachable in this
+    /// configuration — the type system makes the seam unreachable.
+    /// The seam-gated invariant is enforced by the
+    /// `PeerRelayContext.tx_pool: &Mutex<TxPool>` field's
+    /// non-optionality.
     #[test]
     fn handle_live_message_message_tx_without_relay_ctx_does_not_admit() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
