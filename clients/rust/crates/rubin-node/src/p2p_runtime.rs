@@ -554,7 +554,7 @@ impl PeerSession {
                     // Lock-ordering precedent: this is engine→pool nested.
                     // The caller in
                     // `clients/rust/crates/rubin-node/src/p2p_service.rs`
-                    // (`run_peer_session_loop`) holds
+                    // (`handle_peer`) holds
                     // `shared.sync_engine.lock()` while calling
                     // `collect_live_responses`, so the seam acquires
                     // `ctx.tx_pool.lock()` while engine remains held; both
@@ -2979,10 +2979,10 @@ mod tests {
     ///   - The test does NOT call `pool.admit(...)` directly. Admission
     ///     happens through `PeerSession::handle_live_message`, which is the
     ///     same public entrypoint used by the production message loop in
-    ///     `clients/rust/crates/rubin-node/src/p2p_service.rs::run_peer_session_loop`.
+    ///     `clients/rust/crates/rubin-node/src/p2p_service.rs::handle_peer`.
     ///   - The test constructs a real `PeerRelayContext` whose `tx_pool`
     ///     field uses the same `Mutex<TxPool>` shape that
-    ///     `p2p_service.rs::run_peer_session_loop` constructs from
+    ///     `p2p_service.rs::handle_peer` constructs from
     ///     `&shared.tx_pool` (the canonical pool that already drives the
     ///     production block-apply cleanup path).
     ///   - The canonical pool side effect is asserted from outside the
