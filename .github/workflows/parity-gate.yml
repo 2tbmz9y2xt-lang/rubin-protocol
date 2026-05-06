@@ -57,6 +57,26 @@ jobs:
           jq -r '.pull_request.labels[]?.name' "$GITHUB_EVENT_PATH" > "$labels_file"
           jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" > "$body_file"
 
+          has_justification_block() {
+            local heading="$1"
+            local file="$2"
+            awk -v heading="$heading" '
+              $0 == heading {
+                in_block = 1
+                next
+              }
+              in_block && /^### / {
+                exit
+              }
+              in_block && $0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*N\/A([[:space:][:punct:]].*)?$/ {
+                found = 1
+              }
+              END {
+                exit found ? 0 : 1
+              }
+            ' "$file"
+          }
+
           parity_label=false
           fixture_label=false
           parity_block=false
@@ -70,10 +90,10 @@ jobs:
           if grep -Fxq 'fixture-exempt' "$labels_file"; then
             fixture_label=true
           fi
-          if grep -Fq '### Parity exemption justification' "$body_file"; then
+          if has_justification_block '### Parity exemption justification' "$body_file"; then
             parity_block=true
           fi
-          if grep -Fq '### Fixture exemption justification' "$body_file"; then
+          if has_justification_block '### Fixture exemption justification' "$body_file"; then
             fixture_block=true
           fi
           if [[ "$parity_label" == "true" && "$parity_block" == "true" ]]; then
