@@ -487,24 +487,14 @@ func validMempoolTxSource(source mempoolTxSource) bool {
 
 // RelayMetadata returns the metadata a relay peer needs to forward the
 // transaction (fee + serialized size). It runs full structural +
-// chainstate validation via checkParsedTransactionWithSnapshot but
-// intentionally DOES NOT enforce the rolling-relay-fee floor: the
-// admit-path policy (see `addTxWithSource` → `addEntryLockedWithFloor`
-// → `validateFeeFloorLockedWithFloor` in this file) is the uniform
-// owner of relay-floor classification (see `applyPolicyAgainstState`
-// docstring in this file for the matching admit-path rationale).
+// chainstate validation via checkParsedTransactionWithSnapshot and then
+// enforces the rolling-relay-fee floor read-only. Below-floor otherwise-valid
+// txs return the same TxAdmitUnavailable class/message family as admit-path
+// validateFeeFloorLockedWithFloor.
 //
-// Cross-client divergence between Go RelayMetadata and Rust relay_metadata:
-// Rust `relay_metadata` (clients/rust/crates/rubin-node/src/txpool.rs)
-// DOES enforce relay-floor inline via `apply_post_consensus_policy_with_floor`
-// → `validate_fee_floor`. The Go relay path delegates floor enforcement to
-// per-peer relay-policy + the admit-time check. RelayMetadata is a
-// read-only metadata fetcher and does NOT insert into the mempool. The
-// documented expected delta is: below-floor txs whose Go RelayMetadata
-// returns metadata while Rust relay_metadata returns `Unavailable`. This
-// asymmetry is INTENTIONAL pending a future cross-client unification slice
-// (separate follow-up — TBD). See the Rust pinning test
-// `rub166_relay_metadata_below_floor_p2pk_still_returns_unavailable_matching_admit`.
+// RelayMetadata is not full mempool admission: it does not insert, does not
+// record source/admission_seq, and does not check duplicate, conflict, or
+// capacity state. Those remain owned by addTxWithSource/addEntryLockedWithFloor.
 func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if m == nil {
 		return RelayTxMetadata{}, txAdmitUnavailable("nil mempool")
@@ -520,14 +510,31 @@ func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	defer m.chainState.admissionMu.RUnlock()
 	snapshot := m.chainState.admissionSnapshotForInputs(relayMetadataInputs(tx))
 	policy := m.policySnapshot()
+	snappedFloor := m.CurrentMinFeeRateSnapshot()
 	checked, _, err := m.checkParsedTransactionWithSnapshot(txBytes, tx, txid, wtxid, snapshot, policy)
 	if err != nil {
+		return RelayTxMetadata{}, err
+	}
+	if err := m.validateRelayMetadataFeeFloor(checked, snappedFloor); err != nil {
 		return RelayTxMetadata{}, err
 	}
 	return RelayTxMetadata{
 		Fee:  checked.Fee,
 		Size: checked.SerializedSize,
 	}, nil
+}
+
+func (m *Mempool) validateRelayMetadataFeeFloor(checked *consensus.CheckedTransaction, snappedFloor uint64) error {
+	if checked == nil {
+		return txAdmitRejected("nil checked transaction")
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.validateFeeFloorLockedWithFloor(&mempoolEntry{
+		fee:    checked.Fee,
+		weight: checked.Weight,
+		size:   checked.SerializedSize,
+	}, snappedFloor)
 }
 
 func parseRelayMetadataTx(txBytes []byte) (*consensus.Tx, [32]byte, [32]byte, error) {
@@ -952,11 +959,9 @@ func (m *Mempool) validateFeeFloorLocked(entry *mempoolEntry) error {
 //     rejected against the current congestion-control policy. NEVER
 //     admits a transaction below the current rolling floor.
 //
-// Wave-7 (snap-once-pass-through) closed the decay race in one
-// direction but introduced the raise race in the opposite direction
-// (both Codex PRRT_TRxc and Copilot PRRT_TYQt found this). Wave-8
-// adds the locked re-read with max-of-(snap, live) per Copilot's
-// explicit wave-7 fix recommendation.
+// A prior snap-once pass-through closed the decay race in one direction but
+// introduced the raise race in the opposite direction. The locked re-read with
+// max-of-(snap, live) closes both sides.
 func (m *Mempool) validateFeeFloorLockedWithFloor(entry *mempoolEntry, snappedFloor uint64) error {
 	if entry == nil {
 		return txAdmitRejected("nil mempool entry")

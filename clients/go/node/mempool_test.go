@@ -1037,6 +1037,7 @@ func TestMempoolRelayMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
+	mp.SetCurrentMinFeeRateForTest(8)
 	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 300_000, 5, fromKey, fromAddress, toAddress)
 	meta, err := mp.RelayMetadata(txBytes)
 	if err != nil {
@@ -1047,6 +1048,54 @@ func TestMempoolRelayMetadata(t *testing.T) {
 	}
 	if meta.Size != len(txBytes) {
 		t.Fatalf("size=%d, want %d", meta.Size, len(txBytes))
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("RelayMetadata inserted tx; mempool len=%d, want 0", got)
+	}
+	if mp.Contains(txID(t, txBytes)) {
+		t.Fatalf("RelayMetadata inserted txid %x", txID(t, txBytes))
+	}
+	if got := mp.BytesUsed(); got != 0 {
+		t.Fatalf("RelayMetadata mutated bytes used=%d, want 0", got)
+	}
+	if mp.lastAdmissionSeq != 0 {
+		t.Fatalf("RelayMetadata consumed admission_seq=%d, want 0", mp.lastAdmissionSeq)
+	}
+}
+
+func TestMempoolRelayMetadataBelowRollingFloorUnavailable(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddress := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddress, []uint64{1_000_000})
+
+	mp, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("new mempool: %v", err)
+	}
+	mp.SetCurrentMinFeeRateForTest(8)
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 1, 5, fromKey, fromAddress, toAddress)
+
+	_, err = mp.RelayMetadata(txBytes)
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable {
+		t.Fatalf("RelayMetadata below-floor err=%T %v, want TxAdmitUnavailable", err, err)
+	}
+	if !strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+		t.Fatalf("below-floor reason %q does not match admit-path fee-floor wording", txErr.Message)
+	}
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("RelayMetadata below-floor inserted tx; mempool len=%d, want 0", got)
+	}
+	if mp.Contains(txID(t, txBytes)) {
+		t.Fatalf("RelayMetadata below-floor inserted txid %x", txID(t, txBytes))
+	}
+	if got := mp.BytesUsed(); got != 0 {
+		t.Fatalf("RelayMetadata below-floor mutated bytes used=%d, want 0", got)
+	}
+	if mp.lastAdmissionSeq != 0 {
+		t.Fatalf("RelayMetadata below-floor consumed admission_seq=%d, want 0", mp.lastAdmissionSeq)
 	}
 }
 
@@ -1061,10 +1110,19 @@ func TestMempoolRelayMetadataTrailingBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new mempool: %v", err)
 	}
+	mp.SetCurrentMinFeeRateForTest(8)
 	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 300_000, 5, fromKey, fromAddress, toAddress)
 	txBytes = append(txBytes, 0x00)
-	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "trailing bytes after canonical tx") {
+	_, err = mp.RelayMetadata(txBytes)
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitRejected {
+		t.Fatalf("RelayMetadata trailing bytes err=%T %v, want TxAdmitRejected", err, err)
+	}
+	if !strings.Contains(txErr.Message, "trailing bytes after canonical tx") {
 		t.Fatalf("expected trailing-bytes rejection, got %v", err)
+	}
+	if strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+		t.Fatalf("trailing-bytes path was stolen by rolling-floor check: %q", txErr.Message)
 	}
 }
 
@@ -1116,8 +1174,16 @@ func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
 	if err := mp.AddTx(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below Stage C floor") {
 		t.Fatalf("expected DA Stage C floor rejection, got %v", err)
 	}
-	if _, err := mp.RelayMetadata(txBytes); err == nil || !strings.Contains(err.Error(), "DA fee below Stage C floor") {
+	_, err = mp.RelayMetadata(txBytes)
+	var txErr *TxAdmitError
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitRejected {
+		t.Fatalf("RelayMetadata low-fee DA err=%T %v, want TxAdmitRejected", err, err)
+	}
+	if !strings.Contains(txErr.Message, "DA fee below Stage C floor") {
 		t.Fatalf("expected relay metadata DA Stage C floor rejection, got %v", err)
+	}
+	if strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+		t.Fatalf("DA floor path was stolen by rolling-floor check: %q", txErr.Message)
 	}
 }
 
