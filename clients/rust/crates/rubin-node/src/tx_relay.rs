@@ -48,6 +48,10 @@
 //! facts in place, the application's shared pool is unreachable
 //! from this module's call graph through these surfaces.
 //!
+//! RUB-178 / GitHub #1438: canonical-pool seam lives in
+//! `p2p_runtime.rs::collect_live_responses` MESSAGE_TX via the new
+//! `PeerRelayContext.tx_pool` carrier; `handle_received_tx` stays relay-only.
+//!
 //! The `boundary_checker` test module below uses `syn::parse_file`
 //! to walk this file's production AST and detect direct syntactic
 //! canonical-`TxPool` admission call expressions. It is a token-
