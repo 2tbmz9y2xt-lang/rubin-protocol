@@ -3067,9 +3067,9 @@ mod tests {
             let (_, txid, _, _consumed) = parse_tx(&tx_bytes).expect("parse tx for txid");
 
             // 1) production-path reachability: the canonical pool side
-            //    effect is observable AFTER `handle_live_message` returns.
-            //    No direct `pool.admit(...)` call from the test reached
-            //    this state; the only path is through
+            //    effect is observable AFTER `collect_live_responses`
+            //    returns. No direct `pool.admit(...)` call from the
+            //    test reached this state; the only path is through
             //    `collect_live_responses::MESSAGE_TX` -> tx_relay::Relayed
             //    -> ctx.tx_pool seam.
             let pool_guard = canonical_tx_pool.lock().expect("pool lock");

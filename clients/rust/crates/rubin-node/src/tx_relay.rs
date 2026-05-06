@@ -48,17 +48,9 @@
 //! facts in place, the application's shared pool is unreachable
 //! from this module's call graph through these surfaces.
 //!
-//! RUB-178 / GitHub #1438 boundary re-verification: `handle_received_tx`
-//! itself remains relay-only — its argument list still does NOT carry
-//! a canonical `TxPool` handle. The canonical-pool admission seam was
-//! added in the *caller* (`p2p_runtime.rs::collect_live_responses`'s
-//! `MESSAGE_TX` branch) via a new `PeerRelayContext.tx_pool` carrier
-//! field, so the call-graph claim above remains literally true through
-//! `handle_received_tx`'s signature, but a peer-relayed tx now reaches
-//! a canonical-pool admit immediately after `Relayed` in that caller.
-//! `TxSource::Remote` source-aware classification is RUB-173 / GitHub
-//! #1420 follow-up; RUB-178 uses the legacy `pool.admit` entrypoint
-//! which records `TxSource::Local` as an accepted intermediate state.
+//! RUB-178 / GitHub #1438: canonical-pool seam lives in
+//! `p2p_runtime.rs::collect_live_responses` MESSAGE_TX via the new
+//! `PeerRelayContext.tx_pool` carrier; `handle_received_tx` stays relay-only.
 //!
 //! The `boundary_checker` test module below uses `syn::parse_file`
 //! to walk this file's production AST and detect direct syntactic
