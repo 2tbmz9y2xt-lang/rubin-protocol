@@ -1515,8 +1515,8 @@ mod tests {
         // back to `default_mine_address()`. Go's `hex.DecodeString` would
         // reject the same input as invalid hex. This test pins the Rust
         // accept-path so the divergence is visible and cannot regress silently.
-        let mut cfg = parse_args(&["--mine-address".to_string(), "   ".to_string()])
-            .expect("parse args");
+        let mut cfg =
+            parse_args(&["--mine-address".to_string(), "   ".to_string()]).expect("parse args");
         validate_config(&mut cfg)
             .expect("whitespace-only mine_address must be accepted (Rust silent-default path)");
     }
