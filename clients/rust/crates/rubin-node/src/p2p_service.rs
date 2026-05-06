@@ -804,12 +804,14 @@ fn handle_peer(
         addr: peer_addr.clone(),
     };
 
-    // Build relay context for message loop. RUB-178 / GitHub #1438:
-    // `tx_pool` threads the existing `shared.tx_pool` handle (already
-    // used by the block-apply cleanup path in `apply_tx_pool_cleanup`)
-    // into the peer-tx dispatch so peer transactions reach canonical
-    // admission via the legacy `pool.admit` seam in
-    // `collect_live_responses`. No new lifecycle ownership: this is
+    // Build relay context for message loop. RUB-178 / GitHub #1438
+    // introduced the lifecycle plumbing; `tx_pool` threads the existing
+    // `shared.tx_pool` handle (already used by the block-apply cleanup
+    // path in `apply_tx_pool_cleanup`) into the peer-tx dispatch so
+    // peer transactions reach canonical admission via the seam in
+    // `collect_live_responses`. RUB-173 / GitHub #1420 then swapped that
+    // seam to `add_tx_with_source(..., TxSource::Remote, ...)` for
+    // source-aware classification. No new lifecycle ownership: this is
     // the same `Arc<Mutex<TxPool>>` introduced for cleanup in PR #876.
     let relay_ctx = PeerRelayContext {
         relay_state: &shared.relay_state,
