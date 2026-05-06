@@ -2140,25 +2140,43 @@ mod tests {
             .set_read_timeout(Some(Duration::from_millis(200)))
             .expect("set read timeout");
         let result = read_http_request(&mut stream);
-        // RUB-202: drain any residual bytes the parser left in the
-        // socket so the writer's `write_all` releases back-pressure and
-        // `writer.join()` returns deterministically. Without this
-        // drain, a reader that returned `Err("body too large")` after
-        // reading ~1 MiB would leave the OS send buffer full; the
-        // writer would remain blocked in `sendto` until its
-        // `set_write_timeout` (above) fires. Bounded by the per-read
-        // 100ms timeout + 2s writer-side timeout: total worst-case ~2s
-        // before the helper unwedges. Reads that hit the timeout
+        // RUB-202: drain residual bytes ONLY on the early-reject path.
+        // On the success path the parser already consumed exactly the
+        // bytes it needed and the writer's small payload + shutdown
+        // were issued before the parser returned, so dropping the
+        // socket at function exit is sufficient and avoids burning the
+        // 100ms read-timeout budget on the FIN-propagation race for
+        // every successful test. On the early-reject path (e.g.,
+        // `Err("body too large")` after the cap fires inside
+        // `read_chunked_body`) the parser stops draining mid-stream
+        // and the writer remains blocked in `sendto` until its
+        // 2s `set_write_timeout` (above) fires; this drain releases
+        // that back-pressure so the writer's `write_all` completes
+        // promptly and `writer.join()` returns. Bounded by the
+        // per-read 100ms timeout + 2s writer-side timeout: worst-case
+        // ~2s before the helper unwedges. Reads that hit the timeout
         // return `Err`, which exits the `while let Ok(n) = ...` loop
         // cleanly without surfacing into the test result.
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-        let mut sink = [0u8; 4096];
-        while let Ok(n) = stream.read(&mut sink) {
-            if n == 0 {
-                break;
+        if result.is_err() {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+            let mut sink = [0u8; 4096];
+            while let Ok(n) = stream.read(&mut sink) {
+                if n == 0 {
+                    break;
+                }
             }
         }
-        let _ = writer.join();
+        // RUB-202: propagate writer-thread panics (e.g., a failed
+        // `TcpStream::connect` — the only remaining `.expect` in the
+        // closure) so a broken test-infra environment surfaces loudly
+        // instead of letting tests pass on a never-attempted send.
+        // Writer-side `write_all` / `shutdown` / `set_write_timeout`
+        // errors are swallowed inside the closure (per issue contract:
+        // "Writer-side BrokenPipe/timeout after reader-side reject is
+        // acceptable and must not fail the test"), so this expect only
+        // fires when the closure panicked, not on the expected
+        // BrokenPipe / TimedOut paths.
+        writer.join().expect("writer thread panicked");
         result
     }
 
