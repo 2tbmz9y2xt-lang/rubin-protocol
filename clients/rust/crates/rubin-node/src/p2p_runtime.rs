@@ -127,20 +127,27 @@ pub struct PeerRelayContext<'a> {
     /// Outbound relay queues: serialized wire frames enqueued by broadcast,
     /// drained by the peer thread to avoid concurrent TcpStream writes.
     pub peer_writers: &'a std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
-    /// Canonical TxPool admission seam (RUB-178 / GitHub #1438).
+    /// Canonical TxPool admission seam with source-aware classification
+    /// (RUB-178 / GitHub #1438 introduced the lifecycle plumbing using
+    /// legacy `pool.admit`; RUB-173 / GitHub #1420 swapped the call to
+    /// `add_tx_with_source(..., TxSource::Remote, ...)`).
     ///
     /// Threads the existing `shared.tx_pool: Arc<Mutex<TxPool>>` handle
     /// (introduced in PR #876, commit `ce270e3`, already used by the
     /// production block-apply cleanup path in `p2p_service.rs`) into the
-    /// peer-tx live message dispatch so peer transactions can reach
-    /// canonical admission after relay-cache success.
-    ///
-    /// Class C lifecycle plumbing only. This field uses the legacy
-    /// `pool.admit(...)` entrypoint; source classification (Local / Reorg
-    /// / Remote) is owned by `add_tx_with_source` and the per-source
-    /// producer wiring tasks. RUB-173 / GitHub #1420 will replace this
-    /// seam with `add_tx_with_source(..., TxSource::Remote, ...)` for
-    /// peer-originated transactions.
+    /// peer-tx live message dispatch so peer transactions admit through
+    /// the canonical source-aware entry after relay-cache success. The
+    /// `Remote` provenance matches Go's `Mempool.AddRemoteTx`
+    /// (`clients/go/node/mempool.go:416`). Go's p2p production path
+    /// reaches `AddRemoteTx` through three indirections:
+    /// `clients/go/node/p2p/handlers_tx.go::handleTx` (line 45) calls
+    /// `cfg.TxPool.Put` against the `TxPool` interface, which
+    /// production wiring at
+    /// `clients/go/cmd/rubin-node/main.go:489`
+    /// (`p2p.NewCanonicalMempoolTxPool(mempool)`) routes through
+    /// `CanonicalMempoolTxPool.Put`
+    /// (`clients/go/node/p2p/mempool.go:45-54`); that method's last
+    /// statement (line 53) is `p.mempool.AddRemoteTx(raw)`.
     pub tx_pool: &'a std::sync::Mutex<crate::txpool::TxPool>,
 }
 
@@ -524,33 +531,51 @@ impl PeerSession {
                         ctx.local_addr,
                         ctx.peer_writers,
                     )?;
-                    // RUB-178 / GitHub #1438: canonical TxPool admission seam.
+                    // RUB-173 / GitHub #1420: canonical TxPool admission
+                    // seam with source-aware classification. Peer-relayed
+                    // transactions admit via
+                    // `add_tx_with_source(..., TxSource::Remote, ...)`,
+                    // matching Go's `Mempool.AddRemoteTx`
+                    // (`clients/go/node/mempool.go:416`). Go's p2p
+                    // production path reaches `AddRemoteTx` indirectly:
+                    // `handlers_tx.go::handleTx` calls
+                    // `cfg.TxPool.Put` (the `TxPool` interface), which
+                    // production wiring
+                    // (`clients/go/cmd/rubin-node/main.go:489`,
+                    // `NewCanonicalMempoolTxPool(mempool)`) routes
+                    // through `CanonicalMempoolTxPool.Put`
+                    // (`clients/go/node/p2p/mempool.go:45-54`); line 53
+                    // is `p.mempool.AddRemoteTx(raw)`.
                     //
                     // Only fires after `handle_received_tx` returns
                     // `RelayTxOutcome::Relayed`, which means the peer tx
                     // already passed parse, dedup, and `relay_metadata`
-                    // (rolling fee floor). The seam threads the existing
-                    // `shared.tx_pool` handle one level deeper and uses the
-                    // legacy `pool.admit(...)` entrypoint — source
-                    // classification (`TxSource::Remote`) is reserved for
-                    // RUB-173 / GitHub #1420 replacement. Until that lands,
-                    // the seam admits peer-relayed txs with the legacy
-                    // `pool.admit` default of `TxSource::Local`; the
-                    // production-path test below explicitly pins this
-                    // intermediate state via
-                    // `pool.entry_source(&txid) == Some(TxSource::Local)`
-                    // so RUB-173 will see the assertion break and update
-                    // it together with the source-aware switch.
+                    // (rolling fee floor). Source is recorded on
+                    // `TxPoolEntry.source` for observability and
+                    // downstream filtering; per `add_tx_with_source` doc,
+                    // source does NOT affect validation, admission
+                    // ordering, or capacity-eviction priority — admission
+                    // is source-blind, only provenance differs.
+                    //
+                    // RUB-178 / GitHub #1438 introduced this seam first
+                    // using the legacy `pool.admit(...)` entrypoint
+                    // (which records `TxSource::Local`) as an explicit
+                    // Class C lifecycle prerequisite; this slice (RUB-173)
+                    // is the Class B replacement that flips source
+                    // classification to `Remote`. The production-path
+                    // test below pins
+                    // `pool.entry_source(&txid) == Some(TxSource::Remote)`
+                    // as the Go/Rust source-provenance parity anchor.
                     //
                     // Admission Result is intentionally discarded — it
                     // does NOT change `RelayTxOutcome` and does NOT
-                    // contribute to ban-score policy (per issue's
+                    // contribute to ban-score policy (per RUB-178 issue's
                     // failure_modes: "preserve existing txpool caller
                     // error class; no new policy ordering"). The
                     // relay-cache leg has already accepted the tx, and
-                    // RUB-178's invariant is "seam is reachable", not
-                    // "every peer tx admits". Future divergence
-                    // observability is a separate change.
+                    // the seam's invariant is now "seam admits with
+                    // Remote source", not "every peer tx admits". Future
+                    // divergence observability is a separate change.
                     //
                     // Lock poisoning is a separate concern from admission
                     // failure: a poisoned `tx_pool` Mutex means a prior
@@ -585,11 +610,12 @@ impl PeerSession {
                     if matches!(outcome, crate::tx_relay::RelayTxOutcome::Relayed) {
                         match ctx.tx_pool.lock() {
                             Ok(mut pool) => {
-                                let _ = pool.admit(
+                                let _ = pool.add_tx_with_source(
                                     &msg.payload,
                                     &sync_engine.chain_state,
                                     sync_engine.block_store.as_ref(),
                                     sync_engine.cfg.chain_id,
+                                    crate::txpool::TxSource::Remote,
                                 );
                             }
                             Err(_) => {
@@ -2996,14 +3022,24 @@ mod tests {
         assert!(err.contains("unknown message type: weird"), "got: {err}");
     }
 
-    /// RUB-178 / GitHub #1438: production-path reachability proof for the
-    /// canonical TxPool admission seam introduced in `PeerRelayContext`.
+    /// RUB-178 / GitHub #1438 introduced this production-path
+    /// reachability proof for the canonical TxPool admission seam in
+    /// `PeerRelayContext`; RUB-173 / GitHub #1420 paired the seam swap
+    /// to `add_tx_with_source(_, _, _, _, TxSource::Remote)` with an
+    /// `entry_source` parity update from `Local` to `Remote`.
+    ///
+    /// Proof assertion: the `assert_eq!(pool_guard.entry_source(&txid),
+    /// Some(crate::txpool::TxSource::Remote), ...)` near the end of
+    /// this test is the regression anchor that breaks if the seam
+    /// regresses to legacy `pool.admit` (Local) or any other source
+    /// variant.
     ///
     /// Why this is not helper-only:
     ///
-    ///   - The test does NOT call `pool.admit(...)` directly. Admission
-    ///     happens through `PeerSession::collect_live_responses`, the
-    ///     exact public method used by the production message loop in
+    ///   - The test does NOT call `add_tx_with_source(...)` or
+    ///     `pool.admit(...)` directly. Admission happens through
+    ///     `PeerSession::collect_live_responses`, the exact public
+    ///     method used by the production message loop in
     ///     `clients/rust/crates/rubin-node/src/p2p_service.rs::handle_peer`
     ///     (see the `session.collect_live_responses(msg, &mut engine,
     ///     Some(&relay_ctx))` call in `handle_peer`'s message-loop body).
@@ -3017,8 +3053,11 @@ mod tests {
     ///     `tx_pool.lock()` is taken and `pool.contains(&txid)` plus
     ///     `pool.entry_source(&txid)` are checked. The seam is the
     ///     only code path that could put the txid there in this scenario.
-    ///   - No `TxSource::Remote` claim. The seam uses legacy `pool.admit`;
-    ///     source-aware classification is RUB-173 / GitHub #1420 follow-up.
+    ///   - Source classification: `entry_source(&txid)` is asserted to
+    ///     equal `Some(TxSource::Remote)` per RUB-173 / GitHub #1420.
+    ///     This matches Go's `Mempool.AddRemoteTx` provenance and breaks
+    ///     if the seam regresses to legacy `pool.admit` (Local) or any
+    ///     other source variant.
     #[test]
     fn collect_live_responses_message_tx_admits_through_canonical_pool_seam() {
         use std::collections::HashMap;
@@ -3103,22 +3142,23 @@ mod tests {
                 "canonical TxPool must contain the txid after MESSAGE_TX dispatch — \
                  the seam is the only code path that could place it there in this test"
             );
-            // RUB-178 intermediate-state pin: the seam uses legacy
-            // `pool.admit(...)` which delegates to `add_tx_with_source(_,
-            // TxSource::Local, _)`. RUB-173 / GitHub #1420 will replace
-            // the seam with `add_tx_with_source(_, TxSource::Remote, _)`
-            // and update this pin together with the source switch.
-            // Proof assertion: the `assert_eq!` below comparing
+            // RUB-173 / GitHub #1420 source-provenance pin: the seam
+            // uses `add_tx_with_source(_, _, _, _, TxSource::Remote)`
+            // which records `Remote` on `TxPoolEntry.source` to match
+            // Go's `Mempool.AddRemoteTx` provenance. Proof assertion:
+            // the `assert_eq!` below comparing
             // `pool_guard.entry_source(&txid)` against
-            // `Some(crate::txpool::TxSource::Local)` is the regression
-            // anchor; any future seam-source flip without a paired
-            // update of this assertion produces a test failure here.
+            // `Some(crate::txpool::TxSource::Remote)` is the parity
+            // anchor; any regression that drops back to legacy
+            // `pool.admit` (Local) or any other source variant
+            // produces a test failure here.
             assert_eq!(
                 pool_guard.entry_source(&txid),
-                Some(crate::txpool::TxSource::Local),
-                "RUB-178 seam uses legacy pool.admit which records \
-                 TxSource::Local; RUB-173 / GitHub #1420 will switch to \
-                 TxSource::Remote and update this pin"
+                Some(crate::txpool::TxSource::Remote),
+                "RUB-173 / GitHub #1420 seam uses \
+                 add_tx_with_source(_, _, _, _, TxSource::Remote) — \
+                 peer-relayed txs must record Remote provenance to match \
+                 Go AddRemoteTx"
             );
             drop(pool_guard);
 
