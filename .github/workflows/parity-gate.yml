@@ -100,7 +100,19 @@ jobs:
               in_block {
                 visible = trimmed
                 lower = tolower(visible)
-                if (visible == "" || visible ~ /^<!--.*-->$/) {
+                if (in_comment) {
+                  if (visible ~ /-->/) {
+                    in_comment = 0
+                  }
+                  next
+                }
+                if (visible == "") {
+                  next
+                }
+                if (visible ~ /^<!--/) {
+                  if (visible !~ /-->/) {
+                    in_comment = 1
+                  }
                   next
                 }
                 if (lower ~ /^(n\/a|na|none|null|todo|tbd|not applicable)([[:space:][:punct:]].*)?$/) {
