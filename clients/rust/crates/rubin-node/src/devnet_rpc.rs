@@ -54,11 +54,12 @@ pub struct DevnetRPCState {
     live_mining_cfg: Option<MinerConfig>,
     /// RUB-10 / GitHub #1151: readiness gate driving `/ready` semantics.
     /// Mirrors Go's `clients/go/cmd/rubin-node/http_rpc.go::readinessGate`
-    /// (lines 96-219). Three-state machine: `NotReady` -> `Ready` (one-shot
-    /// via `try_mark_ready_on_startup`) -> `Shutdown` (sticky terminal,
-    /// via `mark_shutdown`). Mixed-client devnet evidence consumers
-    /// distinguish a starting node, a serving node, and a shutting-down
-    /// node by `/ready`'s 503/200 response and the `{ready: bool}` body.
+    /// (type at line 125; methods 143-219). Three-state machine:
+    /// `NotReady` -> `Ready` (one-shot via `try_mark_ready_on_startup`)
+    /// -> `Shutdown` (sticky terminal, via `mark_shutdown`). Mixed-client
+    /// devnet evidence consumers distinguish a starting node, a serving
+    /// node, and a shutting-down node by `/ready`'s 503/200 response
+    /// and the `{ready: bool}` body.
     readiness: Arc<ReadinessGate>,
 }
 
@@ -75,7 +76,7 @@ pub struct RunningDevnetRPCServer {
 
 /// RUB-10 / GitHub #1151: three-state readiness machine mirroring Go's
 /// `readyState` constants in `clients/go/cmd/rubin-node/http_rpc.go`
-/// (lines 92-95). Transitions are monotone: `NotReady` is the initial
+/// (lines 85-89). Transitions are monotone: `NotReady` is the initial
 /// boot state; `try_mark_ready_on_startup` flips it to `Ready` exactly
 /// once; `mark_shutdown` flips any state to the sticky terminal
 /// `Shutdown`. `Shutdown` is observable via `is_ready() == false` and
@@ -109,6 +110,18 @@ impl ReadinessGate {
     /// if already `Ready` (idempotent re-call) or `Shutdown` (sticky;
     /// post-shutdown re-readiness is forbidden by design — operators
     /// must restart the node, matching Go's contract).
+    ///
+    /// Documented divergence vs Go (matches the divergence note on
+    /// `is_ready` below): Go's implementation calls
+    /// `observeShutdownLocked` first and can return false (and stamp
+    /// Shutdown) when a wired `shutdownCtx` is observed canceled even
+    /// while state is still `NotReady`. Rust's RPC server exposes no
+    /// equivalent context cancellation channel, so the only paths
+    /// into `Shutdown` are the explicit `mark_shutdown()` call (from
+    /// `RunningDevnetRPCServer::close` and `Drop`). A poisoned mutex
+    /// is treated as failure (the function returns false without
+    /// flipping state) — defense-in-depth so a panicked operation
+    /// that left the gate inconsistent can't quietly succeed here.
     fn try_mark_ready_on_startup(&self) -> bool {
         let Ok(mut cell) = self.state.lock() else {
             return false;
@@ -376,13 +389,21 @@ pub fn start_devnet_rpc_server(
     let stop_flag = Arc::clone(&stop);
     let state = Arc::new(state);
     // RUB-10 / GitHub #1151: stamp `Ready` BEFORE the accept thread
-    // spawns. Mirrors Go's `main.go:768` `rpcServer.TryMarkReadyOnStartup()`
-    // call placement: it runs after the listener is bound but before
-    // (or concurrent with) the first request is served, so any
-    // observer hitting `/ready` after the listener is up sees the
-    // serving state, not the boot-time `NotReady` value. The
-    // `Arc::clone` keeps a handle past the move into the thread so
-    // `RunningDevnetRPCServer` can `mark_shutdown` on close.
+    // spawns. The lifecycle position matches Go's stamp at
+    // `clients/go/cmd/rubin-node/main.go:768` (called via
+    // `maybeFlipReadyOnStartup` from `main.go:572`) — both run after
+    // the listener is bound but before the first request is served —
+    // even though the call site differs structurally: Go's stamp
+    // runs from the bin's main after `startDevnetRPCServer` returns
+    // and additional state wiring (SetIdentity, peer-lifecycle hooks)
+    // completes, while Rust folds the stamp inside
+    // `start_devnet_rpc_server` because the equivalent state wiring
+    // already happened in `clients/rust/crates/rubin-node/src/main.rs`
+    // before this function was called (so the operational invariant —
+    // "Ready iff serving + state wired" — is preserved despite the
+    // call-site difference). The `Arc::clone` keeps a handle past
+    // the move into the thread so `RunningDevnetRPCServer` can
+    // `mark_shutdown` on close.
     let readiness = Arc::clone(&state.readiness);
     readiness.try_mark_ready_on_startup();
     let join = thread::spawn(move || {
@@ -580,10 +601,16 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
 ///     `Allow: GET` header on non-GET methods, per RFC 9110 §15.5.6
 ///
 /// Mirrors Go's `handleReady` at
-/// `clients/go/cmd/rubin-node/http_rpc.go:645-670` byte-for-byte at
-/// the JSON level (`{ready: bool}` shape; same 200/503 split; same
-/// 405+`Allow: GET` envelope shared with the rest of the surface
-/// via the `accepted/error` JSON shape).
+/// `clients/go/cmd/rubin-node/http_rpc.go:645-670` at the JSON shape
+/// and status-code level (`{ready: bool}` payload; same 200/503
+/// split; same 405+`Allow: GET` envelope shared with the rest of the
+/// surface via the `accepted/error` JSON shape). Documented
+/// byte-level divergence (pre-existing, applies to every Rust
+/// devnet RPC handler not just `/ready`): Go's `writeJSONResponse`
+/// uses `json.NewEncoder(w).Encode` which appends a trailing `\n`,
+/// while Rust's `json_response` uses `serde_json::to_vec` which
+/// does not. JSON-parsing consumers tolerate either; this divergence
+/// is not introduced by RUB-10.
 ///
 /// Status code 405 (vs the 400 used by other Rust query handlers like
 /// `handle_get_tip` / `handle_get_block`) is intentional and matches
@@ -2089,11 +2116,12 @@ fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result
     // RUB-10 / GitHub #1151: emit any opt-in headers attached via
     // `HttpResponse::with_header` (currently used only by `/ready`'s
     // 405 path for `Allow: GET`). Names are `&'static str` so they
-    // cannot carry runtime-injected CRLF; values are owned `String`
-    // and are sanitized at the caller — `with_header` callers in this
-    // file only pass static literals (e.g., `"GET"`), so no runtime
-    // injection vector currently exists, and adding one would
-    // require an upstream method change.
+    // cannot carry runtime-injected CRLF. Values are owned `String`
+    // and are NOT sanitized here; the only current caller passes a
+    // static literal (`"GET"`), so no runtime CRLF-injection vector
+    // exists today. Future callers passing runtime-shaped values
+    // MUST sanitize CRLF before invoking `with_header` (or this
+    // emission must be hardened) to avoid response-splitting.
     for (name, value) in &response.extra_headers {
         headers.push_str(name);
         headers.push_str(": ");
