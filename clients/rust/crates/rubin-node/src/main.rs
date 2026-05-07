@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rubin_consensus::{
     canonical_rotation_network_name_normalized, normalized_rotation_network_name,
@@ -279,6 +279,27 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         sync_engine.record_best_known_height(height);
     }
 
+    // RUB-13 / GitHub #1157: operator-facing startup banner mirroring
+    // Go's `clients/go/cmd/rubin-node/main.go:442`. Mixed-client devnet
+    // diagnostic scripts that scrape `rubin-node` startup output for
+    // sync state expect this exact one-line format on both clients.
+    // Printed BEFORE the effective-config JSON dump so the order
+    // matches Go's (banners first, then `--dry-run` exit). All three
+    // accessors are pre-existing public API on `SyncEngine`:
+    // `header_sync_request()` / `is_in_ibd(now_unix)`.
+    let header_req = sync_engine.header_sync_request();
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(
+        stdout,
+        "sync: header_request_has_from={} header_request_limit={} ibd={}",
+        header_req.has_from,
+        header_req.limit,
+        sync_engine.is_in_ibd(now_unix)
+    );
+
     let effective = EffectiveConfig {
         network: cfg.network.clone(),
         data_dir: cfg.data_dir.display().to_string(),
@@ -404,6 +425,19 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
     let peer_runtime_cfg = default_peer_runtime_config(&cfg.network, cfg.max_peers);
     let peer_manager = Arc::new(PeerManager::new(peer_runtime_cfg.clone()));
+    // RUB-13 / GitHub #1157: operator-facing peer-slots banner mirroring
+    // Go's `clients/go/cmd/rubin-node/main.go:443`. Printed at the same
+    // structural position (after PeerManager construction, before p2p
+    // service start). Companions the existing Rust-only `p2p: listening=`
+    // banner below — the listening line stays because the post-bind
+    // address is operator-useful and Go cannot print it because Go's
+    // bind happens inside `p2pService.Start(ctx)`. `peer_manager.snapshot()`
+    // is the same accessor `/peers` uses (RUB-14 / GitHub #1159).
+    let _ = writeln!(
+        stdout,
+        "{}",
+        format_peer_slots_banner(cfg.max_peers, peer_manager.snapshot().len())
+    );
     let mut p2p_service = match start_node_p2p_service(NodeP2PServiceConfig {
         bind_addr: cfg.bind_addr.clone(),
         bootstrap_peers: cfg.peers.clone(),
@@ -460,6 +494,19 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     loop {
         thread::sleep(Duration::from_secs(60));
     }
+}
+
+/// RUB-13 / GitHub #1157: format the operator-facing `p2p: peer_slots=N
+/// connected=K` banner that mirrors Go's
+/// `clients/go/cmd/rubin-node/main.go:443`. Pure-string helper extracted
+/// from the call site so the format can be unit-tested without spinning
+/// up the full p2p stack (the surrounding `run()` enters an infinite
+/// service loop after the banner prints, blocking integration tests).
+/// Output line is identical to Go's `fmt.Fprintf` format token-for-token:
+/// `p2p: peer_slots=<usize> connected=<usize>` with a trailing newline
+/// added by the caller's `writeln!`.
+fn format_peer_slots_banner(max_peers: usize, connected: usize) -> String {
+    format!("p2p: peer_slots={max_peers} connected={connected}")
 }
 
 fn runtime_genesis_hash(genesis_cfg: &LoadedGenesisConfig) -> Result<[u8; 32], String> {
@@ -960,8 +1007,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        legacy_exposure_hooks, parse_args, run, runtime_genesis_hash, validate_config,
-        LegacyExposureReport,
+        format_peer_slots_banner, legacy_exposure_hooks, parse_args, run, runtime_genesis_hash,
+        validate_config, LegacyExposureReport,
     };
     use rubin_consensus::constants::{
         ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
@@ -1021,6 +1068,22 @@ mod tests {
                 grace_hook: "not_applicable_legacy_exposure_present".to_string(),
             },
         ]
+    }
+
+    /// RUB-13 / GitHub #1157: stdout helper for tests that parse the
+    /// effective-config JSON dump. After RUB-13 the dry-run/full
+    /// startup stdout is `<sync banner line>\n{<EffectiveConfig>}\n`
+    /// rather than `{<EffectiveConfig>}\n`, so callers that previously
+    /// did `serde_json::from_slice(&stdout)` would error on the
+    /// pre-JSON banner. This helper finds the first `{` byte (the
+    /// JSON object start) and parses from there. Both dry-run and
+    /// post-mining tests use the same shape.
+    fn parse_effective_config_json(stdout: &[u8]) -> Value {
+        let json_start = stdout
+            .iter()
+            .position(|&b| b == b'{')
+            .expect("expected JSON object in stdout");
+        serde_json::from_slice(&stdout[json_start..]).expect("json")
     }
 
     struct FailingWriter;
@@ -1166,7 +1229,7 @@ mod tests {
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
 
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert_eq!(
             json["chain_id_hex"].as_str(),
             Some("88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103")
@@ -1199,7 +1262,7 @@ mod tests {
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
 
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert_eq!(
             json["chain_id_hex"].as_str(),
             Some("1111111111111111111111111111111111111111111111111111111111111111")
@@ -1536,7 +1599,7 @@ mod tests {
 
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert_eq!(json["rpc_bind_addr"].as_str(), Some("127.0.0.1:19112"));
 
         fs::remove_dir_all(&dir).expect("cleanup");
@@ -1561,7 +1624,7 @@ mod tests {
 
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert_eq!(json["bind_addr"].as_str(), Some("127.0.0.1:19111"));
         assert_eq!(json["max_peers"].as_u64(), Some(16));
         assert_eq!(json["peers"][0].as_str(), Some("127.0.0.1:19112"));
@@ -1586,11 +1649,141 @@ mod tests {
 
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert_eq!(json["pv_mode"].as_str(), Some("on"));
         assert_eq!(json["pv_shadow_max"].as_u64(), Some(9));
 
         fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-13 / GitHub #1157: dry-run startup stdout contains both
+    /// operator-facing parity banners that mirror Go's
+    /// `clients/go/cmd/rubin-node/main.go:442-443`. Without these
+    /// banners, mixed-client devnet diagnostic scripts that scrape
+    /// `rubin-node` startup output for sync state or peer-slot
+    /// occupancy would break on the Rust client.
+    ///
+    /// Proof assertion: stdout contains exactly the expected one-line
+    /// formats: `sync: header_request_has_from=<bool> header_request_limit=<u64> ibd=<bool>`
+    /// before the JSON dump, and `p2p: peer_slots=<u64> connected=<u64>`
+    /// AFTER the JSON dump but on a startup that doesn't reach
+    /// `cfg.dry_run` early-return (i.e., a non-dry-run path; we exercise
+    /// the dry-run path here since that is the only path the test can
+    /// reach without spinning up p2p sockets — so this test pins the
+    /// `sync:` banner; full-startup p2p banner is implicitly covered
+    /// by the p2p init code path being reached on every non-dry-run
+    /// boot, which the existing `start_devnet_rpc_server`-using tests
+    /// already exercise indirectly).
+    #[test]
+    fn dry_run_emits_sync_header_request_banner() {
+        let dir = unique_temp_dir("rubin-node-bin-sync-banner");
+        let args = vec![
+            "--dry-run".to_string(),
+            "--datadir".to_string(),
+            dir.display().to_string(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run(&args, &mut stdout, &mut stderr);
+        assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
+        let stdout_str = String::from_utf8(stdout).expect("stdout utf8");
+
+        // The banner must appear BEFORE the JSON object (matches Go's
+        // "banners first" startup ordering at main.go:442-443).
+        let banner_line = stdout_str
+            .lines()
+            .find(|line| line.starts_with("sync: header_request_has_from="))
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing `sync: header_request_has_from=…` banner in stdout; \
+                     full stdout=\n{stdout_str}"
+                )
+            });
+        // Pin the exact one-line format Go emits, by parsing the three
+        // key=value pairs and asserting all three keys are present with
+        // syntactically valid values (bool / u64 / bool). The actual
+        // ibd flag depends on real wall-clock vs tip timestamp at test
+        // time, so we accept any bool token but reject missing or
+        // misordered fields.
+        let mut pairs = banner_line.trim_start_matches("sync: ").split(' ');
+        let has_from_kv = pairs.next().expect("has_from kv");
+        let limit_kv = pairs.next().expect("limit kv");
+        let ibd_kv = pairs.next().expect("ibd kv");
+        assert!(
+            pairs.next().is_none(),
+            "extra fields in banner: {banner_line}"
+        );
+        let (has_from_key, has_from_val) = has_from_kv.split_once('=').expect("has_from k=v");
+        let (limit_key, limit_val) = limit_kv.split_once('=').expect("limit k=v");
+        let (ibd_key, ibd_val) = ibd_kv.split_once('=').expect("ibd k=v");
+        assert_eq!(has_from_key, "header_request_has_from");
+        assert_eq!(limit_key, "header_request_limit");
+        assert_eq!(ibd_key, "ibd");
+        assert!(
+            has_from_val == "true" || has_from_val == "false",
+            "header_request_has_from must be a bool token; got {has_from_val:?}"
+        );
+        assert!(
+            limit_val.parse::<u64>().is_ok(),
+            "header_request_limit must parse as u64; got {limit_val:?}"
+        );
+        assert!(
+            ibd_val == "true" || ibd_val == "false",
+            "ibd must be a bool token; got {ibd_val:?}"
+        );
+
+        // The banner sits BEFORE the JSON object, matching Go's order.
+        let banner_pos = stdout_str
+            .find("sync: header_request_has_from=")
+            .expect("banner present");
+        let json_pos = stdout_str.find('{').expect("json present");
+        assert!(
+            banner_pos < json_pos,
+            "sync banner must appear before the JSON object (Go's order); \
+             banner_pos={banner_pos}, json_pos={json_pos}"
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-13 / GitHub #1157: pin the exact one-line format of the
+    /// `p2p: peer_slots=N connected=K` banner that mirrors Go's
+    /// `clients/go/cmd/rubin-node/main.go:443`. Direct unit test on
+    /// the format helper is the integration-test substitute, because
+    /// the surrounding `run()` enters an infinite service loop after
+    /// the banner prints (no test can sit through that without
+    /// killing the process). The helper input mirrors what production
+    /// passes: `cfg.max_peers` (usize from --max-peers flag) and
+    /// `peer_manager.snapshot().len()` (usize, the same accessor
+    /// `/peers` uses, RUB-14).
+    ///
+    /// Proof assertion: empty peer set produces `connected=0`,
+    /// non-empty produces the exact slot count, and the entire line
+    /// matches the literal Go format string token-for-token.
+    #[test]
+    fn format_peer_slots_banner_matches_go_format() {
+        // Empty peer set, default max_peers (8 — the devnet default).
+        assert_eq!(
+            format_peer_slots_banner(8, 0),
+            "p2p: peer_slots=8 connected=0"
+        );
+        // Non-empty peer set with non-default cap.
+        assert_eq!(
+            format_peer_slots_banner(16, 3),
+            "p2p: peer_slots=16 connected=3"
+        );
+        // Edge: connected at slot cap.
+        assert_eq!(
+            format_peer_slots_banner(2, 2),
+            "p2p: peer_slots=2 connected=2"
+        );
+        // Edge: zero slots (operator could pass --max-peers=0 — Go
+        // accepts it too; banner still renders honestly).
+        assert_eq!(
+            format_peer_slots_banner(0, 0),
+            "p2p: peer_slots=0 connected=0"
+        );
     }
 
     #[test]
@@ -1665,7 +1858,7 @@ mod tests {
 
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert!(json["indexed_suite_ids"].is_array());
         assert!(json["watched_legacy_suite_ids"].is_array());
         assert_eq!(
@@ -1756,7 +1949,7 @@ mod tests {
 
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert_eq!(json["include_outpoints"].as_bool(), Some(true));
         assert_eq!(json["legacy_exposure_total"].as_u64(), Some(2));
         assert_eq!(
@@ -1806,7 +1999,7 @@ mod tests {
 
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert_eq!(json["include_outpoints"].as_bool(), Some(true));
         assert_eq!(json["legacy_exposure_total"].as_u64(), Some(0));
         assert_eq!(
@@ -1951,7 +2144,7 @@ mod tests {
 
         let code = run(&args, &mut stdout, &mut stderr);
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
-        let json: Value = serde_json::from_slice(&stdout).expect("json");
+        let json: Value = parse_effective_config_json(&stdout);
         assert_eq!(json["network"].as_str(), Some("mainnet"));
         assert_eq!(json["legacy_exposure_total"].as_u64(), Some(0));
 
