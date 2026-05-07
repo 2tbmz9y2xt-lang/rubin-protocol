@@ -504,12 +504,20 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
 }
 
 /// RUB-13 / GitHub #1157: format the operator-facing `p2p: peer_slots=N
-/// connected=K` banner that mirrors Go's
-/// `clients/go/cmd/rubin-node/main.go:443`. Pure-string helper extracted
-/// from the call site so the format can be unit-tested without spinning
-/// up the full p2p stack (the surrounding `run()` enters an infinite
-/// service loop after the banner prints, blocking integration tests).
-/// Output line is identical to Go's `fmt.Fprintf` format token-for-token:
+/// connected=K` banner that pins the cross-client format from
+/// `clients/go/cmd/rubin-node/main.go:443`. Pure-string helper that
+/// the public-path integration test
+/// `dry_run_emits_sync_and_peer_slots_banners_after_json_in_order`
+/// covers via `--dry-run` (the dry-run early-exit at L345-347 returns
+/// `0` immediately after both banners print, well before the post-bind
+/// service loop). The companion unit test
+/// `format_peer_slots_banner_matches_go_format` exercises the helper
+/// with edge inputs that the public path cannot reach because
+/// `validate_config` rejects them upstream — most notably
+/// `max_peers == 0`, which `clients/go/node/config.go:395-396` and the
+/// Rust counterpart at the validate_config block reject before
+/// `run()` is ever invoked. Output line is identical to the upstream
+/// `fmt.Fprintf` format token-for-token:
 /// `p2p: peer_slots=<usize> connected=<usize>` with a trailing newline
 /// added by the caller's `writeln!`.
 fn format_peer_slots_banner(max_peers: usize, connected: usize) -> String {
@@ -852,9 +860,12 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     // contract via `parse_mine_address_arg` (already imported from
     // `crate::miner`). Without this gate, a malformed `--mine-address`
     // slipped through dry-run and only failed later inside miner setup
-    // at `miner_cfg.mine_address = parsed` (run() ~line 327, CLI mining
-    // path) or `miner_cfg.mine_address = addr` (live RPC mining
-    // ~line 370). Closes hostile-case matrix #2 in the issue contract.
+    // at `miner_cfg.mine_address = parsed` (CLI mining path) or
+    // `miner_cfg.mine_address = addr` (live RPC mining path). Both
+    // assignment sites are unique enough to grep; line numbers are
+    // omitted because the RUB-13 banner hoist shifted them and any
+    // future re-arrangement would invalidate fixed line refs.
+    // Closes hostile-case matrix #2 in the issue contract.
     //
     // Go counterpart anchor: `clients/go/node/config.go::ValidateConfig`
     // lines 407-415 also gates mine_address at config-validation time
@@ -1079,12 +1090,17 @@ mod tests {
 
     /// RUB-13 / GitHub #1157: stdout helper for tests that parse the
     /// effective-config JSON dump. After RUB-13 the dry-run/full
-    /// startup stdout is `<sync line>\n{<EffectiveConfig>}\n`
-    /// rather than `{<EffectiveConfig>}\n`, so callers that previously
-    /// invoked `serde_json::from_slice(&buf)` directly now hit the
-    /// pre-JSON output and reject. This helper finds the first `{`
-    /// byte (the JSON object start) and parses from there. Both
-    /// dry-run and post-mining tests use the same shape.
+    /// startup stdout layout is
+    /// `{<EffectiveConfig>}\n<sync line>\n<peer_slots line>\n`
+    /// rather than the previous `{<EffectiveConfig>}\n` only, so a
+    /// caller using the strict `serde_json::from_slice(&buf)` reads
+    /// the JSON object cleanly but then hits the trailing post-JSON
+    /// banner bytes and rejects via the strict trailing-character
+    /// check. This helper finds the first `{` byte (the JSON object
+    /// start) and parses with a streaming `serde_json::Deserializer`
+    /// that takes only the first JSON value, so the trailing banner
+    /// content is tolerated. Both dry-run and post-mining tests use
+    /// the same shape.
     fn parse_effective_config_json(stdout: &[u8]) -> Value {
         let json_start = stdout
             .iter()
@@ -1511,9 +1527,11 @@ mod tests {
     /// `--mine-address` BEFORE dry-run completes, mirroring Go
     /// `ValidateConfig` (`clients/go/node/config.go:407-415`). Without
     /// this gate, a bad address slipped through dry-run and only failed
-    /// inside `Miner::new` setup (run() ~line 322 / live RPC mining
-    /// ~line 372), causing operators to discover the error after
-    /// startup-side effects rather than at config-validation time.
+    /// inside `Miner::new` setup (CLI mining path or live RPC mining
+    /// path — line numbers omitted because the RUB-13 banner hoist
+    /// shifted them; both call sites are unique enough to grep),
+    /// causing operators to discover the error after startup-side
+    /// effects rather than at config-validation time.
     ///
     /// Proof assertion: each `assert!(err.contains("invalid mine_address"))`
     /// in the rejection tests below is the regression anchor; each
@@ -1784,19 +1802,26 @@ mod tests {
     }
 
     /// RUB-13 / GitHub #1157: pin the exact one-line format of the
-    /// `p2p: peer_slots=N connected=K` banner that mirrors Go's
-    /// `clients/go/cmd/rubin-node/main.go:443`. Direct unit test on
-    /// the format helper is the integration-test substitute, because
-    /// the surrounding `run()` enters an infinite service loop after
-    /// the banner prints (no test can sit through that without
-    /// killing the process). The helper input mirrors what production
-    /// passes: `cfg.max_peers` (usize from --max-peers flag) and
-    /// `peer_manager.snapshot().len()` (usize, the same accessor
-    /// `/peers` uses, RUB-14).
+    /// `p2p: peer_slots=N connected=K` banner that mirrors the
+    /// upstream emission at `clients/go/cmd/rubin-node/main.go:443`.
+    /// The public-path integration test
+    /// `dry_run_emits_sync_and_peer_slots_banners_after_json_in_order`
+    /// already covers the dry-run public path; this unit test is
+    /// the helper-only edge cover. It pins inputs that the public
+    /// path cannot reach because `validate_config` rejects them
+    /// upstream — most notably `max_peers == 0`, which
+    /// `clients/go/node/config.go:395-396` and the Rust counterpart
+    /// reject before `run()` is ever invoked, so the format helper
+    /// is the only callable surface for the `(0, 0)` row. The
+    /// helper input mirrors what production passes: `cfg.max_peers`
+    /// (usize from --max-peers flag) and `peer_manager.snapshot().len()`
+    /// (usize, the same accessor `/peers` uses, RUB-14).
     ///
     /// Proof assertion: empty peer set produces `connected=0`,
-    /// non-empty produces the exact slot count, and the entire line
-    /// matches the literal Go format string token-for-token.
+    /// non-empty produces the exact slot count, the slot-cap-reached
+    /// edge prints both equal, and the unreachable `(0, 0)` defensive
+    /// row still renders honestly. The entire line matches the
+    /// upstream format string token-for-token.
     #[test]
     fn format_peer_slots_banner_matches_go_format() {
         // Empty peer set, default max_peers (8 — the devnet default).
