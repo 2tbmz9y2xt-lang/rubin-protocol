@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,12 +98,19 @@ pub struct PVTelemetrySnapshot {
 ///   (General Category Cc plus a focused subset of well-known Cf
 ///   format characters, Zl/Zp separators, non-ASCII Zs whitespace,
 ///   bidi controls, and BOM):
-///   * codepoint < 0x80 (C0 + DEL minus the named ones): `\xNN`
-///     two-hex-digit lowercase form
+///   * codepoint < 0x80 (C0 + DEL minus the named ones): two-hex-digit
+///     lowercase form `\xNN` (literal output examples: `\x00`,
+///     `\x1f`, `\x7f`)
 ///   * codepoint 0x80..=0xffff (C1 + other BMP non-printables):
-///     `\u00NN` four-hex-digit lowercase form
-///   * codepoint > 0xffff (astral non-printable): `\U00NNNNNN`
-///     eight-hex-digit lowercase form
+///     four-hex-digit lowercase form `\uNNNN` (literal output
+///     examples: U+0080 renders as backslash-u-0-0-8-0, U+00A0 as
+///     backslash-u-0-0-a-0, U+2028 as backslash-u-2-0-2-8, U+FEFF
+///     as backslash-u-f-e-f-f -- note: NOT a fixed `\u00NN` prefix,
+///     all four hex digits are codepoint-derived)
+///   * codepoint > 0xffff (astral non-printable): eight-hex-digit
+///     lowercase form `\UNNNNNNNN` (literal output example: U+E0001
+///     renders as backslash-U-0-0-0-e-0-0-0-1 -- note: NOT a fixed
+///     `\U00NNNNNN` prefix, all eight hex digits are codepoint-derived)
 /// - everything else (printable ASCII, printable Unicode, multi-
 ///   byte UTF-8): passes through unchanged
 ///
@@ -132,13 +140,18 @@ fn escape_prometheus_label_value(value: &str) -> String {
             '\r' => out.push_str(r"\r"),
             c if is_go_quote_nonprintable(c) => {
                 let cp = c as u32;
-                if cp < 0x80 {
-                    out.push_str(&format!(r"\x{:02x}", cp));
+                // `write!` into the existing `String` (which implements
+                // `fmt::Write`) avoids the per-rune heap allocation that
+                // an interim `format!(...)` would incur. Writing to a
+                // `String` cannot fail at runtime, so the `Result` is
+                // safely discarded via `let _ = ...`.
+                let _ = if cp < 0x80 {
+                    write!(&mut out, r"\x{:02x}", cp)
                 } else if cp <= 0xffff {
-                    out.push_str(&format!(r"\u{:04x}", cp));
+                    write!(&mut out, r"\u{:04x}", cp)
                 } else {
-                    out.push_str(&format!(r"\U{:08x}", cp));
-                }
+                    write!(&mut out, r"\U{:08x}", cp)
+                };
             }
             _ => out.push(c),
         }
@@ -1880,8 +1893,10 @@ mod tests {
             r"a\rb\tc\x01d"
         );
         // C1 control chars (U+0080..=U+009F) are caught by
-        // `char::is_control()` (Cc) and emitted as `\u00NN` four-digit
-        // lowercase hex, matching Go's `strconv.Quote`.
+        // `char::is_control()` (Cc) and emitted as `\uNNNN` (four
+        // lowercase hex digits, e.g. U+0080 -> backslash-u-0-0-8-0,
+        // U+00A0 -> backslash-u-0-0-a-0, U+2028 -> backslash-u-2-0-2-8),
+        // matching Go's `strconv.Quote` for codepoints in the BMP.
         assert_eq!(super::escape_prometheus_label_value("\u{80}"), "\\u0080");
         assert_eq!(super::escape_prometheus_label_value("\u{85}"), "\\u0085");
         assert_eq!(super::escape_prometheus_label_value("\u{9f}"), "\\u009f");
