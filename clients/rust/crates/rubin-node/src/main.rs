@@ -279,14 +279,14 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         sync_engine.record_best_known_height(height);
     }
 
-    // RUB-13 / GitHub #1157: operator-facing startup banner mirroring
-    // Go's `clients/go/cmd/rubin-node/main.go:442`. Mixed-client devnet
-    // diagnostic scripts that scrape `rubin-node` startup output for
-    // sync state expect this exact one-line format on both clients.
-    // Printed BEFORE the effective-config JSON dump so the order
-    // matches Go's (banners first, then `--dry-run` exit). All three
-    // accessors are pre-existing public API on `SyncEngine`:
-    // `header_sync_request()` / `is_in_ibd(now_unix)`.
+    // RUB-13 / GitHub #1157: operator-facing startup banner that
+    // mirrors the cross-client format pinned in PR evidence. Mixed-
+    // client devnet diagnostic scripts scraping `rubin-node` startup
+    // stdout for sync diagnostics rely on this exact one-line format
+    // on both clients. Printed BEFORE the effective-config JSON dump
+    // so the upstream startup ordering is preserved (banners first,
+    // then `--dry-run` exit). Both accessors are pre-existing public
+    // API on `SyncEngine`: `header_sync_request()` / `is_in_ibd(now_unix)`.
     let header_req = sync_engine.header_sync_request();
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -425,14 +425,15 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
     let peer_runtime_cfg = default_peer_runtime_config(&cfg.network, cfg.max_peers);
     let peer_manager = Arc::new(PeerManager::new(peer_runtime_cfg.clone()));
-    // RUB-13 / GitHub #1157: operator-facing peer-slots banner mirroring
-    // Go's `clients/go/cmd/rubin-node/main.go:443`. Printed at the same
-    // structural position (after PeerManager construction, before p2p
-    // service start). Companions the existing Rust-only `p2p: listening=`
-    // banner below — the listening line stays because the post-bind
-    // address is operator-useful and Go cannot print it because Go's
-    // bind happens inside `p2pService.Start(ctx)`. `peer_manager.snapshot()`
-    // is the same accessor `/peers` uses (RUB-14 / GitHub #1159).
+    // RUB-13 / GitHub #1157: operator-facing peer-slots banner that
+    // mirrors the cross-client format pinned in PR evidence. Printed
+    // at the same structural position (after PeerManager construction,
+    // before p2p service start). Companions the existing Rust-only
+    // `p2p: listening=` banner below — the listening line stays because
+    // the post-bind address is operator-useful and the upstream client
+    // cannot emit it symmetrically (its bind happens inside
+    // `p2pService.Start(ctx)`). `peer_manager.snapshot()` is the same
+    // accessor `/peers` uses (RUB-14 / GitHub #1159).
     let _ = writeln!(
         stdout,
         "{}",
@@ -1072,12 +1073,12 @@ mod tests {
 
     /// RUB-13 / GitHub #1157: stdout helper for tests that parse the
     /// effective-config JSON dump. After RUB-13 the dry-run/full
-    /// startup stdout is `<sync banner line>\n{<EffectiveConfig>}\n`
+    /// startup stdout is `<sync line>\n{<EffectiveConfig>}\n`
     /// rather than `{<EffectiveConfig>}\n`, so callers that previously
-    /// did `serde_json::from_slice(&stdout)` would error on the
-    /// pre-JSON banner. This helper finds the first `{` byte (the
-    /// JSON object start) and parses from there. Both dry-run and
-    /// post-mining tests use the same shape.
+    /// invoked `serde_json::from_slice(&buf)` directly now hit the
+    /// pre-JSON output and reject. This helper finds the first `{`
+    /// byte (the JSON object start) and parses from there. Both
+    /// dry-run and post-mining tests use the same shape.
     fn parse_effective_config_json(stdout: &[u8]) -> Value {
         let json_start = stdout
             .iter()
@@ -1689,8 +1690,9 @@ mod tests {
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
         let stdout_str = String::from_utf8(stdout).expect("stdout utf8");
 
-        // The banner must appear BEFORE the JSON object (matches Go's
-        // "banners first" startup ordering at main.go:442-443).
+        // The banner must appear BEFORE the JSON object — same
+        // upstream sequencing pinned at
+        // `clients/go/cmd/rubin-node/main.go:442-443`.
         let banner_line = stdout_str
             .lines()
             .find(|line| line.starts_with("sync: header_request_has_from="))
@@ -1733,14 +1735,15 @@ mod tests {
             "ibd must be a bool token; got {ibd_val:?}"
         );
 
-        // The banner sits BEFORE the JSON object, matching Go's order.
+        // The banner sits BEFORE the JSON object — same upstream
+        // sequencing pinned at `clients/go/cmd/rubin-node/main.go:442-443`.
         let banner_pos = stdout_str
             .find("sync: header_request_has_from=")
             .expect("banner present");
         let json_pos = stdout_str.find('{').expect("json present");
         assert!(
             banner_pos < json_pos,
-            "sync banner must appear before the JSON object (Go's order); \
+            "sync banner must appear before the JSON object (upstream sequencing); \
              banner_pos={banner_pos}, json_pos={json_pos}"
         );
 
