@@ -105,10 +105,13 @@ pub struct RunningDevnetRPCServer {
 ///
 /// - `NotReady` (boot zero-value): means "the
 ///   `ReadinessGate::try_mark_ready_on_startup` path has not yet
-///   completed its `NotReady` -> `Ready` transition". `/ready` reports
-///   503 + `{ready: false}` (the JSON envelope byte-pinned by
-///   `ready_response_body_byte_pinned_rust_wire_format`). This is
-///   the state a freshly constructed `DevnetRPCState` exposes BEFORE
+///   completed its `NotReady` -> `Ready` transition". `GET /ready`
+///   reports 503 + `{ready: false}` (the JSON envelope byte-pinned by
+///   `ready_response_body_byte_pinned_rust_wire_format`); non-GET
+///   methods on `/ready` always return 405 + `Allow: GET` regardless
+///   of gate state per RFC 9110 §15.5.6 (handler dispatch order:
+///   method check first, then state read). This is the state a
+///   freshly constructed `DevnetRPCState` exposes BEFORE
 ///   `start_devnet_rpc_server` runs the post-bind stamp at the
 ///   `try_mark_ready_on_startup` call site below; orchestrators MUST
 ///   treat 503 as "not-ready / unavailable" and not interleave work.
@@ -154,9 +157,11 @@ pub struct RunningDevnetRPCServer {
 ///   `/ready` as the boot-stamp latch only.
 ///
 /// - `Shutdown` (post-`mark_shutdown` terminal): sticky; once entered
-///   the gate never returns to `Ready`. `/ready` reports 503 + `{ready:
-///   false}` permanently for this gate's lifetime; operator-facing
-///   recovery is process restart, not a /ready-driven re-arm.
+///   the gate never returns to `Ready`. `GET /ready` reports 503 +
+///   `{ready: false}` permanently for this gate's lifetime; non-GET
+///   methods on `/ready` continue to return 405 + `Allow: GET`
+///   independently of gate state. Operator-facing recovery is
+///   process restart, not a /ready-driven re-arm.
 ///
 /// `go_rust_parity_matrix` row "error status and response shape" is
 /// pinned by `handle_ready` below (200 vs 503 status code; `{ready:
