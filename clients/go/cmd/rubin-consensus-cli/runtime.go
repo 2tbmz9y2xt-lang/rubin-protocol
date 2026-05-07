@@ -999,16 +999,17 @@ func relayMetadataPolicyResp(req Request) Response {
 		}
 	case node.TxAdmitRejected:
 		resp.AdmitClass = "rejected"
-		if strings.Contains(admitErr.Message, "DA fee below Stage C floor") {
+		switch {
+		case strings.Contains(admitErr.Message, "DA fee below Stage C floor"):
 			resp.RejectReason = "DA_FEE_BELOW_STAGE_C_FLOOR"
 			resp.DominantFloor = "da"
-		} else if strings.Contains(admitErr.Message, string(consensus.TX_ERR_PARSE)) {
+		case strings.Contains(admitErr.Message, string(consensus.TX_ERR_PARSE)):
 			resp.Ok = false
 			resp.Err = string(consensus.TX_ERR_PARSE)
 			resp.AdmitClass = ""
 			resp.DominantFloor = ""
 			resp.RejectReason = ""
-		} else {
+		default:
 			resp.Err = admitErr.Message
 		}
 	case node.TxAdmitConflict:
