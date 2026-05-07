@@ -87,27 +87,32 @@ pub struct PVTelemetrySnapshot {
 /// RUB-12 / GitHub #1156: escape a Prometheus label value matching
 /// Go's `fmt.Sprintf` `%q` verb (`strconv.Quote` semantics) used at
 /// `clients/go/node/pv_telemetry.go:250` for the `rubin_pv_mode`
-/// label. Covers the full `%q` byte set:
+/// label. Covers the full `%q` byte set, including C0 + DEL + C1 +
+/// other Unicode control codepoints:
 /// - `\` -> `\\`
 /// - `"` -> `\"`
 /// - named control-char escapes: `\a` (BEL 0x07), `\b` (BS 0x08),
 ///   `\t`, `\n`, `\v`, `\f`, `\r`
-/// - other control chars (0x00..=0x1f minus the named ones, plus
-///   0x7f DEL): `\xNN` two-hex-digit lowercase form
-/// - everything else (printable ASCII + multi-byte UTF-8): passes
-///   through unchanged
+/// - any other Unicode control (`char::is_control()` — General
+///   Category Cc, same as Go's `unicode.IsControl`):
+///   * codepoint < 0x80 (C0 + DEL minus the named ones): `\xNN`
+///     two-hex-digit lowercase form
+///   * codepoint 0x80..=0xffff (C1 + other BMP controls): `\u00NN`
+///     four-hex-digit lowercase form
+///   * codepoint > 0xffff (astral non-printable): `\U00NNNNNN`
+///     eight-hex-digit lowercase form
+/// - everything else (printable ASCII, printable Unicode, multi-
+///   byte UTF-8): passes through unchanged
 ///
 /// Byte-aligned with Go's `%q` is what the doc on `prometheus_lines`
-/// claims; the prior partial-escape (only `\` / `"` / `\n`) would
-/// have left `\r` / `\t` / `0x00..=0x1f` flowing through as raw
-/// control bytes, breaking byte-aligned exposition under runtime-
-/// shaped `mode` values. Defense-in-depth: today's only production
-/// caller is `ParallelValidationMode::as_str()` returning the static
-/// literal "off"/"shadow"/"on" (escape is identity on that input),
-/// but `PVTelemetrySnapshot` is a `pub` struct with `pub mode: String`
+/// claims. Defense-in-depth: today's only production caller is
+/// `ParallelValidationMode::as_str()` returning the static literal
+/// "off"/"shadow"/"on" (escape is identity on that input), but
+/// `PVTelemetrySnapshot` is a `pub` struct with `pub mode: String`
 /// so a future external constructor passing a runtime-shaped value
 /// must neither break the label literal nor drift from Go's `%q`
-/// byte stream.
+/// byte stream — including for non-ASCII Unicode control codepoints
+/// (C1 NEL `U+0085`, line separator `U+2028`, etc.).
 fn escape_prometheus_label_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
@@ -121,8 +126,15 @@ fn escape_prometheus_label_value(value: &str) -> String {
             '\x0b' => out.push_str(r"\v"),
             '\x0c' => out.push_str(r"\f"),
             '\r' => out.push_str(r"\r"),
-            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
-                out.push_str(&format!(r"\x{:02x}", c as u32));
+            c if c.is_control() => {
+                let cp = c as u32;
+                if cp < 0x80 {
+                    out.push_str(&format!(r"\x{:02x}", cp));
+                } else if cp <= 0xffff {
+                    out.push_str(&format!(r"\u{:04x}", cp));
+                } else {
+                    out.push_str(&format!(r"\U{:08x}", cp));
+                }
             }
             _ => out.push(c),
         }
@@ -1797,8 +1809,22 @@ mod tests {
             super::escape_prometheus_label_value("a\rb\tc\x01d"),
             r"a\rb\tc\x01d"
         );
-        // UTF-8 passes through.
+        // C1 control chars (U+0080..=U+009F) and other non-ASCII
+        // Unicode controls are caught by `char::is_control()` and
+        // emitted as `\u00NN` (BMP) or `\U00NNNNNN` (astral),
+        // matching Go's `strconv.Quote` for codepoints >= 0x80.
+        assert_eq!(super::escape_prometheus_label_value("\u{80}"), "\\u0080");
+        assert_eq!(super::escape_prometheus_label_value("\u{85}"), "\\u0085");
+        assert_eq!(super::escape_prometheus_label_value("\u{9f}"), "\\u009f");
+        // Other Unicode controls beyond C1 (line separator U+2028,
+        // paragraph separator U+2029, byte order mark U+FEFF, etc.)
+        // are also `is_control()` per Cc + Cf categories... but only
+        // Cc is "is_control" in Rust; Cf is is_format. Stick to Cc.
+        // Printable Unicode (Latin-1 supplement, Cyrillic, etc.)
+        // passes through unchanged.
         assert_eq!(super::escape_prometheus_label_value("режим"), "режим");
+        assert_eq!(super::escape_prometheus_label_value("\u{a0}"), "\u{a0}");
+        assert_eq!(super::escape_prometheus_label_value("é"), "é");
         // End-to-end injection attempt: malicious `mode` tries to
         // close the label, terminate the line, and inject a fake
         // `# HELP` block. After escape the entire payload is
