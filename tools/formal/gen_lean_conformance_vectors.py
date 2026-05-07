@@ -1616,7 +1616,7 @@ def _int_default(v: dict[str, Any], key: str, default: int, vid: str) -> int:
     return _require_int(v, key, vid)
 
 
-def load_cv_da_fee_floor(path: Path, gate: str = "CV-DA-FEE-FLOOR") -> list[DaFeeFloorVector]:
+def load_da_fee_floor_policy_vectors(path: Path, gate: str = "CV-DA-FEE-FLOOR") -> list[DaFeeFloorVector]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("gate") != gate:
         raise ValueError(f"expected gate={gate}, got {data.get('gate')!r}")
@@ -1658,7 +1658,7 @@ def load_cv_da_fee_floor(path: Path, gate: str = "CV-DA-FEE-FLOOR") -> list[DaFe
             )
         )
     if not out:
-        raise ValueError("no DA fee-floor vectors found")
+        raise ValueError(f"{gate}: no da_fee_floor_policy vectors found")
     return out
 
 
@@ -2997,7 +2997,7 @@ def main() -> int:
 
     in_da_fee_floor = repo_root / "conformance" / "fixtures" / "CV-DA-FEE-FLOOR.json"
     out_da_fee_floor = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVDaFeeFloorVectors.lean"
-    dffv = load_cv_da_fee_floor(in_da_fee_floor)
+    dffv = load_da_fee_floor_policy_vectors(in_da_fee_floor)
     out_da_fee_floor.write_text(
         _inject_perf_options(render_cv_da_fee_floor_lean(dffv)),
         encoding="utf-8",
@@ -3006,7 +3006,7 @@ def main() -> int:
 
     in_mempool = repo_root / "conformance" / "fixtures" / "CV-MEMPOOL.json"
     out_mempool = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVMempoolVectors.lean"
-    mpv = load_cv_da_fee_floor(in_mempool, gate="CV-MEMPOOL")
+    mpv = load_da_fee_floor_policy_vectors(in_mempool, gate="CV-MEMPOOL")
     out_mempool.write_text(
         _inject_perf_options(render_cv_mempool_lean(mpv)),
         encoding="utf-8",

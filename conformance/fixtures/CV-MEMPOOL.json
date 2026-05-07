@@ -158,8 +158,8 @@
       "early_guards_passed": [
         "scenario_tx_materialized",
         "tx_parse_full_consumed",
-        "tx_weight_and_da_bytes_computed",
-        "policy_utxo_fee_computed"
+        "policy_utxo_fee_computed",
+        "tx_weight_and_da_bytes_computed"
       ]
     },
     {

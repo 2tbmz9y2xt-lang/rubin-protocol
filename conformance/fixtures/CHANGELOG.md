@@ -28,6 +28,9 @@ Policy:
 
 Не затронуто: Go/Rust runtime policy behavior, replay op/parser family, capacity/source vectors, protocol artifacts.
 
+Follow-up correction:
+- `CV-MEMPOOL-05-OMITTED-CURRENT-FLOOR-DEFAULT` reordered `early_guards_passed` to match the established fee-before-weight audit order; vector semantics and replay expectations unchanged.
+
 ## 2026-05-05 — DA fee-floor executable vectors (Q-CONF-DA-FEE-FLOOR-VECTORS-01)
 
 Причина:
