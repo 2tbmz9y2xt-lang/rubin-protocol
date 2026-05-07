@@ -642,14 +642,23 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
 fn handle_ready(state: &DevnetRPCState, method: &str) -> HttpResponse {
     const ROUTE: &str = "/ready";
     if method != "GET" {
-        let body = serde_json::to_vec(&SubmitTxResponse {
-            accepted: false,
-            txid: None,
-            error: Some("GET required".to_string()),
-        })
-        .unwrap_or_else(|_| b"{\"accepted\":false,\"error\":\"GET required\"}".to_vec());
-        state.metrics.note(ROUTE, 405);
-        return HttpResponse::plain(405, "application/json", body).with_header("Allow", "GET");
+        // Copilot wave-1 P2 on PR #1472: build the 405 body via the
+        // shared `json_response` helper for encoder/fallback/metrics
+        // parity with every other handler, then attach `Allow: GET`
+        // separately. The Go counterpart `handleReady` writes JSON
+        // inline, but Rust idiom + bug-class consistency favors the
+        // helper here; the wire envelope is identical.
+        return json_response(
+            state,
+            ROUTE,
+            405,
+            &SubmitTxResponse {
+                accepted: false,
+                txid: None,
+                error: Some("GET required".to_string()),
+            },
+        )
+        .with_header("Allow", "GET");
     }
     let ready = state.readiness.is_ready();
     let status: u16 = if ready { 200 } else { 503 };
@@ -2138,11 +2147,10 @@ fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result
     // `HttpResponse::with_header` (currently used only by `/ready`'s
     // 405 path for `Allow: GET`). Names are `&'static str` so they
     // cannot carry runtime-injected CRLF. Values are owned `String`
-    // and are NOT sanitized here; the only current caller passes a
-    // static literal (`"GET"`), so no runtime CRLF-injection vector
-    // exists today. Future callers passing runtime-shaped values
-    // MUST sanitize CRLF before invoking `with_header` (or this
-    // emission must be hardened) to avoid response-splitting.
+    // but `with_header` rejects any value containing CR/LF before
+    // append (Copilot wave-1 P1 on PR #1472), so by the time this
+    // loop runs no value can contain `\r` or `\n` — response-splitting
+    // is closed at the API entry, not here.
     for (name, value) in &response.extra_headers {
         headers.push_str(name);
         headers.push_str(": ");
@@ -2255,8 +2263,9 @@ struct HttpResponse {
     /// Default empty for every existing response (current callers go
     /// through `HttpResponse::plain` which leaves this empty).
     /// Names are `&'static str` to match the rest of the type's
-    /// reliance on static lifetimes; values are owned `String` to
-    /// allow runtime-shaped values when future endpoints need them.
+    /// reliance on static lifetimes; values are owned `String` so
+    /// runtime-shaped values are accepted, with CR/LF rejected at the
+    /// `with_header` API entry (response-splitting is closed in code).
     extra_headers: Vec<(&'static str, String)>,
 }
 
@@ -2274,8 +2283,27 @@ impl HttpResponse {
     /// `handle_ready` to attach `Allow: GET` to its 405 response.
     /// Each call appends; duplicates are not deduplicated (no current
     /// caller writes the same header twice).
+    ///
+    /// HTTP response-splitting hardening (Copilot wave-1 P1 on PR #1472):
+    /// header values containing CR (`\r`) or LF (`\n`) are dropped on the
+    /// floor — the response is returned without that header pair so a
+    /// future caller passing a runtime-shaped value cannot inject a
+    /// CRLF sequence and forge a second response. Names are
+    /// `&'static str` and therefore cannot carry runtime CRLF.
+    /// Production callers in this PR pass the literal `"GET"` which
+    /// contains no CRLF; the validator is defense-in-depth for future
+    /// runtime-shaped values.
+    ///
+    /// Proof assertion: `with_header_drops_crlf_injected_value` (test
+    /// in this file) builds a response with `value="GET\r\nX-Inject: 1"`
+    /// and verifies the rendered HTTP head does NOT contain
+    /// `X-Inject:`, i.e. the injection is filtered.
     fn with_header(mut self, name: &'static str, value: impl Into<String>) -> Self {
-        self.extra_headers.push((name, value.into()));
+        let value = value.into();
+        if value.bytes().any(|b| b == b'\r' || b == b'\n') {
+            return self;
+        }
+        self.extra_headers.push((name, value));
         self
     }
 }
@@ -5402,6 +5430,56 @@ mod tests {
             response.extra_headers
         );
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-10 / GitHub #1151 + Copilot wave-1 P1 on PR #1472:
+    /// `HttpResponse::with_header` rejects values containing CR/LF
+    /// to close HTTP response-splitting at the API entry. Production
+    /// callers in this PR pass the static literal `"GET"` so this
+    /// path is currently unreachable in production, but the validator
+    /// is defense-in-depth and required by the security-self-review
+    /// gate for any new public API that accepts runtime-shaped
+    /// `String` values.
+    ///
+    /// Proof assertion: a value containing `\r\nX-Inject: 1` is
+    /// dropped (extra_headers stays empty for that pair) AND the
+    /// rendered HTTP head emitted by `write_http_response` does NOT
+    /// contain `X-Inject:`.
+    #[test]
+    fn with_header_drops_crlf_injected_value() {
+        let r = super::HttpResponse::plain(200, "application/json", b"{}".to_vec())
+            .with_header("Allow", "GET\r\nX-Inject: 1");
+        assert!(
+            r.extra_headers
+                .iter()
+                .all(|(_, v)| !v.contains('\r') && !v.contains('\n')),
+            "CRLF-bearing value must not be appended; got: {:?}",
+            r.extra_headers,
+        );
+        assert!(
+            r.extra_headers.iter().all(|(name, _)| *name != "Allow"),
+            "the Allow pair must be dropped entirely (not appended with sanitized value); got: {:?}",
+            r.extra_headers,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let writer = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            super::write_http_response(&mut stream, r).expect("write");
+        });
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf);
+        writer.join().expect("writer joined");
+        let head = String::from_utf8_lossy(&buf);
+        assert!(
+            !head.contains("X-Inject:"),
+            "rendered HTTP head must not carry the injected header; got:\n{}",
+            head,
+        );
     }
 
     /// RUB-10 / GitHub #1151: end-to-end TCP roundtrip through
