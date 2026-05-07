@@ -66,7 +66,7 @@ pub struct DevnetRPCState {
     /// stack unwinding), but `clients/rust/crates/rubin-node/src/main.rs`
     /// installs no SIGINT/SIGTERM handler, so a signal-driven kill
     /// terminates the process before `close()` runs and consumers see
-    /// connection-refused rather than the 503+`{ready:false}` envelope.
+    /// connection-refused rather than the 503+`{"ready":false}` envelope.
     /// Adding a signal handler that drives `mark_shutdown` is a
     /// runtime-lifecycle change deliberately excluded from RUB-10 by
     /// `class_change_stop_rule`; it is in scope for graceful-shutdown
@@ -106,7 +106,7 @@ pub struct RunningDevnetRPCServer {
 /// - `NotReady` (boot zero-value): means "the
 ///   `ReadinessGate::try_mark_ready_on_startup` path has not yet
 ///   completed its `NotReady` -> `Ready` transition". `GET /ready`
-///   reports 503 + `{ready: false}` (the JSON envelope byte-pinned by
+///   reports 503 + `{"ready":false}` (the JSON envelope byte-pinned by
 ///   `ready_response_body_byte_pinned_rust_wire_format`); non-GET
 ///   methods on `/ready` always return 405 + `Allow: GET` regardless
 ///   of gate state per RFC 9110 §15.5.6 (handler dispatch order:
@@ -116,7 +116,7 @@ pub struct RunningDevnetRPCServer {
 ///   `try_mark_ready_on_startup` call site below; orchestrators MUST
 ///   treat 503 as "not-ready / unavailable" and not interleave work.
 ///   Note: 503 alone does NOT distinguish `NotReady` (pre-stamp) from
-///   `Shutdown` (post-stamp) — both report 503 + `{ready:false}` by
+///   `Shutdown` (post-stamp) — both report 503 + `{"ready":false}` by
 ///   design. Consumers that need to distinguish boot-up from drain
 ///   must use process-level signals (start log line, supervisor
 ///   state) rather than reading meaning into the 503 source state.
@@ -158,7 +158,7 @@ pub struct RunningDevnetRPCServer {
 ///
 /// - `Shutdown` (post-`mark_shutdown` terminal): sticky; once entered
 ///   the gate never returns to `Ready`. `GET /ready` reports 503 +
-///   `{ready: false}` permanently for this gate's lifetime; non-GET
+///   `{"ready":false}` permanently for this gate's lifetime; non-GET
 ///   methods on `/ready` continue to return 405 + `Allow: GET`
 ///   independently of gate state. Operator-facing recovery is
 ///   process restart, not a /ready-driven re-arm.
@@ -748,9 +748,9 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
 
 /// RUB-10 / GitHub #1151: `/ready` endpoint for mixed-client devnet
 /// evidence consumers. Returns one of:
-///   - 200 `{ready: true}` when the gate is in `Ready` state
+///   - 200 `{"ready":true}` when the gate is in `Ready` state
 ///     (post-`try_mark_ready_on_startup`, pre-`mark_shutdown`)
-///   - 503 `{ready: false}` when the gate is in `NotReady`
+///   - 503 `{"ready":false}` when the gate is in `NotReady`
 ///     (pre-startup) or `Shutdown` (post-shutdown) state
 ///   - 405 `{accepted: false, error: "GET required"}` with
 ///     `Allow: GET` header on non-GET methods, per RFC 9110 §15.5.6
@@ -5608,7 +5608,7 @@ mod tests {
     }
 
     /// RUB-10 / GitHub #1151: `/ready` endpoint reports 503 + body
-    /// `{ready: false}` when the readiness gate is in the initial
+    /// `{"ready":false}` when the readiness gate is in the initial
     /// `NotReady` state (before `start_devnet_rpc_server` has stamped
     /// it `Ready`). Mirrors Go's `handleReady` 503 branch at
     /// `clients/go/cmd/rubin-node/http_rpc.go:669`.
@@ -5641,7 +5641,7 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
-    /// RUB-10 / GitHub #1151: `/ready` reports 200 + `{ready: true}`
+    /// RUB-10 / GitHub #1151: `/ready` reports 200 + `{"ready":true}`
     /// after `start_devnet_rpc_server` stamps the gate `Ready`.
     /// Mirrors Go's `handleReady` 200 branch at `clients/go/cmd/rubin-node/http_rpc.go:666` and
     /// proves the production startup wiring (mark-ready post-bind in
@@ -5678,7 +5678,7 @@ mod tests {
 
     /// RUB-10 / GitHub #1151: shutdown is sticky. After
     /// `RunningDevnetRPCServer::close` (or Drop) stamps `Shutdown`,
-    /// `/ready` reports 503 + `{ready: false}` permanently — mixed-
+    /// `/ready` reports 503 + `{"ready":false}` permanently — mixed-
     /// client orchestrators must stop submitting work to a draining
     /// node. Mirrors Go's `MarkShutdown` semantics at
     /// `clients/go/cmd/rubin-node/http_rpc.go:184-191` (sticky
@@ -5911,7 +5911,7 @@ mod tests {
     /// RUB-41 / GitHub #1329 hostile_case "partial startup": a
     /// `DevnetRPCState` constructed via `new_devnet_rpc_state` but
     /// never passed through `start_devnet_rpc_server` MUST report
-    /// `/ready` as 503 + `{ready: false}` regardless of any other
+    /// `/ready` as 503 + `{"ready":false}` regardless of any other
     /// node wiring already in place. The boot-time
     /// `try_mark_ready_on_startup` stamp lives inside
     /// `start_devnet_rpc_server`, so a
