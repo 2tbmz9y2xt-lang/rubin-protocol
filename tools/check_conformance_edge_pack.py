@@ -2,22 +2,11 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
-FORMAL_EVIDENCE_SUFFIXES = {".lean", ".json", ".jsonl"}
-
-
-def contained_repo_path(repo_root: Path, raw_path: object) -> Path | None:
-    if not isinstance(raw_path, str) or not raw_path:
-        return None
-    candidate = Path(raw_path)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return None
-    return repo_root / candidate
 
 
 def fail(msg: str) -> int:
@@ -46,59 +35,6 @@ def proof_domain_map(proof_coverage: dict) -> dict[str, dict]:
     return result
 
 
-def rust_fuzz_target_exists(repo_root: Path, root_path: object, name: str) -> bool:
-    root = contained_repo_path(repo_root, root_path)
-    if root is None:
-        return False
-    return (root / "fuzz_targets" / f"{name}.rs").is_file()
-
-
-def go_fuzz_target_exists(repo_root: Path, root_path: object, name: str) -> bool:
-    if not name.startswith("Fuzz"):
-        return False
-    root = contained_repo_path(repo_root, root_path)
-    if root is None:
-        return False
-    if not root.is_dir():
-        return False
-    pattern = re.compile(rf"\bfunc\s+{re.escape(name)}\s*\(")
-    for source in root.rglob("*.go"):
-        try:
-            if pattern.search(source.read_text(encoding="utf-8")):
-                return True
-        except UnicodeDecodeError:
-            continue
-    return False
-
-
-def fuzz_gates(repo_root: Path, proof_coverage: dict) -> set[str]:
-    gates: set[str] = set()
-    sections = (
-        ("fuzz", rust_fuzz_target_exists),
-        ("go_fuzz", go_fuzz_target_exists),
-    )
-    for section, target_exists in sections:
-        body = proof_coverage.get(section, {})
-        if not isinstance(body, dict):
-            continue
-        root_path = body.get("path")
-        targets = body.get("targets", [])
-        if not isinstance(targets, list):
-            continue
-        for target in targets:
-            if not isinstance(target, dict):
-                continue
-            gate = target.get("conformance_gate")
-            name = target.get("name")
-            if isinstance(gate, str) and gate and isinstance(name, str) and target_exists(
-                repo_root,
-                root_path,
-                name,
-            ):
-                gates.add(gate)
-    return gates
-
-
 def status_of(value: object) -> str:
     if not isinstance(value, dict):
         return ""
@@ -117,27 +53,6 @@ def string_list(value: object, *, field_name: str) -> tuple[list[str], str | Non
     if len(set(strings)) != len(strings):
         return [], f"{field_name} entries must be unique"
     return strings, None
-
-
-def repo_relative_existing_paths(repo_root: Path, value: object, *, field_name: str) -> tuple[list[Path], str | None]:
-    if not isinstance(value, list):
-        return [], f"{field_name} must be list"
-    paths: list[Path] = []
-    for item in value:
-        if not isinstance(item, dict):
-            return [], f"{field_name} entries must be objects"
-        raw_path = item.get("path")
-        if not isinstance(raw_path, str) or not raw_path:
-            return [], f"{field_name} entries need non-empty path"
-        full_path = contained_repo_path(repo_root, raw_path)
-        if full_path is None:
-            return [], f"{field_name} paths must be repo-relative and contained"
-        if not raw_path.startswith("rubin-formal/") or full_path.suffix not in FORMAL_EVIDENCE_SUFFIXES:
-            return [], f"{field_name} paths must reference formal artifacts"
-        if not full_path.exists():
-            return [], f"{field_name} path does not exist: {raw_path}"
-        paths.append(full_path)
-    return paths, None
 
 
 def main() -> int:
@@ -159,7 +74,6 @@ def main() -> int:
         proof_domains = proof_domain_map(proof_coverage)
     except ValueError as exc:
         return fail(str(exc))
-    committed_fuzz_gates = fuzz_gates(repo_root, proof_coverage)
     if baseline.get("schema_version") != 1:
         return fail("EDGE_PACK_BASELINE.json schema_version must be 1")
 
@@ -337,13 +251,11 @@ def main() -> int:
 
                 fuzz_status = status_of(proof_domain.get("fuzz"))
                 if fuzz_status in CLAIMED_PRESENT_STATUSES:
-                    missing_fuzz_gates = [gate for gate in gate_names if gate not in committed_fuzz_gates]
-                    if missing_fuzz_gates:
-                        print(
-                            f"FAIL: domain {name}: proof_coverage claims fuzz={fuzz_status} without committed fuzz target for gates: {', '.join(missing_fuzz_gates)}",
-                            file=sys.stderr,
-                        )
-                        failures += 1
+                    print(
+                        f"FAIL: domain {name}: proof_coverage claims fuzz={fuzz_status}; committed fuzz evidence validation is not supported in this edge-pack checker",
+                        file=sys.stderr,
+                    )
+                    failures += 1
                 elif fuzz_status and fuzz_status not in KNOWN_ABSENT_STATUSES:
                     print(
                         f"ERROR: domain {name}: unknown fuzz coverage status {fuzz_status}",
@@ -353,18 +265,11 @@ def main() -> int:
 
                 formal_status = status_of(proof_domain.get("formal"))
                 if formal_status in CLAIMED_PRESENT_STATUSES:
-                    formal_evidence, formal_error = repo_relative_existing_paths(
-                        repo_root,
-                        proof_domain.get("formal_evidence", []),
-                        field_name="formal_evidence",
+                    print(
+                        f"FAIL: domain {name}: proof_coverage claims formal={formal_status}; committed formal evidence validation is not supported in this edge-pack checker",
+                        file=sys.stderr,
                     )
-                    if formal_error is not None or not formal_evidence:
-                        print(
-                            f"FAIL: domain {name}: proof_coverage claims formal={formal_status} without committed formal evidence"
-                            + (f": {formal_error}" if formal_error else ""),
-                            file=sys.stderr,
-                        )
-                        failures += 1
+                    failures += 1
                 elif formal_status and formal_status not in KNOWN_ABSENT_STATUSES:
                     print(
                         f"ERROR: domain {name}: unknown formal coverage status {formal_status}",

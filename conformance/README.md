@@ -73,7 +73,8 @@ scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py --check
 
 Mempool/DA fee-floor domains are accounting-only here: they cite committed
 executable CV vector IDs and replay evidence, but do not claim fuzz or formal
-coverage until a committed fuzz target or formal proof exists.
+coverage. `tools/check_conformance_edge_pack.py` fails closed on fuzz/formal
+`present` claims until a later PR adds concrete evidence validation.
 
 Проверка (локально/CI):
 
@@ -87,7 +88,7 @@ Gate падает если:
 - общее число векторов в домене ниже baseline;
 - отсутствуют обязательные edge vector IDs из baseline.
 - `proof_coverage.json` claims fuzz/formal coverage for an edge/property domain
-  without committed matching evidence.
+  before the checker supports concrete evidence validation.
 
 ## Fixture governance (manual-only)
 
