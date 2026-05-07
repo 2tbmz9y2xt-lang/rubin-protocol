@@ -125,7 +125,7 @@ pub struct PVTelemetrySnapshot {
 /// `%q` would have escaped. See `is_go_quote_nonprintable` for the
 /// full predicate and a note on the deliberate scope-narrowing vs
 /// Go's full `strconv.IsPrint` table.
-fn escape_prometheus_label_value(value: &str) -> String {
+pub(crate) fn escape_prometheus_label_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {

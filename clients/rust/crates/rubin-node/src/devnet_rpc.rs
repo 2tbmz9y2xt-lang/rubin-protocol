@@ -1714,8 +1714,20 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
     let mut route_entries: Vec<_> = route_status.into_iter().collect();
     route_entries.sort_by(|a, b| a.0.cmp(&b.0));
     for ((route, status), value) in route_entries {
+        // RUB-12 / GitHub #1156 class-sweep: Go counterpart at
+        // `clients/go/cmd/rubin-node/http_rpc.go:1314` formats this
+        // line via `fmt.Sprintf("...{route=%q,status=%q}...", route,
+        // status, ...)`. The `route` label is a `String` and must be
+        // run through `escape_prometheus_label_value` for the same
+        // injection / byte-parity reasons as `rubin_pv_mode{mode=...}`
+        // (the wave-2 fix on the PV telemetry emitter). `status` is
+        // a `u16` whose `Display` impl can only emit ASCII digits, so
+        // it cannot inject special characters; quoting it via the
+        // surrounding literal `"..."` is byte-aligned with Goʼs `%q`
+        // on the integer-as-string form Go uses.
+        let escaped_route = crate::sync::escape_prometheus_label_value(&route);
         lines.push(format!(
-            "rubin_node_rpc_requests_total{{route=\"{route}\",status=\"{status}\"}} {value}"
+            "rubin_node_rpc_requests_total{{route=\"{escaped_route}\",status=\"{status}\"}} {value}"
         ));
     }
 
@@ -1726,8 +1738,15 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
     let mut submit_entries: Vec<_> = submit_results.into_iter().collect();
     submit_entries.sort_by(|a, b| a.0.cmp(&b.0));
     for (result, value) in submit_entries {
+        // RUB-12 / GitHub #1156 class-sweep: Go counterpart at
+        // `clients/go/cmd/rubin-node/http_rpc.go:1334` formats this
+        // line via `fmt.Sprintf("...{result=%q}...", key, ...)`.
+        // Reuse the wave-2 escape helper on `result` for symmetry
+        // with the `rubin_pv_mode{mode=...}` emitter and Goʼs `%q`
+        // byte stream.
+        let escaped_result = crate::sync::escape_prometheus_label_value(&result);
         lines.push(format!(
-            "rubin_node_submit_tx_total{{result=\"{result}\"}} {value}"
+            "rubin_node_submit_tx_total{{result=\"{escaped_result}\"}} {value}"
         ));
     }
     lines.extend(pv_lines);
@@ -4549,6 +4568,77 @@ mod tests {
         assert!(body.contains(r#"rubin_node_rpc_requests_total{route="/get_tip",status="200"} 1"#));
         assert!(body.contains(r#"rubin_node_submit_tx_total{result="rejected"} 1"#));
         assert!(body.contains(r#"rubin_pv_mode{mode="off"} 1"#));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-12 / GitHub #1156 class-sweep: extends the wave-2
+    /// `rubin_pv_mode{mode=...}` escape coverage to the other two
+    /// labeled metric emitters in `render_prometheus_metrics`,
+    /// `rubin_node_rpc_requests_total{route=...,status=...}` (counter
+    /// label `route`) and `rubin_node_submit_tx_total{result=...}`
+    /// (counter label `result`). Goʼs counterpart at
+    /// `clients/go/cmd/rubin-node/http_rpc.go:1314,1334` formats both
+    /// labels via `%q`, so for byte-parity with Goʼs `/metrics` text
+    /// stream the Rust side must escape them too.
+    ///
+    /// Today both label sources are static ASCII enum literals (route
+    /// is a `const ROUTE: &str = "/...";` constant on every `note()`
+    /// call site, result is one of `"accepted"/"rejected"/"conflict"/
+    /// "unavailable"/"bad_request"`). The escape is therefore purely
+    /// defense-in-depth — the production happy path is identity — but
+    /// `RpcMetrics::note` and `RpcMetrics::note_submit` accept `&str`
+    /// (not enums) so a future caller that funnels in a runtime-shaped
+    /// string must not be able to break out of the label literal.
+    ///
+    /// This test forges adversarial values via direct calls to the
+    /// private `RpcMetrics::note` / `note_submit` methods, then asserts
+    /// the rendered metrics body keeps the entire payload inside the
+    /// escaped label string and never grows a synthetic line break or
+    /// new metric line at any line start.
+    #[test]
+    fn metrics_render_escapes_labeled_counter_labels_against_injection() {
+        let (state, dir) = build_state(true);
+        let evil_route = "evil\"} 1\n# HELP fake malicious\nfake 1";
+        let evil_result = "shadow\"} 1\n# fake_metric_via_result 1\nattacker 1";
+        state.metrics.note(evil_route, 200);
+        state.metrics.note_submit(evil_result);
+        let body = render_prometheus_metrics(&state);
+        // The escape must turn `"` into `\"` and `\n` into `\n` (literal
+        // backslash-n) so the injected payload sits entirely inside the
+        // label literal.
+        let escaped_route_inline = "evil\\\"} 1\\n# HELP fake malicious\\nfake 1";
+        let escaped_result_inline = "shadow\\\"} 1\\n# fake_metric_via_result 1\\nattacker 1";
+        assert!(
+            body.contains(&format!(
+                "rubin_node_rpc_requests_total{{route=\"{escaped_route_inline}\",status=\"200\"}} 1"
+            )),
+            "route label not escaped properly; body=\n{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "rubin_node_submit_tx_total{{result=\"{escaped_result_inline}\"}} 1"
+            )),
+            "result label not escaped properly; body=\n{body}"
+        );
+        // Verify no synthetic `# HELP` line was forged outside an
+        // existing HELP block. The legitimate HELP/TYPE blocks live at
+        // line starts; an injected `# HELP fake malicious` would too if
+        // escape were missing. Scan every line for a `# HELP fake`
+        // prefix — there must be none.
+        for line in body.lines() {
+            assert!(
+                !line.starts_with("# HELP fake"),
+                "injected # HELP line forged at line start: {line:?}"
+            );
+            assert!(
+                !line.starts_with("fake "),
+                "injected fake metric line forged at line start: {line:?}"
+            );
+            assert!(
+                !line.starts_with("attacker "),
+                "injected attacker metric line forged at line start: {line:?}"
+            );
+        }
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
