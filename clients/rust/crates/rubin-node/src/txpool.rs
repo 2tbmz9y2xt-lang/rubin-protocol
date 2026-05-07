@@ -4,15 +4,20 @@ use std::sync::OnceLock;
 
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
-    parse_block_header_bytes, parse_core_ext_covenant_data, parse_tx, tx_weight_and_stats_public,
-    CoreExtDeploymentProfiles, DefaultRotationProvider, NativeSuiteSet, Outpoint, RotationProvider,
-    SuiteRegistry,
+    constants::MAX_RELAY_MSG_BYTES, parse_block_header_bytes, parse_core_ext_covenant_data,
+    parse_tx, tx_weight_and_stats_public, CoreExtDeploymentProfiles, DefaultRotationProvider,
+    NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
 };
 
 use crate::sync::SuiteContext;
 use crate::{BlockStore, ChainState};
 
 const MAX_TX_POOL_TRANSACTIONS: usize = 300;
+const DEFAULT_TX_POOL_MAX_BYTES: usize = MAX_RELAY_MSG_BYTES as usize;
+const TX_POOL_LOW_WATER_NUMERATOR: usize = 9;
+const TX_POOL_LOW_WATER_DENOMINATOR: usize = 10;
+
+const _: () = assert!(DEFAULT_TX_POOL_MAX_BYTES as u64 == MAX_RELAY_MSG_BYTES);
 
 /// Hot-path cache for the canonical default-fallback `SuiteRegistry`
 /// used by `fee_precheck_p2pk_input_value` when the caller passes
@@ -126,8 +131,14 @@ pub struct TxPool {
     txs: HashMap<[u8; 32], TxPoolEntry>,
     spenders: HashMap<Outpoint, [u8; 32]>,
     worst_heap: BinaryHeap<WorstEntryKey>,
+    // Stable admission sequence per resident txid. It also tags worst_heap
+    // entries for lazy stale-entry filtering.
     heap_seqs: HashMap<[u8; 32], u64>,
     next_heap_id: u64,
+    max_transactions: usize,
+    max_bytes: usize,
+    low_water_bytes: usize,
+    used_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +153,19 @@ struct AdmitPriority<'a> {
     fee: u64,
     weight: u64,
     tie: &'a [u8],
+}
+
+struct CapacityPlanEntry<'a> {
+    txid: [u8; 32],
+    entry: &'a TxPoolEntry,
+    candidate: bool,
+    admission_seq: u64,
+}
+
+#[derive(Clone, Copy)]
+enum CapacityOrdering {
+    LegacyCountPressure,
+    BytePressure,
 }
 
 impl Ord for WorstEntryKey {
@@ -215,6 +239,7 @@ impl TxPool {
     }
 
     pub fn new_with_config(cfg: TxPoolConfig) -> Self {
+        let max_bytes = DEFAULT_TX_POOL_MAX_BYTES;
         Self {
             cfg,
             txs: HashMap::new(),
@@ -222,6 +247,10 @@ impl TxPool {
             worst_heap: BinaryHeap::new(),
             heap_seqs: HashMap::new(),
             next_heap_id: 0,
+            max_transactions: MAX_TX_POOL_TRANSACTIONS,
+            max_bytes,
+            low_water_bytes: default_tx_pool_low_water_bytes(max_bytes),
+            used_bytes: 0,
         }
     }
 
@@ -491,56 +520,12 @@ impl TxPool {
             source,
         };
 
-        // Go-parity capacity admission: `validateCapacityAdmissionLocked`
-        // entry calls `capacityEvictionPlanLocked` helper in
-        // clients/go/node/mempool.go — runs AFTER both
-        // `apply_policy` and the rolling relay-fee floor check above, so
-        // sub-floor / DA-rejected transactions never reach this branch
-        // and the worst-entry comparison only considers floor-compliant
-        // candidates. The three distinct rejection causes are split
-        // into separate error messages so callers/operators can
-        // distinguish legitimate eviction-ordering rejection from
-        // internal heap invariant violation:
-        //   1.  `current_worst_txid()` returns a txid that does NOT
-        //       resolve to a live `txs` entry → MAP-vs-HEAP corruption
-        //       invariant: heap pointed at a stale txid the map no
-        //       longer has. Surfaced as
-        //       `"tx pool capacity invariant violated: worst_heap entry missing from txs map"`.
-        //   2.  `compare_admit_priority` reports candidate is NOT
-        //       strictly greater than worst → routine eviction-ordering
-        //       rejection matching Go's
-        //       `"mempool capacity candidate rejected by eviction ordering"`
-        //       at clients/go/node/mempool.go (`validateCapacityAdmissionLocked` eviction-ordering reject) verbatim.
-        //
-        // The historical `current_worst_txid()` returns None production
-        // error branch has been removed: it was unreachable by
-        // construction in this caller. `current_worst_txid()` always
-        // invokes `seed_worst_heap()`, which rebuilds `worst_heap` from
-        // `self.txs` whenever the heap is empty or out of sync; we only
-        // enter this block when `self.txs.len() >= MAX_TX_POOL_TRANSACTIONS > 0`.
-        // After the rebuild every heap entry pairs with a fresh
-        // `heap_seqs` entry, so the peek/pop loop inside
-        // `current_worst_txid()` cannot exhaust the heap to None. The
-        // `expect()` below documents that internal invariant; a panic
-        // here would indicate a regression in `seed_worst_heap()`
-        // itself.
-        if self.txs.len() >= MAX_TX_POOL_TRANSACTIONS {
-            let worst_txid = self.current_worst_txid().expect(
-                "current_worst_txid is None only when self.txs is empty; \
-                 this branch is gated on self.txs.len() >= MAX_TX_POOL_TRANSACTIONS \
-                 and seed_worst_heap rebuilds worst_heap from non-empty txs",
-            );
-            let Some(worst_entry) = self.txs.get(&worst_txid) else {
-                return Err(unavailable(
-                    "tx pool capacity invariant violated: worst_heap entry missing from txs map",
-                ));
-            };
-            if compare_admit_priority(txid, &entry, worst_txid, worst_entry) != Ordering::Greater {
-                return Err(unavailable(
-                    "mempool capacity candidate rejected by eviction ordering",
-                ));
-            }
-            self.remove_entry(&worst_txid);
+        // Go-parity capacity admission runs after structural, chain,
+        // policy, and rolling-floor checks. The low-water byte cap is an
+        // eviction target under pressure, not a hard upper bound on a
+        // fitting candidate.
+        for evicted_txid in self.capacity_eviction_plan(txid, &entry)? {
+            self.remove_entry(&evicted_txid);
         }
 
         self.insert_entry(txid, entry);
@@ -599,6 +584,7 @@ impl TxPool {
     fn insert_entry(&mut self, txid: [u8; 32], entry: TxPoolEntry) {
         self.next_heap_id = self.next_heap_id.saturating_add(1);
         let heap_id = self.next_heap_id;
+        self.used_bytes = self.used_bytes.saturating_add(entry.size);
         for input in &entry.inputs {
             self.spenders.insert(input.clone(), txid);
         }
@@ -615,11 +601,147 @@ impl TxPool {
     fn remove_entry(&mut self, txid: &[u8; 32]) {
         if let Some(entry) = self.txs.remove(txid) {
             self.heap_seqs.remove(txid);
+            self.used_bytes = self.used_bytes.saturating_sub(entry.size);
             for input in &entry.inputs {
                 self.spenders.remove(input);
             }
         }
         self.compact_worst_heap_if_needed();
+    }
+
+    fn capacity_eviction_plan(
+        &self,
+        candidate_txid: [u8; 32],
+        candidate: &TxPoolEntry,
+    ) -> Result<Vec<[u8; 32]>, TxPoolAdmitError> {
+        if self.max_transactions == 0 || self.max_bytes == 0 {
+            return Err(unavailable(format!(
+                "invalid mempool capacity limits: max_txs={} max_bytes={}",
+                self.max_transactions, self.max_bytes
+            )));
+        }
+        if candidate_txid == [0u8; 32] || candidate.size == 0 || candidate.weight == 0 {
+            return Err(rejected(
+                "tx pool capacity invariant violated: invalid candidate metadata",
+            ));
+        }
+        if candidate.size > self.max_bytes {
+            return Err(unavailable(format!(
+                "mempool byte limit exceeded: current={} tx={} max={}",
+                self.used_bytes, candidate.size, self.max_bytes
+            )));
+        }
+
+        let count_pressure = self.txs.len() >= self.max_transactions;
+        let byte_pressure = self.used_bytes > self.max_bytes.saturating_sub(candidate.size);
+        if !count_pressure && !byte_pressure {
+            return Ok(Vec::new());
+        }
+
+        let target_bytes = if byte_pressure {
+            tx_pool_byte_pressure_target(self.effective_low_water_bytes(), candidate.size)
+        } else {
+            self.max_bytes
+        };
+        let ordering = if byte_pressure {
+            CapacityOrdering::BytePressure
+        } else {
+            CapacityOrdering::LegacyCountPressure
+        };
+        let mut total_count = self.txs.len().saturating_add(1);
+        let mut total_bytes = self.used_bytes.saturating_add(candidate.size);
+        let mut plan_pool = Vec::with_capacity(self.txs.len() + 1);
+        let mut admission_seqs = HashMap::with_capacity(self.txs.len());
+        for (txid, entry) in &self.txs {
+            if *txid == [0u8; 32] {
+                return Err(rejected(
+                    "tx pool capacity invariant violated: invalid resident metadata",
+                ));
+            }
+            let Some(admission_seq) = self.heap_seqs.get(txid).copied() else {
+                return Err(rejected(
+                    "tx pool capacity invariant violated: missing heap sequence",
+                ));
+            };
+            if let Some(existing) = admission_seqs.insert(admission_seq, *txid) {
+                return Err(rejected(format!(
+                    "tx pool capacity invariant violated: duplicate heap sequence {admission_seq} existing={} new={}",
+                    hex::encode(existing),
+                    hex::encode(txid)
+                )));
+            }
+            if entry.size == 0 || entry.weight == 0 {
+                return Err(rejected(
+                    "tx pool capacity invariant violated: invalid resident metadata",
+                ));
+            }
+            plan_pool.push(CapacityPlanEntry {
+                txid: *txid,
+                entry,
+                candidate: false,
+                admission_seq,
+            });
+        }
+        plan_pool.push(CapacityPlanEntry {
+            txid: candidate_txid,
+            entry: candidate,
+            candidate: true,
+            admission_seq: 0,
+        });
+
+        let mut evicted = Vec::new();
+        while (total_count > self.max_transactions || total_bytes > target_bytes)
+            && !plan_pool.is_empty()
+        {
+            let worst_index = worst_capacity_plan_index(&plan_pool, ordering);
+            let worst = plan_pool.remove(worst_index);
+            if worst.candidate {
+                return Err(unavailable(
+                    "mempool capacity candidate rejected by eviction ordering",
+                ));
+            }
+            if total_bytes < worst.entry.size {
+                return Err(unavailable("mempool eviction byte accounting underflow"));
+            }
+            total_count = total_count.saturating_sub(1);
+            total_bytes -= worst.entry.size;
+            evicted.push(worst.txid);
+        }
+
+        if total_count > self.max_transactions || total_bytes > self.max_bytes {
+            return Err(unavailable(format!(
+                "mempool capacity remains exceeded after dry-run eviction: count={}/{} bytes={}/{}",
+                total_count, self.max_transactions, total_bytes, self.max_bytes
+            )));
+        }
+        Ok(evicted)
+    }
+
+    fn effective_low_water_bytes(&self) -> usize {
+        if self.low_water_bytes > 0 || self.max_bytes == 0 {
+            return self.low_water_bytes;
+        }
+        default_tx_pool_low_water_bytes(self.max_bytes)
+    }
+
+    #[cfg(test)]
+    fn set_capacity_for_test(&mut self, max_transactions: usize, max_bytes: usize) {
+        self.max_transactions = max_transactions;
+        self.max_bytes = max_bytes;
+        self.low_water_bytes = default_tx_pool_low_water_bytes(max_bytes);
+    }
+
+    #[cfg(test)]
+    fn insert_capacity_checked_entry_for_test(
+        &mut self,
+        txid: [u8; 32],
+        entry: TxPoolEntry,
+    ) -> Result<(), TxPoolAdmitError> {
+        for evicted_txid in self.capacity_eviction_plan(txid, &entry)? {
+            self.remove_entry(&evicted_txid);
+        }
+        self.insert_entry(txid, entry);
+        Ok(())
     }
 
     // PR-1410 wave-3 — the historical TxPool impl-method that performed
@@ -632,6 +754,7 @@ impl TxPool {
     // carries meaning — the predicate is stateless on the cfg field.
     // Tests call the free `validate_fee_floor` directly.
 
+    #[cfg(test)]
     fn seed_worst_heap(&mut self) {
         let max_stale_tail = self.txs.len().saturating_add(1);
         if self.heap_seqs.len() == self.txs.len()
@@ -643,6 +766,7 @@ impl TxPool {
         self.rebuild_worst_heap();
     }
 
+    #[cfg(test)]
     fn current_worst_txid(&mut self) -> Option<[u8; 32]> {
         self.seed_worst_heap();
         loop {
@@ -666,11 +790,18 @@ impl TxPool {
 
     fn rebuild_worst_heap(&mut self) {
         let mut rebuilt = BinaryHeap::with_capacity(self.txs.len());
-        self.heap_seqs.clear();
+        let live_txids: HashSet<[u8; 32]> = self.txs.keys().copied().collect();
+        self.heap_seqs.retain(|txid, _| live_txids.contains(txid));
         for (txid, entry) in &self.txs {
-            self.next_heap_id = self.next_heap_id.saturating_add(1);
-            let heap_id = self.next_heap_id;
-            self.heap_seqs.insert(*txid, heap_id);
+            let heap_id = match self.heap_seqs.get(txid).copied() {
+                Some(heap_id) => heap_id,
+                None => {
+                    self.next_heap_id = self.next_heap_id.saturating_add(1);
+                    let heap_id = self.next_heap_id;
+                    self.heap_seqs.insert(*txid, heap_id);
+                    heap_id
+                }
+            };
             rebuilt.push(WorstEntryKey {
                 txid: *txid,
                 fee: entry.fee,
@@ -1538,6 +1669,7 @@ fn compare_entries_for_mining(
     }
 }
 
+#[cfg(test)]
 fn compare_admit_priority(
     txid_a: [u8; 32],
     a: &TxPoolEntry,
@@ -1575,6 +1707,83 @@ fn compare_fee_rate(a: &TxPoolEntry, b: &TxPoolEntry) -> Ordering {
     compare_fee_rate_values(a.fee, a.weight, b.fee, b.weight)
 }
 
+fn default_tx_pool_low_water_bytes(max_bytes: usize) -> usize {
+    if max_bytes == 0 {
+        return 0;
+    }
+    let low_water = (max_bytes / TX_POOL_LOW_WATER_DENOMINATOR) * TX_POOL_LOW_WATER_NUMERATOR
+        + ((max_bytes % TX_POOL_LOW_WATER_DENOMINATOR) * TX_POOL_LOW_WATER_NUMERATOR
+            / TX_POOL_LOW_WATER_DENOMINATOR);
+    if low_water == 0 {
+        return 1;
+    }
+    low_water
+}
+
+fn tx_pool_byte_pressure_target(low_water_bytes: usize, candidate_size: usize) -> usize {
+    low_water_bytes.max(candidate_size)
+}
+
+fn worst_capacity_plan_index(
+    plan_pool: &[CapacityPlanEntry<'_>],
+    ordering: CapacityOrdering,
+) -> usize {
+    let mut worst_index = 0;
+    for i in 1..plan_pool.len() {
+        if capacity_plan_entry_worse(&plan_pool[i], &plan_pool[worst_index], ordering) {
+            worst_index = i;
+        }
+    }
+    worst_index
+}
+
+fn capacity_plan_entry_worse(
+    a: &CapacityPlanEntry<'_>,
+    b: &CapacityPlanEntry<'_>,
+    ordering: CapacityOrdering,
+) -> bool {
+    let priority = match ordering {
+        CapacityOrdering::LegacyCountPressure => compare_count_pressure_priority(a, b),
+        CapacityOrdering::BytePressure => compare_capacity_priority(a, b),
+    };
+    match priority {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => a.txid > b.txid,
+    }
+}
+
+fn compare_count_pressure_priority(
+    a: &CapacityPlanEntry<'_>,
+    b: &CapacityPlanEntry<'_>,
+) -> Ordering {
+    compare_priority_values(
+        AdmitPriority {
+            fee: a.entry.fee,
+            weight: a.entry.weight,
+            tie: &a.txid,
+        },
+        AdmitPriority {
+            fee: b.entry.fee,
+            weight: b.entry.weight,
+            tie: &b.txid,
+        },
+    )
+}
+
+fn compare_capacity_priority(a: &CapacityPlanEntry<'_>, b: &CapacityPlanEntry<'_>) -> Ordering {
+    match compare_fee_rate_values(a.entry.fee, a.entry.weight, b.entry.fee, b.entry.weight) {
+        Ordering::Equal => match a.entry.fee.cmp(&b.entry.fee) {
+            Ordering::Equal => match a.admission_seq.cmp(&b.admission_seq) {
+                Ordering::Equal => Ordering::Equal,
+                other => other,
+            },
+            other => other,
+        },
+        other => other,
+    }
+}
+
 fn compare_fee_rate_values(fee_a: u64, weight_a: u64, fee_b: u64, weight_b: u64) -> Ordering {
     if weight_a == 0 || weight_b == 0 {
         return Ordering::Equal;
@@ -1604,11 +1813,11 @@ mod tests {
 
     use super::{
         cheap_fee_floor_precheck, compare_admit_priority, compare_entries_for_mining,
-        compare_fee_rate, conflict, fee_precheck_p2pk_input_value, fee_precheck_p2pk_output_value,
-        mtp_median, next_block_height, next_block_mtp, reject_core_ext_tx_oversized_payload,
-        reject_da_anchor_tx_policy, rejected, relay_metadata, unavailable, TxPool,
-        TxPoolAdmitErrorKind, TxPoolConfig, TxPoolEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE,
-        MAX_TX_POOL_TRANSACTIONS,
+        compare_fee_rate, conflict, default_tx_pool_low_water_bytes, fee_precheck_p2pk_input_value,
+        fee_precheck_p2pk_output_value, mtp_median, next_block_height, next_block_mtp,
+        reject_core_ext_tx_oversized_payload, reject_da_anchor_tx_policy, rejected, relay_metadata,
+        tx_pool_byte_pressure_target, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig,
+        TxPoolEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE, MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -1662,6 +1871,17 @@ mod tests {
         fs::create_dir_all(&dir).expect("mkdir");
         let store = BlockStore::open(block_store_path(&dir)).expect("blockstore");
         (store, dir)
+    }
+
+    fn test_entry(fee: u64, weight: u64, size: usize, source: TxSource) -> TxPoolEntry {
+        TxPoolEntry {
+            raw: vec![0xA5; size],
+            inputs: Vec::new(),
+            fee,
+            weight,
+            size,
+            source,
+        }
     }
 
     fn genesis_coinbase_bytes() -> Vec<u8> {
@@ -2112,7 +2332,7 @@ mod tests {
             // Worst-pool entries sized to outrank candidate fee_rate so
             // pool-full ordering rejects (worst fee_rate=10 > candidate
             // fee_rate≈1.005, candidate cannot beat worst).
-            pool.txs.insert(
+            pool.insert_entry(
                 key,
                 TxPoolEntry {
                     raw: vec![0xff],
@@ -2232,7 +2452,7 @@ mod tests {
 
         let mut pool = TxPool::new();
         let worst = [0x11; 32];
-        pool.txs.insert(
+        pool.insert_entry(
             worst,
             TxPoolEntry {
                 raw: vec![0x01],
@@ -2249,7 +2469,7 @@ mod tests {
             if key == txid || key == worst {
                 key[8] = 1;
             }
-            pool.txs.insert(
+            pool.insert_entry(
                 key,
                 TxPoolEntry {
                     raw: vec![0xff],
@@ -2323,9 +2543,9 @@ mod tests {
         // Worst pool entry: fee_rate = 20000/10000 = 2.0. Above the default
         // rolling floor (1) so the eviction-ordering test exercises the
         // comparator branch that compares "worse candidate at floor" vs
-        // "above-floor resident worst". Inserted directly via pool.txs to
-        // bypass admit_with_metadata's floor check.
-        pool.txs.insert(
+        // "above-floor resident worst". Inserted through insert_entry to
+        // keep capacity indexes coherent while bypassing full tx validation.
+        pool.insert_entry(
             worst,
             TxPoolEntry {
                 raw: vec![0x01; raw_worse.len()],
@@ -2342,7 +2562,7 @@ mod tests {
             if key == worst {
                 key[8] = 1;
             }
-            pool.txs.insert(
+            pool.insert_entry(
                 key,
                 TxPoolEntry {
                     raw: vec![0xff],
@@ -2367,6 +2587,271 @@ mod tests {
         assert_eq!(pool.txs.len(), MAX_TX_POOL_TRANSACTIONS);
         assert!(pool.txs.contains_key(&admitted));
         assert!(!pool.txs.contains_key(&worst));
+    }
+
+    #[test]
+    fn rub196_byte_cap_evicts_to_low_water_through_public_admit() {
+        for (max_bytes, want) in [(0, 0), (1, 1), (9, 8), (10, 9), (11, 9)] {
+            assert_eq!(default_tx_pool_low_water_bytes(max_bytes), want);
+        }
+        assert_eq!(tx_pool_byte_pressure_target(90, 95), 95);
+        let (state, raw) = signed_p2pk_state_and_tx(
+            40_000,
+            vec![TxOutput {
+                value: 10,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x90; 2592]),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        let (_tx, best_txid, _wtxid, consumed) = parse_tx(&raw).expect("parse best");
+        assert_eq!(consumed, raw.len());
+        let size = raw.len();
+        let mut pool = TxPool::new();
+        pool.set_capacity_for_test(10, size * 3);
+        for (txid, fee, source) in [
+            ([0x31; 32], 1, TxSource::Local),
+            ([0x32; 32], 2, TxSource::Remote),
+            ([0x33; 32], 3, TxSource::Reorg),
+        ] {
+            pool.insert_entry(txid, test_entry(fee, 1, size, source));
+        }
+        assert_eq!(
+            pool.admit(&raw, &state, None, [0u8; 32]).unwrap(),
+            best_txid
+        );
+        assert!(pool.used_bytes <= pool.effective_low_water_bytes());
+        assert!(!pool.txs.contains_key(&[0x31; 32]));
+        assert!(!pool.txs.contains_key(&[0x32; 32]));
+        assert!(pool.txs.contains_key(&[0x33; 32]));
+        assert!(pool.txs.contains_key(&best_txid));
+    }
+
+    #[test]
+    fn rub196_byte_capacity_direct_edges() {
+        let mut larger = TxPool::new();
+        larger.set_capacity_for_test(10, 100);
+        larger.insert_entry([0x41; 32], test_entry(1, 1, 95, TxSource::Local));
+        larger
+            .insert_capacity_checked_entry_for_test(
+                [0x42; 32],
+                test_entry(100, 1, 95, TxSource::Remote),
+            )
+            .unwrap();
+        assert_eq!(larger.used_bytes, 95);
+        assert!(larger.txs.contains_key(&[0x42; 32]));
+        assert!(!larger.txs.contains_key(&[0x41; 32]));
+
+        let mut worst = TxPool::new();
+        worst.set_capacity_for_test(10, 100);
+        worst.insert_entry([0x51; 32], test_entry(100, 1, 95, TxSource::Local));
+        let snapshot = (
+            worst.len(),
+            worst.used_bytes,
+            worst.heap_seqs.clone(),
+            worst.next_heap_id,
+        );
+        let err = worst
+            .insert_capacity_checked_entry_for_test(
+                [0x52; 32],
+                test_entry(1, 1, 95, TxSource::Reorg),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(err
+            .message
+            .contains("candidate rejected by eviction ordering"));
+        assert_eq!(
+            (
+                worst.len(),
+                worst.used_bytes,
+                worst.heap_seqs,
+                worst.next_heap_id
+            ),
+            snapshot
+        );
+
+        let mut tie = TxPool::new();
+        tie.set_capacity_for_test(1, 100);
+        tie.insert_entry([0x01; 32], test_entry(10, 1, 50, TxSource::Local));
+        assert!(tie
+            .insert_capacity_checked_entry_for_test(
+                [0xff; 32],
+                test_entry(10, 1, 50, TxSource::Remote)
+            )
+            .is_err());
+        assert!(tie.txs.contains_key(&[0x01; 32]));
+
+        let mut count_only_tie = TxPool::new();
+        count_only_tie.set_capacity_for_test(1, 1_000);
+        count_only_tie.insert_entry([0x80; 32], test_entry(10, 1, 50, TxSource::Local));
+        count_only_tie
+            .insert_capacity_checked_entry_for_test(
+                [0x01; 32],
+                test_entry(10, 1, 50, TxSource::Remote),
+            )
+            .expect("count-only pressure preserves legacy txid tie-break");
+        assert!(count_only_tie.txs.contains_key(&[0x01; 32]));
+        assert!(!count_only_tie.txs.contains_key(&[0x80; 32]));
+    }
+
+    #[test]
+    fn rub196_capacity_rejects_bad_edges_without_mutation() {
+        let mut invalid_limits = TxPool::new();
+        invalid_limits.set_capacity_for_test(0, 100);
+        let err = invalid_limits
+            .insert_capacity_checked_entry_for_test(
+                [0x53; 32],
+                test_entry(100, 1, 1, TxSource::Local),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(err.message.contains("invalid mempool capacity limits"));
+
+        let mut invalid_candidate = TxPool::new();
+        invalid_candidate.set_capacity_for_test(10, 100);
+        let err = invalid_candidate
+            .insert_capacity_checked_entry_for_test(
+                [0u8; 32],
+                test_entry(100, 1, 1, TxSource::Local),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("invalid candidate metadata"));
+
+        let mut oversize = TxPool::new();
+        oversize.set_capacity_for_test(10, 100);
+        let err = oversize
+            .insert_capacity_checked_entry_for_test(
+                [0x54; 32],
+                test_entry(100, 1, 101, TxSource::Local),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert_eq!((oversize.len(), oversize.used_bytes), (0, 0));
+
+        let mut missing_seq = TxPool::new();
+        missing_seq.set_capacity_for_test(1, 100);
+        missing_seq
+            .txs
+            .insert([0x56; 32], test_entry(1, 1, 50, TxSource::Local));
+        let err = missing_seq
+            .insert_capacity_checked_entry_for_test(
+                [0x57; 32],
+                test_entry(100, 1, 50, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("missing heap sequence"));
+
+        let mut invalid_resident = TxPool::new();
+        invalid_resident.set_capacity_for_test(1, 100);
+        invalid_resident.insert_entry([0u8; 32], test_entry(1, 1, 50, TxSource::Local));
+        let err = invalid_resident
+            .insert_capacity_checked_entry_for_test(
+                [0x58; 32],
+                test_entry(100, 1, 50, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("invalid resident metadata"));
+
+        let mut duplicate_seq = TxPool::new();
+        duplicate_seq.set_capacity_for_test(2, 100);
+        duplicate_seq.insert_entry([0x59; 32], test_entry(1, 1, 50, TxSource::Local));
+        duplicate_seq.insert_entry([0x5a; 32], test_entry(2, 1, 50, TxSource::Local));
+        let first_seq = *duplicate_seq.heap_seqs.get(&[0x59; 32]).unwrap();
+        duplicate_seq.heap_seqs.insert([0x5a; 32], first_seq);
+        let err = duplicate_seq
+            .insert_capacity_checked_entry_for_test(
+                [0x5b; 32],
+                test_entry(100, 1, 1, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("duplicate heap sequence"));
+
+        let mut zero_weight = TxPool::new();
+        zero_weight.set_capacity_for_test(1, 100);
+        zero_weight.insert_entry([0x5c; 32], test_entry(1, 0, 50, TxSource::Local));
+        let err = zero_weight
+            .insert_capacity_checked_entry_for_test(
+                [0x5d; 32],
+                test_entry(100, 1, 50, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Rejected);
+        assert!(err.message.contains("invalid resident metadata"));
+
+        let mut underflow = TxPool::new();
+        underflow.set_capacity_for_test(1, 100);
+        underflow.insert_entry([0x5b; 32], test_entry(1, 1, 95, TxSource::Local));
+        underflow.used_bytes = 0;
+        let err = underflow
+            .insert_capacity_checked_entry_for_test(
+                [0x5c; 32],
+                test_entry(100, 1, 1, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(err.message.contains("eviction byte accounting underflow"));
+        assert!(underflow.txs.contains_key(&[0x5b; 32]));
+
+        let mut stale_low_water = TxPool::new();
+        stale_low_water.max_bytes = 100;
+        stale_low_water.low_water_bytes = 0;
+        assert_eq!(stale_low_water.effective_low_water_bytes(), 90);
+
+        let mut exceeded_after_plan = TxPool::new();
+        exceeded_after_plan.set_capacity_for_test(10, 100);
+        exceeded_after_plan.low_water_bytes = 200;
+        exceeded_after_plan.insert_entry([0x5e; 32], test_entry(1, 1, 95, TxSource::Local));
+        let err = exceeded_after_plan
+            .insert_capacity_checked_entry_for_test(
+                [0x5f; 32],
+                test_entry(100, 1, 10, TxSource::Remote),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, TxPoolAdmitErrorKind::Unavailable);
+        assert!(err.message.contains("capacity remains exceeded"));
+
+        let mut rebuild = TxPool::new();
+        rebuild
+            .txs
+            .insert([0x60; 32], test_entry(1, 1, 1, TxSource::Local));
+        assert_eq!(rebuild.current_worst_txid(), Some([0x60; 32]));
+        assert!(rebuild.heap_seqs.contains_key(&[0x60; 32]));
+    }
+
+    #[test]
+    fn rub196_source_does_not_affect_byte_capacity_ordering() {
+        let mut outcomes = Vec::new();
+        for (resident_source, candidate_source) in [
+            (TxSource::Local, TxSource::Remote),
+            (TxSource::Reorg, TxSource::Local),
+        ] {
+            let mut pool = TxPool::new();
+            pool.set_capacity_for_test(10, 100);
+            pool.insert_entry([0x61; 32], test_entry(1, 1, 40, resident_source));
+            pool.insert_entry([0x62; 32], test_entry(50, 1, 40, TxSource::Local));
+            pool.insert_capacity_checked_entry_for_test(
+                [0x63; 32],
+                test_entry(100, 1, 40, candidate_source),
+            )
+            .unwrap();
+            outcomes.push((
+                pool.txs.contains_key(&[0x61; 32]),
+                pool.txs.contains_key(&[0x62; 32]),
+                pool.txs.contains_key(&[0x63; 32]),
+                pool.used_bytes,
+            ));
+        }
+        assert_eq!(
+            outcomes,
+            vec![(false, true, true, 80), (false, true, true, 80)]
+        );
     }
 
     #[test]
@@ -4028,7 +4513,7 @@ mod tests {
         for idx in 0..MAX_TX_POOL_TRANSACTIONS {
             let mut key = [0u8; 32];
             key[..8].copy_from_slice(&(idx as u64 + 1).to_le_bytes());
-            pool.txs.insert(
+            pool.insert_entry(
                 key,
                 TxPoolEntry {
                     raw: vec![0xff],
