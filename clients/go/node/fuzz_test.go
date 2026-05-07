@@ -323,9 +323,9 @@ func fuzzCheckedDaPolicyTx(
 // Direct assertion: reject/admit, daBytes, overflow reason class, exact-boundary
 // acceptance, and floor-1 rejection must match an independent checked oracle.
 func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
-	f.Add(uint16(10), uint64(2000), uint64(1), uint64(200), uint64(0), true)
-	f.Add(uint16(10), uint64(1999), uint64(1), uint64(200), uint64(0), true)
-	f.Add(uint16(10), uint64(3383), uint64(3), uint64(1), uint64(0), true)
+	f.Add(uint16(10), uint64(2000), uint64(0), uint64(200), uint64(0), true)
+	f.Add(uint16(10), uint64(1999), uint64(0), uint64(200), uint64(0), true)
+	f.Add(uint16(10), uint64(3383), uint64(1), uint64(1), uint64(0), true)
 	f.Add(uint16(10), uint64(^uint64(0)), uint64(^uint64(0)), uint64(1), uint64(0), true)
 	f.Add(uint16(0), uint64(0), uint64(^uint64(0)), uint64(^uint64(0)), uint64(^uint64(0)), false)
 	signer, err := consensus.NewMLDSA87Keypair()
@@ -348,6 +348,12 @@ func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
 		weight := checked.Weight
 		wantDaBytes := checked.DaBytes
 		policyFee := checked.Fee
+		if daTx && wantDaBytes != uint64(payloadLen) {
+			t.Fatalf("DA tx daBytes=%d, want payloadLen=%d before policy oracle", wantDaBytes, payloadLen)
+		}
+		if !daTx && wantDaBytes != 0 {
+			t.Fatalf("non-DA tx daBytes=%d, want 0 before policy oracle", wantDaBytes)
+		}
 		policyUtxos := utxos
 		if wantDaBytes == 0 {
 			policyUtxos = nil
