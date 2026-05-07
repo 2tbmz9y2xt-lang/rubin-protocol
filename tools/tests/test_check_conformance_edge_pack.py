@@ -216,6 +216,19 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertIn("proof_coverage.json must be a JSON object", captured.getvalue())
         self.assertNotIn("Traceback", captured.getvalue())
 
+    def test_proof_coverage_malformed_json_fails_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof_path.write_text("{not-json\n", encoding="utf-8")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage.json must contain valid JSON", captured.getvalue())
+        self.assertNotIn("Traceback", captured.getvalue())
+
     def test_fixture_top_level_array_fails_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

@@ -14,8 +14,11 @@ def fail(msg: str) -> int:
     return 1
 
 
-def load_json(path: Path) -> object:
-    return json.loads(path.read_text(encoding="utf-8"))
+def load_json(path: Path, *, label: str) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} must contain valid JSON: {exc}") from exc
 
 
 def json_object(value: object, *, label: str) -> dict:
@@ -83,8 +86,8 @@ def main() -> int:
         return fail("proof_coverage.json not found")
 
     try:
-        baseline = json_object(load_json(baseline_path), label="EDGE_PACK_BASELINE.json")
-        proof_coverage = json_object(load_json(proof_coverage_path), label="proof_coverage.json")
+        baseline = json_object(load_json(baseline_path, label="EDGE_PACK_BASELINE.json"), label="EDGE_PACK_BASELINE.json")
+        proof_coverage = json_object(load_json(proof_coverage_path, label="proof_coverage.json"), label="proof_coverage.json")
         proof_domains = proof_domain_map(proof_coverage)
     except ValueError as exc:
         return fail(str(exc))
@@ -100,7 +103,8 @@ def main() -> int:
     fixture_gate_to_count: dict[str, int] = {}
     for fixture in fixtures_dir.glob("CV-*.json"):
         try:
-            data = json_object(load_json(fixture), label=str(fixture.relative_to(repo_root)))
+            fixture_label = str(fixture.relative_to(repo_root))
+            data = json_object(load_json(fixture, label=fixture_label), label=fixture_label)
         except ValueError as exc:
             return fail(str(exc))
         gate = data.get("gate")
