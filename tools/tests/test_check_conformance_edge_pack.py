@@ -124,6 +124,20 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("duplicate domain name: test_domain", captured.getvalue())
 
+    def test_domain_name_rejects_whitespace_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["name"] = "   "
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("domain name missing/invalid", captured.getvalue())
+
     def test_baseline_top_level_array_fails_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -150,6 +164,20 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("domain test_domain gates entries must be unique", captured.getvalue())
+
+    def test_domain_gate_rejects_whitespace_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["gates"] = ["   "]
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("domain test_domain gates entries must be non-empty strings", captured.getvalue())
 
     def test_required_vector_rejects_non_string_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -192,6 +220,20 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("required_vectors_by_gate[CV-TEST] must be non-empty list", captured.getvalue())
+
+    def test_required_vector_gate_key_rejects_whitespace_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["required_vectors_by_gate"] = {"   ": ["V-1"]}
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("required_vectors_by_gate keys must be non-empty strings", captured.getvalue())
 
     def test_proof_coverage_missing_vector_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -242,6 +284,20 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertIn("conformance/fixtures/CV-TEST.json must be a JSON object", captured.getvalue())
         self.assertNotIn("Traceback", captured.getvalue())
 
+    def test_fixture_gate_rejects_whitespace_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            fixture_path = root / "conformance" / "fixtures" / "CV-TEST.json"
+            fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+            fixture["gate"] = "   "
+            write_json(fixture_path, fixture)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("conformance/fixtures/CV-TEST.json has invalid gate", captured.getvalue())
+
     def test_proof_coverage_duplicate_domain_name_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -256,6 +312,20 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("proof_coverage.json duplicate edge_property_domain: test_domain", captured.getvalue())
 
+    def test_proof_coverage_domain_name_rejects_whitespace_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0]["name"] = "   "
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage.json edge_property_domains entries need non-empty name", captured.getvalue())
+
     def test_proof_coverage_missing_required_vector_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -269,6 +339,20 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("proof_coverage missing vector IDs: V-1", captured.getvalue())
+
+    def test_coverage_accounting_domain_rejects_whitespace_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["coverage_accounting"]["proof_coverage_domain"] = "   "
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("coverage_accounting.proof_coverage_domain must be non-empty string", captured.getvalue())
 
     def test_proof_coverage_rejects_non_string_vector_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -351,6 +435,20 @@ class EdgePackCheckerTests(unittest.TestCase):
             proof_path = root / "proof_coverage.json"
             proof = json.loads(proof_path.read_text(encoding="utf-8"))
             proof["edge_property_domains"][0]["fuzz"] = {"status": 7}
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage fuzz.status must be non-empty string", captured.getvalue())
+
+    def test_fuzz_whitespace_status_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0]["fuzz"] = {"status": "   "}
             write_json(proof_path, proof)
             captured = io.StringIO()
             with chdir(root), contextlib.redirect_stderr(captured):

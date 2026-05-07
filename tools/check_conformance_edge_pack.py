@@ -36,7 +36,7 @@ def proof_domain_map(proof_coverage: dict) -> dict[str, dict]:
         if not isinstance(domain, dict):
             raise ValueError("proof_coverage.json edge_property_domains entries must be objects")
         name = domain.get("name")
-        if not isinstance(name, str) or not name:
+        if not isinstance(name, str) or not name.strip():
             raise ValueError("proof_coverage.json edge_property_domains entries need non-empty name")
         if name in result:
             raise ValueError(f"proof_coverage.json duplicate edge_property_domain: {name}")
@@ -52,7 +52,7 @@ def coverage_status(value: object, *, field_name: str, field_present: bool) -> t
     if "status" not in value:
         return "", f"{field_name}.status must be present when {field_name} is present"
     status = value.get("status")
-    if not isinstance(status, str) or not status:
+    if not isinstance(status, str) or not status.strip():
         return "", f"{field_name}.status must be non-empty string"
     return status, None
 
@@ -64,7 +64,7 @@ def string_list(value: object, *, field_name: str, require_non_empty: bool = Fal
         return [], f"{field_name} must be non-empty list"
     strings: list[str] = []
     for item in value:
-        if not isinstance(item, str) or not item:
+        if not isinstance(item, str) or not item.strip():
             return [], f"{field_name} entries must be non-empty strings"
         strings.append(item)
     if len(set(strings)) != len(strings):
@@ -109,7 +109,7 @@ def main() -> int:
             return fail(str(exc))
         gate = data.get("gate")
         vectors = data.get("vectors", [])
-        if not isinstance(gate, str) or not gate:
+        if not isinstance(gate, str) or not gate.strip():
             return fail(f"{fixture.relative_to(repo_root)} has invalid gate")
         if not isinstance(vectors, list):
             return fail(f"{fixture.relative_to(repo_root)} vectors must be a list")
@@ -138,7 +138,7 @@ def main() -> int:
         required_vectors_by_gate = domain.get("required_vectors_by_gate", {})
         coverage_accounting = domain.get("coverage_accounting")
 
-        if not isinstance(name, str) or not name:
+        if not isinstance(name, str) or not name.strip():
             print("ERROR: domain name missing/invalid", file=sys.stderr)
             failures += 1
             continue
@@ -167,7 +167,7 @@ def main() -> int:
 
         total = 0
         missing_gates: list[str] = []
-        for gate in gates:
+        for gate in gate_names:
             if gate not in fixture_gate_to_count:
                 missing_gates.append(gate)
                 continue
@@ -185,6 +185,10 @@ def main() -> int:
             failures += 1
 
         for gate, raw_required_ids in required_vectors_by_gate.items():
+            if not isinstance(gate, str) or not gate.strip():
+                print(f"ERROR: domain {name}: required_vectors_by_gate keys must be non-empty strings", file=sys.stderr)
+                failures += 1
+                continue
             if gate not in fixture_gate_to_ids:
                 print(f"FAIL: domain {name}: required gate not found: {gate}", file=sys.stderr)
                 failures += 1
@@ -209,7 +213,7 @@ def main() -> int:
 
         if coverage_accounting is not None:
             proof_domain_name = coverage_accounting.get("proof_coverage_domain")
-            if not isinstance(proof_domain_name, str) or not proof_domain_name:
+            if not isinstance(proof_domain_name, str) or not proof_domain_name.strip():
                 print(
                     f"ERROR: domain {name}: coverage_accounting.proof_coverage_domain must be non-empty string",
                     file=sys.stderr,
@@ -265,6 +269,8 @@ def main() -> int:
                         )
                         failures += 1
                     for gate, raw_required_ids in required_vectors_by_gate.items():
+                        if not isinstance(gate, str) or not gate.strip():
+                            continue
                         required_ids, required_ids_error = string_list(
                             raw_required_ids,
                             field_name=f"required_vectors_by_gate[{gate}]",
