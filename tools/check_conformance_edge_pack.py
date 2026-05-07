@@ -35,14 +35,14 @@ def proof_domain_map(proof_coverage: dict) -> dict[str, dict]:
     return result
 
 
-def coverage_status(value: object, *, field_name: str) -> tuple[str, str | None]:
-    if value is None:
+def coverage_status(value: object, *, field_name: str, field_present: bool) -> tuple[str, str | None]:
+    if not field_present:
         return "", None
     if not isinstance(value, dict):
         return "", f"{field_name} must be object"
+    if "status" not in value:
+        return "", f"{field_name}.status must be present when {field_name} is present"
     status = value.get("status")
-    if status is None:
-        return "", None
     if not isinstance(status, str) or not status:
         return "", f"{field_name}.status must be non-empty string"
     return status, None
@@ -269,6 +269,7 @@ def main() -> int:
                 fuzz_status, fuzz_status_error = coverage_status(
                     proof_domain.get("fuzz"),
                     field_name="proof_coverage fuzz",
+                    field_present="fuzz" in proof_domain,
                 )
                 if fuzz_status_error is not None:
                     print(f"ERROR: domain {name}: {fuzz_status_error}", file=sys.stderr)
@@ -289,6 +290,7 @@ def main() -> int:
                 formal_status, formal_status_error = coverage_status(
                     proof_domain.get("formal"),
                     field_name="proof_coverage formal",
+                    field_present="formal" in proof_domain,
                 )
                 if formal_status_error is not None:
                     print(f"ERROR: domain {name}: {formal_status_error}", file=sys.stderr)

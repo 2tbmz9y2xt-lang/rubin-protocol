@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Machine-readable baseline for critical conformance edge coverage across parse/weight/sighash/covenants/difficulty/DA/mempool policy domains.",
+  "description": "Machine-readable baseline for critical conformance edge coverage across parse/weight/sighash/covenants/difficulty/DA integrity/mempool policy/DA fee-floor policy domains.",
   "domains": [
     {
       "name": "parse",

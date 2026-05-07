@@ -290,6 +290,35 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("proof_coverage fuzz.status must be non-empty string", captured.getvalue())
 
+    def test_fuzz_object_missing_status_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0]["fuzz"] = {}
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage fuzz.status must be present", captured.getvalue())
+
+    def test_absent_fuzz_formal_fields_are_no_claims(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0].pop("fuzz")
+            proof["edge_property_domains"][0].pop("formal")
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stdout(captured):
+                rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
     def test_fuzz_unknown_status_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -350,6 +379,20 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("proof_coverage formal.status must be non-empty string", captured.getvalue())
+
+    def test_formal_object_missing_status_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0]["formal"] = {}
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage formal.status must be present", captured.getvalue())
 
     def test_formal_unknown_status_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:

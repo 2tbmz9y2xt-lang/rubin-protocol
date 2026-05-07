@@ -74,7 +74,8 @@ scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py --check
 Mempool/DA fee-floor domains are accounting-only here: they cite committed
 executable CV vector IDs and replay evidence, but do not claim fuzz or formal
 coverage. `tools/check_conformance_edge_pack.py` fails closed on fuzz/formal
-`present` claims until a later PR adds concrete evidence validation.
+`present`, `covered`, or `complete` claims until a later PR adds concrete
+evidence validation.
 
 Проверка (локально/CI):
 
