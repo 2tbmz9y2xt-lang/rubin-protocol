@@ -84,6 +84,34 @@ pub struct PVTelemetrySnapshot {
     pub commit_avg_ns: u64,
 }
 
+/// RUB-12 / GitHub #1156: escape a Prometheus label value per the
+/// text exposition spec (https://prometheus.io/docs/instrumenting/exposition_formats/),
+/// matching Go's `fmt.Fprintf` `%q` verb behavior used at
+/// `clients/go/node/pv_telemetry.go:250` for the `rubin_pv_mode`
+/// label. Three byte transforms: `\` -> `\\`, `"` -> `\"`,
+/// LF -> `\n` (literal backslash-n). All other ASCII / UTF-8 bytes
+/// pass through unchanged. Defense-in-depth: today the only
+/// production caller is `mode` populated from
+/// `ParallelValidationMode::as_str()` which returns the static
+/// literal "off"/"shadow"/"on" (none contain special chars), but
+/// `PVTelemetrySnapshot` is a `pub` struct with `pub mode: String`,
+/// so a future external constructor passing a runtime-shaped value
+/// must not be able to inject quotes / backslashes / newlines that
+/// would close the label literal early and forge synthetic metric
+/// lines downstream of the formatter.
+fn escape_prometheus_label_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str(r#"\""#),
+            '\n' => out.push_str(r"\n"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 impl PVTelemetrySnapshot {
     /// RUB-12 / GitHub #1156: Prometheus exposition for the PV
     /// telemetry snapshot, format-aligned to the upstream Go emission
@@ -97,7 +125,12 @@ impl PVTelemetrySnapshot {
     /// strings, TYPE keywords, metric NAMEs, label shapes, line
     /// order, and value-token format are byte-aligned with Go. The
     /// emitted VALUES are NOT byte-stable across runtimes — see the
-    /// disclosure below.
+    /// disclosure below. The single label-bearing line
+    /// (`rubin_pv_mode{mode="…"}`) escapes the `mode` value through
+    /// `escape_prometheus_label_value`, matching Go's `%q` verb on
+    /// the same field (`\\` -> `\\\\`, `"` -> `\\"`, LF -> `\\n`),
+    /// so a runtime-shaped `mode` cannot break out of the label
+    /// literal and forge synthetic lines.
     ///
     /// Rust-side tracker disclosure (operators reading both clients):
     /// the internal `PVTelemetry` struct currently zero-stubs four
@@ -132,7 +165,10 @@ impl PVTelemetrySnapshot {
             "# HELP rubin_pv_mode Current parallel validation mode (0=off, 1=shadow, 2=on)."
                 .to_string(),
             "# TYPE rubin_pv_mode gauge".to_string(),
-            format!("rubin_pv_mode{{mode=\"{}\"}} 1", self.mode),
+            format!(
+                "rubin_pv_mode{{mode=\"{}\"}} 1",
+                escape_prometheus_label_value(&self.mode)
+            ),
             "# HELP rubin_pv_blocks_validated_total Blocks processed through PV path.".to_string(),
             "# TYPE rubin_pv_blocks_validated_total counter".to_string(),
             format!("rubin_pv_blocks_validated_total {}", self.blocks_validated),
@@ -1690,6 +1726,79 @@ mod tests {
         assert!(
             !body.contains("rubin_pv_commit_avg_ns "),
             "old short-name commit_avg_ns must not appear; body=\n{body}"
+        );
+    }
+
+    /// RUB-12 / GitHub #1156 + Copilot wave-2 P2 on PR #1477:
+    /// `escape_prometheus_label_value` matches Go's `%q` verb on the
+    /// `rubin_pv_mode` label so a runtime-shaped `mode` value cannot
+    /// inject `"` or `\` to close the label literal early and forge
+    /// synthetic metric lines downstream of the formatter. Today the
+    /// only production caller is `ParallelValidationMode::as_str()`
+    /// returning the literal "off"/"shadow"/"on" (none contain
+    /// special chars), so the validator is purely defense-in-depth
+    /// for a future external constructor of the `pub`
+    /// `PVTelemetrySnapshot { mode: String, ... }`.
+    ///
+    /// Proof assertion: `\` -> `\\`, `"` -> `\"`, LF -> `\n` (literal
+    /// backslash-n), and other ASCII / UTF-8 bytes pass through
+    /// unchanged. Plus: the rendered exposition for an injected mode
+    /// `shadow"} 1\n# malicious_metric 1` does not gain a second
+    /// `# HELP` / new metric line — the entire injected payload sits
+    /// inside the escaped label literal.
+    #[test]
+    fn escape_prometheus_label_value_matches_go_q_verb_and_blocks_injection() {
+        // Identity for safe ASCII (the production happy path).
+        assert_eq!(super::escape_prometheus_label_value("shadow"), "shadow");
+        assert_eq!(super::escape_prometheus_label_value("off"), "off");
+        assert_eq!(super::escape_prometheus_label_value("on"), "on");
+        assert_eq!(super::escape_prometheus_label_value(""), "");
+        // Three Prometheus-spec escapes.
+        assert_eq!(super::escape_prometheus_label_value("a\\b"), r"a\\b");
+        assert_eq!(super::escape_prometheus_label_value("a\"b"), r#"a\"b"#);
+        assert_eq!(super::escape_prometheus_label_value("a\nb"), r"a\nb");
+        // Combined.
+        assert_eq!(super::escape_prometheus_label_value("\"\\\n"), r#"\"\\\n"#);
+        // UTF-8 passes through.
+        assert_eq!(super::escape_prometheus_label_value("режим"), "режим");
+        // End-to-end injection attempt: malicious `mode` tries to
+        // close the label, terminate the line, and inject a fake
+        // `# HELP` block. After escape the entire payload is
+        // inside the label literal — no second line, no second
+        // HELP token at any line start.
+        let injected = "shadow\"} 1\n# HELP fake malicious\n# TYPE fake gauge\nfake 1";
+        let snapshot = super::PVTelemetrySnapshot {
+            mode: injected.to_string(),
+            blocks_validated: 0,
+            blocks_skipped: 0,
+            mismatch_verdict: 0,
+            mismatch_error: 0,
+            mismatch_state: 0,
+            mismatch_witness: 0,
+            sig_total: 0,
+            sig_cache_hits: 0,
+            worker_tasks_total: 0,
+            worker_panics: 0,
+            validate_count: 0,
+            validate_avg_ns: 0,
+            commit_count: 0,
+            commit_avg_ns: 0,
+        };
+        let body = snapshot.prometheus_lines().join("\n");
+        assert!(
+            !body.contains("\nfake "),
+            "injected `fake` metric line must NOT appear at line start; body=\n{body}"
+        );
+        assert!(
+            !body.contains("\n# HELP fake"),
+            "injected `# HELP fake` must NOT appear at line start; body=\n{body}"
+        );
+        // The label literal must contain the escaped forms so the
+        // line is well-formed Prometheus text (parsers see one
+        // metric line, not five).
+        assert!(
+            body.contains(r#"rubin_pv_mode{mode="shadow\"} 1\n# HELP fake malicious\n# TYPE fake gauge\nfake 1"} 1"#),
+            "rendered rubin_pv_mode line must carry the injected payload as an escaped label value, not as separate lines; body=\n{body}"
         );
     }
 }
