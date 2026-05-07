@@ -183,7 +183,8 @@ fn escape_prometheus_label_value(value: &str) -> String {
 ///     annotation anchors).
 ///   * Zl line separator: `U+2028`. Zp paragraph separator: `U+2029`.
 ///   * Zs non-ASCII whitespace: `U+00A0` (NBSP), `U+1680` (Ogham
-///     space), `U+2000..=U+200A` (en/em/figure/etc. spaces),
+///     space), `U+2000..=U+200A` (en/em/figure/etc. spaces, includes
+///     `U+2007` figure space), `U+202F` (narrow no-break space),
 ///     `U+205F` (medium math space), `U+3000` (ideographic space).
 ///
 /// Returns false otherwise (printable ASCII, all of Latin-1 supplement
@@ -215,7 +216,7 @@ fn is_go_quote_nonprintable(c: char) -> bool {
             | 0x180e
             | 0x1680
             | 0x2000..=0x200f
-            | 0x2028..=0x202e
+            | 0x2028..=0x202f
             | 0x205f
             | 0x2060..=0x2064
             | 0x2066..=0x206f
@@ -1907,10 +1908,12 @@ mod tests {
         assert_eq!(super::escape_prometheus_label_value("\u{a0}"), "\\u00a0");
         assert_eq!(super::escape_prometheus_label_value("\u{ad}"), "\\u00ad");
         assert_eq!(super::escape_prometheus_label_value("\u{1680}"), "\\u1680");
+        assert_eq!(super::escape_prometheus_label_value("\u{2007}"), "\\u2007");
         assert_eq!(super::escape_prometheus_label_value("\u{2028}"), "\\u2028");
         assert_eq!(super::escape_prometheus_label_value("\u{2029}"), "\\u2029");
         assert_eq!(super::escape_prometheus_label_value("\u{200b}"), "\\u200b");
         assert_eq!(super::escape_prometheus_label_value("\u{202e}"), "\\u202e");
+        assert_eq!(super::escape_prometheus_label_value("\u{202f}"), "\\u202f");
         assert_eq!(super::escape_prometheus_label_value("\u{2060}"), "\\u2060");
         assert_eq!(super::escape_prometheus_label_value("\u{3000}"), "\\u3000");
         assert_eq!(super::escape_prometheus_label_value("\u{feff}"), "\\ufeff");
