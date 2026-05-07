@@ -34,14 +34,6 @@ def _hex_to_bytes(hex_str: str) -> list[int]:
     return out
 
 
-def _lean_bytearray_literal(bs: list[int]) -> str:
-    # Make the term type-check as `ByteArray`.
-    # `#[...]` alone defaults to `Array Nat` without context.
-    if not bs:
-        return "⟨#[]⟩"
-    return "⟨#[" + ", ".join(f"0x{b:02x}" for b in bs) + "]⟩"
-
-
 def _lean_opt_str(value: str | None) -> str:
     if value is None:
         return "none"
@@ -63,13 +55,6 @@ def _lean_opt_hex_str(hex_str: str | None) -> str:
     if hex_str is None:
         return "none"
     return f"some ({_lean_hex_str(hex_str)})"
-
-
-def _lean_opt_bytes_hex(hex_str: str | None) -> str:
-    if hex_str is None:
-        return "none"
-    bs = _hex_to_bytes(hex_str)
-    return f"some ({_lean_bytearray_literal(bs)})"
 
 
 def _render_lean_namespace(source_fixture: str, module_body: str) -> str:
@@ -1631,10 +1616,10 @@ def _int_default(v: dict[str, Any], key: str, default: int, vid: str) -> int:
     return _require_int(v, key, vid)
 
 
-def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
+def load_da_fee_floor_policy_vectors(path: Path, gate: str = "CV-DA-FEE-FLOOR") -> list[DaFeeFloorVector]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("gate") != "CV-DA-FEE-FLOOR":
-        raise ValueError(f"expected gate=CV-DA-FEE-FLOOR, got {data.get('gate')!r}")
+    if data.get("gate") != gate:
+        raise ValueError(f"expected gate={gate}, got {data.get('gate')!r}")
     vectors = data.get("vectors")
     if not isinstance(vectors, list):
         raise ValueError("vectors must be a list")
@@ -1646,7 +1631,7 @@ def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
             continue
         vid = str(raw.get("id", ""))
         if not vid:
-            raise ValueError("CV-DA-FEE-FLOOR vector missing id")
+            raise ValueError(f"{gate} vector missing id")
         out.append(
             DaFeeFloorVector(
                 vid=vid,
@@ -1673,11 +1658,17 @@ def load_cv_da_fee_floor(path: Path) -> list[DaFeeFloorVector]:
             )
         )
     if not out:
-        raise ValueError("no DA fee-floor vectors found")
+        raise ValueError(f"{gate}: no da_fee_floor_policy vectors found")
     return out
 
 
-def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
+def render_da_fee_floor_lean(
+    vectors: list[DaFeeFloorVector],
+    *,
+    source_fixture: str,
+    structure_name: str,
+    list_name: str,
+) -> str:
     rows: list[str] = []
     for v in vectors:
         rows.append(
@@ -1704,7 +1695,7 @@ def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
             + " }"
         )
     module_body = (
-        "structure CVDaFeeFloorVector where\n"
+        f"structure {structure_name} where\n"
         "  id : String\n"
         "  txHex : Option String\n"
         "  expectOk : Bool := true\n"
@@ -1725,12 +1716,30 @@ def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
         "  expectDaRequiredFee : Option Nat\n"
         "  expectRequiredFee : Option Nat\n"
         "\n"
-        "def cvDaFeeFloorVectors : List CVDaFeeFloorVector := [\n"
+        f"def {list_name} : List {structure_name} := [\n"
         + ",\n".join(rows)
         + "\n]\n"
         "\n"
     )
-    return _render_lean_namespace("CV-DA-FEE-FLOOR", module_body)
+    return _render_lean_namespace(source_fixture, module_body)
+
+
+def render_cv_da_fee_floor_lean(vectors: list[DaFeeFloorVector]) -> str:
+    return render_da_fee_floor_lean(
+        vectors,
+        source_fixture="CV-DA-FEE-FLOOR",
+        structure_name="CVDaFeeFloorVector",
+        list_name="cvDaFeeFloorVectors",
+    )
+
+
+def render_cv_mempool_lean(vectors: list[DaFeeFloorVector]) -> str:
+    return render_da_fee_floor_lean(
+        vectors,
+        source_fixture="CV-MEMPOOL",
+        structure_name="CVMempoolVector",
+        list_name="cvMempoolVectors",
+    )
 
 
 @dataclass(frozen=True)
@@ -2988,12 +2997,21 @@ def main() -> int:
 
     in_da_fee_floor = repo_root / "conformance" / "fixtures" / "CV-DA-FEE-FLOOR.json"
     out_da_fee_floor = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVDaFeeFloorVectors.lean"
-    dffv = load_cv_da_fee_floor(in_da_fee_floor)
+    dffv = load_da_fee_floor_policy_vectors(in_da_fee_floor)
     out_da_fee_floor.write_text(
         _inject_perf_options(render_cv_da_fee_floor_lean(dffv)),
         encoding="utf-8",
     )
     print(f"WROTE: {out_da_fee_floor}")
+
+    in_mempool = repo_root / "conformance" / "fixtures" / "CV-MEMPOOL.json"
+    out_mempool = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVMempoolVectors.lean"
+    mpv = load_da_fee_floor_policy_vectors(in_mempool, gate="CV-MEMPOOL")
+    out_mempool.write_text(
+        _inject_perf_options(render_cv_mempool_lean(mpv)),
+        encoding="utf-8",
+    )
+    print(f"WROTE: {out_mempool}")
 
     in_cov_gen = repo_root / "conformance" / "fixtures" / "CV-COVENANT-GENESIS.json"
     out_cov_gen = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVCovenantGenesisVectors.lean"
