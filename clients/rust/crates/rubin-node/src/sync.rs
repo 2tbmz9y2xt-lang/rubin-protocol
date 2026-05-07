@@ -85,11 +85,21 @@ pub struct PVTelemetrySnapshot {
     pub commit_avg_ns: u64,
 }
 
-/// RUB-12 / GitHub #1156: escape a Prometheus label value matching
-/// Go's `fmt.Sprintf` `%q` verb (`strconv.Quote` semantics) used at
+/// RUB-12 / GitHub #1156: escape a Prometheus label value to match
+/// Go's `fmt.Sprintf` `%q` verb (`strconv.Quote` semantics, used at
 /// `clients/go/node/pv_telemetry.go:250` for the `rubin_pv_mode`
-/// label. Covers the `%q` byte set including C0 + DEL + C1 + other
-/// well-known Unicode non-printable codepoints (`is_go_quote_nonprintable`):
+/// label) for ASCII inputs and a focused subset of non-ASCII non-
+/// printable runes — NOT the full Go `%q` surface. The exact scope:
+/// byte-for-byte aligned with Go `%q` for any string composed of
+/// printable ASCII + the explicitly handled escape classes below
+/// (the production caller's domain); for arbitrary non-ASCII runes
+/// outside `is_go_quote_nonprintable`'s focused subset, output
+/// diverges from Go `%q` per the deliberate scope-narrowing
+/// disclosed on `is_go_quote_nonprintable`.
+///
+/// Handled escape classes (covers the `%q` byte set Wave-1..8 of
+/// PR #1477 enumerated; intentionally narrower than Go's full
+/// `strconv.IsPrint` table):
 /// - `\` -> `\\`
 /// - `"` -> `\"`
 /// - named control-char escapes: `\a` (BEL 0x07), `\b` (BS 0x08),
@@ -160,12 +170,21 @@ pub(crate) fn escape_prometheus_label_value(value: &str) -> String {
 }
 
 /// RUB-12 / GitHub #1156 + Codex wave-5 P2 on PR #1477: predicate for
-/// runes Go's `strconv.Quote` (and therefore `fmt.Sprintf("%q", ...)`)
-/// emits as a `\u`/`\U` escape rather than as a literal byte. Used by
-/// `escape_prometheus_label_value` so a future runtime-shaped `mode`
-/// value cannot pass an invisible bidi/format/separator rune through
-/// the `rubin_pv_mode{mode="…"}` label and forge a downstream parser
-/// surprise (line break, BOM, NBSP-as-space, RTL override).
+/// runes that `escape_prometheus_label_value` must emit as an escape
+/// sequence (any of `\\`/`\"`/named-control/`\xNN`/`\uNNNN`/`\UNNNNNNNN`,
+/// dispatched by the codepoint-width branches in the caller) rather
+/// than as a literal byte. The named control escapes (`\a`/`\b`/`\t`/
+/// `\n`/`\v`/`\f`/`\r`) are matched by earlier arms in
+/// `escape_prometheus_label_value` and therefore never reach this
+/// predicate; for the runes that DO reach it, the caller dispatches
+/// to `\xNN` (codepoint < 0x80), `\uNNNN` (BMP non-printable), or
+/// `\UNNNNNNNN` (astral non-printable). Used so a future runtime-
+/// shaped `mode` value cannot pass an invisible bidi/format/separator
+/// rune through the `rubin_pv_mode{mode="…"}` label and forge a
+/// downstream parser surprise (line break, BOM, NBSP-as-space, RTL
+/// override). Aligns with what Go's `strconv.Quote` /
+/// `fmt.Sprintf("%q", ...)` would emit for ASCII input plus the
+/// focused non-ASCII subset enumerated below.
 ///
 /// Returns true for:
 /// - `char::is_control()` — General Category Cc, exactly Go's
@@ -241,10 +260,18 @@ impl PVTelemetrySnapshot {
     /// emitted VALUES are NOT byte-stable across runtimes — see the
     /// disclosure below. The single label-bearing line
     /// (`rubin_pv_mode{mode="…"}`) escapes the `mode` value through
-    /// `escape_prometheus_label_value`, matching Go's `%q` verb on
-    /// the same field (`\\` -> `\\\\`, `"` -> `\\"`, LF -> `\\n`),
-    /// so a runtime-shaped `mode` cannot break out of the label
-    /// literal and forge synthetic lines.
+    /// `escape_prometheus_label_value`, which is byte-for-byte
+    /// aligned with Go's `%q` verb on the same field for ASCII
+    /// inputs (the production happy path; `mode` is sourced from
+    /// `ParallelValidationMode::as_str()` returning "off"/"shadow"/
+    /// "on") and for the focused non-ASCII subset listed on
+    /// `is_go_quote_nonprintable`; for arbitrary non-ASCII runes
+    /// outside that subset, output diverges from Go `%q` per the
+    /// deliberate scope-narrowing disclosed there. So a runtime-
+    /// shaped `mode` cannot break out of the label literal and
+    /// forge synthetic lines (the `\\` -> `\\\\`, `"` -> `\\"`,
+    /// LF -> `\\n` cases that allow injection are all in the
+    /// byte-for-byte-aligned ASCII subset).
     ///
     /// Rust-side tracker disclosure (operators reading both clients):
     /// the internal `PVTelemetry` struct currently zero-stubs four
@@ -1850,8 +1877,11 @@ mod tests {
     }
 
     /// RUB-12 / GitHub #1156 + Copilot wave-2 P2 on PR #1477:
-    /// `escape_prometheus_label_value` matches Go's `%q` verb on the
-    /// `rubin_pv_mode` label so a runtime-shaped `mode` value cannot
+    /// `escape_prometheus_label_value` is byte-for-byte aligned with
+    /// Go's `%q` verb on the `rubin_pv_mode` label for ASCII inputs
+    /// and the focused non-ASCII subset listed on
+    /// `is_go_quote_nonprintable` (NOT full Go-`%q` parity for
+    /// arbitrary non-ASCII), so a runtime-shaped `mode` value cannot
     /// inject `"` or `\` to close the label literal early and forge
     /// synthetic metric lines downstream of the formatter. Today the
     /// only production caller is `ParallelValidationMode::as_str()`
