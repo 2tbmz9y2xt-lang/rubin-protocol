@@ -2255,6 +2255,22 @@ def validate_vector(
                 problems.append(f"{gate}/{vid}: missing mutated")
             elif policy_bool(go_resp, "mutated", True) != (not bool(v["expect_no_mutation"])):
                 problems.append(f"{gate}/{vid}: expect_no_mutation mismatch")
+        for key in bool_fields:
+            expect_key = f"expect_{key}"
+            if expect_key in v:
+                if not policy_has(go_resp, key):
+                    problems.append(f"{gate}/{vid}: missing {key} for {expect_key}")
+                    continue
+                if policy_bool(go_resp, key, False) != bool(v[expect_key]):
+                    problems.append(f"{gate}/{vid}: {expect_key} mismatch")
+        for key in int_fields:
+            expect_key = f"expect_{key}"
+            if expect_key in v:
+                if not policy_has(go_resp, key):
+                    problems.append(f"{gate}/{vid}: missing {key} for {expect_key}")
+                    continue
+                if policy_int(go_resp, key, "go") != int(v[expect_key]):
+                    problems.append(f"{gate}/{vid}: {expect_key} mismatch")
         if not policy_bool(go_resp, "ok", False) or not policy_bool(rust_resp, "ok", False):
             if "expect_err" in v and policy_str(go_resp, "err", "", "go") != str(v["expect_err"]):
                 problems.append(f"{gate}/{vid}: expect_err mismatch")
@@ -2304,12 +2320,7 @@ def validate_vector(
         for key in int_fields:
             expect_key = f"expect_{key}"
             if expect_key in v:
-                if not policy_has(go_resp, key):
-                    problems.append(f"{gate}/{vid}: missing {key} for {expect_key}")
-                    continue
-                go_value = policy_int(go_resp, key, "go")
-                if go_value != int(v[expect_key]):
-                    problems.append(f"{gate}/{vid}: {expect_key} mismatch")
+                continue
             elif policy_has(go_resp, key):
                 problems.append(f"{gate}/{vid}: unexpected {key}={go_resp.get(key)}")
     elif op.startswith("compact_") and op != "compact_shortid":

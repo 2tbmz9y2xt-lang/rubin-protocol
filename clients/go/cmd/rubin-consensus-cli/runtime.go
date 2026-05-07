@@ -961,11 +961,24 @@ func relayMetadataPolicyResp(req Request) Response {
 	resp.NoDupConflictCap = boolPtr(false)
 	if parseErr != nil || consumed != len(txBytes) {
 		resp.Ok = false
-		resp.Err = string(consensus.TX_ERR_PARSE)
 		resp.Admit = false
 		resp.AdmitClass = ""
 		resp.DominantFloor = ""
 		resp.RejectReason = ""
+		resp.Err = string(consensus.TX_ERR_PARSE)
+		if relayErr == nil {
+			resp.Err = "relay metadata accepted malformed tx"
+			return resp
+		}
+		var admitErr *node.TxAdmitError
+		if !errors.As(relayErr, &admitErr) {
+			resp.Err = relayErr.Error()
+			return resp
+		}
+		if admitErr.Kind != node.TxAdmitRejected || !isRelayMetadataParseReject(admitErr.Message) {
+			resp.Err = fmt.Sprintf("relay metadata parse mismatch: kind=%s message=%s", admitErr.Kind, admitErr.Message)
+			return resp
+		}
 		return resp
 	}
 	if weight, daBytes, _, err := consensus.TxWeightAndStats(tx); err == nil {
@@ -1019,6 +1032,12 @@ func relayMetadataPolicyResp(req Request) Response {
 		resp.Err = admitErr.Message
 	}
 	return resp
+}
+
+func isRelayMetadataParseReject(message string) bool {
+	return strings.Contains(message, string(consensus.TX_ERR_PARSE)) ||
+		strings.Contains(message, "trailing bytes after canonical tx") ||
+		strings.Contains(message, "non-canonical tx bytes")
 }
 
 func daFeeFloorPolicyResp(req Request) Response {

@@ -1486,21 +1486,45 @@ fn mempool_relay_metadata_policy_response(req: &Request) -> Response {
         Ok(v) => v,
         Err(_) => {
             resp.ok = false;
-            resp.err = Some(ErrorCode::TxErrParse.as_str().to_string());
             resp.admit = None;
             resp.admit_class = None;
             resp.dominant_floor = None;
             resp.reject_reason = None;
+            resp.err = Some(match relay_result {
+                Ok(_) => "relay metadata accepted malformed tx".to_string(),
+                Err(err)
+                    if matches!(err.kind, TxPoolAdmitErrorKind::Rejected)
+                        && relay_metadata_parse_reject(&err.message) =>
+                {
+                    ErrorCode::TxErrParse.as_str().to_string()
+                }
+                Err(err) => format!(
+                    "relay metadata parse mismatch: kind={:?} message={}",
+                    err.kind, err.message
+                ),
+            });
             return resp;
         }
     };
     if consumed != tx_bytes.len() {
         resp.ok = false;
-        resp.err = Some(ErrorCode::TxErrParse.as_str().to_string());
         resp.admit = None;
         resp.admit_class = None;
         resp.dominant_floor = None;
         resp.reject_reason = None;
+        resp.err = Some(match relay_result {
+            Ok(_) => "relay metadata accepted non-canonical tx".to_string(),
+            Err(err)
+                if matches!(err.kind, TxPoolAdmitErrorKind::Rejected)
+                    && relay_metadata_parse_reject(&err.message) =>
+            {
+                ErrorCode::TxErrParse.as_str().to_string()
+            }
+            Err(err) => format!(
+                "relay metadata parse mismatch: kind={:?} message={}",
+                err.kind, err.message
+            ),
+        });
         return resp;
     }
     if let Ok((weight, da_bytes, _anchor_bytes)) = tx_weight_and_stats_public(&tx) {
@@ -1555,6 +1579,12 @@ fn mempool_relay_metadata_policy_response(req: &Request) -> Response {
         }
     }
     resp
+}
+
+fn relay_metadata_parse_reject(message: &str) -> bool {
+    message.contains(ErrorCode::TxErrParse.as_str())
+        || message.contains("non-canonical tx bytes")
+        || message.contains("trailing bytes after canonical tx")
 }
 
 fn core_ext_profiles_from_json(
