@@ -87,32 +87,36 @@ pub struct PVTelemetrySnapshot {
 /// RUB-12 / GitHub #1156: escape a Prometheus label value matching
 /// Go's `fmt.Sprintf` `%q` verb (`strconv.Quote` semantics) used at
 /// `clients/go/node/pv_telemetry.go:250` for the `rubin_pv_mode`
-/// label. Covers the full `%q` byte set, including C0 + DEL + C1 +
-/// other Unicode control codepoints:
+/// label. Covers the `%q` byte set including C0 + DEL + C1 + other
+/// well-known Unicode non-printable codepoints (`is_go_quote_nonprintable`):
 /// - `\` -> `\\`
 /// - `"` -> `\"`
 /// - named control-char escapes: `\a` (BEL 0x07), `\b` (BS 0x08),
 ///   `\t`, `\n`, `\v`, `\f`, `\r`
-/// - any other Unicode control (`char::is_control()` — General
-///   Category Cc, same as Go's `unicode.IsControl`):
+/// - any other rune for which `is_go_quote_nonprintable` returns true
+///   (General Category Cc plus a focused subset of well-known Cf
+///   format characters, Zl/Zp separators, non-ASCII Zs whitespace,
+///   bidi controls, and BOM):
 ///   * codepoint < 0x80 (C0 + DEL minus the named ones): `\xNN`
 ///     two-hex-digit lowercase form
-///   * codepoint 0x80..=0xffff (C1 + other BMP controls): `\u00NN`
-///     four-hex-digit lowercase form
+///   * codepoint 0x80..=0xffff (C1 + other BMP non-printables):
+///     `\u00NN` four-hex-digit lowercase form
 ///   * codepoint > 0xffff (astral non-printable): `\U00NNNNNN`
 ///     eight-hex-digit lowercase form
 /// - everything else (printable ASCII, printable Unicode, multi-
 ///   byte UTF-8): passes through unchanged
 ///
-/// Byte-aligned with Go's `%q` is what the doc on `prometheus_lines`
-/// claims. Defense-in-depth: today's only production caller is
+/// Defense-in-depth: today's only production caller is
 /// `ParallelValidationMode::as_str()` returning the static literal
-/// "off"/"shadow"/"on" (escape is identity on that input), but
-/// `PVTelemetrySnapshot` is a `pub` struct with `pub mode: String`
-/// so a future external constructor passing a runtime-shaped value
-/// must neither break the label literal nor drift from Go's `%q`
-/// byte stream — including for non-ASCII Unicode control codepoints
-/// (C1 NEL `U+0085`, line separator `U+2028`, etc.).
+/// "off"/"shadow"/"on" (escape is identity on that input, byte-aligned
+/// with Go's `%q`), but `PVTelemetrySnapshot` is a `pub` struct with
+/// `pub mode: String` so a future external constructor passing a
+/// runtime-shaped value must neither break the label literal nor
+/// silently emit a non-printable rune (for example C1 NEL `U+0085`,
+/// line separator `U+2028`, NBSP `U+00A0`, BOM `U+FEFF`) that Go's
+/// `%q` would have escaped. See `is_go_quote_nonprintable` for the
+/// full predicate and a note on the deliberate scope-narrowing vs
+/// Go's full `strconv.IsPrint` table.
 fn escape_prometheus_label_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
@@ -126,7 +130,7 @@ fn escape_prometheus_label_value(value: &str) -> String {
             '\x0b' => out.push_str(r"\v"),
             '\x0c' => out.push_str(r"\f"),
             '\r' => out.push_str(r"\r"),
-            c if c.is_control() => {
+            c if is_go_quote_nonprintable(c) => {
                 let cp = c as u32;
                 if cp < 0x80 {
                     out.push_str(&format!(r"\x{:02x}", cp));
@@ -140,6 +144,72 @@ fn escape_prometheus_label_value(value: &str) -> String {
         }
     }
     out
+}
+
+/// RUB-12 / GitHub #1156 + Codex wave-5 P2 on PR #1477: predicate for
+/// runes Go's `strconv.Quote` (and therefore `fmt.Sprintf("%q", ...)`)
+/// emits as a `\u`/`\U` escape rather than as a literal byte. Used by
+/// `escape_prometheus_label_value` so a future runtime-shaped `mode`
+/// value cannot pass an invisible bidi/format/separator rune through
+/// the `rubin_pv_mode{mode="…"}` label and forge a downstream parser
+/// surprise (line break, BOM, NBSP-as-space, RTL override).
+///
+/// Returns true for:
+/// - `char::is_control()` — General Category Cc, exactly Go's
+///   `unicode.IsControl`.
+/// - A focused subset of Go's `strconv.IsPrint` non-printable BMP
+///   codepoints covering the well-known invisible categories that
+///   Go's `%q` escapes:
+///   * Cf format characters: `U+00AD` (SHY), `U+061C` (Arabic letter
+///     mark), `U+070F` (Syriac abbrev mark), `U+180E` (Mongolian
+///     vowel separator), `U+200B..=U+200F` (zero-width space + bidi),
+///     `U+202A..=U+202E` (bidi embeds/overrides), `U+2060..=U+2064`
+///     (word joiner + invisible math operators), `U+2066..=U+206F`
+///     (bidi isolates + deprecated format), `U+FEFF` (BOM /
+///     zero-width no-break space), `U+FFF9..=U+FFFB` (interlinear
+///     annotation anchors).
+///   * Zl line separator: `U+2028`. Zp paragraph separator: `U+2029`.
+///   * Zs non-ASCII whitespace: `U+00A0` (NBSP), `U+1680` (Ogham
+///     space), `U+2000..=U+200A` (en/em/figure/etc. spaces),
+///     `U+205F` (medium math space), `U+3000` (ideographic space).
+///
+/// Returns false otherwise (printable ASCII, all of Latin-1 supplement
+/// minus the listed non-printables, all printable Unicode planes).
+///
+/// Scope-narrowing vs Go's full `strconv.IsPrint`: Go ships a
+/// generated table (`go/src/strconv/isprint.go`, ~30 KB binary) of
+/// every non-printable codepoint across all Unicode planes. Porting
+/// the full table inline here is rejected as dead weight — production
+/// caller `ParallelValidationMode::as_str()` returns ASCII literals
+/// only, and the predicate above already covers every well-known
+/// invisible non-ASCII rune cited in the upstream parity discussion.
+/// Untracked supplementary-plane non-printable runes (mostly tag
+/// characters `U+E0000..=U+E007F` and variation selectors supplement
+/// `U+E0100..=U+E01EF`) pass through unescaped — operators reading
+/// both clients on the same `mode` value would see those bytes
+/// literal-on-Rust vs `\U…` -on-Go, but Rust's safe `Display` impl
+/// on `String` already prevents UTF-8 corruption and the production
+/// caller's input is constrained.
+fn is_go_quote_nonprintable(c: char) -> bool {
+    if c.is_control() {
+        return true;
+    }
+    matches!(
+        c as u32,
+        0x00a0 | 0x00ad
+            | 0x061c
+            | 0x070f
+            | 0x180e
+            | 0x1680
+            | 0x2000..=0x200f
+            | 0x2028..=0x202e
+            | 0x205f
+            | 0x2060..=0x2064
+            | 0x2066..=0x206f
+            | 0x3000
+            | 0xfeff
+            | 0xfff9..=0xfffb
+    )
 }
 
 impl PVTelemetrySnapshot {
@@ -1809,22 +1879,31 @@ mod tests {
             super::escape_prometheus_label_value("a\rb\tc\x01d"),
             r"a\rb\tc\x01d"
         );
-        // C1 control chars (U+0080..=U+009F) and other non-ASCII
-        // Unicode controls are caught by `char::is_control()` and
-        // emitted as `\u00NN` (BMP) or `\U00NNNNNN` (astral),
-        // matching Go's `strconv.Quote` for codepoints >= 0x80.
+        // C1 control chars (U+0080..=U+009F) are caught by
+        // `char::is_control()` (Cc) and emitted as `\u00NN` four-digit
+        // lowercase hex, matching Go's `strconv.Quote`.
         assert_eq!(super::escape_prometheus_label_value("\u{80}"), "\\u0080");
         assert_eq!(super::escape_prometheus_label_value("\u{85}"), "\\u0085");
         assert_eq!(super::escape_prometheus_label_value("\u{9f}"), "\\u009f");
-        // Other Unicode controls beyond C1 (line separator U+2028,
-        // paragraph separator U+2029, byte order mark U+FEFF, etc.)
-        // are also `is_control()` per Cc + Cf categories... but only
-        // Cc is "is_control" in Rust; Cf is is_format. Stick to Cc.
+        // Wave-5 (Codex P2): non-Cc runes Go's `%q` still escapes —
+        // Zs non-ASCII whitespace (NBSP, Ogham space, ideographic
+        // space), Zl/Zp separators, BOM, bidi/format controls — must
+        // also escape via `is_go_quote_nonprintable`.
+        assert_eq!(super::escape_prometheus_label_value("\u{a0}"), "\\u00a0");
+        assert_eq!(super::escape_prometheus_label_value("\u{ad}"), "\\u00ad");
+        assert_eq!(super::escape_prometheus_label_value("\u{1680}"), "\\u1680");
+        assert_eq!(super::escape_prometheus_label_value("\u{2028}"), "\\u2028");
+        assert_eq!(super::escape_prometheus_label_value("\u{2029}"), "\\u2029");
+        assert_eq!(super::escape_prometheus_label_value("\u{200b}"), "\\u200b");
+        assert_eq!(super::escape_prometheus_label_value("\u{202e}"), "\\u202e");
+        assert_eq!(super::escape_prometheus_label_value("\u{2060}"), "\\u2060");
+        assert_eq!(super::escape_prometheus_label_value("\u{3000}"), "\\u3000");
+        assert_eq!(super::escape_prometheus_label_value("\u{feff}"), "\\ufeff");
         // Printable Unicode (Latin-1 supplement, Cyrillic, etc.)
         // passes through unchanged.
         assert_eq!(super::escape_prometheus_label_value("режим"), "режим");
-        assert_eq!(super::escape_prometheus_label_value("\u{a0}"), "\u{a0}");
         assert_eq!(super::escape_prometheus_label_value("é"), "é");
+        assert_eq!(super::escape_prometheus_label_value("漢字"), "漢字");
         // End-to-end injection attempt: malicious `mode` tries to
         // close the label, terminate the line, and inject a fake
         // `# HELP` block. After escape the entire payload is
