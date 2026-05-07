@@ -1445,14 +1445,17 @@ fn mempool_relay_metadata_policy_response(req: &Request) -> Response {
         state.tip_hash[0] = 0x11;
     }
 
-    let mut cfg = TxPoolConfig::default();
-    cfg.policy_da_surcharge_per_byte = req.da_surcharge_per_byte;
-    if let Some(v) = req.current_mempool_min_fee_rate {
-        cfg.policy_current_mempool_min_fee_rate = v;
-    }
-    if let Some(v) = req.min_da_fee_rate {
-        cfg.policy_min_da_fee_rate = v;
-    }
+    let default_cfg = TxPoolConfig::default();
+    let cfg = TxPoolConfig {
+        policy_da_surcharge_per_byte: req.da_surcharge_per_byte,
+        policy_current_mempool_min_fee_rate: req
+            .current_mempool_min_fee_rate
+            .unwrap_or(default_cfg.policy_current_mempool_min_fee_rate),
+        policy_min_da_fee_rate: req
+            .min_da_fee_rate
+            .unwrap_or(default_cfg.policy_min_da_fee_rate),
+        ..default_cfg
+    };
     let pool = TxPool::new_with_config(cfg);
     let before_len = pool.len();
     let parsed = parse_tx(&tx_bytes);
