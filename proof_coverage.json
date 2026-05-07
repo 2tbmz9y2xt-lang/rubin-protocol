@@ -190,8 +190,8 @@
     ]
   },
   "go_fuzz": {
-    "package": "consensus",
-    "path": "clients/go/consensus",
+    "package": "multiple",
+    "path": "clients/go",
     "ci_script": "scripts/ci/run_fuzz_stage2.sh",
     "ci_workflow": ".github/workflows/fuzz-nightly.yml",
     "targets": [
@@ -303,6 +303,30 @@
         "property": "MarshalTx -> ParseTx roundtrip identity (txid, wtxid preserved)",
         "conformance_gate": "CV-PARSE",
         "stage": 2
+      },
+      {
+        "name": "FuzzMempoolFeeWeightOrdering",
+        "package": "node",
+        "path": "clients/go/node",
+        "property": "Mempool fee/weight ordering matches checked cross-multiplication oracle; eviction tiers remain fee/weight, absolute fee, admission_seq, source-neutral",
+        "conformance_gate": "CV-MEMPOOL",
+        "stage": 2
+      },
+      {
+        "name": "FuzzMempoolRollingFloorBoundaries",
+        "package": "node",
+        "path": "clients/go/node",
+        "property": "Rolling fee floor clamps to the default, overflows fail closed, non-divisible entry floor uses floor division, and min-fee-step raise saturates",
+        "conformance_gate": "CV-MEMPOOL",
+        "stage": 2
+      },
+      {
+        "name": "FuzzDaFeeFloorPolicyBoundaries",
+        "package": "node",
+        "path": "clients/go/node",
+        "property": "DA Stage C required fee uses checked relay/DA/surcharge arithmetic with exact accept, floor-1 reject, overflow class, and non-DA short-circuit assertions",
+        "conformance_gate": "CV-DA-FEE-FLOOR",
+        "stage": 2
       }
     ]
   },
@@ -333,7 +357,12 @@
       "fuzz": {
         "status": "deferred",
         "issue": "RUB-129",
-        "reason": "No committed fuzz/property target for mempool_policy in this accounting PR."
+        "targets": [
+          "FuzzMempoolFeeWeightOrdering",
+          "FuzzMempoolRollingFloorBoundaries",
+          "FuzzDaFeeFloorPolicyBoundaries"
+        ],
+        "reason": "Committed Go fuzz/property targets are listed in go_fuzz.targets; edge-domain fuzz coverage remains deferred because the edge-pack checker intentionally does not validate concrete fuzz evidence claims yet."
       },
       "formal": {
         "status": "not_claimed",
@@ -376,7 +405,10 @@
       "fuzz": {
         "status": "deferred",
         "issue": "RUB-129",
-        "reason": "No committed fuzz/property target for da_fee_floor in this accounting PR."
+        "targets": [
+          "FuzzDaFeeFloorPolicyBoundaries"
+        ],
+        "reason": "Committed Go fuzz/property targets are listed in go_fuzz.targets; edge-domain fuzz coverage remains deferred because the edge-pack checker intentionally does not validate concrete fuzz evidence claims yet."
       },
       "formal": {
         "status": "not_claimed",

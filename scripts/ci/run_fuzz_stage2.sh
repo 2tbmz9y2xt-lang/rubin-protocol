@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GO_DIR="${ROOT_DIR}/clients/go"
 CONSENSUS_DIR="${GO_DIR}/consensus"
+NODE_DIR="${GO_DIR}/node"
 P2P_DIR="${GO_DIR}/node/p2p"
 ARTIFACTS_DIR="${ROOT_DIR}/.artifacts/fuzz-stage2"
 FUZZ_TIME="${FUZZ_TIME:-45s}"
@@ -37,6 +38,9 @@ TARGETS=(
   "./consensus:FuzzDAChunkHashVerify"
   "./consensus:FuzzDAPayloadCommitVerify"
   "./consensus:FuzzUtxoApplyNonCoinbase"
+  "./node:FuzzMempoolFeeWeightOrdering"
+  "./node:FuzzMempoolRollingFloorBoundaries"
+  "./node:FuzzDaFeeFloorPolicyBoundaries"
   "./node/p2p:FuzzReadFrame"
   "./node/p2p:FuzzDecodeVersionPayload"
 )
@@ -78,16 +82,17 @@ STATUS=0
 # Invoked indirectly via trap on EXIT.
 collect_artifacts() {
   : > "${ARTIFACTS_DIR}/go-fuzz-files.txt"
-  for dir in "${CONSENSUS_DIR}" "${P2P_DIR}"; do
+  local tar_paths=()
+  for dir in "${CONSENSUS_DIR}" "${NODE_DIR}" "${P2P_DIR}"; do
     if [[ -d "${dir}/testdata/fuzz" ]]; then
       find "${dir}/testdata/fuzz" -type f | sort >> "${ARTIFACTS_DIR}/go-fuzz-files.txt" || true
+      tar_paths+=("${dir#"${GO_DIR}/"}/testdata/fuzz")
     fi
   done
-  if [[ -s "${ARTIFACTS_DIR}/go-fuzz-files.txt" ]]; then
+  if [[ "${#tar_paths[@]}" -gt 0 ]]; then
     tar -czf "${ARTIFACTS_DIR}/go-fuzz-testdata.tgz" \
       -C "${GO_DIR}" \
-      consensus/testdata/fuzz \
-      node/p2p/testdata/fuzz 2>/dev/null || true
+      "${tar_paths[@]}" 2>/dev/null || true
   fi
 }
 
