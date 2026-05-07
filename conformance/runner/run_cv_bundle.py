@@ -1657,7 +1657,7 @@ def validate_vector(
             req["suite_registry"] = v.get("suite_registry", [])
     elif op in ("da_fee_floor_policy", "mempool_relay_metadata_policy"):
         if tx_hex == "":
-            return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
+            return [f"{gate}/{v.get('id','?')}: missing tx_hex"], False
         req["tx_hex"] = tx_hex
         if "utxos" in v:
             req["utxos"] = v["utxos"]
