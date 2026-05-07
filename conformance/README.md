@@ -83,13 +83,13 @@ evidence validation.
 scripts/dev-env.sh -- python3 tools/check_conformance_edge_pack.py
 ```
 
-Gate падает если:
+The gate fails when:
 
-- отсутствует обязательный gate/fixture для домена;
-- общее число векторов в домене ниже baseline;
-- отсутствуют обязательные edge vector IDs из baseline;
-- `proof_coverage.json` заявляет fuzz/formal coverage для edge/property-домена
-  до того, как checker начнёт поддерживать валидацию конкретных evidence.
+- a required domain gate or fixture is missing;
+- a domain vector count is below the baseline;
+- required edge vector IDs from the baseline are missing;
+- `proof_coverage.json` claims fuzz/formal coverage for an edge/property domain
+  before the checker supports concrete evidence validation.
 
 ## Fixture governance (manual-only)
 
