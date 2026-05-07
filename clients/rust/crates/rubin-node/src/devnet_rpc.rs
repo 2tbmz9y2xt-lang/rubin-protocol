@@ -107,15 +107,27 @@ pub struct RunningDevnetRPCServer {
 ///   `ReadinessGate::try_mark_ready_on_startup` path has not yet
 ///   completed its `NotReady` -> `Ready` transition". `/ready` reports
 ///   503 + `{ready: false}` (the JSON envelope byte-pinned by
-///   `ready_response_body_byte_pinned_against_go_format`). This is
+///   `ready_response_body_byte_pinned_rust_wire_format`). This is
 ///   the state a freshly constructed `DevnetRPCState` exposes BEFORE
 ///   `start_devnet_rpc_server` runs the post-bind stamp at the
 ///   `try_mark_ready_on_startup` call site below; orchestrators MUST
-///   treat 503 as "not-started" and not interleave work.
+///   treat 503 as "not-ready / unavailable" and not interleave work.
+///   Note: 503 alone does NOT distinguish `NotReady` (pre-stamp) from
+///   `Shutdown` (post-stamp) — both report 503 + `{ready:false}` by
+///   design. Consumers that need to distinguish boot-up from drain
+///   must use process-level signals (start log line, supervisor
+///   state) rather than reading meaning into the 503 source state.
 /// - `Ready` (post-`start_devnet_rpc_server` happy path):
-///   `is_ready() == true` claims ONLY that the RPC accept loop is
-///   bound on its listener and the gate has transitioned through the
-///   single boot stamp. It does NOT claim:
+///   `is_ready() == true` claims ONLY that the boot-time
+///   `try_mark_ready_on_startup` stamp has completed exactly once on
+///   the gate (the gate is a state latch, not a listener-bound
+///   invariant; production wiring at `start_devnet_rpc_server`
+///   stamps the gate post-bind so on the production happy path
+///   `is_ready() == true` coincides with a bound RPC listener, but
+///   nothing inside the gate enforces that — tests can stamp the
+///   gate without binding a listener, and a code change that moved
+///   the production stamp pre-bind would silently widen the
+///   readiness window). It does NOT claim:
 ///     * mempool admit-path is wired or fault-free (RUB-53 / #1339
 ///       tracker is open; mempool policy parity slice has not landed
 ///       and `/ready` does not gate on its readiness here);
@@ -135,9 +147,11 @@ pub struct RunningDevnetRPCServer {
 ///   `go_rust_parity_matrix` row "mempool/miner/sync prerequisites
 ///   if claimed" answered with NOT CLAIMED. Operators reading
 ///   `/ready == true` who need stronger guarantees must layer
-///   additional checks on top (e.g. `/peers` count, `/get_tip`
-///   non-zero height) and treat `/ready` as the boot-stamp latch
-///   only.
+///   additional checks on top (e.g. `/peers` count for peer
+///   liveness, `/get_tip` `has_tip == true` for chain initialization
+///   — note "non-zero height" is NOT a sound heuristic because a
+///   genesis-only chain legitimately reports height 0) and treat
+///   `/ready` as the boot-stamp latch only.
 ///
 /// - `Shutdown` (post-`mark_shutdown` terminal): sticky; once entered
 ///   the gate never returns to `Ready`. `/ready` reports 503 + `{ready:
@@ -150,10 +164,17 @@ pub struct RunningDevnetRPCServer {
 /// on 405 method-not-allowed) and by the `ReadyResponse` struct
 /// envelope. `coverage_reachability_matrix` row "public readiness
 /// check used by localhost/devnet tooling" is satisfied by the
-/// `ready_endpoint_*` test family in `tests` module which exercises
-/// the gate transitions ONLY through the public HTTP route_request
-/// path (no direct `state.readiness.is_ready()` shortcut from the
-/// asserts so a future bug in the public dispatch is caught).
+/// `ready_endpoint_*` test family in `tests` module which asserts
+/// `/ready` HTTP behavior via the public `route_request` dispatch.
+/// Some tests in the family additionally call `state.readiness.*`
+/// directly for setup (driving the gate to a target state) or for
+/// secondary post-condition assertions (e.g.
+/// `ready_endpoint_partial_start_returns_503` calls
+/// `try_mark_ready_on_startup` after the dispatch to prove the
+/// gate stayed in NotReady, not Shutdown). The PRIMARY readiness
+/// assertion in every `ready_endpoint_*` test is the public
+/// `route_request` response (status code + body bytes); helper
+/// calls supplement that, they do not replace it.
 ///
 /// Routes that Go's mixed-client tooling can scrape but Rust does
 /// NOT serve today: `GET /health` (rich operator snapshot at
@@ -5985,7 +6006,7 @@ mod tests {
     /// Proof assertion: byte-equality on body + content_type +
     /// extra_headers for each of the three response classes.
     #[test]
-    fn ready_response_body_byte_pinned_against_go_format() {
+    fn ready_response_body_byte_pinned_rust_wire_format() {
         let (state, dir) = build_state(true);
         // 200 path requires Ready; stamp it directly without going
         // through start_devnet_rpc_server (no listener needed for a
