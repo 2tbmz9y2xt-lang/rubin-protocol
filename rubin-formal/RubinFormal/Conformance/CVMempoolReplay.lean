@@ -3,10 +3,13 @@ import RubinFormal.Conformance.CVDaFeeFloorReplay
 
 namespace RubinFormal.Conformance
 
--- CV-MEMPOOL bounded pass intentionally uses the existing da_fee_floor_policy
--- replay surface. Capacity/source vectors require a later replay op.
+-- CV-MEMPOOL vectors share the DA/rolling-floor arithmetic replay here.
+-- `mempool_relay_metadata_policy` rows additionally prove the actual
+-- Go/Rust relay metadata entrypoints in the executable conformance runner;
+-- capacity/source vectors still require a later replay op.
 def cvMempoolToDaFeeFloorVector (v : CVMempoolVector) : CVDaFeeFloorVector := {
   id := v.id,
+  op := v.op,
   txHex := v.txHex,
   expectOk := v.expectOk,
   expectErr := v.expectErr,

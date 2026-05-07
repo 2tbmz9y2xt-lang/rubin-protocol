@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 type Request struct {
@@ -623,6 +624,12 @@ type Response struct {
 	AdmitClass         string         `json:"admit_class,omitempty"`
 	DominantFloor      string         `json:"dominant_floor,omitempty"`
 	RejectReason       string         `json:"reject_reason,omitempty"`
+	PolicyEntrypoint   string         `json:"policy_entrypoint,omitempty"`
+	MutationChecked    bool           `json:"mutation_checked,omitempty"`
+	Mutated            *bool          `json:"mutated,omitempty"`
+	PoolLenBefore      *int           `json:"pool_len_before,omitempty"`
+	PoolLenAfter       *int           `json:"pool_len_after,omitempty"`
+	NoDupConflictCap   *bool          `json:"duplicate_conflict_capacity_checked,omitempty"`
 	Consumed           int            `json:"consumed,omitempty"`
 	AlreadyGenerated   uint64         `json:"already_generated,omitempty"`
 	AlreadyGeneratedN1 uint64         `json:"already_generated_n1,omitempty"`
@@ -816,6 +823,14 @@ func u64Ptr(v uint64) *uint64 {
 	return &v
 }
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
 func dominantFeeFloor(relayFeeFloor, daRequiredFee uint64) string {
 	switch {
 	case daRequiredFee > relayFeeFloor:
@@ -878,6 +893,131 @@ func feeBelowRollingFloorPolicy(fee, weight, floor uint64) bool {
 		return true
 	}
 	return fee < required
+}
+
+func relayMetadataPolicyResp(req Request) Response {
+	txBytes, err := hex.DecodeString(req.TxHex)
+	if err != nil {
+		return Response{Ok: false, Err: "bad hex"}
+	}
+	chainID := node.DevnetGenesisChainID()
+	if strings.TrimSpace(req.ChainIDHex) != "" {
+		parsedChainID, err := parseExactHex32(req.ChainIDHex)
+		if err != nil {
+			return Response{Ok: false, Err: "bad chain_id"}
+		}
+		chainID = parsedChainID
+	}
+
+	utxos, err := buildUtxoMap(req.Utxos)
+	if err != nil {
+		return Response{Ok: false, Err: err.Error()}
+	}
+	st := node.NewChainState()
+	st.Utxos = utxos
+	if req.Height > 0 {
+		st.HasTip = true
+		st.Height = req.Height - 1
+		st.TipHash[0] = 0x11
+	}
+
+	cfg := node.DefaultMempoolConfig()
+	cfg.PolicyDaSurchargePerByte = req.DASurchargePerByte
+	if req.MinDAFeeRate != nil {
+		cfg.MinDaFeeRate = *req.MinDAFeeRate
+	}
+	mp, err := node.NewMempoolWithConfig(st, nil, chainID, cfg)
+	if err != nil {
+		return Response{Ok: false, Err: err.Error()}
+	}
+	if req.CurrentMempoolMinFee != nil {
+		mp.SetCurrentMinFeeRateForTest(*req.CurrentMempoolMinFee)
+	}
+
+	beforeLen := mp.Len()
+	beforeBytes := mp.BytesUsed()
+	tx, txid, _, consumed, parseErr := consensus.ParseTx(txBytes)
+	hasCanonicalTxid := parseErr == nil && consumed == len(txBytes)
+	beforeContains := false
+	if hasCanonicalTxid {
+		beforeContains = mp.Contains(txid)
+	}
+
+	meta, relayErr := mp.RelayMetadata(txBytes)
+	afterLen := mp.Len()
+	afterBytes := mp.BytesUsed()
+	afterContains := false
+	if hasCanonicalTxid {
+		afterContains = mp.Contains(txid)
+	}
+	mutated := beforeLen != afterLen || beforeBytes != afterBytes || beforeContains != afterContains
+
+	resp := daFeeFloorPolicyResp(req)
+	resp.PolicyEntrypoint = "mempool_relay_metadata"
+	resp.MutationChecked = true
+	resp.Mutated = boolPtr(mutated)
+	resp.PoolLenBefore = intPtr(beforeLen)
+	resp.PoolLenAfter = intPtr(afterLen)
+	resp.NoDupConflictCap = boolPtr(false)
+	if parseErr != nil || consumed != len(txBytes) {
+		resp.Ok = false
+		resp.Err = string(consensus.TX_ERR_PARSE)
+		resp.Admit = false
+		resp.AdmitClass = ""
+		resp.DominantFloor = ""
+		resp.RejectReason = ""
+		return resp
+	}
+	if weight, daBytes, _, err := consensus.TxWeightAndStats(tx); err == nil {
+		resp.Weight = weight
+		resp.DaBytes = daBytes
+	}
+	resp.WireBytes = len(txBytes)
+
+	if relayErr == nil {
+		resp.Ok = true
+		resp.Admit = true
+		resp.AdmitClass = "accepted"
+		resp.RejectReason = ""
+		resp.Fee = meta.Fee
+		resp.WireBytes = meta.Size
+		return resp
+	}
+
+	var admitErr *node.TxAdmitError
+	if !errors.As(relayErr, &admitErr) {
+		return Response{Ok: false, Err: relayErr.Error()}
+	}
+	resp.Ok = true
+	resp.Admit = false
+	switch admitErr.Kind {
+	case node.TxAdmitUnavailable:
+		resp.AdmitClass = "unavailable"
+		if strings.Contains(admitErr.Message, "mempool fee below rolling minimum") {
+			resp.RejectReason = "MEMPOOL_FEE_BELOW_ROLLING_MINIMUM"
+			resp.DominantFloor = "relay"
+		}
+	case node.TxAdmitRejected:
+		resp.AdmitClass = "rejected"
+		if strings.Contains(admitErr.Message, "DA fee below Stage C floor") {
+			resp.RejectReason = "DA_FEE_BELOW_STAGE_C_FLOOR"
+			resp.DominantFloor = "da"
+		} else if strings.Contains(admitErr.Message, string(consensus.TX_ERR_PARSE)) {
+			resp.Ok = false
+			resp.Err = string(consensus.TX_ERR_PARSE)
+			resp.AdmitClass = ""
+			resp.DominantFloor = ""
+			resp.RejectReason = ""
+		} else {
+			resp.Err = admitErr.Message
+		}
+	case node.TxAdmitConflict:
+		resp.AdmitClass = "conflict"
+		resp.Err = admitErr.Message
+	default:
+		resp.Err = admitErr.Message
+	}
+	return resp
 }
 
 func daFeeFloorPolicyResp(req Request) Response {
@@ -1437,6 +1577,10 @@ func runFromStdin() {
 
 	case "da_fee_floor_policy":
 		writeResp(os.Stdout, daFeeFloorPolicyResp(req))
+		return
+
+	case "mempool_relay_metadata_policy":
+		writeResp(os.Stdout, relayMetadataPolicyResp(req))
 		return
 
 	case "rotation_create_suite_check":

@@ -490,6 +490,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "rubin-consensus",
+ "rubin-node",
  "serde",
  "serde_json",
  "sha2",

@@ -11,6 +11,23 @@ Policy:
 
 ---
 
+## 2026-05-07 — CV-MEMPOOL relay metadata executable vectors (RUB-54)
+
+Причина:
+- добавить bounded `CV-MEMPOOL-RELAY-METADATA` slice после RUB-197;
+- доказать actual Go/Rust relay metadata replay path, а не только static fee-floor arithmetic: accepted read-only metadata, rolling-floor `Unavailable`, DA-floor `Rejected`, malformed parse-before-floor;
+- явно зафиксировать, что relay metadata vectors не обещают duplicate/conflict/capacity behavior.
+
+Инструменты:
+- ручное добавление `mempool_relay_metadata_policy` rows в `CV-MEMPOOL.json`;
+- Go/Rust replay adapter wiring только для conformance CLI;
+- regeneration of `conformance/MATRIX.md` and Lean CV-MEMPOOL companion.
+
+Изменённые fixtures:
+- `CV-MEMPOOL.json`
+
+Не затронуто: Go/Rust node runtime policy behavior, capacity/source/fast-reject vectors, protocol artifacts.
+
 ## 2026-05-07 — Bounded CV-MEMPOOL policy classification vectors (RUB-54 first pass)
 
 Причина:
