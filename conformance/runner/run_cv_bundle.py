@@ -2240,37 +2240,48 @@ def validate_vector(
                 problems.append(
                     f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
                 )
-        if "expect_policy_entrypoint" in v and policy_str(go_resp, "policy_entrypoint", "", "go") != str(v["expect_policy_entrypoint"]):
-            problems.append(f"{gate}/{vid}: expect_policy_entrypoint mismatch")
+        if "expect_policy_entrypoint" in v:
+            expected = str(v["expect_policy_entrypoint"])
+            for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                if policy_str(resp, "policy_entrypoint", "", side) != expected:
+                    problems.append(f"{gate}/{vid}: {side}.expect_policy_entrypoint mismatch")
         if "expect_duplicate_conflict_capacity_checked" in v:
             key = "duplicate_conflict_capacity_checked"
-            if not policy_has(go_resp, key):
-                problems.append(f"{gate}/{vid}: missing {key}")
-            elif policy_bool(go_resp, key, False) != bool(v["expect_duplicate_conflict_capacity_checked"]):
-                problems.append(f"{gate}/{vid}: expect_duplicate_conflict_capacity_checked mismatch")
+            expected = bool(v["expect_duplicate_conflict_capacity_checked"])
+            for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                if not policy_has(resp, key):
+                    problems.append(f"{gate}/{vid}: missing {side}.{key}")
+                elif policy_bool(resp, key, False) != expected:
+                    problems.append(f"{gate}/{vid}: {side}.expect_duplicate_conflict_capacity_checked mismatch")
         if "expect_no_mutation" in v:
-            if not policy_bool(go_resp, "mutation_checked", False):
-                problems.append(f"{gate}/{vid}: mutation_checked missing/false")
-            if not policy_has(go_resp, "mutated"):
-                problems.append(f"{gate}/{vid}: missing mutated")
-            elif policy_bool(go_resp, "mutated", True) != (not bool(v["expect_no_mutation"])):
-                problems.append(f"{gate}/{vid}: expect_no_mutation mismatch")
+            expected_mutated = not bool(v["expect_no_mutation"])
+            for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                if not policy_bool(resp, "mutation_checked", False):
+                    problems.append(f"{gate}/{vid}: {side}.mutation_checked missing/false")
+                if not policy_has(resp, "mutated"):
+                    problems.append(f"{gate}/{vid}: missing {side}.mutated")
+                elif policy_bool(resp, "mutated", True) != expected_mutated:
+                    problems.append(f"{gate}/{vid}: {side}.expect_no_mutation mismatch")
         for key in bool_fields:
             expect_key = f"expect_{key}"
             if expect_key in v:
-                if not policy_has(go_resp, key):
-                    problems.append(f"{gate}/{vid}: missing {key} for {expect_key}")
-                    continue
-                if policy_bool(go_resp, key, False) != bool(v[expect_key]):
-                    problems.append(f"{gate}/{vid}: {expect_key} mismatch")
+                expected = bool(v[expect_key])
+                for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                    if not policy_has(resp, key):
+                        problems.append(f"{gate}/{vid}: missing {side}.{key} for {expect_key}")
+                        continue
+                    if policy_bool(resp, key, False) != expected:
+                        problems.append(f"{gate}/{vid}: {side}.{expect_key} mismatch")
         for key in int_fields:
             expect_key = f"expect_{key}"
             if expect_key in v:
-                if not policy_has(go_resp, key):
-                    problems.append(f"{gate}/{vid}: missing {key} for {expect_key}")
-                    continue
-                if policy_int(go_resp, key, "go") != int(v[expect_key]):
-                    problems.append(f"{gate}/{vid}: {expect_key} mismatch")
+                expected = int(v[expect_key])
+                for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                    if not policy_has(resp, key):
+                        problems.append(f"{gate}/{vid}: missing {side}.{key} for {expect_key}")
+                        continue
+                    if policy_int(resp, key, side) != expected:
+                        problems.append(f"{gate}/{vid}: {side}.{expect_key} mismatch")
         if not policy_bool(go_resp, "ok", False) or not policy_bool(rust_resp, "ok", False):
             if "expect_err" in v and policy_str(go_resp, "err", "", "go") != str(v["expect_err"]):
                 problems.append(f"{gate}/{vid}: expect_err mismatch")
