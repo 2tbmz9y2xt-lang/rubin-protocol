@@ -752,7 +752,7 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
 ///     (post-`try_mark_ready_on_startup`, pre-`mark_shutdown`)
 ///   - 503 `{"ready":false}` when the gate is in `NotReady`
 ///     (pre-startup) or `Shutdown` (post-shutdown) state
-///   - 405 `{accepted: false, error: "GET required"}` with
+///   - 405 `{"accepted":false,"error":"GET required"}` with
 ///     `Allow: GET` header on non-GET methods, per RFC 9110 §15.5.6
 ///
 /// Mirrors Go's `handleReady` at
@@ -805,7 +805,7 @@ fn handle_ready(state: &DevnetRPCState, method: &str) -> HttpResponse {
 ///   - 200 `{count: usize, peers: [PeerEntry...]}` sorted by `addr`
 ///     ascending, on a successful GET (any peer count, including
 ///     zero — empty peer set is `{"count":0,"peers":[]}`)
-///   - 405 `{accepted: false, error: "GET required"}` with
+///   - 405 `{"accepted":false,"error":"GET required"}` with
 ///     `Allow: GET` header on non-GET methods, per RFC 9110 §15.5.6
 ///
 /// Mirrors Go's `handlePeers` at `clients/go/cmd/rubin-node/http_rpc.go:1584-1621`
@@ -5930,7 +5930,7 @@ mod tests {
     /// Proof assertion: drive `/ready` through `route_request` (the
     /// production HTTP dispatch entry the accept loop calls) WITHOUT
     /// calling `start_devnet_rpc_server`. The asserts below pin the
-    /// public-path output (status 503 + body `{"ready": false}`) and
+    /// public-path output (status 503 + body `{"ready":false}`) and
     /// the post-condition that the gate remains eligible for the
     /// boot-time stamp (proof anchor: `try_mark_ready_on_startup`
     /// returns true after the dispatch, which only succeeds from
