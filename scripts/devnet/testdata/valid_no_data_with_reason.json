@@ -1,0 +1,7 @@
+{
+  "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+  "evidence_type": "no_data",
+  "scenario": "rust_node_binary_unavailable_advisory",
+  "verdict": "NO_DATA",
+  "no_data_reason": "Rust node binary not built in this lane; advisory no_data per soak gate contract"
+}

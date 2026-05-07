@@ -1,0 +1,54 @@
+{
+  "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+  "evidence_type": "mixed_client_process_soak",
+  "scenario": "helper_only_artifact_misclaiming_mixed_client",
+  "verdict": "PASS",
+  "participants": [
+    {
+      "name": "node-a",
+      "implementation": "go",
+      "node_role": "helper",
+      "process": {
+        "pid": 99999,
+        "command": "go test ./node -run TestInteropHelper",
+        "started_at": "2026-05-07T22:30:00Z"
+      },
+      "rpc": "127.0.0.1:18545",
+      "p2p": "127.0.0.1:18546",
+      "checkpoint_height": 0,
+      "tip_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "peer_count": 0
+    },
+    {
+      "name": "node-b",
+      "implementation": "rust",
+      "node_role": "helper",
+      "process": {
+        "pid": 99998,
+        "command": "cargo test -p rubin-node --test interop_helper",
+        "started_at": "2026-05-07T22:30:01Z"
+      },
+      "rpc": "127.0.0.1:18547",
+      "p2p": "127.0.0.1:18548",
+      "checkpoint_height": 0,
+      "tip_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "peer_count": 0
+    }
+  ],
+  "topology": {
+    "type": "pair",
+    "edges": [
+      ["node-a", "node-b"]
+    ]
+  },
+  "tx_path": {
+    "submitted_at": "node-a",
+    "observed_at": ["node-b"],
+    "tx_id": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "metrics": {
+    "duration_seconds": 1,
+    "blocks_observed": 0,
+    "txs_observed": 0
+  }
+}

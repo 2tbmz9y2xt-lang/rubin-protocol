@@ -1,0 +1,54 @@
+{
+  "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+  "evidence_type": "mixed_client_process_soak",
+  "scenario": "two_go_nodes_misclaiming_mixed_client",
+  "verdict": "PASS",
+  "participants": [
+    {
+      "name": "node-a",
+      "implementation": "go",
+      "node_role": "real_node_process",
+      "process": {
+        "pid": 12345,
+        "command": "/tmp/rubin-mixed-evidence/rubin-node-go --rpc 127.0.0.1:18545 --p2p 127.0.0.1:18546 --datadir /tmp/rubin-mixed-evidence/node-a",
+        "started_at": "2026-05-07T22:30:00Z"
+      },
+      "rpc": "127.0.0.1:18545",
+      "p2p": "127.0.0.1:18546",
+      "checkpoint_height": 102,
+      "tip_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "peer_count": 1
+    },
+    {
+      "name": "node-b",
+      "implementation": "go",
+      "node_role": "real_node_process",
+      "process": {
+        "pid": 12346,
+        "command": "/tmp/rubin-mixed-evidence/rubin-node-go --rpc 127.0.0.1:18547 --p2p 127.0.0.1:18548 --datadir /tmp/rubin-mixed-evidence/node-b",
+        "started_at": "2026-05-07T22:30:01Z"
+      },
+      "rpc": "127.0.0.1:18547",
+      "p2p": "127.0.0.1:18548",
+      "checkpoint_height": 102,
+      "tip_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "peer_count": 1
+    }
+  ],
+  "topology": {
+    "type": "pair",
+    "edges": [
+      ["node-a", "node-b"]
+    ]
+  },
+  "tx_path": {
+    "submitted_at": "node-a",
+    "observed_at": ["node-b"],
+    "tx_id": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "metrics": {
+    "duration_seconds": 30,
+    "blocks_observed": 2,
+    "txs_observed": 1
+  }
+}
