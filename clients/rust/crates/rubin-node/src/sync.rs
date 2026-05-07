@@ -86,21 +86,46 @@ pub struct PVTelemetrySnapshot {
 
 impl PVTelemetrySnapshot {
     /// RUB-12 / GitHub #1156: Prometheus exposition for the PV
-    /// telemetry snapshot, byte-aligned to the upstream Go emission
+    /// telemetry snapshot, format-aligned to the upstream Go emission
     /// at `clients/go/node/pv_telemetry.go::PVTelemetrySnapshot.PrometheusLines`
     /// (L246-291). Ten distinct HELP/TYPE metric blocks expanding to
     /// thirteen Prometheus time series (the `shadow_mismatches_total`
     /// block carries four `type=` buckets), in the same order Go
-    /// emits. HELP and TYPE strings match the upstream exactly so
-    /// mixed-client Prometheus scrapers see byte-stable output
-    /// regardless of which runtime served `/metrics`. The two
-    /// latency fields `validate_count` / `commit_count` populate the
-    /// average gauges only — they are NOT emitted as standalone
-    /// counters because the upstream Go exposition does not emit
-    /// them either. Renaming the latency gauges to
-    /// `*_latency_avg_ns` (was `*_avg_ns`) closes a metric-NAME
-    /// contract break — Prometheus queries by exact name, and the
-    /// upstream uses the longer form.
+    /// emits.
+    ///
+    /// Scope of the parity claim is exposition format only: HELP
+    /// strings, TYPE keywords, metric NAMEs, label shapes, line
+    /// order, and value-token format are byte-aligned with Go. The
+    /// emitted VALUES are NOT byte-stable across runtimes — see the
+    /// disclosure below.
+    ///
+    /// Rust-side tracker disclosure (operators reading both clients):
+    /// the internal `PVTelemetry` struct currently zero-stubs four
+    /// snapshot fields whose Prometheus lines therefore render as
+    /// `... 0` regardless of node activity:
+    /// - `worker_tasks_total`: Go production wires
+    ///   `RecordWorkerTasks(parSummary.SigTaskCount)` at
+    ///   `clients/go/node/sync.go:675`; Rust has no `record_worker_tasks`
+    ///   call site, so this counter diverges from Go under load.
+    /// - `sig_total`, `sig_cache_hits`, `mismatch_witness`: neither
+    ///   client wires these in production today, so both report `0`;
+    ///   when either side wires its tracker, this disclosure must be
+    ///   re-checked.
+    /// Wiring the missing trackers is out of this slice's scope per
+    /// `class_change_stop_rule` (single_contract_delta is exposition
+    /// alignment, not tracker plumbing).
+    ///
+    /// The two latency fields `validate_count` / `commit_count` populate
+    /// the average gauges only — they are NOT emitted as standalone
+    /// counters because the upstream Go exposition does not emit them
+    /// either. Renaming the latency gauges to `*_latency_avg_ns` (was
+    /// `*_avg_ns`) closes a metric-NAME contract break — Prometheus
+    /// queries by exact name, and the upstream uses the longer form.
+    /// (Pre-existing helper `averaged_latency_ns(...)` applies a
+    /// `.max(1)` floor when count > 0; Go uses raw integer division.
+    /// For sub-1-ns averages this would emit `1` on Rust vs `0` on Go.
+    /// Pre-existing divergence not introduced by this slice; flagged
+    /// here so the disclosure stays honest.)
     pub fn prometheus_lines(&self) -> Vec<String> {
         vec![
             "# HELP rubin_pv_mode Current parallel validation mode (0=off, 1=shadow, 2=on)."
@@ -1524,6 +1549,14 @@ mod tests {
     /// `rubin_pv_commit_latency_avg_ns` gauges are confirmed present
     /// with the longer upstream NAME (was `*_avg_ns` only, a metric-
     /// NAME contract break vs Go).
+    ///
+    /// Proof scope: this is a renderer-format proof (the helper
+    /// formats a synthetic snapshot correctly), NOT a behavioral
+    /// proof that the Rust runtime emits values matching Go under
+    /// load. See `prometheus_lines` doc for the unwired-tracker
+    /// disclosure (`worker_tasks_total`, `sig_total`,
+    /// `sig_cache_hits`, `mismatch_witness` zero-stub in the Rust
+    /// `PVTelemetry` tracker today).
     #[test]
     fn pv_telemetry_prometheus_lines_match_go_exposition_byte_for_byte() {
         let snapshot = super::PVTelemetrySnapshot {
@@ -1603,6 +1636,12 @@ mod tests {
     /// `commit_count` (which used to populate those counters), the
     /// joined exposition contains neither `rubin_pv_validate_runs_total`
     /// nor `rubin_pv_commit_runs_total` as a substring.
+    ///
+    /// Proof scope: renderer-format proof on a synthetic snapshot,
+    /// not a runtime-tracker proof. See `prometheus_lines` doc for
+    /// the unwired-tracker disclosure (`worker_tasks_total`,
+    /// `sig_total`, `sig_cache_hits`, `mismatch_witness` zero-stub
+    /// in the Rust `PVTelemetry` tracker today).
     #[test]
     fn pv_telemetry_prometheus_lines_dropped_rust_only_counters_absent() {
         let snapshot = super::PVTelemetrySnapshot {

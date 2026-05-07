@@ -4526,6 +4526,21 @@ mod tests {
         ] {
             assert!(body.contains(name), "missing metric {name}");
         }
+        // RUB-12 / GitHub #1156: production-path absence assertion for
+        // the dropped Rust-only counters. The unit test in
+        // `clients/rust/crates/rubin-node/src/sync.rs::pv_telemetry_prometheus_lines_dropped_rust_only_counters_absent`
+        // pins absence on a synthetic snapshot; this loop pins absence
+        // through the production render path so a future regression
+        // that reintroduces the dropped names anywhere downstream of
+        // `prometheus_lines()` (for example via a new `lines.push(...)`
+        // in `render_prometheus_metrics`) cannot slip past unit tests
+        // alone.
+        for dropped in ["rubin_pv_validate_runs_total", "rubin_pv_commit_runs_total"] {
+            assert!(
+                !body.contains(dropped),
+                "dropped Rust-only counter {dropped} reappeared in production rendering; body=\n{body}"
+            );
+        }
         assert!(body.contains(r#"rubin_node_rpc_requests_total{route="/get_tip",status="200"} 1"#));
         assert!(body.contains(r#"rubin_node_submit_tx_total{result="rejected"} 1"#));
         assert!(body.contains(r#"rubin_pv_mode{mode="off"} 1"#));
