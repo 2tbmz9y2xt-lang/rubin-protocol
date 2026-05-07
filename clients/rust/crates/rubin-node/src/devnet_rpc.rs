@@ -286,6 +286,43 @@ struct ReadyResponse {
     ready: bool,
 }
 
+/// RUB-14 / GitHub #1159: bounded JSON projection of a single
+/// `PeerState` for the `/peers` snapshot. Mirrors Go's `peerEntry`
+/// struct in `clients/go/cmd/rubin-node/http_rpc.go:418-428` field-
+/// for-field at the wire level — same JSON keys, same types
+/// (Rust's `i32`/`u32`/`u64` map to Go's `int`/`uint32`/`uint64`
+/// numeric tokens; serde encodes them identically). Five fields
+/// live on the embedded `remote_version: VersionPayloadV1`
+/// (`protocol_version`, `best_height`, `tx_relay`,
+/// `pruned_below_height`, `da_mempool_size`); the other four come
+/// from the top-level `PeerState` (`addr`, `handshake_complete`,
+/// `ban_score`, `last_error`).
+#[derive(Serialize)]
+struct PeerEntry {
+    addr: String,
+    handshake_complete: bool,
+    ban_score: i32,
+    last_error: String,
+    protocol_version: u32,
+    best_height: u64,
+    tx_relay: bool,
+    pruned_below_height: u64,
+    da_mempool_size: u32,
+}
+
+/// RUB-14 / GitHub #1159: bounded payload served by GET `/peers`.
+/// Mirrors Go's `peersResponse` in `clients/go/cmd/rubin-node/http_rpc.go:430-437`.
+/// `count` equals `peers.len()` by construction in `handle_peers`;
+/// `peers` is sorted by `addr` ascending so two consecutive scrapes
+/// are byte-stable across `HashMap` iteration randomization. Empty
+/// initialized peer set serializes to `{"count":0,"peers":[]}`
+/// (NOT `null` — `Vec::new()` produces an empty JSON array).
+#[derive(Serialize)]
+struct PeersResponse {
+    count: usize,
+    peers: Vec<PeerEntry>,
+}
+
 /// True when the host in `host:port` is loopback-only (safe for devnet live mining RPC).
 /// Requires a non-empty, valid `u16` port (rejects `127.0.0.1:` and similar).
 pub fn rpc_bind_host_is_loopback(bind_addr: &str) -> bool {
@@ -590,6 +627,7 @@ fn route_request(state: &DevnetRPCState, req: HttpRequest) -> HttpResponse {
     let (path, query) = split_target(&req.target);
     match path {
         "/ready" => handle_ready(state, &req.method),
+        "/peers" => handle_peers(state, &req.method),
         "/get_tip" => handle_get_tip(state, &req.method),
         "/get_block" => handle_get_block(state, &req.method, &query),
         "/submit_tx" => handle_submit_tx(state, &req.method, &req.body),
@@ -663,6 +701,78 @@ fn handle_ready(state: &DevnetRPCState, method: &str) -> HttpResponse {
     let ready = state.readiness.is_ready();
     let status: u16 = if ready { 200 } else { 503 };
     json_response(state, ROUTE, status, &ReadyResponse { ready })
+}
+
+/// RUB-14 / GitHub #1159: GET `/peers` — deterministic snapshot of
+/// the live `PeerManager` projected to a bounded JSON shape. Returns:
+///   - 200 `{count: usize, peers: [PeerEntry...]}` sorted by `addr`
+///     ascending, on a successful GET (any peer count, including
+///     zero — empty peer set is `{"count":0,"peers":[]}`)
+///   - 405 `{accepted: false, error: "GET required"}` with
+///     `Allow: GET` header on non-GET methods, per RFC 9110 §15.5.6
+///
+/// Mirrors Go's `handlePeers` at `clients/go/cmd/rubin-node/http_rpc.go:1584-1621`
+/// at the JSON envelope, sort order, and status grammar level. Read-
+/// only by construction: `PeerManager::snapshot()` returns owned
+/// `Vec<PeerState>` (cloned values, not references), so the
+/// projection cannot mutate runtime peer state.
+///
+/// Documented divergence from Go's 503 path (out of RUB-14 narrow
+/// scope per `class_change_stop_rule`): Go's handler emits 503
+/// `{accepted:false,error:"peer manager unavailable"}` when
+/// `state.peerManager == nil`. Rust's `DevnetRPCState.peer_manager`
+/// is `Arc<PeerManager>` and is structurally non-null — there is no
+/// reachable nil path through the public construction surface. The
+/// closest Rust analogue would be a poisoned `RwLock` inside
+/// `PeerManager`, but `PeerManager::snapshot()`
+/// (`clients/rust/crates/rubin-node/src/p2p_runtime.rs:235-240`)
+/// already absorbs poison as `Vec::new()`, so an unhealthy lock
+/// surfaces here as 200 `{count:0,peers:[]}` (operationally
+/// indistinguishable from a real zero-peer startup at this layer).
+/// Lifting this divergence requires extending `PeerManager`'s
+/// public API to surface lock health, an edit that touches
+/// `p2p_runtime.rs` and is excluded from RUB-14's narrowed
+/// `devnet_rpc.rs`-only scope; deferred to a follow-up issue if
+/// mixed-client orchestrators ever need to distinguish the two
+/// cases (RUB-12 owns later operator surface elaboration).
+///
+/// Sort discipline: stable sort on `addr` (`String::cmp`, byte-wise
+/// lexicographic) — same total order Go's `sort.Slice` produces on
+/// `string` comparison. Two scrapes against an unchanging peer set
+/// are byte-stable.
+fn handle_peers(state: &DevnetRPCState, method: &str) -> HttpResponse {
+    const ROUTE: &str = "/peers";
+    if method != "GET" {
+        return json_response(
+            state,
+            ROUTE,
+            405,
+            &SubmitTxResponse {
+                accepted: false,
+                txid: None,
+                error: Some("GET required".to_string()),
+            },
+        )
+        .with_header("Allow", "GET");
+    }
+    let mut snapshot = state.peer_manager.snapshot();
+    snapshot.sort_by(|a, b| a.addr.cmp(&b.addr));
+    let peers: Vec<PeerEntry> = snapshot
+        .into_iter()
+        .map(|p| PeerEntry {
+            addr: p.addr,
+            handshake_complete: p.handshake_complete,
+            ban_score: p.ban_score,
+            last_error: p.last_error,
+            protocol_version: p.remote_version.protocol_version,
+            best_height: p.remote_version.best_height,
+            tx_relay: p.remote_version.tx_relay,
+            pruned_below_height: p.remote_version.pruned_below_height,
+            da_mempool_size: p.remote_version.da_mempool_size,
+        })
+        .collect();
+    let count = peers.len();
+    json_response(state, ROUTE, 200, &PeersResponse { count, peers })
 }
 
 fn handle_get_tip(state: &DevnetRPCState, method: &str) -> HttpResponse {
@@ -2322,6 +2432,7 @@ mod tests {
     use serde_json::Value;
 
     use crate::io_utils::unique_temp_path;
+    use crate::p2p_runtime::{PeerState, VersionPayloadV1};
     use crate::test_helpers::signed_conflicting_p2pk_state_and_txs;
     use crate::txpool::TxSource;
     use crate::{
@@ -5575,6 +5686,276 @@ mod tests {
             ReadyState::Ready,
             ReadyState::Shutdown,
         ];
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-14 / GitHub #1159: helper to build a `PeerState` with
+    /// just the fields each test cares about; everything else
+    /// defaults via `PeerState::default()`. Construction stays in-
+    /// test (no production helper added) so the test surface
+    /// doesn't grow the public API of `p2p_runtime`.
+    #[allow(clippy::too_many_arguments)]
+    fn make_peer(
+        addr: &str,
+        handshake_complete: bool,
+        ban_score: i32,
+        last_error: &str,
+        protocol_version: u32,
+        best_height: u64,
+        tx_relay: bool,
+        pruned_below_height: u64,
+        da_mempool_size: u32,
+    ) -> PeerState {
+        PeerState {
+            addr: addr.to_string(),
+            last_error: last_error.to_string(),
+            remote_version: VersionPayloadV1 {
+                protocol_version,
+                best_height,
+                tx_relay,
+                pruned_below_height,
+                da_mempool_size,
+                ..VersionPayloadV1::default()
+            },
+            ban_score,
+            handshake_complete,
+            ..PeerState::default()
+        }
+    }
+
+    /// RUB-14 / GitHub #1159: non-GET method on `/peers` returns 405
+    /// with the JSON-error envelope shared by `handle_submit_tx` /
+    /// `handle_get_tip` / `handle_ready` (`{accepted:false,error:"GET required"}`)
+    /// AND the RFC 9110 §15.5.6 `Allow: GET` header. Mirrors Go's
+    /// `handlePeers` 405 branch at `clients/go/cmd/rubin-node/http_rpc.go:1586-1593`.
+    ///
+    /// Proof assertion: `assert_eq!(response.status, 405)` and
+    /// `assert!(response.extra_headers.iter().any(|(n,v)| *n == "Allow" && v == "GET"))`
+    /// pin both the status code and the Allow-header parity.
+    #[test]
+    fn peers_endpoint_returns_405_with_allow_header_on_post() {
+        let (state, dir) = build_state(false);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/peers".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 405);
+        let body: Value = serde_json::from_slice(&response.body).expect("peers 405 json");
+        assert_eq!(body["accepted"], serde_json::json!(false));
+        assert_eq!(body["error"], serde_json::json!("GET required"));
+        assert!(
+            response
+                .extra_headers
+                .iter()
+                .any(|(name, value)| *name == "Allow" && value == "GET"),
+            "405 response must include Allow: GET header (RFC 9110 §15.5.6); \
+             got headers: {:?}",
+            response.extra_headers
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-14 / GitHub #1159: empty PeerManager returns 200 +
+    /// `{"count":0,"peers":[]}` — NOT `null`. Mirrors Go's empty-
+    /// initialized peer-set behavior at
+    /// `clients/go/cmd/rubin-node/http_rpc.go:1601-1620`: the slice
+    /// allocates with `make([]peerEntry, 0, len(snapshot))` so the
+    /// JSON is `[]` not `null`. Rust's `Vec::new()` serialized via
+    /// serde produces the same `[]` token.
+    ///
+    /// Proof assertion: status 200, `body["count"] == 0`,
+    /// `body["peers"]` is a JSON array with length 0.
+    #[test]
+    fn peers_endpoint_empty_returns_200_with_count_zero_and_empty_array() {
+        let (state, dir) = build_state(false);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/peers".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).expect("peers 200 json");
+        assert_eq!(body["count"], serde_json::json!(0));
+        let peers = body["peers"].as_array().expect("peers must be JSON array");
+        assert_eq!(
+            peers.len(),
+            0,
+            "empty peer set must serialize as [] not null"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-14 / GitHub #1159: populated PeerManager returns peers
+    /// sorted by `addr` ascending (lexicographic byte order, matching
+    /// Go's `sort.Slice` on `string`). Two consecutive scrapes must
+    /// be byte-stable across `HashMap` iteration randomization.
+    /// Mirrors Go's sort discipline at
+    /// `clients/go/cmd/rubin-node/http_rpc.go:1602`.
+    ///
+    /// Proof assertion: insert peers in non-sorted order
+    /// (`192.168.1.10`, `10.0.0.5`, `203.0.113.7`); the response's
+    /// `peers[*].addr` sequence equals the lexicographic-ascending
+    /// permutation (`10.0.0.5`, `192.168.1.10`, `203.0.113.7`); and
+    /// `body["count"]` equals `peers.len()`. Addresses use port `:0`
+    /// because the test exercises only the in-memory `PeerManager`
+    /// projection (no TCP bind); the sort key is the full `addr`
+    /// string, so the IP octets carry the order regardless of port.
+    #[test]
+    fn peers_endpoint_returns_count_and_peers_sorted_by_addr_ascending() {
+        let (state, dir) = build_state(false);
+        for addr in ["192.168.1.10:0", "10.0.0.5:0", "203.0.113.7:0"] {
+            state
+                .peer_manager
+                .add_peer(make_peer(addr, true, 0, "", 1, 0, true, 0, 0))
+                .expect("add_peer");
+        }
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/peers".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).expect("peers 200 json");
+        assert_eq!(body["count"], serde_json::json!(3));
+        let peers = body["peers"].as_array().expect("peers must be JSON array");
+        let addrs: Vec<&str> = peers.iter().map(|p| p["addr"].as_str().unwrap()).collect();
+        assert_eq!(
+            addrs,
+            vec!["10.0.0.5:0", "192.168.1.10:0", "203.0.113.7:0"],
+            "peers must be sorted by addr ascending (lexicographic byte order)"
+        );
+        assert_eq!(
+            peers.len(),
+            body["count"].as_u64().expect("count u64") as usize,
+            "count must equal peers.len() by construction"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-14 / GitHub #1159: every JSON key from Go's `peerEntry`
+    /// struct (`clients/go/cmd/rubin-node/http_rpc.go:418-428`) is
+    /// present and carries the value sourced from the corresponding
+    /// `PeerState` / `PeerState.remote_version` field.
+    ///
+    /// Proof assertion: insert one peer with distinct non-default
+    /// values for each of the 9 fields and verify each JSON key
+    /// reflects the expected value. Pins the field mapping so a
+    /// future refactor of `PeerState` / `VersionPayloadV1` cannot
+    /// silently drop a `/peers` field.
+    #[test]
+    fn peers_endpoint_includes_all_peer_entry_fields_from_state_and_remote_version() {
+        let (state, dir) = build_state(false);
+        state
+            .peer_manager
+            .add_peer(make_peer(
+                "127.0.0.1:0",
+                true,
+                7,
+                "stale handshake",
+                42,
+                100_500,
+                false,
+                90_000,
+                12,
+            ))
+            .expect("add_peer");
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/peers".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).expect("peers 200 json");
+        let entry = &body["peers"][0];
+        assert_eq!(entry["addr"], serde_json::json!("127.0.0.1:0"));
+        assert_eq!(entry["handshake_complete"], serde_json::json!(true));
+        assert_eq!(entry["ban_score"], serde_json::json!(7));
+        assert_eq!(entry["last_error"], serde_json::json!("stale handshake"));
+        assert_eq!(entry["protocol_version"], serde_json::json!(42));
+        assert_eq!(entry["best_height"], serde_json::json!(100_500));
+        assert_eq!(entry["tx_relay"], serde_json::json!(false));
+        assert_eq!(entry["pruned_below_height"], serde_json::json!(90_000));
+        assert_eq!(entry["da_mempool_size"], serde_json::json!(12));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-14 / GitHub #1159: end-to-end TCP roundtrip through
+    /// `handle_connection` exercising the full public path
+    /// (parser -> dispatcher -> `handle_peers` -> wire response).
+    /// Complements the route-level tests above by proving the
+    /// envelope shape and sort lands in the actual HTTP wire bytes
+    /// downstream HTTP clients parse.
+    ///
+    /// Proof assertion: raw response head starts with `HTTP/1.1 200`;
+    /// the body parses as JSON with `count == 2` and `peers[*].addr`
+    /// in sorted order.
+    #[test]
+    fn peers_endpoint_end_to_end_tcp_returns_sorted_snapshot() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (state, dir) = build_state(false);
+        state
+            .peer_manager
+            .add_peer(make_peer("198.51.100.4:0", true, 0, "", 1, 1, true, 0, 0))
+            .expect("add_peer");
+        state
+            .peer_manager
+            .add_peer(make_peer("10.0.0.1:0", false, 0, "", 1, 0, true, 0, 0))
+            .expect("add_peer");
+        let raw = b"GET /peers HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".to_vec();
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            stream.write_all(&raw).expect("write");
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("shutdown write");
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf);
+            buf
+        });
+        let (server_stream, _) = listener.accept().expect("accept");
+        let _ = handle_connection(server_stream, &state);
+        let response_bytes = client.join().expect("join client");
+        let head_end = response_bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response head delimiter");
+        let head_text =
+            std::str::from_utf8(&response_bytes[..head_end]).expect("response head utf8");
+        assert!(
+            head_text.starts_with("HTTP/1.1 200 "),
+            "expected 200 status line; got: {head_text}"
+        );
+        let body = &response_bytes[head_end + 4..];
+        let body_json: Value = serde_json::from_slice(body).expect("body json");
+        assert_eq!(body_json["count"], serde_json::json!(2));
+        let addrs: Vec<&str> = body_json["peers"]
+            .as_array()
+            .expect("peers array")
+            .iter()
+            .map(|p| p["addr"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            addrs,
+            vec!["10.0.0.1:0", "198.51.100.4:0"],
+            "wire-level peers list must be sorted by addr ascending"
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 }
