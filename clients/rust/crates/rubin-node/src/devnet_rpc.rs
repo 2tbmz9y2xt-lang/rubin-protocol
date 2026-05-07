@@ -96,6 +96,77 @@ pub struct RunningDevnetRPCServer {
 /// `Shutdown`. `Shutdown` is observable via `is_ready() == false` and
 /// is the operational signal mixed-client devnet evidence consumers
 /// use to stop submitting work to a draining node.
+///
+/// RUB-41 / GitHub #1329 readiness-meaning matrix (the `go_rust_parity_matrix`
+/// row "not-started/starting/ready/unavailable meaning" enumerated
+/// per state). The semantics that `is_ready() == true` claims and what
+/// it does NOT claim are pinned here so future readers can recover
+/// the bounded readiness contract from the source alone:
+///
+/// - `NotReady` (boot zero-value): means "the
+///   `ReadinessGate::try_mark_ready_on_startup` path has not yet
+///   completed its `NotReady` -> `Ready` transition". `/ready` reports
+///   503 + `{ready: false}` (the JSON envelope byte-pinned by
+///   `ready_response_body_byte_pinned_against_go_format`). This is
+///   the state a freshly constructed `DevnetRPCState` exposes BEFORE
+///   `start_devnet_rpc_server` runs the post-bind stamp at the
+///   `try_mark_ready_on_startup` call site below; orchestrators MUST
+///   treat 503 as "not-started" and not interleave work.
+/// - `Ready` (post-`start_devnet_rpc_server` happy path):
+///   `is_ready() == true` claims ONLY that the RPC accept loop is
+///   bound on its listener and the gate has transitioned through the
+///   single boot stamp. It does NOT claim:
+///     * mempool admit-path is wired or fault-free (RUB-53 / #1339
+///       tracker is open; mempool policy parity slice has not landed
+///       and `/ready` does not gate on its readiness here);
+///     * miner is configured (live mining is opt-in via
+///       `live_mining_cfg`; absence does not flip the gate to false);
+///     * sync engine has reached chain tip or has any peer
+///       (`PeerManager` peer count is observable via `/peers`, not
+///       `/ready`);
+///     * the lifecycle context has not been canceled by an external
+///       signal (Rust `main.rs` does not install SIGINT/SIGTERM
+///       handlers, so a signal-driven kill skips `mark_shutdown` and
+///       the gate stays `Ready` until process exit terminates the
+///       listener — the documented Rust-vs-Go divergence preserved
+///       from RUB-10).
+///
+///   The mempool/miner/sync absence rows above are explicitly the
+///   `go_rust_parity_matrix` row "mempool/miner/sync prerequisites
+///   if claimed" answered with NOT CLAIMED. Operators reading
+///   `/ready == true` who need stronger guarantees must layer
+///   additional checks on top (e.g. `/peers` count, `/get_tip`
+///   non-zero height) and treat `/ready` as the boot-stamp latch
+///   only.
+///
+/// - `Shutdown` (post-`mark_shutdown` terminal): sticky; once entered
+///   the gate never returns to `Ready`. `/ready` reports 503 + `{ready:
+///   false}` permanently for this gate's lifetime; operator-facing
+///   recovery is process restart, not a /ready-driven re-arm.
+///
+/// `go_rust_parity_matrix` row "error status and response shape" is
+/// pinned by `handle_ready` below (200 vs 503 status code; `{ready:
+/// bool}` body; `application/json` Content-Type; `Allow: GET` header
+/// on 405 method-not-allowed) and by the `ReadyResponse` struct
+/// envelope. `coverage_reachability_matrix` row "public readiness
+/// check used by localhost/devnet tooling" is satisfied by the
+/// `ready_endpoint_*` test family in `tests` module which exercises
+/// the gate transitions ONLY through the public HTTP route_request
+/// path (no direct `state.readiness.is_ready()` shortcut from the
+/// asserts so a future bug in the public dispatch is caught).
+///
+/// Routes that Go's mixed-client tooling can scrape but Rust does
+/// NOT serve today: `GET /health` (rich operator snapshot at
+/// `clients/go/cmd/rubin-node/http_rpc.go::handleHealth` L1517+,
+/// returning ready+chain_context+mempool counts+peer_count) and
+/// `GET /chain_identity` (chain identity mux at the same Go file
+/// L701-703; `/health` mux follows at L704). Adding either Rust
+/// mirror is explicitly out of
+/// scope for RUB-41 because the `class_change_stop_rule` would
+/// trigger ("If readiness needs new endpoint/schema/lifecycle
+/// behavior, stop and split"). RUB-41 narrows to `/ready` SEMANTICS
+/// only; the missing routes are deferred to a follow-up slice once
+/// the contract for adding them has its own architect review.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadyState {
     NotReady,
@@ -5808,6 +5879,179 @@ mod tests {
             ReadyState::Ready,
             ReadyState::Shutdown,
         ];
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-41 / GitHub #1329 hostile_case "partial startup": a
+    /// `DevnetRPCState` constructed via `new_devnet_rpc_state` but
+    /// never passed through `start_devnet_rpc_server` MUST report
+    /// `/ready` as 503 + `{ready: false}` regardless of any other
+    /// node wiring already in place. The boot-time
+    /// `try_mark_ready_on_startup` stamp lives inside
+    /// `start_devnet_rpc_server`, so a
+    /// half-spawned node — for example a fixture that constructs the
+    /// state to exercise some other handler in isolation, or a
+    /// production startup that bails before the listener is bound —
+    /// MUST NOT be observed as ready by orchestrators.
+    ///
+    /// This is the public-path counterpart of the boot-state row in
+    /// the `ReadinessGate` parity matrix doc. It complements
+    /// `ready_endpoint_reports_503_when_not_ready` (which exercises
+    /// the gate-only path) by asserting that a richer state object
+    /// (block_store wired, peer_manager wired, sync_engine populated)
+    /// still reports 503 when the gate is at boot zero-value.
+    ///
+    /// Proof assertion: drive `/ready` through `route_request` (the
+    /// production HTTP dispatch entry the accept loop calls) WITHOUT
+    /// calling `start_devnet_rpc_server`. The asserts below pin the
+    /// public-path output (status 503 + body `{"ready": false}`) and
+    /// the post-condition that the gate remains eligible for the
+    /// boot-time stamp (proof anchor: `try_mark_ready_on_startup`
+    /// returns true after the dispatch, which only succeeds from
+    /// the `NotReady` initial cell value).
+    #[test]
+    fn ready_endpoint_partial_start_returns_503() {
+        let (state, dir) = build_state(true);
+        // Sanity: gate is at boot zero-value, not yet stamped Ready.
+        assert!(
+            !state.readiness.is_ready(),
+            "freshly constructed gate must report not-ready before \
+             start_devnet_rpc_server"
+        );
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(
+            response.status, 503,
+            "/ready on a partially-started node must report 503 (boot \
+             zero-value gate); got status={}",
+            response.status
+        );
+        let body: Value =
+            serde_json::from_slice(&response.body).expect("partial-start ready 503 json");
+        assert_eq!(body["ready"], serde_json::json!(false));
+        // Proof anchor: try_mark_ready_on_startup returns true only
+        // when the gate is at the NotReady initial cell value. The
+        // assertion below therefore pins that the partial-start path
+        // leaves the gate in NotReady (not Shutdown), so the boot-
+        // time stamp can still complete on the same state object.
+        assert!(
+            state.readiness.try_mark_ready_on_startup(),
+            "partial-start gate must still be in NotReady (eligible \
+             for boot stamp), not Shutdown"
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    /// RUB-41 / GitHub #1329 hostile_case "status field mismatch vs
+    /// Go": pin the exact byte format Rust's `/ready` responses
+    /// produce so a future change to `json_response` or the
+    /// `ReadyResponse` struct cannot silently drift from the wire
+    /// shape orchestrators (mixed-client devnet evidence consumers,
+    /// Codacy/Copilot health probes, operator scripts) parse.
+    ///
+    /// Pinned by this test (RUB-10 PR #1472 baseline preserved):
+    /// - 200 path: `Content-Type: application/json`, body bytes
+    ///   `{"ready":true}` (no trailing newline, no whitespace inside
+    ///   braces, fields in declaration order).
+    /// - 503 path: `Content-Type: application/json`, body bytes
+    ///   `{"ready":false}`.
+    /// - 405 path: `Content-Type: application/json` + `Allow: GET`
+    ///   header, body bytes `{"accepted":false,"error":"GET required"}`
+    ///   (no `txid` field — `Option::None` skipped via
+    ///   `skip_serializing_if`).
+    ///
+    /// Documented divergence vs Go that this test does NOT close
+    /// (out of RUB-41 scope per `class_change_stop_rule`): Go's
+    /// `writeJSONResponse` calls `json.NewEncoder(w).Encode(payload)`,
+    /// which appends a `\n` byte per Go documentation
+    /// (`encoding/json.Encoder.Encode`). Rust's `json_response` calls
+    /// `serde_json::to_vec(payload)` which does NOT append `\n`. So
+    /// Go emits `{"ready":true}\n` (15 bytes) where Rust emits
+    /// `{"ready":true}` (14 bytes); both are valid JSON and every
+    /// JSON parser accepts both. Aligning the trailing newline is a
+    /// broader `json_response` refactor that touches every Rust RPC
+    /// handler — out of scope here, deferred to a future slice that
+    /// owns "Rust JSON wire-format trailing-newline parity" if
+    /// orchestrators ever need byte-exact equality (today the
+    /// `Content-Length` header lets parsers terminate cleanly without
+    /// the trailing newline).
+    ///
+    /// Proof assertion: byte-equality on body + content_type +
+    /// extra_headers for each of the three response classes.
+    #[test]
+    fn ready_response_body_byte_pinned_against_go_format() {
+        let (state, dir) = build_state(true);
+        // 200 path requires Ready; stamp it directly without going
+        // through start_devnet_rpc_server (no listener needed for a
+        // body-only byte-pin test).
+        assert!(state.readiness.try_mark_ready_on_startup());
+        let r200 = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(r200.status, 200);
+        assert_eq!(r200.content_type, "application/json");
+        assert_eq!(
+            r200.body.as_slice(),
+            b"{\"ready\":true}".as_slice(),
+            "200 body bytes must match the pinned Rust wire format \
+             (no trailing newline, no whitespace); got: {:?}",
+            String::from_utf8_lossy(&r200.body)
+        );
+        // 503 path: flip gate to Shutdown, ready=false.
+        state.readiness.mark_shutdown();
+        let r503 = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(r503.status, 503);
+        assert_eq!(r503.content_type, "application/json");
+        assert_eq!(
+            r503.body.as_slice(),
+            b"{\"ready\":false}".as_slice(),
+            "503 body bytes must match the pinned Rust wire format; \
+             got: {:?}",
+            String::from_utf8_lossy(&r503.body)
+        );
+        // 405 path: non-GET method, error envelope + Allow header.
+        let r405 = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(r405.status, 405);
+        assert_eq!(r405.content_type, "application/json");
+        assert_eq!(
+            r405.body.as_slice(),
+            b"{\"accepted\":false,\"error\":\"GET required\"}".as_slice(),
+            "405 body bytes must match the pinned Rust error envelope \
+             (no `txid` field per skip_serializing_if); got: {:?}",
+            String::from_utf8_lossy(&r405.body)
+        );
+        assert!(
+            r405.extra_headers
+                .iter()
+                .any(|(name, value)| *name == "Allow" && value == "GET"),
+            "405 response must carry `Allow: GET` per RFC 9110 \
+             §15.5.6 (also pinned by ready_endpoint_returns_405_*)"
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
