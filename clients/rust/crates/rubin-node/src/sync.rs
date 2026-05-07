@@ -176,9 +176,10 @@ fn escape_prometheus_label_value(value: &str) -> String {
 ///   * Cf format characters: `U+00AD` (SHY), `U+061C` (Arabic letter
 ///     mark), `U+070F` (Syriac abbrev mark), `U+180E` (Mongolian
 ///     vowel separator), `U+200B..=U+200F` (zero-width space + bidi),
-///     `U+202A..=U+202E` (bidi embeds/overrides), `U+2060..=U+2064`
-///     (word joiner + invisible math operators), `U+2066..=U+206F`
-///     (bidi isolates + deprecated format), `U+FEFF` (BOM /
+///     `U+202A..=U+202E` (bidi embeds/overrides), `U+2060..=U+206F`
+///     (word joiner + invisible math operators + bidi isolates +
+///     deprecated format; range merged across U+2065 reserved
+///     codepoint to match Go's `strconv.IsPrint`), `U+FEFF` (BOM /
 ///     zero-width no-break space), `U+FFF9..=U+FFFB` (interlinear
 ///     annotation anchors).
 ///   * Zl line separator: `U+2028`. Zp paragraph separator: `U+2029`.
@@ -218,8 +219,7 @@ fn is_go_quote_nonprintable(c: char) -> bool {
             | 0x2000..=0x200f
             | 0x2028..=0x202f
             | 0x205f
-            | 0x2060..=0x2064
-            | 0x2066..=0x206f
+            | 0x2060..=0x206f
             | 0x3000
             | 0xfeff
             | 0xfff9..=0xfffb
@@ -1915,6 +1915,8 @@ mod tests {
         assert_eq!(super::escape_prometheus_label_value("\u{202e}"), "\\u202e");
         assert_eq!(super::escape_prometheus_label_value("\u{202f}"), "\\u202f");
         assert_eq!(super::escape_prometheus_label_value("\u{2060}"), "\\u2060");
+        assert_eq!(super::escape_prometheus_label_value("\u{2065}"), "\\u2065");
+        assert_eq!(super::escape_prometheus_label_value("\u{206f}"), "\\u206f");
         assert_eq!(super::escape_prometheus_label_value("\u{3000}"), "\\u3000");
         assert_eq!(super::escape_prometheus_label_value("\u{feff}"), "\\ufeff");
         // Printable Unicode (Latin-1 supplement, Cyrillic, etc.)
