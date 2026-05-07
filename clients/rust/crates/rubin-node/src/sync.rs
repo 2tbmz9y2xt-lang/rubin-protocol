@@ -111,6 +111,7 @@ impl PVTelemetrySnapshot {
     ///   client wires these in production today, so both report `0`;
     ///   when either side wires its tracker, this disclosure must be
     ///   re-checked.
+    ///
     /// Wiring the missing trackers is out of this slice's scope per
     /// `class_change_stop_rule` (single_contract_delta is exposition
     /// alignment, not tracker plumbing).
