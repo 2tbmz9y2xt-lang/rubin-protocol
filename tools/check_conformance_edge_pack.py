@@ -35,16 +35,24 @@ def proof_domain_map(proof_coverage: dict) -> dict[str, dict]:
     return result
 
 
-def status_of(value: object) -> str:
+def coverage_status(value: object, *, field_name: str) -> tuple[str, str | None]:
+    if value is None:
+        return "", None
     if not isinstance(value, dict):
-        return ""
+        return "", f"{field_name} must be object"
     status = value.get("status")
-    return status if isinstance(status, str) else ""
+    if status is None:
+        return "", None
+    if not isinstance(status, str) or not status:
+        return "", f"{field_name}.status must be non-empty string"
+    return status, None
 
 
-def string_list(value: object, *, field_name: str) -> tuple[list[str], str | None]:
+def string_list(value: object, *, field_name: str, require_non_empty: bool = False) -> tuple[list[str], str | None]:
     if not isinstance(value, list):
         return [], f"{field_name} must be list"
+    if require_non_empty and not value:
+        return [], f"{field_name} must be non-empty list"
     strings: list[str] = []
     for item in value:
         if not isinstance(item, str) or not item:
@@ -161,17 +169,22 @@ def main() -> int:
             )
             failures += 1
 
-        for gate, required_ids in required_vectors_by_gate.items():
+        for gate, raw_required_ids in required_vectors_by_gate.items():
             if gate not in fixture_gate_to_ids:
                 print(f"FAIL: domain {name}: required gate not found: {gate}", file=sys.stderr)
                 failures += 1
                 continue
-            if not isinstance(required_ids, list):
-                print(f"ERROR: domain {name}: required_vectors_by_gate[{gate}] must be list", file=sys.stderr)
+            required_ids, required_ids_error = string_list(
+                raw_required_ids,
+                field_name=f"required_vectors_by_gate[{gate}]",
+                require_non_empty=True,
+            )
+            if required_ids_error is not None:
+                print(f"ERROR: domain {name}: {required_ids_error}", file=sys.stderr)
                 failures += 1
                 continue
             present = fixture_gate_to_ids[gate]
-            missing = [rid for rid in required_ids if isinstance(rid, str) and rid not in present]
+            missing = [rid for rid in required_ids if rid not in present]
             if missing:
                 print(
                     f"FAIL: domain {name}: gate {gate} missing required vectors: {', '.join(missing)}",
@@ -236,12 +249,15 @@ def main() -> int:
                             file=sys.stderr,
                         )
                         failures += 1
-                    for gate, required_ids in required_vectors_by_gate.items():
-                        if not isinstance(required_ids, list):
+                    for gate, raw_required_ids in required_vectors_by_gate.items():
+                        required_ids, required_ids_error = string_list(
+                            raw_required_ids,
+                            field_name=f"required_vectors_by_gate[{gate}]",
+                            require_non_empty=True,
+                        )
+                        if required_ids_error is not None:
                             continue
-                        missing_from_proof = [
-                            rid for rid in required_ids if isinstance(rid, str) and rid not in proof_vector_ids
-                        ]
+                        missing_from_proof = [rid for rid in required_ids if rid not in proof_vector_ids]
                         if missing_from_proof:
                             print(
                                 f"FAIL: domain {name}: proof_coverage missing vector IDs: {', '.join(missing_from_proof)}",
@@ -249,8 +265,14 @@ def main() -> int:
                             )
                             failures += 1
 
-                fuzz_status = status_of(proof_domain.get("fuzz"))
-                if fuzz_status in CLAIMED_PRESENT_STATUSES:
+                fuzz_status, fuzz_status_error = coverage_status(
+                    proof_domain.get("fuzz"),
+                    field_name="proof_coverage fuzz",
+                )
+                if fuzz_status_error is not None:
+                    print(f"ERROR: domain {name}: {fuzz_status_error}", file=sys.stderr)
+                    failures += 1
+                elif fuzz_status in CLAIMED_PRESENT_STATUSES:
                     print(
                         f"FAIL: domain {name}: proof_coverage claims fuzz={fuzz_status}; committed fuzz evidence validation is not supported in this edge-pack checker",
                         file=sys.stderr,
@@ -263,8 +285,14 @@ def main() -> int:
                     )
                     failures += 1
 
-                formal_status = status_of(proof_domain.get("formal"))
-                if formal_status in CLAIMED_PRESENT_STATUSES:
+                formal_status, formal_status_error = coverage_status(
+                    proof_domain.get("formal"),
+                    field_name="proof_coverage formal",
+                )
+                if formal_status_error is not None:
+                    print(f"ERROR: domain {name}: {formal_status_error}", file=sys.stderr)
+                    failures += 1
+                elif formal_status in CLAIMED_PRESENT_STATUSES:
                     print(
                         f"FAIL: domain {name}: proof_coverage claims formal={formal_status}; committed formal evidence validation is not supported in this edge-pack checker",
                         file=sys.stderr,

@@ -108,6 +108,48 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("missing required vectors: V-MISSING", captured.getvalue())
 
+    def test_required_vector_rejects_non_string_id(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["required_vectors_by_gate"]["CV-TEST"] = ["V-1", 7]
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("required_vectors_by_gate[CV-TEST] entries must be non-empty strings", captured.getvalue())
+
+    def test_required_vector_rejects_duplicate_id(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["required_vectors_by_gate"]["CV-TEST"] = ["V-1", "V-1"]
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("required_vectors_by_gate[CV-TEST] entries must be unique", captured.getvalue())
+
+    def test_required_vector_rejects_empty_list(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["required_vectors_by_gate"]["CV-TEST"] = []
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("required_vectors_by_gate[CV-TEST] must be non-empty list", captured.getvalue())
+
     def test_proof_coverage_missing_vector_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -182,6 +224,44 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("committed fuzz evidence validation is not supported", captured.getvalue())
 
+    def test_fuzz_covered_claim_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root, fuzz_status="covered")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("claims fuzz=covered", captured.getvalue())
+
+    def test_fuzz_scalar_present_shape_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0]["fuzz"] = "present"
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage fuzz must be object", captured.getvalue())
+
+    def test_fuzz_non_string_status_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0]["fuzz"] = {"status": 7}
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage fuzz.status must be non-empty string", captured.getvalue())
+
     def test_fuzz_unknown_status_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -204,6 +284,44 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("committed formal evidence validation is not supported", captured.getvalue())
+
+    def test_formal_complete_claim_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root, formal_status="complete")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("claims formal=complete", captured.getvalue())
+
+    def test_formal_scalar_present_shape_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0]["formal"] = "covered"
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage formal must be object", captured.getvalue())
+
+    def test_formal_non_string_status_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"][0]["formal"] = {"status": 7}
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage formal.status must be non-empty string", captured.getvalue())
 
     def test_formal_unknown_status_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
