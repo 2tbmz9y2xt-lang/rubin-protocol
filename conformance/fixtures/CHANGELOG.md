@@ -11,6 +11,23 @@ Policy:
 
 ---
 
+## 2026-05-07 — Bounded CV-MEMPOOL policy classification vectors (RUB-54 first pass)
+
+Причина:
+- добавить первый executable `CV-MEMPOOL` gate только для уже поддержанного replay op `da_fee_floor_policy`;
+- зафиксировать стандартную mempool classification поверхность без runtime изменений: rolling relay floor `accepted`/`unavailable`, Stage C DA floor `accepted`/`rejected`, omitted current floor default и malformed tx parse-before-floor;
+- capacity/source/reorg vectors намеренно не добавлены в этот pass, потому что текущий replay request не содержит capacity/source state и их добавление потребовало бы новый Go/Rust replay adapter.
+
+Инструменты:
+- ручное добавление нового gate `CV-MEMPOOL`,
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-MEMPOOL`,
+- проверка через `tools/gen_conformance_matrix.py --check`.
+
+Изменённые fixtures:
+- `CV-MEMPOOL.json` (new)
+
+Не затронуто: Go/Rust runtime policy behavior, replay op/parser family, capacity/source vectors, protocol artifacts.
+
 ## 2026-05-05 — DA fee-floor executable vectors (Q-CONF-DA-FEE-FLOOR-VECTORS-01)
 
 Причина:
