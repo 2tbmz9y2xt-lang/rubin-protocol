@@ -1720,11 +1720,16 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
         // status, ...)`. The `route` label is a `String` and must be
         // run through `escape_prometheus_label_value` for the same
         // injection / byte-parity reasons as `rubin_pv_mode{mode=...}`
-        // (the wave-2 fix on the PV telemetry emitter). `status` is
-        // a `u16` whose `Display` impl can only emit ASCII digits, so
-        // it cannot inject special characters; quoting it via the
-        // surrounding literal `"..."` is byte-aligned with Goʼs `%q`
-        // on the integer-as-string form Go uses.
+        // (the wave-2 fix on the PV telemetry emitter). `status` on
+        // the Rust side is a `u16` whose `Display` impl can only emit
+        // ASCII digits, so it cannot inject special characters;
+        // quoting it via the surrounding literal `"..."` is byte-
+        // identical to what `%q` emits on the Go side, because Goʼs
+        // `status` is itself a `string` (split from the `route|status`
+        // metric key at `http_rpc.go:1306-1310`) populated with the
+        // same ASCII-digit HTTP status code, and `%q` on an ASCII-
+        // only string emits exactly the same outer `"..."` wrapper
+        // the Rust literal already provides.
         let escaped_route = crate::sync::escape_prometheus_label_value(&route);
         lines.push(format!(
             "rubin_node_rpc_requests_total{{route=\"{escaped_route}\",status=\"{status}\"}} {value}"
