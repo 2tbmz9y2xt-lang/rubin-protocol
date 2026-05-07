@@ -98,7 +98,7 @@ pub struct PVTelemetrySnapshot {
 /// disclosed on `is_go_quote_nonprintable`.
 ///
 /// Handled escape classes (covers the `%q` byte set Wave-1..8 of
-/// PR #1477 enumerated; intentionally narrower than Go's full
+/// PR #1477 enumerated; intentionally narrower than the full Go
 /// `strconv.IsPrint` table):
 /// - `\` -> `\\`
 /// - `"` -> `\"`
@@ -134,7 +134,7 @@ pub struct PVTelemetrySnapshot {
 /// line separator `U+2028`, NBSP `U+00A0`, BOM `U+FEFF`) that Go's
 /// `%q` would have escaped. See `is_go_quote_nonprintable` for the
 /// full predicate and a note on the deliberate scope-narrowing vs
-/// Go's full `strconv.IsPrint` table.
+/// the full Go `strconv.IsPrint` table.
 pub(crate) fn escape_prometheus_label_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
