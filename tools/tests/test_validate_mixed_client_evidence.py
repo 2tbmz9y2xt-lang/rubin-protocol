@@ -331,6 +331,66 @@ class HostileMutationTests(unittest.TestCase):
                 f"expected error to cite started_at; got {errors}",
             )
 
+    def test_started_at_invalid_month_rejected(self):
+        """Shape-valid but calendar-invalid month must be rejected (semantic check)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-13-07T22:30:00Z"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "month=13 must be rejected by semantic RFC3339 check")
+            self.assertTrue(
+                any("started_at" in e for e in errors),
+                f"expected error to cite started_at; got {errors}",
+            )
+
+    def test_started_at_invalid_hour_rejected(self):
+        """Shape-valid but calendar-invalid hour=25 must be rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-05-07T25:30:00Z"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "hour=25 must be rejected by semantic RFC3339 check")
+            self.assertTrue(
+                any("started_at" in e for e in errors),
+                f"expected error to cite started_at; got {errors}",
+            )
+
+    def test_started_at_invalid_day_for_month_rejected(self):
+        """Calendar-invalid day-for-month (Feb 30) must be rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-02-30T12:00:00Z"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "Feb 30 must be rejected by semantic RFC3339 check")
+            self.assertTrue(
+                any("started_at" in e for e in errors),
+                f"expected error to cite started_at; got {errors}",
+            )
+
+    def test_started_at_invalid_second_rejected(self):
+        """Calendar-invalid second=60 (leap second) must be rejected per producer contract."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-05-07T22:30:60Z"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "second=60 must be rejected by semantic RFC3339 check")
+            self.assertTrue(
+                any("started_at" in e for e in errors),
+                f"expected error to cite started_at; got {errors}",
+            )
+
+    def test_stopped_at_invalid_timestamp_rejected(self):
+        """format_checker must apply to stopped_at too (global registration)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["stopped_at"] = "2026-13-07T22:30:00Z"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "invalid stopped_at month must be rejected")
+            self.assertTrue(
+                any("stopped_at" in e for e in errors),
+                f"expected error to cite stopped_at; got {errors}",
+            )
+
     def test_port_above_max_rejected(self):
         """Port > 65535 must be rejected via structural check."""
         with tempfile.TemporaryDirectory() as td:

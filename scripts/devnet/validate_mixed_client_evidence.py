@@ -15,6 +15,7 @@ Exits 0 on PASS, 1 on validation failure or unreadable input.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import re
 import sys
@@ -29,18 +30,25 @@ PROCESS_SOAK_TYPES = ("mixed_client_process_soak", "single_client_process_soak")
 MAX_TCP_UDP_PORT = 65535
 ENDPOINT_FIELDS = ("rpc", "p2p")
 RFC3339_DATE_TIME_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+    r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
 )
 
 
 def _build_format_checker() -> Any:
-    """jsonschema.FormatChecker with an RFC3339 date-time check.
+    """jsonschema.FormatChecker with a semantic RFC3339 date-time check.
 
     The stdlib jsonschema package only registers ``date-time`` when the
     optional ``rfc3339-validator`` or ``python-dateutil`` packages are
     installed, neither of which is a CI/runtime dependency in this repo.
-    Registering a self-contained regex check keeps the validator usable
-    without expanding pip surface.
+    Registering a self-contained check keeps the validator usable without
+    expanding pip surface.
+
+    The check enforces both shape (anchored RFC3339 regex) and calendar
+    semantics (year/month/day/hour/minute/second bounds via
+    ``datetime.datetime.strptime``), so values like ``2026-13-07T22:30:00Z``
+    or ``2026-05-07T25:30:00Z`` are rejected even though they match the
+    pure shape regex. Leap seconds (second=60) are rejected; this matches
+    the producers in this repo, which never emit a leap-second timestamp.
     """
     import jsonschema  # type: ignore[import-untyped]
 
@@ -50,8 +58,17 @@ def _build_format_checker() -> Any:
     def _check_date_time(value: Any) -> bool:
         if not isinstance(value, str):
             return True
-        if not RFC3339_DATE_TIME_RE.match(value):
+        m = RFC3339_DATE_TIME_RE.match(value)
+        if not m:
             raise ValueError(f"not a valid RFC3339 date-time: {value!r}")
+        try:
+            datetime.datetime.strptime(
+                f"{m.group('date')}T{m.group('time')}", "%Y-%m-%dT%H:%M:%S"
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"not a valid RFC3339 date-time: {value!r} ({exc})"
+            ) from exc
         return True
 
     return fc
