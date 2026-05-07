@@ -50,17 +50,18 @@ scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py --check
 
 ## Error expectation fields in vectors
 
-Для большинства ops используется поле `expect_err`: это ожидаемый финальный код ошибки,
-который вернёт runtime для данного вектора.
+Most ops use the `expect_err` field: the expected final error code returned by
+the runtime for that vector.
 
-Для gate `CV-VALIDATION-ORDER` используется отдельное поле `expect_first_err`: это ожидаемый
-**первый** код ошибки по deterministic-order симулятору (nested/conflict cases).  
-Итоговый runtime-ошибочный код (`expect_err`) и `expect_first_err` могут отличаться по дизайну.
+The `CV-VALIDATION-ORDER` gate uses a separate `expect_first_err` field: the
+expected **first** error code from the deterministic-order simulator
+(nested/conflict cases). The final runtime error code (`expect_err`) and
+`expect_first_err` may intentionally differ.
 
 ## Edge-pack baseline (critical domains)
 
-`conformance/EDGE_PACK_BASELINE.json` фиксирует минимально требуемое edge-покрытие
-по доменам:
+`conformance/EDGE_PACK_BASELINE.json` pins the minimum required edge coverage
+by domain:
 
 - parse
 - weight
@@ -77,7 +78,7 @@ coverage. `tools/check_conformance_edge_pack.py` fails closed on fuzz/formal
 `present`, `covered`, or `complete` claims until a later PR adds concrete
 evidence validation.
 
-Проверка (локально/CI):
+Local/CI check:
 
 ```bash
 scripts/dev-env.sh -- python3 tools/check_conformance_edge_pack.py
@@ -95,17 +96,17 @@ The gate fails when:
 
 `clients/go/cmd/gen-conformance-fixtures` — **manual-only tool**.
 
-Правила:
+Rules:
 
-1. Mutating-режим генератора **НЕ** запускается из CI (ни в `ci.yml`, ни в других workflow).
-2. Регенерация fixtures выполняется вручную локально через reproducible env:
+1. The generator mutating mode **MUST NOT** run from CI (`ci.yml` or any other workflow).
+2. Fixture regeneration is manual-only through the reproducible env:
    - `scripts/dev-env.sh -- bash -lc 'cd clients/go && go run ./cmd/gen-conformance-fixtures'`
-3. Любое изменение `conformance/fixtures/CV-*.json` обязано сопровождаться обновлением
-   `conformance/fixtures/CHANGELOG.md` (что изменили, зачем, каким инструментом).
-4. Для точечных deterministic fixtures допускается отдельный генератор:
+3. Any change to `conformance/fixtures/CV-*.json` must update
+   `conformance/fixtures/CHANGELOG.md` with what changed, why, and which tool was used.
+4. Focused deterministic fixtures may use a dedicated generator:
    - `scripts/dev-env.sh -- python3 tools/gen_cv_da_integrity.py`
 
-Guard-проверка (CI):
+CI guard:
 
 ```bash
 scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_policy.py
@@ -113,29 +114,29 @@ scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_policy.py
 
 ### Check-only `--output-dir` mode
 
-`gen-conformance-fixtures` поддерживает non-mutating режим: при передаче
-абсолютного `--output-dir <path>` генератор пишет candidate fixtures
-**только** под `<path>`, не трогая `conformance/fixtures/**`. Источник
-данных по-прежнему читается из committed `conformance/fixtures/**`.
+`gen-conformance-fixtures` supports a non-mutating mode: with an absolute
+`--output-dir <path>`, the generator writes candidate fixtures **only** under
+`<path>` and does not touch `conformance/fixtures/**`. Source data is still read
+from committed `conformance/fixtures/**`.
 
 ```bash
 scripts/dev-env.sh -- bash -lc \
   'cd clients/go && go run ./cmd/gen-conformance-fixtures --output-dir /tmp/candidate-fixtures'
 ```
 
-Свойства check-only режима:
+Check-only mode properties:
 
-- ML-DSA-87 ключи deterministic, embedded под `clients/go/cmd/gen-conformance-fixtures/testdata/keys/*.der`
-  (committed conformance test material, не production keys);
-- подпись через `(*consensus.MLDSA87Keypair).SignDigest32ForConformanceFixture`
-  (FIPS 204 deterministic ML-DSA); package-level caller-grep guard
-  в `consensus/openssl_signer_conformance_fixture_test.go` ограничивает
-  использование этим генератором;
-- два прогона с разными `--output-dir` дают **byte-identical** результат
+- ML-DSA-87 keys are deterministic and embedded under
+  `clients/go/cmd/gen-conformance-fixtures/testdata/keys/*.der`
+  (committed conformance test material, not production keys);
+- signing uses `(*consensus.MLDSA87Keypair).SignDigest32ForConformanceFixture`
+  (FIPS 204 deterministic ML-DSA); the package-level caller-grep guard in
+  `consensus/openssl_signer_conformance_fixture_test.go` restricts use to this generator;
+- two runs with different `--output-dir` values produce **byte-identical** output
   (`TestGenerator_DeterministicOutputDir`);
-- `--output-dir` обязан быть абсолютным; запрет указывать committed
-  `conformance/fixtures` или путь под ним;
-- production signing path (`SignDigest32`, hedged ML-DSA) **не** меняется.
+- `--output-dir` must be absolute; committed `conformance/fixtures` and paths
+  under it are forbidden;
+- the production signing path (`SignDigest32`, hedged ML-DSA) **does not** change.
 
 CI drift gate (`Q-CONF-FIXTURE-DRIFT-CHECK-01`):
 
@@ -143,12 +144,12 @@ CI drift gate (`Q-CONF-FIXTURE-DRIFT-CHECK-01`):
 scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_drift.py
 ```
 
-Скрипт запускает `gen-conformance-fixtures --output-dir <isolated-temp>`,
-а затем побайтово сравнивает каждый сгенерированный файл с committed
-`conformance/fixtures/**`. Exit `0` — без drift, exit `1` — drift, exit
-`2` — usage / environment ошибка. Скрипт **никогда** не пишет под
-`conformance/fixtures/**` (auto-regen в CI запрещён); ручная
-регенерация остаётся authoritative path.
+The script runs `gen-conformance-fixtures --output-dir <isolated-temp>`, then
+byte-compares every generated file with committed `conformance/fixtures/**`.
+Exit `0` means no drift, exit `1` means drift, and exit `2` means usage or
+environment error. The script **never** writes under `conformance/fixtures/**`
+(auto-regeneration in CI is forbidden); manual regeneration remains the
+authoritative path.
 
 ## Fuzz crash promotion (manual-only)
 
