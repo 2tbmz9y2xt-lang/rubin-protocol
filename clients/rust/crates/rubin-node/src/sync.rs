@@ -88,17 +88,19 @@ impl PVTelemetrySnapshot {
     /// RUB-12 / GitHub #1156: Prometheus exposition for the PV
     /// telemetry snapshot, byte-aligned to the upstream Go emission
     /// at `clients/go/node/pv_telemetry.go::PVTelemetrySnapshot.PrometheusLines`
-    /// (L246-291). Eleven metric blocks total, in the same order.
-    /// HELP and TYPE strings match the upstream exactly so mixed-
-    /// client Prometheus scrapers see byte-stable output regardless
-    /// of which runtime served `/metrics`. The two latency fields
-    /// `validate_count` / `commit_count` populate the average gauges
-    /// only — they are NOT emitted as standalone counters because
-    /// the upstream Go exposition does not emit them either.
-    /// Renaming the latency gauges to `*_latency_avg_ns` (was
-    /// `*_avg_ns`) closes a metric-NAME contract break — Prometheus
-    /// queries by exact name, and the upstream uses the longer
-    /// form.
+    /// (L246-291). Ten distinct HELP/TYPE metric blocks expanding to
+    /// thirteen Prometheus time series (the `shadow_mismatches_total`
+    /// block carries four `type=` buckets), in the same order Go
+    /// emits. HELP and TYPE strings match the upstream exactly so
+    /// mixed-client Prometheus scrapers see byte-stable output
+    /// regardless of which runtime served `/metrics`. The two
+    /// latency fields `validate_count` / `commit_count` populate the
+    /// average gauges only — they are NOT emitted as standalone
+    /// counters because the upstream Go exposition does not emit
+    /// them either. Renaming the latency gauges to
+    /// `*_latency_avg_ns` (was `*_avg_ns`) closes a metric-NAME
+    /// contract break — Prometheus queries by exact name, and the
+    /// upstream uses the longer form.
     pub fn prometheus_lines(&self) -> Vec<String> {
         vec![
             "# HELP rubin_pv_mode Current parallel validation mode (0=off, 1=shadow, 2=on)."
@@ -1501,19 +1503,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// RUB-12 / GitHub #1156: pin the exact eleven-metric Prometheus
+    /// RUB-12 / GitHub #1156: pin the exact 33-line Prometheus
     /// exposition `prometheus_lines()` produces for a fully populated
-    /// `PVTelemetrySnapshot`. Each emitted block (HELP / TYPE / value
-    /// line, or the four-bucket `shadow_mismatches_total`) is asserted
+    /// `PVTelemetrySnapshot`. The 33 lines correspond to ten distinct
+    /// HELP/TYPE metric blocks (nine simple 3-line blocks plus the
+    /// `shadow_mismatches_total` block which is HELP+TYPE+four
+    /// `type=`-bucketed value lines), expanding to thirteen distinct
+    /// Prometheus time series in total. Each emitted line is asserted
     /// against a literal string that matches the upstream Go emission
     /// at `clients/go/node/pv_telemetry.go::PrometheusLines` (L246-291)
     /// token-for-token. A drift in any HELP string, metric NAME, label
     /// shape, or numeric format trips this test.
     ///
-    /// Proof assertion: the eleven metric blocks render in the exact
-    /// order Go emits, with HELP/TYPE/value lines positionally
-    /// identical. The dropped Rust-only `rubin_pv_validate_runs_total`
-    /// and `rubin_pv_commit_runs_total` counters are confirmed absent;
+    /// Proof assertion: the ten HELP/TYPE metric blocks (thirteen
+    /// time series) render in the exact order Go emits, with
+    /// HELP/TYPE/value lines positionally identical. The dropped
+    /// Rust-only `rubin_pv_validate_runs_total` and
+    /// `rubin_pv_commit_runs_total` counters are confirmed absent;
     /// the renamed `rubin_pv_validate_latency_avg_ns` and
     /// `rubin_pv_commit_latency_avg_ns` gauges are confirmed present
     /// with the longer upstream NAME (was `*_avg_ns` only, a metric-
