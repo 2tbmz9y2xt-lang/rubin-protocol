@@ -22,6 +22,7 @@ use rubin_consensus::{
     ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
+use rubin_node::{devnet_genesis_chain_id, ChainState, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
@@ -935,6 +936,24 @@ struct Response {
     reject_reason: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    policy_entrypoint: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mutation_checked: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mutated: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pool_len_before: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pool_len_after: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duplicate_conflict_capacity_checked: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     counted_bytes: Option<i64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1380,6 +1399,192 @@ fn da_fee_floor_policy_response(req: &Request) -> Response {
 
     resp.admit = Some(true);
     resp
+}
+
+fn mempool_relay_metadata_policy_response(req: &Request) -> Response {
+    let tx_bytes = match hex::decode(&req.tx_hex) {
+        Ok(v) => v,
+        Err(_) => {
+            return Response {
+                ok: false,
+                err: Some("bad hex".to_string()),
+                ..Default::default()
+            }
+        }
+    };
+    let chain_id = if req.chain_id.trim().is_empty() {
+        devnet_genesis_chain_id()
+    } else {
+        match parse_exact_hex32(&req.chain_id) {
+            Ok(v) => v,
+            Err(_) => {
+                return Response {
+                    ok: false,
+                    err: Some("bad chain_id".to_string()),
+                    ..Default::default()
+                }
+            }
+        }
+    };
+
+    let utxos = match policy_utxo_map(&req.utxos) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response {
+                ok: false,
+                err: Some(e),
+                ..Default::default()
+            }
+        }
+    };
+    let mut state = ChainState::new();
+    state.utxos = utxos;
+    if req.height > 0 {
+        state.has_tip = true;
+        state.height = req.height - 1;
+        state.tip_hash[0] = 0x11;
+    }
+
+    let default_cfg = TxPoolConfig::default();
+    let cfg = TxPoolConfig {
+        policy_da_surcharge_per_byte: req.da_surcharge_per_byte,
+        policy_current_mempool_min_fee_rate: req
+            .current_mempool_min_fee_rate
+            .unwrap_or(default_cfg.policy_current_mempool_min_fee_rate),
+        policy_min_da_fee_rate: req
+            .min_da_fee_rate
+            .unwrap_or(default_cfg.policy_min_da_fee_rate),
+        ..default_cfg
+    };
+    let pool = TxPool::new_with_config(cfg);
+    let before_len = pool.len();
+    let parsed = parse_tx(&tx_bytes);
+    let canonical_txid = match &parsed {
+        Ok((_tx, txid, _wtxid, consumed)) if *consumed == tx_bytes.len() => Some(*txid),
+        _ => None,
+    };
+    let before_contains = canonical_txid
+        .as_ref()
+        .map(|txid| pool.contains(txid))
+        .unwrap_or(false);
+    let relay_result = pool.relay_metadata_for_bytes(&tx_bytes, &state, None, chain_id);
+    let after_len = pool.len();
+    let after_contains = canonical_txid
+        .as_ref()
+        .map(|txid| pool.contains(txid))
+        .unwrap_or(false);
+    let mutated = before_len != after_len || before_contains != after_contains;
+
+    let mut resp = da_fee_floor_policy_response(req);
+    resp.policy_entrypoint = Some("mempool_relay_metadata".to_string());
+    resp.mutation_checked = Some(true);
+    resp.mutated = Some(mutated);
+    resp.pool_len_before = Some(before_len);
+    resp.pool_len_after = Some(after_len);
+    resp.duplicate_conflict_capacity_checked = Some(false);
+    let (tx, _txid, _wtxid, consumed) = match parsed {
+        Ok(v) => v,
+        Err(_) => {
+            resp.ok = false;
+            resp.admit = None;
+            resp.admit_class = None;
+            resp.dominant_floor = None;
+            resp.reject_reason = None;
+            resp.err = Some(match relay_result {
+                Ok(_) => "relay metadata accepted malformed tx".to_string(),
+                Err(err)
+                    if matches!(err.kind, TxPoolAdmitErrorKind::Rejected)
+                        && relay_metadata_parse_reject(&err.message) =>
+                {
+                    ErrorCode::TxErrParse.as_str().to_string()
+                }
+                Err(err) => format!(
+                    "relay metadata parse mismatch: kind={:?} message={}",
+                    err.kind, err.message
+                ),
+            });
+            return resp;
+        }
+    };
+    if consumed != tx_bytes.len() {
+        resp.ok = false;
+        resp.admit = None;
+        resp.admit_class = None;
+        resp.dominant_floor = None;
+        resp.reject_reason = None;
+        resp.err = Some(match relay_result {
+            Ok(_) => "relay metadata accepted non-canonical tx".to_string(),
+            Err(err)
+                if matches!(err.kind, TxPoolAdmitErrorKind::Rejected)
+                    && relay_metadata_parse_reject(&err.message) =>
+            {
+                ErrorCode::TxErrParse.as_str().to_string()
+            }
+            Err(err) => format!(
+                "relay metadata parse mismatch: kind={:?} message={}",
+                err.kind, err.message
+            ),
+        });
+        return resp;
+    }
+    if let Ok((weight, da_bytes, _anchor_bytes)) = tx_weight_and_stats_public(&tx) {
+        resp.weight = Some(weight);
+        resp.da_bytes = Some(da_bytes);
+    }
+    resp.wire_bytes = Some(tx_bytes.len());
+
+    match relay_result {
+        Ok(meta) => {
+            resp.ok = true;
+            resp.admit = Some(true);
+            resp.admit_class = Some("accepted".to_string());
+            resp.reject_reason = None;
+            resp.fee = Some(meta.fee);
+            resp.wire_bytes = Some(meta.size);
+        }
+        Err(err) => {
+            resp.ok = true;
+            resp.admit = Some(false);
+            match err.kind {
+                TxPoolAdmitErrorKind::Unavailable => {
+                    resp.admit_class = Some("unavailable".to_string());
+                    if err.message.contains("mempool fee below rolling minimum") {
+                        resp.reject_reason = Some("MEMPOOL_FEE_BELOW_ROLLING_MINIMUM".to_string());
+                        resp.dominant_floor = Some("relay".to_string());
+                    }
+                }
+                TxPoolAdmitErrorKind::Rejected => {
+                    resp.admit_class = Some("rejected".to_string());
+                    if err.message.contains("DA fee below Stage C floor") {
+                        resp.reject_reason = Some("DA_FEE_BELOW_STAGE_C_FLOOR".to_string());
+                        resp.dominant_floor = Some("da".to_string());
+                    } else if err.message.contains(ErrorCode::TxErrParse.as_str())
+                        || err.message.contains("non-canonical tx bytes")
+                    {
+                        resp.ok = false;
+                        resp.err = Some(ErrorCode::TxErrParse.as_str().to_string());
+                        resp.admit = None;
+                        resp.admit_class = None;
+                        resp.dominant_floor = None;
+                        resp.reject_reason = None;
+                    } else {
+                        resp.err = Some(err.message);
+                    }
+                }
+                TxPoolAdmitErrorKind::Conflict => {
+                    resp.admit_class = Some("conflict".to_string());
+                    resp.err = Some(err.message);
+                }
+            }
+        }
+    }
+    resp
+}
+
+fn relay_metadata_parse_reject(message: &str) -> bool {
+    message.contains(ErrorCode::TxErrParse.as_str())
+        || message.contains("non-canonical tx bytes")
+        || message.contains("trailing bytes after canonical tx")
 }
 
 fn core_ext_profiles_from_json(
@@ -2149,6 +2354,10 @@ fn main() {
         }
         "da_fee_floor_policy" => {
             let resp = da_fee_floor_policy_response(&req);
+            let _ = serde_json::to_writer(std::io::stdout(), &resp);
+        }
+        "mempool_relay_metadata_policy" => {
+            let resp = mempool_relay_metadata_policy_response(&req);
             let _ = serde_json::to_writer(std::io::stdout(), &resp);
         }
         "rotation_create_suite_check" => {
