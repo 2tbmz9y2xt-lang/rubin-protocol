@@ -263,17 +263,23 @@ impl PVTelemetrySnapshot {
     /// `class_change_stop_rule` (single_contract_delta is exposition
     /// alignment, not tracker plumbing).
     ///
-    /// The two latency fields `validate_count` / `commit_count` populate
-    /// the average gauges only — they are NOT emitted as standalone
-    /// counters because the upstream Go exposition does not emit them
-    /// either. Renaming the latency gauges to `*_latency_avg_ns` (was
-    /// `*_avg_ns`) closes a metric-NAME contract break — Prometheus
-    /// queries by exact name, and the upstream uses the longer form.
-    /// (Pre-existing helper `averaged_latency_ns(...)` applies a
-    /// `.max(1)` floor when count > 0; Go uses raw integer division.
-    /// For sub-1-ns averages this would emit `1` on Rust vs `0` on Go.
-    /// Pre-existing divergence not introduced by this slice; flagged
-    /// here so the disclosure stays honest.)
+    /// The two latency-count fields `validate_count` / `commit_count`
+    /// are NOT emitted by `prometheus_lines` directly. They are
+    /// consumed earlier by `PVTelemetry::snapshot()`, which divides
+    /// `validate_total_ns` / `commit_total_ns` by the corresponding
+    /// count via `averaged_latency_ns(...)` to populate the snapshot's
+    /// `validate_avg_ns` / `commit_avg_ns` fields; only those `_avg_ns`
+    /// gauges are then emitted here. The upstream Go exposition emits
+    /// no standalone count counter either, so this slice neither adds
+    /// nor drops a metric line. Renaming the latency gauges to
+    /// `*_latency_avg_ns` (was `*_avg_ns`) closes a metric-NAME
+    /// contract break — Prometheus queries by exact name, and the
+    /// upstream uses the longer form. (Pre-existing helper
+    /// `averaged_latency_ns(...)` applies a `.max(1)` floor when
+    /// count > 0; Go uses raw integer division. For sub-1-ns averages
+    /// this would emit `1` on Rust vs `0` on Go. Pre-existing
+    /// divergence not introduced by this slice; flagged here so the
+    /// disclosure stays honest.)
     pub fn prometheus_lines(&self) -> Vec<String> {
         vec![
             "# HELP rubin_pv_mode Current parallel validation mode (0=off, 1=shadow, 2=on)."
