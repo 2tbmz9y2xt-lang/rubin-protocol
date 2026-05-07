@@ -108,6 +108,34 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("missing required vectors: V-MISSING", captured.getvalue())
 
+    def test_duplicate_domain_name_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"].append(dict(baseline["domains"][0]))
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("duplicate domain name: test_domain", captured.getvalue())
+
+    def test_duplicate_domain_gate_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["gates"] = ["CV-TEST", "CV-TEST"]
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("domain test_domain gates entries must be unique", captured.getvalue())
+
     def test_required_vector_rejects_non_string_id(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

@@ -89,6 +89,7 @@ def main() -> int:
     if not isinstance(domains, list) or not domains:
         return fail("EDGE_PACK_BASELINE.json must contain non-empty domains list")
 
+    seen_domain_names: set[str] = set()
     fixture_gate_to_ids: dict[str, set[str]] = {}
     fixture_gate_to_count: dict[str, int] = {}
     for fixture in fixtures_dir.glob("CV-*.json"):
@@ -127,8 +128,14 @@ def main() -> int:
             print("ERROR: domain name missing/invalid", file=sys.stderr)
             failures += 1
             continue
-        if not isinstance(gates, list) or not gates:
-            print(f"ERROR: domain {name}: gates must be non-empty list", file=sys.stderr)
+        if name in seen_domain_names:
+            print(f"ERROR: duplicate domain name: {name}", file=sys.stderr)
+            failures += 1
+            continue
+        seen_domain_names.add(name)
+        gate_names, gate_names_error = string_list(gates, field_name=f"domain {name} gates", require_non_empty=True)
+        if gate_names_error is not None:
+            print(f"ERROR: domain {name}: {gate_names_error}", file=sys.stderr)
             failures += 1
             continue
         if not isinstance(min_vectors_total, int) or min_vectors_total < 0:
@@ -146,13 +153,7 @@ def main() -> int:
 
         total = 0
         missing_gates: list[str] = []
-        gate_names: list[str] = []
         for gate in gates:
-            if not isinstance(gate, str) or not gate:
-                print(f"ERROR: domain {name}: gate entry must be non-empty string", file=sys.stderr)
-                failures += 1
-                continue
-            gate_names.append(gate)
             if gate not in fixture_gate_to_count:
                 missing_gates.append(gate)
                 continue
