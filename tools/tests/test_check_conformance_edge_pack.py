@@ -122,6 +122,19 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("duplicate domain name: test_domain", captured.getvalue())
 
+    def test_baseline_top_level_array_fails_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline_path.write_text("[]\n", encoding="utf-8")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("EDGE_PACK_BASELINE.json must be a JSON object", captured.getvalue())
+        self.assertNotIn("Traceback", captured.getvalue())
+
     def test_duplicate_domain_gate_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -187,6 +200,46 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("proof_coverage references missing vector IDs: V-MISSING", captured.getvalue())
+
+    def test_proof_coverage_top_level_array_fails_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof_path.write_text("[]\n", encoding="utf-8")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage.json must be a JSON object", captured.getvalue())
+        self.assertNotIn("Traceback", captured.getvalue())
+
+    def test_fixture_top_level_array_fails_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            fixture_path = root / "conformance" / "fixtures" / "CV-TEST.json"
+            fixture_path.write_text("[]\n", encoding="utf-8")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("conformance/fixtures/CV-TEST.json must be a JSON object", captured.getvalue())
+        self.assertNotIn("Traceback", captured.getvalue())
+
+    def test_proof_coverage_duplicate_domain_name_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            proof_path = root / "proof_coverage.json"
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            proof["edge_property_domains"].append(dict(proof["edge_property_domains"][0]))
+            write_json(proof_path, proof)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("proof_coverage.json duplicate edge_property_domain: test_domain", captured.getvalue())
 
     def test_proof_coverage_missing_required_vector_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
