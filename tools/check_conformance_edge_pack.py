@@ -122,6 +122,7 @@ def main() -> int:
 
     failures = 0
     for domain in domains:
+        domain_failures_before = failures
         if not isinstance(domain, dict):
             print("ERROR: domain entry must be object", file=sys.stderr)
             failures += 1
@@ -317,7 +318,8 @@ def main() -> int:
                     )
                     failures += 1
 
-        print(f"OK: domain {name} total_vectors={total} min={min_vectors_total}")
+        if failures == domain_failures_before:
+            print(f"OK: domain {name} total_vectors={total} min={min_vectors_total}")
 
     if failures:
         print(f"FAILED: edge-pack check found {failures} issue(s)", file=sys.stderr)

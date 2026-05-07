@@ -102,11 +102,13 @@ class EdgePackCheckerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             make_repo(root, vector_id="V-MISSING")
+            stdout = io.StringIO()
             captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stderr(captured):
+            with chdir(root), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(captured):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("missing required vectors: V-MISSING", captured.getvalue())
+        self.assertNotIn("OK: domain test_domain", stdout.getvalue())
 
     def test_duplicate_domain_name_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
