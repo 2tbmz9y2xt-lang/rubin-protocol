@@ -45,6 +45,7 @@ EXPECTED_GATES = frozenset(
         "CV-FORK-CHOICE",
         "CV-HTLC",
         "CV-HTLC-ORDERING",
+        "CV-MEMPOOL",
         "CV-MERKLE",
         "CV-MULTISIG",
         "CV-NATIVE-ROTATION-CREATE",
