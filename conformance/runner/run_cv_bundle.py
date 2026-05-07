@@ -1655,17 +1655,23 @@ def validate_vector(
             req["rotation_descriptor"] = v["rotation_descriptor"]
         if "suite_registry" in v:
             req["suite_registry"] = v.get("suite_registry", [])
-    elif op == "da_fee_floor_policy":
+    elif op in ("da_fee_floor_policy", "mempool_relay_metadata_policy"):
         if tx_hex == "":
-            return [f"{gate}/{v.get('id','?')}: missing tx_hex"]
+            return [f"{gate}/{v.get('id','?')}: missing tx_hex"], False
         req["tx_hex"] = tx_hex
         if "utxos" in v:
             req["utxos"] = v["utxos"]
+        elif op == "mempool_relay_metadata_policy":
+            return [f"{gate}/{vid}: mempool_relay_metadata_policy requires explicit utxos"], False
         else:
             try:
                 req["utxos"] = _da_fee_floor_policy_utxos(v)
             except Exception as exc:
                 return [f"{gate}/{vid}: {exc}"], False
+        if "chain_id" in v:
+            req["chain_id"] = v["chain_id"]
+        if "height" in v:
+            req["height"] = int(v["height"])
         for key in (
             "current_mempool_min_fee_rate",
             "min_da_fee_rate",
@@ -2161,7 +2167,7 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_da_bytes mismatch")
         if "expect_anchor_bytes" in v and go_resp.get("anchor_bytes") != v["expect_anchor_bytes"]:
             problems.append(f"{gate}/{vid}: expect_anchor_bytes mismatch")
-    elif op == "da_fee_floor_policy":
+    elif op in ("da_fee_floor_policy", "mempool_relay_metadata_policy"):
         def policy_has(resp: Dict[str, Any], key: str) -> bool:
             return key in resp
 
@@ -2199,13 +2205,21 @@ def validate_vector(
             "fee",
             "weight",
             "da_bytes",
+            "wire_bytes",
             "relay_fee_floor",
             "da_fee_floor",
             "da_surcharge",
             "da_required_fee",
             "required_fee",
+            "pool_len_before",
+            "pool_len_after",
         ]
-        str_fields = ["admit_class", "dominant_floor", "reject_reason"]
+        str_fields = ["admit_class", "dominant_floor", "reject_reason", "policy_entrypoint"]
+        bool_fields = [
+            "mutation_checked",
+            "mutated",
+            "duplicate_conflict_capacity_checked",
+        ]
         if policy_bool(go_resp, "admit", False) != policy_bool(rust_resp, "admit", False):
             problems.append(f"{gate}/{vid}: admit mismatch go={go_resp.get('admit')} rust={rust_resp.get('admit')}")
         if policy_bool(go_resp, "ok", False) != policy_bool(rust_resp, "ok", False):
@@ -2214,6 +2228,60 @@ def validate_vector(
             problems.append(f"{gate}/{vid}: expect_ok mismatch")
         if policy_str(go_resp, "err", "", "go") != policy_str(rust_resp, "err", "", "rust"):
             problems.append(f"{gate}/{vid}: err mismatch go={go_resp.get('err')} rust={rust_resp.get('err')}")
+        for key in bool_fields:
+            go_has = policy_has(go_resp, key)
+            rust_has = policy_has(rust_resp, key)
+            if go_has != rust_has:
+                problems.append(
+                    f"{gate}/{vid}: {key} presence mismatch go={go_has} rust={rust_has}"
+                )
+                continue
+            if go_has and policy_bool(go_resp, key, False) != policy_bool(rust_resp, key, False):
+                problems.append(
+                    f"{gate}/{vid}: {key} mismatch go={go_resp.get(key)} rust={rust_resp.get(key)}"
+                )
+        if "expect_policy_entrypoint" in v:
+            expected = str(v["expect_policy_entrypoint"])
+            for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                if policy_str(resp, "policy_entrypoint", "", side) != expected:
+                    problems.append(f"{gate}/{vid}: {side}.expect_policy_entrypoint mismatch")
+        if "expect_duplicate_conflict_capacity_checked" in v:
+            key = "duplicate_conflict_capacity_checked"
+            expected = bool(v["expect_duplicate_conflict_capacity_checked"])
+            for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                if not policy_has(resp, key):
+                    problems.append(f"{gate}/{vid}: missing {side}.{key}")
+                elif policy_bool(resp, key, False) != expected:
+                    problems.append(f"{gate}/{vid}: {side}.expect_duplicate_conflict_capacity_checked mismatch")
+        if "expect_no_mutation" in v:
+            expected_mutated = not bool(v["expect_no_mutation"])
+            for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                if not policy_bool(resp, "mutation_checked", False):
+                    problems.append(f"{gate}/{vid}: {side}.mutation_checked missing/false")
+                if not policy_has(resp, "mutated"):
+                    problems.append(f"{gate}/{vid}: missing {side}.mutated")
+                elif policy_bool(resp, "mutated", True) != expected_mutated:
+                    problems.append(f"{gate}/{vid}: {side}.expect_no_mutation mismatch")
+        for key in bool_fields:
+            expect_key = f"expect_{key}"
+            if expect_key in v:
+                expected = bool(v[expect_key])
+                for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                    if not policy_has(resp, key):
+                        problems.append(f"{gate}/{vid}: missing {side}.{key} for {expect_key}")
+                        continue
+                    if policy_bool(resp, key, False) != expected:
+                        problems.append(f"{gate}/{vid}: {side}.{expect_key} mismatch")
+        for key in int_fields:
+            expect_key = f"expect_{key}"
+            if expect_key in v:
+                expected = int(v[expect_key])
+                for side, resp in (("go", go_resp), ("rust", rust_resp)):
+                    if not policy_has(resp, key):
+                        problems.append(f"{gate}/{vid}: missing {side}.{key} for {expect_key}")
+                        continue
+                    if policy_int(resp, key, side) != expected:
+                        problems.append(f"{gate}/{vid}: {side}.{expect_key} mismatch")
         if not policy_bool(go_resp, "ok", False) or not policy_bool(rust_resp, "ok", False):
             if "expect_err" in v and policy_str(go_resp, "err", "", "go") != str(v["expect_err"]):
                 problems.append(f"{gate}/{vid}: expect_err mismatch")
@@ -2263,12 +2331,7 @@ def validate_vector(
         for key in int_fields:
             expect_key = f"expect_{key}"
             if expect_key in v:
-                if not policy_has(go_resp, key):
-                    problems.append(f"{gate}/{vid}: missing {key} for {expect_key}")
-                    continue
-                go_value = policy_int(go_resp, key, "go")
-                if go_value != int(v[expect_key]):
-                    problems.append(f"{gate}/{vid}: {expect_key} mismatch")
+                continue
             elif policy_has(go_resp, key):
                 problems.append(f"{gate}/{vid}: unexpected {key}={go_resp.get(key)}")
     elif op.startswith("compact_") and op != "compact_shortid":

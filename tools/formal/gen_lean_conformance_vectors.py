@@ -1577,6 +1577,7 @@ def render_cv_da_stress_lean(vectors: list[DaStressVector]) -> str:
 @dataclass(frozen=True)
 class DaFeeFloorVector:
     vid: str
+    op: str
     tx_hex: str | None
     expect_ok: bool
     expect_err: str | None
@@ -1616,7 +1617,11 @@ def _int_default(v: dict[str, Any], key: str, default: int, vid: str) -> int:
     return _require_int(v, key, vid)
 
 
-def load_da_fee_floor_policy_vectors(path: Path, gate: str = "CV-DA-FEE-FLOOR") -> list[DaFeeFloorVector]:
+def load_da_fee_floor_policy_vectors(
+    path: Path,
+    gate: str = "CV-DA-FEE-FLOOR",
+    allowed_ops: tuple[str, ...] = ("da_fee_floor_policy",),
+) -> list[DaFeeFloorVector]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("gate") != gate:
         raise ValueError(f"expected gate={gate}, got {data.get('gate')!r}")
@@ -1627,7 +1632,8 @@ def load_da_fee_floor_policy_vectors(path: Path, gate: str = "CV-DA-FEE-FLOOR") 
     for idx, raw in enumerate(vectors):
         if not isinstance(raw, dict):
             raise ValueError(f"vector[{idx}] must be an object")
-        if raw.get("op") != "da_fee_floor_policy":
+        op = str(raw.get("op", ""))
+        if op not in allowed_ops:
             continue
         vid = str(raw.get("id", ""))
         if not vid:
@@ -1635,6 +1641,7 @@ def load_da_fee_floor_policy_vectors(path: Path, gate: str = "CV-DA-FEE-FLOOR") 
         out.append(
             DaFeeFloorVector(
                 vid=vid,
+                op=op,
                 tx_hex=(str(raw["tx_hex"]) if "tx_hex" in raw else None),
                 expect_ok=bool(raw.get("expect_ok", True)),
                 expect_err=(str(raw["expect_err"]) if "expect_err" in raw else None),
@@ -1674,6 +1681,7 @@ def render_da_fee_floor_lean(
         rows.append(
             "  { "
             + f'id := "{v.vid}", '
+            + f'op := "{v.op}", '
             + f"txHex := {_lean_opt_str(v.tx_hex)}, "
             + f"expectOk := {'true' if v.expect_ok else 'false'}, "
             + f"expectErr := {_lean_opt_str(v.expect_err)}, "
@@ -1697,6 +1705,7 @@ def render_da_fee_floor_lean(
     module_body = (
         f"structure {structure_name} where\n"
         "  id : String\n"
+        "  op : String\n"
         "  txHex : Option String\n"
         "  expectOk : Bool := true\n"
         "  expectErr : Option String := none\n"
@@ -3006,7 +3015,11 @@ def main() -> int:
 
     in_mempool = repo_root / "conformance" / "fixtures" / "CV-MEMPOOL.json"
     out_mempool = repo_root / "rubin-formal" / "RubinFormal" / "Conformance" / "CVMempoolVectors.lean"
-    mpv = load_da_fee_floor_policy_vectors(in_mempool, gate="CV-MEMPOOL")
+    mpv = load_da_fee_floor_policy_vectors(
+        in_mempool,
+        gate="CV-MEMPOOL",
+        allowed_ops=("da_fee_floor_policy", "mempool_relay_metadata_policy"),
+    )
     out_mempool.write_text(
         _inject_perf_options(render_cv_mempool_lean(mpv)),
         encoding="utf-8",
