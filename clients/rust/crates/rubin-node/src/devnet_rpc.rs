@@ -4518,11 +4518,16 @@ mod tests {
             // RUB-12 / GitHub #1156: metric NAME alignment to Go's
             // `clients/go/node/pv_telemetry.go::PrometheusLines` —
             // the previous Rust-only `rubin_pv_validate_runs_total`
-            // is no longer emitted (Go exposition has no counterpart),
-            // and the latency gauge is now the longer
-            // `rubin_pv_validate_latency_avg_ns` to match the upstream
-            // metric name exactly.
+            // and `rubin_pv_commit_runs_total` are no longer emitted
+            // (Go exposition has no counterpart), and the latency
+            // gauges are now the longer `rubin_pv_validate_latency_avg_ns`
+            // and `rubin_pv_commit_latency_avg_ns` to match the
+            // upstream metric names exactly. Both renamed gauges are
+            // pinned through the production render path so a future
+            // regression that drops either rename is caught here, not
+            // only by the unit tests in sync.rs.
             "rubin_pv_validate_latency_avg_ns",
+            "rubin_pv_commit_latency_avg_ns",
         ] {
             assert!(body.contains(name), "missing metric {name}");
         }

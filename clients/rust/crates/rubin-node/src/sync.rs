@@ -89,9 +89,9 @@ impl PVTelemetrySnapshot {
     /// telemetry snapshot, format-aligned to the upstream Go emission
     /// at `clients/go/node/pv_telemetry.go::PVTelemetrySnapshot.PrometheusLines`
     /// (L246-291). Ten distinct HELP/TYPE metric blocks expanding to
-    /// thirteen Prometheus time series (the `shadow_mismatches_total`
-    /// block carries four `type=` buckets), in the same order Go
-    /// emits.
+    /// thirteen Prometheus time series (the
+    /// `rubin_pv_shadow_mismatches_total` block carries four `type=`
+    /// buckets), in the same order Go emits.
     ///
     /// Scope of the parity claim is exposition format only: HELP
     /// strings, TYPE keywords, metric NAMEs, label shapes, line
@@ -1533,7 +1533,7 @@ mod tests {
     /// exposition `prometheus_lines()` produces for a fully populated
     /// `PVTelemetrySnapshot`. The 33 lines correspond to ten distinct
     /// HELP/TYPE metric blocks (nine simple 3-line blocks plus the
-    /// `shadow_mismatches_total` block which is HELP+TYPE+four
+    /// `rubin_pv_shadow_mismatches_total` block which is HELP+TYPE+four
     /// `type=`-bucketed value lines), expanding to thirteen distinct
     /// Prometheus time series in total. Each emitted line is asserted
     /// against a literal string that matches the upstream Go emission
