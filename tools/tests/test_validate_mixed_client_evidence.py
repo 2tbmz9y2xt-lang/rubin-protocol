@@ -319,6 +319,74 @@ class HostileMutationTests(unittest.TestCase):
             errors = _write_and_validate(Path(td), data)
             self.assertTrue(errors, "tip_hash not 64 hex must be rejected")
 
+    def test_invalid_started_at_timestamp_rejected(self):
+        """format_checker must reject malformed RFC3339 timestamps."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "not-a-timestamp"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "malformed started_at must be rejected by format_checker")
+            self.assertTrue(
+                any("started_at" in e for e in errors),
+                f"expected error to cite started_at; got {errors}",
+            )
+
+    def test_port_above_max_rejected(self):
+        """Port > 65535 must be rejected via structural check."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["rpc"] = "127.0.0.1:99999"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "port 99999 must be rejected")
+            self.assertTrue(
+                any("65535" in e and "rpc" in e for e in errors),
+                f"expected port-range error citing 65535; got {errors}",
+            )
+
+    def test_port_just_above_max_rejected(self):
+        """Boundary: 65536 must be rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][1]["p2p"] = "127.0.0.1:65536"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "port 65536 must be rejected")
+            self.assertTrue(
+                any("65535" in e and "p2p" in e for e in errors),
+                f"expected port-range error citing 65535; got {errors}",
+            )
+
+    def test_restart_checkpoint_invalid_port_rejected(self):
+        """restart.checkpoint endpoint with port > 65535 must be rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["restart"] = {
+                "enabled": True,
+                "stopped_node": "node-b",
+                "checkpoint_before_stop": {
+                    "height": 102,
+                    "tip_hash": "1" * 64,
+                    "rpc": "127.0.0.1:70000",
+                },
+                "state_after_catchup": {
+                    "height": 104,
+                    "tip_hash": "4" * 64,
+                },
+                "post_restart_live_action": {
+                    "action": "mine_next",
+                    "height": 105,
+                    "block_hash": "5" * 64,
+                },
+            }
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "restart checkpoint port > 65535 must be rejected")
+            self.assertTrue(
+                any(
+                    "restart.checkpoint_before_stop.rpc" in e and "65535" in e
+                    for e in errors
+                ),
+                f"expected restart checkpoint port-range error; got {errors}",
+            )
+
 
 class FalsePositivePassTests(unittest.TestCase):
     def test_single_client_with_one_implementation_passes(self):
@@ -399,6 +467,27 @@ class FalsePositivePassTests(unittest.TestCase):
                 errors,
                 [],
                 f"restart.enabled=false should not require sub-fields; got {errors}",
+            )
+
+    def test_port_boundary_max_accepted(self):
+        """Port 65535 is the inclusive upper bound and must pass."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["rpc"] = "127.0.0.1:65535"
+            data["participants"][1]["p2p"] = "127.0.0.1:65535"
+            errors = _write_and_validate(Path(td), data)
+            self.assertEqual(
+                errors, [], f"port 65535 must be accepted; got {errors}"
+            )
+
+    def test_port_boundary_min_accepted(self):
+        """Port 1 is the inclusive lower bound and must pass."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["rpc"] = "127.0.0.1:1"
+            errors = _write_and_validate(Path(td), data)
+            self.assertEqual(
+                errors, [], f"port 1 must be accepted; got {errors}"
             )
 
 

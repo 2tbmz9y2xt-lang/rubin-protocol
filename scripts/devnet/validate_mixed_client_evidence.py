@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,35 @@ DEFAULT_SCHEMA = REPO_ROOT / "scripts" / "devnet" / "schema" / "mixed_client_evi
 
 SCHEMA_VERSION = "rubin-mixed-client-devnet-evidence-v1"
 PROCESS_SOAK_TYPES = ("mixed_client_process_soak", "single_client_process_soak")
+MAX_TCP_UDP_PORT = 65535
+ENDPOINT_FIELDS = ("rpc", "p2p")
+RFC3339_DATE_TIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def _build_format_checker() -> Any:
+    """jsonschema.FormatChecker with an RFC3339 date-time check.
+
+    The stdlib jsonschema package only registers ``date-time`` when the
+    optional ``rfc3339-validator`` or ``python-dateutil`` packages are
+    installed, neither of which is a CI/runtime dependency in this repo.
+    Registering a self-contained regex check keeps the validator usable
+    without expanding pip surface.
+    """
+    import jsonschema  # type: ignore[import-untyped]
+
+    fc = jsonschema.FormatChecker()
+
+    @fc.checks("date-time", raises=ValueError)
+    def _check_date_time(value: Any) -> bool:
+        if not isinstance(value, str):
+            return True
+        if not RFC3339_DATE_TIME_RE.match(value):
+            raise ValueError(f"not a valid RFC3339 date-time: {value!r}")
+        return True
+
+    return fc
 
 
 def _validate_with_jsonschema(data: Any, schema: dict) -> list[str]:
@@ -34,12 +64,36 @@ def _validate_with_jsonschema(data: Any, schema: dict) -> list[str]:
         return [
             "<root>: jsonschema library unavailable; install jsonschema for full Draft 2020-12 validation"
         ]
-    validator = jsonschema.Draft202012Validator(schema)
+    validator = jsonschema.Draft202012Validator(
+        schema, format_checker=_build_format_checker()
+    )
     errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
     return [
         f"{'.'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}"
         for e in errors
     ]
+
+
+def _check_endpoint_port(endpoint: Any) -> str | None:
+    """Return error message if endpoint port is outside 1..65535, else None.
+
+    Schema regex bounds the endpoint to 1-5 nonzero digits; the upper TCP/UDP
+    port limit (65535) cannot be expressed in a tight pure regex without
+    multiline alternation, so the structural check completes the contract.
+    """
+    if not isinstance(endpoint, str):
+        return None
+    if ":" not in endpoint:
+        return None
+    port_str = endpoint.rsplit(":", 1)[1]
+    if not port_str.isdigit():
+        return None
+    port = int(port_str)
+    if not 1 <= port <= MAX_TCP_UDP_PORT:
+        return (
+            f"port {port} is outside the valid TCP/UDP range 1..{MAX_TCP_UDP_PORT}"
+        )
+    return None
 
 
 def _validate_cross_field(data: Any) -> list[str]:
@@ -125,6 +179,14 @@ def _validate_cross_field(data: Any) -> list[str]:
             errors.append(
                 f"participants: duplicate names: {duplicates}"
             )
+
+        for i, p in enumerate(participants):
+            if not isinstance(p, dict):
+                continue
+            for fld in ENDPOINT_FIELDS:
+                msg = _check_endpoint_port(p.get(fld))
+                if msg is not None:
+                    errors.append(f"participants[{i}].{fld}: {msg}")
     elif evidence_type in PROCESS_SOAK_TYPES:
         errors.append(
             f"participants: required for evidence_type={evidence_type!r}"
@@ -200,6 +262,13 @@ def _validate_cross_field(data: Any) -> list[str]:
                 errors.append(
                     f"restart.{fld}: required when restart.enabled=true"
                 )
+        for sub in ("checkpoint_before_stop", "state_after_catchup"):
+            checkpoint = restart.get(sub)
+            if isinstance(checkpoint, dict):
+                for fld in ENDPOINT_FIELDS:
+                    msg = _check_endpoint_port(checkpoint.get(fld))
+                    if msg is not None:
+                        errors.append(f"restart.{sub}.{fld}: {msg}")
 
     reorg = data.get("reorg")
     if isinstance(reorg, dict) and reorg.get("enabled") is True:
