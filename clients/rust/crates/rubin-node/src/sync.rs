@@ -85,6 +85,20 @@ pub struct PVTelemetrySnapshot {
 }
 
 impl PVTelemetrySnapshot {
+    /// RUB-12 / GitHub #1156: Prometheus exposition for the PV
+    /// telemetry snapshot, byte-aligned to the upstream Go emission
+    /// at `clients/go/node/pv_telemetry.go::PVTelemetrySnapshot.PrometheusLines`
+    /// (L246-291). Eleven metric blocks total, in the same order.
+    /// HELP and TYPE strings match the upstream exactly so mixed-
+    /// client Prometheus scrapers see byte-stable output regardless
+    /// of which runtime served `/metrics`. The two latency fields
+    /// `validate_count` / `commit_count` populate the average gauges
+    /// only — they are NOT emitted as standalone counters because
+    /// the upstream Go exposition does not emit them either.
+    /// Renaming the latency gauges to `*_latency_avg_ns` (was
+    /// `*_avg_ns`) closes a metric-NAME contract break — Prometheus
+    /// queries by exact name, and the upstream uses the longer
+    /// form.
     pub fn prometheus_lines(&self) -> Vec<String> {
         vec![
             "# HELP rubin_pv_mode Current parallel validation mode (0=off, 1=shadow, 2=on)."
@@ -116,31 +130,26 @@ impl PVTelemetrySnapshot {
                 "rubin_pv_shadow_mismatches_total{{type=\"witness\"}} {}",
                 self.mismatch_witness
             ),
-            "# HELP rubin_pv_sig_total Total PV signature checks attempted.".to_string(),
+            "# HELP rubin_pv_sig_total Total signature verifications attempted.".to_string(),
             "# TYPE rubin_pv_sig_total counter".to_string(),
             format!("rubin_pv_sig_total {}", self.sig_total),
-            "# HELP rubin_pv_sig_cache_hits_total Total PV signature cache hits.".to_string(),
+            "# HELP rubin_pv_sig_cache_hits_total Signature cache hits (skipped crypto)."
+                .to_string(),
             "# TYPE rubin_pv_sig_cache_hits_total counter".to_string(),
             format!("rubin_pv_sig_cache_hits_total {}", self.sig_cache_hits),
-            "# HELP rubin_pv_worker_tasks_total Total PV worker tasks dispatched.".to_string(),
+            "# HELP rubin_pv_worker_tasks_total Tasks dispatched to worker pool.".to_string(),
             "# TYPE rubin_pv_worker_tasks_total counter".to_string(),
             format!("rubin_pv_worker_tasks_total {}", self.worker_tasks_total),
-            "# HELP rubin_pv_worker_panics_total Total recovered PV worker panics.".to_string(),
+            "# HELP rubin_pv_worker_panics_total Recovered panics in worker pool.".to_string(),
             "# TYPE rubin_pv_worker_panics_total counter".to_string(),
             format!("rubin_pv_worker_panics_total {}", self.worker_panics),
-            "# HELP rubin_pv_validate_runs_total Total PV validation runs.".to_string(),
-            "# TYPE rubin_pv_validate_runs_total counter".to_string(),
-            format!("rubin_pv_validate_runs_total {}", self.validate_count),
-            "# HELP rubin_pv_validate_avg_ns Average PV validation latency in nanoseconds."
+            "# HELP rubin_pv_validate_latency_avg_ns Average validation phase latency (ns)."
                 .to_string(),
-            "# TYPE rubin_pv_validate_avg_ns gauge".to_string(),
-            format!("rubin_pv_validate_avg_ns {}", self.validate_avg_ns),
-            "# HELP rubin_pv_commit_runs_total Total PV commit runs.".to_string(),
-            "# TYPE rubin_pv_commit_runs_total counter".to_string(),
-            format!("rubin_pv_commit_runs_total {}", self.commit_count),
-            "# HELP rubin_pv_commit_avg_ns Average PV commit latency in nanoseconds.".to_string(),
-            "# TYPE rubin_pv_commit_avg_ns gauge".to_string(),
-            format!("rubin_pv_commit_avg_ns {}", self.commit_avg_ns),
+            "# TYPE rubin_pv_validate_latency_avg_ns gauge".to_string(),
+            format!("rubin_pv_validate_latency_avg_ns {}", self.validate_avg_ns),
+            "# HELP rubin_pv_commit_latency_avg_ns Average commit phase latency (ns).".to_string(),
+            "# TYPE rubin_pv_commit_latency_avg_ns gauge".to_string(),
+            format!("rubin_pv_commit_latency_avg_ns {}", self.commit_avg_ns),
         ]
     }
 }
@@ -1490,5 +1499,151 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// RUB-12 / GitHub #1156: pin the exact eleven-metric Prometheus
+    /// exposition `prometheus_lines()` produces for a fully populated
+    /// `PVTelemetrySnapshot`. Each emitted block (HELP / TYPE / value
+    /// line, or the four-bucket `shadow_mismatches_total`) is asserted
+    /// against a literal string that matches the upstream Go emission
+    /// at `clients/go/node/pv_telemetry.go::PrometheusLines` (L246-291)
+    /// token-for-token. A drift in any HELP string, metric NAME, label
+    /// shape, or numeric format trips this test.
+    ///
+    /// Proof assertion: the eleven metric blocks render in the exact
+    /// order Go emits, with HELP/TYPE/value lines positionally
+    /// identical. The dropped Rust-only `rubin_pv_validate_runs_total`
+    /// and `rubin_pv_commit_runs_total` counters are confirmed absent;
+    /// the renamed `rubin_pv_validate_latency_avg_ns` and
+    /// `rubin_pv_commit_latency_avg_ns` gauges are confirmed present
+    /// with the longer upstream NAME (was `*_avg_ns` only, a metric-
+    /// NAME contract break vs Go).
+    #[test]
+    fn pv_telemetry_prometheus_lines_match_go_exposition_byte_for_byte() {
+        let snapshot = super::PVTelemetrySnapshot {
+            mode: "shadow".to_string(),
+            blocks_validated: 7,
+            blocks_skipped: 3,
+            mismatch_verdict: 1,
+            mismatch_error: 2,
+            mismatch_state: 4,
+            mismatch_witness: 8,
+            sig_total: 16,
+            sig_cache_hits: 9,
+            worker_tasks_total: 32,
+            worker_panics: 0,
+            validate_count: 5,
+            validate_avg_ns: 12345,
+            commit_count: 5,
+            commit_avg_ns: 678,
+        };
+        let lines = snapshot.prometheus_lines();
+        let expected: Vec<&str> = vec![
+            "# HELP rubin_pv_mode Current parallel validation mode (0=off, 1=shadow, 2=on).",
+            "# TYPE rubin_pv_mode gauge",
+            "rubin_pv_mode{mode=\"shadow\"} 1",
+            "# HELP rubin_pv_blocks_validated_total Blocks processed through PV path.",
+            "# TYPE rubin_pv_blocks_validated_total counter",
+            "rubin_pv_blocks_validated_total 7",
+            "# HELP rubin_pv_blocks_skipped_total Blocks skipped (mode=off or not in IBD).",
+            "# TYPE rubin_pv_blocks_skipped_total counter",
+            "rubin_pv_blocks_skipped_total 3",
+            "# HELP rubin_pv_shadow_mismatches_total Shadow mismatch count by type.",
+            "# TYPE rubin_pv_shadow_mismatches_total counter",
+            "rubin_pv_shadow_mismatches_total{type=\"verdict\"} 1",
+            "rubin_pv_shadow_mismatches_total{type=\"error\"} 2",
+            "rubin_pv_shadow_mismatches_total{type=\"state\"} 4",
+            "rubin_pv_shadow_mismatches_total{type=\"witness\"} 8",
+            "# HELP rubin_pv_sig_total Total signature verifications attempted.",
+            "# TYPE rubin_pv_sig_total counter",
+            "rubin_pv_sig_total 16",
+            "# HELP rubin_pv_sig_cache_hits_total Signature cache hits (skipped crypto).",
+            "# TYPE rubin_pv_sig_cache_hits_total counter",
+            "rubin_pv_sig_cache_hits_total 9",
+            "# HELP rubin_pv_worker_tasks_total Tasks dispatched to worker pool.",
+            "# TYPE rubin_pv_worker_tasks_total counter",
+            "rubin_pv_worker_tasks_total 32",
+            "# HELP rubin_pv_worker_panics_total Recovered panics in worker pool.",
+            "# TYPE rubin_pv_worker_panics_total counter",
+            "rubin_pv_worker_panics_total 0",
+            "# HELP rubin_pv_validate_latency_avg_ns Average validation phase latency (ns).",
+            "# TYPE rubin_pv_validate_latency_avg_ns gauge",
+            "rubin_pv_validate_latency_avg_ns 12345",
+            "# HELP rubin_pv_commit_latency_avg_ns Average commit phase latency (ns).",
+            "# TYPE rubin_pv_commit_latency_avg_ns gauge",
+            "rubin_pv_commit_latency_avg_ns 678",
+        ];
+        assert_eq!(
+            lines.len(),
+            expected.len(),
+            "line count mismatch: got {} expected {}; lines={:?}",
+            lines.len(),
+            expected.len(),
+            lines
+        );
+        for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got, want, "line {i} mismatch: got {got:?} want {want:?}");
+        }
+    }
+
+    /// RUB-12 / GitHub #1156: the dropped Rust-only counters
+    /// `rubin_pv_validate_runs_total` and `rubin_pv_commit_runs_total`
+    /// must NOT appear in the Prometheus exposition under any populated
+    /// snapshot — they were Rust-only emissions with no upstream Go
+    /// counterpart and would inflate the Rust client's metric surface
+    /// vs. Go for mixed-client devnet evidence consumers.
+    ///
+    /// Proof assertion: even with non-zero `validate_count` /
+    /// `commit_count` (which used to populate those counters), the
+    /// joined exposition contains neither `rubin_pv_validate_runs_total`
+    /// nor `rubin_pv_commit_runs_total` as a substring.
+    #[test]
+    fn pv_telemetry_prometheus_lines_dropped_rust_only_counters_absent() {
+        let snapshot = super::PVTelemetrySnapshot {
+            mode: "on".to_string(),
+            blocks_validated: 0,
+            blocks_skipped: 0,
+            mismatch_verdict: 0,
+            mismatch_error: 0,
+            mismatch_state: 0,
+            mismatch_witness: 0,
+            sig_total: 0,
+            sig_cache_hits: 0,
+            worker_tasks_total: 0,
+            worker_panics: 0,
+            validate_count: 99,
+            validate_avg_ns: 0,
+            commit_count: 99,
+            commit_avg_ns: 0,
+        };
+        let body = snapshot.prometheus_lines().join("\n");
+        assert!(
+            !body.contains("rubin_pv_validate_runs_total"),
+            "validate_runs_total must be dropped (Go has no counterpart); body=\n{body}"
+        );
+        assert!(
+            !body.contains("rubin_pv_commit_runs_total"),
+            "commit_runs_total must be dropped (Go has no counterpart); body=\n{body}"
+        );
+        // The renamed latency gauges with the longer upstream NAME
+        // must be present — Prometheus consumers query by exact name.
+        assert!(
+            body.contains("\nrubin_pv_validate_latency_avg_ns 0"),
+            "validate_latency_avg_ns line missing; body=\n{body}"
+        );
+        assert!(
+            body.contains("\nrubin_pv_commit_latency_avg_ns 0"),
+            "commit_latency_avg_ns line missing; body=\n{body}"
+        );
+        // The shorter Rust-historical names must NOT remain in any
+        // form so a future regression cannot silently restore them.
+        assert!(
+            !body.contains("rubin_pv_validate_avg_ns "),
+            "old short-name validate_avg_ns must not appear; body=\n{body}"
+        );
+        assert!(
+            !body.contains("rubin_pv_commit_avg_ns "),
+            "old short-name commit_avg_ns must not appear; body=\n{body}"
+        );
     }
 }

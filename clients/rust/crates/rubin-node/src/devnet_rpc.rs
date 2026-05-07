@@ -4515,7 +4515,14 @@ mod tests {
             "rubin_pv_blocks_validated_total",
             "rubin_pv_blocks_skipped_total",
             "rubin_pv_shadow_mismatches_total",
-            "rubin_pv_validate_runs_total",
+            // RUB-12 / GitHub #1156: metric NAME alignment to Go's
+            // `clients/go/node/pv_telemetry.go::PrometheusLines` —
+            // the previous Rust-only `rubin_pv_validate_runs_total`
+            // is no longer emitted (Go exposition has no counterpart),
+            // and the latency gauge is now the longer
+            // `rubin_pv_validate_latency_avg_ns` to match the upstream
+            // metric name exactly.
+            "rubin_pv_validate_latency_avg_ns",
         ] {
             assert!(body.contains(name), "missing metric {name}");
         }
