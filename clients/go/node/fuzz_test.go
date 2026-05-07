@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -73,40 +74,6 @@ func fuzzCheckedAdd(a, b uint64) (uint64, bool) {
 		return 0, false
 	}
 	return a + b, true
-}
-
-func fuzzDaPolicyTx(daTx bool, payloadLen int, fee uint64) (*consensus.Tx, map[consensus.Outpoint]consensus.UtxoEntry) {
-	var prev [32]byte
-	prev[0] = 0x42
-	op := consensus.Outpoint{Txid: prev, Vout: 0}
-	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
-		op: {Value: fee, CovenantType: consensus.COV_TYPE_P2PK},
-	}
-	tx := &consensus.Tx{
-		Version: 1,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs: []consensus.TxInput{{
-			PrevTxid: prev,
-			PrevVout: 0,
-		}},
-		Outputs: []consensus.TxOutput{{
-			Value:        0,
-			CovenantType: consensus.COV_TYPE_P2PK,
-		}},
-	}
-	if daTx {
-		if payloadLen <= 0 {
-			payloadLen = 1
-		}
-		tx.TxKind = 0x01
-		tx.DaCommitCore = &consensus.DaCommitCore{ChunkCount: 1, BatchNumber: 1}
-		tx.DaPayload = make([]byte, payloadLen)
-		for i := range tx.DaPayload {
-			tx.DaPayload[i] = byte(i)
-		}
-	}
-	return tx, utxos
 }
 
 // Target: Mempool.AddTx capacity ordering via compareFeeRateWeightValues and
@@ -226,16 +193,133 @@ func FuzzMempoolRollingFloorBoundaries(f *testing.F) {
 	})
 }
 
+func fuzzCanonicalPolicyFee(fee uint64) uint64 {
+	// A checked non-coinbase spend needs at least one positive output, so the
+	// maximum fuzzed fee is normalized to the highest representable fee with a
+	// one-unit output.
+	if fee == ^uint64(0) {
+		return ^uint64(0) - 1
+	}
+	return fee
+}
+
+func fuzzCloneUtxos(utxos map[consensus.Outpoint]consensus.UtxoEntry) map[consensus.Outpoint]consensus.UtxoEntry {
+	clone := make(map[consensus.Outpoint]consensus.UtxoEntry, len(utxos))
+	for outpoint, entry := range utxos {
+		entry.CovenantData = append([]byte(nil), entry.CovenantData...)
+		clone[outpoint] = entry
+	}
+	return clone
+}
+
+type fuzzLockedSigner struct {
+	mu sync.Mutex
+	kp *consensus.MLDSA87Keypair
+}
+
+func (s *fuzzLockedSigner) PubkeyBytes() []byte {
+	return s.kp.PubkeyBytes()
+}
+
+func (s *fuzzLockedSigner) SignDigest32(digest [32]byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.kp.SignDigest32(digest)
+}
+
+func fuzzCheckedDaPolicyTx(
+	t *testing.T,
+	daTx bool,
+	payloadLen int,
+	fee uint64,
+	signer consensus.DigestSigner,
+	address []byte,
+) (*consensus.CheckedTransaction, map[consensus.Outpoint]consensus.UtxoEntry) {
+	t.Helper()
+	policyFee := fuzzCanonicalPolicyFee(fee)
+	state, outpoints := testSpendableChainState(address, []uint64{policyFee + 1})
+	utxos := fuzzCloneUtxos(state.Utxos)
+
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs: []consensus.TxInput{{
+			PrevTxid: outpoints[0].Txid,
+			PrevVout: outpoints[0].Vout,
+			Sequence: 0,
+		}},
+		Outputs: []consensus.TxOutput{{
+			Value:        1,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: append([]byte(nil), address...),
+		}},
+		Locktime: 0,
+	}
+	if daTx {
+		if payloadLen <= 0 {
+			payloadLen = 1
+		}
+		tx.TxKind = 0x01
+		tx.DaPayload = make([]byte, payloadLen)
+		for i := range tx.DaPayload {
+			tx.DaPayload[i] = byte(i)
+		}
+		tx.DaCommitCore = &consensus.DaCommitCore{
+			ChunkCount:  1,
+			BatchNumber: 1,
+		}
+	}
+	if err := consensus.SignTransaction(tx, utxos, devnetGenesisChainID, signer); err != nil {
+		t.Fatalf("SignTransaction(signed fuzz tx): %v", err)
+	}
+	txBytes, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx(signed fuzz tx): %v", err)
+	}
+
+	tx, txid, wtxid, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx(signed fuzz tx): %v", err)
+	}
+	if consumed != len(txBytes) {
+		t.Fatalf("ParseTx consumed=%d, want %d", consumed, len(txBytes))
+	}
+	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+		txBytes,
+		tx,
+		txid,
+		wtxid,
+		fuzzCloneUtxos(utxos),
+		101,
+		0,
+		devnetGenesisChainID,
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(signed fuzz tx): %v", err)
+	}
+	if checked.Fee != policyFee {
+		t.Fatalf("checked fee=%d, want %d", checked.Fee, policyFee)
+	}
+	return checked, utxos
+}
+
 // Target: Mempool.AddTx and RelayMetadata DA Stage C policy via
 // RejectDaAnchorTxPolicy.
 // Invariant: DA required fee uses checked arithmetic and required_fee =
 // max(relay_fee_floor, da_fee_floor + da_surcharge), while non-DA transactions
-// short-circuit this helper before fee/UTXO access.
-// Public/runtime entrypoint: Mempool.AddTx/RelayMetadata ->
-// applyPolicyAgainstState/RejectDaAnchorTxPolicy for DA policy classification.
-// Early guards: the fuzz target constructs a weight-valid tx with a matching
-// UTXO so malformed parse and missing-UTXO guards cannot satisfy the assertion;
-// payload length is bounded to keep fuzz smoke stable.
+// short-circuit the policy helper before fee/UTXO access after the shared
+// checked transaction path has accepted the tx.
+// Public/runtime entrypoint: Mempool.AddTx/RelayMetadata parse and check a
+// signed transaction, then applyPolicyAgainstState calls RejectDaAnchorTxPolicy
+// for DA policy classification.
+// Early guards: the fuzz target constructs a signed P2PK spend with matching
+// covenant data, witness, and UTXO, then marshals, parses, and runs the shared
+// checked transaction path before calling the policy oracle; payload length is
+// bounded to keep fuzz smoke stable.
 // Direct assertion: reject/admit, daBytes, overflow reason class, exact-boundary
 // acceptance, and floor-1 rejection must match an independent checked oracle.
 func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
@@ -244,18 +328,32 @@ func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
 	f.Add(uint16(10), uint64(3383), uint64(3), uint64(1), uint64(0), true)
 	f.Add(uint16(10), uint64(^uint64(0)), uint64(^uint64(0)), uint64(1), uint64(0), true)
 	f.Add(uint16(0), uint64(0), uint64(^uint64(0)), uint64(^uint64(0)), uint64(^uint64(0)), false)
+	signer, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unsupported") {
+			f.Skipf("ML-DSA backend unavailable: %v", err)
+		}
+		f.Fatalf("NewMLDSA87Keypair: %v", err)
+	}
+	f.Cleanup(func() { signer.Close() })
+	lockedSigner := &fuzzLockedSigner{kp: signer}
+	address := consensus.P2PKCovenantDataForPubkey(lockedSigner.PubkeyBytes())
+
 	f.Fuzz(func(t *testing.T, payloadSeed uint16, fee, currentMinFeeRate, minDaFeeRate, daSurchargePerByte uint64, daTx bool) {
 		payloadLen := int(payloadSeed % fuzzMaxDAPayloadLen)
 		if daTx && payloadLen == 0 {
 			payloadLen = 1
 		}
-		tx, utxos := fuzzDaPolicyTx(daTx, payloadLen, fee)
-		weight, wantDaBytes, _, err := consensus.TxWeightAndStats(tx)
-		if err != nil {
-			t.Fatalf("constructed tx should be weight-valid: %v", err)
+		checked, utxos := fuzzCheckedDaPolicyTx(t, daTx, payloadLen, fee, lockedSigner, address)
+		weight := checked.Weight
+		wantDaBytes := checked.DaBytes
+		policyFee := checked.Fee
+		policyUtxos := utxos
+		if wantDaBytes == 0 {
+			policyUtxos = nil
 		}
 
-		reject, gotDaBytes, reason, policyErr := RejectDaAnchorTxPolicy(tx, utxos, currentMinFeeRate, minDaFeeRate, daSurchargePerByte)
+		reject, gotDaBytes, reason, policyErr := RejectDaAnchorTxPolicy(checked.Tx, policyUtxos, currentMinFeeRate, minDaFeeRate, daSurchargePerByte)
 		if gotDaBytes != wantDaBytes {
 			t.Fatalf("daBytes=%d, want %d", gotDaBytes, wantDaBytes)
 		}
@@ -298,9 +396,9 @@ func FuzzDaFeeFloorPolicyBoundaries(f *testing.F) {
 		if daRequired > required {
 			required = daRequired
 		}
-		wantReject := required != 0 && fee < required
+		wantReject := required != 0 && policyFee < required
 		if reject != wantReject {
-			t.Fatalf("reject=%v, want %v (fee=%d required=%d relay=%d da=%d surcharge=%d weight=%d daBytes=%d)", reject, wantReject, fee, required, relayFloor, daFloor, daSurcharge, weight, wantDaBytes)
+			t.Fatalf("reject=%v, want %v (fee=%d required=%d relay=%d da=%d surcharge=%d weight=%d daBytes=%d)", reject, wantReject, policyFee, required, relayFloor, daFloor, daSurcharge, weight, wantDaBytes)
 		}
 		if wantReject {
 			if policyErr != nil || !strings.Contains(reason, "DA fee below Stage C floor") {
