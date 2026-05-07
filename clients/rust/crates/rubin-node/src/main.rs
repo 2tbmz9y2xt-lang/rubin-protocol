@@ -279,27 +279,6 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         sync_engine.record_best_known_height(height);
     }
 
-    // RUB-13 / GitHub #1157: operator-facing startup banner that
-    // mirrors the cross-client format pinned in PR evidence. Mixed-
-    // client devnet diagnostic scripts scraping `rubin-node` startup
-    // stdout for sync diagnostics rely on this exact one-line format
-    // on both clients. Printed BEFORE the effective-config JSON dump
-    // so the upstream startup ordering is preserved (banners first,
-    // then `--dry-run` exit). Both accessors are pre-existing public
-    // API on `SyncEngine`: `header_sync_request()` / `is_in_ibd(now_unix)`.
-    let header_req = sync_engine.header_sync_request();
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let _ = writeln!(
-        stdout,
-        "sync: header_request_has_from={} header_request_limit={} ibd={}",
-        header_req.has_from,
-        header_req.limit,
-        sync_engine.is_in_ibd(now_unix)
-    );
-
     let effective = EffectiveConfig {
         network: cfg.network.clone(),
         data_dir: cfg.data_dir.display().to_string(),
@@ -327,6 +306,41 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         return 1;
     }
     let _ = writeln!(stdout);
+
+    // RUB-13 / GitHub #1157: operator-facing startup banners that pin
+    // the cross-client format. Mixed-client devnet diagnostic scripts
+    // scraping `rubin-node` startup stdout for sync diagnostics or
+    // peer-slot occupancy rely on these exact one-line formats on
+    // both clients. Same upstream sequencing pinned at
+    // `clients/go/cmd/rubin-node/main.go:441-443`: emitted AFTER the
+    // effective-config JSON dump and BEFORE the `--dry-run` early
+    // exit so a `--dry-run` run on either client emits both banners.
+    // PeerManager construction is moved here (from its previous
+    // post-dry-run position) so the peer-slots banner can render
+    // before the dry-run early exit, matching the upstream's pre-
+    // exit emission. The accessors are pre-existing public API on
+    // `SyncEngine` (`header_sync_request()` / `is_in_ibd(now_unix)`)
+    // and `PeerManager` (`snapshot()`, the same accessor `/peers`
+    // uses, RUB-14 / GitHub #1159).
+    let header_req = sync_engine.header_sync_request();
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(
+        stdout,
+        "sync: header_request_has_from={} header_request_limit={} ibd={}",
+        header_req.has_from,
+        header_req.limit,
+        sync_engine.is_in_ibd(now_unix)
+    );
+    let peer_runtime_cfg = default_peer_runtime_config(&cfg.network, cfg.max_peers);
+    let peer_manager = Arc::new(PeerManager::new(peer_runtime_cfg.clone()));
+    let _ = writeln!(
+        stdout,
+        "{}",
+        format_peer_slots_banner(cfg.max_peers, peer_manager.snapshot().len())
+    );
 
     if cfg.dry_run {
         return 0;
@@ -423,22 +437,14 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     };
     let sync_engine = Arc::new(Mutex::new(sync_engine));
     let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
-    let peer_runtime_cfg = default_peer_runtime_config(&cfg.network, cfg.max_peers);
-    let peer_manager = Arc::new(PeerManager::new(peer_runtime_cfg.clone()));
-    // RUB-13 / GitHub #1157: operator-facing peer-slots banner that
-    // mirrors the cross-client format pinned in PR evidence. Printed
-    // at the same structural position (after PeerManager construction,
-    // before p2p service start). Companions the existing Rust-only
-    // `p2p: listening=` banner below — the listening line stays because
-    // the post-bind address is operator-useful and the upstream client
-    // cannot emit it symmetrically (its bind happens inside
-    // `p2pService.Start(ctx)`). `peer_manager.snapshot()` is the same
-    // accessor `/peers` uses (RUB-14 / GitHub #1159).
-    let _ = writeln!(
-        stdout,
-        "{}",
-        format_peer_slots_banner(cfg.max_peers, peer_manager.snapshot().len())
-    );
+    // peer_runtime_cfg / peer_manager were constructed earlier (above
+    // the dry-run early-exit) so the RUB-13 peer-slots banner could
+    // render in the dry-run path matching the upstream sequencing at
+    // `clients/go/cmd/rubin-node/main.go:441-443`. They are reused
+    // here to feed `p2p_service` startup. The Rust-only `p2p: listening=`
+    // banner below stays because the post-bind address is operator-
+    // useful and the upstream client cannot emit it symmetrically
+    // (its bind happens inside `p2pService.Start(ctx)`).
     let mut p2p_service = match start_node_p2p_service(NodeP2PServiceConfig {
         bind_addr: cfg.bind_addr.clone(),
         bootstrap_peers: cfg.peers.clone(),
@@ -1084,7 +1090,15 @@ mod tests {
             .iter()
             .position(|&b| b == b'{')
             .expect("expected JSON object in stdout");
-        serde_json::from_slice(&stdout[json_start..]).expect("json")
+        // Use a streaming Deserializer so trailing post-JSON content
+        // (the RUB-13 banner lines that print after the JSON dump)
+        // does not trip the strict trailing-character reject path
+        // of `serde_json::from_slice`.
+        serde_json::Deserializer::from_slice(&stdout[json_start..])
+            .into_iter::<Value>()
+            .next()
+            .expect("first JSON value")
+            .expect("json parse")
     }
 
     struct FailingWriter;
@@ -1657,31 +1671,30 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 
-    /// RUB-13 / GitHub #1157: dry-run startup stdout contains both
-    /// operator-facing parity banners that mirror Go's
-    /// `clients/go/cmd/rubin-node/main.go:442-443`. Without these
-    /// banners, mixed-client devnet diagnostic scripts that scrape
-    /// `rubin-node` startup output for sync state or peer-slot
-    /// occupancy would break on the Rust client.
+    /// RUB-13 / GitHub #1157: dry-run startup stdout emits BOTH
+    /// operator-facing parity banners (sync header_request + p2p
+    /// peer_slots) that pin the cross-client format from
+    /// `clients/go/cmd/rubin-node/main.go:441-443`. Without these
+    /// banners — and without their adjacent placement after the JSON
+    /// dump and before the dry-run early-exit — mixed-client devnet
+    /// diagnostic scripts scraping `rubin-node` startup output for
+    /// sync state or peer-slot occupancy break on the Rust client.
     ///
-    /// Proof assertion: stdout contains exactly the expected one-line
-    /// formats: `sync: header_request_has_from=<bool> header_request_limit=<u64> ibd=<bool>`
-    /// before the JSON dump, and `p2p: peer_slots=<u64> connected=<u64>`
-    /// AFTER the JSON dump but on a startup that doesn't reach
-    /// `cfg.dry_run` early-return (i.e., a non-dry-run path; we exercise
-    /// the dry-run path here since that is the only path the test can
-    /// reach without spinning up p2p sockets — so this test pins the
-    /// `sync:` banner; full-startup p2p banner is implicitly covered
-    /// by the p2p init code path being reached on every non-dry-run
-    /// boot, which the existing `start_devnet_rpc_server`-using tests
-    /// already exercise indirectly).
+    /// Proof assertion: stdout contains the two one-line formats
+    /// `sync: header_request_has_from=<bool> header_request_limit=<u64> ibd=<bool>`
+    /// and `p2p: peer_slots=<usize> connected=<usize>` on adjacent
+    /// lines, both AFTER the effective-config JSON dump and BEFORE
+    /// the `--dry-run` early-exit. Scraping clients on either runtime
+    /// see both banners on a `--dry-run` invocation.
     #[test]
-    fn dry_run_emits_sync_header_request_banner() {
-        let dir = unique_temp_dir("rubin-node-bin-sync-banner");
+    fn dry_run_emits_sync_and_peer_slots_banners_after_json_in_order() {
+        let dir = unique_temp_dir("rubin-node-bin-banners");
         let args = vec![
             "--dry-run".to_string(),
             "--datadir".to_string(),
             dir.display().to_string(),
+            "--max-peers".to_string(),
+            "12".to_string(),
         ];
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1690,31 +1703,25 @@ mod tests {
         assert_eq!(code, 0, "stderr={}", String::from_utf8_lossy(&stderr));
         let stdout_str = String::from_utf8(stdout).expect("stdout utf8");
 
-        // The banner must appear BEFORE the JSON object — same
-        // upstream sequencing pinned at
-        // `clients/go/cmd/rubin-node/main.go:442-443`.
-        let banner_line = stdout_str
+        // (1) sync banner: pin the exact one-line format token-for-
+        // token. Three key=value pairs in order; bool / u64 / bool.
+        // ibd depends on wall-clock at test time so any bool is OK.
+        let sync_line = stdout_str
             .lines()
             .find(|line| line.starts_with("sync: header_request_has_from="))
             .unwrap_or_else(|| {
                 panic!(
-                    "missing `sync: header_request_has_from=…` banner in stdout; \
+                    "missing `sync: header_request_has_from=…` banner; \
                      full stdout=\n{stdout_str}"
                 )
             });
-        // Pin the exact one-line format Go emits, by parsing the three
-        // key=value pairs and asserting all three keys are present with
-        // syntactically valid values (bool / u64 / bool). The actual
-        // ibd flag depends on real wall-clock vs tip timestamp at test
-        // time, so we accept any bool token but reject missing or
-        // misordered fields.
-        let mut pairs = banner_line.trim_start_matches("sync: ").split(' ');
+        let mut pairs = sync_line.trim_start_matches("sync: ").split(' ');
         let has_from_kv = pairs.next().expect("has_from kv");
         let limit_kv = pairs.next().expect("limit kv");
         let ibd_kv = pairs.next().expect("ibd kv");
         assert!(
             pairs.next().is_none(),
-            "extra fields in banner: {banner_line}"
+            "extra fields in sync banner: {sync_line}"
         );
         let (has_from_key, has_from_val) = has_from_kv.split_once('=').expect("has_from k=v");
         let (limit_key, limit_val) = limit_kv.split_once('=').expect("limit k=v");
@@ -1735,16 +1742,42 @@ mod tests {
             "ibd must be a bool token; got {ibd_val:?}"
         );
 
-        // The banner sits BEFORE the JSON object — same upstream
-        // sequencing pinned at `clients/go/cmd/rubin-node/main.go:442-443`.
-        let banner_pos = stdout_str
-            .find("sync: header_request_has_from=")
-            .expect("banner present");
-        let json_pos = stdout_str.find('{').expect("json present");
+        // (2) p2p:peer_slots banner: empty PeerManager at startup,
+        // so connected=0; --max-peers=12 above pins the slot cap.
+        // Direct equality — token-for-token format helper output.
         assert!(
-            banner_pos < json_pos,
-            "sync banner must appear before the JSON object (upstream sequencing); \
-             banner_pos={banner_pos}, json_pos={json_pos}"
+            stdout_str
+                .lines()
+                .any(|line| line == "p2p: peer_slots=12 connected=0"),
+            "missing exact `p2p: peer_slots=12 connected=0` banner; \
+             full stdout=\n{stdout_str}"
+        );
+
+        // (3) Sequencing: JSON dump BEFORE both banners, sync banner
+        // BEFORE peer_slots banner, both BEFORE the (implicit) dry-run
+        // exit. Same upstream sequencing pinned at
+        // `clients/go/cmd/rubin-node/main.go:441-443`.
+        let json_pos = stdout_str.find('{').expect("json open present");
+        let json_close_pos = stdout_str.rfind('}').expect("json close present");
+        let sync_pos = stdout_str
+            .find("sync: header_request_has_from=")
+            .expect("sync banner present");
+        let peers_pos = stdout_str
+            .find("p2p: peer_slots=")
+            .expect("peers banner present");
+        assert!(
+            json_close_pos < sync_pos,
+            "JSON dump must close before sync banner; \
+             json_close_pos={json_close_pos}, sync_pos={sync_pos}"
+        );
+        assert!(
+            sync_pos < peers_pos,
+            "sync banner must appear before peer_slots banner (upstream order); \
+             sync_pos={sync_pos}, peers_pos={peers_pos}"
+        );
+        assert!(
+            json_pos < json_close_pos,
+            "JSON object well-formed; json_pos={json_pos}, json_close_pos={json_close_pos}"
         );
 
         fs::remove_dir_all(&dir).expect("cleanup");
@@ -1781,8 +1814,13 @@ mod tests {
             format_peer_slots_banner(2, 2),
             "p2p: peer_slots=2 connected=2"
         );
-        // Edge: zero slots (operator could pass --max-peers=0 — Go
-        // accepts it too; banner still renders honestly).
+        // Defensive renderer test for an input that is rejected
+        // upstream by `validate_config` (`--max-peers` must be > 0
+        // on both runtimes — `clients/go/node/config.go:395-396`
+        // and the Rust counterpart enforce this). The renderer
+        // itself stays total: it does not validate, it only formats,
+        // so a hypothetical pre-validation caller still gets honest
+        // output.
         assert_eq!(
             format_peer_slots_banner(0, 0),
             "p2p: peer_slots=0 connected=0"
