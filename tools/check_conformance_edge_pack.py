@@ -5,6 +5,9 @@ import json
 import sys
 from pathlib import Path
 
+CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
+KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
+
 
 def fail(msg: str) -> int:
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -15,17 +18,78 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def proof_domain_map(proof_coverage: dict) -> dict[str, dict]:
+    domains = proof_coverage.get("edge_property_domains", [])
+    if not isinstance(domains, list):
+        raise ValueError("proof_coverage.json edge_property_domains must be a list")
+    result: dict[str, dict] = {}
+    for domain in domains:
+        if not isinstance(domain, dict):
+            raise ValueError("proof_coverage.json edge_property_domains entries must be objects")
+        name = domain.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("proof_coverage.json edge_property_domains entries need non-empty name")
+        if name in result:
+            raise ValueError(f"proof_coverage.json duplicate edge_property_domain: {name}")
+        result[name] = domain
+    return result
+
+
+def fuzz_gates(proof_coverage: dict) -> set[str]:
+    gates: set[str] = set()
+    for section in ("fuzz", "go_fuzz"):
+        targets = proof_coverage.get(section, {}).get("targets", [])
+        if not isinstance(targets, list):
+            continue
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            gate = target.get("conformance_gate")
+            if isinstance(gate, str) and gate:
+                gates.add(gate)
+    return gates
+
+
+def status_of(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    status = value.get("status")
+    return status if isinstance(status, str) else ""
+
+
+def string_list(value: object, *, field_name: str) -> tuple[list[str], str | None]:
+    if not isinstance(value, list):
+        return [], f"{field_name} must be list"
+    strings: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            return [], f"{field_name} entries must be non-empty strings"
+        strings.append(item)
+    if len(set(strings)) != len(strings):
+        return [], f"{field_name} entries must be unique"
+    return strings, None
+
+
 def main() -> int:
     repo_root = Path(".").resolve()
     baseline_path = repo_root / "conformance" / "EDGE_PACK_BASELINE.json"
     fixtures_dir = repo_root / "conformance" / "fixtures"
+    proof_coverage_path = repo_root / "proof_coverage.json"
 
     if not baseline_path.exists():
         return fail("conformance/EDGE_PACK_BASELINE.json not found")
     if not fixtures_dir.exists():
         return fail("conformance/fixtures directory not found")
+    if not proof_coverage_path.exists():
+        return fail("proof_coverage.json not found")
 
     baseline = load_json(baseline_path)
+    proof_coverage = load_json(proof_coverage_path)
+    try:
+        proof_domains = proof_domain_map(proof_coverage)
+    except ValueError as exc:
+        return fail(str(exc))
+    committed_fuzz_gates = fuzz_gates(proof_coverage)
     if baseline.get("schema_version") != 1:
         return fail("EDGE_PACK_BASELINE.json schema_version must be 1")
 
@@ -65,6 +129,7 @@ def main() -> int:
         gates = domain.get("gates")
         min_vectors_total = domain.get("min_vectors_total")
         required_vectors_by_gate = domain.get("required_vectors_by_gate", {})
+        coverage_accounting = domain.get("coverage_accounting")
 
         if not isinstance(name, str) or not name:
             print("ERROR: domain name missing/invalid", file=sys.stderr)
@@ -82,14 +147,20 @@ def main() -> int:
             print(f"ERROR: domain {name}: required_vectors_by_gate must be object", file=sys.stderr)
             failures += 1
             continue
+        if coverage_accounting is not None and not isinstance(coverage_accounting, dict):
+            print(f"ERROR: domain {name}: coverage_accounting must be object", file=sys.stderr)
+            failures += 1
+            continue
 
         total = 0
         missing_gates: list[str] = []
+        gate_names: list[str] = []
         for gate in gates:
             if not isinstance(gate, str) or not gate:
                 print(f"ERROR: domain {name}: gate entry must be non-empty string", file=sys.stderr)
                 failures += 1
                 continue
+            gate_names.append(gate)
             if gate not in fixture_gate_to_count:
                 missing_gates.append(gate)
                 continue
@@ -123,6 +194,108 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 failures += 1
+
+        if coverage_accounting is not None:
+            proof_domain_name = coverage_accounting.get("proof_coverage_domain")
+            if not isinstance(proof_domain_name, str) or not proof_domain_name:
+                print(
+                    f"ERROR: domain {name}: coverage_accounting.proof_coverage_domain must be non-empty string",
+                    file=sys.stderr,
+                )
+                failures += 1
+            elif proof_domain_name not in proof_domains:
+                print(
+                    f"FAIL: domain {name}: missing proof_coverage edge_property_domain {proof_domain_name}",
+                    file=sys.stderr,
+                )
+                failures += 1
+            else:
+                proof_domain = proof_domains[proof_domain_name]
+                proof_gates, proof_gates_error = string_list(
+                    proof_domain.get("conformance_gates"),
+                    field_name="proof_coverage conformance_gates",
+                )
+                if proof_gates_error is not None:
+                    print(
+                        f"ERROR: domain {name}: {proof_gates_error}",
+                        file=sys.stderr,
+                    )
+                    failures += 1
+                elif sorted(proof_gates) != sorted(gate_names):
+                    print(
+                        f"FAIL: domain {name}: proof_coverage gates do not match EDGE baseline gates",
+                        file=sys.stderr,
+                    )
+                    failures += 1
+                proof_vector_ids, proof_vector_ids_error = string_list(
+                    proof_domain.get("vector_ids"),
+                    field_name="proof_coverage vector_ids",
+                )
+                if proof_vector_ids_error is not None:
+                    print(
+                        f"ERROR: domain {name}: {proof_vector_ids_error}",
+                        file=sys.stderr,
+                    )
+                    failures += 1
+                else:
+                    present_for_domain: set[str] = set()
+                    for gate in gate_names:
+                        present_for_domain.update(fixture_gate_to_ids.get(gate, set()))
+                    missing_proof_ids = [
+                        vid
+                        for vid in proof_vector_ids
+                        if isinstance(vid, str) and vid not in present_for_domain
+                    ]
+                    if missing_proof_ids:
+                        print(
+                            f"FAIL: domain {name}: proof_coverage references missing vector IDs: {', '.join(missing_proof_ids)}",
+                            file=sys.stderr,
+                        )
+                        failures += 1
+                    for gate, required_ids in required_vectors_by_gate.items():
+                        if not isinstance(required_ids, list):
+                            continue
+                        missing_from_proof = [
+                            rid for rid in required_ids if isinstance(rid, str) and rid not in proof_vector_ids
+                        ]
+                        if missing_from_proof:
+                            print(
+                                f"FAIL: domain {name}: proof_coverage missing vector IDs: {', '.join(missing_from_proof)}",
+                                file=sys.stderr,
+                            )
+                            failures += 1
+
+                fuzz_status = status_of(proof_domain.get("fuzz"))
+                if fuzz_status in CLAIMED_PRESENT_STATUSES:
+                    missing_fuzz_gates = [gate for gate in gate_names if gate not in committed_fuzz_gates]
+                    if missing_fuzz_gates:
+                        print(
+                            f"FAIL: domain {name}: proof_coverage claims fuzz={fuzz_status} without committed fuzz target for gates: {', '.join(missing_fuzz_gates)}",
+                            file=sys.stderr,
+                        )
+                        failures += 1
+                elif fuzz_status and fuzz_status not in KNOWN_ABSENT_STATUSES:
+                    print(
+                        f"ERROR: domain {name}: unknown fuzz coverage status {fuzz_status}",
+                        file=sys.stderr,
+                    )
+                    failures += 1
+
+                formal_status = status_of(proof_domain.get("formal"))
+                if formal_status in CLAIMED_PRESENT_STATUSES:
+                    formal_evidence = proof_domain.get("formal_evidence", [])
+                    if not isinstance(formal_evidence, list) or not formal_evidence:
+                        print(
+                            f"FAIL: domain {name}: proof_coverage claims formal={formal_status} without formal_evidence",
+                            file=sys.stderr,
+                        )
+                        failures += 1
+                elif formal_status and formal_status not in KNOWN_ABSENT_STATUSES:
+                    print(
+                        f"ERROR: domain {name}: unknown formal coverage status {formal_status}",
+                        file=sys.stderr,
+                    )
+                    failures += 1
 
         print(f"OK: domain {name} total_vectors={total} min={min_vectors_total}")
 

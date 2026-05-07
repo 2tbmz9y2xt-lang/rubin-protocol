@@ -305,5 +305,83 @@
         "stage": 2
       }
     ]
-  }
+  },
+  "edge_property_domains": [
+    {
+      "name": "mempool_policy",
+      "conformance_gates": [
+        "CV-MEMPOOL"
+      ],
+      "vector_ids": [
+        "CV-MEMPOOL-01-ROLLING-FLOOR-ACCEPTED",
+        "CV-MEMPOOL-02-ROLLING-FLOOR-UNAVAILABLE",
+        "CV-MEMPOOL-03-DA-FLOOR-REJECTED",
+        "CV-MEMPOOL-04-DA-FLOOR-ACCEPTED",
+        "CV-MEMPOOL-05-OMITTED-CURRENT-FLOOR-DEFAULT",
+        "CV-MEMPOOL-06-MALFORMED-TX-PARSE-FIRST",
+        "CV-MEMPOOL-RELAY-METADATA-01-ACCEPTED-READONLY",
+        "CV-MEMPOOL-RELAY-METADATA-02-ROLLING-FLOOR-UNAVAILABLE-READONLY",
+        "CV-MEMPOOL-RELAY-METADATA-03-DA-FLOOR-REJECTED-READONLY",
+        "CV-MEMPOOL-RELAY-METADATA-04-MALFORMED-PARSE-FIRST-READONLY"
+      ],
+      "conformance_replay": {
+        "status": "present",
+        "command": "scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py --only-gates CV-MEMPOOL",
+        "evidence_source": "RUB-191 closeout on origin/main@79df40a942456abf432664a30c1911703f3545bb"
+      },
+      "go_rust_replay": "present",
+      "fuzz": {
+        "status": "deferred",
+        "issue": "RUB-129",
+        "reason": "No committed fuzz/property target for mempool_policy in this accounting PR."
+      },
+      "formal": {
+        "status": "not_claimed",
+        "reason": "No formal theorem/proof bridge is added or claimed for mempool_policy here."
+      }
+    },
+    {
+      "name": "da_fee_floor",
+      "conformance_gates": [
+        "CV-DA-FEE-FLOOR"
+      ],
+      "vector_ids": [
+        "CV-DA-FEE-FLOOR-01-DA-EXACT",
+        "CV-DA-FEE-FLOOR-02-DA-UNDER",
+        "CV-DA-FEE-FLOOR-03-DA-ABOVE",
+        "CV-DA-FEE-FLOOR-04-RELAY-DOMINANT-UNDER",
+        "CV-DA-FEE-FLOOR-05-MIN-PLUS-SURCHARGE-EXACT",
+        "CV-DA-FEE-FLOOR-06-MIN-PLUS-SURCHARGE-UNDER",
+        "CV-DA-FEE-FLOOR-07-DA-FLOOR-OVERFLOW",
+        "CV-DA-FEE-FLOOR-08-NON-DA-RELAY-PASS",
+        "CV-DA-FEE-FLOOR-09-RELAY-DOMINANT-BELOW-BOTH",
+        "CV-DA-FEE-FLOOR-10-RELAY-DOMINANT-EXACT",
+        "CV-DA-FEE-FLOOR-11-TIE-UNDER",
+        "CV-DA-FEE-FLOOR-12-RELAY-FLOOR-OVERFLOW",
+        "CV-DA-FEE-FLOOR-13-DA-SURCHARGE-OVERFLOW",
+        "CV-DA-FEE-FLOOR-14-DA-REQUIRED-FEE-OVERFLOW",
+        "CV-DA-FEE-FLOOR-15-ZERO-MIN-SURCHARGE-EXACT",
+        "CV-DA-FEE-FLOOR-16-TIE-EXACT",
+        "CV-DA-FEE-FLOOR-17-DA-ZERO-REQUIRED-SKIPS-FEE",
+        "CV-DA-FEE-FLOOR-18-NON-DA-SKIPS-FEE",
+        "CV-DA-FEE-FLOOR-19-OMITTED-CURRENT-FLOOR-DEFAULT",
+        "CV-DA-FEE-FLOOR-20-MALFORMED-TX-PARSE-FIRST"
+      ],
+      "conformance_replay": {
+        "status": "present",
+        "command": "scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py --only-gates CV-DA-FEE-FLOOR",
+        "evidence_source": "RUB-191 closeout on origin/main@79df40a942456abf432664a30c1911703f3545bb"
+      },
+      "go_rust_replay": "present",
+      "fuzz": {
+        "status": "deferred",
+        "issue": "RUB-129",
+        "reason": "No committed fuzz/property target for da_fee_floor in this accounting PR."
+      },
+      "formal": {
+        "status": "not_claimed",
+        "reason": "No formal theorem/proof bridge is added or claimed for da_fee_floor here."
+      }
+    }
+  ]
 }

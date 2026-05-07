@@ -68,6 +68,12 @@ scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py --check
 - covenants
 - difficulty
 - DA
+- mempool policy
+- DA fee-floor policy
+
+Mempool/DA fee-floor domains are accounting-only here: they cite committed
+executable CV vector IDs and replay evidence, but do not claim fuzz or formal
+coverage until a committed fuzz target or formal proof exists.
 
 Проверка (локально/CI):
 
@@ -80,6 +86,8 @@ Gate падает если:
 - отсутствует обязательный gate/fixture для домена;
 - общее число векторов в домене ниже baseline;
 - отсутствуют обязательные edge vector IDs из baseline.
+- `proof_coverage.json` claims fuzz/formal coverage for an edge/property domain
+  without committed matching evidence.
 
 ## Fixture governance (manual-only)
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Machine-readable baseline for critical conformance edge coverage across parse/weight/sighash/covenants/difficulty/DA domains.",
+  "description": "Machine-readable baseline for critical conformance edge coverage across parse/weight/sighash/covenants/difficulty/DA/mempool policy domains.",
   "domains": [
     {
       "name": "parse",
@@ -119,6 +119,64 @@
           "CV-C-30",
           "CV-C-31"
         ]
+      }
+    },
+    {
+      "name": "mempool_policy",
+      "gates": [
+        "CV-MEMPOOL"
+      ],
+      "min_vectors_total": 10,
+      "required_vectors_by_gate": {
+        "CV-MEMPOOL": [
+          "CV-MEMPOOL-01-ROLLING-FLOOR-ACCEPTED",
+          "CV-MEMPOOL-02-ROLLING-FLOOR-UNAVAILABLE",
+          "CV-MEMPOOL-03-DA-FLOOR-REJECTED",
+          "CV-MEMPOOL-04-DA-FLOOR-ACCEPTED",
+          "CV-MEMPOOL-05-OMITTED-CURRENT-FLOOR-DEFAULT",
+          "CV-MEMPOOL-06-MALFORMED-TX-PARSE-FIRST",
+          "CV-MEMPOOL-RELAY-METADATA-01-ACCEPTED-READONLY",
+          "CV-MEMPOOL-RELAY-METADATA-02-ROLLING-FLOOR-UNAVAILABLE-READONLY",
+          "CV-MEMPOOL-RELAY-METADATA-03-DA-FLOOR-REJECTED-READONLY",
+          "CV-MEMPOOL-RELAY-METADATA-04-MALFORMED-PARSE-FIRST-READONLY"
+        ]
+      },
+      "coverage_accounting": {
+        "proof_coverage_domain": "mempool_policy"
+      }
+    },
+    {
+      "name": "da_fee_floor",
+      "gates": [
+        "CV-DA-FEE-FLOOR"
+      ],
+      "min_vectors_total": 20,
+      "required_vectors_by_gate": {
+        "CV-DA-FEE-FLOOR": [
+          "CV-DA-FEE-FLOOR-01-DA-EXACT",
+          "CV-DA-FEE-FLOOR-02-DA-UNDER",
+          "CV-DA-FEE-FLOOR-03-DA-ABOVE",
+          "CV-DA-FEE-FLOOR-04-RELAY-DOMINANT-UNDER",
+          "CV-DA-FEE-FLOOR-05-MIN-PLUS-SURCHARGE-EXACT",
+          "CV-DA-FEE-FLOOR-06-MIN-PLUS-SURCHARGE-UNDER",
+          "CV-DA-FEE-FLOOR-07-DA-FLOOR-OVERFLOW",
+          "CV-DA-FEE-FLOOR-08-NON-DA-RELAY-PASS",
+          "CV-DA-FEE-FLOOR-09-RELAY-DOMINANT-BELOW-BOTH",
+          "CV-DA-FEE-FLOOR-10-RELAY-DOMINANT-EXACT",
+          "CV-DA-FEE-FLOOR-11-TIE-UNDER",
+          "CV-DA-FEE-FLOOR-12-RELAY-FLOOR-OVERFLOW",
+          "CV-DA-FEE-FLOOR-13-DA-SURCHARGE-OVERFLOW",
+          "CV-DA-FEE-FLOOR-14-DA-REQUIRED-FEE-OVERFLOW",
+          "CV-DA-FEE-FLOOR-15-ZERO-MIN-SURCHARGE-EXACT",
+          "CV-DA-FEE-FLOOR-16-TIE-EXACT",
+          "CV-DA-FEE-FLOOR-17-DA-ZERO-REQUIRED-SKIPS-FEE",
+          "CV-DA-FEE-FLOOR-18-NON-DA-SKIPS-FEE",
+          "CV-DA-FEE-FLOOR-19-OMITTED-CURRENT-FLOOR-DEFAULT",
+          "CV-DA-FEE-FLOOR-20-MALFORMED-TX-PARSE-FIRST"
+        ]
+      },
+      "coverage_accounting": {
+        "proof_coverage_domain": "da_fee_floor"
       }
     }
   ]
