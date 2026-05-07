@@ -84,28 +84,46 @@ pub struct PVTelemetrySnapshot {
     pub commit_avg_ns: u64,
 }
 
-/// RUB-12 / GitHub #1156: escape a Prometheus label value per the
-/// text exposition spec (https://prometheus.io/docs/instrumenting/exposition_formats/),
-/// matching Go's `fmt.Fprintf` `%q` verb behavior used at
+/// RUB-12 / GitHub #1156: escape a Prometheus label value matching
+/// Go's `fmt.Sprintf` `%q` verb (`strconv.Quote` semantics) used at
 /// `clients/go/node/pv_telemetry.go:250` for the `rubin_pv_mode`
-/// label. Three byte transforms: `\` -> `\\`, `"` -> `\"`,
-/// LF -> `\n` (literal backslash-n). All other ASCII / UTF-8 bytes
-/// pass through unchanged. Defense-in-depth: today the only
-/// production caller is `mode` populated from
-/// `ParallelValidationMode::as_str()` which returns the static
-/// literal "off"/"shadow"/"on" (none contain special chars), but
-/// `PVTelemetrySnapshot` is a `pub` struct with `pub mode: String`,
+/// label. Covers the full `%q` byte set:
+/// - `\` -> `\\`
+/// - `"` -> `\"`
+/// - named control-char escapes: `\a` (BEL 0x07), `\b` (BS 0x08),
+///   `\t`, `\n`, `\v`, `\f`, `\r`
+/// - other control chars (0x00..=0x1f minus the named ones, plus
+///   0x7f DEL): `\xNN` two-hex-digit lowercase form
+/// - everything else (printable ASCII + multi-byte UTF-8): passes
+///   through unchanged
+///
+/// Byte-aligned with Go's `%q` is what the doc on `prometheus_lines`
+/// claims; the prior partial-escape (only `\` / `"` / `\n`) would
+/// have left `\r` / `\t` / `0x00..=0x1f` flowing through as raw
+/// control bytes, breaking byte-aligned exposition under runtime-
+/// shaped `mode` values. Defense-in-depth: today's only production
+/// caller is `ParallelValidationMode::as_str()` returning the static
+/// literal "off"/"shadow"/"on" (escape is identity on that input),
+/// but `PVTelemetrySnapshot` is a `pub` struct with `pub mode: String`
 /// so a future external constructor passing a runtime-shaped value
-/// must not be able to inject quotes / backslashes / newlines that
-/// would close the label literal early and forge synthetic metric
-/// lines downstream of the formatter.
+/// must neither break the label literal nor drift from Go's `%q`
+/// byte stream.
 fn escape_prometheus_label_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
             '\\' => out.push_str(r"\\"),
             '"' => out.push_str(r#"\""#),
+            '\x07' => out.push_str(r"\a"),
+            '\x08' => out.push_str(r"\b"),
+            '\t' => out.push_str(r"\t"),
             '\n' => out.push_str(r"\n"),
+            '\x0b' => out.push_str(r"\v"),
+            '\x0c' => out.push_str(r"\f"),
+            '\r' => out.push_str(r"\r"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!(r"\x{:02x}", c as u32));
+            }
             _ => out.push(c),
         }
     }
@@ -1759,6 +1777,26 @@ mod tests {
         assert_eq!(super::escape_prometheus_label_value("a\nb"), r"a\nb");
         // Combined.
         assert_eq!(super::escape_prometheus_label_value("\"\\\n"), r#"\"\\\n"#);
+        // Go-%q named control-char escapes beyond the Prometheus
+        // spec subset: BEL, BS, TAB, VT, FF, CR — must match Go's
+        // strconv.Quote byte-for-byte.
+        assert_eq!(super::escape_prometheus_label_value("\x07"), r"\a");
+        assert_eq!(super::escape_prometheus_label_value("\x08"), r"\b");
+        assert_eq!(super::escape_prometheus_label_value("\t"), r"\t");
+        assert_eq!(super::escape_prometheus_label_value("\x0b"), r"\v");
+        assert_eq!(super::escape_prometheus_label_value("\x0c"), r"\f");
+        assert_eq!(super::escape_prometheus_label_value("\r"), r"\r");
+        // Other control chars fall through to `\xNN` two-digit
+        // lowercase hex form, matching Go's strconv.Quote.
+        assert_eq!(super::escape_prometheus_label_value("\x00"), r"\x00");
+        assert_eq!(super::escape_prometheus_label_value("\x01"), r"\x01");
+        assert_eq!(super::escape_prometheus_label_value("\x1f"), r"\x1f");
+        assert_eq!(super::escape_prometheus_label_value("\x7f"), r"\x7f");
+        // Combined: a control sandwich.
+        assert_eq!(
+            super::escape_prometheus_label_value("a\rb\tc\x01d"),
+            r"a\rb\tc\x01d"
+        );
         // UTF-8 passes through.
         assert_eq!(super::escape_prometheus_label_value("режим"), "режим");
         // End-to-end injection attempt: malicious `mode` tries to
