@@ -87,9 +87,9 @@ Gate падает если:
 
 - отсутствует обязательный gate/fixture для домена;
 - общее число векторов в домене ниже baseline;
-- отсутствуют обязательные edge vector IDs из baseline.
-- `proof_coverage.json` claims fuzz/formal coverage for an edge/property domain
-  before the checker supports concrete evidence validation.
+- отсутствуют обязательные edge vector IDs из baseline;
+- `proof_coverage.json` заявляет fuzz/formal coverage для edge/property-домена
+  до того, как checker начнёт поддерживать валидацию конкретных evidence.
 
 ## Fixture governance (manual-only)
 
