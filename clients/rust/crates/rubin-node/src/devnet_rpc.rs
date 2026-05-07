@@ -728,13 +728,13 @@ fn handle_ready(state: &DevnetRPCState, method: &str) -> HttpResponse {
 /// (`clients/rust/crates/rubin-node/src/p2p_runtime.rs:235-240`)
 /// already absorbs poison as `Vec::new()`, so an unhealthy lock
 /// surfaces here as 200 `{count:0,peers:[]}` (operationally
-/// indistinguishable from a real zero-peer startup state at this
-/// layer). Lifting this divergence requires extending
-/// `PeerManager`'s public API to surface lock-state, which would
-/// touch `p2p_runtime.rs` and is excluded from RUB-14's narrowed
+/// indistinguishable from a real zero-peer startup at this layer).
+/// Lifting this divergence requires extending `PeerManager`'s
+/// public API to surface lock health, an edit that touches
+/// `p2p_runtime.rs` and is excluded from RUB-14's narrowed
 /// `devnet_rpc.rs`-only scope; deferred to a follow-up issue if
 /// mixed-client orchestrators ever need to distinguish the two
-/// states (RUB-12 owns later operator surface elaboration).
+/// cases (RUB-12 owns later operator surface elaboration).
 ///
 /// Sort discipline: stable sort on `addr` (`String::cmp`, byte-wise
 /// lexicographic) — same total order Go's `sort.Slice` produces on
