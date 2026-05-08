@@ -29,6 +29,7 @@ Exits 0 on PASS, 1 on validation failure or unreadable input.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import sys
 from pathlib import Path
@@ -91,12 +92,22 @@ def _validate_cross_field(data: Any) -> list[str]:
         for p in participants
         if isinstance(p, dict) and isinstance(p.get("name"), str)
     ]
+    # Restrict impl_by_name to fully-typed (str, str) entries so the dict's
+    # declared type holds at runtime — None implementations are filtered out
+    # here and re-surfaced via the schema-level "implementation: required" error
+    # rather than leaking through the cross-impl branch.
     impl_by_name: dict[str, str] = {
-        p.get("name"): p.get("implementation")
+        p["name"]: p["implementation"]
+        for p in participants
+        if isinstance(p, dict)
+        and isinstance(p.get("name"), str)
+        and isinstance(p.get("implementation"), str)
+    }
+    valid_names = {
+        p.get("name")
         for p in participants
         if isinstance(p, dict) and isinstance(p.get("name"), str)
     }
-    valid_names = set(impl_by_name)
 
     if evidence_type == "mixed_client_process_soak":
         if not (any(i == "go" for i in impls) and any(i == "rust" for i in impls)):
@@ -119,7 +130,8 @@ def _validate_cross_field(data: Any) -> list[str]:
                 f"requires one implementation; observed={sorted(unique)}"
             )
 
-    duplicates = sorted({n for n in names_list if names_list.count(n) > 1})
+    name_counts = collections.Counter(names_list)
+    duplicates = sorted(n for n, c in name_counts.items() if c > 1)
     if duplicates:
         errors.append(f"participants: duplicate names: {duplicates}")
 
@@ -148,18 +160,21 @@ def _validate_cross_field(data: Any) -> list[str]:
             and isinstance(observed_at, list)
         ):
             submitter_impl = impl_by_name[submitted_at]
-            observer_impls = {
-                impl_by_name[o]
-                for o in observed_at
-                if isinstance(o, str) and o in impl_by_name
-            }
+            observer_pairs = sorted(
+                {
+                    (o, impl_by_name[o])
+                    for o in observed_at
+                    if isinstance(o, str) and o in impl_by_name
+                }
+            )
+            observer_impls = {impl for _, impl in observer_pairs}
             if not any(impl != submitter_impl for impl in observer_impls):
                 errors.append(
                     "tx_path: mixed_client_process_soak with verdict=PASS "
-                    "requires at least one observer with implementation != "
-                    f"submitted_at.implementation; submitter={submitted_at!r} "
-                    f"implementation={submitter_impl!r}, observer implementations="
-                    f"{sorted(observer_impls)}"
+                    "requires observer implementation to differ from submitter "
+                    "implementation; submitter "
+                    f"{submitted_at!r}/{submitter_impl}, observers="
+                    f"{[f'{n}/{i}' for n, i in observer_pairs]}"
                 )
     elif (
         evidence_type == "mixed_client_process_soak" and verdict == "PASS"

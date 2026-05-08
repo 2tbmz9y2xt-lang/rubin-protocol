@@ -92,7 +92,7 @@ class CrossImplTxPathRejectionTests(unittest.TestCase):
             data["tx_path"]["submitted_at"] = "node-a"
             data["tx_path"]["observed_at"] = ["node-b"]
             errors = _validate_dict(Path(td), data)
-            _assert_one(self, errors, "tx_path", "implementation", "submitted_at")
+            _assert_one(self, errors, "tx_path", "submitter", "observer")
 
     def test_rust_to_rust_only_in_mixed_set_rejected(self):
         """{rust, rust, go} with tx_path rust-1 -> [rust-2] must reject (T13 case 2)."""
@@ -107,7 +107,7 @@ class CrossImplTxPathRejectionTests(unittest.TestCase):
             data["tx_path"]["submitted_at"] = "node-a"
             data["tx_path"]["observed_at"] = ["node-b"]
             errors = _validate_dict(Path(td), data)
-            _assert_one(self, errors, "tx_path", "implementation", "submitted_at")
+            _assert_one(self, errors, "tx_path", "submitter", "observer")
 
     def test_submitter_only_observer_rejected(self):
         """observed_at == [submitted_at] for mixed-client PASS must reject."""
