@@ -170,7 +170,7 @@ def _validate_cross_field(data: Any) -> list[str]:
     # `tx_path.{submitted_at,observed_at} not in participants` message
     # would be misleading; the schema layer reports each malformed item's
     # `participants[i]` errors authoritatively.
-    participants_fully_named = all(
+    all_participant_names_valid = all(
         isinstance(p, dict) and isinstance(p.get("name"), str)
         for p in participants
     )
@@ -223,7 +223,7 @@ def _validate_cross_field(data: Any) -> list[str]:
         observed_at = tx_path.get("observed_at")
 
         if (
-            participants_fully_named
+            all_participant_names_valid
             and isinstance(submitted_at, str)
             and submitted_at not in valid_names
         ):
@@ -231,7 +231,7 @@ def _validate_cross_field(data: Any) -> list[str]:
                 f"tx_path.submitted_at: {submitted_at!r} not in participants"
             )
 
-        if participants_fully_named and isinstance(observed_at, list):
+        if all_participant_names_valid and isinstance(observed_at, list):
             for i, observer in enumerate(observed_at):
                 if isinstance(observer, str) and observer not in valid_names:
                     errors.append(
