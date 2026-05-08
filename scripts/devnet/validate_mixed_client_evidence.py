@@ -68,7 +68,12 @@ def _validate_cross_field(data: Any) -> list[str]:
 
     Per-site decisions:
 
-      S1  top-level non-object             AUTHORITATIVE (jsonschema-absent path)
+      S1  top-level non-object             REMOVED (schema's root `type:
+                                              object` is authoritative; in the
+                                              jsonschema-absent path the
+                                              "library unavailable" message
+                                              from `_validate_with_jsonschema`
+                                              is itself the operative signal)
       S2  schema_version mismatch          GATED on isinstance(str)
                                               (schema `const` handles None/wrong-type)
       S3  verdict=FAIL ⇒ failure_reason    GATED on (None or empty str)
@@ -107,7 +112,15 @@ def _validate_cross_field(data: Any) -> list[str]:
     """
     errors: list[str] = []
     if not isinstance(data, dict):
-        return ["<root>: top-level JSON must be an object"]
+        # S1: schema's root `type: object` is authoritative for non-object
+        # inputs. When jsonschema is available (the standard path), it
+        # emits "<root>: <value> is not of type 'object'"; emitting a
+        # second cross-field "top-level JSON must be an object" message
+        # would duplicate. When jsonschema is unavailable, the
+        # `<root>: jsonschema library unavailable` message from
+        # `_validate_with_jsonschema` is itself the operative signal —
+        # so we return no additional cross-field message either way.
+        return errors
 
     # S2: only emit cross-field "expected vs got" wording when schema_version
     # is a string but wrong value; missing or wrong-type cases are reported

@@ -70,10 +70,21 @@ class MalformedInputTests(unittest.TestCase):
             _assert_one(self, validator.validate(f, SCHEMA_PATH), "malformed JSON")
 
     def test_top_level_array_rejected(self):
+        """Top-level non-object input: schema owns the root `type: object`
+        rejection; the cross-field `<root>: top-level JSON must be an
+        object` message must NOT fire on top of the schema's authoritative
+        error (S1 wave-7 close)."""
         with tempfile.TemporaryDirectory() as td:
             f = Path(td) / "arr.json"
             f.write_text("[]", encoding="utf-8")
-            self.assertTrue(validator.validate(f, SCHEMA_PATH))
+            errors = validator.validate(f, SCHEMA_PATH)
+            # Schema reports the root type-mismatch authoritatively.
+            _assert_one(self, errors, "is not of type", "object")
+            # Custom cross-field root message must NOT fire.
+            self.assertFalse(
+                any("top-level JSON must be an object" in e for e in errors),
+                f"cross-field S1 root message duplicates schema error; got {errors}",
+            )
 
     def test_missing_schema_version_no_duplicate_cross_field_message(self):
         """When `schema_version` is missing, schema's `const` reports the
