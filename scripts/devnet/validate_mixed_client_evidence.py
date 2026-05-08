@@ -75,7 +75,18 @@ def _schema_layer(data: Any, schema: dict) -> tuple[list[str], bool]:
             True,
         )
 
-    errors = sorted(raw_errors, key=lambda e: list(e.absolute_path))
+    # Total-orderable sort key: tuple of (type-tag, str-of-element) for
+    # each path component. `e.absolute_path` may legitimately mix int
+    # (array indices) and str (object keys) depending on which schema
+    # the validator runs against; a plain `list(e.absolute_path)` key
+    # raises `TypeError: '<' not supported between 'int' and 'str'` when
+    # adjacent errors have different element types at the same depth.
+    def _path_key(err: object) -> tuple:
+        return tuple(
+            (type(p).__name__, str(p)) for p in getattr(err, "absolute_path", ())
+        )
+
+    errors = sorted(raw_errors, key=_path_key)
     return (
         [
             f"{'.'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}"
@@ -104,11 +115,39 @@ def _cross_field(data: dict) -> list[str]:
     errors: list[str] = []
     evidence_type = data.get("evidence_type")
     verdict = data.get("verdict")
-    participants = data["participants"]
 
-    # Schema PASS contract: every entry in `participants` is a dict with
-    # `name` and `implementation` as strings; `valid_names` is therefore
-    # exhaustive (`all_participant_names_valid` by construction here).
+    # Schema-independent minimal-shape guard. Defensive against
+    # permissive alternate `--schema` overrides that could admit input
+    # violating the committed shape; without these checks the direct
+    # indexing below would raise KeyError/TypeError instead of returning
+    # deterministic validation errors. The committed schema enforces
+    # all of these via `required` / `type` / `items`; this guard is the
+    # minimum needed to keep cross-field code safe under any schema.
+    minimal_shape_errors: list[str] = []
+    if not isinstance(data.get("participants"), list) or not data.get("participants"):
+        minimal_shape_errors.append(
+            "<root>: alternate schema admitted; expected non-empty `participants` list"
+        )
+        return minimal_shape_errors
+    participants = data["participants"]
+    for i, p in enumerate(participants):
+        if not isinstance(p, dict):
+            minimal_shape_errors.append(
+                f"<root>: participants[{i}] not an object (alternate schema admitted)"
+            )
+            continue
+        if not isinstance(p.get("name"), str):
+            minimal_shape_errors.append(
+                f"<root>: participants[{i}].name not a string (alternate schema admitted)"
+            )
+        if not isinstance(p.get("implementation"), str):
+            minimal_shape_errors.append(
+                f"<root>: participants[{i}].implementation not a string (alternate schema admitted)"
+            )
+    if minimal_shape_errors:
+        return minimal_shape_errors
+    # all_participant_names_valid by construction (every p is dict with str name)
+
     impls = {p["implementation"] for p in participants}
     names_list = [p["name"] for p in participants]
     impl_by_name: dict[str, str] = {p["name"]: p["implementation"] for p in participants}
@@ -150,8 +189,34 @@ def _cross_field(data: dict) -> list[str]:
 
     tx_path = data.get("tx_path")
     if isinstance(tx_path, dict):
-        submitted_at = tx_path["submitted_at"]
-        observed_at = tx_path["observed_at"]
+        # Committed-shape prerequisites for tx_path (same checks the
+        # committed schema enforces). Defensive against permissive
+        # alternate schemas that admit dict-shaped tx_path missing
+        # required keys or with wrong-type values.
+        tx_path_shape_errors: list[str] = []
+        submitted_at = tx_path.get("submitted_at")
+        observed_at = tx_path.get("observed_at")
+        tx_id = tx_path.get("tx_id")
+        if not isinstance(submitted_at, str):
+            tx_path_shape_errors.append(
+                "<root>: tx_path.submitted_at not a string (alternate schema admitted)"
+            )
+        if (
+            not isinstance(observed_at, list)
+            or not observed_at
+            or not all(isinstance(o, str) for o in observed_at)
+        ):
+            tx_path_shape_errors.append(
+                "<root>: tx_path.observed_at not a non-empty list of strings "
+                "(alternate schema admitted)"
+            )
+        if not isinstance(tx_id, str):
+            tx_path_shape_errors.append(
+                "<root>: tx_path.tx_id not a string (alternate schema admitted)"
+            )
+        if tx_path_shape_errors:
+            errors.extend(tx_path_shape_errors)
+            return errors
 
         if submitted_at not in valid_names:
             errors.append(
@@ -170,8 +235,7 @@ def _cross_field(data: dict) -> list[str]:
         # name -> impl mapping is ambiguous and the duplicate-names
         # error above is authoritative) or when any observer name is
         # unknown (the per-observer "not in participants" error above
-        # is authoritative; chaining the cross-impl algorithm off an
-        # unknown name would KeyError on impl_by_name lookup).
+        # is authoritative).
         if (
             evidence_type == "mixed_client_process_soak"
             and verdict == "PASS"
@@ -211,14 +275,20 @@ def _cross_field(data: dict) -> list[str]:
 def validate(fixture_path: Path, schema_path: Path) -> list[str]:
     """Return sorted, deduplicated error messages. Empty list = PASS.
 
+    Contract: `result == [] ⇒ data conforms to the committed-shape
+    encoded by `mixed_client_evidence_v1.json`. The committed schema is
+    ALWAYS enforced as a floor; the user-supplied `--schema` may add
+    extra constraints but cannot relax committed ones. This prevents
+    silent PASS on permissive alternate schemas.
+
     On any deterministic input failure (unreadable file, malformed JSON,
-    invalid schema object, or schema-layer rejection of the fixture),
+    invalid schema object, or any schema-layer rejection of the fixture),
     cross-field validation is NOT run; only the schema-owned errors are
-    returned.
+    returned. The CLI never raises a Python exception on bad input.
     """
     try:
         with open(schema_path, encoding="utf-8") as f:
-            schema = json.load(f)
+            user_schema = json.load(f)
     except OSError as e:
         return [f"schema: cannot read {schema_path}: {e}"]
     except json.JSONDecodeError as e:
@@ -232,30 +302,43 @@ def validate(fixture_path: Path, schema_path: Path) -> list[str]:
     except json.JSONDecodeError as e:
         return [f"fixture: malformed JSON in {fixture_path}: {e}"]
 
-    schema_errors, schema_available = _schema_layer(data, schema)
-    if schema_errors:
-        return sorted(set(schema_errors))
+    # Floor: ALWAYS run the committed schema regardless of `schema_path`.
+    # If the user supplied `DEFAULT_SCHEMA` (the canonical path), this is
+    # a no-op duplicate; if they supplied a permissive alternate schema,
+    # this catches every committed-shape violation the alternate schema
+    # would have admitted.
+    try:
+        with open(DEFAULT_SCHEMA, encoding="utf-8") as f:
+            committed_schema = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return [f"schema: cannot read committed schema {DEFAULT_SCHEMA}: {e}"]
 
-    # Schema PASS → run cross-field invariants. (When jsonschema is
-    # unavailable, `schema_errors` already contains the «library
-    # unavailable» message and we never reach this branch.)
+    committed_errors, schema_available = _schema_layer(data, committed_schema)
     if not schema_available:
-        return sorted(set(schema_errors))
+        return committed_errors  # «jsonschema library unavailable» path
+    if committed_errors:
+        return sorted(set(committed_errors))
 
-    if not isinstance(data, dict):
-        # The committed schema enforces root `type: object`, so this
-        # branch is unreachable when the default `--schema` is used.
-        # However, `validate()` accepts a parametrized `schema_path`,
-        # so a permissive alternate schema (one that does not assert
-        # `type: object` at root) could let non-object fixtures past
-        # the schema layer. Returning `[]` here would silently PASS
-        # such input — break the «empty list = PASS» contract by
-        # surfacing a deterministic non-object error.
-        return [
-            "<root>: evidence must be a JSON object at top level "
-            "(schema layer did not enforce this)"
-        ]
+    # User-supplied schema may add extra constraints (e.g., stricter
+    # patterns or extra required fields). Run only when distinct from
+    # the committed schema to avoid duplicate work.
+    try:
+        same_schema = (
+            schema_path.resolve(strict=False) == DEFAULT_SCHEMA.resolve(strict=False)
+        )
+    except (OSError, RuntimeError):
+        same_schema = False
+    if not same_schema:
+        user_errors, _ = _schema_layer(data, user_schema)
+        if user_errors:
+            return sorted(set(user_errors))
 
+    # Both schema layers passed; data is committed-shape by construction
+    # (the committed schema enforces `type: object`, root `required`,
+    # `properties.*`, `additionalProperties: false`, and every
+    # constraint the cross-field code below relies on). `_cross_field`
+    # may safely index data["participants"], p["name"], p["implementation"],
+    # tx_path["submitted_at"], etc.
     return sorted(set(_cross_field(data)))
 
 

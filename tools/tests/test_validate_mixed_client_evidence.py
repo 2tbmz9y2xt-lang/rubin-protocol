@@ -165,36 +165,127 @@ class FailClosedCliTests(unittest.TestCase):
                 self, validator.validate(bad, SCHEMA_PATH), "fixture:", "malformed JSON"
             )
 
-    def test_permissive_alternate_schema_does_not_silently_pass_non_object(self):
-        """When the user supplies an alternate `--schema` that does NOT
-        enforce `type: object` at the root, a non-object fixture must
-        still be rejected — not silently PASSed by the cross-field
-        layer's defensive non-dict guard. The committed schema does
-        enforce `type: object`, so this exercises the parametrized
-        `validate(fixture_path, schema_path)` boundary."""
+    def _permissive_schema(self, td: Path) -> Path:
+        """Helper: write a permissive schema (only $schema declared) to td."""
+        p = td / "permissive.json"
+        p.write_text(
+            json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema"}),
+            encoding="utf-8",
+        )
+        return p
+
+    def test_permissive_alternate_schema_non_object_root_rejected(self):
+        """Non-object root under alternate permissive schema: committed
+        schema is enforced as floor regardless of user's --schema, so
+        the validator returns a deterministic schema-owned type error."""
         with tempfile.TemporaryDirectory() as td:
-            # Permissive schema: matches any JSON value (no `type: object`).
-            permissive = Path(td) / "permissive.json"
-            permissive.write_text(
-                json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema"}),
+            tdp = Path(td)
+            permissive = self._permissive_schema(tdp)
+            for fixture_text in ("[]", "42", "null", '"hello"'):
+                fix = tdp / "f.json"
+                fix.write_text(fixture_text, encoding="utf-8")
+                errors = validator.validate(fix, permissive)
+                self.assertTrue(
+                    errors,
+                    f"validator silently PASSed non-object fixture {fixture_text!r}",
+                )
+                self.assertTrue(
+                    any("is not of type" in e and "object" in e for e in errors),
+                    f"validator did not surface schema-owned type error for "
+                    f"{fixture_text!r}; got {errors}",
+                )
+                self.assertFalse(
+                    any("Traceback" in e for e in errors),
+                    f"validator leaked traceback for {fixture_text!r}; got {errors}",
+                )
+
+    def test_permissive_alternate_schema_empty_object_rejected(self):
+        """`{}` under permissive alternate schema: committed-schema floor
+        catches missing required top-level fields."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            permissive = self._permissive_schema(tdp)
+            fix = tdp / "f.json"
+            fix.write_text("{}", encoding="utf-8")
+            errors = validator.validate(fix, permissive)
+            _assert_one(self, errors, "required")
+
+    def test_permissive_alternate_schema_empty_participants_rejected(self):
+        """`{participants: []}` under permissive alternate schema:
+        committed-schema floor catches `minItems: 1`."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            permissive = self._permissive_schema(tdp)
+            fix = tdp / "f.json"
+            fix.write_text(json.dumps({"participants": []}), encoding="utf-8")
+            errors = validator.validate(fix, permissive)
+            self.assertTrue(errors)
+            self.assertFalse(any("Traceback" in e for e in errors))
+
+    def test_permissive_alternate_schema_participant_missing_implementation_rejected(self):
+        """Participant missing `implementation` under permissive alt
+        schema: committed-schema floor catches missing required."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            permissive = self._permissive_schema(tdp)
+            fix = tdp / "f.json"
+            fix.write_text(
+                json.dumps({"participants": [{"name": "node-a"}]}),
                 encoding="utf-8",
             )
-            non_object_fixture = Path(td) / "arr.json"
-            non_object_fixture.write_text("[]", encoding="utf-8")
-            errors = validator.validate(non_object_fixture, permissive)
-            self.assertTrue(
-                errors,
-                "validator silently PASSed non-object fixture under alternate "
-                "permissive schema",
-            )
-            self.assertTrue(
-                any(
-                    "evidence must be a JSON object" in e
-                    or "expected" in e.lower()
-                    for e in errors
-                ),
-                f"validator did not surface clear non-object rejection; got {errors}",
-            )
+            errors = validator.validate(fix, permissive)
+            self.assertTrue(any("implementation" in e for e in errors))
+            self.assertFalse(any("Traceback" in e for e in errors))
+
+    def test_permissive_alternate_schema_empty_tx_path_rejected(self):
+        """`tx_path: {}` under permissive alt schema: committed-schema
+        floor catches missing required tx_path keys."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            permissive = self._permissive_schema(tdp)
+            data = _load_committed_valid()
+            data["tx_path"] = {}
+            fix = tdp / "f.json"
+            fix.write_text(json.dumps(data), encoding="utf-8")
+            errors = validator.validate(fix, permissive)
+            self.assertTrue(any("tx_path" in e for e in errors))
+            self.assertFalse(any("Traceback" in e for e in errors))
+
+    def test_permissive_alternate_schema_wrong_type_observed_at_rejected(self):
+        """`tx_path.observed_at` non-list under permissive alt schema:
+        committed-schema floor catches wrong type."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            permissive = self._permissive_schema(tdp)
+            data = _load_committed_valid()
+            data["tx_path"]["observed_at"] = "node-b"  # wrong type — should be array
+            fix = tdp / "f.json"
+            fix.write_text(json.dumps(data), encoding="utf-8")
+            errors = validator.validate(fix, permissive)
+            self.assertTrue(any("observed_at" in e for e in errors))
+            self.assertFalse(any("Traceback" in e for e in errors))
+
+    def test_alternate_schema_with_mixed_path_types_does_not_typeerror(self):
+        """Sort key for `_schema_layer` errors must be total-orderable
+        across mixed-type `absolute_path` (int + str). Constructed by
+        passing a fixture with errors at both `participants[0]` (int
+        index path) and `evidence_type` (str key path) under the
+        committed schema."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            data = _load_committed_valid()
+            data["evidence_type"] = "bogus"  # str-path enum violation
+            data["participants"][0]["name"] = "BAD-CAPS"  # int-then-str pattern violation
+            fix = tdp / "f.json"
+            fix.write_text(json.dumps(data), encoding="utf-8")
+            try:
+                errors = validator.validate(fix, SCHEMA_PATH)
+            except TypeError as e:
+                self.fail(f"sorted() raised TypeError on mixed path types: {e}")
+            self.assertTrue(errors)
+            # Should contain both errors
+            self.assertTrue(any("evidence_type" in e for e in errors))
+            self.assertTrue(any("name" in e for e in errors))
 
 
 class SchemaOwnedTests(unittest.TestCase):
