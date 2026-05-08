@@ -165,6 +165,37 @@ class FailClosedCliTests(unittest.TestCase):
                 self, validator.validate(bad, SCHEMA_PATH), "fixture:", "malformed JSON"
             )
 
+    def test_permissive_alternate_schema_does_not_silently_pass_non_object(self):
+        """When the user supplies an alternate `--schema` that does NOT
+        enforce `type: object` at the root, a non-object fixture must
+        still be rejected — not silently PASSed by the cross-field
+        layer's defensive non-dict guard. The committed schema does
+        enforce `type: object`, so this exercises the parametrized
+        `validate(fixture_path, schema_path)` boundary."""
+        with tempfile.TemporaryDirectory() as td:
+            # Permissive schema: matches any JSON value (no `type: object`).
+            permissive = Path(td) / "permissive.json"
+            permissive.write_text(
+                json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema"}),
+                encoding="utf-8",
+            )
+            non_object_fixture = Path(td) / "arr.json"
+            non_object_fixture.write_text("[]", encoding="utf-8")
+            errors = validator.validate(non_object_fixture, permissive)
+            self.assertTrue(
+                errors,
+                "validator silently PASSed non-object fixture under alternate "
+                "permissive schema",
+            )
+            self.assertTrue(
+                any(
+                    "evidence must be a JSON object" in e
+                    or "expected" in e.lower()
+                    for e in errors
+                ),
+                f"validator did not surface clear non-object rejection; got {errors}",
+            )
+
 
 class SchemaOwnedTests(unittest.TestCase):
     """For each shape/type/const/minLength/pattern problem the schema

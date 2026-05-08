@@ -243,10 +243,18 @@ def validate(fixture_path: Path, schema_path: Path) -> list[str]:
         return sorted(set(schema_errors))
 
     if not isinstance(data, dict):
-        # Defensive: schema's `type: object` would have already rejected
-        # non-dict input above, but the cross-field code below
-        # dereferences `data` as a dict.
-        return []
+        # The committed schema enforces root `type: object`, so this
+        # branch is unreachable when the default `--schema` is used.
+        # However, `validate()` accepts a parametrized `schema_path`,
+        # so a permissive alternate schema (one that does not assert
+        # `type: object` at root) could let non-object fixtures past
+        # the schema layer. Returning `[]` here would silently PASS
+        # such input — break the «empty list = PASS» contract by
+        # surfacing a deterministic non-object error.
+        return [
+            "<root>: evidence must be a JSON object at top level "
+            "(schema layer did not enforce this)"
+        ]
 
     return sorted(set(_cross_field(data)))
 
