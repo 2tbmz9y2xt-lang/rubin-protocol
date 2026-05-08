@@ -217,7 +217,7 @@ jobs:
       - name: Install Rust nightly with miri
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable branch SHA, pinned action
         with:
-          toolchain: nightly-2025-11-21
+          toolchain: ${{ env.RUST_NIGHTLY }}
           components: miri,rust-src
 
       - name: Run bounded miri target
@@ -304,7 +304,7 @@ jobs:
             cargo mutants \
               -p rubin-consensus \
               --file crates/rubin-consensus/src/compactsize.rs \
-              --re 'compactsize.rs:5:5.*Ok\(\(0, 0\)\)' \
+              --re 'read_compact_size -> Result<\(u64, usize\), TxError> with Ok\(\(0, 0\)\)' \
               --jobs 1 \
               --timeout 60 \
               --baseline run \
@@ -321,7 +321,7 @@ jobs:
             echo
             echo "Target file: clients/rust/crates/rubin-consensus/src/compactsize.rs"
             echo
-            echo "Mutant filter: compactsize.rs:5:5.*Ok((0, 0))"
+            echo "Mutant filter: read_compact_size signature replacement with Ok((0, 0))"
             echo
             echo "Timeout seconds: ${CARGO_MUTANTS_TIMEOUT_SECONDS}"
             echo
