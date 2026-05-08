@@ -203,7 +203,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      MIRI_TIMEOUT_SECONDS: ${{ inputs.miri_timeout_seconds || '900' }}
+      MIRI_TIMEOUT_SECONDS: ${{ github.event.inputs.miri_timeout_seconds || '900' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -269,7 +269,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      CARGO_MUTANTS_TIMEOUT_SECONDS: ${{ inputs.cargo_mutants_timeout_seconds || '900' }}
+      CARGO_MUTANTS_TIMEOUT_SECONDS: ${{ github.event.inputs.cargo_mutants_timeout_seconds || '900' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
