@@ -456,6 +456,89 @@ class DeterminismTests(unittest.TestCase):
             self.assertEqual(runs[1], runs[2])
 
 
+class CrossFieldDirectFallbackTests(unittest.TestCase):
+    """Direct invocation of `_cross_field` that BYPASSES `validate()`'s
+    committed-schema floor, exercising the defensive `minimal_shape_errors`
+    branches that protect future callers (refactor / direct unit test) which
+    skip the floor. Without these tests the defensive diagnostics would be
+    unreachable on the standard call path and would drift from the comment
+    contract documented in the validator (see lines 125-138).
+    """
+
+    def test_cross_field_non_list_participants_returns_minimal_shape_error(self):
+        # participants is a dict, not a list.
+        errors = validator._cross_field({
+            "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+            "evidence_type": "mixed_client_process_soak",
+            "scenario": "x",
+            "verdict": "PASS",
+            "participants": {"node-a": "go"},
+            "tx_path": {
+                "submitted_at": "node-a",
+                "observed_at": ["node-b"],
+                "tx_id": "0" * 64,
+            },
+        })
+        self.assertEqual(
+            errors,
+            ["<root>: alternate schema admitted; expected non-empty `participants` list"],
+        )
+
+    def test_cross_field_empty_participants_returns_minimal_shape_error(self):
+        errors = validator._cross_field({
+            "evidence_type": "mixed_client_process_soak",
+            "verdict": "PASS",
+            "participants": [],
+        })
+        self.assertEqual(
+            errors,
+            ["<root>: alternate schema admitted; expected non-empty `participants` list"],
+        )
+
+    def test_cross_field_participant_not_object_returns_minimal_shape_error(self):
+        errors = validator._cross_field({
+            "evidence_type": "mixed_client_process_soak",
+            "verdict": "PASS",
+            "participants": ["node-a"],
+        })
+        self.assertTrue(
+            any(
+                "participants[0] not an object" in e and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected participant-not-object minimal-shape error; got {errors}",
+        )
+
+    def test_cross_field_participant_name_not_string_returns_minimal_shape_error(self):
+        errors = validator._cross_field({
+            "evidence_type": "mixed_client_process_soak",
+            "verdict": "PASS",
+            "participants": [{"name": 1, "implementation": "go"}],
+        })
+        self.assertTrue(
+            any(
+                "participants[0].name not a string" in e and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected name-not-string minimal-shape error; got {errors}",
+        )
+
+    def test_cross_field_participant_implementation_not_string_returns_minimal_shape_error(self):
+        errors = validator._cross_field({
+            "evidence_type": "mixed_client_process_soak",
+            "verdict": "PASS",
+            "participants": [{"name": "node-a", "implementation": 7}],
+        })
+        self.assertTrue(
+            any(
+                "participants[0].implementation not a string" in e
+                and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected implementation-not-string minimal-shape error; got {errors}",
+        )
+
+
 class CliTests(unittest.TestCase):
     def test_main_zero_on_valid_fixture(self):
         buf = io.StringIO()
