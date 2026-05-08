@@ -1597,6 +1597,13 @@ class TimestampPolicyTests(unittest.TestCase):
         # emit 60). 61 is plainly invalid.
         with tempfile.TemporaryDirectory() as td:
             errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:33:60Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_calendar_invalid_second_overflow_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
                 Path(td), self._with_started_at("2026-05-07T21:33:61Z")
             )
             self.assertTrue(any("started_at" in e for e in errors), errors)
@@ -1717,6 +1724,11 @@ class EndpointPolicyTests(unittest.TestCase):
     def test_non_numeric_port_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:abc"))
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_negative_port_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:-1"))
             self.assertTrue(any("endpoint" in e for e in errors), errors)
 
     def test_missing_colon_rejected(self):
