@@ -344,8 +344,21 @@ def _cross_field_restart(data: dict, valid_names: set[str]) -> list[str]:
         )
 
     # post_restart_live_action.accepted_by_peer cross-field checks.
+    # Defense-in-depth: a permissive alternate schema admitted via the
+    # direct-call path could pass a non-dict (string/list/int) for
+    # `post_restart_live_action`; without an explicit guard the dict
+    # branch is silently skipped and the live-action invariants
+    # fail-open. Mirror the top-level `restart` non-dict guard for the
+    # nested optional object.
     live_action = restart_obj.get("post_restart_live_action")
-    if isinstance(live_action, dict):
+    if "post_restart_live_action" in restart_obj and not isinstance(
+        live_action, dict
+    ):
+        errors.append(
+            "<root>: restart.post_restart_live_action not an object "
+            "(alternate schema admitted)"
+        )
+    elif isinstance(live_action, dict):
         accepted_by_peer = live_action.get("accepted_by_peer")
         if not isinstance(accepted_by_peer, str):
             errors.append(
@@ -436,9 +449,24 @@ def _cross_field_reorg(data: dict) -> list[str]:
     # final_state consistency check fires only when present (optional
     # per false_positive_cases: «reorg-only evidence should not require
     # restart fields ... fields absent by design must not be required
-    # retroactively»).
+    # retroactively»). When `final_state` IS declared, the schema now
+    # requires both `tip` and `height` (so consistency cannot be silently
+    # skipped on a partial object); the cross-field check below is the
+    # final-leg authority for value equality with the declared winning
+    # branch.
+    #
+    # Defense-in-depth: a permissive alternate schema admitted via the
+    # direct-call path could pass a non-dict for `final_state`; without
+    # an explicit guard the dict branch is silently skipped and the
+    # consistency invariants fail-open. Mirror the top-level `reorg`
+    # non-dict guard for the nested optional object.
     final_state = reorg_obj.get("final_state")
-    if isinstance(final_state, dict):
+    if "final_state" in reorg_obj and not isinstance(final_state, dict):
+        errors.append(
+            "<root>: reorg.final_state not an object "
+            "(alternate schema admitted)"
+        )
+    elif isinstance(final_state, dict):
         tip = final_state.get("tip")
         height = final_state.get("height")
         if isinstance(tip, str) and tip != winning_branch_tip:

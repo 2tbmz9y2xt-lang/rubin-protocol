@@ -1097,6 +1097,69 @@ class RestartReorgSchemaOwnedTests(unittest.TestCase):
                 f"expected schema minLength violation; got {errors}",
             )
 
+    def test_reorg_final_state_missing_tip_schema_owned_only(self):
+        """reorg.final_state without `tip` is schema-rejected (RUB-207
+        wave-2 F1: chatgpt-codex P2 — incomplete final_state must not
+        silently pass cross-field consistency). Schema now requires both
+        tip and height when final_state is present, so cross-field never
+        sees a partial object on the standard call path."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(
+                fork_h=95, winning_h=100,
+                winning_tip=_VALID_TIP_HASH,
+                include_final_state=True,
+            )
+            del data["reorg"]["final_state"]["tip"]
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(errors)
+            self.assertTrue(
+                any("tip" in e and "required" in e for e in errors),
+                f"expected schema-required violation for final_state.tip; "
+                f"got {errors}",
+            )
+            self.assertFalse(
+                any("must equal winning_branch_tip" in e for e in errors),
+                f"cross-field consistency must not fire on schema-rejected "
+                f"input; got {errors}",
+            )
+
+    def test_reorg_final_state_missing_height_schema_owned_only(self):
+        """reorg.final_state without `height` is schema-rejected (sister
+        site of test_reorg_final_state_missing_tip_schema_owned_only)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(
+                fork_h=95, winning_h=100,
+                winning_tip=_VALID_TIP_HASH,
+                include_final_state=True,
+            )
+            del data["reorg"]["final_state"]["height"]
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(errors)
+            self.assertTrue(
+                any("height" in e and "required" in e for e in errors),
+                f"expected schema-required violation for final_state.height; "
+                f"got {errors}",
+            )
+            self.assertFalse(
+                any("must equal winning_branch_height" in e for e in errors),
+                f"cross-field consistency must not fire on schema-rejected "
+                f"input; got {errors}",
+            )
+
+    def test_reorg_final_state_empty_object_schema_owned_only(self):
+        """reorg.final_state = {} is schema-rejected because BOTH tip
+        and height are now required when final_state is present."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(fork_h=95, winning_h=100)
+            data["reorg"]["final_state"] = {}
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(errors)
+            self.assertTrue(
+                any("tip" in e and "required" in e for e in errors)
+                or any("height" in e and "required" in e for e in errors),
+                f"expected schema-required violation; got {errors}",
+            )
+
 
 class RestartDirectFallbackTests(unittest.TestCase):
     """Direct invocation of `_cross_field_restart` BYPASSING the
@@ -1181,6 +1244,52 @@ class RestartDirectFallbackTests(unittest.TestCase):
             f"got {errors}",
         )
 
+    def test_cross_field_restart_live_action_not_dict_returns_alternate_admitted_error(self):
+        """RUB-207 wave-2 F2 (Copilot P2): a permissive alternate schema
+        admitted via the direct-call path could pass a non-dict
+        (string/list/int) for `post_restart_live_action`; without an
+        explicit guard the dict branch is silently skipped and the
+        live-action invariants fail-open. The minimal_shape branch must
+        emit a deterministic `(alternate schema admitted)` diagnostic
+        and not silently skip."""
+        errors = validator._cross_field_restart(
+            {"restart": {
+                "stopped_node": "node-a",
+                "pre_restart_height": 100,
+                "catch_up_height": 100,
+                "post_restart_live_action": "not-an-object",
+            }},
+            self._names(),
+        )
+        self.assertTrue(
+            any(
+                "restart.post_restart_live_action not an object" in e
+                and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected post_restart_live_action-not-object alternate-admitted "
+            f"error; got {errors}",
+        )
+
+    def test_cross_field_restart_live_action_list_returns_alternate_admitted_error(self):
+        """Sister site of the string case: list also rejected."""
+        errors = validator._cross_field_restart(
+            {"restart": {
+                "stopped_node": "node-a",
+                "pre_restart_height": 100,
+                "catch_up_height": 100,
+                "post_restart_live_action": ["node-b"],
+            }},
+            self._names(),
+        )
+        self.assertTrue(
+            any(
+                "restart.post_restart_live_action not an object" in e
+                for e in errors
+            ),
+            f"got {errors}",
+        )
+
 
 class ReorgDirectFallbackTests(unittest.TestCase):
     """Direct invocation of `_cross_field_reorg` BYPASSING the
@@ -1239,6 +1348,41 @@ class ReorgDirectFallbackTests(unittest.TestCase):
         }})
         self.assertTrue(
             any("reorg.fork_height not an integer" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_final_state_not_dict_returns_alternate_admitted_error(self):
+        """RUB-207 wave-2 F3 (Copilot P2): a permissive alternate schema
+        admitted via the direct-call path could pass a non-dict for
+        `final_state`; without an explicit guard the dict branch is
+        silently skipped and consistency invariants fail-open. Mirror of
+        the post_restart_live_action non-dict guard."""
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+            "final_state": "not-an-object",
+        }})
+        self.assertTrue(
+            any(
+                "reorg.final_state not an object" in e
+                and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected final_state-not-object alternate-admitted error; "
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_final_state_int_returns_alternate_admitted_error(self):
+        """Sister site: int (or any non-dict) for final_state rejected."""
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+            "final_state": 42,
+        }})
+        self.assertTrue(
+            any("reorg.final_state not an object" in e for e in errors),
             f"got {errors}",
         )
 

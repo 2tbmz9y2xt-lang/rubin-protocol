@@ -151,6 +151,10 @@
         },
         "final_state": {
           "type": "object",
+          "required": [
+            "tip",
+            "height"
+          ],
           "additionalProperties": false,
           "properties": {
             "tip": {
