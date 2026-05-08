@@ -152,20 +152,28 @@ def _validate_cross_field(data: Any) -> list[str]:
                         f"tx_path.observed_at[{i}]: {observer!r} not in participants"
                     )
 
+        # Cross-impl tx_path invariant only fires when every participant on
+        # the tx_path has a known string implementation. If the submitter or
+        # any string observer is missing impl, the schema layer already emits
+        # `participants[i].implementation` as the real problem; running the
+        # cross-impl check on a partial dataset would emit a duplicative and
+        # misleading "submitter/observer differ" error on top of it.
+        string_observers = (
+            [o for o in observed_at if isinstance(o, str)]
+            if isinstance(observed_at, list)
+            else []
+        )
         if (
             evidence_type == "mixed_client_process_soak"
             and verdict == "PASS"
             and isinstance(submitted_at, str)
             and submitted_at in impl_by_name
-            and isinstance(observed_at, list)
+            and string_observers
+            and all(o in impl_by_name for o in string_observers)
         ):
             submitter_impl = impl_by_name[submitted_at]
             observer_pairs = sorted(
-                {
-                    (o, impl_by_name[o])
-                    for o in observed_at
-                    if isinstance(o, str) and o in impl_by_name
-                }
+                {(o, impl_by_name[o]) for o in string_observers}
             )
             observer_impls = {impl for _, impl in observer_pairs}
             if not any(impl != submitter_impl for impl in observer_impls):

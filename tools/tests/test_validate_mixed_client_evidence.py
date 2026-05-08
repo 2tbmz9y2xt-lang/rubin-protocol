@@ -75,6 +75,36 @@ class MalformedInputTests(unittest.TestCase):
             f.write_text("[]", encoding="utf-8")
             self.assertTrue(validator.validate(f, SCHEMA_PATH))
 
+    def test_observer_missing_impl_does_not_trigger_cross_impl_error(self):
+        """If a string observer references a participant with no string
+        `implementation`, the schema layer reports the missing field; the
+        cross-impl check must NOT additionally emit a duplicative
+        submitter/observer error on the same case (Copilot wave-3 P2).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["scenario"] = "observer_missing_impl"
+            data["participants"] = [
+                {"name": "node-a", "implementation": "go"},
+                {"name": "node-b"},  # implementation field omitted
+            ]
+            data["tx_path"]["submitted_at"] = "node-a"
+            data["tx_path"]["observed_at"] = ["node-b"]
+            errors = _validate_dict(Path(td), data)
+            # schema layer must report the missing field
+            self.assertTrue(
+                any("implementation" in e for e in errors),
+                f"expected schema error on missing implementation; got {errors}",
+            )
+            # cross-impl algorithm must NOT additionally fire
+            self.assertFalse(
+                any(
+                    ("submitter" in e and "observer" in e and "differ" in e)
+                    for e in errors
+                ),
+                f"cross-impl check fired on incomplete data; got {errors}",
+            )
+
 
 class CrossImplTxPathRejectionTests(unittest.TestCase):
     """T13 hostile cases: same-impl propagation in mixed-client set rejected."""
