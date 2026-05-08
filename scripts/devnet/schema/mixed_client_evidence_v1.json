@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rubin-protocol.dev/schemas/scripts/devnet/mixed_client_evidence_v1.json",
+  "title": "Rubin Mixed-Client Devnet Evidence v1 — base slice (PR-A)",
+  "description": "Minimum process-soak evidence schema needed to prove cross-implementation tx propagation between Go and Rust nodes. Restart/reorg, timestamp policy, and endpoint port policy are deferred to follow-up slices.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "evidence_type",
+    "scenario",
+    "verdict",
+    "participants"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "rubin-mixed-client-devnet-evidence-v1"
+    },
+    "evidence_type": {
+      "type": "string",
+      "enum": [
+        "mixed_client_process_soak",
+        "single_client_process_soak"
+      ]
+    },
+    "scenario": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "failure_reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "participants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "implementation"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^node-[a-z0-9][a-z0-9-]{0,30}$"
+          },
+          "implementation": {
+            "type": "string",
+            "enum": [
+              "go",
+              "rust"
+            ]
+          }
+        }
+      }
+    },
+    "tx_path": {
+      "type": "object",
+      "required": [
+        "submitted_at",
+        "observed_at",
+        "tx_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "submitted_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_at": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "tx_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}
