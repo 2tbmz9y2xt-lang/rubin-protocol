@@ -391,6 +391,42 @@ class HostileMutationTests(unittest.TestCase):
                 f"expected error to cite stopped_at; got {errors}",
             )
 
+    def test_started_at_tz_hour_out_of_range_rejected(self):
+        """Shape-valid TZ offset with HH>23 must be rejected (semantic TZ check)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-05-07T22:30:00+25:00"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "TZ HH=25 must be rejected")
+            self.assertTrue(
+                any("started_at" in e and "timezone offset" in e for e in errors),
+                f"expected timezone-offset error; got {errors}",
+            )
+
+    def test_started_at_tz_minute_out_of_range_rejected(self):
+        """Shape-valid TZ offset with MM>59 must be rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-05-07T22:30:00+05:99"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "TZ MM=99 must be rejected")
+            self.assertTrue(
+                any("started_at" in e and "timezone offset" in e for e in errors),
+                f"expected timezone-offset error; got {errors}",
+            )
+
+    def test_started_at_tz_combined_out_of_range_rejected(self):
+        """Combined TZ HH and MM out of range (Copilot example) must be rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-05-07T22:30:00+99:99"
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "TZ HH=99 MM=99 must be rejected")
+            self.assertTrue(
+                any("started_at" in e and "timezone offset" in e for e in errors),
+                f"expected timezone-offset error; got {errors}",
+            )
+
     def test_port_above_max_rejected(self):
         """Port > 65535 must be rejected via structural check."""
         with tempfile.TemporaryDirectory() as td:
@@ -548,6 +584,26 @@ class FalsePositivePassTests(unittest.TestCase):
             errors = _write_and_validate(Path(td), data)
             self.assertEqual(
                 errors, [], f"port 1 must be accepted; got {errors}"
+            )
+
+    def test_started_at_tz_negative_offset_accepted(self):
+        """Valid negative TZ offset must pass."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-05-07T22:30:00-05:30"
+            errors = _write_and_validate(Path(td), data)
+            self.assertEqual(
+                errors, [], f"valid -05:30 TZ must be accepted; got {errors}"
+            )
+
+    def test_started_at_tz_max_offset_accepted(self):
+        """TZ +23:59 is the inclusive upper bound and must pass."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["participants"][0]["process"]["started_at"] = "2026-05-07T22:30:00+23:59"
+            errors = _write_and_validate(Path(td), data)
+            self.assertEqual(
+                errors, [], f"TZ +23:59 must be accepted; got {errors}"
             )
 
 

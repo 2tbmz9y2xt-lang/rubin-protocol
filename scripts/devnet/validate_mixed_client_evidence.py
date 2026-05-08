@@ -30,25 +30,33 @@ PROCESS_SOAK_TYPES = ("mixed_client_process_soak", "single_client_process_soak")
 MAX_TCP_UDP_PORT = 65535
 ENDPOINT_FIELDS = ("rpc", "p2p")
 RFC3339_DATE_TIME_RE = re.compile(
-    r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+    r"^(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}:\d{2}:\d{2})(\.\d+)?"
+    r"(?P<tz>Z|[+-]\d{2}:\d{2})$"
 )
+MAX_TZ_HOUR = 23
+MAX_TZ_MINUTE = 59
 
 
 def _build_format_checker() -> Any:
     """jsonschema.FormatChecker with a semantic RFC3339 date-time check.
 
-    The stdlib jsonschema package only registers ``date-time`` when the
-    optional ``rfc3339-validator`` or ``python-dateutil`` packages are
-    installed, neither of which is a CI/runtime dependency in this repo.
-    Registering a self-contained check keeps the validator usable without
-    expanding pip surface.
+    The third-party ``jsonschema`` package only registers ``date-time``
+    when the optional ``rfc3339-validator`` or ``python-dateutil`` packages
+    are also installed; neither is in this repo's pip surface (the CI policy
+    step pins only ``jsonschema==4.19.2``). Registering a self-contained
+    check keeps the validator usable without expanding pip surface.
 
-    The check enforces both shape (anchored RFC3339 regex) and calendar
-    semantics (year/month/day/hour/minute/second bounds via
-    ``datetime.datetime.strptime``), so values like ``2026-13-07T22:30:00Z``
-    or ``2026-05-07T25:30:00Z`` are rejected even though they match the
-    pure shape regex. Leap seconds (second=60) are rejected; this matches
-    the producers in this repo, which never emit a leap-second timestamp.
+    The check enforces:
+    * shape (anchored RFC3339 regex with named ``date``/``time``/``tz`` groups);
+    * calendar semantics for year/month/day/hour/minute/second bounds via
+      ``datetime.datetime.strptime``, so values like ``2026-13-07T22:30:00Z``
+      or ``2026-02-30T12:00:00Z`` are rejected;
+    * timezone-offset semantics for the ``[+-]HH:MM`` suffix (HH 0-23,
+      MM 0-59), so values like ``2026-05-07T22:30:00+99:99`` are rejected
+      even though they match the pure shape regex. ``Z`` is always valid.
+
+    Leap seconds (second=60) are rejected; this matches the producers in
+    this repo, which never emit a leap-second timestamp.
     """
     import jsonschema  # type: ignore[import-untyped]
 
@@ -69,6 +77,16 @@ def _build_format_checker() -> Any:
             raise ValueError(
                 f"not a valid RFC3339 date-time: {value!r} ({exc})"
             ) from exc
+        tz = m.group("tz")
+        if tz != "Z":
+            tz_h = int(tz[1:3])
+            tz_m = int(tz[4:6])
+            if tz_h > MAX_TZ_HOUR or tz_m > MAX_TZ_MINUTE:
+                raise ValueError(
+                    f"not a valid RFC3339 date-time: {value!r} "
+                    f"(timezone offset out of range; "
+                    f"HH must be 0..{MAX_TZ_HOUR}, MM must be 0..{MAX_TZ_MINUTE})"
+                )
         return True
 
     return fc
@@ -85,10 +103,19 @@ def _validate_with_jsonschema(data: Any, schema: dict) -> list[str]:
         schema, format_checker=_build_format_checker()
     )
     errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
-    return [
-        f"{'.'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}"
-        for e in errors
-    ]
+    formatted: list[str] = []
+    for e in errors:
+        path = ".".join(str(p) for p in e.absolute_path) or "<root>"
+        # jsonschema's FormatError surfaces a fixed "X is not a 'date-time'" message
+        # and stashes the underlying ValueError on .cause; surface that cause so
+        # custom checks (e.g. "timezone offset out of range") remain visible to
+        # downstream consumers and tests.
+        cause = getattr(e, "cause", None)
+        if cause is not None:
+            formatted.append(f"{path}: {e.message} [{cause}]")
+        else:
+            formatted.append(f"{path}: {e.message}")
+    return formatted
 
 
 def _check_endpoint_port(endpoint: Any) -> str | None:
