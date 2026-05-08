@@ -167,7 +167,7 @@ class MalformedInputTests(unittest.TestCase):
                 f"expected schema type/pattern error on participants[0].name; got {errors}",
             )
             # Cross-field membership diagnostic must NOT fire because
-            # `participants_fully_named` is False.
+            # `all_participant_names_valid` is False.
             self.assertFalse(
                 any("not in participants" in e for e in errors),
                 f"S8/S9 membership diagnostic fired despite partial-shape participants; got {errors}",
