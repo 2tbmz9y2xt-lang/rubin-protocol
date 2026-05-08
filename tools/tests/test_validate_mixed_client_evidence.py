@@ -1501,7 +1501,7 @@ class ReorgDirectFallbackTests(unittest.TestCase):
 #   * accepted canonical inputs (uppercase T/Z, port 1..65535);
 #   * rejected lexical-shape inputs (lowercase t/z, offsets, fractional);
 #   * rejected calendar-bound inputs (month=13, day=40, hour=25);
-#   * rejected port-range inputs (0, 65536, 99999, blank, non-numeric);
+#   * rejected port-range inputs (0, 65536, 99999, negative, blank, non-numeric);
 #   * direct-call reachability of the Python defense-in-depth helpers
 #     (so the «schema rejects before Python check fires» class from the
 #     RUB-208 hostile_review_matrix cannot recur silently).
