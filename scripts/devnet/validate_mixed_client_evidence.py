@@ -287,22 +287,25 @@ def _cross_field(data: dict) -> list[str]:
 def validate(fixture_path: Path, schema_path: Path) -> list[str]:
     """Return sorted, deduplicated error messages. Empty list = PASS.
 
-    Contract: `result == [] ⇒ data conforms to the committed-shape
-    encoded by `mixed_client_evidence_v1.json`. The committed schema is
-    ALWAYS enforced as a floor; the user-supplied `--schema` may add
-    extra constraints but cannot relax committed ones. This prevents
-    silent PASS on permissive alternate schemas.
+    Contract: an empty result list means the input data conforms to the
+    committed-shape encoded by ``mixed_client_evidence_v1.json``. The
+    committed schema is ALWAYS enforced as a floor; the user-supplied
+    ``--schema`` may add extra constraints but cannot relax committed
+    ones. This prevents silent PASS on permissive alternate schemas.
 
-    On any deterministic input failure (unreadable file, malformed JSON,
-    invalid schema object, or any schema-layer rejection of the fixture),
-    cross-field validation is NOT run; only the schema-owned errors are
-    returned. The CLI never raises a Python exception on bad input.
+    On any deterministic input failure (unreadable file, non-UTF-8 bytes,
+    malformed JSON, invalid schema object, or any schema-layer rejection
+    of the fixture), cross-field validation is NOT run; only the
+    schema-owned errors are returned. The CLI never raises a Python
+    exception on bad input.
     """
     try:
         with open(schema_path, encoding="utf-8") as f:
             user_schema = json.load(f)
     except OSError as e:
         return [f"schema: cannot read {schema_path}: {e}"]
+    except UnicodeDecodeError as e:
+        return [f"schema: non-UTF-8 bytes in {schema_path}: {e}"]
     except json.JSONDecodeError as e:
         return [f"schema: malformed JSON in {schema_path}: {e}"]
 
@@ -311,6 +314,8 @@ def validate(fixture_path: Path, schema_path: Path) -> list[str]:
             data = json.load(f)
     except OSError as e:
         return [f"fixture: cannot read {fixture_path}: {e}"]
+    except UnicodeDecodeError as e:
+        return [f"fixture: non-UTF-8 bytes in {fixture_path}: {e}"]
     except json.JSONDecodeError as e:
         return [f"fixture: malformed JSON in {fixture_path}: {e}"]
 
@@ -322,8 +327,16 @@ def validate(fixture_path: Path, schema_path: Path) -> list[str]:
     try:
         with open(DEFAULT_SCHEMA, encoding="utf-8") as f:
             committed_schema = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
+    except OSError as e:
         return [f"schema: cannot read committed schema {DEFAULT_SCHEMA}: {e}"]
+    except UnicodeDecodeError as e:
+        return [
+            f"schema: non-UTF-8 bytes in committed schema {DEFAULT_SCHEMA}: {e}"
+        ]
+    except json.JSONDecodeError as e:
+        return [
+            f"schema: malformed JSON in committed schema {DEFAULT_SCHEMA}: {e}"
+        ]
 
     committed_errors, schema_available = _schema_layer(data, committed_schema)
     if not schema_available:

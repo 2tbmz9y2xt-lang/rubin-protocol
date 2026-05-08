@@ -165,6 +165,90 @@ class FailClosedCliTests(unittest.TestCase):
                 self, validator.validate(bad, SCHEMA_PATH), "fixture:", "malformed JSON"
             )
 
+    # F1 owner tests — UnicodeDecodeError on each of three file-read sites
+    # in `validate()` (user schema, fixture, committed schema). Without
+    # explicit `UnicodeDecodeError` catches, non-UTF-8 bytes (e.g. 0xff)
+    # in any of these files would escape `validate()` as a Python
+    # traceback, breaking the fail-closed CLI contract.
+
+    def test_non_utf8_schema_returns_deterministic_error(self):
+        """Non-UTF-8 bytes in --schema path must yield a deterministic
+        `schema: non-UTF-8 bytes ...` error and exit 1; no traceback.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            bad_schema = Path(td) / "bad_schema.json"
+            bad_schema.write_bytes(b"\xff\xfe{\"$schema\": \"x\"}")
+            errors = validator.validate(
+                TESTDATA_DIR / "valid_minimal_mixed.json", bad_schema
+            )
+            _assert_one(self, errors, "schema:", "non-UTF-8 bytes")
+            self.assertFalse(
+                any("Traceback" in e for e in errors),
+                f"validator leaked traceback on non-UTF-8 schema; got {errors}",
+            )
+
+    def test_non_utf8_fixture_returns_deterministic_error(self):
+        """Non-UTF-8 bytes in fixture path must yield a deterministic
+        `fixture: non-UTF-8 bytes ...` error and exit 1; no traceback.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            bad_fixture = Path(td) / "bad_fixture.json"
+            bad_fixture.write_bytes(b"\xff\xfe{\"k\": \"v\"}")
+            errors = validator.validate(bad_fixture, SCHEMA_PATH)
+            _assert_one(self, errors, "fixture:", "non-UTF-8 bytes")
+            self.assertFalse(
+                any("Traceback" in e for e in errors),
+                f"validator leaked traceback on non-UTF-8 fixture; got {errors}",
+            )
+
+    def test_non_utf8_committed_schema_returns_deterministic_error(self):
+        """Non-UTF-8 bytes in the committed (DEFAULT_SCHEMA) file must
+        yield a deterministic `schema: non-UTF-8 bytes in committed
+        schema ...` error and exit 1; no traceback. Exercised by
+        monkeypatching `validator.DEFAULT_SCHEMA` to a corrupted
+        committed-schema fixture so the floor read fails.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            bad_committed = Path(td) / "committed_corrupt.json"
+            bad_committed.write_bytes(b"\xff\xfe{}")
+            original = validator.DEFAULT_SCHEMA
+            try:
+                validator.DEFAULT_SCHEMA = bad_committed
+                errors = validator.validate(
+                    TESTDATA_DIR / "valid_minimal_mixed.json", SCHEMA_PATH
+                )
+            finally:
+                validator.DEFAULT_SCHEMA = original
+            _assert_one(
+                self,
+                errors,
+                "schema:",
+                "non-UTF-8 bytes",
+                "committed schema",
+            )
+            self.assertFalse(
+                any("Traceback" in e for e in errors),
+                f"validator leaked traceback on non-UTF-8 committed schema; "
+                f"got {errors}",
+            )
+
+    def test_main_cli_fail_closed_on_non_utf8_fixture(self):
+        """End-to-end CLI: non-UTF-8 fixture → exit 1, deterministic
+        prefix to stderr, no Python traceback at all.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            bad = Path(td) / "bad.json"
+            bad.write_bytes(b"\xff\xfe garbage")
+            err_buf = io.StringIO()
+            out_buf = io.StringIO()
+            with contextlib.redirect_stderr(err_buf), contextlib.redirect_stdout(out_buf):
+                rc = validator.main([str(bad)])
+            self.assertEqual(rc, 1, f"main rc={rc}; stderr={err_buf.getvalue()!r}")
+            stderr = err_buf.getvalue()
+            self.assertIn("fixture:", stderr)
+            self.assertIn("non-UTF-8 bytes", stderr)
+            self.assertNotIn("Traceback", stderr)
+
     def _permissive_schema(self, td: Path) -> Path:
         """Helper: write a permissive schema (only $schema declared) to td."""
         p = td / "permissive.json"
@@ -460,9 +544,10 @@ class CrossFieldDirectFallbackTests(unittest.TestCase):
     """Direct invocation of `_cross_field` that BYPASSES `validate()`'s
     committed-schema floor, exercising the defensive `minimal_shape_errors`
     branches that protect future callers (refactor / direct unit test) which
-    skip the floor. Without these tests the defensive diagnostics would be
-    unreachable on the standard call path and would drift from the comment
-    contract documented in the validator (see lines 125-138).
+    skip the floor. Without these tests the defensive `(alternate schema
+    admitted)` diagnostics for `participants` would be unreachable on the
+    standard call path and would drift from the comment contract documented
+    in `_cross_field`.
     """
 
     def test_cross_field_non_list_participants_returns_minimal_shape_error(self):
@@ -541,11 +626,12 @@ class CrossFieldDirectFallbackTests(unittest.TestCase):
 
 class TxPathDirectFallbackTests(unittest.TestCase):
     """Direct invocation of `_cross_field` that BYPASSES `validate()`'s
-    committed-schema floor for the `tx_path` defensive shape branch
-    (lines 198-227). Without these tests the defensive `tx_path` minimal-
-    shape diagnostics would be unreachable on the standard call path and
-    would drift from the comment contract documented in the validator
-    (parallel to `CrossFieldDirectFallbackTests` above for participants).
+    committed-schema floor for the `tx_path` defensive shape branch.
+    Without these tests the defensive `tx_path` minimal-shape `(alternate
+    schema admitted)` diagnostics would be unreachable on the standard
+    call path and would drift from the comment contract documented in
+    `_cross_field` (parallel to `CrossFieldDirectFallbackTests` above for
+    `participants`).
     """
 
     @staticmethod
@@ -646,11 +732,11 @@ class TxPathDirectFallbackTests(unittest.TestCase):
 
 
 class CrossFieldUnknownSubmitterTests(unittest.TestCase):
-    """Positive owner test for the cross-field diagnostic
-    `tx_path.submitted_at: <name> not in participants` (validator.py:229-232).
-    Schema cannot express participant-name membership, so the diagnostic is
-    a true cross-field invariant. This test must reach the diagnostic on
-    the standard call path (schema-valid fixture with a submitter name not
+    """Positive owner test for the `_cross_field` diagnostic
+    `tx_path.submitted_at: <name> not in participants`. Schema cannot
+    express participant-name membership, so the diagnostic is a true
+    cross-field invariant. This test must reach the diagnostic on the
+    standard call path (schema-valid fixture with a submitter name not
     declared in `participants`).
     """
 
@@ -661,10 +747,10 @@ class CrossFieldUnknownSubmitterTests(unittest.TestCase):
             errors = _validate_dict(Path(td), data)
             _assert_one(self, errors, "tx_path.submitted_at", "node-ghost", "not in participants")
             # Class-closure: when the submitter is unknown, the T13
-            # cross-impl gate (line 251 `submitted_at in impl_by_name`)
-            # short-circuits, so the cross-impl diagnostic must NOT also
-            # fire — defense against a future refactor that drops the
-            # membership gate.
+            # cross-impl gate (`submitted_at in impl_by_name` predicate
+            # in `_cross_field`) short-circuits, so the cross-impl
+            # diagnostic must NOT also fire — defense against a future
+            # refactor that drops the membership gate.
             self.assertFalse(
                 any("requires observer implementation to differ" in e for e in errors),
                 f"unknown submitter must NOT spuriously trigger the T13 cross-impl "
