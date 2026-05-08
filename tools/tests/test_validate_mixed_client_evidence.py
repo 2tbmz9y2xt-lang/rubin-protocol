@@ -539,6 +539,139 @@ class CrossFieldDirectFallbackTests(unittest.TestCase):
         )
 
 
+class TxPathDirectFallbackTests(unittest.TestCase):
+    """Direct invocation of `_cross_field` that BYPASSES `validate()`'s
+    committed-schema floor for the `tx_path` defensive shape branch
+    (lines 198-227). Without these tests the defensive `tx_path` minimal-
+    shape diagnostics would be unreachable on the standard call path and
+    would drift from the comment contract documented in the validator
+    (parallel to `CrossFieldDirectFallbackTests` above for participants).
+    """
+
+    @staticmethod
+    def _mixed_pass_with(tx_path) -> dict:
+        return {
+            "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+            "evidence_type": "mixed_client_process_soak",
+            "scenario": "x",
+            "verdict": "PASS",
+            "participants": [
+                {"name": "node-a", "implementation": "go"},
+                {"name": "node-b", "implementation": "rust"},
+            ],
+            "tx_path": tx_path,
+        }
+
+    def test_cross_field_tx_path_submitted_at_not_string_returns_minimal_shape_error(self):
+        errors = validator._cross_field(
+            self._mixed_pass_with({
+                "submitted_at": 1,
+                "observed_at": ["node-b"],
+                "tx_id": "0" * 64,
+            })
+        )
+        self.assertTrue(
+            any(
+                "tx_path.submitted_at not a string" in e
+                and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected submitted_at-not-string minimal-shape error; got {errors}",
+        )
+
+    def test_cross_field_tx_path_observed_at_not_list_returns_minimal_shape_error(self):
+        errors = validator._cross_field(
+            self._mixed_pass_with({
+                "submitted_at": "node-a",
+                "observed_at": "node-b",
+                "tx_id": "0" * 64,
+            })
+        )
+        self.assertTrue(
+            any(
+                "tx_path.observed_at not a non-empty list of strings" in e
+                and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected observed_at-not-list minimal-shape error; got {errors}",
+        )
+
+    def test_cross_field_tx_path_observed_at_empty_returns_minimal_shape_error(self):
+        errors = validator._cross_field(
+            self._mixed_pass_with({
+                "submitted_at": "node-a",
+                "observed_at": [],
+                "tx_id": "0" * 64,
+            })
+        )
+        self.assertTrue(
+            any(
+                "tx_path.observed_at not a non-empty list of strings" in e
+                and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected observed_at-empty minimal-shape error; got {errors}",
+        )
+
+    def test_cross_field_tx_path_tx_id_not_string_returns_minimal_shape_error(self):
+        errors = validator._cross_field(
+            self._mixed_pass_with({
+                "submitted_at": "node-a",
+                "observed_at": ["node-b"],
+                "tx_id": 1,
+            })
+        )
+        self.assertTrue(
+            any(
+                "tx_path.tx_id not a string" in e
+                and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected tx_id-not-string minimal-shape error; got {errors}",
+        )
+
+    def test_cross_field_tx_path_non_dict_non_none_returns_alternate_admitted_error(self):
+        # Non-dict, non-None `tx_path` (e.g. a string or int admitted by a
+        # permissive alternate schema). Direct path must surface a
+        # deterministic minimal-shape error, not silently fall through.
+        errors = validator._cross_field(self._mixed_pass_with("not-an-object"))
+        self.assertTrue(
+            any(
+                "tx_path not an object" in e
+                and "alternate schema admitted" in e
+                for e in errors
+            ),
+            f"expected tx_path-not-object alternate-admitted error; got {errors}",
+        )
+
+
+class CrossFieldUnknownSubmitterTests(unittest.TestCase):
+    """Positive owner test for the cross-field diagnostic
+    `tx_path.submitted_at: <name> not in participants` (validator.py:229-232).
+    Schema cannot express participant-name membership, so the diagnostic is
+    a true cross-field invariant. This test must reach the diagnostic on
+    the standard call path (schema-valid fixture with a submitter name not
+    declared in `participants`).
+    """
+
+    def test_unknown_submitter_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["tx_path"]["submitted_at"] = "node-ghost"
+            errors = _validate_dict(Path(td), data)
+            _assert_one(self, errors, "tx_path.submitted_at", "node-ghost", "not in participants")
+            # Class-closure: when the submitter is unknown, the T13
+            # cross-impl gate (line 251 `submitted_at in impl_by_name`)
+            # short-circuits, so the cross-impl diagnostic must NOT also
+            # fire — defense against a future refactor that drops the
+            # membership gate.
+            self.assertFalse(
+                any("requires observer implementation to differ" in e for e in errors),
+                f"unknown submitter must NOT spuriously trigger the T13 cross-impl "
+                f"message; got {errors}",
+            )
+
+
 class CliTests(unittest.TestCase):
     def test_main_zero_on_valid_fixture(self):
         buf = io.StringIO()

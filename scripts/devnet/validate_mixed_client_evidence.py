@@ -263,19 +263,23 @@ def _cross_field(data: dict) -> list[str]:
                     f"{submitted_at!r}/{submitter_impl}, observers="
                     f"{[f'{n}/{i}' for n, i in observer_pairs]}"
                 )
-    elif (
-        # `tx_path is None` (absent) is the only remaining branch: schema
-        # validated `tx_path` as `type: object` when present, so the
-        # cross-field tx_path-required message only fires for genuinely
-        # absent tx_path on a mixed-client PASS soak.
-        tx_path is None
-        and evidence_type == "mixed_client_process_soak"
-        and verdict == "PASS"
-    ):
-        errors.append(
-            "tx_path: required for evidence_type=mixed_client_process_soak "
-            "with verdict=PASS"
-        )
+    elif evidence_type == "mixed_client_process_soak" and verdict == "PASS":
+        # Standard call path: schema validates `tx_path` as `type: object`
+        # when present, so on the standard path this branch only fires for
+        # genuinely absent `tx_path`. The non-None / non-dict case is
+        # reachable only on direct `_cross_field` calls that bypass the
+        # committed-schema floor (defense-in-depth, same rationale as the
+        # participants guard above); both subcases are exercised by direct
+        # tests in `CrossFieldDirectFallbackTests`.
+        if tx_path is None:
+            errors.append(
+                "tx_path: required for evidence_type=mixed_client_process_soak "
+                "with verdict=PASS"
+            )
+        else:
+            errors.append(
+                "<root>: tx_path not an object (alternate schema admitted)"
+            )
 
     return errors
 
