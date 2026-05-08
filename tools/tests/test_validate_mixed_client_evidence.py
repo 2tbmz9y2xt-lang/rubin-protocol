@@ -784,5 +784,459 @@ class CliTests(unittest.TestCase):
             self.assertIn("FAIL", buf.getvalue())
 
 
+# ---------------------------------------------------------------------------
+# RUB-207 (RUB-24B): restart and reorg cross-field invariants.
+# Schema owns: type, required, minLength, minimum, hex pattern,
+# additionalProperties. Cross-field owns: participant-name membership,
+# accepted_by_peer distinct-from-stopped_node, catch_up_height >=
+# pre_restart_height (with reorg-explained-rollback escape), reorg
+# fork_height < winning_branch_height, and final_state consistency
+# with the declared winning branch when present.
+# ---------------------------------------------------------------------------
+
+
+_VALID_TIP_HASH = "a" * 64
+_VALID_TIP_HASH_2 = "b" * 64
+
+
+def _valid_with_restart(stopped="node-a", peer="node-b",
+                        pre_h=100, catch_h=100,
+                        include_live_action=True) -> dict:
+    """Helper: committed valid fixture mutated to include a coherent
+    restart object with optional post_restart_live_action. Default
+    pairs (node-a stopped, node-b accepts live action) match the
+    committed participants set so cross-field membership passes."""
+    data = _load_committed_valid()
+    data["restart"] = {
+        "stopped_node": stopped,
+        "pre_restart_height": pre_h,
+        "catch_up_height": catch_h,
+    }
+    if include_live_action:
+        data["restart"]["post_restart_live_action"] = {
+            "accepted_by_peer": peer,
+        }
+    return data
+
+
+def _valid_with_reorg(fork_h=95, winning_h=100,
+                      winning_tip=_VALID_TIP_HASH,
+                      include_final_state=False,
+                      final_tip=None, final_height=None) -> dict:
+    """Helper: committed valid fixture mutated to include a coherent
+    reorg object with optional final_state. Default fork=95<winning=100
+    satisfies the lifecycle-order invariant; final_state is omitted by
+    default to exercise the false_positive_cases clause that absent
+    final_state must not be required retroactively."""
+    data = _load_committed_valid()
+    data["reorg"] = {
+        "fork_height": fork_h,
+        "winning_branch_height": winning_h,
+        "winning_branch_tip": winning_tip,
+    }
+    if include_final_state:
+        data["reorg"]["final_state"] = {
+            "tip": final_tip if final_tip is not None else winning_tip,
+            "height": final_height if final_height is not None else winning_h,
+        }
+    return data
+
+
+class RestartEvidenceTests(unittest.TestCase):
+    """Cross-field invariants for the optional `restart` object."""
+
+    def test_restart_only_evidence_passes(self):
+        """Valid restart added to committed valid fixture (no reorg)
+        passes; default catch_up >= pre_restart, accepted_by_peer in
+        participants and != stopped_node."""
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(_validate_dict(Path(td), _valid_with_restart()), [])
+
+    def test_restart_no_live_action_passes(self):
+        """post_restart_live_action is optional — restart without it
+        passes per false_positive_cases."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(include_live_action=False)
+            self.assertEqual(_validate_dict(Path(td), data), [])
+
+    def test_restart_stopped_node_unknown_rejected(self):
+        """stopped_node references undeclared participant — schema
+        validates string shape only; the cross-field membership check
+        is the sole authority."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(stopped="node-ghost")
+            errors = _validate_dict(Path(td), data)
+            _assert_one(self, errors, "restart.stopped_node",
+                        "node-ghost", "not in participants")
+
+    def test_restart_live_action_accepted_by_unknown_peer_rejected(self):
+        """accepted_by_peer references undeclared participant."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(peer="node-ghost")
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self, errors,
+                "post_restart_live_action.accepted_by_peer",
+                "node-ghost", "not in participants",
+            )
+
+    def test_restart_live_action_accepted_by_stopped_node_rejected(self):
+        """accepted_by_peer equals stopped_node — live action cannot be
+        accepted by the stopped participant."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(stopped="node-a", peer="node-a")
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self, errors,
+                "post_restart_live_action.accepted_by_peer",
+                "equals stopped_node",
+            )
+
+    def test_restart_catch_up_height_decrease_without_reorg_rejected(self):
+        """catch_up_height < pre_restart_height with no reorg
+        explanation — silent rollback is a lifecycle-order violation."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(pre_h=100, catch_h=80)
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self, errors,
+                "restart.catch_up_height",
+                "below pre_restart_height",
+                "no reorg explanation",
+            )
+
+    def test_restart_catch_up_height_decrease_with_reorg_explanation_passes(self):
+        """site×site interaction: catch_up_height < pre_restart_height
+        is allowed when reorg.fork_height < pre_restart_height
+        explains the rollback."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(pre_h=100, catch_h=80)
+            data.update(_valid_with_reorg(fork_h=70, winning_h=85))
+            self.assertEqual(_validate_dict(Path(td), data), [])
+
+    def test_restart_catch_up_height_decrease_with_high_fork_reorg_still_rejected(self):
+        """site×site negative: a reorg whose fork_height >=
+        pre_restart_height does NOT explain the catch_up rollback."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(pre_h=100, catch_h=80)
+            data.update(_valid_with_reorg(fork_h=100, winning_h=110))
+            errors = _validate_dict(Path(td), data)
+            # Two findings expected: catch_up_height + fork_height >= winning
+            _assert_one(
+                self, errors,
+                "restart.catch_up_height",
+                "no reorg explanation",
+            )
+
+    def test_restart_catch_up_height_equal_to_pre_restart_passes(self):
+        """Boundary: catch_up_height == pre_restart_height passes
+        (the rule is >= not >)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(pre_h=100, catch_h=100)
+            self.assertEqual(_validate_dict(Path(td), data), [])
+
+
+class ReorgEvidenceTests(unittest.TestCase):
+    """Cross-field invariants for the optional `reorg` object."""
+
+    def test_reorg_only_evidence_passes(self):
+        """Valid reorg added (fork < winning) without restart object
+        and without final_state passes per false_positive_cases."""
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(_validate_dict(Path(td), _valid_with_reorg()), [])
+
+    def test_reorg_fork_height_equals_winning_rejected(self):
+        """Boundary: fork_height == winning_branch_height violates
+        lifecycle-order (fork must be strictly below winning)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(fork_h=100, winning_h=100)
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self, errors,
+                "reorg.fork_height",
+                "must be less than winning_branch_height",
+            )
+
+    def test_reorg_fork_height_above_winning_rejected(self):
+        """fork_height > winning_branch_height violates lifecycle order."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(fork_h=120, winning_h=100)
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self, errors,
+                "reorg.fork_height",
+                "must be less than winning_branch_height",
+            )
+
+    def test_reorg_final_state_consistent_passes(self):
+        """final_state present and matches winning branch — passes."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(
+                fork_h=95, winning_h=100,
+                winning_tip=_VALID_TIP_HASH,
+                include_final_state=True,
+                final_tip=_VALID_TIP_HASH, final_height=100,
+            )
+            self.assertEqual(_validate_dict(Path(td), data), [])
+
+    def test_reorg_final_state_tip_inconsistent_rejected(self):
+        """final_state.tip differs from winning_branch_tip."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(
+                fork_h=95, winning_h=100,
+                winning_tip=_VALID_TIP_HASH,
+                include_final_state=True,
+                final_tip=_VALID_TIP_HASH_2, final_height=100,
+            )
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self, errors,
+                "reorg.final_state.tip",
+                "must equal winning_branch_tip",
+            )
+
+    def test_reorg_final_state_height_inconsistent_rejected(self):
+        """final_state.height differs from winning_branch_height."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(
+                fork_h=95, winning_h=100,
+                winning_tip=_VALID_TIP_HASH,
+                include_final_state=True,
+                final_tip=_VALID_TIP_HASH, final_height=99,
+            )
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self, errors,
+                "reorg.final_state.height",
+                "must equal winning_branch_height",
+            )
+
+    def test_reorg_final_state_absent_passes(self):
+        """false_positive_cases: reorg without final_state passes."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(include_final_state=False)
+            self.assertEqual(_validate_dict(Path(td), data), [])
+
+
+class RestartReorgSchemaOwnedTests(unittest.TestCase):
+    """Schema layer is the sole authority for type/required/minimum/
+    pattern problems on restart/reorg fields. The cross-field layer
+    must NOT also fire on schema-rejected inputs (short-circuit drift
+    check)."""
+
+    def test_restart_missing_required_field_schema_owned_only(self):
+        """restart without `stopped_node` is schema-rejected; no
+        cross-field "restart.stopped_node: ... not in participants"
+        diagnostic should appear."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["restart"] = {
+                # missing stopped_node
+                "pre_restart_height": 100,
+                "catch_up_height": 100,
+            }
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(errors)
+            self.assertTrue(
+                any("stopped_node" in e and "required" in e for e in errors),
+                f"expected schema-required violation; got {errors}",
+            )
+            self.assertFalse(
+                any("not in participants" in e for e in errors),
+                f"cross-field membership must not fire on schema-rejected "
+                f"input; got {errors}",
+            )
+
+    def test_reorg_missing_required_field_schema_owned_only(self):
+        """reorg without winning_branch_tip is schema-rejected; no
+        cross-field lifecycle error should fire."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["reorg"] = {
+                "fork_height": 95,
+                "winning_branch_height": 100,
+                # missing winning_branch_tip
+            }
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(errors)
+            self.assertTrue(
+                any("winning_branch_tip" in e and "required" in e for e in errors),
+                f"expected schema-required violation; got {errors}",
+            )
+            self.assertFalse(
+                any("must be less than winning_branch_height" in e for e in errors),
+                f"cross-field lifecycle order must not fire on schema-rejected "
+                f"input; got {errors}",
+            )
+
+    def test_reorg_winning_branch_tip_pattern_schema_owned_only(self):
+        """reorg.winning_branch_tip not matching ^[0-9a-f]{64}$ is
+        schema-rejected before cross-field consistency runs."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_reorg(winning_tip="not-a-hash")
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(errors)
+            self.assertTrue(
+                any("winning_branch_tip" in e for e in errors),
+                f"expected schema-pattern violation; got {errors}",
+            )
+
+    def test_restart_stopped_node_empty_string_schema_owned_only(self):
+        """restart.stopped_node empty string violates minLength:1."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_with_restart(stopped="")
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(errors)
+            self.assertTrue(
+                any("stopped_node" in e and "too short" in e for e in errors),
+                f"expected schema minLength violation; got {errors}",
+            )
+
+
+class RestartDirectFallbackTests(unittest.TestCase):
+    """Direct invocation of `_cross_field_restart` BYPASSING the
+    committed-schema floor, exercising the defensive
+    `(alternate schema admitted)` minimal-shape branches that protect
+    direct callers from KeyError. Parallel to
+    `CrossFieldDirectFallbackTests` for participants and
+    `TxPathDirectFallbackTests` for tx_path."""
+
+    @staticmethod
+    def _names() -> set[str]:
+        return {"node-a", "node-b"}
+
+    def test_cross_field_restart_non_dict(self):
+        errors = validator._cross_field_restart(
+            {"restart": "not-an-object"}, self._names()
+        )
+        self.assertTrue(
+            any("restart not an object" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_restart_stopped_node_not_string(self):
+        errors = validator._cross_field_restart(
+            {"restart": {
+                "stopped_node": 1,
+                "pre_restart_height": 100,
+                "catch_up_height": 100,
+            }},
+            self._names(),
+        )
+        self.assertTrue(
+            any("restart.stopped_node not a string" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_restart_pre_restart_height_not_int(self):
+        errors = validator._cross_field_restart(
+            {"restart": {
+                "stopped_node": "node-a",
+                "pre_restart_height": "100",
+                "catch_up_height": 100,
+            }},
+            self._names(),
+        )
+        self.assertTrue(
+            any("restart.pre_restart_height not an integer" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_restart_catch_up_height_not_int(self):
+        errors = validator._cross_field_restart(
+            {"restart": {
+                "stopped_node": "node-a",
+                "pre_restart_height": 100,
+                "catch_up_height": "100",
+            }},
+            self._names(),
+        )
+        self.assertTrue(
+            any("restart.catch_up_height not an integer" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_restart_pre_restart_height_bool_rejected(self):
+        """bool is a Python int subclass; the validator must explicitly
+        reject it because schema declares type:integer."""
+        errors = validator._cross_field_restart(
+            {"restart": {
+                "stopped_node": "node-a",
+                "pre_restart_height": True,
+                "catch_up_height": 100,
+            }},
+            self._names(),
+        )
+        self.assertTrue(
+            any("restart.pre_restart_height not an integer" in e for e in errors),
+            f"got {errors}",
+        )
+
+
+class ReorgDirectFallbackTests(unittest.TestCase):
+    """Direct invocation of `_cross_field_reorg` BYPASSING the
+    committed-schema floor (parallel to RestartDirectFallbackTests)."""
+
+    def test_cross_field_reorg_non_dict(self):
+        errors = validator._cross_field_reorg({"reorg": "not-an-object"})
+        self.assertTrue(
+            any("reorg not an object" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_fork_height_not_int(self):
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": "95",
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+        }})
+        self.assertTrue(
+            any("reorg.fork_height not an integer" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_winning_branch_height_not_int(self):
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": "100",
+            "winning_branch_tip": "a" * 64,
+        }})
+        self.assertTrue(
+            any("reorg.winning_branch_height not an integer" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_winning_branch_tip_not_string(self):
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": 100,
+            "winning_branch_tip": 12345,
+        }})
+        self.assertTrue(
+            any("reorg.winning_branch_tip not a string" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_fork_height_bool_rejected(self):
+        """bool is a Python int subclass; reject explicitly."""
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": True,
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+        }})
+        self.assertTrue(
+            any("reorg.fork_height not an integer" in e for e in errors),
+            f"got {errors}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

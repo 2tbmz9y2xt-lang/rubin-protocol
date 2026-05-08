@@ -281,6 +281,182 @@ def _cross_field(data: dict) -> list[str]:
                 "<root>: tx_path not an object (alternate schema admitted)"
             )
 
+    # RUB-207 (RUB-24B): restart and reorg cross-field invariants.
+    # Both objects are optional at the schema level; cross-field checks
+    # only fire when the object is present. `valid_names` and
+    # `restart_obj`/`reorg_obj` are looked up via `data.get(...)` so the
+    # standard call path (after committed-schema floor PASS) is the
+    # primary reachability vector; direct `_cross_field` callers that
+    # bypass the floor reach the defensive minimal_shape branches via
+    # `RestartDirectFallbackTests` / `ReorgDirectFallbackTests`.
+    errors.extend(_cross_field_restart(data, valid_names))
+    errors.extend(_cross_field_reorg(data))
+
+    return errors
+
+
+def _cross_field_restart(data: dict, valid_names: set[str]) -> list[str]:
+    """Restart-evidence cross-field invariants (RUB-207).
+
+    Schema owns: type, required, minLength/minimum, additionalProperties.
+    Cross-field owns: participant-name membership, accepted_by_peer
+    distinct-from-stopped_node, and the catch_up_height >=
+    pre_restart_height rule with the reorg-explained-rollback escape.
+    """
+    errors: list[str] = []
+    restart_obj = data.get("restart")
+    if restart_obj is None:
+        return errors  # restart is optional
+
+    # Defense-in-depth minimal_shape (parallel to participants/tx_path
+    # pattern). Standard call path is gated by the committed-schema
+    # floor; direct `_cross_field` callers that bypass the floor reach
+    # these branches via `RestartDirectFallbackTests`.
+    shape_errors: list[str] = []
+    if not isinstance(restart_obj, dict):
+        return ["<root>: restart not an object (alternate schema admitted)"]
+    stopped_node = restart_obj.get("stopped_node")
+    pre_restart_height = restart_obj.get("pre_restart_height")
+    catch_up_height = restart_obj.get("catch_up_height")
+    if not isinstance(stopped_node, str):
+        shape_errors.append(
+            "<root>: restart.stopped_node not a string (alternate schema admitted)"
+        )
+    if not isinstance(pre_restart_height, int) or isinstance(
+        pre_restart_height, bool
+    ):
+        shape_errors.append(
+            "<root>: restart.pre_restart_height not an integer "
+            "(alternate schema admitted)"
+        )
+    if not isinstance(catch_up_height, int) or isinstance(catch_up_height, bool):
+        shape_errors.append(
+            "<root>: restart.catch_up_height not an integer "
+            "(alternate schema admitted)"
+        )
+    if shape_errors:
+        return shape_errors
+
+    # Participant-name membership for stopped_node.
+    if stopped_node not in valid_names:
+        errors.append(
+            f"restart.stopped_node: {stopped_node!r} not in participants"
+        )
+
+    # post_restart_live_action.accepted_by_peer cross-field checks.
+    live_action = restart_obj.get("post_restart_live_action")
+    if isinstance(live_action, dict):
+        accepted_by_peer = live_action.get("accepted_by_peer")
+        if not isinstance(accepted_by_peer, str):
+            errors.append(
+                "<root>: restart.post_restart_live_action.accepted_by_peer "
+                "not a string (alternate schema admitted)"
+            )
+        else:
+            if accepted_by_peer not in valid_names:
+                errors.append(
+                    "restart.post_restart_live_action.accepted_by_peer: "
+                    f"{accepted_by_peer!r} not in participants"
+                )
+            if accepted_by_peer == stopped_node:
+                errors.append(
+                    "restart.post_restart_live_action.accepted_by_peer: "
+                    f"{accepted_by_peer!r} equals stopped_node; live action "
+                    "cannot be accepted by the stopped participant"
+                )
+
+    # catch_up_height >= pre_restart_height invariant. The explicit
+    # escape: a reorg.fork_height < pre_restart_height explains a
+    # legitimate rollback below the pre-restart tip. Without that
+    # explanation, a silent decrease is a lifecycle-order violation.
+    if catch_up_height < pre_restart_height:
+        reorg_obj = data.get("reorg")
+        explained_by_reorg = (
+            isinstance(reorg_obj, dict)
+            and isinstance(reorg_obj.get("fork_height"), int)
+            and not isinstance(reorg_obj.get("fork_height"), bool)
+            and reorg_obj["fork_height"] < pre_restart_height
+        )
+        if not explained_by_reorg:
+            errors.append(
+                "restart.catch_up_height: "
+                f"{catch_up_height} below pre_restart_height "
+                f"{pre_restart_height} with no reorg explanation "
+                "(reorg.fork_height < pre_restart_height required)"
+            )
+    return errors
+
+
+def _cross_field_reorg(data: dict) -> list[str]:
+    """Reorg-evidence cross-field invariants (RUB-207).
+
+    Schema owns: type, required, minimum, hex pattern, additionalProperties.
+    Cross-field owns: fork_height < winning_branch_height ordering, and
+    final_state.{tip,height} consistency with the declared winning branch
+    when final_state is present.
+    """
+    errors: list[str] = []
+    reorg_obj = data.get("reorg")
+    if reorg_obj is None:
+        return errors  # reorg is optional
+
+    if not isinstance(reorg_obj, dict):
+        return ["<root>: reorg not an object (alternate schema admitted)"]
+
+    shape_errors: list[str] = []
+    fork_height = reorg_obj.get("fork_height")
+    winning_branch_height = reorg_obj.get("winning_branch_height")
+    winning_branch_tip = reorg_obj.get("winning_branch_tip")
+    if not isinstance(fork_height, int) or isinstance(fork_height, bool):
+        shape_errors.append(
+            "<root>: reorg.fork_height not an integer (alternate schema admitted)"
+        )
+    if not isinstance(winning_branch_height, int) or isinstance(
+        winning_branch_height, bool
+    ):
+        shape_errors.append(
+            "<root>: reorg.winning_branch_height not an integer "
+            "(alternate schema admitted)"
+        )
+    if not isinstance(winning_branch_tip, str):
+        shape_errors.append(
+            "<root>: reorg.winning_branch_tip not a string "
+            "(alternate schema admitted)"
+        )
+    if shape_errors:
+        return shape_errors
+
+    # Lifecycle-order invariant: fork_height < winning_branch_height.
+    if fork_height >= winning_branch_height:
+        errors.append(
+            f"reorg.fork_height: {fork_height} must be less than "
+            f"winning_branch_height {winning_branch_height}"
+        )
+
+    # final_state consistency check fires only when present (optional
+    # per false_positive_cases: «reorg-only evidence should not require
+    # restart fields ... fields absent by design must not be required
+    # retroactively»).
+    final_state = reorg_obj.get("final_state")
+    if isinstance(final_state, dict):
+        tip = final_state.get("tip")
+        height = final_state.get("height")
+        if isinstance(tip, str) and tip != winning_branch_tip:
+            errors.append(
+                "reorg.final_state.tip: "
+                f"{tip!r} must equal winning_branch_tip "
+                f"{winning_branch_tip!r}"
+            )
+        if (
+            isinstance(height, int)
+            and not isinstance(height, bool)
+            and height != winning_branch_height
+        ):
+            errors.append(
+                "reorg.final_state.height: "
+                f"{height} must equal winning_branch_height "
+                f"{winning_branch_height}"
+            )
     return errors
 
 
