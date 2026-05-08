@@ -35,6 +35,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SCHEMA = REPO_ROOT / "scripts" / "devnet" / "schema" / "mixed_client_evidence_v1.json"
 
 
+def _path_key(err: object) -> tuple:
+    """Total-orderable sort key for jsonschema `ValidationError.absolute_path`.
+
+    `e.absolute_path` may legitimately mix int (array indices) and str
+    (object keys); a plain `list(e.absolute_path)` key raises
+    `TypeError: '<' not supported between 'int' and 'str'` when adjacent
+    errors have different element types at the same depth. This typed
+    tuple `(type(p).__name__, str(p))` reduces both to comparable str
+    pairs ('int' < 'str' lexicographically).
+    """
+    return tuple(
+        (type(p).__name__, str(p)) for p in getattr(err, "absolute_path", ())
+    )
+
+
 def _schema_layer(data: Any, schema: dict) -> tuple[list[str], bool]:
     """Run jsonschema Draft 2020-12 validation against `data`.
 
@@ -75,17 +90,8 @@ def _schema_layer(data: Any, schema: dict) -> tuple[list[str], bool]:
             True,
         )
 
-    # Total-orderable sort key: tuple of (type-tag, str-of-element) for
-    # each path component. `e.absolute_path` may legitimately mix int
-    # (array indices) and str (object keys) depending on which schema
-    # the validator runs against; a plain `list(e.absolute_path)` key
-    # raises `TypeError: '<' not supported between 'int' and 'str'` when
-    # adjacent errors have different element types at the same depth.
-    def _path_key(err: object) -> tuple:
-        return tuple(
-            (type(p).__name__, str(p)) for p in getattr(err, "absolute_path", ())
-        )
-
+    # Sort with the module-level `_path_key` (total-orderable across
+    # mixed int/str path elements; see its docstring for rationale).
     errors = sorted(raw_errors, key=_path_key)
     return (
         [
@@ -116,13 +122,14 @@ def _cross_field(data: dict) -> list[str]:
     evidence_type = data.get("evidence_type")
     verdict = data.get("verdict")
 
-    # Schema-independent minimal-shape guard. Defensive against
-    # permissive alternate `--schema` overrides that could admit input
-    # violating the committed shape; without these checks the direct
-    # indexing below would raise KeyError/TypeError instead of returning
-    # deterministic validation errors. The committed schema enforces
-    # all of these via `required` / `type` / `items`; this guard is the
-    # minimum needed to keep cross-field code safe under any schema.
+    # Belt-and-suspenders: the committed-schema floor in `validate()`
+    # already guarantees `participants` is a non-empty list of objects
+    # with str `name` and `implementation` (so the direct indexing
+    # below cannot KeyError on the standard call path). This
+    # schema-independent minimal-shape guard remains as defense-in-
+    # depth in case `_cross_field` is ever called from a future caller
+    # that bypasses the floor (e.g., direct unit-test invocation, or a
+    # refactor that loses the always-on committed-schema floor).
     minimal_shape_errors: list[str] = []
     if not isinstance(data.get("participants"), list) or not data.get("participants"):
         minimal_shape_errors.append(
@@ -189,10 +196,11 @@ def _cross_field(data: dict) -> list[str]:
 
     tx_path = data.get("tx_path")
     if isinstance(tx_path, dict):
-        # Committed-shape prerequisites for tx_path (same checks the
-        # committed schema enforces). Defensive against permissive
-        # alternate schemas that admit dict-shaped tx_path missing
-        # required keys or with wrong-type values.
+        # Belt-and-suspenders: committed-floor in `validate()` already
+        # guarantees tx_path is a dict with str `submitted_at`, list-
+        # of-str `observed_at`, and str `tx_id`. This guard remains as
+        # defense-in-depth (same rationale as the participant guard
+        # above) so direct calls into `_cross_field` cannot KeyError.
         tx_path_shape_errors: list[str] = []
         submitted_at = tx_path.get("submitted_at")
         observed_at = tx_path.get("observed_at")

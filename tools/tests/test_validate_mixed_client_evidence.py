@@ -265,27 +265,96 @@ class FailClosedCliTests(unittest.TestCase):
             self.assertTrue(any("observed_at" in e for e in errors))
             self.assertFalse(any("Traceback" in e for e in errors))
 
-    def test_alternate_schema_with_mixed_path_types_does_not_typeerror(self):
-        """Sort key for `_schema_layer` errors must be total-orderable
-        across mixed-type `absolute_path` (int + str). Constructed by
-        passing a fixture with errors at both `participants[0]` (int
-        index path) and `evidence_type` (str key path) under the
-        committed schema."""
+    def test_path_key_total_orderable_across_int_and_str(self):
+        """Direct unit test of `_schema_layer`'s `_path_key`. A naive
+        `key=lambda e: list(e.absolute_path)` raises `TypeError` when
+        Python is asked to compare an int to a str at the same index;
+        the typed tuple key `(type-tag, str(p))` reduces both to
+        comparable str pairs. This is the regression vector identified
+        by the wave-2 prepush-hostile finding."""
+        # Synthetic error stand-ins — only `absolute_path` is read by
+        # `_path_key` per the implementation contract.
+        class _FakeErr:
+            def __init__(self, path):
+                self.absolute_path = path
+
+        # The buggy `list(absolute_path)` key raises TypeError on this:
+        keys = [validator._path_key(_FakeErr([0])), validator._path_key(_FakeErr(["x"]))]
+        # Sort must complete without raising.
+        try:
+            ordered = sorted(keys)
+        except TypeError as e:
+            self.fail(f"_path_key not total-orderable on int vs str: {e}")
+        # 'int' < 'str' lexicographically, so [0] sorts before ["x"].
+        self.assertEqual(ordered[0], (("int", "0"),))
+        self.assertEqual(ordered[1], (("str", "x"),))
+
+        # Same depth, mixed types — must not raise.
+        same_depth = [
+            validator._path_key(_FakeErr(["participants", 0])),
+            validator._path_key(_FakeErr(["participants", "extra_key"])),
+        ]
+        try:
+            sorted(same_depth)
+        except TypeError as e:
+            self.fail(f"_path_key not total-orderable at same depth: {e}")
+
+    def test_fail_without_failure_reason_cross_field_rejected(self):
+        """Cross-field positive branch: `verdict=FAIL` without
+        `failure_reason` must surface the conditional-required error
+        (committed schema makes failure_reason optional; cross-field is
+        sole authority)."""
         with tempfile.TemporaryDirectory() as td:
-            tdp = Path(td)
             data = _load_committed_valid()
-            data["evidence_type"] = "bogus"  # str-path enum violation
-            data["participants"][0]["name"] = "BAD-CAPS"  # int-then-str pattern violation
-            fix = tdp / "f.json"
-            fix.write_text(json.dumps(data), encoding="utf-8")
-            try:
-                errors = validator.validate(fix, SCHEMA_PATH)
-            except TypeError as e:
-                self.fail(f"sorted() raised TypeError on mixed path types: {e}")
-            self.assertTrue(errors)
-            # Should contain both errors
-            self.assertTrue(any("evidence_type" in e for e in errors))
-            self.assertTrue(any("name" in e for e in errors))
+            data["verdict"] = "FAIL"
+            # Don't include failure_reason at all (committed schema
+            # accepts because failure_reason is not in `required`).
+            errors = _validate_dict(Path(td), data)
+            _assert_one(self, errors, "failure_reason", "required")
+
+    def test_mixed_client_with_only_go_impls_rejected(self):
+        """Cross-field positive branch: `mixed_client_process_soak`
+        with all-go impls must surface the «requires at least one go
+        and one rust» rule (committed schema's enum admits both labels;
+        cross-field enforces distribution)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["scenario"] = "all_go_in_mixed_set"
+            data["participants"] = [
+                {"name": "node-a", "implementation": "go"},
+                {"name": "node-b", "implementation": "go"},
+            ]
+            data["tx_path"]["submitted_at"] = "node-a"
+            data["tx_path"]["observed_at"] = ["node-b"]
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self,
+                errors,
+                "implementation=go",
+                "implementation=rust",
+            )
+
+    def test_mixed_client_with_single_participant_rejected(self):
+        """Cross-field positive branch: `mixed_client_process_soak`
+        with a single participant must surface the «requires at least
+        2 participants» rule (committed schema's `minItems: 1` admits
+        a single-participant list; cross-field enforces ≥2)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["scenario"] = "single_participant_in_mixed_set"
+            data["participants"] = [
+                {"name": "node-a", "implementation": "go"},
+            ]
+            # Drop tx_path — single-participant data can't satisfy
+            # cross-impl invariant; we only want to surface the
+            # «requires at least 2 participants» message.
+            del data["tx_path"]
+            errors = _validate_dict(Path(td), data)
+            _assert_one(
+                self,
+                errors,
+                "requires at least 2 participants",
+            )
 
 
 class SchemaOwnedTests(unittest.TestCase):
