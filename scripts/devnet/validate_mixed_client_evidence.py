@@ -188,6 +188,11 @@ def _validate_cross_field(data: Any) -> list[str]:
     duplicates = sorted(n for n, c in name_counts.items() if c > 1)
     if duplicates:
         errors.append(f"participants: duplicate names: {duplicates}")
+    # The S10 cross-impl observer-differ check below is gated on
+    # `not duplicates` so name->impl-keyed semantics do not chain off
+    # the ambiguous (last-write-wins) `impl_by_name` mapping when names
+    # are duplicated. S8/S9 participant-membership lookups use the
+    # set-valued `valid_names` and are correct regardless of duplicates.
 
     tx_path = data.get("tx_path")
     if isinstance(tx_path, dict):
