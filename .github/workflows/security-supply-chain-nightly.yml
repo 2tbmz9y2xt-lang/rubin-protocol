@@ -1,0 +1,336 @@
+name: security-supply-chain-nightly
+
+on:
+  schedule:
+    - cron: "37 2 * * *"
+  workflow_dispatch:
+    inputs:
+      cargo_mutants_timeout_seconds:
+        description: "Overall cargo-mutants timeout in seconds"
+        required: false
+        default: "900"
+      miri_timeout_seconds:
+        description: "Overall cargo miri timeout in seconds"
+        required: false
+        default: "900"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-supply-chain-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_MUTANTS_VERSION: "27.0.0"
+  GITLEAKS_VERSION: "v8.30.1"
+  GRYPE_VERSION: "v0.112.0"
+  RUST_NIGHTLY: "nightly-2025-11-21"
+  SYFT_VERSION: "v1.44.0"
+
+jobs:
+  secret-scan:
+    name: Secret scan (full tree)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: "1.26.3"
+          cache: true
+          cache-dependency-path: |
+            clients/go/go.mod
+            conformance/go.mod
+
+      - name: Install pinned gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_bin="${RUNNER_TEMP}/rubin-security-tools/bin"
+          mkdir -p "${tool_bin}"
+          GOBIN="${tool_bin}" GOTOOLCHAIN=auto go install "github.com/zricethezav/gitleaks/v8@${GITLEAKS_VERSION}"
+          echo "${tool_bin}" >> "${GITHUB_PATH}"
+          "${tool_bin}/gitleaks" version
+
+      - name: Run gitleaks full-tree scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir=".artifacts/security-supply-chain/gitleaks"
+          mkdir -p "${report_dir}"
+          cat > "${report_dir}/scan-metadata.txt" <<'META'
+          scope=full-tree
+          config=default-plus-rubin-fixture-false-positive
+          fail_on_scan_errors=true
+          META
+          config_path="${RUNNER_TEMP}/rubin-gitleaks.toml"
+          cat > "${config_path}" <<'TOML'
+          [extend]
+          useDefault = true
+          disabledRules = ["coinbase-access-token"]
+          TOML
+          set +e
+          timeout --signal=TERM --kill-after=30s 600 \
+            gitleaks dir \
+              --config "${config_path}" \
+              --redact=100 \
+              --exit-code 1 \
+              --report-format json \
+              --report-path "${report_dir}/gitleaks.json" \
+              --timeout 570 \
+              --no-banner \
+              .
+          gitleaks_status="$?"
+          set -e
+          {
+            echo "### Secret scan"
+            echo
+            echo "gitleaks exit status: ${gitleaks_status}"
+            echo
+            echo "Artifact: ${report_dir}/gitleaks.json"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${gitleaks_status}" -ne 0 ]]; then
+            echo "ERROR: gitleaks found leaks or failed with status ${gitleaks_status}" >&2
+            exit "${gitleaks_status}"
+          fi
+
+      - name: Upload gitleaks artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: security-nightly-gitleaks-${{ github.run_id }}
+          path: .artifacts/security-supply-chain/gitleaks/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  sbom-vulnerability-scan:
+    name: SBOM vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: "1.26.3"
+          cache: true
+          cache-dependency-path: |
+            clients/go/go.mod
+            conformance/go.mod
+
+      - name: Install pinned SBOM scanner tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_bin="${RUNNER_TEMP}/rubin-security-tools/bin"
+          mkdir -p "${tool_bin}"
+          GOBIN="${tool_bin}" GOTOOLCHAIN=auto go install "github.com/anchore/syft/cmd/syft@${SYFT_VERSION}"
+          GOBIN="${tool_bin}" GOTOOLCHAIN=auto go install "github.com/anchore/grype/cmd/grype@${GRYPE_VERSION}"
+          echo "${tool_bin}" >> "${GITHUB_PATH}"
+          "${tool_bin}/syft" version
+          "${tool_bin}/grype" version
+
+      - name: Generate SBOM and scan with grype
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir=".artifacts/security-supply-chain/sbom"
+          mkdir -p "${report_dir}"
+          sbom_spdx="${report_dir}/rubin-protocol.spdx.json"
+          sbom_syft="${report_dir}/rubin-protocol.syft.json"
+          syft dir:. -o "spdx-json=${sbom_spdx}"
+          syft dir:. -o "syft-json=${sbom_syft}"
+
+          set +e
+          grype "sbom:${sbom_syft}" \
+            --fail-on high \
+            --output json \
+            --file "${report_dir}/grype.json"
+          grype_status="$?"
+          grype "sbom:${sbom_syft}" \
+            --output table \
+            --file "${report_dir}/grype.txt"
+          table_status="$?"
+          set -e
+
+          {
+            echo "### SBOM vulnerability scan"
+            echo
+            echo "SPDX SBOM: ${sbom_spdx}"
+            echo
+            echo "Syft SBOM: ${sbom_syft}"
+            echo
+            echo "grype JSON exit status: ${grype_status}"
+            echo
+            echo "grype table exit status: ${table_status}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [[ "${table_status}" -ne 0 ]]; then
+            echo "ERROR: grype table report failed with status ${table_status}" >&2
+            exit "${table_status}"
+          fi
+          if [[ "${grype_status}" -ne 0 ]]; then
+            echo "ERROR: grype found high-or-higher vulnerabilities or failed with status ${grype_status}" >&2
+            exit "${grype_status}"
+          fi
+
+      - name: Upload SBOM scan artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: security-nightly-sbom-grype-${{ github.run_id }}
+          path: .artifacts/security-supply-chain/sbom/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  rust-miri:
+    name: Rust Miri bounded smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MIRI_TIMEOUT_SECONDS: ${{ inputs.miri_timeout_seconds || '900' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install OpenSSL dev headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - name: Install Rust nightly with miri
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable branch SHA, pinned action
+        with:
+          toolchain: nightly-2025-11-21
+          components: miri,rust-src
+
+      - name: Run bounded miri target
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="${GITHUB_WORKSPACE}/.artifacts/security-supply-chain/miri"
+          mkdir -p "${report_dir}"
+          cd clients/rust
+          cargo +"${RUST_NIGHTLY}" miri setup
+          set +e
+          timeout --signal=TERM --kill-after=30s "${MIRI_TIMEOUT_SECONDS}" \
+            cargo +"${RUST_NIGHTLY}" miri test \
+              -p rubin-consensus \
+              tests::tx_parse::parse_tx_nonminimal_compactsize \
+              --lib \
+              -- \
+              --exact \
+            2>&1 | tee "${report_dir}/miri.log"
+          miri_status="$?"
+          set -e
+          {
+            echo "### Miri bounded smoke"
+            echo
+            echo "Target: rubin-consensus tests::tx_parse::parse_tx_nonminimal_compactsize"
+            echo
+            echo "Timeout seconds: ${MIRI_TIMEOUT_SECONDS}"
+            echo
+            echo "miri exit status: ${miri_status}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${miri_status}" -ne 0 ]]; then
+            echo "ERROR: miri failed or timed out with status ${miri_status}" >&2
+            exit "${miri_status}"
+          fi
+          grep -Fq "test tests::tx_parse::parse_tx_nonminimal_compactsize ... ok" "${report_dir}/miri.log"
+
+      - name: Upload miri artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: security-nightly-miri-${{ github.run_id }}
+          path: .artifacts/security-supply-chain/miri/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  cargo-mutants:
+    name: Cargo mutants bounded smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_MUTANTS_TIMEOUT_SECONDS: ${{ inputs.cargo_mutants_timeout_seconds || '900' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Install OpenSSL dev headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: stable
+
+      - name: Install pinned cargo-mutants
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-mutants --version "${CARGO_MUTANTS_VERSION}" --locked
+          cargo mutants --version
+
+      - name: Run bounded cargo-mutants target
+        shell: bash
+        run: |
+          set -euo pipefail
+          report_dir="${GITHUB_WORKSPACE}/.artifacts/security-supply-chain/cargo-mutants"
+          mkdir -p "${report_dir}"
+          cd clients/rust
+          rm -rf mutants.out
+          set +e
+          timeout --signal=TERM --kill-after=30s "${CARGO_MUTANTS_TIMEOUT_SECONDS}" \
+            cargo mutants \
+              -p rubin-consensus \
+              --file crates/rubin-consensus/src/compactsize.rs \
+              --re 'compactsize.rs:5:5.*Ok\(\(0, 0\)\)' \
+              --jobs 1 \
+              --timeout 60 \
+              --baseline run \
+              -- \
+              --lib tests::tx_parse::parse_tx_nonminimal_compactsize \
+            2>&1 | tee "${report_dir}/cargo-mutants.log"
+          mutants_status="$?"
+          set -e
+          if [[ -d mutants.out ]]; then
+            cp -R mutants.out "${report_dir}/mutants.out"
+          fi
+          {
+            echo "### Cargo mutants bounded smoke"
+            echo
+            echo "Target file: clients/rust/crates/rubin-consensus/src/compactsize.rs"
+            echo
+            echo "Mutant filter: compactsize.rs:5:5.*Ok((0, 0))"
+            echo
+            echo "Timeout seconds: ${CARGO_MUTANTS_TIMEOUT_SECONDS}"
+            echo
+            echo "cargo-mutants exit status: ${mutants_status}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${mutants_status}" -ne 0 ]]; then
+            echo "ERROR: cargo-mutants failed, timed out, or found uncaught mutants: ${mutants_status}" >&2
+            exit "${mutants_status}"
+          fi
+          grep -Fq "1 mutant tested" "${report_dir}/cargo-mutants.log"
+          grep -Fq "1 caught" "${report_dir}/cargo-mutants.log"
+          test ! -s "${report_dir}/mutants.out/missed.txt"
+          test ! -s "${report_dir}/mutants.out/timeout.txt"
+
+      - name: Upload cargo-mutants artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: security-nightly-cargo-mutants-${{ github.run_id }}
+          path: .artifacts/security-supply-chain/cargo-mutants/**
+          if-no-files-found: warn
+          retention-days: 14
