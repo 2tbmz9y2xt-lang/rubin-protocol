@@ -81,15 +81,27 @@ def _validate_cross_field(data: Any) -> list[str]:
       S6  single_client one impl            implicit gate (needs ≥2 string impls)
       S7  duplicate participant names       AUTHORITATIVE (schema lacks uniqueItems
                                               over `name`)
-      S8  tx_path.submitted_at not in set   gates on isinstance(str)
-      S9  tx_path.observed_at[i] not in set gates on isinstance(str)
-      S10 cross-impl observer differ        GATED on every observer impl known
-                                              AND no duplicate participant
-                                              names (wave-3 + wave-5 fix:
-                                              impl_by_name is unreliable when
-                                              names duplicate, so the name
-                                              ambiguity cross-field error is
-                                              authoritative)
+      S8  tx_path.submitted_at not in set   GATED on every participant being
+                                              fully schema-shaped (dict + str
+                                              name) AND isinstance(str) (wave-6:
+                                              partial-shape participants make
+                                              `valid_names` incomplete and the
+                                              membership diagnostic misleading)
+      S9  tx_path.observed_at[i] not in set GATED on every participant being
+                                              fully schema-shaped AND
+                                              isinstance(str) per-item (wave-6:
+                                              same as S8)
+      S10 cross-impl observer differ        GATED on (a) every observer impl
+                                              known, (b) no duplicate participant
+                                              names, (c) `observed_at` is a
+                                              non-empty list of ONLY strings
+                                              (wave-3 + wave-5 + wave-6:
+                                              impl_by_name unreliable when
+                                              names duplicate; cross-impl must
+                                              not chain off the string-subset
+                                              of a mixed-type observed_at when
+                                              schema reports the item-type
+                                              error)
       S11 mixed PASS ⇒ tx_path required     GATED on `tx_path is None`
                                               (schema `type` handles wrong-type)
     """
@@ -151,6 +163,17 @@ def _validate_cross_field(data: Any) -> list[str]:
         for p in participants
         if isinstance(p, dict) and isinstance(p.get("name"), str)
     }
+    # Element-shape gate for S8/S9: only run participant-membership
+    # diagnostics on the tx_path lookups when every participant entry is
+    # fully schema-shaped (a dict with a string `name`). When any item is
+    # partially schema-invalid, `valid_names` is incomplete and a
+    # `tx_path.{submitted_at,observed_at} not in participants` message
+    # would be misleading; the schema layer reports each malformed item's
+    # `participants[i]` errors authoritatively.
+    participants_fully_named = all(
+        isinstance(p, dict) and isinstance(p.get("name"), str)
+        for p in participants
+    )
 
     if evidence_type == "mixed_client_process_soak":
         # S5: only emit the "go AND rust required" cross-impl message when
@@ -199,12 +222,16 @@ def _validate_cross_field(data: Any) -> list[str]:
         submitted_at = tx_path.get("submitted_at")
         observed_at = tx_path.get("observed_at")
 
-        if isinstance(submitted_at, str) and submitted_at not in valid_names:
+        if (
+            participants_fully_named
+            and isinstance(submitted_at, str)
+            and submitted_at not in valid_names
+        ):
             errors.append(
                 f"tx_path.submitted_at: {submitted_at!r} not in participants"
             )
 
-        if isinstance(observed_at, list):
+        if participants_fully_named and isinstance(observed_at, list):
             for i, observer in enumerate(observed_at):
                 if isinstance(observer, str) and observer not in valid_names:
                     errors.append(
@@ -212,19 +239,21 @@ def _validate_cross_field(data: Any) -> list[str]:
                     )
 
         # Cross-impl tx_path invariant only fires when every participant on
-        # the tx_path has a known string implementation AND participant names
-        # are unique. If the submitter or any string observer is missing impl,
-        # the schema layer already emits `participants[i].implementation` as
-        # the real problem. If duplicate names exist, `impl_by_name` is
-        # ambiguous (last-write-wins) — the duplicate-names cross-field
-        # error above is authoritative; running the name->impl-keyed
-        # cross-impl algorithm on top of an ambiguous mapping would emit a
-        # misleading "submitter/observer differ" error chained off arbitrary
-        # impl resolution.
-        string_observers = (
-            [o for o in observed_at if isinstance(o, str)]
+        # the tx_path has a known string implementation, participant names
+        # are unique, AND `observed_at` is a non-empty list whose items
+        # are ALL strings. If any observer item is non-string, the schema
+        # layer already emits an `observed_at[i]` type error; running the
+        # cross-impl algorithm on the string-subset of a mixed-type list
+        # would stack a misleading "submitter/observer differ" message on
+        # top of the schema-owned item-type rejection. If duplicate names
+        # exist, `impl_by_name` is last-write-wins ambiguous — the
+        # duplicate-names cross-field error above is authoritative.
+        observed_at_strs: list[str] | None = (
+            list(observed_at)
             if isinstance(observed_at, list)
-            else []
+            and observed_at
+            and all(isinstance(o, str) for o in observed_at)
+            else None
         )
         if (
             evidence_type == "mixed_client_process_soak"
@@ -232,12 +261,12 @@ def _validate_cross_field(data: Any) -> list[str]:
             and not duplicates
             and isinstance(submitted_at, str)
             and submitted_at in impl_by_name
-            and string_observers
-            and all(o in impl_by_name for o in string_observers)
+            and observed_at_strs is not None
+            and all(o in impl_by_name for o in observed_at_strs)
         ):
             submitter_impl = impl_by_name[submitted_at]
             observer_pairs = sorted(
-                {(o, impl_by_name[o]) for o in string_observers}
+                {(o, impl_by_name[o]) for o in observed_at_strs}
             )
             observer_impls = {impl for _, impl in observer_pairs}
             if not any(impl != submitter_impl for impl in observer_impls):

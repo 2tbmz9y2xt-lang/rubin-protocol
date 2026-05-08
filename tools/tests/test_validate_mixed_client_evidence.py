@@ -138,6 +138,75 @@ class MalformedInputTests(unittest.TestCase):
                 f"cross-field 'participants: required' fired; got {errors}",
             )
 
+    def test_partial_schema_shape_participants_suppress_membership_diagnostic(self):
+        """When ANY participant is partially schema-invalid (item is not a
+        dict, or item.name is not a string), `valid_names` is incomplete;
+        the schema layer's per-item type/required errors are authoritative.
+        S8/S9 `tx_path.{submitted_at,observed_at} not in participants`
+        diagnostics must NOT fire on top of that incomplete view (S8/S9
+        wave-6 element-shape gate)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["scenario"] = "partial_shape_participant_with_tx_path_lookup"
+            # First participant has wrong-type name (int); second is
+            # well-shaped. tx_path references a name that ISN'T in
+            # `valid_names` so without the gate S8/S9 would emit a
+            # misleading "not in participants" message even though the
+            # real problem is reported by the schema (`participants[0].name`
+            # type error).
+            data["participants"] = [
+                {"name": 42, "implementation": "go"},  # type: ignore[dict-item]
+                {"name": "node-b", "implementation": "rust"},
+            ]
+            data["tx_path"]["submitted_at"] = "node-a"
+            data["tx_path"]["observed_at"] = ["node-b"]
+            errors = _validate_dict(Path(td), data)
+            # Schema reports the type error on the malformed name.
+            self.assertTrue(
+                any("name" in e for e in errors),
+                f"expected schema type/pattern error on participants[0].name; got {errors}",
+            )
+            # Cross-field membership diagnostic must NOT fire because
+            # `participants_fully_named` is False.
+            self.assertFalse(
+                any("not in participants" in e for e in errors),
+                f"S8/S9 membership diagnostic fired despite partial-shape participants; got {errors}",
+            )
+
+    def test_observed_at_with_non_string_item_suppresses_cross_impl_check(self):
+        """When `observed_at` is a list whose items are not all strings,
+        the schema layer reports the item-type error authoritatively. S10
+        cross-impl observer-differ check must NOT additionally fire on the
+        string subset (S10 wave-6 list-purity gate)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["scenario"] = "observed_at_mixed_types"
+            data["participants"] = [
+                {"name": "node-a", "implementation": "go"},
+                {"name": "node-b", "implementation": "go"},
+                {"name": "node-c", "implementation": "rust"},
+            ]
+            data["tx_path"]["submitted_at"] = "node-a"
+            # Mixed-type observed_at: schema reports item-type error on 42;
+            # without the gate, cross-impl would still run on the string
+            # subset ["node-b"] (same impl as submitter "go") and emit a
+            # misleading differ message.
+            data["tx_path"]["observed_at"] = ["node-b", 42]  # type: ignore[list-item]
+            errors = _validate_dict(Path(td), data)
+            # Schema reports the item-type error.
+            self.assertTrue(
+                any("observed_at" in e for e in errors),
+                f"expected schema error on tx_path.observed_at item-type; got {errors}",
+            )
+            # Cross-impl differ must NOT fire on the string subset.
+            self.assertFalse(
+                any(
+                    ("submitter" in e and "observer" in e and "differ" in e)
+                    for e in errors
+                ),
+                f"S10 fired on string subset of mixed-type observed_at; got {errors}",
+            )
+
     def test_duplicate_names_suppress_cross_impl_observer_differ_check(self):
         """When participant names are duplicated, `impl_by_name` is
         last-write-wins ambiguous; the duplicate-names cross-field error
@@ -147,7 +216,12 @@ class MalformedInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             data = _load_committed_valid()
             data["scenario"] = "duplicate_names_with_cross_impl_setup"
-            # node-a appears twice with conflicting impls; node-c is rust.
+            # node-a appears twice (same impl=go); node-c is rust. Without
+            # the gate, the cross-impl algorithm would resolve `node-a` via
+            # last-write-wins `impl_by_name` and, with submitted_at and the
+            # sole observer both pointing at node-a, emit a misleading
+            # "submitter/observer differ" message even though the underlying
+            # ambiguity is the duplicate-name cross-field error.
             data["participants"] = [
                 {"name": "node-a", "implementation": "go"},
                 {"name": "node-a", "implementation": "go"},
