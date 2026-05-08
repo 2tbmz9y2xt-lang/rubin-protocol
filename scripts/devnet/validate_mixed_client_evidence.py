@@ -57,6 +57,13 @@ def _build_format_checker() -> Any:
 
     Leap seconds (second=60) are rejected; this matches the producers in
     this repo, which never emit a leap-second timestamp.
+
+    Note on case: the regex is deliberately stricter than RFC3339 §5.6 ABNF
+    (which allows lowercase ``t``/``z``). Only uppercase ``T`` and ``Z`` are
+    accepted, matching the producer contract for Go (``time.RFC3339``) and
+    Rust (``chrono::SecondsFormat`` default) devnet nodes, which always emit
+    uppercase. If a future producer needs lowercase support, switch the
+    pattern to ``re.IGNORECASE`` and add corresponding tests.
     """
     import jsonschema  # type: ignore[import-untyped]
 
@@ -121,9 +128,16 @@ def _validate_with_jsonschema(data: Any, schema: dict) -> list[str]:
 def _check_endpoint_port(endpoint: Any) -> str | None:
     """Return error message if endpoint port is outside 1..65535, else None.
 
-    Schema regex bounds the endpoint to 1-5 nonzero digits; the upper TCP/UDP
-    port limit (65535) cannot be expressed in a tight pure regex without
-    multiline alternation, so the structural check completes the contract.
+    Defense-in-depth structural port-range check. Since wave-2 commit
+    ``30b3cd2``, the schema regex at ``$defs/participant.{rpc,p2p}`` and
+    ``$defs/checkpoint.{rpc,p2p}`` independently bounds the port to 1..65535
+    via the bounded alternation
+    ``(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3})``,
+    so out-of-range ports are rejected by the schema layer alone. This
+    function is the structural complement: it surfaces a clearer
+    ``port N is outside the valid TCP/UDP range 1..65535`` message and stays
+    in place to catch any future schema edit that loosens the alternation
+    without updating this guard.
     """
     if not isinstance(endpoint, str):
         return None
