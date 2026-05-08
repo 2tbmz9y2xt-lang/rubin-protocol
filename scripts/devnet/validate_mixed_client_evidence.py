@@ -34,8 +34,6 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SCHEMA = REPO_ROOT / "scripts" / "devnet" / "schema" / "mixed_client_evidence_v1.json"
 
-SCHEMA_VERSION = "rubin-mixed-client-devnet-evidence-v1"
-
 
 def _schema_layer(data: Any, schema: dict) -> tuple[list[str], bool]:
     """Run jsonschema Draft 2020-12 validation against `data`.
@@ -108,6 +106,9 @@ def _cross_field(data: dict) -> list[str]:
     verdict = data.get("verdict")
     participants = data["participants"]
 
+    # Schema PASS contract: every entry in `participants` is a dict with
+    # `name` and `implementation` as strings; `valid_names` is therefore
+    # exhaustive (`all_participant_names_valid` by construction here).
     impls = {p["implementation"] for p in participants}
     names_list = [p["name"] for p in participants]
     impl_by_name: dict[str, str] = {p["name"]: p["implementation"] for p in participants}
@@ -133,6 +134,10 @@ def _cross_field(data: dict) -> list[str]:
     )
     if duplicates:
         errors.append(f"participants: duplicate names: {duplicates}")
+    # The T13 cross-impl invariant below is gated on `not duplicates` so
+    # name->impl-keyed semantics do not chain off the ambiguous
+    # last-write-wins `impl_by_name` mapping when names duplicate; the
+    # duplicate-names cross-field error above is then authoritative.
 
     # verdict=FAIL conditional requirement (schema makes failure_reason
     # optional and `minLength: 1` rejects empty strings; cross-field is
@@ -186,7 +191,15 @@ def _cross_field(data: dict) -> list[str]:
                     f"{submitted_at!r}/{submitter_impl}, observers="
                     f"{[f'{n}/{i}' for n, i in observer_pairs]}"
                 )
-    elif evidence_type == "mixed_client_process_soak" and verdict == "PASS":
+    elif (
+        # `tx_path is None` (absent) is the only remaining branch: schema
+        # validated `tx_path` as `type: object` when present, so the
+        # cross-field tx_path-required message only fires for genuinely
+        # absent tx_path on a mixed-client PASS soak.
+        tx_path is None
+        and evidence_type == "mixed_client_process_soak"
+        and verdict == "PASS"
+    ):
         errors.append(
             "tx_path: required for evidence_type=mixed_client_process_soak "
             "with verdict=PASS"
