@@ -298,6 +298,7 @@ def _validate_cross_field(data: Any) -> list[str]:
     restart = data.get("restart")
     if isinstance(restart, dict) and restart.get("enabled") is True:
         for fld in (
+            "stopped_node",
             "checkpoint_before_stop",
             "state_after_catchup",
             "post_restart_live_action",
@@ -306,6 +307,15 @@ def _validate_cross_field(data: Any) -> list[str]:
                 errors.append(
                     f"restart.{fld}: required when restart.enabled=true"
                 )
+        stopped_node = restart.get("stopped_node")
+        if (
+            isinstance(stopped_node, str)
+            and participant_names
+            and stopped_node not in participant_names
+        ):
+            errors.append(
+                f"restart.stopped_node: {stopped_node!r} not in participants"
+            )
         for sub in ("checkpoint_before_stop", "state_after_catchup"):
             checkpoint = restart.get(sub)
             if isinstance(checkpoint, dict):

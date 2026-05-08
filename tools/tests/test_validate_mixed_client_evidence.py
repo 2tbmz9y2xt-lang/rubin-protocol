@@ -190,6 +190,10 @@ class HostileMutationTests(unittest.TestCase):
                 errors, "restart.enabled=true with no sub-fields must be rejected"
             )
             self.assertTrue(
+                any("restart.stopped_node" in e and "required" in e for e in errors),
+                errors,
+            )
+            self.assertTrue(
                 any("restart.checkpoint_before_stop" in e for e in errors), errors
             )
             self.assertTrue(
@@ -197,6 +201,56 @@ class HostileMutationTests(unittest.TestCase):
             )
             self.assertTrue(
                 any("restart.post_restart_live_action" in e for e in errors), errors
+            )
+
+    def test_restart_stopped_node_unknown_rejected(self):
+        """restart.stopped_node value must reference a declared participant."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["restart"] = {
+                "enabled": True,
+                "stopped_node": "node-ghost",
+                "checkpoint_before_stop": {"height": 102, "tip_hash": "1" * 64},
+                "state_after_catchup": {"height": 104, "tip_hash": "4" * 64},
+                "post_restart_live_action": {
+                    "action": "mine_next",
+                    "height": 105,
+                    "block_hash": "5" * 64,
+                },
+            }
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(errors, "unknown stopped_node must be rejected")
+            self.assertTrue(
+                any(
+                    "restart.stopped_node" in e and "node-ghost" in e
+                    for e in errors
+                ),
+                errors,
+            )
+
+    def test_restart_stopped_node_missing_when_enabled_rejected(self):
+        """restart.enabled=true with all checkpoint fields but no stopped_node must reject."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _valid_mixed()
+            data["restart"] = {
+                "enabled": True,
+                "checkpoint_before_stop": {"height": 102, "tip_hash": "1" * 64},
+                "state_after_catchup": {"height": 104, "tip_hash": "4" * 64},
+                "post_restart_live_action": {
+                    "action": "mine_next",
+                    "height": 105,
+                    "block_hash": "5" * 64,
+                },
+            }
+            errors = _write_and_validate(Path(td), data)
+            self.assertTrue(
+                errors, "missing stopped_node when restart.enabled=true must be rejected"
+            )
+            self.assertTrue(
+                any(
+                    "restart.stopped_node" in e and "required" in e for e in errors
+                ),
+                errors,
             )
 
     def test_reorg_enabled_missing_subfields_rejected(self):
