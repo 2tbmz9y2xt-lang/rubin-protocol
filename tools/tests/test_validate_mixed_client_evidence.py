@@ -1386,6 +1386,107 @@ class ReorgDirectFallbackTests(unittest.TestCase):
             f"got {errors}",
         )
 
+    # --- final_state element-shape direct fallback (RUB-207 PR-B wave-3) ---
+    # Mirrors the `_cross_field_restart.post_restart_live_action.accepted_by_peer`
+    # element-shape pattern: when `final_state` IS a dict but its inner
+    # `tip`/`height` have wrong types, cross-field must emit an explicit
+    # `(alternate schema admitted)` diagnostic, not silently fall through.
+
+    def test_cross_field_reorg_final_state_tip_not_string_returns_alternate_admitted_error(self):
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+            "final_state": {"tip": 12345, "height": 100},
+        }})
+        self.assertTrue(
+            any("reorg.final_state.tip not a string" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_final_state_height_not_int_returns_alternate_admitted_error(self):
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+            "final_state": {"tip": "a" * 64, "height": "100"},
+        }})
+        self.assertTrue(
+            any("reorg.final_state.height not an integer" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_final_state_height_bool_returns_alternate_admitted_error(self):
+        # bool is a Python int subclass; must be explicitly rejected
+        # because the schema declares type:integer, paralleling the
+        # bool-rejection guard on `pre_restart_height`/`catch_up_height`/
+        # `fork_height`/`winning_branch_height`.
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+            "final_state": {"tip": "a" * 64, "height": True},
+        }})
+        self.assertTrue(
+            any("reorg.final_state.height not an integer" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_final_state_missing_tip_returns_alternate_admitted_error(self):
+        # Direct-call path with a permissive alternate schema admitting a
+        # final_state object that omits `tip` entirely. `final_state.get
+        # ("tip")` returns None → `isinstance(None, str)` is False → must
+        # emit the not-a-string element-shape diagnostic, NOT silently
+        # skip the consistency check.
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+            "final_state": {"height": 100},
+        }})
+        self.assertTrue(
+            any("reorg.final_state.tip not a string" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_reorg_final_state_missing_height_returns_alternate_admitted_error(self):
+        errors = validator._cross_field_reorg({"reorg": {
+            "fork_height": 95,
+            "winning_branch_height": 100,
+            "winning_branch_tip": "a" * 64,
+            "final_state": {"tip": "a" * 64},
+        }})
+        self.assertTrue(
+            any("reorg.final_state.height not an integer" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+    # Class-closure sweep: also add positive owner for the
+    # `accepted_by_peer not a string` element-shape branch in
+    # `_cross_field_restart`, which had no direct-call test before
+    # wave-3 (only the parent live_action non-dict cases were covered).
+    def test_cross_field_restart_live_action_accepted_by_peer_not_string_returns_alternate_admitted_error(self):
+        errors = validator._cross_field_restart(
+            {"restart": {
+                "stopped_node": "node-a",
+                "pre_restart_height": 100,
+                "catch_up_height": 100,
+                "post_restart_live_action": {"accepted_by_peer": 12345},
+            }},
+            {"node-a", "node-b"},
+        )
+        self.assertTrue(
+            any("post_restart_live_action.accepted_by_peer" in e
+                and "not a string" in e
+                and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

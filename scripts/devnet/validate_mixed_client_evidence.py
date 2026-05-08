@@ -467,19 +467,33 @@ def _cross_field_reorg(data: dict) -> list[str]:
             "(alternate schema admitted)"
         )
     elif isinstance(final_state, dict):
+        # Defense-in-depth element-shape: a permissive alternate schema
+        # admitted via the direct-call path could pass `final_state` as a
+        # dict whose `tip`/`height` have wrong inner types (int for tip,
+        # str/bool for height). Without explicit guards the consistency
+        # checks below silently fall through (`isinstance(...)` is False
+        # → no error appended), which fails open. Mirror the
+        # `_cross_field_restart.post_restart_live_action.accepted_by_peer`
+        # element-shape pattern at this nested-dict layer.
         tip = final_state.get("tip")
         height = final_state.get("height")
-        if isinstance(tip, str) and tip != winning_branch_tip:
+        if not isinstance(tip, str):
+            errors.append(
+                "<root>: reorg.final_state.tip not a string "
+                "(alternate schema admitted)"
+            )
+        elif tip != winning_branch_tip:
             errors.append(
                 "reorg.final_state.tip: "
                 f"{tip!r} must equal winning_branch_tip "
                 f"{winning_branch_tip!r}"
             )
-        if (
-            isinstance(height, int)
-            and not isinstance(height, bool)
-            and height != winning_branch_height
-        ):
+        if not isinstance(height, int) or isinstance(height, bool):
+            errors.append(
+                "<root>: reorg.final_state.height not an integer "
+                "(alternate schema admitted)"
+            )
+        elif height != winning_branch_height:
             errors.append(
                 "reorg.final_state.height: "
                 f"{height} must equal winning_branch_height "
