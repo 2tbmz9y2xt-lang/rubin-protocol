@@ -75,6 +75,114 @@ class MalformedInputTests(unittest.TestCase):
             f.write_text("[]", encoding="utf-8")
             self.assertTrue(validator.validate(f, SCHEMA_PATH))
 
+    def test_missing_schema_version_no_duplicate_cross_field_message(self):
+        """When `schema_version` is missing, schema's `const` reports the
+        real problem; the cross-field "expected vs got" wording must NOT
+        additionally fire (S2 class-closure)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            del data["schema_version"]
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(
+                any("schema_version" in e for e in errors),
+                f"expected schema error on missing schema_version; got {errors}",
+            )
+            self.assertFalse(
+                any("must be exactly" in e for e in errors),
+                f"cross-field 'must be exactly' fired on missing field; got {errors}",
+            )
+
+    def test_wrong_type_schema_version_no_duplicate_cross_field_message(self):
+        """When `schema_version` is wrong-type (int), schema's `type` is
+        authoritative; cross-field message must NOT fire (S2)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["schema_version"] = 42  # type: ignore[assignment]
+            errors = _validate_dict(Path(td), data)
+            self.assertFalse(
+                any("must be exactly" in e for e in errors),
+                f"cross-field 'must be exactly' fired on wrong-type; got {errors}",
+            )
+
+    def test_failure_reason_wrong_type_no_duplicate_message(self):
+        """verdict=FAIL with wrong-type failure_reason: schema's type
+        check is authoritative; cross-field "required and non-empty" must
+        NOT fire (S3)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["verdict"] = "FAIL"
+            data["failure_reason"] = 42  # type: ignore[assignment]
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(
+                any("failure_reason" in e for e in errors),
+                f"expected schema error on wrong-type failure_reason; got {errors}",
+            )
+            self.assertFalse(
+                any(
+                    "required and must be non-empty when verdict=FAIL" in e
+                    for e in errors
+                ),
+                f"cross-field 'required and non-empty' fired on wrong-type; got {errors}",
+            )
+
+    def test_participants_wrong_type_no_duplicate_required_message(self):
+        """When participants is wrong-type (dict instead of list), schema
+        is authoritative; cross-field 'required for evidence_type=' must
+        NOT fire (S4 closure: cross-field message removed)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["participants"] = {"node-a": "go"}  # type: ignore[assignment]
+            errors = _validate_dict(Path(td), data)
+            self.assertFalse(
+                any("participants: required" in e for e in errors),
+                f"cross-field 'participants: required' fired; got {errors}",
+            )
+
+    def test_all_participants_missing_impl_no_cross_impl_requirement_message(self):
+        """When ALL participants lack `implementation`, schema reports
+        each missing-required error; the cross-impl 'go AND rust required'
+        message must NOT additionally fire (S5)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            for p in data["participants"]:
+                p.pop("implementation", None)
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(
+                any("implementation" in e for e in errors),
+                f"expected schema errors on missing impls; got {errors}",
+            )
+            self.assertFalse(
+                any(
+                    "implementation=go and one implementation=rust" in e
+                    for e in errors
+                ),
+                f"cross-impl requirement message duplicates schema; got {errors}",
+            )
+
+    def test_wrong_type_tx_path_does_not_trigger_required_fallback(self):
+        """When `tx_path` is present but has a wrong type (e.g. list, string),
+        the schema layer reports the type error authoritatively; the
+        cross-field fallback must NOT additionally emit
+        `tx_path: required ...` on the same case (Copilot wave-4 P2).
+        """
+        for wrong in ([], "", 42):
+            with tempfile.TemporaryDirectory() as td:
+                data = _load_committed_valid()
+                data["scenario"] = "tx_path_wrong_type"
+                data["tx_path"] = wrong  # type: ignore[assignment]
+                errors = _validate_dict(Path(td), data)
+                self.assertTrue(
+                    any("tx_path" in e for e in errors),
+                    f"expected schema type error on wrong-type tx_path={wrong!r}; got {errors}",
+                )
+                self.assertFalse(
+                    any(
+                        ("tx_path: required" in e and "mixed_client_process_soak" in e)
+                        for e in errors
+                    ),
+                    f"`tx_path: required` fallback fired on wrong-type tx_path={wrong!r}; got {errors}",
+                )
+
     def test_observer_missing_impl_does_not_trigger_cross_impl_error(self):
         """If a string observer references a participant with no string
         `implementation`, the schema layer reports the missing field; the

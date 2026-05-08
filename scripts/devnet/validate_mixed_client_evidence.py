@@ -50,40 +50,79 @@ def _validate_with_jsonschema(data: Any, schema: dict) -> list[str]:
             "<root>: jsonschema library unavailable; install jsonschema for full Draft 2020-12 validation"
         ]
     validator = jsonschema.Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
+    # Iteration order is left to `validate`, which deduplicates and
+    # lexicographically re-sorts the merged error stream via
+    # `sorted(set(...))`; an inner sort here would be discarded.
     return [
         f"{'.'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}"
-        for e in errors
+        for e in validator.iter_errors(data)
     ]
 
 
 def _validate_cross_field(data: Any) -> list[str]:
-    """Cross-field invariants jsonschema cannot express."""
+    """Cross-field invariants jsonschema cannot express.
+
+    Class-closure invariant: every cross-field check below MUST gate on
+    the input being schema-valid for the field it inspects, so the
+    cross-field message does not duplicate or contradict the schema
+    layer's authoritative type/const/required error on the same case.
+
+    Per-site decisions:
+
+      S1  top-level non-object             AUTHORITATIVE (jsonschema-absent path)
+      S2  schema_version mismatch          GATED on isinstance(str)
+                                              (schema `const` handles None/wrong-type)
+      S3  verdict=FAIL ⇒ failure_reason    GATED on (None or empty str)
+                                              (schema `type` handles wrong-type)
+      S4  participants required             REMOVED (schema `required` + `minItems`
+                                              already authoritative)
+      S5  mixed_client go+rust              GATED on any valid string impl
+                                              (schema per-participant required
+                                               handles all-missing)
+      S6  single_client one impl            implicit gate (needs ≥2 string impls)
+      S7  duplicate participant names       AUTHORITATIVE (schema lacks uniqueItems
+                                              over `name`)
+      S8  tx_path.submitted_at not in set   gates on isinstance(str)
+      S9  tx_path.observed_at[i] not in set gates on isinstance(str)
+      S10 cross-impl observer differ        GATED on every observer impl known
+                                              (wave-3)
+      S11 mixed PASS ⇒ tx_path required     GATED on `tx_path is None`
+                                              (schema `type` handles wrong-type)
+    """
     errors: list[str] = []
     if not isinstance(data, dict):
         return ["<root>: top-level JSON must be an object"]
 
-    if data.get("schema_version") != SCHEMA_VERSION:
+    # S2: only emit cross-field "expected vs got" wording when schema_version
+    # is a string but wrong value; missing or wrong-type cases are reported
+    # authoritatively by the schema's `const` constraint, and emitting a
+    # second cross-field message would duplicate.
+    schema_version = data.get("schema_version")
+    if isinstance(schema_version, str) and schema_version != SCHEMA_VERSION:
         errors.append(
-            f"schema_version: must be exactly '{SCHEMA_VERSION}'; got {data.get('schema_version')!r}"
+            f"schema_version: must be exactly '{SCHEMA_VERSION}'; got {schema_version!r}"
         )
 
     evidence_type = data.get("evidence_type")
     verdict = data.get("verdict")
 
+    # S3: cross-field is the authoritative source for the conditional
+    # requirement (verdict=FAIL ⇒ failure_reason non-empty); only emit
+    # when the field is missing or an empty string. Wrong-type values are
+    # reported authoritatively by the schema's `type: string` constraint.
     if verdict == "FAIL":
         reason = data.get("failure_reason")
-        if not isinstance(reason, str) or not reason.strip():
+        if reason is None or (isinstance(reason, str) and not reason.strip()):
             errors.append(
                 "failure_reason: required and must be non-empty when verdict=FAIL"
             )
 
+    # S4: when participants is missing/wrong-type/empty the schema layer
+    # reports `required` / `type` / `minItems` authoritatively; the early
+    # return below is a guard against None-deref in downstream cross-field
+    # code, not a duplicate message source.
     participants = data.get("participants")
     if not isinstance(participants, list) or not participants:
-        if evidence_type in PROCESS_SOAK_TYPES:
-            errors.append(
-                f"participants: required for evidence_type={evidence_type!r}"
-            )
         return errors
 
     impls = [p.get("implementation") for p in participants if isinstance(p, dict)]
@@ -110,8 +149,19 @@ def _validate_cross_field(data: Any) -> list[str]:
     }
 
     if evidence_type == "mixed_client_process_soak":
-        if not (any(i == "go" for i in impls) and any(i == "rust" for i in impls)):
-            observed = sorted({i for i in impls if isinstance(i, str)})
+        # S5: only emit the "go AND rust required" cross-impl message when
+        # at least one participant has a known string `implementation`. If
+        # every participant is schema-invalid (missing impl or wrong type),
+        # the per-participant `participants[i].implementation: required`
+        # errors from the schema layer are authoritative; emitting a
+        # cross-field "observed implementations=[]" message on top would
+        # duplicate.
+        valid_impls = [i for i in impls if isinstance(i, str)]
+        if valid_impls and not (
+            any(i == "go" for i in valid_impls)
+            and any(i == "rust" for i in valid_impls)
+        ):
+            observed = sorted(set(valid_impls))
             errors.append(
                 "participants: evidence_type=mixed_client_process_soak requires "
                 "at least one implementation=go and one implementation=rust; "
@@ -185,7 +235,13 @@ def _validate_cross_field(data: Any) -> list[str]:
                     f"{[f'{n}/{i}' for n, i in observer_pairs]}"
                 )
     elif (
-        evidence_type == "mixed_client_process_soak" and verdict == "PASS"
+        # Only emit "tx_path: required" when the field is genuinely absent
+        # or null. A wrong-type tx_path (list, string, etc.) is reported
+        # authoritatively by the schema layer as a type error; emitting a
+        # cross-field "required" message on top would be misleading.
+        tx_path is None
+        and evidence_type == "mixed_client_process_soak"
+        and verdict == "PASS"
     ):
         errors.append(
             "tx_path: required for evidence_type=mixed_client_process_soak "
