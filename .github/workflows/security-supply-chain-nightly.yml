@@ -111,6 +111,7 @@ jobs:
         with:
           name: security-nightly-gitleaks-${{ github.run_id }}
           path: .artifacts/security-supply-chain/gitleaks/**
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
@@ -193,6 +194,7 @@ jobs:
         with:
           name: security-nightly-sbom-grype-${{ github.run_id }}
           path: .artifacts/security-supply-chain/sbom/**
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
@@ -258,6 +260,7 @@ jobs:
         with:
           name: security-nightly-miri-${{ github.run_id }}
           path: .artifacts/security-supply-chain/miri/**
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
@@ -339,5 +342,6 @@ jobs:
         with:
           name: security-nightly-cargo-mutants-${{ github.run_id }}
           path: .artifacts/security-supply-chain/cargo-mutants/**
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
