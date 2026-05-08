@@ -235,10 +235,11 @@ def _validate_cross_field(data: Any) -> list[str]:
                     f"{[f'{n}/{i}' for n, i in observer_pairs]}"
                 )
     elif (
-        # Only emit "tx_path: required" when the field is genuinely absent
-        # or null. A wrong-type tx_path (list, string, etc.) is reported
-        # authoritatively by the schema layer as a type error; emitting a
-        # cross-field "required" message on top would be misleading.
+        # Only emit the cross-field tx_path-required message when the
+        # field is genuinely absent or null. A wrong-type tx_path (list,
+        # string, etc.) is reported authoritatively by the schema layer
+        # as a type error; emitting a cross-field required-message on top
+        # would be misleading (S11 in the verdict table above).
         tx_path is None
         and evidence_type == "mixed_client_process_soak"
         and verdict == "PASS"
