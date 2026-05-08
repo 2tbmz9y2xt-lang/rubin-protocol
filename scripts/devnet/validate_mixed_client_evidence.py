@@ -39,7 +39,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SCHEMA = REPO_ROOT / "scripts" / "devnet" / "schema" / "mixed_client_evidence_v1.json"
 
 SCHEMA_VERSION = "rubin-mixed-client-devnet-evidence-v1"
-PROCESS_SOAK_TYPES = ("mixed_client_process_soak", "single_client_process_soak")
 
 
 def _validate_with_jsonschema(data: Any, schema: dict) -> list[str]:
@@ -85,7 +84,12 @@ def _validate_cross_field(data: Any) -> list[str]:
       S8  tx_path.submitted_at not in set   gates on isinstance(str)
       S9  tx_path.observed_at[i] not in set gates on isinstance(str)
       S10 cross-impl observer differ        GATED on every observer impl known
-                                              (wave-3)
+                                              AND no duplicate participant
+                                              names (wave-3 + wave-5 fix:
+                                              impl_by_name is unreliable when
+                                              names duplicate, so the name
+                                              ambiguity cross-field error is
+                                              authoritative)
       S11 mixed PASS ⇒ tx_path required     GATED on `tx_path is None`
                                               (schema `type` handles wrong-type)
     """
@@ -203,11 +207,15 @@ def _validate_cross_field(data: Any) -> list[str]:
                     )
 
         # Cross-impl tx_path invariant only fires when every participant on
-        # the tx_path has a known string implementation. If the submitter or
-        # any string observer is missing impl, the schema layer already emits
-        # `participants[i].implementation` as the real problem; running the
-        # cross-impl check on a partial dataset would emit a duplicative and
-        # misleading "submitter/observer differ" error on top of it.
+        # the tx_path has a known string implementation AND participant names
+        # are unique. If the submitter or any string observer is missing impl,
+        # the schema layer already emits `participants[i].implementation` as
+        # the real problem. If duplicate names exist, `impl_by_name` is
+        # ambiguous (last-write-wins) — the duplicate-names cross-field
+        # error above is authoritative; running the name->impl-keyed
+        # cross-impl algorithm on top of an ambiguous mapping would emit a
+        # misleading "submitter/observer differ" error chained off arbitrary
+        # impl resolution.
         string_observers = (
             [o for o in observed_at if isinstance(o, str)]
             if isinstance(observed_at, list)
@@ -216,6 +224,7 @@ def _validate_cross_field(data: Any) -> list[str]:
         if (
             evidence_type == "mixed_client_process_soak"
             and verdict == "PASS"
+            and not duplicates
             and isinstance(submitted_at, str)
             and submitted_at in impl_by_name
             and string_observers

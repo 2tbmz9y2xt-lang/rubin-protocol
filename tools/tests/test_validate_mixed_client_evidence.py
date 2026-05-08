@@ -138,6 +138,36 @@ class MalformedInputTests(unittest.TestCase):
                 f"cross-field 'participants: required' fired; got {errors}",
             )
 
+    def test_duplicate_names_suppress_cross_impl_observer_differ_check(self):
+        """When participant names are duplicated, `impl_by_name` is
+        last-write-wins ambiguous; the duplicate-names cross-field error
+        is authoritative. The cross-impl observer-differ check must NOT
+        additionally fire on top of an ambiguous mapping (S10 wave-5
+        gate)."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["scenario"] = "duplicate_names_with_cross_impl_setup"
+            # node-a appears twice with conflicting impls; node-c is rust.
+            data["participants"] = [
+                {"name": "node-a", "implementation": "go"},
+                {"name": "node-a", "implementation": "go"},
+                {"name": "node-c", "implementation": "rust"},
+            ]
+            data["tx_path"]["submitted_at"] = "node-a"
+            data["tx_path"]["observed_at"] = ["node-a"]
+            errors = _validate_dict(Path(td), data)
+            self.assertTrue(
+                any("duplicate names" in e for e in errors),
+                f"expected duplicate-names cross-field error; got {errors}",
+            )
+            self.assertFalse(
+                any(
+                    ("submitter" in e and "observer" in e and "differ" in e)
+                    for e in errors
+                ),
+                f"cross-impl observer-differ fired despite duplicate names; got {errors}",
+            )
+
     def test_all_participants_missing_impl_no_cross_impl_requirement_message(self):
         """When ALL participants lack `implementation`, schema reports
         each missing-required error; the cross-impl 'go AND rust required'
@@ -392,13 +422,15 @@ class SchemaShapeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             data = _load_committed_valid()
             data["tx_path"]["tx_id"] = "abc123"
-            self.assertTrue(_validate_dict(Path(td), data))
+            errors = _validate_dict(Path(td), data)
+            _assert_one(self, errors, "tx_path.tx_id", "does not match")
 
     def test_participant_name_uppercase_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             data = _load_committed_valid()
             data["participants"][0]["name"] = "NODE-A"
-            self.assertTrue(_validate_dict(Path(td), data))
+            errors = _validate_dict(Path(td), data)
+            _assert_one(self, errors, "participants.0.name", "does not match")
 
 
 class DeterminismTests(unittest.TestCase):
