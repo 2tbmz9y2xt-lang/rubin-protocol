@@ -26,13 +26,113 @@ from __future__ import annotations
 
 import argparse
 import collections
+import datetime
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_SCHEMA = REPO_ROOT / "scripts" / "devnet" / "schema" / "mixed_client_evidence_v1.json"
+
+# RUB-208 (PR-C) — Rubin canonical date-time subset, narrower than RFC3339
+# §5.6 ABNF. Anchored shape regex enforces:
+#
+#   * 4-digit year, 2-digit month and day,
+#   * uppercase ``T`` separator (lowercase ``t`` REJECTED),
+#   * 2-digit hour, minute, second,
+#   * uppercase ``Z`` UTC indicator (lowercase ``z``, ``±HH:MM`` offsets,
+#     and fractional seconds ``.sss`` are REJECTED).
+#
+# This narrower contract matches Rubin evidence producers (Go
+# ``time.RFC3339`` and Rust ``chrono::SecondsFormat::Secs``); broadening it
+# to full RFC3339 acceptance is a class-B change requiring controller
+# approval per the RUB-208 contract.
+RFC3339_RUBIN_CANONICAL_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+)
+
+# RUB-208 (PR-C) — TCP/UDP port upper bound used by ``_check_endpoint_port``
+# and surfaced verbatim in its diagnostic message. The committed schema
+# regex on ``participants[].endpoint`` independently bounds the port to
+# 1..65535 via an explicit alternation; this Python guard is a
+# defense-in-depth sibling for alt-schema admit paths (see
+# ``_check_endpoint_port`` docstring).
+MAX_TCP_UDP_PORT = 65535
+
+
+def _strict_date_time_check(value: object) -> bool:
+    """Strict Rubin canonical date-time check (RUB-208 / PR-C).
+
+    Returns ``True`` for non-strings (the schema ``type: string`` keyword
+    is the authoritative type-check; this ``format`` checker stays out of
+    its way). For strings, returns ``True`` only when the value matches
+    the Rubin canonical shape regex ``RFC3339_RUBIN_CANONICAL_RE`` AND
+    parses cleanly through ``datetime.datetime.strptime`` with the
+    ``%Y-%m-%dT%H:%M:%SZ`` pattern. Otherwise raises ``ValueError`` so
+    ``jsonschema``'s FormatChecker captures the rejection as a normal
+    schema-layer validation error (not a runtime traceback).
+
+    The ``strptime`` second leg catches calendar-bounds violations that
+    the shape regex alone cannot detect (e.g., ``2026-13-40T25:61:61Z``
+    matches ``\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z`` but is not a
+    real instant). ``strptime`` rejects month=13, day in 32..99,
+    hour=25, minute=60, second=60 and any other calendar-invalid value.
+    """
+    if not isinstance(value, str):
+        return True
+    if not RFC3339_RUBIN_CANONICAL_RE.match(value):
+        raise ValueError(
+            "not a valid Rubin canonical date-time "
+            "(uppercase T/Z, UTC-only, no fractional, no offsets): "
+            f"{value!r}"
+        )
+    try:
+        datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValueError(
+            f"not a valid calendar date-time: {value!r} ({exc})"
+        ) from exc
+    return True
+
+
+def _check_endpoint_port(endpoint: object) -> str | None:
+    """Defense-in-depth port-range check (RUB-208 / PR-C).
+
+    Returns a deterministic error message if the trailing ``:port`` of
+    ``endpoint`` lies outside the valid TCP/UDP range
+    ``1..MAX_TCP_UDP_PORT``; returns ``None`` on shape mismatch (where
+    the schema layer is the authoritative rejector) and on in-range
+    ports.
+
+    The committed schema regex on ``participants[].endpoint`` already
+    bounds the port to ``1..65535`` via the alternation
+    ``(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3})``,
+    so out-of-range ports are rejected at the schema layer alone on the
+    standard call path. This function is the structural complement: it
+    surfaces a clearer
+    ``port {N} is outside the valid TCP/UDP range 1..{MAX}`` message and
+    fires on the alt-schema admit path (a permissive user-supplied
+    ``--schema`` that drops or loosens the alternation, or a direct
+    ``_cross_field`` invocation that bypasses the committed-schema floor
+    in :func:`validate`). It is NOT a network reachability check and
+    performs no DNS or socket I/O.
+    """
+    if not isinstance(endpoint, str):
+        return None
+    if ":" not in endpoint:
+        return None
+    port_str = endpoint.rsplit(":", 1)[1]
+    if not port_str or not port_str.isdigit():
+        return None
+    port = int(port_str)
+    if not 1 <= port <= MAX_TCP_UDP_PORT:
+        return (
+            f"port {port} is outside the valid TCP/UDP range "
+            f"1..{MAX_TCP_UDP_PORT}"
+        )
+    return None
 
 
 def _path_key(err: object) -> tuple:
@@ -71,9 +171,22 @@ def _schema_layer(data: Any, schema: dict) -> tuple[list[str], bool]:
     # Construct the validator and explicitly check the schema object so a
     # malformed Draft 2020-12 schema produces a deterministic
     # `schema: invalid schema: ...` error rather than a traceback.
+    #
+    # RUB-208 (PR-C): pass an explicit ``format_checker`` registering the
+    # Rubin canonical ``date-time`` strict checker. Without this argument
+    # ``jsonschema`` treats every ``"format": "date-time"`` keyword as an
+    # annotation only, so calendar-invalid timestamps like
+    # ``2026-13-40T25:61:61Z`` would silently pass schema validation even
+    # though the schema declares the format constraint.
     try:
         jsonschema.Draft202012Validator.check_schema(schema)
-        validator = jsonschema.Draft202012Validator(schema)
+        format_checker = jsonschema.FormatChecker()
+        format_checker.checks("date-time", raises=ValueError)(
+            _strict_date_time_check
+        )
+        validator = jsonschema.Draft202012Validator(
+            schema, format_checker=format_checker
+        )
     except jsonschema.exceptions.SchemaError as e:
         return ([f"schema: invalid schema: {e.message}"], True)
     except Exception as e:  # defensive: any other validator-init failure
@@ -159,6 +272,22 @@ def _cross_field(data: dict) -> list[str]:
     names_list = [p["name"] for p in participants]
     impl_by_name: dict[str, str] = {p["name"]: p["implementation"] for p in participants}
     valid_names = set(impl_by_name)
+
+    # RUB-208 (PR-C) — endpoint defense-in-depth port-range check.
+    # Schema owns the host:port shape and the ``1..65535`` numeric range
+    # via the bounded alternation on ``participants[].endpoint``; this
+    # cross-field walk is the structural complement that fires when a
+    # permissive alt-schema or a direct ``_cross_field`` call bypasses
+    # that floor (see ``_check_endpoint_port`` docstring). Guarded by
+    # ``"endpoint" in p`` so absent endpoints — the supported default
+    # for participants without an exposed RPC/P2P address — are not
+    # spuriously flagged.
+    for i, p in enumerate(participants):
+        if "endpoint" not in p:
+            continue
+        msg = _check_endpoint_port(p["endpoint"])
+        if msg is not None:
+            errors.append(f"participants[{i}].endpoint: {msg}")
 
     # Mixed-client must have at least one go AND one rust participant.
     if evidence_type == "mixed_client_process_soak":
