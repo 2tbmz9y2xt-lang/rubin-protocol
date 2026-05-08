@@ -71,7 +71,14 @@ jobs:
           cat > "${config_path}" <<'TOML'
           [extend]
           useDefault = true
-          disabledRules = ["coinbase-access-token"]
+
+          [[allowlists]]
+          targetRules = ["coinbase-access-token"]
+          description = "Allow Rubin devnet fixture coinbase_txid hashes only."
+          condition = "AND"
+          regexTarget = "line"
+          paths = ['''^conformance/fixtures/CV-DEVNET-(GENESIS|CHAIN|SUBSIDY)\.json$''']
+          regexes = ['''"coinbase_txid"\s*:\s*"[0-9a-f]{64}"''']
           TOML
           set +e
           timeout --signal=TERM --kill-after=30s 600 \
