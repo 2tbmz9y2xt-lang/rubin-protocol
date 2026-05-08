@@ -393,6 +393,24 @@ class SchemaOwnedTests(unittest.TestCase):
                 f"cross-field FAIL rule duplicates schema minLength; got {errors}",
             )
 
+    def test_scenario_empty_string_schema_owned_only(self):
+        """`scenario: ""` violates schema's `minLength: 1`. Schema layer
+        is the sole authority for the bound."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["scenario"] = ""
+            errors = _validate_dict(Path(td), data)
+            _assert_one(self, errors, "scenario", "too short")
+
+    def test_scenario_too_long_schema_owned_only(self):
+        """`scenario` longer than `maxLength: 200` is rejected by the
+        schema layer."""
+        with tempfile.TemporaryDirectory() as td:
+            data = _load_committed_valid()
+            data["scenario"] = "x" * 201  # 1 over the maxLength: 200 bound
+            errors = _validate_dict(Path(td), data)
+            _assert_one(self, errors, "scenario", "too long")
+
     def test_wrong_type_schema_version_schema_owned_only(self):
         """`schema_version: 42` violates schema's `const`. The error
         list must contain a schema-owned `schema_version` rejection
