@@ -921,7 +921,12 @@ class RestartEvidenceTests(unittest.TestCase):
             data = _valid_with_restart(pre_h=100, catch_h=80)
             data.update(_valid_with_reorg(fork_h=100, winning_h=110))
             errors = _validate_dict(Path(td), data)
-            # Two findings expected: catch_up_height + fork_height >= winning
+            # Exactly one finding expected: restart.catch_up_height fires
+            # because fork_height=100 is NOT < pre_restart_height=100, so
+            # the reorg-explained-rollback escape clause does not apply.
+            # The reorg lifecycle-order invariant (fork < winning) is
+            # satisfied here (100 < 110), so reorg.fork_height does NOT
+            # also fire.
             _assert_one(
                 self, errors,
                 "restart.catch_up_height",
