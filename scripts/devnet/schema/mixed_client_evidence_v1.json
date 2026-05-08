@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://rubin-protocol.dev/schemas/scripts/devnet/mixed_client_evidence_v1.json",
-  "title": "Rubin Mixed-Client Devnet Evidence v1 — base slice (PR-A)",
-  "description": "Minimum process-soak evidence schema needed to prove cross-implementation tx propagation between Go and Rust nodes. Restart/reorg, timestamp policy, and endpoint port policy are deferred to follow-up slices.",
+  "title": "Rubin Mixed-Client Devnet Evidence v1 — base + restart/reorg (PR-A + PR-B)",
+  "description": "Process-soak evidence schema needed to prove cross-implementation tx propagation between Go and Rust nodes (PR-A base) plus restart/reorg lifecycle-coherence evidence (PR-B). Timestamp/endpoint textual policy is deferred to RUB-208 (PR-C).",
   "type": "object",
   "required": [
     "schema_version",
@@ -89,6 +89,83 @@
         "tx_id": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "restart": {
+      "type": "object",
+      "required": [
+        "stopped_node",
+        "pre_restart_height",
+        "catch_up_height"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stopped_node": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pre_restart_height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "catch_up_height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "post_restart_live_action": {
+          "type": "object",
+          "required": [
+            "accepted_by_peer"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "accepted_by_peer": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "reorg": {
+      "type": "object",
+      "required": [
+        "fork_height",
+        "winning_branch_height",
+        "winning_branch_tip"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fork_height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "winning_branch_height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "winning_branch_tip": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "final_state": {
+          "type": "object",
+          "required": [
+            "tip",
+            "height"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "tip": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
         }
       }
     }
