@@ -12,6 +12,8 @@ import contextlib
 import copy
 import io
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1733,6 +1735,13 @@ class EndpointPolicyTests(unittest.TestCase):
             )
             self.assertTrue(any("endpoint" in e for e in errors), errors)
 
+    def test_trailing_carriage_return_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_endpoint("127.0.0.1:8080\r")
+            )
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
     def test_negative_port_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:-1"))
@@ -1742,6 +1751,33 @@ class EndpointPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1"))
             self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_schema_endpoint_pattern_is_ecma_portable(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node unavailable for ECMA regex dialect check")
+        schema = json.loads(validator.DEFAULT_SCHEMA.read_text(encoding="utf-8"))
+        pattern = schema["properties"]["participants"]["items"]["properties"][
+            "endpoint"
+        ]["pattern"]
+        script = (
+            "const pattern = new RegExp(process.argv[1]);"
+            "const rows = ['node:8080', '127.0.0.1:65535',"
+            "'Anode:8080Z', 'node:8080\\n', 'node:8080\\r'];"
+            "console.log(JSON.stringify(rows.map((s) => [s, pattern.test(s)])));"
+        )
+        result = subprocess.run(
+            [node, "-e", script, pattern],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        observed = dict(json.loads(result.stdout))
+        self.assertTrue(observed["node:8080"])
+        self.assertTrue(observed["127.0.0.1:65535"])
+        self.assertFalse(observed["Anode:8080Z"])
+        self.assertFalse(observed["node:8080\n"])
+        self.assertFalse(observed["node:8080\r"])
 
 
 class EndpointDirectFallbackTests(unittest.TestCase):
