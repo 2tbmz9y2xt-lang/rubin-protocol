@@ -122,7 +122,8 @@ def _check_endpoint_port(endpoint: object) -> str | None:
     if ":" not in endpoint:
         return None
     port_str = endpoint.rsplit(":", 1)[1]
-    if not port_str or not port_str.isdigit():
+    signed_negative_digits = port_str.startswith("-") and port_str[1:].isdigit()
+    if not port_str or not (port_str.isdigit() or signed_negative_digits):
         return None
     port = int(port_str)
     if not 1 <= port <= MAX_TCP_UDP_PORT:

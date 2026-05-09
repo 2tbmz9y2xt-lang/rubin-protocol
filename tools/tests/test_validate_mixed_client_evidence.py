@@ -13,7 +13,8 @@ import copy
 import io
 import json
 import shutil
-import subprocess
+# Test invokes fixed local node argv without shell.
+import subprocess  # nosec B404
 import sys
 import tempfile
 import unittest
@@ -1766,7 +1767,8 @@ class EndpointPolicyTests(unittest.TestCase):
             "'Anode:8080Z', 'node:8080\\n', 'node:8080\\r'];"
             "console.log(JSON.stringify(rows.map((s) => [s, pattern.test(s)])));"
         )
-        result = subprocess.run(
+        # Fixed argv; the regex pattern is passed as data, not through shell.
+        result = subprocess.run(  # nosec B603
             [node, "-e", script, pattern],
             check=True,
             capture_output=True,
@@ -1801,6 +1803,27 @@ class EndpointDirectFallbackTests(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn(" 0 ", msg)
         self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_negative_returns_clear_message(self):
+        msg = validator._check_endpoint_port("node:-1")
+        self.assertIsNotNone(msg)
+        self.assertIn("-1", msg)
+        self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_negative_overflow_returns_clear_message(self):
+        msg = validator._check_endpoint_port("node:-65536")
+        self.assertIsNotNone(msg)
+        self.assertIn("-65536", msg)
+        self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_negative_zero_returns_clear_message(self):
+        msg = validator._check_endpoint_port("node:-0")
+        self.assertIsNotNone(msg)
+        self.assertIn(" 0 ", msg)
+        self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_signed_positive_stays_schema_owned(self):
+        self.assertIsNone(validator._check_endpoint_port("node:+1"))
 
     def test_in_range_returns_none(self):
         self.assertIsNone(validator._check_endpoint_port("node:8080"))
@@ -1845,6 +1868,24 @@ class EndpointDirectFallbackTests(unittest.TestCase):
         errors = validator._cross_field(data)
         self.assertTrue(
             any("participants[0].endpoint" in e and "65536" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_signed_negative_endpoint_port_uses_check(self):
+        data = {
+            "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+            "evidence_type": "mixed_client_process_soak",
+            "scenario": "x",
+            "verdict": "FAIL",
+            "failure_reason": "x",
+            "participants": [
+                {"name": "node-a", "implementation": "go", "endpoint": "node:-1"},
+                {"name": "node-b", "implementation": "rust"},
+            ],
+        }
+        errors = validator._cross_field(data)
+        self.assertTrue(
+            any("participants[0].endpoint" in e and "-1" in e for e in errors),
             f"got {errors}",
         )
 
