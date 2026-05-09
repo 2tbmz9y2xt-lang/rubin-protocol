@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,7 @@ const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 // parser without claiming byte-for-byte parity with `readChunkLine`.
 const MAX_CHUNK_LINE_BYTES: usize = 4096;
 const MAX_CONCURRENT_RPC_CONNS: usize = 8;
+const RPC_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub type AnnounceTxFn =
     Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
@@ -80,7 +81,9 @@ pub struct DevnetRPCState {
 pub struct RunningDevnetRPCServer {
     addr: String,
     stop: Arc<AtomicBool>,
+    active_handlers: Arc<AtomicUsize>,
     join: Option<JoinHandle<()>>,
+    done: Option<mpsc::Receiver<()>>,
     /// RUB-10 / GitHub #1151: handle to the same `ReadinessGate` the
     /// `DevnetRPCState` references, kept on the server so `close()`
     /// can stamp `Shutdown` before stopping the accept loop. Mirrors
@@ -541,6 +544,9 @@ pub fn start_devnet_rpc_server(
         .to_string();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
+    let active_handlers = Arc::new(AtomicUsize::new(0));
+    let active_handlers_for_loop = Arc::clone(&active_handlers);
+    let (done_tx, done_rx) = mpsc::channel();
     let state = Arc::new(state);
     // RUB-10 / GitHub #1151: stamp `Ready` BEFORE the accept thread
     // spawns. The lifecycle position matches Go's stamp at
@@ -559,14 +565,21 @@ pub fn start_devnet_rpc_server(
     // the move into the thread so `RunningDevnetRPCServer` can
     // `mark_shutdown` on close.
     let readiness = Arc::clone(&state.readiness);
-    readiness.try_mark_ready_on_startup();
+    if !readiness.try_mark_ready_on_startup() {
+        return Err(
+            "rpc readiness transition failed: server is already ready or shutdown".to_string(),
+        );
+    }
     let join = thread::spawn(move || {
-        run_accept_loop(listener, state, stop_flag);
+        let _done = AcceptLoopDone(Some(done_tx));
+        run_accept_loop(listener, state, stop_flag, active_handlers_for_loop);
     });
     Ok(RunningDevnetRPCServer {
         addr,
         stop,
+        active_handlers,
         join: Some(join),
+        done: Some(done_rx),
         readiness,
     })
 }
@@ -576,7 +589,12 @@ impl RunningDevnetRPCServer {
         &self.addr
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&mut self) -> Result<(), String> {
+        self.close_with_timeout(RPC_SHUTDOWN_TIMEOUT)
+    }
+
+    fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
+        let started = Instant::now();
         // RUB-10 / GitHub #1151: stamp `Shutdown` BEFORE stopping the
         // accept loop so any in-flight `/ready` request that races the
         // close sees the sticky terminal state. Mirrors Go's
@@ -585,17 +603,80 @@ impl RunningDevnetRPCServer {
         // Idempotent: re-calling close (e.g., explicit close + Drop)
         // re-stamps Shutdown without effect.
         self.readiness.mark_shutdown();
+        if self.join.is_none() {
+            return self.wait_for_handlers(started, timeout);
+        }
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.addr);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
+        let done = self
+            .done
+            .as_ref()
+            .ok_or_else(|| "rpc shutdown missing accept-loop completion channel".to_string())?;
+        match done.recv_timeout(Self::remaining_timeout(started, timeout)?) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "rpc shutdown timeout after {} ms: accept loop still running",
+                    timeout.as_millis()
+                ));
+            }
+        }
+        let join = self
+            .join
+            .take()
+            .ok_or_else(|| "rpc shutdown missing accept-loop handle".to_string())?;
+        self.done.take();
+        join.join()
+            .map_err(|_| "rpc accept loop panicked during shutdown".to_string())?;
+        self.wait_for_handlers(started, timeout)
+    }
+
+    fn remaining_timeout(started: Instant, timeout: Duration) -> Result<Duration, String> {
+        match timeout.checked_sub(started.elapsed()) {
+            Some(remaining) if !remaining.is_zero() => Ok(remaining),
+            _ => Err(format!(
+                "rpc shutdown timeout after {} ms: accept loop still running",
+                timeout.as_millis()
+            )),
+        }
+    }
+
+    fn wait_for_handlers(&self, started: Instant, timeout: Duration) -> Result<(), String> {
+        loop {
+            let active = self.active_handlers.load(Ordering::SeqCst);
+            if active == 0 {
+                return Ok(());
+            }
+            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                return Err(format!(
+                    "rpc shutdown timeout after {} ms: {active} handler(s) still running",
+                    timeout.as_millis()
+                ));
+            };
+            if remaining.is_zero() {
+                return Err(format!(
+                    "rpc shutdown timeout after {} ms: {active} handler(s) still running",
+                    timeout.as_millis()
+                ));
+            }
+            thread::sleep(remaining.min(Duration::from_millis(25)));
         }
     }
 }
 
 impl Drop for RunningDevnetRPCServer {
     fn drop(&mut self) {
-        self.close();
+        let _ = self.close();
+    }
+}
+
+struct AcceptLoopDone(Option<mpsc::Sender<()>>);
+
+impl Drop for AcceptLoopDone {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            let _ = done.send(());
+        }
     }
 }
 
@@ -625,8 +706,12 @@ impl RpcMetrics {
     }
 }
 
-fn run_accept_loop(listener: TcpListener, state: Arc<DevnetRPCState>, stop: Arc<AtomicBool>) {
-    let active = Arc::new(AtomicUsize::new(0));
+fn run_accept_loop(
+    listener: TcpListener,
+    state: Arc<DevnetRPCState>,
+    stop: Arc<AtomicBool>,
+    active: Arc<AtomicUsize>,
+) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -640,8 +725,8 @@ fn run_accept_loop(listener: TcpListener, state: Arc<DevnetRPCState>, stop: Arc<
                 ctr.fetch_add(1, Ordering::SeqCst);
                 if thread::Builder::new()
                     .spawn(move || {
+                        let _active = ActiveHandler(ctr);
                         let _ = handle_connection(stream, &st);
-                        ctr.fetch_sub(1, Ordering::SeqCst);
                     })
                     .is_err()
                 {
@@ -655,6 +740,14 @@ fn run_accept_loop(listener: TcpListener, state: Arc<DevnetRPCState>, stop: Arc<
                 thread::sleep(Duration::from_millis(25));
             }
         }
+    }
+}
+
+struct ActiveHandler(Arc<AtomicUsize>);
+
+impl Drop for ActiveHandler {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -2546,8 +2639,9 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use rubin_consensus::{parse_tx, Outpoint, UtxoEntry};
     use serde_json::Value;
@@ -2692,6 +2786,57 @@ mod tests {
         // BrokenPipe / TimedOut paths.
         writer.join().expect("writer thread panicked");
         result
+    }
+
+    fn request_until_response(addr: &str, request: &[u8], required: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut response = String::new();
+        loop {
+            if let Ok(mut stream) = TcpStream::connect(addr) {
+                if stream.write_all(request).is_ok()
+                    && stream.shutdown(std::net::Shutdown::Write).is_ok()
+                {
+                    response.clear();
+                    if stream.read_to_string(&mut response).is_ok() && response.contains(required) {
+                        return response;
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for {required:?} from {addr}; last response: {response}");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn wait_until_connect_fails(addr: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match TcpStream::connect(addr) {
+                Ok(stream) => {
+                    drop(stream);
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(_) => return true,
+            }
+        }
+    }
+
+    fn wait_until_active_handlers(server: &super::RunningDevnetRPCServer, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let active = server.active_handlers.load(Ordering::SeqCst);
+            if active >= expected {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for {expected} active handler(s); observed {active}");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     fn response_json(response: &super::HttpResponse) -> Value {
@@ -4846,7 +4991,187 @@ mod tests {
         }
         assert!(response.contains("HTTP/1.1 200 OK"), "{response}");
         assert!(response.contains("has_tip"), "{response}");
-        server.close();
+        server.close().expect("close server");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn shutdown_close_is_bounded_idempotent_and_stops_listener() {
+        let (state, dir) = build_state(false);
+        let mut server =
+            start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start server");
+        let addr = server.addr().to_string();
+        let ready_response = request_until_response(
+            &addr,
+            b"GET /ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK",
+        );
+        assert!(
+            ready_response.contains("\"ready\":true"),
+            "ready response must come from public RPC path: {ready_response}"
+        );
+
+        server.close().expect("first close must drain accept loop");
+        assert!(
+            wait_until_connect_fails(&addr, Duration::from_secs(1)),
+            "listener still accepted connections after close returned"
+        );
+        assert!(
+            !state.readiness.is_ready(),
+            "close must stamp sticky shutdown readiness"
+        );
+        server.close().expect("second close must be idempotent");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn shutdown_state_cannot_restart_live_listener() {
+        let reserved = TcpListener::bind("127.0.0.1:0").expect("reserve listener addr");
+        let addr = reserved.local_addr().expect("reserved addr").to_string();
+        drop(reserved);
+        let (state, dir) = build_state(false);
+        let mut server = start_devnet_rpc_server(&addr, state.clone()).expect("start server");
+        assert!(state.readiness.is_ready());
+        server.close().expect("shutdown first server");
+        assert!(
+            wait_until_connect_fails(&addr, Duration::from_secs(1)),
+            "listener still accepted connections after first close"
+        );
+
+        let err = match start_devnet_rpc_server(&addr, state.clone()) {
+            Ok(mut restarted) => {
+                let _ = restarted.close();
+                panic!("shutdown state unexpectedly restarted a listener on {addr}");
+            }
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("readiness transition failed"),
+            "unexpected restart error: {err}"
+        );
+        assert!(
+            !state.readiness.is_ready(),
+            "failed restart from Shutdown must stay not-ready"
+        );
+        let rebound = TcpListener::bind(&addr).expect("failed restart must not keep listener live");
+        drop(rebound);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn failed_bind_does_not_mark_ready() {
+        let occupied = TcpListener::bind("127.0.0.1:0").expect("bind occupied listener");
+        let addr = occupied.local_addr().expect("occupied addr").to_string();
+        let (state, dir) = build_state(false);
+        let err = match start_devnet_rpc_server(&addr, state.clone()) {
+            Ok(mut server) => {
+                let _ = server.close();
+                panic!("start_devnet_rpc_server unexpectedly succeeded on occupied {addr}");
+            }
+            Err(err) => err,
+        };
+        assert!(err.contains("bind "), "unexpected bind error: {err}");
+        assert!(
+            !state.readiness.is_ready(),
+            "failed bind must not report ready"
+        );
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        assert_eq!(response_json(&response)["ready"], serde_json::json!(false));
+        drop(occupied);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn shutdown_close_reports_timeout_without_consuming_live_handle() {
+        let (state, dir) = build_state(false);
+        assert!(state.readiness.try_mark_ready_on_startup());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let join = std::thread::spawn(move || {
+            release_rx.recv().expect("wait for synthetic release");
+            done_tx.send(()).expect("report synthetic completion");
+        });
+        let mut server = super::RunningDevnetRPCServer {
+            addr: "127.0.0.1:9".to_string(),
+            stop,
+            active_handlers: Arc::new(AtomicUsize::new(0)),
+            join: Some(join),
+            done: Some(done_rx),
+            readiness: Arc::clone(&state.readiness),
+        };
+
+        let err = server
+            .close_with_timeout(Duration::from_millis(25))
+            .expect_err("close must report a live accept-loop timeout");
+        assert!(
+            err.contains("accept loop still running"),
+            "unexpected timeout error: {err}"
+        );
+        assert!(
+            server.join.is_some(),
+            "timeout must not consume the live join handle"
+        );
+        assert!(
+            server.stop.load(Ordering::SeqCst),
+            "timeout path must request the accept loop to stop"
+        );
+        assert!(
+            !state.readiness.is_ready(),
+            "timeout path still stamps sticky shutdown"
+        );
+
+        release_tx.send(()).expect("release synthetic accept loop");
+        server
+            .close_with_timeout(Duration::from_secs(1))
+            .expect("cleanup close after release");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn shutdown_close_times_out_while_handler_is_live() {
+        let (state, dir) = build_state(false);
+        let mut server =
+            start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start server");
+        let addr = server.addr().to_string();
+        let mut holder = TcpStream::connect(&addr).expect("connect partial holder");
+        holder
+            .write_all(b"GET /ready HTTP/1.1\r\n")
+            .expect("write partial request");
+        wait_until_active_handlers(&server, 1);
+
+        let err = server
+            .close_with_timeout(Duration::from_millis(50))
+            .expect_err("close must report live handler timeout");
+        assert!(
+            err.contains("handler(s) still running"),
+            "unexpected handler timeout error: {err}"
+        );
+        assert!(
+            server.join.is_none(),
+            "accept loop should be joined before handler-drain timeout"
+        );
+        assert!(
+            server.active_handlers.load(Ordering::SeqCst) > 0,
+            "handler must still be active when timeout is reported"
+        );
+        drop(holder);
+        server
+            .close_with_timeout(Duration::from_secs(1))
+            .expect("cleanup close after holder drops");
+        assert_eq!(server.active_handlers.load(Ordering::SeqCst), 0);
+        assert!(
+            !state.readiness.is_ready(),
+            "handler timeout path must stamp sticky shutdown"
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -5693,7 +6018,7 @@ mod tests {
         let mut server =
             start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start_devnet_rpc_server");
         assert!(state.readiness.is_ready());
-        server.close();
+        server.close().expect("close server");
         assert!(
             !state.readiness.is_ready(),
             "close() must flip readiness off"
