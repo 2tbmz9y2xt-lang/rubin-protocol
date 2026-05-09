@@ -12,6 +12,9 @@ import contextlib
 import copy
 import io
 import json
+import shutil
+# Test invokes fixed local node argv without shell.
+import subprocess  # nosec B404
 import sys
 import tempfile
 import unittest
@@ -1484,6 +1487,405 @@ class ReorgDirectFallbackTests(unittest.TestCase):
             any("post_restart_live_action.accepted_by_peer" in e
                 and "not a string" in e
                 and "alternate schema admitted" in e for e in errors),
+            f"got {errors}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# RUB-208 (PR-C) — timestamp + endpoint textual policy tests.
+#
+# Schema owns the date-time format/pattern on participants[].started_at
+# and the host:port pattern on participants[].endpoint. Python provides
+# the strict date-time check through `_strict_date_time_check` (registered
+# on the FormatChecker passed to Draft202012Validator) and the
+# defense-in-depth port-range diagnostic through `_check_endpoint_port`
+# (called from `_cross_field`). The tests below cover:
+#
+#   * accepted canonical inputs (uppercase T/Z, port 1..65535);
+#   * rejected lexical-shape inputs (lowercase t/z, offsets, fractional);
+#   * rejected calendar-bound inputs (month=13, day=40, hour=25);
+#   * rejected port-range inputs (0, 65536, 99999, negative, blank, non-numeric);
+#   * direct-call reachability of the Python defense-in-depth helpers
+#     (so the «schema rejects before Python check fires» class from the
+#     RUB-208 hostile_review_matrix cannot recur silently).
+
+
+class TimestampPolicyTests(unittest.TestCase):
+    """RUB-208 (PR-C) — date-time format policy on participants[].started_at."""
+
+    def _with_started_at(self, value):
+        data = _load_committed_valid()
+        data["participants"][0]["started_at"] = value
+        return data
+
+    def test_canonical_uppercase_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:33:16Z")
+            )
+            self.assertEqual(errors, [])
+
+    def test_started_at_is_optional(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), _load_committed_valid())
+            self.assertEqual(errors, [])
+
+    def test_lowercase_t_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07t21:33:16Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_lowercase_z_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:33:16z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_offset_zero_rejected(self):
+        # +00:00 is full RFC3339 §5.6 but NOT Rubin canonical (UTC-Z only).
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:33:16+00:00")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_offset_positive_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:33:16+02:00")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_fractional_seconds_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:33:16.123Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_calendar_invalid_month_rejected(self):
+        # Shape regex passes; format_checker `strptime` rejects month=13.
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-13-07T21:33:16Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_calendar_invalid_day_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-40T21:33:16Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_calendar_invalid_hour_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T25:33:16Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_calendar_invalid_minute_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:60:16Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_calendar_invalid_second_rejected(self):
+        # Leap-second 60 is intentionally rejected (Rubin producers never
+        # emit 60). 61 is plainly invalid.
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:33:60Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_calendar_invalid_second_overflow_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("2026-05-07T21:33:61Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+    def test_year_too_short_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_started_at("226-05-07T21:33:16Z")
+            )
+            self.assertTrue(any("started_at" in e for e in errors), errors)
+
+
+class TimestampDirectFallbackTests(unittest.TestCase):
+    """RUB-208 (PR-C) — direct-call reachability of `_strict_date_time_check`.
+
+    These tests prove the Rubin canonical date-time check actually runs
+    its branches (per hostile_review_matrix item 3) rather than being
+    silently bypassed by the schema layer rejecting first.
+    """
+
+    def test_passes_canonical(self):
+        self.assertTrue(
+            validator._strict_date_time_check("2026-05-07T21:33:16Z")
+        )
+
+    def test_returns_true_on_non_string(self):
+        # Type-check is the schema's job; format checker stays out of its way.
+        self.assertTrue(validator._strict_date_time_check(123))
+        self.assertTrue(validator._strict_date_time_check(None))
+        self.assertTrue(validator._strict_date_time_check({"k": "v"}))
+
+    def test_rejects_lowercase_t(self):
+        with self.assertRaises(ValueError) as ctx:
+            validator._strict_date_time_check("2026-05-07t21:33:16Z")
+        self.assertIn("Rubin canonical", str(ctx.exception))
+
+    def test_rejects_lowercase_z(self):
+        with self.assertRaises(ValueError) as ctx:
+            validator._strict_date_time_check("2026-05-07T21:33:16z")
+        self.assertIn("Rubin canonical", str(ctx.exception))
+
+    def test_rejects_offset(self):
+        with self.assertRaises(ValueError) as ctx:
+            validator._strict_date_time_check("2026-05-07T21:33:16+00:00")
+        self.assertIn("Rubin canonical", str(ctx.exception))
+
+    def test_rejects_fractional(self):
+        with self.assertRaises(ValueError) as ctx:
+            validator._strict_date_time_check("2026-05-07T21:33:16.5Z")
+        self.assertIn("Rubin canonical", str(ctx.exception))
+
+    def test_rejects_calendar_bound_month(self):
+        # Shape regex passes (\d{2}); strptime rejects the calendar value.
+        with self.assertRaises(ValueError) as ctx:
+            validator._strict_date_time_check("2026-13-07T21:33:16Z")
+        self.assertIn("calendar", str(ctx.exception).lower())
+
+    def test_rejects_calendar_bound_day(self):
+        with self.assertRaises(ValueError) as ctx:
+            validator._strict_date_time_check("2026-05-40T21:33:16Z")
+        self.assertIn("calendar", str(ctx.exception).lower())
+
+
+class EndpointPolicyTests(unittest.TestCase):
+    """RUB-208 (PR-C) — host:port format policy on participants[].endpoint."""
+
+    def _with_endpoint(self, value):
+        data = _load_committed_valid()
+        data["participants"][0]["endpoint"] = value
+        return data
+
+    def test_canonical_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), self._with_endpoint("node1.local:8080"))
+            self.assertEqual(errors, [])
+
+    def test_endpoint_is_optional(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), _load_committed_valid())
+            self.assertEqual(errors, [])
+
+    def test_lowest_port_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:1"))
+            self.assertEqual(errors, [])
+
+    def test_highest_port_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_endpoint("127.0.0.1:65535")
+            )
+            self.assertEqual(errors, [])
+
+    def test_port_zero_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:0"))
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_port_overflow_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_endpoint("127.0.0.1:65536")
+            )
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_port_99999_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_endpoint("127.0.0.1:99999")
+            )
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_blank_port_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:"))
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_non_numeric_port_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:abc"))
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_trailing_newline_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_endpoint("127.0.0.1:8080\n")
+            )
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_trailing_carriage_return_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_endpoint("127.0.0.1:8080\r")
+            )
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_negative_port_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:-1"))
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_missing_colon_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1"))
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
+    def test_schema_endpoint_pattern_is_ecma_portable(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node unavailable for ECMA regex dialect check")
+        schema = json.loads(validator.DEFAULT_SCHEMA.read_text(encoding="utf-8"))
+        pattern = schema["properties"]["participants"]["items"]["properties"][
+            "endpoint"
+        ]["pattern"]
+        script = (
+            "const pattern = new RegExp(process.argv[1]);"
+            "const rows = ['node:8080', '127.0.0.1:65535',"
+            "'Anode:8080Z', 'node:8080\\n', 'node:8080\\r'];"
+            "console.log(JSON.stringify(rows.map((s) => [s, pattern.test(s)])));"
+        )
+        # Fixed argv; the regex pattern is passed as data, not through shell.
+        result = subprocess.run(  # nosec B603
+            [node, "-e", script, pattern],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        observed = dict(json.loads(result.stdout))
+        self.assertTrue(observed["node:8080"])
+        self.assertTrue(observed["127.0.0.1:65535"])
+        self.assertFalse(observed["Anode:8080Z"])
+        self.assertFalse(observed["node:8080\n"])
+        self.assertFalse(observed["node:8080\r"])
+
+
+class EndpointDirectFallbackTests(unittest.TestCase):
+    """RUB-208 (PR-C) — direct-call reachability of `_check_endpoint_port`.
+
+    Proves the Python defense-in-depth helper actually emits its
+    out-of-range diagnostic and stays silent on shape mismatch (where
+    the schema layer is the authoritative rejector). Closes the
+    «Tests pass because invalid endpoint is rejected by schema before
+    Python check reaches its branch» class from the hostile_review_matrix.
+    """
+
+    def test_overflow_returns_clear_message(self):
+        msg = validator._check_endpoint_port("node:65536")
+        self.assertIsNotNone(msg)
+        self.assertIn("65536", msg)
+        self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_zero_returns_clear_message(self):
+        msg = validator._check_endpoint_port("node:0")
+        self.assertIsNotNone(msg)
+        self.assertIn(" 0 ", msg)
+        self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_negative_returns_clear_message(self):
+        msg = validator._check_endpoint_port("node:-1")
+        self.assertIsNotNone(msg)
+        self.assertIn("-1", msg)
+        self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_negative_overflow_returns_clear_message(self):
+        msg = validator._check_endpoint_port("node:-65536")
+        self.assertIsNotNone(msg)
+        self.assertIn("-65536", msg)
+        self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_negative_zero_returns_clear_message(self):
+        msg = validator._check_endpoint_port("node:-0")
+        self.assertIsNotNone(msg)
+        self.assertIn(" 0 ", msg)
+        self.assertIn(f"1..{validator.MAX_TCP_UDP_PORT}", msg)
+
+    def test_signed_positive_stays_schema_owned(self):
+        self.assertIsNone(validator._check_endpoint_port("node:+1"))
+
+    def test_in_range_returns_none(self):
+        self.assertIsNone(validator._check_endpoint_port("node:8080"))
+
+    def test_lowest_in_range_returns_none(self):
+        self.assertIsNone(validator._check_endpoint_port("node:1"))
+
+    def test_highest_in_range_returns_none(self):
+        self.assertIsNone(validator._check_endpoint_port("node:65535"))
+
+    def test_no_colon_returns_none(self):
+        # Shape mismatch: schema is the authoritative rejector.
+        self.assertIsNone(validator._check_endpoint_port("node1.local"))
+
+    def test_blank_port_returns_none(self):
+        self.assertIsNone(validator._check_endpoint_port("node:"))
+
+    def test_non_numeric_port_returns_none(self):
+        self.assertIsNone(validator._check_endpoint_port("node:abc"))
+
+    def test_non_string_returns_none(self):
+        self.assertIsNone(validator._check_endpoint_port(8080))
+        self.assertIsNone(validator._check_endpoint_port(None))
+        self.assertIsNone(validator._check_endpoint_port({"port": 8080}))
+
+    def test_cross_field_endpoint_walk_uses_check(self):
+        # Direct `_cross_field` invocation with a permissive `endpoint`
+        # value (bypasses schema). Proves the cross-field walk reaches
+        # `_check_endpoint_port` and surfaces a participants-indexed error.
+        data = {
+            "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+            "evidence_type": "mixed_client_process_soak",
+            "scenario": "x",
+            "verdict": "FAIL",
+            "failure_reason": "x",
+            "participants": [
+                {"name": "node-a", "implementation": "go",
+                 "endpoint": "node:65536"},
+                {"name": "node-b", "implementation": "rust"},
+            ],
+        }
+        errors = validator._cross_field(data)
+        self.assertTrue(
+            any("participants[0].endpoint" in e and "65536" in e for e in errors),
+            f"got {errors}",
+        )
+
+    def test_cross_field_signed_negative_endpoint_port_uses_check(self):
+        data = {
+            "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+            "evidence_type": "mixed_client_process_soak",
+            "scenario": "x",
+            "verdict": "FAIL",
+            "failure_reason": "x",
+            "participants": [
+                {"name": "node-a", "implementation": "go", "endpoint": "node:-1"},
+                {"name": "node-b", "implementation": "rust"},
+            ],
+        }
+        errors = validator._cross_field(data)
+        self.assertTrue(
+            any("participants[0].endpoint" in e and "-1" in e for e in errors),
             f"got {errors}",
         )
 
