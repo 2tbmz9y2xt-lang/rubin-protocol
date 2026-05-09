@@ -71,10 +71,22 @@ mkdir -p "${DATA_DIR}"
 # exits non-zero before any artifact is emitted, satisfying the
 # "missing Rust binary" hostile case.
 echo "Building Rust rubin-node binary"
+# Pin the Cargo output directory under the harness artifact root so the
+# produced binary path is deterministic regardless of `CARGO_TARGET_DIR`
+# in the environment or `build.target-dir` set by a `.cargo/config.toml`
+# (PR #1510 wave-2 codex+copilot findings: Cargo can be told to write
+# elsewhere, in which case the previous hardcoded
+# `${RUST_WORKSPACE_ROOT}/target/release/rubin-node` lookup misses the
+# real binary and the harness fails after a successful build).
+# Side-effect: each invocation gets its own mktemp'd cargo-target/, so
+# nothing here reuses a shared cache — fine for a skeleton soak whose
+# job is to prove a real-process launch end-to-end on every run.
+CARGO_TARGET_DIR_LOCAL="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
 "${DEV_ENV}" -- cargo build \
   --manifest-path "${RUST_WORKSPACE_ROOT}/Cargo.toml" \
-  --release --locked -p rubin-node
-CARGO_TARGET_BIN="${RUST_WORKSPACE_ROOT}/target/release/rubin-node"
+  --release --locked -p rubin-node \
+  --target-dir "${CARGO_TARGET_DIR_LOCAL}"
+CARGO_TARGET_BIN="${CARGO_TARGET_DIR_LOCAL}/release/rubin-node"
 [[ -x "${CARGO_TARGET_BIN}" ]] || {
   echo "cargo build did not produce executable: ${CARGO_TARGET_BIN}" >&2
   exit 1
