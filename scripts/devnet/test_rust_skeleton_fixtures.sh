@@ -37,9 +37,16 @@ fi
 # anchors the acceptance to the rejection class, not to a generic
 # schema-shape failure that some future schema relaxation could mask.
 echo "test_rust_skeleton_fixtures: helper-only fixture must be rejected"
-REJECTED_OUTPUT="$(python3 "${VALIDATOR}" "${REJECTED_FIXTURE}" 2>&1 || true)"
-REJECTED_RC=0
-python3 "${VALIDATOR}" "${REJECTED_FIXTURE}" >/dev/null 2>&1 || REJECTED_RC=$?
+# Single validator invocation captures both stderr+stdout and exit code
+# (P2 finding from PR #1510 review): the previous double-invocation
+# could mask a behavior change between runs. The if/else form keeps
+# `set -e` armed for everything else and binds REJECTED_RC to the
+# exact exit code of the captured invocation.
+if REJECTED_OUTPUT="$(python3 "${VALIDATOR}" "${REJECTED_FIXTURE}" 2>&1)"; then
+  REJECTED_RC=0
+else
+  REJECTED_RC=$?
+fi
 if [[ "${REJECTED_RC}" == "0" ]]; then
   echo "FAIL: validator accepted the helper-only fixture (expected rejection)" >&2
   echo "actual output:" >&2

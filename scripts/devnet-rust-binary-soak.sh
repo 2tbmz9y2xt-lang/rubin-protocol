@@ -85,10 +85,15 @@ cp "${CARGO_TARGET_BIN}" "${NODE_BIN}"
   exit 1
 }
 
-# Captured BEFORE the launch attempt: UTC-Z seconds-only canonical
-# format per RUB-208 / PR-C policy enforced by the schema regex on
-# participants[].started_at.
-STARTED_AT_UTC="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+# UTC-Z seconds-only canonical format per RUB-208 / PR-C policy
+# enforced by the schema regex on participants[].started_at. Captured
+# inside attempt_skeleton_launch AFTER the rpc-listening banner is
+# observed (P1 finding from PR #1510 review): on slow starts or banner
+# timeouts a pre-launch capture would have stamped evidence with a time
+# earlier than the actual observed start. The empty default here means
+# evidence carries no started_at on launch failure paths, which is
+# honest — we never observed a started state.
+STARTED_AT_UTC=""
 
 LAUNCH_FAILURE_REASON=""
 RPC_ADDR=""
@@ -109,6 +114,10 @@ attempt_skeleton_launch() {
     || { LAUNCH_FAILURE_REASON="rubin_process_start did not capture a pid"; return 1; }
   rubin_process_wait_for_log "${LOG_FILE}" "rpc: listening=" 60 "${NODE_PID}" \
     || { LAUNCH_FAILURE_REASON="rust skeleton did not emit rpc-listening banner within 60s"; return 1; }
+  # Stamped here, immediately after the rpc-listening banner is observed,
+  # so participants[].started_at reflects an observed start time rather
+  # than a pre-launch wall-clock guess.
+  STARTED_AT_UTC="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
   RPC_ADDR="$(rubin_process_extract_rpc_addr "${LOG_FILE}")" \
     || { LAUNCH_FAILURE_REASON="failed to extract rpc-listening address from log"; return 1; }
   [[ -n "${RPC_ADDR}" ]] \
@@ -178,16 +187,30 @@ with open(e["EVIDENCE_JSON"], "w", encoding="utf-8") as f:
 # validated by validate_mixed_client_evidence.py — this report is
 # operator-facing audit material, kept in a sibling file so the
 # schema-validated artifact stays minimal.
+#
+# pid / rpc_endpoint / started_at_utc are recorded whenever they were
+# observed during the launch attempt, regardless of final launch_status
+# (P2 finding from PR #1510 review): a launch that registers a pid and
+# emits the rpc-listening banner before a later readiness check fails
+# previously dropped both fields, hiding identity that operators need
+# for failure forensics. The pid_observed / rpc_observed / started_observed
+# flags carry the boolean "did we ever see this during the attempt".
+node_pid_raw = (e.get("NODE_PID") or "").strip()
+rpc_addr_raw = (e.get("RPC_ADDR") or "").strip()
+started_at_raw = (e.get("STARTED_AT_UTC") or "").strip()
 report = {
     "scenario": "rust_binary_soak_skeleton",
     "implementation": "rust",
     "command_path": e["NODE_BIN"],
     "data_dir": e["DATA_DIR"],
     "log_file": e["LOG_FILE"],
-    "started_at_utc": e["STARTED_AT_UTC"],
     "launch_status": status,
-    "pid": int(e["NODE_PID"]) if status == "success" and e.get("NODE_PID") else None,
-    "rpc_endpoint": e["RPC_ADDR"] if status == "success" else None,
+    "pid": int(node_pid_raw) if node_pid_raw else None,
+    "pid_observed": bool(node_pid_raw),
+    "rpc_endpoint": rpc_addr_raw or None,
+    "rpc_observed": bool(rpc_addr_raw),
+    "started_at_utc": started_at_raw or None,
+    "started_observed": bool(started_at_raw),
     "failure_reason": e["LAUNCH_FAILURE_REASON"] if status == "failed" else None,
     "follow_ups": [
         "RUB-21 owns cross-implementation tx_path PASS evidence",
