@@ -1,0 +1,19 @@
+{
+  "evidence_type": "mixed_client_process_soak",
+  "failure_reason": "rust-only skeleton run; cross-implementation tx_path proof is RUB-21/22/23",
+  "participants": [
+    {
+      "endpoint": "127.0.0.1:54321",
+      "implementation": "rust",
+      "name": "node-rust",
+      "started_at": "2026-05-09T09:50:00Z"
+    },
+    {
+      "implementation": "go",
+      "name": "node-go"
+    }
+  ],
+  "scenario": "rust_binary_soak_skeleton",
+  "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+  "verdict": "FAIL"
+}

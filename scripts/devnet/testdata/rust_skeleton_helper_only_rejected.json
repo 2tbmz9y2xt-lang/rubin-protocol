@@ -1,0 +1,12 @@
+{
+  "evidence_type": "mixed_client_process_soak",
+  "participants": [
+    {
+      "implementation": "rust",
+      "name": "node-rust"
+    }
+  ],
+  "scenario": "rust_only_helper_label_rejected",
+  "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+  "verdict": "PASS"
+}
