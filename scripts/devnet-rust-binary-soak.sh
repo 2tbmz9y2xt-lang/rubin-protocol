@@ -110,6 +110,10 @@ run_fips_preflight_before_captured_dev_env() {
 }
 
 run_fips_preflight_before_captured_dev_env
+run_validator() {
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"
+}
+
 # Force the host triple as the build target (PR #1510 wave-N+1 codex
 # finding "Force host target before executing rubin-node"): without an
 # explicit --target, cargo inherits CARGO_BUILD_TARGET / `build.target`
@@ -373,7 +377,7 @@ PY
 # A validator rejection here is a real bug in this harness, not a
 # launch-time symptom — let `set -e` propagate the non-zero exit.
 echo "Validating emitted evidence via RUB-24 schema validator"
-python3 "${VALIDATOR}" "${EVIDENCE_JSON}"
+run_validator "${EVIDENCE_JSON}"
 
 if [[ "${LAUNCH_STATUS}" == "success" ]]; then
   PASS_SUMMARY="SKELETON: rust binary soak launched pid=${NODE_PID} rpc=${RPC_ADDR} (verdict=FAIL/skeleton-only; cross-impl tx_path is RUB-21/22/23)"
@@ -384,7 +388,11 @@ if [[ "${LAUNCH_STATUS}" == "success" ]]; then
   fi
   exit 0
 else
-  FAIL_SUMMARY="FAIL: rust skeleton launch failed: ${LAUNCH_FAILURE_REASON}"
+  FAILURE_REASON_FOR_SUMMARY="${LAUNCH_FAILURE_REASON}"
+  if [[ -z "${FAILURE_REASON_FOR_SUMMARY//[[:space:]]/}" ]]; then
+    FAILURE_REASON_FOR_SUMMARY="rust skeleton launch failed without a specific reason"
+  fi
+  FAIL_SUMMARY="FAIL: rust skeleton launch failed: ${FAILURE_REASON_FOR_SUMMARY}"
   echo "${FAIL_SUMMARY}; report=${REPORT_JSON} evidence=${EVIDENCE_JSON}" >&2
   exit 1
 fi

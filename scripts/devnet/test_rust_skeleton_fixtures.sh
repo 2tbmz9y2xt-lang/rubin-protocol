@@ -14,18 +14,38 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
 VALID_FIXTURE="${REPO_ROOT}/scripts/devnet/testdata/rust_skeleton_fail_evidence_valid.json"
 REJECTED_FIXTURE="${REPO_ROOT}/scripts/devnet/testdata/rust_skeleton_helper_only_rejected.json"
 
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
+[[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 [[ -r "${VALID_FIXTURE}" ]] || { echo "valid fixture unreadable: ${VALID_FIXTURE}" >&2; exit 1; }
 [[ -r "${REJECTED_FIXTURE}" ]] || { echo "rejected fixture unreadable: ${REJECTED_FIXTURE}" >&2; exit 1; }
 
+run_fips_preflight_before_captured_dev_env() {
+  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" ]]; then
+    return 0
+  fi
+  if [[ "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  echo "Running FIPS-only preflight before captured dev-env validator streams" >&2
+  "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2
+}
+
+run_validator() {
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"
+}
+
+run_fips_preflight_before_captured_dev_env
+
 # Acceptance leg 1: validator MUST accept the well-formed FAIL skeleton.
 echo "test_rust_skeleton_fixtures: valid fixture must validate"
-if ! python3 "${VALIDATOR}" "${VALID_FIXTURE}"; then
+if ! run_validator "${VALID_FIXTURE}"; then
   echo "FAIL: validator rejected the valid skeleton fixture" >&2
   exit 1
 fi
@@ -42,7 +62,7 @@ echo "test_rust_skeleton_fixtures: helper-only fixture must be rejected"
 # could mask a behavior change between runs. The if/else form keeps
 # `set -e` armed for everything else and binds REJECTED_RC to the
 # exact exit code of the captured invocation.
-if REJECTED_OUTPUT="$(python3 "${VALIDATOR}" "${REJECTED_FIXTURE}" 2>&1)"; then
+if REJECTED_OUTPUT="$(run_validator "${REJECTED_FIXTURE}" 2>&1)"; then
   REJECTED_RC=0
 else
   REJECTED_RC=$?
