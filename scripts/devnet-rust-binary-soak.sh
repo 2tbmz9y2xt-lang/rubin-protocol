@@ -16,7 +16,13 @@
 # tx_path PASS section.
 #
 # Hostile-case enforcement (RUB-27 enumeration → enforcement layer):
-#   * missing Rust binary           → cargo build fails → exit non-zero, no artifact
+#   * missing Rust binary           → cargo build fails → exit non-zero before any
+#                                     evidence/report JSON is written; the artifact
+#                                     root may still exist for forensics via the
+#                                     EXIT trap (rubin_process_init creates it
+#                                     up-front) — the failure signal is the
+#                                     non-zero exit and absence of the JSONs,
+#                                     not absence of the directory itself
 #   * binary exits immediately      → rubin_process_start detects exit-before-registration
 #   * pid recorded but already dead → wait_for_log checks rubin_process_is_alive per iteration
 #   * stdout/stderr in JSON parse   → evidence built via python json.dump, never via shell jq
@@ -71,24 +77,76 @@ mkdir -p "${DATA_DIR}"
 # exits non-zero before any artifact is emitted, satisfying the
 # "missing Rust binary" hostile case.
 echo "Building Rust rubin-node binary"
-# Pin the Cargo output directory under the harness artifact root so the
-# produced binary path is deterministic regardless of `CARGO_TARGET_DIR`
-# in the environment or `build.target-dir` set by a `.cargo/config.toml`
-# (PR #1510 wave-2 codex+copilot findings: Cargo can be told to write
-# elsewhere, in which case the previous hardcoded
-# `${RUST_WORKSPACE_ROOT}/target/release/rubin-node` lookup misses the
-# real binary and the harness fails after a successful build).
+# The produced binary path is derived from Cargo's authoritative build
+# output (machine-readable JSON event stream) instead of being guessed
+# from a host-layout assumption. Cargo emits one `compiler-artifact`
+# event per artifact; we select the one whose `target.name == "rubin-node"`
+# AND `target.kind` includes `"bin"` AND `executable` is non-null, then
+# take its `executable` path. That path is correct under every cargo
+# axis that affects placement: `--target-dir`, `CARGO_TARGET_DIR`,
+# `.cargo/config.toml build.target-dir`, `--target <triple>`,
+# `CARGO_BUILD_TARGET`, `.cargo/config.toml build.target`,
+# `--profile <name>`, and `--out-dir <dir>` (PR #1510 wave-3 codex
+# finding: previously pinned `${target-dir}/release/rubin-node` lookup
+# missed `target/<triple>/release/` placement when a target triple was
+# in effect). We still pass `--target-dir` so the artifact root (and
+# its EXIT-trap-managed cleanup) owns the build cache; cargo's metadata
+# is what actually tells the harness where the binary landed.
 # Side-effect: each invocation gets its own mktemp'd cargo-target/, so
-# nothing here reuses a shared cache — fine for a skeleton soak whose
-# job is to prove a real-process launch end-to-end on every run.
+# nothing reuses a shared cache — fine for a skeleton soak whose job
+# is to prove a real-process launch end-to-end on every run.
 CARGO_TARGET_DIR_LOCAL="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
+CARGO_BUILD_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
 "${DEV_ENV}" -- cargo build \
   --manifest-path "${RUST_WORKSPACE_ROOT}/Cargo.toml" \
   --release --locked -p rubin-node \
-  --target-dir "${CARGO_TARGET_DIR_LOCAL}"
-CARGO_TARGET_BIN="${CARGO_TARGET_DIR_LOCAL}/release/rubin-node"
+  --target-dir "${CARGO_TARGET_DIR_LOCAL}" \
+  --message-format=json-render-diagnostics >"${CARGO_BUILD_LOG}"
+
+# Bounded fail-closed parser: scan only artifact events, accept only
+# the rubin-node bin executable, never path-guess. If cargo emits zero
+# matching events (e.g., a future cargo change to artifact semantics
+# or a stale toolchain), the parser exits 1 and the harness fails-
+# closed instead of running a stale binary or guessing a layout.
+CARGO_TARGET_BIN="$(python3 - "${CARGO_BUILD_LOG}" <<'PY'
+import json
+import sys
+
+log_path = sys.argv[1]
+selected = None
+with open(log_path, encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("reason") != "compiler-artifact":
+            continue
+        target = ev.get("target") or {}
+        if target.get("name") != "rubin-node":
+            continue
+        kinds = target.get("kind") or []
+        if "bin" not in kinds:
+            continue
+        executable = ev.get("executable")
+        if not executable:
+            continue
+        # Don't break: take the LAST matching event so a release
+        # rebuild's final link wins over any earlier deps-only emission.
+        selected = executable
+if selected is None:
+    sys.exit(1)
+print(selected)
+PY
+)" || {
+  echo "cargo build emitted no compiler-artifact event with target.name=rubin-node, kind=bin, and a non-null executable; raw log: ${CARGO_BUILD_LOG}" >&2
+  exit 1
+}
 [[ -x "${CARGO_TARGET_BIN}" ]] || {
-  echo "cargo build did not produce executable: ${CARGO_TARGET_BIN}" >&2
+  echo "cargo-reported executable is not executable: ${CARGO_TARGET_BIN}" >&2
   exit 1
 }
 cp "${CARGO_TARGET_BIN}" "${NODE_BIN}"
