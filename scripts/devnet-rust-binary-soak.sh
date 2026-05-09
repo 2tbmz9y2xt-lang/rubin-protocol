@@ -39,28 +39,202 @@ RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
 
-usage() { echo "usage: $0" >&2; }
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  "")
-    ;;
-  *)
-    usage
-    exit 2
-    ;;
-esac
+CHECK_EVIDENCE="" CHECK_EVIDENCE_MODE=0
 
-for tool in python3 perl; do
-  command -v "${tool}" >/dev/null 2>&1 || {
-    echo "${tool} is required for Rust binary soak skeleton" >&2
-    exit 1
-  }
+usage() { echo "usage: $0 [--check-evidence PATH]" >&2; }
+while (($#)); do
+  case "$1" in
+    --check-evidence)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      CHECK_EVIDENCE_MODE=1
+      CHECK_EVIDENCE="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
 done
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "python3 is required for Rust binary soak skeleton" >&2
+  exit 1
+}
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
+
+run_fips_preflight_before_captured_dev_env() {
+  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" ]]; then
+    return 0
+  fi
+  if [[ "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  echo "Running FIPS-only preflight before captured dev-env command streams" >&2
+  "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2
+}
+
+run_validator() {
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"
+}
+
+mixed_gate_fail() {
+  echo "FAIL: mixed-client process evidence gate: $*" >&2
+  return 1
+}
+
+print_prefixed_file() {
+  local label="$1" path="$2"
+  [[ -s "${path}" ]] || return 0
+  echo "${label}:" >&2
+  sed 's/^/  /' "${path}" >&2
+}
+
+check_mixed_client_pass_evidence() {
+  local artifact="${1:-}" validator_stdout="" validator_stderr=""
+  local expected_stdout gate_error validator_artifact validator_expected=""
+
+  [[ -n "${artifact}" ]] || mixed_gate_fail "artifact path is required" || return 1
+  [[ -f "${artifact}" ]] || mixed_gate_fail "artifact not found or not a regular file: ${artifact}" || return 1
+  [[ -r "${artifact}" ]] || mixed_gate_fail "artifact unreadable: ${artifact}" || return 1
+  [[ -s "${artifact}" ]] || mixed_gate_fail "artifact empty: ${artifact}" || return 1
+
+  run_fips_preflight_before_captured_dev_env
+
+  validator_stdout="$(mktemp "${TMPDIR:-/tmp}/rubin-mixed-validator-stdout.XXXXXX")" || return 1
+  validator_stderr="$(mktemp "${TMPDIR:-/tmp}/rubin-mixed-validator-stderr.XXXXXX")" || {
+    rm -f -- "${validator_stdout}"
+    return 1
+  }
+
+  if ! run_validator "${artifact}" >"${validator_stdout}" 2>"${validator_stderr}"; then
+    echo "FAIL: mixed-client process evidence gate validator rejected artifact: ${artifact}" >&2
+    print_prefixed_file "validator stdout" "${validator_stdout}"
+    print_prefixed_file "validator stderr" "${validator_stderr}"
+    rm -f -- "${validator_stdout}" "${validator_stderr}"
+    return 1
+  fi
+
+  validator_artifact="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]))' "${artifact}")"
+  expected_stdout="PASS: ${validator_artifact}"
+  validator_expected="$(mktemp "${TMPDIR:-/tmp}/rubin-mixed-validator-expected.XXXXXX")" || {
+    rm -f -- "${validator_stdout}" "${validator_stderr}"
+    return 1
+  }
+  printf '%s\n' "${expected_stdout}" >"${validator_expected}"
+  if ! cmp -s "${validator_stdout}" "${validator_expected}"; then
+    echo "FAIL: mixed-client process evidence gate validator stdout contaminated for: ${artifact}" >&2
+    echo "expected stdout: ${expected_stdout}" >&2
+    print_prefixed_file "actual stdout" "${validator_stdout}"
+    print_prefixed_file "validator stderr" "${validator_stderr}"
+    rm -f -- "${validator_stdout}" "${validator_stderr}" "${validator_expected}"
+    return 1
+  fi
+
+  print_prefixed_file "validator stderr" "${validator_stderr}"
+  rm -f -- "${validator_stdout}" "${validator_stderr}" "${validator_expected}"
+
+  if ! gate_error="$(python3 - "${artifact}" 2>&1 <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+if data.get("evidence_type") != "mixed_client_process_soak":
+    fail(
+        "evidence_type is not mixed_client_process_soak: "
+        f"{data.get('evidence_type')!r}"
+    )
+if data.get("verdict") != "PASS":
+    fail(
+        "verdict is not PASS; mixed-client process gate rejects "
+        f"{data.get('verdict')!r} evidence"
+    )
+if "failure_reason" in data:
+    fail("failure_reason is not allowed on PASS mixed-client process evidence")
+
+participants = data.get("participants")
+tx_path = data.get("tx_path")
+if not isinstance(participants, list) or not isinstance(tx_path, dict):
+    fail("schema floor unexpectedly allowed missing participants or tx_path")
+
+by_name = {p["name"]: p for p in participants}
+submitted_at = tx_path.get("submitted_at")
+observed_at = tx_path.get("observed_at")
+if not isinstance(submitted_at, str) or not isinstance(observed_at, list):
+    fail("schema floor unexpectedly allowed malformed tx_path references")
+
+missing_process_fields = []
+for participant in participants:
+    missing = [
+        field for field in ("endpoint", "started_at") if not participant.get(field)
+    ]
+    if missing:
+        missing_process_fields.append(
+            f"{participant['name']} missing {','.join(missing)}"
+        )
+
+if missing_process_fields:
+    fail(
+        "participant lacks real process evidence: "
+        + "; ".join(missing_process_fields)
+    )
+
+endpoint_owner = {}
+for participant in participants:
+    endpoint = participant["endpoint"]
+    previous = endpoint_owner.setdefault(endpoint, participant["name"])
+    if previous != participant["name"]:
+        fail(
+            "duplicate participant endpoint in PASS mixed-client process evidence: "
+            f"{endpoint!r} used by {previous!r} and {participant['name']!r}"
+        )
+
+referenced = [submitted_at, *observed_at]
+for name in referenced:
+    participant = by_name.get(name)
+    if participant is None:
+        fail(f"tx_path references undeclared participant: {name!r}")
+
+impls = {by_name[name]["implementation"] for name in referenced}
+if not {"go", "rust"} <= impls:
+    fail(
+        "tx_path does not reference both Go and Rust process participants; "
+        f"referenced implementations={sorted(impls)}"
+    )
+PY
+)"; then
+    echo "FAIL: mixed-client process evidence gate rejected artifact: ${artifact}" >&2
+    printf '%s\n' "${gate_error}" >&2
+    return 1
+  fi
+
+  echo "PASS: mixed-client process evidence gate accepted ${artifact}"
+}
+
+if [[ "${CHECK_EVIDENCE_MODE}" == "1" ]]; then
+  check_mixed_client_pass_evidence "${CHECK_EVIDENCE}"
+  exit 0
+fi
+
+command -v perl >/dev/null 2>&1 || {
+  echo "perl is required for Rust binary soak skeleton" >&2
+  exit 1
+}
 
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
@@ -97,22 +271,7 @@ echo "Building Rust rubin-node binary"
 # is to prove a real-process launch end-to-end on every run.
 CARGO_TARGET_DIR_LOCAL="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
 CARGO_BUILD_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
-run_fips_preflight_before_captured_dev_env() {
-  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" ]]; then
-    return 0
-  fi
-  if [[ "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]]; then
-    return 0
-  fi
-
-  echo "Running FIPS-only preflight before captured dev-env command streams" >&2
-  "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2
-}
-
 run_fips_preflight_before_captured_dev_env
-run_validator() {
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"
-}
 
 # Force the host triple as the build target (PR #1510 wave-N+1 codex
 # finding "Force host target before executing rubin-node"): without an
