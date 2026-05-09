@@ -55,10 +55,10 @@ RFC3339_RUBIN_CANONICAL_RE = re.compile(
 
 # RUB-208 (PR-C) — TCP/UDP port upper bound used by ``_check_endpoint_port``
 # and surfaced verbatim in its diagnostic message. The committed schema
-# regex on ``participants[].endpoint`` independently bounds the port to
-# 1..65535 via an explicit alternation; this Python guard is a
-# defense-in-depth sibling for alt-schema admit paths (see
-# ``_check_endpoint_port`` docstring).
+# regex on ``participants[].endpoint`` independently bounds the public
+# ``validate()`` path to 1..65535 via an explicit alternation; this Python
+# guard is a defense-in-depth sibling for direct helper/future-caller paths
+# (see ``_check_endpoint_port`` docstring).
 MAX_TCP_UDP_PORT = 65535
 
 
@@ -110,13 +110,11 @@ def _check_endpoint_port(endpoint: object) -> str | None:
     bounds the port to ``1..65535`` via the alternation
     ``(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3})``,
     so out-of-range ports are rejected at the schema layer alone on the
-    standard call path. This function is the structural complement: it
-    surfaces a clearer
-    ``port {N} is outside the valid TCP/UDP range 1..{MAX}`` message and
-    fires on the alt-schema admit path (a permissive user-supplied
-    ``--schema`` that drops or loosens the alternation, or a direct
-    ``_cross_field`` invocation that bypasses the committed-schema floor
-    in :func:`validate`). It is NOT a network reachability check and
+    public ``validate()`` path, before cross-field diagnostics run. This
+    function is the structural complement for direct ``_cross_field``
+    callers and future refactors that might bypass the committed-schema
+    floor: it surfaces a clearer ``port {N} is outside the valid TCP/UDP
+    range 1..{MAX}`` message. It is NOT a network reachability check and
     performs no DNS or socket I/O.
     """
     if not isinstance(endpoint, str):
@@ -276,8 +274,8 @@ def _cross_field(data: dict) -> list[str]:
     # RUB-208 (PR-C) — endpoint defense-in-depth port-range check.
     # Schema owns the host:port shape and the ``1..65535`` numeric range
     # via the bounded alternation on ``participants[].endpoint``; this
-    # cross-field walk is the structural complement that fires when a
-    # permissive alt-schema or a direct ``_cross_field`` call bypasses
+    # cross-field walk is the structural complement for direct
+    # ``_cross_field`` callers and future refactors that might bypass
     # that floor (see ``_check_endpoint_port`` docstring). Guarded by
     # ``"endpoint" in p`` so absent endpoints — the supported default
     # for participants without an exposed RPC/P2P address — are not
