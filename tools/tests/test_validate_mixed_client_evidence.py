@@ -1726,6 +1726,13 @@ class EndpointPolicyTests(unittest.TestCase):
             errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:abc"))
             self.assertTrue(any("endpoint" in e for e in errors), errors)
 
+    def test_trailing_newline_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            errors = _validate_dict(
+                Path(td), self._with_endpoint("127.0.0.1:8080\n")
+            )
+            self.assertTrue(any("endpoint" in e for e in errors), errors)
+
     def test_negative_port_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             errors = _validate_dict(Path(td), self._with_endpoint("127.0.0.1:-1"))
