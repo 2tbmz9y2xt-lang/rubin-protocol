@@ -97,6 +97,19 @@ echo "Building Rust rubin-node binary"
 # is to prove a real-process launch end-to-end on every run.
 CARGO_TARGET_DIR_LOCAL="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
 CARGO_BUILD_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
+run_fips_preflight_before_captured_dev_env() {
+  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" ]]; then
+    return 0
+  fi
+  if [[ "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  echo "Running FIPS-only preflight before captured dev-env command streams" >&2
+  "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2
+}
+
+run_fips_preflight_before_captured_dev_env
 # Force the host triple as the build target (PR #1510 wave-N+1 codex
 # finding "Force host target before executing rubin-node"): without an
 # explicit --target, cargo inherits CARGO_BUILD_TARGET / `build.target`
@@ -108,12 +121,12 @@ CARGO_BUILD_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
 # triple defeats every config/env axis that could redirect to a
 # non-host triple. Cargo CLI precedence: explicit --target overrides
 # CARGO_BUILD_TARGET env and .cargo/config.toml `build.target`.
-HOST_TRIPLE="$("${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')"
+HOST_TRIPLE="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')"
 [[ -n "${HOST_TRIPLE}" ]] || {
   echo "could not derive host target triple from rustc -vV output" >&2
   exit 1
 }
-"${DEV_ENV}" -- cargo build \
+RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- cargo build \
   --manifest-path "${RUST_WORKSPACE_ROOT}/Cargo.toml" \
   --release --locked -p rubin-node \
   --target "${HOST_TRIPLE}" \

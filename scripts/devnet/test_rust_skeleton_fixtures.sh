@@ -58,7 +58,7 @@ for needle in \
   "requires at least 2 participants" \
   "at least one implementation=go and one implementation=rust" \
   "tx_path: required for evidence_type=mixed_client_process_soak with verdict=PASS"; do
-  if ! printf '%s\n' "${REJECTED_OUTPUT}" | grep -qF -- "${needle}"; then
+  if [[ "${REJECTED_OUTPUT}" != *"${needle}"* ]]; then
     echo "FAIL: helper-only rejection missing expected cross-field message: ${needle}" >&2
     echo "actual output:" >&2
     printf '%s\n' "${REJECTED_OUTPUT}" >&2
