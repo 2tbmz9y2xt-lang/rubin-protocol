@@ -97,17 +97,47 @@ echo "Building Rust rubin-node binary"
 # is to prove a real-process launch end-to-end on every run.
 CARGO_TARGET_DIR_LOCAL="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
 CARGO_BUILD_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
+# Force the host triple as the build target (PR #1510 wave-N+1 codex
+# finding "Force host target before executing rubin-node"): without an
+# explicit --target, cargo inherits CARGO_BUILD_TARGET / `build.target`
+# / .cargo/config.toml `[build] target=`. A non-host configured default
+# yields a cross-compiled binary; the cargo-metadata path resolution
+# below still picks the right path, but `rubin_process_start` then
+# fails at runtime with `exec format error` because the harness exec's
+# the artifact directly. Pinning --target to rustc's reported host
+# triple defeats every config/env axis that could redirect to a
+# non-host triple. Cargo CLI precedence: explicit --target overrides
+# CARGO_BUILD_TARGET env and .cargo/config.toml `build.target`.
+HOST_TRIPLE="$("${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')"
+[[ -n "${HOST_TRIPLE}" ]] || {
+  echo "could not derive host target triple from rustc -vV output" >&2
+  exit 1
+}
 "${DEV_ENV}" -- cargo build \
   --manifest-path "${RUST_WORKSPACE_ROOT}/Cargo.toml" \
   --release --locked -p rubin-node \
+  --target "${HOST_TRIPLE}" \
   --target-dir "${CARGO_TARGET_DIR_LOCAL}" \
   --message-format=json-render-diagnostics >"${CARGO_BUILD_LOG}"
 
-# Bounded fail-closed parser: scan only artifact events, accept only
-# the rubin-node bin executable, never path-guess. If cargo emits zero
-# matching events (e.g., a future cargo change to artifact semantics
-# or a stale toolchain), the parser exits 1 and the harness fails-
-# closed instead of running a stale binary or guessing a layout.
+# Fail-closed JSONL parser. Cargo's --message-format=json-render-diagnostics
+# routes machine-readable JSON events to stdout (one event per line) and
+# human-rendered diagnostics to stderr; this stdout stream therefore
+# MUST be pure JSON. The parser exits non-zero on three classes of bad
+# input (PR #1510 wave-N+1 copilot P1 finding: previous "fail-closed"
+# label sat on a fail-OPEN body that silently `continue`d on contamination):
+#   (a) any non-empty line whose first byte isn't '{' (wrapper banner,
+#       dev-env preamble, environment-injected message) — fail-closed;
+#   (b) any line that starts with '{' but JSON-decodes with an error
+#       (truncated stream, encoding corruption) — fail-closed;
+#   (c) the whole stream contains zero compiler-artifact events
+#       matching target.name=rubin-node + kind=bin + non-null executable
+#       (cargo skipped the build, or toolchain changed event semantics)
+#       — fail-closed via final exit 1.
+# Empty lines are tolerated as a defensive compatibility hedge; valid
+# JSON events with reason != compiler-artifact (e.g., compiler-message,
+# build-script-executed, build-finished) are correctly skipped — they
+# are part of cargo's normal stream, not contamination.
 CARGO_TARGET_BIN="$(python3 - "${CARGO_BUILD_LOG}" <<'PY'
 import json
 import sys
@@ -115,14 +145,22 @@ import sys
 log_path = sys.argv[1]
 selected = None
 with open(log_path, encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line or not line.startswith("{"):
+    for raw in f:
+        line = raw.strip()
+        if not line:
             continue
+        if not line.startswith("{"):
+            sys.stderr.write(
+                f"cargo build log contamination: non-JSON line: {line[:160]!r}\n"
+            )
+            sys.exit(1)
         try:
             ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            sys.stderr.write(
+                f"cargo build log JSON parse error: {exc}: {line[:160]!r}\n"
+            )
+            sys.exit(1)
         if ev.get("reason") != "compiler-artifact":
             continue
         target = ev.get("target") or {}
@@ -142,7 +180,7 @@ if selected is None:
 print(selected)
 PY
 )" || {
-  echo "cargo build emitted no compiler-artifact event with target.name=rubin-node, kind=bin, and a non-null executable; raw log: ${CARGO_BUILD_LOG}" >&2
+  echo "cargo build log parser failed (no rubin-node bin executable artifact, or contamination); raw log: ${CARGO_BUILD_LOG}" >&2
   exit 1
 }
 [[ -x "${CARGO_TARGET_BIN}" ]] || {
@@ -205,19 +243,35 @@ if attempt_skeleton_launch; then
 fi
 
 export EVIDENCE_JSON REPORT_JSON LAUNCH_STATUS LAUNCH_FAILURE_REASON \
-       RPC_ADDR STARTED_AT_UTC NODE_BIN NODE_PID LOG_FILE DATA_DIR
+       RPC_ADDR STARTED_AT_UTC NODE_BIN NODE_PID LOG_FILE DATA_DIR \
+       RUBIN_PROCESS_ARTIFACT_ROOT
 python3 - <<'PY'
 import json
 import os
 
 e = os.environ
 status = e["LAUNCH_STATUS"]
+launch_failure_raw = (e.get("LAUNCH_FAILURE_REASON") or "").strip()
 
+# Compute one effective_failure_reason and use it in BOTH evidence and
+# report (PR #1510 wave-N+1 copilot P2 finding: previously evidence had
+# an "or '...skeleton...'" fallback while report passed
+# LAUNCH_FAILURE_REASON through unchanged, so a failed-path with empty
+# env var produced an empty/None report.failure_reason while evidence
+# had explicit text). Single computed value eliminates the asymmetry.
 if status == "success":
-    failure_reason = (
+    effective_failure_reason = (
         "rust-only skeleton run; cross-implementation tx_path proof is "
         "RUB-21/22/23"
     )
+elif launch_failure_raw:
+    effective_failure_reason = launch_failure_raw
+else:
+    effective_failure_reason = (
+        "rust skeleton launch failed without a specific reason"
+    )
+
+if status == "success":
     rust_participant = {
         "name": "node-rust",
         "implementation": "rust",
@@ -225,10 +279,6 @@ if status == "success":
         "started_at": e["STARTED_AT_UTC"],
     }
 else:
-    failure_reason = (
-        e["LAUNCH_FAILURE_REASON"]
-        or "rust skeleton launch failed without a specific reason"
-    )
     # Honest evidence: on launch failure no real endpoint/started_at
     # was observed, so the rust participant carries name+implementation
     # only. The schema-required cross-impl participant pair is satisfied
@@ -240,7 +290,7 @@ evidence = {
     "evidence_type": "mixed_client_process_soak",
     "scenario": "rust_binary_soak_skeleton",
     "verdict": "FAIL",
-    "failure_reason": failure_reason,
+    "failure_reason": effective_failure_reason,
     "participants": [
         rust_participant,
         # Declared Go placeholder. RUB-21/22/23 replace this with a
@@ -260,20 +310,32 @@ with open(e["EVIDENCE_JSON"], "w", encoding="utf-8") as f:
 #
 # pid / rpc_endpoint / started_at_utc are recorded whenever they were
 # observed during the launch attempt, regardless of final launch_status
-# (P2 finding from PR #1510 review): a launch that registers a pid and
-# emits the rpc-listening banner before a later readiness check fails
-# previously dropped both fields, hiding identity that operators need
-# for failure forensics. The pid_observed / rpc_observed / started_observed
-# flags carry the boolean "did we ever see this during the attempt".
+# (PR #1510 wave-1 copilot P2 finding): a launch that registers a pid
+# and emits the rpc-listening banner before a later readiness check
+# fails previously dropped both fields, hiding identity that operators
+# need for failure forensics. The pid_observed / rpc_observed /
+# started_observed booleans carry "did we ever see this".
+#
+# log_path is the absolute resolved location of the harness log,
+# alongside artifact_root, so an operator reading this report from
+# outside the harness CWD (tarball, archived report, ticket attachment)
+# can still resolve and tail the log file without re-deriving the
+# artifact-root prefix (PR #1510 wave-N+1 controller-isolated reviewer
+# P2 finding: report was carrying log_file relative-only).
 node_pid_raw = (e.get("NODE_PID") or "").strip()
 rpc_addr_raw = (e.get("RPC_ADDR") or "").strip()
 started_at_raw = (e.get("STARTED_AT_UTC") or "").strip()
+artifact_root = e["RUBIN_PROCESS_ARTIFACT_ROOT"]
+log_file_relative = e["LOG_FILE"]
+log_path_absolute = os.path.join(artifact_root, log_file_relative)
 report = {
     "scenario": "rust_binary_soak_skeleton",
     "implementation": "rust",
     "command_path": e["NODE_BIN"],
     "data_dir": e["DATA_DIR"],
-    "log_file": e["LOG_FILE"],
+    "artifact_root": artifact_root,
+    "log_file": log_file_relative,
+    "log_path": log_path_absolute,
     "launch_status": status,
     "pid": int(node_pid_raw) if node_pid_raw else None,
     "pid_observed": bool(node_pid_raw),
@@ -281,7 +343,7 @@ report = {
     "rpc_observed": bool(rpc_addr_raw),
     "started_at_utc": started_at_raw or None,
     "started_observed": bool(started_at_raw),
-    "failure_reason": e["LAUNCH_FAILURE_REASON"] if status == "failed" else None,
+    "failure_reason": effective_failure_reason,
     "follow_ups": [
         "RUB-21 owns cross-implementation tx_path PASS evidence",
         "RUB-22/23 own end-to-end tx propagation",
