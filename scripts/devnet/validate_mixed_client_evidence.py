@@ -45,10 +45,9 @@ DEFAULT_SCHEMA = REPO_ROOT / "scripts" / "devnet" / "schema" / "mixed_client_evi
 #   * uppercase ``Z`` UTC indicator (lowercase ``z``, ``±HH:MM`` offsets,
 #     and fractional seconds ``.sss`` are REJECTED).
 #
-# This narrower contract matches Rubin evidence producers (Go
-# ``time.RFC3339`` and Rust ``chrono::SecondsFormat::Secs``); broadening it
-# to full RFC3339 acceptance is a class-B change requiring controller
-# approval per the RUB-208 contract.
+# This narrower contract matches Rubin evidence's UTC-Z seconds-only producer
+# contract; broadening it to full RFC3339 acceptance is a class-B change
+# requiring controller approval per the RUB-208 contract.
 RFC3339_RUBIN_CANONICAL_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
 )
