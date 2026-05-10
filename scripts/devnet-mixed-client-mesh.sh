@@ -2,8 +2,7 @@
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"; GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
-RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"; HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
-VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
+RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"; HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"; VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
 CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
 usage() { echo "usage: $0 [--check-report PATH|--check-report-live PATH]" >&2; }
 while (($#)); do case "$1" in --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
@@ -84,12 +83,13 @@ def peers(addr: str) -> dict:
         fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
     req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
     return data
-def snapshot_norm(snapshot: object) -> list[tuple[str, bool]]:
+def snapshot_norm(snapshot: object, expected_addr: str) -> list[tuple[str, bool]]:
     count = snapshot.get("count") if isinstance(snapshot, dict) else None
     peers = snapshot.get("peers") if isinstance(snapshot, dict) else None
     req(isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers), "peer snapshot count/peers are invalid")
     norm = sorted((p.get("addr"), p.get("handshake_complete")) for p in peers if isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool))
     req(len(norm) == len(peers) and len({addr for addr, _ in norm}) == len(norm), "peer snapshot entries are malformed or duplicated")
+    req(norm == [(expected_addr, True)], "peer snapshot has unexpected peer set")
     return norm
 def ts(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z": return False
@@ -117,7 +117,7 @@ try:
 except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
     fail(f"legacy marker is not readable JSON: {exc}")
 req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("verdict") == "FAIL" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong non-authoritative FAIL shape")
-try: validator = subprocess.run([sys.argv[2], "--", "python3", sys.argv[3], str(marker_path)], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+try: validator = subprocess.run(["python3", sys.argv[3], str(marker_path)], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
 except (OSError, subprocess.TimeoutExpired) as exc: fail(f"legacy marker schema validation failed: {exc}")
 req(validator.returncode == 0, "legacy marker schema validation failed: " + ((validator.stderr or validator.stdout).strip().splitlines() or ["validator returned nonzero"])[0])
 nodes = data.get("nodes")
@@ -161,11 +161,10 @@ final = data.get("final_verification")
 req(isinstance(final, dict) and all(final.get(f) is True for f in ("producer_side", "process_identity_rechecked", "rust_outbound_link_rechecked", "peer_snapshots_rechecked")), "PASS report missing producer-side final verification")
 req(final.get("rust_outbound_pid") == nodes_by_impl["rust"]["pid"] and final.get("rust_outbound_local_addr") == go_expected and final.get("rust_outbound_remote_addr") == rust_expected, "final verification is not bound to peer evidence")
 for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snapshot", rust_expected)):
-    stored = snapshot_norm(connectivity.get(field))
-    req((expected_addr, True) in stored, f"{field} missing expected completed peer")
+    stored = snapshot_norm(connectivity.get(field), expected_addr)
     if live:
         endpoint = nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]
-        eventually(lambda endpoint=endpoint, stored=stored: (fresh := peers(endpoint)) is not None and stored == snapshot_norm(fresh), f"{field} differs from live exact peer set")
+        eventually(lambda endpoint=endpoint, stored=stored, expected_addr=expected_addr: (fresh := peers(endpoint)) is not None and stored == snapshot_norm(fresh, expected_addr), f"{field} differs from live exact peer set")
 if not live: fail("offline check cannot prove PASS; use --check-report-live")
 print(f"PASS: mixed-client mesh report accepted {path}")
 PY
@@ -184,7 +183,7 @@ GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="$
 GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
-run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
+run_validator() { python3 "${VALIDATOR}" "$@"; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV' 5 "$@"; }
 argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 rpc_json() {
@@ -362,23 +361,24 @@ wait_peer_snapshot() {
   deadline=$((SECONDS + timeout)); PEER_SNAPSHOT_REASON=""
   tmp="${out}.tmp"
   while (( SECONDS < deadline )); do
-    if { rpc_json GET "${addr}" /peers >"${tmp}" 2>"${tmp}.err" && { PEER_SNAPSHOT_REASON=""; true; } || { PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; false; }; } \
-      && python3 - "${tmp}" "${expected}" <<'PY' >/dev/null 2>&1
+    if rpc_json GET "${addr}" /peers >"${tmp}" 2>"${tmp}.err"; then
+      PEER_SNAPSHOT_REASON=""
+      if python3 - "${tmp}" "${expected}" <<'PY' >/dev/null 2>&1
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
 expected, peers, count = sys.argv[2], data.get("peers"), data.get("count")
 def ep(v): return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and (p := v.rsplit(":", 1)[-1]).isdigit() and 1 <= len(p) <= 5 and 1 <= int(p) <= 65535
-ok = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers) and any(p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
-sys.exit(0 if ok else 1)
+shape = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers)
+has_expected = isinstance(peers, list) and any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
+sys.exit(0 if shape and has_expected and count == 1 else 3 if shape and has_expected else 4 if not shape else 1)
 PY
-    then
-      mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }
-      return 0
-    fi
+      then mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
+      else rc=$?; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; fi
+    else PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
     sleep 1
   done
-  if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -s "${tmp}.err" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ -s "${tmp}" ]] && ! python3 -m json.tool "${tmp}" >/dev/null 2>&1; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
+  if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -s "${tmp}.err" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ "${PEER_SNAPSHOT_REASON:-}" == unexpected_peer_snapshot_peer || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_malformed_json ]]; then :; elif [[ -s "${tmp}" ]] && ! python3 -m json.tool "${tmp}" >/dev/null 2>&1; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
   rm -f -- "${tmp}" "${tmp}.err"
   echo "timeout waiting for ${label} /peers completed handshake: ${PEER_SNAPSHOT_REASON}" >&2
   return 1
