@@ -883,7 +883,10 @@ fn handle_peer(
                 drop(engine);
                 finalize_live_message_outcome(&shared, outcome, pending_cleanup)?
             };
-            maybe_apply_tx_pool_cleanup(&shared, tx_pool_cleanup)?;
+            log_tx_pool_cleanup_requeue_failure(&maybe_apply_tx_pool_cleanup(
+                &shared,
+                tx_pool_cleanup,
+            )?);
             responses
         };
         for outbound in outbound_messages {
@@ -925,7 +928,7 @@ where
 fn apply_tx_pool_cleanup(
     shared: &SharedServiceState,
     tx_pool_cleanup: TxPoolCleanupPlan,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (chain_state, block_store, chain_id) = {
         let engine = shared
             .sync_engine
@@ -948,22 +951,25 @@ fn apply_tx_pool_cleanup(
         chain_id,
     );
     if report.has_requeue_failures() {
-        return Err(format!(
-            "tx pool cleanup requeue failed: {}",
-            report.requeue_failure_summary()
-        ));
+        return Ok(Some(report.requeue_failure_summary()));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn maybe_apply_tx_pool_cleanup(
     shared: &SharedServiceState,
     tx_pool_cleanup: TxPoolCleanupPlan,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if tx_pool_cleanup.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     apply_tx_pool_cleanup(shared, tx_pool_cleanup)
+}
+
+fn log_tx_pool_cleanup_requeue_failure(summary: &Option<String>) {
+    if let Some(summary) = summary {
+        eprintln!("p2p: tx pool cleanup requeue failed: {summary}");
+    }
 }
 
 fn finalize_live_message_outcome(
@@ -977,7 +983,10 @@ fn finalize_live_message_outcome(
             outcome.tx_pool_cleanup.merge(pending_cleanup),
         )),
         Err(err) => {
-            maybe_apply_tx_pool_cleanup(shared, pending_cleanup)?;
+            log_tx_pool_cleanup_requeue_failure(&maybe_apply_tx_pool_cleanup(
+                shared,
+                pending_cleanup,
+            )?);
             Err(format!("handle live message: {err}"))
         }
     }
@@ -1116,21 +1125,6 @@ mod tests {
 
     static DNS_RESOLVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    struct ActiveDnsResolversRestore {
-        previous: usize,
-    }
-
-    impl Drop for ActiveDnsResolversRestore {
-        fn drop(&mut self) {
-            super::ACTIVE_DNS_RESOLVERS.store(self.previous, Ordering::SeqCst);
-        }
-    }
-
-    fn force_active_dns_resolvers_for_test(count: usize) -> ActiveDnsResolversRestore {
-        let previous = super::ACTIVE_DNS_RESOLVERS.swap(count, Ordering::SeqCst);
-        ActiveDnsResolversRestore { previous }
-    }
-
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "{prefix}-{}",
@@ -1223,11 +1217,16 @@ mod tests {
         TxPoolCleanupPlan::from_parts_for_test(Vec::new(), Vec::new(), vec![block_hash_bytes])
     }
 
-    fn assert_requeue_cleanup_error(result: Result<(), String>, expected_bucket: &str) {
-        let err = result.expect_err("requeue cleanup failure must reach live caller");
+    fn assert_requeue_cleanup_failure(
+        result: Result<Option<String>, String>,
+        expected_bucket: &str,
+    ) {
+        let err = result
+            .expect("routine requeue failure must not be infrastructure-fatal")
+            .expect("requeue cleanup failure must reach live caller");
         assert!(
-            err.contains("tx pool cleanup requeue failed:"),
-            "unexpected error prefix: {err}"
+            err.contains("requeue_attempted="),
+            "unexpected cleanup summary: {err}"
         );
         for field in [
             "requeue_blocks_unavailable",
@@ -1326,7 +1325,10 @@ mod tests {
         let cleanup =
             TxPoolCleanupPlan::from_parts_for_test(vec![[0x11; 32]], Vec::new(), Vec::new());
 
-        apply_tx_pool_cleanup(&shared, cleanup).expect("cleanup should apply");
+        assert_eq!(
+            apply_tx_pool_cleanup(&shared, cleanup).expect("cleanup should apply"),
+            None
+        );
 
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -1334,7 +1336,7 @@ mod tests {
     #[test]
     fn apply_tx_pool_cleanup_surfaces_all_requeue_failure_buckets() {
         let (shared, dir) = test_shared_state_after_genesis("rubin-node-p2p-requeue-missing-block");
-        assert_requeue_cleanup_error(
+        assert_requeue_cleanup_failure(
             apply_tx_pool_cleanup(&shared, requeue_cleanup([0x44; 32])),
             "requeue_blocks_unavailable=1",
         );
@@ -1342,7 +1344,7 @@ mod tests {
 
         let (shared, dir) = test_shared_state_after_genesis("rubin-node-p2p-requeue-invalid-block");
         let invalid_block_hash = store_invalid_requeue_block(&shared);
-        assert_requeue_cleanup_error(
+        assert_requeue_cleanup_failure(
             apply_tx_pool_cleanup(&shared, requeue_cleanup(invalid_block_hash)),
             "requeue_blocks_invalid=1",
         );
@@ -1355,7 +1357,7 @@ mod tests {
             engine.chain_state.utxos = state.utxos.clone();
         }
         let low_fee_block_hash = store_requeue_block(&shared, std::slice::from_ref(&low_fee_raw));
-        assert_requeue_cleanup_error(
+        assert_requeue_cleanup_failure(
             apply_tx_pool_cleanup(&shared, requeue_cleanup(low_fee_block_hash)),
             "requeue_unavailable=1",
         );
@@ -1365,7 +1367,7 @@ mod tests {
         let (_, missing_utxo_raw, _) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
         let rejected_block_hash =
             store_requeue_block(&shared, std::slice::from_ref(&missing_utxo_raw));
-        assert_requeue_cleanup_error(
+        assert_requeue_cleanup_failure(
             apply_tx_pool_cleanup(&shared, requeue_cleanup(rejected_block_hash)),
             "requeue_rejected=1",
         );
@@ -1392,8 +1394,8 @@ mod tests {
                 )
                 .expect("preload duplicate");
         }
-        assert_requeue_cleanup_error(
-            apply_tx_pool_cleanup(&shared, requeue_cleanup(conflict_block_hash)),
+        assert_requeue_cleanup_failure(
+            maybe_apply_tx_pool_cleanup(&shared, requeue_cleanup(conflict_block_hash)),
             "requeue_conflict=1",
         );
         fs::remove_dir_all(dir).expect("cleanup conflict");
@@ -1408,8 +1410,11 @@ mod tests {
             sync_engine,
         );
 
-        maybe_apply_tx_pool_cleanup(&shared, TxPoolCleanupPlan::default())
-            .expect("empty cleanup should noop");
+        assert_eq!(
+            maybe_apply_tx_pool_cleanup(&shared, TxPoolCleanupPlan::default())
+                .expect("empty cleanup should noop"),
+            None
+        );
 
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -2025,9 +2030,7 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_rejects_unresolvable_addr() {
-        let _dns_guard = DNS_RESOLVER_TEST_LOCK
-            .lock()
-            .expect("dns resolver test lock");
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
         let err = connect_with_timeout("bad host:19111", Duration::from_millis(25)).unwrap_err();
         assert!(
             err.contains("peer address resolution failed"),
@@ -2627,12 +2630,11 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_rejects_when_dns_resolvers_saturated() {
-        let _dns_guard = DNS_RESOLVER_TEST_LOCK
-            .lock()
-            .expect("dns resolver test lock");
-        let _resolver_restore =
-            force_active_dns_resolvers_for_test(super::MAX_DNS_RESOLVER_THREADS);
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
+        let prev = super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst);
+        super::ACTIVE_DNS_RESOLVERS.store(super::MAX_DNS_RESOLVER_THREADS, Ordering::SeqCst);
         let result = super::connect_with_timeout("unreachable.test:80", Duration::from_secs(1));
+        super::ACTIVE_DNS_RESOLVERS.store(prev, Ordering::SeqCst);
         let err = result.unwrap_err();
         assert!(
             err.contains("DNS resolver limit reached"),
@@ -2653,9 +2655,7 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_hostname_uses_dns_resolver_path() {
-        let _dns_guard = DNS_RESOLVER_TEST_LOCK
-            .lock()
-            .expect("dns resolver test lock");
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
         // "localhost:1" resolves via DNS (not IP literal fast path),
         // covering the resolver thread spawn + channel recv + addr iteration.
         // Port 1 is refused immediately, so this is fast.

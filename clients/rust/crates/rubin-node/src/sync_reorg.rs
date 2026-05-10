@@ -1516,8 +1516,8 @@ mod tests {
     }
 
     #[test]
-    fn reorg_requeue_policy_reject_is_reported_without_pool_mutation() {
-        let (mut engine, dir) = engine_with_store("rubin-reorg-requeue-policy-reject");
+    fn reorg_requeue_below_fee_floor_is_reported_without_pool_mutation() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-requeue-below-fee-floor");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
         engine
             .apply_block_with_reorg(&genesis, None)
