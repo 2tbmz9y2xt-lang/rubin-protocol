@@ -18,8 +18,19 @@ if [[ "${_rubin_process_existing_exit_trap}" == *"rubin_process_exit_trap"* ]]; 
 fi
 unset _rubin_process_existing_exit_trap
 RUBIN_PROCESS_PIDS=()
+RUBIN_PROCESS_STARTED_PIDS=()
+RUBIN_PROCESS_STARTED_EXEC_REALPATHS=()
 RUBIN_PROCESS_LOGS=()
 RUBIN_PROCESS_LAST_PID=""
+RUBIN_PROCESS_TOPOLOGY_NAMES=()
+RUBIN_PROCESS_TOPOLOGY_IMPLS=()
+RUBIN_PROCESS_TOPOLOGY_PIDS=()
+RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=()
+RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS=()
+RUBIN_PROCESS_PROXY_SOURCES=()
+RUBIN_PROCESS_PROXY_TARGETS=()
+RUBIN_PROCESS_PROXY_ADDRS=()
+RUBIN_PROCESS_PROXY_TARGET_FILES=()
 _RUBIN_PROCESS_CREATED_PARENT=""
 _RUBIN_PROCESS_CREATED_ROOT=""
 _RUBIN_PROCESS_CREATED_ROOT_REAL=""
@@ -44,6 +55,17 @@ _rubin_process_uint_decimal() {
 }
 
 _rubin_process_pid() { [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]; }
+_rubin_process_name() { [[ "${1:-}" =~ ^node-[a-z0-9][a-z0-9-]{0,30}$ ]]; }
+_rubin_process_implementation() { [[ "${1:-}" == "go" || "${1:-}" == "rust" ]]; }
+_rubin_process_loopback_endpoint() {
+  local endpoint="${1:-}" host port port_dec
+  [[ "${endpoint}" == 127.0.0.1:* ]] || return 1
+  host="${endpoint%:*}"
+  port="${endpoint##*:}"
+  [[ "${host}" == "127.0.0.1" && "${port}" =~ ^[0-9]+$ ]] || return 1
+  port_dec="$(_rubin_process_uint_decimal port "${port}" 2>/dev/null)" || return 1
+  (( port_dec >= 1 && port_dec <= 65535 ))
+}
 
 _rubin_process_has_parent_ref() { case "/${1:-}/" in *"/../"*) return 0 ;; *) return 1 ;; esac; }
 
@@ -109,8 +131,19 @@ _rubin_process_require_artifact_parent() {
 _rubin_process_clear_state() {
   trap - EXIT
   RUBIN_PROCESS_PIDS=()
+  RUBIN_PROCESS_STARTED_PIDS=()
+  RUBIN_PROCESS_STARTED_EXEC_REALPATHS=()
   RUBIN_PROCESS_LOGS=()
   RUBIN_PROCESS_LAST_PID=""
+  RUBIN_PROCESS_TOPOLOGY_NAMES=()
+  RUBIN_PROCESS_TOPOLOGY_IMPLS=()
+  RUBIN_PROCESS_TOPOLOGY_PIDS=()
+  RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=()
+  RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS=()
+  RUBIN_PROCESS_PROXY_SOURCES=()
+  RUBIN_PROCESS_PROXY_TARGETS=()
+  RUBIN_PROCESS_PROXY_ADDRS=()
+  RUBIN_PROCESS_PROXY_TARGET_FILES=()
   RUBIN_PROCESS_ARTIFACT_ROOT=""
   _RUBIN_PROCESS_CREATED_PARENT=""
   _RUBIN_PROCESS_CREATED_ROOT=""
@@ -173,8 +206,19 @@ rubin_process_init() {
     return 1
   }
   RUBIN_PROCESS_PIDS=()
+  RUBIN_PROCESS_STARTED_PIDS=()
+  RUBIN_PROCESS_STARTED_EXEC_REALPATHS=()
   RUBIN_PROCESS_LOGS=()
   RUBIN_PROCESS_LAST_PID=""
+  RUBIN_PROCESS_TOPOLOGY_NAMES=()
+  RUBIN_PROCESS_TOPOLOGY_IMPLS=()
+  RUBIN_PROCESS_TOPOLOGY_PIDS=()
+  RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=()
+  RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS=()
+  RUBIN_PROCESS_PROXY_SOURCES=()
+  RUBIN_PROCESS_PROXY_TARGETS=()
+  RUBIN_PROCESS_PROXY_ADDRS=()
+  RUBIN_PROCESS_PROXY_TARGET_FILES=()
   trap rubin_process_exit_trap EXIT
 }
 
@@ -184,17 +228,19 @@ rubin_process_is_alive() {
 }
 
 rubin_process_start() {
-  local log_file log_dir launch_status started_pid
+  local log_file log_dir launch_exec_realpath launch_status started_pid
   (( $# >= 2 )) || { _rubin_process_error "rubin_process_start requires a log path and command"; return 1; }
+  RUBIN_PROCESS_LAST_PID=""
   log_file="$(_rubin_process_resolve_log "$1")" || return 1
   shift
   log_dir="$(dirname "${log_file}")"
   _rubin_process_mkdir_under_artifact_root "${log_dir}" || return 1
   _rubin_process_require_artifact_parent "${log_file}" || return 1
   command -v perl >/dev/null 2>&1 || { _rubin_process_error "perl is required to launch managed process groups"; return 1; }
+  launch_exec_realpath="$(_rubin_process_executable_realpath "$1")" || { _rubin_process_error "failed to resolve executable identity for $1"; return 1; }
+  set -- "${launch_exec_realpath}" "${@:2}"
 
-  RUBIN_PROCESS_LAST_PID=""
-  perl -e 'setpgrp(0, 0) or die "setpgrp failed: $!"; exec @ARGV or die "exec failed: $!"' -- "$@" >"${log_file}" 2>&1 &
+  perl -e 'setpgrp(0, 0) or die "setpgrp failed: $!"; exec { $ARGV[0] } @ARGV or die "exec failed: $!"' -- "$@" >"${log_file}" 2>&1 &
   launch_status=$?
   if (( launch_status != 0 )); then
     _rubin_process_error "failed to launch background command for ${log_file}"
@@ -212,9 +258,206 @@ rubin_process_start() {
   # shellcheck disable=SC2034 # caller scripts read this state after sourcing.
   RUBIN_PROCESS_LAST_PID="${started_pid}"
   RUBIN_PROCESS_PIDS+=("${started_pid}")
+  RUBIN_PROCESS_STARTED_PIDS+=("${started_pid}")
+  RUBIN_PROCESS_STARTED_EXEC_REALPATHS+=("${launch_exec_realpath}")
   RUBIN_PROCESS_LOGS+=("${log_file}")
   disown "${started_pid}" 2>/dev/null || true
 }
+
+_rubin_process_node_index() {
+  local name="${1:-}" i
+  for ((i=0; i<${#RUBIN_PROCESS_TOPOLOGY_NAMES[@]}; i++)); do
+    [[ "${RUBIN_PROCESS_TOPOLOGY_NAMES[$i]}" == "${name}" ]] || continue
+    printf '%s\n' "${i}"
+    return 0
+  done
+  return 1
+}
+
+_rubin_process_link_index() {
+  local source="${1:-}" target="${2:-}" i
+  for ((i=0; i<${#RUBIN_PROCESS_PROXY_SOURCES[@]}; i++)); do
+    [[ "${RUBIN_PROCESS_PROXY_SOURCES[$i]}" == "${source}" && "${RUBIN_PROCESS_PROXY_TARGETS[$i]}" == "${target}" ]] || continue
+    printf '%s\n' "${i}"
+    return 0
+  done
+  return 1
+}
+
+_rubin_process_managed_pid() {
+  local pid="${1:-}" current
+  for current in "${RUBIN_PROCESS_PIDS[@]}"; do
+    [[ "${current}" == "${pid}" ]] && return 0
+  done
+  return 1
+}
+
+_rubin_process_executable_realpath() {
+  local executable="${1:-}" resolved
+  [[ -n "${executable}" ]] || return 1
+  if [[ "${executable}" == */* ]]; then
+    resolved="${executable}"
+  else
+    resolved="$(command -v -- "${executable}" 2>/dev/null)" || return 1
+  fi
+  [[ -n "${resolved}" && -f "${resolved}" && -x "${resolved}" ]] || return 1
+  perl -MCwd=realpath -e 'my $p = realpath($ARGV[0]); defined $p && -f $p && -x $p or exit 1; print "$p\n";' -- "${resolved}"
+}
+
+_rubin_process_started_exec_realpath() {
+  local pid="${1:-}" i
+  _rubin_process_pid "${pid}" || return 1
+  for ((i=${#RUBIN_PROCESS_STARTED_PIDS[@]} - 1; i >= 0; i--)); do
+    [[ "${RUBIN_PROCESS_STARTED_PIDS[$i]}" == "${pid}" ]] || continue
+    printf '%s\n' "${RUBIN_PROCESS_STARTED_EXEC_REALPATHS[$i]}"
+    return 0
+  done
+  return 1
+}
+
+_rubin_process_started_exec_matches() {
+  local pid="${1:-}" expected_exec="${2:-}" started_exec
+  [[ -n "${expected_exec}" ]] || return 1
+  started_exec="$(_rubin_process_started_exec_realpath "${pid}")" || return 1
+  [[ "${started_exec}" == "${expected_exec}" ]]
+}
+
+_rubin_process_pid_comm() {
+  local pid="${1:-}" comm
+  comm="$(ps -p "${pid}" -o comm= 2>/dev/null | awk 'NR==1 {print $1}')" || return 1
+  [[ -n "${comm}" ]] || return 1
+  basename -- "${comm}"
+}
+
+_rubin_process_runtime_comm_matches() {
+  local implementation="${1:-}" comm="${2:-}"
+  case "${implementation}:${comm}" in
+    go:rubin-node-go|rust:rubin-node-rust) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_rubin_process_pid_listens_on() {
+  local pid="${1:-}" endpoint="${2:-}" lsof_output lsof_status=0
+  command -v lsof >/dev/null 2>&1 || { _rubin_process_error "NO_DATA: reason=lsof_unavailable pid=${pid} endpoint=${endpoint}"; return 2; }
+  lsof_output="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>&1)" || lsof_status=$?
+  grep -F -x -q -- "n${endpoint}" <<<"${lsof_output}" && return 0
+  (( lsof_status == 0 || ${#lsof_output} == 0 )) || { _rubin_process_error "NO_DATA: reason=lsof_failed pid=${pid} endpoint=${endpoint}"; return 2; }
+  return 1
+}
+
+rubin_process_register_topology_node() {
+  local name="${1:-}" implementation="${2:-}" pid="${3:-}" endpoint="${4:-}" expected_executable="${5:-}" comm listen_status=0
+  _rubin_process_require_init || return 1
+  _rubin_process_name "${name}" || { _rubin_process_error "NO_DATA: reason=invalid_node_name node=${name:-<empty>}"; return 1; }
+  _rubin_process_implementation "${implementation}" || { _rubin_process_error "NO_DATA: reason=invalid_implementation node=${name} implementation=${implementation:-<empty>}"; return 1; }
+  if ! _rubin_process_pid "${pid}" || ! rubin_process_is_alive "${pid}"; then
+    _rubin_process_error "NO_DATA: reason=dead_node_pid node=${name} pid=${pid:-<empty>}"
+    return 1
+  fi
+  _rubin_process_managed_pid "${pid}" || { _rubin_process_error "NO_DATA: reason=unmanaged_node_pid node=${name} pid=${pid}"; return 1; }
+  _rubin_process_loopback_endpoint "${endpoint}" || { _rubin_process_error "NO_DATA: reason=invalid_node_endpoint node=${name} endpoint=${endpoint:-<empty>}"; return 1; }
+  _rubin_process_pid_listens_on "${pid}" "${endpoint}" || listen_status=$?
+  (( listen_status == 0 )) || {
+    (( listen_status == 2 )) && return 1
+    _rubin_process_error "NO_DATA: reason=node_endpoint_not_process_backed node=${name} pid=${pid} endpoint=${endpoint}"
+    return 1
+  }
+  comm="$(_rubin_process_pid_comm "${pid}")" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} pid=${pid}"; return 1; }
+  _rubin_process_runtime_comm_matches "${implementation}" "${comm}" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} implementation=${implementation} pid=${pid} comm=${comm}"; return 1; }
+  [[ -n "${expected_executable}" ]] || { _rubin_process_error "NO_DATA: reason=missing_expected_executable node=${name} implementation=${implementation} pid=${pid}"; return 1; }
+  _rubin_process_executable_realpath "${expected_executable}" >/dev/null || { _rubin_process_error "NO_DATA: reason=expected_executable_unverified node=${name} implementation=${implementation} pid=${pid}"; return 1; }
+  _rubin_process_error "NO_DATA: reason=runtime_identity_verifier_required node=${name} implementation=${implementation} pid=${pid}"
+  return 1
+}
+
+rubin_process_register_proxy_link() {
+  local source="${1:-}" target="${2:-}" proxy_addr="${3:-}" target_file="${4:-}" target_i target_endpoint
+  _rubin_process_require_init || return 1
+  _rubin_process_node_index "${source}" >/dev/null || { _rubin_process_error "NO_DATA: reason=unknown_source source=${source:-<empty>}"; return 1; }
+  target_i="$(_rubin_process_node_index "${target}")" || { _rubin_process_error "NO_DATA: reason=unknown_target target=${target:-<empty>}"; return 1; }
+  [[ "${source}" != "${target}" ]] || { _rubin_process_error "NO_DATA: reason=same_node source=${source} target=${target}"; return 1; }
+  _rubin_process_loopback_endpoint "${proxy_addr}" || { _rubin_process_error "NO_DATA: reason=invalid_proxy_endpoint proxy=${proxy_addr:-<empty>}"; return 1; }
+  _rubin_process_require_artifact_parent "${target_file}" || return 1
+  target_endpoint="${RUBIN_PROCESS_TOPOLOGY_ENDPOINTS[$target_i]}"
+  [[ -r "${target_file}" && "$(tr -d '[:space:]' <"${target_file}")" == "${target_endpoint}" ]] || { _rubin_process_error "NO_DATA: reason=missing_proxy_target source=${source} target=${target}"; return 1; }
+  RUBIN_PROCESS_PROXY_SOURCES+=("${source}")
+  RUBIN_PROCESS_PROXY_TARGETS+=("${target}")
+  RUBIN_PROCESS_PROXY_ADDRS+=("${proxy_addr}")
+  RUBIN_PROCESS_PROXY_TARGET_FILES+=("${target_file}")
+}
+
+rubin_process_probe_endpoint() {
+  local endpoint="${1:-}" timeout="${2:-1}" rc=0
+  _rubin_process_loopback_endpoint "${endpoint}" || { _rubin_process_error "NO_DATA: reason=invalid_probe_endpoint endpoint=${endpoint:-<empty>}"; return 1; }
+  command -v python3 >/dev/null 2>&1 || { _rubin_process_error "NO_DATA: reason=python3_unavailable endpoint=${endpoint}"; return 1; }
+  python3 - "${timeout}" <<'PY' >/dev/null 2>&1 || { _rubin_process_error "NO_DATA: reason=invalid_probe_timeout endpoint=${endpoint}"; return 1; }
+import math, sys
+try:
+    value = float(sys.argv[1])
+except (OverflowError, ValueError):
+    sys.exit(1)
+sys.exit(0 if math.isfinite(value) and value > 0 else 1)
+PY
+  python3 - "${endpoint}" "${timeout}" <<'PY' || rc=$?
+import socket, sys
+endpoint, timeout = sys.argv[1], float(sys.argv[2])
+host, port = endpoint.rsplit(":", 1)
+try:
+    sock = socket.create_connection((host, int(port)), timeout=timeout)
+    sock.settimeout(timeout)
+    data = sock.recv(1)
+    sock.close()
+    sys.exit(0 if data else 1)
+except socket.timeout:
+    sys.exit(2)
+except OSError:
+    sys.exit(1)
+PY
+  case "${rc}" in
+    0) return 0 ;;
+    2) _rubin_process_error "NO_DATA: reason=probe_timeout endpoint=${endpoint}"; return 1 ;;
+    *) _rubin_process_error "NO_DATA: reason=probe_disconnected endpoint=${endpoint}"; return 1 ;;
+  esac
+}
+
+_rubin_process_node_is_fresh() {
+  local index="${1:-}" pid endpoint expected_exec
+  pid="${RUBIN_PROCESS_TOPOLOGY_PIDS[$index]}"
+  endpoint="${RUBIN_PROCESS_TOPOLOGY_ENDPOINTS[$index]}"
+  expected_exec="${RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS[$index]:-}"
+  rubin_process_is_alive "${pid}" && _rubin_process_started_exec_matches "${pid}" "${expected_exec}" && _rubin_process_pid_listens_on "${pid}" "${endpoint}"
+}
+
+_rubin_process_control_pair() {
+  local action="${1:-}" source="${2:-}" target="${3:-}" source_i target_i link_i target_file target_endpoint current_target source_fresh=0 target_fresh=0
+  _rubin_process_require_init || return 1
+  source_i="$(_rubin_process_node_index "${source}")" || { _rubin_process_error "NO_DATA: phase=${action} reason=unknown_source source=${source:-<empty>} target=${target:-<empty>}"; return 1; }
+  [[ "${source}" != "${target}" ]] || { _rubin_process_error "NO_DATA: phase=${action} reason=same_node source=${source} target=${target}"; return 1; }
+  ((${#RUBIN_PROCESS_TOPOLOGY_NAMES[@]} >= 2)) || { _rubin_process_error "NO_DATA: phase=${action} reason=single_node_topology source=${source} target=${target}"; return 1; }
+  target_i="$(_rubin_process_node_index "${target}")" || { _rubin_process_error "NO_DATA: phase=${action} reason=unknown_target source=${source} target=${target:-<empty>}"; return 1; }
+  [[ "${RUBIN_PROCESS_TOPOLOGY_IMPLS[$source_i]}" != "${RUBIN_PROCESS_TOPOLOGY_IMPLS[$target_i]}" ]] || { _rubin_process_error "NO_DATA: phase=${action} reason=same_client_topology source=${source} target=${target}"; return 1; }
+  _rubin_process_node_is_fresh "${source_i}" || source_fresh=$?
+  _rubin_process_node_is_fresh "${target_i}" || target_fresh=$?
+  (( source_fresh != 2 && target_fresh != 2 )) || return 1
+  if (( source_fresh != 0 || target_fresh != 0 )); then
+    _rubin_process_error "NO_DATA: phase=${action} reason=stale_topology source=${source} target=${target}"
+    return 1
+  fi
+  link_i="$(_rubin_process_link_index "${source}" "${target}")" || { _rubin_process_error "NO_DATA: phase=${action} reason=missing_proxy_link source=${source} target=${target}"; return 1; }
+  target_file="${RUBIN_PROCESS_PROXY_TARGET_FILES[$link_i]}"
+  target_endpoint="${RUBIN_PROCESS_TOPOLOGY_ENDPOINTS[$target_i]}"
+  _rubin_process_require_artifact_parent "${target_file}" || return 1
+  [[ -r "${target_file}" ]] || { _rubin_process_error "NO_DATA: phase=${action} reason=missing_proxy_target source=${source} target=${target}"; return 1; }
+  current_target="$(tr -d '[:space:]' <"${target_file}")"
+  [[ "${action}" != "partition" || "${current_target}" != "drop" ]] || { _rubin_process_error "NO_DATA: phase=partition reason=no_effect source=${source} target=${target}"; return 1; }
+  [[ "${action}" != "heal" || "${current_target}" != "${target_endpoint}" ]] || { _rubin_process_error "NO_DATA: phase=heal reason=no_effect source=${source} target=${target}"; return 1; }
+  _rubin_process_error "NO_DATA: phase=${action} reason=runtime_edge_verifier_required source=${source} target=${target}"
+  return 1
+}
+
+rubin_process_partition_pair() { _rubin_process_control_pair partition "$@"; }
+rubin_process_heal_pair() { _rubin_process_control_pair heal "$@"; }
 
 rubin_process_stop_pid() {
   local pid="${1:-}" grace_seconds deadline
@@ -302,7 +545,7 @@ rubin_process_dump_artifacts() {
   for log_file in "${RUBIN_PROCESS_LOGS[@]}"; do
     _rubin_process_require_artifact_parent "${log_file}" || { _rubin_process_error "skipping unsafe log file: ${log_file}"; continue; }
     [[ -f "${log_file}" ]] || continue
-    _rubin_process_error "----- $(basename "${log_file}") -----"
+    _rubin_process_error "----- $(basename -- "${log_file}") -----"
     tail -n 80 "${log_file}" >&2 || true
   done
 }
