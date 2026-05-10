@@ -1,34 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
-GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
-RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"
-HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
+DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"; GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
+RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"; HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
 CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
 usage() { echo "usage: $0 [--check-report PATH|--check-report-live PATH]" >&2; }
-while (($#)); do
-  case "$1" in
-    --check-report|--check-report-live)
-      [[ $# -ge 2 ]] || { usage; exit 2; }
-      CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2
-      ;;
-    -h|--help) usage; exit 0 ;;
-    *)
-      usage
-      exit 2
-      ;;
-  esac
-done
+while (($#)); do case "$1" in --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
 check_report() { local report="${1:-}" mode="${2:-offline}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
   python3 - "${report}" "${DEV_ENV}" "${VALIDATOR}" "${mode}" <<'PY'
-import datetime as dt, json, os, socket, subprocess, sys, time, urllib.error, urllib.request
+import datetime as dt, json, os, socket, struct, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
-path = Path(sys.argv[1])
-live = sys.argv[4] == "live"
+path = Path(sys.argv[1]); live = sys.argv[4] == "live"
 try: LIVE_TIMEOUT = max(1, min(600, int(os.environ.get("MESH_TIMEOUT", "10"))))
 except ValueError: LIVE_TIMEOUT = 10
 def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
@@ -58,6 +43,28 @@ def pid_exe(pid: int) -> str:
         import ctypes; buf = ctypes.create_string_buffer(4096); n = ctypes.CDLL(None).proc_pidpath(int(pid), buf, len(buf))
     except (AttributeError, OSError) as exc: fail(f"pid_exe_unavailable: {exc}")
     return os.path.realpath(buf.value.decode()) if n > 0 else ""
+def pid_argv(pid: int) -> list[str]:
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    if cmdline.exists() or Path("/proc").is_dir():
+        try: raw = cmdline.read_bytes()
+        except FileNotFoundError: return []
+        except OSError as exc: fail(f"argv_unavailable: {exc}")
+        return [a.decode("utf-8", "surrogateescape") for a in raw.rstrip(b"\0").split(b"\0") if a]
+    try:
+        import ctypes; libc = ctypes.CDLL(None); mib = (ctypes.c_int * 3)(1, 49, int(pid)); size = ctypes.c_size_t(0)
+        if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0: fail("argv_unavailable")
+        buf = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0: fail("argv_unavailable")
+    except (AttributeError, OSError) as exc: fail(f"argv_unavailable: {exc}")
+    raw = buf.raw[:size.value]; argc = struct.unpack_from("i", raw)[0]; i = raw.find(b"\0", 4)
+    while i < len(raw) and raw[i] == 0: i += 1
+    args = []
+    for _ in range(argc):
+        j = raw.find(b"\0", i)
+        if j < 0: break
+        args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
+    return args
+def argv_eq(actual: list[str], expected: list[str]) -> bool: return len(actual) == len(expected) and bool(actual) and Path(actual[0]).resolve() == Path(expected[0]).resolve() and actual[1:] == expected[1:]
 def lsof_lines(pid: int, state: str) -> list[str]:
     try:
         p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
@@ -86,13 +93,10 @@ def snapshot_norm(snapshot: object) -> list[tuple[str, bool]]:
     return norm
 def ts(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z": return False
-    try:
-        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
-    except ValueError:
-        return False
+    try: return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
+    except ValueError: return False
 try:
-    with path.open(encoding="utf-8") as f:
-        data = json.load(f)
+    with path.open(encoding="utf-8") as f: data = json.load(f)
 except OSError as exc:
     fail(f"cannot read report: {exc}")
 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -120,8 +124,7 @@ nodes = data.get("nodes")
 req(isinstance(nodes, list) and len(nodes) == 2 and all(isinstance(n, dict) for n in nodes), "PASS report requires exactly two node records")
 expected = {"go": ("node-go", "rubin-node-go"), "rust": ("node-rust", "rubin-node-rust")}
 for node in nodes:
-    impl = node.get("implementation")
-    name = node.get("name")
+    impl, name = node.get("implementation"), node.get("name")
     req(isinstance(impl, str) and impl in expected, f"node has invalid implementation: {impl!r}")
     expected_name, expected_bin = expected[impl]
     req(name == expected_name, f"{impl} node has invalid name: {name!r}")
@@ -134,7 +137,7 @@ for node in nodes:
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
     if live:
-        eventually(lambda node=node, binary_path=binary_path: Path(pid_exe(node["pid"])).resolve() == binary_path, f"{name} live process executable does not match report")
+        eventually(lambda node=node, binary_path=binary_path, command_argv=command_argv: Path(pid_exe(node["pid"])).resolve() == binary_path and argv_eq(pid_argv(node["pid"]), command_argv), f"{name} live process argv/executable does not match report")
         eventually(lambda node=node: owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
     for field in ("process_alive", "rpc_endpoint_process_backed", "p2p_endpoint_process_backed"):
         req(node.get(field) is True, f"{name} does not prove {field}")
@@ -200,10 +203,7 @@ except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
     sys.exit(1)
 PY
 }
-pid_comm() {
-  local pid="$1" comm status=0 err="${RUBIN_PROCESS_ARTIFACT_ROOT}/ps.err"
-  comm="$(bounded ps -ww -p "${pid}" -o comm= 2>"${err}" | sed -n '1p')" || status=$?; (( status == 142 )) && return 3; [[ ${status} -eq 0 || ! -s "${err}" ]] || return 2; [[ -n "${comm}" ]] || return 1; basename -- "${comm}"
-}
+pid_comm() { local pid="$1" raw comm status=0 err="${RUBIN_PROCESS_ARTIFACT_ROOT}/ps.err"; raw="$(bounded ps -ww -p "${pid}" -o comm= 2>"${err}")" || status=$?; (( status == 142 )) && return 3; [[ ${status} -eq 0 || ! -s "${err}" ]] || return 2; comm="$(sed -n '1p' <<<"${raw}")" || return 4; [[ -n "${comm}" ]] || return 1; basename -- "${comm}"; }
 pid_listens_on() {
   local pid="$1" endpoint="$2" out err status=0
   out="$(bounded lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>"${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-listen.err")" || status=$?; err="$(<"${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-listen.err")"
@@ -373,7 +373,7 @@ ok = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers
 sys.exit(0 if ok else 1)
 PY
     then
-      mv -- "${tmp}" "${out}"
+      mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }
       return 0
     fi
     sleep 1
@@ -384,11 +384,13 @@ PY
   return 1
 }
 wait_rust_to_go_link() {
-  local missing="$1" ambiguous="$2" deadline out status err_file err
+  local missing="$1" ambiguous="$2" deadline raw out status err_file err
   deadline=$((SECONDS + MESH_TIMEOUT)); err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-established.err"
   while (( SECONDS < deadline )); do
-    status=0; out="$(bounded lsof -nP -a -p "${RUST_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>"${err_file}" | REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' | sort -u)" || status=$?; err="$(<"${err_file}")"
-    (( status == 142 )) && finish_no_data "lsof_timeout"; (( status == 0 || (${#out} == 0 && ${#err} == 0) )) || finish_no_data "lsof_failed"
+    status=0; raw="$(bounded lsof -nP -a -p "${RUST_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>"${err_file}")" || status=$?; err="$(<"${err_file}")"
+    (( status == 142 )) && finish_no_data "lsof_timeout"; (( status == 0 || (${#raw} == 0 && ${#err} == 0) )) || finish_no_data "lsof_failed"
+    out="$(REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' <<<"${raw}")" || finish_no_data "perl_failed"
+    out="$(sort -u <<<"${out}")" || finish_no_data "sort_failed"
     [[ "${out}" != *$'\n'* ]] || finish_no_data "${ambiguous}"; [[ -z "${out}" ]] || { RUST_TO_GO_LOCAL_ADDR="${out}"; return 0; }
     sleep 1
   done; finish_no_data "${missing}"
@@ -396,7 +398,7 @@ wait_rust_to_go_link() {
 verify_process_identity() {
   local label="$1" impl="$2" pid="$3" rpc_addr="$4" p2p_addr="$5" expected_comm="$6" comm
   rubin_process_is_alive "${pid}" || { echo "${label} pid is not alive: ${pid}" >&2; return 1; }
-  comm="$(pid_comm "${pid}")" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "ps_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "ps_timeout"; echo "${label} process comm unavailable: ${pid}" >&2; return 1; }
+  comm="$(pid_comm "${pid}")" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "ps_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "ps_timeout"; [[ ${rc} -eq 4 ]] && finish_no_data "sed_failed"; echo "${label} process comm unavailable: ${pid}" >&2; return 1; }
   [[ "${comm}" == "${expected_comm}" ]] || { echo "${label} process comm=${comm}, want ${expected_comm}" >&2; return 1; }
   pid_listens_on "${pid}" "${rpc_addr}" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "lsof_timeout"; echo "${label} rpc endpoint is not process-backed: ${rpc_addr}" >&2; return 1; }
   pid_listens_on "${pid}" "${p2p_addr}" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "lsof_timeout"; echo "${label} p2p endpoint is not process-backed: ${p2p_addr}" >&2; return 1; }
@@ -420,7 +422,7 @@ start_go_node() {
   GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || { rc=$?; [[ ${rc} -eq 42 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 43 ]] && finish_no_data "lsof_timeout"; return 1; }
   rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1; GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
-command -v lsof >/dev/null 2>&1 || finish_no_data "lsof_unavailable"; command -v perl >/dev/null 2>&1 || finish_no_data "perl_unavailable"
+for tool in lsof perl sed sort; do command -v "${tool}" >/dev/null 2>&1 || finish_no_data "${tool}_unavailable"; done
 build_go_node || finish_no_data "go_build_failed"
 build_rust_node || finish_no_data "rust_build_failed"
 start_go_node || finish_no_data "go_process_not_ready"
@@ -439,7 +441,7 @@ wait_peer_snapshot node-rust-final "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${ME
 wait_peer_snapshot node-go-final "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-go_final_peer_snapshot_missing_rust_endpoint}"
 FINAL_PEER_SNAPSHOTS_RECHECKED=true
 PASS_REPORT_JSON="${REPORT_JSON}.pass.tmp"; FINAL_REPORT_JSON="${REPORT_JSON}"; REPORT_JSON="${PASS_REPORT_JSON}"
-write_outputs "PASS"; REPORT_JSON="${FINAL_REPORT_JSON}"
+write_outputs "PASS" || { REPORT_JSON="${FINAL_REPORT_JSON}"; finish_no_data "pass_report_write_failed"; }; REPORT_JSON="${FINAL_REPORT_JSON}"
 if run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 && check_report "${PASS_REPORT_JSON}" live >&2; then
   mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}"
 else
