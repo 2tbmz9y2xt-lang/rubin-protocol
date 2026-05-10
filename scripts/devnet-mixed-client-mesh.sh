@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
@@ -7,7 +6,6 @@ GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
-
 CHECK_REPORT="" CHECK_REPORT_MODE=0
 MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
 usage() { echo "usage: $0 [--check-report PATH]" >&2; }
@@ -36,7 +34,7 @@ check_report() {
   local report="${1:-}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
   python3 - "${report}" <<'PY'
-import datetime as dt, json, sys
+import datetime as dt, json, shlex, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 def fail(message: str) -> None:
@@ -51,6 +49,10 @@ def ep(value: object) -> bool:
     return sep == ":" and host == "127.0.0.1" and ":" not in port and port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
 def nonempty_str(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
+def argv0(value: object) -> str:
+    if not nonempty_str(value): return ""
+    try: return shlex.split(value)[0]
+    except ValueError: return ""
 def ts(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z":
         return False
@@ -73,14 +75,17 @@ legacy_schema = data.get("legacy_schema_compatibility")
 req(isinstance(legacy_schema, dict) and legacy_schema.get("authoritative") is False and "verdict" not in legacy_schema and nonempty_str(legacy_schema.get("marker_path")), "legacy_schema_compatibility missing marker_path")
 nodes = data.get("nodes")
 req(isinstance(nodes, list) and len(nodes) == 2 and all(isinstance(n, dict) for n in nodes), "PASS report requires exactly two node records")
-expected_comm = {"go": "rubin-node-go", "rust": "rubin-node-rust"}
+expected = {"go": ("node-go", "rubin-node-go"), "rust": ("node-rust", "rubin-node-rust")}
 for node in nodes:
     impl = node.get("implementation")
     name = node.get("name")
-    req(isinstance(impl, str) and impl in expected_comm, f"node has invalid implementation: {impl!r}")
-    req(isinstance(name, str) and name.startswith("node-"), f"node has invalid name: {name!r}")
-    req(node.get("process_comm") == expected_comm.get(impl), f"{name} process_comm does not prove {impl} identity")
-    req(all(nonempty_str(node.get(field)) for field in ("command", "binary")), f"{name} missing command or binary")
+    req(isinstance(impl, str) and impl in expected, f"node has invalid implementation: {impl!r}")
+    expected_name, expected_bin = expected[impl]
+    req(name == expected_name, f"{impl} node has invalid name: {name!r}")
+    command, binary, command_argv0 = node.get("command"), node.get("binary"), argv0(node.get("command"))
+    req(node.get("process_comm") == expected_bin, f"{name} process_comm does not prove {impl} identity")
+    req(nonempty_str(command) and nonempty_str(binary) and Path(binary).is_absolute(), f"{name} missing absolute command or binary")
+    req(command_argv0 == binary and Path(binary).name == expected_bin, f"{name} command/binary is not bound to {expected_bin}")
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
     for field in ("process_alive", "rpc_endpoint_process_backed", "p2p_endpoint_process_backed"):
@@ -88,6 +93,8 @@ for node in nodes:
 impls = {n["implementation"] for n in nodes}
 req(impls == {"go", "rust"}, f"PASS report requires one go and one rust node, got {sorted(impls)}")
 nodes_by_impl = {node["implementation"]: node for node in nodes}
+req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
+req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"], "go/rust process evidence is not implementation-distinct")
 connectivity = data.get("peer_connectivity")
 req(isinstance(connectivity, dict), "PASS report missing peer_connectivity object")
 req(all(connectivity.get(f) is True for f in ("go_to_rust", "rust_to_go", "bidirectional_observed")), "peer_connectivity booleans are not all true")
@@ -251,7 +258,6 @@ PY
   cp -- "${cargo_bin}" "${RUST_NODE_BIN}" || return 1
   [[ -x "${RUST_NODE_BIN}" ]]
 }
-
 write_outputs() {
   local verdict="$1" reason="${2:-}"
   export REPORT_JSON LEGACY_SCHEMA_MARKER_JSON verdict reason GO_PID RUST_PID GO_RPC_ADDR RUST_RPC_ADDR \
@@ -272,7 +278,6 @@ def read_json(path: str) -> dict:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return {"count": 0, "peers": []}
-
 nodes = []
 for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_key in (
     ("go", "node-go", "GO_PID", "GO_RPC_ADDR", "GO_P2P_ADDR", "GO_STARTED_AT_UTC", "GO_COMM", "GO_NODE_BIN", "GO_CMD"),
@@ -295,7 +300,6 @@ for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_k
         "p2p_endpoint_process_backed": verdict == "PASS" and e.get(f"{prefix}_P2P_PROCESS_BACKED") == "true",
     }
     nodes.append(node)
-
 go_snapshot, rust_snapshot = read_json(e["GO_PEERS_JSON"]), read_json(e["RUST_PEERS_JSON"])
 report = {
     "scenario": "mixed_client_mesh",
@@ -323,7 +327,6 @@ if verdict != "PASS":
 with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
-
 legacy_marker_reason = reason if verdict != "PASS" and reason else (
     "mixed-client mesh process/connectivity PASS is recorded in sibling report; "
     "existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23"
@@ -416,7 +419,6 @@ start_go_node() {
   exit 2
 }
 command -v lsof >/dev/null 2>&1 || finish_no_data "lsof_unavailable"
-
 build_go_node || finish_no_data "go_build_failed"
 build_rust_node || finish_no_data "rust_build_failed"
 start_go_node || finish_no_data "go_process_not_ready"
