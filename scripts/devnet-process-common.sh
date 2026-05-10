@@ -337,9 +337,12 @@ _rubin_process_runtime_comm_matches() {
 }
 
 _rubin_process_pid_listens_on() {
-  local pid="${1:-}" endpoint="${2:-}"
+  local pid="${1:-}" endpoint="${2:-}" lsof_output lsof_status=0
   command -v lsof >/dev/null 2>&1 || { _rubin_process_error "NO_DATA: reason=lsof_unavailable pid=${pid} endpoint=${endpoint}"; return 2; }
-  lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | grep -F -x -q -- "n${endpoint}"
+  lsof_output="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>&1)" || lsof_status=$?
+  grep -F -x -q -- "n${endpoint}" <<<"${lsof_output}" && return 0
+  (( lsof_status == 0 || ${#lsof_output} == 0 )) || { _rubin_process_error "NO_DATA: reason=lsof_failed pid=${pid} endpoint=${endpoint}"; return 2; }
+  return 1
 }
 
 rubin_process_register_topology_node() {
