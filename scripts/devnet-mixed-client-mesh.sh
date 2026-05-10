@@ -46,6 +46,13 @@ def fail(message: str) -> None:
 def req(ok: bool, message: str) -> None:
     if not ok:
         fail(message)
+def ep(value: object) -> bool:
+    if not isinstance(value, str) or not value.startswith("127.0.0.1:"):
+        return False
+    port = value.rsplit(":", 1)[1]
+    return port.isdigit() and 1 <= int(port) <= 65535
+def ts(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 20 and value.endswith("Z") and value[4] == value[7] == "-" and value[10] == "T" and value[13] == value[16] == ":" and (value[:4] + value[5:7] + value[8:10] + value[11:13] + value[14:16] + value[17:19]).isdigit()
 try:
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
@@ -70,8 +77,9 @@ for node in nodes:
     name = node.get("name")
     req(isinstance(name, str) and name.startswith("node-"), f"node has invalid name: {name!r}")
     req(node.get("process_comm") == expected_comm.get(impl), f"{name} process_comm does not prove {impl} identity")
-    for field in ("pid", "command", "binary", "rpc_endpoint", "p2p_endpoint", "started_at"):
+    for field in ("pid", "command", "binary"):
         req(field in node and node[field] not in ("", None), f"{name} missing {field}")
+    req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node["pid"], int) and node["pid"] > 0, f"{name} pid is not a positive integer")
     for field in ("process_alive", "rpc_endpoint_process_backed", "p2p_endpoint_process_backed"):
         req(node.get(field) is True, f"{name} does not prove {field}")
@@ -82,6 +90,7 @@ links = connectivity.get("counterpart_links")
 req(isinstance(links, dict), "PASS report missing counterpart_links")
 go_expected = links.get("go_peer_snapshot_expected_addr")
 rust_expected = links.get("rust_peer_snapshot_expected_addr")
+req(all(ep(links.get(f)) for f in ("go_peer_snapshot_expected_addr", "rust_peer_snapshot_expected_addr", "rust_outbound_local_addr", "rust_outbound_remote_addr")), "counterpart link endpoint is malformed")
 req(rust_expected == nodes_by_impl["go"]["p2p_endpoint"] and links.get("rust_outbound_remote_addr") == rust_expected and links.get("rust_outbound_local_addr") == go_expected and links.get("rust_outbound_pid") == nodes_by_impl["rust"]["pid"], "peer evidence is not bound to expected counterpart endpoints")
 req(isinstance(go_expected, str) and go_expected not in {rust_expected, nodes_by_impl["rust"]["p2p_endpoint"], nodes_by_impl["go"]["rpc_endpoint"], nodes_by_impl["rust"]["rpc_endpoint"]}, "go peer evidence is not a rust outbound peer address")
 for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snapshot", rust_expected)):
@@ -89,6 +98,7 @@ for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snap
     req(isinstance(snapshot, dict) and snapshot.get("count", 0) >= 1, f"{field} must show at least one peer")
     peers = snapshot.get("peers")
     req(isinstance(peers, list) and peers and snapshot.get("count") == len(peers), f"{field}.peers/count are internally inconsistent")
+    req(all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers), f"{field}.peers contain malformed entries")
     req(any(p.get("addr") == expected_addr and p.get("handshake_complete") is True for p in peers if isinstance(p, dict)), f"{field} lacks completed handshake for expected counterpart")
 print(f"PASS: mixed-client mesh report accepted {path}")
 PY
@@ -117,16 +127,8 @@ RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC=""
 GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
-run_fips_preflight_before_captured_dev_env() {
-  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]]; then
-    return 0
-  fi
-  echo "Running FIPS-only preflight before captured dev-env command streams" >&2
-  "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2
-}
-run_validator() {
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"
-}
+run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
+run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
   python3 - "${method}" "${addr}" "${path}" <<'PY'
@@ -201,11 +203,7 @@ extract_log_addr() {
   [[ "${addr}" == 127.0.0.1:* ]] || return 1
   printf '%s\n' "${addr}"
 }
-build_go_node() {
-  echo "Building Go rubin-node binary" >&2
-  "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${GO_NODE_BIN}" ./cmd/rubin-node || return 1
-  [[ -x "${GO_NODE_BIN}" ]]
-}
+build_go_node() { echo "Building Go rubin-node binary" >&2; "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${GO_NODE_BIN}" ./cmd/rubin-node || return 1; [[ -x "${GO_NODE_BIN}" ]]; }
 build_rust_node() {
   local host_triple cargo_target_dir cargo_log cargo_bin
   echo "Building Rust rubin-node binary" >&2
@@ -341,13 +339,7 @@ with open(e["LEGACY_SCHEMA_MARKER_JSON"], "w", encoding="utf-8") as f:
 PY
 }
 
-finish_no_data() {
-  local reason="$1"
-  write_outputs "NO_DATA" "${reason}"
-  run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2
-  echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2
-  exit 1
-}
+finish_no_data() { local reason="$1"; write_outputs "NO_DATA" "${reason}"; run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }
 
 wait_peer_snapshot() {
   local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp
