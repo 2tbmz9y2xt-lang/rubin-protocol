@@ -18,12 +18,15 @@ if [[ "${_rubin_process_existing_exit_trap}" == *"rubin_process_exit_trap"* ]]; 
 fi
 unset _rubin_process_existing_exit_trap
 RUBIN_PROCESS_PIDS=()
+RUBIN_PROCESS_STARTED_PIDS=()
+RUBIN_PROCESS_STARTED_EXEC_REALPATHS=()
 RUBIN_PROCESS_LOGS=()
 RUBIN_PROCESS_LAST_PID=""
 RUBIN_PROCESS_TOPOLOGY_NAMES=()
 RUBIN_PROCESS_TOPOLOGY_IMPLS=()
 RUBIN_PROCESS_TOPOLOGY_PIDS=()
 RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=()
+RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS=()
 RUBIN_PROCESS_PROXY_SOURCES=()
 RUBIN_PROCESS_PROXY_TARGETS=()
 RUBIN_PROCESS_PROXY_ADDRS=()
@@ -128,12 +131,15 @@ _rubin_process_require_artifact_parent() {
 _rubin_process_clear_state() {
   trap - EXIT
   RUBIN_PROCESS_PIDS=()
+  RUBIN_PROCESS_STARTED_PIDS=()
+  RUBIN_PROCESS_STARTED_EXEC_REALPATHS=()
   RUBIN_PROCESS_LOGS=()
   RUBIN_PROCESS_LAST_PID=""
   RUBIN_PROCESS_TOPOLOGY_NAMES=()
   RUBIN_PROCESS_TOPOLOGY_IMPLS=()
   RUBIN_PROCESS_TOPOLOGY_PIDS=()
   RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=()
+  RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS=()
   RUBIN_PROCESS_PROXY_SOURCES=()
   RUBIN_PROCESS_PROXY_TARGETS=()
   RUBIN_PROCESS_PROXY_ADDRS=()
@@ -200,12 +206,15 @@ rubin_process_init() {
     return 1
   }
   RUBIN_PROCESS_PIDS=()
+  RUBIN_PROCESS_STARTED_PIDS=()
+  RUBIN_PROCESS_STARTED_EXEC_REALPATHS=()
   RUBIN_PROCESS_LOGS=()
   RUBIN_PROCESS_LAST_PID=""
   RUBIN_PROCESS_TOPOLOGY_NAMES=()
   RUBIN_PROCESS_TOPOLOGY_IMPLS=()
   RUBIN_PROCESS_TOPOLOGY_PIDS=()
   RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=()
+  RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS=()
   RUBIN_PROCESS_PROXY_SOURCES=()
   RUBIN_PROCESS_PROXY_TARGETS=()
   RUBIN_PROCESS_PROXY_ADDRS=()
@@ -219,7 +228,7 @@ rubin_process_is_alive() {
 }
 
 rubin_process_start() {
-  local log_file log_dir launch_status started_pid
+  local log_file log_dir launch_exec_realpath launch_status started_pid
   (( $# >= 2 )) || { _rubin_process_error "rubin_process_start requires a log path and command"; return 1; }
   log_file="$(_rubin_process_resolve_log "$1")" || return 1
   shift
@@ -227,9 +236,10 @@ rubin_process_start() {
   _rubin_process_mkdir_under_artifact_root "${log_dir}" || return 1
   _rubin_process_require_artifact_parent "${log_file}" || return 1
   command -v perl >/dev/null 2>&1 || { _rubin_process_error "perl is required to launch managed process groups"; return 1; }
+  launch_exec_realpath="$(_rubin_process_executable_realpath "$1")" || { _rubin_process_error "failed to resolve executable identity for $1"; return 1; }
 
   RUBIN_PROCESS_LAST_PID=""
-  perl -e 'setpgrp(0, 0) or die "setpgrp failed: $!"; exec @ARGV or die "exec failed: $!"' -- "$@" >"${log_file}" 2>&1 &
+  perl -e 'setpgrp(0, 0) or die "setpgrp failed: $!"; exec { $ARGV[0] } @ARGV or die "exec failed: $!"' -- "$@" >"${log_file}" 2>&1 &
   launch_status=$?
   if (( launch_status != 0 )); then
     _rubin_process_error "failed to launch background command for ${log_file}"
@@ -247,6 +257,8 @@ rubin_process_start() {
   # shellcheck disable=SC2034 # caller scripts read this state after sourcing.
   RUBIN_PROCESS_LAST_PID="${started_pid}"
   RUBIN_PROCESS_PIDS+=("${started_pid}")
+  RUBIN_PROCESS_STARTED_PIDS+=("${started_pid}")
+  RUBIN_PROCESS_STARTED_EXEC_REALPATHS+=("${launch_exec_realpath}")
   RUBIN_PROCESS_LOGS+=("${log_file}")
   disown "${started_pid}" 2>/dev/null || true
 }
@@ -279,6 +291,36 @@ _rubin_process_managed_pid() {
   return 1
 }
 
+_rubin_process_executable_realpath() {
+  local executable="${1:-}" resolved
+  [[ -n "${executable}" ]] || return 1
+  if [[ "${executable}" == */* ]]; then
+    resolved="${executable}"
+  else
+    resolved="$(command -v -- "${executable}" 2>/dev/null)" || return 1
+  fi
+  [[ -n "${resolved}" && -f "${resolved}" && -x "${resolved}" ]] || return 1
+  perl -MCwd=realpath -e 'my $p = realpath($ARGV[0]); defined $p && -f $p && -x $p or exit 1; print "$p\n";' "${resolved}"
+}
+
+_rubin_process_started_exec_realpath() {
+  local pid="${1:-}" i
+  _rubin_process_pid "${pid}" || return 1
+  for ((i=${#RUBIN_PROCESS_STARTED_PIDS[@]} - 1; i >= 0; i--)); do
+    [[ "${RUBIN_PROCESS_STARTED_PIDS[$i]}" == "${pid}" ]] || continue
+    printf '%s\n' "${RUBIN_PROCESS_STARTED_EXEC_REALPATHS[$i]}"
+    return 0
+  done
+  return 1
+}
+
+_rubin_process_started_exec_matches() {
+  local pid="${1:-}" expected_exec="${2:-}" started_exec
+  [[ -n "${expected_exec}" ]] || return 1
+  started_exec="$(_rubin_process_started_exec_realpath "${pid}")" || return 1
+  [[ "${started_exec}" == "${expected_exec}" ]]
+}
+
 _rubin_process_pid_comm() {
   local pid="${1:-}" comm
   comm="$(ps -p "${pid}" -o comm= 2>/dev/null | awk 'NR==1 {print $1}')" || return 1
@@ -301,7 +343,7 @@ _rubin_process_pid_listens_on() {
 }
 
 rubin_process_register_topology_node() {
-  local name="${1:-}" implementation="${2:-}" pid="${3:-}" endpoint="${4:-}" comm
+  local name="${1:-}" implementation="${2:-}" pid="${3:-}" endpoint="${4:-}" expected_executable="${5:-}" comm expected_exec started_exec
   _rubin_process_require_init || return 1
   _rubin_process_name "${name}" || { _rubin_process_error "NO_DATA: reason=invalid_node_name node=${name:-<empty>}"; return 1; }
   _rubin_process_implementation "${implementation}" || { _rubin_process_error "NO_DATA: reason=invalid_implementation node=${name} implementation=${implementation:-<empty>}"; return 1; }
@@ -314,11 +356,16 @@ rubin_process_register_topology_node() {
   _rubin_process_pid_listens_on "${pid}" "${endpoint}" || { _rubin_process_error "NO_DATA: reason=node_endpoint_not_process_backed node=${name} pid=${pid} endpoint=${endpoint}"; return 1; }
   comm="$(_rubin_process_pid_comm "${pid}")" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} pid=${pid}"; return 1; }
   _rubin_process_runtime_comm_matches "${implementation}" "${comm}" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} implementation=${implementation} pid=${pid} comm=${comm}"; return 1; }
+  [[ -n "${expected_executable}" ]] || { _rubin_process_error "NO_DATA: reason=missing_expected_executable node=${name} implementation=${implementation} pid=${pid}"; return 1; }
+  expected_exec="$(_rubin_process_executable_realpath "${expected_executable}")" || { _rubin_process_error "NO_DATA: reason=expected_executable_unverified node=${name} implementation=${implementation} pid=${pid}"; return 1; }
+  started_exec="$(_rubin_process_started_exec_realpath "${pid}")" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} implementation=${implementation} pid=${pid}"; return 1; }
+  [[ "${started_exec}" == "${expected_exec}" ]] || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} implementation=${implementation} pid=${pid}"; return 1; }
   ! _rubin_process_node_index "${name}" >/dev/null || { _rubin_process_error "NO_DATA: reason=duplicate_node node=${name}"; return 1; }
   RUBIN_PROCESS_TOPOLOGY_NAMES+=("${name}")
   RUBIN_PROCESS_TOPOLOGY_IMPLS+=("${implementation}")
   RUBIN_PROCESS_TOPOLOGY_PIDS+=("${pid}")
   RUBIN_PROCESS_TOPOLOGY_ENDPOINTS+=("${endpoint}")
+  RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS+=("${expected_exec}")
 }
 
 rubin_process_register_proxy_link() {
@@ -362,10 +409,11 @@ PY
 }
 
 _rubin_process_node_is_fresh() {
-  local index="${1:-}" pid endpoint
+  local index="${1:-}" pid endpoint expected_exec
   pid="${RUBIN_PROCESS_TOPOLOGY_PIDS[$index]}"
   endpoint="${RUBIN_PROCESS_TOPOLOGY_ENDPOINTS[$index]}"
-  rubin_process_is_alive "${pid}" && _rubin_process_pid_listens_on "${pid}" "${endpoint}"
+  expected_exec="${RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS[$index]:-}"
+  rubin_process_is_alive "${pid}" && _rubin_process_started_exec_matches "${pid}" "${expected_exec}" && _rubin_process_pid_listens_on "${pid}" "${endpoint}"
 }
 
 _rubin_process_control_pair() {

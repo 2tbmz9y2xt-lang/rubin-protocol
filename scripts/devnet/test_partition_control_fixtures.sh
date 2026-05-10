@@ -49,6 +49,15 @@ while True:
 PY
 }
 
+write_runtime_stub() {
+  mkdir -p "$(dirname "$1")"
+  cat >"$1" <<'SH'
+#!/usr/bin/env sh
+exit 99
+SH
+  chmod +x "$1"
+}
+
 server_addr() { sed -n 's/.*server: listening=//p' "$1" | tail -n 1 | tr -d '[:space:]'; }
 
 start_server() {
@@ -60,11 +69,35 @@ start_server() {
   SERVER_ENDPOINT="$(server_addr "${RUBIN_PROCESS_ARTIFACT_ROOT}/${log_file}")"
 }
 
+start_spoof_server() {
+  local label="$1" runtime_name="$2" log_file spoof_bin
+  log_file="${label}.log"
+  spoof_bin="${RUBIN_PROCESS_ARTIFACT_ROOT}/${runtime_name}"
+  cat >"${spoof_bin}" <<'PL'
+#!/usr/bin/env perl
+use strict; use warnings;
+use IO::Socket::INET;
+$0 =~ s{.*/}{}; $| = 1;
+my $listener = IO::Socket::INET->new(LocalAddr => "127.0.0.1", LocalPort => 0, Listen => 5, ReuseAddr => 1, Proto => "tcp") or die "listen failed: $!";
+print "server: listening=127.0.0.1:" . $listener->sockport() . "\n";
+while (1) {
+  my $client = $listener->accept();
+  next unless $client; print {$client} "ok"; close $client;
+}
+PL
+  chmod +x "${spoof_bin}"
+  rubin_process_start "${log_file}" "${spoof_bin}"
+  rubin_process_wait_for_log "${log_file}" "server: listening=" 10 "${RUBIN_PROCESS_LAST_PID}"
+  SERVER_PID="${RUBIN_PROCESS_LAST_PID}"
+  SERVER_ENDPOINT="$(server_addr "${RUBIN_PROCESS_ARTIFACT_ROOT}/${log_file}")"
+}
+
 seed_nodes() {
   RUBIN_PROCESS_TOPOLOGY_NAMES=(node-go node-rust)
   RUBIN_PROCESS_TOPOLOGY_IMPLS=("${1:-go}" "${2:-rust}")
   RUBIN_PROCESS_TOPOLOGY_PIDS=("${GO_PID}" "${RUST_PID}")
   RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=("${GO_ENDPOINT}" "${RUST_ENDPOINT}")
+  RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS=("$(_rubin_process_started_exec_realpath "${GO_PID}")" "$(_rubin_process_started_exec_realpath "${RUST_PID}")")
 }
 
 seed_link() {
@@ -86,16 +119,22 @@ rubin_process_init partition-control-fail-closed
 trap cleanup_fixture EXIT
 
 SERVER_PY="${RUBIN_PROCESS_ARTIFACT_ROOT}/helper server.py"
+EXPECTED_GO_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/expected/rubin-node-go"
 TARGET_FILE="${RUBIN_PROCESS_ARTIFACT_ROOT}/proxy target.txt"
 MISSING_TARGET="${RUBIN_PROCESS_ARTIFACT_ROOT}/missing target.txt"
 write_server "${SERVER_PY}"
+write_runtime_stub "${EXPECTED_GO_BIN}"
 
 SERVER_PID="" SERVER_ENDPOINT=""
 start_server go-helper send; GO_PID="${SERVER_PID}" GO_ENDPOINT="${SERVER_ENDPOINT}"
 start_server rust-helper send; RUST_PID="${SERVER_PID}" RUST_ENDPOINT="${SERVER_ENDPOINT}"
 start_server silent-helper silent; SILENT_ENDPOINT="${SERVER_ENDPOINT}"
+start_spoof_server basename-spoof rubin-node-go; SPOOF_GO_PID="${SERVER_PID}" SPOOF_GO_ENDPOINT="${SERVER_ENDPOINT}"
+SPOOF_GO_COMM="$(_rubin_process_pid_comm "${SPOOF_GO_PID}")" || { echo "failed to read spoof process comm" >&2; exit 1; }; [[ "${SPOOF_GO_COMM}" == "rubin-node-go" ]] || { echo "spoof fixture did not expose rubin-node-go comm: ${SPOOF_GO_COMM}" >&2; exit 1; }
 
 expect_fail_contains "fake go identity" "reason=process_identity_unverified" rubin_process_register_topology_node node-go go "${GO_PID}" "${GO_ENDPOINT}"
+expect_fail_contains "basename spoof missing expected executable" "reason=missing_expected_executable" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}"
+expect_fail_contains "basename spoof identity" "reason=process_identity_unverified" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}" "${EXPECTED_GO_BIN}"
 ((${#RUBIN_PROCESS_TOPOLOGY_NAMES[@]} == 0)) || { echo "fake process was registered as topology" >&2; exit 1; }
 expect_fail_contains "socket timeout" "reason=probe_timeout" rubin_process_probe_endpoint "${SILENT_ENDPOINT}" 1
 expect_fail_contains "unknown source" "reason=unknown_source" rubin_process_partition_pair node-missing node-rust
@@ -104,6 +143,7 @@ RUBIN_PROCESS_TOPOLOGY_NAMES=(node-go)
 RUBIN_PROCESS_TOPOLOGY_IMPLS=(go)
 RUBIN_PROCESS_TOPOLOGY_PIDS=("${GO_PID}")
 RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=("${GO_ENDPOINT}")
+RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS=("$(_rubin_process_started_exec_realpath "${GO_PID}")")
 expect_fail_contains "same node" "reason=same_node" rubin_process_partition_pair node-go node-go
 expect_fail_contains "single node" "reason=single_node_topology" rubin_process_partition_pair node-go node-rust
 
