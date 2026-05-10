@@ -883,7 +883,10 @@ fn handle_peer(
                 drop(engine);
                 finalize_live_message_outcome(&shared, outcome, pending_cleanup)?
             };
-            maybe_apply_tx_pool_cleanup(&shared, tx_pool_cleanup)?;
+            log_tx_pool_cleanup_requeue_failure(&maybe_apply_tx_pool_cleanup(
+                &shared,
+                tx_pool_cleanup,
+            )?);
             responses
         };
         for outbound in outbound_messages {
@@ -925,7 +928,7 @@ where
 fn apply_tx_pool_cleanup(
     shared: &SharedServiceState,
     tx_pool_cleanup: TxPoolCleanupPlan,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (chain_state, block_store, chain_id) = {
         let engine = shared
             .sync_engine
@@ -937,22 +940,38 @@ fn apply_tx_pool_cleanup(
             engine.chain_id(),
         )
     };
-    let mut tx_pool = shared
-        .tx_pool
-        .lock()
-        .map_err(|_| "tx pool unavailable".to_string())?;
-    tx_pool_cleanup.apply(&mut tx_pool, &chain_state, block_store.as_ref(), chain_id);
-    Ok(())
+    let report = {
+        let mut tx_pool = shared
+            .tx_pool
+            .lock()
+            .map_err(|_| "tx pool unavailable".to_string())?;
+        tx_pool_cleanup.apply_with_report(
+            &mut tx_pool,
+            &chain_state,
+            block_store.as_ref(),
+            chain_id,
+        )
+    };
+    if report.has_requeue_failures() {
+        return Ok(Some(report.requeue_failure_summary()));
+    }
+    Ok(None)
 }
 
 fn maybe_apply_tx_pool_cleanup(
     shared: &SharedServiceState,
     tx_pool_cleanup: TxPoolCleanupPlan,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     if tx_pool_cleanup.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     apply_tx_pool_cleanup(shared, tx_pool_cleanup)
+}
+
+fn log_tx_pool_cleanup_requeue_failure(summary: &Option<String>) {
+    if let Some(summary) = summary {
+        eprintln!("p2p: tx pool cleanup requeue failed: {summary}");
+    }
 }
 
 fn finalize_live_message_outcome(
@@ -966,7 +985,10 @@ fn finalize_live_message_outcome(
             outcome.tx_pool_cleanup.merge(pending_cleanup),
         )),
         Err(err) => {
-            maybe_apply_tx_pool_cleanup(shared, pending_cleanup)?;
+            log_tx_pool_cleanup_requeue_failure(&maybe_apply_tx_pool_cleanup(
+                shared,
+                pending_cleanup,
+            )?);
             Err(format!("handle live message: {err}"))
         }
     }
@@ -1095,12 +1117,15 @@ mod tests {
         LiveMessageOutcome, PeerManager, PeerRuntimeConfig, VersionPayloadV1, WireMessage, MSG_TX,
     };
     use crate::sync_reorg::TxPoolCleanupPlan;
+    use crate::test_helpers::{block_with_txs, signed_conflicting_p2pk_state_and_txs};
     use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
     use crate::{
         block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine, TxPool,
     };
     use std::collections::HashMap;
+
+    static DNS_RESOLVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1148,6 +1173,76 @@ mod tests {
             peer_aliases: Arc::new(Mutex::new(HashMap::new())),
             local_addr: "127.0.0.1:0".to_string(),
         }
+    }
+
+    fn test_shared_state_after_genesis(prefix: &str) -> (SharedServiceState, std::path::PathBuf) {
+        let (sync_engine, dir) = test_engine(prefix);
+        {
+            let mut engine = sync_engine.lock().expect("sync engine");
+            let genesis = devnet_genesis_block_bytes();
+            engine
+                .apply_block_with_reorg(&genesis, None)
+                .expect("apply genesis");
+        }
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            Vec::new(),
+            sync_engine,
+        );
+        (shared, dir)
+    }
+
+    fn store_requeue_block(shared: &SharedServiceState, txs: &[Vec<u8>]) -> [u8; 32] {
+        let block = block_with_txs(1, 0, test_genesis_hash(), 2, txs);
+        let block_hash_bytes = block_hash(&block[..BLOCK_HEADER_BYTES]).expect("block hash");
+        let engine = shared.sync_engine.lock().expect("sync engine");
+        let block_store = engine.block_store.as_ref().expect("blockstore");
+        block_store
+            .store_block(block_hash_bytes, &block[..BLOCK_HEADER_BYTES], &block)
+            .expect("store requeue block");
+        block_hash_bytes
+    }
+
+    fn store_invalid_requeue_block(shared: &SharedServiceState) -> [u8; 32] {
+        let block = block_with_txs(1, 0, test_genesis_hash(), 3, &[]);
+        let header = &block[..BLOCK_HEADER_BYTES];
+        let block_hash_bytes = block_hash(header).expect("block hash");
+        let engine = shared.sync_engine.lock().expect("sync engine");
+        let block_store = engine.block_store.as_ref().expect("blockstore");
+        block_store
+            .store_block(block_hash_bytes, header, header)
+            .expect("store invalid requeue block");
+        block_hash_bytes
+    }
+
+    fn requeue_cleanup(block_hash_bytes: [u8; 32]) -> TxPoolCleanupPlan {
+        TxPoolCleanupPlan::from_parts_for_test(Vec::new(), Vec::new(), vec![block_hash_bytes])
+    }
+
+    fn assert_requeue_cleanup_failure(
+        result: Result<Option<String>, String>,
+        expected_bucket: &str,
+    ) {
+        let err = result
+            .expect("routine requeue failure must not be infrastructure-fatal")
+            .expect("requeue cleanup failure must reach live caller");
+        assert!(
+            err.contains("requeue_attempted="),
+            "unexpected cleanup summary: {err}"
+        );
+        for field in [
+            "requeue_blocks_unavailable",
+            "requeue_blocks_invalid",
+            "requeue_conflict",
+            "requeue_rejected",
+            "requeue_unavailable",
+        ] {
+            assert!(err.contains(field), "missing {field} in error: {err}");
+        }
+        assert!(
+            err.contains(expected_bucket),
+            "missing expected bucket {expected_bucket}: {err}"
+        );
     }
 
     fn wait_until(deadline: Instant, check: impl Fn() -> bool) {
@@ -1232,9 +1327,80 @@ mod tests {
         let cleanup =
             TxPoolCleanupPlan::from_parts_for_test(vec![[0x11; 32]], Vec::new(), Vec::new());
 
-        apply_tx_pool_cleanup(&shared, cleanup).expect("cleanup should apply");
+        assert_eq!(
+            apply_tx_pool_cleanup(&shared, cleanup).expect("cleanup should apply"),
+            None
+        );
 
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_tx_pool_cleanup_surfaces_all_requeue_failure_buckets() {
+        let (shared, dir) = test_shared_state_after_genesis("rubin-node-p2p-requeue-missing-block");
+        assert_requeue_cleanup_failure(
+            apply_tx_pool_cleanup(&shared, requeue_cleanup([0x44; 32])),
+            "requeue_blocks_unavailable=1",
+        );
+        fs::remove_dir_all(dir).expect("cleanup missing block");
+
+        let (shared, dir) = test_shared_state_after_genesis("rubin-node-p2p-requeue-invalid-block");
+        let invalid_block_hash = store_invalid_requeue_block(&shared);
+        assert_requeue_cleanup_failure(
+            apply_tx_pool_cleanup(&shared, requeue_cleanup(invalid_block_hash)),
+            "requeue_blocks_invalid=1",
+        );
+        fs::remove_dir_all(dir).expect("cleanup invalid block");
+
+        let (shared, dir) = test_shared_state_after_genesis("rubin-node-p2p-requeue-unavailable");
+        let (state, low_fee_raw, _) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        {
+            let mut engine = shared.sync_engine.lock().expect("sync engine");
+            engine.chain_state.utxos = state.utxos.clone();
+        }
+        let low_fee_block_hash = store_requeue_block(&shared, std::slice::from_ref(&low_fee_raw));
+        assert_requeue_cleanup_failure(
+            apply_tx_pool_cleanup(&shared, requeue_cleanup(low_fee_block_hash)),
+            "requeue_unavailable=1",
+        );
+        fs::remove_dir_all(dir).expect("cleanup unavailable");
+
+        let (shared, dir) = test_shared_state_after_genesis("rubin-node-p2p-requeue-rejected");
+        let (_, missing_utxo_raw, _) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let rejected_block_hash =
+            store_requeue_block(&shared, std::slice::from_ref(&missing_utxo_raw));
+        assert_requeue_cleanup_failure(
+            apply_tx_pool_cleanup(&shared, requeue_cleanup(rejected_block_hash)),
+            "requeue_rejected=1",
+        );
+        fs::remove_dir_all(dir).expect("cleanup rejected");
+
+        let (shared, dir) = test_shared_state_after_genesis("rubin-node-p2p-requeue-conflict");
+        let (state, admitted_raw, _) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        {
+            let mut engine = shared.sync_engine.lock().expect("sync engine");
+            engine.chain_state.utxos = state.utxos.clone();
+        }
+        let conflict_block_hash = store_requeue_block(&shared, std::slice::from_ref(&admitted_raw));
+        {
+            let engine = shared.sync_engine.lock().expect("sync engine");
+            shared
+                .tx_pool
+                .lock()
+                .expect("tx pool")
+                .admit(
+                    &admitted_raw,
+                    &engine.chain_state,
+                    engine.block_store.as_ref(),
+                    engine.cfg.chain_id,
+                )
+                .expect("preload duplicate");
+        }
+        assert_requeue_cleanup_failure(
+            maybe_apply_tx_pool_cleanup(&shared, requeue_cleanup(conflict_block_hash)),
+            "requeue_conflict=1",
+        );
+        fs::remove_dir_all(dir).expect("cleanup conflict");
     }
 
     #[test]
@@ -1246,8 +1412,11 @@ mod tests {
             sync_engine,
         );
 
-        maybe_apply_tx_pool_cleanup(&shared, TxPoolCleanupPlan::default())
-            .expect("empty cleanup should noop");
+        assert_eq!(
+            maybe_apply_tx_pool_cleanup(&shared, TxPoolCleanupPlan::default())
+                .expect("empty cleanup should noop"),
+            None
+        );
 
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -1863,6 +2032,7 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_rejects_unresolvable_addr() {
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
         let err = connect_with_timeout("bad host:19111", Duration::from_millis(25)).unwrap_err();
         assert!(
             err.contains("peer address resolution failed"),
@@ -2462,6 +2632,7 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_rejects_when_dns_resolvers_saturated() {
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
         let prev = super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst);
         super::ACTIVE_DNS_RESOLVERS.store(super::MAX_DNS_RESOLVER_THREADS, Ordering::SeqCst);
         let result = super::connect_with_timeout("unreachable.test:80", Duration::from_secs(1));
@@ -2486,6 +2657,7 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_hostname_uses_dns_resolver_path() {
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK.lock().unwrap();
         // "localhost:1" resolves via DNS (not IP literal fast path),
         // covering the resolver thread spawn + channel recv + addr iteration.
         // Port 1 is refused immediately, so this is fast.

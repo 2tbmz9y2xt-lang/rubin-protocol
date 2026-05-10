@@ -7,7 +7,7 @@ use std::ops::Deref;
 use crate::blockstore::BlockStore;
 use crate::chainstate::ChainStateConnectSummary;
 use crate::sync::SyncEngine;
-use crate::txpool::{TxPool, TxSource};
+use crate::txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind, TxSource};
 
 pub(crate) const PARENT_BLOCK_NOT_FOUND_ERR: &str = "parent block not found";
 
@@ -46,6 +46,69 @@ pub struct TxPoolCleanupPlan {
     requeue_block_hashes: Vec<[u8; 32]>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TxPoolCleanupReport {
+    requeue_blocks_unavailable: usize,
+    requeue_blocks_invalid: usize,
+    requeue_attempted: usize,
+    requeue_accepted: usize,
+    requeue_conflict: usize,
+    requeue_rejected: usize,
+    requeue_unavailable: usize,
+}
+
+impl TxPoolCleanupReport {
+    pub(crate) fn requeue_failed(&self) -> usize {
+        self.requeue_conflict
+            .saturating_add(self.requeue_rejected)
+            .saturating_add(self.requeue_unavailable)
+    }
+
+    pub(crate) fn requeue_blocks_failed(&self) -> usize {
+        self.requeue_blocks_unavailable
+            .saturating_add(self.requeue_blocks_invalid)
+    }
+
+    pub(crate) fn has_requeue_failures(&self) -> bool {
+        self.requeue_failed() > 0 || self.requeue_blocks_failed() > 0
+    }
+
+    pub(crate) fn requeue_failure_summary(&self) -> String {
+        format!(
+            "requeue_attempted={} requeue_accepted={} requeue_blocks_unavailable={} requeue_blocks_invalid={} requeue_conflict={} requeue_rejected={} requeue_unavailable={}",
+            self.requeue_attempted,
+            self.requeue_accepted,
+            self.requeue_blocks_unavailable,
+            self.requeue_blocks_invalid,
+            self.requeue_conflict,
+            self.requeue_rejected,
+            self.requeue_unavailable
+        )
+    }
+
+    fn record_requeue_attempt(&mut self) {
+        self.requeue_attempted = self.requeue_attempted.saturating_add(1);
+    }
+
+    fn record_requeue_accepted(&mut self) {
+        self.requeue_accepted = self.requeue_accepted.saturating_add(1);
+    }
+
+    fn record_requeue_error(&mut self, err: &TxPoolAdmitError) {
+        match err.kind {
+            TxPoolAdmitErrorKind::Conflict => {
+                self.requeue_conflict = self.requeue_conflict.saturating_add(1);
+            }
+            TxPoolAdmitErrorKind::Rejected => {
+                self.requeue_rejected = self.requeue_rejected.saturating_add(1);
+            }
+            TxPoolAdmitErrorKind::Unavailable => {
+                self.requeue_unavailable = self.requeue_unavailable.saturating_add(1);
+            }
+        }
+    }
+}
+
 impl TxPoolCleanupPlan {
     pub fn is_empty(&self) -> bool {
         self.confirmed_txids.is_empty()
@@ -60,6 +123,25 @@ impl TxPoolCleanupPlan {
         block_store: Option<&BlockStore>,
         chain_id: [u8; 32],
     ) {
+        // Best-effort compatibility path. Live callers that need authoritative
+        // requeue visibility must use `apply_with_report`.
+        let report = self.apply_with_report(pool, chain_state, block_store, chain_id);
+        if report.has_requeue_failures() {
+            eprintln!(
+                "mempool: requeue cleanup failed: {}",
+                report.requeue_failure_summary()
+            );
+        }
+    }
+
+    pub(crate) fn apply_with_report(
+        &self,
+        pool: &mut TxPool,
+        chain_state: &crate::ChainState,
+        block_store: Option<&BlockStore>,
+        chain_id: [u8; 32],
+    ) -> TxPoolCleanupReport {
+        let mut report = TxPoolCleanupReport::default();
         if !self.confirmed_txids.is_empty() {
             pool.evict_txids(&self.confirmed_txids);
         }
@@ -69,9 +151,12 @@ impl TxPoolCleanupPlan {
         if let Some(block_store) = block_store {
             for block_hash in self.requeue_block_hashes.iter().rev() {
                 let Ok(block_bytes) = block_store.get_block_by_hash(*block_hash) else {
+                    report.requeue_blocks_unavailable =
+                        report.requeue_blocks_unavailable.saturating_add(1);
                     continue;
                 };
                 let Ok(txs) = non_coinbase_tx_bytes(&block_bytes) else {
+                    report.requeue_blocks_invalid = report.requeue_blocks_invalid.saturating_add(1);
                     continue;
                 };
                 // Reorg requeue: route through source-aware admission so the
@@ -87,16 +172,25 @@ impl TxPoolCleanupPlan {
                 // intentionally remain unchanged: they remove entries from
                 // existing state and must not mutate any source counter.
                 for tx_bytes in txs {
-                    let _ = pool.add_tx_with_source(
+                    report.record_requeue_attempt();
+                    match pool.add_tx_with_source(
                         &tx_bytes,
                         chain_state,
                         Some(block_store),
                         chain_id,
                         TxSource::Reorg,
-                    );
+                    ) {
+                        Ok(_) => report.record_requeue_accepted(),
+                        Err(err) => report.record_requeue_error(&err),
+                    }
                 }
             }
+        } else if !self.requeue_block_hashes.is_empty() {
+            report.requeue_blocks_unavailable = report
+                .requeue_blocks_unavailable
+                .saturating_add(self.requeue_block_hashes.len());
         }
+        report
     }
 
     pub fn merge(mut self, mut other: Self) -> Self {
@@ -1343,12 +1437,16 @@ mod tests {
         let outcome = engine
             .apply_block_with_reorg(&block2_alt, None)
             .expect("reorg to heavier branch");
-        outcome.tx_pool_cleanup.apply(
+        let report = outcome.tx_pool_cleanup.apply_with_report(
             &mut pool,
             &engine.chain_state,
             engine.block_store.as_ref(),
             engine.cfg.chain_id,
         );
+        assert_eq!(report.requeue_attempted, 1);
+        assert_eq!(report.requeue_accepted, 1);
+        assert_eq!(report.requeue_failed(), 0);
+        assert_eq!(report.requeue_blocks_failed(), 0);
         assert_ne!(
             engine.chain_state.tip_hash, block1_hash,
             "reorg must switch tip away from block 1"
@@ -1399,5 +1497,143 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).expect("cleanup primary");
         std::fs::remove_dir_all(&dir2).expect("cleanup ctrl");
+    }
+
+    #[test]
+    fn reorg_requeue_below_fee_floor_is_reported_without_pool_mutation() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-requeue-below-fee-floor");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+        engine.cfg.chain_id = devnet_genesis_chain_id();
+
+        let (state, low_fee_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
+        engine.chain_state.utxos = state.utxos.clone();
+        let block1 = block_with_txs(
+            1,
+            0,
+            genesis_hash,
+            gen_ts + 1,
+            std::slice::from_ref(&low_fee_raw),
+        );
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("apply block 1");
+
+        let block1_alt = coinbase_only_block(1, genesis_hash, gen_ts + 2);
+        let block1_alt_hash =
+            rubin_consensus::block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("hash block 1'");
+        engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .store_block(
+                block1_alt_hash,
+                &block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &block1_alt,
+            )
+            .expect("store block 1'");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+
+        let mut pool = TxPool::new();
+        let outcome = engine
+            .apply_block_with_reorg(&block2_alt, None)
+            .expect("reorg to heavier branch");
+        let report = outcome.tx_pool_cleanup.apply_with_report(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
+
+        assert_eq!(report.requeue_attempted, 1);
+        assert_eq!(report.requeue_accepted, 0);
+        assert_eq!(report.requeue_unavailable, 1);
+        assert_eq!(report.requeue_failed(), 1);
+        assert_eq!(report.requeue_blocks_failed(), 0);
+        assert!(
+            pool.is_empty(),
+            "failed below-floor requeue must not insert or index the tx as accepted"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn reorg_requeue_duplicate_conflict_is_reported_without_replacing_entry() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-requeue-duplicate-conflict");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+        engine.cfg.chain_id = devnet_genesis_chain_id();
+
+        let (state, admitted_raw, _block_raw) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        engine.chain_state.utxos = state.utxos.clone();
+        let block1 = block_with_txs(
+            1,
+            0,
+            genesis_hash,
+            gen_ts + 1,
+            std::slice::from_ref(&admitted_raw),
+        );
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("apply block 1");
+
+        let block1_alt = coinbase_only_block(1, genesis_hash, gen_ts + 2);
+        let block1_alt_hash =
+            rubin_consensus::block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("hash block 1'");
+        engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .store_block(
+                block1_alt_hash,
+                &block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &block1_alt,
+            )
+            .expect("store block 1'");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+
+        let outcome = engine
+            .apply_block_with_reorg(&block2_alt, None)
+            .expect("reorg to heavier branch");
+        let (_, requeued_txid, _, consumed) =
+            rubin_consensus::parse_tx(&admitted_raw).expect("parse admitted");
+        assert_eq!(consumed, admitted_raw.len());
+
+        let mut pool = TxPool::new();
+        pool.admit(
+            &admitted_raw,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        )
+        .expect("preload duplicate");
+        assert_eq!(pool.entry_source(&requeued_txid), Some(TxSource::Local));
+
+        let report = outcome.tx_pool_cleanup.apply_with_report(
+            &mut pool,
+            &engine.chain_state,
+            engine.block_store.as_ref(),
+            engine.cfg.chain_id,
+        );
+
+        assert_eq!(report.requeue_attempted, 1);
+        assert_eq!(report.requeue_accepted, 0);
+        assert_eq!(report.requeue_conflict, 1);
+        assert_eq!(report.requeue_failed(), 1);
+        assert_eq!(pool.len(), 1);
+        assert_eq!(
+            pool.entry_source(&requeued_txid),
+            Some(TxSource::Local),
+            "duplicate failed requeue must not replace the existing Local entry as Reorg"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
