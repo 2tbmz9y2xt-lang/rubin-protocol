@@ -6,15 +6,13 @@ GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
-CHECK_REPORT="" CHECK_REPORT_MODE=0 MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
-usage() { echo "usage: $0 [--check-report PATH]" >&2; }
+CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
+usage() { echo "usage: $0 [--check-report PATH|--check-report-live PATH]" >&2; }
 while (($#)); do
   case "$1" in
-    --check-report)
+    --check-report|--check-report-live)
       [[ $# -ge 2 ]] || { usage; exit 2; }
-      CHECK_REPORT_MODE=1
-      CHECK_REPORT="$2"
-      shift 2
+      CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2
       ;;
     -h|--help)
       usage
@@ -56,7 +54,8 @@ def ep(value: object) -> bool:
 def nonempty_str(value: object) -> bool: return isinstance(value, str) and bool(value.strip())
 def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-ww", "-p", str(pid), "-o", "comm="]))
 def lsof_lines(pid: int, state: str) -> list[str]:
-    p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5); req(p.returncode == 0 or not p.stderr.strip(), "lsof_failed")
+    p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5); req(p.returncode == 0 or not (p.stdout.strip() or p.stderr.strip()), "lsof_failed")
+    if p.returncode != 0: return []
     return [line[1:] for line in p.stdout.splitlines() if line.startswith("n")]
 def owns_listen(pid: int, endpoint: str) -> bool: return endpoint in lsof_lines(pid, "LISTEN")
 def peers(addr: str) -> dict:
@@ -152,10 +151,10 @@ for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snap
     if live:
         fresh = snapshot_norm(peers(nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]))
         req(stored == fresh, f"{field} differs from live exact peer set")
-print(f"PASS: mixed-client mesh report accepted {path}")
+print(f"PASS: mixed-client mesh report {'accepted' if live else 'structure accepted'} {path}")
 PY
 }
-if [[ "${CHECK_REPORT_MODE}" == "1" ]]; then need_tool python3; check_report "${CHECK_REPORT}" live; exit 0; fi
+if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
 need_tool python3
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
@@ -198,11 +197,11 @@ pid_comm() {
   comm="$(bounded ps -ww -p "${pid}" -o comm= 2>"${err}" | sed -n '1p')" || status=$?; (( status == 142 )) && return 3; [[ ${status} -eq 0 || ! -s "${err}" ]] || return 2; [[ -n "${comm}" ]] || return 1; basename -- "${comm}"
 }
 pid_listens_on() {
-  local pid="$1" endpoint="$2" out status=0
-  out="$(bounded lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>&1)" || status=$?
-  grep -F -x -q -- "n${endpoint}" <<<"${out}" && return 0
+  local pid="$1" endpoint="$2" out err status=0
+  out="$(bounded lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>"${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-listen.err")" || status=$?; err="$(<"${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-listen.err")"
   (( status == 142 )) && return 3
-  (( status == 0 || ${#out} == 0 )) || return 2
+  (( status == 0 || (${#out} == 0 && ${#err} == 0) )) || return 2
+  (( status == 0 )) && grep -F -x -q -- "n${endpoint}" <<<"${out}" && return 0
   return 1
 }
 p2p_addr_for_pid() {
@@ -214,7 +213,9 @@ deadline = time.time() + timeout
 while time.time() < deadline:
     try: proc = subprocess.run(["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
     except subprocess.TimeoutExpired: sys.exit(43)
-    if proc.returncode != 0 and proc.stderr.strip(): sys.exit(42)
+    if proc.returncode != 0:
+        if proc.stdout.strip() or proc.stderr.strip(): sys.exit(42)
+        time.sleep(1); continue
     addrs = sorted({line[1:].strip() for line in proc.stdout.splitlines() if line.startswith("n") and line[1:].strip() != rpc_addr and re.fullmatch(r"127\.0\.0\.1:[0-9]+", line[1:].strip())})
     if len(addrs) == 1: print(addrs[0]); sys.exit(0)
     if len(addrs) > 1: sys.exit(f"ambiguous p2p listen addresses for pid={pid}: {addrs}")
@@ -355,7 +356,7 @@ wait_peer_snapshot() {
   deadline=$((SECONDS + timeout)); PEER_SNAPSHOT_REASON=""
   tmp="${out}.tmp"
   while (( SECONDS < deadline )); do
-    if { rpc_json GET "${addr}" /peers >"${tmp}" 2>"${tmp}.err" || { PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; false; }; } \
+    if { rpc_json GET "${addr}" /peers >"${tmp}" 2>"${tmp}.err" && { PEER_SNAPSHOT_REASON=""; true; } || { PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; false; }; } \
       && python3 - "${tmp}" "${expected}" <<'PY' >/dev/null 2>&1
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
