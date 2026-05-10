@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/devnet-process-common.sh"
+# shellcheck source=scripts/devnet-process-common.sh disable=SC1091
+source "${HELPER}"
+
+require_contains() {
+  local haystack="$1" needle="$2" label="$3"
+  [[ "${haystack}" == *"${needle}"* ]] || { printf 'missing %s in %s: %s\n' "${needle}" "${label}" "${haystack}" >&2; return 1; }
+}
+
+expect_fail_contains() {
+  local label="$1" needle="$2"
+  shift 2
+  local output
+  if output="$("$@" 2>&1)"; then
+    printf 'expected failure for %s\n' "${label}" >&2
+    return 1
+  fi
+  require_contains "${output}" "${needle}" "${label}"
+}
+
+write_server() {
+  cat >"$1" <<'PY'
+import socket, sys, threading, time
+mode = sys.argv[1]
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", 0))
+listener.listen()
+print(f"server: listening={listener.getsockname()[0]}:{listener.getsockname()[1]}", flush=True)
+def handle(conn):
+    try:
+        if mode == "send":
+            conn.sendall(b"ok")
+        else:
+            time.sleep(3)
+    except OSError:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+while True:
+    conn, _ = listener.accept()
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+PY
+}
+
+server_addr() { sed -n 's/.*server: listening=//p' "$1" | tail -n 1 | tr -d '[:space:]'; }
+
+start_server() {
+  local label="$1" mode="$2" log_file
+  log_file="${label}.log"
+  rubin_process_start "${log_file}" python3 -u "${SERVER_PY}" "${mode}"
+  rubin_process_wait_for_log "${log_file}" "server: listening=" 10 "${RUBIN_PROCESS_LAST_PID}"
+  SERVER_PID="${RUBIN_PROCESS_LAST_PID}"
+  SERVER_ENDPOINT="$(server_addr "${RUBIN_PROCESS_ARTIFACT_ROOT}/${log_file}")"
+}
+
+seed_nodes() {
+  RUBIN_PROCESS_TOPOLOGY_NAMES=(node-go node-rust)
+  RUBIN_PROCESS_TOPOLOGY_IMPLS=("${1:-go}" "${2:-rust}")
+  RUBIN_PROCESS_TOPOLOGY_PIDS=("${GO_PID}" "${RUST_PID}")
+  RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=("${GO_ENDPOINT}" "${RUST_ENDPOINT}")
+}
+
+seed_link() {
+  RUBIN_PROCESS_PROXY_SOURCES=(node-go)
+  RUBIN_PROCESS_PROXY_TARGETS=(node-rust)
+  RUBIN_PROCESS_PROXY_ADDRS=("127.0.0.1:1")
+  RUBIN_PROCESS_PROXY_TARGET_FILES=("$1")
+}
+
+PARENT="$(mktemp -d "${TMPDIR:-/tmp}/rubin partition fail closed.XXXXXX")"
+cleanup_fixture() {
+  local status=$?
+  rubin_process_cleanup "${status}" || true
+  [[ "${status}" != "0" || ! -d "${PARENT}" ]] || rmdir "${PARENT}" || true
+  exit "${status}"
+}
+RUBIN_PROCESS_ARTIFACT_PARENT="${PARENT}"
+rubin_process_init partition-control-fail-closed
+trap cleanup_fixture EXIT
+
+SERVER_PY="${RUBIN_PROCESS_ARTIFACT_ROOT}/helper server.py"
+TARGET_FILE="${RUBIN_PROCESS_ARTIFACT_ROOT}/proxy target.txt"
+MISSING_TARGET="${RUBIN_PROCESS_ARTIFACT_ROOT}/missing target.txt"
+write_server "${SERVER_PY}"
+
+SERVER_PID="" SERVER_ENDPOINT=""
+start_server go-helper send; GO_PID="${SERVER_PID}" GO_ENDPOINT="${SERVER_ENDPOINT}"
+start_server rust-helper send; RUST_PID="${SERVER_PID}" RUST_ENDPOINT="${SERVER_ENDPOINT}"
+start_server silent-helper silent; SILENT_ENDPOINT="${SERVER_ENDPOINT}"
+
+expect_fail_contains "fake go identity" "reason=process_identity_unverified" rubin_process_register_topology_node node-go go "${GO_PID}" "${GO_ENDPOINT}"
+((${#RUBIN_PROCESS_TOPOLOGY_NAMES[@]} == 0)) || { echo "fake process was registered as topology" >&2; exit 1; }
+expect_fail_contains "socket timeout" "reason=probe_timeout" rubin_process_probe_endpoint "${SILENT_ENDPOINT}" 1
+expect_fail_contains "unknown source" "reason=unknown_source" rubin_process_partition_pair node-missing node-rust
+
+RUBIN_PROCESS_TOPOLOGY_NAMES=(node-go)
+RUBIN_PROCESS_TOPOLOGY_IMPLS=(go)
+RUBIN_PROCESS_TOPOLOGY_PIDS=("${GO_PID}")
+RUBIN_PROCESS_TOPOLOGY_ENDPOINTS=("${GO_ENDPOINT}")
+expect_fail_contains "same node" "reason=same_node" rubin_process_partition_pair node-go node-go
+expect_fail_contains "single node" "reason=single_node_topology" rubin_process_partition_pair node-go node-rust
+
+seed_nodes go go
+expect_fail_contains "same client" "reason=same_client_topology" rubin_process_partition_pair node-go node-rust
+
+seed_nodes
+seed_link "${MISSING_TARGET}"
+expect_fail_contains "missing proxy target" "reason=missing_proxy_target" rubin_process_partition_pair node-go node-rust
+
+printf 'drop\n' >"${TARGET_FILE}"
+seed_link "${TARGET_FILE}"
+expect_fail_contains "partition no effect" "reason=no_effect" rubin_process_partition_pair node-go node-rust
+printf '%s\n' "${RUST_ENDPOINT}" >"${TARGET_FILE}"
+expect_fail_contains "heal no effect" "reason=no_effect" rubin_process_heal_pair node-go node-rust
+expect_fail_contains "runtime verifier required" "reason=runtime_edge_verifier_required" rubin_process_partition_pair node-go node-rust
+
+rubin_process_stop_pid "${RUST_PID}" || true
+printf '%s\n' "${RUST_ENDPOINT}" >"${TARGET_FILE}"
+expect_fail_contains "stale topology" "reason=stale_topology" rubin_process_partition_pair node-go node-rust
+
+rubin_process_cleanup 0
+rmdir "${PARENT}"
+printf 'PASS: partition control helpers fail closed without live runtime proof\n'
