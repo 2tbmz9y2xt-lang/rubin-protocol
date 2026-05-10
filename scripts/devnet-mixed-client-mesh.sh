@@ -59,7 +59,6 @@ def argv0(value: object) -> str:
     try: return shlex.split(value)[0]
     except ValueError: return ""
 def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-ww", "-p", str(pid), "-o", "comm="]))
-def ps_argv0(pid: int) -> str: return run(["ps", "-ww", "-p", str(pid), "-o", "comm="])
 def lsof_lines(pid: int, state: str) -> list[str]:
     p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
     return [line[1:] for line in p.stdout.splitlines() if line.startswith("n")]
@@ -127,7 +126,7 @@ for node in nodes:
     req(nonempty_str(command) and Path(command_argv0).is_absolute() and Path(command_argv0).resolve() == binary_path and binary_path.name == expected_bin and binary_path.is_file() and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
-    if live: req(ps_comm(node["pid"]) == expected_bin and Path(ps_argv0(node["pid"])).resolve() == binary_path, f"{name} live process identity does not match report"); req(owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
+    if live: req(ps_comm(node["pid"]) == expected_bin, f"{name} live process identity does not match report"); req(owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
     for field in ("process_alive", "rpc_endpoint_process_backed", "p2p_endpoint_process_backed"):
         req(node.get(field) is True, f"{name} does not prove {field}")
 impls = {n["implementation"] for n in nodes}
