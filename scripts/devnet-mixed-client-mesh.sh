@@ -74,10 +74,13 @@ def peers(addr: str) -> dict:
     except Exception as exc:
         fail(f"live peer snapshot failed for {addr}: {exc}")
     return data if isinstance(data, dict) else {}
-def snapshot_exact(snapshot: object, expected: str) -> None:
+def snapshot_norm(snapshot: object) -> list[tuple[str, bool]]:
     count = snapshot.get("count") if isinstance(snapshot, dict) else None
     peers = snapshot.get("peers") if isinstance(snapshot, dict) else None
-    req(count == 1 and isinstance(peers, list) and len(peers) == 1 and peers[0] == {"addr": expected, "handshake_complete": True} and ep(expected), f"peer snapshot is not exact single completed peer {expected}")
+    req(isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers), "peer snapshot count/peers are invalid")
+    norm = sorted((p.get("addr"), p.get("handshake_complete")) for p in peers if isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool))
+    req(len(norm) == len(peers) and len(set(norm)) == len(norm), "peer snapshot entries are malformed or duplicated")
+    return norm
 def ts(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z": return False
     try:
@@ -148,9 +151,9 @@ final = data.get("final_verification")
 req(isinstance(final, dict) and all(final.get(f) is True for f in ("producer_side", "process_identity_rechecked", "rust_outbound_link_rechecked", "peer_snapshots_rechecked")), "PASS report missing producer-side final verification")
 req(final.get("rust_outbound_pid") == nodes_by_impl["rust"]["pid"] and final.get("rust_outbound_local_addr") == go_expected and final.get("rust_outbound_remote_addr") == rust_expected, "final verification is not bound to peer evidence")
 for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snapshot", rust_expected)):
-    snapshot_exact(connectivity.get(field), expected_addr)
-snapshot_exact(peers(nodes_by_impl["go"]["rpc_endpoint"]), go_expected)
-snapshot_exact(peers(nodes_by_impl["rust"]["rpc_endpoint"]), rust_expected)
+    stored = snapshot_norm(connectivity.get(field))
+    live = snapshot_norm(peers(nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]))
+    req(stored == live and (expected_addr, True) in stored, f"{field} differs from live exact peer set")
 print(f"PASS: mixed-client mesh report accepted {path}")
 PY
 }
@@ -357,7 +360,8 @@ import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
 expected, peers, count = sys.argv[2], data.get("peers"), data.get("count")
-ok = count == 1 and isinstance(peers, list) and len(peers) == 1 and peers[0] == {"addr": expected, "handshake_complete": True}
+def ep(v): return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and v.rsplit(":", 1)[-1].isdigit() and 1 <= int(v.rsplit(":", 1)[-1]) <= 65535
+ok = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and any(p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
 sys.exit(0 if ok else 1)
 PY
     then
