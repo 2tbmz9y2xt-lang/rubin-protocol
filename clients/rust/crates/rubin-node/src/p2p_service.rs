@@ -940,16 +940,18 @@ fn apply_tx_pool_cleanup(
             engine.chain_id(),
         )
     };
-    let mut tx_pool = shared
-        .tx_pool
-        .lock()
-        .map_err(|_| "tx pool unavailable".to_string())?;
-    let report = tx_pool_cleanup.apply_with_report(
-        &mut tx_pool,
-        &chain_state,
-        block_store.as_ref(),
-        chain_id,
-    );
+    let report = {
+        let mut tx_pool = shared
+            .tx_pool
+            .lock()
+            .map_err(|_| "tx pool unavailable".to_string())?;
+        tx_pool_cleanup.apply_with_report(
+            &mut tx_pool,
+            &chain_state,
+            block_store.as_ref(),
+            chain_id,
+        )
+    };
     if report.has_requeue_failures() {
         return Ok(Some(report.requeue_failure_summary()));
     }

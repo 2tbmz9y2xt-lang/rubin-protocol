@@ -2,7 +2,6 @@ use rubin_consensus::{
     block_hash, parse_block_bytes, parse_tx, read_compact_size_bytes,
     validate_block_basic_with_context_at_height, Outpoint, ParsedBlock, BLOCK_HEADER_BYTES,
 };
-use std::io::Write;
 use std::ops::Deref;
 
 use crate::blockstore::BlockStore;
@@ -126,7 +125,13 @@ impl TxPoolCleanupPlan {
     ) {
         // Best-effort compatibility path. Live callers that need authoritative
         // requeue visibility must use `apply_with_report`.
-        let _ = self.apply_with_report(pool, chain_state, block_store, chain_id);
+        let report = self.apply_with_report(pool, chain_state, block_store, chain_id);
+        if report.has_requeue_failures() {
+            eprintln!(
+                "mempool: requeue cleanup failed: {}",
+                report.requeue_failure_summary()
+            );
+        }
     }
 
     pub(crate) fn apply_with_report(
@@ -148,12 +153,10 @@ impl TxPoolCleanupPlan {
                 let Ok(block_bytes) = block_store.get_block_by_hash(*block_hash) else {
                     report.requeue_blocks_unavailable =
                         report.requeue_blocks_unavailable.saturating_add(1);
-                    log_requeue_block_failure(block_hash, "block unavailable");
                     continue;
                 };
                 let Ok(txs) = non_coinbase_tx_bytes(&block_bytes) else {
                     report.requeue_blocks_invalid = report.requeue_blocks_invalid.saturating_add(1);
-                    log_requeue_block_failure(block_hash, "block parse failed");
                     continue;
                 };
                 // Reorg requeue: route through source-aware admission so the
@@ -178,10 +181,7 @@ impl TxPoolCleanupPlan {
                         TxSource::Reorg,
                     ) {
                         Ok(_) => report.record_requeue_accepted(),
-                        Err(err) => {
-                            report.record_requeue_error(&err);
-                            log_requeue_tx_failure(&err);
-                        }
+                        Err(err) => report.record_requeue_error(&err),
                     }
                 }
             }
@@ -189,9 +189,6 @@ impl TxPoolCleanupPlan {
             report.requeue_blocks_unavailable = report
                 .requeue_blocks_unavailable
                 .saturating_add(self.requeue_block_hashes.len());
-            for block_hash in &self.requeue_block_hashes {
-                log_requeue_block_failure(block_hash, "blockstore unavailable");
-            }
         }
         report
     }
@@ -263,19 +260,6 @@ impl TxPoolCleanupPlan {
             requeue_block_hashes,
         }
     }
-}
-
-fn log_requeue_block_failure(block_hash: &[u8; 32], reason: &str) {
-    let _ = writeln!(
-        std::io::stderr(),
-        "mempool: requeue-block {}: {}",
-        hex::encode(block_hash),
-        reason
-    );
-}
-
-fn log_requeue_tx_failure(err: &TxPoolAdmitError) {
-    let _ = writeln!(std::io::stderr(), "mempool: requeue-tx: {err}");
 }
 
 #[derive(Clone, Debug)]
