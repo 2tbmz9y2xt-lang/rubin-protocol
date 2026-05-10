@@ -52,7 +52,7 @@ def checked_path(label: str, value: object) -> Path:
 def ep(value: object) -> bool:
     if not isinstance(value, str): return False
     host, sep, port = value.partition(":")
-    return sep == ":" and host == "127.0.0.1" and ":" not in port and port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
+    return sep == ":" and host == "127.0.0.1" and ":" not in port and port.isascii() and port.isdigit() and 1 <= len(port) <= 5 and 1 <= int(port) <= 65535
 def nonempty_str(value: object) -> bool: return isinstance(value, str) and bool(value.strip())
 def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-ww", "-p", str(pid), "-o", "comm="]))
 def lsof_lines(pid: int, state: str) -> list[str]:
@@ -360,7 +360,7 @@ import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
 expected, peers, count = sys.argv[2], data.get("peers"), data.get("count")
-def ep(v): return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and v.rsplit(":", 1)[-1].isdigit() and 1 <= int(v.rsplit(":", 1)[-1]) <= 65535
+def ep(v): return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and (p := v.rsplit(":", 1)[-1]).isdigit() and 1 <= len(p) <= 5 and 1 <= int(p) <= 65535
 ok = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers) and any(p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
 sys.exit(0 if ok else 1)
 PY
