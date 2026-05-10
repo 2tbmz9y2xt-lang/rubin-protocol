@@ -195,5 +195,5 @@ printf '%s\n' "${RUST_ENDPOINT}" >"${TARGET_FILE}"
 expect_fail_contains "stale topology" "reason=stale_topology" rubin_process_partition_pair node-go node-rust
 
 rubin_process_cleanup 0
-rm -f "${PARENT}/expect-fail-output.txt"; rmdir "${PARENT}"
+[[ "${RUBIN_PROCESS_KEEP_ARTIFACTS:-0}" == "1" ]] || { rm -f "${PARENT}/expect-fail-output.txt"; rmdir "${PARENT}"; }
 printf 'PASS: partition control helpers fail closed without live runtime proof\n'
