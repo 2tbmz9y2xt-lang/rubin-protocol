@@ -79,7 +79,7 @@ def snapshot_norm(snapshot: object) -> list[tuple[str, bool]]:
     peers = snapshot.get("peers") if isinstance(snapshot, dict) else None
     req(isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers), "peer snapshot count/peers are invalid")
     norm = sorted((p.get("addr"), p.get("handshake_complete")) for p in peers if isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool))
-    req(len(norm) == len(peers) and len(set(norm)) == len(norm), "peer snapshot entries are malformed or duplicated")
+    req(len(norm) == len(peers) and len({addr for addr, _ in norm}) == len(norm), "peer snapshot entries are malformed or duplicated")
     return norm
 def ts(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z": return False
@@ -361,7 +361,7 @@ with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
 expected, peers, count = sys.argv[2], data.get("peers"), data.get("count")
 def ep(v): return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and v.rsplit(":", 1)[-1].isdigit() and 1 <= int(v.rsplit(":", 1)[-1]) <= 65535
-ok = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and any(p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
+ok = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers) and any(p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
 sys.exit(0 if ok else 1)
 PY
     then
