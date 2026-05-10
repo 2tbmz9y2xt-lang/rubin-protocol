@@ -56,7 +56,7 @@ def ep(value: object) -> bool:
 def nonempty_str(value: object) -> bool: return isinstance(value, str) and bool(value.strip())
 def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-ww", "-p", str(pid), "-o", "comm="]))
 def lsof_lines(pid: int, state: str) -> list[str]:
-    p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+    p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5); req(p.returncode == 0 or not p.stderr.strip(), "lsof_failed")
     return [line[1:] for line in p.stdout.splitlines() if line.startswith("n")]
 def owns_listen(pid: int, endpoint: str) -> bool: return endpoint in lsof_lines(pid, "LISTEN")
 def peers(addr: str) -> dict:
@@ -211,7 +211,8 @@ import re, subprocess, sys, time
 pid, rpc_addr, timeout = sys.argv[1], sys.argv[2], int(sys.argv[3])
 deadline = time.time() + timeout
 while time.time() < deadline:
-    proc = subprocess.run(["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc = subprocess.run(["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0 and proc.stderr.strip(): sys.exit(42)
     addrs = sorted({line[1:].strip() for line in proc.stdout.splitlines() if line.startswith("n") and line[1:].strip() != rpc_addr and re.fullmatch(r"127\.0\.0\.1:[0-9]+", line[1:].strip())})
     if len(addrs) == 1: print(addrs[0]); sys.exit(0)
     if len(addrs) > 1: sys.exit(f"ambiguous p2p listen addresses for pid={pid}: {addrs}")
@@ -373,11 +374,11 @@ PY
   return 1
 }
 wait_rust_to_go_link() {
-  local missing="$1" ambiguous="$2" deadline out status
-  deadline=$((SECONDS + MESH_TIMEOUT))
+  local missing="$1" ambiguous="$2" deadline out status err_file err
+  deadline=$((SECONDS + MESH_TIMEOUT)); err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-established.err"
   while (( SECONDS < deadline )); do
-    status=0; out="$(lsof -nP -a -p "${RUST_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null | REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' | sort -u)" || status=$?
-    (( status == 0 || ${#out} == 0 )) || finish_no_data "${missing}"
+    status=0; out="$(lsof -nP -a -p "${RUST_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>"${err_file}" | REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' | sort -u)" || status=$?; err="$(<"${err_file}")"
+    (( status == 0 || (${#out} == 0 && ${#err} == 0) )) || finish_no_data "lsof_failed"
     [[ "${out}" != *$'\n'* ]] || finish_no_data "${ambiguous}"; [[ -z "${out}" ]] || { RUST_TO_GO_LOCAL_ADDR="${out}"; return 0; }
     sleep 1
   done; finish_no_data "${missing}"
@@ -387,8 +388,8 @@ verify_process_identity() {
   rubin_process_is_alive "${pid}" || { echo "${label} pid is not alive: ${pid}" >&2; return 1; }
   comm="$(pid_comm "${pid}")" || { echo "${label} process comm unavailable: ${pid}" >&2; return 1; }
   [[ "${comm}" == "${expected_comm}" ]] || { echo "${label} process comm=${comm}, want ${expected_comm}" >&2; return 1; }
-  pid_listens_on "${pid}" "${rpc_addr}" || { echo "${label} rpc endpoint is not process-backed: ${rpc_addr}" >&2; return 1; }
-  pid_listens_on "${pid}" "${p2p_addr}" || { echo "${label} p2p endpoint is not process-backed: ${p2p_addr}" >&2; return 1; }
+  pid_listens_on "${pid}" "${rpc_addr}" || { [[ $? -eq 2 ]] && finish_no_data "lsof_failed"; echo "${label} rpc endpoint is not process-backed: ${rpc_addr}" >&2; return 1; }
+  pid_listens_on "${pid}" "${p2p_addr}" || { [[ $? -eq 2 ]] && finish_no_data "lsof_failed"; echo "${label} p2p endpoint is not process-backed: ${p2p_addr}" >&2; return 1; }
   case "${impl}" in
     go) GO_COMM="${comm}"; GO_PROCESS_ALIVE=true; GO_RPC_PROCESS_BACKED=true; GO_P2P_PROCESS_BACKED=true ;;
     rust) RUST_COMM="${comm}"; RUST_PROCESS_ALIVE=true; RUST_RPC_PROCESS_BACKED=true; RUST_P2P_PROCESS_BACKED=true ;;
@@ -414,7 +415,7 @@ start_go_node() {
   GO_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${GO_LOG}" "rpc: listening=" 60 "${GO_PID}" || return 1
   GO_RPC_ADDR="$(rubin_process_extract_rpc_addr "${GO_LOG}")" || return 1
-  GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || return 1
+  GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || { [[ $? -eq 42 ]] && finish_no_data "lsof_failed"; return 1; }
   rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1
   GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
