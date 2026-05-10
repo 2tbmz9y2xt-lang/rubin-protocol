@@ -320,6 +320,7 @@ impl SyncEngine {
 
         // Dry-run: preview the disconnect + reconnect on a cloned state.
         let disconnected_blocks = self.prepare_heavier_branch(&branch, common_ancestor_height)?;
+        let reorg_depth = u64::try_from(disconnected_blocks.len()).unwrap_or(u64::MAX);
 
         // Disconnect canonical chain back to the common ancestor.
         if let Err(err) = self.disconnect_canonical_to_ancestor(common_ancestor_height) {
@@ -360,12 +361,12 @@ impl SyncEngine {
             requeue_block_hashes: collect_disconnected_block_hashes(&disconnected_blocks),
         };
 
-        last_summary
-            .map(|summary| ApplyBlockWithReorgOutcome {
-                summary,
-                tx_pool_cleanup: cleanup,
-            })
-            .ok_or_else(|| "reorg branch was empty".into())
+        let summary = last_summary.ok_or_else(|| "reorg branch was empty".to_string())?;
+        self.note_reorg(reorg_depth);
+        Ok(ApplyBlockWithReorgOutcome {
+            summary,
+            tx_pool_cleanup: cleanup,
+        })
     }
 
     /// Dry-run validation: clone chain state, preview disconnect, then
@@ -870,6 +871,8 @@ mod tests {
         // Stored as side chain; canonical tip unchanged.
         assert_eq!(engine.chain_state.height, 1);
         assert_eq!(summary.block_height, 1);
+        assert_eq!(engine.reorg_count(), 0);
+        assert_eq!(engine.last_reorg_depth(), 0);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -933,6 +936,20 @@ mod tests {
 
         assert_eq!(engine.chain_state.height, 2);
         assert_eq!(summary.block_height, 2);
+        assert_eq!(engine.reorg_count(), 1);
+        assert_eq!(engine.last_reorg_depth(), 1);
+
+        let block2_alt_hash =
+            rubin_consensus::block_hash(&block2_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("hash2'");
+        let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1));
+        let block3 =
+            coinbase_only_block_with_gen(3, subsidy1 + subsidy2, block2_alt_hash, gen_ts + 4);
+        engine
+            .apply_block_with_reorg(&block3, None)
+            .expect("direct extension after reorg");
+        assert_eq!(engine.reorg_count(), 1);
+        assert_eq!(engine.last_reorg_depth(), 0);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
