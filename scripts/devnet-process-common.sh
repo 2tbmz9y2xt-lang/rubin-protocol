@@ -300,7 +300,7 @@ _rubin_process_executable_realpath() {
     resolved="$(command -v -- "${executable}" 2>/dev/null)" || return 1
   fi
   [[ -n "${resolved}" && -f "${resolved}" && -x "${resolved}" ]] || return 1
-  perl -MCwd=realpath -e 'my $p = realpath($ARGV[0]); defined $p && -f $p && -x $p or exit 1; print "$p\n";' "${resolved}"
+  perl -MCwd=realpath -e 'my $p = realpath($ARGV[0]); defined $p && -f $p && -x $p or exit 1; print "$p\n";' -- "${resolved}"
 }
 
 _rubin_process_started_exec_realpath() {
@@ -325,7 +325,7 @@ _rubin_process_pid_comm() {
   local pid="${1:-}" comm
   comm="$(ps -p "${pid}" -o comm= 2>/dev/null | awk 'NR==1 {print $1}')" || return 1
   [[ -n "${comm}" ]] || return 1
-  basename "${comm}"
+  basename -- "${comm}"
 }
 
 _rubin_process_runtime_comm_matches() {
@@ -541,7 +541,7 @@ rubin_process_dump_artifacts() {
   for log_file in "${RUBIN_PROCESS_LOGS[@]}"; do
     _rubin_process_require_artifact_parent "${log_file}" || { _rubin_process_error "skipping unsafe log file: ${log_file}"; continue; }
     [[ -f "${log_file}" ]] || continue
-    _rubin_process_error "----- $(basename "${log_file}") -----"
+    _rubin_process_error "----- $(basename -- "${log_file}") -----"
     tail -n 80 "${log_file}" >&2 || true
   done
 }
