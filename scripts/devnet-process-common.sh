@@ -338,12 +338,12 @@ _rubin_process_runtime_comm_matches() {
 
 _rubin_process_pid_listens_on() {
   local pid="${1:-}" endpoint="${2:-}"
-  command -v lsof >/dev/null 2>&1 || { _rubin_process_error "lsof is required to prove process-backed endpoint"; return 1; }
+  command -v lsof >/dev/null 2>&1 || { _rubin_process_error "NO_DATA: reason=lsof_unavailable pid=${pid} endpoint=${endpoint}"; return 2; }
   lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | grep -F -x -q -- "n${endpoint}"
 }
 
 rubin_process_register_topology_node() {
-  local name="${1:-}" implementation="${2:-}" pid="${3:-}" endpoint="${4:-}" expected_executable="${5:-}" comm
+  local name="${1:-}" implementation="${2:-}" pid="${3:-}" endpoint="${4:-}" expected_executable="${5:-}" comm listen_status=0
   _rubin_process_require_init || return 1
   _rubin_process_name "${name}" || { _rubin_process_error "NO_DATA: reason=invalid_node_name node=${name:-<empty>}"; return 1; }
   _rubin_process_implementation "${implementation}" || { _rubin_process_error "NO_DATA: reason=invalid_implementation node=${name} implementation=${implementation:-<empty>}"; return 1; }
@@ -353,7 +353,12 @@ rubin_process_register_topology_node() {
   fi
   _rubin_process_managed_pid "${pid}" || { _rubin_process_error "NO_DATA: reason=unmanaged_node_pid node=${name} pid=${pid}"; return 1; }
   _rubin_process_loopback_endpoint "${endpoint}" || { _rubin_process_error "NO_DATA: reason=invalid_node_endpoint node=${name} endpoint=${endpoint:-<empty>}"; return 1; }
-  _rubin_process_pid_listens_on "${pid}" "${endpoint}" || { _rubin_process_error "NO_DATA: reason=node_endpoint_not_process_backed node=${name} pid=${pid} endpoint=${endpoint}"; return 1; }
+  _rubin_process_pid_listens_on "${pid}" "${endpoint}" || listen_status=$?
+  (( listen_status == 0 )) || {
+    (( listen_status == 2 )) && return 1
+    _rubin_process_error "NO_DATA: reason=node_endpoint_not_process_backed node=${name} pid=${pid} endpoint=${endpoint}"
+    return 1
+  }
   comm="$(_rubin_process_pid_comm "${pid}")" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} pid=${pid}"; return 1; }
   _rubin_process_runtime_comm_matches "${implementation}" "${comm}" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} implementation=${implementation} pid=${pid} comm=${comm}"; return 1; }
   [[ -n "${expected_executable}" ]] || { _rubin_process_error "NO_DATA: reason=missing_expected_executable node=${name} implementation=${implementation} pid=${pid}"; return 1; }
@@ -421,14 +426,17 @@ _rubin_process_node_is_fresh() {
 }
 
 _rubin_process_control_pair() {
-  local action="${1:-}" source="${2:-}" target="${3:-}" source_i target_i link_i target_file target_endpoint current_target
+  local action="${1:-}" source="${2:-}" target="${3:-}" source_i target_i link_i target_file target_endpoint current_target source_fresh=0 target_fresh=0
   _rubin_process_require_init || return 1
   source_i="$(_rubin_process_node_index "${source}")" || { _rubin_process_error "NO_DATA: phase=${action} reason=unknown_source source=${source:-<empty>} target=${target:-<empty>}"; return 1; }
   [[ "${source}" != "${target}" ]] || { _rubin_process_error "NO_DATA: phase=${action} reason=same_node source=${source} target=${target}"; return 1; }
   ((${#RUBIN_PROCESS_TOPOLOGY_NAMES[@]} >= 2)) || { _rubin_process_error "NO_DATA: phase=${action} reason=single_node_topology source=${source} target=${target}"; return 1; }
   target_i="$(_rubin_process_node_index "${target}")" || { _rubin_process_error "NO_DATA: phase=${action} reason=unknown_target source=${source} target=${target:-<empty>}"; return 1; }
   [[ "${RUBIN_PROCESS_TOPOLOGY_IMPLS[$source_i]}" != "${RUBIN_PROCESS_TOPOLOGY_IMPLS[$target_i]}" ]] || { _rubin_process_error "NO_DATA: phase=${action} reason=same_client_topology source=${source} target=${target}"; return 1; }
-  if ! _rubin_process_node_is_fresh "${source_i}" || ! _rubin_process_node_is_fresh "${target_i}"; then
+  _rubin_process_node_is_fresh "${source_i}" || source_fresh=$?
+  _rubin_process_node_is_fresh "${target_i}" || target_fresh=$?
+  (( source_fresh != 2 && target_fresh != 2 )) || return 1
+  if (( source_fresh != 0 || target_fresh != 0 )); then
     _rubin_process_error "NO_DATA: phase=${action} reason=stale_topology source=${source} target=${target}"
     return 1
   fi

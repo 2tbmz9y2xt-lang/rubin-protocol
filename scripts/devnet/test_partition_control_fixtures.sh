@@ -27,6 +27,17 @@ expect_fail_contains() {
   require_contains "${output}" "${needle}" "${label}"
 }
 
+expect_fail_with_path_contains() {
+  local label="$1" needle="$2" path="$3"
+  shift 3
+  local output
+  if output="$(PATH="${path}" "$@" 2>&1)"; then
+    printf 'expected failure for %s\n' "${label}" >&2
+    return 1
+  fi
+  require_contains "${output}" "${needle}" "${label}"
+}
+
 write_server() {
   cat >"$1" <<'PY'
 import socket, sys, threading, time
@@ -129,10 +140,12 @@ trap cleanup_fixture EXIT
 
 SERVER_PY="${RUBIN_PROCESS_ARTIFACT_ROOT}/helper server.py"
 EXPECTED_GO_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/expected/rubin-node-go"
+NO_TOOLS_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/no-tools"
 TARGET_FILE="${RUBIN_PROCESS_ARTIFACT_ROOT}/proxy target.txt"
 MISSING_TARGET="${RUBIN_PROCESS_ARTIFACT_ROOT}/missing target.txt"
 write_server "${SERVER_PY}"
 write_runtime_stub "${EXPECTED_GO_BIN}"
+mkdir "${NO_TOOLS_DIR}"
 
 SERVER_PID="" SERVER_ENDPOINT="" SPOOF_EXECUTABLE=""
 start_server go-helper send; GO_PID="${SERVER_PID}" GO_ENDPOINT="${SERVER_ENDPOINT}"
@@ -141,6 +154,7 @@ start_server silent-helper silent; SILENT_ENDPOINT="${SERVER_ENDPOINT}"
 start_spoof_server basename-spoof rubin-node-go; SPOOF_GO_PID="${SERVER_PID}" SPOOF_GO_ENDPOINT="${SERVER_ENDPOINT}"
 SPOOF_GO_COMM="$(_rubin_process_pid_comm "${SPOOF_GO_PID}")" || { echo "failed to read spoof process comm" >&2; exit 1; }; [[ "${SPOOF_GO_COMM}" == "rubin-node-go" ]] || { echo "spoof fixture did not expose rubin-node-go comm: ${SPOOF_GO_COMM}" >&2; exit 1; }
 
+expect_fail_with_path_contains "lsof unavailable registration" "reason=lsof_unavailable" "${NO_TOOLS_DIR}" rubin_process_register_topology_node node-go go "${GO_PID}" "${GO_ENDPOINT}" "${EXPECTED_GO_BIN}"
 expect_fail_contains "fake go identity" "reason=process_identity_unverified" rubin_process_register_topology_node node-go go "${GO_PID}" "${GO_ENDPOINT}"
 expect_fail_contains "basename spoof missing expected executable" "reason=missing_expected_executable" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}"
 expect_fail_contains "basename spoof arbitrary expected executable" "reason=runtime_identity_verifier_required" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}" "${SPOOF_EXECUTABLE}"
@@ -162,6 +176,7 @@ seed_nodes go go
 expect_fail_contains "same client" "reason=same_client_topology" rubin_process_partition_pair node-go node-rust
 
 seed_nodes
+expect_fail_with_path_contains "lsof unavailable control" "reason=lsof_unavailable" "${NO_TOOLS_DIR}" rubin_process_partition_pair node-go node-rust
 seed_link "${MISSING_TARGET}"
 expect_fail_contains "missing proxy target" "reason=missing_proxy_target" rubin_process_partition_pair node-go node-rust
 
