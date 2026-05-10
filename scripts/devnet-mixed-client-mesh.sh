@@ -14,9 +14,9 @@ check_report() { local report="${1:-}" mode="${2:-offline}"
 import datetime as dt, json, os, socket, struct, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1]); live = sys.argv[3] == "live"
-try: LIVE_TIMEOUT = max(1, min(600, int(os.environ.get("MESH_TIMEOUT", "10"))))
-except ValueError: LIVE_TIMEOUT = 10
 def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
+try: LIVE_TIMEOUT = int(os.environ["MESH_TIMEOUT"])
+except (KeyError, ValueError): fail("MESH_TIMEOUT must be an integer in [1, 600]")
 def req(ok: bool, message: str) -> None:
     if not ok: fail(message)
 def eventually(fn, message: str) -> None:
@@ -85,13 +85,13 @@ def peers(addr: str) -> dict:
         fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
     req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
     return data
-def snapshot_norm(snapshot: object, expected_addr: str) -> list[tuple[str, bool]]:
+def snapshot_norm(snapshot: object, expected_addr: str, exact: bool = True) -> list[tuple[str, bool]]:
     count = snapshot.get("count") if isinstance(snapshot, dict) else None
     peers = snapshot.get("peers") if isinstance(snapshot, dict) else None
     req(isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers), "peer snapshot count/peers are invalid")
     norm = sorted((p.get("addr"), p.get("handshake_complete")) for p in peers if isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool))
     req(len(norm) == len(peers) and len({addr for addr, _ in norm}) == len(norm), "peer snapshot entries are malformed or duplicated")
-    req(norm == [(expected_addr, True)], "peer snapshot has unexpected peer set")
+    if exact: req(norm == [(expected_addr, True)], "peer snapshot has unexpected peer set")
     return norm
 def ts(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z": return False
@@ -166,13 +166,13 @@ for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snap
     stored = snapshot_norm(connectivity.get(field), expected_addr)
     if live:
         endpoint = nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]
-        eventually(lambda endpoint=endpoint, stored=stored, expected_addr=expected_addr: (fresh := peers(endpoint)) is not None and stored == snapshot_norm(fresh, expected_addr), f"{field} differs from live exact peer set")
+        eventually(lambda endpoint=endpoint, stored=stored, expected_addr=expected_addr: (fresh := peers(endpoint)) is not None and stored == snapshot_norm(fresh, expected_addr, False), f"{field} differs from live exact peer set")
 print(f"PASS: mixed-client mesh report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
 PY
 }
+[[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
 if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
 need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
-[[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
 rubin_process_init mixed-client-mesh
