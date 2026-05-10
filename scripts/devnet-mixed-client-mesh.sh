@@ -14,10 +14,7 @@ while (($#)); do
       [[ $# -ge 2 ]] || { usage; exit 2; }
       CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2
       ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
+    -h|--help) usage; exit 0 ;;
     *)
       usage
       exit 2
