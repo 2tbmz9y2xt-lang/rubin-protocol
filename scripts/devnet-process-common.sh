@@ -370,6 +370,7 @@ rubin_process_register_topology_node() {
 
 rubin_process_register_proxy_link() {
   local source="${1:-}" target="${2:-}" proxy_addr="${3:-}" target_file="${4:-}" target_i target_endpoint
+  _rubin_process_require_init || return 1
   _rubin_process_node_index "${source}" >/dev/null || { _rubin_process_error "NO_DATA: reason=unknown_source source=${source:-<empty>}"; return 1; }
   target_i="$(_rubin_process_node_index "${target}")" || { _rubin_process_error "NO_DATA: reason=unknown_target target=${target:-<empty>}"; return 1; }
   [[ "${source}" != "${target}" ]] || { _rubin_process_error "NO_DATA: reason=same_node source=${source} target=${target}"; return 1; }
@@ -386,6 +387,15 @@ rubin_process_register_proxy_link() {
 rubin_process_probe_endpoint() {
   local endpoint="${1:-}" timeout="${2:-1}" rc=0
   _rubin_process_loopback_endpoint "${endpoint}" || { _rubin_process_error "NO_DATA: reason=invalid_probe_endpoint endpoint=${endpoint:-<empty>}"; return 1; }
+  command -v python3 >/dev/null 2>&1 || { _rubin_process_error "NO_DATA: reason=python3_unavailable endpoint=${endpoint}"; return 1; }
+  python3 - "${timeout}" <<'PY' >/dev/null 2>&1 || { _rubin_process_error "NO_DATA: reason=invalid_probe_timeout endpoint=${endpoint}"; return 1; }
+import math, sys
+try:
+    value = float(sys.argv[1])
+except (OverflowError, ValueError):
+    sys.exit(1)
+sys.exit(0 if math.isfinite(value) and value > 0 else 1)
+PY
   python3 - "${endpoint}" "${timeout}" <<'PY' || rc=$?
 import socket, sys
 endpoint, timeout = sys.argv[1], float(sys.argv[2])
@@ -418,6 +428,7 @@ _rubin_process_node_is_fresh() {
 
 _rubin_process_control_pair() {
   local action="${1:-}" source="${2:-}" target="${3:-}" source_i target_i link_i target_file target_endpoint current_target
+  _rubin_process_require_init || return 1
   source_i="$(_rubin_process_node_index "${source}")" || { _rubin_process_error "NO_DATA: phase=${action} reason=unknown_source source=${source:-<empty>} target=${target:-<empty>}"; return 1; }
   [[ "${source}" != "${target}" ]] || { _rubin_process_error "NO_DATA: phase=${action} reason=same_node source=${source} target=${target}"; return 1; }
   ((${#RUBIN_PROCESS_TOPOLOGY_NAMES[@]} >= 2)) || { _rubin_process_error "NO_DATA: phase=${action} reason=single_node_topology source=${source} target=${target}"; return 1; }

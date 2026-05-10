@@ -5,6 +5,12 @@ HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/devnet-proce
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
 
+if ! command -v lsof >/dev/null 2>&1; then
+  printf 'SKIP: NO_DATA reason=lsof_unavailable fixture=partition_control\n'
+  exit 0
+fi
+
+# Fixture-only internal _rubin_process_* calls seed hostile states unreachable through public APIs.
 require_contains() {
   local haystack="$1" needle="$2" label="$3"
   [[ "${haystack}" == *"${needle}"* ]] || { printf 'missing %s in %s: %s\n' "${needle}" "${label}" "${haystack}" >&2; return 1; }
@@ -115,6 +121,8 @@ cleanup_fixture() {
   exit "${status}"
 }
 RUBIN_PROCESS_ARTIFACT_PARENT="${PARENT}"
+expect_fail_contains "proxy before init" "rubin_process_init must run" rubin_process_register_proxy_link node-go node-rust 127.0.0.1:1 "${PARENT}/missing-target"
+expect_fail_contains "control before init" "rubin_process_init must run" rubin_process_partition_pair node-go node-rust
 rubin_process_init partition-control-fail-closed
 trap cleanup_fixture EXIT
 
@@ -137,6 +145,7 @@ expect_fail_contains "basename spoof missing expected executable" "reason=missin
 expect_fail_contains "basename spoof identity" "reason=process_identity_unverified" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}" "${EXPECTED_GO_BIN}"
 ((${#RUBIN_PROCESS_TOPOLOGY_NAMES[@]} == 0)) || { echo "fake process was registered as topology" >&2; exit 1; }
 expect_fail_contains "socket timeout" "reason=probe_timeout" rubin_process_probe_endpoint "${SILENT_ENDPOINT}" 1
+expect_fail_contains "invalid probe timeout" "reason=invalid_probe_timeout" rubin_process_probe_endpoint "${GO_ENDPOINT}" not-a-float
 expect_fail_contains "unknown source" "reason=unknown_source" rubin_process_partition_pair node-missing node-rust
 
 RUBIN_PROCESS_TOPOLOGY_NAMES=(node-go)
