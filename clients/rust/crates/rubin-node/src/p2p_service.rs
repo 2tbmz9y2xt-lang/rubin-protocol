@@ -1114,6 +1114,23 @@ mod tests {
     };
     use std::collections::HashMap;
 
+    static DNS_RESOLVER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ActiveDnsResolversRestore {
+        previous: usize,
+    }
+
+    impl Drop for ActiveDnsResolversRestore {
+        fn drop(&mut self) {
+            super::ACTIVE_DNS_RESOLVERS.store(self.previous, Ordering::SeqCst);
+        }
+    }
+
+    fn force_active_dns_resolvers_for_test(count: usize) -> ActiveDnsResolversRestore {
+        let previous = super::ACTIVE_DNS_RESOLVERS.swap(count, Ordering::SeqCst);
+        ActiveDnsResolversRestore { previous }
+    }
+
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "{prefix}-{}",
@@ -2008,6 +2025,9 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_rejects_unresolvable_addr() {
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK
+            .lock()
+            .expect("dns resolver test lock");
         let err = connect_with_timeout("bad host:19111", Duration::from_millis(25)).unwrap_err();
         assert!(
             err.contains("peer address resolution failed"),
@@ -2607,10 +2627,12 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_rejects_when_dns_resolvers_saturated() {
-        let prev = super::ACTIVE_DNS_RESOLVERS.load(Ordering::SeqCst);
-        super::ACTIVE_DNS_RESOLVERS.store(super::MAX_DNS_RESOLVER_THREADS, Ordering::SeqCst);
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK
+            .lock()
+            .expect("dns resolver test lock");
+        let _resolver_restore =
+            force_active_dns_resolvers_for_test(super::MAX_DNS_RESOLVER_THREADS);
         let result = super::connect_with_timeout("unreachable.test:80", Duration::from_secs(1));
-        super::ACTIVE_DNS_RESOLVERS.store(prev, Ordering::SeqCst);
         let err = result.unwrap_err();
         assert!(
             err.contains("DNS resolver limit reached"),
@@ -2631,6 +2653,9 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_hostname_uses_dns_resolver_path() {
+        let _dns_guard = DNS_RESOLVER_TEST_LOCK
+            .lock()
+            .expect("dns resolver test lock");
         // "localhost:1" resolves via DNS (not IP literal fast path),
         // covering the resolver thread spawn + channel recv + addr iteration.
         // Port 1 is refused immediately, so this is fast.
