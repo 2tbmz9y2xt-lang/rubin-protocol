@@ -440,11 +440,11 @@ FINAL_RUST_OUTBOUND_LINK_RECHECKED=true
 wait_peer_snapshot node-rust-final "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || finish_no_data "rust_final_peer_snapshot_missing_go_endpoint"
 wait_peer_snapshot node-go-final "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "go_final_peer_snapshot_missing_rust_endpoint"
 FINAL_PEER_SNAPSHOTS_RECHECKED=true
-write_outputs "PASS"
-run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2
-check_report "${REPORT_JSON}" >&2
-if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
-  echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}"
+PASS_REPORT_JSON="${REPORT_JSON}.pass.tmp"; FINAL_REPORT_JSON="${REPORT_JSON}"; REPORT_JSON="${PASS_REPORT_JSON}"
+write_outputs "PASS"; REPORT_JSON="${FINAL_REPORT_JSON}"
+if run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 && check_report "${PASS_REPORT_JSON}" >&2; then
+  mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}"
 else
-  echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"
+  rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_validation_failed"
 fi
+[[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" || echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"
