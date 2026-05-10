@@ -26,8 +26,9 @@ def eventually(fn, message: str) -> None:
         if not live or time.monotonic() >= deadline: fail(message)
         time.sleep(1)
 def checked_path(label: str, value: object) -> Path:
-    req(isinstance(value, str) and value.strip() == value and value and value[0] not in "'\"" and value[-1] not in "'\"", f"{label} is not an unquoted path string")
-    p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return p
+    req(isinstance(value, str) and value.strip() == value and value and value[0] not in "'\"" and value[-1] not in "'\"" and "\0" not in value and all(ord(c) >= 32 for c in value), f"{label} is not a safe unquoted path string")
+    try: p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return p.resolve()
+    except (OSError, ValueError) as exc: fail(f"{label} path is invalid: {exc}")
 def ep(value: object) -> bool:
     if not isinstance(value, str): return False
     host, sep, port = value.partition(":")
@@ -64,7 +65,7 @@ def pid_argv(pid: int) -> list[str]:
         if j < 0: break
         args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
     return args
-def argv_eq(actual: list[str], expected: list[str]) -> bool: return len(actual) == len(expected) and bool(actual) and Path(actual[0]).resolve() == Path(expected[0]).resolve() and actual[1:] == expected[1:]
+def argv_eq(actual: list[str], expected: list[str]) -> bool: return len(actual) == len(expected) and bool(actual) and checked_path("live argv[0]", actual[0]) == checked_path("report command_argv[0]", expected[0]) and actual[1:] == expected[1:]
 def lsof_lines(pid: int, state: str) -> list[str]:
     try:
         p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
@@ -106,10 +107,10 @@ req(isinstance(data, dict), "report root is not an object")
 req(data.get("scenario") == "mixed_client_mesh", f"scenario is not mixed_client_mesh: {data.get('scenario')!r}")
 req(data.get("verdict") == "PASS", f"report verdict is not PASS: {data.get('verdict')!r}")
 req("failure_reason" not in data and "schema_marker" not in data, "PASS report must not carry failure/schema-marker verdict fields")
-artifact_root = checked_path("artifact_root", data.get("artifact_root")).resolve()
+artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
 legacy_schema = data.get("legacy_schema_compatibility")
 req(isinstance(legacy_schema, dict) and legacy_schema.get("authoritative") is False and "verdict" not in legacy_schema and nonempty_str(legacy_schema.get("marker_path")), "legacy_schema_compatibility missing marker_path")
-marker_path = checked_path("legacy_schema_compatibility.marker_path", legacy_schema.get("marker_path")).resolve()
+marker_path = checked_path("legacy_schema_compatibility.marker_path", legacy_schema.get("marker_path"))
 try: marker_path.relative_to(artifact_root)
 except ValueError: fail("legacy marker is outside artifact_root")
 req(marker_path.is_file() and marker_path.stat().st_size > 0, "legacy marker is missing, unreadable, or empty")
@@ -130,21 +131,21 @@ for node in nodes:
     expected_name, expected_bin = expected[impl]
     req(name == expected_name, f"{impl} node has invalid name: {name!r}")
     command, binary, command_argv = node.get("command"), node.get("binary"), node.get("command_argv")
-    binary_path = checked_path(f"{name}.binary", binary).resolve()
+    binary_path = checked_path(f"{name}.binary", binary)
     try: binary_path.relative_to(artifact_root)
     except ValueError: fail(f"{name} binary is outside artifact_root")
     req(node.get("process_comm") == expected_bin, f"{name} process_comm does not prove {impl} identity")
-    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and Path(command_argv[0]).is_absolute() and Path(command_argv[0]).resolve() == binary_path and binary_path.name == expected_bin and binary_path.is_file() and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
+    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and checked_path(f"{name}.command_argv[0]", command_argv[0]) == binary_path and binary_path.name == expected_bin and binary_path.is_file() and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
     if live:
-        eventually(lambda node=node, binary_path=binary_path, command_argv=command_argv: Path(pid_exe(node["pid"])).resolve() == binary_path and argv_eq(pid_argv(node["pid"]), command_argv), f"{name} live process argv/executable does not match report")
+        eventually(lambda node=node, binary_path=binary_path, command_argv=command_argv: checked_path(f"{name}.live_exe", pid_exe(node["pid"])) == binary_path and argv_eq(pid_argv(node["pid"]), command_argv), f"{name} live process argv/executable does not match report")
         eventually(lambda node=node: owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
     for field in ("process_alive", "rpc_endpoint_process_backed", "p2p_endpoint_process_backed"):
         req(node.get(field) is True, f"{name} does not prove {field}")
 req((impls := {n["implementation"] for n in nodes}) == {"go", "rust"}, f"PASS report requires one go and one rust node, got {sorted(impls)}")
 nodes_by_impl = {node["implementation"]: node for node in nodes}
-req(nodes_by_impl["go"]["command_argv"] == [nodes_by_impl["go"]["binary"], "--network", "devnet", "--datadir", str(Path(data["artifact_root"]) / "node-go"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] and nodes_by_impl["rust"]["command_argv"] == [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(Path(data["artifact_root"]) / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"]], "node command_argv does not match exact launched argv")
+req(nodes_by_impl["go"]["command_argv"] == [nodes_by_impl["go"]["binary"], "--network", "devnet", "--datadir", str(Path(artifact_root_arg) / "node-go"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] and nodes_by_impl["rust"]["command_argv"] == [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(Path(artifact_root_arg) / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"]], "node command_argv does not match exact launched argv")
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
