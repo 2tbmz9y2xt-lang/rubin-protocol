@@ -51,7 +51,15 @@ def ep(value: object) -> bool:
 def nonempty_str(value: object) -> bool: return isinstance(value, str) and bool(value.strip())
 def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-ww", "-p", str(pid), "-o", "comm="]))
 def lsof_lines(pid: int, state: str) -> list[str]:
-    p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5); req(p.returncode == 0 or not (p.stdout.strip() or p.stderr.strip()), "lsof_failed")
+    try:
+        p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+    except FileNotFoundError:
+        fail("lsof_unavailable")
+    except subprocess.TimeoutExpired:
+        fail("lsof_timeout")
+    except OSError as exc:
+        fail(f"lsof_failed: {exc}")
+    req(p.returncode == 0 or not (p.stdout.strip() or p.stderr.strip()), "lsof_failed")
     if p.returncode != 0: return []
     return [line[1:] for line in p.stdout.splitlines() if line.startswith("n")]
 def owns_listen(pid: int, endpoint: str) -> bool: return endpoint in lsof_lines(pid, "LISTEN")
@@ -148,7 +156,8 @@ for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snap
     if live:
         fresh = snapshot_norm(peers(nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]))
         req(stored == fresh, f"{field} differs from live exact peer set")
-print(f"PASS: mixed-client mesh report {'accepted' if live else 'structure accepted'} {path}")
+if not live: fail("offline check cannot prove PASS; use --check-report-live")
+print(f"PASS: mixed-client mesh report accepted {path}")
 PY
 }
 if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
