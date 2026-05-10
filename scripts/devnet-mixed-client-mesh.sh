@@ -25,31 +25,39 @@ need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for m
 check_report() { local report="${1:-}" mode="${2:-offline}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
   python3 - "${report}" "${DEV_ENV}" "${VALIDATOR}" "${mode}" <<'PY'
-import datetime as dt, json, os, subprocess, sys, urllib.request
+import datetime as dt, json, os, socket, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1])
 live = sys.argv[4] == "live"
+try: LIVE_TIMEOUT = max(1, min(600, int(os.environ.get("MESH_TIMEOUT", "10"))))
+except ValueError: LIVE_TIMEOUT = 10
 def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
 def req(ok: bool, message: str) -> None:
     if not ok: fail(message)
-def run(argv: list[str]) -> str:
-    try:
-        p = subprocess.run(argv, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        fail(f"live check failed for {argv[0]}: {exc}")
-    req(p.returncode == 0 and p.stdout.strip(), f"live check failed: {' '.join(argv)}")
-    return p.stdout.strip().splitlines()[0]
+def eventually(fn, message: str) -> None:
+    deadline = time.monotonic() + LIVE_TIMEOUT
+    while True:
+        if fn(): return
+        if not live or time.monotonic() >= deadline: fail(message)
+        time.sleep(1)
 def checked_path(label: str, value: object) -> Path:
     req(isinstance(value, str) and value.strip() == value and value and value[0] not in "'\"" and value[-1] not in "'\"", f"{label} is not an unquoted path string")
-    p = Path(value)
-    req(p.is_absolute(), f"{label} is not absolute")
-    return p
+    p = Path(value); req(p.is_absolute(), f"{label} is not absolute"); return p
 def ep(value: object) -> bool:
     if not isinstance(value, str): return False
     host, sep, port = value.partition(":")
     return sep == ":" and host == "127.0.0.1" and ":" not in port and port.isascii() and port.isdigit() and 1 <= len(port) <= 5 and 1 <= int(port) <= 65535
 def nonempty_str(value: object) -> bool: return isinstance(value, str) and bool(value.strip())
-def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-ww", "-p", str(pid), "-o", "comm="]))
+def pid_exe(pid: int) -> str:
+    proc = Path(f"/proc/{pid}/exe")
+    if proc.exists() or Path("/proc").is_dir():
+        try: return str(proc.resolve(strict=True))
+        except FileNotFoundError: return ""
+        except OSError as exc: fail(f"pid_exe_failed: {exc}")
+    try:
+        import ctypes; buf = ctypes.create_string_buffer(4096); n = ctypes.CDLL(None).proc_pidpath(int(pid), buf, len(buf))
+    except (AttributeError, OSError) as exc: fail(f"pid_exe_unavailable: {exc}")
+    return os.path.realpath(buf.value.decode()) if n > 0 else ""
 def lsof_lines(pid: int, state: str) -> list[str]:
     try:
         p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
@@ -62,11 +70,13 @@ def lsof_lines(pid: int, state: str) -> list[str]:
 def owns_listen(pid: int, endpoint: str) -> bool: return endpoint in lsof_lines(pid, "LISTEN")
 def peers(addr: str) -> dict:
     try:
-        with urllib.request.urlopen(f"http://{addr}/peers", timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:
-        fail(f"live peer snapshot failed for {addr}: {exc}")
-    return data if isinstance(data, dict) else {}
+        with urllib.request.urlopen(f"http://{addr}/peers", timeout=5) as resp: data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, socket.timeout):
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
+    req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
+    return data
 def snapshot_norm(snapshot: object) -> list[tuple[str, bool]]:
     count = snapshot.get("count") if isinstance(snapshot, dict) else None
     peers = snapshot.get("peers") if isinstance(snapshot, dict) else None
@@ -124,8 +134,8 @@ for node in nodes:
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
     if live:
-        req(ps_comm(node["pid"]) == expected_bin, f"{name} live process identity does not match report")
-        req(owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
+        eventually(lambda node=node, binary_path=binary_path: Path(pid_exe(node["pid"])).resolve() == binary_path, f"{name} live process executable does not match report")
+        eventually(lambda node=node: owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
     for field in ("process_alive", "rpc_endpoint_process_backed", "p2p_endpoint_process_backed"):
         req(node.get(field) is True, f"{name} does not prove {field}")
 req((impls := {n["implementation"] for n in nodes}) == {"go", "rust"}, f"PASS report requires one go and one rust node, got {sorted(impls)}")
@@ -143,7 +153,7 @@ req(all(ep(links.get(f)) for f in ("go_peer_snapshot_expected_addr", "rust_peer_
 req(rust_expected == nodes_by_impl["go"]["p2p_endpoint"] and links.get("rust_outbound_remote_addr") == rust_expected and links.get("rust_outbound_local_addr") == go_expected and links.get("rust_outbound_pid") == nodes_by_impl["rust"]["pid"], "peer evidence is not bound to expected counterpart endpoints")
 req(isinstance(go_expected, str) and go_expected not in {rust_expected, nodes_by_impl["rust"]["p2p_endpoint"], nodes_by_impl["go"]["rpc_endpoint"], nodes_by_impl["rust"]["rpc_endpoint"]}, "go peer evidence is not a rust outbound peer address")
 if live:
-    req(f"{go_expected}->{rust_expected}" in lsof_lines(nodes_by_impl["rust"]["pid"], "ESTABLISHED"), "rust outbound TCP link is not live and rust-owned")
+    eventually(lambda: f"{go_expected}->{rust_expected}" in lsof_lines(nodes_by_impl["rust"]["pid"], "ESTABLISHED"), "rust outbound TCP link is not live and rust-owned")
 final = data.get("final_verification")
 req(isinstance(final, dict) and all(final.get(f) is True for f in ("producer_side", "process_identity_rechecked", "rust_outbound_link_rechecked", "peer_snapshots_rechecked")), "PASS report missing producer-side final verification")
 req(final.get("rust_outbound_pid") == nodes_by_impl["rust"]["pid"] and final.get("rust_outbound_local_addr") == go_expected and final.get("rust_outbound_remote_addr") == rust_expected, "final verification is not bound to peer evidence")
@@ -151,8 +161,8 @@ for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snap
     stored = snapshot_norm(connectivity.get(field))
     req((expected_addr, True) in stored, f"{field} missing expected completed peer")
     if live:
-        fresh = snapshot_norm(peers(nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]))
-        req(stored == fresh, f"{field} differs from live exact peer set")
+        endpoint = nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]
+        eventually(lambda endpoint=endpoint, stored=stored: (fresh := peers(endpoint)) is not None and stored == snapshot_norm(fresh), f"{field} differs from live exact peer set")
 if not live: fail("offline check cannot prove PASS; use --check-report-live")
 print(f"PASS: mixed-client mesh report accepted {path}")
 PY
@@ -225,8 +235,7 @@ extract_log_addr() {
   local log_file="$1" prefix="$2" path addr
   path="$(_rubin_process_resolve_log "${log_file}")" || return 1
   addr="$(sed -n "s/.*${prefix}//p" "${path}" | tail -n 1 | tr -d '[:space:]')" || return 1
-  [[ "${addr}" == 127.0.0.1:* ]] || return 1
-  printf '%s\n' "${addr}"
+  [[ "${addr}" == 127.0.0.1:* ]] || return 1; printf '%s\n' "${addr}"
 }
 build_go_node() { echo "Building Go rubin-node binary" >&2; "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${GO_NODE_BIN}" ./cmd/rubin-node || return 1; [[ -x "${GO_NODE_BIN}" ]]; }
 build_rust_node() {
@@ -235,8 +244,7 @@ build_rust_node() {
   run_fips_preflight_before_captured_dev_env || return 1
   host_triple="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')" || return 1
   [[ -n "${host_triple}" ]] || return 1
-  cargo_target_dir="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
-  cargo_log="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
+  cargo_target_dir="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"; cargo_log="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
   RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- cargo build --manifest-path "${RUST_WORKSPACE_ROOT}/Cargo.toml" --release --locked -p rubin-node --target "${host_triple}" --target-dir "${cargo_target_dir}" --message-format=json-render-diagnostics >"${cargo_log}" || return 1
   cargo_bin="$(python3 - "${cargo_log}" <<'PY'
 import json, sys
@@ -348,7 +356,7 @@ with open(e["LEGACY_SCHEMA_MARKER_JSON"], "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 }
-finish_no_data() { local reason="$1"; write_outputs "NO_DATA" "${reason}"; run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }
+finish_no_data() { local reason="$1"; write_outputs "NO_DATA" "${reason}" || { echo "FAIL_REPORT_WRITE_FAILED: ${reason}" >&2; exit 1; }; run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 || { echo "FAIL_REPORT_VALIDATION_FAILED: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }; echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }
 wait_peer_snapshot() {
   local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp
   deadline=$((SECONDS + timeout)); PEER_SNAPSHOT_REASON=""
@@ -392,34 +400,25 @@ verify_process_identity() {
   [[ "${comm}" == "${expected_comm}" ]] || { echo "${label} process comm=${comm}, want ${expected_comm}" >&2; return 1; }
   pid_listens_on "${pid}" "${rpc_addr}" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "lsof_timeout"; echo "${label} rpc endpoint is not process-backed: ${rpc_addr}" >&2; return 1; }
   pid_listens_on "${pid}" "${p2p_addr}" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "lsof_timeout"; echo "${label} p2p endpoint is not process-backed: ${p2p_addr}" >&2; return 1; }
-  case "${impl}" in
-    go) GO_COMM="${comm}"; GO_PROCESS_ALIVE=true; GO_RPC_PROCESS_BACKED=true; GO_P2P_PROCESS_BACKED=true ;;
-    rust) RUST_COMM="${comm}"; RUST_PROCESS_ALIVE=true; RUST_RPC_PROCESS_BACKED=true; RUST_P2P_PROCESS_BACKED=true ;;
-    *) return 1 ;;
-  esac
+  [[ "${impl}" == "go" ]] && { GO_COMM="${comm}"; GO_PROCESS_ALIVE=true; GO_RPC_PROCESS_BACKED=true; GO_P2P_PROCESS_BACKED=true; return 0; }
+  [[ "${impl}" == "rust" ]] && { RUST_COMM="${comm}"; RUST_PROCESS_ALIVE=true; RUST_RPC_PROCESS_BACKED=true; RUST_P2P_PROCESS_BACKED=true; return 0; }
+  return 1
 }
 start_rust_node() {
   local -a argv=("${RUST_NODE_BIN}" --network devnet --datadir "${RUST_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${GO_P2P_ADDR}")
   RUST_CMD="$(argv_cmd "${argv[@]}")"; RUST_ARGV_JSON="$(argv_json "${argv[@]}")"
-  rubin_process_start "${RUST_LOG}" "${argv[@]}" || return 1
-  RUST_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${RUST_LOG}" "p2p: listening=" 60 "${RUST_PID}" || return 1
-  rubin_process_wait_for_log "${RUST_LOG}" "rpc: listening=" 60 "${RUST_PID}" || return 1
-  RUST_P2P_ADDR="$(extract_log_addr "${RUST_LOG}" "p2p: listening=")" || return 1
-  RUST_RPC_ADDR="$(rubin_process_extract_rpc_addr "${RUST_LOG}")" || return 1
-  rubin_process_wait_for_rpc_ready "${RUST_RPC_ADDR}" 30 || return 1
-  RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  rubin_process_start "${RUST_LOG}" "${argv[@]}" || return 1; RUST_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${RUST_LOG}" "p2p: listening=" 60 "${RUST_PID}" || return 1; rubin_process_wait_for_log "${RUST_LOG}" "rpc: listening=" 60 "${RUST_PID}" || return 1
+  RUST_P2P_ADDR="$(extract_log_addr "${RUST_LOG}" "p2p: listening=")" || return 1; RUST_RPC_ADDR="$(rubin_process_extract_rpc_addr "${RUST_LOG}")" || return 1
+  rubin_process_wait_for_rpc_ready "${RUST_RPC_ADDR}" 30 || return 1; RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 start_go_node() {
   local -a argv=("${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
   GO_CMD="$(argv_cmd "${argv[@]}")"; GO_ARGV_JSON="$(argv_json "${argv[@]}")"
-  rubin_process_start "${GO_LOG}" "${argv[@]}" || return 1
-  GO_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${GO_LOG}" "rpc: listening=" 60 "${GO_PID}" || return 1
-  GO_RPC_ADDR="$(rubin_process_extract_rpc_addr "${GO_LOG}")" || return 1
+  rubin_process_start "${GO_LOG}" "${argv[@]}" || return 1; GO_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${GO_LOG}" "rpc: listening=" 60 "${GO_PID}" || return 1; GO_RPC_ADDR="$(rubin_process_extract_rpc_addr "${GO_LOG}")" || return 1
   GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || { rc=$?; [[ ${rc} -eq 42 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 43 ]] && finish_no_data "lsof_timeout"; return 1; }
-  rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1
-  GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1; GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 command -v lsof >/dev/null 2>&1 || finish_no_data "lsof_unavailable"; command -v perl >/dev/null 2>&1 || finish_no_data "perl_unavailable"
 build_go_node || finish_no_data "go_build_failed"
