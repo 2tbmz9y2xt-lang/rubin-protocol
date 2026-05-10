@@ -48,10 +48,10 @@ def req(ok: bool, message: str) -> None:
     if not ok:
         fail(message)
 def ep(value: object) -> bool:
-    if not isinstance(value, str) or not value.startswith("127.0.0.1:"):
+    if not isinstance(value, str):
         return False
-    port = value.rsplit(":", 1)[1]
-    return port.isdigit() and 1 <= int(port) <= 65535
+    host, sep, port = value.partition(":")
+    return sep == ":" and host == "127.0.0.1" and ":" not in port and port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
 def ts(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z":
         return False
@@ -101,9 +101,10 @@ req(rust_expected == nodes_by_impl["go"]["p2p_endpoint"] and links.get("rust_out
 req(isinstance(go_expected, str) and go_expected not in {rust_expected, nodes_by_impl["rust"]["p2p_endpoint"], nodes_by_impl["go"]["rpc_endpoint"], nodes_by_impl["rust"]["rpc_endpoint"]}, "go peer evidence is not a rust outbound peer address")
 for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snapshot", rust_expected)):
     snapshot = connectivity.get(field)
-    req(isinstance(snapshot, dict) and snapshot.get("count", 0) >= 1, f"{field} must show at least one peer")
+    count = snapshot.get("count") if isinstance(snapshot, dict) else None
+    req(isinstance(snapshot, dict) and isinstance(count, int) and not isinstance(count, bool) and count >= 1, f"{field} must show at least one peer")
     peers = snapshot.get("peers")
-    req(isinstance(peers, list) and peers and snapshot.get("count") == len(peers), f"{field}.peers/count are internally inconsistent")
+    req(isinstance(peers, list) and peers and count == len(peers), f"{field}.peers/count are internally inconsistent")
     req(all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers), f"{field}.peers contain malformed entries")
     req(any(p.get("addr") == expected_addr and p.get("handshake_complete") is True for p in peers if isinstance(p, dict)), f"{field} lacks completed handshake for expected counterpart")
 print(f"PASS: mixed-client mesh report accepted {path}")
@@ -358,8 +359,8 @@ import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
-expected, peers = sys.argv[2], data.get("peers")
-ok = isinstance(peers, list) and data.get("count") == len(peers) and any(
+expected, peers, count = sys.argv[2], data.get("peers"), data.get("count")
+ok = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and any(
     isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers
 )
 sys.exit(0 if ok else 1)
