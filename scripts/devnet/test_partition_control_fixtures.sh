@@ -16,23 +16,23 @@ require_contains() {
 expect_fail_contains() {
   local label="$1" needle="$2"
   shift 2
-  local output
-  if output="$("$@" 2>&1)"; then
+  local output output_file="${PARENT}/expect-fail-output.txt"
+  if "$@" >"${output_file}" 2>&1; then
     printf 'expected failure for %s\n' "${label}" >&2
     return 1
   fi
+  output="$(<"${output_file}")"
   require_contains "${output}" "${needle}" "${label}"
 }
 
 expect_fail_with_path_contains() {
-  local label="$1" needle="$2" path="$3"
+  local label="$1" needle="$2" path="$3" old_path rc
   shift 3
-  local output
-  if output="$(PATH="${path}" "$@" 2>&1)"; then
-    printf 'expected failure for %s\n' "${label}" >&2
-    return 1
-  fi
-  require_contains "${output}" "${needle}" "${label}"
+  old_path="${PATH}"
+  PATH="${path}"
+  if expect_fail_contains "${label}" "${needle}" "$@"; then rc=0; else rc=$?; fi
+  PATH="${old_path}"
+  return "${rc}"
 }
 
 write_server() {
@@ -195,5 +195,5 @@ printf '%s\n' "${RUST_ENDPOINT}" >"${TARGET_FILE}"
 expect_fail_contains "stale topology" "reason=stale_topology" rubin_process_partition_pair node-go node-rust
 
 rubin_process_cleanup 0
-rmdir "${PARENT}"
+rm -f "${PARENT}/expect-fail-output.txt"; rmdir "${PARENT}"
 printf 'PASS: partition control helpers fail closed without live runtime proof\n'
