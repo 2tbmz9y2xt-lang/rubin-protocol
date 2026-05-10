@@ -30,7 +30,7 @@ need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for m
 check_report() {
   local report="${1:-}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
-  python3 - "${report}" <<'PY'
+  python3 - "${report}" "${DEV_ENV}" "${VALIDATOR}" <<'PY'
 import datetime as dt, json, os, shlex, subprocess, sys, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -107,6 +107,9 @@ try:
 except (OSError, json.JSONDecodeError) as exc:
     fail(f"legacy marker is not readable JSON: {exc}")
 req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("verdict") == "FAIL" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong non-authoritative FAIL shape")
+try: validator = subprocess.run([sys.argv[2], "--", "python3", sys.argv[3], str(marker_path)], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+except (OSError, subprocess.TimeoutExpired) as exc: fail(f"legacy marker schema validation failed: {exc}")
+req(validator.returncode == 0, "legacy marker schema validation failed: " + ((validator.stderr or validator.stdout).strip().splitlines() or ["validator returned nonzero"])[0])
 nodes = data.get("nodes")
 req(isinstance(nodes, list) and len(nodes) == 2 and all(isinstance(n, dict) for n in nodes), "PASS report requires exactly two node records")
 expected = {"go": ("node-go", "rubin-node-go"), "rust": ("node-rust", "rubin-node-rust")}
