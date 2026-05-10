@@ -26,9 +26,7 @@ while (($#)); do
       ;;
   esac
 done
-need_tool() {
-  command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }
-}
+need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
 check_report() {
   local report="${1:-}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
@@ -60,8 +58,8 @@ def argv0(value: object) -> str:
     if not nonempty_str(value): return ""
     try: return shlex.split(value)[0]
     except ValueError: return ""
-def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-p", str(pid), "-o", "comm="]))
-def ps_argv0(pid: int) -> str: return argv0(run(["ps", "-p", str(pid), "-o", "command="]))
+def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-ww", "-p", str(pid), "-o", "comm="]))
+def ps_argv0(pid: int) -> str: return run(["ps", "-ww", "-p", str(pid), "-o", "comm="])
 def lsof_lines(pid: int, state: str) -> list[str]:
     p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
     return [line[1:] for line in p.stdout.splitlines() if line.startswith("n")]
@@ -157,7 +155,7 @@ print(f"PASS: mixed-client mesh report accepted {path}")
 PY
 }
 if [[ "${CHECK_REPORT_MODE}" == "1" ]]; then need_tool python3; need_tool lsof; check_report "${CHECK_REPORT}"; exit 0; fi
-need_tool python3; need_tool perl
+need_tool python3
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
@@ -179,6 +177,7 @@ FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
+argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
   python3 - "${method}" "${addr}" "${path}" <<'PY'
@@ -197,7 +196,7 @@ PY
 }
 pid_comm() {
   local pid="$1" comm
-  comm="$(ps -p "${pid}" -o comm= 2>/dev/null | awk 'NR==1 {print $1}')" || return 1; [[ -n "${comm}" ]] || return 1; basename -- "${comm}"
+  comm="$(ps -ww -p "${pid}" -o comm= 2>/dev/null | sed -n '1p')" || return 1; [[ -n "${comm}" ]] || return 1; basename -- "${comm}"
 }
 pid_listens_on() {
   local pid="$1" endpoint="$2" out status=0
@@ -242,11 +241,12 @@ build_rust_node() {
 import json, sys
 selected = None
 with open(sys.argv[1], encoding="utf-8") as f:
-    for raw in f:
+    for line_no, raw in enumerate(f, 1):
         line = raw.strip()
         if not line: continue
         if not line.startswith("{"): sys.exit(f"cargo build log contamination: {line[:160]!r}")
-        ev = json.loads(line)
+        try: ev = json.loads(line)
+        except json.JSONDecodeError as exc: sys.exit(f"malformed cargo JSON at line {line_no}: {exc.msg}")
         if ev.get("reason") != "compiler-artifact": continue
         target = ev.get("target") or {}
         if target.get("name") == "rubin-node" and "bin" in (target.get("kind") or []) and ev.get("executable"): selected = ev["executable"]
@@ -396,11 +396,9 @@ verify_process_identity() {
   esac
 }
 start_rust_node() {
-  RUST_CMD="${RUST_NODE_BIN} --network devnet --datadir ${RUST_DIR} --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer ${GO_P2P_ADDR}"
-  rubin_process_start "${RUST_LOG}" "${RUST_NODE_BIN}" \
-    --network devnet --datadir "${RUST_DIR}" \
-    --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
-    --peer "${GO_P2P_ADDR}" || return 1
+  local -a argv=("${RUST_NODE_BIN}" --network devnet --datadir "${RUST_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${GO_P2P_ADDR}")
+  RUST_CMD="$(argv_cmd "${argv[@]}")"
+  rubin_process_start "${RUST_LOG}" "${argv[@]}" || return 1
   RUST_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${RUST_LOG}" "p2p: listening=" 60 "${RUST_PID}" || return 1
   rubin_process_wait_for_log "${RUST_LOG}" "rpc: listening=" 60 "${RUST_PID}" || return 1
@@ -410,10 +408,9 @@ start_rust_node() {
   RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 start_go_node() {
-  GO_CMD="${GO_NODE_BIN} --network devnet --datadir ${GO_DIR} --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0"
-  rubin_process_start "${GO_LOG}" "${GO_NODE_BIN}" \
-    --network devnet --datadir "${GO_DIR}" \
-    --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 || return 1
+  local -a argv=("${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
+  GO_CMD="$(argv_cmd "${argv[@]}")"
+  rubin_process_start "${GO_LOG}" "${argv[@]}" || return 1
   GO_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${GO_LOG}" "rpc: listening=" 60 "${GO_PID}" || return 1
   GO_RPC_ADDR="$(rubin_process_extract_rpc_addr "${GO_LOG}")" || return 1
@@ -422,7 +419,7 @@ start_go_node() {
   GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]+$ && "${MESH_TIMEOUT}" -ge 1 && "${MESH_TIMEOUT}" -le 600 ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
-command -v lsof >/dev/null 2>&1 || finish_no_data "lsof_unavailable"
+command -v lsof >/dev/null 2>&1 || finish_no_data "lsof_unavailable"; command -v perl >/dev/null 2>&1 || finish_no_data "perl_unavailable"
 build_go_node || finish_no_data "go_build_failed"
 build_rust_node || finish_no_data "rust_build_failed"
 start_go_node || finish_no_data "go_process_not_ready"
