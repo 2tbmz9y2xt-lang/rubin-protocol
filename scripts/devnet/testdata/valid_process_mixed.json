@@ -1,0 +1,25 @@
+{
+  "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+  "evidence_type": "mixed_client_process_soak",
+  "scenario": "process_mixed_go_to_rust_propagation",
+  "verdict": "PASS",
+  "participants": [
+    {
+      "name": "node-go",
+      "implementation": "go",
+      "endpoint": "127.0.0.1:41001",
+      "started_at": "2026-05-09T10:00:00Z"
+    },
+    {
+      "name": "node-rust",
+      "implementation": "rust",
+      "endpoint": "127.0.0.1:41002",
+      "started_at": "2026-05-09T10:00:01Z"
+    }
+  ],
+  "tx_path": {
+    "submitted_at": "node-go",
+    "observed_at": ["node-rust"],
+    "tx_id": "4444444444444444444444444444444444444444444444444444444444444444"
+  }
+}
