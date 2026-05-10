@@ -5,10 +5,7 @@ HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/devnet-proce
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
 
-if ! command -v lsof >/dev/null 2>&1; then
-  printf 'SKIP: NO_DATA reason=lsof_unavailable fixture=partition_control\n'
-  exit 0
-fi
+command -v lsof >/dev/null 2>&1 || { printf 'FAIL: NO_DATA reason=lsof_unavailable fixture=partition_control\n' >&2; exit 1; }
 
 # Fixture-only internal _rubin_process_* calls seed hostile states unreachable through public APIs.
 require_contains() {
