@@ -443,7 +443,7 @@ FINAL_PEER_SNAPSHOTS_RECHECKED=true
 PASS_REPORT_JSON="${REPORT_JSON}.pass.tmp"; FINAL_REPORT_JSON="${REPORT_JSON}"; REPORT_JSON="${PASS_REPORT_JSON}"
 write_outputs "PASS" || { REPORT_JSON="${FINAL_REPORT_JSON}"; finish_no_data "pass_report_write_failed"; }; REPORT_JSON="${FINAL_REPORT_JSON}"
 if run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 && check_report "${PASS_REPORT_JSON}" live >&2; then
-  mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}"
+  mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
 else
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_validation_failed"
 fi
