@@ -36,6 +36,7 @@ check_report() {
   local report="${1:-}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
   python3 - "${report}" <<'PY'
+import datetime as dt
 import json
 import sys
 from pathlib import Path
@@ -52,7 +53,12 @@ def ep(value: object) -> bool:
     port = value.rsplit(":", 1)[1]
     return port.isdigit() and 1 <= int(port) <= 65535
 def ts(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 20 and value.endswith("Z") and value[4] == value[7] == "-" and value[10] == "T" and value[13] == value[16] == ":" and (value[:4] + value[5:7] + value[8:10] + value[11:13] + value[14:16] + value[17:19]).isdigit()
+    if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z":
+        return False
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
+    except ValueError:
+        return False
 try:
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
