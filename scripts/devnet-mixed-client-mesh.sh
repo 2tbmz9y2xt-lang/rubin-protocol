@@ -73,6 +73,17 @@ if verdict != "PASS":
     sys.exit(0)
 if "failure_reason" in data:
     fail("PASS report must not carry failure_reason")
+if "schema_marker" in data:
+    fail("PASS report must not embed legacy schema marker as report verdict")
+legacy_schema = data.get("legacy_schema_compatibility")
+if not isinstance(legacy_schema, dict):
+    fail("PASS report missing legacy_schema_compatibility boundary")
+if legacy_schema.get("authoritative") is not False:
+    fail("legacy_schema_compatibility must be non-authoritative")
+if "verdict" in legacy_schema:
+    fail("legacy_schema_compatibility must not carry a verdict field")
+if not legacy_schema.get("marker_path"):
+    fail("legacy_schema_compatibility missing marker_path")
 
 nodes = data.get("nodes")
 if not isinstance(nodes, list) or len(nodes) != 2:
@@ -141,7 +152,7 @@ RUST_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
 GO_LOG="node-go.log"
 RUST_LOG="node-rust.log"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"
-EVIDENCE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-schema-marker.json"
+LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"
 RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 
@@ -294,7 +305,7 @@ PY
 
 write_outputs() {
   local verdict="$1" reason="${2:-}"
-  export REPORT_JSON EVIDENCE_JSON verdict reason GO_PID RUST_PID GO_RPC_ADDR RUST_RPC_ADDR \
+  export REPORT_JSON LEGACY_SCHEMA_MARKER_JSON verdict reason GO_PID RUST_PID GO_RPC_ADDR RUST_RPC_ADDR \
     GO_P2P_ADDR RUST_P2P_ADDR GO_STARTED_AT_UTC RUST_STARTED_AT_UTC GO_COMM RUST_COMM \
     GO_NODE_BIN RUST_NODE_BIN GO_CMD RUST_CMD GO_PEERS_JSON RUST_PEERS_JSON \
     RUBIN_PROCESS_ARTIFACT_ROOT
@@ -350,9 +361,10 @@ report = {
         "go_peer_snapshot": go_snapshot,
         "rust_peer_snapshot": rust_snapshot,
     },
-    "schema_marker": {
-        "path": e["EVIDENCE_JSON"],
-        "verdict": "FAIL",
+    "legacy_schema_compatibility": {
+        "authoritative": False,
+        "marker_path": e["LEGACY_SCHEMA_MARKER_JSON"],
+        "purpose": "schema-valid legacy artifact only; not the mesh report verdict",
         "reason": "existing mixed_client_evidence_v1 PASS requires tx_path; RUB-21 mesh-only PASS lives in this report",
     },
 }
@@ -362,23 +374,23 @@ with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
 
-marker_reason = reason if verdict != "PASS" and reason else (
+legacy_marker_reason = reason if verdict != "PASS" and reason else (
     "mixed-client mesh process/connectivity PASS is recorded in sibling report; "
     "existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23"
 )
-schema_marker = {
+legacy_schema_marker = {
     "schema_version": "rubin-mixed-client-devnet-evidence-v1",
     "evidence_type": "mixed_client_process_soak",
     "scenario": "mixed_client_mesh_schema_marker",
     "verdict": "FAIL",
-    "failure_reason": marker_reason,
+    "failure_reason": legacy_marker_reason,
     "participants": [
         {"name": "node-go", "implementation": "go", **({"endpoint": e["GO_RPC_ADDR"], "started_at": e["GO_STARTED_AT_UTC"]} if e.get("GO_RPC_ADDR") and e.get("GO_STARTED_AT_UTC") else {})},
         {"name": "node-rust", "implementation": "rust", **({"endpoint": e["RUST_RPC_ADDR"], "started_at": e["RUST_STARTED_AT_UTC"]} if e.get("RUST_RPC_ADDR") and e.get("RUST_STARTED_AT_UTC") else {})},
     ],
 }
-with open(e["EVIDENCE_JSON"], "w", encoding="utf-8") as f:
-    json.dump(schema_marker, f, indent=2, sort_keys=True)
+with open(e["LEGACY_SCHEMA_MARKER_JSON"], "w", encoding="utf-8") as f:
+    json.dump(legacy_schema_marker, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
 }
@@ -386,8 +398,8 @@ PY
 finish_no_data() {
   local reason="$1"
   write_outputs "NO_DATA" "${reason}"
-  run_validator "${EVIDENCE_JSON}" >&2
-  echo "NO_DATA: ${reason}; report=${REPORT_JSON} schema_marker=${EVIDENCE_JSON}" >&2
+  run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2
+  echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2
   exit 1
 }
 
@@ -477,10 +489,10 @@ wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}"
 wait_peer_snapshot node-rust "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" || finish_no_data "rust_peer_snapshot_missing_completed_handshake"
 
 write_outputs "PASS"
-run_validator "${EVIDENCE_JSON}" >&2
+run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2
 check_report "${REPORT_JSON}" >&2
 if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
-  echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} schema_marker=${EVIDENCE_JSON}"
+  echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}"
 else
   echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"
 fi
