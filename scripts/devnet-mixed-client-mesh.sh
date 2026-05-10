@@ -130,6 +130,8 @@ req(impls == {"go", "rust"}, f"PASS report requires one go and one rust node, go
 nodes_by_impl = {node["implementation"]: node for node in nodes}
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
+endpoints = [nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")]
+req(len(set(endpoints)) == 4, "node rpc/p2p endpoints are not pairwise distinct")
 connectivity = data.get("peer_connectivity")
 req(isinstance(connectivity, dict), "PASS report missing peer_connectivity object")
 req(all(connectivity.get(f) is True for f in ("go_to_rust", "rust_to_go", "bidirectional_observed")), "peer_connectivity booleans are not all true")
