@@ -478,6 +478,8 @@ pub struct SyncEngine {
     pub(crate) cfg: SyncConfig,
     pub(crate) tip_timestamp: u64,
     pub(crate) best_known_height: u64,
+    last_reorg_depth: u64,
+    reorg_count: u64,
     pv_mode: ParallelValidationMode,
     pv_shadow_max_samples: u64,
     pv_shadow_mismatches: u64,
@@ -503,6 +505,8 @@ pub(crate) struct SyncRollbackState {
     pub canonical_removed_suffix: Option<Vec<String>>,
     pub tip_timestamp: u64,
     pub best_known_height: u64,
+    pub last_reorg_depth: u64,
+    pub reorg_count: u64,
 }
 
 pub fn default_sync_config(
@@ -570,6 +574,8 @@ impl SyncEngine {
             cfg,
             tip_timestamp,
             best_known_height,
+            last_reorg_depth: 0,
+            reorg_count: 0,
             pv_mode,
             pv_shadow_max_samples,
             pv_shadow_mismatches: 0,
@@ -603,6 +609,21 @@ impl SyncEngine {
 
     pub fn best_known_height(&self) -> u64 {
         self.best_known_height
+    }
+
+    pub fn last_reorg_depth(&self) -> u64 {
+        self.last_reorg_depth
+    }
+
+    pub fn reorg_count(&self) -> u64 {
+        self.reorg_count
+    }
+
+    pub(crate) fn note_reorg(&mut self, depth: u64) {
+        self.last_reorg_depth = depth;
+        if depth > 0 {
+            self.reorg_count = self.reorg_count.saturating_add(1);
+        }
     }
 
     pub fn chain_state_snapshot(&self) -> ChainState {
@@ -921,6 +942,9 @@ impl SyncEngine {
         if summary.block_height > self.best_known_height {
             self.best_known_height = summary.block_height;
         }
+        // Direct canonical apply clears the last-depth gauge; successful reorg
+        // reconnects set it again after the whole branch commits.
+        self.last_reorg_depth = 0;
         if pv_active {
             self.pv_telemetry
                 .record_commit_latency(commit_start.elapsed());
@@ -939,6 +963,8 @@ impl SyncEngine {
             canonical_removed_suffix: None,
             tip_timestamp: self.tip_timestamp,
             best_known_height: self.best_known_height,
+            last_reorg_depth: self.last_reorg_depth,
+            reorg_count: self.reorg_count,
         }
     }
 
@@ -958,6 +984,8 @@ impl SyncEngine {
                 .map(|bs| bs.canonical_suffix_from(reorg_base)),
             tip_timestamp: self.tip_timestamp,
             best_known_height: self.best_known_height,
+            last_reorg_depth: self.last_reorg_depth,
+            reorg_count: self.reorg_count,
         }
     }
 
@@ -989,6 +1017,8 @@ impl SyncEngine {
         self.chain_state = rb.chain_state;
         self.tip_timestamp = rb.tip_timestamp;
         self.best_known_height = rb.best_known_height;
+        self.last_reorg_depth = rb.last_reorg_depth;
+        self.reorg_count = rb.reorg_count;
 
         if let Some(path) = self.cfg.chain_state_path.as_ref() {
             if let Err(e) = self.chain_state.save(path) {

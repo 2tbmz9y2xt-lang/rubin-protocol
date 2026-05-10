@@ -1894,23 +1894,33 @@ fn handle_metrics(state: &DevnetRPCState, method: &str) -> HttpResponse {
 }
 
 fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
-    let (tip_height, best_known_height, in_ibd, pv_lines) = match state.sync_engine.lock() {
-        Ok(engine) => {
-            let tip_height = match engine.tip() {
-                Ok(Some((height, _))) => height,
-                _ => 0,
-            };
-            let best_known_height = engine.best_known_height();
-            let in_ibd = if engine.is_in_ibd((state.now_unix)()) {
-                1
-            } else {
-                0
-            };
-            let pv_lines = engine.pv_telemetry_snapshot().prometheus_lines();
-            (tip_height, best_known_height, in_ibd, pv_lines)
-        }
-        Err(_) => (0, 0, 1, Vec::new()),
-    };
+    let (tip_height, best_known_height, in_ibd, reorg_count, last_reorg_depth, pv_lines) =
+        match state.sync_engine.lock() {
+            Ok(engine) => {
+                let tip_height = match engine.tip() {
+                    Ok(Some((height, _))) => height,
+                    _ => 0,
+                };
+                let best_known_height = engine.best_known_height();
+                let in_ibd = if engine.is_in_ibd((state.now_unix)()) {
+                    1
+                } else {
+                    0
+                };
+                let reorg_count = engine.reorg_count();
+                let last_reorg_depth = engine.last_reorg_depth();
+                let pv_lines = engine.pv_telemetry_snapshot().prometheus_lines();
+                (
+                    tip_height,
+                    best_known_height,
+                    in_ibd,
+                    reorg_count,
+                    last_reorg_depth,
+                    pv_lines,
+                )
+            }
+            Err(_) => (0, 0, 1, 0, 0, Vec::new()),
+        };
     let mempool_txs = match state.tx_pool.lock() {
         Ok(pool) => pool.len() as u64,
         Err(_) => 0,
@@ -1930,6 +1940,14 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
             .to_string(),
         "# TYPE rubin_node_in_ibd gauge".to_string(),
         format!("rubin_node_in_ibd {in_ibd}"),
+        "# HELP rubin_node_reorg_total Total canonical reorg events observed by the sync engine."
+            .to_string(),
+        "# TYPE rubin_node_reorg_total counter".to_string(),
+        format!("rubin_node_reorg_total {reorg_count}"),
+        "# HELP rubin_node_last_reorg_depth Depth of the most recent canonical reorg, or 0 when no reorg depth is currently recorded."
+            .to_string(),
+        "# TYPE rubin_node_last_reorg_depth gauge".to_string(),
+        format!("rubin_node_last_reorg_depth {last_reorg_depth}"),
         "# HELP rubin_node_peer_count Currently tracked peers.".to_string(),
         "# TYPE rubin_node_peer_count gauge".to_string(),
         format!("rubin_node_peer_count {peer_count}"),
@@ -2684,12 +2702,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use rubin_consensus::{parse_tx, Outpoint, UtxoEntry};
+    use rubin_consensus::{block_hash, parse_tx, Outpoint, UtxoEntry};
     use serde_json::Value;
 
     use crate::io_utils::unique_temp_path;
     use crate::p2p_runtime::{PeerState, VersionPayloadV1};
-    use crate::test_helpers::signed_conflicting_p2pk_state_and_txs;
+    use crate::test_helpers::{
+        coinbase_only_block, coinbase_only_block_with_gen, genesis_info,
+        signed_conflicting_p2pk_state_and_txs,
+    };
     use crate::txpool::TxSource;
     use crate::{
         block_store_path, default_peer_runtime_config, default_sync_config,
@@ -4814,6 +4835,8 @@ mod tests {
             "rubin_node_tip_height",
             "rubin_node_best_known_height",
             "rubin_node_in_ibd",
+            "rubin_node_reorg_total",
+            "rubin_node_last_reorg_depth",
             "rubin_node_peer_count",
             "rubin_node_mempool_txs",
             "rubin_node_rpc_requests_total",
@@ -4856,6 +4879,95 @@ mod tests {
         assert!(body.contains(r#"rubin_node_rpc_requests_total{route="/get_tip",status="200"} 1"#));
         assert!(body.contains(r#"rubin_node_submit_tx_total{result="rejected"} 1"#));
         assert!(body.contains(r#"rubin_pv_mode{mode="off"} 1"#));
+        assert!(body.contains("rubin_node_reorg_total 0"), "{body}");
+        assert!(body.contains("rubin_node_last_reorg_depth 0"), "{body}");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn metrics_render_exposes_reorg_counters_read_only() {
+        let (state, dir) = build_state(true);
+        let (_genesis, genesis_hash, gen_ts) = genesis_info();
+        let block3;
+
+        {
+            let mut engine = state.sync_engine.lock().expect("sync engine");
+            assert_eq!(engine.reorg_count(), 0);
+            assert_eq!(engine.last_reorg_depth(), 0);
+
+            let block1 = coinbase_only_block(1, genesis_hash, gen_ts + 1);
+            engine
+                .apply_block_with_reorg(&block1, None)
+                .expect("block1 canonical");
+            assert_eq!(engine.reorg_count(), 0);
+            assert_eq!(engine.last_reorg_depth(), 0);
+
+            let block1_alt = coinbase_only_block(1, genesis_hash, gen_ts + 2);
+            let block1_alt_hash = block_hash(&block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("block1 alt hash");
+            engine
+                .block_store
+                .as_ref()
+                .expect("blockstore")
+                .store_block(
+                    block1_alt_hash,
+                    &block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES],
+                    &block1_alt,
+                )
+                .expect("store block1 alt");
+
+            let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+            let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+            engine
+                .apply_block_with_reorg(&block2_alt, None)
+                .expect("reorg to heavier branch");
+            assert_eq!(engine.reorg_count(), 1);
+            assert_eq!(engine.last_reorg_depth(), 1);
+
+            let block2_alt_hash = block_hash(&block2_alt[..rubin_consensus::BLOCK_HEADER_BYTES])
+                .expect("block2 alt hash");
+            let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1));
+            block3 =
+                coinbase_only_block_with_gen(3, subsidy1 + subsidy2, block2_alt_hash, gen_ts + 4);
+        }
+
+        let body1 = render_prometheus_metrics(&state);
+        let body2 = render_prometheus_metrics(&state);
+        for body in [&body1, &body2] {
+            for want in [
+                "# HELP rubin_node_reorg_total Total canonical reorg events observed by the sync engine.",
+                "# TYPE rubin_node_reorg_total counter",
+                "rubin_node_reorg_total 1",
+                "# HELP rubin_node_last_reorg_depth Depth of the most recent canonical reorg, or 0 when no reorg depth is currently recorded.",
+                "# TYPE rubin_node_last_reorg_depth gauge",
+                "rubin_node_last_reorg_depth 1",
+            ] {
+                assert!(body.contains(want), "missing {want:?} in {body}");
+            }
+            assert!(
+                !body.contains("rubin_node_reorg_total{")
+                    && !body.contains("rubin_node_last_reorg_depth{"),
+                "reorg metrics must stay unlabeled; body=\n{body}"
+            );
+        }
+
+        let engine = state.sync_engine.lock().expect("sync engine after render");
+        assert_eq!(engine.reorg_count(), 1);
+        assert_eq!(engine.last_reorg_depth(), 1);
+        drop(engine);
+
+        {
+            let mut engine = state.sync_engine.lock().expect("sync engine direct");
+            engine
+                .apply_block_with_reorg(&block3, None)
+                .expect("direct extension after reorg");
+            assert_eq!(engine.reorg_count(), 1);
+            assert_eq!(engine.last_reorg_depth(), 0);
+        }
+
+        let body3 = render_prometheus_metrics(&state);
+        assert!(body3.contains("rubin_node_reorg_total 1"), "{body3}");
+        assert!(body3.contains("rubin_node_last_reorg_depth 0"), "{body3}");
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
