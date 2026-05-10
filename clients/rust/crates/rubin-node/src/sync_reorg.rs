@@ -48,7 +48,7 @@ pub struct TxPoolCleanupPlan {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TxPoolCleanupReport {
+pub(crate) struct TxPoolCleanupReport {
     requeue_blocks_unavailable: usize,
     requeue_blocks_invalid: usize,
     requeue_attempted: usize,
@@ -59,17 +59,32 @@ struct TxPoolCleanupReport {
 }
 
 impl TxPoolCleanupReport {
-    #[cfg(test)]
-    fn requeue_failed(&self) -> usize {
+    pub(crate) fn requeue_failed(&self) -> usize {
         self.requeue_conflict
             .saturating_add(self.requeue_rejected)
             .saturating_add(self.requeue_unavailable)
     }
 
-    #[cfg(test)]
-    fn requeue_blocks_failed(&self) -> usize {
+    pub(crate) fn requeue_blocks_failed(&self) -> usize {
         self.requeue_blocks_unavailable
             .saturating_add(self.requeue_blocks_invalid)
+    }
+
+    pub(crate) fn has_requeue_failures(&self) -> bool {
+        self.requeue_failed() > 0 || self.requeue_blocks_failed() > 0
+    }
+
+    pub(crate) fn requeue_failure_summary(&self) -> String {
+        format!(
+            "requeue_attempted={} requeue_accepted={} requeue_blocks_unavailable={} requeue_blocks_invalid={} requeue_conflict={} requeue_rejected={} requeue_unavailable={}",
+            self.requeue_attempted,
+            self.requeue_accepted,
+            self.requeue_blocks_unavailable,
+            self.requeue_blocks_invalid,
+            self.requeue_conflict,
+            self.requeue_rejected,
+            self.requeue_unavailable
+        )
     }
 
     fn record_requeue_attempt(&mut self) {
@@ -109,10 +124,12 @@ impl TxPoolCleanupPlan {
         block_store: Option<&BlockStore>,
         chain_id: [u8; 32],
     ) {
+        // Best-effort compatibility path. Live callers that need authoritative
+        // requeue visibility must use `apply_with_report`.
         let _ = self.apply_with_report(pool, chain_state, block_store, chain_id);
     }
 
-    fn apply_with_report(
+    pub(crate) fn apply_with_report(
         &self,
         pool: &mut TxPool,
         chain_state: &crate::ChainState,
