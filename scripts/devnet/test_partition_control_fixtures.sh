@@ -157,7 +157,6 @@ start_server rust-helper send; RUST_PID="${SERVER_PID}" RUST_ENDPOINT="${SERVER_
 start_server silent-helper silent; SILENT_ENDPOINT="${SERVER_ENDPOINT}"
 start_spoof_server basename-spoof rubin-node-go; SPOOF_GO_PID="${SERVER_PID}" SPOOF_GO_ENDPOINT="${SERVER_ENDPOINT}"
 SPOOF_GO_COMM="$(_rubin_process_pid_comm "${SPOOF_GO_PID}")" || { echo "failed to read spoof process comm" >&2; exit 1; }; [[ "${SPOOF_GO_COMM}" == "rubin-node-go" ]] || { echo "spoof fixture did not expose rubin-node-go comm: ${SPOOF_GO_COMM}" >&2; exit 1; }
-
 expect_fail_with_path_contains "lsof unavailable registration" "reason=lsof_unavailable" "${NO_TOOLS_DIR}" rubin_process_register_topology_node node-go go "${GO_PID}" "${GO_ENDPOINT}" "${EXPECTED_GO_BIN}"
 expect_fail_contains "fake go identity" "reason=process_identity_unverified" rubin_process_register_topology_node node-go go "${GO_PID}" "${GO_ENDPOINT}"
 expect_fail_contains "basename spoof missing expected executable" "reason=missing_expected_executable" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}"
