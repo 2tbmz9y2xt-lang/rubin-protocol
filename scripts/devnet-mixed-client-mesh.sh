@@ -67,29 +67,20 @@ if data.get("scenario") != "mixed_client_mesh":
 verdict = data.get("verdict")
 if verdict != "PASS":
     fail(f"report verdict is not PASS: {verdict!r}")
-if "failure_reason" in data:
-    fail("PASS report must not carry failure_reason")
-if "schema_marker" in data:
-    fail("PASS report must not embed legacy schema marker as report verdict")
+if "failure_reason" in data or "schema_marker" in data:
+    fail("PASS report must not carry failure/schema-marker verdict fields")
 legacy_schema = data.get("legacy_schema_compatibility")
-if not isinstance(legacy_schema, dict):
-    fail("PASS report missing legacy_schema_compatibility boundary")
-if legacy_schema.get("authoritative") is not False:
-    fail("legacy_schema_compatibility must be non-authoritative")
-if "verdict" in legacy_schema:
-    fail("legacy_schema_compatibility must not carry a verdict field")
-if not legacy_schema.get("marker_path"):
+if not isinstance(legacy_schema, dict) or legacy_schema.get("authoritative") is not False or "verdict" in legacy_schema or not legacy_schema.get("marker_path"):
     fail("legacy_schema_compatibility missing marker_path")
 
 nodes = data.get("nodes")
-if not isinstance(nodes, list) or len(nodes) != 2:
+if not isinstance(nodes, list) or len(nodes) != 2 or not all(isinstance(node, dict) for node in nodes):
     fail("PASS report requires exactly two node records")
-if not all(isinstance(node, dict) for node in nodes):
-    fail("node entry is not an object")
 impls = {node.get("implementation") for node in nodes}
 if impls != {"go", "rust"}:
     fail(f"PASS report requires one go and one rust node, got {sorted(str(impl) for impl in impls)}")
 expected_comm = {"go": "rubin-node-go", "rust": "rubin-node-rust"}
+nodes_by_impl = {node["implementation"]: node for node in nodes}
 for node in nodes:
     impl = node.get("implementation")
     name = node.get("name")
@@ -109,18 +100,26 @@ for node in nodes:
 connectivity = data.get("peer_connectivity")
 if not isinstance(connectivity, dict):
     fail("PASS report missing peer_connectivity object")
-for field in ("go_to_rust", "rust_to_go", "bidirectional_observed"):
-    if connectivity.get(field) is not True:
-        fail(f"peer_connectivity.{field} is not true")
-for field in ("go_peer_snapshot", "rust_peer_snapshot"):
+if any(connectivity.get(field) is not True for field in ("go_to_rust", "rust_to_go", "bidirectional_observed")):
+    fail("peer_connectivity booleans are not all true")
+links = connectivity.get("counterpart_links")
+if not isinstance(links, dict):
+    fail("PASS report missing counterpart_links")
+go_expected = links.get("go_peer_snapshot_expected_addr")
+rust_expected = links.get("rust_peer_snapshot_expected_addr")
+if rust_expected != nodes_by_impl["go"]["p2p_endpoint"] or links.get("rust_outbound_remote_addr") != rust_expected or links.get("rust_outbound_local_addr") != go_expected or links.get("rust_outbound_pid") != nodes_by_impl["rust"]["pid"]:
+    fail("peer evidence is not bound to expected counterpart endpoints")
+if not isinstance(go_expected, str) or go_expected in {rust_expected, nodes_by_impl["rust"]["p2p_endpoint"], nodes_by_impl["go"]["rpc_endpoint"], nodes_by_impl["rust"]["rpc_endpoint"]}:
+    fail("go peer evidence is not a rust outbound peer address")
+for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snapshot", rust_expected)):
     snapshot = connectivity.get(field)
     if not isinstance(snapshot, dict) or snapshot.get("count", 0) < 1:
         fail(f"{field} must show at least one peer")
     peers = snapshot.get("peers")
-    if not isinstance(peers, list) or not peers:
-        fail(f"{field}.peers must be non-empty")
-    if not any(peer.get("handshake_complete") is True for peer in peers if isinstance(peer, dict)):
-        fail(f"{field} lacks a completed handshake")
+    if not isinstance(peers, list) or not peers or snapshot.get("count") != len(peers):
+        fail(f"{field}.peers/count are internally inconsistent")
+    if not any(peer.get("addr") == expected_addr and peer.get("handshake_complete") is True for peer in peers if isinstance(peer, dict)):
+        fail(f"{field} lacks completed handshake for expected counterpart")
 
 print(f"PASS: mixed-client mesh report accepted {path}")
 PY
@@ -152,9 +151,8 @@ LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-lega
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"
 RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR=""
-GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM=""
-GO_CMD="" RUST_CMD=""
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC=""
+GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 
 run_fips_preflight_before_captured_dev_env() {
@@ -305,6 +303,7 @@ write_outputs() {
     GO_P2P_ADDR RUST_P2P_ADDR GO_STARTED_AT_UTC RUST_STARTED_AT_UTC GO_COMM RUST_COMM \
     GO_NODE_BIN RUST_NODE_BIN GO_CMD RUST_CMD GO_PEERS_JSON RUST_PEERS_JSON \
     GO_PROCESS_ALIVE RUST_PROCESS_ALIVE GO_RPC_PROCESS_BACKED RUST_RPC_PROCESS_BACKED GO_P2P_PROCESS_BACKED RUST_P2P_PROCESS_BACKED \
+    RUST_TO_GO_LOCAL_ADDR \
     RUBIN_PROCESS_ARTIFACT_ROOT
   python3 - <<'PY'
 import json
@@ -345,8 +344,7 @@ for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_k
     }
     nodes.append(node)
 
-go_snapshot = read_json(e["GO_PEERS_JSON"])
-rust_snapshot = read_json(e["RUST_PEERS_JSON"])
+go_snapshot, rust_snapshot = read_json(e["GO_PEERS_JSON"]), read_json(e["RUST_PEERS_JSON"])
 report = {
     "scenario": "mixed_client_mesh",
     "verdict": verdict,
@@ -356,6 +354,7 @@ report = {
         "go_to_rust": verdict == "PASS",
         "rust_to_go": verdict == "PASS",
         "bidirectional_observed": verdict == "PASS",
+        "counterpart_links": {"go_peer_snapshot_expected_addr": e.get("RUST_TO_GO_LOCAL_ADDR") or None, "rust_peer_snapshot_expected_addr": e.get("GO_P2P_ADDR") or None, "rust_outbound_local_addr": e.get("RUST_TO_GO_LOCAL_ADDR") or None, "rust_outbound_remote_addr": e.get("GO_P2P_ADDR") or None, "rust_outbound_pid": int(e["RUST_PID"]) if e.get("RUST_PID", "").isdigit() else None},
         "go_peer_snapshot": go_snapshot,
         "rust_peer_snapshot": rust_snapshot,
     },
@@ -402,19 +401,19 @@ finish_no_data() {
 }
 
 wait_peer_snapshot() {
-  local label="$1" addr="$2" out="$3" timeout="$4" deadline tmp
+  local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp
   deadline=$((SECONDS + timeout))
   tmp="${out}.tmp"
   while (( SECONDS < deadline )); do
     if rpc_json GET "${addr}" /peers >"${tmp}" 2>/dev/null \
-      && python3 - "${tmp}" <<'PY' >/dev/null 2>&1
+      && python3 - "${tmp}" "${expected}" <<'PY' >/dev/null 2>&1
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
-peers = data.get("peers")
-ok = isinstance(peers, list) and data.get("count", 0) >= 1 and any(
-    isinstance(p, dict) and p.get("handshake_complete") is True for p in peers
+expected, peers = sys.argv[2], data.get("peers")
+ok = isinstance(peers, list) and data.get("count") == len(peers) and any(
+    isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers
 )
 sys.exit(0 if ok else 1)
 PY
@@ -483,8 +482,10 @@ start_go_node || finish_no_data "go_process_not_ready"
 verify_process_identity node-go go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go || finish_no_data "go_process_identity_unverified"
 start_rust_node || finish_no_data "rust_process_not_ready"
 verify_process_identity node-rust rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust || finish_no_data "rust_process_identity_unverified"
-wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" || finish_no_data "go_peer_snapshot_missing_completed_handshake"
-wait_peer_snapshot node-rust "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" || finish_no_data "rust_peer_snapshot_missing_completed_handshake"
+wait_peer_snapshot node-rust "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || finish_no_data "rust_peer_snapshot_missing_go_endpoint"
+RUST_TO_GO_LOCAL_ADDR="$(lsof -nP -a -p "${RUST_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null | REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' | sort -u)" || finish_no_data "rust_to_go_tcp_link_missing"
+[[ -n "${RUST_TO_GO_LOCAL_ADDR}" && "${RUST_TO_GO_LOCAL_ADDR}" != *$'\n'* ]] || finish_no_data "rust_to_go_tcp_link_ambiguous"
+wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "go_peer_snapshot_missing_rust_endpoint"
 verify_process_identity node-go-final go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go || finish_no_data "go_final_process_identity_unverified"
 verify_process_identity node-rust-final rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust || finish_no_data "rust_final_process_identity_unverified"
 
