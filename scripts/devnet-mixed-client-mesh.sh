@@ -419,7 +419,7 @@ start_go_node() {
   rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1
   GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
-[[ "${MESH_TIMEOUT}" =~ ^[0-9]+$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
+[[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
 MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
 command -v lsof >/dev/null 2>&1 || finish_no_data "lsof_unavailable"; command -v perl >/dev/null 2>&1 || finish_no_data "perl_unavailable"
 build_go_node || finish_no_data "go_build_failed"
