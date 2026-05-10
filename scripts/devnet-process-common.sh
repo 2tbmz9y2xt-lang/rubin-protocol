@@ -343,7 +343,7 @@ _rubin_process_pid_listens_on() {
 }
 
 rubin_process_register_topology_node() {
-  local name="${1:-}" implementation="${2:-}" pid="${3:-}" endpoint="${4:-}" expected_executable="${5:-}" comm expected_exec started_exec
+  local name="${1:-}" implementation="${2:-}" pid="${3:-}" endpoint="${4:-}" expected_executable="${5:-}" comm
   _rubin_process_require_init || return 1
   _rubin_process_name "${name}" || { _rubin_process_error "NO_DATA: reason=invalid_node_name node=${name:-<empty>}"; return 1; }
   _rubin_process_implementation "${implementation}" || { _rubin_process_error "NO_DATA: reason=invalid_implementation node=${name} implementation=${implementation:-<empty>}"; return 1; }
@@ -357,15 +357,9 @@ rubin_process_register_topology_node() {
   comm="$(_rubin_process_pid_comm "${pid}")" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} pid=${pid}"; return 1; }
   _rubin_process_runtime_comm_matches "${implementation}" "${comm}" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} implementation=${implementation} pid=${pid} comm=${comm}"; return 1; }
   [[ -n "${expected_executable}" ]] || { _rubin_process_error "NO_DATA: reason=missing_expected_executable node=${name} implementation=${implementation} pid=${pid}"; return 1; }
-  expected_exec="$(_rubin_process_executable_realpath "${expected_executable}")" || { _rubin_process_error "NO_DATA: reason=expected_executable_unverified node=${name} implementation=${implementation} pid=${pid}"; return 1; }
-  started_exec="$(_rubin_process_started_exec_realpath "${pid}")" || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} implementation=${implementation} pid=${pid}"; return 1; }
-  [[ "${started_exec}" == "${expected_exec}" ]] || { _rubin_process_error "NO_DATA: reason=process_identity_unverified node=${name} implementation=${implementation} pid=${pid}"; return 1; }
-  ! _rubin_process_node_index "${name}" >/dev/null || { _rubin_process_error "NO_DATA: reason=duplicate_node node=${name}"; return 1; }
-  RUBIN_PROCESS_TOPOLOGY_NAMES+=("${name}")
-  RUBIN_PROCESS_TOPOLOGY_IMPLS+=("${implementation}")
-  RUBIN_PROCESS_TOPOLOGY_PIDS+=("${pid}")
-  RUBIN_PROCESS_TOPOLOGY_ENDPOINTS+=("${endpoint}")
-  RUBIN_PROCESS_TOPOLOGY_EXEC_REALPATHS+=("${expected_exec}")
+  _rubin_process_executable_realpath "${expected_executable}" >/dev/null || { _rubin_process_error "NO_DATA: reason=expected_executable_unverified node=${name} implementation=${implementation} pid=${pid}"; return 1; }
+  _rubin_process_error "NO_DATA: reason=runtime_identity_verifier_required node=${name} implementation=${implementation} pid=${pid}"
+  return 1
 }
 
 rubin_process_register_proxy_link() {

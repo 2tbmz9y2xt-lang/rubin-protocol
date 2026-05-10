@@ -79,6 +79,7 @@ start_spoof_server() {
   local label="$1" runtime_name="$2" log_file spoof_bin
   log_file="${label}.log"
   spoof_bin="${RUBIN_PROCESS_ARTIFACT_ROOT}/${runtime_name}"
+  SPOOF_EXECUTABLE="${spoof_bin}"
   cat >"${spoof_bin}" <<'PL'
 #!/usr/bin/env perl
 use strict; use warnings;
@@ -133,7 +134,7 @@ MISSING_TARGET="${RUBIN_PROCESS_ARTIFACT_ROOT}/missing target.txt"
 write_server "${SERVER_PY}"
 write_runtime_stub "${EXPECTED_GO_BIN}"
 
-SERVER_PID="" SERVER_ENDPOINT=""
+SERVER_PID="" SERVER_ENDPOINT="" SPOOF_EXECUTABLE=""
 start_server go-helper send; GO_PID="${SERVER_PID}" GO_ENDPOINT="${SERVER_ENDPOINT}"
 start_server rust-helper send; RUST_PID="${SERVER_PID}" RUST_ENDPOINT="${SERVER_ENDPOINT}"
 start_server silent-helper silent; SILENT_ENDPOINT="${SERVER_ENDPOINT}"
@@ -142,7 +143,8 @@ SPOOF_GO_COMM="$(_rubin_process_pid_comm "${SPOOF_GO_PID}")" || { echo "failed t
 
 expect_fail_contains "fake go identity" "reason=process_identity_unverified" rubin_process_register_topology_node node-go go "${GO_PID}" "${GO_ENDPOINT}"
 expect_fail_contains "basename spoof missing expected executable" "reason=missing_expected_executable" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}"
-expect_fail_contains "basename spoof identity" "reason=process_identity_unverified" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}" "${EXPECTED_GO_BIN}"
+expect_fail_contains "basename spoof arbitrary expected executable" "reason=runtime_identity_verifier_required" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}" "${SPOOF_EXECUTABLE}"
+expect_fail_contains "basename spoof identity mismatch" "reason=runtime_identity_verifier_required" rubin_process_register_topology_node node-spoof go "${SPOOF_GO_PID}" "${SPOOF_GO_ENDPOINT}" "${EXPECTED_GO_BIN}"
 ((${#RUBIN_PROCESS_TOPOLOGY_NAMES[@]} == 0)) || { echo "fake process was registered as topology" >&2; exit 1; }
 expect_fail_contains "socket timeout" "reason=probe_timeout" rubin_process_probe_endpoint "${SILENT_ENDPOINT}" 1
 expect_fail_contains "invalid probe timeout" "reason=invalid_probe_timeout" rubin_process_probe_endpoint "${GO_ENDPOINT}" not-a-float
