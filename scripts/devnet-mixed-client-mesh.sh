@@ -230,7 +230,7 @@ build_go_node() { echo "Building Go rubin-node binary" >&2; "${DEV_ENV}" -- go -
 build_rust_node() {
   local host_triple cargo_target_dir cargo_log cargo_bin
   echo "Building Rust rubin-node binary" >&2
-  run_fips_preflight_before_captured_dev_env
+  run_fips_preflight_before_captured_dev_env || return 1
   host_triple="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')" || return 1
   [[ -n "${host_triple}" ]] || return 1
   cargo_target_dir="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
