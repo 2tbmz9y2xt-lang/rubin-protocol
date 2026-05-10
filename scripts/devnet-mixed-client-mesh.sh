@@ -7,13 +7,13 @@ CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
 usage() { echo "usage: $0 [--check-report PATH|--check-report-live PATH]" >&2; }
 while (($#)); do case "$1" in --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
-validator_python() { local py; for py in "${RUBIN_VALIDATOR_PYTHON:-}" python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 "${HOME}/.local/bin/python3"; do [[ -n "${py}" ]] || continue; command -v -- "${py}" >/dev/null 2>&1 || continue; "${py}" -c 'import jsonschema' >/dev/null 2>&1 && { printf '%s\n' "${py}"; return 0; }; done; return 1; }
+run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
 check_report() { local report="${1:-}" mode="${2:-offline}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
-  python3 - "${report}" "${VALIDATOR}" "${mode}" "$(validator_python || true)" <<'PY'
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" <<'PY'
 import datetime as dt, json, os, socket, struct, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
-path = Path(sys.argv[1]); live = sys.argv[3] == "live"; validator_py = sys.argv[4]
+path = Path(sys.argv[1]); live = sys.argv[3] == "live"
 try: LIVE_TIMEOUT = max(1, min(600, int(os.environ.get("MESH_TIMEOUT", "10"))))
 except ValueError: LIVE_TIMEOUT = 10
 def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
@@ -118,8 +118,7 @@ try:
 except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
     fail(f"legacy marker is not readable JSON: {exc}")
 req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("verdict") == "FAIL" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong non-authoritative FAIL shape")
-req(bool(validator_py), "validator_unavailable: python jsonschema unavailable")
-try: validator = subprocess.run([validator_py, sys.argv[2], str(marker_path)], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+try: validator = subprocess.run([sys.executable, sys.argv[2], str(marker_path)], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
 except (OSError, subprocess.TimeoutExpired) as exc: fail(f"legacy marker schema validation failed: {exc}")
 req(validator.returncode == 0, "legacy marker schema validation failed: " + ((validator.stderr or validator.stdout).strip().splitlines() or ["validator returned nonzero"])[0])
 nodes = data.get("nodes")
@@ -184,7 +183,6 @@ GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="$
 GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
-run_validator() { local py; py="$(validator_python)" || { echo "validator_unavailable: python jsonschema unavailable" >&2; return 1; }; "${py}" "${VALIDATOR}" "$@"; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV' 5 "$@"; }
 argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 rpc_json() {
