@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# RUB-21: launch one real Go node and one real Rust node, then prove a live
-# mixed-client mesh through process identity plus bidirectional peer snapshots.
 
 set -euo pipefail
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
@@ -13,7 +10,6 @@ VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
 
 CHECK_REPORT="" CHECK_REPORT_MODE=0
 MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
-
 usage() { echo "usage: $0 [--check-report PATH]" >&2; }
 while (($#)); do
   case "$1" in
@@ -33,11 +29,9 @@ while (($#)); do
       ;;
   esac
 done
-
 need_tool() {
   command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }
 }
-
 check_report() {
   local report="${1:-}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
@@ -45,13 +39,13 @@ check_report() {
 import json
 import sys
 from pathlib import Path
-
 path = Path(sys.argv[1])
-
 def fail(message: str) -> None:
     print(f"FAIL: {message}", file=sys.stderr)
     sys.exit(1)
-
+def req(ok: bool, message: str) -> None:
+    if not ok:
+        fail(message)
 try:
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
@@ -59,77 +53,47 @@ except OSError as exc:
     fail(f"cannot read report: {exc}")
 except json.JSONDecodeError as exc:
     fail(f"malformed JSON report: {exc}")
-
-if not isinstance(data, dict):
-    fail("report root is not an object")
-if data.get("scenario") != "mixed_client_mesh":
-    fail(f"scenario is not mixed_client_mesh: {data.get('scenario')!r}")
-verdict = data.get("verdict")
-if verdict != "PASS":
-    fail(f"report verdict is not PASS: {verdict!r}")
-if "failure_reason" in data or "schema_marker" in data:
-    fail("PASS report must not carry failure/schema-marker verdict fields")
+req(isinstance(data, dict), "report root is not an object")
+req(data.get("scenario") == "mixed_client_mesh", f"scenario is not mixed_client_mesh: {data.get('scenario')!r}")
+req(data.get("verdict") == "PASS", f"report verdict is not PASS: {data.get('verdict')!r}")
+req("failure_reason" not in data and "schema_marker" not in data, "PASS report must not carry failure/schema-marker verdict fields")
 legacy_schema = data.get("legacy_schema_compatibility")
-if not isinstance(legacy_schema, dict) or legacy_schema.get("authoritative") is not False or "verdict" in legacy_schema or not legacy_schema.get("marker_path"):
-    fail("legacy_schema_compatibility missing marker_path")
-
+req(isinstance(legacy_schema, dict) and legacy_schema.get("authoritative") is False and "verdict" not in legacy_schema and legacy_schema.get("marker_path"), "legacy_schema_compatibility missing marker_path")
 nodes = data.get("nodes")
-if not isinstance(nodes, list) or len(nodes) != 2 or not all(isinstance(node, dict) for node in nodes):
-    fail("PASS report requires exactly two node records")
-impls = {node.get("implementation") for node in nodes}
-if impls != {"go", "rust"}:
-    fail(f"PASS report requires one go and one rust node, got {sorted(str(impl) for impl in impls)}")
+req(isinstance(nodes, list) and len(nodes) == 2 and all(isinstance(n, dict) for n in nodes), "PASS report requires exactly two node records")
+impls = {n.get("implementation") for n in nodes}
+req(impls == {"go", "rust"}, f"PASS report requires one go and one rust node, got {sorted(str(i) for i in impls)}")
 expected_comm = {"go": "rubin-node-go", "rust": "rubin-node-rust"}
 nodes_by_impl = {node["implementation"]: node for node in nodes}
 for node in nodes:
     impl = node.get("implementation")
     name = node.get("name")
-    if not isinstance(name, str) or not name.startswith("node-"):
-        fail(f"node has invalid name: {name!r}")
-    if node.get("process_comm") != expected_comm.get(impl):
-        fail(f"{name} process_comm does not prove {impl} identity")
+    req(isinstance(name, str) and name.startswith("node-"), f"node has invalid name: {name!r}")
+    req(node.get("process_comm") == expected_comm.get(impl), f"{name} process_comm does not prove {impl} identity")
     for field in ("pid", "command", "binary", "rpc_endpoint", "p2p_endpoint", "started_at"):
-        if field not in node or node[field] in ("", None):
-            fail(f"{name} missing {field}")
-    if not isinstance(node["pid"], int) or node["pid"] <= 0:
-        fail(f"{name} pid is not a positive integer")
+        req(field in node and node[field] not in ("", None), f"{name} missing {field}")
+    req(isinstance(node["pid"], int) and node["pid"] > 0, f"{name} pid is not a positive integer")
     for field in ("process_alive", "rpc_endpoint_process_backed", "p2p_endpoint_process_backed"):
-        if node.get(field) is not True:
-            fail(f"{name} does not prove {field}")
-
+        req(node.get(field) is True, f"{name} does not prove {field}")
 connectivity = data.get("peer_connectivity")
-if not isinstance(connectivity, dict):
-    fail("PASS report missing peer_connectivity object")
-if any(connectivity.get(field) is not True for field in ("go_to_rust", "rust_to_go", "bidirectional_observed")):
-    fail("peer_connectivity booleans are not all true")
+req(isinstance(connectivity, dict), "PASS report missing peer_connectivity object")
+req(all(connectivity.get(f) is True for f in ("go_to_rust", "rust_to_go", "bidirectional_observed")), "peer_connectivity booleans are not all true")
 links = connectivity.get("counterpart_links")
-if not isinstance(links, dict):
-    fail("PASS report missing counterpart_links")
+req(isinstance(links, dict), "PASS report missing counterpart_links")
 go_expected = links.get("go_peer_snapshot_expected_addr")
 rust_expected = links.get("rust_peer_snapshot_expected_addr")
-if rust_expected != nodes_by_impl["go"]["p2p_endpoint"] or links.get("rust_outbound_remote_addr") != rust_expected or links.get("rust_outbound_local_addr") != go_expected or links.get("rust_outbound_pid") != nodes_by_impl["rust"]["pid"]:
-    fail("peer evidence is not bound to expected counterpart endpoints")
-if not isinstance(go_expected, str) or go_expected in {rust_expected, nodes_by_impl["rust"]["p2p_endpoint"], nodes_by_impl["go"]["rpc_endpoint"], nodes_by_impl["rust"]["rpc_endpoint"]}:
-    fail("go peer evidence is not a rust outbound peer address")
+req(rust_expected == nodes_by_impl["go"]["p2p_endpoint"] and links.get("rust_outbound_remote_addr") == rust_expected and links.get("rust_outbound_local_addr") == go_expected and links.get("rust_outbound_pid") == nodes_by_impl["rust"]["pid"], "peer evidence is not bound to expected counterpart endpoints")
+req(isinstance(go_expected, str) and go_expected not in {rust_expected, nodes_by_impl["rust"]["p2p_endpoint"], nodes_by_impl["go"]["rpc_endpoint"], nodes_by_impl["rust"]["rpc_endpoint"]}, "go peer evidence is not a rust outbound peer address")
 for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snapshot", rust_expected)):
     snapshot = connectivity.get(field)
-    if not isinstance(snapshot, dict) or snapshot.get("count", 0) < 1:
-        fail(f"{field} must show at least one peer")
+    req(isinstance(snapshot, dict) and snapshot.get("count", 0) >= 1, f"{field} must show at least one peer")
     peers = snapshot.get("peers")
-    if not isinstance(peers, list) or not peers or snapshot.get("count") != len(peers):
-        fail(f"{field}.peers/count are internally inconsistent")
-    if not any(peer.get("addr") == expected_addr and peer.get("handshake_complete") is True for peer in peers if isinstance(peer, dict)):
-        fail(f"{field} lacks completed handshake for expected counterpart")
-
+    req(isinstance(peers, list) and peers and snapshot.get("count") == len(peers), f"{field}.peers/count are internally inconsistent")
+    req(any(p.get("addr") == expected_addr and p.get("handshake_complete") is True for p in peers if isinstance(p, dict)), f"{field} lacks completed handshake for expected counterpart")
 print(f"PASS: mixed-client mesh report accepted {path}")
 PY
 }
-
-if [[ "${CHECK_REPORT_MODE}" == "1" ]]; then
-  need_tool python3
-  check_report "${CHECK_REPORT}"
-  exit 0
-fi
+if [[ "${CHECK_REPORT_MODE}" == "1" ]]; then need_tool python3; check_report "${CHECK_REPORT}"; exit 0; fi
 
 need_tool python3
 need_tool perl
@@ -150,11 +114,9 @@ REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"
 LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"
 RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
-
 GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC=""
 GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
-
 run_fips_preflight_before_captured_dev_env() {
   if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]]; then
     return 0
@@ -162,15 +124,9 @@ run_fips_preflight_before_captured_dev_env() {
   echo "Running FIPS-only preflight before captured dev-env command streams" >&2
   "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2
 }
-
 run_validator() {
   RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"
 }
-
-utc_now() {
-  python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))'
-}
-
 rpc_json() {
   local method="$1" addr="$2" path="$3"
   python3 - "${method}" "${addr}" "${path}" <<'PY'
@@ -191,14 +147,12 @@ except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
     sys.exit(1)
 PY
 }
-
 pid_comm() {
   local pid="$1" comm
   comm="$(ps -p "${pid}" -o comm= 2>/dev/null | awk 'NR==1 {print $1}')" || return 1
   [[ -n "${comm}" ]] || return 1
   basename -- "${comm}"
 }
-
 pid_listens_on() {
   local pid="$1" endpoint="$2" out status=0
   out="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>&1)" || status=$?
@@ -206,7 +160,6 @@ pid_listens_on() {
   (( status == 0 || ${#out} == 0 )) || return 2
   return 1
 }
-
 p2p_addr_for_pid() {
   local pid="$1" rpc_addr="$2" timeout="$3"
   python3 - "${pid}" "${rpc_addr}" "${timeout}" <<'PY'
@@ -241,7 +194,6 @@ while time.time() < deadline:
 sys.exit(f"timeout resolving p2p listen address for pid={pid}")
 PY
 }
-
 extract_log_addr() {
   local log_file="$1" prefix="$2" path addr
   path="$(_rubin_process_resolve_log "${log_file}")" || return 1
@@ -249,13 +201,11 @@ extract_log_addr() {
   [[ "${addr}" == 127.0.0.1:* ]] || return 1
   printf '%s\n' "${addr}"
 }
-
 build_go_node() {
   echo "Building Go rubin-node binary" >&2
   "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${GO_NODE_BIN}" ./cmd/rubin-node || return 1
   [[ -x "${GO_NODE_BIN}" ]]
 }
-
 build_rust_node() {
   local host_triple cargo_target_dir cargo_log cargo_bin
   echo "Building Rust rubin-node binary" >&2
@@ -308,7 +258,6 @@ write_outputs() {
   python3 - <<'PY'
 import json
 import os
-from pathlib import Path
 
 e = os.environ
 verdict = e["verdict"]
@@ -454,7 +403,7 @@ start_rust_node() {
   RUST_P2P_ADDR="$(extract_log_addr "${RUST_LOG}" "p2p: listening=")" || return 1
   RUST_RPC_ADDR="$(rubin_process_extract_rpc_addr "${RUST_LOG}")" || return 1
   rubin_process_wait_for_rpc_ready "${RUST_RPC_ADDR}" 30 || return 1
-  RUST_STARTED_AT_UTC="$(utc_now)"
+  RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
 start_go_node() {
@@ -467,7 +416,7 @@ start_go_node() {
   GO_RPC_ADDR="$(rubin_process_extract_rpc_addr "${GO_LOG}")" || return 1
   GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || return 1
   rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1
-  GO_STARTED_AT_UTC="$(utc_now)"
+  GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]+$ && "${MESH_TIMEOUT}" -ge 1 && "${MESH_TIMEOUT}" -le 600 ]] || {
