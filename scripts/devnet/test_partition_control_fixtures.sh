@@ -149,6 +149,13 @@ mkdir "${NO_TOOLS_DIR}"
 
 SERVER_PID="" SERVER_ENDPOINT="" SPOOF_EXECUTABLE=""
 start_server go-helper send; GO_PID="${SERVER_PID}" GO_ENDPOINT="${SERVER_ENDPOINT}"
+START_FAILURE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/start failure.txt"
+if rubin_process_start missing-command.log "${RUBIN_PROCESS_ARTIFACT_ROOT}/missing-command" 2>"${START_FAILURE_LOG}"; then
+  echo "expected start failure for missing command" >&2
+  exit 1
+fi
+require_contains "$(cat "${START_FAILURE_LOG}")" "failed to resolve executable identity" "start clears stale last pid"
+[[ -z "${RUBIN_PROCESS_LAST_PID}" ]] || { echo "failed start left stale RUBIN_PROCESS_LAST_PID=${RUBIN_PROCESS_LAST_PID}" >&2; exit 1; }
 start_server rust-helper send; RUST_PID="${SERVER_PID}" RUST_ENDPOINT="${SERVER_ENDPOINT}"
 start_server silent-helper silent; SILENT_ENDPOINT="${SERVER_ENDPOINT}"
 start_spoof_server basename-spoof rubin-node-go; SPOOF_GO_PID="${SERVER_PID}" SPOOF_GO_ENDPOINT="${SERVER_ENDPOINT}"

@@ -230,6 +230,7 @@ rubin_process_is_alive() {
 rubin_process_start() {
   local log_file log_dir launch_exec_realpath launch_status started_pid
   (( $# >= 2 )) || { _rubin_process_error "rubin_process_start requires a log path and command"; return 1; }
+  RUBIN_PROCESS_LAST_PID=""
   log_file="$(_rubin_process_resolve_log "$1")" || return 1
   shift
   log_dir="$(dirname "${log_file}")"
@@ -238,7 +239,6 @@ rubin_process_start() {
   command -v perl >/dev/null 2>&1 || { _rubin_process_error "perl is required to launch managed process groups"; return 1; }
   launch_exec_realpath="$(_rubin_process_executable_realpath "$1")" || { _rubin_process_error "failed to resolve executable identity for $1"; return 1; }
 
-  RUBIN_PROCESS_LAST_PID=""
   perl -e 'setpgrp(0, 0) or die "setpgrp failed: $!"; exec { $ARGV[0] } @ARGV or die "exec failed: $!"' -- "$@" >"${log_file}" 2>&1 &
   launch_status=$?
   if (( launch_status != 0 )); then
