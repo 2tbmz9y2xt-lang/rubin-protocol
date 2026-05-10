@@ -27,13 +27,13 @@ while (($#)); do
   esac
 done
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
-check_report() {
-  local report="${1:-}"
+check_report() { local report="${1:-}" mode="${2:-offline}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
-  python3 - "${report}" "${DEV_ENV}" "${VALIDATOR}" <<'PY'
+  python3 - "${report}" "${DEV_ENV}" "${VALIDATOR}" "${mode}" <<'PY'
 import datetime as dt, json, os, shlex, subprocess, sys, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1])
+live = sys.argv[4] == "live"
 def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
 def req(ok: bool, message: str) -> None:
     if not ok: fail(message)
@@ -127,8 +127,7 @@ for node in nodes:
     req(nonempty_str(command) and Path(command_argv0).is_absolute() and Path(command_argv0).resolve() == binary_path and binary_path.name == expected_bin and binary_path.is_file() and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
-    req(ps_comm(node["pid"]) == expected_bin and Path(ps_argv0(node["pid"])).resolve() == binary_path, f"{name} live process identity does not match report")
-    req(owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
+    if live: req(ps_comm(node["pid"]) == expected_bin and Path(ps_argv0(node["pid"])).resolve() == binary_path, f"{name} live process identity does not match report"); req(owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
     for field in ("process_alive", "rpc_endpoint_process_backed", "p2p_endpoint_process_backed"):
         req(node.get(field) is True, f"{name} does not prove {field}")
 impls = {n["implementation"] for n in nodes}
@@ -146,18 +145,18 @@ rust_expected = links.get("rust_peer_snapshot_expected_addr")
 req(all(ep(links.get(f)) for f in ("go_peer_snapshot_expected_addr", "rust_peer_snapshot_expected_addr", "rust_outbound_local_addr", "rust_outbound_remote_addr")), "counterpart link endpoint is malformed")
 req(rust_expected == nodes_by_impl["go"]["p2p_endpoint"] and links.get("rust_outbound_remote_addr") == rust_expected and links.get("rust_outbound_local_addr") == go_expected and links.get("rust_outbound_pid") == nodes_by_impl["rust"]["pid"], "peer evidence is not bound to expected counterpart endpoints")
 req(isinstance(go_expected, str) and go_expected not in {rust_expected, nodes_by_impl["rust"]["p2p_endpoint"], nodes_by_impl["go"]["rpc_endpoint"], nodes_by_impl["rust"]["rpc_endpoint"]}, "go peer evidence is not a rust outbound peer address")
-req(f"{go_expected}->{rust_expected}" in lsof_lines(nodes_by_impl["rust"]["pid"], "ESTABLISHED"), "rust outbound TCP link is not live and rust-owned")
+if live: req(f"{go_expected}->{rust_expected}" in lsof_lines(nodes_by_impl["rust"]["pid"], "ESTABLISHED"), "rust outbound TCP link is not live and rust-owned")
 final = data.get("final_verification")
 req(isinstance(final, dict) and all(final.get(f) is True for f in ("producer_side", "process_identity_rechecked", "rust_outbound_link_rechecked", "peer_snapshots_rechecked")), "PASS report missing producer-side final verification")
 req(final.get("rust_outbound_pid") == nodes_by_impl["rust"]["pid"] and final.get("rust_outbound_local_addr") == go_expected and final.get("rust_outbound_remote_addr") == rust_expected, "final verification is not bound to peer evidence")
 for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snapshot", rust_expected)):
     stored = snapshot_norm(connectivity.get(field))
-    live = snapshot_norm(peers(nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]))
-    req(stored == live and (expected_addr, True) in stored, f"{field} differs from live exact peer set")
+    req((expected_addr, True) in stored, f"{field} missing expected completed peer")
+    if live: fresh = snapshot_norm(peers(nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"])); req(stored == fresh, f"{field} differs from live exact peer set")
 print(f"PASS: mixed-client mesh report accepted {path}")
 PY
 }
-if [[ "${CHECK_REPORT_MODE}" == "1" ]]; then need_tool python3; need_tool lsof; check_report "${CHECK_REPORT}"; exit 0; fi
+if [[ "${CHECK_REPORT_MODE}" == "1" ]]; then need_tool python3; check_report "${CHECK_REPORT}" offline; exit 0; fi
 need_tool python3
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
@@ -421,7 +420,8 @@ start_go_node() {
   rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1
   GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
-[[ "${MESH_TIMEOUT}" =~ ^[0-9]+$ && "${MESH_TIMEOUT}" -ge 1 && "${MESH_TIMEOUT}" -le 600 ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
+[[ "${MESH_TIMEOUT}" =~ ^[0-9]+$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
+MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
 command -v lsof >/dev/null 2>&1 || finish_no_data "lsof_unavailable"; command -v perl >/dev/null 2>&1 || finish_no_data "perl_unavailable"
 build_go_node || finish_no_data "go_build_failed"
 build_rust_node || finish_no_data "rust_build_failed"
@@ -442,7 +442,7 @@ wait_peer_snapshot node-go-final "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIM
 FINAL_PEER_SNAPSHOTS_RECHECKED=true
 PASS_REPORT_JSON="${REPORT_JSON}.pass.tmp"; FINAL_REPORT_JSON="${REPORT_JSON}"; REPORT_JSON="${PASS_REPORT_JSON}"
 write_outputs "PASS"; REPORT_JSON="${FINAL_REPORT_JSON}"
-if run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 && check_report "${PASS_REPORT_JSON}" >&2; then
+if run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 && check_report "${PASS_REPORT_JSON}" live >&2; then
   mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}"
 else
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_validation_failed"
