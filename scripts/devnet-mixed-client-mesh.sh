@@ -66,11 +66,7 @@ if data.get("scenario") != "mixed_client_mesh":
     fail(f"scenario is not mixed_client_mesh: {data.get('scenario')!r}")
 verdict = data.get("verdict")
 if verdict != "PASS":
-    reason = data.get("failure_reason")
-    if verdict not in {"FAIL", "NO_DATA"} or not isinstance(reason, str) or not reason:
-        fail("non-PASS report must carry verdict FAIL/NO_DATA and failure_reason")
-    print(f"PASS: non-PASS mixed-client mesh report is typed: {path}")
-    sys.exit(0)
+    fail(f"report verdict is not PASS: {verdict!r}")
 if "failure_reason" in data:
     fail("PASS report must not carry failure_reason")
 if "schema_marker" in data:
@@ -308,6 +304,7 @@ write_outputs() {
   export REPORT_JSON LEGACY_SCHEMA_MARKER_JSON verdict reason GO_PID RUST_PID GO_RPC_ADDR RUST_RPC_ADDR \
     GO_P2P_ADDR RUST_P2P_ADDR GO_STARTED_AT_UTC RUST_STARTED_AT_UTC GO_COMM RUST_COMM \
     GO_NODE_BIN RUST_NODE_BIN GO_CMD RUST_CMD GO_PEERS_JSON RUST_PEERS_JSON \
+    GO_PROCESS_ALIVE RUST_PROCESS_ALIVE GO_RPC_PROCESS_BACKED RUST_RPC_PROCESS_BACKED GO_P2P_PROCESS_BACKED RUST_P2P_PROCESS_BACKED \
     RUBIN_PROCESS_ARTIFACT_ROOT
   python3 - <<'PY'
 import json
@@ -331,6 +328,7 @@ for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_k
     ("rust", "node-rust", "RUST_PID", "RUST_RPC_ADDR", "RUST_P2P_ADDR", "RUST_STARTED_AT_UTC", "RUST_COMM", "RUST_NODE_BIN", "RUST_CMD"),
 ):
     pid_raw = (e.get(pid_key) or "").strip()
+    prefix = impl.upper()
     node = {
         "name": name,
         "implementation": impl,
@@ -341,9 +339,9 @@ for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_k
         "p2p_endpoint": e.get(p2p_key) or None,
         "started_at": e.get(started_key) or None,
         "process_comm": e.get(comm_key) or None,
-        "process_alive": bool(pid_raw),
-        "rpc_endpoint_process_backed": bool(e.get(rpc_key)),
-        "p2p_endpoint_process_backed": bool(e.get(p2p_key)),
+        "process_alive": verdict == "PASS" and e.get(f"{prefix}_PROCESS_ALIVE") == "true",
+        "rpc_endpoint_process_backed": verdict == "PASS" and e.get(f"{prefix}_RPC_PROCESS_BACKED") == "true",
+        "p2p_endpoint_process_backed": verdict == "PASS" and e.get(f"{prefix}_P2P_PROCESS_BACKED") == "true",
     }
     nodes.append(node)
 
@@ -439,8 +437,8 @@ verify_process_identity() {
   pid_listens_on "${pid}" "${rpc_addr}" || { echo "${label} rpc endpoint is not process-backed: ${rpc_addr}" >&2; return 1; }
   pid_listens_on "${pid}" "${p2p_addr}" || { echo "${label} p2p endpoint is not process-backed: ${p2p_addr}" >&2; return 1; }
   case "${impl}" in
-    go) GO_COMM="${comm}" ;;
-    rust) RUST_COMM="${comm}" ;;
+    go) GO_COMM="${comm}"; GO_PROCESS_ALIVE=true; GO_RPC_PROCESS_BACKED=true; GO_P2P_PROCESS_BACKED=true ;;
+    rust) RUST_COMM="${comm}"; RUST_PROCESS_ALIVE=true; RUST_RPC_PROCESS_BACKED=true; RUST_P2P_PROCESS_BACKED=true ;;
     *) return 1 ;;
   esac
 }
@@ -487,6 +485,8 @@ start_rust_node || finish_no_data "rust_process_not_ready"
 verify_process_identity node-rust rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust || finish_no_data "rust_process_identity_unverified"
 wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" || finish_no_data "go_peer_snapshot_missing_completed_handshake"
 wait_peer_snapshot node-rust "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" || finish_no_data "rust_peer_snapshot_missing_completed_handshake"
+verify_process_identity node-go-final go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go || finish_no_data "go_final_process_identity_unverified"
+verify_process_identity node-rust-final rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust || finish_no_data "rust_final_process_identity_unverified"
 
 write_outputs "PASS"
 run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2
