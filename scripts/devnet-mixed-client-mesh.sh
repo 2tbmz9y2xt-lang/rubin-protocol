@@ -6,8 +6,7 @@ GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
-CHECK_REPORT="" CHECK_REPORT_MODE=0
-MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
+CHECK_REPORT="" CHECK_REPORT_MODE=0 MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
 usage() { echo "usage: $0 [--check-report PATH]" >&2; }
 while (($#)); do
   case "$1" in
@@ -158,8 +157,7 @@ print(f"PASS: mixed-client mesh report accepted {path}")
 PY
 }
 if [[ "${CHECK_REPORT_MODE}" == "1" ]]; then need_tool python3; need_tool lsof; check_report "${CHECK_REPORT}"; exit 0; fi
-need_tool python3
-need_tool perl
+need_tool python3; need_tool perl
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
@@ -374,6 +372,16 @@ PY
   echo "timeout waiting for ${label} /peers completed handshake" >&2
   return 1
 }
+wait_rust_to_go_link() {
+  local missing="$1" ambiguous="$2" deadline out status
+  deadline=$((SECONDS + MESH_TIMEOUT))
+  while (( SECONDS < deadline )); do
+    status=0; out="$(lsof -nP -a -p "${RUST_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null | REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' | sort -u)" || status=$?
+    (( status == 0 || ${#out} == 0 )) || finish_no_data "${missing}"
+    [[ "${out}" != *$'\n'* ]] || finish_no_data "${ambiguous}"; [[ -z "${out}" ]] || { RUST_TO_GO_LOCAL_ADDR="${out}"; return 0; }
+    sleep 1
+  done; finish_no_data "${missing}"
+}
 verify_process_identity() {
   local label="$1" impl="$2" pid="$3" rpc_addr="$4" p2p_addr="$5" expected_comm="$6" comm
   rubin_process_is_alive "${pid}" || { echo "${label} pid is not alive: ${pid}" >&2; return 1; }
@@ -413,10 +421,7 @@ start_go_node() {
   rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1
   GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
-[[ "${MESH_TIMEOUT}" =~ ^[0-9]+$ && "${MESH_TIMEOUT}" -ge 1 && "${MESH_TIMEOUT}" -le 600 ]] || {
-  echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2
-  exit 2
-}
+[[ "${MESH_TIMEOUT}" =~ ^[0-9]+$ && "${MESH_TIMEOUT}" -ge 1 && "${MESH_TIMEOUT}" -le 600 ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }
 command -v lsof >/dev/null 2>&1 || finish_no_data "lsof_unavailable"
 build_go_node || finish_no_data "go_build_failed"
 build_rust_node || finish_no_data "rust_build_failed"
@@ -425,14 +430,12 @@ verify_process_identity node-go go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}"
 start_rust_node || finish_no_data "rust_process_not_ready"
 verify_process_identity node-rust rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust || finish_no_data "rust_process_identity_unverified"
 wait_peer_snapshot node-rust "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || finish_no_data "rust_peer_snapshot_missing_go_endpoint"
-RUST_TO_GO_LOCAL_ADDR="$(lsof -nP -a -p "${RUST_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null | REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' | sort -u)" || finish_no_data "rust_to_go_tcp_link_missing"
-[[ -n "${RUST_TO_GO_LOCAL_ADDR}" && "${RUST_TO_GO_LOCAL_ADDR}" != *$'\n'* ]] || finish_no_data "rust_to_go_tcp_link_ambiguous"
+wait_rust_to_go_link rust_to_go_tcp_link_missing rust_to_go_tcp_link_ambiguous
 wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "go_peer_snapshot_missing_rust_endpoint"
 verify_process_identity node-go-final go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go || finish_no_data "go_final_process_identity_unverified"
 verify_process_identity node-rust-final rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust || finish_no_data "rust_final_process_identity_unverified"
 FINAL_PROCESS_IDENTITY_RECHECKED=true
-RUST_TO_GO_LOCAL_ADDR="$(lsof -nP -a -p "${RUST_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null | REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' | sort -u)" || finish_no_data "rust_final_to_go_tcp_link_missing"
-[[ -n "${RUST_TO_GO_LOCAL_ADDR}" && "${RUST_TO_GO_LOCAL_ADDR}" != *$'\n'* ]] || finish_no_data "rust_final_to_go_tcp_link_ambiguous"
+wait_rust_to_go_link rust_final_to_go_tcp_link_missing rust_final_to_go_tcp_link_ambiguous
 FINAL_RUST_OUTBOUND_LINK_RECHECKED=true
 wait_peer_snapshot node-rust-final "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || finish_no_data "rust_final_peer_snapshot_missing_go_endpoint"
 wait_peer_snapshot node-go-final "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "go_final_peer_snapshot_missing_rust_endpoint"
