@@ -30,7 +30,7 @@ need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for m
 check_report() { local report="${1:-}" mode="${2:-offline}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
   python3 - "${report}" "${DEV_ENV}" "${VALIDATOR}" "${mode}" <<'PY'
-import datetime as dt, json, os, shlex, subprocess, sys, urllib.request
+import datetime as dt, json, os, subprocess, sys, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1])
 live = sys.argv[4] == "live"
@@ -54,10 +54,6 @@ def ep(value: object) -> bool:
     host, sep, port = value.partition(":")
     return sep == ":" and host == "127.0.0.1" and ":" not in port and port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
 def nonempty_str(value: object) -> bool: return isinstance(value, str) and bool(value.strip())
-def argv0(value: object) -> str:
-    if not nonempty_str(value): return ""
-    try: return shlex.split(value)[0]
-    except ValueError: return ""
 def ps_comm(pid: int) -> str: return os.path.basename(run(["ps", "-ww", "-p", str(pid), "-o", "comm="]))
 def lsof_lines(pid: int, state: str) -> list[str]:
     p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
@@ -118,12 +114,12 @@ for node in nodes:
     req(isinstance(impl, str) and impl in expected, f"node has invalid implementation: {impl!r}")
     expected_name, expected_bin = expected[impl]
     req(name == expected_name, f"{impl} node has invalid name: {name!r}")
-    command, binary, command_argv0 = node.get("command"), node.get("binary"), argv0(node.get("command"))
+    command, binary, command_argv = node.get("command"), node.get("binary"), node.get("command_argv")
     binary_path = checked_path(f"{name}.binary", binary).resolve()
     try: binary_path.relative_to(artifact_root)
     except ValueError: fail(f"{name} binary is outside artifact_root")
     req(node.get("process_comm") == expected_bin, f"{name} process_comm does not prove {impl} identity")
-    req(nonempty_str(command) and Path(command_argv0).is_absolute() and Path(command_argv0).resolve() == binary_path and binary_path.name == expected_bin and binary_path.is_file() and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
+    req(nonempty_str(command) and isinstance(command_argv, list) and all(isinstance(arg, str) for arg in command_argv) and command_argv and Path(command_argv[0]).is_absolute() and Path(command_argv[0]).resolve() == binary_path and binary_path.name == expected_bin and binary_path.is_file() and os.access(binary_path, os.X_OK), f"{name} command/binary is not bound to executable {expected_bin}")
     req(ep(node.get("rpc_endpoint")) and ep(node.get("p2p_endpoint")) and ts(node.get("started_at")), f"{name} has malformed endpoint or timestamp")
     req(isinstance(node.get("pid"), int) and not isinstance(node.get("pid"), bool) and node["pid"] > 0, f"{name} pid is not a positive integer")
     if live: req(ps_comm(node["pid"]) == expected_bin, f"{name} live process identity does not match report"); req(owns_listen(node["pid"], node["rpc_endpoint"]) and owns_listen(node["pid"], node["p2p_endpoint"]), f"{name} live listeners are not pid-owned")
@@ -133,7 +129,7 @@ impls = {n["implementation"] for n in nodes}
 req(impls == {"go", "rust"}, f"PASS report requires one go and one rust node, got {sorted(impls)}")
 nodes_by_impl = {node["implementation"]: node for node in nodes}
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
-req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"], "go/rust process evidence is not implementation-distinct")
+req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 connectivity = data.get("peer_connectivity")
 req(isinstance(connectivity, dict), "PASS report missing peer_connectivity object")
 req(all(connectivity.get(f) is True for f in ("go_to_rust", "rust_to_go", "bidirectional_observed")), "peer_connectivity booleans are not all true")
@@ -173,12 +169,12 @@ LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-lega
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"
 RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC=""
-GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD=""
+GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON=""
 FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
-argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }
+argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
   python3 - "${method}" "${addr}" "${path}" <<'PY'
@@ -263,7 +259,7 @@ write_outputs() {
   local verdict="$1" reason="${2:-}"
   export REPORT_JSON LEGACY_SCHEMA_MARKER_JSON verdict reason GO_PID RUST_PID GO_RPC_ADDR RUST_RPC_ADDR \
     GO_P2P_ADDR RUST_P2P_ADDR GO_STARTED_AT_UTC RUST_STARTED_AT_UTC GO_COMM RUST_COMM \
-    GO_NODE_BIN RUST_NODE_BIN GO_CMD RUST_CMD GO_PEERS_JSON RUST_PEERS_JSON \
+    GO_NODE_BIN RUST_NODE_BIN GO_CMD RUST_CMD GO_ARGV_JSON RUST_ARGV_JSON GO_PEERS_JSON RUST_PEERS_JSON \
     GO_PROCESS_ALIVE RUST_PROCESS_ALIVE GO_RPC_PROCESS_BACKED RUST_RPC_PROCESS_BACKED GO_P2P_PROCESS_BACKED RUST_P2P_PROCESS_BACKED \
     RUST_TO_GO_LOCAL_ADDR FINAL_PROCESS_IDENTITY_RECHECKED FINAL_RUST_OUTBOUND_LINK_RECHECKED FINAL_PEER_SNAPSHOTS_RECHECKED \
     RUBIN_PROCESS_ARTIFACT_ROOT
@@ -279,9 +275,9 @@ def read_json(path: str) -> dict:
     except (OSError, json.JSONDecodeError):
         return {"count": 0, "peers": []}
 nodes = []
-for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_key in (
-    ("go", "node-go", "GO_PID", "GO_RPC_ADDR", "GO_P2P_ADDR", "GO_STARTED_AT_UTC", "GO_COMM", "GO_NODE_BIN", "GO_CMD"),
-    ("rust", "node-rust", "RUST_PID", "RUST_RPC_ADDR", "RUST_P2P_ADDR", "RUST_STARTED_AT_UTC", "RUST_COMM", "RUST_NODE_BIN", "RUST_CMD"),
+for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_key, argv_key in (
+    ("go", "node-go", "GO_PID", "GO_RPC_ADDR", "GO_P2P_ADDR", "GO_STARTED_AT_UTC", "GO_COMM", "GO_NODE_BIN", "GO_CMD", "GO_ARGV_JSON"),
+    ("rust", "node-rust", "RUST_PID", "RUST_RPC_ADDR", "RUST_P2P_ADDR", "RUST_STARTED_AT_UTC", "RUST_COMM", "RUST_NODE_BIN", "RUST_CMD", "RUST_ARGV_JSON"),
 ):
     pid_raw = (e.get(pid_key) or "").strip()
     prefix = impl.upper()
@@ -290,6 +286,7 @@ for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_k
         "implementation": impl,
         "pid": int(pid_raw) if pid_raw.isdigit() else None,
         "command": e.get(cmd_key) or "",
+        "command_argv": json.loads(e.get(argv_key) or "[]"),
         "binary": e.get(bin_key) or "",
         "rpc_endpoint": e.get(rpc_key) or None,
         "p2p_endpoint": e.get(p2p_key) or None,
@@ -398,7 +395,7 @@ verify_process_identity() {
 }
 start_rust_node() {
   local -a argv=("${RUST_NODE_BIN}" --network devnet --datadir "${RUST_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${GO_P2P_ADDR}")
-  RUST_CMD="$(argv_cmd "${argv[@]}")"
+  RUST_CMD="$(argv_cmd "${argv[@]}")"; RUST_ARGV_JSON="$(argv_json "${argv[@]}")"
   rubin_process_start "${RUST_LOG}" "${argv[@]}" || return 1
   RUST_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${RUST_LOG}" "p2p: listening=" 60 "${RUST_PID}" || return 1
@@ -410,7 +407,7 @@ start_rust_node() {
 }
 start_go_node() {
   local -a argv=("${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
-  GO_CMD="$(argv_cmd "${argv[@]}")"
+  GO_CMD="$(argv_cmd "${argv[@]}")"; GO_ARGV_JSON="$(argv_json "${argv[@]}")"
   rubin_process_start "${GO_LOG}" "${argv[@]}" || return 1
   GO_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${GO_LOG}" "rpc: listening=" 60 "${GO_PID}" || return 1
