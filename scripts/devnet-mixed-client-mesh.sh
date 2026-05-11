@@ -3,14 +3,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"; GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"; HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"; VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
-CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}"
-usage() { echo "usage: $0 [--check-report PATH|--check-report-live PATH]" >&2; }
-while (($#)); do case "$1" in --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
+CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}" TX_PATH_MODE=0 DETERMINISTIC_TX_FEE="${DETERMINISTIC_TX_FEE:-10000}"
+usage() { echo "usage: $0 [--go-submit-rust-accept] [--check-report PATH|--check-report-live PATH]" >&2; }
+while (($#)); do case "$1" in --go-submit-rust-accept) TX_PATH_MODE=1; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
 check_report() { local report="${1:-}" mode="${2:-offline}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" <<'PY'
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${GO_MODULE_ROOT}" <<'PY'
 import datetime as dt, json, os, socket, struct, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1]); live = sys.argv[3] == "live"
@@ -34,6 +34,34 @@ def ep(value: object) -> bool:
     host, sep, port = value.partition(":")
     return sep == ":" and host == "127.0.0.1" and ":" not in port and port.isascii() and port.isdigit() and 1 <= len(port) <= 5 and 1 <= int(port) <= 65535
 def nonempty_str(value: object) -> bool: return isinstance(value, str) and bool(value.strip())
+def parse_txid(txhex: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["go", "-C", sys.argv[4], "run", "./cmd/rubin-consensus-cli"],
+            input=json.dumps({"op": "parse_tx", "tx_hex": txhex}) + "\n",
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fail(f"tx_identity parser failed: {exc}")
+    if proc.returncode != 0:
+        fail("tx_identity parser failed: " + ((proc.stderr or proc.stdout).strip().splitlines() or ["nonzero exit"])[0])
+    try:
+        parsed = json.loads(proc.stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        fail(f"tx_identity parser returned malformed JSON: {exc}")
+    req(isinstance(parsed, dict) and parsed.get("ok") is True, "tx_identity parser rejected go_submit.tx_hex")
+    try:
+        tx_len = len(bytes.fromhex(txhex))
+    except ValueError:
+        fail("tx_identity parser input is not canonical hex")
+    req(isinstance(parsed.get("consumed"), int) and not isinstance(parsed.get("consumed"), bool) and parsed["consumed"] == tx_len, "tx_identity parser did not consume full go_submit.tx_hex")
+    parsed_txid = parsed.get("txid")
+    req(isinstance(parsed_txid, str) and len(parsed_txid) == 64 and all(c in "0123456789abcdef" for c in parsed_txid), "tx_identity parser returned malformed txid")
+    return parsed_txid
 def pid_exe(pid: int) -> str:
     proc = Path(f"/proc/{pid}/exe")
     if proc.exists() or Path("/proc").is_dir():
@@ -85,6 +113,33 @@ def peers(addr: str) -> dict:
         fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
     req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
     return data
+def live_tx_pending_found(label: str, addr: str, txid: str, txhex: str) -> None:
+    deadline = time.monotonic() + LIVE_TIMEOUT
+    saw_success = False
+    while True:
+        try:
+            with urllib.request.urlopen(f"http://{addr}/tx_status?txid={txid}", timeout=5) as resp:
+                status = json.loads(resp.read().decode("utf-8"))
+            req(isinstance(status, dict), f"{label}_malformed_rpc_body")
+            saw_success = True
+            if status.get("txid") == txid and status.get("status") == "pending":
+                with urllib.request.urlopen(f"http://{addr}/get_tx?txid={txid}", timeout=5) as resp:
+                    got = json.loads(resp.read().decode("utf-8"))
+                req(isinstance(got, dict), f"{label}_malformed_rpc_body")
+                saw_success = True
+                req(got.get("found") is True and got.get("txid") == txid and got.get("raw_hex") == txhex, f"{label}_wrong_tx_identity")
+                return
+            if isinstance(status.get("txid"), str) and status.get("txid") != txid:
+                fail(f"{label}_wrong_tx_identity")
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            fail(f"{label}_malformed_rpc_body")
+        except urllib.error.HTTPError:
+            pass
+        except (urllib.error.URLError, TimeoutError, socket.timeout):
+            pass
+        if time.monotonic() >= deadline:
+            fail(f"{label}_pending_timeout" if saw_success else f"{label}_rpc_failed")
+        time.sleep(1)
 def snapshot_norm(snapshot: object, expected_addr: str, exact: bool = True) -> list[tuple[str, bool]]:
     count = snapshot.get("count") if isinstance(snapshot, dict) else None
     peers = snapshot.get("peers") if isinstance(snapshot, dict) else None
@@ -104,7 +159,9 @@ except OSError as exc:
 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
     fail(f"malformed JSON report: {exc}")
 req(isinstance(data, dict), "report root is not an object")
-req(data.get("scenario") == "mixed_client_mesh", f"scenario is not mixed_client_mesh: {data.get('scenario')!r}")
+scenario = data.get("scenario")
+req(scenario in {"mixed_client_mesh", "mixed_client_go_submit_rust_accept"}, f"scenario is not recognized: {scenario!r}")
+tx_mode = scenario == "mixed_client_go_submit_rust_accept"
 req(data.get("verdict") == "PASS", f"report verdict is not PASS: {data.get('verdict')!r}")
 req("failure_reason" not in data and "schema_marker" not in data, "PASS report must not carry failure/schema-marker verdict fields")
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
@@ -118,7 +175,11 @@ try:
     with marker_path.open(encoding="utf-8") as f: marker = json.load(f)
 except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
     fail(f"legacy marker is not readable JSON: {exc}")
-req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("verdict") == "FAIL" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong non-authoritative FAIL shape")
+req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong scenario/evidence_type")
+if tx_mode:
+    req(marker.get("verdict") == "PASS" and isinstance(marker.get("tx_path"), dict), "tx-path report requires schema-valid PASS marker with tx_path")
+else:
+    req(marker.get("verdict") == "FAIL", "mesh report requires non-authoritative FAIL marker")
 try: validator = subprocess.run([sys.executable, sys.argv[2], str(marker_path)], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
 except (OSError, subprocess.TimeoutExpired) as exc: fail(f"legacy marker schema validation failed: {exc}")
 req(validator.returncode == 0, "legacy marker schema validation failed: " + ((validator.stderr or validator.stdout).strip().splitlines() or ["validator returned nonzero"])[0])
@@ -167,11 +228,72 @@ for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snap
     if live:
         endpoint = nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]
         eventually(lambda endpoint=endpoint, stored=stored, expected_addr=expected_addr: (fresh := peers(endpoint)) is not None and stored == snapshot_norm(fresh, expected_addr, False), f"{field} differs from live exact peer set")
+if tx_mode:
+    tx_path = data.get("tx_path")
+    go_submit = data.get("go_submit")
+    rust_accept = data.get("rust_accept")
+    req(isinstance(tx_path, dict) and isinstance(go_submit, dict) and isinstance(rust_accept, dict), "tx-path report missing tx_path/go_submit/rust_accept")
+    txid = tx_path.get("tx_id")
+    txhex = go_submit.get("tx_hex")
+    req(isinstance(txid, str) and len(txid) == 64 and all(c in "0123456789abcdef" for c in txid), "tx_path.tx_id is not canonical hex")
+    req(tx_path.get("submitted_at") == "node-go" and tx_path.get("observed_at") == ["node-rust"], "tx_path is not Go-submit -> Rust-observe")
+    req(isinstance(txhex, str) and len(txhex) > 0 and len(txhex) % 2 == 0 and all(c in "0123456789abcdef" for c in txhex), "go_submit.tx_hex is not lowercase even hex")
+    req(parse_txid(txhex) == txid, "tx_path.tx_id does not match parsed go_submit.tx_hex")
+    req(go_submit.get("accepted") is True and go_submit.get("txid") == txid and go_submit.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"], "go_submit is not bound to node-go txid")
+    req(rust_accept.get("class") == "pending_found" and rust_accept.get("txid") == txid and rust_accept.get("rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"], "rust_accept is not pending_found for the submitted txid")
+    req(rust_accept.get("raw_hex") == txhex, "rust_accept raw_hex does not match submitted tx")
+    req(marker.get("tx_path") == tx_path, "schema marker tx_path differs from report tx_path")
+    def sidecar(label: str, value: object) -> dict:
+        sidecar_path = checked_path(label, value)
+        try:
+            sidecar_path.relative_to(artifact_root)
+        except ValueError:
+            fail(f"{label} is outside artifact_root")
+        req(sidecar_path.is_file() and sidecar_path.stat().st_size > 0, f"{label} missing or empty")
+        try:
+            with sidecar_path.open(encoding="utf-8") as f:
+                sidecar_data = json.load(f)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            fail(f"{label} is not readable JSON: {exc}")
+        req(isinstance(sidecar_data, dict), f"{label} root is not an object")
+        return sidecar_data
+    submit_sidecar = sidecar("go_submit.submit_response_path", go_submit.get("submit_response_path"))
+    status_sidecar = sidecar("rust_accept.tx_status_path", rust_accept.get("tx_status_path"))
+    get_tx_sidecar = sidecar("rust_accept.get_tx_path", rust_accept.get("get_tx_path"))
+    submit_status_sidecar = sidecar("go_submit.tx_status_path", go_submit.get("tx_status_path"))
+    submit_get_tx_sidecar = sidecar("go_submit.get_tx_path", go_submit.get("get_tx_path"))
+    req(submit_sidecar.get("accepted") is True and submit_sidecar.get("txid") == txid, "go submit sidecar does not prove accepted txid")
+    req(submit_status_sidecar.get("status") == "pending" and submit_status_sidecar.get("txid") == txid, "go submit tx_status sidecar does not prove pending stored txid")
+    req(submit_get_tx_sidecar.get("found") is True and submit_get_tx_sidecar.get("txid") == txid and submit_get_tx_sidecar.get("raw_hex") == txhex, "go submit get_tx sidecar does not prove raw tx identity")
+    req(status_sidecar.get("status") == "pending" and status_sidecar.get("txid") == txid, "rust tx_status sidecar does not prove pending txid")
+    req(get_tx_sidecar.get("found") is True and get_tx_sidecar.get("txid") == txid and get_tx_sidecar.get("raw_hex") == txhex, "rust get_tx sidecar does not prove raw tx identity")
+    txgen_argv = go_submit.get("txgen_command_argv")
+    fee = go_submit.get("fee")
+    key_material_path = checked_path("go_submit.key_material_path", go_submit.get("key_material_path"))
+    try:
+        key_material_path.relative_to(artifact_root)
+    except ValueError:
+        fail("go_submit.key_material_path is outside artifact_root")
+    try:
+        with key_material_path.open(encoding="utf-8") as f:
+            key_material = json.load(f)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        fail(f"go_submit.key_material_path is not readable JSON: {exc}")
+    req(isinstance(key_material, dict) and isinstance(key_material.get("from_der_hex"), str) and isinstance(key_material.get("to_address_hex"), str), "go_submit key material is malformed")
+    txgen_path = checked_path("txgen_command_argv[0]", txgen_argv[0] if isinstance(txgen_argv, list) and txgen_argv else "")
+    expected_txgen_argv = [str(Path(artifact_root_arg) / "rubin-txgen"), "--datadir", str(Path(artifact_root_arg) / "node-go"), "--from-key", key_material["from_der_hex"], "--to-key", key_material["to_address_hex"], "--amount", "1", "--fee", str(fee)]
+    req(isinstance(txgen_argv, list) and all(isinstance(arg, str) for arg in txgen_argv) and txgen_argv == expected_txgen_argv, "txgen_command_argv does not match exact Go-submit argv")
+    req(isinstance(fee, int) and not isinstance(fee, bool) and fee >= 0, "go_submit.fee is malformed")
+    req(txgen_path == artifact_root / "rubin-txgen" and txgen_path.is_file() and os.access(txgen_path, os.X_OK), "txgen argv is not bound to executable artifact")
+    if live:
+        live_tx_pending_found("go_submit_live", nodes_by_impl["go"]["rpc_endpoint"], txid, txhex)
+        live_tx_pending_found("rust_accept_live", nodes_by_impl["rust"]["rpc_endpoint"], txid, txhex)
 print(f"PASS: mixed-client mesh report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
 PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
 if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
+if (( TX_PATH_MODE == 1 )); then [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,10}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a non-negative integer" >&2; exit 2; }; DETERMINISTIC_TX_FEE="$((10#${DETERMINISTIC_TX_FEE}))"; export DETERMINISTIC_TX_FEE; fi
 need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
@@ -180,13 +302,15 @@ GO_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"; RUST_NODE_BIN="${RUB
 GO_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-go"; RUST_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
 GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON=""
+GO_SUBMIT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.json"; GO_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-tx-status.json"; GO_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-get-tx.json"; RUST_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-tx-status.json"; RUST_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-get-tx.json"
+TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/key-material.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/key-material.json"; MINE_LOG="mine-go.log"
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TXGEN_CMD="" TXGEN_ARGV_JSON="" RUST_ACCEPT_CLASS=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
 argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 loopback_endpoint() { local endpoint="${1:-}" port; [[ "${endpoint}" =~ ^127[.]0[.]0[.]1:([0-9]{1,5})$ ]] || return 1; port="${BASH_REMATCH[1]}"; (( 10#${port} >= 1 && 10#${port} <= 65535 )); }
-check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
+check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("go_submit_live_malformed_rpc_body","go_submit_live_malformed_rpc_body"),("go_submit_live_wrong_tx_identity","go_submit_live_wrong_tx_identity"),("go_submit_live_rpc_failed","go_submit_live_rpc_failed"),("go_submit_live_pending_timeout","go_submit_live_pending_timeout"),("rust_accept_live_malformed_rpc_body","rust_accept_live_malformed_rpc_body"),("rust_accept_live_wrong_tx_identity","rust_accept_live_wrong_tx_identity"),("rust_accept_live_rpc_failed","rust_accept_live_rpc_failed"),("rust_accept_live_pending_timeout","rust_accept_live_pending_timeout"),("rust_accept.get_tx_path","rust_accept_sidecar_invalid"),("rust_accept.tx_status_path","rust_accept_sidecar_invalid"),("go_submit.submit_response_path","go_submit_sidecar_invalid"),("go_submit.tx_status_path","go_submit_sidecar_invalid"),("go_submit.get_tx_path","go_submit_sidecar_invalid"),("go submit sidecar does not prove accepted txid","go_submit_response_invalid"),("go submit tx_status sidecar does not prove pending stored txid","go_submit_sidecar_invalid"),("go submit get_tx sidecar does not prove raw tx identity","go_submit_sidecar_invalid"),("txgen_command_argv","txgen_argv_invalid"),("txgen argv is not bound to executable artifact","txgen_executable_invalid"),("go_submit.key_material_path","go_submit_key_material_invalid"),("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
   python3 - "${method}" "${addr}" "${path}" <<'PY'
@@ -246,6 +370,7 @@ extract_log_addr() {
   [[ -n "${addr}" ]] || return 1; printf '%s\n' "${addr}"
 }
 build_go_node() { BUILD_REASON=""; echo "Building Go rubin-node binary" >&2; "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${GO_NODE_BIN}" ./cmd/rubin-node || { BUILD_REASON=go_build_failed; return 1; }; [[ -x "${GO_NODE_BIN}" ]] || { BUILD_REASON=go_binary_missing_or_not_executable; return 1; }; }
+build_go_txgen() { BUILD_REASON=""; echo "Building Go rubin-txgen binary" >&2; "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${TXGEN_BIN}" ./cmd/rubin-txgen || { BUILD_REASON=go_txgen_build_failed; return 1; }; [[ -x "${TXGEN_BIN}" ]] || { BUILD_REASON=go_txgen_missing_or_not_executable; return 1; }; }
 build_rust_node() {
   local host_triple cargo_target_dir cargo_log cargo_bin rc
   BUILD_REASON=""
@@ -276,6 +401,244 @@ PY
   cp -- "${cargo_bin}" "${RUST_NODE_BIN}" || { BUILD_REASON=rust_binary_copy_failed; return 1; }
   [[ -x "${RUST_NODE_BIN}" ]] || { BUILD_REASON=rust_binary_not_executable; return 1; }
 }
+write_keygen() {
+  cat >"${KEYGEN_GO}" <<'EOF'
+package main
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"os"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
+
+func main() {
+	from, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		panic(err)
+	}
+	defer from.Close()
+	to, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		panic(err)
+	}
+	defer to.Close()
+	der, err := from.PrivateKeyDER()
+	if err != nil {
+		panic(err)
+	}
+	out := map[string]string{
+		"from_der_hex": hex.EncodeToString(der),
+		"mine_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes())),
+		"to_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+		panic(err)
+	}
+}
+EOF
+}
+prepare_tx_chainstate() {
+  local mine_address
+  TX_REASON=""
+  build_go_txgen || { TX_REASON="${BUILD_REASON:-go_txgen_build_failed}"; return 1; }
+  write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }
+  "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" >"${KEYGEN_JSON}" || { TX_REASON=go_submit_keygen_failed; return 1; }
+  mine_address="$(python3 - "${KEYGEN_JSON}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    print(json.load(f)["mine_address_hex"])
+PY
+)" || { TX_REASON=go_submit_key_material_malformed; return 1; }
+  echo "Mining mature chainstate for Go-submit -> Rust-accept path" >&2
+  "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { TX_REASON=go_submit_mine_failed; return 1; }
+  cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { TX_REASON=go_submit_chainstate_copy_failed; return 1; }
+}
+submit_go_tx() {
+  local from_key to_key status=0 err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.err"
+  TX_REASON=""
+  from_key="$(python3 - "${KEYGEN_JSON}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    print(json.load(f)["from_der_hex"])
+PY
+)" || { TX_REASON=go_submit_key_material_malformed; return 1; }
+  to_key="$(python3 - "${KEYGEN_JSON}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    print(json.load(f)["to_address_hex"])
+PY
+)" || { TX_REASON=go_submit_key_material_malformed; return 1; }
+  local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key "${from_key}" --to-key "${to_key}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}")
+  TXGEN_CMD="$(argv_cmd "${argv[@]}")"; TXGEN_ARGV_JSON="$(argv_json "${argv[@]}")"
+  TX_HEX="$("${argv[@]}" 2>"${err_file}")" || { TX_REASON=go_submit_txgen_failed; return 1; }
+  python3 - "${TX_HEX}" >"${GO_SUBMIT_JSON}.parse-request" <<'PY' || { TX_REASON=tx_identity_malformed; return 1; }
+import json
+import sys
+
+print(json.dumps({"op": "parse_tx", "tx_hex": sys.argv[1].strip()}))
+PY
+  parse_json="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run ./cmd/rubin-consensus-cli <"${GO_SUBMIT_JSON}.parse-request" 2>"${err_file}")" || { TX_REASON=tx_identity_malformed; return 1; }
+  TX_ID="$(python3 - "${parse_json}" <<'PY'
+import json
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+except json.JSONDecodeError:
+    raise SystemExit(1)
+if data.get("ok") is not True:
+    raise SystemExit(1)
+txid = data.get("txid")
+if not isinstance(txid, str) or len(txid) != 64 or any(c not in "0123456789abcdef" for c in txid):
+    raise SystemExit(1)
+print(txid)
+PY
+)" || { TX_REASON=tx_identity_malformed; return 1; }
+  python3 - "${GO_RPC_ADDR}" "${TX_HEX}" "${GO_SUBMIT_JSON}" 2>"${err_file}" <<'PY' || status=$?
+import json
+import socket
+import sys
+import urllib.error
+import urllib.request
+
+addr, tx_hex, out_path = sys.argv[1:4]
+body = json.dumps({"tx_hex": tx_hex.strip()}).encode("utf-8")
+request = urllib.request.Request(
+    f"http://{addr}/submit_tx",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        raw = response.read().decode("utf-8")
+except urllib.error.HTTPError as exc:
+    try:
+        raw = exc.read().decode("utf-8")
+    except UnicodeDecodeError:
+        raise SystemExit(13)
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(raw)
+    except OSError:
+        raise SystemExit(17)
+    raise SystemExit(16)
+except UnicodeDecodeError:
+    raise SystemExit(13)
+except (urllib.error.URLError, TimeoutError, socket.timeout):
+    raise SystemExit(12)
+try:
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(raw)
+except OSError:
+    raise SystemExit(17)
+PY
+  case "${status}" in 0) ;; 12) TX_REASON=go_submit_rpc_failed; return 1 ;; 13) TX_REASON=go_submit_malformed_rpc_body; return 1 ;; 16) TX_REASON=go_submit_submit_response_rejected; return 1 ;; 17) TX_REASON=go_submit_artifact_write_failed; return 1 ;; *) TX_REASON=go_submit_unknown_failure; return 1 ;; esac
+  status=0
+  rpc_json GET "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${GO_SUBMIT_STATUS_JSON}" 2>"${err_file}" || { TX_REASON=go_submit_rpc_failed; return 1; }
+  rpc_json GET "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${GO_SUBMIT_GET_TX_JSON}" 2>"${err_file}" || { TX_REASON=go_submit_rpc_failed; return 1; }
+  python3 - "${TX_ID}" "${TX_HEX}" "${GO_SUBMIT_JSON}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" 2>"${err_file}" <<'PY' || status=$?
+import json
+import sys
+
+txid, tx_hex, submit_path, status_path, get_path = sys.argv[1:6]
+try:
+    with open(submit_path, encoding="utf-8") as f:
+        submit = json.load(f)
+    with open(status_path, encoding="utf-8") as f:
+        status = json.load(f)
+    with open(get_path, encoding="utf-8") as f:
+        got = json.load(f)
+except json.JSONDecodeError:
+    raise SystemExit(13)
+except UnicodeDecodeError:
+    raise SystemExit(13)
+except OSError:
+    raise SystemExit(12)
+if not isinstance(submit, dict) or not isinstance(status, dict) or not isinstance(got, dict):
+    raise SystemExit(13)
+if submit.get("accepted") is not True or submit.get("txid") != txid:
+    raise SystemExit(15)
+if status.get("txid") != txid or status.get("status") != "pending":
+    raise SystemExit(14)
+if got.get("found") is not True or got.get("txid") != txid or got.get("raw_hex") != tx_hex.strip():
+    raise SystemExit(15)
+PY
+  case "${status}" in 0) return 0 ;; 12) TX_REASON=go_submit_artifact_write_failed ;; 13) TX_REASON=go_submit_malformed_rpc_body ;; 14) TX_REASON=go_submit_pending_timeout ;; 15) TX_REASON=go_submit_wrong_tx_identity ;; *) TX_REASON=go_submit_unknown_failure ;; esac
+  return 1
+}
+wait_rust_accept() {
+  local accept_class status
+  TX_REASON=""
+  accept_class="$(python3 - "${RUST_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" "${MESH_TIMEOUT}" <<'PY'
+import json
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+
+addr, txid, tx_hex, status_path, get_tx_path, timeout_s = sys.argv[1:7]
+deadline = time.monotonic() + int(timeout_s)
+saw_success = False
+
+def fetch_json(path: str) -> dict:
+    with urllib.request.urlopen(f"http://{addr}{path}", timeout=5) as response:
+        raw = response.read().decode("utf-8")
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("response root is not an object")
+    return data
+
+while time.monotonic() < deadline:
+    try:
+        status = fetch_json(f"/tx_status?txid={txid}")
+        saw_success = True
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump(status, f, indent=2, sort_keys=True)
+            f.write("\n")
+        if status.get("txid") == txid and status.get("status") == "pending":
+            got = fetch_json(f"/get_tx?txid={txid}")
+            saw_success = True
+            try:
+                with open(get_tx_path, "w", encoding="utf-8") as f:
+                    json.dump(got, f, indent=2, sort_keys=True)
+                    f.write("\n")
+            except OSError:
+                raise SystemExit(16)
+            if got.get("found") is True and got.get("txid") == txid and got.get("raw_hex") == tx_hex.strip():
+                print("pending_found")
+                raise SystemExit(0)
+            raise SystemExit(15)
+    except json.JSONDecodeError:
+        raise SystemExit(13)
+    except UnicodeDecodeError:
+        raise SystemExit(13)
+    except ValueError:
+        raise SystemExit(13)
+    except urllib.error.HTTPError:
+        time.sleep(1)
+        continue
+    except (urllib.error.URLError, TimeoutError, socket.timeout):
+        time.sleep(1)
+        continue
+    except OSError:
+        raise SystemExit(16)
+    time.sleep(1)
+if not saw_success:
+    raise SystemExit(12)
+raise SystemExit(14)
+PY
+)" || status=$?
+  status="${status:-0}"
+  case "${status}" in 0) RUST_ACCEPT_CLASS="${accept_class}"; return 0 ;; 12) TX_REASON=rust_accept_rpc_failed ;; 13) TX_REASON=rust_accept_malformed_rpc_body ;; 14) TX_REASON=rust_accept_pending_timeout ;; 15) TX_REASON=rust_accept_wrong_tx_identity ;; 16) TX_REASON=rust_accept_artifact_write_failed ;; *) TX_REASON=rust_accept_unknown_failure ;; esac
+  return 1
+}
 write_outputs() {
   local verdict="$1" reason="${2:-}"
   export REPORT_JSON LEGACY_SCHEMA_MARKER_JSON verdict reason GO_PID RUST_PID GO_RPC_ADDR RUST_RPC_ADDR \
@@ -283,7 +646,7 @@ write_outputs() {
     GO_NODE_BIN RUST_NODE_BIN GO_CMD RUST_CMD GO_ARGV_JSON RUST_ARGV_JSON GO_PEERS_JSON RUST_PEERS_JSON \
     GO_PROCESS_ALIVE RUST_PROCESS_ALIVE GO_RPC_PROCESS_BACKED RUST_RPC_PROCESS_BACKED GO_P2P_PROCESS_BACKED RUST_P2P_PROCESS_BACKED \
     RUST_TO_GO_LOCAL_ADDR FINAL_PROCESS_IDENTITY_RECHECKED FINAL_RUST_OUTBOUND_LINK_RECHECKED FINAL_PEER_SNAPSHOTS_RECHECKED \
-    RUBIN_PROCESS_ARTIFACT_ROOT
+    RUBIN_PROCESS_ARTIFACT_ROOT TX_PATH_MODE TX_ID TX_HEX TXGEN_BIN TXGEN_CMD TXGEN_ARGV_JSON GO_SUBMIT_JSON GO_SUBMIT_STATUS_JSON GO_SUBMIT_GET_TX_JSON RUST_STATUS_JSON RUST_GET_TX_JSON RUST_ACCEPT_CLASS KEYGEN_JSON DETERMINISTIC_TX_FEE
   python3 - <<'PY'
 import json, os
 e = os.environ
@@ -319,8 +682,9 @@ for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_k
     }
     nodes.append(node)
 go_snapshot, rust_snapshot = read_json(e["GO_PEERS_JSON"]), read_json(e["RUST_PEERS_JSON"])
+tx_mode = e.get("TX_PATH_MODE") == "1"
 report = {
-    "scenario": "mixed_client_mesh",
+    "scenario": "mixed_client_go_submit_rust_accept" if tx_mode else "mixed_client_mesh",
     "verdict": verdict,
     "artifact_root": e["RUBIN_PROCESS_ARTIFACT_ROOT"],
     "nodes": nodes,
@@ -340,6 +704,30 @@ report = {
         "reason": "existing mixed_client_evidence_v1 PASS requires tx_path; RUB-21 mesh-only PASS lives in this report",
     },
 }
+if tx_mode and verdict == "PASS":
+    tx_path = {"submitted_at": "node-go", "observed_at": ["node-rust"], "tx_id": e["TX_ID"]}
+    report["tx_path"] = tx_path
+    report["go_submit"] = {
+        "accepted": True,
+        "txid": e["TX_ID"],
+        "tx_hex": e["TX_HEX"],
+        "rpc_endpoint": e["GO_RPC_ADDR"],
+        "txgen_command": e.get("TXGEN_CMD") or "",
+        "txgen_command_argv": json.loads(e.get("TXGEN_ARGV_JSON") or "[]"),
+        "submit_response_path": e["GO_SUBMIT_JSON"],
+        "tx_status_path": e["GO_SUBMIT_STATUS_JSON"],
+        "get_tx_path": e["GO_SUBMIT_GET_TX_JSON"],
+        "key_material_path": e["KEYGEN_JSON"],
+        "fee": int(e.get("DETERMINISTIC_TX_FEE") or "0"),
+    }
+    report["rust_accept"] = {
+        "class": e["RUST_ACCEPT_CLASS"],
+        "txid": e["TX_ID"],
+        "raw_hex": e["TX_HEX"],
+        "rpc_endpoint": e["RUST_RPC_ADDR"],
+        "tx_status_path": e["RUST_STATUS_JSON"],
+        "get_tx_path": e["RUST_GET_TX_JSON"],
+    }
 if verdict != "PASS":
     report["failure_reason"] = reason or "mixed-client mesh did not produce PASS evidence"
 with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
@@ -350,13 +738,16 @@ legacy_schema_marker = {
     "schema_version": "rubin-mixed-client-devnet-evidence-v1",
     "evidence_type": "mixed_client_process_soak",
     "scenario": "mixed_client_mesh_schema_marker",
-    "verdict": "FAIL",
-    "failure_reason": legacy_marker_reason,
+    "verdict": "PASS" if tx_mode and verdict == "PASS" else "FAIL",
     "participants": [
         {"name": "node-go", "implementation": "go", **({"endpoint": e["GO_RPC_ADDR"], "started_at": e["GO_STARTED_AT_UTC"]} if e.get("GO_RPC_ADDR") and e.get("GO_STARTED_AT_UTC") else {})},
         {"name": "node-rust", "implementation": "rust", **({"endpoint": e["RUST_RPC_ADDR"], "started_at": e["RUST_STARTED_AT_UTC"]} if e.get("RUST_RPC_ADDR") and e.get("RUST_STARTED_AT_UTC") else {})},
     ],
 }
+if tx_mode and verdict == "PASS":
+    legacy_schema_marker["tx_path"] = tx_path
+else:
+    legacy_schema_marker["failure_reason"] = legacy_marker_reason
 with open(e["LEGACY_SCHEMA_MARKER_JSON"], "w", encoding="utf-8") as f:
     json.dump(legacy_schema_marker, f, indent=2, sort_keys=True)
     f.write("\n")
@@ -444,6 +835,9 @@ start_go_node() {
 for tool in lsof perl ps sed sort; do command -v "${tool}" >/dev/null 2>&1 || finish_no_data "${tool}_unavailable"; done
 build_go_node || finish_no_data "${BUILD_REASON:-go_build_failed}"
 build_rust_node || finish_no_data "${BUILD_REASON:-rust_build_failed}"
+if (( TX_PATH_MODE == 1 )); then
+  prepare_tx_chainstate || finish_no_data "${TX_REASON:-go_submit_chainstate_prepare_failed}"
+fi
 start_go_node || finish_no_data "${START_REASON:-go_process_not_ready}"
 verify_process_identity node-go go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go go_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-go_process_identity_unverified}"
 start_rust_node || finish_no_data "${START_REASON:-rust_process_not_ready}"
@@ -459,6 +853,10 @@ FINAL_RUST_OUTBOUND_LINK_RECHECKED=true
 wait_peer_snapshot node-rust-final "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-rust_final_peer_snapshot_missing_go_endpoint}"
 wait_peer_snapshot node-go-final "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-go_final_peer_snapshot_missing_rust_endpoint}"
 FINAL_PEER_SNAPSHOTS_RECHECKED=true
+if (( TX_PATH_MODE == 1 )); then
+  submit_go_tx || finish_no_data "${TX_REASON:-go_submit_failed}"
+  wait_rust_accept || finish_no_data "${TX_REASON:-rust_accept_failed}"
+fi
 PASS_REPORT_JSON="$(mktemp "/tmp/mixed-client-mesh-pass.XXXXXX")" || finish_no_data "pass_report_temp_failed"; FINAL_REPORT_JSON="${REPORT_JSON}"; REPORT_JSON="${PASS_REPORT_JSON}"
 write_outputs "PASS" || { REPORT_JSON="${FINAL_REPORT_JSON}"; finish_no_data "pass_report_write_failed"; }; REPORT_JSON="${FINAL_REPORT_JSON}"
 if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
