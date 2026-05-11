@@ -180,11 +180,13 @@ GO_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"; RUST_NODE_BIN="${RUB
 GO_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-go"; RUST_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
 GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED=""
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
-bounded() { perl -e 'alarm shift @ARGV; exec @ARGV' 5 "$@"; }
+bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
 argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
+loopback_endpoint() { local endpoint="${1:-}" port; [[ "${endpoint}" =~ ^127[.]0[.]0[.]1:([0-9]{1,5})$ ]] || return 1; port="${BASH_REMATCH[1]}"; (( 10#${port} >= 1 && 10#${port} <= 65535 )); }
+check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
   python3 - "${method}" "${addr}" "${path}" <<'PY'
@@ -194,8 +196,13 @@ req = urllib.request.Request(f"http://{addr}{path}", method=method)
 try:
     with urllib.request.urlopen(req, timeout=5) as resp: print(resp.read().decode("utf-8"), end="")
 except urllib.error.HTTPError as exc:
-    print(exc.read().decode("utf-8"), end="")
+    try:
+        print(exc.read().decode("utf-8"), end="")
+    except UnicodeDecodeError:
+        sys.exit(23)
     sys.exit(22)
+except UnicodeDecodeError:
+    sys.exit(23)
 except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
     print(f"request failed: {getattr(exc, 'reason', exc)}", end="")
     sys.exit(1)
@@ -224,26 +231,30 @@ while time.time() < deadline:
         time.sleep(1); continue
     addrs = sorted({line[1:].strip() for line in proc.stdout.splitlines() if line.startswith("n") and line[1:].strip() != rpc_addr and re.fullmatch(r"127\.0\.0\.1:[0-9]+", line[1:].strip())})
     if len(addrs) == 1: print(addrs[0]); sys.exit(0)
-    if len(addrs) > 1: sys.exit(f"ambiguous p2p listen addresses for pid={pid}: {addrs}")
+    if len(addrs) > 1:
+        print(f"ambiguous p2p listen addresses for pid={pid}: {addrs}", file=sys.stderr)
+        sys.exit(44)
     time.sleep(1)
-sys.exit(f"timeout resolving p2p listen address for pid={pid}")
+print(f"timeout resolving p2p listen address for pid={pid}", file=sys.stderr)
+sys.exit(45)
 PY
 }
 extract_log_addr() {
   local log_file="$1" prefix="$2" path addr
   path="$(_rubin_process_resolve_log "${log_file}")" || return 1
   addr="$(sed -n "s/.*${prefix}//p" "${path}" | tail -n 1 | tr -d '[:space:]')" || return 1
-  [[ "${addr}" == 127.0.0.1:* ]] || return 1; printf '%s\n' "${addr}"
+  [[ -n "${addr}" ]] || return 1; printf '%s\n' "${addr}"
 }
-build_go_node() { echo "Building Go rubin-node binary" >&2; "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${GO_NODE_BIN}" ./cmd/rubin-node || return 1; [[ -x "${GO_NODE_BIN}" ]]; }
+build_go_node() { BUILD_REASON=""; echo "Building Go rubin-node binary" >&2; "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${GO_NODE_BIN}" ./cmd/rubin-node || { BUILD_REASON=go_build_failed; return 1; }; [[ -x "${GO_NODE_BIN}" ]] || { BUILD_REASON=go_binary_missing_or_not_executable; return 1; }; }
 build_rust_node() {
-  local host_triple cargo_target_dir cargo_log cargo_bin
+  local host_triple cargo_target_dir cargo_log cargo_bin rc
+  BUILD_REASON=""
   echo "Building Rust rubin-node binary" >&2
-  run_fips_preflight_before_captured_dev_env || return 1
-  host_triple="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')" || return 1
-  [[ -n "${host_triple}" ]] || return 1
+  run_fips_preflight_before_captured_dev_env || { BUILD_REASON=rust_fips_preflight_failed; return 1; }
+  host_triple="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')" || { BUILD_REASON=rust_host_triple_failed; return 1; }
+  [[ -n "${host_triple}" ]] || { BUILD_REASON=rust_host_triple_missing; return 1; }
   cargo_target_dir="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"; cargo_log="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- cargo build --manifest-path "${RUST_WORKSPACE_ROOT}/Cargo.toml" --release --locked -p rubin-node --target "${host_triple}" --target-dir "${cargo_target_dir}" --message-format=json-render-diagnostics >"${cargo_log}" || return 1
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- cargo build --manifest-path "${RUST_WORKSPACE_ROOT}/Cargo.toml" --release --locked -p rubin-node --target "${host_triple}" --target-dir "${cargo_target_dir}" --message-format=json-render-diagnostics >"${cargo_log}" || { BUILD_REASON=rust_cargo_build_failed; return 1; }
   cargo_bin="$(python3 - "${cargo_log}" <<'PY'
 import json, sys
 selected = None
@@ -251,19 +262,19 @@ with open(sys.argv[1], encoding="utf-8") as f:
     for line_no, raw in enumerate(f, 1):
         line = raw.strip()
         if not line: continue
-        if not line.startswith("{"): sys.exit(f"cargo build log contamination: {line[:160]!r}")
+        if not line.startswith("{"): sys.exit(2)
         try: ev = json.loads(line)
-        except json.JSONDecodeError as exc: sys.exit(f"malformed cargo JSON at line {line_no}: {exc.msg}")
+        except json.JSONDecodeError: sys.exit(2)
         if ev.get("reason") != "compiler-artifact": continue
         target = ev.get("target") or {}
         if target.get("name") == "rubin-node" and "bin" in (target.get("kind") or []) and ev.get("executable"): selected = ev["executable"]
-if selected is None: sys.exit("no rubin-node executable artifact in cargo JSON stream")
+if selected is None: sys.exit(3)
 print(selected)
 PY
-)" || return 1
-  [[ -x "${cargo_bin}" ]] || return 1
-  cp -- "${cargo_bin}" "${RUST_NODE_BIN}" || return 1
-  [[ -x "${RUST_NODE_BIN}" ]]
+  )" || { rc=$?; [[ ${rc} -eq 2 ]] && BUILD_REASON=rust_cargo_json_malformed || BUILD_REASON=rust_cargo_artifact_missing; return 1; }
+  [[ -x "${cargo_bin}" ]] || { BUILD_REASON=rust_cargo_artifact_missing; return 1; }
+  cp -- "${cargo_bin}" "${RUST_NODE_BIN}" || { BUILD_REASON=rust_binary_copy_failed; return 1; }
+  [[ -x "${RUST_NODE_BIN}" ]] || { BUILD_REASON=rust_binary_not_executable; return 1; }
 }
 write_outputs() {
   local verdict="$1" reason="${2:-}"
@@ -362,21 +373,25 @@ wait_peer_snapshot() {
       if python3 - "${tmp}" "${expected}" <<'PY' >/dev/null 2>&1
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
-    data = json.load(f)
+    try:
+        data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        sys.exit(4)
 if not isinstance(data, dict):
-    sys.exit(4)
+    sys.exit(5)
 expected, peers, count = sys.argv[2], data.get("peers"), data.get("count")
 def ep(v): return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and (p := v.rsplit(":", 1)[-1]).isdigit() and 1 <= len(p) <= 5 and 1 <= int(p) <= 65535
 shape = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers)
-has_expected = isinstance(peers, list) and any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
-sys.exit(0 if shape and has_expected and count == 1 else 3 if shape and has_expected else 4 if not shape else 1)
+has_expected_complete = isinstance(peers, list) and any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
+has_expected_incomplete = isinstance(peers, list) and any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is False for p in peers)
+sys.exit(0 if shape and has_expected_complete and count == 1 else 3 if shape and has_expected_complete else 5 if not shape else 6 if has_expected_incomplete else 7)
 PY
       then mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
-      else rc=$?; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; fi
-    else PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
+      else rc=$?; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_handshake_incomplete; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
+    else rc=$?; [[ ${rc} -eq 23 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json || PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; fi
     sleep 1
   done
-  if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -s "${tmp}.err" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ "${PEER_SNAPSHOT_REASON:-}" == unexpected_peer_snapshot_peer || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_malformed_json ]]; then :; elif [[ -s "${tmp}" ]] && ! python3 -m json.tool "${tmp}" >/dev/null 2>&1; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
+  if [[ "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_rpc_failed || -s "${tmp}.err" ]]; then PEER_SNAPSHOT_REASON=peer_snapshot_rpc_failed; elif [[ "${PEER_SNAPSHOT_REASON:-}" == unexpected_peer_snapshot_peer || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_malformed_json || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_invalid_shape || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_handshake_incomplete || "${PEER_SNAPSHOT_REASON:-}" == peer_snapshot_expected_peer_absent ]]; then :; elif [[ -s "${tmp}" ]] && ! python3 -m json.tool "${tmp}" >/dev/null 2>&1; then PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; else PEER_SNAPSHOT_REASON="${label}_peer_snapshot_missing_endpoint"; fi
   rm -f -- "${tmp}" "${tmp}.err"
   echo "timeout waiting for ${label} /peers completed handshake: ${PEER_SNAPSHOT_REASON}" >&2
   return 1
@@ -394,44 +409,50 @@ wait_rust_to_go_link() {
   done; finish_no_data "${missing}"
 }
 verify_process_identity() {
-  local label="$1" impl="$2" pid="$3" rpc_addr="$4" p2p_addr="$5" expected_comm="$6" comm
-  rubin_process_is_alive "${pid}" || { echo "${label} pid is not alive: ${pid}" >&2; return 1; }
-  comm="$(pid_comm "${pid}")" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "ps_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "ps_timeout"; [[ ${rc} -eq 4 ]] && finish_no_data "sed_failed"; echo "${label} process comm unavailable: ${pid}" >&2; return 1; }
-  [[ "${comm}" == "${expected_comm}" ]] || { echo "${label} process comm=${comm}, want ${expected_comm}" >&2; return 1; }
-  pid_listens_on "${pid}" "${rpc_addr}" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "lsof_timeout"; echo "${label} rpc endpoint is not process-backed: ${rpc_addr}" >&2; return 1; }
-  pid_listens_on "${pid}" "${p2p_addr}" || { rc=$?; [[ ${rc} -eq 2 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 3 ]] && finish_no_data "lsof_timeout"; echo "${label} p2p endpoint is not process-backed: ${p2p_addr}" >&2; return 1; }
+  local label="$1" impl="$2" pid="$3" rpc_addr="$4" p2p_addr="$5" expected_comm="$6" reason_prefix="$7" comm rc
+  PROCESS_IDENTITY_REASON=""
+  rubin_process_is_alive "${pid}" || { PROCESS_IDENTITY_REASON="${reason_prefix}_process_not_alive"; echo "${label} pid is not alive: ${pid}" >&2; return 1; }
+  comm="$(pid_comm "${pid}")" || { rc=$?; case "${rc}" in 2) PROCESS_IDENTITY_REASON="${reason_prefix}_ps_failed" ;; 3) PROCESS_IDENTITY_REASON="${reason_prefix}_ps_timeout" ;; 4) PROCESS_IDENTITY_REASON="${reason_prefix}_sed_failed" ;; *) PROCESS_IDENTITY_REASON="${reason_prefix}_comm_unavailable" ;; esac; echo "${label} process comm unavailable: ${pid}" >&2; return 1; }
+  [[ "${comm}" == "${expected_comm}" ]] || { PROCESS_IDENTITY_REASON="${reason_prefix}_comm_mismatch"; echo "${label} process comm=${comm}, want ${expected_comm}" >&2; return 1; }
+  pid_listens_on "${pid}" "${rpc_addr}" || { rc=$?; case "${rc}" in 2) PROCESS_IDENTITY_REASON="${reason_prefix}_lsof_failed" ;; 3) PROCESS_IDENTITY_REASON="${reason_prefix}_lsof_timeout" ;; *) PROCESS_IDENTITY_REASON="${reason_prefix}_rpc_endpoint_not_process_backed" ;; esac; echo "${label} rpc endpoint is not process-backed: ${rpc_addr}" >&2; return 1; }
+  pid_listens_on "${pid}" "${p2p_addr}" || { rc=$?; case "${rc}" in 2) PROCESS_IDENTITY_REASON="${reason_prefix}_lsof_failed" ;; 3) PROCESS_IDENTITY_REASON="${reason_prefix}_lsof_timeout" ;; *) PROCESS_IDENTITY_REASON="${reason_prefix}_p2p_endpoint_not_process_backed" ;; esac; echo "${label} p2p endpoint is not process-backed: ${p2p_addr}" >&2; return 1; }
   [[ "${impl}" == "go" ]] && { GO_COMM="${comm}"; GO_PROCESS_ALIVE=true; GO_RPC_PROCESS_BACKED=true; GO_P2P_PROCESS_BACKED=true; return 0; }
   [[ "${impl}" == "rust" ]] && { RUST_COMM="${comm}"; RUST_PROCESS_ALIVE=true; RUST_RPC_PROCESS_BACKED=true; RUST_P2P_PROCESS_BACKED=true; return 0; }
   return 1
 }
 start_rust_node() {
   local -a argv=("${RUST_NODE_BIN}" --network devnet --datadir "${RUST_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${GO_P2P_ADDR}")
+  START_REASON=""
   RUST_CMD="$(argv_cmd "${argv[@]}")"; RUST_ARGV_JSON="$(argv_json "${argv[@]}")"
-  rubin_process_start "${RUST_LOG}" "${argv[@]}" || return 1; RUST_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${RUST_LOG}" "p2p: listening=" 60 "${RUST_PID}" || return 1; rubin_process_wait_for_log "${RUST_LOG}" "rpc: listening=" 60 "${RUST_PID}" || return 1
-  RUST_P2P_ADDR="$(extract_log_addr "${RUST_LOG}" "p2p: listening=")" || return 1; RUST_RPC_ADDR="$(rubin_process_extract_rpc_addr "${RUST_LOG}")" || return 1
-  rubin_process_wait_for_rpc_ready "${RUST_RPC_ADDR}" 30 || return 1; RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  rubin_process_start "${RUST_LOG}" "${argv[@]}" || { START_REASON=rust_launch_failed; return 1; }; RUST_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${RUST_LOG}" "p2p: listening=" 60 "${RUST_PID}" || { START_REASON=rust_p2p_log_wait_failed; return 1; }
+  rubin_process_wait_for_log "${RUST_LOG}" "rpc: listening=" 60 "${RUST_PID}" || { START_REASON=rust_rpc_log_wait_failed; return 1; }
+  RUST_P2P_ADDR="$(extract_log_addr "${RUST_LOG}" "p2p: listening=")" || { START_REASON=rust_p2p_addr_extract_failed; return 1; }; loopback_endpoint "${RUST_P2P_ADDR}" || finish_no_data "rust_p2p_addr_malformed"
+  RUST_RPC_ADDR="$(rubin_process_extract_rpc_addr "${RUST_LOG}")" || { START_REASON=rust_rpc_addr_extract_failed; return 1; }; loopback_endpoint "${RUST_RPC_ADDR}" || finish_no_data "rust_rpc_addr_malformed"
+  rubin_process_wait_for_rpc_ready "${RUST_RPC_ADDR}" 30 || { START_REASON=rust_rpc_ready_timeout; return 1; }; RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 start_go_node() {
   local -a argv=("${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
+  START_REASON=""
   GO_CMD="$(argv_cmd "${argv[@]}")"; GO_ARGV_JSON="$(argv_json "${argv[@]}")"
-  rubin_process_start "${GO_LOG}" "${argv[@]}" || return 1; GO_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${GO_LOG}" "rpc: listening=" 60 "${GO_PID}" || return 1; GO_RPC_ADDR="$(rubin_process_extract_rpc_addr "${GO_LOG}")" || return 1
-  GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || { rc=$?; [[ ${rc} -eq 42 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 43 ]] && finish_no_data "lsof_timeout"; return 1; }
-  rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || return 1; GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  rubin_process_start "${GO_LOG}" "${argv[@]}" || { START_REASON=go_launch_failed; return 1; }; GO_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${GO_LOG}" "rpc: listening=" 60 "${GO_PID}" || { START_REASON=go_rpc_log_wait_failed; return 1; }
+  GO_RPC_ADDR="$(rubin_process_extract_rpc_addr "${GO_LOG}")" || { START_REASON=go_rpc_addr_extract_failed; return 1; }; loopback_endpoint "${GO_RPC_ADDR}" || finish_no_data "go_rpc_addr_malformed"
+  GO_P2P_ADDR="$(p2p_addr_for_pid "${GO_PID}" "${GO_RPC_ADDR}" 30)" || { rc=$?; [[ ${rc} -eq 42 ]] && finish_no_data "lsof_failed"; [[ ${rc} -eq 43 ]] && finish_no_data "lsof_timeout"; [[ ${rc} -eq 44 ]] && finish_no_data "go_p2p_addr_ambiguous"; [[ ${rc} -eq 45 ]] && finish_no_data "go_p2p_addr_timeout"; return 1; }; loopback_endpoint "${GO_P2P_ADDR}" || finish_no_data "go_p2p_addr_malformed"
+  rubin_process_wait_for_rpc_ready "${GO_RPC_ADDR}" 30 || { START_REASON=go_rpc_ready_timeout; return 1; }; GO_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
-for tool in lsof perl sed sort; do command -v "${tool}" >/dev/null 2>&1 || finish_no_data "${tool}_unavailable"; done
-build_go_node || finish_no_data "go_build_failed"
-build_rust_node || finish_no_data "rust_build_failed"
-start_go_node || finish_no_data "go_process_not_ready"
-verify_process_identity node-go go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go || finish_no_data "go_process_identity_unverified"
-start_rust_node || finish_no_data "rust_process_not_ready"
-verify_process_identity node-rust rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust || finish_no_data "rust_process_identity_unverified"
+for tool in lsof perl ps sed sort; do command -v "${tool}" >/dev/null 2>&1 || finish_no_data "${tool}_unavailable"; done
+build_go_node || finish_no_data "${BUILD_REASON:-go_build_failed}"
+build_rust_node || finish_no_data "${BUILD_REASON:-rust_build_failed}"
+start_go_node || finish_no_data "${START_REASON:-go_process_not_ready}"
+verify_process_identity node-go go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go go_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-go_process_identity_unverified}"
+start_rust_node || finish_no_data "${START_REASON:-rust_process_not_ready}"
+verify_process_identity node-rust rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust rust_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-rust_process_identity_unverified}"
 wait_peer_snapshot node-rust "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-rust_peer_snapshot_missing_go_endpoint}"
 wait_rust_to_go_link rust_to_go_tcp_link_missing rust_to_go_tcp_link_ambiguous
 wait_peer_snapshot node-go "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-go_peer_snapshot_missing_rust_endpoint}"
-verify_process_identity node-go-final go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go || finish_no_data "go_final_process_identity_unverified"
-verify_process_identity node-rust-final rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust || finish_no_data "rust_final_process_identity_unverified"
+verify_process_identity node-go-final go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go go_final_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-go_final_process_identity_unverified}"
+verify_process_identity node-rust-final rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust rust_final_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-rust_final_process_identity_unverified}"
 FINAL_PROCESS_IDENTITY_RECHECKED=true
 wait_rust_to_go_link rust_final_to_go_tcp_link_missing rust_final_to_go_tcp_link_ambiguous
 FINAL_RUST_OUTBOUND_LINK_RECHECKED=true
@@ -440,9 +461,11 @@ wait_peer_snapshot node-go-final "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIM
 FINAL_PEER_SNAPSHOTS_RECHECKED=true
 PASS_REPORT_JSON="$(mktemp "/tmp/mixed-client-mesh-pass.XXXXXX")" || finish_no_data "pass_report_temp_failed"; FINAL_REPORT_JSON="${REPORT_JSON}"; REPORT_JSON="${PASS_REPORT_JSON}"
 write_outputs "PASS" || { REPORT_JSON="${FINAL_REPORT_JSON}"; finish_no_data "pass_report_write_failed"; }; REPORT_JSON="${FINAL_REPORT_JSON}"
-if run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 && check_report "${PASS_REPORT_JSON}" live >&2; then
-  mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
-else
-  rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_validation_failed"
+if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
+  rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "legacy_schema_marker_validation_failed"
 fi
+if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
+  rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
+fi
+mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
 [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" || echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"
