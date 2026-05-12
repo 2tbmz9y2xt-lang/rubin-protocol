@@ -72,15 +72,17 @@ def artifact_file(label: str, value: object, root: Path) -> Path:
     except ValueError: fail(f"{label} is outside artifact_root")
     req(p.is_file(), f"{label} file is missing")
     return p
-def tx_sidecars(status: dict, got: dict, txid: str, txhex: str, label: str) -> None:
-    req(set(status) == {"status", "txid"}, f"{label}.tx_status keys mismatch: {sorted(status)}")
+def tx_sidecars(status: dict, got: dict, txid: str, txhex: str, label: str, impl: str, endpoint: str, status_path: str, get_path: str) -> None:
+    req(set(status) == {"implementation", "request_path", "rpc_endpoint", "status", "txid"}, f"{label}.tx_status keys mismatch: {sorted(status)}")
+    req(status.get("implementation") == impl and status.get("rpc_endpoint") == endpoint and status.get("request_path") == status_path, f"{label}.tx_status capture identity mismatch")
     req(status.get("status") == "pending", f"{label}.tx_status is not pending")
     req(status.get("txid") == txid, f"{label}.tx_status txid mismatch")
-    req(set(got) == {"found", "raw_hex", "txid"}, f"{label}.get_tx keys mismatch: {sorted(got)}")
+    req(set(got) == {"found", "implementation", "raw_hex", "request_path", "rpc_endpoint", "txid"}, f"{label}.get_tx keys mismatch: {sorted(got)}")
+    req(got.get("implementation") == impl and got.get("rpc_endpoint") == endpoint and got.get("request_path") == get_path, f"{label}.get_tx capture identity mismatch")
     req(got.get("found") is True, f"{label}.get_tx did not find tx")
     req(got.get("txid") == txid, f"{label}.get_tx txid mismatch")
     req(got.get("raw_hex") == txhex, f"{label}.get_tx raw_hex mismatch")
-def tx_rpc(addr: str, path_suffix: str, label: str) -> dict:
+def tx_rpc(addr: str, path_suffix: str, label: str, impl: str) -> dict:
     try:
         with urllib.request.urlopen(f"http://{addr}{path_suffix}", timeout=5) as resp: raw = resp.read(1000001)
     except (urllib.error.URLError, TimeoutError, socket.timeout) as exc: fail(f"{label} rpc failed: {exc}")
@@ -88,20 +90,12 @@ def tx_rpc(addr: str, path_suffix: str, label: str) -> dict:
     try: data = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc: fail(f"{label} rpc malformed JSON: {exc}")
     req(isinstance(data, dict), f"{label} rpc root is not an object")
+    data.update({"implementation": impl, "rpc_endpoint": addr, "request_path": path_suffix})
     return data
 def parse_txid_from_hex(txhex: str) -> str:
     request = json.dumps({"op": "parse_tx", "tx_hex": txhex}) + "\n"
     try:
-        proc = subprocess.run(
-            [dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"],
-            check=False,
-            env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
-            input=request,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=30,
-        )
+        proc = subprocess.run([dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         fail("tx parser timeout")
     except OSError as exc:
@@ -115,7 +109,8 @@ def parse_txid_from_hex(txhex: str) -> str:
         parsed = json.loads(stdout)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         fail(f"tx parser malformed output: {exc}")
-    txid = parsed.get("txid") if isinstance(parsed, dict) else None
+    req(isinstance(parsed, dict), "tx parser root is not an object")
+    txid = parsed.get("txid")
     req(parsed.get("ok") is True and isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid), "tx parser did not produce txid")
     return txid
 def pid_exe(pid: int) -> str:
@@ -185,7 +180,6 @@ def ts(value: object) -> bool:
     try: return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
     except ValueError: return False
 data = load_json_file("report", path)
-req(isinstance(data, dict), "report root is not an object")
 scenario = data.get("scenario")
 tx_mode = scenario == SCENARIO_TX
 req(scenario in {SCENARIO_MESH, SCENARIO_TX}, f"scenario is not supported: {scenario!r}")
@@ -203,6 +197,7 @@ except ValueError: fail("legacy marker is outside artifact_root")
 marker = load_json_file("legacy marker", marker_path)
 req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong schema marker shape")
 if tx_mode:
+    req(set(marker) == {"evidence_type", "participants", "scenario", "schema_version", "tx_path", "verdict"}, f"legacy marker keys mismatch: {sorted(marker)}")
     req(marker.get("verdict") == "PASS" and marker.get("tx_path") == data.get("tx_path"), "legacy marker is not bound to tx_path PASS")
 else:
     req(marker.get("verdict") == "FAIL", "legacy marker has wrong non-authoritative FAIL shape")
@@ -255,11 +250,12 @@ if tx_mode:
     go_get = artifact_file("go_submit.get_tx_path", go_submit.get("get_tx_path"), artifact_root)
     rust_status = artifact_file("rust_accept.tx_status_path", rust_accept.get("tx_status_path"), artifact_root)
     rust_get = artifact_file("rust_accept.get_tx_path", rust_accept.get("get_tx_path"), artifact_root)
-    tx_sidecars(load_json_file("go_submit.tx_status", go_status), load_json_file("go_submit.get_tx", go_get), txid, txhex, "go_submit")
-    tx_sidecars(load_json_file("rust_accept.tx_status", rust_status), load_json_file("rust_accept.get_tx", rust_get), txid, txhex, "rust_accept")
+    req(len({go_status, go_get, rust_status, rust_get}) == 4, "tx sidecar paths are not pairwise distinct")
+    tx_sidecars(load_json_file("go_submit.tx_status", go_status), load_json_file("go_submit.get_tx", go_get), txid, txhex, "go_submit", "go", nodes_by_impl["go"]["rpc_endpoint"], f"/tx_status?txid={txid}", f"/get_tx?txid={txid}")
+    tx_sidecars(load_json_file("rust_accept.tx_status", rust_status), load_json_file("rust_accept.get_tx", rust_get), txid, txhex, "rust_accept", "rust", nodes_by_impl["rust"]["rpc_endpoint"], f"/tx_status?txid={txid}", f"/get_tx?txid={txid}")
     if live:
-        tx_sidecars(tx_rpc(nodes_by_impl["go"]["rpc_endpoint"], f"/tx_status?txid={txid}", "go_submit.tx_status"), tx_rpc(nodes_by_impl["go"]["rpc_endpoint"], f"/get_tx?txid={txid}", "go_submit.get_tx"), txid, txhex, "go_submit.live")
-        tx_sidecars(tx_rpc(nodes_by_impl["rust"]["rpc_endpoint"], f"/tx_status?txid={txid}", "rust_accept.tx_status"), tx_rpc(nodes_by_impl["rust"]["rpc_endpoint"], f"/get_tx?txid={txid}", "rust_accept.get_tx"), txid, txhex, "rust_accept.live")
+        tx_sidecars(tx_rpc(nodes_by_impl["go"]["rpc_endpoint"], f"/tx_status?txid={txid}", "go_submit.tx_status", "go"), tx_rpc(nodes_by_impl["go"]["rpc_endpoint"], f"/get_tx?txid={txid}", "go_submit.get_tx", "go"), txid, txhex, "go_submit.live", "go", nodes_by_impl["go"]["rpc_endpoint"], f"/tx_status?txid={txid}", f"/get_tx?txid={txid}")
+        tx_sidecars(tx_rpc(nodes_by_impl["rust"]["rpc_endpoint"], f"/tx_status?txid={txid}", "rust_accept.tx_status", "rust"), tx_rpc(nodes_by_impl["rust"]["rpc_endpoint"], f"/get_tx?txid={txid}", "rust_accept.get_tx", "rust"), txid, txhex, "rust_accept.live", "rust", nodes_by_impl["rust"]["rpc_endpoint"], f"/tx_status?txid={txid}", f"/get_tx?txid={txid}")
 connectivity = data.get("peer_connectivity")
 req(isinstance(connectivity, dict), "PASS report missing peer_connectivity object")
 req(all(connectivity.get(f) is True for f in ("go_to_rust", "rust_to_go", "bidirectional_observed")), "peer_connectivity booleans are not all true")
@@ -381,10 +377,10 @@ import socket, sys, urllib.error, urllib.request
 method, addr, path = sys.argv[1:4]
 req = urllib.request.Request(f"http://{addr}{path}", method=method)
 try:
-    with urllib.request.urlopen(req, timeout=5) as resp: print(resp.read().decode("utf-8"), end="")
+    with urllib.request.urlopen(req, timeout=5) as resp: print(resp.read(1000001).decode("utf-8"), end="")
 except urllib.error.HTTPError as exc:
     try:
-        print(exc.read().decode("utf-8"), end="")
+        print(exc.read(1000001).decode("utf-8"), end="")
     except UnicodeDecodeError:
         sys.exit(23)
     sys.exit(22)
@@ -393,6 +389,32 @@ except UnicodeDecodeError:
 except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
     print(f"request failed: {getattr(exc, 'reason', exc)}", end="")
     sys.exit(1)
+PY
+}
+capture_tx_rpc_sidecar() {
+  local impl="$1" addr="$2" path="$3" out="$4" status=0; local tmp="${out}.raw"
+  rpc_json GET "${addr}" "${path}" >"${tmp}" || status=$?
+  (( status == 0 )) || { rm -f -- "${tmp}"; return "${status}"; }
+  python3 - "${impl}" "${addr}" "${path}" "${tmp}" "${out}" <<'PY'
+import json, os, sys
+impl, addr, request_path, src, dst = sys.argv[1:6]
+try:
+    with open(src, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(23)
+if not isinstance(data, dict):
+    sys.exit(23)
+data.update({"implementation": impl, "request_path": request_path, "rpc_endpoint": addr})
+tmp = dst + ".tmp"
+try:
+    with open(tmp, "w", encoding="utf-8") as f: json.dump(data, f, indent=2, sort_keys=True); f.write("\n")
+    os.replace(tmp, dst)
+except OSError:
+    sys.exit(1)
+finally:
+    try: os.remove(src)
+    except OSError: pass
 PY
 }
 pid_comm() { local pid="$1" raw comm status=0 err="${RUBIN_PROCESS_ARTIFACT_ROOT}/ps.err"; raw="$(bounded ps -ww -p "${pid}" -o comm= 2>"${err}")" || status=$?; (( status == 142 )) && return 3; [[ ${status} -eq 0 || ! -s "${err}" ]] || return 2; comm="$(sed -n '1p' <<<"${raw}")" || return 4; [[ -n "${comm}" ]] || return 1; basename -- "${comm}"; }
@@ -476,31 +498,15 @@ import (
 )
 func main() {
 	dir := os.Args[1]
-	from, err := consensus.NewMLDSA87Keypair()
-	if err != nil {
-		panic(err)
-	}
+	from, err := consensus.NewMLDSA87Keypair(); if err != nil { panic(err) }
 	defer from.Close()
-	to, err := consensus.NewMLDSA87Keypair()
-	if err != nil {
-		panic(err)
-	}
+	to, err := consensus.NewMLDSA87Keypair(); if err != nil { panic(err) }
 	defer to.Close()
-	der, err := from.PrivateKeyDER()
-	if err != nil {
-		panic(err)
-	}
+	der, err := from.PrivateKeyDER(); if err != nil { panic(err) }
 	fromAddress := hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes()))
 	path := filepath.Join(dir, "from-key.hex")
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(der)+"\n"), 0o600); err != nil {
-		panic(err)
-	}
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{
-		"private_key_file": path,
-		"from_address_hex": fromAddress,
-		"to_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
-		"mine_address_hex": fromAddress,
-	})
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(der)+"\n"), 0o600); err != nil { panic(err) }
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"private_key_file": path, "from_address_hex": fromAddress, "to_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())), "mine_address_hex": fromAddress})
 }
 EOF
 }
@@ -533,23 +539,11 @@ PY
 }
 parse_txid() {
   python3 - "${DEV_ENV}" "${GO_MODULE_ROOT}" "${TX_HEX}" <<'PY'
-import json
-import os
-import subprocess
-import sys
+import json, os, subprocess, sys
 dev_env, go_module_root, txhex = sys.argv[1:4]
 request = json.dumps({"op": "parse_tx", "tx_hex": txhex}) + "\n"
 try:
-    proc = subprocess.run(
-        [dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"],
-        check=False,
-        env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
-        input=request,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=30,
-    )
+    proc = subprocess.run([dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
 except (OSError, subprocess.TimeoutExpired):
     sys.exit(1)
 if proc.returncode != 0:
@@ -558,7 +552,9 @@ try:
     data = json.loads(proc.stdout)
 except (json.JSONDecodeError, UnicodeDecodeError):
     sys.exit(1)
-txid = data.get("txid") if isinstance(data, dict) else None
+if not isinstance(data, dict):
+    sys.exit(1)
+txid = data.get("txid")
 if data.get("ok") is not True or not isinstance(txid, str):
     sys.exit(1)
 print(txid)
@@ -576,15 +572,16 @@ tx_sidecar_reason() {
     17) printf '%s\n' "${label}_sidecar_read_failed" ;;
     18) printf '%s\n' "${label}_status_keys_mismatch" ;;
     19) printf '%s\n' "${label}_get_tx_keys_mismatch" ;;
+    20) printf '%s\n' "${label}_capture_identity_mismatch" ;;
     *) printf '%s\n' "${label}_identity_unverified" ;;
   esac
 }
 verify_tx_sidecars() {
-  local label="$1" txid="$2" txhex="$3" status_path="$4" get_path="$5"
-  python3 - "${label}" "${txid}" "${txhex}" "${status_path}" "${get_path}" <<'PY'
+  local label="$1" impl="$2" endpoint="$3" txid="$4" txhex="$5" status_request="$6" get_request="$7" status_path="$8" get_path="$9"
+  python3 - "${label}" "${impl}" "${endpoint}" "${txid}" "${txhex}" "${status_request}" "${get_request}" "${status_path}" "${get_path}" <<'PY'
 import json
 import sys
-label, txid, txhex, status_path, get_path = sys.argv[1:6]
+label, impl, endpoint, txid, txhex, status_request, get_request, status_path, get_path = sys.argv[1:10]
 def fail(code: int, message: str) -> None:
     print(f"{label}: {message}", file=sys.stderr)
     sys.exit(code)
@@ -601,8 +598,10 @@ def load_json(path: str, kind: str) -> dict:
     return data
 status = load_json(status_path, "tx_status")
 got = load_json(get_path, "get_tx")
-if set(status) != {"status", "txid"}:
+if set(status) != {"implementation", "request_path", "rpc_endpoint", "status", "txid"}:
     fail(18, f"tx_status_keys_mismatch: {sorted(status)}")
+if status.get("implementation") != impl or status.get("rpc_endpoint") != endpoint or status.get("request_path") != status_request:
+    fail(20, "tx_status_capture_identity_mismatch")
 status_txid = status.get("txid")
 status_value = status.get("status")
 if status_value != "pending":
@@ -619,8 +618,10 @@ if found is not True:
     if "txid" in got and got.get("txid") != txid:
         fail(15, f"get_tx_txid_mismatch: {got.get('txid')!r}")
     fail(14, f"get_tx_not_found: {found!r}")
-if got_keys != {"found", "raw_hex", "txid"}:
+if got_keys != {"found", "implementation", "raw_hex", "request_path", "rpc_endpoint", "txid"}:
     fail(19, f"get_tx_keys_mismatch: {sorted(got)}")
+if got.get("implementation") != impl or got.get("rpc_endpoint") != endpoint or got.get("request_path") != get_request:
+    fail(20, "get_tx_capture_identity_mismatch")
 if got.get("txid") != txid:
     fail(15, f"get_tx_txid_mismatch: {got.get('txid')!r}")
 if got.get("raw_hex") != txhex:
@@ -638,18 +639,18 @@ submit_go_tx() {
   (( status == 0 )) || { [[ ${status} -eq 142 ]] && TX_REASON=go_submit_txgen_timeout || TX_REASON=go_submit_txgen_failed; return 1; }
   [[ "${TX_HEX}" =~ ^[0-9a-f]+$ && ${#TX_HEX} -le 20000 && $(( ${#TX_HEX} % 2 )) -eq 0 ]] || { TX_REASON=go_submit_tx_hex_malformed_or_unbounded; return 1; }
   TX_ID="$(parse_txid)" || { TX_REASON=go_submit_txid_parse_failed; return 1; }
-  rpc_json GET "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${GO_SUBMIT_STATUS_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
-  rpc_json GET "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${GO_SUBMIT_GET_TX_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
-  verify_tx_sidecars go_submit "${TX_ID}" "${TX_HEX}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" || { rc=$?; TX_REASON="$(tx_sidecar_reason go_submit "${rc}")"; return 1; }
+  capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
+  capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_GET_TX_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
+  verify_tx_sidecars go_submit go "${GO_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" || { rc=$?; TX_REASON="$(tx_sidecar_reason go_submit "${rc}")"; return 1; }
 }
 wait_rust_accept() {
   local deadline rc=0 last_retry_reason=""
   TX_REASON=""
   deadline=$((SECONDS + MESH_TIMEOUT))
   while (( SECONDS < deadline )); do
-    if rpc_json GET "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${RUST_STATUS_JSON}"; then
-      if rpc_json GET "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${RUST_GET_TX_JSON}"; then
-        if verify_tx_sidecars rust_accept "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then
+    if capture_tx_rpc_sidecar rust "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${RUST_STATUS_JSON}"; then
+      if capture_tx_rpc_sidecar rust "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${RUST_GET_TX_JSON}"; then
+        if verify_tx_sidecars rust_accept rust "${RUST_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then
           return 0
         else
           rc=$?
