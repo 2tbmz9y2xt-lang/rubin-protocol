@@ -1148,6 +1148,15 @@ for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_k
     nodes.append(node)
 go_snapshot, rust_snapshot = read_peer_snapshot(e["GO_PEERS_JSON"]), read_peer_snapshot(e["RUST_PEERS_JSON"])
 tx_mode = e.get("TX_PATH_MODE") == "1"
+legacy_schema_reason = (
+    "existing mixed_client_evidence_v1 PASS requires tx_path; Go-submit -> Rust-accept tx-path PASS is recorded in this same-run producer report"
+    if tx_mode and verdict == "PASS"
+    else (
+        "existing mixed_client_evidence_v1 PASS requires tx_path; Go-submit -> Rust-accept tx-path PASS is produced only by same-run producer PASS reports"
+        if tx_mode
+        else "existing mixed_client_evidence_v1 PASS requires tx_path; RUB-21 mesh-only PASS lives in this report"
+    )
+)
 report = {
     "scenario": "mixed_client_go_submit_rust_accept" if tx_mode else "mixed_client_mesh",
     "verdict": verdict,
@@ -1166,7 +1175,7 @@ report = {
         "authoritative": False,
         "marker_path": e["LEGACY_SCHEMA_MARKER_JSON"],
         "purpose": "schema-valid legacy artifact only; not the mesh report verdict",
-        "reason": "existing mixed_client_evidence_v1 PASS requires tx_path; RUB-21 mesh-only PASS lives in this report",
+        "reason": legacy_schema_reason,
     },
 }
 if tx_mode and verdict == "PASS":
@@ -1190,11 +1199,15 @@ if tx_mode and verdict == "PASS":
         "get_tx_path": e["RUST_GET_TX_JSON"],
     }
 if verdict != "PASS":
-    report["failure_reason"] = reason or "mixed-client mesh did not produce PASS evidence"
+    report["failure_reason"] = reason or ("mixed-client Go-submit -> Rust-accept path did not produce PASS evidence" if tx_mode else "mixed-client mesh did not produce PASS evidence")
 with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
-legacy_marker_reason = reason if verdict != "PASS" and reason else "mixed-client mesh process/connectivity PASS is recorded in sibling report; existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23"
+legacy_marker_reason = reason if verdict != "PASS" and reason else (
+    "mixed-client Go-submit -> Rust-accept path did not produce PASS evidence; schema v1 tx_path proof is same-run producer-only"
+    if tx_mode
+    else "mixed-client mesh process/connectivity PASS is recorded in sibling report; existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23"
+)
 legacy_schema_marker = {
     "schema_version": "rubin-mixed-client-devnet-evidence-v1",
     "evidence_type": "mixed_client_process_soak",
