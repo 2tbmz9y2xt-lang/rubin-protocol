@@ -585,12 +585,27 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
   cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { TX_REASON=go_submit_chainstate_copy_failed; return 1; }
 }
 submit_go_tx() {
-  local from_key to_key from_key_fingerprint rc status=0 err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.err"
+  local from_key to_key from_key_fingerprint from_key_file rc status=0 err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.err"
   TX_REASON=""
   from_key="${TX_FROM_KEY}"; to_key="${TX_TO_KEY}"; from_key_fingerprint="${TX_FROM_KEY_FINGERPRINT}"
+  TX_FROM_KEY=""
   [[ -n "${from_key}" && -n "${to_key}" && "${from_key_fingerprint}" == sha256:* ]] || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key "${from_key}" --to-key "${to_key}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}")
-  TX_HEX="$("${argv[@]}" 2>"${err_file}")" || { TX_REASON=go_submit_txgen_failed; return 1; }
+  from_key_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/txgen-from-key.hex"
+  python3 -c '
+import os
+import sys
+
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    f.write(sys.stdin.read().strip())
+    f.write("\n")
+os.chmod(sys.argv[1], 0o600)
+' "${from_key_file}" <<<"${from_key}" || { TX_REASON=go_submit_keygen_write_failed; return 1; }
+  from_key=""
+  local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${from_key_file}" --to-key "${to_key}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}")
+  TX_HEX="$(trap 'rm -f -- "${from_key_file}"' EXIT; "${argv[@]}" 2>"${err_file}")" || status=$?
+  rm -f -- "${from_key_file}" || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
+  (( status == 0 )) || { TX_REASON=go_submit_txgen_failed; return 1; }
   python3 - "${TX_HEX}" >"${GO_SUBMIT_JSON}.parse-request" <<'PY' || { TX_REASON=tx_identity_malformed; return 1; }
 import json
 import sys

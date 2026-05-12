@@ -38,6 +38,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	datadir := fs.String("datadir", node.DefaultDataDir(), "node data directory")
 	fromKeyHex := fs.String("from-key", "", "hex-encoded ML-DSA private key DER")
+	fromKeyFile := fs.String("from-key-file", "", "path to hex-encoded ML-DSA private key DER")
 	toKeyHex := fs.String("to-key", "", "destination P2PK key_id hex or canonical covenant_data hex")
 	amount := fs.Uint64("amount", 0, "transfer amount")
 	fee := fs.Uint64("fee", 0, "transaction fee")
@@ -45,8 +46,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if strings.TrimSpace(*fromKeyHex) == "" {
-		_, _ = fmt.Fprintln(stderr, "missing required --from-key")
+	fromKeyFlagSet := strings.TrimSpace(*fromKeyHex) != ""
+	fromKeyFileSet := strings.TrimSpace(*fromKeyFile) != ""
+	if !fromKeyFlagSet && !fromKeyFileSet {
+		_, _ = fmt.Fprintln(stderr, "missing required --from-key or --from-key-file")
+		return 2
+	}
+	if fromKeyFlagSet && fromKeyFileSet {
+		_, _ = fmt.Fprintln(stderr, "--from-key and --from-key-file are mutually exclusive")
 		return 2
 	}
 	if strings.TrimSpace(*toKeyHex) == "" {
@@ -63,7 +70,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	dataDir := node.NormalizeDataDir(*datadir)
 
-	fromDER, err := decodeHexFlag(*fromKeyHex)
+	fromDER, err := loadFromKeyDER(*fromKeyHex, *fromKeyFile)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "invalid from-key: %v\n", err)
 		return 2
@@ -214,6 +221,33 @@ func validateLocalSubmitHost(host string) error {
 		return fmt.Errorf("submit target host %q must be localhost or loopback", hostname)
 	}
 	return nil
+}
+
+const maxFromKeyFileBytes = 1 << 20
+
+func loadFromKeyDER(fromKeyHex string, fromKeyFile string) ([]byte, error) {
+	fromKeyFlagSet := strings.TrimSpace(fromKeyHex) != ""
+	fromKeyFileSet := strings.TrimSpace(fromKeyFile) != ""
+	switch {
+	case fromKeyFlagSet && fromKeyFileSet:
+		return nil, errors.New("--from-key and --from-key-file are mutually exclusive")
+	case fromKeyFileSet:
+		f, err := os.Open(strings.TrimSpace(fromKeyFile))
+		if err != nil {
+			return nil, fmt.Errorf("read from-key-file: %w", err)
+		}
+		defer f.Close()
+		raw, err := io.ReadAll(io.LimitReader(f, maxFromKeyFileBytes+1))
+		if err != nil {
+			return nil, fmt.Errorf("read from-key-file: %w", err)
+		}
+		if len(raw) > maxFromKeyFileBytes {
+			return nil, fmt.Errorf("from-key-file exceeds %d bytes", maxFromKeyFileBytes)
+		}
+		return decodeHexFlag(string(raw))
+	default:
+		return decodeHexFlag(fromKeyHex)
+	}
 }
 
 func decodeHexFlag(value string) ([]byte, error) {

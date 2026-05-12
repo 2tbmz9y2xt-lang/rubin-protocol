@@ -46,12 +46,16 @@ func TestTxGenCreateValidTx(t *testing.T) {
 	if err := st.Save(node.ChainStatePath(dir)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+	fromKeyFile := filepath.Join(dir, "from-key.hex")
+	if err := os.WriteFile(fromKeyFile, []byte(hex.EncodeToString(fromDER)+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile from-key: %v", err)
+	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run([]string{
 		"--datadir", dir,
-		"--from-key", hex.EncodeToString(fromDER),
+		"--from-key-file", fromKeyFile,
 		"--to-key", hex.EncodeToString(toAddress),
 		"--amount", "90",
 		"--fee", "1",
@@ -174,6 +178,39 @@ func TestRunRejectsMissingRequiredFlags(t *testing.T) {
 		t.Fatalf("zero amount exit=%d", code)
 	}
 	if !strings.Contains(stderr.String(), "missing or zero --amount") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunRejectsAmbiguousFromKeyInputs(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--from-key", "00",
+		"--from-key-file", filepath.Join(t.TempDir(), "from-key.hex"),
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("ambiguous from-key exit=%d", code)
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunRejectsUnreadableFromKeyFile(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--from-key-file", filepath.Join(t.TempDir(), "missing.hex"),
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("missing from-key-file exit=%d", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid from-key: read from-key-file") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
