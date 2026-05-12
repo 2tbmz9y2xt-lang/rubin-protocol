@@ -321,21 +321,9 @@ tx_report_reason_token() {
   local msg
   msg="$(cat)"
   python3 - "${msg}" <<'PY'
-import re
-import sys
+import re, sys
 msg = sys.argv[1]
-rules = [
-    ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"),
-    ("txid is malformed", "txid_malformed"),
-    ("scenario mismatch", "scenario_mismatch"),
-    ("verdict mismatch", "verdict_mismatch"),
-    ("artifact_root mismatch", "artifact_root_mismatch"),
-    ("tx_path identity mismatch", "tx_path_identity_mismatch"),
-    ("go_submit endpoint mismatch", "go_submit_endpoint_mismatch"),
-    ("rust_accept endpoint mismatch", "rust_accept_endpoint_mismatch"),
-    ("tx report txid mismatch", "tx_identity_mismatch"),
-    ("tx report raw transaction mismatch", "raw_tx_mismatch"),
-]
+rules = [("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("go_submit endpoint mismatch", "go_submit_endpoint_mismatch"), ("rust_accept endpoint mismatch", "rust_accept_endpoint_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
 for needle, token in rules:
     if needle in msg:
         print(token)
@@ -544,22 +532,28 @@ dev_env, go_module_root, txhex = sys.argv[1:4]
 request = json.dumps({"op": "parse_tx", "tx_hex": txhex}) + "\n"
 try:
     proc = subprocess.run([dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-except (OSError, subprocess.TimeoutExpired):
-    sys.exit(1)
+except subprocess.TimeoutExpired:
+    sys.exit(2)
+except OSError:
+    sys.exit(3)
+stdout, stderr = proc.stdout or "", proc.stderr or ""
+if len(stdout) > 100000 or len(stderr) > 100000:
+    sys.exit(8)
 if proc.returncode != 0:
-    sys.exit(1)
+    sys.exit(4)
 try:
-    data = json.loads(proc.stdout)
+    data = json.loads(stdout)
 except (json.JSONDecodeError, UnicodeDecodeError):
-    sys.exit(1)
+    sys.exit(5)
 if not isinstance(data, dict):
-    sys.exit(1)
+    sys.exit(6)
 txid = data.get("txid")
-if data.get("ok") is not True or not isinstance(txid, str):
-    sys.exit(1)
+if data.get("ok") is not True or not isinstance(txid, str) or len(txid) != 64 or any(c not in "0123456789abcdef" for c in txid):
+    sys.exit(7)
 print(txid)
 PY
 }
+txid_parse_reason() { case "$1" in 2) printf '%s\n' go_submit_txid_parse_timeout ;; 3) printf '%s\n' go_submit_txid_parser_unavailable ;; 4) printf '%s\n' go_submit_txid_parser_failed ;; 5) printf '%s\n' go_submit_txid_parser_malformed_output ;; 6) printf '%s\n' go_submit_txid_parser_root_invalid ;; 7) printf '%s\n' go_submit_txid_missing_or_malformed ;; 8) printf '%s\n' go_submit_txid_parser_output_too_large ;; *) printf '%s\n' go_submit_txid_parse_failed ;; esac; }
 tx_sidecar_reason() {
   local label="$1" rc="$2"
   case "${rc}" in
@@ -638,7 +632,7 @@ submit_go_tx() {
   (( cleanup_status == 0 )) || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
   (( status == 0 )) || { [[ ${status} -eq 142 ]] && TX_REASON=go_submit_txgen_timeout || TX_REASON=go_submit_txgen_failed; return 1; }
   [[ "${TX_HEX}" =~ ^[0-9a-f]+$ && ${#TX_HEX} -le 20000 && $(( ${#TX_HEX} % 2 )) -eq 0 ]] || { TX_REASON=go_submit_tx_hex_malformed_or_unbounded; return 1; }
-  TX_ID="$(parse_txid)" || { TX_REASON=go_submit_txid_parse_failed; return 1; }
+  TX_ID="$(parse_txid)" || { rc=$?; TX_REASON="$(txid_parse_reason "${rc}")"; return 1; }
   capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
   capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_GET_TX_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
   verify_tx_sidecars go_submit go "${GO_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" || { rc=$?; TX_REASON="$(tx_sidecar_reason go_submit "${rc}")"; return 1; }
