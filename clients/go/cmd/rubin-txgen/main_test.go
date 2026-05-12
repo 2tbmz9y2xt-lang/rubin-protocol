@@ -195,6 +195,44 @@ func TestRunRejectsAmbiguousFromKeyInputs(t *testing.T) {
 	}
 }
 
+func TestRunKeepsDirectFromKeyDiagnosticPrefix(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--from-key", "0",
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("direct from-key exit=%d", code)
+	}
+	if !strings.HasPrefix(stderr.String(), "invalid from-key: ") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if strings.HasPrefix(stderr.String(), "invalid from-key-file: ") {
+		t.Fatalf("direct from-key used file prefix: stderr=%q", stderr.String())
+	}
+}
+
+func TestRunUsesFromKeyFileDiagnosticPrefix(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--from-key-file", filepath.Join(t.TempDir(), "missing.hex"),
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("from-key-file exit=%d", code)
+	}
+	if !strings.HasPrefix(stderr.String(), "invalid from-key-file: ") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if strings.HasPrefix(stderr.String(), "invalid from-key: ") {
+		t.Fatalf("from-key-file used direct prefix: stderr=%q", stderr.String())
+	}
+}
+
 func TestLoadFromKeyDERRejectsAmbiguousInputs(t *testing.T) {
 	_, err := loadFromKeyDER("00", filepath.Join(t.TempDir(), "from-key.hex"))
 	if err == nil {

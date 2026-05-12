@@ -30,7 +30,7 @@ func TestRunRejectsFromKeyFileUnsupported(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("unsupported from-key-file exit=%d", code)
 	}
-	if !strings.Contains(stderr.String(), "invalid from-key: from-key-file unsupported on this platform") {
+	if !strings.Contains(stderr.String(), "invalid from-key-file: from-key-file unsupported on this platform") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }

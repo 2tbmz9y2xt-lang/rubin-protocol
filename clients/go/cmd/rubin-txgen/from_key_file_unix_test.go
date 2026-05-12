@@ -39,7 +39,7 @@ func TestRunRejectsUnreadableFromKeyFile(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("missing from-key-file exit=%d", code)
 	}
-	if !strings.Contains(stderr.String(), "invalid from-key: read from-key-file") {
+	if !strings.Contains(stderr.String(), "invalid from-key-file: read from-key-file") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
@@ -76,7 +76,7 @@ func TestRunRejectsNonRegularFromKeyFile(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("non-regular from-key-file exit=%d", code)
 	}
-	if !strings.Contains(stderr.String(), "invalid from-key: from-key-file must be a regular file") {
+	if !strings.Contains(stderr.String(), "invalid from-key-file: from-key-file must be a regular file") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
@@ -106,7 +106,7 @@ func TestRunRejectsFIFOFromKeyFileWithoutBlocking(t *testing.T) {
 		if !strings.HasPrefix(got, "2:") {
 			t.Fatalf("fifo from-key-file result=%q", got)
 		}
-		if !strings.Contains(got, "invalid from-key: from-key-file must be a regular file") {
+		if !strings.Contains(got, "invalid from-key-file: from-key-file must be a regular file") {
 			t.Fatalf("fifo from-key-file stderr=%q", got)
 		}
 	case <-time.After(2 * time.Second):

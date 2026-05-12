@@ -69,15 +69,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	dataDir := node.NormalizeDataDir(*datadir)
+	fromKeyErrorPrefix := "invalid from-key"
+	if fromKeyFileSet {
+		fromKeyErrorPrefix = "invalid from-key-file"
+	}
 
 	fromDER, err := loadFromKeyDER(*fromKeyHex, *fromKeyFile)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "invalid from-key: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", fromKeyErrorPrefix, err)
 		return 2
 	}
 	fromKey, err := consensus.NewMLDSA87KeypairFromDER(fromDER)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "invalid from-key: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", fromKeyErrorPrefix, err)
 		return 2
 	}
 	defer fromKey.Close()

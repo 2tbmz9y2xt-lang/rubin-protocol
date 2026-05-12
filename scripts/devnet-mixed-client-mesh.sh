@@ -412,7 +412,7 @@ if tx_mode:
         live_tx_pending_found("rust_accept_live", nodes_by_impl["rust"]["rpc_endpoint"], txid, txhex)
 else:
     req(all(field not in data for field in ("tx_path", "go_submit", "rust_accept")), "mesh report must not carry tx_path/go_submit/rust_accept")
-print(f"PASS: mixed-client mesh report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
+print(f"PASS: {scenario} report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
 PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
@@ -1346,4 +1346,5 @@ if ! check_err="$(check_report "${PASS_REPORT_JSON}" live "${PRODUCER_CHECK_MODE
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
 fi
 mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
-[[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" || echo "PASS: mixed-client mesh connected go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"
+PASS_SCENARIO="mixed_client_mesh"; (( TX_PATH_MODE == 1 )) && PASS_SCENARIO="mixed_client_go_submit_rust_accept"
+[[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && echo "PASS: ${PASS_SCENARIO} connected go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" || echo "PASS: ${PASS_SCENARIO} connected go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"
