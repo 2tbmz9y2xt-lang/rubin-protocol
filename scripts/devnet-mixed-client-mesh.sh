@@ -112,6 +112,7 @@ def parse_txid_from_hex(txhex: str) -> str:
     req(isinstance(parsed, dict), "tx parser root is not an object")
     txid = parsed.get("txid")
     req(parsed.get("ok") is True and isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid), "tx parser did not produce txid")
+    req(parsed.get("consumed") == len(txhex) // 2, "tx parser consumed mismatch")
     return txid
 def pid_exe(pid: int) -> str:
     proc = Path(f"/proc/{pid}/exe")
@@ -323,7 +324,7 @@ tx_report_reason_token() {
   python3 - "${msg}" <<'PY'
 import re, sys
 msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in sys.argv[1].splitlines())
-rules = [("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
+rules = [("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
 for needle, token in rules:
     if needle in msg:
         print(token)
@@ -552,10 +553,12 @@ if not isinstance(data, dict):
 txid = data.get("txid")
 if data.get("ok") is not True or not isinstance(txid, str) or len(txid) != 64 or any(c not in "0123456789abcdef" for c in txid):
     sys.exit(7)
+if data.get("consumed") != len(txhex) // 2:
+    sys.exit(9)
 print(txid)
 PY
 }
-txid_parse_reason() { case "$1" in 2) printf '%s\n' go_submit_txid_parse_timeout ;; 3) printf '%s\n' go_submit_txid_parser_unavailable ;; 4) printf '%s\n' go_submit_txid_parser_failed ;; 5) printf '%s\n' go_submit_txid_parser_malformed_output ;; 6) printf '%s\n' go_submit_txid_parser_root_invalid ;; 7) printf '%s\n' go_submit_txid_missing_or_malformed ;; 8) printf '%s\n' go_submit_txid_parser_output_too_large ;; *) printf '%s\n' go_submit_txid_parse_failed ;; esac; }
+txid_parse_reason() { case "$1" in 2) printf '%s\n' go_submit_txid_parse_timeout ;; 3) printf '%s\n' go_submit_txid_parser_unavailable ;; 4) printf '%s\n' go_submit_txid_parser_failed ;; 5) printf '%s\n' go_submit_txid_parser_malformed_output ;; 6) printf '%s\n' go_submit_txid_parser_root_invalid ;; 7) printf '%s\n' go_submit_txid_missing_or_malformed ;; 8) printf '%s\n' go_submit_txid_parser_output_too_large ;; 9) printf '%s\n' go_submit_txid_parser_consumed_mismatch ;; *) printf '%s\n' go_submit_txid_parse_failed ;; esac; }
 tx_capture_reason() { local label="$1" rc="$2"; case "${rc}" in 21) printf '%s\n' "${label}_http_error" ;; 22) printf '%s\n' "${label}_rpc_failed" ;; 23) printf '%s\n' "${label}_malformed_json" ;; 24) printf '%s\n' "${label}_capture_read_failed" ;; 25) printf '%s\n' "${label}_invalid_shape" ;; 26) printf '%s\n' "${label}_artifact_write_failed" ;; *) printf '%s\n' "${label}_capture_failed" ;; esac; }
 tx_sidecar_reason() {
   local label="$1" rc="$2"
@@ -656,25 +659,13 @@ wait_rust_accept() {
           13|14) last_retry_reason="$(tx_sidecar_reason rust_accept "${rc}")" ;;
           *) TX_REASON="$(tx_sidecar_reason rust_accept "${rc}")"; return 1 ;;
         esac
-      else
-        rc=$?
-        if [[ ${rc} -eq 23 ]]; then
-          TX_REASON="$(tx_capture_reason rust_accept_get_tx "${rc}")"
-        else
-          TX_REASON="$(tx_capture_reason rust_accept_get_tx "${rc}")"
-        fi
-      fi
+      else rc=$?; TX_REASON="$(tx_capture_reason rust_accept_get_tx "${rc}")"; fi
     else
-      rc=$?
-      if [[ ${rc} -eq 23 ]]; then
-        TX_REASON="$(tx_capture_reason rust_accept_tx_status "${rc}")"
-      else
-        TX_REASON="$(tx_capture_reason rust_accept_tx_status "${rc}")"
-      fi
+      rc=$?; TX_REASON="$(tx_capture_reason rust_accept_tx_status "${rc}")"
     fi
     sleep 1
   done
-  [[ -n "${TX_REASON}" ]] || { [[ -n "${last_retry_reason}" ]] && TX_REASON="rust_accept_timeout_last_${last_retry_reason#rust_accept_}" || TX_REASON=rust_accept_pending_timeout; }
+  [[ -n "${last_retry_reason}" ]] && TX_REASON="rust_accept_timeout_last_${last_retry_reason#rust_accept_}" || TX_REASON="${TX_REASON:-rust_accept_pending_timeout}"
   return 1
 }
 write_outputs() {
