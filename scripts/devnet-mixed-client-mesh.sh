@@ -613,9 +613,11 @@ found = got.get("found")
 if found is not True:
     if found is not False:
         fail(19, f"get_tx_found_invalid: {found!r}")
-    if got_keys - {"found", "txid"}:
+    if got_keys != {"found", "implementation", "request_path", "rpc_endpoint", "txid"}:
         fail(19, f"get_tx_keys_mismatch: {sorted(got)}")
-    if "txid" in got and got.get("txid") != txid:
+    if got.get("implementation") != impl or got.get("rpc_endpoint") != endpoint or got.get("request_path") != get_request:
+        fail(20, "get_tx_capture_identity_mismatch")
+    if got.get("txid") != txid:
         fail(15, f"get_tx_txid_mismatch: {got.get('txid')!r}")
     fail(14, f"get_tx_not_found: {found!r}")
 if got_keys != {"found", "implementation", "raw_hex", "request_path", "rpc_endpoint", "txid"}:
