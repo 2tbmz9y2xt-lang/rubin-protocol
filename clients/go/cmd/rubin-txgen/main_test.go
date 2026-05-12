@@ -157,7 +157,7 @@ func TestRunRejectsMissingRequiredFlags(t *testing.T) {
 	if code := run([]string{}, &stdout, &stderr); code != 2 {
 		t.Fatalf("missing from-key exit=%d", code)
 	}
-	if !strings.Contains(stderr.String(), "missing required --from-key") {
+	if stderr.String() != "missing required --from-key or --from-key-file\n" {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 
@@ -175,6 +175,109 @@ func TestRunRejectsMissingRequiredFlags(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "missing or zero --amount") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunRejectsAmbiguousFromKeyInputs(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--from-key", "00",
+		"--from-key-file", filepath.Join(t.TempDir(), "from-key.hex"),
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("ambiguous from-key exit=%d", code)
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunKeepsDirectFromKeyDiagnosticPrefix(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--from-key", "0",
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("direct from-key exit=%d", code)
+	}
+	if !strings.HasPrefix(stderr.String(), "invalid from-key: ") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if strings.HasPrefix(stderr.String(), "invalid from-key-file: ") {
+		t.Fatalf("direct from-key used file prefix: stderr=%q", stderr.String())
+	}
+}
+
+func TestRunUsesFromKeyFileDiagnosticPrefix(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--from-key-file", filepath.Join(t.TempDir(), "missing.hex"),
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("from-key-file exit=%d", code)
+	}
+	if !strings.HasPrefix(stderr.String(), "invalid from-key-file: ") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if strings.HasPrefix(stderr.String(), "invalid from-key: ") {
+		t.Fatalf("from-key-file used direct prefix: stderr=%q", stderr.String())
+	}
+}
+
+func TestLoadFromKeyDERRejectsAmbiguousInputs(t *testing.T) {
+	_, err := loadFromKeyDER("00", filepath.Join(t.TempDir(), "from-key.hex"))
+	if err == nil {
+		t.Fatal("expected ambiguous from-key error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReadOpenedFromKeyFileRejectsNonRegularDescriptor(t *testing.T) {
+	dirHandle, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Skipf("open directory handle unavailable: %v", err)
+	}
+	defer dirHandle.Close()
+
+	_, err = readOpenedFromKeyFile(dirHandle)
+	if err == nil {
+		t.Fatal("expected non-regular descriptor error")
+	}
+	if !strings.Contains(err.Error(), "from-key-file must be a regular file") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReadOpenedFromKeyFileRejectsClosedDescriptor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "from-key.hex")
+	if err := os.WriteFile(path, []byte("00"), 0o600); err != nil {
+		t.Fatalf("WriteFile from-key: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open from-key: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close from-key: %v", err)
+	}
+
+	_, err = readOpenedFromKeyFile(f)
+	if err == nil {
+		t.Fatal("expected closed descriptor error")
+	}
+	if !strings.Contains(err.Error(), "read from-key-file failed") {
+		t.Fatalf("err=%v", err)
 	}
 }
 

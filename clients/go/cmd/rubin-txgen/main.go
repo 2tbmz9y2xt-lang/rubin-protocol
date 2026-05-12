@@ -38,6 +38,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	datadir := fs.String("datadir", node.DefaultDataDir(), "node data directory")
 	fromKeyHex := fs.String("from-key", "", "hex-encoded ML-DSA private key DER")
+	fromKeyFile := fs.String("from-key-file", "", "path to hex-encoded ML-DSA private key DER")
 	toKeyHex := fs.String("to-key", "", "destination P2PK key_id hex or canonical covenant_data hex")
 	amount := fs.Uint64("amount", 0, "transfer amount")
 	fee := fs.Uint64("fee", 0, "transaction fee")
@@ -45,8 +46,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if strings.TrimSpace(*fromKeyHex) == "" {
-		_, _ = fmt.Fprintln(stderr, "missing required --from-key")
+	fromKeyFlagSet := strings.TrimSpace(*fromKeyHex) != ""
+	fromKeyFileSet := strings.TrimSpace(*fromKeyFile) != ""
+	if !fromKeyFlagSet && !fromKeyFileSet {
+		_, _ = fmt.Fprintln(stderr, "missing required --from-key or --from-key-file")
+		return 2
+	}
+	if fromKeyFlagSet && fromKeyFileSet {
+		_, _ = fmt.Fprintln(stderr, "--from-key and --from-key-file are mutually exclusive")
 		return 2
 	}
 	if strings.TrimSpace(*toKeyHex) == "" {
@@ -62,15 +69,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	dataDir := node.NormalizeDataDir(*datadir)
+	fromKeyErrorPrefix := "invalid from-key"
+	if fromKeyFileSet {
+		fromKeyErrorPrefix = "invalid from-key-file"
+	}
 
-	fromDER, err := decodeHexFlag(*fromKeyHex)
+	fromDER, err := loadFromKeyDER(*fromKeyHex, *fromKeyFile)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "invalid from-key: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", fromKeyErrorPrefix, err)
 		return 2
 	}
 	fromKey, err := consensus.NewMLDSA87KeypairFromDER(fromDER)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "invalid from-key: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", fromKeyErrorPrefix, err)
 		return 2
 	}
 	defer fromKey.Close()
@@ -214,6 +225,49 @@ func validateLocalSubmitHost(host string) error {
 		return fmt.Errorf("submit target host %q must be localhost or loopback", hostname)
 	}
 	return nil
+}
+
+const maxFromKeyFileBytes = 1 << 20
+
+func loadFromKeyDER(fromKeyHex string, fromKeyFile string) ([]byte, error) {
+	fromKeyFlagSet := strings.TrimSpace(fromKeyHex) != ""
+	fromKeyFileSet := strings.TrimSpace(fromKeyFile) != ""
+	switch {
+	case fromKeyFlagSet && fromKeyFileSet:
+		return nil, errors.New("--from-key and --from-key-file are mutually exclusive")
+	case fromKeyFileSet:
+		path := strings.TrimSpace(fromKeyFile)
+		f, err := openRegularFromKeyFile(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		raw, err := readOpenedFromKeyFile(f)
+		if err != nil {
+			return nil, err
+		}
+		return decodeHexFlag(string(raw))
+	default:
+		return decodeHexFlag(fromKeyHex)
+	}
+}
+
+func readOpenedFromKeyFile(f *os.File) ([]byte, error) {
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return nil, errors.New("read from-key-file failed")
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return nil, errors.New("from-key-file must be a regular file")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxFromKeyFileBytes+1))
+	if err != nil {
+		return nil, errors.New("read from-key-file failed")
+	}
+	if len(raw) > maxFromKeyFileBytes {
+		return nil, fmt.Errorf("from-key-file exceeds %d bytes", maxFromKeyFileBytes)
+	}
+	return raw, nil
 }
 
 func decodeHexFlag(value string) ([]byte, error) {
