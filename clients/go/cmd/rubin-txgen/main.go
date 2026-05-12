@@ -245,17 +245,32 @@ func loadFromKeyDER(fromKeyHex string, fromKeyFile string) ([]byte, error) {
 			return nil, errors.New("read from-key-file failed")
 		}
 		defer f.Close()
-		raw, err := io.ReadAll(io.LimitReader(f, maxFromKeyFileBytes+1))
+		raw, err := readOpenedFromKeyFile(f)
 		if err != nil {
-			return nil, errors.New("read from-key-file failed")
-		}
-		if len(raw) > maxFromKeyFileBytes {
-			return nil, fmt.Errorf("from-key-file exceeds %d bytes", maxFromKeyFileBytes)
+			return nil, err
 		}
 		return decodeHexFlag(string(raw))
 	default:
 		return decodeHexFlag(fromKeyHex)
 	}
+}
+
+func readOpenedFromKeyFile(f *os.File) ([]byte, error) {
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return nil, errors.New("read from-key-file failed")
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return nil, errors.New("from-key-file must be a regular file")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxFromKeyFileBytes+1))
+	if err != nil {
+		return nil, errors.New("read from-key-file failed")
+	}
+	if len(raw) > maxFromKeyFileBytes {
+		return nil, fmt.Errorf("from-key-file exceeds %d bytes", maxFromKeyFileBytes)
+	}
+	return raw, nil
 }
 
 func decodeHexFlag(value string) ([]byte, error) {

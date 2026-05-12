@@ -431,6 +431,15 @@ cleanup_tx_from_key_file() {
   restore_xtrace_after_secret "${xtrace_was_enabled}"
   return "${cleanup_status}"
 }
+cleanup_tx_from_key_file_for_failure() {
+  local reason="$1" cleanup_status=0
+  cleanup_tx_from_key_file || cleanup_status=$?
+  if (( cleanup_status != 0 )); then
+    TX_REASON=go_submit_keygen_cleanup_failed
+    return "${cleanup_status}"
+  fi
+  TX_REASON="${reason}"
+}
 rubin_process_exit_trap_with_tx_secret_cleanup() {
   local status=$? cleanup_status=0
   cleanup_tx_from_key_file || cleanup_status=$?
@@ -617,11 +626,11 @@ prepare_tx_chainstate() {
     TX_REASON=go_submit_keygen_temp_under_artifact_root
     return 1
   fi
-  keygen_public_json="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_FILE}")" || { rc=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_failed; return "${rc}"; }
+  keygen_public_json="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_FILE}")" || { rc=$?; cleanup_tx_from_key_file_for_failure go_submit_keygen_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return "${rc}"; }
   restore_xtrace_after_secret "${xtrace_was_enabled}"
-  TX_TO_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_public_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  TX_FROM_KEY_FINGERPRINT="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["from_key_fingerprint"])' <<<"${keygen_public_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  mine_address="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_public_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  TX_TO_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || return 1; return 1; }
+  TX_FROM_KEY_FINGERPRINT="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["from_key_fingerprint"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || return 1; return 1; }
+  mine_address="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || return 1; return 1; }
   python3 -c '
 import json
 import sys
@@ -638,11 +647,11 @@ public = {
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     json.dump(public, f, indent=2, sort_keys=True)
     f.write("\n")
-	' "${KEYGEN_JSON}" <<<"${keygen_public_json}" || { TX_REASON=go_submit_keygen_write_failed; return 1; }
-  rm -f -- "${KEYGEN_GO}" || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
+	' "${KEYGEN_JSON}" <<<"${keygen_public_json}" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_write_failed || return 1; return 1; }
+  rm -f -- "${KEYGEN_GO}" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_cleanup_failed || return 1; return 1; }
   echo "Mining mature chainstate for Go-submit -> Rust-accept path" >&2
-  "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { TX_REASON=go_submit_mine_failed; return 1; }
-  cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { TX_REASON=go_submit_chainstate_copy_failed; return 1; }
+  "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { cleanup_tx_from_key_file_for_failure go_submit_mine_failed || return 1; return 1; }
+  cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { cleanup_tx_from_key_file_for_failure go_submit_chainstate_copy_failed || return 1; return 1; }
 }
 submit_go_tx() {
   local rc status=0 cleanup_status=0 err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.err" xtrace_was_enabled=0
@@ -1079,7 +1088,17 @@ with open(e["LEGACY_SCHEMA_MARKER_JSON"], "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 }
-finish_no_data() { local reason="$1"; write_outputs "NO_DATA" "${reason}" || { echo "FAIL_REPORT_WRITE_FAILED: ${reason}" >&2; exit 1; }; run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 || { echo "FAIL_REPORT_VALIDATION_FAILED: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }; echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }
+finish_no_data() {
+  local reason="$1" cleanup_status=0
+  cleanup_tx_from_key_file || cleanup_status=$?
+  if (( cleanup_status != 0 )); then
+    reason=go_submit_keygen_cleanup_failed
+  fi
+  write_outputs "NO_DATA" "${reason}" || { echo "FAIL_REPORT_WRITE_FAILED: ${reason}" >&2; exit 1; }
+  run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 || { echo "FAIL_REPORT_VALIDATION_FAILED: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }
+  echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2
+  exit 1
+}
 wait_peer_snapshot() {
   local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp
   deadline=$((SECONDS + timeout)); PEER_SNAPSHOT_REASON=""

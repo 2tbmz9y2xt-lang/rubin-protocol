@@ -231,6 +231,22 @@ func TestRunRejectsNonRegularFromKeyFile(t *testing.T) {
 	}
 }
 
+func TestReadOpenedFromKeyFileRejectsNonRegularDescriptor(t *testing.T) {
+	dirHandle, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Skipf("open directory handle unavailable: %v", err)
+	}
+	defer dirHandle.Close()
+
+	_, err = readOpenedFromKeyFile(dirHandle)
+	if err == nil {
+		t.Fatal("expected non-regular descriptor error")
+	}
+	if !strings.Contains(err.Error(), "from-key-file must be a regular file") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestRunRejectsBlankDataDir(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
