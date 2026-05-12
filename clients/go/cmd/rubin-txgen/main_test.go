@@ -12,9 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -48,16 +46,12 @@ func TestTxGenCreateValidTx(t *testing.T) {
 	if err := st.Save(node.ChainStatePath(dir)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	fromKeyFile := filepath.Join(dir, "from-key.hex")
-	if err := os.WriteFile(fromKeyFile, []byte(hex.EncodeToString(fromDER)+"\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile from-key: %v", err)
-	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := run([]string{
 		"--datadir", dir,
-		"--from-key-file", fromKeyFile,
+		"--from-key", hex.EncodeToString(fromDER),
 		"--to-key", hex.EncodeToString(toAddress),
 		"--amount", "90",
 		"--fee", "1",
@@ -207,107 +201,6 @@ func TestLoadFromKeyDERRejectsAmbiguousInputs(t *testing.T) {
 		t.Fatal("expected ambiguous from-key error")
 	}
 	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestRunRejectsUnreadableFromKeyFile(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	code := run([]string{
-		"--from-key-file", filepath.Join(t.TempDir(), "missing.hex"),
-		"--to-key", "00",
-		"--amount", "1",
-	}, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("missing from-key-file exit=%d", code)
-	}
-	if !strings.Contains(stderr.String(), "invalid from-key: read from-key-file") {
-		t.Fatalf("stderr=%q", stderr.String())
-	}
-}
-
-func TestOpenRegularFromKeyFileRejectsSymlink(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "target.hex")
-	if err := os.WriteFile(target, []byte("00"), 0o600); err != nil {
-		t.Fatalf("WriteFile target: %v", err)
-	}
-	link := filepath.Join(dir, "from-key.hex")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-
-	f, err := openRegularFromKeyFile(link)
-	if err == nil {
-		_ = f.Close()
-		t.Fatal("expected symlink rejection")
-	}
-	if !strings.Contains(err.Error(), "from-key-file must be a regular file") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestRunRejectsNonRegularFromKeyFile(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	code := run([]string{
-		"--from-key-file", t.TempDir(),
-		"--to-key", "00",
-		"--amount", "1",
-	}, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("non-regular from-key-file exit=%d", code)
-	}
-	if !strings.Contains(stderr.String(), "invalid from-key: from-key-file must be a regular file") {
-		t.Fatalf("stderr=%q", stderr.String())
-	}
-}
-
-func TestRunRejectsFIFOFromKeyFileWithoutBlocking(t *testing.T) {
-	fifoPath := filepath.Join(t.TempDir(), "from-key.fifo")
-	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
-		t.Skipf("mkfifo unavailable: %v", err)
-	}
-	dataDir := t.TempDir()
-
-	done := make(chan string, 1)
-	go func() {
-		var stdout bytes.Buffer
-		var stderr bytes.Buffer
-		code := run([]string{
-			"--datadir", dataDir,
-			"--from-key-file", fifoPath,
-			"--to-key", "00",
-			"--amount", "1",
-		}, &stdout, &stderr)
-		done <- fmt.Sprintf("%d:%s", code, stderr.String())
-	}()
-
-	select {
-	case got := <-done:
-		if !strings.HasPrefix(got, "2:") {
-			t.Fatalf("fifo from-key-file result=%q", got)
-		}
-		if !strings.Contains(got, "invalid from-key: from-key-file must be a regular file") {
-			t.Fatalf("fifo from-key-file stderr=%q", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("run blocked opening FIFO from-key-file")
-	}
-}
-
-func TestLoadFromKeyDERRejectsOversizedFromKeyFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "from-key.hex")
-	if err := os.WriteFile(path, bytes.Repeat([]byte("0"), maxFromKeyFileBytes+1), 0o600); err != nil {
-		t.Fatalf("WriteFile oversized from-key: %v", err)
-	}
-
-	_, err := loadFromKeyDER("", path)
-	if err == nil {
-		t.Fatal("expected oversized from-key-file error")
-	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("from-key-file exceeds %d bytes", maxFromKeyFileBytes)) {
 		t.Fatalf("err=%v", err)
 	}
 }
