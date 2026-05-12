@@ -201,6 +201,16 @@ func TestRunRejectsAmbiguousFromKeyInputs(t *testing.T) {
 	}
 }
 
+func TestLoadFromKeyDERRejectsAmbiguousInputs(t *testing.T) {
+	_, err := loadFromKeyDER("00", filepath.Join(t.TempDir(), "from-key.hex"))
+	if err == nil {
+		t.Fatal("expected ambiguous from-key error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestRunRejectsUnreadableFromKeyFile(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -214,6 +224,27 @@ func TestRunRejectsUnreadableFromKeyFile(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid from-key: read from-key-file") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestOpenRegularFromKeyFileRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.hex")
+	if err := os.WriteFile(target, []byte("00"), 0o600); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	link := filepath.Join(dir, "from-key.hex")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	f, err := openRegularFromKeyFile(link)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("expected symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "from-key-file must be a regular file") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -266,6 +297,21 @@ func TestRunRejectsFIFOFromKeyFileWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestLoadFromKeyDERRejectsOversizedFromKeyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "from-key.hex")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("0"), maxFromKeyFileBytes+1), 0o600); err != nil {
+		t.Fatalf("WriteFile oversized from-key: %v", err)
+	}
+
+	_, err := loadFromKeyDER("", path)
+	if err == nil {
+		t.Fatal("expected oversized from-key-file error")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("from-key-file exceeds %d bytes", maxFromKeyFileBytes)) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestReadOpenedFromKeyFileRejectsNonRegularDescriptor(t *testing.T) {
 	dirHandle, err := os.Open(t.TempDir())
 	if err != nil {
@@ -278,6 +324,28 @@ func TestReadOpenedFromKeyFileRejectsNonRegularDescriptor(t *testing.T) {
 		t.Fatal("expected non-regular descriptor error")
 	}
 	if !strings.Contains(err.Error(), "from-key-file must be a regular file") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReadOpenedFromKeyFileRejectsClosedDescriptor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "from-key.hex")
+	if err := os.WriteFile(path, []byte("00"), 0o600); err != nil {
+		t.Fatalf("WriteFile from-key: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open from-key: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close from-key: %v", err)
+	}
+
+	_, err = readOpenedFromKeyFile(f)
+	if err == nil {
+		t.Fatal("expected closed descriptor error")
+	}
+	if !strings.Contains(err.Error(), "read from-key-file failed") {
 		t.Fatalf("err=%v", err)
 	}
 }
