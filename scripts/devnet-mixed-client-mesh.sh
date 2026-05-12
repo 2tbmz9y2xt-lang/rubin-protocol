@@ -4,22 +4,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"; GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"; HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"; VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
 CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}" TX_PATH_MODE=0 DETERMINISTIC_TX_FEE="${DETERMINISTIC_TX_FEE:-100000000}"
-usage() {
-  cat >&2 <<EOF
-usage:
-  $0 [--go-submit-rust-accept]
-  $0 --check-report PATH
-  $0 --check-report-live PATH
---check-report and --check-report-live validate mixed_client_mesh and mixed_client_go_submit_rust_accept reports.
-EOF
-}
+usage() { printf '%s\n' "usage: $0 [--go-submit-rust-accept]" "usage: $0 --check-report PATH" "usage: $0 --check-report-live PATH" "--check-report and --check-report-live validate mixed_client_mesh and mixed_client_go_submit_rust_accept reports." >&2; }
 while (($#)); do case "$1" in --go-submit-rust-accept) TX_PATH_MODE=1; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 if [[ -n "${CHECK_REPORT_MODE}" && "${TX_PATH_MODE}" == "1" ]]; then echo "--go-submit-rust-accept cannot be combined with --check-report or --check-report-live" >&2; exit 2; fi
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
 validate_deterministic_tx_fee() {
-  [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,10}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 9999999999" >&2; exit 2; }
+  [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,9}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 100000000" >&2; exit 2; }
   DETERMINISTIC_TX_FEE="$((10#${DETERMINISTIC_TX_FEE}))"
-  (( DETERMINISTIC_TX_FEE > 0 )) || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 9999999999" >&2; exit 2; }
+  (( DETERMINISTIC_TX_FEE > 0 && DETERMINISTIC_TX_FEE <= 100000000 )) || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 100000000" >&2; exit 2; }
   export DETERMINISTIC_TX_FEE
 }
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
@@ -244,6 +236,8 @@ req(nodes_by_impl["go"]["command_argv"] == [nodes_by_impl["go"]["binary"], "--ne
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
+if tx_mode:
+    req(sorted((p.get("name"), p.get("implementation"), p.get("endpoint"), p.get("started_at")) for p in marker.get("participants", []) if isinstance(p, dict)) == sorted((n["name"], n["implementation"], n["rpc_endpoint"], n["started_at"]) for n in nodes), "legacy marker participants are not bound to report nodes")
 if tx_mode:
     tx_path = exact_object(data.get("tx_path"), {"submitted_at", "observed_at", "tx_id"}, "tx_path")
     txid = tx_path.get("tx_id")
@@ -642,7 +636,7 @@ submit_go_tx() {
   cleanup_tx_from_key_file || cleanup_status=$?
   (( cleanup_status == 0 )) || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
   (( status == 0 )) || { [[ ${status} -eq 142 ]] && TX_REASON=go_submit_txgen_timeout || TX_REASON=go_submit_txgen_failed; return 1; }
-  [[ "${TX_HEX}" =~ ^[0-9a-f]+$ && $(( ${#TX_HEX} % 2 )) -eq 0 ]] || { TX_REASON=go_submit_tx_hex_malformed; return 1; }
+  [[ "${TX_HEX}" =~ ^[0-9a-f]+$ && ${#TX_HEX} -le 20000 && $(( ${#TX_HEX} % 2 )) -eq 0 ]] || { TX_REASON=go_submit_tx_hex_malformed_or_unbounded; return 1; }
   TX_ID="$(parse_txid)" || { TX_REASON=go_submit_txid_parse_failed; return 1; }
   rpc_json GET "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${GO_SUBMIT_STATUS_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
   rpc_json GET "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${GO_SUBMIT_GET_TX_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
