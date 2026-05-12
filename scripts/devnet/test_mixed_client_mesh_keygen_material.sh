@@ -7,7 +7,8 @@ HARNESS="${REPO_ROOT}/scripts/devnet-mixed-client-mesh.sh"
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
 [[ -x "${HARNESS}" ]] || { echo "mixed-client mesh harness missing or non-executable: ${HARNESS}" >&2; exit 1; }
 
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rubin-mesh-keygen-material.XXXXXX")"
+TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "test TMPDIR parent is not usable: ${TMPDIR:-/tmp}" >&2; exit 1; }
+TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-mesh-keygen-material.XXXXXX")"
 cleanup() {
   rm -rf -- "${TMP_ROOT}"
 }
@@ -79,6 +80,23 @@ good_output="$(parse_keygen_material "${good_json}")" || { echo "FAIL: valid key
 [[ "$(printf '%s\n' "${good_output}" | sed -n '1p')" == "${expected_key_file}" ]] || { echo "FAIL: private key file output mismatch" >&2; exit 1; }
 [[ "$(printf '%s\n' "${good_output}" | sed -n '2p')" == "${addr_b}" ]] || { echo "FAIL: to address output mismatch" >&2; exit 1; }
 [[ "$(printf '%s\n' "${good_output}" | sed -n '3p')" == "${addr_a}" ]] || { echo "FAIL: mine address output mismatch" >&2; exit 1; }
+
+mkdir "${TMP_ROOT}/relative tmp"
+canonical_relative_tmp="$(cd "${TMP_ROOT}" && tx_secret_tmp_parent "relative tmp")" || { echo "FAIL: relative TMPDIR parent rejected" >&2; exit 1; }
+[[ "${canonical_relative_tmp}" == "$(cd "${TMP_ROOT}/relative tmp" && pwd -P)" && "${canonical_relative_tmp}" == /* ]] || { echo "FAIL: relative TMPDIR parent was not canonicalized" >&2; exit 1; }
+relative_secret="$(cd "${TMP_ROOT}" && make_tx_secret_dir "relative tmp")" || { echo "FAIL: relative TMPDIR secret dir creation failed" >&2; exit 1; }
+case "${relative_secret}" in
+  "${canonical_relative_tmp}"/rubin-txgen-from-key.*) ;;
+  *) echo "FAIL: relative TMPDIR secret dir was not created under canonical parent: ${relative_secret}" >&2; exit 1 ;;
+esac
+relative_key_file="${relative_secret}/from-key.hex"
+printf 'abcd\n' >"${relative_key_file}"
+chmod 600 "${relative_key_file}"
+TX_FROM_KEY_DIR="${relative_secret}"
+relative_good_json="$(material_json "${relative_key_file}" "${addr_a}" "${addr_b}" "${addr_a}")"
+relative_good_output="$(parse_keygen_material "${relative_good_json}")" || { echo "FAIL: canonicalized relative TMPDIR keygen material rejected" >&2; exit 1; }
+[[ "$(printf '%s\n' "${relative_good_output}" | sed -n '1p')" == "${relative_key_file}" ]] || { echo "FAIL: relative TMPDIR private key output mismatch" >&2; exit 1; }
+TX_FROM_KEY_DIR="${TMP_ROOT}/secret"
 
 expect_reason "malformed json" go_submit_keygen_material_malformed_json "{"
 expect_reason "wrong root" go_submit_keygen_material_root_invalid "[]"

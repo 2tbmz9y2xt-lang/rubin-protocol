@@ -559,6 +559,16 @@ keygen_material_reason() {
     *) printf '%s\n' go_submit_keygen_material_malformed ;;
   esac
 }
+tx_secret_tmp_parent() {
+  local parent="${1:-/tmp}"
+  [[ -n "${parent}" ]] || parent="/tmp"
+  (cd -- "${parent}" && pwd -P)
+}
+make_tx_secret_dir() {
+  local tmp_parent
+  tmp_parent="$(tx_secret_tmp_parent "${1:-/tmp}")" || return 1
+  mktemp -d "${tmp_parent%/}/rubin-txgen-from-key.XXXXXX"
+}
 parse_keygen_material() {
   local raw="$1" raw_file="${TX_FROM_KEY_DIR}/keygen-public.json" rc=0
   [[ ${#raw} -le 4096 ]] || return 2
@@ -626,12 +636,12 @@ PY
   return "${rc}"
 }
 prepare_tx_chainstate() {
-  local keygen_public_json keygen_fields_raw mine_address xtrace_was_enabled=0 tmp_parent="${TMPDIR:-/tmp}" status=0 rc=0
+  local keygen_public_json keygen_fields_raw mine_address xtrace_was_enabled=0 status=0 rc=0
   TX_REASON=""
   build_go_txgen || { TX_REASON="${BUILD_REASON:-go_txgen_build_failed}"; return 1; }
   write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }
   if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
-  TX_FROM_KEY_DIR="$(mktemp -d "${tmp_parent%/}/rubin-txgen-from-key.XXXXXX")" || { restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return 1; }
+  TX_FROM_KEY_DIR="$(make_tx_secret_dir "${TMPDIR:-/tmp}")" || { restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return 1; }
   chmod 700 "${TX_FROM_KEY_DIR}" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return "${status}"; }
   keygen_public_json="$(bounded_mesh env RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_DIR}")" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_keygen_timeout || TX_REASON=go_submit_keygen_failed; return "${status}"; }
   keygen_fields_raw="$(parse_keygen_material "${keygen_public_json}")" || { rc=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON="$(keygen_material_reason "${rc}")"; return 1; }
