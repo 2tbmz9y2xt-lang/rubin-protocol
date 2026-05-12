@@ -4,7 +4,18 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"; GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"; HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"; VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
 CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}" TX_PATH_MODE=0 DETERMINISTIC_TX_FEE="${DETERMINISTIC_TX_FEE:-100000000}"
-usage() { printf '%s\n' "usage: $0 [--go-submit-rust-accept]" "usage: $0 --check-report PATH" "usage: $0 --check-report-live PATH" "--check-report and --check-report-live validate mixed_client_mesh and mixed_client_go_submit_rust_accept reports." >&2; }
+usage() {
+  cat >&2 <<EOF
+usage:
+  $0 [--go-submit-rust-accept]
+  $0 --check-report PATH
+  $0 --check-report-live PATH
+
+--check-report and --check-report-live validate mixed_client_mesh reports only.
+mixed_client_go_submit_rust_accept proof is same-run producer validation and is not
+accepted from public report revalidation paths.
+EOF
+}
 while (($#)); do case "$1" in --go-submit-rust-accept) TX_PATH_MODE=1; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 if [[ -n "${CHECK_REPORT_MODE}" && "${TX_PATH_MODE}" == "1" ]]; then echo "--go-submit-rust-accept cannot be combined with --check-report or --check-report-live" >&2; exit 2; fi
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
@@ -15,12 +26,12 @@ validate_deterministic_tx_fee() {
   export DETERMINISTIC_TX_FEE
 }
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
-check_report() { local report="${1:-}" mode="${2:-offline}"
+check_report() { local report="${1:-}" mode="${2:-offline}" expected_mode="${3:-public}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${DEV_ENV}" "${GO_MODULE_ROOT}" <<'PY'
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${expected_mode}" "${DEV_ENV}" "${GO_MODULE_ROOT}" <<'PY'
 import datetime as dt, json, os, re, socket, struct, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
-path = Path(sys.argv[1]); live = sys.argv[3] == "live"; dev_env = sys.argv[4]; go_module_root = sys.argv[5]
+path = Path(sys.argv[1]); live = sys.argv[3] == "live"; expected_mode = sys.argv[4]; dev_env = sys.argv[5]; go_module_root = sys.argv[6]
 SCENARIO_MESH = "mixed_client_mesh"
 SCENARIO_TX = "mixed_client_go_submit_rust_accept"
 MAX_JSON_BYTES = 1_000_000
@@ -57,10 +68,11 @@ def load_bounded_json(label: str, p: Path) -> object:
             raw = f.read(MAX_JSON_BYTES + 1)
     except OSError as exc:
         fail(f"{label} read failed: {exc}")
+    req(raw != b"", f"{label} is empty")
     req(len(raw) <= MAX_JSON_BYTES, f"{label} is too large")
     try:
         return json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"{label} malformed JSON: {exc}")
 def load_json_file(label: str, p: Path) -> dict:
     data = load_bounded_json(label, p)
@@ -88,7 +100,7 @@ def tx_rpc(addr: str, path_suffix: str, label: str, impl: str) -> dict:
     except (urllib.error.URLError, TimeoutError, socket.timeout) as exc: fail(f"{label} rpc failed: {exc}")
     req(len(raw) <= 1000000, f"{label} rpc response too large")
     try: data = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc: fail(f"{label} rpc malformed JSON: {exc}")
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc: fail(f"{label} rpc malformed JSON: {exc}")
     req(isinstance(data, dict), f"{label} rpc root is not an object")
     data.update({"implementation": impl, "rpc_endpoint": addr, "request_path": path_suffix})
     return data
@@ -107,7 +119,7 @@ def parse_txid_from_hex(txhex: str) -> str:
         fail(f"tx parser failed: {detail}")
     try:
         parsed = json.loads(stdout)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"tx parser malformed output: {exc}")
     req(isinstance(parsed, dict), "tx parser root is not an object")
     txid = parsed.get("txid")
@@ -164,7 +176,7 @@ def peers(addr: str) -> dict:
     req(len(raw) <= MAX_JSON_BYTES, f"live peer snapshot too large for {addr}")
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
     req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
     return data
@@ -181,9 +193,14 @@ def ts(value: object) -> bool:
     try: return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
     except ValueError: return False
 data = load_json_file("report", path)
+req(expected_mode in {"public", "producer-tx"}, f"check_report expected mode is invalid: {expected_mode!r}")
 scenario = data.get("scenario")
 tx_mode = scenario == SCENARIO_TX
 req(scenario in {SCENARIO_MESH, SCENARIO_TX}, f"scenario is not supported: {scenario!r}")
+if tx_mode and expected_mode != "producer-tx":
+    fail(("public tx-path check-report-live is unsupported" if live else "public tx-path check-report is unsupported") + "; same-run producer evidence is required")
+if expected_mode == "producer-tx":
+    req(tx_mode, "producer tx validation requires mixed_client_go_submit_rust_accept report")
 req(data.get("verdict") == "PASS", f"report verdict is not PASS: {data.get('verdict')!r}")
 req("failure_reason" not in data and "schema_marker" not in data, "PASS report must not carry failure/schema-marker verdict fields")
 base_keys = {"artifact_root", "final_verification", "legacy_schema_compatibility", "nodes", "peer_connectivity", "scenario", "verdict"}
@@ -317,7 +334,7 @@ rubin_process_exit_trap_with_tx_secret_cleanup() {
   exit "${cleanup_status}"
 }
 trap rubin_process_exit_trap_with_tx_secret_cleanup EXIT
-check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
+check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("public tx-path check-report-live is unsupported","public_tx_path_check_report_live_unsupported"),("public tx-path check-report is unsupported","public_tx_path_check_report_unsupported"),("same-run producer evidence is required","tx_path_requires_same_run_producer_evidence"),("report path is required","report_path_required"),("report is not a regular file","report_not_regular_file"),("report is empty","report_empty"),("report is too large","report_too_large"),("report read failed","report_read_failed"),("report malformed JSON","report_malformed_json"),("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
 tx_report_reason_token() {
   local msg
   msg="$(cat)"
@@ -879,7 +896,7 @@ if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "legacy_schema_marker_validation_failed"
 fi
 if (( TX_PATH_MODE == 1 )); then
-  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
+  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live producer-tx 2>&1)"; then
     rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(combined_report_reason_token <<<"${check_err}")"
   fi
 else
