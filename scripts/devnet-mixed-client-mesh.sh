@@ -11,7 +11,7 @@ usage:
   $0 --check-report PATH
   $0 --check-report-live PATH
 
---check-report and --check-report-live validate mixed_client_mesh reports only.
+--check-report and --check-report-live validate mixed_client_mesh and mixed_client_go_submit_rust_accept reports.
 EOF
 }
 while (($#)); do case "$1" in --go-submit-rust-accept) TX_PATH_MODE=1; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
@@ -27,9 +27,11 @@ run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VAL
 check_report() { local report="${1:-}" mode="${2:-offline}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
   RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" <<'PY'
-import datetime as dt, json, os, socket, struct, subprocess, sys, time, urllib.error, urllib.request
+import datetime as dt, json, os, re, socket, struct, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
 path = Path(sys.argv[1]); live = sys.argv[3] == "live"
+SCENARIO_MESH = "mixed_client_mesh"
+SCENARIO_TX = "mixed_client_go_submit_rust_accept"
 def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
 try: LIVE_TIMEOUT = int(os.environ["MESH_TIMEOUT"])
 except (KeyError, ValueError): fail("MESH_TIMEOUT must be an integer in [1, 600]")
@@ -50,6 +52,40 @@ def ep(value: object) -> bool:
     host, sep, port = value.partition(":")
     return sep == ":" and host == "127.0.0.1" and ":" not in port and port.isascii() and port.isdigit() and 1 <= len(port) <= 5 and 1 <= int(port) <= 65535
 def nonempty_str(value: object) -> bool: return isinstance(value, str) and bool(value.strip())
+def exact_object(data: object, keys: set[str], label: str) -> dict:
+    req(isinstance(data, dict), f"{label} is not an object")
+    req(set(data) == keys, f"{label} keys mismatch: {sorted(data)}")
+    return data
+def load_json_file(label: str, p: Path) -> dict:
+    try:
+        with p.open(encoding="utf-8") as f: data = json.load(f)
+    except OSError as exc: fail(f"{label} read failed: {exc}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc: fail(f"{label} malformed JSON: {exc}")
+    req(isinstance(data, dict), f"{label} root is not an object")
+    return data
+def artifact_file(label: str, value: object, root: Path) -> Path:
+    p = checked_path(label, value)
+    try: p.relative_to(root)
+    except ValueError: fail(f"{label} is outside artifact_root")
+    req(p.is_file(), f"{label} file is missing")
+    return p
+def tx_sidecars(status: dict, got: dict, txid: str, txhex: str, label: str) -> None:
+    req(set(status) == {"status", "txid"}, f"{label}.tx_status keys mismatch: {sorted(status)}")
+    req(status.get("status") == "pending", f"{label}.tx_status is not pending")
+    req(status.get("txid") == txid, f"{label}.tx_status txid mismatch")
+    req(set(got) == {"found", "raw_hex", "txid"}, f"{label}.get_tx keys mismatch: {sorted(got)}")
+    req(got.get("found") is True, f"{label}.get_tx did not find tx")
+    req(got.get("txid") == txid, f"{label}.get_tx txid mismatch")
+    req(got.get("raw_hex") == txhex, f"{label}.get_tx raw_hex mismatch")
+def tx_rpc(addr: str, path_suffix: str, label: str) -> dict:
+    try:
+        with urllib.request.urlopen(f"http://{addr}{path_suffix}", timeout=5) as resp: raw = resp.read(1000001)
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc: fail(f"{label} rpc failed: {exc}")
+    req(len(raw) <= 1000000, f"{label} rpc response too large")
+    try: data = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc: fail(f"{label} rpc malformed JSON: {exc}")
+    req(isinstance(data, dict), f"{label} rpc root is not an object")
+    return data
 def pid_exe(pid: int) -> str:
     proc = Path(f"/proc/{pid}/exe")
     if proc.exists() or Path("/proc").is_dir():
@@ -120,7 +156,9 @@ except OSError as exc:
 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
     fail(f"malformed JSON report: {exc}")
 req(isinstance(data, dict), "report root is not an object")
-req(data.get("scenario") == "mixed_client_mesh", f"scenario is not mixed_client_mesh: {data.get('scenario')!r}")
+scenario = data.get("scenario")
+tx_mode = scenario == SCENARIO_TX
+req(scenario in {SCENARIO_MESH, SCENARIO_TX}, f"scenario is not supported: {scenario!r}")
 req(data.get("verdict") == "PASS", f"report verdict is not PASS: {data.get('verdict')!r}")
 req("failure_reason" not in data and "schema_marker" not in data, "PASS report must not carry failure/schema-marker verdict fields")
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
@@ -134,7 +172,11 @@ try:
     with marker_path.open(encoding="utf-8") as f: marker = json.load(f)
 except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
     fail(f"legacy marker is not readable JSON: {exc}")
-req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("verdict") == "FAIL" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong non-authoritative FAIL shape")
+req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong schema marker shape")
+if tx_mode:
+    req(marker.get("verdict") == "PASS" and marker.get("tx_path") == data.get("tx_path"), "legacy marker is not bound to tx_path PASS")
+else:
+    req(marker.get("verdict") == "FAIL", "legacy marker has wrong non-authoritative FAIL shape")
 try: validator = subprocess.run([sys.executable, sys.argv[2], str(marker_path)], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
 except (OSError, subprocess.TimeoutExpired) as exc: fail(f"legacy marker schema validation failed: {exc}")
 req(validator.returncode == 0, "legacy marker schema validation failed: " + ((validator.stderr or validator.stdout).strip().splitlines() or ["validator returned nonzero"])[0])
@@ -165,6 +207,27 @@ req(nodes_by_impl["go"]["command_argv"] == [nodes_by_impl["go"]["binary"], "--ne
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
+if tx_mode:
+    tx_path = exact_object(data.get("tx_path"), {"submitted_at", "observed_at", "tx_id"}, "tx_path")
+    txid = tx_path.get("tx_id")
+    req(tx_path == {"submitted_at": "node-go", "observed_at": ["node-rust"], "tx_id": txid}, "tx_path identity mismatch")
+    req(isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid), "txid is malformed")
+    go_submit = exact_object(data.get("go_submit"), {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"}, "go_submit")
+    rust_accept = exact_object(data.get("rust_accept"), {"get_tx_path", "raw_hex", "rpc_endpoint", "tx_status_path", "txid"}, "rust_accept")
+    txhex = go_submit.get("tx_hex")
+    req(isinstance(txhex, str) and 2 <= len(txhex) <= 20000 and len(txhex) % 2 == 0 and re.fullmatch(r"[0-9a-f]+", txhex), "tx_hex is malformed or unbounded")
+    req(go_submit.get("txid") == txid and rust_accept.get("txid") == txid, "tx report txid mismatch")
+    req(rust_accept.get("raw_hex") == txhex, "tx report raw transaction mismatch")
+    req(go_submit.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and rust_accept.get("rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"], "tx report rpc endpoint mismatch")
+    go_status = artifact_file("go_submit.tx_status_path", go_submit.get("tx_status_path"), artifact_root)
+    go_get = artifact_file("go_submit.get_tx_path", go_submit.get("get_tx_path"), artifact_root)
+    rust_status = artifact_file("rust_accept.tx_status_path", rust_accept.get("tx_status_path"), artifact_root)
+    rust_get = artifact_file("rust_accept.get_tx_path", rust_accept.get("get_tx_path"), artifact_root)
+    tx_sidecars(load_json_file("go_submit.tx_status", go_status), load_json_file("go_submit.get_tx", go_get), txid, txhex, "go_submit")
+    tx_sidecars(load_json_file("rust_accept.tx_status", rust_status), load_json_file("rust_accept.get_tx", rust_get), txid, txhex, "rust_accept")
+    if live:
+        tx_sidecars(tx_rpc(nodes_by_impl["go"]["rpc_endpoint"], f"/tx_status?txid={txid}", "go_submit.tx_status"), tx_rpc(nodes_by_impl["go"]["rpc_endpoint"], f"/get_tx?txid={txid}", "go_submit.get_tx"), txid, txhex, "go_submit.live")
+        tx_sidecars(tx_rpc(nodes_by_impl["rust"]["rpc_endpoint"], f"/tx_status?txid={txid}", "rust_accept.tx_status"), tx_rpc(nodes_by_impl["rust"]["rpc_endpoint"], f"/get_tx?txid={txid}", "rust_accept.get_tx"), txid, txhex, "rust_accept.live")
 connectivity = data.get("peer_connectivity")
 req(isinstance(connectivity, dict), "PASS report missing peer_connectivity object")
 req(all(connectivity.get(f) is True for f in ("go_to_rust", "rust_to_go", "bidirectional_observed")), "peer_connectivity booleans are not all true")
@@ -183,7 +246,7 @@ for field, expected_addr in (("go_peer_snapshot", go_expected), ("rust_peer_snap
     if live:
         endpoint = nodes_by_impl["go" if field.startswith("go_") else "rust"]["rpc_endpoint"]
         eventually(lambda endpoint=endpoint, stored=stored, expected_addr=expected_addr: (fresh := peers(endpoint)) is not None and stored == snapshot_norm(fresh, expected_addr, False), f"{field} differs from live exact peer set")
-print(f"PASS: mixed-client mesh report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
+print(f"PASS: {scenario} report {'accepted' if live else 'structurally accepted'} {path}" + ("" if live else "; live proof not checked"))
 PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
@@ -271,6 +334,13 @@ for label, text in re.findall(r"tx report self-validation: ([A-Za-z0-9_.]+) ([^\
             sys.exit(0)
 print("unclassified")
 PY
+}
+combined_report_reason_token() {
+  local msg token
+  msg="$(cat)"
+  token="$(tx_report_reason_token <<<"${msg}")"
+  if [[ "${token}" == "unclassified" ]]; then token="$(check_report_reason_token <<<"${msg}")"; fi
+  printf '%s\n' "${token}"
 }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
@@ -843,6 +913,9 @@ if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "legacy_schema_marker_validation_failed"
 fi
 if (( TX_PATH_MODE == 1 )); then
+  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
+    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(combined_report_reason_token <<<"${check_err}")"
+  fi
   if ! check_err="$(check_tx_report "${PASS_REPORT_JSON}" 2>&1)"; then
     rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "tx_report_self_validation_$(tx_report_reason_token <<<"${check_err}")"
   fi
