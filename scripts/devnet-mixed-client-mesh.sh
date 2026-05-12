@@ -412,12 +412,33 @@ GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; REPORT_JSON="${RUBIN_PROCESS_ART
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 GO_SUBMIT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.json"; GO_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-tx-status.json"; GO_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-get-tx.json"; RUST_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-tx-status.json"; RUST_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-get-tx.json"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"; MINE_LOG="mine-go.log"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" RUST_ACCEPT_CLASS="" TX_FROM_KEY="" TX_TO_KEY="" TX_FROM_KEY_FINGERPRINT=""
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" RUST_ACCEPT_CLASS="" TX_FROM_KEY_FILE="" TX_TO_KEY="" TX_FROM_KEY_FINGERPRINT=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
 argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 loopback_endpoint() { local endpoint="${1:-}" port; [[ "${endpoint}" =~ ^127[.]0[.]0[.]1:([0-9]{1,5})$ ]] || return 1; port="${BASH_REMATCH[1]}"; (( 10#${port} >= 1 && 10#${port} <= 65535 )); }
+disable_xtrace_for_secret() { case "$-" in *x*) set +x; return 0 ;; *) return 1 ;; esac; }
+restore_xtrace_after_secret() { [[ "${1:-0}" == "1" ]] && set -x; return 0; }
+cleanup_tx_from_key_file() {
+  local xtrace_was_enabled=0
+  if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
+  local secret_file="${TX_FROM_KEY_FILE:-}" cleanup_status=0
+  if [[ -n "${secret_file}" ]]; then
+    rm -f -- "${secret_file}" || cleanup_status=$?
+    TX_FROM_KEY_FILE=""
+  fi
+  restore_xtrace_after_secret "${xtrace_was_enabled}"
+  return "${cleanup_status}"
+}
+rubin_process_exit_trap_with_tx_secret_cleanup() {
+  local status=$? cleanup_status=0
+  cleanup_tx_from_key_file || cleanup_status=$?
+  rubin_process_cleanup "${status}" || cleanup_status=$?
+  [[ "${status}" != "0" ]] && exit "${status}"
+  exit "${cleanup_status}"
+}
+trap rubin_process_exit_trap_with_tx_secret_cleanup EXIT
 check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("tx-path check-report is structural-only and cannot prove Go-submit evidence","tx_path_check_report_structural_only"),("report scenario does not match requested tx-path mode","report_scenario_mismatch"),("mesh report must not carry tx_path/go_submit/rust_accept","mesh_tx_path_fields_forbidden"),("tx-path offline check-report requires --check-report-live","tx_path_offline_requires_live"),("tx report has unexpected or missing keys","tx_report_keys_invalid"),("mesh report has unexpected or missing keys","mesh_report_keys_invalid"),("tx_path has unexpected or missing keys","tx_path_keys_invalid"),("go_submit has unexpected or missing keys","go_submit_keys_invalid"),("rust_accept has unexpected or missing keys","rust_accept_keys_invalid"),("secret-looking key","pass_report_secret_field"),("legacy_schema_compatibility has unexpected or missing keys","legacy_schema_compatibility_keys_invalid"),("schema marker has unexpected or missing keys","legacy_marker_invalid"),("schema marker participant has unexpected or missing keys","legacy_marker_invalid"),("node record has unexpected or missing keys","node_record_keys_invalid"),("peer_connectivity has unexpected or missing keys","peer_connectivity_keys_invalid"),("counterpart_links has unexpected or missing keys","counterpart_links_keys_invalid"),("final_verification has unexpected or missing keys","final_verification_keys_invalid"),("go_peer_snapshot has unexpected or missing keys","peer_snapshot_invalid"),("rust_peer_snapshot has unexpected or missing keys","peer_snapshot_invalid"),(".peers[","peer_snapshot_invalid"),("go submit sidecar has unexpected or missing keys","go_submit_sidecar_invalid"),("go submit tx_status sidecar has unexpected or missing keys","go_submit_sidecar_invalid"),("go submit get_tx sidecar has unexpected or missing keys","go_submit_sidecar_invalid"),("rust tx_status sidecar has unexpected or missing keys","rust_accept_sidecar_invalid"),("rust get_tx sidecar has unexpected or missing keys","rust_accept_sidecar_invalid"),("report is not a regular file","report_not_regular"),("cannot read report","report_unreadable"),("malformed JSON report","report_malformed_json"),("report exceeds devnet report maximum","report_oversized"),("legacy marker is not a regular file","legacy_marker_invalid"),("legacy marker exceeds devnet report maximum","legacy_marker_oversized"),("_rpc_body_oversized","live_rpc_body_oversized"),("live peer snapshot exceeds devnet report maximum","live_peer_snapshot_oversized"),("go_submit_live_malformed_rpc_body","go_submit_live_malformed_rpc_body"),("go_submit_live_wrong_tx_identity","go_submit_live_wrong_tx_identity"),("go_submit_live_rpc_failed","go_submit_live_rpc_failed"),("go_submit_live_pending_timeout","go_submit_live_pending_timeout"),("go_submit_live_get_tx_missing","go_submit_live_get_tx_missing"),("rust_accept_live_malformed_rpc_body","rust_accept_live_malformed_rpc_body"),("rust_accept_live_wrong_tx_identity","rust_accept_live_wrong_tx_identity"),("rust_accept_live_rpc_failed","rust_accept_live_rpc_failed"),("rust_accept_live_pending_timeout","rust_accept_live_pending_timeout"),("rust_accept_live_get_tx_missing","rust_accept_live_get_tx_missing"),("tx-path report missing tx_path/go_submit/rust_accept","tx_path_fields_missing"),("tx_path.tx_id is not canonical hex","tx_identity_invalid"),("tx_path is not Go-submit -> Rust-observe","tx_path_direction_invalid"),("go_submit.tx_hex is not lowercase even hex","tx_identity_tx_hex_invalid"),("go_submit.tx_hex exceeds devnet report maximum","tx_identity_tx_hex_oversized"),("tx_path.tx_id does not match parsed go_submit.tx_hex","tx_identity_mismatch"),("go_submit is not bound to node-go txid","go_submit_identity_invalid"),("rust_accept is not pending_found for the submitted txid","rust_accept_class_invalid"),("rust_accept raw_hex does not match submitted tx","rust_accept_raw_mismatch"),("schema marker tx_path differs from report tx_path","schema_marker_tx_path_mismatch"),("schema marker participant identity differs from report node identity","schema_marker_participant_identity_mismatch"),("schema marker participants differ from report roles","schema_marker_roles_mismatch"),("go submit sidecar does not prove accepted txid","go_submit_response_invalid"),("go submit tx_status sidecar does not prove pending stored txid","go_submit_sidecar_invalid"),("go submit get_tx sidecar found flag is malformed","go_submit_sidecar_invalid"),("go submit get_tx sidecar reports missing tx","go_submit_get_tx_missing"),("go submit get_tx sidecar does not prove raw tx identity","go_submit_sidecar_invalid"),("rust tx_status sidecar does not prove pending txid","rust_accept_sidecar_invalid"),("rust get_tx sidecar found flag is malformed","rust_accept_sidecar_invalid"),("rust get_tx sidecar reports missing tx","rust_accept_get_tx_missing"),("rust get_tx sidecar does not prove raw tx identity","rust_accept_sidecar_invalid"),("go_submit keygen material is malformed","go_submit_keygen_invalid"),("go_submit.fee is malformed","go_submit_fee_invalid"),("go_submit.fee is below parsed tx weight","go_submit_fee_below_mempool_floor"),("go toolchain unavailable for tx_fee_floor parser","go_submit_fee_floor_parser_tool_failure"),("tx_fee_floor parser timeout","go_submit_fee_floor_parser_timeout"),("tx_fee_floor parser tool failure","go_submit_fee_floor_parser_tool_failure"),("tx_fee_floor parser nonzero exit","go_submit_fee_floor_parser_nonzero"),("tx_fee_floor parser stdout malformed","go_submit_fee_floor_parser_stdout_malformed"),("sidecar artifact is not a regular file","sidecar_artifact_invalid"),("sidecar artifact missing or empty","sidecar_artifact_invalid"),("malformed JSON sidecar artifact","sidecar_artifact_invalid"),("sidecar artifact exceeds devnet report maximum","sidecar_artifact_oversized"),("tx sidecar artifact paths are not distinct","sidecar_artifact_alias"),("txgen_command_argv_redacted is too large","txgen_argv_oversized"),("txgen_command_argv_redacted is malformed","txgen_argv_invalid"),("rust_accept.get_tx_path","rust_accept_sidecar_invalid"),("rust_accept.tx_status_path","rust_accept_sidecar_invalid"),("go_submit.submit_response_path","go_submit_sidecar_invalid"),("go_submit.tx_status_path","go_submit_sidecar_invalid"),("go_submit.get_tx_path","go_submit_sidecar_invalid"),("go toolchain unavailable for tx_identity parser","tx_identity_go_unavailable"),("tx_identity parser timeout","tx_identity_parser_timeout"),("tx_identity parser tool failure","tx_identity_parser_tool_failure"),("tx_identity parser nonzero exit","tx_identity_parser_nonzero"),("tx_identity parser stdout malformed","tx_identity_parser_stdout_malformed"),("tx_identity parser","tx_identity_parser_failed"),("txgen_command_argv_redacted","txgen_argv_invalid"),("txgen_command_argv","txgen_argv_invalid"),("txgen argv is not bound to executable artifact","txgen_executable_invalid"),("go_submit.keygen_path","go_submit_keygen_invalid"),("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
@@ -521,14 +542,36 @@ write_keygen() {
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+func writePrivateKey(path string, derHex string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(derHex + "\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 func main() {
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "private key output path required")
+		os.Exit(2)
+	}
 	from, err := consensus.NewMLDSA87Keypair()
 	if err != nil {
 		panic(err)
@@ -543,10 +586,16 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	derHex := hex.EncodeToString(der)
+	if err := writePrivateKey(os.Args[1], derHex); err != nil {
+		fmt.Fprintln(os.Stderr, "write private key failed")
+		os.Exit(1)
+	}
+	fromKeyFingerprint := sha256.Sum256([]byte(derHex))
 	out := map[string]string{
-		"from_der_hex": hex.EncodeToString(der),
-		"mine_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes())),
-		"to_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
+		"from_key_fingerprint": "sha256:" + hex.EncodeToString(fromKeyFingerprint[:]),
+		"mine_address_hex":     hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes())),
+		"to_address_hex":       hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		panic(err)
@@ -555,56 +604,68 @@ func main() {
 EOF
 }
 prepare_tx_chainstate() {
-  local keygen_private_json mine_address
+  local keygen_public_json mine_address rc tmp_parent xtrace_was_enabled=0
   TX_REASON=""
   build_go_txgen || { TX_REASON="${BUILD_REASON:-go_txgen_build_failed}"; return 1; }
   write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }
-  keygen_private_json="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}")" || { TX_REASON=go_submit_keygen_failed; return 1; }
-  TX_FROM_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["from_der_hex"])' <<<"${keygen_private_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  TX_TO_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_private_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  TX_FROM_KEY_FINGERPRINT="$(python3 -c 'import hashlib, json, sys; print("sha256:" + hashlib.sha256(json.load(sys.stdin)["from_der_hex"].encode("utf-8")).hexdigest())' <<<"${keygen_private_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  mine_address="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_private_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  tmp_parent="${TMPDIR:-/tmp}"
+  if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
+  TX_FROM_KEY_FILE="$(mktemp "${tmp_parent%/}/rubin-txgen-from-key.XXXXXXXXXX")" || { rc=$?; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_temp_failed; return "${rc}"; }
+  if [[ "${TX_FROM_KEY_FILE}" == "${RUBIN_PROCESS_ARTIFACT_ROOT}" || "${TX_FROM_KEY_FILE}" == "${RUBIN_PROCESS_ARTIFACT_ROOT}/"* ]]; then
+    cleanup_tx_from_key_file || true
+    restore_xtrace_after_secret "${xtrace_was_enabled}"
+    TX_REASON=go_submit_keygen_temp_under_artifact_root
+    return 1
+  fi
+  keygen_public_json="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_FILE}")" || { rc=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_failed; return "${rc}"; }
+  restore_xtrace_after_secret "${xtrace_was_enabled}"
+  TX_TO_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_public_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  TX_FROM_KEY_FINGERPRINT="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["from_key_fingerprint"])' <<<"${keygen_public_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  mine_address="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_public_json}")" || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
   python3 -c '
-import hashlib
 import json
 import sys
 
 data = json.load(sys.stdin)
+required = {"from_key_fingerprint", "mine_address_hex", "to_address_hex"}
+if set(data) != required:
+    raise SystemExit(2)
 public = {
-    "from_key_fingerprint": "sha256:" + hashlib.sha256(data["from_der_hex"].encode("utf-8")).hexdigest(),
+    "from_key_fingerprint": data["from_key_fingerprint"],
     "mine_address_hex": data["mine_address_hex"],
     "to_address_hex": data["to_address_hex"],
 }
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     json.dump(public, f, indent=2, sort_keys=True)
     f.write("\n")
-' "${KEYGEN_JSON}" <<<"${keygen_private_json}" || { TX_REASON=go_submit_keygen_write_failed; return 1; }
+	' "${KEYGEN_JSON}" <<<"${keygen_public_json}" || { TX_REASON=go_submit_keygen_write_failed; return 1; }
   rm -f -- "${KEYGEN_GO}" || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
   echo "Mining mature chainstate for Go-submit -> Rust-accept path" >&2
   "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { TX_REASON=go_submit_mine_failed; return 1; }
   cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { TX_REASON=go_submit_chainstate_copy_failed; return 1; }
 }
 submit_go_tx() {
-  local from_key to_key from_key_fingerprint from_key_file rc status=0 err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.err"
+  local rc status=0 cleanup_status=0 err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.err" xtrace_was_enabled=0
   TX_REASON=""
-  from_key="${TX_FROM_KEY}"; to_key="${TX_TO_KEY}"; from_key_fingerprint="${TX_FROM_KEY_FINGERPRINT}"
-  TX_FROM_KEY=""
-  [[ -n "${from_key}" && -n "${to_key}" && "${from_key_fingerprint}" == sha256:* ]] || { TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  from_key_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/txgen-from-key.hex"
-  python3 -c '
-import os
-import sys
-
-fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
-    f.write(sys.stdin.read().strip())
-    f.write("\n")
-os.chmod(sys.argv[1], 0o600)
-' "${from_key_file}" <<<"${from_key}" || { TX_REASON=go_submit_keygen_write_failed; return 1; }
-  from_key=""
+  if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
+  local from_key_file="${TX_FROM_KEY_FILE:-}" to_key="${TX_TO_KEY}" from_key_fingerprint="${TX_FROM_KEY_FINGERPRINT}"
+  if [[ -z "${from_key_file}" || -z "${to_key}" || "${from_key_fingerprint}" != sha256:* ]]; then
+    cleanup_tx_from_key_file || true
+    restore_xtrace_after_secret "${xtrace_was_enabled}"
+    TX_REASON=go_submit_keygen_material_malformed
+    return 1
+  fi
+  if [[ ! -f "${from_key_file}" ]]; then
+    cleanup_tx_from_key_file || true
+    restore_xtrace_after_secret "${xtrace_was_enabled}"
+    TX_REASON=go_submit_keygen_material_malformed
+    return 1
+  fi
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${from_key_file}" --to-key "${to_key}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}")
-  TX_HEX="$(trap 'rm -f -- "${from_key_file}"' EXIT; "${argv[@]}" 2>"${err_file}")" || status=$?
-  rm -f -- "${from_key_file}" || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
+  TX_HEX="$("${argv[@]}" 2>"${err_file}")" || status=$?
+  cleanup_tx_from_key_file || cleanup_status=$?
+  restore_xtrace_after_secret "${xtrace_was_enabled}"
+  (( cleanup_status == 0 )) || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
   (( status == 0 )) || { TX_REASON=go_submit_txgen_failed; return 1; }
   python3 - "${TX_HEX}" >"${GO_SUBMIT_JSON}.parse-request" <<'PY' || { TX_REASON=tx_identity_malformed; return 1; }
 import json

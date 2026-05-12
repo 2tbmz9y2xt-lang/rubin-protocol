@@ -232,14 +232,22 @@ func loadFromKeyDER(fromKeyHex string, fromKeyFile string) ([]byte, error) {
 	case fromKeyFlagSet && fromKeyFileSet:
 		return nil, errors.New("--from-key and --from-key-file are mutually exclusive")
 	case fromKeyFileSet:
-		f, err := os.Open(strings.TrimSpace(fromKeyFile))
+		path := strings.TrimSpace(fromKeyFile)
+		info, err := os.Stat(path)
 		if err != nil {
-			return nil, fmt.Errorf("read from-key-file: %w", err)
+			return nil, errors.New("read from-key-file failed")
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("from-key-file must be a regular file")
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, errors.New("read from-key-file failed")
 		}
 		defer f.Close()
 		raw, err := io.ReadAll(io.LimitReader(f, maxFromKeyFileBytes+1))
 		if err != nil {
-			return nil, fmt.Errorf("read from-key-file: %w", err)
+			return nil, errors.New("read from-key-file failed")
 		}
 		if len(raw) > maxFromKeyFileBytes {
 			return nil, fmt.Errorf("from-key-file exceeds %d bytes", maxFromKeyFileBytes)

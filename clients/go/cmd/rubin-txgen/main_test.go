@@ -215,6 +215,22 @@ func TestRunRejectsUnreadableFromKeyFile(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNonRegularFromKeyFile(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--from-key-file", t.TempDir(),
+		"--to-key", "00",
+		"--amount", "1",
+	}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("non-regular from-key-file exit=%d", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid from-key: from-key-file must be a regular file") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
 func TestRunRejectsBlankDataDir(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
