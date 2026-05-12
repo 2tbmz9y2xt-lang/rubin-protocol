@@ -428,7 +428,7 @@ GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; REPORT_JSON="${RUBIN_PROCESS_ART
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 GO_SUBMIT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.json"; GO_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-tx-status.json"; GO_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-get-tx.json"; RUST_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-tx-status.json"; RUST_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-get-tx.json"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"; MINE_LOG="mine-go.log"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" RUST_ACCEPT_CLASS="" TX_FROM_KEY_FILE="" TX_TO_KEY=""
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" RUST_ACCEPT_CLASS="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
@@ -439,10 +439,14 @@ restore_xtrace_after_secret() { [[ "${1:-0}" == "1" ]] && set -x; return 0; }
 cleanup_tx_from_key_file() {
   local xtrace_was_enabled=0
   if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
-  local secret_file="${TX_FROM_KEY_FILE:-}" cleanup_status=0
+  local secret_file="${TX_FROM_KEY_FILE:-}" secret_dir="${TX_FROM_KEY_DIR:-}" cleanup_status=0
   if [[ -n "${secret_file}" ]]; then
     rm -f -- "${secret_file}" || cleanup_status=$?
     TX_FROM_KEY_FILE=""
+  fi
+  if [[ -n "${secret_dir}" ]]; then
+    rmdir -- "${secret_dir}" || cleanup_status=$?
+    TX_FROM_KEY_DIR=""
   fi
   restore_xtrace_after_secret "${xtrace_was_enabled}"
   return "${cleanup_status}"
@@ -571,29 +575,139 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-func writePrivateKey(path string, derHex string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+type keygenOutput struct {
+	MineAddressHex string `json:"mine_address_hex"`
+	ToAddressHex   string `json:"to_address_hex"`
+	PrivateKeyFile string `json:"private_key_file"`
+	PrivateKeyDir  string `json:"private_key_dir"`
+}
+
+func insideOrSame(root string, child string) bool {
+	root = filepath.Clean(root)
+	child = filepath.Clean(child)
+	rel, err := filepath.Rel(root, child)
 	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func canonicalExistingPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(real), nil
+}
+
+func validateFD(fd int, wantType uint32, wantPerm os.FileMode, label string) error {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
 		return err
+	}
+	mode := uint32(st.Mode)
+	if mode&uint32(syscall.S_IFMT) != wantType {
+		return fmt.Errorf("%s has wrong file type", label)
+	}
+	if st.Uid != uint32(os.Getuid()) {
+		return fmt.Errorf("%s owner mismatch", label)
+	}
+	if os.FileMode(mode&0o777) != wantPerm {
+		return fmt.Errorf("%s mode mismatch", label)
+	}
+	return nil
+}
+
+func writePrivateKey(tempParent string, artifactRoot string, derHex string) (string, string, error) {
+	parent, err := canonicalExistingPath(tempParent)
+	if err != nil {
+		return "", "", err
+	}
+	artifact, err := canonicalExistingPath(artifactRoot)
+	if err != nil {
+		return "", "", err
+	}
+	dir, err := os.MkdirTemp(parent, "rubin-txgen-from-key.")
+	if err != nil {
+		return "", "", err
+	}
+	success := false
+	keyPath := filepath.Join(dir, "from-key.hex")
+	defer func() {
+		if !success {
+			_ = os.Remove(keyPath)
+			_ = os.Remove(dir)
+		}
+	}()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", "", err
+	}
+	dir, err = canonicalExistingPath(dir)
+	if err != nil {
+		return "", "", err
+	}
+	if insideOrSame(artifact, dir) {
+		return "", "", fmt.Errorf("private key temp directory is under artifact root")
+	}
+	dirFD, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return "", "", err
+	}
+	defer syscall.Close(dirFD)
+	if err := validateFD(dirFD, syscall.S_IFDIR, 0o700, "private key directory"); err != nil {
+		return "", "", err
+	}
+	keyPath = filepath.Join(dir, "from-key.hex")
+	fd, err := syscall.Open(keyPath, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return "", "", err
+	}
+	f := os.NewFile(uintptr(fd), keyPath)
+	if f == nil {
+		_ = syscall.Close(fd)
+		return "", "", fmt.Errorf("private key file open failed")
+	}
+	closeFile := true
+	defer func() {
+		if closeFile {
+			_ = f.Close()
+		}
+	}()
+	if err := validateFD(fd, syscall.S_IFREG, 0o600, "private key file"); err != nil {
+		return "", "", err
 	}
 	if _, err := f.WriteString(derHex + "\n"); err != nil {
-		_ = f.Close()
-		return err
+		return "", "", err
 	}
 	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		return err
+		return "", "", err
 	}
-	return f.Close()
+	if err := validateFD(fd, syscall.S_IFREG, 0o600, "private key file"); err != nil {
+		return "", "", err
+	}
+	if err := f.Close(); err != nil {
+		closeFile = false
+		return "", "", err
+	}
+	closeFile = false
+	success = true
+	return keyPath, dir, nil
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "private key output path required")
+	if len(os.Args) != 3 {
+		fmt.Fprintln(os.Stderr, "private key temp parent and artifact root required")
 		os.Exit(2)
 	}
 	from, err := consensus.NewMLDSA87Keypair()
@@ -611,13 +725,16 @@ func main() {
 		panic(err)
 	}
 	derHex := hex.EncodeToString(der)
-	if err := writePrivateKey(os.Args[1], derHex); err != nil {
+	privateKeyFile, privateKeyDir, err := writePrivateKey(os.Args[1], os.Args[2], derHex)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "write private key failed")
 		os.Exit(1)
 	}
-	out := map[string]string{
-		"mine_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes())),
-		"to_address_hex":   hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
+	out := keygenOutput{
+		MineAddressHex: hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes())),
+		ToAddressHex:   hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
+		PrivateKeyFile: privateKeyFile,
+		PrivateKeyDir:  privateKeyDir,
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		panic(err)
@@ -632,23 +749,17 @@ prepare_tx_chainstate() {
   write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }
   tmp_parent="${TMPDIR:-/tmp}"
   if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
-  TX_FROM_KEY_FILE="$(mktemp "${tmp_parent%/}/rubin-txgen-from-key.XXXXXXXXXX")" || { rc=$?; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_temp_failed; return "${rc}"; }
-  if [[ "${TX_FROM_KEY_FILE}" == "${RUBIN_PROCESS_ARTIFACT_ROOT}" || "${TX_FROM_KEY_FILE}" == "${RUBIN_PROCESS_ARTIFACT_ROOT}/"* ]]; then
-    cleanup_tx_from_key_file || true
-    restore_xtrace_after_secret "${xtrace_was_enabled}"
-    TX_REASON=go_submit_keygen_temp_under_artifact_root
-    return 1
-  fi
-  keygen_public_json="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_FILE}")" || { rc=$?; cleanup_tx_from_key_file_for_failure go_submit_keygen_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return "${rc}"; }
-  restore_xtrace_after_secret "${xtrace_was_enabled}"
-  TX_TO_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || return 1; return 1; }
-  mine_address="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || return 1; return 1; }
+  keygen_public_json="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${tmp_parent}" "${RUBIN_PROCESS_ARTIFACT_ROOT}")" || { rc=$?; cleanup_tx_from_key_file_for_failure go_submit_keygen_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return "${rc}"; }
+  TX_FROM_KEY_FILE="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["private_key_file"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  TX_FROM_KEY_DIR="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["private_key_dir"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  TX_TO_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  mine_address="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
   python3 -c '
 import json
 import sys
 
 data = json.load(sys.stdin)
-required = {"mine_address_hex", "to_address_hex"}
+required = {"mine_address_hex", "private_key_dir", "private_key_file", "to_address_hex"}
 if set(data) != required:
     raise SystemExit(2)
 public = {
@@ -658,7 +769,9 @@ public = {
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     json.dump(public, f, indent=2, sort_keys=True)
     f.write("\n")
-	' "${KEYGEN_JSON}" <<<"${keygen_public_json}" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_write_failed || return 1; return 1; }
+	' "${KEYGEN_JSON}" <<<"${keygen_public_json}" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_write_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; keygen_public_json=""; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  keygen_public_json=""
+  restore_xtrace_after_secret "${xtrace_was_enabled}"
   rm -f -- "${KEYGEN_GO}" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_cleanup_failed || return 1; return 1; }
   echo "Mining mature chainstate for Go-submit -> Rust-accept path" >&2
   "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { cleanup_tx_from_key_file_for_failure go_submit_mine_failed || return 1; return 1; }
