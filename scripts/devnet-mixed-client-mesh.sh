@@ -629,16 +629,12 @@ func validateFD(fd int, wantType uint32, wantPerm os.FileMode, label string) err
 	return nil
 }
 
-func writePrivateKey(tempParent string, artifactRoot string, derHex string) (string, string, error) {
-	parent, err := canonicalExistingPath(tempParent)
-	if err != nil {
-		return "", "", err
-	}
+func writePrivateKey(privateKeyDir string, artifactRoot string, derHex string) (string, string, error) {
 	artifact, err := canonicalExistingPath(artifactRoot)
 	if err != nil {
 		return "", "", err
 	}
-	dir, err := os.MkdirTemp(parent, "rubin-txgen-from-key.")
+	dir, err := canonicalExistingPath(privateKeyDir)
 	if err != nil {
 		return "", "", err
 	}
@@ -647,7 +643,6 @@ func writePrivateKey(tempParent string, artifactRoot string, derHex string) (str
 	defer func() {
 		if !success {
 			_ = os.Remove(keyPath)
-			_ = os.Remove(dir)
 		}
 	}()
 	if err := os.Chmod(dir, 0o700); err != nil {
@@ -707,7 +702,7 @@ func writePrivateKey(tempParent string, artifactRoot string, derHex string) (str
 
 func main() {
 	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "private key temp parent and artifact root required")
+		fmt.Fprintln(os.Stderr, "private key directory and artifact root required")
 		os.Exit(2)
 	}
 	from, err := consensus.NewMLDSA87Keypair()
@@ -743,15 +738,22 @@ func main() {
 EOF
 }
 prepare_tx_chainstate() {
-  local keygen_public_json mine_address rc tmp_parent xtrace_was_enabled=0
+  local canonical_key_dir keygen_public_json mine_address parsed_key_dir parsed_key_file rc tmp_parent xtrace_was_enabled=0
   TX_REASON=""
   build_go_txgen || { TX_REASON="${BUILD_REASON:-go_txgen_build_failed}"; return 1; }
   write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }
   tmp_parent="${TMPDIR:-/tmp}"
   if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
-  keygen_public_json="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${tmp_parent}" "${RUBIN_PROCESS_ARTIFACT_ROOT}")" || { rc=$?; cleanup_tx_from_key_file_for_failure go_submit_keygen_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return "${rc}"; }
-  TX_FROM_KEY_FILE="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["private_key_file"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
-  TX_FROM_KEY_DIR="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["private_key_dir"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  TX_FROM_KEY_DIR="$(mktemp -d "${tmp_parent%/}/rubin-txgen-from-key.XXXXXX")" || { rc=$?; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return "${rc}"; }
+  canonical_key_dir="$(cd -P "${TX_FROM_KEY_DIR}" && pwd)" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_tempdir_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  TX_FROM_KEY_DIR="${canonical_key_dir}"
+  TX_FROM_KEY_FILE="${TX_FROM_KEY_DIR}/from-key.hex"
+  chmod 700 "${TX_FROM_KEY_DIR}" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_tempdir_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  run_fips_preflight_before_captured_dev_env || { cleanup_tx_from_key_file_for_failure go_submit_keygen_fips_preflight_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  keygen_public_json="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_DIR}" "${RUBIN_PROCESS_ARTIFACT_ROOT}")" || { rc=$?; cleanup_tx_from_key_file_for_failure go_submit_keygen_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return "${rc}"; }
+  parsed_key_file="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["private_key_file"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  parsed_key_dir="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["private_key_dir"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
+  [[ "${parsed_key_file}" == "${TX_FROM_KEY_FILE}" && "${parsed_key_dir}" == "${TX_FROM_KEY_DIR}" ]] || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
   TX_TO_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
   mine_address="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
   python3 -c '
