@@ -10,7 +10,6 @@ usage:
   $0 [--go-submit-rust-accept]
   $0 --check-report PATH
   $0 --check-report-live PATH
-
 --check-report and --check-report-live validate mixed_client_mesh and mixed_client_go_submit_rust_accept reports.
 EOF
 }
@@ -26,12 +25,15 @@ validate_deterministic_tx_fee() {
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
 check_report() { local report="${1:-}" mode="${2:-offline}"
   [[ -n "${report}" ]] || { echo "FAIL: report path is required" >&2; return 1; }
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" <<'PY'
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 - "${report}" "${VALIDATOR}" "${mode}" "${DEV_ENV}" "${GO_MODULE_ROOT}" <<'PY'
 import datetime as dt, json, os, re, socket, struct, subprocess, sys, time, urllib.error, urllib.request
 from pathlib import Path
-path = Path(sys.argv[1]); live = sys.argv[3] == "live"
+path = Path(sys.argv[1]); live = sys.argv[3] == "live"; dev_env = sys.argv[4]; go_module_root = sys.argv[5]
 SCENARIO_MESH = "mixed_client_mesh"
 SCENARIO_TX = "mixed_client_go_submit_rust_accept"
+MAX_JSON_BYTES = 1_000_000
+MAX_PARSER_OUTPUT_BYTES = 100_000
+MAX_TX_HEX_CHARS = 20_000
 def fail(message: str) -> None: print(f"FAIL: {message}", file=sys.stderr); sys.exit(1)
 try: LIVE_TIMEOUT = int(os.environ["MESH_TIMEOUT"])
 except (KeyError, ValueError): fail("MESH_TIMEOUT must be an integer in [1, 600]")
@@ -56,11 +58,20 @@ def exact_object(data: object, keys: set[str], label: str) -> dict:
     req(isinstance(data, dict), f"{label} is not an object")
     req(set(data) == keys, f"{label} keys mismatch: {sorted(data)}")
     return data
-def load_json_file(label: str, p: Path) -> dict:
+def load_bounded_json(label: str, p: Path) -> object:
     try:
-        with p.open(encoding="utf-8") as f: data = json.load(f)
-    except OSError as exc: fail(f"{label} read failed: {exc}")
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc: fail(f"{label} malformed JSON: {exc}")
+        req(p.is_file(), f"{label} is not a regular file")
+        with p.open("rb") as f:
+            raw = f.read(MAX_JSON_BYTES + 1)
+    except OSError as exc:
+        fail(f"{label} read failed: {exc}")
+    req(len(raw) <= MAX_JSON_BYTES, f"{label} is too large")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        fail(f"{label} malformed JSON: {exc}")
+def load_json_file(label: str, p: Path) -> dict:
+    data = load_bounded_json(label, p)
     req(isinstance(data, dict), f"{label} root is not an object")
     return data
 def artifact_file(label: str, value: object, root: Path) -> Path:
@@ -86,6 +97,35 @@ def tx_rpc(addr: str, path_suffix: str, label: str) -> dict:
     except (json.JSONDecodeError, UnicodeDecodeError) as exc: fail(f"{label} rpc malformed JSON: {exc}")
     req(isinstance(data, dict), f"{label} rpc root is not an object")
     return data
+def parse_txid_from_hex(txhex: str) -> str:
+    request = json.dumps({"op": "parse_tx", "tx_hex": txhex}) + "\n"
+    try:
+        proc = subprocess.run(
+            [dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"],
+            check=False,
+            env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
+            input=request,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        fail("tx parser timeout")
+    except OSError as exc:
+        fail(f"tx parser unavailable: {exc}")
+    stdout, stderr = proc.stdout or "", proc.stderr or ""
+    req(len(stdout) <= MAX_PARSER_OUTPUT_BYTES and len(stderr) <= MAX_PARSER_OUTPUT_BYTES, "tx parser output too large")
+    if proc.returncode != 0:
+        detail = ((stderr or stdout).strip().splitlines() or ["parser returned nonzero"])[0]
+        fail(f"tx parser failed: {detail}")
+    try:
+        parsed = json.loads(stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        fail(f"tx parser malformed output: {exc}")
+    txid = parsed.get("txid") if isinstance(parsed, dict) else None
+    req(parsed.get("ok") is True and isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid), "tx parser did not produce txid")
+    return txid
 def pid_exe(pid: int) -> str:
     proc = Path(f"/proc/{pid}/exe")
     if proc.exists() or Path("/proc").is_dir():
@@ -130,9 +170,12 @@ def lsof_lines(pid: int, state: str) -> list[str]:
 def owns_listen(pid: int, endpoint: str) -> bool: return endpoint in lsof_lines(pid, "LISTEN")
 def peers(addr: str) -> dict:
     try:
-        with urllib.request.urlopen(f"http://{addr}/peers", timeout=5) as resp: data = json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(f"http://{addr}/peers", timeout=5) as resp: raw = resp.read(MAX_JSON_BYTES + 1)
     except (urllib.error.URLError, TimeoutError, socket.timeout):
         return None
+    req(len(raw) <= MAX_JSON_BYTES, f"live peer snapshot too large for {addr}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
     req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
@@ -149,12 +192,7 @@ def ts(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z": return False
     try: return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
     except ValueError: return False
-try:
-    with path.open(encoding="utf-8") as f: data = json.load(f)
-except OSError as exc:
-    fail(f"cannot read report: {exc}")
-except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-    fail(f"malformed JSON report: {exc}")
+data = load_json_file("report", path)
 req(isinstance(data, dict), "report root is not an object")
 scenario = data.get("scenario")
 tx_mode = scenario == SCENARIO_TX
@@ -170,11 +208,7 @@ req(isinstance(legacy_schema, dict) and legacy_schema.get("authoritative") is Fa
 marker_path = checked_path("legacy_schema_compatibility.marker_path", legacy_schema.get("marker_path"))
 try: marker_path.relative_to(artifact_root)
 except ValueError: fail("legacy marker is outside artifact_root")
-req(marker_path.is_file() and marker_path.stat().st_size > 0, "legacy marker is missing, unreadable, or empty")
-try:
-    with marker_path.open(encoding="utf-8") as f: marker = json.load(f)
-except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-    fail(f"legacy marker is not readable JSON: {exc}")
+marker = load_json_file("legacy marker", marker_path)
 req(isinstance(marker, dict) and marker.get("scenario") == "mixed_client_mesh_schema_marker" and marker.get("evidence_type") == "mixed_client_process_soak", "legacy marker has wrong schema marker shape")
 if tx_mode:
     req(marker.get("verdict") == "PASS" and marker.get("tx_path") == data.get("tx_path"), "legacy marker is not bound to tx_path PASS")
@@ -218,7 +252,8 @@ if tx_mode:
     go_submit = exact_object(data.get("go_submit"), {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"}, "go_submit")
     rust_accept = exact_object(data.get("rust_accept"), {"get_tx_path", "raw_hex", "rpc_endpoint", "tx_status_path", "txid"}, "rust_accept")
     txhex = go_submit.get("tx_hex")
-    req(isinstance(txhex, str) and 2 <= len(txhex) <= 20000 and len(txhex) % 2 == 0 and re.fullmatch(r"[0-9a-f]+", txhex), "tx_hex is malformed or unbounded")
+    req(isinstance(txhex, str) and 2 <= len(txhex) <= MAX_TX_HEX_CHARS and len(txhex) % 2 == 0 and re.fullmatch(r"[0-9a-f]+", txhex), "tx_hex is malformed or unbounded")
+    req(parse_txid_from_hex(txhex) == txid, "tx_hex txid mismatch")
     req(go_submit.get("txid") == txid and rust_accept.get("txid") == txid, "tx report txid mismatch")
     req(rust_accept.get("raw_hex") == txhex, "tx report raw transaction mismatch")
     req(go_submit.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and rust_accept.get("rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"], "tx report rpc endpoint mismatch")
@@ -253,7 +288,7 @@ print(f"PASS: {scenario} report {'accepted' if live else 'structurally accepted'
 PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
-if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
+if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
 if (( TX_PATH_MODE == 1 )); then validate_deterministic_tx_fee; fi
 need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
@@ -298,7 +333,6 @@ tx_report_reason_token() {
   python3 - "${msg}" <<'PY'
 import re
 import sys
-
 msg = sys.argv[1]
 rules = [
     ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"),
@@ -439,16 +473,13 @@ PY
 write_keygen() {
   cat >"${KEYGEN_GO}" <<'EOF'
 package main
-
 import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
-
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
-
 func main() {
 	dir := os.Args[1]
 	from, err := consensus.NewMLDSA87Keypair()
@@ -512,7 +543,6 @@ import json
 import os
 import subprocess
 import sys
-
 dev_env, go_module_root, txhex = sys.argv[1:4]
 request = json.dumps({"op": "parse_tx", "tx_hex": txhex}) + "\n"
 try:
@@ -560,13 +590,10 @@ verify_tx_sidecars() {
   python3 - "${label}" "${txid}" "${txhex}" "${status_path}" "${get_path}" <<'PY'
 import json
 import sys
-
 label, txid, txhex, status_path, get_path = sys.argv[1:6]
-
 def fail(code: int, message: str) -> None:
     print(f"{label}: {message}", file=sys.stderr)
     sys.exit(code)
-
 def load_json(path: str, kind: str) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
@@ -578,7 +605,6 @@ def load_json(path: str, kind: str) -> dict:
     if not isinstance(data, dict):
         fail(11, f"{kind}_root_not_object")
     return data
-
 status = load_json(status_path, "tx_status")
 got = load_json(get_path, "get_tx")
 if set(status) != {"status", "txid"}:
