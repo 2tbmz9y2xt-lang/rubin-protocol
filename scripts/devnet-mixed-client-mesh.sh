@@ -7,6 +7,12 @@ CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}" TX_PATH_
 usage() { echo "usage: $0 [--go-submit-rust-accept] [--check-report PATH|--check-report-live PATH]" >&2; }
 while (($#)); do case "$1" in --go-submit-rust-accept) TX_PATH_MODE=1; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
+validate_deterministic_tx_fee() {
+  [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,10}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 9999999999" >&2; exit 2; }
+  DETERMINISTIC_TX_FEE="$((10#${DETERMINISTIC_TX_FEE}))"
+  (( DETERMINISTIC_TX_FEE > 0 )) || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 9999999999" >&2; exit 2; }
+  export DETERMINISTIC_TX_FEE
+}
 run_validator() { RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- python3 "${VALIDATOR}" "$@"; }
 check_report() { local report="${1:-}" mode="${2:-offline}" expected_mode="${3:-auto}"
   [[ "${expected_mode}" != auto || "${TX_PATH_MODE:-0}" != "1" ]] || expected_mode=tx
@@ -367,7 +373,7 @@ PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
 if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
-if (( TX_PATH_MODE == 1 )); then [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,10}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a non-negative integer <= 9999999999" >&2; exit 2; }; DETERMINISTIC_TX_FEE="$((10#${DETERMINISTIC_TX_FEE}))"; export DETERMINISTIC_TX_FEE; fi
+if (( TX_PATH_MODE == 1 )); then validate_deterministic_tx_fee; fi
 need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
@@ -609,7 +615,59 @@ if not isinstance(txid, str) or len(txid) != 64 or any(c not in "0123456789abcde
     raise SystemExit(15)
 print(txid)
 PY
-)" || { rc=$?; case "${rc}" in 12) TX_REASON=tx_identity_parser_timeout ;; 13) TX_REASON=tx_identity_parser_tool_failure ;; 14) TX_REASON=tx_identity_parser_nonzero ;; 15) TX_REASON=tx_identity_parser_stdout_malformed ;; *) TX_REASON=tx_identity_parser_unknown_failure ;; esac; return 1; }
+	)" || { rc=$?; case "${rc}" in 12) TX_REASON=tx_identity_parser_timeout ;; 13) TX_REASON=tx_identity_parser_tool_failure ;; 14) TX_REASON=tx_identity_parser_nonzero ;; 15) TX_REASON=tx_identity_parser_stdout_malformed ;; *) TX_REASON=tx_identity_parser_unknown_failure ;; esac; return 1; }
+  python3 - "${TX_HEX}" >"${GO_SUBMIT_JSON}.fee-floor-request" <<'PY' || { TX_REASON=go_submit_fee_floor_request_failed; return 1; }
+import json
+import sys
+
+print(json.dumps({"op": "tx_weight_and_stats", "tx_hex": sys.argv[1].strip()}))
+PY
+  TX_REQUIRED_FEE="$(python3 - "${DEV_ENV}" "${GO_MODULE_ROOT}" "${GO_SUBMIT_JSON}.fee-floor-request" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+dev_env, module_root, request_path = sys.argv[1:4]
+try:
+    request = open(request_path, encoding="utf-8")
+except OSError:
+    raise SystemExit(13)
+with request:
+    env = os.environ.copy()
+    env["RUBIN_OPENSSL_SKIP_FIPS_GUARD"] = "1"
+    try:
+        proc = subprocess.run(
+            [dev_env, "--", "go", "-C", module_root, "run", "./cmd/rubin-consensus-cli"],
+            stdin=request,
+            check=False,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(12)
+    except OSError:
+        raise SystemExit(13)
+if proc.returncode != 0:
+    raise SystemExit(14)
+if len(proc.stdout.encode("utf-8", "surrogateescape")) > 65536:
+    raise SystemExit(15)
+try:
+    data = json.loads(proc.stdout)
+except (json.JSONDecodeError, RecursionError, UnicodeDecodeError, ValueError):
+    raise SystemExit(15)
+if data.get("ok") is not True:
+    raise SystemExit(15)
+weight = data.get("weight")
+if not isinstance(weight, int) or isinstance(weight, bool) or weight <= 0:
+    raise SystemExit(15)
+print(weight)
+PY
+	)" || { rc=$?; case "${rc}" in 12) TX_REASON=go_submit_fee_floor_parser_timeout ;; 13) TX_REASON=go_submit_fee_floor_parser_tool_failure ;; 14) TX_REASON=go_submit_fee_floor_parser_nonzero ;; 15) TX_REASON=go_submit_fee_floor_parser_stdout_malformed ;; *) TX_REASON=go_submit_fee_floor_parser_unknown_failure ;; esac; return 1; }
+  (( DETERMINISTIC_TX_FEE >= TX_REQUIRED_FEE )) || { TX_REASON=go_submit_fee_below_mempool_floor; return 1; }
   python3 - "${GO_RPC_ADDR}" "${TX_HEX}" "${GO_SUBMIT_JSON}" 2>"${err_file}" <<'PY' || status=$?
 import json
 import socket
