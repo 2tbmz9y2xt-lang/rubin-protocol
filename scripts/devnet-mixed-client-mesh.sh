@@ -583,16 +583,24 @@ status = load_json(status_path, "tx_status")
 got = load_json(get_path, "get_tx")
 if set(status) != {"status", "txid"}:
     fail(18, f"tx_status_keys_mismatch: {sorted(status)}")
-if set(got) != {"found", "raw_hex", "txid"}:
-    fail(19, f"get_tx_keys_mismatch: {sorted(got)}")
 status_txid = status.get("txid")
 status_value = status.get("status")
 if status_value != "pending":
     fail(13, f"tx_status_not_pending: {status_value!r}")
 if status_txid != txid:
     fail(12, f"tx_status_txid_mismatch: {status_txid!r}")
-if got.get("found") is not True:
-    fail(14, f"get_tx_not_found: {got.get('found')!r}")
+got_keys = set(got)
+found = got.get("found")
+if found is not True:
+    if found is not False:
+        fail(19, f"get_tx_found_invalid: {found!r}")
+    if got_keys - {"found", "txid"}:
+        fail(19, f"get_tx_keys_mismatch: {sorted(got)}")
+    if "txid" in got and got.get("txid") != txid:
+        fail(15, f"get_tx_txid_mismatch: {got.get('txid')!r}")
+    fail(14, f"get_tx_not_found: {found!r}")
+if got_keys != {"found", "raw_hex", "txid"}:
+    fail(19, f"get_tx_keys_mismatch: {sorted(got)}")
 if got.get("txid") != txid:
     fail(15, f"get_tx_txid_mismatch: {got.get('txid')!r}")
 if got.get("raw_hex") != txhex:
@@ -619,20 +627,32 @@ wait_rust_accept() {
   TX_REASON=""
   deadline=$((SECONDS + MESH_TIMEOUT))
   while (( SECONDS < deadline )); do
-    if ! rpc_json GET "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${RUST_STATUS_JSON}"; then
-      rc=$?; [[ ${rc} -eq 23 ]] && TX_REASON=rust_accept_tx_status_malformed_json || TX_REASON=rust_accept_tx_status_rpc_failed
-    elif ! rpc_json GET "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${RUST_GET_TX_JSON}"; then
-      rc=$?; [[ ${rc} -eq 23 ]] && TX_REASON=rust_accept_get_tx_malformed_json || TX_REASON=rust_accept_get_tx_rpc_failed
-    else
-      if verify_tx_sidecars rust_accept "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then
-        return 0
+    if rpc_json GET "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${RUST_STATUS_JSON}"; then
+      if rpc_json GET "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${RUST_GET_TX_JSON}"; then
+        if verify_tx_sidecars rust_accept "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then
+          return 0
+        else
+          rc=$?
+        fi
+        case "${rc}" in
+          13|14) last_retry_reason="$(tx_sidecar_reason rust_accept "${rc}")" ;;
+          *) TX_REASON="$(tx_sidecar_reason rust_accept "${rc}")"; return 1 ;;
+        esac
       else
         rc=$?
+        if [[ ${rc} -eq 23 ]]; then
+          TX_REASON=rust_accept_get_tx_malformed_json
+        else
+          TX_REASON=rust_accept_get_tx_rpc_failed
+        fi
       fi
-      case "${rc}" in
-        13|14) last_retry_reason="$(tx_sidecar_reason rust_accept "${rc}")" ;;
-        *) TX_REASON="$(tx_sidecar_reason rust_accept "${rc}")"; return 1 ;;
-      esac
+    else
+      rc=$?
+      if [[ ${rc} -eq 23 ]]; then
+        TX_REASON=rust_accept_tx_status_malformed_json
+      else
+        TX_REASON=rust_accept_tx_status_rpc_failed
+      fi
     fi
     sleep 1
   done
@@ -733,7 +753,14 @@ with open(e["LEGACY_SCHEMA_MARKER_JSON"], "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 }
-finish_no_data() { local reason="$1"; write_outputs "NO_DATA" "${reason}" || { echo "FAIL_REPORT_WRITE_FAILED: ${reason}" >&2; exit 1; }; run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 || { echo "FAIL_REPORT_VALIDATION_FAILED: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }; echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }
+finish_no_data() {
+  local reason="$1"
+  cleanup_tx_from_key_file || true
+  write_outputs "NO_DATA" "${reason}" || { echo "FAIL_REPORT_WRITE_FAILED: ${reason}" >&2; exit 1; }
+  run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 || { echo "FAIL_REPORT_VALIDATION_FAILED: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }
+  echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2
+  exit 1
+}
 wait_peer_snapshot() {
   local label="$1" addr="$2" out="$3" timeout="$4" expected="$5" deadline tmp
   deadline=$((SECONDS + timeout)); PEER_SNAPSHOT_REASON=""
