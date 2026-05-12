@@ -12,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -228,6 +230,39 @@ func TestRunRejectsNonRegularFromKeyFile(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid from-key: from-key-file must be a regular file") {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunRejectsFIFOFromKeyFileWithoutBlocking(t *testing.T) {
+	fifoPath := filepath.Join(t.TempDir(), "from-key.fifo")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	dataDir := t.TempDir()
+
+	done := make(chan string, 1)
+	go func() {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := run([]string{
+			"--datadir", dataDir,
+			"--from-key-file", fifoPath,
+			"--to-key", "00",
+			"--amount", "1",
+		}, &stdout, &stderr)
+		done <- fmt.Sprintf("%d:%s", code, stderr.String())
+	}()
+
+	select {
+	case got := <-done:
+		if !strings.HasPrefix(got, "2:") {
+			t.Fatalf("fifo from-key-file result=%q", got)
+		}
+		if !strings.Contains(got, "invalid from-key: from-key-file must be a regular file") {
+			t.Fatalf("fifo from-key-file stderr=%q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run blocked opening FIFO from-key-file")
 	}
 }
 

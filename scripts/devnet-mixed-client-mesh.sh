@@ -412,7 +412,7 @@ GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; REPORT_JSON="${RUBIN_PROCESS_ART
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 GO_SUBMIT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.json"; GO_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-tx-status.json"; GO_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-get-tx.json"; RUST_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-tx-status.json"; RUST_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-get-tx.json"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"; MINE_LOG="mine-go.log"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" RUST_ACCEPT_CLASS="" TX_FROM_KEY_FILE="" TX_TO_KEY="" TX_FROM_KEY_FINGERPRINT=""
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" RUST_ACCEPT_CLASS="" TX_FROM_KEY_FILE="" TX_TO_KEY=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
@@ -551,7 +551,6 @@ write_keygen() {
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -600,11 +599,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "write private key failed")
 		os.Exit(1)
 	}
-	fromKeyFingerprint := sha256.Sum256([]byte(derHex))
 	out := map[string]string{
-		"from_key_fingerprint": "sha256:" + hex.EncodeToString(fromKeyFingerprint[:]),
-		"mine_address_hex":     hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes())),
-		"to_address_hex":       hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
+		"mine_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes())),
+		"to_address_hex":   hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
 		panic(err)
@@ -629,18 +626,16 @@ prepare_tx_chainstate() {
   keygen_public_json="$("${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_FILE}")" || { rc=$?; cleanup_tx_from_key_file_for_failure go_submit_keygen_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; restore_xtrace_after_secret "${xtrace_was_enabled}"; return "${rc}"; }
   restore_xtrace_after_secret "${xtrace_was_enabled}"
   TX_TO_KEY="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || return 1; return 1; }
-  TX_FROM_KEY_FINGERPRINT="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["from_key_fingerprint"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || return 1; return 1; }
   mine_address="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_material_malformed || return 1; return 1; }
   python3 -c '
 import json
 import sys
 
 data = json.load(sys.stdin)
-required = {"from_key_fingerprint", "mine_address_hex", "to_address_hex"}
+required = {"mine_address_hex", "to_address_hex"}
 if set(data) != required:
     raise SystemExit(2)
 public = {
-    "from_key_fingerprint": data["from_key_fingerprint"],
     "mine_address_hex": data["mine_address_hex"],
     "to_address_hex": data["to_address_hex"],
 }
@@ -657,8 +652,8 @@ submit_go_tx() {
   local rc status=0 cleanup_status=0 err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.err" xtrace_was_enabled=0
   TX_REASON=""
   if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
-  local from_key_file="${TX_FROM_KEY_FILE:-}" to_key="${TX_TO_KEY}" from_key_fingerprint="${TX_FROM_KEY_FINGERPRINT}"
-  if [[ -z "${from_key_file}" || -z "${to_key}" || "${from_key_fingerprint}" != sha256:* ]]; then
+  local from_key_file="${TX_FROM_KEY_FILE:-}" to_key="${TX_TO_KEY}"
+  if [[ -z "${from_key_file}" || -z "${to_key}" ]]; then
     cleanup_tx_from_key_file || true
     restore_xtrace_after_secret "${xtrace_was_enabled}"
     TX_REASON=go_submit_keygen_material_malformed

@@ -17,6 +17,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -233,16 +234,9 @@ func loadFromKeyDER(fromKeyHex string, fromKeyFile string) ([]byte, error) {
 		return nil, errors.New("--from-key and --from-key-file are mutually exclusive")
 	case fromKeyFileSet:
 		path := strings.TrimSpace(fromKeyFile)
-		info, err := os.Stat(path)
+		f, err := openRegularFromKeyFile(path)
 		if err != nil {
-			return nil, errors.New("read from-key-file failed")
-		}
-		if !info.Mode().IsRegular() {
-			return nil, errors.New("from-key-file must be a regular file")
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, errors.New("read from-key-file failed")
+			return nil, err
 		}
 		defer f.Close()
 		raw, err := readOpenedFromKeyFile(f)
@@ -253,6 +247,31 @@ func loadFromKeyDER(fromKeyHex string, fromKeyFile string) ([]byte, error) {
 	default:
 		return decodeHexFlag(fromKeyHex)
 	}
+}
+
+func openRegularFromKeyFile(path string) (*os.File, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, errors.New("from-key-file must be a regular file")
+		}
+		return nil, errors.New("read from-key-file failed")
+	}
+	f := os.NewFile(uintptr(fd), path)
+	if f == nil {
+		_ = syscall.Close(fd)
+		return nil, errors.New("read from-key-file failed")
+	}
+	openedInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, errors.New("read from-key-file failed")
+	}
+	if !openedInfo.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, errors.New("from-key-file must be a regular file")
+	}
+	return f, nil
 }
 
 func readOpenedFromKeyFile(f *os.File) ([]byte, error) {
