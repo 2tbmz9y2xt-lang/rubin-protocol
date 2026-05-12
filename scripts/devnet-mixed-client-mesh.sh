@@ -604,10 +604,10 @@ submit_go_tx() {
   local status=0 cleanup_status=0 rc=0
   TX_REASON=""
   [[ -n "${TX_FROM_KEY_FILE}" && -f "${TX_FROM_KEY_FILE}" && -n "${TX_TO_KEY}" ]] || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  TX_HEX="$("${argv[@]}")" || status=$?
+  TX_HEX="$(bounded_mesh "${argv[@]}")" || status=$?
   cleanup_tx_from_key_file || cleanup_status=$?
   (( cleanup_status == 0 )) || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
-  (( status == 0 )) || { TX_REASON=go_submit_txgen_failed; return 1; }
+  (( status == 0 )) || { [[ ${status} -eq 142 ]] && TX_REASON=go_submit_txgen_timeout || TX_REASON=go_submit_txgen_failed; return 1; }
   [[ "${TX_HEX}" =~ ^[0-9a-f]+$ && $(( ${#TX_HEX} % 2 )) -eq 0 ]] || { TX_REASON=go_submit_tx_hex_malformed; return 1; }
   TX_ID="$(parse_txid)" || { TX_REASON=go_submit_txid_parse_failed; return 1; }
   rpc_json GET "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${GO_SUBMIT_STATUS_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
@@ -619,7 +619,11 @@ wait_rust_accept() {
   TX_REASON=""
   deadline=$((SECONDS + MESH_TIMEOUT))
   while (( SECONDS < deadline )); do
-    if rpc_json GET "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${RUST_STATUS_JSON}" && rpc_json GET "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${RUST_GET_TX_JSON}"; then
+    if ! rpc_json GET "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${RUST_STATUS_JSON}"; then
+      rc=$?; [[ ${rc} -eq 23 ]] && TX_REASON=rust_accept_tx_status_malformed_json || TX_REASON=rust_accept_tx_status_rpc_failed
+    elif ! rpc_json GET "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${RUST_GET_TX_JSON}"; then
+      rc=$?; [[ ${rc} -eq 23 ]] && TX_REASON=rust_accept_get_tx_malformed_json || TX_REASON=rust_accept_get_tx_rpc_failed
+    else
       if verify_tx_sidecars rust_accept "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then
         return 0
       else
@@ -629,8 +633,6 @@ wait_rust_accept() {
         13|14) last_retry_reason="$(tx_sidecar_reason rust_accept "${rc}")" ;;
         *) TX_REASON="$(tx_sidecar_reason rust_accept "${rc}")"; return 1 ;;
       esac
-    else
-      TX_REASON=rust_accept_rpc_failed
     fi
     sleep 1
   done
