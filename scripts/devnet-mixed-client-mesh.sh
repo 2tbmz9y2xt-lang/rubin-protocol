@@ -322,8 +322,8 @@ tx_report_reason_token() {
   msg="$(cat)"
   python3 - "${msg}" <<'PY'
 import re, sys
-msg = sys.argv[1]
-rules = [("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("go_submit endpoint mismatch", "go_submit_endpoint_mismatch"), ("rust_accept endpoint mismatch", "rust_accept_endpoint_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
+msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in sys.argv[1].splitlines())
+rules = [("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
 for needle, token in rules:
     if needle in msg:
         print(token)
@@ -336,7 +336,7 @@ label_rules = [
     ("keys mismatch", "keys_mismatch"),
     ("path mismatch", "path_mismatch"),
     ("file is missing", "file_missing"),
-    ("is outside artifact root", "outside_artifact_root"),
+    ("is outside artifact_root", "outside_artifact_root"),
     ("is not pending", "not_pending"),
     ("txid mismatch", "txid_mismatch"),
     ("did not find tx", "not_found"),
@@ -356,7 +356,7 @@ combined_report_reason_token() {
   msg="$(cat)"
   token="$(tx_report_reason_token <<<"${msg}")"
   if [[ "${token}" == "unclassified" ]]; then token="$(check_report_reason_token <<<"${msg}")"; fi
-  printf '%s\n' "${token}"
+  [[ "${token}" == "unknown" || "${token}" == "unclassified" ]] && token=tx_report_validation_failed; printf '%s\n' "${token}"
 }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
@@ -382,24 +382,26 @@ PY
 capture_tx_rpc_sidecar() {
   local impl="$1" addr="$2" path="$3" out="$4" status=0; local tmp="${out}.raw"
   rpc_json GET "${addr}" "${path}" >"${tmp}" || status=$?
-  (( status == 0 )) || { rm -f -- "${tmp}"; return "${status}"; }
+  (( status == 0 )) || { rm -f -- "${tmp}"; case "${status}" in 22) return 21 ;; 23) return 23 ;; *) return 22 ;; esac; }
   python3 - "${impl}" "${addr}" "${path}" "${tmp}" "${out}" <<'PY'
 import json, os, sys
 impl, addr, request_path, src, dst = sys.argv[1:6]
 try:
     with open(src, encoding="utf-8") as f:
         data = json.load(f)
-except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+except OSError:
+    sys.exit(24)
+except (json.JSONDecodeError, UnicodeDecodeError):
     sys.exit(23)
 if not isinstance(data, dict):
-    sys.exit(23)
+    sys.exit(25)
 data.update({"implementation": impl, "request_path": request_path, "rpc_endpoint": addr})
 tmp = dst + ".tmp"
 try:
     with open(tmp, "w", encoding="utf-8") as f: json.dump(data, f, indent=2, sort_keys=True); f.write("\n")
     os.replace(tmp, dst)
 except OSError:
-    sys.exit(1)
+    sys.exit(26)
 finally:
     try: os.remove(src)
     except OSError: pass
@@ -554,6 +556,7 @@ print(txid)
 PY
 }
 txid_parse_reason() { case "$1" in 2) printf '%s\n' go_submit_txid_parse_timeout ;; 3) printf '%s\n' go_submit_txid_parser_unavailable ;; 4) printf '%s\n' go_submit_txid_parser_failed ;; 5) printf '%s\n' go_submit_txid_parser_malformed_output ;; 6) printf '%s\n' go_submit_txid_parser_root_invalid ;; 7) printf '%s\n' go_submit_txid_missing_or_malformed ;; 8) printf '%s\n' go_submit_txid_parser_output_too_large ;; *) printf '%s\n' go_submit_txid_parse_failed ;; esac; }
+tx_capture_reason() { local label="$1" rc="$2"; case "${rc}" in 21) printf '%s\n' "${label}_http_error" ;; 22) printf '%s\n' "${label}_rpc_failed" ;; 23) printf '%s\n' "${label}_malformed_json" ;; 24) printf '%s\n' "${label}_capture_read_failed" ;; 25) printf '%s\n' "${label}_invalid_shape" ;; 26) printf '%s\n' "${label}_artifact_write_failed" ;; *) printf '%s\n' "${label}_capture_failed" ;; esac; }
 tx_sidecar_reason() {
   local label="$1" rc="$2"
   case "${rc}" in
@@ -633,8 +636,8 @@ submit_go_tx() {
   (( status == 0 )) || { [[ ${status} -eq 142 ]] && TX_REASON=go_submit_txgen_timeout || TX_REASON=go_submit_txgen_failed; return 1; }
   [[ "${TX_HEX}" =~ ^[0-9a-f]+$ && ${#TX_HEX} -le 20000 && $(( ${#TX_HEX} % 2 )) -eq 0 ]] || { TX_REASON=go_submit_tx_hex_malformed_or_unbounded; return 1; }
   TX_ID="$(parse_txid)" || { rc=$?; TX_REASON="$(txid_parse_reason "${rc}")"; return 1; }
-  capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
-  capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_GET_TX_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
+  capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason go_submit_tx_status "${rc}")"; return 1; }
+  capture_tx_rpc_sidecar go "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_GET_TX_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason go_submit_get_tx "${rc}")"; return 1; }
   verify_tx_sidecars go_submit go "${GO_RPC_ADDR}" "${TX_ID}" "${TX_HEX}" "/tx_status?txid=${TX_ID}" "/get_tx?txid=${TX_ID}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" || { rc=$?; TX_REASON="$(tx_sidecar_reason go_submit "${rc}")"; return 1; }
 }
 wait_rust_accept() {
@@ -656,22 +659,22 @@ wait_rust_accept() {
       else
         rc=$?
         if [[ ${rc} -eq 23 ]]; then
-          TX_REASON=rust_accept_get_tx_malformed_json
+          TX_REASON="$(tx_capture_reason rust_accept_get_tx "${rc}")"
         else
-          TX_REASON=rust_accept_get_tx_rpc_failed
+          TX_REASON="$(tx_capture_reason rust_accept_get_tx "${rc}")"
         fi
       fi
     else
       rc=$?
       if [[ ${rc} -eq 23 ]]; then
-        TX_REASON=rust_accept_tx_status_malformed_json
+        TX_REASON="$(tx_capture_reason rust_accept_tx_status "${rc}")"
       else
-        TX_REASON=rust_accept_tx_status_rpc_failed
+        TX_REASON="$(tx_capture_reason rust_accept_tx_status "${rc}")"
       fi
     fi
     sleep 1
   done
-  [[ -n "${last_retry_reason}" ]] && TX_REASON="rust_accept_timeout_last_${last_retry_reason#rust_accept_}" || TX_REASON="${TX_REASON:-rust_accept_pending_timeout}"
+  [[ -n "${TX_REASON}" ]] || { [[ -n "${last_retry_reason}" ]] && TX_REASON="rust_accept_timeout_last_${last_retry_reason#rust_accept_}" || TX_REASON=rust_accept_pending_timeout; }
   return 1
 }
 write_outputs() {
