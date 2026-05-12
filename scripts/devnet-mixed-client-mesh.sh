@@ -569,9 +569,13 @@ make_tx_secret_dir() {
   tmp_parent="$(tx_secret_tmp_parent "${1:-/tmp}")" || return 1
   mktemp -d "${tmp_parent%/}/rubin-txgen-from-key.XXXXXX"
 }
+keygen_material_byte_len() {
+  LC_ALL=C printf '%s' "$1" | wc -c | tr -d '[:space:]'
+}
 parse_keygen_material() {
-  local raw="$1" raw_file="${TX_FROM_KEY_DIR}/keygen-public.json" rc=0
-  [[ ${#raw} -le 4096 ]] || return 2
+  local raw="$1" raw_file="${TX_FROM_KEY_DIR}/keygen-public.json" raw_bytes rc=0
+  raw_bytes="$(keygen_material_byte_len "${raw}")" || return 2
+  [[ "${raw_bytes}" =~ ^[0-9]+$ && "${raw_bytes}" -le 4096 ]] || return 2
   (umask 077 && printf '%s' "${raw}" >"${raw_file}") || { rm -f -- "${raw_file}" 2>/dev/null || true; return 14; }
   if python3 - "${TX_FROM_KEY_DIR}" "${raw_file}" <<'PY'
 import json

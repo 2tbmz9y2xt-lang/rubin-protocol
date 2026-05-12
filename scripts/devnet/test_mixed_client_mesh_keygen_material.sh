@@ -80,6 +80,7 @@ good_output="$(parse_keygen_material "${good_json}")" || { echo "FAIL: valid key
 [[ "$(printf '%s\n' "${good_output}" | sed -n '1p')" == "${expected_key_file}" ]] || { echo "FAIL: private key file output mismatch" >&2; exit 1; }
 [[ "$(printf '%s\n' "${good_output}" | sed -n '2p')" == "${addr_b}" ]] || { echo "FAIL: to address output mismatch" >&2; exit 1; }
 [[ "$(printf '%s\n' "${good_output}" | sed -n '3p')" == "${addr_a}" ]] || { echo "FAIL: mine address output mismatch" >&2; exit 1; }
+[[ "$(keygen_material_byte_len "é")" == "2" ]] || { echo "FAIL: keygen material byte counter is locale-sensitive" >&2; exit 1; }
 
 mkdir "${TMP_ROOT}/relative tmp"
 canonical_relative_tmp="$(cd "${TMP_ROOT}" && tx_secret_tmp_parent "relative tmp")" || { echo "FAIL: relative TMPDIR parent rejected" >&2; exit 1; }
@@ -97,6 +98,14 @@ relative_good_json="$(material_json "${relative_key_file}" "${addr_a}" "${addr_b
 relative_good_output="$(parse_keygen_material "${relative_good_json}")" || { echo "FAIL: canonicalized relative TMPDIR keygen material rejected" >&2; exit 1; }
 [[ "$(printf '%s\n' "${relative_good_output}" | sed -n '1p')" == "${relative_key_file}" ]] || { echo "FAIL: relative TMPDIR private key output mismatch" >&2; exit 1; }
 TX_FROM_KEY_DIR="${TMP_ROOT}/secret"
+
+oversized_multibyte="$(python3 - <<'PY'
+print("é" * 2049, end="")
+PY
+)"
+chmod 500 "${TX_FROM_KEY_DIR}"
+expect_reason "oversized multibyte keygen stdout" go_submit_keygen_stdout_too_large "${oversized_multibyte}"
+chmod 700 "${TX_FROM_KEY_DIR}"
 
 expect_reason "malformed json" go_submit_keygen_material_malformed_json "{"
 expect_reason "wrong root" go_submit_keygen_material_root_invalid "[]"
