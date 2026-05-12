@@ -263,7 +263,7 @@ label_rules = [
     ("did not find tx", "not_found"),
     ("raw_hex mismatch", "raw_hex_mismatch"),
 ]
-for label, text in re.findall(r"tx report self-validation: ([A-Za-z0-9_.]+) ([^\\n]+)", msg):
+for label, text in re.findall(r"tx report self-validation: ([A-Za-z0-9_.]+) ([^\n]+)", msg):
     safe_label = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_").lower()
     for needle, token in label_rules:
         if needle in text:
@@ -540,8 +540,11 @@ wait_rust_accept() {
   deadline=$((SECONDS + MESH_TIMEOUT))
   while (( SECONDS < deadline )); do
     if rpc_json GET "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${RUST_STATUS_JSON}" && rpc_json GET "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${RUST_GET_TX_JSON}"; then
-      if verify_tx_sidecars rust_accept "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then return 0; fi
-      rc=$?
+      if verify_tx_sidecars rust_accept "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then
+        return 0
+      else
+        rc=$?
+      fi
       case "${rc}" in
         13|14) TX_REASON="$(tx_sidecar_reason rust_accept "${rc}")" ;;
         *) TX_REASON="$(tx_sidecar_reason rust_accept "${rc}")"; return 1 ;;
