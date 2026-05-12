@@ -23,6 +23,11 @@ try: LIVE_TIMEOUT = int(os.environ["MESH_TIMEOUT"])
 except (KeyError, ValueError): fail("MESH_TIMEOUT must be an integer in [1, 600]")
 def req(ok: bool, message: str) -> None:
     if not ok: fail(message)
+def decode_json_bytes(label: str, raw: bytes) -> object:
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
+        fail(f"malformed JSON {label}: {exc}")
 def load_json_file(label: str, json_path: Path) -> object:
     try:
         req(json_path.is_file(), f"{label} is not a regular file")
@@ -32,15 +37,15 @@ def load_json_file(label: str, json_path: Path) -> object:
         fail(f"cannot read {label}: {exc}")
     req(raw != b"", f"{label} missing or empty")
     req(len(raw) <= MAX_REPORT_JSON_BYTES, f"{label} exceeds devnet report maximum")
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        fail(f"malformed JSON {label}: {exc}")
-def http_json(url: str, oversized_message: str) -> object:
+    return decode_json_bytes(label, raw)
+def http_json(url: str, oversized_message: str, malformed_message: str) -> object:
     with urllib.request.urlopen(url, timeout=5) as resp:
         raw = resp.read(MAX_REPORT_JSON_BYTES + 1)
     req(len(raw) <= MAX_REPORT_JSON_BYTES, oversized_message)
-    return json.loads(raw.decode("utf-8"))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
+        fail(f"{malformed_message}: {exc}")
 def eventually(fn, message: str) -> None:
     deadline = time.monotonic() + LIVE_TIMEOUT
     while True:
@@ -75,7 +80,7 @@ def parse_txid(txhex: str) -> str:
         fail("tx_identity parser failed: " + ((proc.stderr or proc.stdout).strip().splitlines() or ["nonzero exit"])[0])
     try:
         parsed = json.loads(proc.stdout)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
         fail(f"tx_identity parser returned malformed JSON: {exc}")
     req(isinstance(parsed, dict) and parsed.get("ok") is True, "tx_identity parser rejected go_submit.tx_hex")
     try:
@@ -130,7 +135,7 @@ def lsof_lines(pid: int, state: str) -> list[str]:
 def owns_listen(pid: int, endpoint: str) -> bool: return endpoint in lsof_lines(pid, "LISTEN")
 def peers(addr: str) -> dict:
     try:
-        data = http_json(f"http://{addr}/peers", "live peer snapshot exceeds devnet report maximum")
+        data = http_json(f"http://{addr}/peers", "live peer snapshot exceeds devnet report maximum", f"live peer snapshot malformed JSON for {addr}")
     except (urllib.error.URLError, TimeoutError, socket.timeout):
         return None
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -142,7 +147,7 @@ def live_tx_pending_found(label: str, addr: str, txid: str, txhex: str) -> None:
     saw_success = False
     while True:
         try:
-            status = http_json(f"http://{addr}/tx_status?txid={txid}", f"{label}_rpc_body_oversized")
+            status = http_json(f"http://{addr}/tx_status?txid={txid}", f"{label}_rpc_body_oversized", f"{label}_malformed_rpc_body")
             req(isinstance(status, dict), f"{label}_malformed_rpc_body")
             saw_success = True
             status_txid = status.get("txid")
@@ -152,7 +157,7 @@ def live_tx_pending_found(label: str, addr: str, txid: str, txhex: str) -> None:
             req(status_txid == txid and status_value in {"missing", "pending"}, f"{label}_malformed_rpc_body")
             if status_value == "pending":
                 try:
-                    got = http_json(f"http://{addr}/get_tx?txid={txid}", f"{label}_rpc_body_oversized")
+                    got = http_json(f"http://{addr}/get_tx?txid={txid}", f"{label}_rpc_body_oversized", f"{label}_malformed_rpc_body")
                 except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                     fail(f"{label}_malformed_rpc_body")
                 except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, socket.timeout):
@@ -303,7 +308,7 @@ if tx_mode:
     req(isinstance(get_tx_sidecar.get("found"), bool), "rust get_tx sidecar found flag is malformed")
     req(get_tx_sidecar.get("found") is True, "rust get_tx sidecar reports missing tx")
     req(get_tx_sidecar.get("txid") == txid and get_tx_sidecar.get("raw_hex") == txhex, "rust get_tx sidecar does not prove raw tx identity")
-    txgen_argv = go_submit.get("txgen_command_argv")
+    txgen_argv = go_submit.get("txgen_command_argv_redacted")
     fee = go_submit.get("fee")
     keygen_path = checked_path("go_submit.keygen_path", go_submit.get("keygen_path"))
     try:
@@ -316,12 +321,14 @@ if tx_mode:
     req(isinstance(key_material["from_key_fingerprint"], str) and len(key_material["from_key_fingerprint"]) == 71 and key_material["from_key_fingerprint"].startswith("sha256:") and all(c in "0123456789abcdef" for c in key_material["from_key_fingerprint"][7:]), "go_submit keygen fingerprint is malformed")
     req(isinstance(key_material["mine_address_hex"], str) and len(key_material["mine_address_hex"]) > 0 and len(key_material["mine_address_hex"]) % 2 == 0 and all(c in "0123456789abcdef" for c in key_material["mine_address_hex"]), "go_submit keygen mine address is malformed")
     req(isinstance(key_material["to_address_hex"], str) and len(key_material["to_address_hex"]) > 0 and len(key_material["to_address_hex"]) % 2 == 0 and all(c in "0123456789abcdef" for c in key_material["to_address_hex"]), "go_submit keygen to address is malformed")
-    req(isinstance(txgen_argv, list) and len(txgen_argv) <= 16 and all(isinstance(arg, str) and len(arg) <= 16384 for arg in txgen_argv), "txgen_command_argv is too large")
-    txgen_path = checked_path("txgen_command_argv[0]", txgen_argv[0] if txgen_argv else "")
+    req(isinstance(txgen_argv, list) and all(isinstance(arg, str) for arg in txgen_argv), "txgen_command_argv_redacted is malformed")
+    req(len(txgen_argv) <= 16 and all(len(arg) <= 16384 for arg in txgen_argv), "txgen_command_argv_redacted is too large")
+    txgen_path = checked_path("txgen_command_argv_redacted[0]", txgen_argv[0] if txgen_argv else "")
     expected_txgen_argv = [str(Path(artifact_root_arg) / "rubin-txgen"), "--datadir", str(Path(artifact_root_arg) / "node-go"), "--from-key", key_material["from_key_fingerprint"], "--to-key", key_material["to_address_hex"], "--amount", "1", "--fee", str(fee)]
-    req(isinstance(txgen_argv, list) and all(isinstance(arg, str) for arg in txgen_argv) and txgen_argv == expected_txgen_argv, "txgen_command_argv does not match exact Go-submit argv")
+    req(isinstance(txgen_argv, list) and all(isinstance(arg, str) for arg in txgen_argv) and txgen_argv == expected_txgen_argv, "txgen_command_argv_redacted does not match expected Go-submit redacted argv")
+    req("txgen_command_argv" not in go_submit, "go_submit.txgen_command_argv must be omitted; use txgen_command_argv_redacted")
     req("txgen_command" not in go_submit, "go_submit.txgen_command must be omitted")
-    req(isinstance(fee, int) and not isinstance(fee, bool) and fee >= 0, "go_submit.fee is malformed")
+    req(isinstance(fee, int) and not isinstance(fee, bool) and 0 <= fee <= 9999999999, "go_submit.fee is malformed")
     req(txgen_path == artifact_root / "rubin-txgen" and txgen_path.is_file() and os.access(txgen_path, os.X_OK), "txgen argv is not bound to executable artifact")
     if live:
         live_tx_pending_found("go_submit_live", nodes_by_impl["go"]["rpc_endpoint"], txid, txhex)
@@ -331,7 +338,7 @@ PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
 if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
-if (( TX_PATH_MODE == 1 )); then [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,10}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a non-negative integer" >&2; exit 2; }; DETERMINISTIC_TX_FEE="$((10#${DETERMINISTIC_TX_FEE}))"; export DETERMINISTIC_TX_FEE; fi
+if (( TX_PATH_MODE == 1 )); then [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,10}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a non-negative integer <= 9999999999" >&2; exit 2; }; DETERMINISTIC_TX_FEE="$((10#${DETERMINISTIC_TX_FEE}))"; export DETERMINISTIC_TX_FEE; fi
 need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
@@ -348,7 +355,7 @@ run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-of
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
 argv_cmd() { local out="" arg q; for arg; do printf -v q "%q" "$arg"; out+="${out:+ }${q}"; done; printf '%s\n' "${out}"; }; argv_json() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@"; }
 loopback_endpoint() { local endpoint="${1:-}" port; [[ "${endpoint}" =~ ^127[.]0[.]0[.]1:([0-9]{1,5})$ ]] || return 1; port="${BASH_REMATCH[1]}"; (( 10#${port} >= 1 && 10#${port} <= 65535 )); }
-check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("report scenario does not match requested tx-path mode","report_scenario_mismatch"),("report is not a regular file","report_not_regular"),("cannot read report","report_unreadable"),("malformed JSON report","report_malformed_json"),("report exceeds devnet report maximum","report_oversized"),("legacy marker is not a regular file","legacy_marker_invalid"),("legacy marker exceeds devnet report maximum","legacy_marker_oversized"),("_rpc_body_oversized","live_rpc_body_oversized"),("live peer snapshot exceeds devnet report maximum","live_peer_snapshot_oversized"),("go_submit_live_malformed_rpc_body","go_submit_live_malformed_rpc_body"),("go_submit_live_wrong_tx_identity","go_submit_live_wrong_tx_identity"),("go_submit_live_rpc_failed","go_submit_live_rpc_failed"),("go_submit_live_pending_timeout","go_submit_live_pending_timeout"),("go_submit_live_get_tx_missing","go_submit_live_get_tx_missing"),("rust_accept_live_malformed_rpc_body","rust_accept_live_malformed_rpc_body"),("rust_accept_live_wrong_tx_identity","rust_accept_live_wrong_tx_identity"),("rust_accept_live_rpc_failed","rust_accept_live_rpc_failed"),("rust_accept_live_pending_timeout","rust_accept_live_pending_timeout"),("rust_accept_live_get_tx_missing","rust_accept_live_get_tx_missing"),("tx-path report missing tx_path/go_submit/rust_accept","tx_path_fields_missing"),("tx_path.tx_id is not canonical hex","tx_identity_invalid"),("tx_path is not Go-submit -> Rust-observe","tx_path_direction_invalid"),("go_submit.tx_hex is not lowercase even hex","tx_identity_tx_hex_invalid"),("go_submit.tx_hex exceeds devnet report maximum","tx_identity_tx_hex_oversized"),("tx_path.tx_id does not match parsed go_submit.tx_hex","tx_identity_mismatch"),("go_submit is not bound to node-go txid","go_submit_identity_invalid"),("rust_accept is not pending_found for the submitted txid","rust_accept_class_invalid"),("rust_accept raw_hex does not match submitted tx","rust_accept_raw_mismatch"),("schema marker tx_path differs from report tx_path","schema_marker_tx_path_mismatch"),("go submit sidecar does not prove accepted txid","go_submit_response_invalid"),("go submit tx_status sidecar does not prove pending stored txid","go_submit_sidecar_invalid"),("go submit get_tx sidecar found flag is malformed","go_submit_sidecar_invalid"),("go submit get_tx sidecar reports missing tx","go_submit_get_tx_missing"),("go submit get_tx sidecar does not prove raw tx identity","go_submit_sidecar_invalid"),("rust tx_status sidecar does not prove pending txid","rust_accept_sidecar_invalid"),("rust get_tx sidecar found flag is malformed","rust_accept_sidecar_invalid"),("rust get_tx sidecar reports missing tx","rust_accept_get_tx_missing"),("rust get_tx sidecar does not prove raw tx identity","rust_accept_sidecar_invalid"),("go_submit keygen material is malformed","go_submit_keygen_invalid"),("go_submit.fee is malformed","go_submit_fee_invalid"),("sidecar artifact is not a regular file","sidecar_artifact_invalid"),("sidecar artifact missing or empty","sidecar_artifact_invalid"),("malformed JSON sidecar artifact","sidecar_artifact_invalid"),("sidecar artifact exceeds devnet report maximum","sidecar_artifact_oversized"),("tx sidecar artifact paths are not distinct","sidecar_artifact_alias"),("txgen_command_argv is too large","txgen_argv_oversized"),("rust_accept.get_tx_path","rust_accept_sidecar_invalid"),("rust_accept.tx_status_path","rust_accept_sidecar_invalid"),("go_submit.submit_response_path","go_submit_sidecar_invalid"),("go_submit.tx_status_path","go_submit_sidecar_invalid"),("go_submit.get_tx_path","go_submit_sidecar_invalid"),("go toolchain unavailable for tx_identity parser","tx_identity_go_unavailable"),("tx_identity parser","tx_identity_parser_failed"),("txgen_command_argv","txgen_argv_invalid"),("txgen argv is not bound to executable artifact","txgen_executable_invalid"),("go_submit.keygen_path","go_submit_keygen_invalid"),("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
+check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("report scenario does not match requested tx-path mode","report_scenario_mismatch"),("report is not a regular file","report_not_regular"),("cannot read report","report_unreadable"),("malformed JSON report","report_malformed_json"),("report exceeds devnet report maximum","report_oversized"),("legacy marker is not a regular file","legacy_marker_invalid"),("legacy marker exceeds devnet report maximum","legacy_marker_oversized"),("_rpc_body_oversized","live_rpc_body_oversized"),("live peer snapshot exceeds devnet report maximum","live_peer_snapshot_oversized"),("go_submit_live_malformed_rpc_body","go_submit_live_malformed_rpc_body"),("go_submit_live_wrong_tx_identity","go_submit_live_wrong_tx_identity"),("go_submit_live_rpc_failed","go_submit_live_rpc_failed"),("go_submit_live_pending_timeout","go_submit_live_pending_timeout"),("go_submit_live_get_tx_missing","go_submit_live_get_tx_missing"),("rust_accept_live_malformed_rpc_body","rust_accept_live_malformed_rpc_body"),("rust_accept_live_wrong_tx_identity","rust_accept_live_wrong_tx_identity"),("rust_accept_live_rpc_failed","rust_accept_live_rpc_failed"),("rust_accept_live_pending_timeout","rust_accept_live_pending_timeout"),("rust_accept_live_get_tx_missing","rust_accept_live_get_tx_missing"),("tx-path report missing tx_path/go_submit/rust_accept","tx_path_fields_missing"),("tx_path.tx_id is not canonical hex","tx_identity_invalid"),("tx_path is not Go-submit -> Rust-observe","tx_path_direction_invalid"),("go_submit.tx_hex is not lowercase even hex","tx_identity_tx_hex_invalid"),("go_submit.tx_hex exceeds devnet report maximum","tx_identity_tx_hex_oversized"),("tx_path.tx_id does not match parsed go_submit.tx_hex","tx_identity_mismatch"),("go_submit is not bound to node-go txid","go_submit_identity_invalid"),("rust_accept is not pending_found for the submitted txid","rust_accept_class_invalid"),("rust_accept raw_hex does not match submitted tx","rust_accept_raw_mismatch"),("schema marker tx_path differs from report tx_path","schema_marker_tx_path_mismatch"),("go submit sidecar does not prove accepted txid","go_submit_response_invalid"),("go submit tx_status sidecar does not prove pending stored txid","go_submit_sidecar_invalid"),("go submit get_tx sidecar found flag is malformed","go_submit_sidecar_invalid"),("go submit get_tx sidecar reports missing tx","go_submit_get_tx_missing"),("go submit get_tx sidecar does not prove raw tx identity","go_submit_sidecar_invalid"),("rust tx_status sidecar does not prove pending txid","rust_accept_sidecar_invalid"),("rust get_tx sidecar found flag is malformed","rust_accept_sidecar_invalid"),("rust get_tx sidecar reports missing tx","rust_accept_get_tx_missing"),("rust get_tx sidecar does not prove raw tx identity","rust_accept_sidecar_invalid"),("go_submit keygen material is malformed","go_submit_keygen_invalid"),("go_submit.fee is malformed","go_submit_fee_invalid"),("sidecar artifact is not a regular file","sidecar_artifact_invalid"),("sidecar artifact missing or empty","sidecar_artifact_invalid"),("malformed JSON sidecar artifact","sidecar_artifact_invalid"),("sidecar artifact exceeds devnet report maximum","sidecar_artifact_oversized"),("tx sidecar artifact paths are not distinct","sidecar_artifact_alias"),("txgen_command_argv_redacted is too large","txgen_argv_oversized"),("txgen_command_argv_redacted is malformed","txgen_argv_invalid"),("rust_accept.get_tx_path","rust_accept_sidecar_invalid"),("rust_accept.tx_status_path","rust_accept_sidecar_invalid"),("go_submit.submit_response_path","go_submit_sidecar_invalid"),("go_submit.tx_status_path","go_submit_sidecar_invalid"),("go_submit.get_tx_path","go_submit_sidecar_invalid"),("go toolchain unavailable for tx_identity parser","tx_identity_go_unavailable"),("tx_identity parser","tx_identity_parser_failed"),("txgen_command_argv_redacted","txgen_argv_invalid"),("txgen_command_argv","txgen_argv_invalid"),("txgen argv is not bound to executable artifact","txgen_executable_invalid"),("go_submit.keygen_path","go_submit_keygen_invalid"),("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
 rpc_json() {
   local method="$1" addr="$2" path="$3"
   python3 - "${method}" "${addr}" "${path}" <<'PY'
@@ -797,7 +804,7 @@ if tx_mode and verdict == "PASS":
         "txid": e["TX_ID"],
         "tx_hex": e["TX_HEX"],
         "rpc_endpoint": e["GO_RPC_ADDR"],
-        "txgen_command_argv": json.loads(e.get("TXGEN_ARGV_JSON") or "[]"),
+        "txgen_command_argv_redacted": json.loads(e.get("TXGEN_ARGV_JSON") or "[]"),
         "submit_response_path": e["GO_SUBMIT_JSON"],
         "tx_status_path": e["GO_SUBMIT_STATUS_JSON"],
         "get_tx_path": e["GO_SUBMIT_GET_TX_JSON"],
