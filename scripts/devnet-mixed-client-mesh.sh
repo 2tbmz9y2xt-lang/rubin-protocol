@@ -359,7 +359,7 @@ func main() {
 EOF
 }
 prepare_tx_chainstate() {
-  local keygen_public_json mine_address xtrace_was_enabled=0 tmp_parent="${TMPDIR:-/tmp}" status=0
+  local keygen_public_json keygen_fields_raw mine_address xtrace_was_enabled=0 tmp_parent="${TMPDIR:-/tmp}" status=0
   TX_REASON=""
   build_go_txgen || { TX_REASON="${BUILD_REASON:-go_txgen_build_failed}"; return 1; }
   write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }
@@ -367,9 +367,11 @@ prepare_tx_chainstate() {
   TX_FROM_KEY_DIR="$(mktemp -d "${tmp_parent%/}/rubin-txgen-from-key.XXXXXX")" || { restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return 1; }
   chmod 700 "${TX_FROM_KEY_DIR}" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return "${status}"; }
   keygen_public_json="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_DIR}")" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_failed; return "${status}"; }
-  TX_FROM_KEY_FILE="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["private_key_file"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  TX_TO_KEY="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["to_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  mine_address="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["mine_address_hex"])' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  keygen_fields_raw="$(python3 -c $'import json\nimport sys\ntry:\n    data = json.load(sys.stdin)\nexcept (json.JSONDecodeError, UnicodeDecodeError):\n    sys.exit(1)\nfor key in ("private_key_file", "to_address_hex", "mine_address_hex"):\n    value = data.get(key) if isinstance(data, dict) else None\n    if not isinstance(value, str) or not value:\n        sys.exit(1)\n    print(value)' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  [[ "$(printf '%s\n' "${keygen_fields_raw}" | sed -n '$=')" == "3" ]] || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  TX_FROM_KEY_FILE="$(printf '%s\n' "${keygen_fields_raw}" | sed -n '1p')"
+  TX_TO_KEY="$(printf '%s\n' "${keygen_fields_raw}" | sed -n '2p')"
+  mine_address="$(printf '%s\n' "${keygen_fields_raw}" | sed -n '3p')"
   restore_xtrace_after_secret "${xtrace_was_enabled}"
   python3 - "${KEYGEN_JSON}" "${mine_address}" "${TX_TO_KEY}" <<'PY' || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_keygen_material_malformed; return 1; }
 import json, sys
@@ -384,13 +386,95 @@ PY
   cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_chainstate_copy_failed; return 1; }
 }
 parse_txid() {
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run ./cmd/rubin-consensus-cli <<EOF | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True; print(data["txid"])'
-{"op":"parse_tx","tx_hex":"${TX_HEX}"}
-EOF
+  python3 - "${DEV_ENV}" "${GO_MODULE_ROOT}" "${TX_HEX}" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+dev_env, go_module_root, txhex = sys.argv[1:4]
+request = json.dumps({"op": "parse_tx", "tx_hex": txhex}) + "\n"
+try:
+    proc = subprocess.run(
+        [dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"],
+        check=False,
+        env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
+        input=request,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    sys.exit(1)
+if proc.returncode != 0:
+    sys.exit(1)
+try:
+    data = json.loads(proc.stdout)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(1)
+txid = data.get("txid") if isinstance(data, dict) else None
+if data.get("ok") is not True or not isinstance(txid, str):
+    sys.exit(1)
+print(txid)
+PY
+}
+tx_sidecar_reason() {
+  local label="$1" rc="$2"
+  case "${rc}" in
+    11) printf '%s\n' "${label}_sidecar_malformed_json" ;;
+    12) printf '%s\n' "${label}_status_txid_mismatch" ;;
+    13) printf '%s\n' "${label}_status_not_pending" ;;
+    14) printf '%s\n' "${label}_get_tx_not_found" ;;
+    15) printf '%s\n' "${label}_get_txid_mismatch" ;;
+    16) printf '%s\n' "${label}_raw_hex_mismatch" ;;
+    17) printf '%s\n' "${label}_sidecar_read_failed" ;;
+    *) printf '%s\n' "${label}_identity_unverified" ;;
+  esac
+}
+verify_tx_sidecars() {
+  local label="$1" txid="$2" txhex="$3" status_path="$4" get_path="$5"
+  python3 - "${label}" "${txid}" "${txhex}" "${status_path}" "${get_path}" <<'PY'
+import json
+import sys
+
+label, txid, txhex, status_path, get_path = sys.argv[1:6]
+
+def fail(code: int, message: str) -> None:
+    print(f"{label}: {message}", file=sys.stderr)
+    sys.exit(code)
+
+def load_json(path: str, kind: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as exc:
+        fail(17, f"{kind}_read_failed: {exc}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        fail(11, f"{kind}_malformed_json: {exc}")
+    if not isinstance(data, dict):
+        fail(11, f"{kind}_root_not_object")
+    return data
+
+status = load_json(status_path, "tx_status")
+got = load_json(get_path, "get_tx")
+status_txid = status.get("txid")
+status_value = status.get("status")
+if status_value != "pending":
+    fail(13, f"tx_status_not_pending: {status_value!r}")
+if status_txid != txid:
+    fail(12, f"tx_status_txid_mismatch: {status_txid!r}")
+if got.get("found") is not True:
+    fail(14, f"get_tx_not_found: {got.get('found')!r}")
+if got.get("txid") != txid:
+    fail(15, f"get_tx_txid_mismatch: {got.get('txid')!r}")
+if got.get("raw_hex") != txhex:
+    fail(16, "get_tx_raw_hex_mismatch")
+PY
 }
 submit_go_tx() {
   local -a argv=("${TXGEN_BIN}" --datadir "${GO_DIR}" --from-key-file "${TX_FROM_KEY_FILE}" --to-key "${TX_TO_KEY}" --amount 1 --fee "${DETERMINISTIC_TX_FEE}" --submit-to "${GO_RPC_ADDR}")
-  local status=0 cleanup_status=0
+  local status=0 cleanup_status=0 rc=0
   TX_REASON=""
   [[ -n "${TX_FROM_KEY_FILE}" && -f "${TX_FROM_KEY_FILE}" && -n "${TX_TO_KEY}" ]] || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_keygen_material_malformed; return 1; }
   TX_HEX="$("${argv[@]}")" || status=$?
@@ -401,34 +485,26 @@ submit_go_tx() {
   TX_ID="$(parse_txid)" || { TX_REASON=go_submit_txid_parse_failed; return 1; }
   rpc_json GET "${GO_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${GO_SUBMIT_STATUS_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
   rpc_json GET "${GO_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${GO_SUBMIT_GET_TX_JSON}" || { TX_REASON=go_submit_rpc_failed; return 1; }
-  python3 - "${TX_ID}" "${TX_HEX}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" <<'PY' || { TX_REASON=go_submit_identity_unverified; return 1; }
-import json, sys
-txid, txhex, status_path, get_path = sys.argv[1:5]
-status = json.load(open(status_path, encoding="utf-8"))
-got = json.load(open(get_path, encoding="utf-8"))
-assert status.get("txid") == txid and status.get("status") == "pending"
-assert got.get("found") is True and got.get("txid") == txid and got.get("raw_hex") == txhex
-PY
+  verify_tx_sidecars go_submit "${TX_ID}" "${TX_HEX}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" || { rc=$?; TX_REASON="$(tx_sidecar_reason go_submit "${rc}")"; return 1; }
 }
 wait_rust_accept() {
-  local deadline
+  local deadline rc=0
   TX_REASON=""
   deadline=$((SECONDS + MESH_TIMEOUT))
   while (( SECONDS < deadline )); do
     if rpc_json GET "${RUST_RPC_ADDR}" "/tx_status?txid=${TX_ID}" >"${RUST_STATUS_JSON}" && rpc_json GET "${RUST_RPC_ADDR}" "/get_tx?txid=${TX_ID}" >"${RUST_GET_TX_JSON}"; then
-      if python3 - "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" <<'PY' >/dev/null 2>&1
-import json, sys
-txid, txhex, status_path, get_path = sys.argv[1:5]
-status = json.load(open(status_path, encoding="utf-8"))
-got = json.load(open(get_path, encoding="utf-8"))
-assert status.get("txid") == txid and status.get("status") == "pending"
-assert got.get("found") is True and got.get("txid") == txid and got.get("raw_hex") == txhex
-PY
-      then return 0; fi
+      if verify_tx_sidecars rust_accept "${TX_ID}" "${TX_HEX}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" >/dev/null 2>&1; then return 0; fi
+      rc=$?
+      case "${rc}" in
+        13|14) TX_REASON="$(tx_sidecar_reason rust_accept "${rc}")" ;;
+        *) TX_REASON="$(tx_sidecar_reason rust_accept "${rc}")"; return 1 ;;
+      esac
+    else
+      TX_REASON=rust_accept_rpc_failed
     fi
     sleep 1
   done
-  TX_REASON=rust_accept_pending_timeout
+  TX_REASON="${TX_REASON:-rust_accept_pending_timeout}"
   return 1
 }
 write_outputs() {
@@ -523,6 +599,90 @@ else:
 with open(e["LEGACY_SCHEMA_MARKER_JSON"], "w", encoding="utf-8") as f:
     json.dump(legacy_schema_marker, f, indent=2, sort_keys=True)
     f.write("\n")
+PY
+}
+check_tx_report() {
+  local report="$1"
+  python3 - "${report}" "${RUBIN_PROCESS_ARTIFACT_ROOT}" "${TX_ID}" "${TX_HEX}" "${GO_RPC_ADDR}" "${RUST_RPC_ADDR}" "${GO_SUBMIT_STATUS_JSON}" "${GO_SUBMIT_GET_TX_JSON}" "${RUST_STATUS_JSON}" "${RUST_GET_TX_JSON}" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+report_path, artifact_root, txid, txhex, go_rpc, rust_rpc, go_status, go_get, rust_status, rust_get = sys.argv[1:11]
+MAX_TX_HEX_CHARS = 20000
+
+def fail(message: str) -> None:
+    print(f"FAIL: tx report self-validation: {message}", file=sys.stderr)
+    sys.exit(1)
+
+def req(ok: bool, message: str) -> None:
+    if not ok:
+        fail(message)
+
+def load_json(path: str, label: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as exc:
+        fail(f"{label} read failed: {exc}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        fail(f"{label} malformed JSON: {exc}")
+    req(isinstance(data, dict), f"{label} root is not an object")
+    return data
+
+def exact_object(data: object, keys: set[str], label: str) -> dict:
+    req(isinstance(data, dict), f"{label} is not an object")
+    req(set(data) == keys, f"{label} keys mismatch: {sorted(data)}")
+    return data
+
+def inside_artifact(path_value: object, expected: str, label: str) -> None:
+    req(isinstance(path_value, str) and path_value == expected, f"{label} path mismatch")
+    path = Path(path_value)
+    root = Path(artifact_root)
+    req(path.is_file(), f"{label} file is missing")
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        fail(f"{label} is outside artifact root")
+
+def endpoint(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    host, sep, port = value.partition(":")
+    return sep == ":" and host == "127.0.0.1" and port.isdigit() and 1 <= len(port) <= 5 and 1 <= int(port) <= 65535
+
+def tx_sidecars(status_path: str, get_path: str, label: str) -> None:
+    status = load_json(status_path, f"{label}.tx_status")
+    got = load_json(get_path, f"{label}.get_tx")
+    req(set(status) == {"status", "txid"}, f"{label}.tx_status keys mismatch: {sorted(status)}")
+    req(status.get("status") == "pending", f"{label}.tx_status is not pending")
+    req(status.get("txid") == txid, f"{label}.tx_status txid mismatch")
+    req(set(got) == {"found", "raw_hex", "txid"}, f"{label}.get_tx keys mismatch: {sorted(got)}")
+    req(got.get("found") is True, f"{label}.get_tx did not find tx")
+    req(got.get("txid") == txid, f"{label}.get_tx txid mismatch")
+    req(got.get("raw_hex") == txhex, f"{label}.get_tx raw_hex mismatch")
+
+req(re.fullmatch(r"[0-9a-f]{64}", txid) is not None, "txid is malformed")
+req(isinstance(txhex, str) and 2 <= len(txhex) <= MAX_TX_HEX_CHARS and len(txhex) % 2 == 0 and re.fullmatch(r"[0-9a-f]+", txhex), "tx_hex is malformed or unbounded")
+report = load_json(report_path, "report")
+req(report.get("scenario") == "mixed_client_go_submit_rust_accept", f"scenario mismatch: {report.get('scenario')!r}")
+req(report.get("verdict") == "PASS", f"verdict mismatch: {report.get('verdict')!r}")
+req(report.get("artifact_root") == artifact_root, "artifact_root mismatch")
+tx_path = exact_object(report.get("tx_path"), {"submitted_at", "observed_at", "tx_id"}, "tx_path")
+req(tx_path == {"submitted_at": "node-go", "observed_at": ["node-rust"], "tx_id": txid}, "tx_path identity mismatch")
+go_submit = exact_object(report.get("go_submit"), {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"}, "go_submit")
+rust_accept = exact_object(report.get("rust_accept"), {"get_tx_path", "raw_hex", "rpc_endpoint", "tx_status_path", "txid"}, "rust_accept")
+req(endpoint(go_submit.get("rpc_endpoint")) and go_submit["rpc_endpoint"] == go_rpc, "go_submit endpoint mismatch")
+req(endpoint(rust_accept.get("rpc_endpoint")) and rust_accept["rpc_endpoint"] == rust_rpc, "rust_accept endpoint mismatch")
+req(go_submit.get("txid") == txid and rust_accept.get("txid") == txid, "tx report txid mismatch")
+req(go_submit.get("tx_hex") == txhex and rust_accept.get("raw_hex") == txhex, "tx report raw transaction mismatch")
+inside_artifact(go_submit.get("tx_status_path"), go_status, "go_submit.tx_status")
+inside_artifact(go_submit.get("get_tx_path"), go_get, "go_submit.get_tx")
+inside_artifact(rust_accept.get("tx_status_path"), rust_status, "rust_accept.tx_status")
+inside_artifact(rust_accept.get("get_tx_path"), rust_get, "rust_accept.get_tx")
+tx_sidecars(go_status, go_get, "go_submit")
+tx_sidecars(rust_status, rust_get, "rust_accept")
 PY
 }
 finish_no_data() { local reason="$1"; write_outputs "NO_DATA" "${reason}" || { echo "FAIL_REPORT_WRITE_FAILED: ${reason}" >&2; exit 1; }; run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2 || { echo "FAIL_REPORT_VALIDATION_FAILED: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }; echo "NO_DATA: ${reason}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" >&2; exit 1; }
@@ -632,7 +792,11 @@ write_outputs "PASS" || { REPORT_JSON="${FINAL_REPORT_JSON}"; finish_no_data "pa
 if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "legacy_schema_marker_validation_failed"
 fi
-if (( TX_PATH_MODE == 0 )); then
+if (( TX_PATH_MODE == 1 )); then
+  if ! check_err="$(check_tx_report "${PASS_REPORT_JSON}" 2>&1)"; then
+    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "tx_report_self_validation_$(check_report_reason_token <<<"${check_err}")"
+  fi
+else
   if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
     rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
   fi
