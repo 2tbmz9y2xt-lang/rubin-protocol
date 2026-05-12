@@ -326,7 +326,7 @@ label_rules = [
     ("did not find tx", "not_found"),
     ("raw_hex mismatch", "raw_hex_mismatch"),
 ]
-for label, text in re.findall(r"tx report self-validation: ([A-Za-z0-9_.]+) ([^\n]+)", msg):
+for label, text in re.findall(r"(?:tx report self-validation: )?([A-Za-z0-9_.]+) ([^\n]+)", msg):
     safe_label = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_").lower()
     for needle, token in label_rules:
         if needle in text:
@@ -546,6 +546,8 @@ tx_sidecar_reason() {
     15) printf '%s\n' "${label}_get_txid_mismatch" ;;
     16) printf '%s\n' "${label}_raw_hex_mismatch" ;;
     17) printf '%s\n' "${label}_sidecar_read_failed" ;;
+    18) printf '%s\n' "${label}_status_keys_mismatch" ;;
+    19) printf '%s\n' "${label}_get_tx_keys_mismatch" ;;
     *) printf '%s\n' "${label}_identity_unverified" ;;
   esac
 }
@@ -575,6 +577,10 @@ def load_json(path: str, kind: str) -> dict:
 
 status = load_json(status_path, "tx_status")
 got = load_json(get_path, "get_tx")
+if set(status) != {"status", "txid"}:
+    fail(18, f"tx_status_keys_mismatch: {sorted(status)}")
+if set(got) != {"found", "raw_hex", "txid"}:
+    fail(19, f"get_tx_keys_mismatch: {sorted(got)}")
 status_txid = status.get("txid")
 status_value = status.get("status")
 if status_value != "pending":
