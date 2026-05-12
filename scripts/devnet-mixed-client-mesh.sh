@@ -774,10 +774,19 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
 	' "${KEYGEN_JSON}" <<<"${keygen_public_json}" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_write_failed || { restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }; keygen_public_json=""; restore_xtrace_after_secret "${xtrace_was_enabled}"; return 1; }
   keygen_public_json=""
   restore_xtrace_after_secret "${xtrace_was_enabled}"
-  rm -f -- "${KEYGEN_GO}" || { cleanup_tx_from_key_file_for_failure go_submit_keygen_cleanup_failed || return 1; return 1; }
+  if ! rm -f -- "${KEYGEN_GO}"; then
+    cleanup_tx_from_key_file_for_failure go_submit_keygen_cleanup_failed || return 1
+    return 1
+  fi
   echo "Mining mature chainstate for Go-submit -> Rust-accept path" >&2
-  "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { cleanup_tx_from_key_file_for_failure go_submit_mine_failed || return 1; return 1; }
-  cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { cleanup_tx_from_key_file_for_failure go_submit_chainstate_copy_failed || return 1; return 1; }
+  if ! "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1; then
+    cleanup_tx_from_key_file_for_failure go_submit_mine_failed || return 1
+    return 1
+  fi
+  if ! cp -R -- "${GO_DIR}/." "${RUST_DIR}/"; then
+    cleanup_tx_from_key_file_for_failure go_submit_chainstate_copy_failed || return 1
+    return 1
+  fi
 }
 submit_go_tx() {
   local rc status=0 cleanup_status=0 err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-submit.err" xtrace_was_enabled=0

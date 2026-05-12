@@ -157,7 +157,7 @@ func TestRunRejectsMissingRequiredFlags(t *testing.T) {
 	if code := run([]string{}, &stdout, &stderr); code != 2 {
 		t.Fatalf("missing from-key exit=%d", code)
 	}
-	if !strings.Contains(stderr.String(), "missing required --from-key") {
+	if stderr.String() != "missing required --from-key or --from-key-file\n" {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 
