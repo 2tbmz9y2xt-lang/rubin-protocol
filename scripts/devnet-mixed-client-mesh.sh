@@ -225,6 +225,53 @@ rubin_process_exit_trap_with_tx_secret_cleanup() {
 }
 trap rubin_process_exit_trap_with_tx_secret_cleanup EXIT
 check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
+tx_report_reason_token() {
+  local msg
+  msg="$(cat)"
+  python3 - "${msg}" <<'PY'
+import re
+import sys
+
+msg = sys.argv[1]
+rules = [
+    ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"),
+    ("txid is malformed", "txid_malformed"),
+    ("scenario mismatch", "scenario_mismatch"),
+    ("verdict mismatch", "verdict_mismatch"),
+    ("artifact_root mismatch", "artifact_root_mismatch"),
+    ("tx_path identity mismatch", "tx_path_identity_mismatch"),
+    ("go_submit endpoint mismatch", "go_submit_endpoint_mismatch"),
+    ("rust_accept endpoint mismatch", "rust_accept_endpoint_mismatch"),
+    ("tx report txid mismatch", "tx_identity_mismatch"),
+    ("tx report raw transaction mismatch", "raw_tx_mismatch"),
+]
+for needle, token in rules:
+    if needle in msg:
+        print(token)
+        sys.exit(0)
+label_rules = [
+    ("root is not an object", "root_invalid"),
+    ("malformed JSON", "malformed_json"),
+    ("read failed", "read_failed"),
+    ("is not an object", "object_invalid"),
+    ("keys mismatch", "keys_mismatch"),
+    ("path mismatch", "path_mismatch"),
+    ("file is missing", "file_missing"),
+    ("is outside artifact root", "outside_artifact_root"),
+    ("is not pending", "not_pending"),
+    ("txid mismatch", "txid_mismatch"),
+    ("did not find tx", "not_found"),
+    ("raw_hex mismatch", "raw_hex_mismatch"),
+]
+for label, text in re.findall(r"tx report self-validation: ([A-Za-z0-9_.]+) ([^\\n]+)", msg):
+    safe_label = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_").lower()
+    for needle, token in label_rules:
+        if needle in text:
+            print(f"{safe_label}_{token}")
+            sys.exit(0)
+print("unclassified")
+PY
+}
 rpc_json() {
   local method="$1" addr="$2" path="$3"
   python3 - "${method}" "${addr}" "${path}" <<'PY'
@@ -794,7 +841,7 @@ if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
 fi
 if (( TX_PATH_MODE == 1 )); then
   if ! check_err="$(check_tx_report "${PASS_REPORT_JSON}" 2>&1)"; then
-    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "tx_report_self_validation_$(check_report_reason_token <<<"${check_err}")"
+    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "tx_report_self_validation_$(tx_report_reason_token <<<"${check_err}")"
   fi
 else
   if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
