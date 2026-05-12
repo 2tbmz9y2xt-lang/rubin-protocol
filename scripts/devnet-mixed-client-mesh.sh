@@ -138,7 +138,7 @@ def peers(addr: str) -> dict:
         data = http_json(f"http://{addr}/peers", "live peer snapshot exceeds devnet report maximum", f"live peer snapshot malformed JSON for {addr}")
     except (urllib.error.URLError, TimeoutError, socket.timeout):
         return None
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         fail(f"live peer snapshot malformed JSON for {addr}: {exc}")
     req(isinstance(data, dict), f"live peer snapshot malformed JSON for {addr}")
     return data
@@ -158,7 +158,7 @@ def live_tx_pending_found(label: str, addr: str, txid: str, txhex: str) -> None:
             if status_value == "pending":
                 try:
                     got = http_json(f"http://{addr}/get_tx?txid={txid}", f"{label}_rpc_body_oversized", f"{label}_malformed_rpc_body")
-                except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError):
                     fail(f"{label}_malformed_rpc_body")
                 except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, socket.timeout):
                     fail(f"{label}_rpc_failed")
@@ -168,7 +168,7 @@ def live_tx_pending_found(label: str, addr: str, txid: str, txhex: str) -> None:
                 req(got.get("found") is True, f"{label}_get_tx_missing")
                 req(got.get("txid") == txid and got.get("raw_hex") == txhex, f"{label}_wrong_tx_identity")
                 return
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError):
             fail(f"{label}_malformed_rpc_body")
         except urllib.error.HTTPError:
             pass
@@ -441,7 +441,7 @@ with open(sys.argv[1], encoding="utf-8") as f:
         if not line: continue
         if not line.startswith("{"): sys.exit(2)
         try: ev = json.loads(line)
-        except json.JSONDecodeError: sys.exit(2)
+        except (json.JSONDecodeError, RecursionError, ValueError): sys.exit(2)
         if ev.get("reason") != "compiler-artifact": continue
         target = ev.get("target") or {}
         if target.get("name") == "rubin-node" and "bin" in (target.get("kind") or []) and ev.get("executable"): selected = ev["executable"]
@@ -543,7 +543,7 @@ import sys
 
 try:
     data = json.loads(sys.argv[1])
-except json.JSONDecodeError:
+except (json.JSONDecodeError, RecursionError, ValueError):
     raise SystemExit(1)
 if data.get("ok") is not True:
     raise SystemExit(1)
@@ -614,7 +614,7 @@ try:
         status = json.load(f)
     with open(get_path, encoding="utf-8") as f:
         got = json.load(f)
-except json.JSONDecodeError:
+except (json.JSONDecodeError, RecursionError, ValueError):
     raise SystemExit(13)
 except UnicodeDecodeError:
     raise SystemExit(13)
@@ -688,6 +688,8 @@ while time.monotonic() < deadline:
                 raise SystemExit(13)
             except UnicodeDecodeError:
                 raise SystemExit(13)
+            except RecursionError:
+                raise SystemExit(13)
             except ValueError:
                 raise SystemExit(13)
             except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, socket.timeout):
@@ -710,6 +712,8 @@ while time.monotonic() < deadline:
     except json.JSONDecodeError:
         raise SystemExit(13)
     except UnicodeDecodeError:
+        raise SystemExit(13)
+    except RecursionError:
         raise SystemExit(13)
     except ValueError:
         raise SystemExit(13)
@@ -748,7 +752,7 @@ def read_json(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return {"count": 0, "peers": []}
 nodes = []
 for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_key, argv_key in (
@@ -857,7 +861,7 @@ import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     try:
         data = json.load(f)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         sys.exit(4)
 if not isinstance(data, dict):
     sys.exit(5)
