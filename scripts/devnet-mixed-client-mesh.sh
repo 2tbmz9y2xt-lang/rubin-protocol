@@ -157,7 +157,29 @@ def pid_argv(pid: int) -> list[str]:
         if j < 0: break
         args.append(raw[i:j].decode("utf-8", "surrogateescape")); i = j + 1
     return args
-def argv_eq(actual: list[str], expected: list[str]) -> bool: return len(actual) == len(expected) and bool(actual) and checked_path("live argv[0]", actual[0]) == checked_path("report command_argv[0]", expected[0]) and actual[1:] == expected[1:]
+def argv_eq(actual: list[str], expected: list[str], actual_label: str = "live argv", expected_label: str = "report command_argv") -> bool:
+    if len(actual) != len(expected) or not actual:
+        return False
+    if checked_path(f"{actual_label}[0]", actual[0]) != checked_path(f"{expected_label}[0]", expected[0]):
+        return False
+    path_flags = {"--datadir"}
+    i = 1
+    while i < len(expected):
+        if expected[i] in path_flags:
+            if i + 1 >= len(expected):
+                return False
+            if actual[i] != expected[i] or checked_path(f"{actual_label}[{i + 1}]", actual[i + 1]) != checked_path(f"{expected_label}[{i + 1}]", expected[i + 1]):
+                return False
+            i += 2
+            continue
+        if actual[i] != expected[i]:
+            return False
+        i += 1
+    return True
+def report_node_argv_eq(node: dict, datadir_name: str, extra: list[str]) -> bool:
+    argv = node.get("command_argv")
+    expected = [node["binary"], "--network", "devnet", "--datadir", str(Path(artifact_root_arg) / datadir_name), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + extra
+    return isinstance(argv, list) and len(argv) == len(expected) and argv_eq(argv, expected, "report command_argv", "expected command_argv")
 def lsof_lines(pid: int, state: str) -> list[str]:
     try:
         p = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", f"-sTCP:{state}", "-Fn"], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
@@ -245,7 +267,7 @@ for node in nodes:
         req(node.get(field) is True, f"{name} does not prove {field}")
 req((impls := {n["implementation"] for n in nodes}) == {"go", "rust"}, f"PASS report requires one go and one rust node, got {sorted(impls)}")
 nodes_by_impl = {node["implementation"]: node for node in nodes}
-req(nodes_by_impl["go"]["command_argv"] == [nodes_by_impl["go"]["binary"], "--network", "devnet", "--datadir", str(Path(artifact_root_arg) / "node-go"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] and nodes_by_impl["rust"]["command_argv"] == [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(Path(artifact_root_arg) / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"]], "node command_argv does not match exact launched argv")
+req(report_node_argv_eq(nodes_by_impl["go"], "node-go", []) and report_node_argv_eq(nodes_by_impl["rust"], "node-rust", ["--peer", nodes_by_impl["go"]["p2p_endpoint"]]), "node command_argv does not match exact launched argv")
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
@@ -322,7 +344,7 @@ cleanup_tx_from_key_file() {
   if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
   local secret_file="${TX_FROM_KEY_FILE:-}" secret_dir="${TX_FROM_KEY_DIR:-}" cleanup_status=0
   if [[ -n "${secret_file}" ]]; then rm -f -- "${secret_file}" || cleanup_status=$?; TX_FROM_KEY_FILE=""; fi
-  if [[ -n "${secret_dir}" ]]; then rm -f -- "${secret_dir}/from-key.hex" || cleanup_status=$?; rmdir -- "${secret_dir}" || cleanup_status=$?; TX_FROM_KEY_DIR=""; fi
+  if [[ -n "${secret_dir}" ]]; then rm -f -- "${secret_dir}/keygen-public.json" "${secret_dir}/from-key.hex" || cleanup_status=$?; rmdir -- "${secret_dir}" || cleanup_status=$?; TX_FROM_KEY_DIR=""; fi
   restore_xtrace_after_secret "${xtrace_was_enabled}"
   return "${cleanup_status}"
 }
@@ -518,16 +540,115 @@ func main() {
 }
 EOF
 }
+keygen_material_reason() {
+  case "$1" in
+    2) printf '%s\n' go_submit_keygen_stdout_too_large ;;
+    3) printf '%s\n' go_submit_keygen_material_malformed_json ;;
+    4) printf '%s\n' go_submit_keygen_material_root_invalid ;;
+    5) printf '%s\n' go_submit_keygen_material_keys_mismatch ;;
+    6) printf '%s\n' go_submit_keygen_material_string_invalid ;;
+    7) printf '%s\n' go_submit_keygen_private_path_invalid ;;
+    8) printf '%s\n' go_submit_keygen_private_path_mismatch ;;
+    9) printf '%s\n' go_submit_keygen_private_file_invalid ;;
+    10) printf '%s\n' go_submit_keygen_private_file_mode_invalid ;;
+    11) printf '%s\n' go_submit_keygen_address_malformed ;;
+    12) printf '%s\n' go_submit_keygen_from_mine_mismatch ;;
+    13) printf '%s\n' go_submit_keygen_to_matches_from ;;
+    14) printf '%s\n' go_submit_keygen_material_temp_write_failed ;;
+    15) printf '%s\n' go_submit_keygen_material_temp_cleanup_failed ;;
+    *) printf '%s\n' go_submit_keygen_material_malformed ;;
+  esac
+}
+tx_secret_tmp_parent() {
+  local parent="${1:-/tmp}"
+  [[ -n "${parent}" ]] || parent="/tmp"
+  (cd -- "${parent}" && pwd -P)
+}
+make_tx_secret_dir() {
+  local tmp_parent
+  tmp_parent="$(tx_secret_tmp_parent "${1:-/tmp}")" || return 1
+  mktemp -d "${tmp_parent%/}/rubin-txgen-from-key.XXXXXX"
+}
+keygen_material_byte_len() {
+  LC_ALL=C printf '%s' "$1" | wc -c | tr -d '[:space:]'
+}
+parse_keygen_material() {
+  local raw="$1" raw_file="${TX_FROM_KEY_DIR}/keygen-public.json" raw_bytes rc=0
+  raw_bytes="$(keygen_material_byte_len "${raw}")" || return 2
+  [[ "${raw_bytes}" =~ ^[0-9]+$ && "${raw_bytes}" -le 4096 ]] || return 2
+  (umask 077 && printf '%s' "${raw}" >"${raw_file}") || { rm -f -- "${raw_file}" 2>/dev/null || true; return 14; }
+  if python3 - "${TX_FROM_KEY_DIR}" "${raw_file}" <<'PY'
+import json
+import re
+import stat
+import sys
+from pathlib import Path
+
+expected_keys = {"private_key_file", "from_address_hex", "to_address_hex", "mine_address_hex"}
+try:
+    with open(sys.argv[2], "rb") as f:
+        raw = f.read(4097)
+except OSError:
+    sys.exit(7)
+if len(raw) > 4096:
+    sys.exit(2)
+try:
+    data = json.loads(raw.decode("utf-8"))
+except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    sys.exit(3)
+if not isinstance(data, dict):
+    sys.exit(4)
+if set(data) != expected_keys:
+    sys.exit(5)
+for value in data.values():
+    if not isinstance(value, str) or not value or "\x00" in value or any(ord(ch) < 32 for ch in value):
+        sys.exit(6)
+try:
+    secret_dir = Path(sys.argv[1]).resolve(strict=True)
+    private_path = Path(data["private_key_file"])
+    if not private_path.is_absolute():
+        sys.exit(7)
+    private_path = private_path.resolve(strict=False)
+except (OSError, RuntimeError):
+    sys.exit(7)
+if private_path != (secret_dir / "from-key.hex"):
+    sys.exit(8)
+try:
+    st = private_path.stat()
+except OSError:
+    sys.exit(9)
+if not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or st.st_size > 1_000_000:
+    sys.exit(9)
+if stat.S_IMODE(st.st_mode) != 0o600:
+    sys.exit(10)
+addr_re = re.compile(r"01[0-9a-f]{64}")
+from_addr = data["from_address_hex"]
+to_addr = data["to_address_hex"]
+mine_addr = data["mine_address_hex"]
+if not all(addr_re.fullmatch(v) for v in (from_addr, to_addr, mine_addr)):
+    sys.exit(11)
+if from_addr != mine_addr:
+    sys.exit(12)
+if to_addr == from_addr:
+    sys.exit(13)
+print(private_path)
+print(to_addr)
+print(mine_addr)
+PY
+  then rc=0; else rc=$?; fi
+  rm -f -- "${raw_file}" || return 15
+  return "${rc}"
+}
 prepare_tx_chainstate() {
-  local keygen_public_json keygen_fields_raw mine_address xtrace_was_enabled=0 tmp_parent="${TMPDIR:-/tmp}" status=0
+  local keygen_public_json keygen_fields_raw mine_address xtrace_was_enabled=0 status=0 rc=0
   TX_REASON=""
   build_go_txgen || { TX_REASON="${BUILD_REASON:-go_txgen_build_failed}"; return 1; }
   write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }
   if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
-  TX_FROM_KEY_DIR="$(mktemp -d "${tmp_parent%/}/rubin-txgen-from-key.XXXXXX")" || { restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return 1; }
+  TX_FROM_KEY_DIR="$(make_tx_secret_dir "${TMPDIR:-/tmp}")" || { restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return 1; }
   chmod 700 "${TX_FROM_KEY_DIR}" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return "${status}"; }
   keygen_public_json="$(bounded_mesh env RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_DIR}")" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_keygen_timeout || TX_REASON=go_submit_keygen_failed; return "${status}"; }
-  keygen_fields_raw="$(python3 -c $'import json\nimport sys\ntry:\n    data = json.load(sys.stdin)\nexcept (json.JSONDecodeError, UnicodeDecodeError):\n    sys.exit(1)\nfor key in ("private_key_file", "to_address_hex", "mine_address_hex"):\n    value = data.get(key) if isinstance(data, dict) else None\n    if not isinstance(value, str) or not value:\n        sys.exit(1)\n    print(value)' <<<"${keygen_public_json}")" || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed; return 1; }
+  keygen_fields_raw="$(parse_keygen_material "${keygen_public_json}")" || { rc=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON="$(keygen_material_reason "${rc}")"; return 1; }
   [[ "$(printf '%s\n' "${keygen_fields_raw}" | sed -n '$=')" == "3" ]] || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed; return 1; }
   TX_FROM_KEY_FILE="$(printf '%s\n' "${keygen_fields_raw}" | sed -n '1p')"
   TX_TO_KEY="$(printf '%s\n' "${keygen_fields_raw}" | sed -n '2p')"
