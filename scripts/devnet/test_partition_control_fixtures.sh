@@ -122,7 +122,9 @@ seed_link() {
   RUBIN_PROCESS_PROXY_TARGET_FILES=("$1")
 }
 
-PARENT="$(mktemp -d "${TMPDIR:-/tmp}/rubin partition fail closed.XXXXXX")"
+TMP_PARENT="${TMPDIR:-/tmp}"
+TMP_PARENT="$(cd -- "${TMP_PARENT}" && pwd -P)" || { echo "failed to canonicalize TMPDIR=${TMP_PARENT}" >&2; exit 1; }
+PARENT="$(mktemp -d "${TMP_PARENT}/rubin partition fail closed.XXXXXX")"
 cleanup_fixture() {
   local status=$?
   rubin_process_cleanup "${status}" || true
