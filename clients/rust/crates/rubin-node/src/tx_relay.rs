@@ -488,10 +488,7 @@ fn broadcast_inv_to_addrs(
         // report announce success without enqueueing the block inventory.
     }
     if !failures.is_empty() {
-        return Err(format!(
-            "block inventory enqueue failed: {}",
-            failures.join("; ")
-        ));
+        return Err(format!("inventory enqueue failed: {}", failures.join("; ")));
     }
     Ok(())
 }
@@ -550,7 +547,7 @@ pub fn announce_block(
 ) -> Result<(), String> {
     let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
     let hash = block_hash(&parsed.header_bytes).map_err(|err| err.to_string())?;
-    if !relay_state.block_seen.add(hash) {
+    if relay_state.block_seen.has(&hash) {
         return Ok(());
     }
     let peers = peer_manager.snapshot();
@@ -558,7 +555,7 @@ pub fn announce_block(
     if addrs.is_empty() {
         return Ok(());
     }
-    match broadcast_inv_to_addrs(
+    broadcast_inv_to_addrs(
         &[InventoryVector {
             kind: MSG_BLOCK,
             hash,
@@ -567,13 +564,9 @@ pub fn announce_block(
         &relay_state.network,
         peer_writers,
         true,
-    ) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            relay_state.block_seen.remove(&hash);
-            Err(err)
-        }
-    }
+    )?;
+    let _ = relay_state.block_seen.add(hash);
+    Ok(())
 }
 
 /// Outcome of processing a peer-relayed tx.
@@ -1042,7 +1035,7 @@ mod tests {
 
         let (relay, pm, outboxes) = block_announce_fixture(&[]);
         announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("no-peer announce");
-        assert!(relay.block_seen.has(&hash));
+        assert!(!relay.block_seen.has(&hash));
         assert!(outboxes.lock().unwrap().is_empty());
     }
 
@@ -1081,6 +1074,7 @@ mod tests {
         let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
             .expect_err("full outbox must fail block announce");
         assert!(err.contains("peer outbox full for full:8333"));
+        assert!(!relay.block_seen.has(&hash));
     }
 
     #[test]

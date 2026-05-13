@@ -80,14 +80,6 @@ impl BoundedHashSet {
         inner.items.contains_key(hash)
     }
 
-    /// Remove hash from the set. Returns `true` if it was present.
-    pub fn remove(&self, hash: &[u8; 32]) -> bool {
-        let Ok(mut inner) = self.inner.lock() else {
-            return false;
-        };
-        inner.items.remove(hash).is_some()
-    }
-
     /// Returns the current number of entries in the set.
     pub fn len(&self) -> usize {
         let Ok(inner) = self.inner.lock() else {
