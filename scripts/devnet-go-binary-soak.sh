@@ -291,9 +291,39 @@ partition_no_data() {
   return 1
 }
 build_rust_node_for_partition() {
+  local host_triple cargo_target_dir cargo_log cargo_bin rc
   echo "Building Rust rubin-node binary"
-  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- cargo build --manifest-path "${RUST_MODULE_ROOT}/Cargo.toml" -p rubin-node >/dev/null
-  cp -- "${RUST_MODULE_ROOT}/target/debug/rubin-node" "${RUST_NODE_BIN}"
+  host_triple="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')" || return 1
+  [[ -n "${host_triple}" ]] || { echo "could not derive host target triple from rustc -vV output" >&2; return 1; }
+  cargo_target_dir="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
+  cargo_log="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-cargo-build.jsonl"
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- cargo build --manifest-path "${RUST_MODULE_ROOT}/Cargo.toml" --release --locked -p rubin-node --target "${host_triple}" --target-dir "${cargo_target_dir}" --message-format=json-render-diagnostics >"${cargo_log}" || return 1
+  cargo_bin="$(python3 - "${cargo_log}" <<'PY'
+import json, sys
+selected = None
+with open(sys.argv[1], encoding="utf-8") as f:
+    for raw in f:
+        line = raw.strip()
+        if not line:
+            continue
+        if not line.startswith("{"):
+            sys.exit(2)
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            sys.exit(2)
+        if ev.get("reason") != "compiler-artifact":
+            continue
+        target = ev.get("target") or {}
+        if target.get("name") == "rubin-node" and "bin" in (target.get("kind") or []) and ev.get("executable"):
+            selected = ev["executable"]
+if selected is None:
+    sys.exit(3)
+print(selected)
+PY
+  )" || { rc=$?; [[ ${rc} -eq 2 ]] && echo "cargo build log parser failed: malformed JSON stream ${cargo_log}" >&2 || echo "cargo build log parser failed: rubin-node executable artifact missing in ${cargo_log}" >&2; return 1; }
+  [[ -x "${cargo_bin}" ]] || { echo "cargo-reported executable is not executable: ${cargo_bin}" >&2; return 1; }
+  cp -- "${cargo_bin}" "${RUST_NODE_BIN}"
   [[ -x "${RUST_NODE_BIN}" ]] || { echo "Rust rubin-node binary is missing after build" >&2; return 1; }
 }
 pid_listens_on() {
@@ -305,23 +335,23 @@ pid_listens_on() {
 start_partition_go_node() {
   local log_file="partition-node-go.log"
   GO_PARTITION_PID="" GO_PARTITION_RPC="" GO_PARTITION_P2P="" GO_PARTITION_STARTED=""
-  rubin_process_start "${log_file}" "${NODE_BIN}" --network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-go" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0
+  rubin_process_start "${log_file}" "${NODE_BIN}" --network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-go" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 || return 1
   GO_PARTITION_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 60 "${GO_PARTITION_PID}"
-  GO_PARTITION_RPC="$(rubin_process_extract_rpc_addr "${log_file}")"
-  GO_PARTITION_P2P="$(p2p_addr_for_pid "${GO_PARTITION_PID}" "${GO_PARTITION_RPC}" 30)"
-  rubin_process_wait_for_rpc_ready "${GO_PARTITION_RPC}" 30
+  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 60 "${GO_PARTITION_PID}" || return 1
+  GO_PARTITION_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || return 1
+  GO_PARTITION_P2P="$(p2p_addr_for_pid "${GO_PARTITION_PID}" "${GO_PARTITION_RPC}" 30)" || return 1
+  rubin_process_wait_for_rpc_ready "${GO_PARTITION_RPC}" 30 || return 1
   GO_PARTITION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 start_partition_rust_node() {
   local log_file="partition-node-rust.log" peer_addr="$1"
   RUST_PARTITION_PID="" RUST_PARTITION_RPC="" RUST_PARTITION_P2P="" RUST_PARTITION_STARTED=""
-  rubin_process_start "${log_file}" "${RUST_NODE_BIN}" --network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-rust" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}"
+  rubin_process_start "${log_file}" "${RUST_NODE_BIN}" --network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-rust" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}" || return 1
   RUST_PARTITION_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 60 "${RUST_PARTITION_PID}"
-  RUST_PARTITION_RPC="$(rubin_process_extract_rpc_addr "${log_file}")"
-  RUST_PARTITION_P2P="$(p2p_addr_for_pid "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" 30)"
-  rubin_process_wait_for_rpc_ready "${RUST_PARTITION_RPC}" 30
+  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 60 "${RUST_PARTITION_PID}" || return 1
+  RUST_PARTITION_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || return 1
+  RUST_PARTITION_P2P="$(p2p_addr_for_pid "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" 30)" || return 1
+  rubin_process_wait_for_rpc_ready "${RUST_PARTITION_RPC}" 30 || return 1
   RUST_PARTITION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 verify_partition_process_identity() {
@@ -336,6 +366,7 @@ capture_peer_snapshot() {
   local impl="$1" rpc_addr="$2" phase="$3" out="$4" tmp raw
   tmp="${out}.tmp"
   raw="${out}.raw"
+  rm -f -- "${out}" "${tmp}" "${raw}"
   rpc_json GET "${rpc_addr}" /peers >"${raw}" || { rm -f -- "${raw}" "${tmp}"; return 1; }
   python3 - "${impl}" "${rpc_addr}" "${phase}" "${raw}" "${tmp}" <<'PY'
 import json, os, sys, time
@@ -363,7 +394,7 @@ with open(out_path, "w", encoding="utf-8") as f:
     json.dump(out, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
-  mv -- "${tmp}" "${out}"
+  mv -- "${tmp}" "${out}" || { rm -f -- "${raw}" "${tmp}" "${out}"; return 1; }
   rm -f -- "${raw}"
 }
 peer_snapshot_has_complete() {
@@ -393,11 +424,14 @@ wait_peer_present() {
   return 1
 }
 wait_peer_absent() {
-  local label="$1" impl="$2" rpc_addr="$3" expected_addr="$4" out="$5" timeout="$6" deadline
+  local label="$1" impl="$2" rpc_addr="$3" expected_addr="$4" out="$5" timeout="$6" deadline rc
   deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
-    if capture_peer_snapshot "${impl}" "${rpc_addr}" "${label}" "${out}" 2>/dev/null && ! peer_snapshot_has_complete "${out}" "${expected_addr}"; then
-      return 0
+    if capture_peer_snapshot "${impl}" "${rpc_addr}" "${label}" "${out}" 2>/dev/null; then
+      rc=0
+      peer_snapshot_has_complete "${out}" "${expected_addr}" || rc=$?
+      [[ "${rc}" == "1" ]] && return 0
+      (( rc == 0 )) || { echo "invalid ${label} peer snapshot: ${out}" >&2; return 1; }
     fi
     sleep 1
   done
