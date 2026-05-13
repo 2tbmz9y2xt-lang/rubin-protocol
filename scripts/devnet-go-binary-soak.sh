@@ -363,25 +363,69 @@ verify_partition_process_identity() {
   pid_listens_on "${pid}" "${p2p_addr}" || { echo "${label} p2p endpoint is not pid-owned: ${p2p_addr}" >&2; return 1; }
 }
 capture_peer_snapshot() {
-  local impl="$1" rpc_addr="$2" phase="$3" out="$4" tmp raw
+  local impl="$1" rpc_addr="$2" phase="$3" out="$4" tmp raw rc=0
   tmp="${out}.tmp"
   raw="${out}.raw"
+  PEER_SNAPSHOT_REASON=""
   rm -f -- "${out}" "${tmp}" "${raw}"
-  rpc_json GET "${rpc_addr}" /peers >"${raw}" || { rm -f -- "${raw}" "${tmp}"; return 1; }
-  python3 - "${impl}" "${rpc_addr}" "${phase}" "${raw}" "${tmp}" <<'PY'
-import json, os, sys, time
+  rpc_json GET "${rpc_addr}" /peers >"${raw}" || rc=$?
+  if (( rc != 0 )); then
+    [[ "${rc}" == "22" ]] && PEER_SNAPSHOT_REASON="http_error" || PEER_SNAPSHOT_REASON="rpc_failed"
+    rm -f -- "${raw}" "${tmp}"
+    return 2
+  fi
+  python3 - "${impl}" "${rpc_addr}" "${phase}" "${raw}" "${tmp}" <<'PY' || rc=$?
+import json, sys, time
 impl, rpc_addr, phase, raw_path, out_path = sys.argv[1:6]
-with open(raw_path, encoding="utf-8") as f:
-    data = json.load(f)
+
+def fail(reason, detail):
+    print(f"{reason}: {detail}", file=sys.stderr)
+    codes = {
+        "json_malformed": 2,
+        "shape_mismatch": 3,
+        "write_failed": 4,
+    }
+    sys.exit(codes.get(reason, 5))
+
+try:
+    with open(raw_path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    fail("json_malformed", exc)
+
 if not isinstance(data, dict):
-    raise SystemExit("peer response root is not an object")
+    fail("shape_mismatch", "peer response root is not an object")
+allowed_response_keys = {"count", "peers"}
+if set(data) != allowed_response_keys:
+    fail("shape_mismatch", f"peer response keys mismatch: {sorted(data)}")
 peers = data.get("peers")
 count = data.get("count")
 if not isinstance(count, int) or isinstance(count, bool) or not isinstance(peers, list) or count != len(peers):
-    raise SystemExit("peer response count/peers shape mismatch")
+    fail("shape_mismatch", "peer response count/peers shape mismatch")
+allowed_peer_keys = {
+    "addr",
+    "ban_score",
+    "best_height",
+    "da_mempool_size",
+    "handshake_complete",
+    "last_error",
+    "protocol_version",
+    "pruned_below_height",
+    "tx_relay",
+}
 for peer in peers:
-    if not isinstance(peer, dict) or not isinstance(peer.get("addr"), str) or not isinstance(peer.get("handshake_complete"), bool):
-        raise SystemExit("peer response entry shape mismatch")
+    if not isinstance(peer, dict):
+        fail("shape_mismatch", "peer response entry is not an object")
+    if set(peer) != allowed_peer_keys:
+        fail("shape_mismatch", f"peer entry keys mismatch: {sorted(peer)}")
+    if not isinstance(peer["addr"], str) or not isinstance(peer["last_error"], str):
+        fail("shape_mismatch", "peer response string field mismatch")
+    for key in ("ban_score", "best_height", "da_mempool_size", "protocol_version", "pruned_below_height"):
+        value = peer[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            fail("shape_mismatch", f"peer response integer field mismatch: {key}")
+    if not isinstance(peer["handshake_complete"], bool) or not isinstance(peer["tx_relay"], bool):
+        fail("shape_mismatch", "peer response boolean field mismatch")
 out = {
     "captured_at_unix_ns": time.time_ns(),
     "implementation": impl,
@@ -390,19 +434,35 @@ out = {
     "rpc_endpoint": rpc_addr,
     "response": data,
 }
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(out, f, indent=2, sort_keys=True)
-    f.write("\n")
+try:
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, sort_keys=True)
+        f.write("\n")
+except OSError as exc:
+    fail("write_failed", exc)
 PY
-  mv -- "${tmp}" "${out}" || { rm -f -- "${raw}" "${tmp}" "${out}"; return 1; }
+  if (( rc != 0 )); then
+    case "${rc}" in
+      2) PEER_SNAPSHOT_REASON="json_malformed" ;;
+      3) PEER_SNAPSHOT_REASON="shape_mismatch" ;;
+      4) PEER_SNAPSHOT_REASON="write_failed" ;;
+      *) PEER_SNAPSHOT_REASON="parser_failed" ;;
+    esac
+    rm -f -- "${raw}" "${tmp}" "${out}"
+    return 2
+  fi
+  mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON="publish_failed"; rm -f -- "${raw}" "${tmp}" "${out}"; return 2; }
   rm -f -- "${raw}"
 }
 peer_snapshot_has_complete() {
   local snapshot="$1" expected_addr="$2"
   python3 - "${snapshot}" "${expected_addr}" <<'PY'
 import json, sys
-with open(sys.argv[1], encoding="utf-8") as f:
-    data = json.load(f)
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+    sys.exit(2)
 expected = sys.argv[2]
 resp = data.get("response") if isinstance(data, dict) else None
 peers = resp.get("peers") if isinstance(resp, dict) else None
@@ -411,12 +471,25 @@ if not isinstance(peers, list):
 sys.exit(0 if any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers) else 1)
 PY
 }
+peer_snapshot_no_data_reason() {
+  local label="$1" reason="${PEER_SNAPSHOT_REASON:-peer_snapshot_failed}"
+  label="${label//-/_}"
+  printf '%s_peer_snapshot_%s\n' "${label}" "${reason}"
+}
 wait_peer_present() {
-  local label="$1" impl="$2" rpc_addr="$3" expected_addr="$4" out="$5" timeout="$6" deadline
+  local label="$1" impl="$2" rpc_addr="$3" expected_addr="$4" out="$5" timeout="$6" deadline rc
   deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
-    if capture_peer_snapshot "${impl}" "${rpc_addr}" "${label}" "${out}" 2>/dev/null && peer_snapshot_has_complete "${out}" "${expected_addr}"; then
-      return 0
+    if capture_peer_snapshot "${impl}" "${rpc_addr}" "${label}" "${out}"; then
+      rc=0
+      peer_snapshot_has_complete "${out}" "${expected_addr}" || rc=$?
+      (( rc == 0 )) && return 0
+      (( rc == 2 )) && { PEER_SNAPSHOT_REASON="sidecar_malformed"; echo "invalid ${label} peer snapshot: ${out}" >&2; return 2; }
+    else
+      rc=$?
+      (( rc == 2 )) || PEER_SNAPSHOT_REASON="snapshot_failed"
+      echo "${label} peer snapshot failed: reason=${PEER_SNAPSHOT_REASON:-peer_snapshot_failed}" >&2
+      return 2
     fi
     sleep 1
   done
@@ -427,16 +500,37 @@ wait_peer_absent() {
   local label="$1" impl="$2" rpc_addr="$3" expected_addr="$4" out="$5" timeout="$6" deadline rc
   deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
-    if capture_peer_snapshot "${impl}" "${rpc_addr}" "${label}" "${out}" 2>/dev/null; then
+    if capture_peer_snapshot "${impl}" "${rpc_addr}" "${label}" "${out}"; then
       rc=0
       peer_snapshot_has_complete "${out}" "${expected_addr}" || rc=$?
       [[ "${rc}" == "1" ]] && return 0
-      (( rc == 0 )) || { echo "invalid ${label} peer snapshot: ${out}" >&2; return 1; }
+      (( rc == 0 )) || { PEER_SNAPSHOT_REASON="sidecar_malformed"; echo "invalid ${label} peer snapshot: ${out}" >&2; return 2; }
+    else
+      rc=$?
+      (( rc == 2 )) || PEER_SNAPSHOT_REASON="snapshot_failed"
+      echo "${label} peer snapshot failed: reason=${PEER_SNAPSHOT_REASON:-peer_snapshot_failed}" >&2
+      return 2
     fi
     sleep 1
   done
   echo "timeout waiting for ${label} peer ${expected_addr} to disappear" >&2
   return 1
+}
+require_peer_present() {
+  local missing_reason="$1" label="$2" rc=0
+  shift 2
+  wait_peer_present "${label}" "$@" || rc=$?
+  (( rc == 0 )) && return 0
+  (( rc == 2 )) && partition_no_data "$(peer_snapshot_no_data_reason "${label}")"
+  partition_no_data "${missing_reason}"
+}
+require_peer_absent() {
+  local unchanged_reason="$1" label="$2" rc=0
+  shift 2
+  wait_peer_absent "${label}" "$@" || rc=$?
+  (( rc == 0 )) && return 0
+  (( rc == 2 )) && partition_no_data "$(peer_snapshot_no_data_reason "${label}")"
+  partition_no_data "${unchanged_reason}"
 }
 established_local_to_remote() {
   local pid="$1" remote="$2" raw status=0
@@ -550,18 +644,18 @@ run_mixed_partition_heal() {
   start_proxy "partition-proxy.log" "${proxy_target}" || partition_no_data proxy_not_ready
   start_partition_rust_node "${PROXY_ADDR}" || partition_no_data rust_process_not_ready
   verify_partition_process_identity node-rust "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" "${RUST_PARTITION_P2P}" "${RUST_NODE_BIN}" || partition_no_data rust_process_identity_unverified
-  wait_peer_present pre-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PRE_RUST_PEERS}" 90 || partition_no_data pre_partition_source_peer_missing
+  require_peer_present pre_partition_source_peer_missing pre-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PRE_RUST_PEERS}" 90
   GO_PROXY_LOCAL_PRE="$(wait_established_local_to_remote proxy-pre "${PROXY_PID}" "${GO_PARTITION_P2P}" 30)" || partition_no_data pre_partition_proxy_target_link_missing
-  wait_peer_present pre-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PRE_GO_PEERS}" 30 || partition_no_data pre_partition_target_peer_missing
+  require_peer_present pre_partition_target_peer_missing pre-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PRE_GO_PEERS}" 30
   printf 'drop\n' >"${proxy_target}"
-  wait_peer_absent partition-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PARTITION_RUST_PEERS}" 90 || partition_no_data partition_source_peer_unchanged
-  wait_peer_absent partition-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PARTITION_GO_PEERS}" 30 || partition_no_data partition_target_peer_unchanged
+  require_peer_absent partition_source_peer_unchanged partition-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PARTITION_RUST_PEERS}" 90
+  require_peer_absent partition_target_peer_unchanged partition-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PARTITION_GO_PEERS}" 30
   wait_no_established_to_remote rust-partition "${RUST_PARTITION_PID}" "${PROXY_ADDR}" 30 || partition_no_data partition_source_tcp_link_unchanged
   wait_no_established_to_remote proxy-partition "${PROXY_PID}" "${GO_PARTITION_P2P}" 30 || partition_no_data partition_proxy_target_link_unchanged
   printf '%s\n' "${GO_PARTITION_P2P}" >"${proxy_target}"
-  wait_peer_present heal-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${HEAL_RUST_PEERS}" 120 || partition_no_data heal_source_peer_missing
+  require_peer_present heal_source_peer_missing heal-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${HEAL_RUST_PEERS}" 120
   GO_PROXY_LOCAL_HEAL="$(wait_established_local_to_remote proxy-heal "${PROXY_PID}" "${GO_PARTITION_P2P}" 60)" || partition_no_data heal_proxy_target_link_missing
-  wait_peer_present heal-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_HEAL}" "${HEAL_GO_PEERS}" 60 || partition_no_data heal_target_peer_missing
+  require_peer_present heal_target_peer_missing heal-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_HEAL}" "${HEAL_GO_PEERS}" 60
   verify_partition_process_identity node-go-final "${GO_PARTITION_PID}" "${GO_PARTITION_RPC}" "${GO_PARTITION_P2P}" "${NODE_BIN}" || partition_no_data go_final_process_identity_unverified
   verify_partition_process_identity node-rust-final "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" "${RUST_PARTITION_P2P}" "${RUST_NODE_BIN}" || partition_no_data rust_final_process_identity_unverified
   write_partition_report || partition_no_data report_write_failed
