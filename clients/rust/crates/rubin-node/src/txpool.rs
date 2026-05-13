@@ -4325,6 +4325,10 @@ mod tests {
             },
         );
         let next_heap_id_before = pool.next_heap_id;
+        let survivor_heap_seq_before = *pool
+            .heap_seqs
+            .get(&survivor_txid)
+            .expect("survivor heap sequence before eviction");
 
         pool.evict_txids(&[removed_txid]);
         pool.evict_txids(&[removed_txid, [0xFF; 32]]);
@@ -4351,6 +4355,11 @@ mod tests {
             "survivor source preserved"
         );
         assert_eq!(
+            pool.heap_seqs.get(&survivor_txid),
+            Some(&survivor_heap_seq_before),
+            "survivor heap sequence preserved before lazy worst lookup"
+        );
+        assert_eq!(
             pool.next_heap_id, next_heap_id_before,
             "remove/no-op paths must not allocate heap ids"
         );
@@ -4358,6 +4367,10 @@ mod tests {
             pool.current_worst_txid(),
             Some(survivor_txid),
             "stale removed heap entries are hidden by heap_seqs"
+        );
+        assert_eq!(
+            pool.next_heap_id, next_heap_id_before,
+            "worst lookup must not repair accounting after remove/no-op"
         );
     }
 
