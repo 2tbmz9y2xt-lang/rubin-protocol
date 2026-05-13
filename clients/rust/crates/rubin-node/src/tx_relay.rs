@@ -316,6 +316,7 @@ impl PeerOutbox {
 /// Shared relay state passed through the P2P service.
 pub struct TxRelayState {
     pub tx_seen: BoundedHashSet,
+    pub block_seen: BoundedHashSet,
     pub relay_pool: RelayTxPool,
     pub tx_relay_fanout: usize,
     pub network: String,
@@ -335,6 +336,7 @@ impl TxRelayState {
     pub fn new_with_network(network: &str) -> Self {
         Self {
             tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            block_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY),
             relay_pool: RelayTxPool::new(),
             tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
             network: network.to_string(),
@@ -541,6 +543,9 @@ pub fn announce_block(
 ) -> Result<(), String> {
     let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
     let hash = block_hash(&parsed.header_bytes).map_err(|err| err.to_string())?;
+    if !relay_state.block_seen.add(hash) {
+        return Ok(());
+    }
     let peers = peer_manager.snapshot();
     let addrs: Vec<String> = peers.iter().map(|p| p.addr.clone()).collect();
     if addrs.is_empty() {
@@ -1014,6 +1019,30 @@ mod tests {
     }
 
     #[test]
+    fn announce_block_deduplicates_seen_block_inventory() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-a:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-a:8333".to_string(), PeerOutbox::default());
+
+        let block = crate::genesis::devnet_genesis_block_bytes();
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("first announce");
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("duplicate announce");
+
+        let boxes = outboxes.lock().unwrap();
+        assert_eq!(boxes["peer-a:8333"].len(), 1);
+    }
+
+    #[test]
     fn announce_block_errors_when_connected_peer_has_no_outbox() {
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
@@ -1288,6 +1317,7 @@ mod tests {
         };
         let relay = TxRelayState {
             tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            block_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY),
             relay_pool: RelayTxPool::new_with_limit(1),
             tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
             network: "devnet".to_string(),
@@ -1324,6 +1354,7 @@ mod tests {
         let existing_txid = [0xEE; 32];
         let relay = TxRelayState {
             tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            block_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY),
             relay_pool: RelayTxPool::new_with_limit(1),
             tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
             network: "devnet".to_string(),
