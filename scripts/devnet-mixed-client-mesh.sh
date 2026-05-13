@@ -947,6 +947,20 @@ func main() {
 }
 EOF
 }
+block_inclusion_failure_reason() {
+  local label="$1" output="$2"
+  case "${output}" in
+    *"read block response:"*) printf '%s\n' "${label}_block_response_read_failed" ;;
+    *"decode block response:"*) printf '%s\n' "${label}_block_response_malformed_json" ;;
+    *"block response height/hash/canonical mismatch"*) printf '%s\n' "${label}_block_sidecar_mismatch" ;;
+    *"decode tx_hex:"*|*"parse tx_hex failed"*) printf '%s\n' "${label}_tx_hex_parse_failed" ;;
+    *"tx_hex txid mismatch"*) printf '%s\n' "${label}_txid_mismatch" ;;
+    *"decode block_hex:"*|*"parse block_hex failed:"*) printf '%s\n' "${label}_block_hex_parse_failed" ;;
+    *"parsed block hash mismatch"*) printf '%s\n' "${label}_block_hash_mismatch" ;;
+    *"submitted txid missing from parsed block txids"*) printf '%s\n' "${label}_block_missing_submitted_txid" ;;
+    *) printf '%s\n' "${label}_inclusion_failed" ;;
+  esac
+}
 verify_block_inclusion() {
   local label="$1" block_path="$2" height="$3" block_hash="$4" output
   [[ -s "${BLOCK_CHECK_GO}" ]] || write_block_check_go || { TX_REASON="${label}_block_check_write_failed"; return 1; }
@@ -956,7 +970,7 @@ verify_block_inclusion() {
     if [[ "${status}" -eq 142 ]]; then
       TX_REASON="${label}_inclusion_timeout"
     else
-      TX_REASON="${label}_inclusion_failed"
+      TX_REASON="$(block_inclusion_failure_reason "${label}" "${output}")"
     fi
     return 1
   }
