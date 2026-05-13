@@ -3344,6 +3344,112 @@ mod tests {
     }
 
     #[test]
+    fn mine_next_returns_422_when_miner_rejects_block() {
+        let (state, dir) = build_state_with_live_mining(true);
+        {
+            let mut engine = state.sync_engine.lock().expect("sync engine");
+            engine.chain_state.has_tip = true;
+            engine.chain_state.height = u64::MAX;
+        }
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+
+        assert_eq!(response.status, 422);
+        let json = response_json(&response);
+        assert_eq!(json["mined"].as_bool(), Some(false));
+        assert_eq!(json["error"].as_str(), Some("height overflow"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_skips_announce_when_rpc_block_store_missing() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        state.block_store = None;
+        let announced = Arc::new(Mutex::new(false));
+        let announced_clone = Arc::clone(&announced);
+        state.announce_block = Some(Arc::new(move |_| {
+            *announced_clone.lock().expect("announce lock") = true;
+            Ok(())
+        }));
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response_json(&response)["mined"].as_bool(), Some(true));
+        assert!(
+            !*announced.lock().expect("announce lock"),
+            "announce_block must not run without block bytes",
+        );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_skips_announce_when_rpc_block_store_lacks_mined_block() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        let empty_dir = unique_temp_path("rubin-devnet-rpc-empty-blockstore");
+        fs::create_dir_all(&empty_dir).expect("mkdir empty blockstore");
+        state.block_store =
+            Some(BlockStore::open(block_store_path(&empty_dir)).expect("empty blockstore"));
+        let announced = Arc::new(Mutex::new(false));
+        let announced_clone = Arc::clone(&announced);
+        state.announce_block = Some(Arc::new(move |_| {
+            *announced_clone.lock().expect("announce lock") = true;
+            Ok(())
+        }));
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response_json(&response)["mined"].as_bool(), Some(true));
+        assert!(
+            !*announced.lock().expect("announce lock"),
+            "announce_block must not run when block bytes cannot be reloaded",
+        );
+        fs::remove_dir_all(empty_dir).expect("cleanup empty blockstore");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_logs_announce_block_error_without_failing_rpc() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        state.announce_block = Some(Arc::new(|_| Err("forced announce failure".to_string())));
+
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response_json(&response)["mined"].as_bool(), Some(true));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
     fn get_tip_rejects_bad_method() {
         let (state, dir) = build_state(false);
         let response = route_request(

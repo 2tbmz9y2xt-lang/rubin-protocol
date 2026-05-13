@@ -2308,6 +2308,32 @@ mod tests {
         assert_eq!(retained.frames(), existing.frames());
     }
 
+    #[test]
+    fn peer_outbox_registration_recovers_from_poisoned_lock() {
+        let outboxes = Arc::new(Mutex::new(HashMap::<String, PeerOutbox>::new()));
+        let poison_target = Arc::clone(&outboxes);
+        let _ = thread::spawn(move || {
+            let _guard = poison_target.lock().expect("lock outboxes");
+            panic!("poison peer outboxes");
+        })
+        .join();
+
+        let primary = "peer-poison.example.com:19111";
+        let guard = register_peer_outbox(&outboxes, primary).expect("register after poisoned lock");
+
+        assert!(outboxes
+            .lock()
+            .unwrap_err()
+            .into_inner()
+            .contains_key(primary));
+        drop(guard);
+        assert!(!outboxes
+            .lock()
+            .unwrap_err()
+            .into_inner()
+            .contains_key(primary));
+    }
+
     /// Race scenario flagged by Codex/Copilot P1: two concurrent dials
     /// land on the same `remote_raw_addr` under different primary keys
     /// (e.g. `seed.example.com:19111` vs `mirror.example.org:19111`

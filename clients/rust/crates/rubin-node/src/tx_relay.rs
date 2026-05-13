@@ -1145,6 +1145,25 @@ mod tests {
     }
 
     #[test]
+    fn announce_block_with_no_peers_marks_seen_without_broadcast() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+
+        let block = crate::genesis::devnet_genesis_block_bytes();
+        let parsed = parse_block_bytes(&block).expect("parse block");
+        let block_hash = block_hash(&parsed.header_bytes).expect("block hash");
+
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect("no-peer announce should be a successful no-op");
+
+        assert!(relay.block_seen.has(&block_hash));
+        assert!(outboxes.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn broadcast_inventory_skip_addr_excludes_sender() {
         let relay = TxRelayState::new();
         let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
