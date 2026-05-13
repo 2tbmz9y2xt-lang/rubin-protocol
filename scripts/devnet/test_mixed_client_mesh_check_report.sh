@@ -85,9 +85,17 @@ start = next(i for i, line in enumerate(lines) if line.startswith("check_report(
 end = next(i for i, line in enumerate(lines[start:], start) if line.startswith('[[ "${MESH_TIMEOUT}"'))
 token_start = next(i for i, line in enumerate(lines) if line.startswith("tx_report_reason_token()"))
 token_end = next(i for i, line in enumerate(lines[token_start:], token_start) if line.startswith("combined_report_reason_token()"))
+capture_start = next(i for i, line in enumerate(lines) if line.startswith("rpc_json()"))
+capture_end = next(i for i, line in enumerate(lines[capture_start:], capture_start) if line.startswith("pid_comm()"))
+tx_capture_start = next(i for i, line in enumerate(lines) if line.startswith("tx_capture_reason()"))
+tx_capture_end = next(i for i, line in enumerate(lines[tx_capture_start:], tx_capture_start) if line.startswith("tx_sidecar_reason()"))
 block_reason_start = next(i for i, line in enumerate(lines) if line.startswith("block_inclusion_failure_reason()"))
 block_reason_end = next(i for i, line in enumerate(lines[block_reason_start:], block_reason_start) if line.startswith("verify_block_inclusion()"))
-Path(dst).write_text("\n".join(lines[start:end] + [""] + lines[token_start:token_end] + [""] + lines[block_reason_start:block_reason_end]) + "\n", encoding="utf-8")
+mine_reason_start = next(i for i, line in enumerate(lines) if line.startswith("mine_next_http_error_reason()"))
+mine_reason_end = next(i for i, line in enumerate(lines[mine_reason_start:], mine_reason_start) if line.startswith("rust_mine_including_tx()"))
+rust_mine_start = next(i for i, line in enumerate(lines) if line.startswith("rust_mine_including_tx()"))
+rust_mine_end = next(i for i, line in enumerate(lines[rust_mine_start:], rust_mine_start) if line.startswith("tip_matches()"))
+Path(dst).write_text("\n".join(lines[start:end] + [""] + lines[token_start:token_end] + [""] + lines[capture_start:capture_end] + [""] + lines[tx_capture_start:tx_capture_end] + [""] + lines[block_reason_start:block_reason_end] + [""] + lines[mine_reason_start:mine_reason_end] + [""] + lines[rust_mine_start:rust_mine_end]) + "\n", encoding="utf-8")
 PY
 }
 
@@ -379,6 +387,28 @@ expect_fail_token "token maps parsed block tx omission" "block_missing_submitted
 [[ "$(block_inclusion_failure_reason rust_mine "parsed block hash mismatch")" == "rust_mine_block_hash_mismatch" ]] || { echo "FAIL: rust mine hash mismatch reason collapsed" >&2; exit 1; }
 [[ "$(block_inclusion_failure_reason go_converge "submitted txid missing from parsed block txids")" == "go_converge_block_missing_submitted_txid" ]] || { echo "FAIL: go converge missing-tx reason collapsed" >&2; exit 1; }
 [[ "$(block_inclusion_failure_reason go_converge "block response height/hash/canonical mismatch")" == "go_converge_block_sidecar_mismatch" ]] || { echo "FAIL: go converge sidecar mismatch reason collapsed" >&2; exit 1; }
+printf '{"mined":false,"error":"live mining unavailable"}\n' >"${TMP_ROOT}/mine-live-unavailable.json"
+printf '{"mined":false,"error":"sync engine unavailable"}\n' >"${TMP_ROOT}/mine-sync-unavailable.json"
+printf '{"mined":false,"error":"tx pool unavailable"}\n' >"${TMP_ROOT}/mine-pool-unavailable.json"
+printf '{"mined":false,"error":"template rejected"}\n' >"${TMP_ROOT}/mine-rejected.json"
+[[ "$(mine_next_http_error_reason "${TMP_ROOT}/mine-live-unavailable.json")" == "rust_mine_live_mining_unavailable" ]] || { echo "FAIL: live mining error reason collapsed" >&2; exit 1; }
+[[ "$(mine_next_http_error_reason "${TMP_ROOT}/mine-sync-unavailable.json")" == "rust_mine_sync_unavailable" ]] || { echo "FAIL: sync unavailable error reason collapsed" >&2; exit 1; }
+[[ "$(mine_next_http_error_reason "${TMP_ROOT}/mine-pool-unavailable.json")" == "rust_mine_tx_pool_unavailable" ]] || { echo "FAIL: tx pool unavailable error reason collapsed" >&2; exit 1; }
+[[ "$(mine_next_http_error_reason "${TMP_ROOT}/mine-rejected.json")" == "rust_mine_rejected" ]] || { echo "FAIL: miner rejection error reason collapsed" >&2; exit 1; }
+rpc_json() {
+  [[ "$1" == "POST" && "$3" == "/mine_next" ]] || return 1
+  printf '{"mined":false,"error":"tx pool unavailable"}\n'
+  return 22
+}
+export RUST_RPC_ADDR="127.0.0.1:59999"
+RUST_MINE_JSON="${TMP_ROOT}/mine-next-sidecar.json"
+TX_REASON=""
+if rust_mine_including_tx; then
+  echo "FAIL: rust_mine_including_tx should fail on /mine_next HTTP error" >&2
+  exit 1
+fi
+[[ "${TX_REASON}" == "rust_mine_tx_pool_unavailable" ]] || { echo "FAIL: mine_next HTTP body did not map through raw sidecar to TX_REASON: ${TX_REASON}" >&2; exit 1; }
+[[ ! -e "${RUST_MINE_JSON}.raw" ]] || { echo "FAIL: mine_next HTTP raw body was not cleaned up" >&2; exit 1; }
 
 expect_fail_contains "non-regular report" "report is not a regular file" "${HARNESS}" --check-report "${TMP_ROOT}"
 expect_fail_contains "empty report" "report is empty" "${HARNESS}" --check-report "${TMP_ROOT}/empty.json"

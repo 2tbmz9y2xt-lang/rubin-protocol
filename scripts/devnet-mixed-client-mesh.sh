@@ -514,9 +514,15 @@ except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
 PY
 }
 capture_rpc_sidecar() {
-  local impl="$1" method="$2" addr="$3" path="$4" out="$5" status=0; local tmp="${out}.raw"
+  local impl="$1" method="$2" addr="$3" path="$4" out="$5" preserve_http_error="${6:-}" status=0; local tmp="${out}.raw"
   rpc_json "${method}" "${addr}" "${path}" >"${tmp}" || status=$?
-  (( status == 0 )) || { rm -f -- "${tmp}"; case "${status}" in 22) return 21 ;; 23) return 23 ;; *) return 22 ;; esac; }
+  (( status == 0 )) || {
+    if [[ "${status}" -eq 22 && "${preserve_http_error}" == preserve-http-error ]]; then
+      return 21
+    fi
+    rm -f -- "${tmp}"
+    case "${status}" in 22) return 21 ;; 23) return 23 ;; *) return 22 ;; esac
+  }
   python3 - "${impl}" "${addr}" "${path}" "${tmp}" "${out}" <<'PY'
 import json, os, sys
 impl, addr, request_path, src, dst = sys.argv[1:6]
@@ -997,10 +1003,49 @@ if not isinstance(tx_count, int) or isinstance(tx_count, bool) or tx_count < 2:
 print(height, block_hash, tx_count, sep="\t")
 PY
 }
+mine_next_http_error_reason() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    print("rust_mine_http_error_body_malformed")
+    sys.exit(0)
+if not isinstance(data, dict):
+    print("rust_mine_http_error_body_malformed")
+    sys.exit(0)
+err = data.get("error")
+if not isinstance(err, str) or not err:
+    print("rust_mine_http_error")
+elif err == "live mining unavailable":
+    print("rust_mine_live_mining_unavailable")
+elif err == "rpc unavailable":
+    print("rust_mine_rpc_unavailable")
+elif err == "sync engine unavailable":
+    print("rust_mine_sync_unavailable")
+elif err == "tx pool unavailable":
+    print("rust_mine_tx_pool_unavailable")
+elif err == "POST required":
+    print("rust_mine_method_rejected")
+else:
+    print("rust_mine_rejected")
+PY
+}
 rust_mine_including_tx() {
   local parsed rc=0
   TX_REASON=""
-  capture_rpc_sidecar rust POST "${RUST_RPC_ADDR}" /mine_next "${RUST_MINE_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason rust_mine "${rc}")"; return 1; }
+  capture_rpc_sidecar rust POST "${RUST_RPC_ADDR}" /mine_next "${RUST_MINE_JSON}" preserve-http-error || {
+    rc=$?
+    if [[ "${rc}" -eq 21 ]]; then
+      TX_REASON="$(mine_next_http_error_reason "${RUST_MINE_JSON}.raw")"
+      rm -f -- "${RUST_MINE_JSON}.raw"
+    else
+      TX_REASON="$(tx_capture_reason rust_mine "${rc}")"
+    fi
+    return 1
+  }
   parsed="$(parse_mine_next_response "${RUST_MINE_JSON}")" || { rc=$?; case "${rc}" in 13) TX_REASON=rust_mine_malformed_rpc_body ;; 14) TX_REASON=rust_mine_unavailable ;; 16) TX_REASON=rust_mine_tx_count_invalid ;; *) TX_REASON=rust_mine_unknown_failure ;; esac; return 1; }
   IFS=$'\t' read -r RUST_MINE_HEIGHT RUST_MINE_HASH RUST_MINE_TX_COUNT <<<"${parsed}" || { TX_REASON=rust_mine_malformed_rpc_body; return 1; }
   capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" "${RUST_MINE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason rust_mine_get_block "${rc}")"; return 1; }
