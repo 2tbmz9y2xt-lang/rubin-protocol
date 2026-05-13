@@ -247,6 +247,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Mutex;
 
+use rubin_consensus::{block_hash, parse_block_bytes};
 use sha3::{Digest, Sha3_256};
 
 use crate::p2p_runtime::{
@@ -315,6 +316,7 @@ impl PeerOutbox {
 /// Shared relay state passed through the P2P service.
 pub struct TxRelayState {
     pub tx_seen: BoundedHashSet,
+    pub block_seen: BoundedHashSet,
     pub relay_pool: RelayTxPool,
     pub tx_relay_fanout: usize,
     pub network: String,
@@ -334,6 +336,7 @@ impl TxRelayState {
     pub fn new_with_network(network: &str) -> Self {
         Self {
             tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            block_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY),
             relay_pool: RelayTxPool::new(),
             tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
             network: network.to_string(),
@@ -428,7 +431,13 @@ pub fn broadcast_inventory(
 
     if !block_items.is_empty() {
         let block_vecs: Vec<InventoryVector> = block_items.into_iter().cloned().collect();
-        broadcast_inv_to_addrs(&block_vecs, &addrs, &relay_state.network, peer_writers)?;
+        broadcast_inv_to_addrs(
+            &block_vecs,
+            &addrs,
+            &relay_state.network,
+            peer_writers,
+            false,
+        )?;
     }
 
     if tx_items.is_empty() {
@@ -439,7 +448,7 @@ pub fn broadcast_inventory(
     let relay_key = inventory_relay_key(&tx_vecs);
     let relay_salt = skip_addr.unwrap_or(local_addr);
     addrs = select_tx_relay_peers(relay_key, relay_salt, &addrs, relay_state.tx_relay_fanout);
-    broadcast_inv_to_addrs(&tx_vecs, &addrs, &relay_state.network, peer_writers)
+    broadcast_inv_to_addrs(&tx_vecs, &addrs, &relay_state.network, peer_writers, false)
 }
 
 /// Send INV message to a set of peer addresses.
@@ -448,6 +457,7 @@ fn broadcast_inv_to_addrs(
     addrs: &[String],
     network: &str,
     peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
+    require_all_queues: bool,
 ) -> Result<(), String> {
     let payload = encode_inventory_vectors(items).map_err(|e| e.to_string())?;
     let magic = crate::p2p_runtime::network_magic(network);
@@ -459,15 +469,27 @@ fn broadcast_inv_to_addrs(
     frame.extend_from_slice(&payload);
     // Enqueue the frame into each peer's outbox. The peer's own thread
     // will drain the queue, ensuring writes are serialized on the TcpStream.
-    let Ok(mut outboxes) = peer_writers.lock() else {
-        return Err("peer_outboxes lock poisoned".to_string());
+    let mut outboxes = match peer_writers.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
     };
+    let mut failures = Vec::new();
     for addr in addrs {
-        if let Some(queue) = outboxes.get_mut(addr) {
-            let _ = queue.push_frame(frame.clone());
-            // else: drop silently — peer is slow or over byte budget and will
-            // catch up on the next drain.
+        let Some(queue) = outboxes.get_mut(addr) else {
+            if require_all_queues {
+                failures.push(format!("peer outbox missing for {addr}"));
+            }
+            continue;
+        };
+        if !queue.push_frame(frame.clone()) && require_all_queues {
+            failures.push(format!("peer outbox full for {addr}"));
         }
+        // Non-strict relay drops silently when a peer is slow or over byte
+        // budget; strict block announce uses errors so local mining cannot
+        // report announce success without enqueueing the block inventory.
+    }
+    if !failures.is_empty() {
+        return Err(format!("inventory enqueue failed: {}", failures.join("; ")));
     }
     Ok(())
 }
@@ -510,6 +532,42 @@ pub fn announce_tx(
         local_addr,
         peer_writers,
     )
+}
+
+/// Announce a locally mined block after it is committed to the block store.
+///
+/// Rust `/mine_next` uses this to mirror Go's `AnnounceBlock`: parse the
+/// committed full block, derive its canonical hash, then broadcast a BLOCK
+/// inventory item to every connected peer.
+pub fn announce_block(
+    block_bytes: &[u8],
+    relay_state: &TxRelayState,
+    peer_manager: &PeerManager,
+    _local_addr: &str,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
+) -> Result<(), String> {
+    let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
+    let hash = block_hash(&parsed.header_bytes).map_err(|err| err.to_string())?;
+    if relay_state.block_seen.has(&hash) {
+        return Ok(());
+    }
+    let peers = peer_manager.snapshot();
+    let addrs: Vec<String> = peers.iter().map(|p| p.addr.clone()).collect();
+    if addrs.is_empty() {
+        return Ok(());
+    }
+    broadcast_inv_to_addrs(
+        &[InventoryVector {
+            kind: MSG_BLOCK,
+            hash,
+        }],
+        &addrs,
+        &relay_state.network,
+        peer_writers,
+        true,
+    )?;
+    let _ = relay_state.block_seen.add(hash);
+    Ok(())
 }
 
 /// Outcome of processing a peer-relayed tx.
@@ -918,6 +976,124 @@ mod tests {
         assert_eq!(boxes["peer-b:8333"].len(), 1);
     }
 
+    fn test_block() -> (Vec<u8>, [u8; 32]) {
+        let block = crate::genesis::devnet_genesis_block_bytes();
+        let parsed = parse_block_bytes(&block).expect("parse block");
+        let hash = block_hash(&parsed.header_bytes).expect("block hash");
+        (block, hash)
+    }
+
+    fn block_announce_fixture(
+        addrs: &[&str],
+    ) -> (
+        TxRelayState,
+        PeerManager,
+        Mutex<HashMap<String, PeerOutbox>>,
+    ) {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes = Mutex::new(HashMap::new());
+        for addr in addrs {
+            let addr = (*addr).to_string();
+            let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+                addr: addr.clone(),
+                ..Default::default()
+            });
+            outboxes.lock().unwrap().insert(addr, PeerOutbox::default());
+        }
+        (relay, pm, outboxes)
+    }
+
+    fn assert_block_inv_frame(queue: &PeerOutbox, hash: [u8; 32]) {
+        let frames = queue.frames();
+        assert_eq!(frames.len(), 1);
+        let msg = crate::p2p_runtime::fuzz_parse_wire_message("devnet", &frames[0]).expect("frame");
+        assert_eq!(msg.command, "inv");
+        assert_eq!(
+            crate::p2p_runtime::decode_inventory_vectors(&msg.payload).expect("decode inventory"),
+            vec![InventoryVector {
+                kind: MSG_BLOCK,
+                hash
+            }],
+        );
+    }
+
+    #[test]
+    fn announce_block_broadcasts_deduplicates_and_handles_no_peers() {
+        let (block, hash) = test_block();
+        let (relay, pm, outboxes) = block_announce_fixture(&["peer-a:8333", "peer-b:8333"]);
+
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("announce block");
+        {
+            let boxes = outboxes.lock().unwrap();
+            assert_block_inv_frame(&boxes["peer-a:8333"], hash);
+            assert_block_inv_frame(&boxes["peer-b:8333"], hash);
+        }
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("dedupe");
+        assert_eq!(outboxes.lock().unwrap()["peer-a:8333"].len(), 1);
+
+        let (relay, pm, outboxes) = block_announce_fixture(&[]);
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("no-peer announce");
+        assert!(!relay.block_seen.has(&hash));
+        assert!(outboxes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn announce_block_failure_paths_remain_retryable() {
+        let (block, hash) = test_block();
+        let (relay, pm, outboxes) = block_announce_fixture(&["healthy:8333"]);
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "missing:8333".to_string(),
+            ..Default::default()
+        });
+
+        let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect_err("missing peer outbox should fail strict block announce");
+        assert!(err.contains("peer outbox missing for missing:8333"));
+        assert_eq!(outboxes.lock().unwrap()["healthy:8333"].len(), 1);
+        assert!(!relay.block_seen.has(&hash));
+
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("missing:8333".to_string(), PeerOutbox::default());
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("retry after repair");
+        assert_eq!(outboxes.lock().unwrap()["missing:8333"].len(), 1);
+        assert!(relay.block_seen.has(&hash));
+
+        let (relay, pm, outboxes) = block_announce_fixture(&["full:8333"]);
+        for _ in 0..MAX_OUTBOX_FRAMES_PER_PEER {
+            assert!(outboxes
+                .lock()
+                .unwrap()
+                .get_mut("full:8333")
+                .unwrap()
+                .push_frame(Vec::new()));
+        }
+        let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect_err("full outbox must fail block announce");
+        assert!(err.contains("peer outbox full for full:8333"));
+        assert!(!relay.block_seen.has(&hash));
+    }
+
+    #[test]
+    fn announce_block_recovers_poisoned_peer_outboxes_lock() {
+        let (block, hash) = test_block();
+        let (relay, pm, outboxes) = block_announce_fixture(&["peer:8333"]);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = outboxes.lock().expect("lock outboxes before poison");
+            panic!("poison peer outboxes for regression test");
+        }));
+        assert!(outboxes.lock().is_err());
+
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect("poisoned peer outboxes should recover for announce");
+        let boxes = outboxes.lock().unwrap_or_else(|p| p.into_inner());
+        assert_block_inv_frame(&boxes["peer:8333"], hash);
+    }
+
     #[test]
     fn broadcast_inventory_skip_addr_excludes_sender() {
         let relay = TxRelayState::new();
@@ -1150,6 +1326,7 @@ mod tests {
         };
         let relay = TxRelayState {
             tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            block_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY),
             relay_pool: RelayTxPool::new_with_limit(1),
             tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
             network: "devnet".to_string(),
@@ -1186,6 +1363,7 @@ mod tests {
         let existing_txid = [0xEE; 32];
         let relay = TxRelayState {
             tx_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_TX_SEEN_CAPACITY),
+            block_seen: BoundedHashSet::new(crate::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY),
             relay_pool: RelayTxPool::new_with_limit(1),
             tx_relay_fanout: DEFAULT_TX_RELAY_FANOUT,
             network: "devnet".to_string(),

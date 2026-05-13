@@ -472,12 +472,22 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             rubin_node::tx_relay::announce_tx(tx_bytes, meta, &relay_state, &pm, &local, &pw)
         }))
     };
+    let announce_block: Option<rubin_node::devnet_rpc::AnnounceBlockFn> = {
+        let relay_state = p2p_service.relay_state();
+        let pm = Arc::clone(&peer_manager);
+        let pw = p2p_service.peer_outboxes();
+        let local = p2p_service.addr().to_string();
+        Some(Arc::new(move |block_bytes: &[u8]| {
+            rubin_node::tx_relay::announce_block(block_bytes, &relay_state, &pm, &local, &pw)
+        }))
+    };
     let state = new_devnet_rpc_state_with_tx_pool(
         Arc::clone(&sync_engine),
         Some(block_store),
         Arc::clone(&tx_pool),
         Arc::clone(&peer_manager),
         announce_tx,
+        announce_block,
         live_mining_cfg,
     );
     let server = if cfg.rpc_bind_addr.trim().is_empty() {

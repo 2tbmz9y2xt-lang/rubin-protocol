@@ -363,6 +363,24 @@ fn register_peer_alias(
     })
 }
 
+fn register_peer_outbox(
+    peer_outboxes: &Arc<Mutex<HashMap<String, PeerOutbox>>>,
+    peer_addr: &str,
+) -> Result<PeerOutboxGuard, String> {
+    let mut outboxes = match peer_outboxes.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if outboxes.contains_key(peer_addr) {
+        return Err(format!("peer outbox already registered: {peer_addr}"));
+    }
+    outboxes.insert(peer_addr.to_string(), PeerOutbox::default());
+    Ok(PeerOutboxGuard {
+        peer_outboxes: Arc::clone(peer_outboxes),
+        addr: peer_addr.to_string(),
+    })
+}
+
 fn reconnect_missing_bootstrap_peers(shared: &SharedServiceState) {
     let n = shared.bootstrap_peers.len();
     if n == 0 {
@@ -763,6 +781,11 @@ fn handle_peer(
         peer_state.addr = addr.clone();
     }
     let peer_addr = peer_state.addr.clone();
+
+    // Register before peer visibility so local block announce cannot snapshot
+    // a connected peer without an outbox. Declaration order makes it drop last.
+    let _outbox_guard = register_peer_outbox(&shared.peer_outboxes, &peer_addr)?;
+
     shared
         .peer_manager
         .add_peer(peer_state)
@@ -775,9 +798,9 @@ fn handle_peer(
     // window in which the peer still answers as connected but its alias
     // is gone, so `is_connected_with_alias(shared, remote_raw_addr)`
     // returns false and a concurrent dialer can attach a duplicate
-    // session against the same remote. Therefore: alias_guard FIRST
-    // (drops last), peer_guard SECOND (drops before alias), outbox_guard
-    // LAST (drops first).
+    // session against the same remote. Therefore: outbox_guard FIRST
+    // (drops last), alias_guard SECOND (drops after peer), peer_guard
+    // THIRD (drops first).
     //
     // Register alias only when the observed remote socket address differs
     // from the primary key. Empty / "<unknown>" / duplicate aliases are a
@@ -786,21 +809,6 @@ fn handle_peer(
 
     let _peer_guard = PeerGuard {
         peer_manager: Arc::clone(&shared.peer_manager),
-        addr: peer_addr.clone(),
-    };
-
-    // Register outbox for this peer so relay broadcasts can enqueue
-    // frames. Recover from poison so a single earlier worker panic
-    // (while holding the outbox lock) does not cascade into panics on
-    // every subsequent peer handshake.
-    let mut peer_outboxes = match shared.peer_outboxes.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    peer_outboxes.insert(peer_addr.clone(), PeerOutbox::default());
-    drop(peer_outboxes);
-    let _outbox_guard = PeerOutboxGuard {
-        peer_outboxes: Arc::clone(&shared.peer_outboxes),
         addr: peer_addr.clone(),
     };
 
@@ -1106,8 +1114,9 @@ mod tests {
         apply_tx_pool_cleanup, connect_with_timeout, finalize_live_message_outcome,
         flush_peer_outbox, is_connected_with_alias, join_all_service_workers, lock_in_flight_dials,
         maybe_apply_tx_pool_cleanup, outbound_connect_timeout, reconnect_missing_bootstrap_peers,
-        register_peer_alias, should_skip_outbound_dial, start_node_p2p_service,
-        wait_for_service_shutdown, NodeP2PServiceConfig, PeerAliasGuard, SharedServiceState,
+        register_peer_alias, register_peer_outbox, should_skip_outbound_dial,
+        start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig, PeerAliasGuard,
+        PeerGuard, SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
@@ -2215,6 +2224,75 @@ mod tests {
         assert!(!shared.peer_aliases.lock().unwrap().contains_key(alias));
 
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_outbox_outlives_peer_manager_visibility() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-outbox-drop-order");
+        let runtime_cfg = default_peer_runtime_config("devnet", 8);
+        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
+        let primary = "peer.example.com:19111".to_string();
+        let alias = "127.0.0.1:19111";
+
+        let outbox_guard =
+            register_peer_outbox(&shared.peer_outboxes, &primary).expect("register outbox");
+        shared
+            .peer_manager
+            .add_peer(crate::p2p_runtime::PeerState {
+                addr: primary.clone(),
+                ..Default::default()
+            })
+            .expect("register primary");
+        let alias_guard = register_peer_alias(&shared, alias, &primary).expect("register alias");
+        let peer_guard = PeerGuard {
+            peer_manager: Arc::clone(&shared.peer_manager),
+            addr: primary.clone(),
+        };
+
+        assert!(is_connected_with_alias(&shared, &primary));
+        assert!(is_connected_with_alias(&shared, alias));
+        assert!(shared.peer_outboxes.lock().unwrap().contains_key(&primary));
+
+        drop(peer_guard);
+        assert!(!is_connected_with_alias(&shared, &primary));
+        assert!(is_connected_with_alias(&shared, alias));
+        assert!(
+            shared.peer_outboxes.lock().unwrap().contains_key(&primary),
+            "outbox must remain while alias still exposes the peer as connected",
+        );
+
+        drop(alias_guard);
+        assert!(!is_connected_with_alias(&shared, alias));
+        assert!(
+            shared.peer_outboxes.lock().unwrap().contains_key(&primary),
+            "outbox guard must drop after peer and alias guards",
+        );
+
+        drop(outbox_guard);
+        assert!(!shared.peer_outboxes.lock().unwrap().contains_key(&primary));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_outbox_registration_refuses_duplicate_without_clobbering() {
+        let primary = "peer.example.com:19111";
+        let mut existing = PeerOutbox::default();
+        assert!(existing.push_frame(vec![0xAA, 0xBB, 0xCC]));
+        let outboxes = Arc::new(Mutex::new(HashMap::from([(
+            primary.to_string(),
+            existing.clone(),
+        )])));
+
+        let err = match register_peer_outbox(&outboxes, primary) {
+            Ok(_) => panic!("duplicate outbox registration must fail closed"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("peer outbox already registered"));
+        assert_eq!(
+            outboxes.lock().unwrap()[primary].frames(),
+            existing.frames()
+        );
     }
 
     /// Race scenario flagged by Codex/Copilot P1: two concurrent dials

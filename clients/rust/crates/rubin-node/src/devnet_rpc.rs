@@ -39,6 +39,7 @@ const RPC_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub type AnnounceTxFn =
     Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
+pub type AnnounceBlockFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct DevnetRPCState {
@@ -49,6 +50,7 @@ pub struct DevnetRPCState {
     metrics: Arc<RpcMetrics>,
     now_unix: fn() -> u64,
     announce_tx: Option<AnnounceTxFn>,
+    announce_block: Option<AnnounceBlockFn>,
     /// Serializes mutating devnet RPC (submit_tx + mine_next).
     rpc_op_lock: Arc<Mutex<()>>,
     /// When set, POST `/mine_next` mines one block using this config (devnet + loopback RPC only).
@@ -473,6 +475,7 @@ pub fn new_devnet_rpc_state(
     block_store: Option<BlockStore>,
     peer_manager: Arc<PeerManager>,
     announce_tx: Option<AnnounceTxFn>,
+    announce_block: Option<AnnounceBlockFn>,
 ) -> DevnetRPCState {
     let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
     new_devnet_rpc_state_with_tx_pool(
@@ -481,6 +484,7 @@ pub fn new_devnet_rpc_state(
         tx_pool,
         peer_manager,
         announce_tx,
+        announce_block,
         None,
     )
 }
@@ -491,6 +495,7 @@ pub fn new_devnet_rpc_state_with_tx_pool(
     tx_pool: Arc<Mutex<TxPool>>,
     peer_manager: Arc<PeerManager>,
     announce_tx: Option<AnnounceTxFn>,
+    announce_block: Option<AnnounceBlockFn>,
     live_mining_cfg: Option<MinerConfig>,
 ) -> DevnetRPCState {
     DevnetRPCState {
@@ -501,6 +506,7 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         metrics: Arc::new(RpcMetrics::default()),
         now_unix: current_unix,
         announce_tx,
+        announce_block,
         rpc_op_lock: Arc::new(Mutex::new(())),
         live_mining_cfg,
         // RUB-10 / GitHub #1151: gate starts in `NotReady`. The
@@ -1453,6 +1459,7 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             },
         );
     };
+    let block_store = state.block_store.clone();
     let _rpc_op = match state.rpc_op_lock.lock() {
         Ok(g) => g,
         Err(_) => {
@@ -1529,36 +1536,67 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             );
         }
     };
-    match miner.mine_one(&[]) {
-        Ok(b) => json_response(
-            state,
-            ROUTE,
-            200,
-            &MineNextResponse {
-                mined: true,
-                height: Some(b.height),
-                block_hash: Some(hex::encode(b.hash)),
-                timestamp: Some(b.timestamp),
-                nonce: Some(b.nonce),
-                tx_count: Some(b.tx_count),
-                error: None,
-            },
-        ),
-        Err(err) => json_response(
-            state,
-            ROUTE,
-            422,
-            &MineNextResponse {
-                mined: false,
-                height: None,
-                block_hash: None,
-                timestamp: None,
-                nonce: None,
-                tx_count: None,
-                error: Some(err),
-            },
-        ),
+    let mined = match miner.mine_one(&[]) {
+        Ok(b) => b,
+        Err(err) => {
+            return json_response(
+                state,
+                ROUTE,
+                422,
+                &MineNextResponse {
+                    mined: false,
+                    height: None,
+                    block_hash: None,
+                    timestamp: None,
+                    nonce: None,
+                    tx_count: None,
+                    error: Some(err),
+                },
+            )
+        }
+    };
+    drop(miner);
+    drop(pool);
+    drop(sync_engine);
+    drop(_rpc_op);
+    let block_bytes = match block_store {
+        Some(store) => match store.get_block_by_hash(mined.hash) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => {
+                eprintln!(
+                    "rpc: announce-block: get mined block {}: {err}",
+                    hex::encode(mined.hash)
+                );
+                None
+            }
+        },
+        None => {
+            eprintln!(
+                "rpc: announce-block: block store unavailable for {}",
+                hex::encode(mined.hash)
+            );
+            None
+        }
+    };
+    if let (Some(announce), Some(bytes)) = (state.announce_block.as_ref(), block_bytes.as_ref()) {
+        if let Err(err) = announce(bytes) {
+            eprintln!("rpc: announce-block: {err}");
+        }
     }
+    json_response(
+        state,
+        ROUTE,
+        200,
+        &MineNextResponse {
+            mined: true,
+            height: Some(mined.height),
+            block_hash: Some(hex::encode(mined.hash)),
+            timestamp: Some(mined.timestamp),
+            nonce: Some(mined.nonce),
+            tx_count: Some(mined.tx_count),
+            error: None,
+        },
+    )
 }
 
 /// Percent-decode a query component to raw bytes.  Returns `None` only on
@@ -2702,7 +2740,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use rubin_consensus::{block_hash, parse_tx, Outpoint, UtxoEntry};
+    use rubin_consensus::{block_hash, parse_block_bytes, parse_tx, Outpoint, UtxoEntry};
     use serde_json::Value;
 
     use crate::io_utils::unique_temp_path;
@@ -2746,6 +2784,7 @@ mod tests {
             Some(rpc_block_store),
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
             None,
+            None,
         );
         (state, dir)
     }
@@ -2777,6 +2816,7 @@ mod tests {
             Some(rpc_block_store),
             tx_pool,
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            None,
             None,
             Some(live_cfg),
         );
@@ -3022,6 +3062,7 @@ mod tests {
             metrics: Arc::new(super::RpcMetrics::default()),
             now_unix: super::current_unix,
             announce_tx: None,
+            announce_block: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
             // RUB-10 / GitHub #1151: this helper bypasses the public
@@ -3225,6 +3266,17 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
+    fn post_mine_next(state: &super::DevnetRPCState) -> super::HttpResponse {
+        route_request(
+            state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        )
+    }
+
     #[test]
     fn mine_next_mines_after_genesis() {
         let (state, dir) = build_state_with_live_mining(true);
@@ -3258,6 +3310,70 @@ mod tests {
             json["timestamp"].as_u64().is_some(),
             "timestamp must be present"
         );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_announces_mined_block_on_success() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        let announced = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let announced_clone = Arc::clone(&announced);
+        state.announce_block = Some(Arc::new(move |block_bytes: &[u8]| {
+            *announced_clone.lock().expect("announce lock") = Some(block_bytes.to_vec());
+            Ok(())
+        }));
+
+        let response = post_mine_next(&state);
+
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let json = response_json(&response);
+        let expected_hash = json["block_hash"]
+            .as_str()
+            .expect("mine_next block_hash")
+            .to_string();
+        let block_bytes = announced
+            .lock()
+            .expect("announce lock")
+            .take()
+            .expect("announce_block must receive mined block bytes");
+        let parsed = parse_block_bytes(&block_bytes).expect("parse announced block");
+        let announced_hash = block_hash(&parsed.header_bytes).expect("announced block hash");
+        assert_eq!(hex::encode(announced_hash), expected_hash);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_returns_422_when_miner_rejects_block() {
+        let (state, dir) = build_state_with_live_mining(true);
+        {
+            let mut engine = state.sync_engine.lock().expect("sync engine");
+            engine.chain_state.has_tip = true;
+            engine.chain_state.height = u64::MAX;
+        }
+
+        let response = post_mine_next(&state);
+
+        assert_eq!(response.status, 422);
+        let json = response_json(&response);
+        assert_eq!(json["mined"].as_bool(), Some(false));
+        assert_eq!(json["error"].as_str(), Some("height overflow"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_logs_announce_block_error_without_failing_rpc() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        state.announce_block = Some(Arc::new(|_| Err("forced announce failure".to_string())));
+
+        let response = post_mine_next(&state);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response_json(&response)["mined"].as_bool(), Some(true));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -4436,7 +4552,7 @@ mod tests {
     fn read_http_request_accepts_trailer_with_tab_and_obs_text_in_field_value() {
         // HTAB and obs-text (0x80-0xFF) are both valid in field-value per
         // RFC 7230 §3.2.6; the check must accept these so legitimate
-        // trailers with UTF-8 content (e.g. `"тест"`) continue to work.
+        // trailers with non-ASCII UTF-8 content continue to work.
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trace:\t\xd1\x82\xd0\xb5\xd1\x81\xd1\x82\r\n\r\n";
         let req = read_request_from_bytes(raw).expect("trailer with HTAB + obs-text accepted");
         // Body has no data chunks in this case, so the decoded body is empty
@@ -4798,6 +4914,7 @@ mod tests {
             metrics: Arc::new(super::RpcMetrics::default()),
             now_unix: || 0,
             announce_tx: None,
+            announce_block: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
             // RUB-10 / GitHub #1151: render_prometheus_metrics test does
@@ -5449,6 +5566,7 @@ mod tests {
             Some(rpc_block_store),
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
             None,
+            None,
         );
         let server = start_devnet_rpc_server("127.0.0.1:0", state).expect("start");
         let addr = server.addr().to_string();
@@ -5495,6 +5613,7 @@ mod tests {
             Arc::new(Mutex::new(engine)),
             Some(rpc_block_store),
             Arc::new(PeerManager::new(default_peer_runtime_config("devnet", 8))),
+            None,
             None,
         );
         let server = start_devnet_rpc_server("127.0.0.1:0", state).expect("start");
