@@ -394,10 +394,6 @@ impl TxPool {
         if consumed != tx_bytes.len() {
             return Err(rejected("transaction rejected: non-canonical tx bytes"));
         }
-        if self.txs.contains_key(&txid) {
-            return Err(conflict("tx already in mempool"));
-        }
-
         let inputs: Vec<Outpoint> = tx
             .inputs
             .iter()
@@ -406,21 +402,13 @@ impl TxPool {
                 vout: input.prev_vout,
             })
             .collect();
-        for input in &inputs {
-            if let Some(existing) = self.spenders.get(input) {
-                return Err(conflict(format!(
-                    "mempool double-spend conflict with {}",
-                    hex::encode(existing)
-                )));
-            }
-        }
 
         // RUB-167 single-walk invariant: extract weight + da_bytes once
-        // here and reuse via `apply_post_consensus_policy_with_floor`
-        // (which forwards to `apply_policy` -> `reject_da_anchor_tx_policy`)
-        // and `validate_fee_floor`. The same `(weight, da_bytes)` tuple
-        // anchors both the DA-side classification and the rolling-floor
-        // classification so they cannot diverge.
+        // here and reuse for both post-consensus policy
+        // (`apply_policy` -> `reject_da_anchor_tx_policy`) and the
+        // final `validate_fee_floor` call. The same `(weight, da_bytes)`
+        // tuple anchors both the DA-side classification and the
+        // rolling-floor classification so they cannot diverge.
         let (weight, da_bytes, _) = tx_weight_and_stats_public(&tx)
             .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
 
@@ -490,16 +478,15 @@ impl TxPool {
                 registry,
             )
             .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-        // RUB-162 PR-1410 wave-3 drift-prevention: delegate the
-        // post-consensus policy sequence (cfg-clone with cfg-zero
-        // override → apply_policy → rolling-floor enforcement) to the
-        // shared `apply_post_consensus_policy_with_floor` helper so
-        // both `admit_with_metadata` and `relay_metadata` cannot drift
-        // again (Copilot PR-1410 wave-2 Thread 4 finding). The miner
-        // caller (`reject_candidate`) keeps its own policy_cfg
-        // construction because it has no rolling-floor equivalent —
-        // the template needs to skip a tx whenever it fails any floor
-        // (Go `applyPolicyAgainstState` in clients/go/node/mempool.go).
+        // RUB-18/RUB-162 ordering: run post-consensus policy before
+        // mempool duplicate/conflict checks, then run the final rolling
+        // floor after duplicate/conflict checks. This mirrors Go:
+        // `checkTransactionWithSnapshot` performs cheap precheck,
+        // consensus validation, and `applyPolicyAgainstState` before
+        // `validateNonCapacityAdmissionLocked`; `validateCapacityAdmissionLocked`
+        // then applies the final rolling floor after duplicate/conflict
+        // rejection. Relay has no duplicate/conflict boundary, so it
+        // still uses `apply_post_consensus_policy_with_floor` below.
         // `#[rustfmt::skip]` keeps the call on one line so the
         // tarpaulin / Codacy diff-coverage tool attributes hits to a
         // single statement instead of per-arg lines (multi-line calls
@@ -508,8 +495,25 @@ impl TxPool {
         let utxos = &chain_state.utxos;
         let cfg = &self.cfg;
         #[rustfmt::skip]
-        let policy_result = apply_post_consensus_policy_with_floor(&tx, utxos, next_height, summary.fee, weight, da_bytes, cfg);
+        let policy_result = apply_post_consensus_policy_without_floor(&tx, utxos, next_height, weight, da_bytes, cfg);
         policy_result?;
+
+        if self.txs.contains_key(&txid) {
+            return Err(conflict("tx already in mempool"));
+        }
+        for input in &inputs {
+            if let Some(existing) = self.spenders.get(input) {
+                return Err(conflict(format!(
+                    "mempool double-spend conflict with {}",
+                    hex::encode(existing)
+                )));
+            }
+        }
+        validate_fee_floor(
+            summary.fee,
+            weight,
+            self.cfg.policy_current_mempool_min_fee_rate,
+        )?;
 
         let entry = TxPoolEntry {
             raw: tx_bytes.to_vec(),
@@ -747,12 +751,14 @@ impl TxPool {
     // PR-1410 wave-3 — the historical TxPool impl-method that performed
     // the rolling-floor check (the `_locked` suffix referred to its
     // TxPool-state lock convenience) was removed. After the wave-3
-    // drift-prevention helper extraction (`apply_post_consensus_policy_with_floor`),
-    // both `admit_with_metadata` and `relay_metadata` go through that
-    // helper, and the free `validate_fee_floor` predicate is the single
-    // source-of-truth call. The historical `_locked` suffix no longer
-    // carries meaning — the predicate is stateless on the cfg field.
-    // Tests call the free `validate_fee_floor` directly.
+    // drift-prevention helper extraction, the free `validate_fee_floor`
+    // predicate is the single source-of-truth call. `relay_metadata` uses
+    // `apply_post_consensus_policy_with_floor`; admission uses the
+    // policy-only subhelper, performs duplicate/conflict checks at the Go
+    // boundary, then calls the same `validate_fee_floor` predicate. The
+    // historical `_locked` suffix no longer carries meaning — the
+    // predicate is stateless on the cfg field. Tests call the free
+    // `validate_fee_floor` directly.
 
     #[cfg(test)]
     fn seed_worst_heap(&mut self) {
@@ -861,18 +867,15 @@ pub(crate) fn relay_metadata(
             registry,
         )
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
-    // RUB-162 PR-1410 wave-3 drift-prevention: delegate the
+    // RUB-162/RUB-197 relay drift-prevention: relay must run the
     // post-consensus policy sequence (cfg-clone with cfg-zero override
-    // → apply_policy → rolling-floor enforcement) to the shared
-    // `apply_post_consensus_policy_with_floor` helper so the relay path
-    // and the admit path (`admit_with_metadata`) cannot drift again.
-    // Wave-2 already fixed one drift instance (relay_metadata had
-    // skipped the rolling-floor check entirely while admit enforced it
-    // via `validate_fee_floor`); the shared helper makes that
-    // class of drift impossible by construction.
-    // RUB-167 single-walk invariant (mirrors admit_with_metadata): one
-    // `tx_weight_and_stats_public` call here feeds both the DA-side and
-    // the rolling-floor classifications inside the wrapper.
+    // -> apply_policy -> rolling-floor enforcement) read-only. Admission
+    // uses the same policy-only helper and `validate_fee_floor` predicate,
+    // but keeps the Go-compatible duplicate/conflict boundary between
+    // those two calls.
+    // RUB-167 single-walk invariant: one `tx_weight_and_stats_public`
+    // call here feeds both the DA-side and the rolling-floor
+    // classifications inside the wrapper.
     let (weight, da_bytes, _) = tx_weight_and_stats_public(&tx)
         .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
     // `#[rustfmt::skip]` keeps the call on one line for tarpaulin /
@@ -888,23 +891,21 @@ pub(crate) fn relay_metadata(
     })
 }
 
-/// Shared post-consensus policy sequence used by both
-/// `TxPool::admit_with_metadata` (admit gate) and `relay_metadata`
-/// (relay gate). Mirrors Go's `applyPolicyAgainstState` plus the
-/// `validateFeeFloorLocked` + `validateFeeFloorLockedWithFloor` pair
-/// in clients/go/node/mempool.go. Centralising the cfg-clone, cfg-zero
-/// override, `apply_policy` invocation and rolling-floor enforcement
-/// in one private helper prevents the public-gate-drift class that
-/// PR #1410 wave-2 fixed once already (relay_metadata had skipped the
-/// floor check while admit enforced it).
+/// Relay-side post-consensus policy sequence. Mirrors Go's
+/// `RelayMetadata`: apply policy first, then enforce the rolling floor
+/// read-only. Admission cannot call this whole helper because Go places
+/// duplicate/conflict checks between `applyPolicyAgainstState` and the
+/// final rolling-floor check; admission therefore calls the policy-only
+/// subhelper, performs duplicate/conflict checks, and then calls the same
+/// `validate_fee_floor` predicate.
 ///
 /// Order is mandatory and must NOT be changed without updating the
 /// matching Go reference: apply_policy(cfg-zero) runs first to
 /// classify DA-side rejections as Rejected (terminal), then
 /// validate_fee_floor with the original cfg's
 /// `policy_current_mempool_min_fee_rate` runs to classify rolling-
-/// relay-floor rejections as Unavailable (transient/retryable). Both
-/// public callers must use the same predicate so peer relay
+/// relay-floor rejections as Unavailable (transient/retryable). Relay and
+/// admission must use the same predicate so peer relay
 /// (`tx_relay::handle_received_tx`, which gates on `relay_metadata`)
 /// never propagates a tx that local `admit` would reject.
 ///
@@ -923,7 +924,9 @@ pub(crate) fn relay_metadata(
 ///     `apply_policy` and the same `weight` is reused by
 ///     `validate_fee_floor`, so the DA-side and rolling-floor
 ///     classifications operate on identical `weight` values (RUB-167
-///     single-walk invariant).
+///     single-walk invariant). Admission preserves the same single-walk
+///     invariant even though its policy-only and rolling-floor calls are
+///     separated by the Go-compatible duplicate/conflict boundary.
 ///   - The miner caller (`reject_candidate`) deliberately does NOT
 ///     use this helper; miner has its own policy_cfg construction
 ///     because it has no rolling-floor equivalent (Go
@@ -940,10 +943,21 @@ fn apply_post_consensus_policy_with_floor(
     da_bytes: u64,
     cfg: &TxPoolConfig,
 ) -> Result<(), TxPoolAdmitError> {
+    apply_post_consensus_policy_without_floor(tx, utxos, next_height, weight, da_bytes, cfg)?;
+    validate_fee_floor(fee, weight, cfg.policy_current_mempool_min_fee_rate)
+}
+
+fn apply_post_consensus_policy_without_floor(
+    tx: &rubin_consensus::Tx,
+    utxos: &HashMap<Outpoint, rubin_consensus::UtxoEntry>,
+    next_height: u64,
+    weight: u64,
+    da_bytes: u64,
+    cfg: &TxPoolConfig,
+) -> Result<(), TxPoolAdmitError> {
     let mut policy_cfg = cfg.clone();
     policy_cfg.policy_current_mempool_min_fee_rate = 0;
-    apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg).map_err(rejected)?;
-    validate_fee_floor(fee, weight, cfg.policy_current_mempool_min_fee_rate)
+    apply_policy(tx, weight, da_bytes, utxos, next_height, &policy_cfg).map_err(rejected)
 }
 
 impl Default for TxPool {
@@ -1074,11 +1088,12 @@ fn fee_rate_below_floor(fee: u64, weight: u64, floor: u64) -> bool {
     (fee as u128) < required
 }
 
-/// Free-function predicate enforcing the rolling-relay-floor invariant
-/// shared by `admit_with_metadata` and `relay_metadata` via
-/// `apply_post_consensus_policy_with_floor` so both paths use one
-/// source-of-truth check. Returns `Unavailable` (transient / retryable)
-/// on rolling-floor failure, mirroring Go `validateFeeFloorLocked` at
+/// Free-function predicate enforcing the rolling-relay-floor invariant.
+/// `relay_metadata` calls it through `apply_post_consensus_policy_with_floor`;
+/// admission calls it after its Go-compatible duplicate/conflict boundary.
+/// Both paths use this one source-of-truth check. Returns `Unavailable`
+/// (transient / retryable) on rolling-floor failure, mirroring Go
+/// `validateFeeFloorLocked` at
 /// clients/go/node/mempool.go (`validateFeeFloorLocked` wrapper + `validateFeeFloorLockedWithFloor` body). The `DEFAULT_MEMPOOL_MIN_FEE_RATE`
 /// clamp lives inside `fee_rate_below_floor` (Go-parity at
 /// clients/go/node/mempool.go in-helper clamp inside `feeRateBelowFloor` — grep `DefaultMempoolMinFeeRate` in fn body. The error message surfaces
@@ -1115,10 +1130,10 @@ fn validate_fee_floor(fee: u64, weight: u64, cfg_floor: u64) -> Result<(), TxPoo
 ///
 /// `weight` is passed in by the caller per the RUB-167 single-walk
 /// invariant; the same `weight` value is reused downstream by
-/// `validate_fee_floor` inside `apply_post_consensus_policy_with_floor`
-/// so DA-side and rolling-floor classifications operate on identical
-/// values (this precheck plus the downstream check use the same
-/// `weight`, so a fee-rate decision here matches the final decision).
+/// `validate_fee_floor` so DA-side and rolling-floor classifications
+/// operate on identical values (this precheck plus the downstream check
+/// use the same `weight`, so a fee-rate decision here matches the final
+/// decision).
 ///
 /// On below-floor reject the error message uses the verbatim
 /// `validate_fee_floor` format ("mempool fee below rolling minimum:
@@ -1494,12 +1509,12 @@ pub(crate) fn reject_non_coinbase_anchor_outputs(tx: &rubin_consensus::Tx) -> Re
 /// Rust helper trusts the caller because (a) it stays `pub(crate)` so
 /// every callsite is audited in-crate (`admit_with_metadata`,
 /// `relay_metadata`, `apply_post_consensus_policy_with_floor`,
-/// `miner::reject_candidate`, and the `run_da_policy` test helper all
-/// walk weight at the call site), and (b) reusing one `weight` value
-/// across both `reject_da_anchor_tx_policy` (which also consumes
-/// `da_bytes`) and `validate_fee_floor` removes the drift class where
-/// the DA and rolling-floor halves could otherwise see different
-/// `weight` values.
+/// `apply_post_consensus_policy_without_floor`, `miner::reject_candidate`,
+/// and the `run_da_policy` test helper all walk weight at the call site),
+/// and (b) reusing one `weight` value across both
+/// `reject_da_anchor_tx_policy` (which also consumes `da_bytes`) and
+/// `validate_fee_floor` removes the drift class where the DA and
+/// rolling-floor halves could otherwise see different `weight` values.
 pub(crate) fn reject_da_anchor_tx_policy(
     tx: &rubin_consensus::Tx,
     weight: u64,
@@ -1512,14 +1527,10 @@ pub(crate) fn reject_da_anchor_tx_policy(
     if da_bytes == 0 {
         // Non-DA transaction: the helper only enforces the DA half of the
         // Stage C admission contract. Non-DA relay-fee floor enforcement
-        // is now performed by the free `validate_fee_floor` predicate
-        // (defined below), invoked inside
-        // `apply_post_consensus_policy_with_floor` which both
-        // `TxPool::admit_with_metadata` and `relay_metadata` call AFTER
-        // this helper's `apply_policy` returns Ok — mirroring Go's
-        // `validateCapacityAdmissionLocked` calling `validateFeeFloorLocked`
-        // at clients/go/node/mempool.go (`addEntryLockedWithFloor` capacity-eviction block). Both `admit_with_metadata`
-        // and `relay_metadata` zero-out the rolling floor before invoking
+        // is performed by the free `validate_fee_floor` predicate: relay
+        // calls it via `apply_post_consensus_policy_with_floor`, while
+        // admission calls it after the Go-compatible duplicate/conflict
+        // boundary. Both paths zero-out the rolling floor before invoking
         // this helper so the DA-side classification is preserved without
         // double-charging the relay floor inside the DA helper. The helper
         // deliberately short-circuits here for non-DA transactions and does
@@ -1829,11 +1840,6 @@ mod tests {
         vectors: Vec<T>,
     }
 
-    #[derive(serde::Deserialize)]
-    struct MaturityVector {
-        tx_hex: String,
-    }
-
     #[derive(Clone, serde::Deserialize)]
     struct FixtureUtxo {
         txid: String,
@@ -1893,17 +1899,6 @@ mod tests {
         let tx_start = BLOCK_HEADER_BYTES + 1;
         let (_tx, _txid, _wtxid, consumed) = parse_tx(&block[tx_start..]).expect("parse tx");
         block[tx_start..tx_start + consumed].to_vec()
-    }
-
-    fn maturity_fixture_tx_bytes() -> Vec<u8> {
-        const DEVNET_MATURITY_FIXTURE_JSON: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../conformance/fixtures/CV-DEVNET-MATURITY.json"
-        ));
-        let fixture: FixtureFile<MaturityVector> =
-            serde_json::from_str(DEVNET_MATURITY_FIXTURE_JSON).expect("parse fixture");
-        let vector = fixture.vectors.into_iter().next().expect("fixture vector");
-        hex::decode(vector.tx_hex).expect("tx hex")
     }
 
     fn parse_hex32_test(name: &str, value: &str) -> [u8; 32] {
@@ -2233,24 +2228,12 @@ mod tests {
 
     #[test]
     fn admit_rejects_duplicate_txid() {
-        let raw = genesis_coinbase_bytes();
-        let (_tx, txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
-        assert_eq!(consumed, raw.len());
-
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
         let mut pool = TxPool::new();
-        pool.txs.insert(
-            txid,
-            TxPoolEntry {
-                raw: raw.clone(),
-                inputs: Vec::new(),
-                fee: 0,
-                weight: 0,
-                size: raw.len(),
-                source: TxSource::Local,
-            },
-        );
+        pool.admit(&raw, &state, None, devnet_genesis_chain_id())
+            .expect("first admit");
         let err = pool
-            .admit(&raw, &ChainState::new(), None, devnet_genesis_chain_id())
+            .admit(&raw, &state, None, devnet_genesis_chain_id())
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Conflict);
         assert!(err.message.contains("already in mempool"));
@@ -2856,21 +2839,12 @@ mod tests {
 
     #[test]
     fn admit_rejects_mempool_input_conflict() {
-        let raw = maturity_fixture_tx_bytes();
-        let (tx, _txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
-        assert_eq!(consumed, raw.len());
-        let first = tx.inputs.first().expect("fixture input");
-
+        let (state, resident, conflicting) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
         let mut pool = TxPool::new();
-        pool.spenders.insert(
-            rubin_consensus::Outpoint {
-                txid: first.prev_txid,
-                vout: first.prev_vout,
-            },
-            [0xabu8; 32],
-        );
+        pool.admit(&resident, &state, None, devnet_genesis_chain_id())
+            .expect("resident admit");
         let err = pool
-            .admit(&raw, &ChainState::new(), None, devnet_genesis_chain_id())
+            .admit(&conflicting, &state, None, devnet_genesis_chain_id())
             .unwrap_err();
         assert_eq!(err.kind, TxPoolAdmitErrorKind::Conflict);
         assert!(err.message.contains("double-spend conflict"));
@@ -3908,14 +3882,12 @@ mod tests {
     fn stage_c_non_da_tx_short_circuits_admit() {
         // Non-DA tx (tx_kind=0, no DaChunkCore, no da_payload) must be admitted
         // by reject_da_anchor_tx_policy without applying any DA term, even with
-        // aggressive rate config. Non-DA relay-fee floor enforcement now lives
-        // in the free validate_fee_floor predicate, invoked inside
-        // apply_post_consensus_policy_with_floor (called from admit_with_metadata
-        // AFTER apply_policy returns Ok) — mirroring Go's
-        // validateCapacityAdmissionLocked → validateFeeFloorLocked split at
-        // clients/go/node/mempool.go (`addEntryLockedWithFloor` capacity-eviction block). This helper only validates the
-        // DA half of the Stage C contract and intentionally short-circuits for
-        // non-DA inputs.
+        // aggressive rate config. Non-DA relay-fee floor enforcement lives in
+        // the free validate_fee_floor predicate. Admission calls it after the
+        // Go-compatible duplicate/conflict boundary; relay calls it through
+        // apply_post_consensus_policy_with_floor. This helper only validates
+        // the DA half of the Stage C contract and intentionally short-circuits
+        // for non-DA inputs.
         let (state, raw) = signed_p2pk_state_and_tx(
             10,
             vec![TxOutput {
@@ -4702,6 +4674,90 @@ mod tests {
         );
         assert_eq!(pool.len(), 0);
         assert!(pool.spenders.is_empty());
+    }
+
+    /// RUB-18 ordering parity: Go's `addTxWithSource` runs the plain-P2PK
+    /// cheap fee-floor precheck before locked duplicate-txid admission checks.
+    /// A duplicate that is also below the current rolling floor must therefore
+    /// return `Unavailable`, not `Conflict`.
+    #[test]
+    fn rub18_admit_below_floor_duplicate_fast_rejects_before_conflict() {
+        let (state, raw, _conflict) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (tx, _txid, _wtxid, consumed) = parse_tx(&raw).expect("parse tx");
+        assert_eq!(consumed, raw.len());
+        let (weight, _da_bytes, _) = tx_weight_and_stats_public(&tx).expect("weight");
+        assert!(
+            7690u128 < (weight as u128) * 2,
+            "test fixture must become below-floor after raising floor to 2"
+        );
+
+        let mut pool = TxPool::new();
+        pool.admit(&raw, &state, None, devnet_genesis_chain_id())
+            .expect("first floor-compliant admit");
+        pool.cfg.policy_current_mempool_min_fee_rate = 2;
+
+        let err = pool
+            .admit(&raw, &state, None, devnet_genesis_chain_id())
+            .expect_err("below-floor duplicate must hit fast floor precheck first");
+        assert_eq!(
+            err.kind,
+            TxPoolAdmitErrorKind::Unavailable,
+            "Go-compatible cheap precheck must win over duplicate Conflict"
+        );
+        assert!(
+            err.message.contains("mempool fee below rolling minimum"),
+            "expected rolling-floor message, got: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("already in mempool"),
+            "duplicate conflict must not win this ordering case: {}",
+            err.message
+        );
+        assert_eq!(pool.len(), 1, "failed duplicate retry must not mutate pool");
+    }
+
+    /// RUB-18 ordering parity: Go's plain-P2PK cheap fee-floor precheck also
+    /// runs before the locked spender conflict check. A conflicting candidate
+    /// that is below floor must return `Unavailable`, not `Conflict`.
+    #[test]
+    fn rub18_admit_below_floor_spender_conflict_fast_rejects_before_conflict() {
+        let (state, resident, conflicting) = signed_conflicting_p2pk_state_and_txs(7700, 10, 7699);
+        let (tx, _txid, _wtxid, consumed) = parse_tx(&conflicting).expect("parse tx");
+        assert_eq!(consumed, conflicting.len());
+        let (weight, _da_bytes, _) = tx_weight_and_stats_public(&tx).expect("weight");
+        assert!(
+            1u128 < weight as u128,
+            "conflicting fixture must be below the default floor"
+        );
+
+        let mut pool = TxPool::new();
+        pool.admit(&resident, &state, None, devnet_genesis_chain_id())
+            .expect("resident admit");
+
+        let err = pool
+            .admit(&conflicting, &state, None, devnet_genesis_chain_id())
+            .expect_err("below-floor spender conflict must hit fast floor precheck first");
+        assert_eq!(
+            err.kind,
+            TxPoolAdmitErrorKind::Unavailable,
+            "Go-compatible cheap precheck must win over spender Conflict"
+        );
+        assert!(
+            err.message.contains("mempool fee below rolling minimum"),
+            "expected rolling-floor message, got: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("double-spend conflict"),
+            "spender conflict must not win this ordering case: {}",
+            err.message
+        );
+        assert_eq!(
+            pool.len(),
+            1,
+            "failed conflicting candidate must not mutate pool"
+        );
     }
 
     /// Plain P2PK at or above the rolling floor: precheck returns
