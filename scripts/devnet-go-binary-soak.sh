@@ -4,10 +4,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
+RUST_MODULE_ROOT="${REPO_ROOT}/clients/rust"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
-TARGET_HEIGHT=120 WITH_RESTART=0
+TARGET_HEIGHT=120 WITH_RESTART=0 MIXED_PARTITION_HEAL=0
 
-usage() { echo "usage: $0 [--target-height N] [--with-restart]" >&2; }
+usage() { echo "usage: $0 [--target-height N] [--with-restart] [--mixed-client-partition-heal]" >&2; }
 while (($#)); do
   case "$1" in
     --target-height)
@@ -17,6 +18,10 @@ while (($#)); do
       ;;
     --with-restart)
       WITH_RESTART=1
+      shift
+      ;;
+    --mixed-client-partition-heal)
+      MIXED_PARTITION_HEAL=1
       shift
       ;;
     -h|--help)
@@ -41,11 +46,13 @@ TARGET_HEIGHT="$(python3 -c 'import sys; s=sys.argv[1]; n=int(s) if s.isdecimal(
 source "${HELPER}"
 rubin_process_init go-binary-soak
 NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
+RUST_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-rust"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"
 KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"
 KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"
 TCP_PROXY_PY="${RUBIN_PROCESS_ARTIFACT_ROOT}/tcp_proxy.py"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-binary-soak-report.json"
+PARTITION_REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-partition-heal-report.json"
 BASE_HEIGHT=$((TARGET_HEIGHT - 1))
 BASE_MINE_BLOCKS=$((BASE_HEIGHT + 1))
 A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
@@ -172,6 +179,80 @@ while True:
         threading.Thread(target=pump, args=(src, dst), daemon=True).start()
 PY
 }
+write_partition_tcp_proxy() {
+  cat >"${TCP_PROXY_PY}" <<'PY'
+import socket, sys, threading, time
+target_file = sys.argv[1]
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", 0))
+listener.listen()
+print(f"proxy: listening={listener.getsockname()[0]}:{listener.getsockname()[1]}", flush=True)
+active = set()
+lock = threading.Lock()
+last_target = None
+def close_sock(sock):
+    try: sock.shutdown(socket.SHUT_RDWR)
+    except OSError: pass
+    try: sock.close()
+    except OSError: pass
+def close_active():
+    with lock:
+        socks = list(active)
+        active.clear()
+    for sock in socks:
+        close_sock(sock)
+def read_target():
+    try:
+        return open(target_file, encoding="utf-8").read().strip()
+    except OSError:
+        return "drop"
+def watch_target():
+    global last_target
+    while True:
+        current = read_target()
+        if last_target is None:
+            last_target = current
+        elif current != last_target:
+            last_target = current
+            close_active()
+        time.sleep(0.2)
+def pump(src, dst):
+    try:
+        src.settimeout(0.5)
+        while True:
+            try:
+                data = src.recv(65536)
+            except socket.timeout:
+                continue
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    for sock in (src, dst):
+        close_sock(sock)
+        with lock:
+            active.discard(sock)
+threading.Thread(target=watch_target, daemon=True).start()
+while True:
+    client, _ = listener.accept()
+    try:
+        target = read_target()
+        if target == "drop": raise ValueError("proxy target is drop")
+        host, port = target.rsplit(":", 1)
+        if host != "127.0.0.1": raise ValueError("proxy target must be loopback")
+        upstream = socket.create_connection((host, int(port)), timeout=5)
+        upstream.settimeout(None)
+    except Exception:
+        client.close(); continue
+    with lock:
+        active.add(client)
+        active.add(upstream)
+    for src, dst in ((client, upstream), (upstream, client)):
+        threading.Thread(target=pump, args=(src, dst), daemon=True).start()
+PY
+}
 PROXY_PID=""
 PROXY_ADDR=""
 start_proxy() {
@@ -203,6 +284,255 @@ while time.time() < deadline:
     time.sleep(1)
 sys.exit(f"timeout resolving p2p listen address for pid={pid}")
 PY
+}
+partition_no_data() {
+  local reason="${1:-unknown}"
+  echo "NO_DATA: reason=${reason}; report=${PARTITION_REPORT_JSON}" >&2
+  return 1
+}
+build_rust_node_for_partition() {
+  echo "Building Rust rubin-node binary"
+  RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- cargo build --manifest-path "${RUST_MODULE_ROOT}/Cargo.toml" -p rubin-node >/dev/null
+  cp -- "${RUST_MODULE_ROOT}/target/debug/rubin-node" "${RUST_NODE_BIN}"
+  [[ -x "${RUST_NODE_BIN}" ]] || { echo "Rust rubin-node binary is missing after build" >&2; return 1; }
+}
+pid_listens_on() {
+  local pid="$1" endpoint="$2" out status=0
+  out="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:LISTEN -Fn 2>/dev/null)" || status=$?
+  (( status == 0 )) || return 1
+  grep -F -x -q -- "n${endpoint}" <<<"${out}"
+}
+start_partition_go_node() {
+  local log_file="partition-node-go.log"
+  GO_PARTITION_PID="" GO_PARTITION_RPC="" GO_PARTITION_P2P="" GO_PARTITION_STARTED=""
+  rubin_process_start "${log_file}" "${NODE_BIN}" --network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-go" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0
+  GO_PARTITION_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 60 "${GO_PARTITION_PID}"
+  GO_PARTITION_RPC="$(rubin_process_extract_rpc_addr "${log_file}")"
+  GO_PARTITION_P2P="$(p2p_addr_for_pid "${GO_PARTITION_PID}" "${GO_PARTITION_RPC}" 30)"
+  rubin_process_wait_for_rpc_ready "${GO_PARTITION_RPC}" 30
+  GO_PARTITION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+start_partition_rust_node() {
+  local log_file="partition-node-rust.log" peer_addr="$1"
+  RUST_PARTITION_PID="" RUST_PARTITION_RPC="" RUST_PARTITION_P2P="" RUST_PARTITION_STARTED=""
+  rubin_process_start "${log_file}" "${RUST_NODE_BIN}" --network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-rust" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}"
+  RUST_PARTITION_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 60 "${RUST_PARTITION_PID}"
+  RUST_PARTITION_RPC="$(rubin_process_extract_rpc_addr "${log_file}")"
+  RUST_PARTITION_P2P="$(p2p_addr_for_pid "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" 30)"
+  rubin_process_wait_for_rpc_ready "${RUST_PARTITION_RPC}" 30
+  RUST_PARTITION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+verify_partition_process_identity() {
+  local label="$1" pid="$2" rpc_addr="$3" p2p_addr="$4" expected_executable="$5" expected_realpath
+  rubin_process_is_alive "${pid}" || { echo "${label} pid is not alive: ${pid}" >&2; return 1; }
+  expected_realpath="$(_rubin_process_executable_realpath "${expected_executable}")" || { echo "${label} expected executable is not verifiable: ${expected_executable}" >&2; return 1; }
+  _rubin_process_started_exec_matches "${pid}" "${expected_realpath}" || { echo "${label} executable identity mismatch: ${pid}" >&2; return 1; }
+  pid_listens_on "${pid}" "${rpc_addr}" || { echo "${label} rpc endpoint is not pid-owned: ${rpc_addr}" >&2; return 1; }
+  pid_listens_on "${pid}" "${p2p_addr}" || { echo "${label} p2p endpoint is not pid-owned: ${p2p_addr}" >&2; return 1; }
+}
+capture_peer_snapshot() {
+  local impl="$1" rpc_addr="$2" phase="$3" out="$4" tmp raw
+  tmp="${out}.tmp"
+  raw="${out}.raw"
+  rpc_json GET "${rpc_addr}" /peers >"${raw}" || { rm -f -- "${raw}" "${tmp}"; return 1; }
+  python3 - "${impl}" "${rpc_addr}" "${phase}" "${raw}" "${tmp}" <<'PY'
+import json, os, sys, time
+impl, rpc_addr, phase, raw_path, out_path = sys.argv[1:6]
+with open(raw_path, encoding="utf-8") as f:
+    data = json.load(f)
+if not isinstance(data, dict):
+    raise SystemExit("peer response root is not an object")
+peers = data.get("peers")
+count = data.get("count")
+if not isinstance(count, int) or isinstance(count, bool) or not isinstance(peers, list) or count != len(peers):
+    raise SystemExit("peer response count/peers shape mismatch")
+for peer in peers:
+    if not isinstance(peer, dict) or not isinstance(peer.get("addr"), str) or not isinstance(peer.get("handshake_complete"), bool):
+        raise SystemExit("peer response entry shape mismatch")
+out = {
+    "captured_at_unix_ns": time.time_ns(),
+    "implementation": impl,
+    "phase": phase,
+    "request_path": "/peers",
+    "rpc_endpoint": rpc_addr,
+    "response": data,
+}
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(out, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+  mv -- "${tmp}" "${out}"
+  rm -f -- "${raw}"
+}
+peer_snapshot_has_complete() {
+  local snapshot="$1" expected_addr="$2"
+  python3 - "${snapshot}" "${expected_addr}" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+expected = sys.argv[2]
+resp = data.get("response") if isinstance(data, dict) else None
+peers = resp.get("peers") if isinstance(resp, dict) else None
+if not isinstance(peers, list):
+    sys.exit(2)
+sys.exit(0 if any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers) else 1)
+PY
+}
+wait_peer_present() {
+  local label="$1" impl="$2" rpc_addr="$3" expected_addr="$4" out="$5" timeout="$6" deadline
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if capture_peer_snapshot "${impl}" "${rpc_addr}" "${label}" "${out}" 2>/dev/null && peer_snapshot_has_complete "${out}" "${expected_addr}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timeout waiting for ${label} peer ${expected_addr}" >&2
+  return 1
+}
+wait_peer_absent() {
+  local label="$1" impl="$2" rpc_addr="$3" expected_addr="$4" out="$5" timeout="$6" deadline
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if capture_peer_snapshot "${impl}" "${rpc_addr}" "${label}" "${out}" 2>/dev/null && ! peer_snapshot_has_complete "${out}" "${expected_addr}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timeout waiting for ${label} peer ${expected_addr} to disappear" >&2
+  return 1
+}
+established_local_to_remote() {
+  local pid="$1" remote="$2" raw
+  raw="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null)" || return 1
+  LSOF_RAW="${raw}" python3 - "${remote}" <<'PY'
+import os, re, sys
+remote = sys.argv[1]
+locals_ = []
+for raw in os.environ.get("LSOF_RAW", "").splitlines():
+    raw = raw.strip()
+    if not raw.startswith("n"):
+        continue
+    value = raw[1:]
+    m = re.fullmatch(r"(127[.]0[.]0[.]1:[0-9]+)->(127[.]0[.]0[.]1:[0-9]+)", value)
+    if m and m.group(2) == remote:
+        locals_.append(m.group(1))
+locals_ = sorted(set(locals_))
+if len(locals_) == 1:
+    print(locals_[0])
+    sys.exit(0)
+if len(locals_) == 0:
+    sys.exit(1)
+sys.exit(2)
+PY
+}
+wait_established_local_to_remote() {
+  local label="$1" pid="$2" remote="$3" timeout="$4" deadline out rc
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    rc=0
+    out="$(established_local_to_remote "${pid}" "${remote}")" || rc=$?
+    (( rc == 0 )) && { printf '%s\n' "${out}"; return 0; }
+    (( rc == 2 )) && { echo "ambiguous ${label} established link to ${remote}" >&2; return 1; }
+    sleep 1
+  done
+  echo "timeout waiting for ${label} established link to ${remote}" >&2
+  return 1
+}
+wait_no_established_to_remote() {
+  local label="$1" pid="$2" remote="$3" timeout="$4" deadline rc
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    rc=0
+    established_local_to_remote "${pid}" "${remote}" >/dev/null || rc=$?
+    if [[ "${rc:-1}" == "1" ]]; then
+      return 0
+    fi
+    (( rc == 2 )) && { echo "ambiguous ${label} established link to ${remote}" >&2; return 1; }
+    rc=0
+    sleep 1
+  done
+  echo "timeout waiting for ${label} established link to ${remote} to close" >&2
+  return 1
+}
+write_partition_report() {
+  local tmp="${PARTITION_REPORT_JSON}.tmp"
+  export PARTITION_REPORT_JSON PARTITION_REPORT_TMP GO_PARTITION_PID GO_PARTITION_RPC GO_PARTITION_P2P GO_PARTITION_STARTED RUST_PARTITION_PID RUST_PARTITION_RPC RUST_PARTITION_P2P RUST_PARTITION_STARTED PROXY_PID PROXY_ADDR GO_PROXY_LOCAL_PRE GO_PROXY_LOCAL_HEAL PRE_RUST_PEERS PRE_GO_PEERS PARTITION_RUST_PEERS PARTITION_GO_PEERS HEAL_RUST_PEERS HEAL_GO_PEERS
+  PARTITION_REPORT_TMP="${tmp}"
+  rm -f -- "${tmp}"
+  python3 - <<'PY'
+import json, os
+e = os.environ
+report = {
+    "scenario": "mixed_client_partition_heal_peer_state",
+    "verdict": "PASS",
+    "nodes": [
+        {"name": "node-go", "implementation": "go", "pid": int(e["GO_PARTITION_PID"]), "rpc_endpoint": e["GO_PARTITION_RPC"], "p2p_endpoint": e["GO_PARTITION_P2P"], "started_at": e["GO_PARTITION_STARTED"]},
+        {"name": "node-rust", "implementation": "rust", "pid": int(e["RUST_PARTITION_PID"]), "rpc_endpoint": e["RUST_PARTITION_RPC"], "p2p_endpoint": e["RUST_PARTITION_P2P"], "started_at": e["RUST_PARTITION_STARTED"]},
+    ],
+    "control": {"mode": "active_drop_tcp_proxy_with_live_peer_state", "source": "node-rust", "target": "node-go", "proxy_pid": int(e["PROXY_PID"]), "proxy_addr": e["PROXY_ADDR"]},
+    "proof": {
+        "partition_changed_peer_state": True,
+        "heal_restored_peer_state": True,
+        "proxy_target_file_only_is_insufficient": True,
+        "process_identity_rechecked_after_heal": True,
+        "source_expected_peer_addr": e["PROXY_ADDR"],
+        "target_pre_partition_peer_addr": e["GO_PROXY_LOCAL_PRE"],
+        "target_heal_peer_addr": e["GO_PROXY_LOCAL_HEAL"],
+    },
+    "observations": {
+        "pre_partition": {"rust_peer_snapshot": e["PRE_RUST_PEERS"], "go_peer_snapshot": e["PRE_GO_PEERS"]},
+        "partition": {"rust_peer_snapshot": e["PARTITION_RUST_PEERS"], "go_peer_snapshot": e["PARTITION_GO_PEERS"]},
+        "heal": {"rust_peer_snapshot": e["HEAL_RUST_PEERS"], "go_peer_snapshot": e["HEAL_GO_PEERS"]},
+    },
+    "non_goals": ["no reorg proof", "no schema/report validator change", "no Go/Rust runtime change"],
+}
+with open(e["PARTITION_REPORT_TMP"], "w", encoding="utf-8") as f:
+    json.dump(report, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+  mv -- "${tmp}" "${PARTITION_REPORT_JSON}"
+}
+run_mixed_partition_heal() {
+  local proxy_target="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-proxy-target.txt"
+  PRE_RUST_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/pre-rust-peers.json"
+  PRE_GO_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/pre-go-peers.json"
+  PARTITION_RUST_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-peers.json"
+  PARTITION_GO_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-peers.json"
+  HEAL_RUST_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/heal-rust-peers.json"
+  HEAL_GO_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/heal-go-peers.json"
+  echo "Building Go/Rust rubin-node binaries for live partition/heal proof"
+  "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${NODE_BIN}" ./cmd/rubin-node || partition_no_data go_build_failed
+  build_rust_node_for_partition || partition_no_data rust_build_failed
+  write_partition_tcp_proxy
+  start_partition_go_node || partition_no_data go_process_not_ready
+  verify_partition_process_identity node-go "${GO_PARTITION_PID}" "${GO_PARTITION_RPC}" "${GO_PARTITION_P2P}" "${NODE_BIN}" || partition_no_data go_process_identity_unverified
+  printf '%s\n' "${GO_PARTITION_P2P}" >"${proxy_target}"
+  start_proxy "partition-proxy.log" "${proxy_target}" || partition_no_data proxy_not_ready
+  start_partition_rust_node "${PROXY_ADDR}" || partition_no_data rust_process_not_ready
+  verify_partition_process_identity node-rust "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" "${RUST_PARTITION_P2P}" "${RUST_NODE_BIN}" || partition_no_data rust_process_identity_unverified
+  wait_peer_present pre-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PRE_RUST_PEERS}" 90 || partition_no_data pre_partition_source_peer_missing
+  GO_PROXY_LOCAL_PRE="$(wait_established_local_to_remote proxy-pre "${PROXY_PID}" "${GO_PARTITION_P2P}" 30)" || partition_no_data pre_partition_proxy_target_link_missing
+  wait_peer_present pre-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PRE_GO_PEERS}" 30 || partition_no_data pre_partition_target_peer_missing
+  printf 'drop\n' >"${proxy_target}"
+  wait_peer_absent partition-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PARTITION_RUST_PEERS}" 90 || partition_no_data partition_source_peer_unchanged
+  wait_peer_absent partition-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PARTITION_GO_PEERS}" 30 || partition_no_data partition_target_peer_unchanged
+  wait_no_established_to_remote rust-partition "${RUST_PARTITION_PID}" "${PROXY_ADDR}" 30 || partition_no_data partition_source_tcp_link_unchanged
+  wait_no_established_to_remote proxy-partition "${PROXY_PID}" "${GO_PARTITION_P2P}" 30 || partition_no_data partition_proxy_target_link_unchanged
+  printf '%s\n' "${GO_PARTITION_P2P}" >"${proxy_target}"
+  wait_peer_present heal-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${HEAL_RUST_PEERS}" 120 || partition_no_data heal_source_peer_missing
+  GO_PROXY_LOCAL_HEAL="$(wait_established_local_to_remote proxy-heal "${PROXY_PID}" "${GO_PARTITION_P2P}" 60)" || partition_no_data heal_proxy_target_link_missing
+  wait_peer_present heal-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_HEAL}" "${HEAL_GO_PEERS}" 60 || partition_no_data heal_target_peer_missing
+  verify_partition_process_identity node-go-final "${GO_PARTITION_PID}" "${GO_PARTITION_RPC}" "${GO_PARTITION_P2P}" "${NODE_BIN}" || partition_no_data go_final_process_identity_unverified
+  verify_partition_process_identity node-rust-final "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" "${RUST_PARTITION_P2P}" "${RUST_NODE_BIN}" || partition_no_data rust_final_process_identity_unverified
+  write_partition_report || partition_no_data report_write_failed
+  if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
+    echo "PASS: mixed-client partition/heal changed and restored live peer state; report=${PARTITION_REPORT_JSON}"
+  else
+    echo "PASS: mixed-client partition/heal changed and restored live peer state; set KEEP_TMP=1 to retain report"
+  fi
 }
 start_node_ready() {
   local label="$1" log_file="$2" datadir="$3" peers="${4:-}" args
@@ -266,6 +596,10 @@ func main() {
 }
 EOF
 }
+if (( MIXED_PARTITION_HEAL == 1 )); then
+  run_mixed_partition_heal
+  exit 0
+fi
 echo "Building Go rubin-node and rubin-txgen"
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${NODE_BIN}" ./cmd/rubin-node
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${TXGEN_BIN}" ./cmd/rubin-txgen
