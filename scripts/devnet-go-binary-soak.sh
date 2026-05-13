@@ -6,9 +6,9 @@ DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 RUST_MODULE_ROOT="${REPO_ROOT}/clients/rust"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
-TARGET_HEIGHT=120 WITH_RESTART=0 MIXED_PARTITION_HEAL=0
+TARGET_HEIGHT=120 WITH_RESTART=0 MIXED_PARTITION_HEAL=0 MIXED_PARTITION_HEAL_REORG=0
 
-usage() { echo "usage: $0 [--target-height N] [--with-restart] [--mixed-client-partition-heal]" >&2; }
+usage() { echo "usage: $0 [--target-height N] [--with-restart] [--mixed-client-partition-heal] [--mixed-client-partition-heal-reorg]" >&2; }
 while (($#)); do
   case "$1" in
     --target-height)
@@ -24,6 +24,10 @@ while (($#)); do
       MIXED_PARTITION_HEAL=1
       shift
       ;;
+    --mixed-client-partition-heal-reorg)
+      MIXED_PARTITION_HEAL_REORG=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -34,6 +38,7 @@ while (($#)); do
       ;;
   esac
 done
+(( MIXED_PARTITION_HEAL + MIXED_PARTITION_HEAL_REORG <= 1 )) || { usage; exit 2; }
 for tool in python3 perl lsof; do
   command -v "${tool}" >/dev/null 2>&1 || {
     echo "${tool} is required for Go binary soak evidence" >&2
@@ -53,6 +58,7 @@ KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"
 TCP_PROXY_PY="${RUBIN_PROCESS_ARTIFACT_ROOT}/tcp_proxy.py"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-binary-soak-report.json"
 PARTITION_REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-partition-heal-report.json"
+PARTITION_REORG_REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-partition-heal-reorg-report.json"
 BASE_HEIGHT=$((TARGET_HEIGHT - 1))
 BASE_MINE_BLOCKS=$((BASE_HEIGHT + 1))
 A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
@@ -333,9 +339,11 @@ pid_listens_on() {
   grep -F -x -q -- "n${endpoint}" <<<"${out}"
 }
 start_partition_go_node() {
-  local log_file="partition-node-go.log"
+  local log_file="partition-node-go.log" args
   GO_PARTITION_PID="" GO_PARTITION_RPC="" GO_PARTITION_P2P="" GO_PARTITION_STARTED=""
-  rubin_process_start "${log_file}" "${NODE_BIN}" --network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-go" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 || return 1
+  args=(--network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-go" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
+  [[ -z "${PARTITION_GO_MINE_ADDRESS_HEX:-}" ]] || args+=(--mine-address "${PARTITION_GO_MINE_ADDRESS_HEX}")
+  rubin_process_start "${log_file}" "${NODE_BIN}" "${args[@]}" || return 1
   GO_PARTITION_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${log_file}" "rpc: listening=" 60 "${GO_PARTITION_PID}" || return 1
   GO_PARTITION_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || return 1
@@ -344,9 +352,11 @@ start_partition_go_node() {
   GO_PARTITION_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 start_partition_rust_node() {
-  local log_file="partition-node-rust.log" peer_addr="$1"
+  local log_file="partition-node-rust.log" peer_addr="$1" args
   RUST_PARTITION_PID="" RUST_PARTITION_RPC="" RUST_PARTITION_P2P="" RUST_PARTITION_STARTED=""
-  rubin_process_start "${log_file}" "${RUST_NODE_BIN}" --network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-rust" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}" || return 1
+  args=(--network devnet --datadir "${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-node-rust" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${peer_addr}")
+  [[ -z "${PARTITION_RUST_MINE_ADDRESS_HEX:-}" ]] || args+=(--mine-address "${PARTITION_RUST_MINE_ADDRESS_HEX}")
+  rubin_process_start "${log_file}" "${RUST_NODE_BIN}" "${args[@]}" || return 1
   RUST_PARTITION_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${log_file}" "rpc: listening=" 60 "${RUST_PARTITION_PID}" || return 1
   RUST_PARTITION_RPC="$(rubin_process_extract_rpc_addr "${log_file}")" || return 1
@@ -634,6 +644,285 @@ with open(e["PARTITION_REPORT_TMP"], "w", encoding="utf-8") as f:
 PY
   mv -- "${tmp}" "${PARTITION_REPORT_JSON}" || { rm -f -- "${tmp}"; return 1; }
 }
+partition_reorg_no_data() {
+  local reason="${1:-unknown}"
+  echo "NO_DATA: reason=${reason}; report=${PARTITION_REORG_REPORT_JSON}" >&2
+  return 1
+}
+require_reorg_peer_present() {
+  local missing_reason="$1" label="$2" rc=0
+  shift 2
+  wait_peer_present "${label}" "$@" || rc=$?
+  (( rc == 0 )) && return 0
+  (( rc == 2 )) && partition_reorg_no_data "$(peer_snapshot_no_data_reason "${label}")"
+  partition_reorg_no_data "${missing_reason}"
+}
+require_reorg_peer_absent() {
+  local unchanged_reason="$1" label="$2" rc=0
+  shift 2
+  wait_peer_absent "${label}" "$@" || rc=$?
+  (( rc == 0 )) && return 0
+  (( rc == 2 )) && partition_reorg_no_data "$(peer_snapshot_no_data_reason "${label}")"
+  partition_reorg_no_data "${unchanged_reason}"
+}
+capture_reorg_rpc_sidecar() {
+  local impl="$1" method="$2" rpc_addr="$3" path="$4" phase="$5" out="$6" body="${7:-}" tmp raw rc=0
+  tmp="${out}.tmp"
+  raw="${out}.raw"
+  rm -f -- "${out}" "${tmp}" "${raw}"
+  rpc_json "${method}" "${rpc_addr}" "${path}" "${body}" >"${raw}" || rc=$?
+  if (( rc != 0 )); then
+    echo "${phase} ${method} ${path} failed via ${impl} rpc=${rpc_addr}: $(cat "${raw}" 2>/dev/null || true)" >&2
+    rm -f -- "${raw}" "${tmp}" "${out}"
+    return 1
+  fi
+  python3 - "${impl}" "${method}" "${rpc_addr}" "${path}" "${phase}" "${raw}" "${tmp}" <<'PY' || rc=$?
+import json
+import os
+import sys
+import time
+
+impl, method, rpc_addr, path, phase, raw_path, out_path = sys.argv[1:8]
+
+def fail(reason, detail):
+    print(f"{reason}: {detail}", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    size = os.path.getsize(raw_path)
+except OSError as exc:
+    fail("read_failed", exc)
+if size <= 0 or size > 1048576:
+    fail("size_mismatch", f"raw response size={size}")
+try:
+    with open(raw_path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    fail("json_malformed", exc)
+if not isinstance(data, dict):
+    fail("shape_mismatch", "response root is not an object")
+sidecar = {
+    "captured_at_unix_ns": time.time_ns(),
+    "implementation": impl,
+    "method": method,
+    "phase": phase,
+    "request_path": path,
+    "response": data,
+    "rpc_endpoint": rpc_addr,
+}
+try:
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(sidecar, f, indent=2, sort_keys=True)
+        f.write("\n")
+except OSError as exc:
+    fail("write_failed", exc)
+PY
+  if (( rc != 0 )); then
+    rm -f -- "${raw}" "${tmp}" "${out}"
+    return 1
+  fi
+  mv -- "${tmp}" "${out}" || { rm -f -- "${raw}" "${tmp}" "${out}"; return 1; }
+  rm -f -- "${raw}"
+}
+reorg_mine_tsv() {
+  python3 - "$1" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    sys.exit(f"mine sidecar malformed: {exc}")
+if not isinstance(data, dict) or set(data) != {"captured_at_unix_ns", "implementation", "method", "phase", "request_path", "response", "rpc_endpoint"}:
+    sys.exit("mine sidecar shape mismatch")
+if data.get("method") != "POST" or data.get("request_path") != "/mine_next":
+    sys.exit("mine sidecar route mismatch")
+resp = data.get("response")
+if not isinstance(resp, dict) or set(resp) != {"block_hash", "height", "mined", "nonce", "timestamp", "tx_count"}:
+    sys.exit("mine response shape mismatch")
+height, block_hash, tx_count = resp.get("height"), resp.get("block_hash"), resp.get("tx_count")
+if resp.get("mined") is not True:
+    sys.exit("mine response did not mine")
+if not isinstance(height, int) or isinstance(height, bool) or height < 1:
+    sys.exit("mine height mismatch")
+if not isinstance(block_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+    sys.exit("mine block hash mismatch")
+if not isinstance(tx_count, int) or isinstance(tx_count, bool) or tx_count < 1:
+    sys.exit("mine tx_count mismatch")
+print(height, block_hash, tx_count, sep="\t")
+PY
+}
+reorg_tip_tsv() {
+  python3 - "$1" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    sys.exit(f"tip sidecar malformed: {exc}")
+if not isinstance(data, dict) or set(data) != {"captured_at_unix_ns", "implementation", "method", "phase", "request_path", "response", "rpc_endpoint"}:
+    sys.exit("tip sidecar shape mismatch")
+if data.get("method") != "GET" or data.get("request_path") != "/get_tip":
+    sys.exit("tip sidecar route mismatch")
+resp = data.get("response")
+if not isinstance(resp, dict) or set(resp) != {"best_known_height", "has_tip", "height", "in_ibd", "tip_hash"}:
+    sys.exit("tip response shape mismatch")
+height, tip_hash = resp.get("height"), resp.get("tip_hash")
+if resp.get("has_tip") is not True:
+    sys.exit("tip response has no tip")
+if not isinstance(height, int) or isinstance(height, bool) or height < 1:
+    sys.exit("tip height mismatch")
+if not isinstance(tip_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", tip_hash):
+    sys.exit("tip hash mismatch")
+print(height, tip_hash, sep="\t")
+PY
+}
+reorg_block_matches() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json
+import re
+import sys
+
+path, height_raw, want_hash = sys.argv[1:4]
+try:
+    want_height = int(height_raw)
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    sys.exit(f"block sidecar malformed: {exc}")
+if not isinstance(data, dict) or set(data) != {"captured_at_unix_ns", "implementation", "method", "phase", "request_path", "response", "rpc_endpoint"}:
+    sys.exit("block sidecar shape mismatch")
+if data.get("method") != "GET" or data.get("request_path") != f"/get_block?height={want_height}":
+    sys.exit("block sidecar route mismatch")
+resp = data.get("response")
+if not isinstance(resp, dict) or set(resp) != {"block_hex", "canonical", "hash", "height"}:
+    sys.exit("block response shape mismatch")
+block_hex = resp.get("block_hex")
+if resp.get("height") != want_height or resp.get("canonical") is not True or resp.get("hash") != want_hash:
+    sys.exit("block response height/hash/canonical mismatch")
+if not isinstance(block_hex, str) or not block_hex or not re.fullmatch(r"[0-9a-f]+", block_hex):
+    sys.exit("block_hex shape mismatch")
+PY
+}
+mine_reorg_block() {
+  local impl="$1" rpc_addr="$2" phase="$3" out="$4"
+  capture_reorg_rpc_sidecar "${impl}" POST "${rpc_addr}" /mine_next "${phase}" "${out}" '{}' || return 1
+  reorg_mine_tsv "${out}"
+}
+capture_reorg_block() {
+  local impl="$1" rpc_addr="$2" phase="$3" height="$4" block_hash="$5" out="$6"
+  capture_reorg_rpc_sidecar "${impl}" GET "${rpc_addr}" "/get_block?height=${height}" "${phase}" "${out}" || return 1
+  reorg_block_matches "${out}" "${height}" "${block_hash}"
+}
+wait_reorg_tip_matches() {
+  local impl="$1" rpc_addr="$2" phase="$3" out="$4" want_height="$5" want_hash="$6" timeout="$7" deadline tmp parsed height tip_hash
+  deadline=$((SECONDS + timeout))
+  tmp="${out}.candidate"
+  rm -f -- "${out}" "${tmp}"
+  while (( SECONDS < deadline )); do
+    if capture_reorg_rpc_sidecar "${impl}" GET "${rpc_addr}" /get_tip "${phase}" "${tmp}"; then
+      parsed="$(reorg_tip_tsv "${tmp}")" || { rm -f -- "${tmp}"; return 2; }
+      IFS=$'\t' read -r height tip_hash <<<"${parsed}" || { rm -f -- "${tmp}"; return 2; }
+      if [[ "${height}" == "${want_height}" && "${tip_hash}" == "${want_hash}" ]]; then
+        mv -- "${tmp}" "${out}" || { rm -f -- "${tmp}" "${out}"; return 2; }
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  rm -f -- "${tmp}"
+  return 1
+}
+require_reorg_tip_matches() {
+  local timeout_reason="$1" malformed_reason="$2" rc=0
+  shift 2
+  wait_reorg_tip_matches "$@" || rc=$?
+  (( rc == 0 )) && return 0
+  (( rc == 2 )) && partition_reorg_no_data "${malformed_reason}"
+  partition_reorg_no_data "${timeout_reason}"
+}
+write_partition_reorg_report() {
+  local tmp="${PARTITION_REORG_REPORT_JSON}.tmp"
+  export PARTITION_REORG_REPORT_JSON PARTITION_REORG_REPORT_TMP GO_PARTITION_PID GO_PARTITION_RPC GO_PARTITION_P2P GO_PARTITION_STARTED RUST_PARTITION_PID RUST_PARTITION_RPC RUST_PARTITION_P2P RUST_PARTITION_STARTED PROXY_PID PROXY_ADDR GO_PROXY_LOCAL_PRE GO_PROXY_LOCAL_HEAL PRE_RUST_PEERS PRE_GO_PEERS PARTITION_RUST_PEERS PARTITION_GO_PEERS FORK_RUST_PEERS FORK_GO_PEERS HEAL_RUST_PEERS HEAL_GO_PEERS COMMON_HEIGHT COMMON_HASH COMMON_TX_COUNT GO_FORK_HEIGHT GO_FORK_HASH GO_FORK_TX_COUNT RUST_FORK1_HEIGHT RUST_FORK1_HASH RUST_FORK1_TX_COUNT RUST_FORK2_HEIGHT RUST_FORK2_HASH RUST_FORK2_TX_COUNT GO_REORG_TOTAL GO_LAST_REORG_DEPTH COMMON_GO_MINE COMMON_RUST_TIP COMMON_GO_BLOCK COMMON_RUST_BLOCK GO_FORK_MINE GO_FORK_TIP GO_FORK_BLOCK RUST_FORK1_MINE RUST_FORK2_MINE RUST_FORK_TIP RUST_FORK1_BLOCK RUST_FORK2_BLOCK FINAL_GO_TIP FINAL_RUST_TIP FINAL_GO_REORG_BLOCK FINAL_GO_TIP_BLOCK FINAL_RUST_TIP_BLOCK
+  PARTITION_REORG_REPORT_TMP="${tmp}"
+  rm -f -- "${tmp}"
+  python3 - <<'PY' || { rm -f -- "${tmp}"; return 1; }
+import json
+import os
+
+e = os.environ
+report = {
+    "scenario": "mixed_client_partition_heal_reorg",
+    "verdict": "PASS",
+    "nodes": [
+        {"name": "node-go", "implementation": "go", "pid": int(e["GO_PARTITION_PID"]), "rpc_endpoint": e["GO_PARTITION_RPC"], "p2p_endpoint": e["GO_PARTITION_P2P"], "started_at": e["GO_PARTITION_STARTED"]},
+        {"name": "node-rust", "implementation": "rust", "pid": int(e["RUST_PARTITION_PID"]), "rpc_endpoint": e["RUST_PARTITION_RPC"], "p2p_endpoint": e["RUST_PARTITION_P2P"], "started_at": e["RUST_PARTITION_STARTED"]},
+    ],
+    "control": {"mode": "active_drop_tcp_proxy_with_live_peer_state_and_reorg", "source": "node-rust", "target": "node-go", "proxy_pid": int(e["PROXY_PID"]), "proxy_addr": e["PROXY_ADDR"]},
+    "proof": {
+        "common_height": int(e["COMMON_HEIGHT"]),
+        "common_hash": e["COMMON_HASH"],
+        "partition_changed_peer_state": True,
+        "fork_diverged": True,
+        "heal_restored_peer_state": True,
+        "reorg_converged": True,
+        "go_partition_tip": {"height": int(e["GO_FORK_HEIGHT"]), "hash": e["GO_FORK_HASH"]},
+        "rust_winning_tip": {"height": int(e["RUST_FORK2_HEIGHT"]), "hash": e["RUST_FORK2_HASH"]},
+        "go_reorg_parent_after_heal": {"height": int(e["RUST_FORK1_HEIGHT"]), "hash": e["RUST_FORK1_HASH"]},
+        "mined_tx_counts": {"common": int(e["COMMON_TX_COUNT"]), "go_fork": int(e["GO_FORK_TX_COUNT"]), "rust_fork_1": int(e["RUST_FORK1_TX_COUNT"]), "rust_fork_2": int(e["RUST_FORK2_TX_COUNT"])},
+        "go_reorg_metrics": {"rubin_node_reorg_total": int(e["GO_REORG_TOTAL"]), "rubin_node_last_reorg_depth": int(e["GO_LAST_REORG_DEPTH"])},
+        "process_identity_rechecked_after_heal": True,
+        "source_expected_peer_addr": e["PROXY_ADDR"],
+        "target_pre_partition_peer_addr": e["GO_PROXY_LOCAL_PRE"],
+        "target_heal_peer_addr": e["GO_PROXY_LOCAL_HEAL"],
+    },
+    "observations": {
+        "pre_partition": {"rust_peer_snapshot": e["PRE_RUST_PEERS"], "go_peer_snapshot": e["PRE_GO_PEERS"], "common_go_mine": e["COMMON_GO_MINE"], "common_rust_tip": e["COMMON_RUST_TIP"], "common_go_block": e["COMMON_GO_BLOCK"], "common_rust_block": e["COMMON_RUST_BLOCK"]},
+        "partition": {"rust_peer_snapshot": e["PARTITION_RUST_PEERS"], "go_peer_snapshot": e["PARTITION_GO_PEERS"]},
+        "fork": {"rust_peer_snapshot": e["FORK_RUST_PEERS"], "go_peer_snapshot": e["FORK_GO_PEERS"], "go_mine": e["GO_FORK_MINE"], "go_tip": e["GO_FORK_TIP"], "go_block": e["GO_FORK_BLOCK"], "rust_mine_1": e["RUST_FORK1_MINE"], "rust_mine_2": e["RUST_FORK2_MINE"], "rust_tip": e["RUST_FORK_TIP"], "rust_block_1": e["RUST_FORK1_BLOCK"], "rust_block_2": e["RUST_FORK2_BLOCK"]},
+        "heal": {"rust_peer_snapshot": e["HEAL_RUST_PEERS"], "go_peer_snapshot": e["HEAL_GO_PEERS"]},
+        "reorg": {"go_tip": e["FINAL_GO_TIP"], "rust_tip": e["FINAL_RUST_TIP"], "go_reorg_parent_block": e["FINAL_GO_REORG_BLOCK"], "go_tip_block": e["FINAL_GO_TIP_BLOCK"], "rust_tip_block": e["FINAL_RUST_TIP_BLOCK"]},
+    },
+    "non_goals": ["no reorg algorithm/runtime change", "no P2P protocol change", "no tx-path proof beyond setup evidence"],
+}
+if set(report) != {"control", "nodes", "non_goals", "observations", "proof", "scenario", "verdict"}:
+    raise SystemExit("report top-level key mismatch")
+expected_proof_keys = {
+    "common_hash",
+    "common_height",
+    "fork_diverged",
+    "go_partition_tip",
+    "go_reorg_metrics",
+    "go_reorg_parent_after_heal",
+    "heal_restored_peer_state",
+    "mined_tx_counts",
+    "partition_changed_peer_state",
+    "process_identity_rechecked_after_heal",
+    "reorg_converged",
+    "rust_winning_tip",
+    "source_expected_peer_addr",
+    "target_heal_peer_addr",
+    "target_pre_partition_peer_addr",
+}
+if set(report["proof"]) != expected_proof_keys:
+    raise SystemExit("report proof key mismatch")
+if report["verdict"] != "PASS" or "failure_phase" in report or "failure_reason" in report:
+    raise SystemExit("report verdict/failure field mismatch")
+if report["proof"]["go_partition_tip"]["hash"] == report["proof"]["rust_winning_tip"]["hash"]:
+    raise SystemExit("report does not prove divergent fork")
+if report["proof"]["go_reorg_metrics"]["rubin_node_reorg_total"] < 1 or report["proof"]["go_reorg_metrics"]["rubin_node_last_reorg_depth"] < 1:
+    raise SystemExit("report does not prove Go reorg metric increment")
+with open(e["PARTITION_REORG_REPORT_TMP"], "w", encoding="utf-8") as f:
+    json.dump(report, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+  mv -- "${tmp}" "${PARTITION_REORG_REPORT_JSON}" || { rm -f -- "${tmp}"; return 1; }
+}
 run_mixed_partition_heal() {
   local proxy_target="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-proxy-target.txt"
   PRE_RUST_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/pre-rust-peers.json"
@@ -671,6 +960,105 @@ run_mixed_partition_heal() {
     echo "PASS: mixed-client partition/heal changed and restored live peer state; report=${PARTITION_REPORT_JSON}"
   else
     echo "PASS: mixed-client partition/heal changed and restored live peer state; set KEEP_TMP=1 to retain report"
+  fi
+}
+run_mixed_partition_heal_reorg() {
+  local proxy_target="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-reorg-proxy-target.txt" parsed expected_fork_height expected_winning_height
+  PARTITION_GO_MINE_ADDRESS_HEX="1111111111111111111111111111111111111111111111111111111111111111"
+  PARTITION_RUST_MINE_ADDRESS_HEX="2222222222222222222222222222222222222222222222222222222222222222"
+  PRE_RUST_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-pre-rust-peers.json"
+  PRE_GO_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-pre-go-peers.json"
+  PARTITION_RUST_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-partition-rust-peers.json"
+  PARTITION_GO_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-partition-go-peers.json"
+  FORK_RUST_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-fork-rust-peers.json"
+  FORK_GO_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-fork-go-peers.json"
+  HEAL_RUST_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-heal-rust-peers.json"
+  HEAL_GO_PEERS="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-heal-go-peers.json"
+  COMMON_GO_MINE="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-common-go-mine.json"
+  COMMON_RUST_TIP="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-common-rust-tip.json"
+  COMMON_GO_BLOCK="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-common-go-block.json"
+  COMMON_RUST_BLOCK="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-common-rust-block.json"
+  GO_FORK_MINE="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-go-fork-mine.json"
+  GO_FORK_TIP="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-go-fork-tip.json"
+  GO_FORK_BLOCK="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-go-fork-block.json"
+  RUST_FORK1_MINE="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-rust-fork1-mine.json"
+  RUST_FORK2_MINE="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-rust-fork2-mine.json"
+  RUST_FORK_TIP="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-rust-fork-tip.json"
+  RUST_FORK1_BLOCK="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-rust-fork1-block.json"
+  RUST_FORK2_BLOCK="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-rust-fork2-block.json"
+  FINAL_GO_TIP="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-final-go-tip.json"
+  FINAL_RUST_TIP="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-final-rust-tip.json"
+  FINAL_GO_REORG_BLOCK="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-final-go-reorg-parent-block.json"
+  FINAL_GO_TIP_BLOCK="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-final-go-tip-block.json"
+  FINAL_RUST_TIP_BLOCK="${RUBIN_PROCESS_ARTIFACT_ROOT}/reorg-final-rust-tip-block.json"
+  echo "Building Go/Rust rubin-node binaries for live partition/heal reorg proof"
+  "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${NODE_BIN}" ./cmd/rubin-node || partition_reorg_no_data go_build_failed
+  build_rust_node_for_partition || partition_reorg_no_data rust_build_failed
+  write_partition_tcp_proxy
+  start_partition_go_node || partition_reorg_no_data go_process_not_ready
+  verify_partition_process_identity node-go "${GO_PARTITION_PID}" "${GO_PARTITION_RPC}" "${GO_PARTITION_P2P}" "${NODE_BIN}" || partition_reorg_no_data go_process_identity_unverified
+  printf '%s\n' "${GO_PARTITION_P2P}" >"${proxy_target}"
+  start_proxy "partition-reorg-proxy.log" "${proxy_target}" || partition_reorg_no_data proxy_not_ready
+  start_partition_rust_node "${PROXY_ADDR}" || partition_reorg_no_data rust_process_not_ready
+  verify_partition_process_identity node-rust "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" "${RUST_PARTITION_P2P}" "${RUST_NODE_BIN}" || partition_reorg_no_data rust_process_identity_unverified
+  require_reorg_peer_present pre_partition_source_peer_missing pre-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PRE_RUST_PEERS}" 90
+  GO_PROXY_LOCAL_PRE="$(wait_established_local_to_remote proxy-pre "${PROXY_PID}" "${GO_PARTITION_P2P}" 30)" || partition_reorg_no_data pre_partition_proxy_target_link_missing
+  require_reorg_peer_present pre_partition_target_peer_missing pre-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PRE_GO_PEERS}" 30
+
+  parsed="$(mine_reorg_block go "${GO_PARTITION_RPC}" common-go-mine "${COMMON_GO_MINE}")" || partition_reorg_no_data common_go_mine_failed
+  IFS=$'\t' read -r COMMON_HEIGHT COMMON_HASH COMMON_TX_COUNT <<<"${parsed}" || partition_reorg_no_data common_go_mine_malformed
+  require_reorg_tip_matches common_rust_converge_timeout common_rust_tip_malformed rust "${RUST_PARTITION_RPC}" common-rust-tip "${COMMON_RUST_TIP}" "${COMMON_HEIGHT}" "${COMMON_HASH}" 120
+  capture_reorg_block go "${GO_PARTITION_RPC}" common-go-block "${COMMON_HEIGHT}" "${COMMON_HASH}" "${COMMON_GO_BLOCK}" || partition_reorg_no_data common_go_block_missing
+  capture_reorg_block rust "${RUST_PARTITION_RPC}" common-rust-block "${COMMON_HEIGHT}" "${COMMON_HASH}" "${COMMON_RUST_BLOCK}" || partition_reorg_no_data common_rust_block_missing
+
+  printf 'drop\n' >"${proxy_target}"
+  require_reorg_peer_absent partition_source_peer_unchanged partition-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PARTITION_RUST_PEERS}" 90
+  require_reorg_peer_absent partition_target_peer_unchanged partition-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PARTITION_GO_PEERS}" 30
+  wait_no_established_to_remote rust-partition "${RUST_PARTITION_PID}" "${PROXY_ADDR}" 30 || partition_reorg_no_data partition_source_tcp_link_unchanged
+  wait_no_established_to_remote proxy-partition "${PROXY_PID}" "${GO_PARTITION_P2P}" 30 || partition_reorg_no_data partition_proxy_target_link_unchanged
+
+  expected_fork_height=$((COMMON_HEIGHT + 1))
+  parsed="$(mine_reorg_block go "${GO_PARTITION_RPC}" partition-go-fork-mine "${GO_FORK_MINE}")" || partition_reorg_no_data go_fork_mine_failed
+  IFS=$'\t' read -r GO_FORK_HEIGHT GO_FORK_HASH GO_FORK_TX_COUNT <<<"${parsed}" || partition_reorg_no_data go_fork_mine_malformed
+  (( GO_FORK_HEIGHT == expected_fork_height )) || partition_reorg_no_data go_fork_height_unexpected
+  require_reorg_tip_matches go_fork_tip_timeout go_fork_tip_malformed go "${GO_PARTITION_RPC}" partition-go-fork-tip "${GO_FORK_TIP}" "${GO_FORK_HEIGHT}" "${GO_FORK_HASH}" 30
+  capture_reorg_block go "${GO_PARTITION_RPC}" partition-go-fork-block "${GO_FORK_HEIGHT}" "${GO_FORK_HASH}" "${GO_FORK_BLOCK}" || partition_reorg_no_data go_fork_block_missing
+
+  parsed="$(mine_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork1-mine "${RUST_FORK1_MINE}")" || partition_reorg_no_data rust_fork1_mine_failed
+  IFS=$'\t' read -r RUST_FORK1_HEIGHT RUST_FORK1_HASH RUST_FORK1_TX_COUNT <<<"${parsed}" || partition_reorg_no_data rust_fork1_mine_malformed
+  (( RUST_FORK1_HEIGHT == expected_fork_height )) || partition_reorg_no_data rust_fork1_height_unexpected
+  [[ "${RUST_FORK1_HASH}" != "${GO_FORK_HASH}" ]] || partition_reorg_no_data fork_hash_not_divergent
+  expected_winning_height=$((COMMON_HEIGHT + 2))
+  parsed="$(mine_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork2-mine "${RUST_FORK2_MINE}")" || partition_reorg_no_data rust_fork2_mine_failed
+  IFS=$'\t' read -r RUST_FORK2_HEIGHT RUST_FORK2_HASH RUST_FORK2_TX_COUNT <<<"${parsed}" || partition_reorg_no_data rust_fork2_mine_malformed
+  (( RUST_FORK2_HEIGHT == expected_winning_height )) || partition_reorg_no_data rust_fork2_height_unexpected
+  require_reorg_tip_matches rust_fork_tip_timeout rust_fork_tip_malformed rust "${RUST_PARTITION_RPC}" partition-rust-fork-tip "${RUST_FORK_TIP}" "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" 30
+  capture_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork1-block "${RUST_FORK1_HEIGHT}" "${RUST_FORK1_HASH}" "${RUST_FORK1_BLOCK}" || partition_reorg_no_data rust_fork1_block_missing
+  capture_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork2-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${RUST_FORK2_BLOCK}" || partition_reorg_no_data rust_fork2_block_missing
+  require_reorg_peer_absent fork_source_peer_unchanged fork-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${FORK_RUST_PEERS}" 5
+  require_reorg_peer_absent fork_target_peer_unchanged fork-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${FORK_GO_PEERS}" 5
+
+  printf '%s\n' "${GO_PARTITION_P2P}" >"${proxy_target}"
+  require_reorg_peer_present heal_source_peer_missing heal-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${HEAL_RUST_PEERS}" 120
+  GO_PROXY_LOCAL_HEAL="$(wait_established_local_to_remote proxy-heal "${PROXY_PID}" "${GO_PARTITION_P2P}" 60)" || partition_reorg_no_data heal_proxy_target_link_missing
+  require_reorg_peer_present heal_target_peer_missing heal-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_HEAL}" "${HEAL_GO_PEERS}" 60
+
+  require_reorg_tip_matches go_reorg_converge_timeout go_reorg_tip_malformed go "${GO_PARTITION_RPC}" final-go-tip "${FINAL_GO_TIP}" "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" 180
+  require_reorg_tip_matches rust_final_tip_timeout rust_final_tip_malformed rust "${RUST_PARTITION_RPC}" final-rust-tip "${FINAL_RUST_TIP}" "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" 30
+  capture_reorg_block go "${GO_PARTITION_RPC}" final-go-reorg-parent-block "${RUST_FORK1_HEIGHT}" "${RUST_FORK1_HASH}" "${FINAL_GO_REORG_BLOCK}" || partition_reorg_no_data go_reorg_parent_block_missing
+  capture_reorg_block go "${GO_PARTITION_RPC}" final-go-tip-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${FINAL_GO_TIP_BLOCK}" || partition_reorg_no_data go_reorg_tip_block_missing
+  capture_reorg_block rust "${RUST_PARTITION_RPC}" final-rust-tip-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${FINAL_RUST_TIP_BLOCK}" || partition_reorg_no_data rust_final_tip_block_missing
+  GO_REORG_TOTAL="$(metric_value "${GO_PARTITION_RPC}" rubin_node_reorg_total)" || partition_reorg_no_data go_reorg_metric_missing
+  GO_LAST_REORG_DEPTH="$(metric_value "${GO_PARTITION_RPC}" rubin_node_last_reorg_depth)" || partition_reorg_no_data go_reorg_depth_metric_missing
+  (( GO_REORG_TOTAL >= 1 )) || partition_reorg_no_data go_reorg_metric_not_incremented
+  (( GO_LAST_REORG_DEPTH >= 1 )) || partition_reorg_no_data go_reorg_depth_not_recorded
+  verify_partition_process_identity node-go-final "${GO_PARTITION_PID}" "${GO_PARTITION_RPC}" "${GO_PARTITION_P2P}" "${NODE_BIN}" || partition_reorg_no_data go_final_process_identity_unverified
+  verify_partition_process_identity node-rust-final "${RUST_PARTITION_PID}" "${RUST_PARTITION_RPC}" "${RUST_PARTITION_P2P}" "${RUST_NODE_BIN}" || partition_reorg_no_data rust_final_process_identity_unverified
+  write_partition_reorg_report || partition_reorg_no_data report_write_failed
+  if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
+    echo "PASS: mixed-client partition/heal produced live reorg convergence; report=${PARTITION_REORG_REPORT_JSON}"
+  else
+    echo "PASS: mixed-client partition/heal produced live reorg convergence; set KEEP_TMP=1 to retain report"
   fi
 }
 start_node_ready() {
@@ -737,6 +1125,10 @@ EOF
 }
 if (( MIXED_PARTITION_HEAL == 1 )); then
   run_mixed_partition_heal
+  exit 0
+fi
+if (( MIXED_PARTITION_HEAL_REORG == 1 )); then
+  run_mixed_partition_heal_reorg
   exit 0
 fi
 echo "Building Go rubin-node and rubin-txgen"
