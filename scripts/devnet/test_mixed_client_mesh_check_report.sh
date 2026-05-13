@@ -320,6 +320,44 @@ final_verification = {
     "rust_outbound_remote_addr": go_p2p,
 }
 
+
+def raw_samples(prop_direction=None, prop_elapsed=2, conv_direction=None, conv_elapsed=3):
+    def bucket(direction, elapsed, sample_kind):
+        if direction is None:
+            return {
+                "classification": "not_requested",
+                "path_direction": None,
+                "reason": f"{sample_kind}_sample_not_requested_by_scenario",
+                "samples": [],
+                "unit": "seconds",
+            }
+        source_impl, target_impl = direction.split("->")
+        sample = {
+            "classification": "observed",
+            "elapsed": elapsed,
+            "path_direction": direction,
+            "source": f"node-{source_impl}",
+            "target": f"node-{target_impl}",
+            "tx_id": txid,
+            "unit": "seconds",
+        }
+        if sample_kind == "convergence":
+            sample.update({"block_hash": block_hash, "height": height})
+        return {
+            "classification": "observed",
+            "path_direction": direction,
+            "reason": None,
+            "samples": [sample],
+            "unit": "seconds",
+        }
+    return {
+        "schema_version": "rubin-devnet-process-soak-raw-samples-v1",
+        "semantics": "raw samples only; no SLO threshold or pass claim",
+        "propagation": bucket(prop_direction, prop_elapsed, "propagation"),
+        "convergence": bucket(conv_direction, conv_elapsed, "convergence"),
+    }
+
+
 mesh_marker = artifact_root / "mesh-marker.json"
 dump(mesh_marker, {
     "evidence_type": "mixed_client_process_soak",
@@ -343,6 +381,7 @@ mesh_report = {
     },
     "nodes": nodes,
     "peer_connectivity": connectivity,
+    "raw_samples": raw_samples(),
     "scenario": "mixed_client_mesh",
     "verdict": "PASS",
 }
@@ -504,6 +543,7 @@ tx_report = {
         "txid": txid,
     },
     "legacy_schema_compatibility": {**mesh_report["legacy_schema_compatibility"], "marker_path": str(tx_marker)},
+    "raw_samples": raw_samples(prop_direction="go->rust", prop_elapsed=2),
     "rust_accept": {
         "get_tx_path": str(artifact_root / "rust-get-tx.json"),
         "raw_hex": tx_hex,
@@ -528,6 +568,7 @@ converge_report = {
         "tip_path": str(artifact_root / "go-converge-tip.json"),
         "txid": txid,
     },
+    "raw_samples": raw_samples(prop_direction="go->rust", prop_elapsed=2, conv_direction="rust->go", conv_elapsed=4),
     "rust_mine": {
         "block_hash": block_hash,
         "block_path": str(artifact_root / "rust-mined-block.json"),
@@ -578,6 +619,7 @@ rust_converge_report = {
         "txid": txid,
     },
     "legacy_schema_compatibility": {**mesh_report["legacy_schema_compatibility"], "marker_path": str(rust_tx_marker)},
+    "raw_samples": raw_samples(prop_direction="rust->go", prop_elapsed=2, conv_direction="go->rust", conv_elapsed=4),
     "rust_converge": {
         "block_hash": block_hash,
         "block_path": str(artifact_root / "rust-converged-block.json"),
@@ -600,6 +642,24 @@ rust_converge_report = {
     "tx_path": rust_tx_path,
 }
 dump(root / "rust-submit-go-mine-report.json", rust_converge_report)
+bad_tx_samples = json.loads(json.dumps(tx_report))
+bad_tx_samples["raw_samples"]["propagation"]["samples"] = []
+dump(root / "tx-missing-propagation-samples.json", bad_tx_samples)
+bad_tx_samples = json.loads(json.dumps(tx_report))
+bad_tx_samples["raw_samples"]["propagation"]["samples"][0]["elapsed"] = float("nan")
+dump(root / "tx-nonfinite-propagation-sample.json", bad_tx_samples)
+bad_tx_samples = json.loads(json.dumps(tx_report))
+bad_tx_samples["raw_samples"]["propagation"]["p90_seconds"] = 2
+dump(root / "tx-slo-claim-sample.json", bad_tx_samples)
+bad_converge_samples = json.loads(json.dumps(converge_report))
+bad_converge_samples["raw_samples"]["convergence"]["samples"] = []
+dump(root / "converge-missing-convergence-samples.json", bad_converge_samples)
+bad_mesh_samples = json.loads(json.dumps(mesh_report))
+bad_mesh_samples["raw_samples"]["propagation"]["reason"] = "p90_seconds_slo_passed"
+dump(root / "mesh-bad-propagation-not-requested-reason.json", bad_mesh_samples)
+bad_mesh_samples = json.loads(json.dumps(mesh_report))
+bad_mesh_samples["raw_samples"]["convergence"]["reason"] = "latency_threshold_passed"
+dump(root / "mesh-bad-convergence-not-requested-reason.json", bad_mesh_samples)
 bad_rust_converge = json.loads(json.dumps(rust_converge_report))
 bad_rust_converge["rust_converge"]["txid"] = "11" * 32
 dump(root / "rust-submit-go-mine-wrong-txid.json", bad_rust_converge)
@@ -669,6 +729,12 @@ print(root / "mesh-report.json")
 print(root / "tx-report.json")
 print(root / "converge-report.json")
 print(root / "rust-submit-go-mine-report.json")
+print(root / "tx-missing-propagation-samples.json")
+print(root / "tx-nonfinite-propagation-sample.json")
+print(root / "tx-slo-claim-sample.json")
+print(root / "converge-missing-convergence-samples.json")
+print(root / "mesh-bad-propagation-not-requested-reason.json")
+print(root / "mesh-bad-convergence-not-requested-reason.json")
 print(root / "rust-submit-go-mine-wrong-txid.json")
 print(root / "rust-submit-go-mine-bad-go-class.json")
 print(root / "rust-submit-go-mine-bad-rust-converge-class.json")
@@ -705,24 +771,32 @@ MESH_REPORT="$(sed -n '1p' "${REPORT_LIST}")"
 TX_REPORT="$(sed -n '2p' "${REPORT_LIST}")"
 CONVERGE_REPORT="$(sed -n '3p' "${REPORT_LIST}")"
 RUST_SUBMIT_GO_MINE_REPORT="$(sed -n '4p' "${REPORT_LIST}")"
-RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT="$(sed -n '5p' "${REPORT_LIST}")"
-RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT="$(sed -n '6p' "${REPORT_LIST}")"
-RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT="$(sed -n '7p' "${REPORT_LIST}")"
-RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT="$(sed -n '8p' "${REPORT_LIST}")"
-RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT="$(sed -n '9p' "${REPORT_LIST}")"
-RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT="$(sed -n '10p' "${REPORT_LIST}")"
-RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT="$(sed -n '11p' "${REPORT_LIST}")"
-CONVERGE_WRONG_TXID_REPORT="$(sed -n '12p' "${REPORT_LIST}")"
-CONVERGE_BAD_RUST_CLASS_REPORT="$(sed -n '13p' "${REPORT_LIST}")"
-CONVERGE_DUPLICATE_SIDECAR_REPORT="$(sed -n '14p' "${REPORT_LIST}")"
-CONVERGE_WRONG_SIDECAR_SOURCE_REPORT="$(sed -n '15p' "${REPORT_LIST}")"
-CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '16p' "${REPORT_LIST}")"
-CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '17p' "${REPORT_LIST}")"
-CONVERGE_BAD_MERKLE_BLOCK_REPORT="$(sed -n '18p' "${REPORT_LIST}")"
-CONVERGE_TX_COUNT_MISMATCH_REPORT="$(sed -n '19p' "${REPORT_LIST}")"
-[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
+TX_MISSING_PROPAGATION_SAMPLE_REPORT="$(sed -n '5p' "${REPORT_LIST}")"
+TX_NONFINITE_PROPAGATION_SAMPLE_REPORT="$(sed -n '6p' "${REPORT_LIST}")"
+TX_SLO_CLAIM_SAMPLE_REPORT="$(sed -n '7p' "${REPORT_LIST}")"
+CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT="$(sed -n '8p' "${REPORT_LIST}")"
+MESH_BAD_PROPAGATION_REASON_REPORT="$(sed -n '9p' "${REPORT_LIST}")"
+MESH_BAD_CONVERGENCE_REASON_REPORT="$(sed -n '10p' "${REPORT_LIST}")"
+RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT="$(sed -n '11p' "${REPORT_LIST}")"
+RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT="$(sed -n '12p' "${REPORT_LIST}")"
+RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT="$(sed -n '13p' "${REPORT_LIST}")"
+RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT="$(sed -n '14p' "${REPORT_LIST}")"
+RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT="$(sed -n '15p' "${REPORT_LIST}")"
+RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT="$(sed -n '16p' "${REPORT_LIST}")"
+RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT="$(sed -n '17p' "${REPORT_LIST}")"
+CONVERGE_WRONG_TXID_REPORT="$(sed -n '18p' "${REPORT_LIST}")"
+CONVERGE_BAD_RUST_CLASS_REPORT="$(sed -n '19p' "${REPORT_LIST}")"
+CONVERGE_DUPLICATE_SIDECAR_REPORT="$(sed -n '20p' "${REPORT_LIST}")"
+CONVERGE_WRONG_SIDECAR_SOURCE_REPORT="$(sed -n '21p' "${REPORT_LIST}")"
+CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '22p' "${REPORT_LIST}")"
+CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '23p' "${REPORT_LIST}")"
+CONVERGE_BAD_MERKLE_BLOCK_REPORT="$(sed -n '24p' "${REPORT_LIST}")"
+CONVERGE_TX_COUNT_MISMATCH_REPORT="$(sed -n '25p' "${REPORT_LIST}")"
+[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_SLO_CLAIM_SAMPLE_REPORT}" && -n "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" && -n "${MESH_BAD_PROPAGATION_REASON_REPORT}" && -n "${MESH_BAD_CONVERGENCE_REASON_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
+expect_fail_contains "public rejects propagation not-requested reason drift" "raw_samples.propagation must be not_requested with canonical reason" "${HARNESS}" --check-report "${MESH_BAD_PROPAGATION_REASON_REPORT}"
+expect_fail_contains "public rejects convergence not-requested reason drift" "raw_samples.convergence must be not_requested with canonical reason" "${HARNESS}" --check-report "${MESH_BAD_CONVERGENCE_REASON_REPORT}"
 expect_fail_contains "public tx check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${TX_REPORT}"
 expect_fail_contains "public converge check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${CONVERGE_REPORT}"
 expect_fail_contains "public rust-submit converge check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${RUST_SUBMIT_GO_MINE_REPORT}"
@@ -735,6 +809,10 @@ expect_pass_contains "producer tx internal check" "PASS: mixed_client_go_submit_
 expect_pass_contains "producer converge internal check" "PASS: mixed_client_go_submit_rust_mine_go_converge report structurally accepted" check_report "${CONVERGE_REPORT}" offline producer-tx
 expect_pass_contains "producer rust-submit converge internal check" "PASS: mixed_client_rust_submit_go_mine_rust_converge report structurally accepted" check_report "${RUST_SUBMIT_GO_MINE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects missing propagation sample" "raw_samples.propagation requires one observed sample" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects non-finite propagation sample" "raw_samples.propagation.samples[0].elapsed is not finite" check_report "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects sample SLO claim" "raw_samples.propagation keys mismatch" check_report "${TX_SLO_CLAIM_SAMPLE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects missing convergence sample" "raw_samples.convergence requires one observed sample" check_report "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects converged txid drift" "mined/converged tx identity differs from submitted tx" check_report "${CONVERGE_WRONG_TXID_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects rust-submit converged txid drift" "mined/converged tx identity differs from submitted tx" check_report "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects reused converge sidecar path" "converge sidecar paths are not pairwise distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
@@ -752,6 +830,7 @@ expect_fail_token "token maps go mine class drift" "go_mine_class_invalid" check
 expect_fail_token "token maps rust converge class drift" "rust_converge_class_invalid" check_report "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" offline producer-tx
 expect_fail_token "token maps reused converge sidecar path" "converge_sidecar_paths_not_distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
 expect_fail_token "token maps reused rust-submit converge sidecar path" "converge_sidecar_paths_not_distinct" check_report "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
+expect_fail_token "token maps propagation sample failures" "propagation_samples_invalid" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
 expect_fail_token "token maps wrong-source converge sidecar" "converge_sidecar_identity_mismatch" check_report "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
 expect_fail_token "token maps wrong-source rust converge sidecar" "converge_sidecar_identity_mismatch" check_report "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
 expect_fail_token "token maps malformed parsed block" "block_hex_parse_failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
