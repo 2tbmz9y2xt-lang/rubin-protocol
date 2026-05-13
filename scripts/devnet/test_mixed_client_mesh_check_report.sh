@@ -118,8 +118,72 @@ for path in (go_bin, rust_bin):
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
-tx_hex = "010000000001000000000000000001010000000000000000016954e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716000000000000"
-txid = "d379ae84430d5296e97a71ba8e6996d869b8c6e85b13b51ab0d8ee23455057e1"
+def compact_size(n: int) -> bytes:
+    if n < 0xfd:
+        return bytes([n])
+    if n <= 0xffff:
+        return b"\xfd" + n.to_bytes(2, "little")
+    if n <= 0xffffffff:
+        return b"\xfe" + n.to_bytes(4, "little")
+    return b"\xff" + n.to_bytes(8, "little")
+
+def sha3(data: bytes) -> bytes:
+    return hashlib.sha3_256(data).digest()
+
+def read_compact_size(buf: bytes, off: int) -> tuple[int, int]:
+    first = buf[off]
+    if first < 0xfd:
+        return first, off + 1
+    if first == 0xfd:
+        return int.from_bytes(buf[off + 1:off + 3], "little"), off + 3
+    if first == 0xfe:
+        return int.from_bytes(buf[off + 1:off + 5], "little"), off + 5
+    return int.from_bytes(buf[off + 1:off + 9], "little"), off + 9
+
+def txid_kind0(txb: bytes) -> bytes:
+    off = 0
+    off += 4  # version
+    tx_kind = txb[off]
+    off += 1
+    if tx_kind != 0:
+        raise ValueError("synthetic test only supports tx_kind=0")
+    off += 8  # nonce
+    n_inputs, off = read_compact_size(txb, off)
+    for _ in range(n_inputs):
+        off += 32 + 4
+        script_len, off = read_compact_size(txb, off)
+        off += script_len + 4
+    n_outputs, off = read_compact_size(txb, off)
+    for _ in range(n_outputs):
+        off += 8 + 2
+        covenant_len, off = read_compact_size(txb, off)
+        off += covenant_len
+    off += 4  # locktime
+    return sha3(txb[:off])
+
+def build_synthetic_submitted_tx() -> bytes:
+    return b"".join([
+        (1).to_bytes(4, "little"),
+        b"\x00",
+        (7).to_bytes(8, "little"),
+        compact_size(1),
+        b"\x11" * 32,
+        (0).to_bytes(4, "little"),
+        compact_size(0),
+        (0).to_bytes(4, "little"),
+        compact_size(1),
+        (0).to_bytes(8, "little"),
+        (0x0002).to_bytes(2, "little"),
+        compact_size(1),
+        b"\x42",
+        (0).to_bytes(4, "little"),
+        compact_size(0),
+        compact_size(0),
+    ])
+
+tx_bytes = build_synthetic_submitted_tx()
+tx_hex = tx_bytes.hex()
+txid = txid_kind0(tx_bytes).hex()
 go_rpc = "127.0.0.1:51001"
 go_p2p = "127.0.0.1:51002"
 rust_rpc = "127.0.0.1:51003"
@@ -250,19 +314,93 @@ for impl, endpoint, prefix in (("go", go_rpc, "go"), ("rust", rust_rpc, "rust"))
     })
 height = 102
 tx_count = 2
-header = b"\x00" * 116
-block_hash = hashlib.sha3_256(header).hexdigest()
-block_hex = header.hex() + "02" + tx_hex + tx_hex
+
+def merkle(ids: list[bytes], leaf_tag: int, node_tag: int) -> bytes:
+    level = [sha3(bytes([leaf_tag]) + item) for item in ids]
+    while len(level) > 1:
+        next_level = []
+        i = 0
+        while i < len(level):
+            if i == len(level) - 1:
+                next_level.append(level[i])
+                i += 1
+            else:
+                next_level.append(sha3(bytes([node_tag]) + level[i] + level[i + 1]))
+                i += 2
+        level = next_level
+    return level[0]
+
+def coinbase_with_witness_commitment(block_height: int, non_coinbase_txs: list[bytes]) -> tuple[bytes, bytes, bytes]:
+    wtxids = [bytes(32)] + [sha3(txb) for txb in non_coinbase_txs]
+    witness_root = merkle(wtxids, 0x02, 0x03)
+    commitment = sha3(b"RUBIN-WITNESS/" + witness_root)
+    core = b"".join([
+        (1).to_bytes(4, "little"),
+        b"\x00",
+        (0).to_bytes(8, "little"),
+        compact_size(1),
+        bytes(32),
+        (0xffffffff).to_bytes(4, "little"),
+        compact_size(0),
+        (0xffffffff).to_bytes(4, "little"),
+        compact_size(1),
+        (0).to_bytes(8, "little"),
+        (0x0002).to_bytes(2, "little"),
+        compact_size(len(commitment)),
+        commitment,
+        block_height.to_bytes(4, "little"),
+    ])
+    full = core + compact_size(0) + compact_size(0)
+    return full, sha3(core), sha3(full)
+
+def build_basic_block(non_coinbase_hex: str, block_height: int) -> tuple[str, str]:
+    non_coinbase = bytes.fromhex(non_coinbase_hex)
+    non_coinbase_txid = txid_kind0(non_coinbase)
+    if non_coinbase_hex == tx_hex and non_coinbase_txid.hex() != txid:
+        raise ValueError("synthetic txid fixture drift")
+    coinbase, coinbase_txid, _ = coinbase_with_witness_commitment(block_height, [non_coinbase])
+    txids = [coinbase_txid, non_coinbase_txid]
+    merkle_root = merkle(txids, 0x00, 0x01)
+    header = b"".join([
+        (1).to_bytes(4, "little"),
+        bytes(32),
+        merkle_root,
+        (1).to_bytes(8, "little"),
+        b"\xff" * 32,
+        (1).to_bytes(8, "little"),
+    ])
+    block = header + compact_size(2) + coinbase + non_coinbase
+    return block.hex(), sha3(header).hex()
+
+def corrupt_merkle_block(block_hex_value: str) -> tuple[str, str]:
+    block = bytearray.fromhex(block_hex_value)
+    block[4 + 32] ^= 0x01
+    return bytes(block).hex(), sha3(bytes(block[:116])).hex()
+
+def block_sidecar(impl: str, endpoint: str, block_hex_value: str, block_hash_value: str) -> dict:
+    return {"block_hex": block_hex_value, "canonical": True, "hash": block_hash_value, "height": height, "implementation": impl, "request_path": f"/get_block?height={height}", "rpc_endpoint": endpoint}
+
+block_hex, block_hash = build_basic_block(tx_hex, height)
 mutated_tx = bytearray.fromhex(tx_hex)
 mutated_tx[5] ^= 0x01
-missing_tx_block_hex = header.hex() + "02" + mutated_tx.hex() + mutated_tx.hex()
-dump(artifact_root / "rust-mined-block.json", {"block_hex": block_hex, "canonical": True, "hash": block_hash, "height": height, "implementation": "rust", "request_path": f"/get_block?height={height}", "rpc_endpoint": rust_rpc})
-dump(artifact_root / "go-converged-block.json", {"block_hex": block_hex, "canonical": True, "hash": block_hash, "height": height, "implementation": "go", "request_path": f"/get_block?height={height}", "rpc_endpoint": go_rpc})
-dump(artifact_root / "go-converged-wrong-source-block.json", {"block_hex": block_hex, "canonical": True, "hash": block_hash, "height": height, "implementation": "rust", "request_path": f"/get_block?height={height}", "rpc_endpoint": rust_rpc})
+missing_tx_block_hex, missing_tx_hash = build_basic_block(mutated_tx.hex(), height)
+corrupt_block_hex, corrupt_block_hash = corrupt_merkle_block(block_hex)
+
+dump(artifact_root / "rust-mined-block.json", block_sidecar("rust", rust_rpc, block_hex, block_hash))
+dump(artifact_root / "go-converged-block.json", block_sidecar("go", go_rpc, block_hex, block_hash))
+dump(artifact_root / "go-converged-wrong-source-block.json", block_sidecar("rust", rust_rpc, block_hex, block_hash))
 dump(artifact_root / "go-converged-malformed-block.json", {"block_hex": "00", "canonical": True, "hash": block_hash, "height": height, "implementation": "go", "request_path": f"/get_block?height={height}", "rpc_endpoint": go_rpc})
-dump(artifact_root / "go-converged-missing-tx-block.json", {"block_hex": missing_tx_block_hex, "canonical": True, "hash": block_hash, "height": height, "implementation": "go", "request_path": f"/get_block?height={height}", "rpc_endpoint": go_rpc})
+dump(artifact_root / "rust-missing-tx-block.json", block_sidecar("rust", rust_rpc, missing_tx_block_hex, missing_tx_hash))
+dump(artifact_root / "go-converged-missing-tx-block.json", block_sidecar("go", go_rpc, missing_tx_block_hex, missing_tx_hash))
+dump(artifact_root / "rust-corrupt-merkle-block.json", block_sidecar("rust", rust_rpc, corrupt_block_hex, corrupt_block_hash))
+dump(artifact_root / "go-corrupt-merkle-block.json", block_sidecar("go", go_rpc, corrupt_block_hex, corrupt_block_hash))
 dump(artifact_root / "rust-mine-next.json", {"block_hash": block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "rust-missing-tx-mine-next.json", {"block_hash": missing_tx_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "rust-corrupt-merkle-mine-next.json", {"block_hash": corrupt_block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "rust-tx-count-mismatch-mine-next.json", {"block_hash": block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": 3})
 dump(artifact_root / "go-converge-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": block_hash})
+dump(artifact_root / "go-missing-tx-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": missing_tx_hash})
+dump(artifact_root / "go-corrupt-merkle-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": corrupt_block_hash})
 tx_report = {
     **mesh_report,
     "go_submit": {
@@ -328,8 +466,25 @@ bad_converge = json.loads(json.dumps(converge_report))
 bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-malformed-block.json")
 dump(root / "converge-malformed-block.json", bad_converge)
 bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["rust_mine"]["block_hash"] = missing_tx_hash
+bad_converge["rust_mine"]["block_path"] = str(artifact_root / "rust-missing-tx-block.json")
+bad_converge["rust_mine"]["mine_next_path"] = str(artifact_root / "rust-missing-tx-mine-next.json")
+bad_converge["go_converge"]["block_hash"] = missing_tx_hash
 bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-missing-tx-block.json")
+bad_converge["go_converge"]["tip_path"] = str(artifact_root / "go-missing-tx-tip.json")
 dump(root / "converge-missing-tx-block.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["rust_mine"]["block_hash"] = corrupt_block_hash
+bad_converge["rust_mine"]["block_path"] = str(artifact_root / "rust-corrupt-merkle-block.json")
+bad_converge["rust_mine"]["mine_next_path"] = str(artifact_root / "rust-corrupt-merkle-mine-next.json")
+bad_converge["go_converge"]["block_hash"] = corrupt_block_hash
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-corrupt-merkle-block.json")
+bad_converge["go_converge"]["tip_path"] = str(artifact_root / "go-corrupt-merkle-tip.json")
+dump(root / "converge-bad-merkle-block.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["rust_mine"]["tx_count"] = 3
+bad_converge["rust_mine"]["mine_next_path"] = str(artifact_root / "rust-tx-count-mismatch-mine-next.json")
+dump(root / "converge-tx-count-mismatch.json", bad_converge)
 (root / "empty.json").write_text("", encoding="utf-8")
 (root / "malformed.json").write_text("[", encoding="utf-8")
 with (root / "oversized.json").open("wb") as f:
@@ -343,6 +498,8 @@ print(root / "converge-duplicate-sidecar-path.json")
 print(root / "converge-wrong-sidecar-source.json")
 print(root / "converge-malformed-block.json")
 print(root / "converge-missing-tx-block.json")
+print(root / "converge-bad-merkle-block.json")
+print(root / "converge-tx-count-mismatch.json")
 PY
 }
 
@@ -361,7 +518,9 @@ CONVERGE_DUPLICATE_SIDECAR_REPORT="$(sed -n '6p' "${REPORT_LIST}")"
 CONVERGE_WRONG_SIDECAR_SOURCE_REPORT="$(sed -n '7p' "${REPORT_LIST}")"
 CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '8p' "${REPORT_LIST}")"
 CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '9p' "${REPORT_LIST}")"
-[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
+CONVERGE_BAD_MERKLE_BLOCK_REPORT="$(sed -n '10p' "${REPORT_LIST}")"
+CONVERGE_TX_COUNT_MISMATCH_REPORT="$(sed -n '11p' "${REPORT_LIST}")"
+[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_fail_contains "public tx check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${TX_REPORT}"
@@ -378,13 +537,19 @@ expect_fail_contains "producer rejects reused converge sidecar path" "converge s
 expect_fail_contains "producer rejects wrong-source converge block" "go_converge.block_path sidecar identity mismatch" check_report "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects malformed converge block" "go_converge.block_path inclusion check failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects converge block missing tx" "submitted txid missing from parsed block txids" check_report "${CONVERGE_MISSING_TX_BLOCK_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects uncommitted converge block tx list" "basic block validation failed" check_report "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects converge block tx_count mismatch" "parsed block tx_count mismatch" check_report "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" offline producer-tx
 expect_fail_token "token maps converge class drift" "rust_mine_class_invalid" check_report "${CONVERGE_BAD_RUST_CLASS_REPORT}" offline producer-tx
 expect_fail_token "token maps reused converge sidecar path" "converge_sidecar_paths_not_distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
 expect_fail_token "token maps wrong-source converge sidecar" "converge_sidecar_identity_mismatch" check_report "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
 expect_fail_token "token maps malformed parsed block" "block_hex_parse_failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
 expect_fail_token "token maps parsed block tx omission" "block_missing_submitted_txid" check_report "${CONVERGE_MISSING_TX_BLOCK_REPORT}" offline producer-tx
+expect_fail_token "token maps uncommitted block tx list" "block_basic_validation_failed" check_report "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" offline producer-tx
+expect_fail_token "token maps block tx_count mismatch" "block_tx_count_mismatch" check_report "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" offline producer-tx
 [[ "$(block_inclusion_failure_reason rust_mine "parse block_hex failed: short block")" == "rust_mine_block_hex_parse_failed" ]] || { echo "FAIL: rust mine parse failure reason collapsed" >&2; exit 1; }
 [[ "$(block_inclusion_failure_reason rust_mine "parsed block hash mismatch")" == "rust_mine_block_hash_mismatch" ]] || { echo "FAIL: rust mine hash mismatch reason collapsed" >&2; exit 1; }
+[[ "$(block_inclusion_failure_reason rust_mine "basic block validation failed: BLOCK_ERR_MERKLE_INVALID")" == "rust_mine_block_basic_validation_failed" ]] || { echo "FAIL: rust mine basic block failure reason collapsed" >&2; exit 1; }
+[[ "$(block_inclusion_failure_reason go_converge "parsed block tx_count mismatch")" == "go_converge_block_tx_count_mismatch" ]] || { echo "FAIL: go converge tx_count mismatch reason collapsed" >&2; exit 1; }
 [[ "$(block_inclusion_failure_reason go_converge "submitted txid missing from parsed block txids")" == "go_converge_block_missing_submitted_txid" ]] || { echo "FAIL: go converge missing-tx reason collapsed" >&2; exit 1; }
 [[ "$(block_inclusion_failure_reason go_converge "block response height/hash/canonical mismatch")" == "go_converge_block_sidecar_mismatch" ]] || { echo "FAIL: go converge sidecar mismatch reason collapsed" >&2; exit 1; }
 printf '{"mined":false,"error":"live mining unavailable"}\n' >"${TMP_ROOT}/mine-live-unavailable.json"

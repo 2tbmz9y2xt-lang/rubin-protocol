@@ -128,7 +128,7 @@ def parse_txid_from_hex(txhex: str) -> str:
     req(parsed.get("ok") is True and isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid), "tx parser did not produce txid")
     req(parsed.get("consumed") == len(txhex) // 2, "tx parser consumed mismatch")
     return txid
-def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, height: int, block_hash: str, impl: str, endpoint: str, request_path: str) -> None:
+def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, height: int, block_hash: str, tx_count: int, impl: str, endpoint: str, request_path: str) -> None:
     block = load_json_file(label, p)
     req(set(block) == {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}, f"{label} keys mismatch: {sorted(block)}")
     req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == request_path, f"{label} sidecar identity mismatch")
@@ -161,8 +161,10 @@ func main() {
 	txidHex := flag.String("txid", "", "")
 	heightRaw := flag.String("height", "", "")
 	hashHex := flag.String("hash", "", "")
+	txCountRaw := flag.String("tx-count", "", "")
 	flag.Parse()
 	wantHeight, err := strconv.ParseUint(*heightRaw, 10, 64); if err != nil { die("bad height") }
+	wantTxCount, err := strconv.ParseUint(*txCountRaw, 10, 64); if err != nil { die("bad tx_count") }
 	raw, err := os.ReadFile(*respPath); if err != nil { die("read block response: " + err.Error()) }
 	var resp blockResp; if err := json.Unmarshal(raw, &resp); err != nil { die("decode block response: " + err.Error()) }
 	gotHash := resp.Hash; if gotHash == "" { gotHash = resp.BlockHash }
@@ -173,7 +175,9 @@ func main() {
 	blockBytes, err := hex.DecodeString(strings.TrimSpace(resp.BlockHex)); if err != nil { die("decode block_hex: " + err.Error()) }
 	pb, err := consensus.ParseBlockBytes(blockBytes); if err != nil { die("parse block_hex failed: " + err.Error()) }
 	gotBlockHash, err := consensus.BlockHash(pb.HeaderBytes); if err != nil || hex.EncodeToString(gotBlockHash[:]) != strings.ToLower(*hashHex) { die("parsed block hash mismatch") }
-	for _, got := range pb.Txids { if got == wantTxid { return } }
+	if pb.TxCount != wantTxCount { die("parsed block tx_count mismatch") }
+	if _, err := consensus.ValidateBlockBasicAtHeight(blockBytes, nil, nil, wantHeight); err != nil { die("basic block validation failed: " + err.Error()) }
+	for i, got := range pb.Txids { if i > 0 && got == wantTxid { return } }
 	die("submitted txid missing from parsed block txids")
 }
 '''
@@ -181,7 +185,7 @@ func main() {
         source_path = Path(td) / "block-check.go"
         source_path.write_text(source, encoding="utf-8")
         try:
-            proc = subprocess.run([dev_env, "--", "go", "-C", go_module_root, "run", str(source_path), "--block-response", str(p), "--tx-hex", txhex, "--txid", txid, "--height", str(height), "--hash", block_hash], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=max(30, min(LIVE_TIMEOUT, 60)))
+            proc = subprocess.run([dev_env, "--", "go", "-C", go_module_root, "run", str(source_path), "--block-response", str(p), "--tx-hex", txhex, "--txid", txid, "--height", str(height), "--hash", block_hash, "--tx-count", str(tx_count)], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=max(30, min(LIVE_TIMEOUT, 60)))
         except subprocess.TimeoutExpired:
             fail(f"{label} inclusion check timeout")
         except OSError as exc:
@@ -383,8 +387,8 @@ if tx_mode:
         req(set(mine_next) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"rust_mine.mine_next keys mismatch: {sorted(mine_next)}")
         req(mine_next.get("implementation") == "rust" and mine_next.get("rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", "rust_mine mine_next sidecar identity mismatch")
         req(mine_next.get("mined") is True and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == rust_mine["tx_count"], "rust_mine mine_next sidecar does not match report")
-        verify_block_inclusion_sidecar("rust_mine.block_path", rust_block_path, txhex, txid, height, block_hash, "rust", nodes_by_impl["rust"]["rpc_endpoint"], f"/get_block?height={height}")
-        verify_block_inclusion_sidecar("go_converge.block_path", go_block_path, txhex, txid, height, block_hash, "go", nodes_by_impl["go"]["rpc_endpoint"], f"/get_block?height={height}")
+        verify_block_inclusion_sidecar("rust_mine.block_path", rust_block_path, txhex, txid, height, block_hash, rust_mine["tx_count"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], f"/get_block?height={height}")
+        verify_block_inclusion_sidecar("go_converge.block_path", go_block_path, txhex, txid, height, block_hash, rust_mine["tx_count"], "go", nodes_by_impl["go"]["rpc_endpoint"], f"/get_block?height={height}")
         tip = load_json_file("go_converge.tip", go_tip_path)
         req(set(tip) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"go_converge.tip keys mismatch: {sorted(tip)}")
         req(tip.get("implementation") == "go" and tip.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and tip.get("request_path") == "/get_tip", "go_converge tip sidecar identity mismatch")
@@ -457,7 +461,7 @@ tx_report_reason_token() {
   python3 - "${msg}" <<'PY'
 import re, sys
 msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in sys.argv[1].splitlines())
-rules = [("rust_mine is not node-rust mined_included", "rust_mine_class_invalid"), ("go_converge is not node-go canonical_block_found", "go_converge_class_invalid"), ("mined/converged RPC endpoints are not bound", "converge_rpc_endpoint_mismatch"), ("rust_mine.height is malformed", "rust_mine_height_invalid"), ("rust_mine.block_hash is malformed", "rust_mine_hash_invalid"), ("sidecar identity mismatch", "converge_sidecar_identity_mismatch"), ("converge sidecar paths are not pairwise distinct", "converge_sidecar_paths_not_distinct"), ("submitted txid missing from parsed block txids", "block_missing_submitted_txid"), ("parse block_hex failed", "block_hex_parse_failed"), ("parsed block hash mismatch", "block_hash_mismatch"), ("inclusion check timeout", "block_inclusion_timeout"), ("inclusion check failed", "block_inclusion_failed"), ("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("mine_next sidecar does not match", "rust_mine_sidecar_invalid"), ("sidecar height/hash/canonical mismatch", "block_sidecar_invalid"), ("block_hex is missing", "block_sidecar_invalid"), ("tip sidecar does not match", "go_converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "tx_capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
+rules = [("rust_mine is not node-rust mined_included", "rust_mine_class_invalid"), ("go_converge is not node-go canonical_block_found", "go_converge_class_invalid"), ("mined/converged RPC endpoints are not bound", "converge_rpc_endpoint_mismatch"), ("rust_mine.height is malformed", "rust_mine_height_invalid"), ("rust_mine.block_hash is malformed", "rust_mine_hash_invalid"), ("sidecar identity mismatch", "converge_sidecar_identity_mismatch"), ("converge sidecar paths are not pairwise distinct", "converge_sidecar_paths_not_distinct"), ("submitted txid missing from parsed block txids", "block_missing_submitted_txid"), ("parse block_hex failed", "block_hex_parse_failed"), ("parsed block hash mismatch", "block_hash_mismatch"), ("parsed block tx_count mismatch", "block_tx_count_mismatch"), ("basic block validation failed", "block_basic_validation_failed"), ("inclusion check timeout", "block_inclusion_timeout"), ("inclusion check failed", "block_inclusion_failed"), ("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("mine_next sidecar does not match", "rust_mine_sidecar_invalid"), ("sidecar height/hash/canonical mismatch", "block_sidecar_invalid"), ("block_hex is missing", "block_sidecar_invalid"), ("tip sidecar does not match", "go_converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "tx_capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
 for needle, token in rules:
     if needle in msg:
         print(token)
@@ -937,8 +941,10 @@ func main() {
 	txidHex := flag.String("txid", "", "")
 	heightRaw := flag.String("height", "", "")
 	hashHex := flag.String("hash", "", "")
+	txCountRaw := flag.String("tx-count", "", "")
 	flag.Parse()
 	wantHeight, err := strconv.ParseUint(*heightRaw, 10, 64); if err != nil { die("bad height") }
+	wantTxCount, err := strconv.ParseUint(*txCountRaw, 10, 64); if err != nil { die("bad tx_count") }
 	raw, err := os.ReadFile(*respPath); if err != nil { die("read block response: " + err.Error()) }
 	var resp blockResp; if err := json.Unmarshal(raw, &resp); err != nil { die("decode block response: " + err.Error()) }
 	if resp.Height != wantHeight || strings.ToLower(resp.Hash) != strings.ToLower(*hashHex) || !resp.Canonical { die("block response height/hash/canonical mismatch") }
@@ -948,7 +954,9 @@ func main() {
 	blockBytes, err := hex.DecodeString(strings.TrimSpace(resp.BlockHex)); if err != nil { die("decode block_hex: " + err.Error()) }
 	pb, err := consensus.ParseBlockBytes(blockBytes); if err != nil { die("parse block_hex failed: " + err.Error()) }
 	gotHash, err := consensus.BlockHash(pb.HeaderBytes); if err != nil || hex.EncodeToString(gotHash[:]) != strings.ToLower(*hashHex) { die("parsed block hash mismatch") }
-	for _, got := range pb.Txids { if got == wantTxid { return } }
+	if pb.TxCount != wantTxCount { die("parsed block tx_count mismatch") }
+	if _, err := consensus.ValidateBlockBasicAtHeight(blockBytes, nil, nil, wantHeight); err != nil { die("basic block validation failed: " + err.Error()) }
+	for i, got := range pb.Txids { if i > 0 && got == wantTxid { return } }
 	die("submitted txid missing from parsed block txids")
 }
 EOF
@@ -963,14 +971,16 @@ block_inclusion_failure_reason() {
     *"tx_hex txid mismatch"*) printf '%s\n' "${label}_txid_mismatch" ;;
     *"decode block_hex:"*|*"parse block_hex failed:"*) printf '%s\n' "${label}_block_hex_parse_failed" ;;
     *"parsed block hash mismatch"*) printf '%s\n' "${label}_block_hash_mismatch" ;;
+    *"parsed block tx_count mismatch"*) printf '%s\n' "${label}_block_tx_count_mismatch" ;;
+    *"basic block validation failed:"*) printf '%s\n' "${label}_block_basic_validation_failed" ;;
     *"submitted txid missing from parsed block txids"*) printf '%s\n' "${label}_block_missing_submitted_txid" ;;
     *) printf '%s\n' "${label}_inclusion_failed" ;;
   esac
 }
 verify_block_inclusion() {
-  local label="$1" block_path="$2" height="$3" block_hash="$4" output
+  local label="$1" block_path="$2" height="$3" block_hash="$4" tx_count="$5" output
   [[ -s "${BLOCK_CHECK_GO}" ]] || write_block_check_go || { TX_REASON="${label}_block_check_write_failed"; return 1; }
-  output="$(bounded_mesh /usr/bin/env RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${BLOCK_CHECK_GO}" --block-response "${block_path}" --tx-hex "${TX_HEX}" --txid "${TX_ID}" --height "${height}" --hash "${block_hash}" 2>&1)" || {
+  output="$(bounded_mesh /usr/bin/env RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${BLOCK_CHECK_GO}" --block-response "${block_path}" --tx-hex "${TX_HEX}" --txid "${TX_ID}" --height "${height}" --hash "${block_hash}" --tx-count "${tx_count}" 2>&1)" || {
     local status=$?
     printf '%s\n' "${label} inclusion check failed: ${output}" >&2
     if [[ "${status}" -eq 142 ]]; then
@@ -1049,7 +1059,7 @@ rust_mine_including_tx() {
   parsed="$(parse_mine_next_response "${RUST_MINE_JSON}")" || { rc=$?; case "${rc}" in 13) TX_REASON=rust_mine_malformed_rpc_body ;; 14) TX_REASON=rust_mine_unavailable ;; 16) TX_REASON=rust_mine_tx_count_invalid ;; *) TX_REASON=rust_mine_unknown_failure ;; esac; return 1; }
   IFS=$'\t' read -r RUST_MINE_HEIGHT RUST_MINE_HASH RUST_MINE_TX_COUNT <<<"${parsed}" || { TX_REASON=rust_mine_malformed_rpc_body; return 1; }
   capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" "${RUST_MINE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason rust_mine_get_block "${rc}")"; return 1; }
-  verify_block_inclusion rust_mine "${RUST_MINE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"
+  verify_block_inclusion rust_mine "${RUST_MINE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}" "${RUST_MINE_TX_COUNT}"
 }
 tip_matches() {
   python3 - "$1" "$2" "$3" <<'PY'
@@ -1075,7 +1085,7 @@ wait_go_converge_to_rust_mined_block() {
       if tip_matches "${tmp}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"; then
         mv -- "${tmp}" "${GO_CONVERGE_TIP_JSON}" || { TX_REASON=go_converge_artifact_write_failed; return 1; }
         capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" "${GO_CONVERGE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason go_converge_get_block "${rc}")"; return 1; }
-        verify_block_inclusion go_converge "${GO_CONVERGE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"
+        verify_block_inclusion go_converge "${GO_CONVERGE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}" "${RUST_MINE_TX_COUNT}"
         return $?
       else
         rc=$?
