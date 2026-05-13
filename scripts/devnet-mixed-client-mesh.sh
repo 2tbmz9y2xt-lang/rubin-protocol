@@ -149,7 +149,6 @@ import (
 )
 type blockResp struct {
 	Hash string `json:"hash"`
-	BlockHash string `json:"block_hash"`
 	Height uint64 `json:"height"`
 	Canonical bool `json:"canonical"`
 	BlockHex string `json:"block_hex"`
@@ -167,8 +166,7 @@ func main() {
 	wantTxCount, err := strconv.ParseUint(*txCountRaw, 10, 64); if err != nil { die("bad tx_count") }
 	raw, err := os.ReadFile(*respPath); if err != nil { die("read block response: " + err.Error()) }
 	var resp blockResp; if err := json.Unmarshal(raw, &resp); err != nil { die("decode block response: " + err.Error()) }
-	gotHash := resp.Hash; if gotHash == "" { gotHash = resp.BlockHash }
-	if resp.Height != wantHeight || strings.ToLower(gotHash) != strings.ToLower(*hashHex) || !resp.Canonical { die("block response height/hash/canonical mismatch") }
+	if resp.Height != wantHeight || strings.ToLower(resp.Hash) != strings.ToLower(*hashHex) || !resp.Canonical { die("block response height/hash/canonical mismatch") }
 	txBytes, err := hex.DecodeString(strings.TrimSpace(*txHex)); if err != nil { die("decode tx_hex: " + err.Error()) }
 	_, wantTxid, _, consumed, err := consensus.ParseTx(txBytes); if err != nil || consumed != len(txBytes) { die("parse tx_hex failed") }
 	if hex.EncodeToString(wantTxid[:]) != strings.ToLower(*txidHex) { die("tx_hex txid mismatch") }
