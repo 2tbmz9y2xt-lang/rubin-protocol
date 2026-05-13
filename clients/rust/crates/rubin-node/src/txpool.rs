@@ -4283,6 +4283,166 @@ mod tests {
         );
     }
 
+    /// RUB-17 remove-helper parity: removing an existing entry and then
+    /// removing the same or an absent txid again must remain a no-op for
+    /// unrelated resident entries. This pins Go-compatible
+    /// `removeTxLocked` no-op semantics while checking Rust's extra
+    /// heap/accounting indexes.
+    #[test]
+    fn rub17_evict_txids_is_idempotent_and_preserves_unrelated_accounting() {
+        let mut pool = TxPool::new();
+        let removed_txid = [0xD1; 32];
+        let survivor_txid = [0xD2; 32];
+        let removed_outpoint = Outpoint {
+            txid: [0xE1; 32],
+            vout: 0,
+        };
+        let survivor_outpoint = Outpoint {
+            txid: [0xE2; 32],
+            vout: 1,
+        };
+
+        pool.insert_entry(
+            removed_txid,
+            TxPoolEntry {
+                raw: vec![0xD1; 3],
+                inputs: vec![removed_outpoint.clone()],
+                fee: 30,
+                weight: 3,
+                size: 3,
+                source: TxSource::Remote,
+            },
+        );
+        pool.insert_entry(
+            survivor_txid,
+            TxPoolEntry {
+                raw: vec![0xD2; 5],
+                inputs: vec![survivor_outpoint.clone()],
+                fee: 50,
+                weight: 5,
+                size: 5,
+                source: TxSource::Reorg,
+            },
+        );
+        let next_heap_id_before = pool.next_heap_id;
+        let survivor_heap_seq_before = *pool
+            .heap_seqs
+            .get(&survivor_txid)
+            .expect("survivor heap sequence before eviction");
+
+        pool.evict_txids(&[removed_txid]);
+        pool.evict_txids(&[removed_txid, [0xFF; 32]]);
+
+        assert!(!pool.txs.contains_key(&removed_txid), "removed tx gone");
+        assert!(
+            !pool.spenders.contains_key(&removed_outpoint),
+            "removed spender index gone"
+        );
+        assert!(
+            !pool.heap_seqs.contains_key(&removed_txid),
+            "removed heap sequence gone"
+        );
+        assert_eq!(pool.len(), 1, "only survivor remains");
+        assert_eq!(pool.used_bytes, 5, "used_bytes counts only survivor");
+        assert_eq!(
+            pool.spenders.get(&survivor_outpoint),
+            Some(&survivor_txid),
+            "survivor spender index preserved"
+        );
+        assert_eq!(
+            pool.entry_source(&survivor_txid),
+            Some(TxSource::Reorg),
+            "survivor source preserved"
+        );
+        assert_eq!(
+            pool.heap_seqs.get(&survivor_txid),
+            Some(&survivor_heap_seq_before),
+            "survivor heap sequence preserved before lazy worst lookup"
+        );
+        assert_eq!(
+            pool.next_heap_id, next_heap_id_before,
+            "remove/no-op paths must not allocate heap ids"
+        );
+        assert_eq!(
+            pool.current_worst_txid(),
+            Some(survivor_txid),
+            "stale removed heap entries are hidden by heap_seqs"
+        );
+        assert_eq!(
+            pool.next_heap_id, next_heap_id_before,
+            "worst lookup must not repair accounting after remove/no-op"
+        );
+    }
+
+    /// RUB-17 direct-helper coverage: after the private `remove_entry`
+    /// clears all indexes, re-adding the same txid/outpoint must create
+    /// fresh accounting rather than inheriting stale bytes, source, or
+    /// heap sequence state.
+    #[test]
+    fn rub17_remove_entry_then_readd_same_txid_has_fresh_accounting() {
+        let mut pool = TxPool::new();
+        let txid = [0xD3; 32];
+        let outpoint = Outpoint {
+            txid: [0xE3; 32],
+            vout: 2,
+        };
+
+        pool.insert_entry(
+            txid,
+            TxPoolEntry {
+                raw: vec![0x01; 7],
+                inputs: vec![outpoint.clone()],
+                fee: 70,
+                weight: 7,
+                size: 7,
+                source: TxSource::Remote,
+            },
+        );
+        let first_heap_seq = *pool.heap_seqs.get(&txid).expect("first heap seq");
+
+        pool.remove_entry(&txid);
+        assert_eq!(pool.len(), 0, "entry removed");
+        assert_eq!(pool.used_bytes, 0, "bytes cleared after remove_entry");
+        assert!(!pool.spenders.contains_key(&outpoint), "spender cleared");
+        assert!(!pool.heap_seqs.contains_key(&txid), "heap seq cleared");
+        assert_eq!(pool.entry_source(&txid), None, "source cleared");
+        assert_eq!(pool.current_worst_txid(), None, "no live worst entry");
+
+        pool.insert_entry(
+            txid,
+            TxPoolEntry {
+                raw: vec![0x02; 11],
+                inputs: vec![outpoint.clone()],
+                fee: 110,
+                weight: 11,
+                size: 11,
+                source: TxSource::Reorg,
+            },
+        );
+
+        assert_eq!(pool.len(), 1, "re-add succeeds");
+        assert_eq!(pool.used_bytes, 11, "bytes reflect fresh entry only");
+        assert_eq!(
+            pool.spenders.get(&outpoint),
+            Some(&txid),
+            "spender index rebuilt for fresh entry"
+        );
+        assert_eq!(
+            pool.entry_source(&txid),
+            Some(TxSource::Reorg),
+            "source reflects fresh entry"
+        );
+        assert!(
+            *pool.heap_seqs.get(&txid).expect("second heap seq") > first_heap_seq,
+            "re-add must allocate a fresh heap sequence"
+        );
+        assert_eq!(
+            pool.current_worst_txid(),
+            Some(txid),
+            "fresh heap entry is visible"
+        );
+    }
+
     /// P1 #4 helper unit test — `fee_rate_below_floor` is a u128 cross-mul
     /// predicate matching Go `feeRateBelowFloor`
     /// (`feeRateBelowFloor` in clients/go/node/mempool.go), including the in-helper
