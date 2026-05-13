@@ -59,6 +59,7 @@ TCP_PROXY_PY="${RUBIN_PROCESS_ARTIFACT_ROOT}/tcp_proxy.py"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-binary-soak-report.json"
 PARTITION_REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-partition-heal-report.json"
 PARTITION_REORG_REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-partition-heal-reorg-report.json"
+PARTITION_REORG_BLOCK_CHECK_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-reorg-block-check.go"
 BASE_HEIGHT=$((TARGET_HEIGHT - 1))
 BASE_MINE_BLOCKS=$((BASE_HEIGHT + 1))
 A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
@@ -667,14 +668,16 @@ require_reorg_peer_absent() {
 }
 capture_reorg_rpc_sidecar() {
   local impl="$1" method="$2" rpc_addr="$3" path="$4" phase="$5" out="$6" body="${7:-}" tmp raw rc=0
+  REORG_CAPTURE_REASON=""
   tmp="${out}.tmp"
   raw="${out}.raw"
   rm -f -- "${out}" "${tmp}" "${raw}"
   rpc_json "${method}" "${rpc_addr}" "${path}" "${body}" >"${raw}" || rc=$?
   if (( rc != 0 )); then
+    [[ "${rc}" == "22" ]] && REORG_CAPTURE_REASON="${phase}_http_error" || REORG_CAPTURE_REASON="${phase}_rpc_failed"
     echo "${phase} ${method} ${path} failed via ${impl} rpc=${rpc_addr}: $(cat "${raw}" 2>/dev/null || true)" >&2
     rm -f -- "${raw}" "${tmp}" "${out}"
-    return 1
+    return 2
   fi
   python3 - "${impl}" "${method}" "${rpc_addr}" "${path}" "${phase}" "${raw}" "${tmp}" <<'PY' || rc=$?
 import json
@@ -686,7 +689,14 @@ impl, method, rpc_addr, path, phase, raw_path, out_path = sys.argv[1:8]
 
 def fail(reason, detail):
     print(f"{reason}: {detail}", file=sys.stderr)
-    sys.exit(2)
+    codes = {
+        "read_failed": 3,
+        "size_mismatch": 4,
+        "json_malformed": 5,
+        "shape_mismatch": 6,
+        "write_failed": 7,
+    }
+    sys.exit(codes.get(reason, 8))
 
 try:
     size = os.path.getsize(raw_path)
@@ -718,10 +728,18 @@ except OSError as exc:
     fail("write_failed", exc)
 PY
   if (( rc != 0 )); then
+    case "${rc}" in
+      3) REORG_CAPTURE_REASON="${phase}_sidecar_read_failed" ;;
+      4) REORG_CAPTURE_REASON="${phase}_sidecar_size_mismatch" ;;
+      5) REORG_CAPTURE_REASON="${phase}_sidecar_json_malformed" ;;
+      6) REORG_CAPTURE_REASON="${phase}_sidecar_shape_mismatch" ;;
+      7) REORG_CAPTURE_REASON="${phase}_sidecar_write_failed" ;;
+      *) REORG_CAPTURE_REASON="${phase}_sidecar_parser_failed" ;;
+    esac
     rm -f -- "${raw}" "${tmp}" "${out}"
-    return 1
+    return 2
   fi
-  mv -- "${tmp}" "${out}" || { rm -f -- "${raw}" "${tmp}" "${out}"; return 1; }
+  mv -- "${tmp}" "${out}" || { REORG_CAPTURE_REASON="${phase}_sidecar_publish_failed"; rm -f -- "${raw}" "${tmp}" "${out}"; return 2; }
   rm -f -- "${raw}"
 }
 reorg_mine_tsv() {
@@ -782,13 +800,80 @@ if not isinstance(tip_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", tip_hash):
 print(height, tip_hash, sep="\t")
 PY
 }
+write_partition_reorg_block_check_go() {
+  cat >"${PARTITION_REORG_BLOCK_CHECK_GO}" <<'EOF'
+package main
+import (
+  "encoding/hex"
+  "flag"
+  "fmt"
+  "os"
+  "strings"
+  "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
+func die(format string, args ...any) {
+  fmt.Fprintf(os.Stderr, format+"\n", args...)
+  os.Exit(1)
+}
+func main() {
+  blockHexPath := flag.String("block-hex-file", "", "file containing block_hex")
+  wantHash := flag.String("hash", "", "expected block hash")
+  flag.Parse()
+  if *blockHexPath == "" || *wantHash == "" {
+    die("missing required flags")
+  }
+  rawHex, err := os.ReadFile(*blockHexPath)
+  if err != nil {
+    die("read block_hex: %v", err)
+  }
+  blockHex := strings.TrimSpace(string(rawHex))
+  blockBytes, err := hex.DecodeString(blockHex)
+  if err != nil {
+    die("decode block_hex: %v", err)
+  }
+  pb, err := consensus.ParseBlockBytes(blockBytes)
+  if err != nil {
+    die("parse block_hex failed: %v", err)
+  }
+  got, err := consensus.BlockHash(pb.HeaderBytes)
+  if err != nil {
+    die("hash block header failed: %v", err)
+  }
+  gotHex := hex.EncodeToString(got[:])
+  if gotHex != *wantHash {
+    die("parsed block hash mismatch: got=%s want=%s", gotHex, *wantHash)
+  }
+}
+EOF
+}
+reorg_block_failure_reason() {
+  local phase="$1" output="$2"
+  case "${output}" in
+    *"sidecar malformed:"*) printf '%s\n' "${phase}_block_sidecar_malformed" ;;
+    *"sidecar shape mismatch"*) printf '%s\n' "${phase}_block_sidecar_shape_mismatch" ;;
+    *"sidecar route mismatch"*) printf '%s\n' "${phase}_block_sidecar_route_mismatch" ;;
+    *"block response shape mismatch"*) printf '%s\n' "${phase}_block_response_shape_mismatch" ;;
+    *"block response height/hash/canonical mismatch"*) printf '%s\n' "${phase}_block_response_mismatch" ;;
+    *"block_hex shape mismatch"*) printf '%s\n' "${phase}_block_hex_shape_mismatch" ;;
+    *"write block_hex failed"*) printf '%s\n' "${phase}_block_hex_write_failed" ;;
+    *"read block_hex:"*) printf '%s\n' "${phase}_block_hex_read_failed" ;;
+    *"decode block_hex:"*) printf '%s\n' "${phase}_block_hex_decode_failed" ;;
+    *"parse block_hex failed:"*) printf '%s\n' "${phase}_block_hex_parse_failed" ;;
+    *"hash block header failed:"*) printf '%s\n' "${phase}_block_hash_failed" ;;
+    *"parsed block hash mismatch:"*) printf '%s\n' "${phase}_block_hash_mismatch" ;;
+    *) printf '%s\n' "${phase}_block_check_failed" ;;
+  esac
+}
 reorg_block_matches() {
-  python3 - "$1" "$2" "$3" <<'PY'
+  local phase="$1" path="$2" height="$3" block_hash="$4" block_hex_file output
+  block_hex_file="${path}.block_hex"
+  rm -f -- "${block_hex_file}"
+  output="$(python3 - "${path}" "${height}" "${block_hash}" "${block_hex_file}" <<'PY'
 import json
 import re
 import sys
 
-path, height_raw, want_hash = sys.argv[1:4]
+path, height_raw, want_hash, block_hex_path = sys.argv[1:5]
 try:
     want_height = int(height_raw)
     with open(path, encoding="utf-8") as f:
@@ -805,33 +890,60 @@ if not isinstance(resp, dict) or set(resp) != {"block_hex", "canonical", "hash",
 block_hex = resp.get("block_hex")
 if resp.get("height") != want_height or resp.get("canonical") is not True or resp.get("hash") != want_hash:
     sys.exit("block response height/hash/canonical mismatch")
-if not isinstance(block_hex, str) or not block_hex or not re.fullmatch(r"[0-9a-f]+", block_hex):
+if not isinstance(block_hex, str) or not block_hex or len(block_hex) % 2 != 0 or not re.fullmatch(r"[0-9a-f]+", block_hex):
     sys.exit("block_hex shape mismatch")
+try:
+    with open(block_hex_path, "w", encoding="utf-8") as f:
+        f.write(block_hex)
+        f.write("\n")
+except OSError as exc:
+    sys.exit(f"write block_hex failed: {exc}")
 PY
+  )" || {
+    REORG_STEP_REASON="$(reorg_block_failure_reason "${phase}" "${output}")"
+    rm -f -- "${block_hex_file}"
+    printf '%s\n' "${output}" >&2
+    return 1
+  }
+  [[ -s "${PARTITION_REORG_BLOCK_CHECK_GO}" ]] || write_partition_reorg_block_check_go
+  output="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${PARTITION_REORG_BLOCK_CHECK_GO}" --block-hex-file "${block_hex_file}" --hash "${block_hash}" 2>&1)" || {
+    REORG_STEP_REASON="$(reorg_block_failure_reason "${phase}" "${output}")"
+    rm -f -- "${block_hex_file}"
+    printf '%s\n' "${output}" >&2
+    return 1
+  }
+  rm -f -- "${block_hex_file}"
 }
 mine_reorg_block() {
   local impl="$1" rpc_addr="$2" phase="$3" out="$4"
-  capture_reorg_rpc_sidecar "${impl}" POST "${rpc_addr}" /mine_next "${phase}" "${out}" '{}' || return 1
-  reorg_mine_tsv "${out}"
+  REORG_STEP_REASON=""
+  capture_reorg_rpc_sidecar "${impl}" POST "${rpc_addr}" /mine_next "${phase}" "${out}" '{}' || { REORG_STEP_REASON="${REORG_CAPTURE_REASON:-${phase}_capture_failed}"; return 1; }
+  reorg_mine_tsv "${out}" || { REORG_STEP_REASON="${phase}_mine_sidecar_malformed"; return 1; }
 }
 capture_reorg_block() {
   local impl="$1" rpc_addr="$2" phase="$3" height="$4" block_hash="$5" out="$6"
-  capture_reorg_rpc_sidecar "${impl}" GET "${rpc_addr}" "/get_block?height=${height}" "${phase}" "${out}" || return 1
-  reorg_block_matches "${out}" "${height}" "${block_hash}"
+  REORG_STEP_REASON=""
+  capture_reorg_rpc_sidecar "${impl}" GET "${rpc_addr}" "/get_block?height=${height}" "${phase}" "${out}" || { REORG_STEP_REASON="${REORG_CAPTURE_REASON:-${phase}_capture_failed}"; return 1; }
+  reorg_block_matches "${phase}" "${out}" "${height}" "${block_hash}" || { REORG_STEP_REASON="${REORG_STEP_REASON:-${phase}_block_check_failed}"; return 1; }
 }
 wait_reorg_tip_matches() {
   local impl="$1" rpc_addr="$2" phase="$3" out="$4" want_height="$5" want_hash="$6" timeout="$7" deadline tmp parsed height tip_hash
+  REORG_STEP_REASON=""
   deadline=$((SECONDS + timeout))
   tmp="${out}.candidate"
   rm -f -- "${out}" "${tmp}"
   while (( SECONDS < deadline )); do
     if capture_reorg_rpc_sidecar "${impl}" GET "${rpc_addr}" /get_tip "${phase}" "${tmp}"; then
-      parsed="$(reorg_tip_tsv "${tmp}")" || { rm -f -- "${tmp}"; return 2; }
-      IFS=$'\t' read -r height tip_hash <<<"${parsed}" || { rm -f -- "${tmp}"; return 2; }
+      parsed="$(reorg_tip_tsv "${tmp}")" || { REORG_STEP_REASON="${phase}_tip_sidecar_malformed"; rm -f -- "${tmp}"; return 2; }
+      IFS=$'\t' read -r height tip_hash <<<"${parsed}" || { REORG_STEP_REASON="${phase}_tip_sidecar_malformed"; rm -f -- "${tmp}"; return 2; }
       if [[ "${height}" == "${want_height}" && "${tip_hash}" == "${want_hash}" ]]; then
-        mv -- "${tmp}" "${out}" || { rm -f -- "${tmp}" "${out}"; return 2; }
+        mv -- "${tmp}" "${out}" || { REORG_STEP_REASON="${phase}_tip_publish_failed"; rm -f -- "${tmp}" "${out}"; return 2; }
         return 0
       fi
+    else
+      REORG_STEP_REASON="${REORG_CAPTURE_REASON:-${phase}_capture_failed}"
+      rm -f -- "${tmp}"
+      return 2
     fi
     sleep 1
   done
@@ -843,7 +955,7 @@ require_reorg_tip_matches() {
   shift 2
   wait_reorg_tip_matches "$@" || rc=$?
   (( rc == 0 )) && return 0
-  (( rc == 2 )) && partition_reorg_no_data "${malformed_reason}"
+  (( rc == 2 )) && partition_reorg_no_data "${REORG_STEP_REASON:-${malformed_reason}}"
   partition_reorg_no_data "${timeout_reason}"
 }
 write_partition_reorg_report() {
@@ -1005,11 +1117,11 @@ run_mixed_partition_heal_reorg() {
   GO_PROXY_LOCAL_PRE="$(wait_established_local_to_remote proxy-pre "${PROXY_PID}" "${GO_PARTITION_P2P}" 30)" || partition_reorg_no_data pre_partition_proxy_target_link_missing
   require_reorg_peer_present pre_partition_target_peer_missing pre-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${PRE_GO_PEERS}" 30
 
-  parsed="$(mine_reorg_block go "${GO_PARTITION_RPC}" common-go-mine "${COMMON_GO_MINE}")" || partition_reorg_no_data common_go_mine_failed
+  parsed="$(mine_reorg_block go "${GO_PARTITION_RPC}" common-go-mine "${COMMON_GO_MINE}")" || partition_reorg_no_data "${REORG_STEP_REASON:-common_go_mine_failed}"
   IFS=$'\t' read -r COMMON_HEIGHT COMMON_HASH COMMON_TX_COUNT <<<"${parsed}" || partition_reorg_no_data common_go_mine_malformed
   require_reorg_tip_matches common_rust_converge_timeout common_rust_tip_malformed rust "${RUST_PARTITION_RPC}" common-rust-tip "${COMMON_RUST_TIP}" "${COMMON_HEIGHT}" "${COMMON_HASH}" 120
-  capture_reorg_block go "${GO_PARTITION_RPC}" common-go-block "${COMMON_HEIGHT}" "${COMMON_HASH}" "${COMMON_GO_BLOCK}" || partition_reorg_no_data common_go_block_missing
-  capture_reorg_block rust "${RUST_PARTITION_RPC}" common-rust-block "${COMMON_HEIGHT}" "${COMMON_HASH}" "${COMMON_RUST_BLOCK}" || partition_reorg_no_data common_rust_block_missing
+  capture_reorg_block go "${GO_PARTITION_RPC}" common-go-block "${COMMON_HEIGHT}" "${COMMON_HASH}" "${COMMON_GO_BLOCK}" || partition_reorg_no_data "${REORG_STEP_REASON:-common_go_block_missing}"
+  capture_reorg_block rust "${RUST_PARTITION_RPC}" common-rust-block "${COMMON_HEIGHT}" "${COMMON_HASH}" "${COMMON_RUST_BLOCK}" || partition_reorg_no_data "${REORG_STEP_REASON:-common_rust_block_missing}"
 
   printf 'drop\n' >"${proxy_target}"
   require_reorg_peer_absent partition_source_peer_unchanged partition-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${PARTITION_RUST_PEERS}" 90
@@ -1018,23 +1130,23 @@ run_mixed_partition_heal_reorg() {
   wait_no_established_to_remote proxy-partition "${PROXY_PID}" "${GO_PARTITION_P2P}" 30 || partition_reorg_no_data partition_proxy_target_link_unchanged
 
   expected_fork_height=$((COMMON_HEIGHT + 1))
-  parsed="$(mine_reorg_block go "${GO_PARTITION_RPC}" partition-go-fork-mine "${GO_FORK_MINE}")" || partition_reorg_no_data go_fork_mine_failed
+  parsed="$(mine_reorg_block go "${GO_PARTITION_RPC}" partition-go-fork-mine "${GO_FORK_MINE}")" || partition_reorg_no_data "${REORG_STEP_REASON:-go_fork_mine_failed}"
   IFS=$'\t' read -r GO_FORK_HEIGHT GO_FORK_HASH GO_FORK_TX_COUNT <<<"${parsed}" || partition_reorg_no_data go_fork_mine_malformed
   (( GO_FORK_HEIGHT == expected_fork_height )) || partition_reorg_no_data go_fork_height_unexpected
   require_reorg_tip_matches go_fork_tip_timeout go_fork_tip_malformed go "${GO_PARTITION_RPC}" partition-go-fork-tip "${GO_FORK_TIP}" "${GO_FORK_HEIGHT}" "${GO_FORK_HASH}" 30
-  capture_reorg_block go "${GO_PARTITION_RPC}" partition-go-fork-block "${GO_FORK_HEIGHT}" "${GO_FORK_HASH}" "${GO_FORK_BLOCK}" || partition_reorg_no_data go_fork_block_missing
+  capture_reorg_block go "${GO_PARTITION_RPC}" partition-go-fork-block "${GO_FORK_HEIGHT}" "${GO_FORK_HASH}" "${GO_FORK_BLOCK}" || partition_reorg_no_data "${REORG_STEP_REASON:-go_fork_block_missing}"
 
-  parsed="$(mine_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork1-mine "${RUST_FORK1_MINE}")" || partition_reorg_no_data rust_fork1_mine_failed
+  parsed="$(mine_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork1-mine "${RUST_FORK1_MINE}")" || partition_reorg_no_data "${REORG_STEP_REASON:-rust_fork1_mine_failed}"
   IFS=$'\t' read -r RUST_FORK1_HEIGHT RUST_FORK1_HASH RUST_FORK1_TX_COUNT <<<"${parsed}" || partition_reorg_no_data rust_fork1_mine_malformed
   (( RUST_FORK1_HEIGHT == expected_fork_height )) || partition_reorg_no_data rust_fork1_height_unexpected
   [[ "${RUST_FORK1_HASH}" != "${GO_FORK_HASH}" ]] || partition_reorg_no_data fork_hash_not_divergent
   expected_winning_height=$((COMMON_HEIGHT + 2))
-  parsed="$(mine_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork2-mine "${RUST_FORK2_MINE}")" || partition_reorg_no_data rust_fork2_mine_failed
+  parsed="$(mine_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork2-mine "${RUST_FORK2_MINE}")" || partition_reorg_no_data "${REORG_STEP_REASON:-rust_fork2_mine_failed}"
   IFS=$'\t' read -r RUST_FORK2_HEIGHT RUST_FORK2_HASH RUST_FORK2_TX_COUNT <<<"${parsed}" || partition_reorg_no_data rust_fork2_mine_malformed
   (( RUST_FORK2_HEIGHT == expected_winning_height )) || partition_reorg_no_data rust_fork2_height_unexpected
   require_reorg_tip_matches rust_fork_tip_timeout rust_fork_tip_malformed rust "${RUST_PARTITION_RPC}" partition-rust-fork-tip "${RUST_FORK_TIP}" "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" 30
-  capture_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork1-block "${RUST_FORK1_HEIGHT}" "${RUST_FORK1_HASH}" "${RUST_FORK1_BLOCK}" || partition_reorg_no_data rust_fork1_block_missing
-  capture_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork2-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${RUST_FORK2_BLOCK}" || partition_reorg_no_data rust_fork2_block_missing
+  capture_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork1-block "${RUST_FORK1_HEIGHT}" "${RUST_FORK1_HASH}" "${RUST_FORK1_BLOCK}" || partition_reorg_no_data "${REORG_STEP_REASON:-rust_fork1_block_missing}"
+  capture_reorg_block rust "${RUST_PARTITION_RPC}" partition-rust-fork2-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${RUST_FORK2_BLOCK}" || partition_reorg_no_data "${REORG_STEP_REASON:-rust_fork2_block_missing}"
   require_reorg_peer_absent fork_source_peer_unchanged fork-rust rust "${RUST_PARTITION_RPC}" "${PROXY_ADDR}" "${FORK_RUST_PEERS}" 5
   require_reorg_peer_absent fork_target_peer_unchanged fork-go go "${GO_PARTITION_RPC}" "${GO_PROXY_LOCAL_PRE}" "${FORK_GO_PEERS}" 5
 
@@ -1045,9 +1157,9 @@ run_mixed_partition_heal_reorg() {
 
   require_reorg_tip_matches go_reorg_converge_timeout go_reorg_tip_malformed go "${GO_PARTITION_RPC}" final-go-tip "${FINAL_GO_TIP}" "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" 180
   require_reorg_tip_matches rust_final_tip_timeout rust_final_tip_malformed rust "${RUST_PARTITION_RPC}" final-rust-tip "${FINAL_RUST_TIP}" "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" 30
-  capture_reorg_block go "${GO_PARTITION_RPC}" final-go-reorg-parent-block "${RUST_FORK1_HEIGHT}" "${RUST_FORK1_HASH}" "${FINAL_GO_REORG_BLOCK}" || partition_reorg_no_data go_reorg_parent_block_missing
-  capture_reorg_block go "${GO_PARTITION_RPC}" final-go-tip-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${FINAL_GO_TIP_BLOCK}" || partition_reorg_no_data go_reorg_tip_block_missing
-  capture_reorg_block rust "${RUST_PARTITION_RPC}" final-rust-tip-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${FINAL_RUST_TIP_BLOCK}" || partition_reorg_no_data rust_final_tip_block_missing
+  capture_reorg_block go "${GO_PARTITION_RPC}" final-go-reorg-parent-block "${RUST_FORK1_HEIGHT}" "${RUST_FORK1_HASH}" "${FINAL_GO_REORG_BLOCK}" || partition_reorg_no_data "${REORG_STEP_REASON:-go_reorg_parent_block_missing}"
+  capture_reorg_block go "${GO_PARTITION_RPC}" final-go-tip-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${FINAL_GO_TIP_BLOCK}" || partition_reorg_no_data "${REORG_STEP_REASON:-go_reorg_tip_block_missing}"
+  capture_reorg_block rust "${RUST_PARTITION_RPC}" final-rust-tip-block "${RUST_FORK2_HEIGHT}" "${RUST_FORK2_HASH}" "${FINAL_RUST_TIP_BLOCK}" || partition_reorg_no_data "${REORG_STEP_REASON:-rust_final_tip_block_missing}"
   GO_REORG_TOTAL="$(metric_value "${GO_PARTITION_RPC}" rubin_node_reorg_total)" || partition_reorg_no_data go_reorg_metric_missing
   GO_LAST_REORG_DEPTH="$(metric_value "${GO_PARTITION_RPC}" rubin_node_last_reorg_depth)" || partition_reorg_no_data go_reorg_depth_metric_missing
   (( GO_REORG_TOTAL >= 1 )) || partition_reorg_no_data go_reorg_metric_not_incremented
