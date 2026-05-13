@@ -132,8 +132,7 @@ def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, h
     block = load_json_file(label, p)
     req(set(block) == {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}, f"{label} keys mismatch: {sorted(block)}")
     req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == request_path, f"{label} sidecar identity mismatch")
-    actual_hash = block.get("hash") or block.get("block_hash")
-    req(block.get("canonical") is True and block.get("height") == height and actual_hash == block_hash, f"{label} sidecar height/hash/canonical mismatch")
+    req(block.get("canonical") is True and block.get("height") == height and block.get("hash") == block_hash, f"{label} sidecar height/hash/canonical mismatch")
     req(isinstance(block.get("block_hex"), str) and block["block_hex"], f"{label} block_hex is missing")
     source = r'''
 package main
@@ -744,6 +743,7 @@ PY
 }
 prepare_tx_chainstate() {
   local keygen_public_json keygen_fields_raw mine_address keygen_raw="${KEYGEN_JSON}.raw" keygen_err="${KEYGEN_JSON}.stderr" xtrace_was_enabled=0 status=0 rc=0
+  trap 'rm -f -- "${keygen_raw}" "${keygen_err}" >/dev/null 2>&1 || true; trap - RETURN' RETURN
   TX_REASON=""
   build_go_txgen || { TX_REASON="${BUILD_REASON:-go_txgen_build_failed}"; return 1; }
   write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }

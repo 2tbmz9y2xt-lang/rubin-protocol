@@ -99,6 +99,71 @@ Path(dst).write_text("\n".join(lines[start:end] + [""] + lines[token_start:token
 PY
 }
 
+extract_prepare_tx_chainstate() {
+  python3 - "${HARNESS}" "${PREPARE_TX_CHAINSTATE_LIB}" <<'PY'
+from pathlib import Path
+import sys
+
+src, dst = map(Path, sys.argv[1:3])
+lines = src.read_text(encoding="utf-8").splitlines()
+start = next(i for i, line in enumerate(lines) if line.startswith("prepare_tx_chainstate()"))
+end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("parse_txid()"))
+Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
+PY
+}
+
+check_prepare_tx_chainstate_cleanup() {
+  local probe="${TMP_ROOT}/prepare-tx-chainstate-cleanup.sh" probe_root="${TMP_ROOT}/prepare-tx-chainstate-cleanup"
+  mkdir -p -- "${probe_root}"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$1"
+probe_root="$2"
+KEYGEN_JSON="${probe_root}/keygen.json"
+KEYGEN_GO="${probe_root}/keygen.go"
+GO_MODULE_ROOT="${probe_root}/go"
+DEV_ENV="${probe_root}/dev-env.sh"
+GO_NODE_BIN="${probe_root}/rubin-node"
+GO_DIR="${probe_root}/go-node"
+RUST_DIR="${probe_root}/rust-node"
+MINE_LOG="${probe_root}/mine-go.log"
+TMPDIR="${probe_root}/tmp"
+TX_REASON=""
+TX_FROM_KEY_DIR=""
+TX_FROM_KEY_FILE=""
+TX_TO_KEY=""
+mkdir -p -- "${TMPDIR}" "${GO_MODULE_ROOT}" "${GO_DIR}" "${RUST_DIR}"
+
+build_go_txgen() { :; }
+write_keygen() { :; }
+disable_xtrace_for_secret() { return 1; }
+restore_xtrace_after_secret() { :; }
+make_tx_secret_dir() {
+  mkdir -p -- "${probe_root}/secret"
+  printf '%s\n' "${probe_root}/secret"
+}
+cleanup_tx_from_key_file() { :; }
+bounded_mesh() {
+  printf '{"malformed":true}\n'
+  printf 'keygen stderr\n' >&2
+}
+parse_keygen_material() { return 9; }
+keygen_material_reason() { printf '%s\n' go_submit_keygen_material_malformed; }
+
+set +e
+prepare_tx_chainstate
+rc=$?
+set -e
+[[ ${rc} -ne 0 ]] || { echo "FAIL: prepare_tx_chainstate should fail on malformed keygen material" >&2; exit 1; }
+[[ "${TX_REASON}" == "go_submit_keygen_material_malformed" ]] || { echo "FAIL: unexpected TX_REASON: ${TX_REASON}" >&2; exit 1; }
+[[ ! -e "${KEYGEN_JSON}.raw" ]] || { echo "FAIL: keygen raw sidecar survived failure" >&2; exit 1; }
+[[ ! -e "${KEYGEN_JSON}.stderr" ]] || { echo "FAIL: keygen stderr sidecar survived failure" >&2; exit 1; }
+SH
+  bash "${probe}" "${PREPARE_TX_CHAINSTATE_LIB}" "${probe_root}"
+}
+
 write_reports() {
   python3 - "${TMP_ROOT}" <<'PY'
 from pathlib import Path
@@ -504,7 +569,10 @@ PY
 }
 
 CHECK_REPORT_LIB="${TMP_ROOT}/check-report-lib.sh"
+PREPARE_TX_CHAINSTATE_LIB="${TMP_ROOT}/prepare-tx-chainstate-lib.sh"
 extract_check_report
+extract_prepare_tx_chainstate
+check_prepare_tx_chainstate_cleanup
 # shellcheck source=/dev/null
 source "${CHECK_REPORT_LIB}"
 REPORT_LIST="${TMP_ROOT}/reports.txt"
