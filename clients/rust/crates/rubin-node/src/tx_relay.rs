@@ -429,7 +429,13 @@ pub fn broadcast_inventory(
 
     if !block_items.is_empty() {
         let block_vecs: Vec<InventoryVector> = block_items.into_iter().cloned().collect();
-        broadcast_inv_to_addrs(&block_vecs, &addrs, &relay_state.network, peer_writers)?;
+        broadcast_inv_to_addrs(
+            &block_vecs,
+            &addrs,
+            &relay_state.network,
+            peer_writers,
+            false,
+        )?;
     }
 
     if tx_items.is_empty() {
@@ -440,7 +446,7 @@ pub fn broadcast_inventory(
     let relay_key = inventory_relay_key(&tx_vecs);
     let relay_salt = skip_addr.unwrap_or(local_addr);
     addrs = select_tx_relay_peers(relay_key, relay_salt, &addrs, relay_state.tx_relay_fanout);
-    broadcast_inv_to_addrs(&tx_vecs, &addrs, &relay_state.network, peer_writers)
+    broadcast_inv_to_addrs(&tx_vecs, &addrs, &relay_state.network, peer_writers, false)
 }
 
 /// Send INV message to a set of peer addresses.
@@ -449,6 +455,7 @@ fn broadcast_inv_to_addrs(
     addrs: &[String],
     network: &str,
     peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
+    require_all_queues: bool,
 ) -> Result<(), String> {
     let payload = encode_inventory_vectors(items).map_err(|e| e.to_string())?;
     let magic = crate::p2p_runtime::network_magic(network);
@@ -464,11 +471,18 @@ fn broadcast_inv_to_addrs(
         return Err("peer_outboxes lock poisoned".to_string());
     };
     for addr in addrs {
-        if let Some(queue) = outboxes.get_mut(addr) {
-            let _ = queue.push_frame(frame.clone());
-            // else: drop silently — peer is slow or over byte budget and will
-            // catch up on the next drain.
+        let Some(queue) = outboxes.get_mut(addr) else {
+            if require_all_queues {
+                return Err(format!("peer outbox missing for {addr}"));
+            }
+            continue;
+        };
+        if !queue.push_frame(frame.clone()) && require_all_queues {
+            return Err(format!("peer outbox full for {addr}"));
         }
+        // Non-strict relay drops silently when a peer is slow or over byte
+        // budget; strict block announce uses errors so local mining cannot
+        // report announce success without enqueueing the block inventory.
     }
     Ok(())
 }
@@ -522,21 +536,25 @@ pub fn announce_block(
     block_bytes: &[u8],
     relay_state: &TxRelayState,
     peer_manager: &PeerManager,
-    local_addr: &str,
+    _local_addr: &str,
     peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> Result<(), String> {
     let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
     let hash = block_hash(&parsed.header_bytes).map_err(|err| err.to_string())?;
-    broadcast_inventory(
-        relay_state,
-        None,
+    let peers = peer_manager.snapshot();
+    let addrs: Vec<String> = peers.iter().map(|p| p.addr.clone()).collect();
+    if addrs.is_empty() {
+        return Ok(());
+    }
+    broadcast_inv_to_addrs(
         &[InventoryVector {
             kind: MSG_BLOCK,
             hash,
         }],
-        peer_manager,
-        local_addr,
+        &addrs,
+        &relay_state.network,
         peer_writers,
+        true,
     )
 }
 
@@ -993,6 +1011,49 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn announce_block_errors_when_connected_peer_has_no_outbox() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-a:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+
+        let block = crate::genesis::devnet_genesis_block_bytes();
+        let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect_err("connected peer without outbox must fail block announce");
+
+        assert!(err.contains("peer outbox missing for peer-a:8333"));
+    }
+
+    #[test]
+    fn announce_block_errors_when_connected_peer_outbox_is_full() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-a:8333".to_string(),
+            ..Default::default()
+        });
+        let mut outbox = PeerOutbox::default();
+        for _ in 0..MAX_OUTBOX_FRAMES_PER_PEER {
+            assert!(outbox.push_frame(Vec::new()));
+        }
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> =
+            Mutex::new(HashMap::from([("peer-a:8333".to_string(), outbox)]));
+
+        let block = crate::genesis::devnet_genesis_block_bytes();
+        let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect_err("full outbox must fail block announce");
+
+        assert!(err.contains("peer outbox full for peer-a:8333"));
     }
 
     #[test]
