@@ -439,8 +439,9 @@ wait_peer_absent() {
   return 1
 }
 established_local_to_remote() {
-  local pid="$1" remote="$2" raw
-  raw="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null)" || return 1
+  local pid="$1" remote="$2" raw status=0
+  raw="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null)" || status=$?
+  (( status == 0 || ${#raw} == 0 )) || return 3
   LSOF_RAW="${raw}" python3 - "${remote}" <<'PY'
 import os, re, sys
 remote = sys.argv[1]
@@ -470,6 +471,7 @@ wait_established_local_to_remote() {
     out="$(established_local_to_remote "${pid}" "${remote}")" || rc=$?
     (( rc == 0 )) && { printf '%s\n' "${out}"; return 0; }
     (( rc == 2 )) && { echo "ambiguous ${label} established link to ${remote}" >&2; return 1; }
+    (( rc == 3 )) && { echo "lsof failed while checking ${label} established link to ${remote}" >&2; return 1; }
     sleep 1
   done
   echo "timeout waiting for ${label} established link to ${remote}" >&2
@@ -485,6 +487,7 @@ wait_no_established_to_remote() {
       return 0
     fi
     (( rc == 2 )) && { echo "ambiguous ${label} established link to ${remote}" >&2; return 1; }
+    (( rc == 3 )) && { echo "lsof failed while checking ${label} established link to ${remote}" >&2; return 1; }
     rc=0
     sleep 1
   done
@@ -496,7 +499,7 @@ write_partition_report() {
   export PARTITION_REPORT_JSON PARTITION_REPORT_TMP GO_PARTITION_PID GO_PARTITION_RPC GO_PARTITION_P2P GO_PARTITION_STARTED RUST_PARTITION_PID RUST_PARTITION_RPC RUST_PARTITION_P2P RUST_PARTITION_STARTED PROXY_PID PROXY_ADDR GO_PROXY_LOCAL_PRE GO_PROXY_LOCAL_HEAL PRE_RUST_PEERS PRE_GO_PEERS PARTITION_RUST_PEERS PARTITION_GO_PEERS HEAL_RUST_PEERS HEAL_GO_PEERS
   PARTITION_REPORT_TMP="${tmp}"
   rm -f -- "${tmp}"
-  python3 - <<'PY'
+  python3 - <<'PY' || { rm -f -- "${tmp}"; return 1; }
 import json, os
 e = os.environ
 report = {
@@ -527,7 +530,7 @@ with open(e["PARTITION_REPORT_TMP"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
 PY
-  mv -- "${tmp}" "${PARTITION_REPORT_JSON}"
+  mv -- "${tmp}" "${PARTITION_REPORT_JSON}" || { rm -f -- "${tmp}"; return 1; }
 }
 run_mixed_partition_heal() {
   local proxy_target="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-proxy-target.txt"
