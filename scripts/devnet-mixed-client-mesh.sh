@@ -7,17 +7,17 @@ CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}" TX_PATH_
 usage() {
   cat >&2 <<EOF
 usage:
-  $0 [--go-submit-rust-accept]
+  $0 [--go-submit-rust-accept|--go-submit-rust-mine-go-converge]
   $0 --check-report PATH
   $0 --check-report-live PATH
 
 --check-report and --check-report-live validate mixed_client_mesh reports only.
-mixed_client_go_submit_rust_accept proof is same-run producer validation and is not
-accepted from public report revalidation paths.
+tx-path proofs are same-run producer validation and are not accepted from public
+report revalidation paths.
 EOF
 }
-while (($#)); do case "$1" in --go-submit-rust-accept) TX_PATH_MODE=1; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
-if [[ -n "${CHECK_REPORT_MODE}" && "${TX_PATH_MODE}" == "1" ]]; then echo "--go-submit-rust-accept cannot be combined with --check-report or --check-report-live" >&2; exit 2; fi
+while (($#)); do case "$1" in --go-submit-rust-accept) TX_PATH_MODE=1; shift ;; --go-submit-rust-mine-go-converge) TX_PATH_MODE=2; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
+if [[ -n "${CHECK_REPORT_MODE}" && "${TX_PATH_MODE}" != "0" ]]; then echo "tx-path modes cannot be combined with --check-report or --check-report-live" >&2; exit 2; fi
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
 validate_deterministic_tx_fee() {
   [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,9}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 100000000" >&2; exit 2; }
@@ -34,6 +34,7 @@ from pathlib import Path
 path = Path(sys.argv[1]); live = sys.argv[3] == "live"; expected_mode = sys.argv[4]; dev_env = sys.argv[5]; go_module_root = sys.argv[6]
 SCENARIO_MESH = "mixed_client_mesh"
 SCENARIO_TX = "mixed_client_go_submit_rust_accept"
+SCENARIO_CONVERGE = "mixed_client_go_submit_rust_mine_go_converge"
 MAX_JSON_BYTES = 1_000_000
 MAX_PARSER_OUTPUT_BYTES = 100_000
 MAX_TX_HEX_CHARS = 20_000
@@ -217,16 +218,17 @@ def ts(value: object) -> bool:
 data = load_json_file("report", path)
 req(expected_mode in {"public", "producer-tx"}, f"check_report expected mode is invalid: {expected_mode!r}")
 scenario = data.get("scenario")
-tx_mode = scenario == SCENARIO_TX
-req(scenario in {SCENARIO_MESH, SCENARIO_TX}, f"scenario is not supported: {scenario!r}")
+tx_mode = scenario in {SCENARIO_TX, SCENARIO_CONVERGE}
+converge_mode = scenario == SCENARIO_CONVERGE
+req(scenario in {SCENARIO_MESH, SCENARIO_TX, SCENARIO_CONVERGE}, f"scenario is not supported: {scenario!r}")
 if tx_mode and expected_mode != "producer-tx":
     fail(("public tx-path check-report-live is unsupported" if live else "public tx-path check-report is unsupported") + "; same-run producer evidence is required")
 if expected_mode == "producer-tx":
-    req(tx_mode, "producer tx validation requires mixed_client_go_submit_rust_accept report")
+    req(tx_mode, "producer tx validation requires a mixed-client tx-path report")
 req(data.get("verdict") == "PASS", f"report verdict is not PASS: {data.get('verdict')!r}")
 req("failure_reason" not in data and "schema_marker" not in data, "PASS report must not carry failure/schema-marker verdict fields")
 base_keys = {"artifact_root", "final_verification", "legacy_schema_compatibility", "nodes", "peer_connectivity", "scenario", "verdict"}
-allowed_keys = base_keys | ({"go_submit", "rust_accept", "tx_path"} if tx_mode else set())
+allowed_keys = base_keys | ({"go_submit", "rust_accept", "tx_path"} if tx_mode else set()) | ({"rust_mine", "go_converge"} if converge_mode else set())
 req(set(data) == allowed_keys, f"report top-level keys mismatch: {sorted(data)}")
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
 legacy_schema = data.get("legacy_schema_compatibility")
@@ -293,9 +295,29 @@ if tx_mode:
     req(len({go_status, go_get, rust_status, rust_get}) == 4, "tx sidecar paths are not pairwise distinct")
     tx_sidecars(load_json_file("go_submit.tx_status", go_status), load_json_file("go_submit.get_tx", go_get), txid, txhex, "go_submit", "go", nodes_by_impl["go"]["rpc_endpoint"], f"/tx_status?txid={txid}", f"/get_tx?txid={txid}")
     tx_sidecars(load_json_file("rust_accept.tx_status", rust_status), load_json_file("rust_accept.get_tx", rust_get), txid, txhex, "rust_accept", "rust", nodes_by_impl["rust"]["rpc_endpoint"], f"/tx_status?txid={txid}", f"/get_tx?txid={txid}")
-    if live:
+    if live and not converge_mode:
         tx_sidecars(tx_rpc(nodes_by_impl["go"]["rpc_endpoint"], f"/tx_status?txid={txid}", "go_submit.tx_status", "go"), tx_rpc(nodes_by_impl["go"]["rpc_endpoint"], f"/get_tx?txid={txid}", "go_submit.get_tx", "go"), txid, txhex, "go_submit.live", "go", nodes_by_impl["go"]["rpc_endpoint"], f"/tx_status?txid={txid}", f"/get_tx?txid={txid}")
         tx_sidecars(tx_rpc(nodes_by_impl["rust"]["rpc_endpoint"], f"/tx_status?txid={txid}", "rust_accept.tx_status", "rust"), tx_rpc(nodes_by_impl["rust"]["rpc_endpoint"], f"/get_tx?txid={txid}", "rust_accept.get_tx", "rust"), txid, txhex, "rust_accept.live", "rust", nodes_by_impl["rust"]["rpc_endpoint"], f"/tx_status?txid={txid}", f"/get_tx?txid={txid}")
+    if converge_mode:
+        rust_mine = exact_object(data.get("rust_mine"), {"block_hash", "block_path", "class", "height", "mine_next_path", "mined_by", "raw_hex", "rpc_endpoint", "tx_count", "txid"}, "rust_mine")
+        go_converge = exact_object(data.get("go_converge"), {"block_hash", "block_path", "class", "converged_at", "height", "raw_hex", "rpc_endpoint", "tip_path", "txid"}, "go_converge")
+        req(rust_mine.get("class") == "mined_included" and rust_mine.get("mined_by") == "node-rust", "rust_mine is not node-rust mined_included")
+        req(go_converge.get("class") == "canonical_block_found" and go_converge.get("converged_at") == "node-go", "go_converge is not node-go canonical_block_found")
+        req(rust_mine.get("txid") == txid and go_converge.get("txid") == txid and rust_mine.get("raw_hex") == txhex and go_converge.get("raw_hex") == txhex, "mined/converged tx identity differs from submitted tx")
+        req(rust_mine.get("rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"] and go_converge.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"], "mined/converged RPC endpoints are not bound to expected nodes")
+        height, block_hash = rust_mine.get("height"), rust_mine.get("block_hash")
+        req(isinstance(height, int) and not isinstance(height, bool) and height >= 1, "rust_mine.height is malformed")
+        req(isinstance(block_hash, str) and re.fullmatch(r"[0-9a-f]{64}", block_hash), "rust_mine.block_hash is malformed")
+        req(isinstance(rust_mine.get("tx_count"), int) and not isinstance(rust_mine.get("tx_count"), bool) and rust_mine["tx_count"] >= 2, "rust_mine.tx_count does not prove coinbase plus submitted tx")
+        req(go_converge.get("height") == height and go_converge.get("block_hash") == block_hash, "go_converge does not match rust_mine height/hash")
+        mine_next = load_json_file("rust_mine.mine_next", artifact_file("rust_mine.mine_next_path", rust_mine.get("mine_next_path"), artifact_root))
+        req(mine_next.get("mined") is True and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == rust_mine["tx_count"], "rust_mine mine_next sidecar does not match report")
+        for label, path_value in (("rust_mine.block_path", rust_mine.get("block_path")), ("go_converge.block_path", go_converge.get("block_path"))):
+            block = load_json_file(label, artifact_file(label, path_value, artifact_root))
+            actual_hash = block.get("hash") or block.get("block_hash")
+            req(block.get("canonical") is True and block.get("height") == height and actual_hash == block_hash and isinstance(block.get("block_hex"), str) and block["block_hex"], f"{label} does not prove canonical mined block")
+        tip = load_json_file("go_converge.tip", artifact_file("go_converge.tip_path", go_converge.get("tip_path"), artifact_root))
+        req(tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash, "go_converge tip sidecar does not match rust mined block")
 connectivity = data.get("peer_connectivity")
 req(isinstance(connectivity, dict), "PASS report missing peer_connectivity object")
 req(all(connectivity.get(f) is True for f in ("go_to_rust", "rust_to_go", "bidirectional_observed")), "peer_connectivity booleans are not all true")
@@ -319,7 +341,7 @@ PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
 if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
-if (( TX_PATH_MODE == 1 )); then validate_deterministic_tx_fee; fi
+if (( TX_PATH_MODE >= 1 )); then validate_deterministic_tx_fee; fi
 need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
@@ -329,8 +351,9 @@ GO_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-go"; RUST_DIR="${RUBIN_PROCESS_ARTIF
 GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
 GO_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-tx-status.json"; GO_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-get-tx.json"; RUST_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-tx-status.json"; RUST_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-get-tx.json"
-TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"; MINE_LOG="mine-go.log"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY=""
+RUST_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-mine-next.json"; RUST_MINE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-mined-block.json"; GO_CONVERGE_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-converge-tip.json"; GO_CONVERGE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-converge-block.json"
+TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"; BLOCK_CHECK_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/block-check.go"; MINE_LOG="mine-go.log"
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
@@ -341,7 +364,7 @@ disable_xtrace_for_secret() { case "$-" in *x*) set +x; return 0 ;; *) return 1 
 restore_xtrace_after_secret() { [[ "${1:-0}" == "1" ]] && set -x; return 0; }
 cleanup_tx_from_key_file() {
   local xtrace_was_enabled=0
-  if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
+  case "$-" in *x*) set +x; xtrace_was_enabled=1 ;; esac
   local secret_file="${TX_FROM_KEY_FILE:-}" secret_dir="${TX_FROM_KEY_DIR:-}" cleanup_status=0
   if [[ -n "${secret_file}" ]]; then rm -f -- "${secret_file}" || cleanup_status=$?; TX_FROM_KEY_FILE=""; fi
   if [[ -n "${secret_dir}" ]]; then rm -f -- "${secret_dir}/keygen-public.json" "${secret_dir}/from-key.hex" || cleanup_status=$?; rmdir -- "${secret_dir}" || cleanup_status=$?; TX_FROM_KEY_DIR=""; fi
@@ -363,7 +386,7 @@ tx_report_reason_token() {
   python3 - "${msg}" <<'PY'
 import re, sys
 msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in sys.argv[1].splitlines())
-rules = [("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
+rules = [("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("mine_next sidecar does not match", "rust_mine_sidecar_invalid"), ("does not prove canonical mined block", "block_sidecar_invalid"), ("tip sidecar does not match", "go_converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
 for needle, token in rules:
     if needle in msg:
         print(token)
@@ -536,7 +559,7 @@ func main() {
 	fromAddress := hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes()))
 	path := filepath.Join(dir, "from-key.hex")
 	if err := os.WriteFile(path, []byte(hex.EncodeToString(der)+"\n"), 0o600); err != nil { panic(err) }
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"private_key_file": path, "from_address_hex": fromAddress, "to_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())), "mine_address_hex": fromAddress})
+	if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"private_key_file": path, "from_address_hex": fromAddress, "to_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())), "mine_address_hex": fromAddress}); err != nil { panic(err) }
 }
 EOF
 }
@@ -640,15 +663,17 @@ PY
   return "${rc}"
 }
 prepare_tx_chainstate() {
-  local keygen_public_json keygen_fields_raw mine_address xtrace_was_enabled=0 status=0 rc=0
+  local keygen_public_json keygen_fields_raw mine_address keygen_raw="${KEYGEN_JSON}.raw" keygen_err="${KEYGEN_JSON}.stderr" xtrace_was_enabled=0 status=0 rc=0
   TX_REASON=""
   build_go_txgen || { TX_REASON="${BUILD_REASON:-go_txgen_build_failed}"; return 1; }
   write_keygen || { TX_REASON=go_submit_keygen_write_failed; return 1; }
   if disable_xtrace_for_secret; then xtrace_was_enabled=1; fi
   TX_FROM_KEY_DIR="$(make_tx_secret_dir "${TMPDIR:-/tmp}")" || { restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return 1; }
   chmod 700 "${TX_FROM_KEY_DIR}" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_tempdir_failed; return "${status}"; }
-  keygen_public_json="$(bounded_mesh env RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_DIR}")" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_keygen_timeout || TX_REASON=go_submit_keygen_failed; return "${status}"; }
+  bounded_mesh /usr/bin/env RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${TX_FROM_KEY_DIR}" >"${keygen_raw}" 2>"${keygen_err}" || { status=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_keygen_timeout || TX_REASON=go_submit_keygen_failed; return "${status}"; }
+  keygen_public_json="$(cat -- "${keygen_raw}")" || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed_json; return 1; }
   keygen_fields_raw="$(parse_keygen_material "${keygen_public_json}")" || { rc=$?; cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON="$(keygen_material_reason "${rc}")"; return 1; }
+  rm -f -- "${keygen_raw}" "${keygen_err}" || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
   [[ "$(printf '%s\n' "${keygen_fields_raw}" | sed -n '$=')" == "3" ]] || { cleanup_tx_from_key_file || true; restore_xtrace_after_secret "${xtrace_was_enabled}"; TX_REASON=go_submit_keygen_material_malformed; return 1; }
   TX_FROM_KEY_FILE="$(printf '%s\n' "${keygen_fields_raw}" | sed -n '1p')"
   TX_TO_KEY="$(printf '%s\n' "${keygen_fields_raw}" | sed -n '2p')"
@@ -808,6 +833,127 @@ wait_rust_accept() {
   [[ -n "${last_retry_reason}" ]] && TX_REASON="rust_accept_timeout_last_${last_retry_reason#rust_accept_}" || TX_REASON="${TX_REASON:-rust_accept_pending_timeout}"
   return 1
 }
+write_block_check_go() {
+  cat >"${BLOCK_CHECK_GO}" <<'EOF'
+package main
+import (
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
+type blockResp struct {
+	Hash string `json:"hash"`
+	Height uint64 `json:"height"`
+	Canonical bool `json:"canonical"`
+	BlockHex string `json:"block_hex"`
+}
+func die(v any) { fmt.Fprintln(os.Stderr, v); os.Exit(1) }
+func main() {
+	respPath := flag.String("block-response", "", "")
+	txHex := flag.String("tx-hex", "", "")
+	txidHex := flag.String("txid", "", "")
+	heightRaw := flag.String("height", "", "")
+	hashHex := flag.String("hash", "", "")
+	flag.Parse()
+	wantHeight, err := strconv.ParseUint(*heightRaw, 10, 64); if err != nil { die("bad height") }
+	raw, err := os.ReadFile(*respPath); if err != nil { die("read block response: " + err.Error()) }
+	var resp blockResp; if err := json.Unmarshal(raw, &resp); err != nil { die("decode block response: " + err.Error()) }
+	if resp.Height != wantHeight || strings.ToLower(resp.Hash) != strings.ToLower(*hashHex) || !resp.Canonical { die("block response height/hash/canonical mismatch") }
+	txBytes, err := hex.DecodeString(strings.TrimSpace(*txHex)); if err != nil { die("decode tx_hex: " + err.Error()) }
+	_, wantTxid, _, consumed, err := consensus.ParseTx(txBytes); if err != nil || consumed != len(txBytes) { die("parse tx_hex failed") }
+	if hex.EncodeToString(wantTxid[:]) != strings.ToLower(*txidHex) { die("tx_hex txid mismatch") }
+	blockBytes, err := hex.DecodeString(strings.TrimSpace(resp.BlockHex)); if err != nil { die("decode block_hex: " + err.Error()) }
+	pb, err := consensus.ParseBlockBytes(blockBytes); if err != nil { die("parse block_hex failed: " + err.Error()) }
+	gotHash, err := consensus.BlockHash(pb.HeaderBytes); if err != nil || hex.EncodeToString(gotHash[:]) != strings.ToLower(*hashHex) { die("parsed block hash mismatch") }
+	for _, got := range pb.Txids { if got == wantTxid { return } }
+	die("submitted txid missing from parsed block txids")
+}
+EOF
+}
+verify_block_inclusion() {
+  local label="$1" block_path="$2" height="$3" block_hash="$4" output
+  [[ -s "${BLOCK_CHECK_GO}" ]] || write_block_check_go || { TX_REASON="${label}_block_check_write_failed"; return 1; }
+  output="$(RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${BLOCK_CHECK_GO}" --block-response "${block_path}" --tx-hex "${TX_HEX}" --txid "${TX_ID}" --height "${height}" --hash "${block_hash}" 2>&1)" || {
+    printf '%s\n' "${label} inclusion check failed: ${output}" >&2
+    TX_REASON="${label}_inclusion_failed"
+    return 1
+  }
+}
+parse_mine_next_response() {
+  python3 - "$1" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(13)
+if not isinstance(data, dict):
+    sys.exit(13)
+height, block_hash, tx_count = data.get("height"), data.get("block_hash"), data.get("tx_count")
+if data.get("mined") is not True:
+    sys.exit(14)
+if not isinstance(height, int) or isinstance(height, bool) or height < 1:
+    sys.exit(13)
+if not isinstance(block_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+    sys.exit(13)
+if not isinstance(tx_count, int) or isinstance(tx_count, bool) or tx_count < 2:
+    sys.exit(16)
+print(height, block_hash, tx_count, sep="\t")
+PY
+}
+rust_mine_including_tx() {
+  local parsed rc=0
+  TX_REASON=""
+  rpc_json POST "${RUST_RPC_ADDR}" /mine_next >"${RUST_MINE_JSON}" || { TX_REASON=rust_mine_rpc_failed; return 1; }
+  parsed="$(parse_mine_next_response "${RUST_MINE_JSON}")" || { rc=$?; case "${rc}" in 13) TX_REASON=rust_mine_malformed_rpc_body ;; 14) TX_REASON=rust_mine_unavailable ;; 16) TX_REASON=rust_mine_tx_count_invalid ;; *) TX_REASON=rust_mine_unknown_failure ;; esac; return 1; }
+  IFS=$'\t' read -r RUST_MINE_HEIGHT RUST_MINE_HASH RUST_MINE_TX_COUNT <<<"${parsed}" || { TX_REASON=rust_mine_malformed_rpc_body; return 1; }
+  rpc_json GET "${RUST_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" >"${RUST_MINE_BLOCK_JSON}" || { TX_REASON=rust_mine_get_block_failed; return 1; }
+  verify_block_inclusion rust_mine "${RUST_MINE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"
+}
+tip_matches() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+path, height_raw, block_hash = sys.argv[1:4]
+try:
+    height = int(height_raw)
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(2)
+if not isinstance(data, dict):
+    sys.exit(2)
+sys.exit(0 if data.get("has_tip") is True and data.get("height") == height and data.get("tip_hash") == block_hash else 1)
+PY
+}
+wait_go_converge_to_rust_mined_block() {
+  local deadline tmp rc=0
+  TX_REASON=""
+  deadline=$((SECONDS + MESH_TIMEOUT)); tmp="${GO_CONVERGE_TIP_JSON}.tmp"
+  while (( SECONDS < deadline )); do
+    if rpc_json GET "${GO_RPC_ADDR}" /get_tip >"${tmp}"; then
+      if tip_matches "${tmp}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"; then
+        mv -- "${tmp}" "${GO_CONVERGE_TIP_JSON}" || { TX_REASON=go_converge_artifact_write_failed; return 1; }
+        rpc_json GET "${GO_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" >"${GO_CONVERGE_BLOCK_JSON}" || { TX_REASON=go_converge_get_block_failed; return 1; }
+        verify_block_inclusion go_converge "${GO_CONVERGE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"
+        return $?
+      else
+        rc=$?
+        (( rc == 2 )) && { rm -f -- "${tmp}"; TX_REASON=go_converge_malformed_rpc_body; return 1; }
+      fi
+    else
+      TX_REASON=go_converge_rpc_failed
+    fi
+    sleep 1
+  done
+  rm -f -- "${tmp}"
+  TX_REASON="${TX_REASON:-go_converge_timeout}"
+  return 1
+}
 write_outputs() {
   local verdict="$1" reason="${2:-}"
   export REPORT_JSON LEGACY_SCHEMA_MARKER_JSON verdict reason GO_PID RUST_PID GO_RPC_ADDR RUST_RPC_ADDR \
@@ -815,7 +961,8 @@ write_outputs() {
     GO_NODE_BIN RUST_NODE_BIN GO_CMD RUST_CMD GO_ARGV_JSON RUST_ARGV_JSON GO_PEERS_JSON RUST_PEERS_JSON \
     GO_PROCESS_ALIVE RUST_PROCESS_ALIVE GO_RPC_PROCESS_BACKED RUST_RPC_PROCESS_BACKED GO_P2P_PROCESS_BACKED RUST_P2P_PROCESS_BACKED \
     RUST_TO_GO_LOCAL_ADDR FINAL_PROCESS_IDENTITY_RECHECKED FINAL_RUST_OUTBOUND_LINK_RECHECKED FINAL_PEER_SNAPSHOTS_RECHECKED \
-    RUBIN_PROCESS_ARTIFACT_ROOT TX_PATH_MODE TX_ID TX_HEX GO_SUBMIT_STATUS_JSON GO_SUBMIT_GET_TX_JSON RUST_STATUS_JSON RUST_GET_TX_JSON
+    RUBIN_PROCESS_ARTIFACT_ROOT TX_PATH_MODE TX_ID TX_HEX GO_SUBMIT_STATUS_JSON GO_SUBMIT_GET_TX_JSON RUST_STATUS_JSON RUST_GET_TX_JSON \
+    RUST_MINE_JSON RUST_MINE_BLOCK_JSON GO_CONVERGE_TIP_JSON GO_CONVERGE_BLOCK_JSON RUST_MINE_HEIGHT RUST_MINE_HASH RUST_MINE_TX_COUNT
   python3 - <<'PY'
 import json, os
 e = os.environ
@@ -851,8 +998,11 @@ for impl, name, pid_key, rpc_key, p2p_key, started_key, comm_key, bin_key, cmd_k
     }
     nodes.append(node)
 go_snapshot, rust_snapshot = read_json(e["GO_PEERS_JSON"]), read_json(e["RUST_PEERS_JSON"])
+tx_path_mode = e.get("TX_PATH_MODE")
+tx_mode = tx_path_mode in {"1", "2"}
+converge_mode = tx_path_mode == "2"
 report = {
-    "scenario": "mixed_client_go_submit_rust_accept" if e.get("TX_PATH_MODE") == "1" else "mixed_client_mesh",
+    "scenario": "mixed_client_go_submit_rust_mine_go_converge" if converge_mode else "mixed_client_go_submit_rust_accept" if tx_mode else "mixed_client_mesh",
     "verdict": verdict,
     "artifact_root": e["RUBIN_PROCESS_ARTIFACT_ROOT"],
     "nodes": nodes,
@@ -872,11 +1022,14 @@ report = {
         "reason": "existing mixed_client_evidence_v1 PASS requires tx_path; RUB-21 mesh-only PASS lives in this report",
     },
 }
-if e.get("TX_PATH_MODE") == "1" and verdict == "PASS":
+if tx_mode and verdict == "PASS":
     tx_path = {"submitted_at": "node-go", "observed_at": ["node-rust"], "tx_id": e["TX_ID"]}
     report["tx_path"] = tx_path
     report["go_submit"] = {"txid": e["TX_ID"], "tx_hex": e["TX_HEX"], "rpc_endpoint": e["GO_RPC_ADDR"], "tx_status_path": e["GO_SUBMIT_STATUS_JSON"], "get_tx_path": e["GO_SUBMIT_GET_TX_JSON"]}
     report["rust_accept"] = {"txid": e["TX_ID"], "raw_hex": e["TX_HEX"], "rpc_endpoint": e["RUST_RPC_ADDR"], "tx_status_path": e["RUST_STATUS_JSON"], "get_tx_path": e["RUST_GET_TX_JSON"]}
+    if converge_mode:
+        report["rust_mine"] = {"block_hash": e["RUST_MINE_HASH"], "block_path": e["RUST_MINE_BLOCK_JSON"], "class": "mined_included", "height": int(e["RUST_MINE_HEIGHT"]), "mine_next_path": e["RUST_MINE_JSON"], "mined_by": "node-rust", "raw_hex": e["TX_HEX"], "rpc_endpoint": e["RUST_RPC_ADDR"], "tx_count": int(e["RUST_MINE_TX_COUNT"]), "txid": e["TX_ID"]}
+        report["go_converge"] = {"block_hash": e["RUST_MINE_HASH"], "block_path": e["GO_CONVERGE_BLOCK_JSON"], "class": "canonical_block_found", "converged_at": "node-go", "height": int(e["RUST_MINE_HEIGHT"]), "raw_hex": e["TX_HEX"], "rpc_endpoint": e["GO_RPC_ADDR"], "tip_path": e["GO_CONVERGE_TIP_JSON"], "txid": e["TX_ID"]}
 if verdict != "PASS":
     report["failure_reason"] = reason or "mixed-client mesh did not produce PASS evidence"
 with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
@@ -887,13 +1040,13 @@ legacy_schema_marker = {
     "schema_version": "rubin-mixed-client-devnet-evidence-v1",
     "evidence_type": "mixed_client_process_soak",
     "scenario": "mixed_client_mesh_schema_marker",
-    "verdict": "PASS" if e.get("TX_PATH_MODE") == "1" and verdict == "PASS" else "FAIL",
+    "verdict": "PASS" if tx_mode and verdict == "PASS" else "FAIL",
     "participants": [
         {"name": "node-go", "implementation": "go", **({"endpoint": e["GO_RPC_ADDR"], "started_at": e["GO_STARTED_AT_UTC"]} if e.get("GO_RPC_ADDR") and e.get("GO_STARTED_AT_UTC") else {})},
         {"name": "node-rust", "implementation": "rust", **({"endpoint": e["RUST_RPC_ADDR"], "started_at": e["RUST_STARTED_AT_UTC"]} if e.get("RUST_RPC_ADDR") and e.get("RUST_STARTED_AT_UTC") else {})},
     ],
 }
-if e.get("TX_PATH_MODE") == "1" and verdict == "PASS":
+if tx_mode and verdict == "PASS":
     legacy_schema_marker["tx_path"] = tx_path
 else:
     legacy_schema_marker["failure_reason"] = legacy_marker_reason
@@ -991,7 +1144,7 @@ start_go_node() {
 for tool in lsof perl ps sed sort; do command -v "${tool}" >/dev/null 2>&1 || finish_no_data "${tool}_unavailable"; done
 build_go_node || finish_no_data "${BUILD_REASON:-go_build_failed}"
 build_rust_node || finish_no_data "${BUILD_REASON:-rust_build_failed}"
-if (( TX_PATH_MODE == 1 )); then prepare_tx_chainstate || finish_no_data "${TX_REASON:-go_submit_chainstate_prepare_failed}"; fi
+if (( TX_PATH_MODE >= 1 )); then prepare_tx_chainstate || finish_no_data "${TX_REASON:-go_submit_chainstate_prepare_failed}"; fi
 start_go_node || finish_no_data "${START_REASON:-go_process_not_ready}"
 verify_process_identity node-go go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go go_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-go_process_identity_unverified}"
 start_rust_node || finish_no_data "${START_REASON:-rust_process_not_ready}"
@@ -1007,16 +1160,20 @@ FINAL_RUST_OUTBOUND_LINK_RECHECKED=true
 wait_peer_snapshot node-rust-final "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-rust_final_peer_snapshot_missing_go_endpoint}"
 wait_peer_snapshot node-go-final "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-go_final_peer_snapshot_missing_rust_endpoint}"
 FINAL_PEER_SNAPSHOTS_RECHECKED=true
-if (( TX_PATH_MODE == 1 )); then
+if (( TX_PATH_MODE >= 1 )); then
   submit_go_tx || finish_no_data "${TX_REASON:-go_submit_failed}"
   wait_rust_accept || finish_no_data "${TX_REASON:-rust_accept_failed}"
+  if (( TX_PATH_MODE == 2 )); then
+    rust_mine_including_tx || finish_no_data "${TX_REASON:-rust_mine_failed}"
+    wait_go_converge_to_rust_mined_block || finish_no_data "${TX_REASON:-go_converge_failed}"
+  fi
 fi
 PASS_REPORT_JSON="$(mktemp "/tmp/mixed-client-mesh-pass.XXXXXX")" || finish_no_data "pass_report_temp_failed"; FINAL_REPORT_JSON="${REPORT_JSON}"; REPORT_JSON="${PASS_REPORT_JSON}"
 write_outputs "PASS" || { REPORT_JSON="${FINAL_REPORT_JSON}"; finish_no_data "pass_report_write_failed"; }; REPORT_JSON="${FINAL_REPORT_JSON}"
 if ! run_validator "${LEGACY_SCHEMA_MARKER_JSON}" >&2; then
   rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "legacy_schema_marker_validation_failed"
 fi
-if (( TX_PATH_MODE == 1 )); then
+if (( TX_PATH_MODE >= 1 )); then
   if ! check_err="$(check_report "${PASS_REPORT_JSON}" live producer-tx 2>&1)"; then
     rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(combined_report_reason_token <<<"${check_err}")"
   fi
@@ -1026,5 +1183,5 @@ else
   fi
 fi
 mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
-PASS_SCENARIO="mixed-client mesh connected"; (( TX_PATH_MODE == 1 )) && PASS_SCENARIO="Go-submit/Rust-accept path observed"
+PASS_SCENARIO="mixed-client mesh connected"; (( TX_PATH_MODE == 1 )) && PASS_SCENARIO="Go-submit/Rust-accept path observed"; (( TX_PATH_MODE == 2 )) && PASS_SCENARIO="Go-submit/Rust-mine/Go-converge path observed"
 [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && echo "PASS: ${PASS_SCENARIO} go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" || echo "PASS: ${PASS_SCENARIO} go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"

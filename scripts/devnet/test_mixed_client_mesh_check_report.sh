@@ -15,7 +15,8 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rubin-mesh-check-report.XXXXXX")"
+TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "test TMPDIR parent is not usable: ${TMPDIR:-/tmp}" >&2; exit 1; }
+TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-mesh-check-report.XXXXXX")"
 cleanup() {
   rm -rf -- "${TMP_ROOT}"
 }
@@ -216,6 +217,13 @@ for impl, endpoint, prefix in (("go", go_rpc, "go"), ("rust", rust_rpc, "rust"))
         "rpc_endpoint": endpoint,
         "txid": txid,
     })
+height = 102
+block_hash = "ab" * 32
+tx_count = 2
+for path in (artifact_root / "rust-mined-block.json", artifact_root / "go-converged-block.json"):
+    dump(path, {"block_hex": "00", "canonical": True, "hash": block_hash, "height": height})
+dump(artifact_root / "rust-mine-next.json", {"block_hash": block_hash, "height": height, "mined": True, "nonce": 0, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "go-converge-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "in_ibd": False, "tip_hash": block_hash})
 tx_report = {
     **mesh_report,
     "go_submit": {
@@ -237,12 +245,45 @@ tx_report = {
     "tx_path": tx_path,
 }
 dump(root / "tx-report.json", tx_report)
+converge_report = {
+    **tx_report,
+    "go_converge": {
+        "block_hash": block_hash,
+        "block_path": str(artifact_root / "go-converged-block.json"),
+        "class": "canonical_block_found",
+        "converged_at": "node-go",
+        "height": height,
+        "raw_hex": tx_hex,
+        "rpc_endpoint": go_rpc,
+        "tip_path": str(artifact_root / "go-converge-tip.json"),
+        "txid": txid,
+    },
+    "rust_mine": {
+        "block_hash": block_hash,
+        "block_path": str(artifact_root / "rust-mined-block.json"),
+        "class": "mined_included",
+        "height": height,
+        "mine_next_path": str(artifact_root / "rust-mine-next.json"),
+        "mined_by": "node-rust",
+        "raw_hex": tx_hex,
+        "rpc_endpoint": rust_rpc,
+        "tx_count": tx_count,
+        "txid": txid,
+    },
+    "scenario": "mixed_client_go_submit_rust_mine_go_converge",
+}
+dump(root / "converge-report.json", converge_report)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["txid"] = "11" * 32
+dump(root / "converge-wrong-txid.json", bad_converge)
 (root / "empty.json").write_text("", encoding="utf-8")
 (root / "malformed.json").write_text("[", encoding="utf-8")
 with (root / "oversized.json").open("wb") as f:
     f.write(b" " * 1_000_001)
 print(root / "mesh-report.json")
 print(root / "tx-report.json")
+print(root / "converge-report.json")
+print(root / "converge-wrong-txid.json")
 PY
 }
 
@@ -254,15 +295,20 @@ REPORT_LIST="${TMP_ROOT}/reports.txt"
 write_reports >"${REPORT_LIST}"
 MESH_REPORT="$(sed -n '1p' "${REPORT_LIST}")"
 TX_REPORT="$(sed -n '2p' "${REPORT_LIST}")"
-[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
+CONVERGE_REPORT="$(sed -n '3p' "${REPORT_LIST}")"
+CONVERGE_WRONG_TXID_REPORT="$(sed -n '4p' "${REPORT_LIST}")"
+[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_fail_contains "public tx check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${TX_REPORT}"
+expect_fail_contains "public converge check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${CONVERGE_REPORT}"
 expect_fail_contains "public tx check-report-live" "public tx-path check-report-live is unsupported" "${HARNESS}" --check-report-live "${TX_REPORT}"
-expect_fail_contains "combined tx flag and check-report" "cannot be combined" "${HARNESS}" --go-submit-rust-accept --check-report "${TX_REPORT}"
+expect_fail_contains "combined tx flag and check-report" "tx-path modes cannot be combined" "${HARNESS}" --go-submit-rust-accept --check-report "${TX_REPORT}"
 
 expect_pass_contains "producer tx internal check" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TX_REPORT}" offline producer-tx
-expect_fail_contains "producer rejects mesh report" "producer tx validation requires mixed_client_go_submit_rust_accept report" check_report "${MESH_REPORT}" offline producer-tx
+expect_pass_contains "producer converge internal check" "PASS: mixed_client_go_submit_rust_mine_go_converge report structurally accepted" check_report "${CONVERGE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects converged txid drift" "mined/converged tx identity differs from submitted tx" check_report "${CONVERGE_WRONG_TXID_REPORT}" offline producer-tx
 
 expect_fail_contains "non-regular report" "report is not a regular file" "${HARNESS}" --check-report "${TMP_ROOT}"
 expect_fail_contains "empty report" "report is empty" "${HARNESS}" --check-report "${TMP_ROOT}/empty.json"
