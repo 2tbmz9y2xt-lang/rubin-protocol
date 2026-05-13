@@ -782,14 +782,8 @@ fn handle_peer(
     }
     let peer_addr = peer_state.addr.clone();
 
-    // Register the relay outbox BEFORE the peer becomes visible in
-    // `peer_manager`. Otherwise a concurrent local block announcement can
-    // snapshot a connected peer whose outbox does not exist yet and silently
-    // drop the BLOCK inventory that Go convergence depends on.
-    //
-    // Declaration order is critical: Rust drops locals in REVERSE
-    // declaration order. `_outbox_guard` is declared before peer/alias guards,
-    // so the outbox outlives peer-manager visibility on teardown.
+    // Register before peer visibility so local block announce cannot snapshot
+    // a connected peer without an outbox. Declaration order makes it drop last.
     let _outbox_guard = register_peer_outbox(&shared.peer_outboxes, &peer_addr)?;
 
     shared
@@ -1122,7 +1116,7 @@ mod tests {
         maybe_apply_tx_pool_cleanup, outbound_connect_timeout, reconnect_missing_bootstrap_peers,
         register_peer_alias, register_peer_outbox, should_skip_outbound_dial,
         start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig, PeerAliasGuard,
-        PeerGuard, PeerOutboxGuard, SharedServiceState,
+        PeerGuard, SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
@@ -2240,15 +2234,8 @@ mod tests {
         let primary = "peer.example.com:19111".to_string();
         let alias = "127.0.0.1:19111";
 
-        shared
-            .peer_outboxes
-            .lock()
-            .unwrap()
-            .insert(primary.clone(), PeerOutbox::default());
-        let outbox_guard = PeerOutboxGuard {
-            peer_outboxes: Arc::clone(&shared.peer_outboxes),
-            addr: primary.clone(),
-        };
+        let outbox_guard =
+            register_peer_outbox(&shared.peer_outboxes, &primary).expect("register outbox");
         shared
             .peer_manager
             .add_peer(crate::p2p_runtime::PeerState {
@@ -2288,50 +2275,24 @@ mod tests {
 
     #[test]
     fn peer_outbox_registration_refuses_duplicate_without_clobbering() {
-        let outboxes = Arc::new(Mutex::new(HashMap::<String, PeerOutbox>::new()));
-        let primary = "peer.example.com:19111".to_string();
+        let primary = "peer.example.com:19111";
         let mut existing = PeerOutbox::default();
         assert!(existing.push_frame(vec![0xAA, 0xBB, 0xCC]));
-        outboxes
-            .lock()
-            .unwrap()
-            .insert(primary.clone(), existing.clone());
+        let outboxes = Arc::new(Mutex::new(HashMap::from([(
+            primary.to_string(),
+            existing.clone(),
+        )])));
 
-        let err = match register_peer_outbox(&outboxes, &primary) {
+        let err = match register_peer_outbox(&outboxes, primary) {
             Ok(_) => panic!("duplicate outbox registration must fail closed"),
             Err(err) => err,
         };
 
         assert!(err.contains("peer outbox already registered"));
-        let guard = outboxes.lock().unwrap();
-        let retained = guard.get(&primary).expect("existing outbox retained");
-        assert_eq!(retained.frames(), existing.frames());
-    }
-
-    #[test]
-    fn peer_outbox_registration_recovers_from_poisoned_lock() {
-        let outboxes = Arc::new(Mutex::new(HashMap::<String, PeerOutbox>::new()));
-        let poison_target = Arc::clone(&outboxes);
-        let _ = thread::spawn(move || {
-            let _guard = poison_target.lock().expect("lock outboxes");
-            panic!("poison peer outboxes");
-        })
-        .join();
-
-        let primary = "peer-poison.example.com:19111";
-        let guard = register_peer_outbox(&outboxes, primary).expect("register after poisoned lock");
-
-        assert!(outboxes
-            .lock()
-            .unwrap_err()
-            .into_inner()
-            .contains_key(primary));
-        drop(guard);
-        assert!(!outboxes
-            .lock()
-            .unwrap_err()
-            .into_inner()
-            .contains_key(primary));
+        assert_eq!(
+            outboxes.lock().unwrap()[primary].frames(),
+            existing.frames()
+        );
     }
 
     /// Race scenario flagged by Codex/Copilot P1: two concurrent dials

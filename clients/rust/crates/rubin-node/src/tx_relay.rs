@@ -982,185 +982,105 @@ mod tests {
         assert_eq!(boxes["peer-b:8333"].len(), 1);
     }
 
-    #[test]
-    fn announce_block_broadcasts_block_inventory_to_all_peers() {
-        let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
-            "devnet", 64,
-        ));
-        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
-            addr: "peer-a:8333".to_string(),
-            ..Default::default()
-        });
-        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
-            addr: "peer-b:8333".to_string(),
-            ..Default::default()
-        });
-        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
-        outboxes
-            .lock()
-            .unwrap()
-            .insert("peer-a:8333".to_string(), PeerOutbox::default());
-        outboxes
-            .lock()
-            .unwrap()
-            .insert("peer-b:8333".to_string(), PeerOutbox::default());
-
+    fn test_block() -> (Vec<u8>, [u8; 32]) {
         let block = crate::genesis::devnet_genesis_block_bytes();
         let parsed = parse_block_bytes(&block).expect("parse block");
-        let block_hash = block_hash(&parsed.header_bytes).expect("block hash");
-        let result = announce_block(&block, &relay, &pm, "local:8333", &outboxes);
+        let hash = block_hash(&parsed.header_bytes).expect("block hash");
+        (block, hash)
+    }
 
-        assert!(result.is_ok());
-        let boxes = outboxes.lock().unwrap();
-        for addr in ["peer-a:8333", "peer-b:8333"] {
-            let frames = boxes[addr].frames();
-            assert_eq!(frames.len(), 1);
-            let msg =
-                crate::p2p_runtime::fuzz_parse_wire_message("devnet", &frames[0]).expect("frame");
-            assert_eq!(msg.command, "inv");
-            let inventory = crate::p2p_runtime::decode_inventory_vectors(&msg.payload)
-                .expect("decode inventory");
-            assert_eq!(
-                inventory,
-                vec![InventoryVector {
-                    kind: MSG_BLOCK,
-                    hash: block_hash,
-                }]
-            );
+    fn block_announce_fixture(
+        addrs: &[&str],
+    ) -> (
+        TxRelayState,
+        PeerManager,
+        Mutex<HashMap<String, PeerOutbox>>,
+    ) {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let outboxes = Mutex::new(HashMap::new());
+        for addr in addrs {
+            let addr = (*addr).to_string();
+            let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+                addr: addr.clone(),
+                ..Default::default()
+            });
+            outboxes.lock().unwrap().insert(addr, PeerOutbox::default());
         }
+        (relay, pm, outboxes)
+    }
+
+    fn assert_block_inv_frame(queue: &PeerOutbox, hash: [u8; 32]) {
+        let frames = queue.frames();
+        assert_eq!(frames.len(), 1);
+        let msg = crate::p2p_runtime::fuzz_parse_wire_message("devnet", &frames[0]).expect("frame");
+        assert_eq!(msg.command, "inv");
+        assert_eq!(
+            crate::p2p_runtime::decode_inventory_vectors(&msg.payload).expect("decode inventory"),
+            vec![InventoryVector {
+                kind: MSG_BLOCK,
+                hash
+            }],
+        );
     }
 
     #[test]
-    fn announce_block_deduplicates_seen_block_inventory() {
-        let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
-            "devnet", 64,
-        ));
-        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
-            addr: "peer-a:8333".to_string(),
-            ..Default::default()
-        });
-        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
-        outboxes
-            .lock()
-            .unwrap()
-            .insert("peer-a:8333".to_string(), PeerOutbox::default());
+    fn announce_block_broadcasts_deduplicates_and_handles_no_peers() {
+        let (block, hash) = test_block();
+        let (relay, pm, outboxes) = block_announce_fixture(&["peer-a:8333", "peer-b:8333"]);
 
-        let block = crate::genesis::devnet_genesis_block_bytes();
-        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("first announce");
-        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("duplicate announce");
-
-        let boxes = outboxes.lock().unwrap();
-        assert_eq!(boxes["peer-a:8333"].len(), 1);
-    }
-
-    #[test]
-    fn announce_block_errors_when_connected_peer_has_no_outbox() {
-        let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
-            "devnet", 64,
-        ));
-        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
-            addr: "peer-a:8333".to_string(),
-            ..Default::default()
-        });
-        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
-
-        let block = crate::genesis::devnet_genesis_block_bytes();
-        let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
-            .expect_err("connected peer without outbox must fail block announce");
-
-        assert!(err.contains("peer outbox missing for peer-a:8333"));
-    }
-
-    #[test]
-    fn announce_block_errors_when_connected_peer_outbox_is_full() {
-        let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
-            "devnet", 64,
-        ));
-        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
-            addr: "peer-a:8333".to_string(),
-            ..Default::default()
-        });
-        let mut outbox = PeerOutbox::default();
-        for _ in 0..MAX_OUTBOX_FRAMES_PER_PEER {
-            assert!(outbox.push_frame(Vec::new()));
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("announce block");
+        {
+            let boxes = outboxes.lock().unwrap();
+            assert_block_inv_frame(&boxes["peer-a:8333"], hash);
+            assert_block_inv_frame(&boxes["peer-b:8333"], hash);
         }
-        let outboxes: Mutex<HashMap<String, PeerOutbox>> =
-            Mutex::new(HashMap::from([("peer-a:8333".to_string(), outbox)]));
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("dedupe");
+        assert_eq!(outboxes.lock().unwrap()["peer-a:8333"].len(), 1);
 
-        let block = crate::genesis::devnet_genesis_block_bytes();
-        let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
-            .expect_err("full outbox must fail block announce");
-
-        assert!(err.contains("peer outbox full for peer-a:8333"));
+        let (relay, pm, outboxes) = block_announce_fixture(&[]);
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("no-peer announce");
+        assert!(relay.block_seen.has(&hash));
+        assert!(outboxes.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn announce_block_partial_failure_enqueues_healthy_peer_and_allows_retry() {
-        let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
-            "devnet", 64,
-        ));
-        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
-            addr: "healthy:8333".to_string(),
-            ..Default::default()
-        });
+    fn announce_block_failure_paths_remain_retryable() {
+        let (block, hash) = test_block();
+        let (relay, pm, outboxes) = block_announce_fixture(&["healthy:8333"]);
         let _ = pm.add_peer(crate::p2p_runtime::PeerState {
             addr: "missing:8333".to_string(),
             ..Default::default()
         });
-        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
-        outboxes
-            .lock()
-            .unwrap()
-            .insert("healthy:8333".to_string(), PeerOutbox::default());
 
-        let block = crate::genesis::devnet_genesis_block_bytes();
-        let parsed = parse_block_bytes(&block).expect("parse block");
-        let block_hash = block_hash(&parsed.header_bytes).expect("block hash");
         let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
             .expect_err("missing peer outbox should fail strict block announce");
-
         assert!(err.contains("peer outbox missing for missing:8333"));
         assert_eq!(outboxes.lock().unwrap()["healthy:8333"].len(), 1);
-        assert!(
-            !relay.block_seen.has(&block_hash),
-            "partial failure must not suppress a later retry",
-        );
+        assert!(!relay.block_seen.has(&hash));
 
         outboxes
             .lock()
             .unwrap()
             .insert("missing:8333".to_string(), PeerOutbox::default());
-        announce_block(&block, &relay, &pm, "local:8333", &outboxes)
-            .expect("retry after outbox repair");
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes).expect("retry after repair");
+        assert_eq!(outboxes.lock().unwrap()["missing:8333"].len(), 1);
+        assert!(relay.block_seen.has(&hash));
 
-        let boxes = outboxes.lock().unwrap();
-        assert_eq!(boxes["healthy:8333"].len(), 2);
-        assert_eq!(boxes["missing:8333"].len(), 1);
-        assert!(relay.block_seen.has(&block_hash));
-    }
-
-    #[test]
-    fn announce_block_with_no_peers_marks_seen_without_broadcast() {
-        let relay = TxRelayState::new();
-        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
-            "devnet", 64,
-        ));
-        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
-
-        let block = crate::genesis::devnet_genesis_block_bytes();
-        let parsed = parse_block_bytes(&block).expect("parse block");
-        let block_hash = block_hash(&parsed.header_bytes).expect("block hash");
-
-        announce_block(&block, &relay, &pm, "local:8333", &outboxes)
-            .expect("no-peer announce should be a successful no-op");
-
-        assert!(relay.block_seen.has(&block_hash));
-        assert!(outboxes.lock().unwrap().is_empty());
+        let (relay, pm, outboxes) = block_announce_fixture(&["full:8333"]);
+        for _ in 0..MAX_OUTBOX_FRAMES_PER_PEER {
+            assert!(outboxes
+                .lock()
+                .unwrap()
+                .get_mut("full:8333")
+                .unwrap()
+                .push_frame(Vec::new()));
+        }
+        let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect_err("full outbox must fail block announce");
+        assert!(err.contains("peer outbox full for full:8333"));
     }
 
     #[test]

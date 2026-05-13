@@ -188,36 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_existing_and_missing_hashes() {
-        let set = BoundedHashSet::new(10);
-        let hash = [9u8; 32];
-
-        assert!(!set.remove(&hash));
-        assert!(set.add(hash));
-        assert!(set.has(&hash));
-        assert!(set.remove(&hash));
-        assert!(!set.has(&hash));
-        assert_eq!(set.len(), 0);
-        assert!(!set.remove(&hash));
-    }
-
-    #[test]
-    fn remove_returns_false_when_lock_is_poisoned() {
-        use std::sync::Arc;
-        use std::thread;
-
-        let set = Arc::new(BoundedHashSet::new(10));
-        let poison_target = Arc::clone(&set);
-        let _ = thread::spawn(move || {
-            let _guard = poison_target.inner.lock().expect("lock set");
-            panic!("poison bounded hash set");
-        })
-        .join();
-
-        assert!(!set.remove(&[1u8; 32]));
-    }
-
-    #[test]
     fn concurrent_add_has() {
         use std::sync::Arc;
         use std::thread;

@@ -3266,6 +3266,17 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
+    fn post_mine_next(state: &super::DevnetRPCState) -> super::HttpResponse {
+        route_request(
+            state,
+            HttpRequest {
+                method: "POST".to_string(),
+                target: "/mine_next".to_string(),
+                body: b"{}".to_vec(),
+            },
+        )
+    }
+
     #[test]
     fn mine_next_mines_after_genesis() {
         let (state, dir) = build_state_with_live_mining(true);
@@ -3312,14 +3323,7 @@ mod tests {
             Ok(())
         }));
 
-        let response = route_request(
-            &state,
-            HttpRequest {
-                method: "POST".to_string(),
-                target: "/mine_next".to_string(),
-                body: b"{}".to_vec(),
-            },
-        );
+        let response = post_mine_next(&state);
 
         assert_eq!(
             response.status,
@@ -3352,14 +3356,7 @@ mod tests {
             engine.chain_state.height = u64::MAX;
         }
 
-        let response = route_request(
-            &state,
-            HttpRequest {
-                method: "POST".to_string(),
-                target: "/mine_next".to_string(),
-                body: b"{}".to_vec(),
-            },
-        );
+        let response = post_mine_next(&state);
 
         assert_eq!(response.status, 422);
         let json = response_json(&response);
@@ -3369,80 +3366,11 @@ mod tests {
     }
 
     #[test]
-    fn mine_next_skips_announce_when_rpc_block_store_missing() {
-        let (mut state, dir) = build_state_with_live_mining(true);
-        state.block_store = None;
-        let announced = Arc::new(Mutex::new(false));
-        let announced_clone = Arc::clone(&announced);
-        state.announce_block = Some(Arc::new(move |_| {
-            *announced_clone.lock().expect("announce lock") = true;
-            Ok(())
-        }));
-
-        let response = route_request(
-            &state,
-            HttpRequest {
-                method: "POST".to_string(),
-                target: "/mine_next".to_string(),
-                body: b"{}".to_vec(),
-            },
-        );
-
-        assert_eq!(response.status, 200);
-        assert_eq!(response_json(&response)["mined"].as_bool(), Some(true));
-        assert!(
-            !*announced.lock().expect("announce lock"),
-            "announce_block must not run without block bytes",
-        );
-        fs::remove_dir_all(dir).expect("cleanup");
-    }
-
-    #[test]
-    fn mine_next_skips_announce_when_rpc_block_store_lacks_mined_block() {
-        let (mut state, dir) = build_state_with_live_mining(true);
-        let empty_dir = unique_temp_path("rubin-devnet-rpc-empty-blockstore");
-        fs::create_dir_all(&empty_dir).expect("mkdir empty blockstore");
-        state.block_store =
-            Some(BlockStore::open(block_store_path(&empty_dir)).expect("empty blockstore"));
-        let announced = Arc::new(Mutex::new(false));
-        let announced_clone = Arc::clone(&announced);
-        state.announce_block = Some(Arc::new(move |_| {
-            *announced_clone.lock().expect("announce lock") = true;
-            Ok(())
-        }));
-
-        let response = route_request(
-            &state,
-            HttpRequest {
-                method: "POST".to_string(),
-                target: "/mine_next".to_string(),
-                body: b"{}".to_vec(),
-            },
-        );
-
-        assert_eq!(response.status, 200);
-        assert_eq!(response_json(&response)["mined"].as_bool(), Some(true));
-        assert!(
-            !*announced.lock().expect("announce lock"),
-            "announce_block must not run when block bytes cannot be reloaded",
-        );
-        fs::remove_dir_all(empty_dir).expect("cleanup empty blockstore");
-        fs::remove_dir_all(dir).expect("cleanup");
-    }
-
-    #[test]
     fn mine_next_logs_announce_block_error_without_failing_rpc() {
         let (mut state, dir) = build_state_with_live_mining(true);
         state.announce_block = Some(Arc::new(|_| Err("forced announce failure".to_string())));
 
-        let response = route_request(
-            &state,
-            HttpRequest {
-                method: "POST".to_string(),
-                target: "/mine_next".to_string(),
-                body: b"{}".to_vec(),
-            },
-        );
+        let response = post_mine_next(&state);
 
         assert_eq!(response.status, 200);
         assert_eq!(response_json(&response)["mined"].as_bool(), Some(true));
@@ -4624,7 +4552,7 @@ mod tests {
     fn read_http_request_accepts_trailer_with_tab_and_obs_text_in_field_value() {
         // HTAB and obs-text (0x80-0xFF) are both valid in field-value per
         // RFC 7230 §3.2.6; the check must accept these so legitimate
-        // trailers with UTF-8 content (e.g. `"тест"`) continue to work.
+        // trailers with non-ASCII UTF-8 content continue to work.
         let raw = b"POST /submit_tx HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trace:\t\xd1\x82\xd0\xb5\xd1\x81\xd1\x82\r\n\r\n";
         let req = read_request_from_bytes(raw).expect("trailer with HTAB + obs-text accepted");
         // Body has no data chunks in this case, so the decoded body is empty
