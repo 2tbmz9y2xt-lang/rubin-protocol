@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# devnet-rust-binary-soak.sh — RUB-27 process-soak skeleton harness.
+# devnet-rust-binary-soak.sh — RUB-27 Rust helper/advisory launch harness.
 #
 # Launches a real `rubin-node` Rust binary as a process, records honest
-# process-level evidence (mixed_client_evidence_v1 conformant), and fails
-# closed if the binary cannot be built or launched.
+# helper-only/advisory non-process evidence, and fails closed if the
+# binary cannot be built or launched.
 #
-# Skeleton scope (RUB-27): Rust-only process launch. The emitted evidence
-# is intentionally `verdict=FAIL` because a single-Rust skeleton has no
-# cross-implementation tx_path proof — that proof is owned by RUB-21,
-# RUB-22, RUB-23. The Go participant in the artifact is a declared
-# placeholder (name + implementation only) so the schema cross-field
-# gate (mixed_client_process_soak requires both go and rust impls and
-# at least 2 participants) accepts the artifact; downstream issues
-# replace the placeholder with a real-launched Go participant plus a
-# tx_path PASS section.
+# Skeleton scope (RUB-27): Rust-only process launch. The emitted
+# mixed_client_evidence_v1 artifact is a non-authoritative FAIL schema
+# marker labeled by scenario/failure_reason as helper-only/advisory and
+# non-process. It is intentionally NOT full mixed-client process-soak
+# evidence: a single-Rust helper run has no cross-implementation tx_path
+# proof, and that full process proof is owned by RUB-21, RUB-22, and
+# RUB-23. The Go participant in the marker is a declared placeholder
+# (name + implementation only) so the RUB-24 schema shape can still be
+# validated, while the RUB-25 PASS gate rejects it.
 #
 # Hostile-case enforcement (RUB-27 enumeration → enforcement layer):
 #   * missing Rust binary           → cargo build fails → exit non-zero before any
@@ -62,7 +62,7 @@ while (($#)); do
 done
 
 command -v python3 >/dev/null 2>&1 || {
-  echo "python3 is required for Rust binary soak skeleton" >&2
+  echo "python3 is required for Rust helper/advisory launch marker" >&2
   exit 1
 }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
@@ -98,7 +98,7 @@ print_prefixed_file() {
 
 check_mixed_client_pass_evidence() {
   local artifact="${1:-}" validator_stdout="" validator_stderr=""
-  local gate_error
+  local gate_error tmp_parent
 
   [[ -n "${artifact}" ]] || mixed_gate_fail "artifact path is required" || return 1
   [[ -f "${artifact}" ]] || mixed_gate_fail "artifact not found or not a regular file: ${artifact}" || return 1
@@ -107,8 +107,10 @@ check_mixed_client_pass_evidence() {
 
   run_fips_preflight_before_captured_dev_env
 
-  validator_stdout="$(mktemp "${TMPDIR:-/tmp}/rubin-mixed-validator-stdout.XXXXXX")" || return 1
-  validator_stderr="$(mktemp "${TMPDIR:-/tmp}/rubin-mixed-validator-stderr.XXXXXX")" || {
+  tmp_parent="${TMPDIR:-/tmp}"
+  tmp_parent="$(cd -- "${tmp_parent}" && pwd -P)" || return 1
+  validator_stdout="$(mktemp "${tmp_parent%/}/rubin-mixed-validator-stdout.XXXXXX")" || return 1
+  validator_stderr="$(mktemp "${tmp_parent%/}/rubin-mixed-validator-stderr.XXXXXX")" || {
     rm -f -- "${validator_stdout}"
     return 1
   }
@@ -231,19 +233,19 @@ if [[ "${CHECK_EVIDENCE_MODE}" == "1" ]]; then
 fi
 
 command -v perl >/dev/null 2>&1 || {
-  echo "perl is required for Rust binary soak skeleton" >&2
+  echo "perl is required for Rust helper/advisory launch marker" >&2
   exit 1
 }
 
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
-rubin_process_init rust-binary-soak
+rubin_process_init rust-helper-advisory
 
 NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-rust"
 DATA_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
 LOG_FILE="node-rust.log"
-REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-binary-soak-report.json"
-EVIDENCE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-binary-soak-evidence.json"
+REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-helper-advisory-report.json"
+EVIDENCE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-helper-advisory-schema-marker.json"
 mkdir -p "${DATA_DIR}"
 
 # Build the Rust binary via the project dev-env wrapper. cargo failure
@@ -266,7 +268,7 @@ echo "Building Rust rubin-node binary"
 # its EXIT-trap-managed cleanup) owns the build cache; cargo's metadata
 # is what actually tells the harness where the binary landed.
 # Side-effect: each invocation gets its own mktemp'd cargo-target/, so
-# nothing reuses a shared cache — fine for a skeleton soak whose job
+# nothing reuses a shared cache — fine for a helper/advisory launch marker whose job
 # is to prove a real-process launch end-to-end on every run.
 CARGO_TARGET_DIR_LOCAL="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target"
 CARGO_BUILD_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-build.jsonl"
@@ -370,7 +372,7 @@ cp "${CARGO_TARGET_BIN}" "${NODE_BIN}"
 
 # UTC-Z seconds-only canonical format per RUB-208 / PR-C policy
 # enforced by the schema regex on participants[].started_at. Captured
-# inside attempt_skeleton_launch AFTER the rpc-listening banner is
+# inside attempt_helper_launch AFTER the rpc-listening banner is
 # observed (P1 finding from PR #1510 review): on slow starts or banner
 # timeouts a pre-launch capture would have stamped evidence with a time
 # earlier than the actual observed start. The empty default here means
@@ -387,16 +389,16 @@ NODE_PID=""
 # leaves set -e disarmed for commands followed by `||`, so the
 # `cmd || { reason=...; return 1; }` form here does not abort the script
 # on a single helper failure — the calling `if` block decides next steps.
-attempt_skeleton_launch() {
+attempt_helper_launch() {
   rubin_process_start "${LOG_FILE}" "${NODE_BIN}" \
     --network devnet --datadir "${DATA_DIR}" \
     --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
-    || { LAUNCH_FAILURE_REASON="rubin_process_start did not register a Rust skeleton process"; return 1; }
+    || { LAUNCH_FAILURE_REASON="rubin_process_start did not register a Rust helper/advisory process"; return 1; }
   NODE_PID="${RUBIN_PROCESS_LAST_PID:-}"
   [[ -n "${NODE_PID}" ]] \
     || { LAUNCH_FAILURE_REASON="rubin_process_start did not capture a pid"; return 1; }
   rubin_process_wait_for_log "${LOG_FILE}" "rpc: listening=" 60 "${NODE_PID}" \
-    || { LAUNCH_FAILURE_REASON="rust skeleton did not emit rpc-listening banner within 60s"; return 1; }
+    || { LAUNCH_FAILURE_REASON="Rust helper/advisory launch did not emit rpc-listening banner within 60s"; return 1; }
   # Stamped here, immediately after the rpc-listening banner is observed,
   # so participants[].started_at reflects an observed start time rather
   # than a pre-launch wall-clock guess.
@@ -406,14 +408,14 @@ attempt_skeleton_launch() {
   [[ -n "${RPC_ADDR}" ]] \
     || { LAUNCH_FAILURE_REASON="rpc-listening banner missing address payload"; return 1; }
   rubin_process_wait_for_rpc_ready "${RPC_ADDR}" 30 \
-    || { LAUNCH_FAILURE_REASON="rust skeleton /get_tip RPC was not reachable within 30s"; return 1; }
+    || { LAUNCH_FAILURE_REASON="Rust helper/advisory /get_tip RPC was not reachable within 30s"; return 1; }
   rubin_process_is_alive "${NODE_PID}" \
-    || { LAUNCH_FAILURE_REASON="rust skeleton process pid=${NODE_PID} exited after RPC probe"; return 1; }
+    || { LAUNCH_FAILURE_REASON="Rust helper/advisory process pid=${NODE_PID} exited after RPC probe"; return 1; }
   return 0
 }
 
 LAUNCH_STATUS="failed"
-if attempt_skeleton_launch; then
+if attempt_helper_launch; then
   LAUNCH_STATUS="success"
 fi
 
@@ -427,24 +429,23 @@ import os
 e = os.environ
 status = e["LAUNCH_STATUS"]
 launch_failure_raw = (e.get("LAUNCH_FAILURE_REASON") or "").strip()
+helper_boundary = (
+    "helper-only/advisory non-process Rust launch marker; full "
+    "mixed-client process tx_path proof is RUB-21/RUB-22/RUB-23"
+)
 
 # Compute one effective_failure_reason and use it in BOTH evidence and
 # report (PR #1510 wave-N+1 copilot P2 finding: previously evidence had
-# an "or '...skeleton...'" fallback while report passed
+# an older fallback while report passed
 # LAUNCH_FAILURE_REASON through unchanged, so a failed-path with empty
 # env var produced an empty/None report.failure_reason while evidence
 # had explicit text). Single computed value eliminates the asymmetry.
 if status == "success":
-    effective_failure_reason = (
-        "rust-only skeleton run; cross-implementation tx_path proof is "
-        "RUB-21/22/23"
-    )
+    effective_failure_reason = helper_boundary
 elif launch_failure_raw:
-    effective_failure_reason = launch_failure_raw
+    effective_failure_reason = f"{helper_boundary}; launch_failure={launch_failure_raw}"
 else:
-    effective_failure_reason = (
-        "rust skeleton launch failed without a specific reason"
-    )
+    effective_failure_reason = f"{helper_boundary}; launch_failure=unspecified"
 
 if status == "success":
     rust_participant = {
@@ -463,13 +464,14 @@ else:
 evidence = {
     "schema_version": "rubin-mixed-client-devnet-evidence-v1",
     "evidence_type": "mixed_client_process_soak",
-    "scenario": "rust_binary_soak_skeleton",
+    "scenario": "rust_helper_advisory_non_process_marker",
     "verdict": "FAIL",
     "failure_reason": effective_failure_reason,
     "participants": [
         rust_participant,
-        # Declared Go placeholder. RUB-21/22/23 replace this with a
-        # real-launched Go participant plus a tx_path PASS section.
+        # Declared Go placeholder. RUB-21/RUB-22/RUB-23 replace this
+        # marker with a real-launched Go participant plus a tx_path PASS
+        # process-soak artifact.
         {"name": "node-go", "implementation": "go"},
     ],
 }
@@ -504,7 +506,9 @@ artifact_root = e["RUBIN_PROCESS_ARTIFACT_ROOT"]
 log_file_relative = e["LOG_FILE"]
 log_path_absolute = os.path.join(artifact_root, log_file_relative)
 report = {
-    "scenario": "rust_binary_soak_skeleton",
+    "scenario": "rust_helper_advisory_non_process",
+    "evidence_class": "helper_only_advisory_non_process",
+    "claim_boundary": "does_not_prove_mixed_client_process_soak",
     "implementation": "rust",
     "command_path": e["NODE_BIN"],
     "data_dir": e["DATA_DIR"],
@@ -520,9 +524,9 @@ report = {
     "started_observed": bool(started_at_raw),
     "failure_reason": effective_failure_reason,
     "follow_ups": [
-        "RUB-21 owns cross-implementation tx_path PASS evidence",
-        "RUB-22/23 own end-to-end tx propagation",
-        "RUB-25 owns CI fail-closed gate integration",
+        "RUB-21 owns full mixed-client process tx_path PASS evidence",
+        "RUB-22/RUB-23 own end-to-end mixed-client tx propagation",
+        "RUB-25 owns CI fail-closed process evidence gate integration",
     ],
 }
 with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
@@ -530,15 +534,15 @@ with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 
-# RUB-24 schema validator is the canonical gate: must accept the
-# skeleton artifact (well-formed shape) regardless of LAUNCH_STATUS.
-# A validator rejection here is a real bug in this harness, not a
-# launch-time symptom — let `set -e` propagate the non-zero exit.
-echo "Validating emitted evidence via RUB-24 schema validator"
+# RUB-24 schema validator is used here only for the non-authoritative
+# helper/advisory FAIL marker shape. The marker must validate as a
+# well-formed FAIL object, while RUB-25's PASS gate still rejects it as
+# not full mixed-client process soak evidence.
+echo "Validating helper/advisory schema marker via RUB-24 schema validator"
 run_validator "${EVIDENCE_JSON}"
 
 if [[ "${LAUNCH_STATUS}" == "success" ]]; then
-  PASS_SUMMARY="SKELETON: rust binary soak launched pid=${NODE_PID} rpc=${RPC_ADDR} (verdict=FAIL/skeleton-only; cross-impl tx_path is RUB-21/22/23)"
+  PASS_SUMMARY="HELPER_ONLY_ADVISORY: rust binary launch observed pid=${NODE_PID} rpc=${RPC_ADDR} (non-process marker; full mixed-client tx_path proof is RUB-21/RUB-22/RUB-23)"
   if [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]]; then
     echo "${PASS_SUMMARY}; report=${REPORT_JSON} evidence=${EVIDENCE_JSON}"
   else
@@ -548,9 +552,11 @@ if [[ "${LAUNCH_STATUS}" == "success" ]]; then
 else
   FAILURE_REASON_FOR_SUMMARY="${LAUNCH_FAILURE_REASON}"
   if [[ -z "${FAILURE_REASON_FOR_SUMMARY//[[:space:]]/}" ]]; then
-    FAILURE_REASON_FOR_SUMMARY="rust skeleton launch failed without a specific reason"
+    FAILURE_REASON_FOR_SUMMARY="launch_failure=unspecified"
+  else
+    FAILURE_REASON_FOR_SUMMARY="launch_failure=${FAILURE_REASON_FOR_SUMMARY}"
   fi
-  FAIL_SUMMARY="FAIL: rust skeleton launch failed: ${FAILURE_REASON_FOR_SUMMARY}"
+  FAIL_SUMMARY="FAIL: helper-only/advisory non-process Rust launch marker; full mixed-client process tx_path proof is RUB-21/RUB-22/RUB-23; ${FAILURE_REASON_FOR_SUMMARY}"
   echo "${FAIL_SUMMARY}; report=${REPORT_JSON} evidence=${EVIDENCE_JSON}" >&2
   exit 1
 fi
