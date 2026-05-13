@@ -56,6 +56,24 @@ expect_fail_contains() {
   require_contains "${output}" "${needle}" "${label}"
 }
 
+expect_fail_token() {
+  local label="$1" expected_token="$2" output token
+  shift 2
+  if output="$("$@" 2>&1)"; then
+    echo "FAIL: ${label} should fail" >&2
+    echo "actual output:" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+  token="$(printf '%s\n' "${output}" | tx_report_reason_token)"
+  if [[ "${token}" != "${expected_token}" ]]; then
+    echo "FAIL: ${label} produced token ${token}, want ${expected_token}" >&2
+    echo "actual output:" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+}
+
 extract_check_report() {
   python3 - "${HARNESS}" "${CHECK_REPORT_LIB}" <<'PY'
 from pathlib import Path
@@ -65,13 +83,16 @@ src, dst = map(Path, sys.argv[1:3])
 lines = src.read_text(encoding="utf-8").splitlines()
 start = next(i for i, line in enumerate(lines) if line.startswith("check_report()"))
 end = next(i for i, line in enumerate(lines[start:], start) if line.startswith('[[ "${MESH_TIMEOUT}"'))
-Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
+token_start = next(i for i, line in enumerate(lines) if line.startswith("tx_report_reason_token()"))
+token_end = next(i for i, line in enumerate(lines[token_start:], token_start) if line.startswith("combined_report_reason_token()"))
+Path(dst).write_text("\n".join(lines[start:end] + [""] + lines[token_start:token_end]) + "\n", encoding="utf-8")
 PY
 }
 
 write_reports() {
   python3 - "${TMP_ROOT}" <<'PY'
 from pathlib import Path
+import hashlib
 import json
 import stat
 import sys
@@ -218,10 +239,17 @@ for impl, endpoint, prefix in (("go", go_rpc, "go"), ("rust", rust_rpc, "rust"))
         "txid": txid,
     })
 height = 102
-block_hash = "ab" * 32
 tx_count = 2
+header = b"\x00" * 116
+block_hash = hashlib.sha3_256(header).hexdigest()
+block_hex = header.hex() + "02" + tx_hex + tx_hex
+mutated_tx = bytearray.fromhex(tx_hex)
+mutated_tx[5] ^= 0x01
+missing_tx_block_hex = header.hex() + "02" + mutated_tx.hex() + mutated_tx.hex()
 for path in (artifact_root / "rust-mined-block.json", artifact_root / "go-converged-block.json"):
-    dump(path, {"block_hex": "00", "canonical": True, "hash": block_hash, "height": height})
+    dump(path, {"block_hex": block_hex, "canonical": True, "hash": block_hash, "height": height})
+dump(artifact_root / "go-converged-malformed-block.json", {"block_hex": "00", "canonical": True, "hash": block_hash, "height": height})
+dump(artifact_root / "go-converged-missing-tx-block.json", {"block_hex": missing_tx_block_hex, "canonical": True, "hash": block_hash, "height": height})
 dump(artifact_root / "rust-mine-next.json", {"block_hash": block_hash, "height": height, "mined": True, "nonce": 0, "timestamp": 1, "tx_count": tx_count})
 dump(artifact_root / "go-converge-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "in_ibd": False, "tip_hash": block_hash})
 tx_report = {
@@ -276,6 +304,15 @@ dump(root / "converge-report.json", converge_report)
 bad_converge = json.loads(json.dumps(converge_report))
 bad_converge["go_converge"]["txid"] = "11" * 32
 dump(root / "converge-wrong-txid.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["rust_mine"]["class"] = "accepted_only"
+dump(root / "converge-bad-rust-class.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-malformed-block.json")
+dump(root / "converge-malformed-block.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-missing-tx-block.json")
+dump(root / "converge-missing-tx-block.json", bad_converge)
 (root / "empty.json").write_text("", encoding="utf-8")
 (root / "malformed.json").write_text("[", encoding="utf-8")
 with (root / "oversized.json").open("wb") as f:
@@ -284,6 +321,9 @@ print(root / "mesh-report.json")
 print(root / "tx-report.json")
 print(root / "converge-report.json")
 print(root / "converge-wrong-txid.json")
+print(root / "converge-bad-rust-class.json")
+print(root / "converge-malformed-block.json")
+print(root / "converge-missing-tx-block.json")
 PY
 }
 
@@ -297,7 +337,10 @@ MESH_REPORT="$(sed -n '1p' "${REPORT_LIST}")"
 TX_REPORT="$(sed -n '2p' "${REPORT_LIST}")"
 CONVERGE_REPORT="$(sed -n '3p' "${REPORT_LIST}")"
 CONVERGE_WRONG_TXID_REPORT="$(sed -n '4p' "${REPORT_LIST}")"
-[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
+CONVERGE_BAD_RUST_CLASS_REPORT="$(sed -n '5p' "${REPORT_LIST}")"
+CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '6p' "${REPORT_LIST}")"
+CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '7p' "${REPORT_LIST}")"
+[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_fail_contains "public tx check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${TX_REPORT}"
@@ -309,6 +352,11 @@ expect_pass_contains "producer tx internal check" "PASS: mixed_client_go_submit_
 expect_pass_contains "producer converge internal check" "PASS: mixed_client_go_submit_rust_mine_go_converge report structurally accepted" check_report "${CONVERGE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects converged txid drift" "mined/converged tx identity differs from submitted tx" check_report "${CONVERGE_WRONG_TXID_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects malformed converge block" "go_converge.block_path inclusion check failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects converge block missing tx" "submitted txid missing from parsed block txids" check_report "${CONVERGE_MISSING_TX_BLOCK_REPORT}" offline producer-tx
+expect_fail_token "token maps converge class drift" "rust_mine_class_invalid" check_report "${CONVERGE_BAD_RUST_CLASS_REPORT}" offline producer-tx
+expect_fail_token "token maps malformed parsed block" "block_hex_parse_failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
+expect_fail_token "token maps parsed block tx omission" "block_missing_submitted_txid" check_report "${CONVERGE_MISSING_TX_BLOCK_REPORT}" offline producer-tx
 
 expect_fail_contains "non-regular report" "report is not a regular file" "${HARNESS}" --check-report "${TMP_ROOT}"
 expect_fail_contains "empty report" "report is empty" "${HARNESS}" --check-report "${TMP_ROOT}/empty.json"
