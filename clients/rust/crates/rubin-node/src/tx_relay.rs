@@ -247,6 +247,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Mutex;
 
+use rubin_consensus::{block_hash, parse_block_bytes};
 use sha3::{Digest, Sha3_256};
 
 use crate::p2p_runtime::{
@@ -505,6 +506,33 @@ pub fn announce_tx(
         &[InventoryVector {
             kind: MSG_TX,
             hash: txid,
+        }],
+        peer_manager,
+        local_addr,
+        peer_writers,
+    )
+}
+
+/// Announce a locally mined block after it is committed to the block store.
+///
+/// Rust `/mine_next` uses this to mirror Go's `AnnounceBlock`: parse the
+/// committed full block, derive its canonical hash, then broadcast a BLOCK
+/// inventory item to every connected peer.
+pub fn announce_block(
+    block_bytes: &[u8],
+    relay_state: &TxRelayState,
+    peer_manager: &PeerManager,
+    local_addr: &str,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
+) -> Result<(), String> {
+    let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
+    let hash = block_hash(&parsed.header_bytes).map_err(|err| err.to_string())?;
+    broadcast_inventory(
+        relay_state,
+        None,
+        &[InventoryVector {
+            kind: MSG_BLOCK,
+            hash,
         }],
         peer_manager,
         local_addr,
@@ -916,6 +944,55 @@ mod tests {
         // Both peers should have exactly 1 frame.
         assert_eq!(boxes["peer-a:8333"].len(), 1);
         assert_eq!(boxes["peer-b:8333"].len(), 1);
+    }
+
+    #[test]
+    fn announce_block_broadcasts_block_inventory_to_all_peers() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-a:8333".to_string(),
+            ..Default::default()
+        });
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "peer-b:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-a:8333".to_string(), PeerOutbox::default());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("peer-b:8333".to_string(), PeerOutbox::default());
+
+        let block = crate::genesis::devnet_genesis_block_bytes();
+        let parsed = parse_block_bytes(&block).expect("parse block");
+        let block_hash = block_hash(&parsed.header_bytes).expect("block hash");
+        let result = announce_block(&block, &relay, &pm, "local:8333", &outboxes);
+
+        assert!(result.is_ok());
+        let boxes = outboxes.lock().unwrap();
+        for addr in ["peer-a:8333", "peer-b:8333"] {
+            let frames = boxes[addr].frames();
+            assert_eq!(frames.len(), 1);
+            let msg =
+                crate::p2p_runtime::fuzz_parse_wire_message("devnet", &frames[0]).expect("frame");
+            assert_eq!(msg.command, "inv");
+            let inventory = crate::p2p_runtime::decode_inventory_vectors(&msg.payload)
+                .expect("decode inventory");
+            assert_eq!(
+                inventory,
+                vec![InventoryVector {
+                    kind: MSG_BLOCK,
+                    hash: block_hash,
+                }]
+            );
+        }
     }
 
     #[test]
