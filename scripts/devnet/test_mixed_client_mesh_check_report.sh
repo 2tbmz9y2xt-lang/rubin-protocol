@@ -15,7 +15,8 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rubin-mesh-check-report.XXXXXX")"
+TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "test TMPDIR parent is not usable: ${TMPDIR:-/tmp}" >&2; exit 1; }
+TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-mesh-check-report.XXXXXX")"
 cleanup() {
   rm -rf -- "${TMP_ROOT}"
 }
@@ -55,6 +56,24 @@ expect_fail_contains() {
   require_contains "${output}" "${needle}" "${label}"
 }
 
+expect_fail_token() {
+  local label="$1" expected_token="$2" output token
+  shift 2
+  if output="$("$@" 2>&1)"; then
+    echo "FAIL: ${label} should fail" >&2
+    echo "actual output:" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+  token="$(printf '%s\n' "${output}" | tx_report_reason_token)"
+  if [[ "${token}" != "${expected_token}" ]]; then
+    echo "FAIL: ${label} produced token ${token}, want ${expected_token}" >&2
+    echo "actual output:" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+}
+
 extract_check_report() {
   python3 - "${HARNESS}" "${CHECK_REPORT_LIB}" <<'PY'
 from pathlib import Path
@@ -64,13 +83,91 @@ src, dst = map(Path, sys.argv[1:3])
 lines = src.read_text(encoding="utf-8").splitlines()
 start = next(i for i, line in enumerate(lines) if line.startswith("check_report()"))
 end = next(i for i, line in enumerate(lines[start:], start) if line.startswith('[[ "${MESH_TIMEOUT}"'))
+token_start = next(i for i, line in enumerate(lines) if line.startswith("tx_report_reason_token()"))
+token_end = next(i for i, line in enumerate(lines[token_start:], token_start) if line.startswith("combined_report_reason_token()"))
+capture_start = next(i for i, line in enumerate(lines) if line.startswith("rpc_json()"))
+capture_end = next(i for i, line in enumerate(lines[capture_start:], capture_start) if line.startswith("pid_comm()"))
+tx_capture_start = next(i for i, line in enumerate(lines) if line.startswith("tx_capture_reason()"))
+tx_capture_end = next(i for i, line in enumerate(lines[tx_capture_start:], tx_capture_start) if line.startswith("tx_sidecar_reason()"))
+block_reason_start = next(i for i, line in enumerate(lines) if line.startswith("block_inclusion_failure_reason()"))
+block_reason_end = next(i for i, line in enumerate(lines[block_reason_start:], block_reason_start) if line.startswith("verify_block_inclusion()"))
+mine_reason_start = next(i for i, line in enumerate(lines) if line.startswith("mine_next_http_error_reason()"))
+mine_reason_end = next(i for i, line in enumerate(lines[mine_reason_start:], mine_reason_start) if line.startswith("rust_mine_including_tx()"))
+rust_mine_start = next(i for i, line in enumerate(lines) if line.startswith("rust_mine_including_tx()"))
+rust_mine_end = next(i for i, line in enumerate(lines[rust_mine_start:], rust_mine_start) if line.startswith("tip_matches()"))
+Path(dst).write_text("\n".join(lines[start:end] + [""] + lines[token_start:token_end] + [""] + lines[capture_start:capture_end] + [""] + lines[tx_capture_start:tx_capture_end] + [""] + lines[block_reason_start:block_reason_end] + [""] + lines[mine_reason_start:mine_reason_end] + [""] + lines[rust_mine_start:rust_mine_end]) + "\n", encoding="utf-8")
+PY
+}
+
+extract_prepare_tx_chainstate() {
+  python3 - "${HARNESS}" "${PREPARE_TX_CHAINSTATE_LIB}" <<'PY'
+from pathlib import Path
+import sys
+
+src, dst = map(Path, sys.argv[1:3])
+lines = src.read_text(encoding="utf-8").splitlines()
+start = next(i for i, line in enumerate(lines) if line.startswith("prepare_tx_chainstate()"))
+end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("parse_txid()"))
 Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
 PY
+}
+
+check_prepare_tx_chainstate_cleanup() {
+  local probe="${TMP_ROOT}/prepare-tx-chainstate-cleanup.sh" probe_root="${TMP_ROOT}/prepare-tx-chainstate-cleanup"
+  mkdir -p -- "${probe_root}"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$1"
+probe_root="$2"
+KEYGEN_JSON="${probe_root}/keygen.json"
+KEYGEN_GO="${probe_root}/keygen.go"
+GO_MODULE_ROOT="${probe_root}/go"
+DEV_ENV="${probe_root}/dev-env.sh"
+GO_NODE_BIN="${probe_root}/rubin-node"
+GO_DIR="${probe_root}/go-node"
+RUST_DIR="${probe_root}/rust-node"
+MINE_LOG="${probe_root}/mine-go.log"
+TMPDIR="${probe_root}/tmp"
+TX_REASON=""
+TX_FROM_KEY_DIR=""
+TX_FROM_KEY_FILE=""
+TX_TO_KEY=""
+mkdir -p -- "${TMPDIR}" "${GO_MODULE_ROOT}" "${GO_DIR}" "${RUST_DIR}"
+
+build_go_txgen() { :; }
+write_keygen() { :; }
+disable_xtrace_for_secret() { return 1; }
+restore_xtrace_after_secret() { :; }
+make_tx_secret_dir() {
+  mkdir -p -- "${probe_root}/secret"
+  printf '%s\n' "${probe_root}/secret"
+}
+cleanup_tx_from_key_file() { :; }
+bounded_mesh() {
+  printf '{"malformed":true}\n'
+  printf 'keygen stderr\n' >&2
+}
+parse_keygen_material() { return 9; }
+keygen_material_reason() { printf '%s\n' go_submit_keygen_material_malformed; }
+
+set +e
+prepare_tx_chainstate
+rc=$?
+set -e
+[[ ${rc} -ne 0 ]] || { echo "FAIL: prepare_tx_chainstate should fail on malformed keygen material" >&2; exit 1; }
+[[ "${TX_REASON}" == "go_submit_keygen_material_malformed" ]] || { echo "FAIL: unexpected TX_REASON: ${TX_REASON}" >&2; exit 1; }
+[[ ! -e "${KEYGEN_JSON}.raw" ]] || { echo "FAIL: keygen raw sidecar survived failure" >&2; exit 1; }
+[[ ! -e "${KEYGEN_JSON}.stderr" ]] || { echo "FAIL: keygen stderr sidecar survived failure" >&2; exit 1; }
+SH
+  bash "${probe}" "${PREPARE_TX_CHAINSTATE_LIB}" "${probe_root}"
 }
 
 write_reports() {
   python3 - "${TMP_ROOT}" <<'PY'
 from pathlib import Path
+import hashlib
 import json
 import stat
 import sys
@@ -86,8 +183,72 @@ for path in (go_bin, rust_bin):
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
-tx_hex = "010000000001000000000000000001010000000000000000016954e89e15c3eef53f39d5e758fd47dfc84f15f042cd83edc0c93723e93b7d0a83000a00000000000000b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716b3ec7cf4503854f1f691ffb3c0bde5e22af4705161edb20ede25a62e3209a716000000000000"
-txid = "d379ae84430d5296e97a71ba8e6996d869b8c6e85b13b51ab0d8ee23455057e1"
+def compact_size(n: int) -> bytes:
+    if n < 0xfd:
+        return bytes([n])
+    if n <= 0xffff:
+        return b"\xfd" + n.to_bytes(2, "little")
+    if n <= 0xffffffff:
+        return b"\xfe" + n.to_bytes(4, "little")
+    return b"\xff" + n.to_bytes(8, "little")
+
+def sha3(data: bytes) -> bytes:
+    return hashlib.sha3_256(data).digest()
+
+def read_compact_size(buf: bytes, off: int) -> tuple[int, int]:
+    first = buf[off]
+    if first < 0xfd:
+        return first, off + 1
+    if first == 0xfd:
+        return int.from_bytes(buf[off + 1:off + 3], "little"), off + 3
+    if first == 0xfe:
+        return int.from_bytes(buf[off + 1:off + 5], "little"), off + 5
+    return int.from_bytes(buf[off + 1:off + 9], "little"), off + 9
+
+def txid_kind0(txb: bytes) -> bytes:
+    off = 0
+    off += 4  # version
+    tx_kind = txb[off]
+    off += 1
+    if tx_kind != 0:
+        raise ValueError("synthetic test only supports tx_kind=0")
+    off += 8  # nonce
+    n_inputs, off = read_compact_size(txb, off)
+    for _ in range(n_inputs):
+        off += 32 + 4
+        script_len, off = read_compact_size(txb, off)
+        off += script_len + 4
+    n_outputs, off = read_compact_size(txb, off)
+    for _ in range(n_outputs):
+        off += 8 + 2
+        covenant_len, off = read_compact_size(txb, off)
+        off += covenant_len
+    off += 4  # locktime
+    return sha3(txb[:off])
+
+def build_synthetic_submitted_tx() -> bytes:
+    return b"".join([
+        (1).to_bytes(4, "little"),
+        b"\x00",
+        (7).to_bytes(8, "little"),
+        compact_size(1),
+        b"\x11" * 32,
+        (0).to_bytes(4, "little"),
+        compact_size(0),
+        (0).to_bytes(4, "little"),
+        compact_size(1),
+        (0).to_bytes(8, "little"),
+        (0x0002).to_bytes(2, "little"),
+        compact_size(1),
+        b"\x42",
+        (0).to_bytes(4, "little"),
+        compact_size(0),
+        compact_size(0),
+    ])
+
+tx_bytes = build_synthetic_submitted_tx()
+tx_hex = tx_bytes.hex()
+txid = txid_kind0(tx_bytes).hex()
 go_rpc = "127.0.0.1:51001"
 go_p2p = "127.0.0.1:51002"
 rust_rpc = "127.0.0.1:51003"
@@ -216,6 +377,95 @@ for impl, endpoint, prefix in (("go", go_rpc, "go"), ("rust", rust_rpc, "rust"))
         "rpc_endpoint": endpoint,
         "txid": txid,
     })
+height = 102
+tx_count = 2
+
+def merkle(ids: list[bytes], leaf_tag: int, node_tag: int) -> bytes:
+    level = [sha3(bytes([leaf_tag]) + item) for item in ids]
+    while len(level) > 1:
+        next_level = []
+        i = 0
+        while i < len(level):
+            if i == len(level) - 1:
+                next_level.append(level[i])
+                i += 1
+            else:
+                next_level.append(sha3(bytes([node_tag]) + level[i] + level[i + 1]))
+                i += 2
+        level = next_level
+    return level[0]
+
+def coinbase_with_witness_commitment(block_height: int, non_coinbase_txs: list[bytes]) -> tuple[bytes, bytes, bytes]:
+    wtxids = [bytes(32)] + [sha3(txb) for txb in non_coinbase_txs]
+    witness_root = merkle(wtxids, 0x02, 0x03)
+    commitment = sha3(b"RUBIN-WITNESS/" + witness_root)
+    core = b"".join([
+        (1).to_bytes(4, "little"),
+        b"\x00",
+        (0).to_bytes(8, "little"),
+        compact_size(1),
+        bytes(32),
+        (0xffffffff).to_bytes(4, "little"),
+        compact_size(0),
+        (0xffffffff).to_bytes(4, "little"),
+        compact_size(1),
+        (0).to_bytes(8, "little"),
+        (0x0002).to_bytes(2, "little"),
+        compact_size(len(commitment)),
+        commitment,
+        block_height.to_bytes(4, "little"),
+    ])
+    full = core + compact_size(0) + compact_size(0)
+    return full, sha3(core), sha3(full)
+
+def build_basic_block(non_coinbase_hex: str, block_height: int) -> tuple[str, str]:
+    non_coinbase = bytes.fromhex(non_coinbase_hex)
+    non_coinbase_txid = txid_kind0(non_coinbase)
+    if non_coinbase_hex == tx_hex and non_coinbase_txid.hex() != txid:
+        raise ValueError("synthetic txid fixture drift")
+    coinbase, coinbase_txid, _ = coinbase_with_witness_commitment(block_height, [non_coinbase])
+    txids = [coinbase_txid, non_coinbase_txid]
+    merkle_root = merkle(txids, 0x00, 0x01)
+    header = b"".join([
+        (1).to_bytes(4, "little"),
+        bytes(32),
+        merkle_root,
+        (1).to_bytes(8, "little"),
+        b"\xff" * 32,
+        (1).to_bytes(8, "little"),
+    ])
+    block = header + compact_size(2) + coinbase + non_coinbase
+    return block.hex(), sha3(header).hex()
+
+def corrupt_merkle_block(block_hex_value: str) -> tuple[str, str]:
+    block = bytearray.fromhex(block_hex_value)
+    block[4 + 32] ^= 0x01
+    return bytes(block).hex(), sha3(bytes(block[:116])).hex()
+
+def block_sidecar(impl: str, endpoint: str, block_hex_value: str, block_hash_value: str) -> dict:
+    return {"block_hex": block_hex_value, "canonical": True, "hash": block_hash_value, "height": height, "implementation": impl, "request_path": f"/get_block?height={height}", "rpc_endpoint": endpoint}
+
+block_hex, block_hash = build_basic_block(tx_hex, height)
+mutated_tx = bytearray.fromhex(tx_hex)
+mutated_tx[5] ^= 0x01
+missing_tx_block_hex, missing_tx_hash = build_basic_block(mutated_tx.hex(), height)
+corrupt_block_hex, corrupt_block_hash = corrupt_merkle_block(block_hex)
+
+dump(artifact_root / "rust-mined-block.json", block_sidecar("rust", rust_rpc, block_hex, block_hash))
+dump(artifact_root / "go-converged-block.json", block_sidecar("go", go_rpc, block_hex, block_hash))
+dump(artifact_root / "go-converged-wrong-source-block.json", block_sidecar("rust", rust_rpc, block_hex, block_hash))
+dump(artifact_root / "go-converged-malformed-block.json", {"block_hex": "00", "canonical": True, "hash": block_hash, "height": height, "implementation": "go", "request_path": f"/get_block?height={height}", "rpc_endpoint": go_rpc})
+dump(artifact_root / "rust-missing-tx-block.json", block_sidecar("rust", rust_rpc, missing_tx_block_hex, missing_tx_hash))
+dump(artifact_root / "go-converged-missing-tx-block.json", block_sidecar("go", go_rpc, missing_tx_block_hex, missing_tx_hash))
+dump(artifact_root / "rust-corrupt-merkle-block.json", block_sidecar("rust", rust_rpc, corrupt_block_hex, corrupt_block_hash))
+dump(artifact_root / "go-corrupt-merkle-block.json", block_sidecar("go", go_rpc, corrupt_block_hex, corrupt_block_hash))
+dump(artifact_root / "rust-mine-next.json", {"block_hash": block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "rust-missing-tx-mine-next.json", {"block_hash": missing_tx_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "rust-corrupt-merkle-mine-next.json", {"block_hash": corrupt_block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "rust-tx-count-mismatch-mine-next.json", {"block_hash": block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": 3})
+dump(artifact_root / "go-converge-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": block_hash})
+dump(artifact_root / "go-missing-tx-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": missing_tx_hash})
+dump(artifact_root / "go-corrupt-merkle-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": corrupt_block_hash})
 tx_report = {
     **mesh_report,
     "go_submit": {
@@ -237,32 +487,161 @@ tx_report = {
     "tx_path": tx_path,
 }
 dump(root / "tx-report.json", tx_report)
+converge_report = {
+    **tx_report,
+    "go_converge": {
+        "block_hash": block_hash,
+        "block_path": str(artifact_root / "go-converged-block.json"),
+        "class": "canonical_block_found",
+        "converged_at": "node-go",
+        "height": height,
+        "raw_hex": tx_hex,
+        "rpc_endpoint": go_rpc,
+        "tip_path": str(artifact_root / "go-converge-tip.json"),
+        "txid": txid,
+    },
+    "rust_mine": {
+        "block_hash": block_hash,
+        "block_path": str(artifact_root / "rust-mined-block.json"),
+        "class": "mined_included",
+        "height": height,
+        "mine_next_path": str(artifact_root / "rust-mine-next.json"),
+        "mined_by": "node-rust",
+        "raw_hex": tx_hex,
+        "rpc_endpoint": rust_rpc,
+        "tx_count": tx_count,
+        "txid": txid,
+    },
+    "scenario": "mixed_client_go_submit_rust_mine_go_converge",
+}
+dump(root / "converge-report.json", converge_report)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["txid"] = "11" * 32
+dump(root / "converge-wrong-txid.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["rust_mine"]["class"] = "accepted_only"
+dump(root / "converge-bad-rust-class.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "rust-mined-block.json")
+dump(root / "converge-duplicate-sidecar-path.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-wrong-source-block.json")
+dump(root / "converge-wrong-sidecar-source.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-malformed-block.json")
+dump(root / "converge-malformed-block.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["rust_mine"]["block_hash"] = missing_tx_hash
+bad_converge["rust_mine"]["block_path"] = str(artifact_root / "rust-missing-tx-block.json")
+bad_converge["rust_mine"]["mine_next_path"] = str(artifact_root / "rust-missing-tx-mine-next.json")
+bad_converge["go_converge"]["block_hash"] = missing_tx_hash
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-missing-tx-block.json")
+bad_converge["go_converge"]["tip_path"] = str(artifact_root / "go-missing-tx-tip.json")
+dump(root / "converge-missing-tx-block.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["rust_mine"]["block_hash"] = corrupt_block_hash
+bad_converge["rust_mine"]["block_path"] = str(artifact_root / "rust-corrupt-merkle-block.json")
+bad_converge["rust_mine"]["mine_next_path"] = str(artifact_root / "rust-corrupt-merkle-mine-next.json")
+bad_converge["go_converge"]["block_hash"] = corrupt_block_hash
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-corrupt-merkle-block.json")
+bad_converge["go_converge"]["tip_path"] = str(artifact_root / "go-corrupt-merkle-tip.json")
+dump(root / "converge-bad-merkle-block.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["rust_mine"]["tx_count"] = 3
+bad_converge["rust_mine"]["mine_next_path"] = str(artifact_root / "rust-tx-count-mismatch-mine-next.json")
+dump(root / "converge-tx-count-mismatch.json", bad_converge)
 (root / "empty.json").write_text("", encoding="utf-8")
 (root / "malformed.json").write_text("[", encoding="utf-8")
 with (root / "oversized.json").open("wb") as f:
     f.write(b" " * 1_000_001)
 print(root / "mesh-report.json")
 print(root / "tx-report.json")
+print(root / "converge-report.json")
+print(root / "converge-wrong-txid.json")
+print(root / "converge-bad-rust-class.json")
+print(root / "converge-duplicate-sidecar-path.json")
+print(root / "converge-wrong-sidecar-source.json")
+print(root / "converge-malformed-block.json")
+print(root / "converge-missing-tx-block.json")
+print(root / "converge-bad-merkle-block.json")
+print(root / "converge-tx-count-mismatch.json")
 PY
 }
 
 CHECK_REPORT_LIB="${TMP_ROOT}/check-report-lib.sh"
+PREPARE_TX_CHAINSTATE_LIB="${TMP_ROOT}/prepare-tx-chainstate-lib.sh"
 extract_check_report
+extract_prepare_tx_chainstate
+check_prepare_tx_chainstate_cleanup
 # shellcheck source=/dev/null
 source "${CHECK_REPORT_LIB}"
 REPORT_LIST="${TMP_ROOT}/reports.txt"
 write_reports >"${REPORT_LIST}"
 MESH_REPORT="$(sed -n '1p' "${REPORT_LIST}")"
 TX_REPORT="$(sed -n '2p' "${REPORT_LIST}")"
-[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
+CONVERGE_REPORT="$(sed -n '3p' "${REPORT_LIST}")"
+CONVERGE_WRONG_TXID_REPORT="$(sed -n '4p' "${REPORT_LIST}")"
+CONVERGE_BAD_RUST_CLASS_REPORT="$(sed -n '5p' "${REPORT_LIST}")"
+CONVERGE_DUPLICATE_SIDECAR_REPORT="$(sed -n '6p' "${REPORT_LIST}")"
+CONVERGE_WRONG_SIDECAR_SOURCE_REPORT="$(sed -n '7p' "${REPORT_LIST}")"
+CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '8p' "${REPORT_LIST}")"
+CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '9p' "${REPORT_LIST}")"
+CONVERGE_BAD_MERKLE_BLOCK_REPORT="$(sed -n '10p' "${REPORT_LIST}")"
+CONVERGE_TX_COUNT_MISMATCH_REPORT="$(sed -n '11p' "${REPORT_LIST}")"
+[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_fail_contains "public tx check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${TX_REPORT}"
+expect_fail_contains "public converge check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${CONVERGE_REPORT}"
 expect_fail_contains "public tx check-report-live" "public tx-path check-report-live is unsupported" "${HARNESS}" --check-report-live "${TX_REPORT}"
-expect_fail_contains "combined tx flag and check-report" "cannot be combined" "${HARNESS}" --go-submit-rust-accept --check-report "${TX_REPORT}"
+expect_fail_contains "combined tx flag and check-report" "tx-path modes cannot be combined" "${HARNESS}" --go-submit-rust-accept --check-report "${TX_REPORT}"
+expect_fail_contains "combined tx-path flags reject" "tx-path modes are mutually exclusive" "${HARNESS}" --go-submit-rust-accept --go-submit-rust-mine-go-converge
 
 expect_pass_contains "producer tx internal check" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TX_REPORT}" offline producer-tx
-expect_fail_contains "producer rejects mesh report" "producer tx validation requires mixed_client_go_submit_rust_accept report" check_report "${MESH_REPORT}" offline producer-tx
+expect_pass_contains "producer converge internal check" "PASS: mixed_client_go_submit_rust_mine_go_converge report structurally accepted" check_report "${CONVERGE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects converged txid drift" "mined/converged tx identity differs from submitted tx" check_report "${CONVERGE_WRONG_TXID_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects reused converge sidecar path" "converge sidecar paths are not pairwise distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects wrong-source converge block" "go_converge.block_path sidecar identity mismatch" check_report "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects malformed converge block" "go_converge.block_path inclusion check failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects converge block missing tx" "submitted txid missing from parsed block txids" check_report "${CONVERGE_MISSING_TX_BLOCK_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects uncommitted converge block tx list" "basic block validation failed" check_report "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects converge block tx_count mismatch" "parsed block tx_count mismatch" check_report "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" offline producer-tx
+expect_fail_token "token maps converge class drift" "rust_mine_class_invalid" check_report "${CONVERGE_BAD_RUST_CLASS_REPORT}" offline producer-tx
+expect_fail_token "token maps reused converge sidecar path" "converge_sidecar_paths_not_distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
+expect_fail_token "token maps wrong-source converge sidecar" "converge_sidecar_identity_mismatch" check_report "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
+expect_fail_token "token maps malformed parsed block" "block_hex_parse_failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
+expect_fail_token "token maps parsed block tx omission" "block_missing_submitted_txid" check_report "${CONVERGE_MISSING_TX_BLOCK_REPORT}" offline producer-tx
+expect_fail_token "token maps uncommitted block tx list" "block_basic_validation_failed" check_report "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" offline producer-tx
+expect_fail_token "token maps block tx_count mismatch" "block_tx_count_mismatch" check_report "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" offline producer-tx
+[[ "$(block_inclusion_failure_reason rust_mine "parse block_hex failed: short block")" == "rust_mine_block_hex_parse_failed" ]] || { echo "FAIL: rust mine parse failure reason collapsed" >&2; exit 1; }
+[[ "$(block_inclusion_failure_reason rust_mine "parsed block hash mismatch")" == "rust_mine_block_hash_mismatch" ]] || { echo "FAIL: rust mine hash mismatch reason collapsed" >&2; exit 1; }
+[[ "$(block_inclusion_failure_reason rust_mine "basic block validation failed: BLOCK_ERR_MERKLE_INVALID")" == "rust_mine_block_basic_validation_failed" ]] || { echo "FAIL: rust mine basic block failure reason collapsed" >&2; exit 1; }
+[[ "$(block_inclusion_failure_reason go_converge "parsed block tx_count mismatch")" == "go_converge_block_tx_count_mismatch" ]] || { echo "FAIL: go converge tx_count mismatch reason collapsed" >&2; exit 1; }
+[[ "$(block_inclusion_failure_reason go_converge "submitted txid missing from parsed block txids")" == "go_converge_block_missing_submitted_txid" ]] || { echo "FAIL: go converge missing-tx reason collapsed" >&2; exit 1; }
+[[ "$(block_inclusion_failure_reason go_converge "block response height/hash/canonical mismatch")" == "go_converge_block_sidecar_mismatch" ]] || { echo "FAIL: go converge sidecar mismatch reason collapsed" >&2; exit 1; }
+printf '{"mined":false,"error":"live mining unavailable"}\n' >"${TMP_ROOT}/mine-live-unavailable.json"
+printf '{"mined":false,"error":"sync engine unavailable"}\n' >"${TMP_ROOT}/mine-sync-unavailable.json"
+printf '{"mined":false,"error":"tx pool unavailable"}\n' >"${TMP_ROOT}/mine-pool-unavailable.json"
+printf '{"mined":false,"error":"template rejected"}\n' >"${TMP_ROOT}/mine-rejected.json"
+[[ "$(mine_next_http_error_reason "${TMP_ROOT}/mine-live-unavailable.json")" == "rust_mine_live_mining_unavailable" ]] || { echo "FAIL: live mining error reason collapsed" >&2; exit 1; }
+[[ "$(mine_next_http_error_reason "${TMP_ROOT}/mine-sync-unavailable.json")" == "rust_mine_sync_unavailable" ]] || { echo "FAIL: sync unavailable error reason collapsed" >&2; exit 1; }
+[[ "$(mine_next_http_error_reason "${TMP_ROOT}/mine-pool-unavailable.json")" == "rust_mine_tx_pool_unavailable" ]] || { echo "FAIL: tx pool unavailable error reason collapsed" >&2; exit 1; }
+[[ "$(mine_next_http_error_reason "${TMP_ROOT}/mine-rejected.json")" == "rust_mine_rejected" ]] || { echo "FAIL: miner rejection error reason collapsed" >&2; exit 1; }
+rpc_json() {
+  [[ "$1" == "POST" && "$3" == "/mine_next" ]] || return 1
+  printf '{"mined":false,"error":"tx pool unavailable"}\n'
+  return 22
+}
+export RUST_RPC_ADDR="127.0.0.1:59999"
+RUST_MINE_JSON="${TMP_ROOT}/mine-next-sidecar.json"
+TX_REASON=""
+if rust_mine_including_tx; then
+  echo "FAIL: rust_mine_including_tx should fail on /mine_next HTTP error" >&2
+  exit 1
+fi
+[[ "${TX_REASON}" == "rust_mine_tx_pool_unavailable" ]] || { echo "FAIL: mine_next HTTP body did not map through raw sidecar to TX_REASON: ${TX_REASON}" >&2; exit 1; }
+[[ ! -e "${RUST_MINE_JSON}.raw" ]] || { echo "FAIL: mine_next HTTP raw body was not cleaned up" >&2; exit 1; }
 
 expect_fail_contains "non-regular report" "report is not a regular file" "${HARNESS}" --check-report "${TMP_ROOT}"
 expect_fail_contains "empty report" "report is empty" "${HARNESS}" --check-report "${TMP_ROOT}/empty.json"
