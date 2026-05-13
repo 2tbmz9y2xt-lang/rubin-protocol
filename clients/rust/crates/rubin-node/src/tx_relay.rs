@@ -472,19 +472,26 @@ fn broadcast_inv_to_addrs(
     let Ok(mut outboxes) = peer_writers.lock() else {
         return Err("peer_outboxes lock poisoned".to_string());
     };
+    let mut failures = Vec::new();
     for addr in addrs {
         let Some(queue) = outboxes.get_mut(addr) else {
             if require_all_queues {
-                return Err(format!("peer outbox missing for {addr}"));
+                failures.push(format!("peer outbox missing for {addr}"));
             }
             continue;
         };
         if !queue.push_frame(frame.clone()) && require_all_queues {
-            return Err(format!("peer outbox full for {addr}"));
+            failures.push(format!("peer outbox full for {addr}"));
         }
         // Non-strict relay drops silently when a peer is slow or over byte
         // budget; strict block announce uses errors so local mining cannot
         // report announce success without enqueueing the block inventory.
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "block inventory enqueue failed: {}",
+            failures.join("; ")
+        ));
     }
     Ok(())
 }
@@ -551,7 +558,7 @@ pub fn announce_block(
     if addrs.is_empty() {
         return Ok(());
     }
-    broadcast_inv_to_addrs(
+    match broadcast_inv_to_addrs(
         &[InventoryVector {
             kind: MSG_BLOCK,
             hash,
@@ -560,7 +567,13 @@ pub fn announce_block(
         &relay_state.network,
         peer_writers,
         true,
-    )
+    ) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            relay_state.block_seen.remove(&hash);
+            Err(err)
+        }
+    }
 }
 
 /// Outcome of processing a peer-relayed tx.
@@ -1083,6 +1096,52 @@ mod tests {
             .expect_err("full outbox must fail block announce");
 
         assert!(err.contains("peer outbox full for peer-a:8333"));
+    }
+
+    #[test]
+    fn announce_block_partial_failure_enqueues_healthy_peer_and_allows_retry() {
+        let relay = TxRelayState::new();
+        let pm = PeerManager::new(crate::p2p_runtime::default_peer_runtime_config(
+            "devnet", 64,
+        ));
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "healthy:8333".to_string(),
+            ..Default::default()
+        });
+        let _ = pm.add_peer(crate::p2p_runtime::PeerState {
+            addr: "missing:8333".to_string(),
+            ..Default::default()
+        });
+        let outboxes: Mutex<HashMap<String, PeerOutbox>> = Mutex::new(HashMap::new());
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("healthy:8333".to_string(), PeerOutbox::default());
+
+        let block = crate::genesis::devnet_genesis_block_bytes();
+        let parsed = parse_block_bytes(&block).expect("parse block");
+        let block_hash = block_hash(&parsed.header_bytes).expect("block hash");
+        let err = announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect_err("missing peer outbox should fail strict block announce");
+
+        assert!(err.contains("peer outbox missing for missing:8333"));
+        assert_eq!(outboxes.lock().unwrap()["healthy:8333"].len(), 1);
+        assert!(
+            !relay.block_seen.has(&block_hash),
+            "partial failure must not suppress a later retry",
+        );
+
+        outboxes
+            .lock()
+            .unwrap()
+            .insert("missing:8333".to_string(), PeerOutbox::default());
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect("retry after outbox repair");
+
+        let boxes = outboxes.lock().unwrap();
+        assert_eq!(boxes["healthy:8333"].len(), 2);
+        assert_eq!(boxes["missing:8333"].len(), 1);
+        assert!(relay.block_seen.has(&block_hash));
     }
 
     #[test]

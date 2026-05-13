@@ -80,6 +80,14 @@ impl BoundedHashSet {
         inner.items.contains_key(hash)
     }
 
+    /// Remove hash from the set. Returns `true` if it was present.
+    pub fn remove(&self, hash: &[u8; 32]) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        inner.items.remove(hash).is_some()
+    }
+
     /// Returns the current number of entries in the set.
     pub fn len(&self) -> usize {
         let Ok(inner) = self.inner.lock() else {
@@ -177,6 +185,20 @@ mod tests {
         assert!(set.is_empty());
         set.add([1u8; 32]);
         assert!(!set.is_empty());
+    }
+
+    #[test]
+    fn remove_existing_and_missing_hashes() {
+        let set = BoundedHashSet::new(10);
+        let hash = [9u8; 32];
+
+        assert!(!set.remove(&hash));
+        assert!(set.add(hash));
+        assert!(set.has(&hash));
+        assert!(set.remove(&hash));
+        assert!(!set.has(&hash));
+        assert_eq!(set.len(), 0);
+        assert!(!set.remove(&hash));
     }
 
     #[test]
