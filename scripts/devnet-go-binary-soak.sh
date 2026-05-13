@@ -533,9 +533,17 @@ require_peer_absent() {
   partition_no_data "${unchanged_reason}"
 }
 established_local_to_remote() {
-  local pid="$1" remote="$2" raw status=0
-  raw="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null)" || status=$?
-  (( status == 0 || ${#raw} == 0 )) || return 3
+  local pid="$1" remote="$2" raw err status=0
+  command -v lsof >/dev/null 2>&1 || return 3
+  err="${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-established-${pid}.err"
+  rm -f -- "${err}"
+  raw="$(lsof -nP -a -p "${pid}" -iTCP -sTCP:ESTABLISHED -Fn 2>"${err}")" || status=$?
+  if (( status != 0 )); then
+    [[ -z "${raw}" && ! -s "${err}" ]] || { rm -f -- "${err}"; return 3; }
+    rm -f -- "${err}"
+    return 1
+  fi
+  rm -f -- "${err}"
   LSOF_RAW="${raw}" python3 - "${remote}" <<'PY'
 import os, re, sys
 remote = sys.argv[1]
