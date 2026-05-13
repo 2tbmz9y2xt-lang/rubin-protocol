@@ -246,12 +246,13 @@ block_hex = header.hex() + "02" + tx_hex + tx_hex
 mutated_tx = bytearray.fromhex(tx_hex)
 mutated_tx[5] ^= 0x01
 missing_tx_block_hex = header.hex() + "02" + mutated_tx.hex() + mutated_tx.hex()
-for path in (artifact_root / "rust-mined-block.json", artifact_root / "go-converged-block.json"):
-    dump(path, {"block_hex": block_hex, "canonical": True, "hash": block_hash, "height": height})
-dump(artifact_root / "go-converged-malformed-block.json", {"block_hex": "00", "canonical": True, "hash": block_hash, "height": height})
-dump(artifact_root / "go-converged-missing-tx-block.json", {"block_hex": missing_tx_block_hex, "canonical": True, "hash": block_hash, "height": height})
-dump(artifact_root / "rust-mine-next.json", {"block_hash": block_hash, "height": height, "mined": True, "nonce": 0, "timestamp": 1, "tx_count": tx_count})
-dump(artifact_root / "go-converge-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "in_ibd": False, "tip_hash": block_hash})
+dump(artifact_root / "rust-mined-block.json", {"block_hex": block_hex, "canonical": True, "hash": block_hash, "height": height, "implementation": "rust", "request_path": f"/get_block?height={height}", "rpc_endpoint": rust_rpc})
+dump(artifact_root / "go-converged-block.json", {"block_hex": block_hex, "canonical": True, "hash": block_hash, "height": height, "implementation": "go", "request_path": f"/get_block?height={height}", "rpc_endpoint": go_rpc})
+dump(artifact_root / "go-converged-wrong-source-block.json", {"block_hex": block_hex, "canonical": True, "hash": block_hash, "height": height, "implementation": "rust", "request_path": f"/get_block?height={height}", "rpc_endpoint": rust_rpc})
+dump(artifact_root / "go-converged-malformed-block.json", {"block_hex": "00", "canonical": True, "hash": block_hash, "height": height, "implementation": "go", "request_path": f"/get_block?height={height}", "rpc_endpoint": go_rpc})
+dump(artifact_root / "go-converged-missing-tx-block.json", {"block_hex": missing_tx_block_hex, "canonical": True, "hash": block_hash, "height": height, "implementation": "go", "request_path": f"/get_block?height={height}", "rpc_endpoint": go_rpc})
+dump(artifact_root / "rust-mine-next.json", {"block_hash": block_hash, "height": height, "implementation": "rust", "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": rust_rpc, "timestamp": 1, "tx_count": tx_count})
+dump(artifact_root / "go-converge-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": block_hash})
 tx_report = {
     **mesh_report,
     "go_submit": {
@@ -308,6 +309,12 @@ bad_converge = json.loads(json.dumps(converge_report))
 bad_converge["rust_mine"]["class"] = "accepted_only"
 dump(root / "converge-bad-rust-class.json", bad_converge)
 bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "rust-mined-block.json")
+dump(root / "converge-duplicate-sidecar-path.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
+bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-wrong-source-block.json")
+dump(root / "converge-wrong-sidecar-source.json", bad_converge)
+bad_converge = json.loads(json.dumps(converge_report))
 bad_converge["go_converge"]["block_path"] = str(artifact_root / "go-converged-malformed-block.json")
 dump(root / "converge-malformed-block.json", bad_converge)
 bad_converge = json.loads(json.dumps(converge_report))
@@ -322,6 +329,8 @@ print(root / "tx-report.json")
 print(root / "converge-report.json")
 print(root / "converge-wrong-txid.json")
 print(root / "converge-bad-rust-class.json")
+print(root / "converge-duplicate-sidecar-path.json")
+print(root / "converge-wrong-sidecar-source.json")
 print(root / "converge-malformed-block.json")
 print(root / "converge-missing-tx-block.json")
 PY
@@ -338,23 +347,30 @@ TX_REPORT="$(sed -n '2p' "${REPORT_LIST}")"
 CONVERGE_REPORT="$(sed -n '3p' "${REPORT_LIST}")"
 CONVERGE_WRONG_TXID_REPORT="$(sed -n '4p' "${REPORT_LIST}")"
 CONVERGE_BAD_RUST_CLASS_REPORT="$(sed -n '5p' "${REPORT_LIST}")"
-CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '6p' "${REPORT_LIST}")"
-CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '7p' "${REPORT_LIST}")"
-[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
+CONVERGE_DUPLICATE_SIDECAR_REPORT="$(sed -n '6p' "${REPORT_LIST}")"
+CONVERGE_WRONG_SIDECAR_SOURCE_REPORT="$(sed -n '7p' "${REPORT_LIST}")"
+CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '8p' "${REPORT_LIST}")"
+CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '9p' "${REPORT_LIST}")"
+[[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_fail_contains "public tx check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${TX_REPORT}"
 expect_fail_contains "public converge check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${CONVERGE_REPORT}"
 expect_fail_contains "public tx check-report-live" "public tx-path check-report-live is unsupported" "${HARNESS}" --check-report-live "${TX_REPORT}"
 expect_fail_contains "combined tx flag and check-report" "tx-path modes cannot be combined" "${HARNESS}" --go-submit-rust-accept --check-report "${TX_REPORT}"
+expect_fail_contains "combined tx-path flags reject" "tx-path modes are mutually exclusive" "${HARNESS}" --go-submit-rust-accept --go-submit-rust-mine-go-converge
 
 expect_pass_contains "producer tx internal check" "PASS: mixed_client_go_submit_rust_accept report structurally accepted" check_report "${TX_REPORT}" offline producer-tx
 expect_pass_contains "producer converge internal check" "PASS: mixed_client_go_submit_rust_mine_go_converge report structurally accepted" check_report "${CONVERGE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects converged txid drift" "mined/converged tx identity differs from submitted tx" check_report "${CONVERGE_WRONG_TXID_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects reused converge sidecar path" "converge sidecar paths are not pairwise distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects wrong-source converge block" "go_converge.block_path sidecar identity mismatch" check_report "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects malformed converge block" "go_converge.block_path inclusion check failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects converge block missing tx" "submitted txid missing from parsed block txids" check_report "${CONVERGE_MISSING_TX_BLOCK_REPORT}" offline producer-tx
 expect_fail_token "token maps converge class drift" "rust_mine_class_invalid" check_report "${CONVERGE_BAD_RUST_CLASS_REPORT}" offline producer-tx
+expect_fail_token "token maps reused converge sidecar path" "converge_sidecar_paths_not_distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
+expect_fail_token "token maps wrong-source converge sidecar" "converge_sidecar_identity_mismatch" check_report "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
 expect_fail_token "token maps malformed parsed block" "block_hex_parse_failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
 expect_fail_token "token maps parsed block tx omission" "block_missing_submitted_txid" check_report "${CONVERGE_MISSING_TX_BLOCK_REPORT}" offline producer-tx
 

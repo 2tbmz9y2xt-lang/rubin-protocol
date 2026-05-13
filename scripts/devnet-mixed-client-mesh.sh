@@ -16,7 +16,8 @@ tx-path proofs are same-run producer validation and are not accepted from public
 report revalidation paths.
 EOF
 }
-while (($#)); do case "$1" in --go-submit-rust-accept) TX_PATH_MODE=1; shift ;; --go-submit-rust-mine-go-converge) TX_PATH_MODE=2; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
+set_tx_path_mode() { local mode="$1" flag="$2"; (( TX_PATH_MODE == 0 )) || { echo "tx-path modes are mutually exclusive: ${flag}" >&2; usage; exit 2; }; TX_PATH_MODE="${mode}"; }
+while (($#)); do case "$1" in --go-submit-rust-accept) set_tx_path_mode 1 "$1"; shift ;; --go-submit-rust-mine-go-converge) set_tx_path_mode 2 "$1"; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 if [[ -n "${CHECK_REPORT_MODE}" && "${TX_PATH_MODE}" != "0" ]]; then echo "tx-path modes cannot be combined with --check-report or --check-report-live" >&2; exit 2; fi
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
 validate_deterministic_tx_fee() {
@@ -127,8 +128,10 @@ def parse_txid_from_hex(txhex: str) -> str:
     req(parsed.get("ok") is True and isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid), "tx parser did not produce txid")
     req(parsed.get("consumed") == len(txhex) // 2, "tx parser consumed mismatch")
     return txid
-def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, height: int, block_hash: str) -> None:
+def verify_block_inclusion_sidecar(label: str, p: Path, txhex: str, txid: str, height: int, block_hash: str, impl: str, endpoint: str, request_path: str) -> None:
     block = load_json_file(label, p)
+    req(set(block) == {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}, f"{label} keys mismatch: {sorted(block)}")
+    req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == request_path, f"{label} sidecar identity mismatch")
     actual_hash = block.get("hash") or block.get("block_hash")
     req(block.get("canonical") is True and block.get("height") == height and actual_hash == block_hash, f"{label} sidecar height/hash/canonical mismatch")
     req(isinstance(block.get("block_hex"), str) and block["block_hex"], f"{label} block_hex is missing")
@@ -371,11 +374,20 @@ if tx_mode:
         req(isinstance(block_hash, str) and re.fullmatch(r"[0-9a-f]{64}", block_hash), "rust_mine.block_hash is malformed")
         req(isinstance(rust_mine.get("tx_count"), int) and not isinstance(rust_mine.get("tx_count"), bool) and rust_mine["tx_count"] >= 2, "rust_mine.tx_count does not prove coinbase plus submitted tx")
         req(go_converge.get("height") == height and go_converge.get("block_hash") == block_hash, "go_converge does not match rust_mine height/hash")
-        mine_next = load_json_file("rust_mine.mine_next", artifact_file("rust_mine.mine_next_path", rust_mine.get("mine_next_path"), artifact_root))
+        rust_mine_next_path = artifact_file("rust_mine.mine_next_path", rust_mine.get("mine_next_path"), artifact_root)
+        rust_block_path = artifact_file("rust_mine.block_path", rust_mine.get("block_path"), artifact_root)
+        go_tip_path = artifact_file("go_converge.tip_path", go_converge.get("tip_path"), artifact_root)
+        go_block_path = artifact_file("go_converge.block_path", go_converge.get("block_path"), artifact_root)
+        req(len({rust_mine_next_path, rust_block_path, go_tip_path, go_block_path}) == 4, "converge sidecar paths are not pairwise distinct")
+        mine_next = load_json_file("rust_mine.mine_next", rust_mine_next_path)
+        req(set(mine_next) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"rust_mine.mine_next keys mismatch: {sorted(mine_next)}")
+        req(mine_next.get("implementation") == "rust" and mine_next.get("rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", "rust_mine mine_next sidecar identity mismatch")
         req(mine_next.get("mined") is True and mine_next.get("height") == height and mine_next.get("block_hash") == block_hash and mine_next.get("tx_count") == rust_mine["tx_count"], "rust_mine mine_next sidecar does not match report")
-        for label, path_value in (("rust_mine.block_path", rust_mine.get("block_path")), ("go_converge.block_path", go_converge.get("block_path"))):
-            verify_block_inclusion_sidecar(label, artifact_file(label, path_value, artifact_root), txhex, txid, height, block_hash)
-        tip = load_json_file("go_converge.tip", artifact_file("go_converge.tip_path", go_converge.get("tip_path"), artifact_root))
+        verify_block_inclusion_sidecar("rust_mine.block_path", rust_block_path, txhex, txid, height, block_hash, "rust", nodes_by_impl["rust"]["rpc_endpoint"], f"/get_block?height={height}")
+        verify_block_inclusion_sidecar("go_converge.block_path", go_block_path, txhex, txid, height, block_hash, "go", nodes_by_impl["go"]["rpc_endpoint"], f"/get_block?height={height}")
+        tip = load_json_file("go_converge.tip", go_tip_path)
+        req(set(tip) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"go_converge.tip keys mismatch: {sorted(tip)}")
+        req(tip.get("implementation") == "go" and tip.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and tip.get("request_path") == "/get_tip", "go_converge tip sidecar identity mismatch")
         req(tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash, "go_converge tip sidecar does not match rust mined block")
 connectivity = data.get("peer_connectivity")
 req(isinstance(connectivity, dict), "PASS report missing peer_connectivity object")
@@ -445,7 +457,7 @@ tx_report_reason_token() {
   python3 - "${msg}" <<'PY'
 import re, sys
 msg = "\n".join(line[5:].strip() if line.startswith("FAIL:") else line for line in sys.argv[1].splitlines())
-rules = [("rust_mine is not node-rust mined_included", "rust_mine_class_invalid"), ("go_converge is not node-go canonical_block_found", "go_converge_class_invalid"), ("mined/converged RPC endpoints are not bound", "converge_rpc_endpoint_mismatch"), ("rust_mine.height is malformed", "rust_mine_height_invalid"), ("rust_mine.block_hash is malformed", "rust_mine_hash_invalid"), ("submitted txid missing from parsed block txids", "block_missing_submitted_txid"), ("parse block_hex failed", "block_hex_parse_failed"), ("parsed block hash mismatch", "block_hash_mismatch"), ("inclusion check timeout", "block_inclusion_timeout"), ("inclusion check failed", "block_inclusion_failed"), ("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("mine_next sidecar does not match", "rust_mine_sidecar_invalid"), ("sidecar height/hash/canonical mismatch", "block_sidecar_invalid"), ("block_hex is missing", "block_sidecar_invalid"), ("tip sidecar does not match", "go_converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
+rules = [("rust_mine is not node-rust mined_included", "rust_mine_class_invalid"), ("go_converge is not node-go canonical_block_found", "go_converge_class_invalid"), ("mined/converged RPC endpoints are not bound", "converge_rpc_endpoint_mismatch"), ("rust_mine.height is malformed", "rust_mine_height_invalid"), ("rust_mine.block_hash is malformed", "rust_mine_hash_invalid"), ("sidecar identity mismatch", "converge_sidecar_identity_mismatch"), ("converge sidecar paths are not pairwise distinct", "converge_sidecar_paths_not_distinct"), ("submitted txid missing from parsed block txids", "block_missing_submitted_txid"), ("parse block_hex failed", "block_hex_parse_failed"), ("parsed block hash mismatch", "block_hash_mismatch"), ("inclusion check timeout", "block_inclusion_timeout"), ("inclusion check failed", "block_inclusion_failed"), ("mined/converged tx identity differs", "converged_tx_identity_mismatch"), ("go_converge does not match rust_mine", "go_converge_height_hash_mismatch"), ("rust_mine.tx_count", "rust_mine_tx_count_invalid"), ("mine_next sidecar does not match", "rust_mine_sidecar_invalid"), ("sidecar height/hash/canonical mismatch", "block_sidecar_invalid"), ("block_hex is missing", "block_sidecar_invalid"), ("tip sidecar does not match", "go_converge_tip_invalid"), ("tx parser consumed mismatch", "tx_parser_consumed_mismatch"), ("tx parser timeout", "tx_parser_timeout"), ("tx parser unavailable", "tx_parser_unavailable"), ("tx parser output too large", "tx_parser_output_too_large"), ("tx parser malformed output", "tx_parser_malformed_output"), ("tx parser root is not an object", "tx_parser_root_invalid"), ("tx parser did not produce txid", "tx_parser_missing_txid"), ("tx parser failed", "tx_parser_failed"), ("tx_hex is malformed or unbounded", "tx_hex_malformed_or_unbounded"), ("txid is malformed", "txid_malformed"), ("tx report rpc endpoint mismatch", "tx_report_rpc_endpoint_mismatch"), ("capture identity mismatch", "tx_capture_identity_mismatch"), ("tx sidecar paths are not pairwise distinct", "tx_sidecar_paths_not_distinct"), ("scenario mismatch", "scenario_mismatch"), ("verdict mismatch", "verdict_mismatch"), ("artifact_root mismatch", "artifact_root_mismatch"), ("tx_path identity mismatch", "tx_path_identity_mismatch"), ("tx report txid mismatch", "tx_identity_mismatch"), ("tx report raw transaction mismatch", "raw_tx_mismatch")]
 for needle, token in rules:
     if needle in msg:
         print(token)
@@ -501,9 +513,9 @@ except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
     sys.exit(1)
 PY
 }
-capture_tx_rpc_sidecar() {
-  local impl="$1" addr="$2" path="$3" out="$4" status=0; local tmp="${out}.raw"
-  rpc_json GET "${addr}" "${path}" >"${tmp}" || status=$?
+capture_rpc_sidecar() {
+  local impl="$1" method="$2" addr="$3" path="$4" out="$5" status=0; local tmp="${out}.raw"
+  rpc_json "${method}" "${addr}" "${path}" >"${tmp}" || status=$?
   (( status == 0 )) || { rm -f -- "${tmp}"; case "${status}" in 22) return 21 ;; 23) return 23 ;; *) return 22 ;; esac; }
   python3 - "${impl}" "${addr}" "${path}" "${tmp}" "${out}" <<'PY'
 import json, os, sys
@@ -529,6 +541,7 @@ finally:
     except OSError: pass
 PY
 }
+capture_tx_rpc_sidecar() { capture_rpc_sidecar "$1" GET "$2" "$3" "$4"; }
 pid_comm() { local pid="$1" raw comm status=0 err="${RUBIN_PROCESS_ARTIFACT_ROOT}/ps.err"; raw="$(bounded ps -ww -p "${pid}" -o comm= 2>"${err}")" || status=$?; (( status == 142 )) && return 3; [[ ${status} -eq 0 || ! -s "${err}" ]] || return 2; comm="$(sed -n '1p' <<<"${raw}")" || return 4; [[ -n "${comm}" ]] || return 1; basename -- "${comm}"; }
 pid_listens_on() {
   local pid="$1" endpoint="$2" out err status=0
@@ -973,10 +986,10 @@ PY
 rust_mine_including_tx() {
   local parsed rc=0
   TX_REASON=""
-  rpc_json POST "${RUST_RPC_ADDR}" /mine_next >"${RUST_MINE_JSON}" || { TX_REASON=rust_mine_rpc_failed; return 1; }
+  capture_rpc_sidecar rust POST "${RUST_RPC_ADDR}" /mine_next "${RUST_MINE_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason rust_mine "${rc}")"; return 1; }
   parsed="$(parse_mine_next_response "${RUST_MINE_JSON}")" || { rc=$?; case "${rc}" in 13) TX_REASON=rust_mine_malformed_rpc_body ;; 14) TX_REASON=rust_mine_unavailable ;; 16) TX_REASON=rust_mine_tx_count_invalid ;; *) TX_REASON=rust_mine_unknown_failure ;; esac; return 1; }
   IFS=$'\t' read -r RUST_MINE_HEIGHT RUST_MINE_HASH RUST_MINE_TX_COUNT <<<"${parsed}" || { TX_REASON=rust_mine_malformed_rpc_body; return 1; }
-  rpc_json GET "${RUST_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" >"${RUST_MINE_BLOCK_JSON}" || { TX_REASON=rust_mine_get_block_failed; return 1; }
+  capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" "${RUST_MINE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason rust_mine_get_block "${rc}")"; return 1; }
   verify_block_inclusion rust_mine "${RUST_MINE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"
 }
 tip_matches() {
@@ -995,27 +1008,30 @@ sys.exit(0 if data.get("has_tip") is True and data.get("height") == height and d
 PY
 }
 wait_go_converge_to_rust_mined_block() {
-  local deadline tmp rc=0
+  local deadline tmp rc=0 saw_valid_tip=false
   TX_REASON=""
   deadline=$((SECONDS + MESH_TIMEOUT)); tmp="${GO_CONVERGE_TIP_JSON}.tmp"
   while (( SECONDS < deadline )); do
-    if rpc_json GET "${GO_RPC_ADDR}" /get_tip >"${tmp}"; then
+    if capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${tmp}"; then
       if tip_matches "${tmp}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"; then
         mv -- "${tmp}" "${GO_CONVERGE_TIP_JSON}" || { TX_REASON=go_converge_artifact_write_failed; return 1; }
-        rpc_json GET "${GO_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" >"${GO_CONVERGE_BLOCK_JSON}" || { TX_REASON=go_converge_get_block_failed; return 1; }
+        capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" "${GO_CONVERGE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason go_converge_get_block "${rc}")"; return 1; }
         verify_block_inclusion go_converge "${GO_CONVERGE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"
         return $?
       else
         rc=$?
         (( rc == 2 )) && { rm -f -- "${tmp}"; TX_REASON=go_converge_malformed_rpc_body; return 1; }
+        saw_valid_tip=true
+        TX_REASON=""
       fi
     else
-      TX_REASON=go_converge_rpc_failed
+      rc=$?
+      [[ "${saw_valid_tip}" == "true" ]] || TX_REASON="$(tx_capture_reason go_converge_tip "${rc}")"
     fi
     sleep 1
   done
   rm -f -- "${tmp}"
-  TX_REASON="${TX_REASON:-go_converge_timeout}"
+  [[ "${saw_valid_tip}" == "true" ]] && TX_REASON=go_converge_timeout || TX_REASON="${TX_REASON:-go_converge_timeout}"
   return 1
 }
 write_outputs() {
