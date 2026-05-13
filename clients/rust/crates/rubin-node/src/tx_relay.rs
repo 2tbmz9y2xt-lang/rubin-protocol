@@ -469,8 +469,9 @@ fn broadcast_inv_to_addrs(
     frame.extend_from_slice(&payload);
     // Enqueue the frame into each peer's outbox. The peer's own thread
     // will drain the queue, ensuring writes are serialized on the TcpStream.
-    let Ok(mut outboxes) = peer_writers.lock() else {
-        return Err("peer_outboxes lock poisoned".to_string());
+    let mut outboxes = match peer_writers.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
     };
     let mut failures = Vec::new();
     for addr in addrs {
@@ -1075,6 +1076,22 @@ mod tests {
             .expect_err("full outbox must fail block announce");
         assert!(err.contains("peer outbox full for full:8333"));
         assert!(!relay.block_seen.has(&hash));
+    }
+
+    #[test]
+    fn announce_block_recovers_poisoned_peer_outboxes_lock() {
+        let (block, hash) = test_block();
+        let (relay, pm, outboxes) = block_announce_fixture(&["peer:8333"]);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = outboxes.lock().expect("lock outboxes before poison");
+            panic!("poison peer outboxes for regression test");
+        }));
+        assert!(outboxes.lock().is_err());
+
+        announce_block(&block, &relay, &pm, "local:8333", &outboxes)
+            .expect("poisoned peer outboxes should recover for announce");
+        let boxes = outboxes.lock().unwrap_or_else(|p| p.into_inner());
+        assert_block_inv_frame(&boxes["peer:8333"], hash);
     }
 
     #[test]
