@@ -249,10 +249,10 @@ if [[ "${REJECTED_RC}" == "0" ]]; then
 fi
 
 for needle in \
-  "helper_only_advisory_non_process" \
-  "is not one of ['mixed_client_process_soak']"; do
+  "evidence_type:" \
+  "helper_only_advisory_non_process"; do
   if [[ "${REJECTED_OUTPUT}" != *"${needle}"* ]]; then
-    echo "FAIL: helper-only rejection missing expected schema-boundary text: ${needle}" >&2
+    echo "FAIL: helper-only rejection missing expected stable schema-boundary marker: ${needle}" >&2
     echo "actual output:" >&2
     printf '%s\n' "${REJECTED_OUTPUT}" >&2
     exit 1
