@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-ctrlc = { version = "3.5.2", features = ["termination"] }
+ctrlc = "3.5.2"
 hex = "0.4"
 num-bigint = "0.4"
 serde = { version = "1.0", features = ["derive"] }
@@ -12,6 +12,9 @@ serde_json = "1.0"
 sha3 = "0.10"
 
 rubin-consensus = { path = "../rubin-consensus" }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
 
 [dev-dependencies]
 criterion = "0.5"
@@ -31,6 +34,7 @@ harness = false
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 
 [package.metadata.cargo-machete]
-# RUB-234 intentionally stages the cross-platform signal dependency before the
-# RUB-225 runtime shutdown wiring consumes it.
-ignored = ["ctrlc"]
+# RUB-225 uses platform-specific signal dependencies behind cfg gates. Host-only
+# cargo-machete runs can miss the inactive cfg arm, so keep both explicitly
+# ignored while the production lifecycle owns the cross-platform stop contract.
+ignored = ["ctrlc", "signal-hook"]

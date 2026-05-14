@@ -2,13 +2,16 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rubin_consensus::{
     canonical_rotation_network_name_normalized, normalized_rotation_network_name,
     SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+};
+use rubin_node::devnet_rpc::{
+    attach_shutdown_signal_to_devnet_rpc_state, RPC_READINESS_TRANSITION_FAILED,
 };
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
@@ -16,9 +19,11 @@ use rubin_node::{
     new_shared_runtime_tx_pool, parse_mine_address_arg, reconcile_chain_state_with_block_store,
     rpc_bind_host_is_loopback, start_devnet_rpc_server, start_node_p2p_service,
     validate_mainnet_genesis_guard, BlockStore, LoadedGenesisConfig, Miner, MinerConfig,
-    NodeP2PServiceConfig, PeerManager, SyncEngine,
+    NodeP2PServiceConfig, PeerManager, RunningDevnetRPCServer, RunningNodeP2PService, SyncEngine,
 };
 use serde::{Deserialize, Serialize};
+
+const PRODUCTION_STOP_SIGNAL_SET: &str = "SIGINT/SIGTERM";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CliConfig {
@@ -437,6 +442,13 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     };
     let sync_engine = Arc::new(Mutex::new(sync_engine));
     let tx_pool = new_shared_runtime_tx_pool(&sync_engine);
+    let stop_signal = match install_production_stop_signal() {
+        Ok(stop_signal) => stop_signal,
+        Err(err) => {
+            let _ = writeln!(stderr, "signal handler install failed: {err}");
+            return 2;
+        }
+    };
     // peer_runtime_cfg / peer_manager were constructed earlier (above
     // the dry-run early-exit) so the RUB-13 peer-slots banner could
     // render in the dry-run path matching the upstream sequencing at
@@ -462,6 +474,12 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         }
     };
     let _ = writeln!(stdout, "p2p: listening={}", p2p_service.addr());
+    let mut server: Option<RunningDevnetRPCServer> = None;
+    if let Some(code) =
+        maybe_shutdown_if_requested(&stop_signal, &mut server, &mut p2p_service, stdout, stderr)
+    {
+        return code;
+    }
 
     let announce_tx: Option<rubin_node::devnet_rpc::AnnounceTxFn> = {
         let relay_state = p2p_service.relay_state();
@@ -481,36 +499,238 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             rubin_node::tx_relay::announce_block(block_bytes, &relay_state, &pm, &local, &pw)
         }))
     };
-    let state = new_devnet_rpc_state_with_tx_pool(
-        Arc::clone(&sync_engine),
-        Some(block_store),
-        Arc::clone(&tx_pool),
-        Arc::clone(&peer_manager),
-        announce_tx,
-        announce_block,
-        live_mining_cfg,
+    let state = attach_shutdown_signal_to_devnet_rpc_state(
+        new_devnet_rpc_state_with_tx_pool(
+            Arc::clone(&sync_engine),
+            Some(block_store),
+            Arc::clone(&tx_pool),
+            Arc::clone(&peer_manager),
+            announce_tx,
+            announce_block,
+            live_mining_cfg,
+        ),
+        stop_signal.shutdown_requested_flag(),
     );
-    let server = if cfg.rpc_bind_addr.trim().is_empty() {
-        None
-    } else {
-        match start_devnet_rpc_server(&cfg.rpc_bind_addr, state) {
+    if !cfg.rpc_bind_addr.trim().is_empty() {
+        server = match start_devnet_rpc_server(&cfg.rpc_bind_addr, state) {
             Ok(server) => Some(server),
             Err(err) => {
-                let _ = writeln!(stderr, "rpc start failed: {err}");
-                p2p_service.close();
-                return 2;
+                return handle_rpc_start_error_after_maybe_stop(
+                    &stop_signal,
+                    &mut server,
+                    &mut p2p_service,
+                    err,
+                    stdout,
+                    stderr,
+                );
             }
-        }
-    };
+        };
+    }
     if let Some(server) = server.as_ref() {
         let _ = writeln!(stdout, "rpc: listening={}", server.addr());
+    }
+    if let Some(code) =
+        maybe_shutdown_if_requested(&stop_signal, &mut server, &mut p2p_service, stdout, stderr)
+    {
+        return code;
     }
     let _ = writeln!(stdout, "rubin-node skeleton running");
     let _ = stdout.flush();
 
-    loop {
-        thread::sleep(Duration::from_secs(60));
+    wait_for_stop_and_shutdown(&stop_signal, &mut server, &mut p2p_service, stdout, stderr)
+}
+
+trait StopSource {
+    fn stop_requested(&self) -> bool;
+    fn wait_for_stop(&self);
+}
+
+trait RpcLifecycle {
+    fn close_rpc(&mut self) -> Result<(), String>;
+}
+
+trait P2pLifecycle {
+    fn close_p2p(&mut self);
+}
+
+#[derive(Clone)]
+struct StopHandle {
+    requested: Arc<AtomicBool>,
+    wake: mpsc::SyncSender<()>,
+}
+
+struct StopSignal {
+    requested: Arc<AtomicBool>,
+    wake_rx: mpsc::Receiver<()>,
+}
+
+impl StopHandle {
+    fn request_stop(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+        // A full channel already contains a pending stop wake.
+        let _ = self.wake.try_send(());
     }
+}
+
+impl StopSource for StopSignal {
+    fn stop_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    fn wait_for_stop(&self) {
+        if self.stop_requested() {
+            return;
+        }
+        let _ = self.wake_rx.recv();
+    }
+}
+
+impl StopSignal {
+    fn shutdown_requested_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.requested)
+    }
+}
+
+impl RpcLifecycle for RunningDevnetRPCServer {
+    fn close_rpc(&mut self) -> Result<(), String> {
+        RunningDevnetRPCServer::close(self)
+    }
+}
+
+impl P2pLifecycle for RunningNodeP2PService {
+    fn close_p2p(&mut self) {
+        RunningNodeP2PService::close(self);
+    }
+}
+
+fn stop_signal_pair() -> (StopHandle, StopSignal) {
+    let requested = Arc::new(AtomicBool::new(false));
+    let (wake, wake_rx) = mpsc::sync_channel(1);
+    (
+        StopHandle {
+            requested: Arc::clone(&requested),
+            wake,
+        },
+        StopSignal { requested, wake_rx },
+    )
+}
+
+#[cfg(unix)]
+fn production_unix_stop_signals() -> [i32; 2] {
+    [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]
+}
+
+#[cfg(unix)]
+fn install_production_stop_signal() -> Result<StopSignal, String> {
+    let (handle, stop_signal) = stop_signal_pair();
+    let mut signals = signal_hook::iterator::Signals::new(production_unix_stop_signals())
+        .map_err(|err| format!("install {PRODUCTION_STOP_SIGNAL_SET} handler: {err}"))?;
+    std::thread::Builder::new()
+        .name("rubin-stop-signal".to_string())
+        .spawn(move || {
+            if signals.forever().next().is_some() {
+                handle.request_stop();
+            }
+        })
+        .map_err(|err| format!("start {PRODUCTION_STOP_SIGNAL_SET} handler: {err}"))?;
+    Ok(stop_signal)
+}
+
+#[cfg(not(unix))]
+fn install_production_stop_signal() -> Result<StopSignal, String> {
+    let (handle, stop_signal) = stop_signal_pair();
+    ctrlc::set_handler(move || handle.request_stop())
+        .map_err(|err| format!("install Ctrl-C handler: {err}"))?;
+    Ok(stop_signal)
+}
+
+fn handle_rpc_start_error_after_maybe_stop<S, R, P>(
+    stop: &S,
+    rpc_server: &mut Option<R>,
+    p2p_service: &mut P,
+    err: String,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32
+where
+    S: StopSource,
+    R: RpcLifecycle,
+    P: P2pLifecycle,
+{
+    if stop.stop_requested() && err == RPC_READINESS_TRANSITION_FAILED {
+        return shutdown_owned_services(rpc_server, p2p_service, stdout, stderr);
+    }
+    let _ = writeln!(stderr, "rpc start failed: {err}");
+    p2p_service.close_p2p();
+    2
+}
+
+fn maybe_shutdown_if_requested<S, R, P>(
+    stop: &S,
+    rpc_server: &mut Option<R>,
+    p2p_service: &mut P,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Option<i32>
+where
+    S: StopSource,
+    R: RpcLifecycle,
+    P: P2pLifecycle,
+{
+    if stop.stop_requested() {
+        Some(shutdown_owned_services(
+            rpc_server,
+            p2p_service,
+            stdout,
+            stderr,
+        ))
+    } else {
+        None
+    }
+}
+
+fn wait_for_stop_and_shutdown<S, R, P>(
+    stop: &S,
+    rpc_server: &mut Option<R>,
+    p2p_service: &mut P,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32
+where
+    S: StopSource,
+    R: RpcLifecycle,
+    P: P2pLifecycle,
+{
+    stop.wait_for_stop();
+    shutdown_owned_services(rpc_server, p2p_service, stdout, stderr)
+}
+
+fn shutdown_owned_services<R, P>(
+    rpc_server: &mut Option<R>,
+    p2p_service: &mut P,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32
+where
+    R: RpcLifecycle,
+    P: P2pLifecycle,
+{
+    let mut exit_code = 0;
+    if let Some(server) = rpc_server.as_mut() {
+        if let Err(err) = server.close_rpc() {
+            let _ = writeln!(stderr, "rpc shutdown failed: {err}");
+            exit_code = 1;
+        }
+    }
+    p2p_service.close_p2p();
+    if exit_code == 0 {
+        let _ = writeln!(stdout, "rubin-node skeleton stopped");
+        let _ = stdout.flush();
+    } else {
+        let _ = writeln!(stderr, "rubin-node skeleton stopped with shutdown errors");
+        let _ = stderr.flush();
+    }
+    exit_code
 }
 
 /// RUB-13 / GitHub #1157: format the operator-facing `p2p: peer_slots=N
@@ -1033,10 +1253,13 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::PathBuf;
+    use std::{cell::RefCell, rc::Rc};
 
     use super::{
-        format_peer_slots_banner, legacy_exposure_hooks, parse_args, run, runtime_genesis_hash,
-        validate_config, LegacyExposureReport,
+        format_peer_slots_banner, handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
+        maybe_shutdown_if_requested, parse_args, run, runtime_genesis_hash, stop_signal_pair,
+        validate_config, wait_for_stop_and_shutdown, LegacyExposureReport,
+        PRODUCTION_STOP_SIGNAL_SET, RPC_READINESS_TRANSITION_FAILED,
     };
     use rubin_consensus::constants::{
         ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
@@ -1140,13 +1363,19 @@ mod tests {
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
+        let leaf = format!(
             "{prefix}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
                 .as_nanos()
-        ))
+        );
+        assert!(leaf
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+        let mut path = std::env::temp_dir();
+        path.push(leaf);
+        path
     }
 
     fn legacy_exposure_contract_repo_path(rel: &str) -> PathBuf {
@@ -1169,6 +1398,271 @@ mod tests {
 
     fn production_rotation_networks() -> [&'static str; 4] {
         ["mainnet", "testnet", " MAINNET ", "\tTestNet\t"]
+    }
+
+    #[derive(Clone, Default)]
+    struct LifecycleEvents(Rc<RefCell<Vec<&'static str>>>);
+
+    impl LifecycleEvents {
+        fn push(&self, event: &'static str) {
+            self.0.borrow_mut().push(event);
+        }
+
+        fn snapshot(&self) -> Vec<&'static str> {
+            self.0.borrow().clone()
+        }
+    }
+
+    struct FakeRpcLifecycle {
+        events: LifecycleEvents,
+        close_result: Result<(), String>,
+    }
+
+    struct FakeP2pLifecycle {
+        events: LifecycleEvents,
+    }
+
+    impl super::RpcLifecycle for FakeRpcLifecycle {
+        fn close_rpc(&mut self) -> Result<(), String> {
+            self.events.push("rpc");
+            self.close_result.clone()
+        }
+    }
+
+    impl super::P2pLifecycle for FakeP2pLifecycle {
+        fn close_p2p(&mut self) {
+            self.events.push("p2p");
+        }
+    }
+
+    #[test]
+    fn signal_lifecycle_does_not_shutdown_before_stop_requested() {
+        let (_handle, stop_signal) = stop_signal_pair();
+        let events = LifecycleEvents::default();
+        let mut rpc_server = Some(FakeRpcLifecycle {
+            events: events.clone(),
+            close_result: Ok(()),
+        });
+        let mut p2p_service = FakeP2pLifecycle {
+            events: events.clone(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let result = maybe_shutdown_if_requested(
+            &stop_signal,
+            &mut rpc_server,
+            &mut p2p_service,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(result, None);
+        assert_eq!(events.snapshot(), Vec::<&'static str>::new());
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn signal_lifecycle_contract_names_go_aligned_signal_set() {
+        assert_eq!(PRODUCTION_STOP_SIGNAL_SET, "SIGINT/SIGTERM");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_lifecycle_unix_signal_set_excludes_sighup_for_go_parity() {
+        let signals = super::production_unix_stop_signals();
+        assert_eq!(
+            signals,
+            [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]
+        );
+        assert!(
+            !signals.contains(&signal_hook::consts::SIGHUP),
+            "SIGHUP is not part of the Go-aligned graceful shutdown contract"
+        );
+    }
+
+    #[test]
+    fn signal_lifecycle_waits_for_stop_then_closes_rpc_before_p2p() {
+        let (handle, stop_signal) = stop_signal_pair();
+        handle.request_stop();
+        handle.request_stop();
+        let events = LifecycleEvents::default();
+        let mut rpc_server = Some(FakeRpcLifecycle {
+            events: events.clone(),
+            close_result: Ok(()),
+        });
+        let mut p2p_service = FakeP2pLifecycle {
+            events: events.clone(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = wait_for_stop_and_shutdown(
+            &stop_signal,
+            &mut rpc_server,
+            &mut p2p_service,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(events.snapshot(), vec!["rpc", "p2p"]);
+        assert_eq!(
+            String::from_utf8(stdout).expect("stdout utf8"),
+            "rubin-node skeleton stopped\n"
+        );
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn signal_lifecycle_stop_before_rpc_start_closes_p2p_only() {
+        let (handle, stop_signal) = stop_signal_pair();
+        handle.request_stop();
+        let events = LifecycleEvents::default();
+        let mut rpc_server: Option<FakeRpcLifecycle> = None;
+        let mut p2p_service = FakeP2pLifecycle {
+            events: events.clone(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let result = maybe_shutdown_if_requested(
+            &stop_signal,
+            &mut rpc_server,
+            &mut p2p_service,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(result, Some(0));
+        assert_eq!(events.snapshot(), vec!["p2p"]);
+        assert_eq!(
+            String::from_utf8(stdout).expect("stdout utf8"),
+            "rubin-node skeleton stopped\n"
+        );
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn signal_lifecycle_rpc_start_error_after_stop_is_graceful_shutdown() {
+        let (handle, stop_signal) = stop_signal_pair();
+        handle.request_stop();
+        let events = LifecycleEvents::default();
+        let mut rpc_server: Option<FakeRpcLifecycle> = None;
+        let mut p2p_service = FakeP2pLifecycle {
+            events: events.clone(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = handle_rpc_start_error_after_maybe_stop(
+            &stop_signal,
+            &mut rpc_server,
+            &mut p2p_service,
+            RPC_READINESS_TRANSITION_FAILED.to_string(),
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, 0);
+        assert_eq!(events.snapshot(), vec!["p2p"]);
+        assert_eq!(
+            String::from_utf8(stdout).expect("stdout utf8"),
+            "rubin-node skeleton stopped\n"
+        );
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn signal_lifecycle_stop_does_not_mask_rpc_bind_failure() {
+        let (handle, stop_signal) = stop_signal_pair();
+        handle.request_stop();
+        let events = LifecycleEvents::default();
+        let mut rpc_server: Option<FakeRpcLifecycle> = None;
+        let mut p2p_service = FakeP2pLifecycle {
+            events: events.clone(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = handle_rpc_start_error_after_maybe_stop(
+            &stop_signal,
+            &mut rpc_server,
+            &mut p2p_service,
+            "bind 127.0.0.1:0: synthetic failure".to_string(),
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, 2);
+        assert_eq!(events.snapshot(), vec!["p2p"]);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("stderr utf8"),
+            "rpc start failed: bind 127.0.0.1:0: synthetic failure\n"
+        );
+    }
+
+    #[test]
+    fn signal_lifecycle_rpc_start_error_without_stop_is_startup_failure() {
+        let (_handle, stop_signal) = stop_signal_pair();
+        let events = LifecycleEvents::default();
+        let mut rpc_server: Option<FakeRpcLifecycle> = None;
+        let mut p2p_service = FakeP2pLifecycle {
+            events: events.clone(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = handle_rpc_start_error_after_maybe_stop(
+            &stop_signal,
+            &mut rpc_server,
+            &mut p2p_service,
+            "bind 127.0.0.1:0: synthetic failure".to_string(),
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, 2);
+        assert_eq!(events.snapshot(), vec!["p2p"]);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("stderr utf8"),
+            "rpc start failed: bind 127.0.0.1:0: synthetic failure\n"
+        );
+    }
+
+    #[test]
+    fn signal_lifecycle_rpc_close_error_reports_failure_and_still_closes_p2p() {
+        let (handle, stop_signal) = stop_signal_pair();
+        handle.request_stop();
+        let events = LifecycleEvents::default();
+        let mut rpc_server = Some(FakeRpcLifecycle {
+            events: events.clone(),
+            close_result: Err("synthetic rpc timeout".to_string()),
+        });
+        let mut p2p_service = FakeP2pLifecycle {
+            events: events.clone(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = wait_for_stop_and_shutdown(
+            &stop_signal,
+            &mut rpc_server,
+            &mut p2p_service,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, 1);
+        assert_eq!(events.snapshot(), vec!["rpc", "p2p"]);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("stderr utf8"),
+            "rpc shutdown failed: synthetic rpc timeout\nrubin-node skeleton stopped with shutdown errors\n"
+        );
     }
 
     #[test]
