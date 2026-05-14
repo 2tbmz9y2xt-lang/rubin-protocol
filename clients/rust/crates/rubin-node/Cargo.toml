@@ -34,6 +34,7 @@ harness = false
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
 
 [package.metadata.cargo-machete]
-# RUB-234/RUB-225 intentionally stage cross-platform signal dependencies before
-# platform-specific shutdown wiring consumes them.
+# RUB-225 uses platform-specific signal dependencies behind cfg gates. Host-only
+# cargo-machete runs can miss the inactive cfg arm, so keep both explicitly
+# ignored while the production lifecycle owns the cross-platform stop contract.
 ignored = ["ctrlc", "signal-hook"]
