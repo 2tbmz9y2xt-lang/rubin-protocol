@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# test_rust_skeleton_fixtures.sh — RUB-27 fixtures plus RUB-25 gate tests.
+# test_rust_skeleton_fixtures.sh — RUB-27 helper marker plus RUB-25 gate tests.
 #
-# Wires the committed Rust skeleton fixtures to the RUB-24 validator
-# and exercises the RUB-25 mixed-client process evidence gate through
-# fixture-driven pass/fail boundaries.
+# Wires the committed Rust helper/advisory marker fixtures to the RUB-24
+# validator and exercises the RUB-25 mixed-client process evidence gate
+# through fixture-driven pass/fail boundaries.
 #
-# This does not prove live Go/Rust runtime behavior; it anchors schema
-# and shell-gate acceptance claims to reproducible fixture exit codes.
+# This does not prove live Go/Rust runtime behavior; it anchors schema,
+# label-boundary, and shell-gate acceptance claims to reproducible
+# fixture exit codes.
 
 set -euo pipefail
 
@@ -14,7 +15,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
 GATE_SCRIPT="${REPO_ROOT}/scripts/devnet-rust-binary-soak.sh"
-VALID_FIXTURE="${REPO_ROOT}/scripts/devnet/testdata/rust_skeleton_fail_evidence_valid.json"
+HELPER_MARKER_FIXTURE="${REPO_ROOT}/scripts/devnet/testdata/rust_helper_advisory_non_process_marker.json"
+HELPER_FAILED_MARKER_FIXTURE="${REPO_ROOT}/scripts/devnet/testdata/rust_helper_advisory_failed_launch_marker.json"
 REJECTED_FIXTURE="${REPO_ROOT}/scripts/devnet/testdata/rust_skeleton_helper_only_rejected.json"
 VALID_MIXED_FIXTURE="${REPO_ROOT}/scripts/devnet/testdata/valid_process_mixed.json"
 
@@ -22,11 +24,14 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 [[ -x "${GATE_SCRIPT}" ]] || { echo "gate script missing or non-executable: ${GATE_SCRIPT}" >&2; exit 1; }
-[[ -r "${VALID_FIXTURE}" ]] || { echo "valid fixture unreadable: ${VALID_FIXTURE}" >&2; exit 1; }
+[[ -r "${HELPER_MARKER_FIXTURE}" ]] || { echo "helper marker fixture unreadable: ${HELPER_MARKER_FIXTURE}" >&2; exit 1; }
+[[ -r "${HELPER_FAILED_MARKER_FIXTURE}" ]] || { echo "failed helper marker fixture unreadable: ${HELPER_FAILED_MARKER_FIXTURE}" >&2; exit 1; }
 [[ -r "${REJECTED_FIXTURE}" ]] || { echo "rejected fixture unreadable: ${REJECTED_FIXTURE}" >&2; exit 1; }
 [[ -r "${VALID_MIXED_FIXTURE}" ]] || { echo "valid mixed fixture unreadable: ${VALID_MIXED_FIXTURE}" >&2; exit 1; }
 
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rubin-rust-skeleton-fixtures.XXXXXX")"
+TMP_PARENT_RAW="${TMPDIR:-/tmp}"
+TMP_PARENT="$(cd -- "${TMP_PARENT_RAW}" && pwd -P)" || { echo "failed to canonicalize TMPDIR=${TMP_PARENT_RAW}" >&2; exit 1; }
+TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-rust-skeleton-fixtures.XXXXXX")" || { echo "failed to create fixture temp dir under ${TMP_PARENT}" >&2; exit 1; }
 cleanup() {
   rm -rf -- "${TMP_ROOT}"
 }
@@ -50,6 +55,34 @@ run_validator() {
 
 run_gate() {
   "${GATE_SCRIPT}" --check-evidence "$@"
+}
+
+assert_helper_marker_labels() {
+  local fixture="$1"
+  python3 - "${fixture}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+
+errors = []
+if data.get("scenario") != "rust_helper_advisory_non_process_marker":
+    errors.append(f"scenario is not helper/advisory/non-process: {data.get('scenario')!r}")
+if data.get("verdict") != "FAIL":
+    errors.append(f"helper marker verdict must be FAIL: {data.get('verdict')!r}")
+reason = data.get("failure_reason")
+required = ["helper-only/advisory", "non-process", "full mixed-client process", "RUB-21", "RUB-22", "RUB-23"]
+if not isinstance(reason, str) or any(token not in reason for token in required):
+    errors.append(f"failure_reason does not pin helper/process boundary: {reason!r}")
+if data.get("evidence_type") != "mixed_client_process_soak":
+    errors.append("schema marker must keep the RUB-24 process enum so the validator can check its shape")
+if errors:
+    for err in errors:
+        print(f"FAIL: {err}", file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 require_output_contains() {
@@ -179,20 +212,25 @@ PY
 
 run_fips_preflight_before_captured_dev_env
 
-# Acceptance leg 1: validator MUST accept the well-formed FAIL skeleton.
-echo "test_rust_skeleton_fixtures: valid fixture must validate"
-if ! run_validator "${VALID_FIXTURE}"; then
-  echo "FAIL: validator rejected the valid skeleton fixture" >&2
+# Acceptance leg 1: validator MUST accept the well-formed helper/advisory
+# FAIL schema marker, and label checks MUST pin it as non-process.
+echo "test_rust_skeleton_fixtures: helper/advisory marker must validate and stay labeled"
+assert_helper_marker_labels "${HELPER_MARKER_FIXTURE}"
+if ! run_validator "${HELPER_MARKER_FIXTURE}"; then
+  echo "FAIL: validator rejected the helper/advisory schema marker" >&2
+  exit 1
+fi
+assert_helper_marker_labels "${HELPER_FAILED_MARKER_FIXTURE}"
+if ! run_validator "${HELPER_FAILED_MARKER_FIXTURE}"; then
+  echo "FAIL: validator rejected the failed helper/advisory schema marker" >&2
   exit 1
 fi
 
-# Acceptance leg 2: validator MUST reject the helper-only shape and
-# surface the three expected cross-field rejections (missing 2nd
-# participant, missing go counterpart impl, tx_path required for PASS).
-# Pinning to specific cross-field messages — not just non-zero exit —
-# anchors the acceptance to the rejection class, not to a generic
-# schema-shape failure that some future schema relaxation could mask.
-echo "test_rust_skeleton_fixtures: helper-only fixture must be rejected"
+# Acceptance leg 2: validator MUST reject an actual helper-only label as
+# outside the mixed_client_process_soak process schema. This pins the
+# process/helper class boundary at the schema floor instead of relying on
+# later cross-field failures under a stale process label.
+echo "test_rust_skeleton_fixtures: helper-only label must be rejected"
 # Single validator invocation captures both stderr+stdout and exit code
 # (P2 finding from PR #1510 review): the previous double-invocation
 # could mask a behavior change between runs. The if/else form keeps
@@ -211,11 +249,10 @@ if [[ "${REJECTED_RC}" == "0" ]]; then
 fi
 
 for needle in \
-  "requires at least 2 participants" \
-  "at least one implementation=go and one implementation=rust" \
-  "tx_path: required for evidence_type=mixed_client_process_soak with verdict=PASS"; do
+  "evidence_type:" \
+  "helper_only_advisory_non_process"; do
   if [[ "${REJECTED_OUTPUT}" != *"${needle}"* ]]; then
-    echo "FAIL: helper-only rejection missing expected cross-field message: ${needle}" >&2
+    echo "FAIL: helper-only rejection missing expected stable schema-boundary marker: ${needle}" >&2
     echo "actual output:" >&2
     printf '%s\n' "${REJECTED_OUTPUT}" >&2
     exit 1
@@ -257,12 +294,12 @@ expect_gate_fail "${EMPTY_FIXTURE}" "empty artifact" "artifact empty"
 expect_gate_fail "${MALFORMED_FIXTURE}" "malformed artifact" "validator rejected artifact"
 expect_gate_fail "${WRONG_ROOT_FIXTURE}" "wrong root artifact" "validator rejected artifact"
 expect_gate_fail "${STDOUT_CONTAMINATED_FIXTURE}" "stdout-contaminated artifact" "validator rejected artifact"
-expect_gate_fail "${REJECTED_FIXTURE}" "helper-only artifact" "validator rejected artifact"
-expect_gate_fail "${VALID_FIXTURE}" "no-data/failure artifact" "verdict is not PASS"
+expect_gate_fail "${REJECTED_FIXTURE}" "helper-only label artifact" "validator rejected artifact"
+expect_gate_fail "${HELPER_MARKER_FIXTURE}" "helper/advisory schema marker" "verdict is not PASS"
 expect_gate_fail "${SAME_CLIENT_FIXTURE}" "same-client selected path" "requires observer implementation to differ"
 expect_gate_fail "${UNSELECTED_HELPER_FIXTURE}" "unselected helper-only participant" "participant lacks real process evidence"
 expect_gate_fail "${SELECTED_DUP_ENDPOINT_FIXTURE}" "selected duplicate endpoint" "duplicate participant endpoint"
 expect_gate_fail "${UNSELECTED_DUP_ENDPOINT_FIXTURE}" "unselected duplicate endpoint" "duplicate participant endpoint"
 expect_gate_fail "${PASS_FAILURE_REASON_FIXTURE}" "PASS with failure_reason" "failure_reason is not allowed"
 
-echo "PASS: rust skeleton fixtures and mixed-client gate boundaries confirmed"
+echo "PASS: rust helper/advisory marker and mixed-client gate boundaries confirmed"
