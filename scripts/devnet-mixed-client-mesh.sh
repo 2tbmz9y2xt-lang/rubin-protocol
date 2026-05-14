@@ -12,10 +12,11 @@ usage:
   $0 --rust-restart --check-report PATH
   $0 --check-report-live PATH
 
---check-report and --check-report-live validate mixed_client_mesh reports only.
+--check-report and --check-report-live validate mixed_client_mesh reports.
 tx-path proofs are same-run producer validation and are not accepted from public
-report revalidation paths. Use --rust-restart with --check-report to require a
-restart scenario report instead of accepting a default mesh report.
+report revalidation paths. Use --rust-restart with --check-report to validate a
+mixed_client_rust_restart report offline. Public --rust-restart --check-report-live
+is unsupported because restart lifecycle proof is same-run producer evidence.
 EOF
 }
 set_tx_path_mode() { local mode="$1" flag="$2"; (( TX_PATH_MODE == 0 )) || { echo "tx-path modes are mutually exclusive: ${flag}" >&2; usage; exit 2; }; TX_PATH_MODE="${mode}"; }
@@ -504,8 +505,6 @@ if restart_mode:
     new_argv = restart_info.get("new_command_argv")
     req(isinstance(old_argv, list) and all(isinstance(arg, str) for arg in old_argv) and argv_eq(old_argv, expected_old_rust_argv, "rust_restart.old_command_argv", "expected old rust argv"), "rust_restart old argv mismatch")
     req(isinstance(new_argv, list) and new_argv == nodes_by_impl["rust"]["command_argv"], "rust_restart new argv mismatch")
-    if live:
-        eventually(lambda: not pid_alive(old_pid), "rust_restart old pid is still live")
 if tx_mode:
     req(sorted((p.get("name"), p.get("implementation"), p.get("endpoint"), p.get("started_at")) for p in marker.get("participants", []) if isinstance(p, dict)) == sorted((n["name"], n["implementation"], n["rpc_endpoint"], n["started_at"]) for n in nodes), "legacy marker participants are not bound to report nodes")
 if tx_mode:
@@ -646,7 +645,6 @@ msg = " ".join(x[5:].strip() for x in sys.argv[1].splitlines() if x.startswith("
 rules = [
     ("rust restart validation requires", "rust_restart_scenario_required"),
     ("rust_restart reused the stopped pid", "rust_restart_same_pid"),
-    ("rust_restart old pid is still live", "rust_restart_old_pid_still_live"),
     ("rust_restart does not prove old process stopped", "rust_restart_old_process_not_stopped"),
     ("rust_restart peer reconnect was not observed", "rust_restart_peer_reconnect_missing"),
     ("rust_restart catch_up_height mismatch", "rust_restart_catch_up_height_mismatch"),
@@ -678,7 +676,7 @@ rules = [
     ("restart.stopped_node must be node-rust", "rust_restart_stopped_node_invalid"),
     ("restart.pre_restart_height is not an integer", "rust_restart_pre_restart_height_invalid"),
     ("restart.catch_up_height is not an integer", "rust_restart_catch_up_height_invalid"),
-    ("restart.catch_up_height:", "rust_restart_catch_up_below_pre_restart"),
+    ("below pre_restart_height", "rust_restart_catch_up_below_pre_restart"),
     ("legacy marker restart object is not bound", "rust_restart_legacy_marker_mismatch"),
     ("public restart check-report-live is unsupported", "public_restart_check_report_live_unsupported"),
     ("public restart check-report is unsupported", "public_restart_check_report_unsupported"),
