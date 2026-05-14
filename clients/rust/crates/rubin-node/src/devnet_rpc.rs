@@ -61,22 +61,15 @@ pub struct DevnetRPCState {
     /// `NotReady` -> `Ready` (one-shot via `try_mark_ready_on_startup`)
     /// -> `Shutdown` (sticky terminal, via `mark_shutdown`).
     ///
-    /// Production Rust delivers two states observable to mixed-client
-    /// devnet evidence consumers today: `NotReady` (pre-`start_devnet_rpc_server`
-    /// stamp) and `Ready` (post-stamp). The third state (`Shutdown`)
-    /// is reachable via `RunningDevnetRPCServer::close` and `Drop`
-    /// (which fire on normal `RunningDevnetRPCServer` lifetime end and
-    /// stack unwinding), but `clients/rust/crates/rubin-node/src/main.rs`
-    /// installs no SIGINT/SIGTERM handler, so a signal-driven kill
-    /// terminates the process before `close()` runs and consumers see
-    /// connection-refused rather than the 503+`{"ready":false}` envelope.
-    /// Adding a signal handler that drives `mark_shutdown` is a
-    /// runtime-lifecycle change deliberately excluded from RUB-10 by
-    /// `class_change_stop_rule`; it is in scope for graceful-shutdown
-    /// follow-up work (RUB-21/RUB-22/RUB-23 own process-soak proof
-    /// per the issue's `non_goals`). Tests exercise all three states
-    /// (`ready_endpoint_reports_503_after_shutdown_sticky` drives the
-    /// gate through `Shutdown` via `RunningDevnetRPCServer::close`).
+    /// Production Rust delivers all three states observable to mixed-client
+    /// devnet evidence consumers: `NotReady` (pre-`start_devnet_rpc_server`
+    /// stamp), `Ready` (post-stamp), and `Shutdown`. The `Shutdown`
+    /// state is reachable via `RunningDevnetRPCServer::close`, `Drop`,
+    /// and the production `clients/rust/crates/rubin-node/src/main.rs`
+    /// stop-signal lifecycle, which routes SIGINT/SIGTERM through
+    /// `close()` before owned runtime services are torn down. Tests
+    /// exercise all three states (`ready_endpoint_reports_503_after_shutdown_sticky`
+    /// drives the gate through `Shutdown` via `RunningDevnetRPCServer::close`).
     readiness: Arc<ReadinessGate>,
 }
 
@@ -136,20 +129,19 @@ pub struct RunningDevnetRPCServer {
 ///   gate without binding a listener, and a code change that moved
 ///   the production stamp pre-bind would silently widen the
 ///   readiness window). It does NOT claim:
-///     * mempool admit-path is wired or fault-free (RUB-53 / #1339
-///       tracker is open; mempool policy parity slice has not landed
-///       and `/ready` does not gate on its readiness here);
+///     * mempool admit-path is fault-free (`/ready` does not gate on
+///       mempool policy or admission health here);
 ///     * miner is configured (live mining is opt-in via
 ///       `live_mining_cfg`; absence does not flip the gate to false);
 ///     * sync engine has reached chain tip or has any peer
 ///       (`PeerManager` peer count is observable via `/peers`, not
 ///       `/ready`);
 ///     * the lifecycle context has not been canceled by an external
-///       signal (Rust `main.rs` does not install SIGINT/SIGTERM
-///       handlers, so a signal-driven kill skips `mark_shutdown` and
-///       the gate stays `Ready` until process exit terminates the
-///       listener — the documented Rust-vs-Go divergence preserved
-///       from RUB-10).
+///       signal before production lifecycle shutdown starts. Rust
+///       production `main.rs` routes SIGINT/SIGTERM through
+///       `RunningDevnetRPCServer::close`, which stamps `Shutdown`; the
+///       gate itself remains a state latch and does not own signal
+///       handling.
 ///
 ///   The mempool/miner/sync absence rows above are explicitly the
 ///   `go_rust_parity_matrix` row "mempool/miner/sync prerequisites
