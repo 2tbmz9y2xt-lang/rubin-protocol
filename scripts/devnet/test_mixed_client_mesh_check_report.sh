@@ -646,8 +646,13 @@ bad_tx_samples = json.loads(json.dumps(tx_report))
 bad_tx_samples["raw_samples"]["propagation"]["samples"] = []
 dump(root / "tx-missing-propagation-samples.json", bad_tx_samples)
 bad_tx_samples = json.loads(json.dumps(tx_report))
-bad_tx_samples["raw_samples"]["propagation"]["samples"][0]["elapsed"] = float("nan")
-dump(root / "tx-nonfinite-propagation-sample.json", bad_tx_samples)
+bad_tx_samples["raw_samples"]["propagation"]["samples"][0]["elapsed"] = "__NONFINITE_ELAPSED_LITERAL__"
+nonfinite_path = root / "tx-nonfinite-propagation-sample.json"
+dump(nonfinite_path, bad_tx_samples)
+nonfinite_path.write_text(
+    nonfinite_path.read_text(encoding="utf-8").replace('"__NONFINITE_ELAPSED_LITERAL__"', "1e309"),
+    encoding="utf-8",
+)
 bad_tx_samples = json.loads(json.dumps(tx_report))
 bad_tx_samples["raw_samples"]["propagation"]["p90_seconds"] = 2
 dump(root / "tx-slo-claim-sample.json", bad_tx_samples)
