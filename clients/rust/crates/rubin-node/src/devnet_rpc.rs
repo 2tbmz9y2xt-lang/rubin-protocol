@@ -6368,6 +6368,38 @@ mod tests {
     }
 
     #[test]
+    fn ready_endpoint_attach_shutdown_signal_wires_public_readiness_path() {
+        let shutdown_requested = Arc::new(AtomicBool::new(true));
+        let (state, dir) = build_state(false);
+        let state = super::attach_shutdown_signal_to_devnet_rpc_state(
+            state,
+            Arc::clone(&shutdown_requested),
+        );
+
+        let err = match start_devnet_rpc_server("127.0.0.1:0", state.clone()) {
+            Ok(_) => panic!("attached shutdown signal must prevent ready startup"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("readiness transition failed"),
+            "unexpected startup error: {err}"
+        );
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        let body: Value = serde_json::from_slice(&response.body).expect("ready attach json");
+        assert_eq!(body["ready"], serde_json::json!(false));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
     fn ready_endpoint_rejects_ready_startup_after_shutdown_signal() {
         let shutdown_requested = Arc::new(AtomicBool::new(true));
         let (mut state, dir) = build_state(false);
@@ -6586,6 +6618,21 @@ mod tests {
         let body_json: Value = serde_json::from_slice(body).expect("body json");
         assert_eq!(body_json["error"], serde_json::json!("GET required"));
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn readiness_gate_poison_reports_not_ready() {
+        let gate = Arc::new(super::ReadinessGate::default());
+        let gate_for_panic = Arc::clone(&gate);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = gate_for_panic.state.lock().expect("lock readiness");
+            panic!("poison readiness");
+        });
+
+        assert!(
+            !gate.is_ready(),
+            "poisoned readiness mutex must fail closed as not ready"
+        );
     }
 
     /// RUB-10 / GitHub #1151: `ReadinessGate::try_mark_ready_on_startup`
