@@ -10,16 +10,15 @@ use rubin_consensus::{
     block_hash, compact_shortid,
     connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
     core_ext_profile_set_anchor_v1, featurebit_state_at_height_from_window_counts,
-    flagday_active_at_height, fork_work_from_target, merkle_root_txids,
-    parse_core_ext_covenant_data, parse_tx, pow_check, retarget_v1, retarget_v1_clamped,
-    sighash_v1_digest, tx_weight_and_stats_at_height, tx_weight_and_stats_public,
-    validate_block_basic_with_context_and_fees_at_height,
+    flagday_active_at_height, merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check,
+    retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
+    tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
     validate_block_basic_with_context_at_height, validate_rotation_descriptor_for_network,
-    validate_rotation_set_for_network, validate_tx_covenants_genesis, CoreExtDeploymentProfile,
-    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode,
-    FeatureBitDeployment, FeatureBitState, FlagDayDeployment, InMemoryChainState, Outpoint,
-    RotationProvider, SuiteParams, SuiteRegistry, UtxoEntry,
-    ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
+    validate_rotation_set_for_network, validate_tx_covenants_genesis, work_from_target,
+    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
+    DescriptorRotationProvider, ErrorCode, FeatureBitDeployment, FeatureBitState,
+    FlagDayDeployment, InMemoryChainState, Outpoint, RotationProvider, SuiteParams, SuiteRegistry,
+    UtxoEntry, ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
 use rubin_node::{devnet_genesis_chain_id, ChainState, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
@@ -1891,7 +1890,7 @@ fn main() {
                 }
             };
 
-            match fork_work_from_target(target) {
+            match work_from_target(target) {
                 Ok(w) => {
                     let resp = Response {
                         ok: true,
@@ -1962,7 +1961,7 @@ fn main() {
                             return;
                         }
                     };
-                    match fork_work_from_target(t) {
+                    match work_from_target(t) {
                         Ok(w) => total += w,
                         Err(e) => {
                             let resp = Response {

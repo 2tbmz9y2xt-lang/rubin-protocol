@@ -390,8 +390,8 @@ impl SyncEngine {
         let ancestor_work = block_store.chain_work(common_ancestor_hash)?;
 
         let branch_targets: Vec<[u8; 32]> = branch.iter().map(|b| b.target).collect();
-        let branch_work = rubin_consensus::fork_chainwork_from_targets(&branch_targets)
-            .map_err(|e| e.to_string())?;
+        let branch_work =
+            rubin_consensus::chain_work_from_targets(&branch_targets).map_err(|e| e.to_string())?;
 
         let candidate_work = ancestor_work + branch_work;
 

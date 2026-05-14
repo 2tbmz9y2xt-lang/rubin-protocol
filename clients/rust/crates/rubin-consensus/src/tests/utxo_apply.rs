@@ -1380,40 +1380,42 @@ fn apply_non_coinbase_tx_basic_multisig_input_accepted() {
 }
 
 #[test]
-fn fork_work_vectors() {
+fn work_from_target_vectors() {
     let ff = [0xffu8; 32];
-    let w = crate::fork_work_from_target(ff).expect("work");
+    let w = crate::work_from_target(ff).expect("work");
     assert_eq!(w, BigUint::one());
 
     let mut half = [0u8; 32];
     half[0] = 0x80;
-    let w = crate::fork_work_from_target(half).expect("work");
+    let w = crate::work_from_target(half).expect("work");
     assert_eq!(w, BigUint::from(2u8));
 
     let mut one = [0u8; 32];
     one[31] = 0x01;
-    let w = crate::fork_work_from_target(one).expect("work");
+    let w = crate::work_from_target(one).expect("work");
     let two256: BigUint = BigUint::one() << 256usize;
     assert_eq!(w, two256);
 }
 
 #[test]
-fn fork_work_rejects_zero_target() {
-    let err = crate::fork_work_from_target([0u8; 32]).unwrap_err();
+fn work_from_target_rejects_zero_target() {
+    let err = crate::work_from_target([0u8; 32]).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "fork_work: target is zero");
 }
 
 #[test]
-fn fork_chainwork_from_targets_accumulates_and_propagates_error() {
+fn chain_work_from_targets_accumulates_and_propagates_error() {
     let ff = [0xffu8; 32];
     let mut half = [0u8; 32];
     half[0] = 0x80;
 
-    let total = crate::fork_chainwork_from_targets(&[ff, half]).expect("chainwork");
+    let total = crate::chain_work_from_targets(&[ff, half]).expect("chainwork");
     assert_eq!(total, BigUint::from(3u8));
 
-    let err = crate::fork_chainwork_from_targets(&[[0u8; 32], ff]).unwrap_err();
+    let err = crate::chain_work_from_targets(&[[0u8; 32], ff]).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "fork_work: target is zero");
 }
 
 #[test]

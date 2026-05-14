@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use num_bigint::BigUint;
 use rubin_consensus::{
-    block_hash, fork_chainwork_from_targets, parse_block_header_bytes, BLOCK_HEADER_BYTES,
+    block_hash, chain_work_from_targets, parse_block_header_bytes, BLOCK_HEADER_BYTES,
 };
 use serde::{Deserialize, Serialize};
 
@@ -542,7 +542,7 @@ impl BlockStore {
             targets.push(header.target);
             current = header.prev_block_hash;
         }
-        fork_chainwork_from_targets(&targets).map_err(|e| e.to_string())
+        chain_work_from_targets(&targets).map_err(|e| e.to_string())
     }
 
     // ----- Undo storage -----

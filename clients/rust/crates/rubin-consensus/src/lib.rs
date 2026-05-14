@@ -79,6 +79,8 @@ pub use featurebits::{
     FeatureBitState,
 };
 pub use flagday::{flagday_active_at_height, FlagDayDeployment};
+pub use fork_choice::{chain_work_from_targets, work_from_target};
+#[allow(deprecated)]
 pub use fork_choice::{fork_chainwork_from_targets, fork_work_from_target};
 pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
 pub use merkle::merkle_root_txids;
