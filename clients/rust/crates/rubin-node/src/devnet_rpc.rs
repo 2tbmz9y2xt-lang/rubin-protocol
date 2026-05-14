@@ -36,6 +36,8 @@ const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CHUNK_LINE_BYTES: usize = 4096;
 const MAX_CONCURRENT_RPC_CONNS: usize = 8;
 const RPC_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+pub const RPC_READINESS_TRANSITION_FAILED: &str =
+    "rpc readiness transition failed: server is already ready or shutdown";
 
 pub type AnnounceTxFn =
     Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
@@ -598,9 +600,7 @@ pub fn start_devnet_rpc_server(
     // `mark_shutdown` on close.
     let readiness = Arc::clone(&state.readiness);
     if !readiness.try_mark_ready_on_startup() {
-        return Err(
-            "rpc readiness transition failed: server is already ready or shutdown".to_string(),
-        );
+        return Err(RPC_READINESS_TRANSITION_FAILED.to_string());
     }
     let join = thread::Builder::new()
         .name("rubin-devnet-rpc".to_string())

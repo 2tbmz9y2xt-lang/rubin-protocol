@@ -10,7 +10,9 @@ use rubin_consensus::{
     canonical_rotation_network_name_normalized, normalized_rotation_network_name,
     SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
 };
-use rubin_node::devnet_rpc::attach_shutdown_signal_to_devnet_rpc_state;
+use rubin_node::devnet_rpc::{
+    attach_shutdown_signal_to_devnet_rpc_state, RPC_READINESS_TRANSITION_FAILED,
+};
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
     load_chain_state, load_genesis_config, new_devnet_rpc_state_with_tx_pool,
@@ -655,7 +657,7 @@ where
     R: RpcLifecycle,
     P: P2pLifecycle,
 {
-    if stop.stop_requested() {
+    if stop.stop_requested() && err == RPC_READINESS_TRANSITION_FAILED {
         return shutdown_owned_services(rpc_server, p2p_service, stdout, stderr);
     }
     let _ = writeln!(stderr, "rpc start failed: {err}");
@@ -1257,7 +1259,7 @@ mod tests {
         format_peer_slots_banner, handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
         maybe_shutdown_if_requested, parse_args, run, runtime_genesis_hash, stop_signal_pair,
         validate_config, wait_for_stop_and_shutdown, LegacyExposureReport,
-        PRODUCTION_STOP_SIGNAL_SET,
+        PRODUCTION_STOP_SIGNAL_SET, RPC_READINESS_TRANSITION_FAILED,
     };
     use rubin_consensus::constants::{
         ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
@@ -1558,7 +1560,7 @@ mod tests {
             &stop_signal,
             &mut rpc_server,
             &mut p2p_service,
-            "readiness transition failed: server is already ready or shutdown".to_string(),
+            RPC_READINESS_TRANSITION_FAILED.to_string(),
             &mut stdout,
             &mut stderr,
         );
@@ -1570,6 +1572,36 @@ mod tests {
             "rubin-node skeleton stopped\n"
         );
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn signal_lifecycle_stop_does_not_mask_rpc_bind_failure() {
+        let (handle, stop_signal) = stop_signal_pair();
+        handle.request_stop();
+        let events = LifecycleEvents::default();
+        let mut rpc_server: Option<FakeRpcLifecycle> = None;
+        let mut p2p_service = FakeP2pLifecycle {
+            events: events.clone(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = handle_rpc_start_error_after_maybe_stop(
+            &stop_signal,
+            &mut rpc_server,
+            &mut p2p_service,
+            "bind 127.0.0.1:0: synthetic failure".to_string(),
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, 2);
+        assert_eq!(events.snapshot(), vec!["p2p"]);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).expect("stderr utf8"),
+            "rpc start failed: bind 127.0.0.1:0: synthetic failure\n"
+        );
     }
 
     #[test]
