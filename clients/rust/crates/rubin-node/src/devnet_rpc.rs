@@ -138,10 +138,10 @@ pub struct RunningDevnetRPCServer {
 ///       `/ready`);
 ///     * the lifecycle context has not been canceled by an external
 ///       signal before production lifecycle shutdown starts. Rust
-///       production `main.rs` routes SIGINT/SIGTERM through
-///       `RunningDevnetRPCServer::close`, which stamps `Shutdown`; the
-///       gate itself remains a state latch and does not own signal
-///       handling.
+///       production `main.rs` wires the SIGINT/SIGTERM stop flag into
+///       this gate, so a stop observed before or during RPC startup
+///       stamps `Shutdown` and `/ready` reports 503 before
+///       `RunningDevnetRPCServer::close` tears the listener down.
 ///
 ///   The mempool/miner/sync absence rows above are explicitly the
 ///   `go_rust_parity_matrix` row "mempool/miner/sync prerequisites
@@ -197,9 +197,9 @@ enum ReadyState {
     Shutdown,
 }
 
-#[derive(Default)]
 struct ReadinessGate {
     state: Mutex<ReadyStateCell>,
+    shutdown_requested: Option<Arc<AtomicBool>>,
 }
 
 struct ReadyStateCell(ReadyState);
@@ -210,7 +210,29 @@ impl Default for ReadyStateCell {
     }
 }
 
+impl Default for ReadinessGate {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ReadyStateCell::default()),
+            shutdown_requested: None,
+        }
+    }
+}
+
 impl ReadinessGate {
+    fn with_shutdown_requested(shutdown_requested: Arc<AtomicBool>) -> Self {
+        Self {
+            state: Mutex::new(ReadyStateCell::default()),
+            shutdown_requested: Some(shutdown_requested),
+        }
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown_requested
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
     /// RUB-10 / GitHub #1151: boot-time `NotReady` -> `Ready` transition.
     /// Mirrors Go `readinessGate.TryMarkReadyOnStartup`
     /// (`clients/go/cmd/rubin-node/http_rpc.go:166-180`). Returns true iff the gate WAS `NotReady`
@@ -219,22 +241,21 @@ impl ReadinessGate {
     /// post-shutdown re-readiness is forbidden by design — operators
     /// must restart the node, matching Go's contract).
     ///
-    /// Documented divergence vs Go (matches the divergence note on
-    /// `is_ready` below): Go's implementation calls
-    /// `observeShutdownLocked` first and can return false (and stamp
-    /// Shutdown) when a wired `shutdownCtx` is observed canceled even
-    /// while state is still `NotReady`. Rust's RPC server exposes no
-    /// equivalent context cancellation channel, so the only paths
-    /// into `Shutdown` are the explicit `mark_shutdown()` call (from
-    /// `RunningDevnetRPCServer::close` and `Drop`). A poisoned mutex
-    /// is treated as not-ready (the function returns early without
-    /// flipping the cell value) — defense-in-depth so a panicked
-    /// operation that left the gate inconsistent cannot quietly
-    /// succeed here.
+    /// Mirrors Go's `observeShutdownLocked` behavior for production
+    /// signal shutdown when this gate has a wired stop flag: a
+    /// pre-requested stop stamps `Shutdown` and prevents the startup
+    /// ready transition. A poisoned mutex is treated as not-ready (the
+    /// function returns early without flipping the cell value) —
+    /// defense-in-depth so a panicked operation that left the gate
+    /// inconsistent cannot quietly succeed here.
     fn try_mark_ready_on_startup(&self) -> bool {
         let Ok(mut cell) = self.state.lock() else {
             return false;
         };
+        if self.shutdown_requested() {
+            cell.0 = ReadyState::Shutdown;
+            return false;
+        }
         if cell.0 != ReadyState::NotReady {
             return false;
         }
@@ -254,19 +275,22 @@ impl ReadinessGate {
     }
 
     /// RUB-10 / GitHub #1151: returns true iff the gate is currently in
-    /// the `Ready` state. Mirrors Go `readinessGate.IsReady`
-    /// (`clients/go/cmd/rubin-node/http_rpc.go:198-208`) without the `shutdownCtx` cancellation
-    /// observation hook — Rust's RPC server does not expose a context
-    /// cancellation channel, so the only paths into `Shutdown` are the
-    /// explicit `mark_shutdown()` call from `RunningDevnetRPCServer::close`
-    /// and `Drop`. A poisoned mutex is treated as not-ready
-    /// (defense-in-depth: a panicked operation that left the gate in
-    /// inconsistent state defaults to reporting not-ready).
+    /// the `Ready` state and no wired production stop signal has been
+    /// observed. Mirrors Go `readinessGate.IsReady`
+    /// (`clients/go/cmd/rubin-node/http_rpc.go:198-208`) including
+    /// cancellation observation when this gate has a wired stop flag.
+    /// A poisoned mutex is treated as not-ready (defense-in-depth: a
+    /// panicked operation that left the gate in inconsistent state
+    /// defaults to reporting not-ready).
     fn is_ready(&self) -> bool {
-        self.state
-            .lock()
-            .map(|cell| cell.0 == ReadyState::Ready)
-            .unwrap_or(false)
+        let Ok(mut cell) = self.state.lock() else {
+            return false;
+        };
+        if self.shutdown_requested() {
+            cell.0 = ReadyState::Shutdown;
+            return false;
+        }
+        cell.0 == ReadyState::Ready
     }
 }
 
@@ -508,6 +532,14 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         // serving requests.
         readiness: Arc::new(ReadinessGate::default()),
     }
+}
+
+pub fn attach_shutdown_signal_to_devnet_rpc_state(
+    mut state: DevnetRPCState,
+    shutdown_requested: Arc<AtomicBool>,
+) -> DevnetRPCState {
+    state.readiness = Arc::new(ReadinessGate::with_shutdown_requested(shutdown_requested));
+    state
 }
 
 pub fn new_shared_runtime_tx_pool(sync_engine: &Arc<Mutex<SyncEngine>>) -> Arc<Mutex<TxPool>> {
@@ -6298,6 +6330,70 @@ mod tests {
         let body: Value = serde_json::from_slice(&response.body).expect("ready 200 json");
         assert_eq!(body["ready"], serde_json::json!(true));
         drop(server);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn ready_endpoint_reports_503_after_shutdown_signal_before_close() {
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let (mut state, dir) = build_state(false);
+        state.readiness = Arc::new(super::ReadinessGate::with_shutdown_requested(Arc::clone(
+            &shutdown_requested,
+        )));
+        let server =
+            start_devnet_rpc_server("127.0.0.1:0", state.clone()).expect("start_devnet_rpc_server");
+        assert!(state.readiness.is_ready());
+
+        shutdown_requested.store(true, Ordering::SeqCst);
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+
+        assert_eq!(response.status, 503);
+        let body: Value = serde_json::from_slice(&response.body).expect("ready signal json");
+        assert_eq!(body["ready"], serde_json::json!(false));
+        assert!(
+            !state.readiness.is_ready(),
+            "observed shutdown signal must stamp readiness off before close"
+        );
+        drop(server);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn ready_endpoint_rejects_ready_startup_after_shutdown_signal() {
+        let shutdown_requested = Arc::new(AtomicBool::new(true));
+        let (mut state, dir) = build_state(false);
+        state.readiness = Arc::new(super::ReadinessGate::with_shutdown_requested(
+            shutdown_requested,
+        ));
+
+        let err = match start_devnet_rpc_server("127.0.0.1:0", state.clone()) {
+            Ok(_) => panic!("shutdown-requested startup must not stamp ready"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("readiness transition failed"),
+            "unexpected startup error: {err}"
+        );
+        assert!(!state.readiness.is_ready());
+        let response = route_request(
+            &state,
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/ready".to_string(),
+                body: Vec::new(),
+            },
+        );
+        assert_eq!(response.status, 503);
+        let body: Value = serde_json::from_slice(&response.body).expect("ready signal json");
+        assert_eq!(body["ready"], serde_json::json!(false));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

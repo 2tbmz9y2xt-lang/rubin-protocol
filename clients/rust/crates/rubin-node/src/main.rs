@@ -10,6 +10,7 @@ use rubin_consensus::{
     canonical_rotation_network_name_normalized, normalized_rotation_network_name,
     SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
 };
+use rubin_node::devnet_rpc::attach_shutdown_signal_to_devnet_rpc_state;
 use rubin_node::{
     block_store_path, chain_state_path, default_peer_runtime_config, default_sync_config,
     load_chain_state, load_genesis_config, new_devnet_rpc_state_with_tx_pool,
@@ -494,14 +495,17 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             rubin_node::tx_relay::announce_block(block_bytes, &relay_state, &pm, &local, &pw)
         }))
     };
-    let state = new_devnet_rpc_state_with_tx_pool(
-        Arc::clone(&sync_engine),
-        Some(block_store),
-        Arc::clone(&tx_pool),
-        Arc::clone(&peer_manager),
-        announce_tx,
-        announce_block,
-        live_mining_cfg,
+    let state = attach_shutdown_signal_to_devnet_rpc_state(
+        new_devnet_rpc_state_with_tx_pool(
+            Arc::clone(&sync_engine),
+            Some(block_store),
+            Arc::clone(&tx_pool),
+            Arc::clone(&peer_manager),
+            announce_tx,
+            announce_block,
+            live_mining_cfg,
+        ),
+        stop_signal.shutdown_requested_flag(),
     );
     if !cfg.rpc_bind_addr.trim().is_empty() {
         server = match start_devnet_rpc_server(&cfg.rpc_bind_addr, state) {
@@ -569,6 +573,12 @@ impl StopSource for StopSignal {
             return;
         }
         let _ = self.wake_rx.recv();
+    }
+}
+
+impl StopSignal {
+    fn shutdown_requested_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.requested)
     }
 }
 
