@@ -125,10 +125,8 @@ pub struct TxPoolEntry {
     pub source: TxSource,
 }
 
-/// Defensive rollback snapshot for Rust `TxPool`. Go `sync_mempool.go` map:
-/// raw/inputs/fee/weight/size/source -> `TxPoolEntry`, txid -> `TxPoolSnapshotEntry.txid`,
-/// admissionSeq/lastAdmissionSeq -> `heap_id`/`next_heap_id`, currentMinFeeRate -> Rust cfg floor.
-/// Go wtxid has no Rust resident/index field; restore reparses raw and validates txid/weight/inputs.
+/// Defensive rollback snapshot for Rust `TxPool`.
+/// Maps Go `sync_mempool.go` fields to Rust resident state; Rust stores no resident wtxid.
 #[derive(Debug, Clone)]
 pub struct TxPoolSnapshot {
     cfg: TxPoolConfig,
@@ -2193,30 +2191,20 @@ mod tests {
     }
 
     fn assert_txpool_snapshot_same(actual: &TxPoolSnapshot, expected: &TxPoolSnapshot) {
-        assert_eq!(actual.entries.len(), expected.entries.len(), "entry count");
-        assert_eq!(
-            actual.next_heap_id, expected.next_heap_id,
-            "heap high-water"
-        );
-        assert_eq!(
-            actual.max_transactions, expected.max_transactions,
-            "max txs"
-        );
-        assert_eq!(actual.max_bytes, expected.max_bytes, "max bytes");
-        assert_eq!(
-            actual.low_water_bytes, expected.low_water_bytes,
-            "low water"
-        );
-        assert_eq!(actual.used_bytes, expected.used_bytes, "used bytes");
+        assert_eq!(actual.entries.len(), expected.entries.len());
+        assert_eq!(actual.next_heap_id, expected.next_heap_id);
+        assert_eq!(actual.max_transactions, expected.max_transactions);
+        assert_eq!(actual.max_bytes, expected.max_bytes);
+        assert_eq!(actual.low_water_bytes, expected.low_water_bytes);
+        assert_eq!(actual.used_bytes, expected.used_bytes);
         assert_eq!(
             actual.cfg.policy_current_mempool_min_fee_rate,
-            expected.cfg.policy_current_mempool_min_fee_rate,
-            "current floor"
+            expected.cfg.policy_current_mempool_min_fee_rate
         );
         for (actual, expected) in actual.entries.iter().zip(&expected.entries) {
-            assert_eq!(actual.txid, expected.txid, "txid");
-            assert_eq!(actual.heap_id, expected.heap_id, "heap id");
-            assert_eq!(actual.entry, expected.entry, "entry");
+            assert_eq!(actual.txid, expected.txid);
+            assert_eq!(actual.heap_id, expected.heap_id);
+            assert_eq!(actual.entry, expected.entry);
         }
     }
 
