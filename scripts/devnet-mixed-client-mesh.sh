@@ -359,6 +359,8 @@ restart_mode = scenario == SCENARIO_RUST_RESTART
 req(scenario in {SCENARIO_MESH, SCENARIO_TX, SCENARIO_CONVERGE, SCENARIO_RUST_SUBMIT_GO_MINE, SCENARIO_RUST_RESTART}, f"scenario is not supported: {scenario!r}")
 if tx_mode and expected_mode != "producer-tx":
     fail(("public tx-path check-report-live is unsupported" if live else "public tx-path check-report is unsupported") + "; same-run producer evidence is required")
+if restart_mode and expected_mode != "rust-restart":
+    fail(("public restart check-report-live is unsupported" if live else "public restart check-report is unsupported") + "; use --rust-restart with --check-report")
 if expected_mode == "producer-tx":
     req(tx_mode, "producer tx validation requires a mixed-client tx-path report")
 if expected_mode == "rust-restart":
@@ -444,6 +446,8 @@ if restart_mode:
     req(isinstance(restart_info.get("pre_restart_height"), int) and restart_info.get("pre_restart_height") == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
     req(isinstance(restart_info.get("catch_up_height"), int) and restart_info.get("catch_up_height") == restart["catch_up_height"], "rust_restart catch_up_height mismatch")
     req(isinstance(restart_info.get("pre_restart_has_tip"), bool) and isinstance(restart_info.get("catch_up_has_tip"), bool), "rust_restart tip flags are not booleans")
+    req(restart_info.get("pre_restart_has_tip") is True, "rust_restart pre-restart tip is not proven")
+    req(restart_info.get("catch_up_has_tip") is True, "rust_restart catch-up tip is not proven")
     req((restart_info.get("pre_restart_tip") is None or (isinstance(restart_info.get("pre_restart_tip"), str) and re.fullmatch(r"[0-9a-f]{64}", restart_info.get("pre_restart_tip")))), "rust_restart.pre_restart_tip is malformed")
     req((restart_info.get("catch_up_tip") is None or (isinstance(restart_info.get("catch_up_tip"), str) and re.fullmatch(r"[0-9a-f]{64}", restart_info.get("catch_up_tip")))), "rust_restart.catch_up_tip is malformed")
     req((restart_info["pre_restart_has_tip"] and restart_info.get("pre_restart_tip") is not None) or (not restart_info["pre_restart_has_tip"] and restart_info.get("pre_restart_tip") is None), "rust_restart.pre_restart_tip does not match pre_restart_has_tip")
@@ -608,6 +612,8 @@ rules = [
     ("rust_restart does not prove same datadir restart", "rust_restart_datadir_mismatch"),
     ("rust_restart pre_restart_height mismatch", "rust_restart_pre_restart_height_mismatch"),
     ("rust_restart tip flags are not booleans", "rust_restart_tip_flags_invalid"),
+    ("rust_restart pre-restart tip is not proven", "rust_restart_pre_tip_not_proven"),
+    ("rust_restart catch-up tip is not proven", "rust_restart_catch_up_tip_not_proven"),
     ("rust_restart.pre_restart_tip is malformed", "rust_restart_pre_tip_malformed"),
     ("rust_restart.catch_up_tip is malformed", "rust_restart_catch_up_tip_malformed"),
     ("rust_restart.pre_restart_tip does not match", "rust_restart_pre_tip_flag_mismatch"),
@@ -620,6 +626,8 @@ rules = [
     ("restart.catch_up_height is not an integer", "rust_restart_catch_up_height_invalid"),
     ("restart.catch_up_height:", "rust_restart_catch_up_below_pre_restart"),
     ("legacy marker restart object is not bound", "rust_restart_legacy_marker_mismatch"),
+    ("public restart check-report-live is unsupported", "public_restart_check_report_live_unsupported"),
+    ("public restart check-report is unsupported", "public_restart_check_report_unsupported"),
     ("public tx-path check-report-live is unsupported", "public_tx_path_check_report_live_unsupported"),
     ("public tx-path check-report is unsupported", "public_tx_path_check_report_unsupported"),
     ("same-run producer evidence is required", "tx_path_requires_same_run_producer_evidence"),
@@ -971,9 +979,15 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write("\n")
 PY
   rm -f -- "${KEYGEN_GO}" || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
-  echo "Mining mature chainstate for mixed-client tx path" >&2
+  echo "Mining mature chainstate for mixed-client evidence" >&2
   bounded_mesh "${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --mine-address "${mine_address}" --mine-blocks 101 --mine-exit >"$(_rubin_process_resolve_log "${MINE_LOG}")" 2>&1 || { status=$?; cleanup_tx_from_key_file || true; [[ ${status} -eq 142 ]] && TX_REASON=go_submit_mine_timeout || TX_REASON=go_submit_mine_failed; return 1; }
   cp -R -- "${GO_DIR}/." "${RUST_DIR}/" || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_chainstate_copy_failed; return 1; }
+}
+prepare_restart_chainstate() {
+  TX_REASON=""
+  RUST_RESTART_REASON=""
+  prepare_tx_chainstate || { RUST_RESTART_REASON="rust_restart_${TX_REASON:-chainstate_prepare_failed}"; return 1; }
+  cleanup_tx_from_key_file || { RUST_RESTART_REASON=rust_restart_chainstate_secret_cleanup_failed; return 1; }
 }
 tx_path_prepare_reason() {
   local reason="${1:-}" mode="${2:-0}"
@@ -1742,10 +1756,7 @@ if has_tip:
     if not isinstance(tip_hash, str) or re.fullmatch(r"[0-9a-f]{64}", tip_hash) is None:
         sys.exit(5)
 else:
-    if not isinstance(best_known_height, int) or isinstance(best_known_height, bool) or best_known_height < 0:
-        sys.exit(3)
-    height = best_known_height
-    tip_hash = ""
+    sys.exit(6)
 print(height, tip_hash, "true" if has_tip else "false", sep="|")
 PY
 }
@@ -1756,6 +1767,7 @@ restart_tip_reason() {
     3) printf '%s\n' "${label}_height_invalid" ;;
     4) printf '%s\n' "${label}_has_tip_invalid" ;;
     5) printf '%s\n' "${label}_tip_hash_invalid" ;;
+    6) printf '%s\n' "${label}_tip_absent" ;;
     *) printf '%s\n' "${label}_tip_parse_failed" ;;
   esac
 }
@@ -1864,6 +1876,8 @@ build_go_node || finish_no_data "${BUILD_REASON:-go_build_failed}"
 build_rust_node || finish_no_data "${BUILD_REASON:-rust_build_failed}"
 if (( TX_PATH_MODE >= 1 )); then
   prepare_tx_chainstate || finish_no_data "$(tx_path_prepare_reason "${TX_REASON:-go_submit_chainstate_prepare_failed}" "${TX_PATH_MODE}")"
+elif (( RUST_RESTART_MODE == 1 )); then
+  prepare_restart_chainstate || finish_no_data "${RUST_RESTART_REASON:-rust_restart_chainstate_prepare_failed}"
 fi
 start_go_node || finish_no_data "${START_REASON:-go_process_not_ready}"
 verify_process_identity node-go go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go go_process_identity || finish_no_data "${PROCESS_IDENTITY_REASON:-go_process_identity_unverified}"
