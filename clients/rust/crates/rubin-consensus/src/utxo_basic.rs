@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_HTLC,
-    COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_STEALTH, COV_TYPE_VAULT,
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_STEALTH,
+    COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
 use crate::core_ext::{validate_core_ext_spend_with_cache_and_suite_context_q, CoreExtProfiles};
 use crate::covenant_genesis::validate_tx_covenants_genesis;
@@ -483,7 +483,7 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
                     )?,
                 }
             }
-            COV_TYPE_EXT => {
+            COV_TYPE_CORE_EXT => {
                 if assigned.len() != 1 {
                     return Err(TxError::new(
                         ErrorCode::TxErrParse,
@@ -521,7 +521,7 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
                     )?,
                 }
             }
-            COV_TYPE_STEALTH => {
+            COV_TYPE_CORE_STEALTH => {
                 if assigned.len() != 1 {
                     return Err(TxError::new(
                         ErrorCode::TxErrParse,
@@ -813,11 +813,11 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
     if covenant_type == COV_TYPE_P2PK {
         return Ok(());
     }
-    if covenant_type == COV_TYPE_EXT {
+    if covenant_type == COV_TYPE_CORE_EXT {
         let _ = crate::core_ext::parse_core_ext_covenant_data(covenant_data)?;
         return Ok(());
     }
-    if covenant_type == COV_TYPE_STEALTH {
+    if covenant_type == COV_TYPE_CORE_STEALTH {
         let _ = parse_stealth_covenant_data(covenant_data)?;
         return Ok(());
     }
@@ -963,7 +963,7 @@ mod tests {
             },
             UtxoEntry {
                 value: 100,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[0x99]),
                 creation_height: 0,
                 created_by_coinbase: false,
@@ -995,7 +995,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 90,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[]),
             }],
             locktime: 0,
@@ -1063,7 +1063,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 90,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: vec![0x01],
             }],
             locktime: 0,
@@ -1121,17 +1121,17 @@ mod tests {
             outputs: vec![
                 TxOutput {
                     value: 30,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(7, &[]),
                 },
                 TxOutput {
                     value: 30,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(7, &[0x01]),
                 },
                 TxOutput {
                     value: 30,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(7, &[0x02]),
                 },
             ],
@@ -1189,7 +1189,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 90,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: vec![0x01],
             }],
             locktime: 0,
@@ -1714,7 +1714,7 @@ mod tests {
             },
             UtxoEntry {
                 value: 500,
-                covenant_type: COV_TYPE_STEALTH,
+                covenant_type: COV_TYPE_CORE_STEALTH,
                 covenant_data: stealth_covenant_data_for_pubkey(&keypair.pubkey_bytes()),
                 creation_height: 0,
                 created_by_coinbase: false,
@@ -1744,7 +1744,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 90,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[]),
             }],
             locktime: 0,

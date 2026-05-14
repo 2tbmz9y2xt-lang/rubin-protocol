@@ -184,8 +184,8 @@ pub(crate) fn validate_stealth_spend_q(
 mod tests {
     use super::*;
     use crate::constants::{
-        COV_TYPE_STEALTH, MAX_STEALTH_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
-        SUITE_ID_ML_DSA_87,
+        COV_TYPE_CORE_STEALTH, MAX_STEALTH_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES,
+        ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
     };
     use crate::tx::{TxInput, TxOutput};
 
@@ -199,7 +199,7 @@ mod tests {
     fn dummy_entry(one_time_key_id: [u8; 32]) -> UtxoEntry {
         UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_STEALTH,
+            covenant_type: COV_TYPE_CORE_STEALTH,
             covenant_data: stealth_cov_data(one_time_key_id),
             creation_height: 0,
             created_by_coinbase: false,

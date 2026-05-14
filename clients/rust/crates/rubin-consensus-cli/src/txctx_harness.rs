@@ -1,7 +1,7 @@
 use super::Response;
 use rubin_consensus::constants::{
-    COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_EXT, COV_TYPE_P2PK, COV_TYPE_VAULT, SIGHASH_ALL,
-    SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE, SUITE_ID_ML_DSA_87,
+    COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, COV_TYPE_VAULT,
+    SIGHASH_ALL, SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE, SUITE_ID_ML_DSA_87,
 };
 use rubin_consensus::core_ext::{
     CoreExtActiveProfile, CoreExtProfiles, CoreExtVerificationBinding,
@@ -369,7 +369,7 @@ fn txctx_default_covenant_data(cov_type: u16) -> Result<Vec<u8>, String> {
 fn txctx_parse_covenant_type(name: &str) -> Result<u16, String> {
     match name.trim().to_uppercase().as_str() {
         "" | "CORE_P2PK" => Ok(COV_TYPE_P2PK),
-        "CORE_EXT" | "CORE_EXT_INACTIVE" => Ok(COV_TYPE_EXT),
+        "CORE_EXT" | "CORE_EXT_INACTIVE" => Ok(COV_TYPE_CORE_EXT),
         "CORE_ANCHOR" => Ok(COV_TYPE_ANCHOR),
         "CORE_VAULT" => Ok(COV_TYPE_VAULT),
         "CORE_DA_COMMIT" => Ok(COV_TYPE_DA_COMMIT),
@@ -420,7 +420,7 @@ fn txctx_has_active_input_ext_id(tc: &TxctxCase, ext_id: u16) -> bool {
     tc.inputs.iter().any(|input| {
         input.ext_id == ext_id
             && txctx_parse_covenant_type(&input.covenant_type)
-                .map(|cov_type| cov_type == COV_TYPE_EXT)
+                .map(|cov_type| cov_type == COV_TYPE_CORE_EXT)
                 .unwrap_or(false)
     })
 }
@@ -505,7 +505,7 @@ fn txctx_profile_error(tc: &TxctxCase) -> Option<&'static str> {
         let Ok(cov_type) = txctx_parse_covenant_type(&output.covenant_type) else {
             continue;
         };
-        if cov_type != COV_TYPE_EXT {
+        if cov_type != COV_TYPE_CORE_EXT {
             continue;
         }
         let Some(profile) = profiles_by_ext.get(&output.ext_id) else {
@@ -532,7 +532,7 @@ fn txctx_first_overflow_ext_id(outputs: &[TxctxOutput]) -> u16 {
         let Ok(cov_type) = txctx_parse_covenant_type(&output.covenant_type) else {
             continue;
         };
-        if cov_type != COV_TYPE_EXT {
+        if cov_type != COV_TYPE_CORE_EXT {
             continue;
         }
         *counts.entry(output.ext_id).or_insert(0usize) += 1;
@@ -596,7 +596,7 @@ fn txctx_build_artifacts(tc: &TxctxCase) -> Result<TxctxArtifacts, String> {
         } else {
             input.ext_id
         };
-        let covenant_data = if cov_type == COV_TYPE_EXT {
+        let covenant_data = if cov_type == COV_TYPE_CORE_EXT {
             txctx_core_ext_covdata(ext_id, &input.ext_payload_hex, &input.raw_ext_payload_hex)?
         } else {
             txctx_default_covenant_data(cov_type)?
@@ -638,7 +638,7 @@ fn txctx_build_artifacts(tc: &TxctxCase) -> Result<TxctxArtifacts, String> {
             txctx_decode_hex(&output.raw_covenant_data_hex)?
         } else {
             match cov_type {
-                COV_TYPE_EXT => txctx_core_ext_covdata(
+                COV_TYPE_CORE_EXT => txctx_core_ext_covdata(
                     output.ext_id,
                     &output.ext_payload_hex,
                     &output.raw_ext_payload_hex,

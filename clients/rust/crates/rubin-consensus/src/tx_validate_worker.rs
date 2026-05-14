@@ -1,7 +1,7 @@
 use crate::block_basic::ParsedBlock;
 use crate::constants::{
-    CORE_EXT_WITNESS_SLOTS, CORE_STEALTH_WITNESS_SLOTS, COV_TYPE_EXT, COV_TYPE_HTLC,
-    COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_STEALTH, COV_TYPE_VAULT,
+    CORE_EXT_WITNESS_SLOTS, CORE_STEALTH_WITNESS_SLOTS, COV_TYPE_CORE_EXT, COV_TYPE_CORE_STEALTH,
+    COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
 use crate::core_ext::{validate_core_ext_spend_with_cache_and_suite_context_q, CoreExtProfiles};
 use crate::error::{ErrorCode, TxError};
@@ -264,7 +264,7 @@ fn validate_input_spend(
             )
         }
 
-        COV_TYPE_EXT => {
+        COV_TYPE_CORE_EXT => {
             if assigned.len() != CORE_EXT_WITNESS_SLOTS as usize {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,
@@ -287,7 +287,7 @@ fn validate_input_spend(
             )
         }
 
-        COV_TYPE_STEALTH => {
+        COV_TYPE_CORE_STEALTH => {
             if assigned.len() != CORE_STEALTH_WITNESS_SLOTS as usize {
                 return Err(TxError::new(
                     ErrorCode::TxErrParse,

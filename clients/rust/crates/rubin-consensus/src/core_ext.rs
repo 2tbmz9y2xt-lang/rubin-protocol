@@ -1050,7 +1050,7 @@ mod tests {
     use super::*;
     use crate::compactsize::encode_compact_size;
     use crate::constants::{
-        COV_TYPE_EXT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
+        COV_TYPE_CORE_EXT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
         VERIFY_COST_ML_DSA_87,
     };
     use crate::tx::{Tx, TxInput, TxOutput};
@@ -1067,7 +1067,7 @@ mod tests {
     fn dummy_entry(ext_id: u16) -> UtxoEntry {
         UtxoEntry {
             value: 1,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(ext_id, b""),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1092,7 +1092,7 @@ mod tests {
                 }],
                 outputs: vec![TxOutput {
                     value: 1,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: vec![],
                 }],
                 locktime: 0,
@@ -1422,7 +1422,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 90,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(ext_id, &[]),
             }],
             locktime: 0,
@@ -1437,7 +1437,7 @@ mod tests {
         };
         let resolved_inputs = vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(ext_id, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1464,7 +1464,7 @@ mod tests {
     fn core_ext_active_txcontext_missing_bundle_fails_closed() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1504,7 +1504,7 @@ mod tests {
     fn core_ext_active_txcontext_missing_runtime_verifier_wins_before_bundle_checks() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1544,7 +1544,7 @@ mod tests {
     fn core_ext_active_txcontext_openssl_binding_without_runtime_verifier_fails_closed() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1609,7 +1609,7 @@ mod tests {
     fn core_ext_active_txcontext_legacy_binding_without_runtime_verifier_fails_closed() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1656,7 +1656,7 @@ mod tests {
     fn core_ext_active_txcontext_native_binding_without_runtime_verifier_fails_closed() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1703,7 +1703,7 @@ mod tests {
     fn core_ext_active_txcontext_missing_continuing_bundle_fails_closed() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1750,7 +1750,7 @@ mod tests {
     fn core_ext_active_txcontext_reject_maps_to_sig_invalid() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1797,7 +1797,7 @@ mod tests {
     fn core_ext_active_txcontext_error_maps_to_sig_alg_invalid() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1858,7 +1858,7 @@ mod tests {
     fn core_ext_active_txcontext_openssl_digest32_binding_verifies_mldsa87_parity() {
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
