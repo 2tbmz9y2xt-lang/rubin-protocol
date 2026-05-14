@@ -312,7 +312,8 @@ def validate_raw_sample_bucket(raw_samples, label, expected, direction, txid=Non
     samples = bucket.get("samples")
     req(isinstance(samples, list), f"raw_samples.{label}.samples is not a list")
     if expected == "observed":
-        req(bucket.get("classification") == "observed" and bucket.get("reason") is None, f"raw_samples.{label} classification is not observed")
+        req(bucket.get("classification") == "observed", f"raw_samples.{label}.classification is not observed")
+        req(bucket.get("reason") is None, f"raw_samples.{label}.reason must be null for observed samples")
         req(len(samples) == 1, f"raw_samples.{label} requires one observed sample")
         source_impl, target_impl = direction.split("->") if direction else ("", "")
         validate_raw_sample_record(samples[0], f"raw_samples.{label}.samples[0]", label, direction, f"node-{source_impl}", f"node-{target_impl}", txid or "", block_hash, height)
