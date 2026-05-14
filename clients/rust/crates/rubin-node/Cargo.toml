@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
+ctrlc = { version = "3.5.2", features = ["termination"] }
 hex = "0.4"
 num-bigint = "0.4"
 serde = { version = "1.0", features = ["derive"] }
@@ -28,3 +29,8 @@ harness = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
+
+[package.metadata.cargo-machete]
+# RUB-234 intentionally stages the cross-platform signal dependency before the
+# RUB-225 runtime shutdown wiring consumes it.
+ignored = ["ctrlc"]
