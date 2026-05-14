@@ -853,6 +853,7 @@ expect_fail_token "token maps rust converge class drift" "rust_converge_class_in
 expect_fail_token "token maps reused converge sidecar path" "converge_sidecar_paths_not_distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
 expect_fail_token "token maps reused rust-submit converge sidecar path" "converge_sidecar_paths_not_distinct" check_report "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
 expect_fail_token "token maps propagation sample failures" "propagation_samples_invalid" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
+expect_fail_token "token maps convergence sample failures" "convergence_samples_invalid" check_report "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" offline producer-tx
 expect_fail_token "token maps wrong-source converge sidecar" "converge_sidecar_identity_mismatch" check_report "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
 expect_fail_token "token maps wrong-source rust converge sidecar" "converge_sidecar_identity_mismatch" check_report "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" offline producer-tx
 expect_fail_token "token maps malformed parsed block" "block_hex_parse_failed" check_report "${CONVERGE_MALFORMED_BLOCK_REPORT}" offline producer-tx
