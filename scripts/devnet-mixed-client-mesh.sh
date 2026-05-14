@@ -1247,10 +1247,10 @@ wait_go_converge_to_rust_mined_block() {
   while (( SECONDS < deadline )); do
     if capture_rpc_sidecar go GET "${GO_RPC_ADDR}" /get_tip "${tmp}"; then
       if tip_matches "${tmp}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}"; then
+        CONVERGENCE_SAMPLE_SECONDS=$((SECONDS - start_seconds))
         mv -- "${tmp}" "${GO_CONVERGE_TIP_JSON}" || { TX_REASON=go_converge_artifact_write_failed; return 1; }
         capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${RUST_MINE_HEIGHT}" "${GO_CONVERGE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason go_converge_get_block "${rc}")"; return 1; }
         verify_block_inclusion go_converge "${GO_CONVERGE_BLOCK_JSON}" "${RUST_MINE_HEIGHT}" "${RUST_MINE_HASH}" "${RUST_MINE_TX_COUNT}" || return 1
-        CONVERGENCE_SAMPLE_SECONDS=$((SECONDS - start_seconds))
         return 0
       else
         rc=$?
@@ -1275,10 +1275,10 @@ wait_rust_converge_to_go_mined_block() {
   while (( SECONDS < deadline )); do
     if capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" /get_tip "${tmp}"; then
       if tip_matches "${tmp}" "${GO_MINE_HEIGHT}" "${GO_MINE_HASH}"; then
+        CONVERGENCE_SAMPLE_SECONDS=$((SECONDS - start_seconds))
         mv -- "${tmp}" "${RUST_CONVERGE_TIP_JSON}" || { TX_REASON=rust_converge_artifact_write_failed; return 1; }
         capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=${GO_MINE_HEIGHT}" "${RUST_CONVERGE_BLOCK_JSON}" || { rc=$?; TX_REASON="$(tx_capture_reason rust_converge_get_block "${rc}")"; return 1; }
         verify_block_inclusion rust_converge "${RUST_CONVERGE_BLOCK_JSON}" "${GO_MINE_HEIGHT}" "${GO_MINE_HASH}" "${GO_MINE_TX_COUNT}" || return 1
-        CONVERGENCE_SAMPLE_SECONDS=$((SECONDS - start_seconds))
         return 0
       else
         rc=$?
