@@ -22,6 +22,7 @@ set_tx_path_mode() { local mode="$1" flag="$2"; (( TX_PATH_MODE == 0 )) || { ech
 while (($#)); do case "$1" in --rust-restart) RUST_RESTART_MODE=1; shift ;; --go-submit-rust-accept) set_tx_path_mode 1 "$1"; shift ;; --go-submit-rust-mine-go-converge) set_tx_path_mode 2 "$1"; shift ;; --rust-submit-go-mine-rust-converge) set_tx_path_mode 3 "$1"; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 if [[ -n "${CHECK_REPORT_MODE}" && "${TX_PATH_MODE}" != "0" ]]; then echo "tx-path modes cannot be combined with --check-report or --check-report-live" >&2; exit 2; fi
 if (( RUST_RESTART_MODE == 1 && TX_PATH_MODE != 0 )); then echo "--rust-restart cannot be combined with tx-path modes" >&2; exit 2; fi
+if (( RUST_RESTART_MODE == 1 )) && [[ "${CHECK_REPORT_MODE}" == "live" ]]; then echo "--rust-restart --check-report-live is unsupported; same-run producer evidence is required" >&2; exit 2; fi
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
 validate_deterministic_tx_fee() {
   [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,9}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 100000000" >&2; exit 2; }

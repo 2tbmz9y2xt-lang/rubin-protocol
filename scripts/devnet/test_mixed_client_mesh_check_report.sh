@@ -998,6 +998,7 @@ CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT="${TMP_ROOT}/converge-uppercase-bloc
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_pass_contains "rust restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --rust-restart --check-report "${RESTART_REPORT}"
 expect_fail_contains "public restart check-report" "public restart check-report is unsupported" "${HARNESS}" --check-report "${RESTART_REPORT}"
+expect_fail_contains "restart live check-report unsupported" "--rust-restart --check-report-live is unsupported" "${HARNESS}" --rust-restart --check-report-live "${RESTART_REPORT}"
 expect_fail_contains "restart mode rejects mesh artifact" "rust restart validation requires a mixed_client_rust_restart report" "${HARNESS}" --rust-restart --check-report "${MESH_REPORT}"
 expect_fail_contains "restart rejects missing restart object" "report top-level keys mismatch" "${HARNESS}" --rust-restart --check-report "${RESTART_MISSING_RESTART_REPORT}"
 expect_fail_contains "restart rejects missing process object" "report top-level keys mismatch" "${HARNESS}" --rust-restart --check-report "${RESTART_MISSING_PROCESS_REPORT}"
