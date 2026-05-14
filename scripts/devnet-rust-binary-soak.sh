@@ -98,7 +98,7 @@ print_prefixed_file() {
 
 check_mixed_client_pass_evidence() {
   local artifact="${1:-}" validator_stdout="" validator_stderr=""
-  local gate_error tmp_parent
+  local gate_error tmp_parent tmp_parent_raw
 
   [[ -n "${artifact}" ]] || mixed_gate_fail "artifact path is required" || return 1
   [[ -f "${artifact}" ]] || mixed_gate_fail "artifact not found or not a regular file: ${artifact}" || return 1
@@ -107,11 +107,18 @@ check_mixed_client_pass_evidence() {
 
   run_fips_preflight_before_captured_dev_env
 
-  tmp_parent="${TMPDIR:-/tmp}"
-  tmp_parent="$(cd -- "${tmp_parent}" && pwd -P)" || return 1
-  validator_stdout="$(mktemp "${tmp_parent%/}/rubin-mixed-validator-stdout.XXXXXX")" || return 1
+  tmp_parent_raw="${TMPDIR:-/tmp}"
+  tmp_parent="$(cd -- "${tmp_parent_raw}" && pwd -P)" || {
+    mixed_gate_fail "invalid TMPDIR for validator temp files: ${tmp_parent_raw}"
+    return 1
+  }
+  validator_stdout="$(mktemp "${tmp_parent%/}/rubin-mixed-validator-stdout.XXXXXX")" || {
+    mixed_gate_fail "failed to create validator stdout temp file under: ${tmp_parent}"
+    return 1
+  }
   validator_stderr="$(mktemp "${tmp_parent%/}/rubin-mixed-validator-stderr.XXXXXX")" || {
     rm -f -- "${validator_stdout}"
+    mixed_gate_fail "failed to create validator stderr temp file under: ${tmp_parent}"
     return 1
   }
 
@@ -506,7 +513,7 @@ artifact_root = e["RUBIN_PROCESS_ARTIFACT_ROOT"]
 log_file_relative = e["LOG_FILE"]
 log_path_absolute = os.path.join(artifact_root, log_file_relative)
 report = {
-    "scenario": "rust_helper_advisory_non_process",
+    "scenario": "rust_helper_advisory_non_process_marker",
     "evidence_class": "helper_only_advisory_non_process",
     "claim_boundary": "does_not_prove_mixed_client_process_soak",
     "implementation": "rust",

@@ -29,9 +29,9 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 [[ -r "${REJECTED_FIXTURE}" ]] || { echo "rejected fixture unreadable: ${REJECTED_FIXTURE}" >&2; exit 1; }
 [[ -r "${VALID_MIXED_FIXTURE}" ]] || { echo "valid mixed fixture unreadable: ${VALID_MIXED_FIXTURE}" >&2; exit 1; }
 
-TMP_PARENT="${TMPDIR:-/tmp}"
-TMP_PARENT="$(cd -- "${TMP_PARENT}" && pwd -P)" || { echo "failed to canonicalize TMPDIR=${TMP_PARENT}" >&2; exit 1; }
-TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-rust-skeleton-fixtures.XXXXXX")"
+TMP_PARENT_RAW="${TMPDIR:-/tmp}"
+TMP_PARENT="$(cd -- "${TMP_PARENT_RAW}" && pwd -P)" || { echo "failed to canonicalize TMPDIR=${TMP_PARENT_RAW}" >&2; exit 1; }
+TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-rust-skeleton-fixtures.XXXXXX")" || { echo "failed to create fixture temp dir under ${TMP_PARENT}" >&2; exit 1; }
 cleanup() {
   rm -rf -- "${TMP_ROOT}"
 }
