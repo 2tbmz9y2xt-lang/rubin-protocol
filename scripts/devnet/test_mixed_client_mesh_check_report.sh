@@ -828,6 +828,24 @@ bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["go_target_height"] = 7
 dump(root / "restart-go-target-not-advanced.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["pre_restart_height"] = "7"
+dump(root / "restart-pre-restart-height-string.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["go_target_height"] = "8"
+dump(root / "restart-go-target-height-string.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["catch_up_height"] = "8"
+dump(root / "restart-catch-up-height-string.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["pre_restart_height"] = True
+dump(root / "restart-pre-restart-height-bool.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["go_target_height"] = True
+dump(root / "restart-go-target-height-bool.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["catch_up_height"] = True
+dump(root / "restart-catch-up-height-bool.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["catch_up_tip"] = "cc" * 32
 dump(root / "restart-catch-up-tip-mismatch.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
@@ -972,6 +990,12 @@ print(root / "restart-new-pid-not-final.json")
 print(root / "restart-pre-tip-absent.json")
 print(root / "restart-catch-up-tip-absent.json")
 print(root / "restart-go-target-not-advanced.json")
+print(root / "restart-pre-restart-height-string.json")
+print(root / "restart-go-target-height-string.json")
+print(root / "restart-catch-up-height-string.json")
+print(root / "restart-pre-restart-height-bool.json")
+print(root / "restart-go-target-height-bool.json")
+print(root / "restart-catch-up-height-bool.json")
 print(root / "restart-catch-up-tip-mismatch.json")
 print(root / "restart-stale-legacy-text.json")
 print(root / "restart-pre-tip-sidecar-float-height.json")
@@ -1041,23 +1065,29 @@ RESTART_NEW_PID_NOT_FINAL_REPORT="$(sed -n '35p' "${REPORT_LIST}")"
 RESTART_PRE_TIP_ABSENT_REPORT="$(sed -n '36p' "${REPORT_LIST}")"
 RESTART_CATCH_UP_TIP_ABSENT_REPORT="$(sed -n '37p' "${REPORT_LIST}")"
 RESTART_GO_TARGET_NOT_ADVANCED_REPORT="$(sed -n '38p' "${REPORT_LIST}")"
-RESTART_CATCH_UP_TIP_MISMATCH_REPORT="$(sed -n '39p' "${REPORT_LIST}")"
-RESTART_STALE_LEGACY_TEXT_REPORT="$(sed -n '40p' "${REPORT_LIST}")"
-RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT="$(sed -n '41p' "${REPORT_LIST}")"
-RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT="$(sed -n '42p' "${REPORT_LIST}")"
-RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT="$(sed -n '43p' "${REPORT_LIST}")"
-RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT="$(sed -n '44p' "${REPORT_LIST}")"
-RESTART_OLD_PID_ALIAS_GO_REPORT="$(sed -n '45p' "${REPORT_LIST}")"
-RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '46p' "${REPORT_LIST}")"
-RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '47p' "${REPORT_LIST}")"
-RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '48p' "${REPORT_LIST}")"
+RESTART_PRE_RESTART_HEIGHT_STRING_REPORT="$(sed -n '39p' "${REPORT_LIST}")"
+RESTART_GO_TARGET_HEIGHT_STRING_REPORT="$(sed -n '40p' "${REPORT_LIST}")"
+RESTART_CATCH_UP_HEIGHT_STRING_REPORT="$(sed -n '41p' "${REPORT_LIST}")"
+RESTART_PRE_RESTART_HEIGHT_BOOL_REPORT="$(sed -n '42p' "${REPORT_LIST}")"
+RESTART_GO_TARGET_HEIGHT_BOOL_REPORT="$(sed -n '43p' "${REPORT_LIST}")"
+RESTART_CATCH_UP_HEIGHT_BOOL_REPORT="$(sed -n '44p' "${REPORT_LIST}")"
+RESTART_CATCH_UP_TIP_MISMATCH_REPORT="$(sed -n '45p' "${REPORT_LIST}")"
+RESTART_STALE_LEGACY_TEXT_REPORT="$(sed -n '46p' "${REPORT_LIST}")"
+RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT="$(sed -n '47p' "${REPORT_LIST}")"
+RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT="$(sed -n '48p' "${REPORT_LIST}")"
+RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT="$(sed -n '49p' "${REPORT_LIST}")"
+RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT="$(sed -n '50p' "${REPORT_LIST}")"
+RESTART_OLD_PID_ALIAS_GO_REPORT="$(sed -n '51p' "${REPORT_LIST}")"
+RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '52p' "${REPORT_LIST}")"
+RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '53p' "${REPORT_LIST}")"
+RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '54p' "${REPORT_LIST}")"
 TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT="${TMP_ROOT}/tx-huge-int-propagation-sample.json"
 CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-bool-height-sample.json"
 CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-float-height-sample.json"
 CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT="${TMP_ROOT}/converge-uppercase-block-hash-sample.json"
 [[ -f "${TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT}" && -f "${CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT}" ]] || { echo "failed to build raw sample regression reports" >&2; exit 1; }
 [[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_SLO_CLAIM_SAMPLE_REPORT}" && -n "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" && -n "${MESH_BAD_PROPAGATION_REASON_REPORT}" && -n "${MESH_BAD_CONVERGENCE_REASON_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
-[[ -n "${RESTART_REPORT}" && -n "${RESTART_MISSING_RESTART_REPORT}" && -n "${RESTART_MISSING_PROCESS_REPORT}" && -n "${RESTART_SAME_PID_REPORT}" && -n "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" && -n "${RESTART_NO_PEER_RECONNECT_REPORT}" && -n "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" && -n "${RESTART_STALE_CATCH_UP_REPORT}" && -n "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}" && -n "${RESTART_NEW_PID_NOT_FINAL_REPORT}" && -n "${RESTART_PRE_TIP_ABSENT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_ABSENT_REPORT}" && -n "${RESTART_GO_TARGET_NOT_ADVANCED_REPORT}" && -n "${RESTART_CATCH_UP_TIP_MISMATCH_REPORT}" && -n "${RESTART_STALE_LEGACY_TEXT_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}" && -n "${RESTART_OLD_PID_ALIAS_GO_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" ]] || { echo "failed to build synthetic restart reports" >&2; exit 1; }
+[[ -n "${RESTART_REPORT}" && -n "${RESTART_MISSING_RESTART_REPORT}" && -n "${RESTART_MISSING_PROCESS_REPORT}" && -n "${RESTART_SAME_PID_REPORT}" && -n "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" && -n "${RESTART_NO_PEER_RECONNECT_REPORT}" && -n "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" && -n "${RESTART_STALE_CATCH_UP_REPORT}" && -n "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}" && -n "${RESTART_NEW_PID_NOT_FINAL_REPORT}" && -n "${RESTART_PRE_TIP_ABSENT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_ABSENT_REPORT}" && -n "${RESTART_GO_TARGET_NOT_ADVANCED_REPORT}" && -n "${RESTART_PRE_RESTART_HEIGHT_STRING_REPORT}" && -n "${RESTART_GO_TARGET_HEIGHT_STRING_REPORT}" && -n "${RESTART_CATCH_UP_HEIGHT_STRING_REPORT}" && -n "${RESTART_PRE_RESTART_HEIGHT_BOOL_REPORT}" && -n "${RESTART_GO_TARGET_HEIGHT_BOOL_REPORT}" && -n "${RESTART_CATCH_UP_HEIGHT_BOOL_REPORT}" && -n "${RESTART_CATCH_UP_TIP_MISMATCH_REPORT}" && -n "${RESTART_STALE_LEGACY_TEXT_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}" && -n "${RESTART_OLD_PID_ALIAS_GO_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" ]] || { echo "failed to build synthetic restart reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_pass_contains "rust restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --rust-restart --check-report "${RESTART_REPORT}"
@@ -1082,6 +1112,12 @@ expect_fail_contains "restart rejects stale legacy text" "legacy_schema_compatib
 expect_fail_contains "restart rejects float pre-restart sidecar height" "rust_restart.pre_restart_tip_path.height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}"
 expect_fail_contains "restart rejects float catch-up sidecar height" "rust_restart.catch_up_tip_path.height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}"
 expect_fail_contains "restart rejects float go target sidecar height" "rust_restart.go_target_tip_path.height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}"
+expect_fail_contains "restart rejects string pre-restart height" "rust_restart.pre_restart_height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_PRE_RESTART_HEIGHT_STRING_REPORT}"
+expect_fail_contains "restart rejects string go target height" "rust_restart.go_target_height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_GO_TARGET_HEIGHT_STRING_REPORT}"
+expect_fail_contains "restart rejects string catch-up height" "rust_restart.catch_up_height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_CATCH_UP_HEIGHT_STRING_REPORT}"
+expect_fail_contains "restart rejects bool pre-restart height" "rust_restart.pre_restart_height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_PRE_RESTART_HEIGHT_BOOL_REPORT}"
+expect_fail_contains "restart rejects bool go target height" "rust_restart.go_target_height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_GO_TARGET_HEIGHT_BOOL_REPORT}"
+expect_fail_contains "restart rejects bool catch-up height" "rust_restart.catch_up_height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_CATCH_UP_HEIGHT_BOOL_REPORT}"
 expect_fail_contains "restart rejects bool go target mine tx_count" "rust_restart.go_target_mine_next_path.tx_count is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}"
 expect_fail_contains "restart rejects low pre-restart sidecar best-known height" "rust_restart.pre_restart_tip_path.best_known_height below height" "${HARNESS}" --rust-restart --check-report "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}"
 expect_fail_contains "restart rejects low go target sidecar best-known height" "rust_restart.go_target_tip_path.best_known_height below height" "${HARNESS}" --rust-restart --check-report "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}"
@@ -1094,6 +1130,12 @@ expect_fail_check_token "token maps restart old pid not stopped" "rust_restart_o
 expect_fail_check_token "token maps restart missing peer reconnect" "rust_restart_peer_reconnect_missing" check_report "${RESTART_NO_PEER_RECONNECT_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart catch-up below pre-restart" "rust_restart_catch_up_below_pre_restart" check_report "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart stale catch-up" "rust_restart_catch_up_height_not_go_target" check_report "${RESTART_STALE_CATCH_UP_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart pre-restart height invalid" "rust_restart_pre_restart_height_invalid" check_report "${RESTART_PRE_RESTART_HEIGHT_STRING_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart go target height invalid" "rust_restart_go_target_height_invalid" check_report "${RESTART_GO_TARGET_HEIGHT_STRING_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart catch-up height invalid" "rust_restart_catch_up_height_invalid" check_report "${RESTART_CATCH_UP_HEIGHT_STRING_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart pre-restart bool invalid" "rust_restart_pre_restart_height_invalid" check_report "${RESTART_PRE_RESTART_HEIGHT_BOOL_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart go target bool invalid" "rust_restart_go_target_height_invalid" check_report "${RESTART_GO_TARGET_HEIGHT_BOOL_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart catch-up bool invalid" "rust_restart_catch_up_height_invalid" check_report "${RESTART_CATCH_UP_HEIGHT_BOOL_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart pre tip absent" "rust_restart_pre_tip_not_proven" check_report "${RESTART_PRE_TIP_ABSENT_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart catch-up tip absent" "rust_restart_catch_up_tip_not_proven" check_report "${RESTART_CATCH_UP_TIP_ABSENT_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart pre sidecar invalid" "rust_restart_pre_restart_tip_sidecar_invalid" check_report "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" offline rust-restart
