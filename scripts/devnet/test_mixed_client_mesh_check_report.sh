@@ -107,7 +107,7 @@ capture_start = next(i for i, line in enumerate(lines) if line.startswith("rpc_j
 capture_end = next(i for i, line in enumerate(lines[capture_start:], capture_start) if line.startswith("pid_comm()"))
 tx_capture_start = next(i for i, line in enumerate(lines) if line.startswith("tx_capture_reason()"))
 tx_capture_end = next(i for i, line in enumerate(lines[tx_capture_start:], tx_capture_start) if line.startswith("tx_sidecar_reason()"))
-tx_prepare_reason_start = next(i for i, line in enumerate(lines) if line.startswith("tx_path_prepare_reason()"))
+tx_prepare_reason_start = next(i for i, line in enumerate(lines) if line.startswith("rust_restart_prepare_reason()"))
 tx_prepare_reason_end = next(i for i, line in enumerate(lines[tx_prepare_reason_start:], tx_prepare_reason_start) if line.startswith("parse_txid()"))
 block_reason_start = next(i for i, line in enumerate(lines) if line.startswith("block_inclusion_failure_reason()"))
 block_reason_end = next(i for i, line in enumerate(lines[block_reason_start:], block_reason_start) if line.startswith("verify_block_inclusion()"))
@@ -766,6 +766,9 @@ bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["old_pid"] = bad_restart["rust_restart"]["new_pid"]
 dump(root / "restart-same-pid.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["old_pid"] = bad_restart["nodes"][0]["pid"]
+dump(root / "restart-old-pid-alias-go.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["old_pid_stopped"] = False
 dump(root / "restart-old-pid-not-stopped.json", bad_restart)
 bad_restart = json.loads(json.dumps(restart_report))
@@ -841,6 +844,21 @@ dump(artifact_root / "rust-catch-up-tip-float-height.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
 bad_restart["rust_restart"]["catch_up_tip_path"] = str(artifact_root / "rust-catch-up-tip-float-height.json")
 dump(root / "restart-catch-up-tip-sidecar-float-height.json", bad_restart)
+bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 7, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "aa" * 32}
+dump(artifact_root / "rust-pre-restart-tip-low-best-known.json", bad_sidecar)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["pre_restart_tip_path"] = str(artifact_root / "rust-pre-restart-tip-low-best-known.json")
+dump(root / "restart-pre-tip-sidecar-low-best-known.json", bad_restart)
+bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 8, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32}
+dump(artifact_root / "go-restart-target-tip-low-best-known.json", bad_sidecar)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["go_target_tip_path"] = str(artifact_root / "go-restart-target-tip-low-best-known.json")
+dump(root / "restart-go-target-tip-sidecar-low-best-known.json", bad_restart)
+bad_sidecar = {"best_known_height": 0, "has_tip": True, "height": 8, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": "bb" * 32}
+dump(artifact_root / "rust-catch-up-tip-low-best-known.json", bad_sidecar)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["catch_up_tip_path"] = str(artifact_root / "rust-catch-up-tip-low-best-known.json")
+dump(root / "restart-catch-up-tip-sidecar-low-best-known.json", bad_restart)
 bad_sidecar = {"best_known_height": 8, "has_tip": True, "height": 8.0, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": "bb" * 32}
 dump(artifact_root / "go-restart-target-tip-float-height.json", bad_sidecar)
 bad_restart = json.loads(json.dumps(restart_report))
@@ -960,6 +978,10 @@ print(root / "restart-pre-tip-sidecar-float-height.json")
 print(root / "restart-catch-up-tip-sidecar-float-height.json")
 print(root / "restart-go-target-tip-float-height.json")
 print(root / "restart-go-target-mine-bool-tx-count.json")
+print(root / "restart-old-pid-alias-go.json")
+print(root / "restart-pre-tip-sidecar-low-best-known.json")
+print(root / "restart-go-target-tip-sidecar-low-best-known.json")
+print(root / "restart-catch-up-tip-sidecar-low-best-known.json")
 PY
 }
 
@@ -975,6 +997,10 @@ source "${CHECK_REPORT_LIB}"
 [[ "$(tx_path_prepare_reason go_submit_chainstate_prepare_failed 3)" == "rust_submit_chainstate_prepare_failed" ]] || { echo "FAIL: rust-submit prep fallback reason was not remapped" >&2; exit 1; }
 [[ "$(tx_path_prepare_reason go_submit_mine_timeout 3)" == "rust_submit_mine_timeout" ]] || { echo "FAIL: rust-submit mining prep timeout reason was not remapped" >&2; exit 1; }
 [[ "$(tx_path_prepare_reason tx_chainstate_unrelated 3)" == "tx_chainstate_unrelated" ]] || { echo "FAIL: non-go-submit prep reason should remain unchanged" >&2; exit 1; }
+[[ "$(rust_restart_prepare_reason go_submit_keygen_failed)" == "rust_restart_keygen_failed" ]] || { echo "FAIL: rust restart keygen prep reason was not remapped" >&2; exit 1; }
+[[ "$(rust_restart_prepare_reason go_submit_mine_timeout)" == "rust_restart_chainstate_mine_timeout" ]] || { echo "FAIL: rust restart mine prep reason was not remapped" >&2; exit 1; }
+[[ "$(rust_restart_prepare_reason go_submit_chainstate_copy_failed)" == "rust_restart_chainstate_copy_failed" ]] || { echo "FAIL: rust restart copy prep reason was not remapped" >&2; exit 1; }
+[[ "$(rust_restart_prepare_reason "")" == "rust_restart_chainstate_prepare_failed" ]] || { echo "FAIL: rust restart empty prep reason fallback was not remapped" >&2; exit 1; }
 REPORT_LIST="${TMP_ROOT}/reports.txt"
 write_reports >"${REPORT_LIST}"
 MESH_REPORT="$(sed -n '1p' "${REPORT_LIST}")"
@@ -1021,13 +1047,17 @@ RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT="$(sed -n '41p' "${REPORT_LIST}")"
 RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT="$(sed -n '42p' "${REPORT_LIST}")"
 RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT="$(sed -n '43p' "${REPORT_LIST}")"
 RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT="$(sed -n '44p' "${REPORT_LIST}")"
+RESTART_OLD_PID_ALIAS_GO_REPORT="$(sed -n '45p' "${REPORT_LIST}")"
+RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '46p' "${REPORT_LIST}")"
+RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '47p' "${REPORT_LIST}")"
+RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '48p' "${REPORT_LIST}")"
 TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT="${TMP_ROOT}/tx-huge-int-propagation-sample.json"
 CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-bool-height-sample.json"
 CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-float-height-sample.json"
 CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT="${TMP_ROOT}/converge-uppercase-block-hash-sample.json"
 [[ -f "${TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT}" && -f "${CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT}" ]] || { echo "failed to build raw sample regression reports" >&2; exit 1; }
 [[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_SLO_CLAIM_SAMPLE_REPORT}" && -n "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" && -n "${MESH_BAD_PROPAGATION_REASON_REPORT}" && -n "${MESH_BAD_CONVERGENCE_REASON_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
-[[ -n "${RESTART_REPORT}" && -n "${RESTART_MISSING_RESTART_REPORT}" && -n "${RESTART_MISSING_PROCESS_REPORT}" && -n "${RESTART_SAME_PID_REPORT}" && -n "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" && -n "${RESTART_NO_PEER_RECONNECT_REPORT}" && -n "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" && -n "${RESTART_STALE_CATCH_UP_REPORT}" && -n "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}" && -n "${RESTART_NEW_PID_NOT_FINAL_REPORT}" && -n "${RESTART_PRE_TIP_ABSENT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_ABSENT_REPORT}" && -n "${RESTART_GO_TARGET_NOT_ADVANCED_REPORT}" && -n "${RESTART_CATCH_UP_TIP_MISMATCH_REPORT}" && -n "${RESTART_STALE_LEGACY_TEXT_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}" ]] || { echo "failed to build synthetic restart reports" >&2; exit 1; }
+[[ -n "${RESTART_REPORT}" && -n "${RESTART_MISSING_RESTART_REPORT}" && -n "${RESTART_MISSING_PROCESS_REPORT}" && -n "${RESTART_SAME_PID_REPORT}" && -n "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" && -n "${RESTART_NO_PEER_RECONNECT_REPORT}" && -n "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" && -n "${RESTART_STALE_CATCH_UP_REPORT}" && -n "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}" && -n "${RESTART_NEW_PID_NOT_FINAL_REPORT}" && -n "${RESTART_PRE_TIP_ABSENT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_ABSENT_REPORT}" && -n "${RESTART_GO_TARGET_NOT_ADVANCED_REPORT}" && -n "${RESTART_CATCH_UP_TIP_MISMATCH_REPORT}" && -n "${RESTART_STALE_LEGACY_TEXT_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}" && -n "${RESTART_OLD_PID_ALIAS_GO_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" ]] || { echo "failed to build synthetic restart reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_pass_contains "rust restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --rust-restart --check-report "${RESTART_REPORT}"
@@ -1037,6 +1067,7 @@ expect_fail_contains "restart mode rejects mesh artifact" "rust restart validati
 expect_fail_contains "restart rejects missing restart object" "report top-level keys mismatch" "${HARNESS}" --rust-restart --check-report "${RESTART_MISSING_RESTART_REPORT}"
 expect_fail_contains "restart rejects missing process object" "report top-level keys mismatch" "${HARNESS}" --rust-restart --check-report "${RESTART_MISSING_PROCESS_REPORT}"
 expect_fail_contains "restart rejects same pid reuse" "rust_restart reused the stopped pid" "${HARNESS}" --rust-restart --check-report "${RESTART_SAME_PID_REPORT}"
+expect_fail_contains "restart rejects old pid aliasing go" "rust_restart.old_pid aliases a final live node pid" "${HARNESS}" --rust-restart --check-report "${RESTART_OLD_PID_ALIAS_GO_REPORT}"
 expect_fail_contains "restart rejects old pid not stopped" "rust_restart does not prove old process stopped" "${HARNESS}" --rust-restart --check-report "${RESTART_OLD_PID_NOT_STOPPED_REPORT}"
 expect_fail_contains "restart rejects missing peer reconnect" "rust_restart peer reconnect was not observed" "${HARNESS}" --rust-restart --check-report "${RESTART_NO_PEER_RECONNECT_REPORT}"
 expect_fail_contains "restart rejects catch-up below pre-restart" "below pre_restart_height" "${HARNESS}" --rust-restart --check-report "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}"
@@ -1052,9 +1083,13 @@ expect_fail_contains "restart rejects float pre-restart sidecar height" "rust_re
 expect_fail_contains "restart rejects float catch-up sidecar height" "rust_restart.catch_up_tip_path.height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}"
 expect_fail_contains "restart rejects float go target sidecar height" "rust_restart.go_target_tip_path.height is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}"
 expect_fail_contains "restart rejects bool go target mine tx_count" "rust_restart.go_target_mine_next_path.tx_count is not an integer" "${HARNESS}" --rust-restart --check-report "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}"
+expect_fail_contains "restart rejects low pre-restart sidecar best-known height" "rust_restart.pre_restart_tip_path.best_known_height below height" "${HARNESS}" --rust-restart --check-report "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}"
+expect_fail_contains "restart rejects low go target sidecar best-known height" "rust_restart.go_target_tip_path.best_known_height below height" "${HARNESS}" --rust-restart --check-report "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}"
+expect_fail_contains "restart rejects low catch-up sidecar best-known height" "rust_restart.catch_up_tip_path.best_known_height below height" "${HARNESS}" --rust-restart --check-report "${RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}"
 expect_fail_check_token "token maps restart mode mismatch" "rust_restart_scenario_required" check_report "${MESH_REPORT}" offline rust-restart
 expect_fail_check_token "token maps public restart report" "public_restart_check_report_unsupported" check_report "${RESTART_REPORT}" offline public
 expect_fail_check_token "token maps restart same pid" "rust_restart_same_pid" check_report "${RESTART_SAME_PID_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart old pid alias" "rust_restart_old_pid_aliases_final_node" check_report "${RESTART_OLD_PID_ALIAS_GO_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart old pid not stopped" "rust_restart_old_process_not_stopped" check_report "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart missing peer reconnect" "rust_restart_peer_reconnect_missing" check_report "${RESTART_NO_PEER_RECONNECT_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart catch-up below pre-restart" "rust_restart_catch_up_below_pre_restart" check_report "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" offline rust-restart
@@ -1065,6 +1100,9 @@ expect_fail_check_token "token maps restart pre sidecar invalid" "rust_restart_p
 expect_fail_check_token "token maps restart catch-up sidecar invalid" "rust_restart_catch_up_tip_sidecar_invalid" check_report "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart go target sidecar invalid" "rust_restart_go_target_tip_sidecar_invalid" check_report "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart go target mine sidecar invalid" "rust_restart_go_target_mine_next_invalid" check_report "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart pre sidecar low best-known" "rust_restart_pre_restart_tip_sidecar_invalid" check_report "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart go target sidecar low best-known" "rust_restart_go_target_tip_sidecar_invalid" check_report "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart catch-up sidecar low best-known" "rust_restart_catch_up_tip_sidecar_invalid" check_report "${RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart go target not advanced" "rust_restart_go_target_not_advanced" check_report "${RESTART_GO_TARGET_NOT_ADVANCED_REPORT}" offline rust-restart
 expect_fail_check_token "token maps restart catch-up tip mismatch" "rust_restart_catch_up_tip_not_go_target" check_report "${RESTART_CATCH_UP_TIP_MISMATCH_REPORT}" offline rust-restart
 expect_fail_contains "public rejects propagation not-requested reason drift" "raw_samples.propagation must be not_requested with canonical reason" "${HARNESS}" --check-report "${MESH_BAD_PROPAGATION_REASON_REPORT}"

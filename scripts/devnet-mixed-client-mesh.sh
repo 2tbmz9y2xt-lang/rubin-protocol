@@ -453,6 +453,9 @@ if restart_mode:
     req(isinstance(new_pid, int) and not isinstance(new_pid, bool) and new_pid > 0, "rust_restart.new_pid is not a positive integer")
     req(old_pid != new_pid, "rust_restart reused the stopped pid")
     req(new_pid == nodes_by_impl["rust"]["pid"], "rust_restart.new_pid is not the final rust node pid")
+    req(old_pid not in {nodes_by_impl["go"]["pid"], nodes_by_impl["rust"]["pid"]}, "rust_restart.old_pid aliases a final live node pid")
+    if live:
+        eventually(lambda: not pid_alive(old_pid), "rust_restart old pid is still live")
     req(ep(restart_info.get("old_rpc_endpoint")) and ep(restart_info.get("old_p2p_endpoint")), "rust_restart old endpoints are malformed")
     req(restart_info.get("new_rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"] and restart_info.get("new_p2p_endpoint") == nodes_by_impl["rust"]["p2p_endpoint"], "rust_restart new endpoints are not bound to final rust node")
     req(ts(restart_info.get("old_started_at")) and restart_info.get("new_started_at") == nodes_by_impl["rust"]["started_at"], "rust_restart timestamps are not bound to old/new processes")
@@ -481,10 +484,11 @@ if restart_mode:
         sidecar = load_json_file(f"rust_restart.{path_field}", sidecar_path)
         req(set(sidecar) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"rust_restart.{path_field} keys mismatch: {sorted(sidecar)}")
         sidecar_height = json_int(sidecar.get("height"), f"rust_restart.{path_field}.height", 0)
-        json_int(sidecar.get("best_known_height"), f"rust_restart.{path_field}.best_known_height", 0)
+        sidecar_best_known_height = json_int(sidecar.get("best_known_height"), f"rust_restart.{path_field}.best_known_height", 0)
         sidecar_has_tip = json_bool(sidecar.get("has_tip"), f"rust_restart.{path_field}.has_tip")
         json_bool(sidecar.get("in_ibd"), f"rust_restart.{path_field}.in_ibd")
         sidecar_tip = json_hex32(sidecar.get("tip_hash"), f"rust_restart.{path_field}.tip_hash")
+        req(sidecar_best_known_height >= sidecar_height, f"rust_restart.{path_field}.best_known_height below height")
         req(sidecar.get("implementation") == impl and sidecar.get("rpc_endpoint") == endpoint and sidecar.get("request_path") == "/get_tip", f"rust_restart.{path_field} identity mismatch")
         req(sidecar_has_tip is True and sidecar_height == height and sidecar_tip == tip, f"rust_restart.{path_field} does not match report")
     restart_tip_sidecar("pre_restart_tip_path", "rust", restart_info["old_rpc_endpoint"], restart_info["pre_restart_height"], restart_info["pre_restart_tip"])
@@ -645,6 +649,8 @@ msg = " ".join(x[5:].strip() for x in sys.argv[1].splitlines() if x.startswith("
 rules = [
     ("rust restart validation requires", "rust_restart_scenario_required"),
     ("rust_restart reused the stopped pid", "rust_restart_same_pid"),
+    ("rust_restart.old_pid aliases", "rust_restart_old_pid_aliases_final_node"),
+    ("rust_restart old pid is still live", "rust_restart_old_pid_still_live"),
     ("rust_restart does not prove old process stopped", "rust_restart_old_process_not_stopped"),
     ("rust_restart peer reconnect was not observed", "rust_restart_peer_reconnect_missing"),
     ("rust_restart catch_up_height mismatch", "rust_restart_catch_up_height_mismatch"),
