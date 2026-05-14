@@ -41,6 +41,11 @@ pub const CORE_EXT_WITNESS_SLOTS: u64 = 1;
 pub const COV_TYPE_CORE_STEALTH: u16 = 0x0105;
 pub const CORE_STEALTH_WITNESS_SLOTS: u64 = 1;
 
+#[deprecated(note = "use COV_TYPE_CORE_EXT")]
+pub const COV_TYPE_EXT: u16 = COV_TYPE_CORE_EXT;
+#[deprecated(note = "use COV_TYPE_CORE_STEALTH")]
+pub const COV_TYPE_STEALTH: u16 = COV_TYPE_CORE_STEALTH;
+
 pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
 pub const MAX_WITNESS_ITEMS: u64 = 1024;
@@ -102,5 +107,17 @@ mod tests {
         assert_eq!(COV_TYPE_CORE_STEALTH, 0x0105);
         assert_eq!(COV_TYPE_CORE_EXT.to_le_bytes(), 0x0102u16.to_le_bytes());
         assert_eq!(COV_TYPE_CORE_STEALTH.to_le_bytes(), 0x0105u16.to_le_bytes());
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn legacy_cov_type_aliases_preserve_wire_values() {
+        assert_eq!(COV_TYPE_EXT, COV_TYPE_CORE_EXT);
+        assert_eq!(COV_TYPE_STEALTH, COV_TYPE_CORE_STEALTH);
+        assert_eq!(COV_TYPE_EXT.to_le_bytes(), COV_TYPE_CORE_EXT.to_le_bytes());
+        assert_eq!(
+            COV_TYPE_STEALTH.to_le_bytes(),
+            COV_TYPE_CORE_STEALTH.to_le_bytes()
+        );
     }
 }
