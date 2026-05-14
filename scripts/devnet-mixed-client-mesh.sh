@@ -300,6 +300,17 @@ def finite_nonnegative(value: object) -> bool:
         return math.isfinite(value) and value >= 0
     except (OverflowError, TypeError, ValueError):
         return False
+def json_int(value, label, minimum=None):
+    req(isinstance(value, int) and not isinstance(value, bool), f"{label} is not an integer")
+    if minimum is not None:
+        req(value >= minimum, f"{label} is below {minimum}")
+    return value
+def json_bool(value, label):
+    req(isinstance(value, bool), f"{label} is not a boolean")
+    return value
+def json_hex32(value, label):
+    req(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value or "") is not None, f"{label} is not lowercase 32-byte hex")
+    return value
 def validate_raw_sample_record(sample, label, kind, direction, source, target, txid, block_hash=None, height=None):
     keys = {"classification", "elapsed", "path_direction", "source", "target", "tx_id", "unit"}
     if kind == "convergence": keys |= {"block_hash", "height"}
@@ -381,6 +392,9 @@ req(set(data) == allowed_keys, f"report top-level keys mismatch: {sorted(data)}"
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
 legacy_schema = data.get("legacy_schema_compatibility")
 req(isinstance(legacy_schema, dict) and legacy_schema.get("authoritative") is False and "verdict" not in legacy_schema and nonempty_str(legacy_schema.get("marker_path")), "legacy_schema_compatibility missing marker_path")
+if restart_mode:
+    req(legacy_schema.get("purpose") == "schema-valid legacy artifact only; not the Rust restart report verdict", "legacy_schema_compatibility restart purpose mismatch")
+    req(legacy_schema.get("reason") == "existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report", "legacy_schema_compatibility restart reason mismatch")
 marker_path = checked_path("legacy_schema_compatibility.marker_path", legacy_schema.get("marker_path"))
 try: marker_path.relative_to(artifact_root)
 except ValueError: fail("legacy marker is outside artifact_root")
@@ -464,16 +478,26 @@ if restart_mode:
         sidecar_path = artifact_file(f"rust_restart.{path_field}", restart_info.get(path_field), artifact_root)
         sidecar = load_json_file(f"rust_restart.{path_field}", sidecar_path)
         req(set(sidecar) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"rust_restart.{path_field} keys mismatch: {sorted(sidecar)}")
+        sidecar_height = json_int(sidecar.get("height"), f"rust_restart.{path_field}.height", 0)
+        json_int(sidecar.get("best_known_height"), f"rust_restart.{path_field}.best_known_height", 0)
+        sidecar_has_tip = json_bool(sidecar.get("has_tip"), f"rust_restart.{path_field}.has_tip")
+        json_bool(sidecar.get("in_ibd"), f"rust_restart.{path_field}.in_ibd")
+        sidecar_tip = json_hex32(sidecar.get("tip_hash"), f"rust_restart.{path_field}.tip_hash")
         req(sidecar.get("implementation") == impl and sidecar.get("rpc_endpoint") == endpoint and sidecar.get("request_path") == "/get_tip", f"rust_restart.{path_field} identity mismatch")
-        req(sidecar.get("has_tip") is True and sidecar.get("height") == height and sidecar.get("tip_hash") == tip, f"rust_restart.{path_field} does not match report")
+        req(sidecar_has_tip is True and sidecar_height == height and sidecar_tip == tip, f"rust_restart.{path_field} does not match report")
     restart_tip_sidecar("pre_restart_tip_path", "rust", restart_info["old_rpc_endpoint"], restart_info["pre_restart_height"], restart_info["pre_restart_tip"])
     restart_tip_sidecar("go_target_tip_path", "go", nodes_by_impl["go"]["rpc_endpoint"], restart_info["go_target_height"], restart_info["go_target_tip"])
     restart_tip_sidecar("catch_up_tip_path", "rust", nodes_by_impl["rust"]["rpc_endpoint"], restart_info["catch_up_height"], restart_info["catch_up_tip"])
     mine_next_path = artifact_file("rust_restart.go_target_mine_next_path", restart_info.get("go_target_mine_next_path"), artifact_root)
     mine_next = load_json_file("rust_restart.go_target_mine_next_path", mine_next_path)
     req(set(mine_next) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"rust_restart.go_target_mine_next_path keys mismatch: {sorted(mine_next)}")
+    mine_height = json_int(mine_next.get("height"), "rust_restart.go_target_mine_next_path.height", 0)
+    mine_hash = json_hex32(mine_next.get("block_hash"), "rust_restart.go_target_mine_next_path.block_hash")
+    mine_tx_count = json_int(mine_next.get("tx_count"), "rust_restart.go_target_mine_next_path.tx_count", 1)
+    json_int(mine_next.get("nonce"), "rust_restart.go_target_mine_next_path.nonce", 0)
+    json_int(mine_next.get("timestamp"), "rust_restart.go_target_mine_next_path.timestamp", 0)
     req(mine_next.get("implementation") == "go" and mine_next.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", "rust_restart go target mine_next sidecar identity mismatch")
-    req(mine_next.get("mined") is True and mine_next.get("height") == restart_info["go_target_height"] and mine_next.get("block_hash") == restart_info["go_target_tip"] and mine_next.get("tx_count") == restart_info["go_target_tx_count"], "rust_restart go target mine_next sidecar does not match report")
+    req(mine_next.get("mined") is True and mine_height == restart_info["go_target_height"] and mine_hash == restart_info["go_target_tip"] and mine_tx_count == restart_info["go_target_tx_count"], "rust_restart go target mine_next sidecar does not match report")
     expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"]]
     old_argv = restart_info.get("old_command_argv")
     new_argv = restart_info.get("new_command_argv")
@@ -1639,8 +1663,8 @@ report = {
     "legacy_schema_compatibility": {
         "authoritative": False,
         "marker_path": e["LEGACY_SCHEMA_MARKER_JSON"],
-        "purpose": "schema-valid legacy artifact only; not the mesh report verdict",
-        "reason": "existing mixed_client_evidence_v1 PASS requires tx_path; RUB-21 mesh-only PASS lives in this report",
+        "purpose": ("schema-valid legacy artifact only; not the Rust restart report verdict" if restart_mode else "schema-valid legacy artifact only; not the mesh report verdict"),
+        "reason": ("existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report" if restart_mode else "existing mixed_client_evidence_v1 PASS requires tx_path; mesh process/connectivity PASS lives in this report"),
     },
 }
 if tx_mode and verdict == "PASS":
@@ -1923,6 +1947,17 @@ start_rust_node_with_log() {
   rubin_process_wait_for_rpc_ready "${RUST_RPC_ADDR}" 30 || { START_REASON=rust_rpc_ready_timeout; return 1; }; RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 start_rust_node() { start_rust_node_with_log "${RUST_LOG}"; }
+unregister_managed_pid() {
+  local managed_pid="${1:-}" kept=() pid
+  [[ -n "${managed_pid}" ]] || return 1
+  for pid in "${RUBIN_PROCESS_PIDS[@]}"; do
+    [[ "${pid}" == "${managed_pid}" ]] || kept+=("${pid}")
+  done
+  RUBIN_PROCESS_PIDS=("${kept[@]}")
+  for pid in "${RUBIN_PROCESS_PIDS[@]}"; do
+    [[ "${pid}" != "${managed_pid}" ]] || return 1
+  done
+}
 run_rust_restart_scenario() {
   RUST_RESTART_REASON=""
   capture_restart_tip rust_restart_pre rust "${RUST_RPC_ADDR}" "${RUST_PRE_RESTART_TIP_JSON}" || return 1
@@ -1934,6 +1969,7 @@ run_rust_restart_scenario() {
   OLD_RUST_ARGV_JSON="${RUST_ARGV_JSON}"
   rubin_process_stop_pid "${OLD_RUST_PID}" || { RUST_RESTART_REASON=rust_restart_stop_failed; return 1; }
   if rubin_process_is_alive "${OLD_RUST_PID}"; then RUST_RESTART_REASON=rust_restart_old_pid_still_alive; return 1; fi
+  unregister_managed_pid "${OLD_RUST_PID}" || { RUST_RESTART_REASON=rust_restart_old_pid_unregister_failed; return 1; }
   OLD_RUST_PID_STOPPED=true
   go_restart_mine_target || return 1
   START_REASON=""
