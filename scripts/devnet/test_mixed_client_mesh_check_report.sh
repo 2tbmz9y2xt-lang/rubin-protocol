@@ -74,6 +74,24 @@ expect_fail_token() {
   fi
 }
 
+expect_fail_check_token() {
+  local label="$1" expected_token="$2" output token
+  shift 2
+  if output="$("$@" 2>&1)"; then
+    echo "FAIL: ${label} should fail" >&2
+    echo "actual output:" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+  token="$(printf '%s\n' "${output}" | check_report_reason_token)"
+  if [[ "${token}" != "${expected_token}" ]]; then
+    echo "FAIL: ${label} produced token ${token}, want ${expected_token}" >&2
+    echo "actual output:" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+}
+
 extract_check_report() {
   python3 - "${HARNESS}" "${CHECK_REPORT_LIB}" <<'PY'
 from pathlib import Path
@@ -83,7 +101,7 @@ src, dst = map(Path, sys.argv[1:3])
 lines = src.read_text(encoding="utf-8").splitlines()
 start = next(i for i, line in enumerate(lines) if line.startswith("check_report()"))
 end = next(i for i, line in enumerate(lines[start:], start) if line.startswith('[[ "${MESH_TIMEOUT}"'))
-token_start = next(i for i, line in enumerate(lines) if line.startswith("tx_report_reason_token()"))
+token_start = next(i for i, line in enumerate(lines) if line.startswith("check_report_reason_token()"))
 token_end = next(i for i, line in enumerate(lines[token_start:], token_start) if line.startswith("combined_report_reason_token()"))
 capture_start = next(i for i, line in enumerate(lines) if line.startswith("rpc_json()"))
 capture_end = next(i for i, line in enumerate(lines[capture_start:], capture_start) if line.startswith("pid_comm()"))
@@ -387,6 +405,56 @@ mesh_report = {
 }
 dump(root / "mesh-report.json", mesh_report)
 
+restart_marker = artifact_root / "restart-marker.json"
+restart = {
+    "catch_up_height": 8,
+    "pre_restart_height": 7,
+    "stopped_node": "node-rust",
+}
+restart_info = {
+    "catch_up_has_tip": True,
+    "catch_up_height": 8,
+    "catch_up_tip": "bb" * 32,
+    "new_command_argv": node("rust")["command_argv"],
+    "new_p2p_endpoint": rust_p2p,
+    "new_pid": 41002,
+    "new_rpc_endpoint": rust_rpc,
+    "new_started_at": rust_started,
+    "old_command_argv": node("rust")["command_argv"],
+    "old_p2p_endpoint": "127.0.0.1:51031",
+    "old_p2p_endpoint_released": True,
+    "old_pid": 41020,
+    "old_pid_stopped": True,
+    "old_rpc_endpoint": "127.0.0.1:51030",
+    "old_rpc_endpoint_released": True,
+    "old_started_at": "2026-05-12T09:59:58Z",
+    "peer_reconnect_observed": True,
+    "pre_restart_has_tip": True,
+    "pre_restart_height": 7,
+    "pre_restart_tip": "aa" * 32,
+    "same_datadir": True,
+}
+dump(restart_marker, {
+    "evidence_type": "mixed_client_process_soak",
+    "failure_reason": "schema v1 PASS requires tx_path; restart PASS lives in sibling report",
+    "participants": [
+        {"endpoint": go_rpc, "implementation": "go", "name": "node-go", "started_at": go_started},
+        {"endpoint": rust_rpc, "implementation": "rust", "name": "node-rust", "started_at": rust_started},
+    ],
+    "restart": restart,
+    "scenario": "mixed_client_mesh_schema_marker",
+    "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+    "verdict": "FAIL",
+})
+restart_report = {
+    **mesh_report,
+    "legacy_schema_compatibility": {**mesh_report["legacy_schema_compatibility"], "marker_path": str(restart_marker)},
+    "restart": restart,
+    "rust_restart": restart_info,
+    "scenario": "mixed_client_rust_restart",
+}
+dump(root / "restart-report.json", restart_report)
+
 tx_marker = artifact_root / "tx-marker.json"
 tx_path = {"observed_at": ["node-rust"], "submitted_at": "node-go", "tx_id": txid}
 dump(tx_marker, {
@@ -673,6 +741,45 @@ dump(root / "mesh-bad-propagation-not-requested-reason.json", bad_mesh_samples)
 bad_mesh_samples = json.loads(json.dumps(mesh_report))
 bad_mesh_samples["raw_samples"]["convergence"]["reason"] = "latency_threshold_passed"
 dump(root / "mesh-bad-convergence-not-requested-reason.json", bad_mesh_samples)
+bad_restart = json.loads(json.dumps(restart_report))
+del bad_restart["restart"]
+dump(root / "restart-missing-restart-object.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+del bad_restart["rust_restart"]
+dump(root / "restart-missing-process-object.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["old_pid"] = bad_restart["rust_restart"]["new_pid"]
+dump(root / "restart-same-pid.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["old_pid_stopped"] = False
+dump(root / "restart-old-pid-not-stopped.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["peer_reconnect_observed"] = False
+dump(root / "restart-no-peer-reconnect.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["restart"]["catch_up_height"] = 6
+bad_restart["rust_restart"]["catch_up_height"] = 6
+stale_restart_marker = artifact_root / "restart-stale-marker.json"
+dump(stale_restart_marker, {
+    "evidence_type": "mixed_client_process_soak",
+    "failure_reason": "schema v1 PASS requires tx_path; restart PASS lives in sibling report",
+    "participants": [
+        {"endpoint": go_rpc, "implementation": "go", "name": "node-go", "started_at": go_started},
+        {"endpoint": rust_rpc, "implementation": "rust", "name": "node-rust", "started_at": rust_started},
+    ],
+    "restart": bad_restart["restart"],
+    "scenario": "mixed_client_mesh_schema_marker",
+    "schema_version": "rubin-mixed-client-devnet-evidence-v1",
+    "verdict": "FAIL",
+})
+bad_restart["legacy_schema_compatibility"]["marker_path"] = str(stale_restart_marker)
+dump(root / "restart-stale-catch-up.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["legacy_schema_compatibility"]["marker_path"] = str(mesh_marker)
+dump(root / "restart-legacy-marker-mismatch.json", bad_restart)
+bad_restart = json.loads(json.dumps(restart_report))
+bad_restart["rust_restart"]["new_pid"] = 41099
+dump(root / "restart-new-pid-not-final.json", bad_restart)
 bad_rust_converge = json.loads(json.dumps(rust_converge_report))
 bad_rust_converge["rust_converge"]["txid"] = "11" * 32
 dump(root / "rust-submit-go-mine-wrong-txid.json", bad_rust_converge)
@@ -763,6 +870,15 @@ print(root / "converge-malformed-block.json")
 print(root / "converge-missing-tx-block.json")
 print(root / "converge-bad-merkle-block.json")
 print(root / "converge-tx-count-mismatch.json")
+print(root / "restart-report.json")
+print(root / "restart-missing-restart-object.json")
+print(root / "restart-missing-process-object.json")
+print(root / "restart-same-pid.json")
+print(root / "restart-old-pid-not-stopped.json")
+print(root / "restart-no-peer-reconnect.json")
+print(root / "restart-stale-catch-up.json")
+print(root / "restart-legacy-marker-mismatch.json")
+print(root / "restart-new-pid-not-final.json")
 PY
 }
 
@@ -805,14 +921,40 @@ CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '22p' "${REPORT_LIST}")"
 CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '23p' "${REPORT_LIST}")"
 CONVERGE_BAD_MERKLE_BLOCK_REPORT="$(sed -n '24p' "${REPORT_LIST}")"
 CONVERGE_TX_COUNT_MISMATCH_REPORT="$(sed -n '25p' "${REPORT_LIST}")"
+RESTART_REPORT="$(sed -n '26p' "${REPORT_LIST}")"
+RESTART_MISSING_RESTART_REPORT="$(sed -n '27p' "${REPORT_LIST}")"
+RESTART_MISSING_PROCESS_REPORT="$(sed -n '28p' "${REPORT_LIST}")"
+RESTART_SAME_PID_REPORT="$(sed -n '29p' "${REPORT_LIST}")"
+RESTART_OLD_PID_NOT_STOPPED_REPORT="$(sed -n '30p' "${REPORT_LIST}")"
+RESTART_NO_PEER_RECONNECT_REPORT="$(sed -n '31p' "${REPORT_LIST}")"
+RESTART_STALE_CATCH_UP_REPORT="$(sed -n '32p' "${REPORT_LIST}")"
+RESTART_LEGACY_MARKER_MISMATCH_REPORT="$(sed -n '33p' "${REPORT_LIST}")"
+RESTART_NEW_PID_NOT_FINAL_REPORT="$(sed -n '34p' "${REPORT_LIST}")"
 TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT="${TMP_ROOT}/tx-huge-int-propagation-sample.json"
 CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-bool-height-sample.json"
 CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-float-height-sample.json"
 CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT="${TMP_ROOT}/converge-uppercase-block-hash-sample.json"
 [[ -f "${TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT}" && -f "${CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT}" ]] || { echo "failed to build raw sample regression reports" >&2; exit 1; }
 [[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_SLO_CLAIM_SAMPLE_REPORT}" && -n "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" && -n "${MESH_BAD_PROPAGATION_REASON_REPORT}" && -n "${MESH_BAD_CONVERGENCE_REASON_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
+[[ -n "${RESTART_REPORT}" && -n "${RESTART_MISSING_RESTART_REPORT}" && -n "${RESTART_MISSING_PROCESS_REPORT}" && -n "${RESTART_SAME_PID_REPORT}" && -n "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" && -n "${RESTART_NO_PEER_RECONNECT_REPORT}" && -n "${RESTART_STALE_CATCH_UP_REPORT}" && -n "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}" && -n "${RESTART_NEW_PID_NOT_FINAL_REPORT}" ]] || { echo "failed to build synthetic restart reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
+expect_pass_contains "rust restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --rust-restart --check-report "${RESTART_REPORT}"
+expect_pass_contains "public restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --check-report "${RESTART_REPORT}"
+expect_fail_contains "restart mode rejects mesh artifact" "rust restart validation requires a mixed_client_rust_restart report" "${HARNESS}" --rust-restart --check-report "${MESH_REPORT}"
+expect_fail_contains "restart rejects missing restart object" "report top-level keys mismatch" "${HARNESS}" --rust-restart --check-report "${RESTART_MISSING_RESTART_REPORT}"
+expect_fail_contains "restart rejects missing process object" "report top-level keys mismatch" "${HARNESS}" --rust-restart --check-report "${RESTART_MISSING_PROCESS_REPORT}"
+expect_fail_contains "restart rejects same pid reuse" "rust_restart reused the stopped pid" "${HARNESS}" --rust-restart --check-report "${RESTART_SAME_PID_REPORT}"
+expect_fail_contains "restart rejects old pid not stopped" "rust_restart does not prove old process stopped" "${HARNESS}" --rust-restart --check-report "${RESTART_OLD_PID_NOT_STOPPED_REPORT}"
+expect_fail_contains "restart rejects missing peer reconnect" "rust_restart peer reconnect was not observed" "${HARNESS}" --rust-restart --check-report "${RESTART_NO_PEER_RECONNECT_REPORT}"
+expect_fail_contains "restart rejects stale catch-up" "below pre_restart_height" "${HARNESS}" --rust-restart --check-report "${RESTART_STALE_CATCH_UP_REPORT}"
+expect_fail_contains "restart rejects legacy marker mismatch" "legacy marker restart object is not bound to report restart object" "${HARNESS}" --rust-restart --check-report "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}"
+expect_fail_contains "restart rejects new pid not final rust process" "rust_restart.new_pid is not the final rust node pid" "${HARNESS}" --rust-restart --check-report "${RESTART_NEW_PID_NOT_FINAL_REPORT}"
+expect_fail_check_token "token maps restart mode mismatch" "rust_restart_scenario_required" check_report "${MESH_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart same pid" "rust_restart_same_pid" check_report "${RESTART_SAME_PID_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart old pid not stopped" "rust_restart_old_process_not_stopped" check_report "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart missing peer reconnect" "rust_restart_peer_reconnect_missing" check_report "${RESTART_NO_PEER_RECONNECT_REPORT}" offline rust-restart
+expect_fail_check_token "token maps restart stale catch-up" "rust_restart_catch_up_below_pre_restart" check_report "${RESTART_STALE_CATCH_UP_REPORT}" offline rust-restart
 expect_fail_contains "public rejects propagation not-requested reason drift" "raw_samples.propagation must be not_requested with canonical reason" "${HARNESS}" --check-report "${MESH_BAD_PROPAGATION_REASON_REPORT}"
 expect_fail_contains "public rejects convergence not-requested reason drift" "raw_samples.convergence must be not_requested with canonical reason" "${HARNESS}" --check-report "${MESH_BAD_CONVERGENCE_REASON_REPORT}"
 expect_fail_contains "public tx check-report" "public tx-path check-report is unsupported" "${HARNESS}" --check-report "${TX_REPORT}"

@@ -3,22 +3,25 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"; GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 RUST_WORKSPACE_ROOT="${REPO_ROOT}/clients/rust"; HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"; VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
-CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}" TX_PATH_MODE=0 DETERMINISTIC_TX_FEE="${DETERMINISTIC_TX_FEE:-100000000}"
+CHECK_REPORT="" CHECK_REPORT_MODE="" MESH_TIMEOUT="${MESH_TIMEOUT:-90}" TX_PATH_MODE=0 RUST_RESTART_MODE=0 DETERMINISTIC_TX_FEE="${DETERMINISTIC_TX_FEE:-100000000}"
 usage() {
   cat >&2 <<EOF
 usage:
-  $0 [--go-submit-rust-accept|--go-submit-rust-mine-go-converge|--rust-submit-go-mine-rust-converge]
+  $0 [--rust-restart|--go-submit-rust-accept|--go-submit-rust-mine-go-converge|--rust-submit-go-mine-rust-converge]
   $0 --check-report PATH
+  $0 --rust-restart --check-report PATH
   $0 --check-report-live PATH
 
 --check-report and --check-report-live validate mixed_client_mesh reports only.
 tx-path proofs are same-run producer validation and are not accepted from public
-report revalidation paths.
+report revalidation paths. Use --rust-restart with --check-report to require a
+restart scenario report instead of accepting a default mesh report.
 EOF
 }
 set_tx_path_mode() { local mode="$1" flag="$2"; (( TX_PATH_MODE == 0 )) || { echo "tx-path modes are mutually exclusive: ${flag}" >&2; usage; exit 2; }; TX_PATH_MODE="${mode}"; }
-while (($#)); do case "$1" in --go-submit-rust-accept) set_tx_path_mode 1 "$1"; shift ;; --go-submit-rust-mine-go-converge) set_tx_path_mode 2 "$1"; shift ;; --rust-submit-go-mine-rust-converge) set_tx_path_mode 3 "$1"; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
+while (($#)); do case "$1" in --rust-restart) RUST_RESTART_MODE=1; shift ;; --go-submit-rust-accept) set_tx_path_mode 1 "$1"; shift ;; --go-submit-rust-mine-go-converge) set_tx_path_mode 2 "$1"; shift ;; --rust-submit-go-mine-rust-converge) set_tx_path_mode 3 "$1"; shift ;; --check-report|--check-report-live) [[ $# -ge 2 ]] || { usage; exit 2; }; CHECK_REPORT_MODE=offline; [[ "$1" == "--check-report-live" ]] && CHECK_REPORT_MODE=live; CHECK_REPORT="$2"; shift 2 ;; -h|--help) usage; exit 0 ;; *) usage; exit 2 ;; esac; done
 if [[ -n "${CHECK_REPORT_MODE}" && "${TX_PATH_MODE}" != "0" ]]; then echo "tx-path modes cannot be combined with --check-report or --check-report-live" >&2; exit 2; fi
+if (( RUST_RESTART_MODE == 1 && TX_PATH_MODE != 0 )); then echo "--rust-restart cannot be combined with tx-path modes" >&2; exit 2; fi
 need_tool() { command -v -- "$1" >/dev/null 2>&1 || { echo "$1 is required for mixed-client mesh evidence" >&2; exit 1; }; }
 validate_deterministic_tx_fee() {
   [[ "${DETERMINISTIC_TX_FEE}" =~ ^[0-9]{1,9}$ ]] || { echo "DETERMINISTIC_TX_FEE must be a positive integer <= 100000000" >&2; exit 2; }
@@ -37,6 +40,7 @@ SCENARIO_MESH = "mixed_client_mesh"
 SCENARIO_TX = "mixed_client_go_submit_rust_accept"
 SCENARIO_CONVERGE = "mixed_client_go_submit_rust_mine_go_converge"
 SCENARIO_RUST_SUBMIT_GO_MINE = "mixed_client_rust_submit_go_mine_rust_converge"
+SCENARIO_RUST_RESTART = "mixed_client_rust_restart"
 MAX_JSON_BYTES = 1_000_000
 MAX_PARSER_OUTPUT_BYTES = 100_000
 MAX_TX_HEX_CHARS = 20_000
@@ -257,6 +261,14 @@ def lsof_lines(pid: int, state: str) -> list[str]:
     if p.returncode != 0: return []
     return [line[1:] for line in p.stdout.splitlines() if line.startswith("n")]
 def owns_listen(pid: int, endpoint: str) -> bool: return endpoint in lsof_lines(pid, "LISTEN")
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 def peers(addr: str) -> dict:
     try:
         with urllib.request.urlopen(f"http://{addr}/peers", timeout=5) as resp: raw = resp.read(MAX_JSON_BYTES + 1)
@@ -337,17 +349,20 @@ def validate_raw_samples(data, tx_mode, go_submit_mode, converge_mode, txid=None
     convergence_direction = "rust->go" if go_submit_mode else "go->rust"
     validate_raw_sample_bucket(raw_samples, "convergence", "observed", convergence_direction, txid, block_hash, height)
 data = load_json_file("report", path)
-req(expected_mode in {"public", "producer-tx"}, f"check_report expected mode is invalid: {expected_mode!r}")
+req(expected_mode in {"public", "producer-tx", "rust-restart"}, f"check_report expected mode is invalid: {expected_mode!r}")
 scenario = data.get("scenario")
 go_submit_mode = scenario in {SCENARIO_TX, SCENARIO_CONVERGE}
 rust_submit_mode = scenario == SCENARIO_RUST_SUBMIT_GO_MINE
 tx_mode = go_submit_mode or rust_submit_mode
 converge_mode = scenario in {SCENARIO_CONVERGE, SCENARIO_RUST_SUBMIT_GO_MINE}
-req(scenario in {SCENARIO_MESH, SCENARIO_TX, SCENARIO_CONVERGE, SCENARIO_RUST_SUBMIT_GO_MINE}, f"scenario is not supported: {scenario!r}")
+restart_mode = scenario == SCENARIO_RUST_RESTART
+req(scenario in {SCENARIO_MESH, SCENARIO_TX, SCENARIO_CONVERGE, SCENARIO_RUST_SUBMIT_GO_MINE, SCENARIO_RUST_RESTART}, f"scenario is not supported: {scenario!r}")
 if tx_mode and expected_mode != "producer-tx":
     fail(("public tx-path check-report-live is unsupported" if live else "public tx-path check-report is unsupported") + "; same-run producer evidence is required")
 if expected_mode == "producer-tx":
     req(tx_mode, "producer tx validation requires a mixed-client tx-path report")
+if expected_mode == "rust-restart":
+    req(restart_mode, "rust restart validation requires a mixed_client_rust_restart report")
 req(data.get("verdict") == "PASS", f"report verdict is not PASS: {data.get('verdict')!r}")
 req("failure_reason" not in data and "schema_marker" not in data, "PASS report must not carry failure/schema-marker verdict fields")
 base_keys = {"artifact_root", "final_verification", "legacy_schema_compatibility", "nodes", "peer_connectivity", "raw_samples", "scenario", "verdict"}
@@ -358,6 +373,8 @@ if go_submit_mode:
         allowed_keys |= {"rust_mine", "go_converge"}
 elif rust_submit_mode:
     allowed_keys |= {"rust_submit", "go_accept", "go_mine", "rust_converge", "tx_path"}
+elif restart_mode:
+    allowed_keys |= {"restart", "rust_restart"}
 req(set(data) == allowed_keys, f"report top-level keys mismatch: {sorted(data)}")
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
 legacy_schema = data.get("legacy_schema_compatibility")
@@ -372,9 +389,12 @@ if tx_mode:
     req(marker.get("verdict") == "PASS" and marker.get("tx_path") == data.get("tx_path"), "legacy marker is not bound to tx_path PASS")
 else:
     req(marker.get("verdict") == "FAIL", "legacy marker has wrong non-authoritative FAIL shape")
+    if restart_mode:
+        req(marker.get("restart") == data.get("restart"), "legacy marker restart object is not bound to report restart object")
 try: validator = subprocess.run([sys.executable, sys.argv[2], str(marker_path)], check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
 except (OSError, subprocess.TimeoutExpired) as exc: fail(f"legacy marker schema validation failed: {exc}")
-req(validator.returncode == 0, "legacy marker schema validation failed: " + ((validator.stderr or validator.stdout).strip().splitlines() or ["validator returned nonzero"])[0])
+validator_detail_lines = (validator.stderr or validator.stdout).strip().splitlines()
+req(validator.returncode == 0, "legacy marker schema validation failed: " + (" ".join(validator_detail_lines[:3]) if validator_detail_lines else "validator returned nonzero"))
 nodes = data.get("nodes")
 req(isinstance(nodes, list) and len(nodes) == 2 and all(isinstance(n, dict) for n in nodes), "PASS report requires exactly two node records")
 expected = {"go": ("node-go", "rubin-node-go"), "rust": ("node-rust", "rubin-node-rust")}
@@ -402,6 +422,41 @@ req(report_node_argv_eq(nodes_by_impl["go"], "node-go", []) and report_node_argv
 req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process evidence uses the same pid")
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
+if restart_mode:
+    restart = exact_object(data.get("restart"), {"catch_up_height", "pre_restart_height", "stopped_node"}, "restart")
+    req(restart.get("stopped_node") == "node-rust", "restart.stopped_node must be node-rust")
+    req(isinstance(restart.get("pre_restart_height"), int) and not isinstance(restart.get("pre_restart_height"), bool), "restart.pre_restart_height is not an integer")
+    req(isinstance(restart.get("catch_up_height"), int) and not isinstance(restart.get("catch_up_height"), bool), "restart.catch_up_height is not an integer")
+    req(restart["catch_up_height"] >= restart["pre_restart_height"], "restart.catch_up_height below pre_restart_height")
+    restart_info = exact_object(data.get("rust_restart"), {"catch_up_has_tip", "catch_up_height", "catch_up_tip", "new_command_argv", "new_p2p_endpoint", "new_pid", "new_rpc_endpoint", "new_started_at", "old_command_argv", "old_p2p_endpoint", "old_p2p_endpoint_released", "old_pid", "old_pid_stopped", "old_rpc_endpoint", "old_rpc_endpoint_released", "old_started_at", "peer_reconnect_observed", "pre_restart_has_tip", "pre_restart_height", "pre_restart_tip", "same_datadir"}, "rust_restart")
+    old_pid = restart_info.get("old_pid")
+    new_pid = restart_info.get("new_pid")
+    req(isinstance(old_pid, int) and not isinstance(old_pid, bool) and old_pid > 0, "rust_restart.old_pid is not a positive integer")
+    req(isinstance(new_pid, int) and not isinstance(new_pid, bool) and new_pid > 0, "rust_restart.new_pid is not a positive integer")
+    req(old_pid != new_pid, "rust_restart reused the stopped pid")
+    req(new_pid == nodes_by_impl["rust"]["pid"], "rust_restart.new_pid is not the final rust node pid")
+    req(ep(restart_info.get("old_rpc_endpoint")) and ep(restart_info.get("old_p2p_endpoint")), "rust_restart old endpoints are malformed")
+    req(restart_info.get("new_rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"] and restart_info.get("new_p2p_endpoint") == nodes_by_impl["rust"]["p2p_endpoint"], "rust_restart new endpoints are not bound to final rust node")
+    req(ts(restart_info.get("old_started_at")) and restart_info.get("new_started_at") == nodes_by_impl["rust"]["started_at"], "rust_restart timestamps are not bound to old/new processes")
+    req(restart_info.get("old_pid_stopped") is True and restart_info.get("old_rpc_endpoint_released") is True and restart_info.get("old_p2p_endpoint_released") is True, "rust_restart does not prove old process stopped")
+    req(restart_info.get("peer_reconnect_observed") is True, "rust_restart peer reconnect was not observed")
+    req(restart_info.get("same_datadir") is True, "rust_restart does not prove same datadir restart")
+    req(isinstance(restart_info.get("pre_restart_height"), int) and restart_info.get("pre_restart_height") == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
+    req(isinstance(restart_info.get("catch_up_height"), int) and restart_info.get("catch_up_height") == restart["catch_up_height"], "rust_restart catch_up_height mismatch")
+    req(isinstance(restart_info.get("pre_restart_has_tip"), bool) and isinstance(restart_info.get("catch_up_has_tip"), bool), "rust_restart tip flags are not booleans")
+    req((restart_info.get("pre_restart_tip") is None or (isinstance(restart_info.get("pre_restart_tip"), str) and re.fullmatch(r"[0-9a-f]{64}", restart_info.get("pre_restart_tip")))), "rust_restart.pre_restart_tip is malformed")
+    req((restart_info.get("catch_up_tip") is None or (isinstance(restart_info.get("catch_up_tip"), str) and re.fullmatch(r"[0-9a-f]{64}", restart_info.get("catch_up_tip")))), "rust_restart.catch_up_tip is malformed")
+    req((restart_info["pre_restart_has_tip"] and restart_info.get("pre_restart_tip") is not None) or (not restart_info["pre_restart_has_tip"] and restart_info.get("pre_restart_tip") is None), "rust_restart.pre_restart_tip does not match pre_restart_has_tip")
+    req((restart_info["catch_up_has_tip"] and restart_info.get("catch_up_tip") is not None) or (not restart_info["catch_up_has_tip"] and restart_info.get("catch_up_tip") is None), "rust_restart.catch_up_tip does not match catch_up_has_tip")
+    if restart_info["catch_up_height"] == restart_info["pre_restart_height"] and restart_info["pre_restart_has_tip"]:
+        req(restart_info.get("catch_up_tip") == restart_info.get("pre_restart_tip"), "rust_restart same-height catch-up tip mismatch")
+    expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"]]
+    old_argv = restart_info.get("old_command_argv")
+    new_argv = restart_info.get("new_command_argv")
+    req(isinstance(old_argv, list) and all(isinstance(arg, str) for arg in old_argv) and argv_eq(old_argv, expected_old_rust_argv, "rust_restart.old_command_argv", "expected old rust argv"), "rust_restart old argv mismatch")
+    req(isinstance(new_argv, list) and new_argv == nodes_by_impl["rust"]["command_argv"], "rust_restart new argv mismatch")
+    if live:
+        eventually(lambda: not pid_alive(old_pid), "rust_restart old pid is still live")
 if tx_mode:
     req(sorted((p.get("name"), p.get("implementation"), p.get("endpoint"), p.get("started_at")) for p in marker.get("participants", []) if isinstance(p, dict)) == sorted((n["name"], n["implementation"], n["rpc_endpoint"], n["started_at"]) for n in nodes), "legacy marker participants are not bound to report nodes")
 if tx_mode:
@@ -491,7 +546,7 @@ print(f"PASS: {scenario} report {'accepted' if live else 'structurally accepted'
 PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
-if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}"; exit 0; fi
+if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }; CHECK_EXPECTED_MODE=public; (( RUST_RESTART_MODE == 1 )) && CHECK_EXPECTED_MODE=rust-restart; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}" "${CHECK_EXPECTED_MODE}"; exit 0; fi
 if (( TX_PATH_MODE >= 1 )); then validate_deterministic_tx_fee; fi
 need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
@@ -499,14 +554,15 @@ source "${HELPER}"
 rubin_process_init mixed-client-mesh
 GO_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"; RUST_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-rust"
 GO_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-go"; RUST_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
-GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
+GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; RUST_RESTART_LOG="node-rust-restart.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
+RUST_PRE_RESTART_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-pre-restart-tip.json"; RUST_CATCH_UP_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-catch-up-tip.json"
 GO_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-tx-status.json"; GO_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-get-tx.json"; RUST_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-tx-status.json"; RUST_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-get-tx.json"
 RUST_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-submit-tx-status.json"; RUST_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-submit-get-tx.json"; GO_ACCEPT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-accept-tx-status.json"; GO_ACCEPT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-accept-get-tx.json"
 RUST_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-mine-next.json"; RUST_MINE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-mined-block.json"; GO_CONVERGE_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-converge-tip.json"; GO_CONVERGE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-converge-block.json"
 GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-mine-next.json"; GO_MINE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-mined-block.json"; RUST_CONVERGE_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-converge-tip.json"; RUST_CONVERGE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-converge-block.json"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"; BLOCK_CHECK_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/block-check.go"; MINE_LOG="mine-go.log"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS=""
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS="" RUST_RESTART_REASON="" RUST_RESTART_TIP_TSV="" OLD_RUST_PID="" OLD_RUST_RPC_ADDR="" OLD_RUST_P2P_ADDR="" OLD_RUST_STARTED_AT_UTC="" OLD_RUST_ARGV_JSON="" PRE_RESTART_RUST_HEIGHT="" PRE_RESTART_RUST_TIP="" PRE_RESTART_RUST_HAS_TIP="" POST_RESTART_RUST_HEIGHT="" POST_RESTART_RUST_TIP="" POST_RESTART_RUST_HAS_TIP="" OLD_RUST_PID_STOPPED="" OLD_RUST_RPC_RELEASED="" OLD_RUST_P2P_RELEASED="" RUST_RESTART_SAME_DATADIR="" RUST_RESTART_PEER_RECONNECTED=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
@@ -532,7 +588,74 @@ rubin_process_exit_trap_with_tx_secret_cleanup() {
   exit "${cleanup_status}"
 }
 trap rubin_process_exit_trap_with_tx_secret_cleanup EXIT
-check_report_reason_token() { python3 -c 'import sys; msg=" ".join(x[5:].strip() for x in sys.stdin.read().splitlines() if x.startswith("FAIL:")); rules=[("public tx-path check-report-live is unsupported","public_tx_path_check_report_live_unsupported"),("public tx-path check-report is unsupported","public_tx_path_check_report_unsupported"),("same-run producer evidence is required","tx_path_requires_same_run_producer_evidence"),("report path is required","report_path_required"),("report is not a regular file","report_not_regular_file"),("report is empty","report_empty"),("report is too large","report_too_large"),("report read failed","report_read_failed"),("report malformed JSON","report_malformed_json"),("live peer snapshot malformed JSON","live_peer_snapshot_malformed_json"),("differs from live exact peer set","live_peer_snapshot_mismatch"),("live listeners are not pid-owned","live_listener_not_pid_owned"),("rust outbound TCP link is not live and rust-owned","rust_outbound_link_not_live"),("argv_unavailable","argv_unavailable"),("live process argv/executable does not match report","argv_mismatch"),("lsof_timeout","lsof_timeout"),("lsof_unavailable","lsof_unavailable"),("lsof_failed","lsof_failed"),("pid_exe_failed","pid_exe_failed"),("pid_exe_unavailable","pid_exe_unavailable"),("argv","argv_mismatch"),("same pid","same_pid"),("process_comm","process_identity_invalid"),("process_alive","process_identity_invalid"),("process-backed","process_identity_invalid"),("peer snapshot","peer_snapshot_invalid"),("legacy marker","legacy_marker_invalid"),("failure/schema-marker","pass_report_has_failure_fields"),("failure_reason","pass_report_has_failure_fields"),("raw_samples.propagation","propagation_samples_invalid"),("raw_samples.convergence","convergence_samples_invalid"),("root is not an object","report_root_invalid")]; print(next((t for p,t in rules if p in msg), "unknown"))'; }
+check_report_reason_token() {
+  local msg
+  msg="$(cat)"
+  python3 - "${msg}" <<'PY'
+import sys
+msg = " ".join(x[5:].strip() for x in sys.argv[1].splitlines() if x.startswith("FAIL:"))
+rules = [
+    ("rust restart validation requires", "rust_restart_scenario_required"),
+    ("rust_restart reused the stopped pid", "rust_restart_same_pid"),
+    ("rust_restart old pid is still live", "rust_restart_old_pid_still_live"),
+    ("rust_restart does not prove old process stopped", "rust_restart_old_process_not_stopped"),
+    ("rust_restart peer reconnect was not observed", "rust_restart_peer_reconnect_missing"),
+    ("rust_restart catch_up_height mismatch", "rust_restart_catch_up_height_mismatch"),
+    ("rust_restart.new_pid is not the final rust node pid", "rust_restart_new_pid_not_final"),
+    ("rust_restart old endpoints are malformed", "rust_restart_old_endpoints_malformed"),
+    ("rust_restart new endpoints are not bound", "rust_restart_new_endpoints_mismatch"),
+    ("rust_restart timestamps are not bound", "rust_restart_timestamps_mismatch"),
+    ("rust_restart does not prove same datadir restart", "rust_restart_datadir_mismatch"),
+    ("rust_restart pre_restart_height mismatch", "rust_restart_pre_restart_height_mismatch"),
+    ("rust_restart tip flags are not booleans", "rust_restart_tip_flags_invalid"),
+    ("rust_restart.pre_restart_tip is malformed", "rust_restart_pre_tip_malformed"),
+    ("rust_restart.catch_up_tip is malformed", "rust_restart_catch_up_tip_malformed"),
+    ("rust_restart.pre_restart_tip does not match", "rust_restart_pre_tip_flag_mismatch"),
+    ("rust_restart.catch_up_tip does not match", "rust_restart_catch_up_tip_flag_mismatch"),
+    ("rust_restart same-height catch-up tip mismatch", "rust_restart_same_height_tip_mismatch"),
+    ("rust_restart old argv mismatch", "rust_restart_old_argv_mismatch"),
+    ("rust_restart new argv mismatch", "rust_restart_new_argv_mismatch"),
+    ("restart.stopped_node must be node-rust", "rust_restart_stopped_node_invalid"),
+    ("restart.pre_restart_height is not an integer", "rust_restart_pre_restart_height_invalid"),
+    ("restart.catch_up_height is not an integer", "rust_restart_catch_up_height_invalid"),
+    ("restart.catch_up_height:", "rust_restart_catch_up_below_pre_restart"),
+    ("legacy marker restart object is not bound", "rust_restart_legacy_marker_mismatch"),
+    ("public tx-path check-report-live is unsupported", "public_tx_path_check_report_live_unsupported"),
+    ("public tx-path check-report is unsupported", "public_tx_path_check_report_unsupported"),
+    ("same-run producer evidence is required", "tx_path_requires_same_run_producer_evidence"),
+    ("report path is required", "report_path_required"),
+    ("report is not a regular file", "report_not_regular_file"),
+    ("report is empty", "report_empty"),
+    ("report is too large", "report_too_large"),
+    ("report read failed", "report_read_failed"),
+    ("report malformed JSON", "report_malformed_json"),
+    ("live peer snapshot malformed JSON", "live_peer_snapshot_malformed_json"),
+    ("differs from live exact peer set", "live_peer_snapshot_mismatch"),
+    ("live listeners are not pid-owned", "live_listener_not_pid_owned"),
+    ("rust outbound TCP link is not live and rust-owned", "rust_outbound_link_not_live"),
+    ("argv_unavailable", "argv_unavailable"),
+    ("live process argv/executable does not match report", "argv_mismatch"),
+    ("lsof_timeout", "lsof_timeout"),
+    ("lsof_unavailable", "lsof_unavailable"),
+    ("lsof_failed", "lsof_failed"),
+    ("pid_exe_failed", "pid_exe_failed"),
+    ("pid_exe_unavailable", "pid_exe_unavailable"),
+    ("argv", "argv_mismatch"),
+    ("same pid", "same_pid"),
+    ("process_comm", "process_identity_invalid"),
+    ("process_alive", "process_identity_invalid"),
+    ("process-backed", "process_identity_invalid"),
+    ("peer snapshot", "peer_snapshot_invalid"),
+    ("legacy marker", "legacy_marker_invalid"),
+    ("failure/schema-marker", "pass_report_has_failure_fields"),
+    ("failure_reason", "pass_report_has_failure_fields"),
+    ("raw_samples.propagation", "propagation_samples_invalid"),
+    ("raw_samples.convergence", "convergence_samples_invalid"),
+    ("root is not an object", "report_root_invalid"),
+]
+print(next((token for pattern, token in rules if pattern in msg), "unknown"))
+PY
+}
 tx_report_reason_token() {
   local msg
   msg="$(cat)"
@@ -1307,7 +1430,10 @@ write_outputs() {
     RUST_SUBMIT_STATUS_JSON RUST_SUBMIT_GET_TX_JSON GO_ACCEPT_STATUS_JSON GO_ACCEPT_GET_TX_JSON \
     RUST_MINE_JSON RUST_MINE_BLOCK_JSON GO_CONVERGE_TIP_JSON GO_CONVERGE_BLOCK_JSON RUST_MINE_HEIGHT RUST_MINE_HASH RUST_MINE_TX_COUNT \
     GO_MINE_JSON GO_MINE_BLOCK_JSON RUST_CONVERGE_TIP_JSON RUST_CONVERGE_BLOCK_JSON GO_MINE_HEIGHT GO_MINE_HASH GO_MINE_TX_COUNT \
-    PROPAGATION_SAMPLE_SECONDS CONVERGENCE_SAMPLE_SECONDS
+    PROPAGATION_SAMPLE_SECONDS CONVERGENCE_SAMPLE_SECONDS RUST_RESTART_MODE OLD_RUST_PID OLD_RUST_RPC_ADDR OLD_RUST_P2P_ADDR \
+    OLD_RUST_STARTED_AT_UTC OLD_RUST_ARGV_JSON PRE_RESTART_RUST_HEIGHT PRE_RESTART_RUST_TIP PRE_RESTART_RUST_HAS_TIP \
+    POST_RESTART_RUST_HEIGHT POST_RESTART_RUST_TIP POST_RESTART_RUST_HAS_TIP OLD_RUST_PID_STOPPED OLD_RUST_RPC_RELEASED \
+    OLD_RUST_P2P_RELEASED RUST_RESTART_SAME_DATADIR RUST_RESTART_PEER_RECONNECTED
   python3 - <<'PY'
 import json, os
 e = os.environ
@@ -1348,7 +1474,10 @@ tx_mode = tx_path_mode in {"1", "2", "3"}
 go_submit_mode = tx_path_mode in {"1", "2"}
 rust_submit_mode = tx_path_mode == "3"
 converge_mode = tx_path_mode in {"2", "3"}
-if tx_path_mode == "2":
+restart_mode = e.get("RUST_RESTART_MODE") == "1"
+if restart_mode:
+    scenario = "mixed_client_rust_restart"
+elif tx_path_mode == "2":
     scenario = "mixed_client_go_submit_rust_mine_go_converge"
 elif tx_path_mode == "3":
     scenario = "mixed_client_rust_submit_go_mine_rust_converge"
@@ -1463,12 +1592,47 @@ if tx_mode and verdict == "PASS":
     elif tx_path_mode == "3":
         report["go_mine"] = {"block_hash": e["GO_MINE_HASH"], "block_path": e["GO_MINE_BLOCK_JSON"], "class": "mined_included", "height": int(e["GO_MINE_HEIGHT"]), "mine_next_path": e["GO_MINE_JSON"], "mined_by": "node-go", "raw_hex": e["TX_HEX"], "rpc_endpoint": e["GO_RPC_ADDR"], "tx_count": int(e["GO_MINE_TX_COUNT"]), "txid": e["TX_ID"]}
         report["rust_converge"] = {"block_hash": e["GO_MINE_HASH"], "block_path": e["RUST_CONVERGE_BLOCK_JSON"], "class": "canonical_block_found", "converged_at": "node-rust", "height": int(e["GO_MINE_HEIGHT"]), "raw_hex": e["TX_HEX"], "rpc_endpoint": e["RUST_RPC_ADDR"], "tip_path": e["RUST_CONVERGE_TIP_JSON"], "txid": e["TX_ID"]}
+if restart_mode and verdict == "PASS":
+    restart = {
+        "stopped_node": "node-rust",
+        "pre_restart_height": int(e["PRE_RESTART_RUST_HEIGHT"]),
+        "catch_up_height": int(e["POST_RESTART_RUST_HEIGHT"]),
+    }
+    report["restart"] = restart
+    report["rust_restart"] = {
+        "old_pid": int(e["OLD_RUST_PID"]),
+        "old_rpc_endpoint": e["OLD_RUST_RPC_ADDR"],
+        "old_p2p_endpoint": e["OLD_RUST_P2P_ADDR"],
+        "old_started_at": e["OLD_RUST_STARTED_AT_UTC"],
+        "old_command_argv": json.loads(e.get("OLD_RUST_ARGV_JSON") or "[]"),
+        "old_pid_stopped": e.get("OLD_RUST_PID_STOPPED") == "true",
+        "old_rpc_endpoint_released": e.get("OLD_RUST_RPC_RELEASED") == "true",
+        "old_p2p_endpoint_released": e.get("OLD_RUST_P2P_RELEASED") == "true",
+        "new_pid": int(e["RUST_PID"]),
+        "new_rpc_endpoint": e["RUST_RPC_ADDR"],
+        "new_p2p_endpoint": e["RUST_P2P_ADDR"],
+        "new_started_at": e["RUST_STARTED_AT_UTC"],
+        "new_command_argv": json.loads(e.get("RUST_ARGV_JSON") or "[]"),
+        "pre_restart_height": int(e["PRE_RESTART_RUST_HEIGHT"]),
+        "pre_restart_tip": e.get("PRE_RESTART_RUST_TIP") or None,
+        "pre_restart_has_tip": e.get("PRE_RESTART_RUST_HAS_TIP") == "true",
+        "catch_up_height": int(e["POST_RESTART_RUST_HEIGHT"]),
+        "catch_up_tip": e.get("POST_RESTART_RUST_TIP") or None,
+        "catch_up_has_tip": e.get("POST_RESTART_RUST_HAS_TIP") == "true",
+        "same_datadir": e.get("RUST_RESTART_SAME_DATADIR") == "true",
+        "peer_reconnect_observed": e.get("RUST_RESTART_PEER_RECONNECTED") == "true",
+    }
 if verdict != "PASS":
     report["failure_reason"] = reason or "mixed-client mesh did not produce PASS evidence"
 with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
     json.dump(report, f, indent=2, sort_keys=True)
     f.write("\n")
-legacy_marker_reason = reason if verdict != "PASS" and reason else "mixed-client mesh process/connectivity PASS is recorded in sibling report; existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23"
+if verdict != "PASS" and reason:
+    legacy_marker_reason = reason
+elif restart_mode:
+    legacy_marker_reason = "mixed-client Rust restart PASS is recorded in sibling report; existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23"
+else:
+    legacy_marker_reason = "mixed-client mesh process/connectivity PASS is recorded in sibling report; existing schema v1 PASS requires tx_path proof owned by RUB-22/RUB-23"
 legacy_schema_marker = {
     "schema_version": "rubin-mixed-client-devnet-evidence-v1",
     "evidence_type": "mixed_client_process_soak",
@@ -1481,6 +1645,9 @@ legacy_schema_marker = {
 }
 if tx_mode and verdict == "PASS":
     legacy_schema_marker["tx_path"] = tx_path
+elif restart_mode and verdict == "PASS":
+    legacy_schema_marker["restart"] = restart
+    legacy_schema_marker["failure_reason"] = legacy_marker_reason
 else:
     legacy_schema_marker["failure_reason"] = legacy_marker_reason
 with open(e["LEGACY_SCHEMA_MARKER_JSON"], "w", encoding="utf-8") as f:
@@ -1553,16 +1720,138 @@ verify_process_identity() {
   [[ "${impl}" == "rust" ]] && { RUST_COMM="${comm}"; RUST_PROCESS_ALIVE=true; RUST_RPC_PROCESS_BACKED=true; RUST_P2P_PROCESS_BACKED=true; return 0; }
   return 1
 }
-start_rust_node() {
+parse_restart_tip_sidecar() {
+  python3 - "$1" <<'PY'
+import json
+import re
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(2)
+if not isinstance(data, dict):
+    sys.exit(2)
+has_tip = data.get("has_tip")
+height = data.get("height")
+best_known_height = data.get("best_known_height")
+tip_hash = data.get("tip_hash")
+if not isinstance(has_tip, bool):
+    sys.exit(4)
+if has_tip:
+    if not isinstance(height, int) or isinstance(height, bool) or height < 0:
+        sys.exit(3)
+    if not isinstance(tip_hash, str) or re.fullmatch(r"[0-9a-f]{64}", tip_hash) is None:
+        sys.exit(5)
+else:
+    if not isinstance(best_known_height, int) or isinstance(best_known_height, bool) or best_known_height < 0:
+        sys.exit(3)
+    height = best_known_height
+    tip_hash = ""
+print(height, tip_hash, "true" if has_tip else "false", sep="|")
+PY
+}
+restart_tip_reason() {
+  local label="$1" rc="$2"
+  case "${rc}" in
+    2) printf '%s\n' "${label}_tip_malformed_json" ;;
+    3) printf '%s\n' "${label}_height_invalid" ;;
+    4) printf '%s\n' "${label}_has_tip_invalid" ;;
+    5) printf '%s\n' "${label}_tip_hash_invalid" ;;
+    *) printf '%s\n' "${label}_tip_parse_failed" ;;
+  esac
+}
+rust_restart_start_reason() {
+  case "${1:-}" in
+    rust_launch_failed) printf '%s\n' rust_restart_launch_failed ;;
+    rust_p2p_log_wait_failed) printf '%s\n' rust_restart_p2p_log_wait_failed ;;
+    rust_rpc_log_wait_failed) printf '%s\n' rust_restart_rpc_log_wait_failed ;;
+    rust_p2p_addr_extract_failed) printf '%s\n' rust_restart_p2p_addr_extract_failed ;;
+    rust_p2p_addr_malformed) printf '%s\n' rust_restart_p2p_addr_malformed ;;
+    rust_rpc_addr_extract_failed) printf '%s\n' rust_restart_rpc_addr_extract_failed ;;
+    rust_rpc_addr_malformed) printf '%s\n' rust_restart_rpc_addr_malformed ;;
+    rust_rpc_ready_timeout) printf '%s\n' rust_restart_rpc_ready_timeout ;;
+    "") printf '%s\n' rust_restart_process_not_ready ;;
+    *) printf '%s\n' "rust_restart_${1}" ;;
+  esac
+}
+capture_restart_tip() {
+  local label="$1" impl="$2" addr="$3" out="$4" parsed rc=0
+  RUST_RESTART_TIP_TSV=""
+  capture_rpc_sidecar "${impl}" GET "${addr}" /get_tip "${out}" || { rc=$?; RUST_RESTART_REASON="$(tx_capture_reason "${label}" "${rc}")"; return 1; }
+  parsed="$(parse_restart_tip_sidecar "${out}")" || { rc=$?; RUST_RESTART_REASON="$(restart_tip_reason "${label}" "${rc}")"; return 1; }
+  RUST_RESTART_TIP_TSV="${parsed}"
+}
+wait_rust_restart_catch_up() {
+  local deadline tmp height tip has_tip
+  RUST_RESTART_REASON=""
+  deadline=$((SECONDS + MESH_TIMEOUT)); tmp="${RUST_CATCH_UP_TIP_JSON}.tmp"
+  while (( SECONDS < deadline )); do
+    if capture_restart_tip rust_restart_catch_up rust "${RUST_RPC_ADDR}" "${tmp}"; then
+      IFS='|' read -r height tip has_tip <<<"${RUST_RESTART_TIP_TSV}" || { RUST_RESTART_REASON=rust_restart_catch_up_tip_parse_failed; rm -f -- "${tmp}"; return 1; }
+      if (( height >= PRE_RESTART_RUST_HEIGHT )); then
+        mv -- "${tmp}" "${RUST_CATCH_UP_TIP_JSON}" || { RUST_RESTART_REASON=rust_restart_catch_up_artifact_write_failed; rm -f -- "${tmp}"; return 1; }
+        POST_RESTART_RUST_HEIGHT="${height}"
+        POST_RESTART_RUST_TIP="${tip}"
+        POST_RESTART_RUST_HAS_TIP="${has_tip}"
+        return 0
+      fi
+      RUST_RESTART_REASON=rust_restart_catch_up_below_pre_restart
+    fi
+    sleep 1
+  done
+  rm -f -- "${tmp}"
+  RUST_RESTART_REASON="${RUST_RESTART_REASON:-rust_restart_catch_up_timeout}"
+  return 1
+}
+start_rust_node_with_log() {
+  local rust_log="$1"
   local -a argv=("${RUST_NODE_BIN}" --network devnet --datadir "${RUST_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peer "${GO_P2P_ADDR}")
   START_REASON=""
   RUST_CMD="$(argv_cmd "${argv[@]}")"; RUST_ARGV_JSON="$(argv_json "${argv[@]}")"
-  rubin_process_start "${RUST_LOG}" "${argv[@]}" || { START_REASON=rust_launch_failed; return 1; }; RUST_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${RUST_LOG}" "p2p: listening=" 60 "${RUST_PID}" || { START_REASON=rust_p2p_log_wait_failed; return 1; }
-  rubin_process_wait_for_log "${RUST_LOG}" "rpc: listening=" 60 "${RUST_PID}" || { START_REASON=rust_rpc_log_wait_failed; return 1; }
-  RUST_P2P_ADDR="$(extract_log_addr "${RUST_LOG}" "p2p: listening=")" || { START_REASON=rust_p2p_addr_extract_failed; return 1; }; loopback_endpoint "${RUST_P2P_ADDR}" || finish_no_data "rust_p2p_addr_malformed"
-  RUST_RPC_ADDR="$(rubin_process_extract_rpc_addr "${RUST_LOG}")" || { START_REASON=rust_rpc_addr_extract_failed; return 1; }; loopback_endpoint "${RUST_RPC_ADDR}" || finish_no_data "rust_rpc_addr_malformed"
+  rubin_process_start "${rust_log}" "${argv[@]}" || { START_REASON=rust_launch_failed; return 1; }; RUST_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${rust_log}" "p2p: listening=" 60 "${RUST_PID}" || { START_REASON=rust_p2p_log_wait_failed; return 1; }
+  rubin_process_wait_for_log "${rust_log}" "rpc: listening=" 60 "${RUST_PID}" || { START_REASON=rust_rpc_log_wait_failed; return 1; }
+  RUST_P2P_ADDR="$(extract_log_addr "${rust_log}" "p2p: listening=")" || { START_REASON=rust_p2p_addr_extract_failed; return 1; }; loopback_endpoint "${RUST_P2P_ADDR}" || { START_REASON=rust_p2p_addr_malformed; return 1; }
+  RUST_RPC_ADDR="$(rubin_process_extract_rpc_addr "${rust_log}")" || { START_REASON=rust_rpc_addr_extract_failed; return 1; }; loopback_endpoint "${RUST_RPC_ADDR}" || { START_REASON=rust_rpc_addr_malformed; return 1; }
   rubin_process_wait_for_rpc_ready "${RUST_RPC_ADDR}" 30 || { START_REASON=rust_rpc_ready_timeout; return 1; }; RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+start_rust_node() { start_rust_node_with_log "${RUST_LOG}"; }
+run_rust_restart_scenario() {
+  RUST_RESTART_REASON=""
+  capture_restart_tip rust_restart_pre rust "${RUST_RPC_ADDR}" "${RUST_PRE_RESTART_TIP_JSON}" || return 1
+  IFS='|' read -r PRE_RESTART_RUST_HEIGHT PRE_RESTART_RUST_TIP PRE_RESTART_RUST_HAS_TIP <<<"${RUST_RESTART_TIP_TSV}" || { RUST_RESTART_REASON=rust_restart_pre_tip_parse_failed; return 1; }
+  OLD_RUST_PID="${RUST_PID}"
+  OLD_RUST_RPC_ADDR="${RUST_RPC_ADDR}"
+  OLD_RUST_P2P_ADDR="${RUST_P2P_ADDR}"
+  OLD_RUST_STARTED_AT_UTC="${RUST_STARTED_AT_UTC}"
+  OLD_RUST_ARGV_JSON="${RUST_ARGV_JSON}"
+  rubin_process_stop_pid "${OLD_RUST_PID}" || { RUST_RESTART_REASON=rust_restart_stop_failed; return 1; }
+  if rubin_process_is_alive "${OLD_RUST_PID}"; then RUST_RESTART_REASON=rust_restart_old_pid_still_alive; return 1; fi
+  OLD_RUST_PID_STOPPED=true
+  OLD_RUST_RPC_RELEASED=true
+  OLD_RUST_P2P_RELEASED=true
+  START_REASON=""
+  RUST_PROCESS_ALIVE=false
+  RUST_RPC_PROCESS_BACKED=false
+  RUST_P2P_PROCESS_BACKED=false
+  FINAL_PROCESS_IDENTITY_RECHECKED=""
+  FINAL_RUST_OUTBOUND_LINK_RECHECKED=""
+  FINAL_PEER_SNAPSHOTS_RECHECKED=""
+  start_rust_node_with_log "${RUST_RESTART_LOG}" || { RUST_RESTART_REASON="$(rust_restart_start_reason "${START_REASON:-}")"; return 1; }
+  [[ "${RUST_PID}" != "${OLD_RUST_PID}" ]] || { RUST_RESTART_REASON=rust_restart_same_pid_reused; return 1; }
+  verify_process_identity node-rust-restart rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust rust_restart_process_identity || { RUST_RESTART_REASON="${PROCESS_IDENTITY_REASON:-rust_restart_process_identity_unverified}"; return 1; }
+  wait_peer_snapshot node-rust-restart "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || { RUST_RESTART_REASON="${PEER_SNAPSHOT_REASON:-rust_restart_peer_snapshot_missing_go_endpoint}"; return 1; }
+  wait_rust_to_go_link rust_restart_to_go_tcp_link_missing rust_restart_to_go_tcp_link_ambiguous || return 1
+  wait_peer_snapshot node-go-after-rust-restart "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || { RUST_RESTART_REASON="${PEER_SNAPSHOT_REASON:-go_after_rust_restart_peer_snapshot_missing_rust_endpoint}"; return 1; }
+  verify_process_identity node-go-after-rust-restart go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go go_after_rust_restart_process_identity || { RUST_RESTART_REASON="${PROCESS_IDENTITY_REASON:-go_after_rust_restart_process_identity_unverified}"; return 1; }
+  verify_process_identity node-rust-after-restart rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust rust_after_restart_process_identity || { RUST_RESTART_REASON="${PROCESS_IDENTITY_REASON:-rust_after_restart_process_identity_unverified}"; return 1; }
+  wait_rust_restart_catch_up || return 1
+  RUST_RESTART_SAME_DATADIR=true
+  RUST_RESTART_PEER_RECONNECTED=true
+  FINAL_PROCESS_IDENTITY_RECHECKED=true
+  FINAL_RUST_OUTBOUND_LINK_RECHECKED=true
+  FINAL_PEER_SNAPSHOTS_RECHECKED=true
 }
 start_go_node() {
   local -a argv=("${GO_NODE_BIN}" --network devnet --datadir "${GO_DIR}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
@@ -1595,6 +1884,9 @@ FINAL_RUST_OUTBOUND_LINK_RECHECKED=true
 wait_peer_snapshot node-rust-final "${RUST_RPC_ADDR}" "${RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${GO_P2P_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-rust_final_peer_snapshot_missing_go_endpoint}"
 wait_peer_snapshot node-go-final "${GO_RPC_ADDR}" "${GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${RUST_TO_GO_LOCAL_ADDR}" || finish_no_data "${PEER_SNAPSHOT_REASON:-go_final_peer_snapshot_missing_rust_endpoint}"
 FINAL_PEER_SNAPSHOTS_RECHECKED=true
+if (( RUST_RESTART_MODE == 1 )); then
+  run_rust_restart_scenario || finish_no_data "${RUST_RESTART_REASON:-rust_restart_failed}"
+fi
 if (( TX_PATH_MODE == 1 || TX_PATH_MODE == 2 )); then
   submit_go_tx || finish_no_data "${TX_REASON:-go_submit_failed}"
   wait_rust_accept || finish_no_data "${TX_REASON:-rust_accept_failed}"
@@ -1617,11 +1909,16 @@ if (( TX_PATH_MODE >= 1 )); then
   if ! check_err="$(check_report "${PASS_REPORT_JSON}" live producer-tx 2>&1)"; then
     rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(combined_report_reason_token <<<"${check_err}")"
   fi
+elif (( RUST_RESTART_MODE == 1 )); then
+  if ! check_err="$(check_report "${PASS_REPORT_JSON}" live rust-restart 2>&1)"; then
+    printf '%s\n' "${check_err}" >"${RUBIN_PROCESS_ARTIFACT_ROOT}/pass-report-live-validation.err" || true
+    rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
+  fi
 else
   if ! check_err="$(check_report "${PASS_REPORT_JSON}" live 2>&1)"; then
     rm -f -- "${PASS_REPORT_JSON}"; finish_no_data "pass_report_live_validation_$(check_report_reason_token <<<"${check_err}")"
   fi
 fi
 mv -- "${PASS_REPORT_JSON}" "${REPORT_JSON}" || finish_no_data "pass_report_publish_failed"
-PASS_SCENARIO="mixed-client mesh connected"; (( TX_PATH_MODE == 1 )) && PASS_SCENARIO="Go-submit/Rust-accept path observed"; (( TX_PATH_MODE == 2 )) && PASS_SCENARIO="Go-submit/Rust-mine/Go-converge path observed"; (( TX_PATH_MODE == 3 )) && PASS_SCENARIO="Rust-submit/Go-mine/Rust-converge path observed"
+PASS_SCENARIO="mixed-client mesh connected"; (( RUST_RESTART_MODE == 1 )) && PASS_SCENARIO="Rust restart/reconnect/catch-up path observed"; (( TX_PATH_MODE == 1 )) && PASS_SCENARIO="Go-submit/Rust-accept path observed"; (( TX_PATH_MODE == 2 )) && PASS_SCENARIO="Go-submit/Rust-mine/Go-converge path observed"; (( TX_PATH_MODE == 3 )) && PASS_SCENARIO="Rust-submit/Go-mine/Rust-converge path observed"
 [[ "${RUBIN_PROCESS_KEEP_ARTIFACTS}" == "1" ]] && echo "PASS: ${PASS_SCENARIO} go_pid=${GO_PID} rust_pid=${RUST_PID}; report=${REPORT_JSON} legacy_schema_marker=${LEGACY_SCHEMA_MARKER_JSON}" || echo "PASS: ${PASS_SCENARIO} go_pid=${GO_PID} rust_pid=${RUST_PID}; set KEEP_TMP=1 to retain report"
