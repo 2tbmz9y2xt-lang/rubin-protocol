@@ -306,7 +306,7 @@ fn apply_non_coinbase_tx_basic_workq_stealth_branch() {
         },
         UtxoEntry {
             value: 500,
-            covenant_type: COV_TYPE_STEALTH,
+            covenant_type: COV_TYPE_CORE_STEALTH,
             covenant_data: cov_data,
             creation_height: 0,
             created_by_coinbase: false,
@@ -945,7 +945,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
 
     let mut disallowed_destination_tx = tx_base(crate::tx::TxOutput {
         value: 50,
-        covenant_type: COV_TYPE_EXT,
+        covenant_type: COV_TYPE_CORE_EXT,
         covenant_data: core_ext_covdata(1, &[]),
     });
     disallowed_destination_tx.witness = vec![
@@ -1004,7 +1004,7 @@ fn apply_non_coinbase_tx_basic_workq_core_ext_branches() {
         },
         UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(42, &[]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1106,7 +1106,7 @@ fn apply_non_coinbase_tx_basic_workq_core_ext_branches() {
         },
         UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -1131,7 +1131,7 @@ fn apply_non_coinbase_tx_basic_workq_core_ext_branches() {
         }],
         outputs: vec![crate::tx::TxOutput {
             value: 90,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: vec![0x01],
         }],
         locktime: 0,

@@ -1199,7 +1199,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87};
+    use rubin_consensus::constants::{
+        COV_TYPE_CORE_EXT, COV_TYPE_P2PK, POW_LIMIT, SUITE_ID_ML_DSA_87,
+    };
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
         block_hash, encode_compact_size, merkle_root_txids, parse_block_bytes, parse_tx,
@@ -1617,7 +1619,7 @@ mod tests {
             },
             UtxoEntry {
                 value: 100,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: vec![0x01, 0x00, 0x00],
                 creation_height: 0,
                 created_by_coinbase: false,
@@ -1700,7 +1702,7 @@ mod tests {
             },
             UtxoEntry {
                 value: 100,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: vec![0x01, 0x00, 0x00],
                 creation_height: 0,
                 created_by_coinbase: false,

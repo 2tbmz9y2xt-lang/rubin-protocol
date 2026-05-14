@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rubin_consensus::constants::{COV_TYPE_EXT, COV_TYPE_P2PK};
+use rubin_consensus::constants::{COV_TYPE_CORE_EXT, COV_TYPE_P2PK};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 {
@@ -47,7 +47,7 @@ fuzz_target!(|data: &[u8]| {
         });
         resolved_inputs.push(rubin_consensus::UtxoEntry {
             value: 1 + take(1).first().copied().unwrap_or(0) as u64,
-            covenant_type: if is_ext { COV_TYPE_EXT } else { COV_TYPE_P2PK },
+            covenant_type: if is_ext { COV_TYPE_CORE_EXT } else { COV_TYPE_P2PK },
             covenant_data: if is_ext {
                 mk_cov(ext_id, payload)
             } else {
@@ -66,7 +66,7 @@ fuzz_target!(|data: &[u8]| {
         let is_ext = take(1).first().copied().unwrap_or(0) % 2 == 0;
         outputs.push(rubin_consensus::TxOutput {
             value: take(1).first().copied().unwrap_or(0) as u64,
-            covenant_type: if is_ext { COV_TYPE_EXT } else { COV_TYPE_P2PK },
+            covenant_type: if is_ext { COV_TYPE_CORE_EXT } else { COV_TYPE_P2PK },
             covenant_data: if is_ext {
                 mk_cov(ext_id, payload)
             } else {

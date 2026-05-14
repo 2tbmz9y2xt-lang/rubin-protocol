@@ -1,7 +1,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use crate::constants::{
-    COV_TYPE_HTLC, COV_TYPE_P2PK, COV_TYPE_STEALTH, LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP,
+    COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP,
     MAX_HTLC_COVENANT_DATA, MAX_STEALTH_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
     ML_KEM_1024_CT_BYTES, SIGHASH_ALL, SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE,
     SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
@@ -80,7 +80,7 @@ fn stealth_entry_for_pubkey(pubkey: &[u8]) -> UtxoEntry {
     cov[ML_KEM_1024_CT_BYTES as usize..].copy_from_slice(&crate::hash::sha3_256(pubkey));
     UtxoEntry {
         value: 100,
-        covenant_type: COV_TYPE_STEALTH,
+        covenant_type: COV_TYPE_CORE_STEALTH,
         covenant_data: cov,
         creation_height: 0,
         created_by_coinbase: false,

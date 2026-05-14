@@ -32,8 +32,8 @@ fuzz_target!(|data: &[u8]| {
         1 => 0x0100, // COV_TYPE_HTLC
         2 => 0x0101, // COV_TYPE_VAULT
         3 => 0x0104, // COV_TYPE_MULTISIG
-        4 => 0x0102, // COV_TYPE_EXT
-        5 => 0x0105, // COV_TYPE_STEALTH
+        4 => 0x0102, // COV_TYPE_CORE_EXT
+        5 => 0x0105, // COV_TYPE_CORE_STEALTH
         _ => unreachable!(),
     };
     pos += 2; // consume both bytes for layout stability
@@ -106,8 +106,8 @@ fuzz_target!(|data: &[u8]| {
     // (2 slots), VAULT/MULTISIG (threshold-dependent) are reachable.
     let witness_slot_count: usize = match covenant_type {
         0x0000 => 1, // COV_TYPE_P2PK
-        0x0102 => 1, // COV_TYPE_EXT
-        0x0105 => 1, // COV_TYPE_STEALTH
+        0x0102 => 1, // COV_TYPE_CORE_EXT
+        0x0105 => 1, // COV_TYPE_CORE_STEALTH
         0x0100 => 2, // COV_TYPE_HTLC
         0x0104 => {   // COV_TYPE_MULTISIG: threshold from covenant_data[1]
             covenant_data.get(1).copied().unwrap_or(1).max(1) as usize

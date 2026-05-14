@@ -439,7 +439,7 @@ mod tests {
     use super::*;
     use crate::compactsize::encode_compact_size;
     use crate::constants::{
-        COV_TYPE_EXT, COV_TYPE_HTLC, COV_TYPE_P2PK, COV_TYPE_STEALTH, LOCK_MODE_HEIGHT,
+        COV_TYPE_CORE_EXT, COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT,
         MAX_HTLC_COVENANT_DATA, MAX_STEALTH_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES,
         ML_DSA_87_SIG_BYTES, ML_KEM_1024_CT_BYTES, SIGHASH_ALL, SUITE_ID_ML_DSA_87,
         SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87,
@@ -586,7 +586,7 @@ mod tests {
         out[ML_KEM_1024_CT_BYTES as usize..].copy_from_slice(&one_time_key_id);
         UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_STEALTH,
+            covenant_type: COV_TYPE_CORE_STEALTH,
             covenant_data: out,
             creation_height: 0,
             created_by_coinbase: false,
@@ -1385,7 +1385,7 @@ mod tests {
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let entry = UtxoEntry {
             value: 1,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(ext_id, b""),
             creation_height: 0,
             created_by_coinbase: false,
@@ -2106,7 +2106,7 @@ mod tests {
         let kp = Mldsa87Keypair::generate().expect("kp");
         let entry = UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_STEALTH,
+            covenant_type: COV_TYPE_CORE_STEALTH,
             covenant_data: vec![0u8; 10], // wrong length (not 1600)
             creation_height: 0,
             created_by_coinbase: false,

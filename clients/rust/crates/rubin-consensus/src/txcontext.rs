@@ -1,4 +1,4 @@
-use crate::constants::COV_TYPE_EXT;
+use crate::constants::COV_TYPE_CORE_EXT;
 use crate::core_ext::{parse_core_ext_covenant_data, CoreExtProfiles};
 use crate::error::{ErrorCode, TxError};
 use crate::tx::{Tx, TxOutput};
@@ -172,7 +172,7 @@ pub fn build_tx_context_output_ext_id_cache(
 ) -> Result<BTreeMap<u16, Vec<ExtIdCacheEntry>>, TxError> {
     let mut cache = BTreeMap::new();
     for (vout_index, output) in tx.outputs.iter().enumerate() {
-        if output.covenant_type != COV_TYPE_EXT {
+        if output.covenant_type != COV_TYPE_CORE_EXT {
             continue;
         }
         let covenant = parse_core_ext_covenant_data(&output.covenant_data)?;
@@ -195,7 +195,7 @@ pub(crate) fn collect_txcontext_ext_ids(
 ) -> Result<Vec<u16>, TxError> {
     let mut ext_ids = BTreeSet::new();
     for entry in resolved_inputs {
-        if entry.covenant_type != COV_TYPE_EXT {
+        if entry.covenant_type != COV_TYPE_CORE_EXT {
             continue;
         }
         let covenant = parse_core_ext_covenant_data(&entry.covenant_data)?;
@@ -309,7 +309,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 10,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: vec![0x01],
             }],
             locktime: 0,
@@ -349,7 +349,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 33,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[0xaa]),
             }],
             locktime: 0,
@@ -360,7 +360,7 @@ mod tests {
         };
         let resolved_inputs = vec![UtxoEntry {
             value: 50,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0xbb]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -383,21 +383,21 @@ mod tests {
         let resolved_inputs = vec![
             UtxoEntry {
                 value: 11,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(9, &[0x90]),
                 creation_height: 0,
                 created_by_coinbase: false,
             },
             UtxoEntry {
                 value: 12,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[0x71]),
                 creation_height: 0,
                 created_by_coinbase: false,
             },
             UtxoEntry {
                 value: 13,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[0x72]),
                 creation_height: 0,
                 created_by_coinbase: false,
@@ -421,7 +421,7 @@ mod tests {
     fn collect_txcontext_ext_ids_rejects_duplicate_active_profiles() {
         let resolved_inputs = vec![UtxoEntry {
             value: 11,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x71]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -468,7 +468,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 33,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[]),
             }],
             locktime: 0,
@@ -479,7 +479,7 @@ mod tests {
         };
         let resolved_inputs = vec![UtxoEntry {
             value: 50,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0xbb]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -510,7 +510,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 33,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[]),
             }],
             locktime: 0,
@@ -557,7 +557,7 @@ mod tests {
         };
         let resolved_inputs = vec![UtxoEntry {
             value: 50,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0xbb]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -609,7 +609,7 @@ mod tests {
             outputs: vec![
                 TxOutput {
                     value: 11,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(7, &[0x07, 0x01]),
                 },
                 TxOutput {
@@ -619,17 +619,17 @@ mod tests {
                 },
                 TxOutput {
                     value: 13,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(5, &[0x05, 0x01]),
                 },
                 TxOutput {
                     value: 14,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(7, &[0x07, 0x02]),
                 },
                 TxOutput {
                     value: 15,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(5, &[0x05, 0x02]),
                 },
             ],
@@ -642,14 +642,14 @@ mod tests {
         let resolved_inputs = vec![
             UtxoEntry {
                 value: 100,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[0xaa]),
                 creation_height: 0,
                 created_by_coinbase: false,
             },
             UtxoEntry {
                 value: 200,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(5, &[0xbb]),
                 creation_height: 0,
                 created_by_coinbase: false,
@@ -707,7 +707,7 @@ mod tests {
             }],
             outputs: vec![TxOutput {
                 value: 33,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[]),
             }],
             locktime: 0,
@@ -718,7 +718,7 @@ mod tests {
         };
         let resolved_inputs = vec![UtxoEntry {
             value: 50,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0xaa]),
             creation_height: 0,
             created_by_coinbase: false,
@@ -766,32 +766,32 @@ mod tests {
             outputs: vec![
                 TxOutput {
                     value: 1,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(9, &[0x91]),
                 },
                 TxOutput {
                     value: 2,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(7, &[0x71]),
                 },
                 TxOutput {
                     value: 3,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(9, &[0x92]),
                 },
                 TxOutput {
                     value: 4,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(7, &[0x72]),
                 },
                 TxOutput {
                     value: 5,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(7, &[0x73]),
                 },
                 TxOutput {
                     value: 6,
-                    covenant_type: COV_TYPE_EXT,
+                    covenant_type: COV_TYPE_CORE_EXT,
                     covenant_data: core_ext_covdata(9, &[0x93]),
                 },
             ],
@@ -804,14 +804,14 @@ mod tests {
         let resolved_inputs = vec![
             UtxoEntry {
                 value: 100,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(9, &[0xaa]),
                 creation_height: 0,
                 created_by_coinbase: false,
             },
             UtxoEntry {
                 value: 200,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[0xbb]),
                 creation_height: 0,
                 created_by_coinbase: false,
