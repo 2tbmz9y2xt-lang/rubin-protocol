@@ -282,7 +282,12 @@ def ts(value: object) -> bool:
     try: return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
     except ValueError: return False
 def finite_nonnegative(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except (OverflowError, TypeError, ValueError):
+        return False
 def validate_raw_sample_record(sample, label, kind, direction, source, target, txid, block_hash=None, height=None):
     keys = {"classification", "elapsed", "path_direction", "source", "target", "tx_id", "unit"}
     if kind == "convergence": keys |= {"block_hash", "height"}
@@ -294,8 +299,12 @@ def validate_raw_sample_record(sample, label, kind, direction, source, target, t
     req(finite_nonnegative(elapsed), f"{label}.elapsed is not finite non-negative seconds")
     req(sample.get("tx_id") == txid, f"{label}.tx_id mismatch")
     if kind == "convergence":
-        req(sample.get("block_hash") == block_hash, f"{label}.block_hash mismatch")
-        req(sample.get("height") == height, f"{label}.height mismatch")
+        sample_block_hash = sample.get("block_hash")
+        sample_height = sample.get("height")
+        req(isinstance(sample_block_hash, str) and re.fullmatch(r"[0-9a-f]{64}", sample_block_hash or "") is not None, f"{label}.block_hash is not lowercase 32-byte hex")
+        req(sample_block_hash == block_hash, f"{label}.block_hash mismatch")
+        req(isinstance(sample_height, int) and not isinstance(sample_height, bool), f"{label}.height is not an integer")
+        req(sample_height == height, f"{label}.height mismatch")
 def validate_raw_sample_bucket(raw_samples, label, expected, direction, txid=None, block_hash=None, height=None):
     bucket = exact_object(raw_samples.get(label), {"classification", "path_direction", "reason", "samples", "unit"}, f"raw_samples.{label}")
     req(bucket.get("unit") == "seconds", f"raw_samples.{label}.unit is not seconds")

@@ -650,11 +650,23 @@ bad_tx_samples["raw_samples"]["propagation"]["samples"][0]["elapsed"] = "__NONFI
 nonfinite_json = json.dumps(bad_tx_samples, indent=2, sort_keys=True).replace('"__NONFINITE_ELAPSED__"', '1e309', 1) + "\n"
 (root / "tx-nonfinite-propagation-sample.json").write_text(nonfinite_json, encoding="utf-8")
 bad_tx_samples = json.loads(json.dumps(tx_report))
+bad_tx_samples["raw_samples"]["propagation"]["samples"][0]["elapsed"] = 10 ** 400
+dump(root / "tx-huge-int-propagation-sample.json", bad_tx_samples)
+bad_tx_samples = json.loads(json.dumps(tx_report))
 bad_tx_samples["raw_samples"]["propagation"]["p90_seconds"] = 2
 dump(root / "tx-slo-claim-sample.json", bad_tx_samples)
 bad_converge_samples = json.loads(json.dumps(converge_report))
 bad_converge_samples["raw_samples"]["convergence"]["samples"] = []
 dump(root / "converge-missing-convergence-samples.json", bad_converge_samples)
+bad_converge_samples = json.loads(json.dumps(converge_report))
+bad_converge_samples["raw_samples"]["convergence"]["samples"][0]["height"] = True
+dump(root / "converge-bool-height-sample.json", bad_converge_samples)
+bad_converge_samples = json.loads(json.dumps(converge_report))
+bad_converge_samples["raw_samples"]["convergence"]["samples"][0]["height"] = 1.0
+dump(root / "converge-float-height-sample.json", bad_converge_samples)
+bad_converge_samples = json.loads(json.dumps(converge_report))
+bad_converge_samples["raw_samples"]["convergence"]["samples"][0]["block_hash"] = block_hash.upper()
+dump(root / "converge-uppercase-block-hash-sample.json", bad_converge_samples)
 bad_mesh_samples = json.loads(json.dumps(mesh_report))
 bad_mesh_samples["raw_samples"]["propagation"]["reason"] = "p90_seconds_slo_passed"
 dump(root / "mesh-bad-propagation-not-requested-reason.json", bad_mesh_samples)
@@ -793,6 +805,11 @@ CONVERGE_MALFORMED_BLOCK_REPORT="$(sed -n '22p' "${REPORT_LIST}")"
 CONVERGE_MISSING_TX_BLOCK_REPORT="$(sed -n '23p' "${REPORT_LIST}")"
 CONVERGE_BAD_MERKLE_BLOCK_REPORT="$(sed -n '24p' "${REPORT_LIST}")"
 CONVERGE_TX_COUNT_MISMATCH_REPORT="$(sed -n '25p' "${REPORT_LIST}")"
+TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT="${TMP_ROOT}/tx-huge-int-propagation-sample.json"
+CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-bool-height-sample.json"
+CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-float-height-sample.json"
+CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT="${TMP_ROOT}/converge-uppercase-block-hash-sample.json"
+[[ -f "${TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT}" && -f "${CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT}" ]] || { echo "failed to build raw sample regression reports" >&2; exit 1; }
 [[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_SLO_CLAIM_SAMPLE_REPORT}" && -n "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" && -n "${MESH_BAD_PROPAGATION_REASON_REPORT}" && -n "${MESH_BAD_CONVERGENCE_REASON_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
@@ -812,8 +829,12 @@ expect_pass_contains "producer rust-submit converge internal check" "PASS: mixed
 expect_fail_contains "producer rejects mesh report" "producer tx validation requires a mixed-client tx-path report" check_report "${MESH_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects missing propagation sample" "raw_samples.propagation requires one observed sample" check_report "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects non-finite propagation sample" "raw_samples.propagation.samples[0].elapsed is not finite" check_report "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects huge integer propagation sample" "raw_samples.propagation.samples[0].elapsed is not finite" check_report "${TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects sample SLO claim" "raw_samples.propagation keys mismatch" check_report "${TX_SLO_CLAIM_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects missing convergence sample" "raw_samples.convergence requires one observed sample" check_report "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects bool convergence height" "raw_samples.convergence.samples[0].height is not an integer" check_report "${CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects float convergence height" "raw_samples.convergence.samples[0].height is not an integer" check_report "${CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT}" offline producer-tx
+expect_fail_contains "producer rejects uppercase convergence block hash" "raw_samples.convergence.samples[0].block_hash is not lowercase 32-byte hex" check_report "${CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects converged txid drift" "mined/converged tx identity differs from submitted tx" check_report "${CONVERGE_WRONG_TXID_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects rust-submit converged txid drift" "mined/converged tx identity differs from submitted tx" check_report "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" offline producer-tx
 expect_fail_contains "producer rejects reused converge sidecar path" "converge sidecar paths are not pairwise distinct" check_report "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" offline producer-tx
