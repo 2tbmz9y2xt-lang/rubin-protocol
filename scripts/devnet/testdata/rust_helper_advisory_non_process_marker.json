@@ -1,6 +1,6 @@
 {
   "evidence_type": "mixed_client_process_soak",
-  "failure_reason": "rust-only skeleton run; cross-implementation tx_path proof is RUB-21/22/23",
+  "failure_reason": "helper-only/advisory non-process Rust launch marker; full mixed-client process tx_path proof is RUB-21/RUB-22/RUB-23",
   "participants": [
     {
       "endpoint": "127.0.0.1:54321",
@@ -13,7 +13,7 @@
       "name": "node-go"
     }
   ],
-  "scenario": "rust_binary_soak_skeleton",
+  "scenario": "rust_helper_advisory_non_process_marker",
   "schema_version": "rubin-mixed-client-devnet-evidence-v1",
   "verdict": "FAIL"
 }
