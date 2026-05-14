@@ -428,7 +428,7 @@ if restart_mode:
     req(isinstance(restart.get("pre_restart_height"), int) and not isinstance(restart.get("pre_restart_height"), bool), "restart.pre_restart_height is not an integer")
     req(isinstance(restart.get("catch_up_height"), int) and not isinstance(restart.get("catch_up_height"), bool), "restart.catch_up_height is not an integer")
     req(restart["catch_up_height"] >= restart["pre_restart_height"], "restart.catch_up_height below pre_restart_height")
-    restart_info = exact_object(data.get("rust_restart"), {"catch_up_has_tip", "catch_up_height", "catch_up_tip", "new_command_argv", "new_p2p_endpoint", "new_pid", "new_rpc_endpoint", "new_started_at", "old_command_argv", "old_p2p_endpoint", "old_p2p_endpoint_released", "old_pid", "old_pid_stopped", "old_rpc_endpoint", "old_rpc_endpoint_released", "old_started_at", "peer_reconnect_observed", "pre_restart_has_tip", "pre_restart_height", "pre_restart_tip", "same_datadir"}, "rust_restart")
+    restart_info = exact_object(data.get("rust_restart"), {"catch_up_has_tip", "catch_up_height", "catch_up_tip", "new_command_argv", "new_p2p_endpoint", "new_pid", "new_rpc_endpoint", "new_started_at", "old_command_argv", "old_p2p_endpoint", "old_pid", "old_pid_stopped", "old_rpc_endpoint", "old_started_at", "peer_reconnect_observed", "pre_restart_has_tip", "pre_restart_height", "pre_restart_tip", "same_datadir"}, "rust_restart")
     old_pid = restart_info.get("old_pid")
     new_pid = restart_info.get("new_pid")
     req(isinstance(old_pid, int) and not isinstance(old_pid, bool) and old_pid > 0, "rust_restart.old_pid is not a positive integer")
@@ -438,7 +438,7 @@ if restart_mode:
     req(ep(restart_info.get("old_rpc_endpoint")) and ep(restart_info.get("old_p2p_endpoint")), "rust_restart old endpoints are malformed")
     req(restart_info.get("new_rpc_endpoint") == nodes_by_impl["rust"]["rpc_endpoint"] and restart_info.get("new_p2p_endpoint") == nodes_by_impl["rust"]["p2p_endpoint"], "rust_restart new endpoints are not bound to final rust node")
     req(ts(restart_info.get("old_started_at")) and restart_info.get("new_started_at") == nodes_by_impl["rust"]["started_at"], "rust_restart timestamps are not bound to old/new processes")
-    req(restart_info.get("old_pid_stopped") is True and restart_info.get("old_rpc_endpoint_released") is True and restart_info.get("old_p2p_endpoint_released") is True, "rust_restart does not prove old process stopped")
+    req(restart_info.get("old_pid_stopped") is True, "rust_restart does not prove old process stopped")
     req(restart_info.get("peer_reconnect_observed") is True, "rust_restart peer reconnect was not observed")
     req(restart_info.get("same_datadir") is True, "rust_restart does not prove same datadir restart")
     req(isinstance(restart_info.get("pre_restart_height"), int) and restart_info.get("pre_restart_height") == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
@@ -562,7 +562,7 @@ RUST_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-submit-tx-status.js
 RUST_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-mine-next.json"; RUST_MINE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-mined-block.json"; GO_CONVERGE_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-converge-tip.json"; GO_CONVERGE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-converge-block.json"
 GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-mine-next.json"; GO_MINE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-mined-block.json"; RUST_CONVERGE_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-converge-tip.json"; RUST_CONVERGE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-converge-block.json"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"; BLOCK_CHECK_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/block-check.go"; MINE_LOG="mine-go.log"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS="" RUST_RESTART_REASON="" RUST_RESTART_TIP_TSV="" OLD_RUST_PID="" OLD_RUST_RPC_ADDR="" OLD_RUST_P2P_ADDR="" OLD_RUST_STARTED_AT_UTC="" OLD_RUST_ARGV_JSON="" PRE_RESTART_RUST_HEIGHT="" PRE_RESTART_RUST_TIP="" PRE_RESTART_RUST_HAS_TIP="" POST_RESTART_RUST_HEIGHT="" POST_RESTART_RUST_TIP="" POST_RESTART_RUST_HAS_TIP="" OLD_RUST_PID_STOPPED="" OLD_RUST_RPC_RELEASED="" OLD_RUST_P2P_RELEASED="" RUST_RESTART_SAME_DATADIR="" RUST_RESTART_PEER_RECONNECTED=""
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS="" RUST_RESTART_REASON="" RUST_RESTART_TIP_TSV="" OLD_RUST_PID="" OLD_RUST_RPC_ADDR="" OLD_RUST_P2P_ADDR="" OLD_RUST_STARTED_AT_UTC="" OLD_RUST_ARGV_JSON="" PRE_RESTART_RUST_HEIGHT="" PRE_RESTART_RUST_TIP="" PRE_RESTART_RUST_HAS_TIP="" POST_RESTART_RUST_HEIGHT="" POST_RESTART_RUST_TIP="" POST_RESTART_RUST_HAS_TIP="" OLD_RUST_PID_STOPPED="" RUST_RESTART_SAME_DATADIR="" RUST_RESTART_PEER_RECONNECTED=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
@@ -1432,8 +1432,8 @@ write_outputs() {
     GO_MINE_JSON GO_MINE_BLOCK_JSON RUST_CONVERGE_TIP_JSON RUST_CONVERGE_BLOCK_JSON GO_MINE_HEIGHT GO_MINE_HASH GO_MINE_TX_COUNT \
     PROPAGATION_SAMPLE_SECONDS CONVERGENCE_SAMPLE_SECONDS RUST_RESTART_MODE OLD_RUST_PID OLD_RUST_RPC_ADDR OLD_RUST_P2P_ADDR \
     OLD_RUST_STARTED_AT_UTC OLD_RUST_ARGV_JSON PRE_RESTART_RUST_HEIGHT PRE_RESTART_RUST_TIP PRE_RESTART_RUST_HAS_TIP \
-    POST_RESTART_RUST_HEIGHT POST_RESTART_RUST_TIP POST_RESTART_RUST_HAS_TIP OLD_RUST_PID_STOPPED OLD_RUST_RPC_RELEASED \
-    OLD_RUST_P2P_RELEASED RUST_RESTART_SAME_DATADIR RUST_RESTART_PEER_RECONNECTED
+    POST_RESTART_RUST_HEIGHT POST_RESTART_RUST_TIP POST_RESTART_RUST_HAS_TIP OLD_RUST_PID_STOPPED \
+    RUST_RESTART_SAME_DATADIR RUST_RESTART_PEER_RECONNECTED
   python3 - <<'PY'
 import json, os
 e = os.environ
@@ -1606,8 +1606,6 @@ if restart_mode and verdict == "PASS":
         "old_started_at": e["OLD_RUST_STARTED_AT_UTC"],
         "old_command_argv": json.loads(e.get("OLD_RUST_ARGV_JSON") or "[]"),
         "old_pid_stopped": e.get("OLD_RUST_PID_STOPPED") == "true",
-        "old_rpc_endpoint_released": e.get("OLD_RUST_RPC_RELEASED") == "true",
-        "old_p2p_endpoint_released": e.get("OLD_RUST_P2P_RELEASED") == "true",
         "new_pid": int(e["RUST_PID"]),
         "new_rpc_endpoint": e["RUST_RPC_ADDR"],
         "new_p2p_endpoint": e["RUST_P2P_ADDR"],
@@ -1829,8 +1827,6 @@ run_rust_restart_scenario() {
   rubin_process_stop_pid "${OLD_RUST_PID}" || { RUST_RESTART_REASON=rust_restart_stop_failed; return 1; }
   if rubin_process_is_alive "${OLD_RUST_PID}"; then RUST_RESTART_REASON=rust_restart_old_pid_still_alive; return 1; fi
   OLD_RUST_PID_STOPPED=true
-  OLD_RUST_RPC_RELEASED=true
-  OLD_RUST_P2P_RELEASED=true
   START_REASON=""
   RUST_PROCESS_ALIVE=false
   RUST_RPC_PROCESS_BACKED=false
