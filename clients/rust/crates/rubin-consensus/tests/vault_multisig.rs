@@ -396,12 +396,12 @@ fn witness_slots_p2pk() {
 
 #[test]
 fn witness_slots_ext() {
-    assert_eq!(witness_slots(0x0102, &[]).unwrap(), 1); // COV_TYPE_EXT
+    assert_eq!(witness_slots(0x0102, &[]).unwrap(), 1); // COV_TYPE_CORE_EXT
 }
 
 #[test]
 fn witness_slots_stealth() {
-    assert_eq!(witness_slots(0x0105, &[]).unwrap(), 1); // COV_TYPE_STEALTH (CORE_STEALTH_WITNESS_SLOTS=1)
+    assert_eq!(witness_slots(0x0105, &[]).unwrap(), 1); // COV_TYPE_CORE_STEALTH (CORE_STEALTH_WITNESS_SLOTS=1)
 }
 
 #[test]

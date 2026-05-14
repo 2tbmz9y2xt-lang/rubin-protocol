@@ -50,8 +50,8 @@ fuzz_target!(|data: &[u8]| {
         1 => 0x0100, // COV_TYPE_HTLC
         2 => 0x0101, // COV_TYPE_VAULT
         3 => 0x0104, // COV_TYPE_MULTISIG
-        4 => 0x0102, // COV_TYPE_EXT
-        5 => 0x0105, // COV_TYPE_STEALTH
+        4 => 0x0102, // COV_TYPE_CORE_EXT
+        5 => 0x0105, // COV_TYPE_CORE_STEALTH
         _ => unreachable!(),
     };
 

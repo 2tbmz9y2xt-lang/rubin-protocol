@@ -36,9 +36,9 @@ pub const MAX_VAULT_KEYS: u8 = 12;
 pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
 pub const MAX_MULTISIG_KEYS: u8 = 12;
 pub const COV_TYPE_MULTISIG: u16 = 0x0104;
-pub const COV_TYPE_EXT: u16 = 0x0102;
+pub const COV_TYPE_CORE_EXT: u16 = 0x0102;
 pub const CORE_EXT_WITNESS_SLOTS: u64 = 1;
-pub const COV_TYPE_STEALTH: u16 = 0x0105;
+pub const COV_TYPE_CORE_STEALTH: u16 = 0x0105;
 pub const CORE_STEALTH_WITNESS_SLOTS: u64 = 1;
 
 pub const MAX_TX_INPUTS: u64 = 1024;
@@ -90,3 +90,17 @@ pub const SIGNAL_THRESHOLD: u32 = 1815;
 pub const FALLOW_PERIOD: u64 = 2016;
 
 pub const POW_LIMIT: [u8; 32] = [0xff; 32];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_cov_type_names_preserve_wire_values() {
+        assert_eq!(COV_TYPE_CORE_EXT, 0x0102);
+        assert_eq!(COV_TYPE_DA_COMMIT, 0x0103);
+        assert_eq!(COV_TYPE_CORE_STEALTH, 0x0105);
+        assert_eq!(COV_TYPE_CORE_EXT.to_le_bytes(), 0x0102u16.to_le_bytes());
+        assert_eq!(COV_TYPE_CORE_STEALTH.to_le_bytes(), 0x0105u16.to_le_bytes());
+    }
+}

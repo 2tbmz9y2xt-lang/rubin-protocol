@@ -1109,7 +1109,7 @@ fn stealth_spend_rejects_non_native_suite_via_rotation() {
 
     let entry = crate::utxo_basic::UtxoEntry {
         value: 100,
-        covenant_type: COV_TYPE_STEALTH,
+        covenant_type: COV_TYPE_CORE_STEALTH,
         covenant_data: vec![0u8; MAX_STEALTH_COVENANT_DATA as usize],
         creation_height: 0,
         created_by_coinbase: false,

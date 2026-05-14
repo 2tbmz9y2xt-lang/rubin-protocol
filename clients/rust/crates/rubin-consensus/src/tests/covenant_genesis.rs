@@ -239,7 +239,7 @@ fn validate_tx_covenants_genesis_ext_ok() {
     cov.extend_from_slice(&[0xaa, 0xbb]);
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
-        covenant_type: COV_TYPE_EXT,
+        covenant_type: COV_TYPE_CORE_EXT,
         covenant_data: cov,
     }];
     validate_tx_covenants_genesis(&tx, 0, None).expect("ok");
@@ -253,7 +253,7 @@ fn validate_tx_covenants_genesis_ext_zero_value_rejected() {
     crate::compactsize::encode_compact_size(0, &mut cov);
     tx.outputs = vec![crate::tx::TxOutput {
         value: 0,
-        covenant_type: COV_TYPE_EXT,
+        covenant_type: COV_TYPE_CORE_EXT,
         covenant_data: cov,
     }];
     let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
@@ -266,7 +266,7 @@ fn validate_tx_covenants_genesis_stealth_ok() {
     let cov = vec![0x55u8; MAX_STEALTH_COVENANT_DATA as usize];
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
-        covenant_type: COV_TYPE_STEALTH,
+        covenant_type: COV_TYPE_CORE_STEALTH,
         covenant_data: cov,
     }];
     validate_tx_covenants_genesis(&tx, 0, None).expect("ok");
@@ -277,7 +277,7 @@ fn validate_tx_covenants_genesis_stealth_zero_value_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
     tx.outputs = vec![crate::tx::TxOutput {
         value: 0,
-        covenant_type: COV_TYPE_STEALTH,
+        covenant_type: COV_TYPE_CORE_STEALTH,
         covenant_data: vec![0x55u8; MAX_STEALTH_COVENANT_DATA as usize],
     }];
     let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();

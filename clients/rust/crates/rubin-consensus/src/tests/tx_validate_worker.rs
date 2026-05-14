@@ -494,7 +494,7 @@ fn validate_tx_local_ext_context_build_error() {
         txid: [0u8; 32],
         resolved_inputs: vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: vec![0u8; 4], // malformed: too short for ext_id parse
             creation_height: 1,
             created_by_coinbase: false,
@@ -637,7 +637,7 @@ fn validate_tx_local_stealth_valid() {
         txid: [0u8; 32],
         resolved_inputs: vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_STEALTH,
+            covenant_type: COV_TYPE_CORE_STEALTH,
             covenant_data: stealth_covenant_data_for_pubkey(&kp.pubkey),
             creation_height: 1,
             created_by_coinbase: false,
@@ -696,7 +696,7 @@ fn validate_tx_local_core_ext_active_profile_valid() {
         txid: [0u8; 32],
         resolved_inputs: vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(1, &[0x99]),
             creation_height: 1,
             created_by_coinbase: false,
@@ -745,7 +745,7 @@ fn validate_tx_local_core_ext_txcontext_enabled_dispatches_verifier() {
         }],
         outputs: vec![TxOutput {
             value: 90,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[]),
         }],
         locktime: 0,
@@ -761,7 +761,7 @@ fn validate_tx_local_core_ext_txcontext_enabled_dispatches_verifier() {
         txid: [0u8; 32],
         resolved_inputs: vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 1,
             created_by_coinbase: false,
@@ -810,7 +810,7 @@ fn validate_tx_local_core_ext_txcontext_malformed_output_fails_before_verifier()
         }],
         outputs: vec![TxOutput {
             value: 90,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: vec![0x01],
         }],
         locktime: 0,
@@ -826,7 +826,7 @@ fn validate_tx_local_core_ext_txcontext_malformed_output_fails_before_verifier()
         txid: [0u8; 32],
         resolved_inputs: vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 1,
             created_by_coinbase: false,
@@ -876,17 +876,17 @@ fn validate_tx_local_core_ext_txcontext_too_many_continuing_outputs_fails_before
         outputs: vec![
             TxOutput {
                 value: 30,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[]),
             },
             TxOutput {
                 value: 30,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[0x01]),
             },
             TxOutput {
                 value: 30,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covdata(7, &[0x02]),
             },
         ],
@@ -903,7 +903,7 @@ fn validate_tx_local_core_ext_txcontext_too_many_continuing_outputs_fails_before
         txid: [0u8; 32],
         resolved_inputs: vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_EXT,
+            covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(7, &[0x99]),
             creation_height: 1,
             created_by_coinbase: false,

@@ -1432,7 +1432,7 @@ pub(crate) fn reject_core_ext_tx_oversized_payload(
         return Ok(());
     }
     for (i, output) in tx.outputs.iter().enumerate() {
-        if output.covenant_type != rubin_consensus::constants::COV_TYPE_EXT {
+        if output.covenant_type != rubin_consensus::constants::COV_TYPE_CORE_EXT {
             continue;
         }
         let cov = match parse_core_ext_covenant_data(&output.covenant_data) {
@@ -1616,7 +1616,7 @@ pub(crate) fn reject_core_ext_tx_pre_activation(
         .active_profiles_at_height(height)
         .map_err(|err| err.to_string())?;
     for output in &tx.outputs {
-        if output.covenant_type != rubin_consensus::constants::COV_TYPE_EXT {
+        if output.covenant_type != rubin_consensus::constants::COV_TYPE_CORE_EXT {
             continue;
         }
         let cov =
@@ -1637,7 +1637,7 @@ pub(crate) fn reject_core_ext_tx_pre_activation(
         let Some(entry) = utxos.get(&outpoint) else {
             continue;
         };
-        if entry.covenant_type != rubin_consensus::constants::COV_TYPE_EXT {
+        if entry.covenant_type != rubin_consensus::constants::COV_TYPE_CORE_EXT {
             continue;
         }
         let cov =
@@ -1813,7 +1813,7 @@ mod tests {
 
     use rubin_consensus::block::BLOCK_HEADER_BYTES;
     use rubin_consensus::constants::{
-        COV_TYPE_ANCHOR, COV_TYPE_EXT, COV_TYPE_P2PK, SUITE_ID_SENTINEL, TX_WIRE_VERSION,
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_P2PK, SUITE_ID_SENTINEL, TX_WIRE_VERSION,
     };
     use rubin_consensus::{
         marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction,
@@ -2030,7 +2030,7 @@ mod tests {
             input.clone(),
             UtxoEntry {
                 value: 10,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: empty_core_ext_covenant_data(ext_id),
                 creation_height: 0,
                 created_by_coinbase: false,
@@ -2256,7 +2256,7 @@ mod tests {
             10,
             vec![TxOutput {
                 value: 9,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: empty_core_ext_covenant_data(7),
             }],
             0x00,
@@ -3396,7 +3396,7 @@ mod tests {
             7700,
             vec![TxOutput {
                 value: 9,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: empty_core_ext_covenant_data(7),
             }],
             0x00,
@@ -3429,7 +3429,7 @@ mod tests {
             7_542,
             vec![TxOutput {
                 value: 9,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: empty_core_ext_covenant_data(7),
             }],
             0x00,
@@ -3511,7 +3511,7 @@ mod tests {
             inputs: vec![],
             outputs: vec![TxOutput {
                 value: 1,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 32]),
             }],
             locktime: 0,
@@ -3532,7 +3532,7 @@ mod tests {
             inputs: vec![],
             outputs: vec![TxOutput {
                 value: 1,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 48]),
             }],
             locktime: 0,
@@ -3553,7 +3553,7 @@ mod tests {
             inputs: vec![],
             outputs: vec![TxOutput {
                 value: 1,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 49]),
             }],
             locktime: 0,
@@ -3597,7 +3597,7 @@ mod tests {
             inputs: vec![],
             outputs: vec![TxOutput {
                 value: 1,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covenant_data_with_payload(5, &[0u8; 100]),
             }],
             locktime: 0,
@@ -3618,7 +3618,7 @@ mod tests {
             inputs: vec![],
             outputs: vec![TxOutput {
                 value: 1,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: core_ext_covenant_data_with_payload(5, &[]),
             }],
             locktime: 0,
@@ -4755,7 +4755,7 @@ mod tests {
             10,
             vec![TxOutput {
                 value: 9,
-                covenant_type: COV_TYPE_EXT,
+                covenant_type: COV_TYPE_CORE_EXT,
                 covenant_data: empty_core_ext_covenant_data(7),
             }],
             0x00,
