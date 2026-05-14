@@ -668,7 +668,10 @@ rules = [
     ("rust_restart.go_target_tx_count is malformed", "rust_restart_go_target_tx_count_invalid"),
     ("rust_restart.pre_restart_tip is malformed", "rust_restart_pre_tip_malformed"),
     ("rust_restart.catch_up_tip is malformed", "rust_restart_catch_up_tip_malformed"),
+    ("rust_restart.pre_restart_tip_path", "rust_restart_pre_restart_tip_sidecar_invalid"),
     ("rust_restart.pre_restart_tip does not match", "rust_restart_pre_tip_flag_mismatch"),
+    ("rust_restart.go_target_mine_next_path", "rust_restart_go_target_mine_next_invalid"),
+    ("rust_restart.catch_up_tip_path", "rust_restart_catch_up_tip_sidecar_invalid"),
     ("rust_restart.catch_up_tip does not match", "rust_restart_catch_up_tip_flag_mismatch"),
     ("rust_restart same-height catch-up tip mismatch", "rust_restart_same_height_tip_mismatch"),
     ("rust_restart old argv mismatch", "rust_restart_old_argv_mismatch"),
@@ -1038,8 +1041,18 @@ PY
 prepare_restart_chainstate() {
   TX_REASON=""
   RUST_RESTART_REASON=""
-  prepare_tx_chainstate || { RUST_RESTART_REASON="rust_restart_${TX_REASON:-chainstate_prepare_failed}"; return 1; }
+  prepare_tx_chainstate || { RUST_RESTART_REASON="$(rust_restart_prepare_reason "${TX_REASON:-}")"; return 1; }
   cleanup_tx_from_key_file || { RUST_RESTART_REASON=rust_restart_chainstate_secret_cleanup_failed; return 1; }
+}
+rust_restart_prepare_reason() {
+  case "${1:-}" in
+    "") printf '%s\n' rust_restart_chainstate_prepare_failed ;;
+    go_submit_keygen_*) printf 'rust_restart_keygen_%s\n' "${1#go_submit_keygen_}" ;;
+    go_submit_mine_*) printf 'rust_restart_chainstate_mine_%s\n' "${1#go_submit_mine_}" ;;
+    go_submit_chainstate_copy_failed) printf '%s\n' rust_restart_chainstate_copy_failed ;;
+    go_submit_*) printf 'rust_restart_chainstate_%s\n' "${1#go_submit_}" ;;
+    *) printf 'rust_restart_%s\n' "${1}" ;;
+  esac
 }
 tx_path_prepare_reason() {
   local reason="${1:-}" mode="${2:-0}"
@@ -1946,6 +1959,23 @@ start_rust_node_with_log() {
   rubin_process_wait_for_rpc_ready "${RUST_RPC_ADDR}" 30 || { START_REASON=rust_rpc_ready_timeout; return 1; }; RUST_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 start_rust_node() { start_rust_node_with_log "${RUST_LOG}"; }
+clear_current_rust_process_evidence() {
+  RUST_PID=""
+  RUST_RPC_ADDR=""
+  RUST_P2P_ADDR=""
+  RUST_STARTED_AT_UTC=""
+  RUST_COMM=""
+  RUST_CMD=""
+  RUST_ARGV_JSON=""
+  RUST_TO_GO_LOCAL_ADDR=""
+  RUST_PROCESS_ALIVE=false
+  RUST_RPC_PROCESS_BACKED=false
+  RUST_P2P_PROCESS_BACKED=false
+  FINAL_PROCESS_IDENTITY_RECHECKED=""
+  FINAL_RUST_OUTBOUND_LINK_RECHECKED=""
+  FINAL_PEER_SNAPSHOTS_RECHECKED=""
+  rm -f -- "${RUST_PEERS_JSON}" || { RUST_RESTART_REASON=rust_restart_stale_peer_snapshot_cleanup_failed; return 1; }
+}
 unregister_managed_pid() {
   local managed_pid="${1:-}" kept=() pid
   [[ -n "${managed_pid}" ]] || return 1
@@ -1972,12 +2002,7 @@ run_rust_restart_scenario() {
   OLD_RUST_PID_STOPPED=true
   go_restart_mine_target || return 1
   START_REASON=""
-  RUST_PROCESS_ALIVE=false
-  RUST_RPC_PROCESS_BACKED=false
-  RUST_P2P_PROCESS_BACKED=false
-  FINAL_PROCESS_IDENTITY_RECHECKED=""
-  FINAL_RUST_OUTBOUND_LINK_RECHECKED=""
-  FINAL_PEER_SNAPSHOTS_RECHECKED=""
+  clear_current_rust_process_evidence || return 1
   start_rust_node_with_log "${RUST_RESTART_LOG}" || { RUST_RESTART_REASON="$(rust_restart_start_reason "${START_REASON:-}")"; return 1; }
   [[ "${RUST_PID}" != "${OLD_RUST_PID}" ]] || { RUST_RESTART_REASON=rust_restart_same_pid_reused; return 1; }
   verify_process_identity node-rust-restart rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust rust_restart_process_identity || { RUST_RESTART_REASON="${PROCESS_IDENTITY_REASON:-rust_restart_process_identity_unverified}"; return 1; }
