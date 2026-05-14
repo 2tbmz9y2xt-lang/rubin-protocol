@@ -430,7 +430,7 @@ if restart_mode:
     req(isinstance(restart.get("pre_restart_height"), int) and not isinstance(restart.get("pre_restart_height"), bool), "restart.pre_restart_height is not an integer")
     req(isinstance(restart.get("catch_up_height"), int) and not isinstance(restart.get("catch_up_height"), bool), "restart.catch_up_height is not an integer")
     req(restart["catch_up_height"] >= restart["pre_restart_height"], "restart.catch_up_height below pre_restart_height")
-    restart_info = exact_object(data.get("rust_restart"), {"catch_up_has_tip", "catch_up_height", "catch_up_tip", "new_command_argv", "new_p2p_endpoint", "new_pid", "new_rpc_endpoint", "new_started_at", "old_command_argv", "old_p2p_endpoint", "old_pid", "old_pid_stopped", "old_rpc_endpoint", "old_started_at", "peer_reconnect_observed", "pre_restart_has_tip", "pre_restart_height", "pre_restart_tip", "same_datadir"}, "rust_restart")
+    restart_info = exact_object(data.get("rust_restart"), {"catch_up_has_tip", "catch_up_height", "catch_up_tip", "catch_up_tip_path", "go_target_has_tip", "go_target_height", "go_target_mine_next_path", "go_target_tip", "go_target_tip_path", "go_target_tx_count", "new_command_argv", "new_p2p_endpoint", "new_pid", "new_rpc_endpoint", "new_started_at", "old_command_argv", "old_p2p_endpoint", "old_pid", "old_pid_stopped", "old_rpc_endpoint", "old_started_at", "peer_reconnect_observed", "pre_restart_has_tip", "pre_restart_height", "pre_restart_tip", "pre_restart_tip_path", "same_datadir"}, "rust_restart")
     old_pid = restart_info.get("old_pid")
     new_pid = restart_info.get("new_pid")
     req(isinstance(old_pid, int) and not isinstance(old_pid, bool) and old_pid > 0, "rust_restart.old_pid is not a positive integer")
@@ -444,16 +444,36 @@ if restart_mode:
     req(restart_info.get("peer_reconnect_observed") is True, "rust_restart peer reconnect was not observed")
     req(restart_info.get("same_datadir") is True, "rust_restart does not prove same datadir restart")
     req(isinstance(restart_info.get("pre_restart_height"), int) and restart_info.get("pre_restart_height") == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
+    req(isinstance(restart_info.get("go_target_height"), int) and not isinstance(restart_info.get("go_target_height"), bool), "rust_restart go_target_height mismatch")
     req(isinstance(restart_info.get("catch_up_height"), int) and restart_info.get("catch_up_height") == restart["catch_up_height"], "rust_restart catch_up_height mismatch")
-    req(isinstance(restart_info.get("pre_restart_has_tip"), bool) and isinstance(restart_info.get("catch_up_has_tip"), bool), "rust_restart tip flags are not booleans")
+    req(isinstance(restart_info.get("pre_restart_has_tip"), bool) and isinstance(restart_info.get("go_target_has_tip"), bool) and isinstance(restart_info.get("catch_up_has_tip"), bool), "rust_restart tip flags are not booleans")
     req(restart_info.get("pre_restart_has_tip") is True, "rust_restart pre-restart tip is not proven")
+    req(restart_info.get("go_target_has_tip") is True, "rust_restart go target tip is not proven")
     req(restart_info.get("catch_up_has_tip") is True, "rust_restart catch-up tip is not proven")
     req((restart_info.get("pre_restart_tip") is None or (isinstance(restart_info.get("pre_restart_tip"), str) and re.fullmatch(r"[0-9a-f]{64}", restart_info.get("pre_restart_tip")))), "rust_restart.pre_restart_tip is malformed")
+    req((restart_info.get("go_target_tip") is None or (isinstance(restart_info.get("go_target_tip"), str) and re.fullmatch(r"[0-9a-f]{64}", restart_info.get("go_target_tip")))), "rust_restart.go_target_tip is malformed")
     req((restart_info.get("catch_up_tip") is None or (isinstance(restart_info.get("catch_up_tip"), str) and re.fullmatch(r"[0-9a-f]{64}", restart_info.get("catch_up_tip")))), "rust_restart.catch_up_tip is malformed")
     req((restart_info["pre_restart_has_tip"] and restart_info.get("pre_restart_tip") is not None) or (not restart_info["pre_restart_has_tip"] and restart_info.get("pre_restart_tip") is None), "rust_restart.pre_restart_tip does not match pre_restart_has_tip")
+    req((restart_info["go_target_has_tip"] and restart_info.get("go_target_tip") is not None) or (not restart_info["go_target_has_tip"] and restart_info.get("go_target_tip") is None), "rust_restart.go_target_tip does not match go_target_has_tip")
     req((restart_info["catch_up_has_tip"] and restart_info.get("catch_up_tip") is not None) or (not restart_info["catch_up_has_tip"] and restart_info.get("catch_up_tip") is None), "rust_restart.catch_up_tip does not match catch_up_has_tip")
-    if restart_info["catch_up_height"] == restart_info["pre_restart_height"] and restart_info["pre_restart_has_tip"]:
-        req(restart_info.get("catch_up_tip") == restart_info.get("pre_restart_tip"), "rust_restart same-height catch-up tip mismatch")
+    req(restart_info["go_target_height"] > restart_info["pre_restart_height"], "rust_restart go target did not advance beyond pre-restart tip")
+    req(restart_info["catch_up_height"] == restart_info["go_target_height"], "rust_restart catch-up height does not match go target")
+    req(restart_info.get("catch_up_tip") == restart_info.get("go_target_tip"), "rust_restart catch-up tip does not match go target")
+    req(isinstance(restart_info.get("go_target_tx_count"), int) and not isinstance(restart_info.get("go_target_tx_count"), bool) and restart_info["go_target_tx_count"] >= 1, "rust_restart.go_target_tx_count is malformed")
+    def restart_tip_sidecar(path_field, impl, endpoint, height, tip):
+        sidecar_path = artifact_file(f"rust_restart.{path_field}", restart_info.get(path_field), artifact_root)
+        sidecar = load_json_file(f"rust_restart.{path_field}", sidecar_path)
+        req(set(sidecar) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"rust_restart.{path_field} keys mismatch: {sorted(sidecar)}")
+        req(sidecar.get("implementation") == impl and sidecar.get("rpc_endpoint") == endpoint and sidecar.get("request_path") == "/get_tip", f"rust_restart.{path_field} identity mismatch")
+        req(sidecar.get("has_tip") is True and sidecar.get("height") == height and sidecar.get("tip_hash") == tip, f"rust_restart.{path_field} does not match report")
+    restart_tip_sidecar("pre_restart_tip_path", "rust", restart_info["old_rpc_endpoint"], restart_info["pre_restart_height"], restart_info["pre_restart_tip"])
+    restart_tip_sidecar("go_target_tip_path", "go", nodes_by_impl["go"]["rpc_endpoint"], restart_info["go_target_height"], restart_info["go_target_tip"])
+    restart_tip_sidecar("catch_up_tip_path", "rust", nodes_by_impl["rust"]["rpc_endpoint"], restart_info["catch_up_height"], restart_info["catch_up_tip"])
+    mine_next_path = artifact_file("rust_restart.go_target_mine_next_path", restart_info.get("go_target_mine_next_path"), artifact_root)
+    mine_next = load_json_file("rust_restart.go_target_mine_next_path", mine_next_path)
+    req(set(mine_next) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"rust_restart.go_target_mine_next_path keys mismatch: {sorted(mine_next)}")
+    req(mine_next.get("implementation") == "go" and mine_next.get("rpc_endpoint") == nodes_by_impl["go"]["rpc_endpoint"] and mine_next.get("request_path") == "/mine_next", "rust_restart go target mine_next sidecar identity mismatch")
+    req(mine_next.get("mined") is True and mine_next.get("height") == restart_info["go_target_height"] and mine_next.get("block_hash") == restart_info["go_target_tip"] and mine_next.get("tx_count") == restart_info["go_target_tx_count"], "rust_restart go target mine_next sidecar does not match report")
     expected_old_rust_argv = [nodes_by_impl["rust"]["binary"], "--network", "devnet", "--datadir", str(artifact_root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", nodes_by_impl["go"]["p2p_endpoint"]]
     old_argv = restart_info.get("old_command_argv")
     new_argv = restart_info.get("new_command_argv")
@@ -560,13 +580,13 @@ GO_NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"; RUST_NODE_BIN="${RUB
 GO_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-go"; RUST_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-rust"
 GO_LOG="node-go.log"; RUST_LOG="node-rust.log"; RUST_RESTART_LOG="node-rust-restart.log"; REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-report.json"; LEGACY_SCHEMA_MARKER_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/mixed-client-mesh-legacy-schema-marker.json"
 GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-peers.json"; RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-peers.json"
-RUST_PRE_RESTART_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-pre-restart-tip.json"; RUST_CATCH_UP_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-catch-up-tip.json"
+RUST_PRE_RESTART_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-pre-restart-tip.json"; GO_RESTART_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-restart-mine-next.json"; GO_RESTART_TARGET_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-restart-target-tip.json"; RUST_CATCH_UP_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-catch-up-tip.json"
 GO_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-tx-status.json"; GO_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-get-tx.json"; RUST_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-tx-status.json"; RUST_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-get-tx.json"
 RUST_SUBMIT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-submit-tx-status.json"; RUST_SUBMIT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-submit-get-tx.json"; GO_ACCEPT_STATUS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-accept-tx-status.json"; GO_ACCEPT_GET_TX_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-accept-get-tx.json"
 RUST_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-mine-next.json"; RUST_MINE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-mined-block.json"; GO_CONVERGE_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-converge-tip.json"; GO_CONVERGE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-converge-block.json"
 GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-mine-next.json"; GO_MINE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-mined-block.json"; RUST_CONVERGE_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-converge-tip.json"; RUST_CONVERGE_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-converge-block.json"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"; KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"; KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"; BLOCK_CHECK_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/block-check.go"; MINE_LOG="mine-go.log"
-GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS="" RUST_RESTART_REASON="" RUST_RESTART_TIP_TSV="" OLD_RUST_PID="" OLD_RUST_RPC_ADDR="" OLD_RUST_P2P_ADDR="" OLD_RUST_STARTED_AT_UTC="" OLD_RUST_ARGV_JSON="" PRE_RESTART_RUST_HEIGHT="" PRE_RESTART_RUST_TIP="" PRE_RESTART_RUST_HAS_TIP="" POST_RESTART_RUST_HEIGHT="" POST_RESTART_RUST_TIP="" POST_RESTART_RUST_HAS_TIP="" OLD_RUST_PID_STOPPED="" RUST_RESTART_SAME_DATADIR="" RUST_RESTART_PEER_RECONNECTED=""
+GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS="" RUST_RESTART_REASON="" RUST_RESTART_TIP_TSV="" OLD_RUST_PID="" OLD_RUST_RPC_ADDR="" OLD_RUST_P2P_ADDR="" OLD_RUST_STARTED_AT_UTC="" OLD_RUST_ARGV_JSON="" PRE_RESTART_RUST_HEIGHT="" PRE_RESTART_RUST_TIP="" PRE_RESTART_RUST_HAS_TIP="" GO_RESTART_TARGET_HEIGHT="" GO_RESTART_TARGET_TIP="" GO_RESTART_TARGET_HAS_TIP="" GO_RESTART_TARGET_TX_COUNT="" POST_RESTART_RUST_HEIGHT="" POST_RESTART_RUST_TIP="" POST_RESTART_RUST_HAS_TIP="" OLD_RUST_PID_STOPPED="" RUST_RESTART_SAME_DATADIR="" RUST_RESTART_PEER_RECONNECTED=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
 bounded() { perl -e 'alarm shift @ARGV; exec @ARGV; die "exec failed: $!\n"' 5 "$@"; }
@@ -605,6 +625,12 @@ rules = [
     ("rust_restart does not prove old process stopped", "rust_restart_old_process_not_stopped"),
     ("rust_restart peer reconnect was not observed", "rust_restart_peer_reconnect_missing"),
     ("rust_restart catch_up_height mismatch", "rust_restart_catch_up_height_mismatch"),
+    ("rust_restart go_target_height mismatch", "rust_restart_go_target_height_mismatch"),
+    ("rust_restart go target did not advance", "rust_restart_go_target_not_advanced"),
+    ("rust_restart catch-up height does not match go target", "rust_restart_catch_up_height_not_go_target"),
+    ("rust_restart catch-up tip does not match go target", "rust_restart_catch_up_tip_not_go_target"),
+    ("rust_restart go target mine_next sidecar", "rust_restart_go_target_mine_next_invalid"),
+    ("rust_restart.go_target_tip_path", "rust_restart_go_target_tip_sidecar_invalid"),
     ("rust_restart.new_pid is not the final rust node pid", "rust_restart_new_pid_not_final"),
     ("rust_restart old endpoints are malformed", "rust_restart_old_endpoints_malformed"),
     ("rust_restart new endpoints are not bound", "rust_restart_new_endpoints_mismatch"),
@@ -614,6 +640,9 @@ rules = [
     ("rust_restart tip flags are not booleans", "rust_restart_tip_flags_invalid"),
     ("rust_restart pre-restart tip is not proven", "rust_restart_pre_tip_not_proven"),
     ("rust_restart catch-up tip is not proven", "rust_restart_catch_up_tip_not_proven"),
+    ("rust_restart go target tip is not proven", "rust_restart_go_target_tip_not_proven"),
+    ("rust_restart.go_target_tip is malformed", "rust_restart_go_target_tip_malformed"),
+    ("rust_restart.go_target_tx_count is malformed", "rust_restart_go_target_tx_count_invalid"),
     ("rust_restart.pre_restart_tip is malformed", "rust_restart_pre_tip_malformed"),
     ("rust_restart.catch_up_tip is malformed", "rust_restart_catch_up_tip_malformed"),
     ("rust_restart.pre_restart_tip does not match", "rust_restart_pre_tip_flag_mismatch"),
@@ -1294,6 +1323,28 @@ if not isinstance(tx_count, int) or isinstance(tx_count, bool) or tx_count < 2:
 print(height, block_hash, tx_count, sep="\t")
 PY
 }
+parse_restart_mine_next_response() {
+  python3 - "$1" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    sys.exit(13)
+if not isinstance(data, dict) or data.get("mined") is not True:
+    sys.exit(14)
+height = data.get("height")
+block_hash = data.get("block_hash")
+tx_count = data.get("tx_count")
+if not isinstance(height, int) or isinstance(height, bool) or height < 0:
+    sys.exit(13)
+if not isinstance(block_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", block_hash):
+    sys.exit(13)
+if not isinstance(tx_count, int) or isinstance(tx_count, bool) or tx_count < 1:
+    sys.exit(16)
+print(height, block_hash, tx_count, sep="\t")
+PY
+}
 mine_next_http_error_reason() {
   local label="${2:-rust_mine}"
   python3 - "$1" "${label}" <<'PY'
@@ -1446,7 +1497,8 @@ write_outputs() {
     GO_MINE_JSON GO_MINE_BLOCK_JSON RUST_CONVERGE_TIP_JSON RUST_CONVERGE_BLOCK_JSON GO_MINE_HEIGHT GO_MINE_HASH GO_MINE_TX_COUNT \
     PROPAGATION_SAMPLE_SECONDS CONVERGENCE_SAMPLE_SECONDS RUST_RESTART_MODE OLD_RUST_PID OLD_RUST_RPC_ADDR OLD_RUST_P2P_ADDR \
     OLD_RUST_STARTED_AT_UTC OLD_RUST_ARGV_JSON PRE_RESTART_RUST_HEIGHT PRE_RESTART_RUST_TIP PRE_RESTART_RUST_HAS_TIP \
-    POST_RESTART_RUST_HEIGHT POST_RESTART_RUST_TIP POST_RESTART_RUST_HAS_TIP OLD_RUST_PID_STOPPED \
+    GO_RESTART_MINE_JSON GO_RESTART_TARGET_TIP_JSON GO_RESTART_TARGET_HEIGHT GO_RESTART_TARGET_TIP GO_RESTART_TARGET_HAS_TIP GO_RESTART_TARGET_TX_COUNT \
+    RUST_PRE_RESTART_TIP_JSON RUST_CATCH_UP_TIP_JSON POST_RESTART_RUST_HEIGHT POST_RESTART_RUST_TIP POST_RESTART_RUST_HAS_TIP OLD_RUST_PID_STOPPED \
     RUST_RESTART_SAME_DATADIR RUST_RESTART_PEER_RECONNECTED
   python3 - <<'PY'
 import json, os
@@ -1628,9 +1680,17 @@ if restart_mode and verdict == "PASS":
         "pre_restart_height": int(e["PRE_RESTART_RUST_HEIGHT"]),
         "pre_restart_tip": e.get("PRE_RESTART_RUST_TIP") or None,
         "pre_restart_has_tip": e.get("PRE_RESTART_RUST_HAS_TIP") == "true",
+        "pre_restart_tip_path": e["RUST_PRE_RESTART_TIP_JSON"],
+        "go_target_height": int(e["GO_RESTART_TARGET_HEIGHT"]),
+        "go_target_tip": e.get("GO_RESTART_TARGET_TIP") or None,
+        "go_target_has_tip": e.get("GO_RESTART_TARGET_HAS_TIP") == "true",
+        "go_target_tx_count": int(e["GO_RESTART_TARGET_TX_COUNT"]),
+        "go_target_mine_next_path": e["GO_RESTART_MINE_JSON"],
+        "go_target_tip_path": e["GO_RESTART_TARGET_TIP_JSON"],
         "catch_up_height": int(e["POST_RESTART_RUST_HEIGHT"]),
         "catch_up_tip": e.get("POST_RESTART_RUST_TIP") or None,
         "catch_up_has_tip": e.get("POST_RESTART_RUST_HAS_TIP") == "true",
+        "catch_up_tip_path": e["RUST_CATCH_UP_TIP_JSON"],
         "same_datadir": e.get("RUST_RESTART_SAME_DATADIR") == "true",
         "peer_reconnect_observed": e.get("RUST_RESTART_PEER_RECONNECTED") == "true",
     }
@@ -1792,6 +1852,33 @@ capture_restart_tip() {
   parsed="$(parse_restart_tip_sidecar "${out}")" || { rc=$?; RUST_RESTART_REASON="$(restart_tip_reason "${label}" "${rc}")"; return 1; }
   RUST_RESTART_TIP_TSV="${parsed}"
 }
+go_restart_mine_target() {
+  local parsed rc=0 target_height target_tip target_has_tip
+  RUST_RESTART_REASON=""
+  capture_rpc_sidecar go POST "${GO_RPC_ADDR}" /mine_next "${GO_RESTART_MINE_JSON}" preserve-http-error || {
+    rc=$?
+    if [[ "${rc}" -eq 21 ]]; then
+      RUST_RESTART_REASON="$(mine_next_http_error_reason "${GO_RESTART_MINE_JSON}.raw" go_restart_mine)"
+      rm -f -- "${GO_RESTART_MINE_JSON}.raw"
+    else
+      RUST_RESTART_REASON="$(tx_capture_reason go_restart_mine "${rc}")"
+    fi
+    return 1
+  }
+  parsed="$(parse_restart_mine_next_response "${GO_RESTART_MINE_JSON}")" || { rc=$?; case "${rc}" in 13) RUST_RESTART_REASON=go_restart_mine_malformed_rpc_body ;; 14) RUST_RESTART_REASON=go_restart_mine_unavailable ;; 16) RUST_RESTART_REASON=go_restart_mine_tx_count_invalid ;; *) RUST_RESTART_REASON=go_restart_mine_unknown_failure ;; esac; return 1; }
+  IFS=$'\t' read -r GO_RESTART_TARGET_HEIGHT GO_RESTART_TARGET_TIP GO_RESTART_TARGET_TX_COUNT <<<"${parsed}" || { RUST_RESTART_REASON=go_restart_mine_malformed_rpc_body; return 1; }
+  if (( GO_RESTART_TARGET_HEIGHT <= PRE_RESTART_RUST_HEIGHT )); then
+    RUST_RESTART_REASON=go_restart_target_not_advanced
+    return 1
+  fi
+  capture_restart_tip go_restart_target go "${GO_RPC_ADDR}" "${GO_RESTART_TARGET_TIP_JSON}" || return 1
+  IFS='|' read -r target_height target_tip target_has_tip <<<"${RUST_RESTART_TIP_TSV}" || { RUST_RESTART_REASON=go_restart_target_tip_parse_failed; return 1; }
+  if (( target_height != GO_RESTART_TARGET_HEIGHT )) || [[ "${target_tip}" != "${GO_RESTART_TARGET_TIP}" || "${target_has_tip}" != "true" ]]; then
+    RUST_RESTART_REASON=go_restart_target_tip_mismatch
+    return 1
+  fi
+  GO_RESTART_TARGET_HAS_TIP="${target_has_tip}"
+}
 wait_rust_restart_catch_up() {
   local deadline tmp height tip has_tip
   RUST_RESTART_REASON=""
@@ -1799,14 +1886,23 @@ wait_rust_restart_catch_up() {
   while (( SECONDS < deadline )); do
     if capture_restart_tip rust_restart_catch_up rust "${RUST_RPC_ADDR}" "${tmp}"; then
       IFS='|' read -r height tip has_tip <<<"${RUST_RESTART_TIP_TSV}" || { RUST_RESTART_REASON=rust_restart_catch_up_tip_parse_failed; rm -f -- "${tmp}"; return 1; }
-      if (( height >= PRE_RESTART_RUST_HEIGHT )); then
+      if (( height < GO_RESTART_TARGET_HEIGHT )); then
+        RUST_RESTART_REASON=rust_restart_catch_up_below_go_target
+      elif (( height > GO_RESTART_TARGET_HEIGHT )); then
+        RUST_RESTART_REASON=rust_restart_catch_up_above_go_target
+        rm -f -- "${tmp}"
+        return 1
+      elif [[ "${tip}" != "${GO_RESTART_TARGET_TIP}" ]]; then
+        RUST_RESTART_REASON=rust_restart_catch_up_tip_mismatch
+        rm -f -- "${tmp}"
+        return 1
+      else
         mv -- "${tmp}" "${RUST_CATCH_UP_TIP_JSON}" || { RUST_RESTART_REASON=rust_restart_catch_up_artifact_write_failed; rm -f -- "${tmp}"; return 1; }
         POST_RESTART_RUST_HEIGHT="${height}"
         POST_RESTART_RUST_TIP="${tip}"
         POST_RESTART_RUST_HAS_TIP="${has_tip}"
         return 0
       fi
-      RUST_RESTART_REASON=rust_restart_catch_up_below_pre_restart
     fi
     sleep 1
   done
@@ -1839,6 +1935,7 @@ run_rust_restart_scenario() {
   rubin_process_stop_pid "${OLD_RUST_PID}" || { RUST_RESTART_REASON=rust_restart_stop_failed; return 1; }
   if rubin_process_is_alive "${OLD_RUST_PID}"; then RUST_RESTART_REASON=rust_restart_old_pid_still_alive; return 1; fi
   OLD_RUST_PID_STOPPED=true
+  go_restart_mine_target || return 1
   START_REASON=""
   RUST_PROCESS_ALIVE=false
   RUST_RPC_PROCESS_BACKED=false
