@@ -21,7 +21,7 @@ use rubin_node::{
 };
 use serde::{Deserialize, Serialize};
 
-const PRODUCTION_STOP_SIGNAL_SET: &str = "SIGINT/SIGTERM/SIGHUP";
+const PRODUCTION_STOP_SIGNAL_SET: &str = "SIGINT/SIGTERM";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CliConfig {
@@ -613,10 +613,32 @@ fn stop_signal_pair() -> (StopHandle, StopSignal) {
     )
 }
 
+#[cfg(unix)]
+fn production_unix_stop_signals() -> [i32; 2] {
+    [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]
+}
+
+#[cfg(unix)]
+fn install_production_stop_signal() -> Result<StopSignal, String> {
+    let (handle, stop_signal) = stop_signal_pair();
+    let mut signals = signal_hook::iterator::Signals::new(production_unix_stop_signals())
+        .map_err(|err| format!("install {PRODUCTION_STOP_SIGNAL_SET} handler: {err}"))?;
+    std::thread::Builder::new()
+        .name("rubin-stop-signal".to_string())
+        .spawn(move || {
+            if signals.forever().next().is_some() {
+                handle.request_stop();
+            }
+        })
+        .map_err(|err| format!("start {PRODUCTION_STOP_SIGNAL_SET} handler: {err}"))?;
+    Ok(stop_signal)
+}
+
+#[cfg(not(unix))]
 fn install_production_stop_signal() -> Result<StopSignal, String> {
     let (handle, stop_signal) = stop_signal_pair();
     ctrlc::set_handler(move || handle.request_stop())
-        .map_err(|err| format!("install {PRODUCTION_STOP_SIGNAL_SET} handler: {err}"))?;
+        .map_err(|err| format!("install Ctrl-C handler: {err}"))?;
     Ok(stop_signal)
 }
 
@@ -1440,8 +1462,22 @@ mod tests {
     }
 
     #[test]
-    fn signal_lifecycle_contract_names_ctrlc_termination_signal_set() {
-        assert_eq!(PRODUCTION_STOP_SIGNAL_SET, "SIGINT/SIGTERM/SIGHUP");
+    fn signal_lifecycle_contract_names_go_aligned_signal_set() {
+        assert_eq!(PRODUCTION_STOP_SIGNAL_SET, "SIGINT/SIGTERM");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_lifecycle_unix_signal_set_excludes_sighup_for_go_parity() {
+        let signals = super::production_unix_stop_signals();
+        assert_eq!(
+            signals,
+            [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM]
+        );
+        assert!(
+            !signals.contains(&signal_hook::consts::SIGHUP),
+            "SIGHUP is not part of the Go-aligned graceful shutdown contract"
+        );
     }
 
     #[test]

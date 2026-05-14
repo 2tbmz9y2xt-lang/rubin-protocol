@@ -139,11 +139,11 @@ pub struct RunningDevnetRPCServer {
 ///     * the lifecycle context has not been canceled by an external
 ///       signal before production lifecycle shutdown starts. Rust
 ///       production `main.rs` wires the process stop flag into this
-///       gate. With `ctrlc`'s `termination` feature enabled, that flag
-///       is set for Ctrl-C/SIGINT and for Unix SIGTERM/SIGHUP, so a
-///       stop observed before or during RPC startup stamps `Shutdown`
-///       and `/ready` reports 503 before `RunningDevnetRPCServer::close`
-///       tears the listener down.
+///       gate for the Go-aligned graceful-stop set: SIGINT and SIGTERM
+///       on Unix, and Ctrl-C on non-Unix platforms. SIGHUP is not part
+///       of the graceful-stop contract. A stop observed before or during
+///       RPC startup stamps `Shutdown` and `/ready` reports 503 before
+///       `RunningDevnetRPCServer::close` tears the listener down.
 ///
 ///   The mempool/miner/sync absence rows above are explicitly the
 ///   `go_rust_parity_matrix` row "mempool/miner/sync prerequisites
