@@ -980,8 +980,8 @@ submit_go_tx() {
   local status=0 cleanup_status=0 rc=0
   TX_REASON=""
   [[ -n "${TX_FROM_KEY_FILE}" && -f "${TX_FROM_KEY_FILE}" && -n "${TX_TO_KEY}" ]] || { cleanup_tx_from_key_file || true; TX_REASON=go_submit_keygen_material_malformed; return 1; }
-  PROPAGATION_SAMPLE_START_SECONDS="${SECONDS}"
   TX_HEX="$(bounded_mesh "${argv[@]}")" || status=$?
+  PROPAGATION_SAMPLE_START_SECONDS="${SECONDS}"
   cleanup_tx_from_key_file || cleanup_status=$?
   (( cleanup_status == 0 )) || { TX_REASON=go_submit_keygen_cleanup_failed; return 1; }
   (( status == 0 )) || { [[ ${status} -eq 142 ]] && TX_REASON=go_submit_txgen_timeout || TX_REASON=go_submit_txgen_failed; return 1; }
@@ -996,8 +996,8 @@ submit_rust_tx() {
   local status=0 cleanup_status=0 rc=0
   TX_REASON=""
   [[ -n "${TX_FROM_KEY_FILE}" && -f "${TX_FROM_KEY_FILE}" && -n "${TX_TO_KEY}" ]] || { cleanup_tx_from_key_file || true; TX_REASON=rust_submit_keygen_material_malformed; return 1; }
-  PROPAGATION_SAMPLE_START_SECONDS="${SECONDS}"
   TX_HEX="$(bounded_mesh "${argv[@]}")" || status=$?
+  PROPAGATION_SAMPLE_START_SECONDS="${SECONDS}"
   cleanup_tx_from_key_file || cleanup_status=$?
   (( cleanup_status == 0 )) || { TX_REASON=rust_submit_keygen_cleanup_failed; return 1; }
   (( status == 0 )) || { [[ ${status} -eq 142 ]] && TX_REASON=rust_submit_txgen_timeout || TX_REASON=rust_submit_txgen_failed; return 1; }
