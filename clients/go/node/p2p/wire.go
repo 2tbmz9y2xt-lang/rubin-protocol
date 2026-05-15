@@ -119,12 +119,27 @@ func readFrameWithPayloadLimit(r io.Reader, expectedMagic [4]byte, maxMessageSiz
 
 func readPayloadWithChecksum(r io.Reader, size uint32, wantChecksum [4]byte) ([]byte, error) {
 	if size == 0 {
-		if wantChecksum != wireChecksum(nil) {
-			return nil, errors.New("invalid envelope checksum")
-		}
-		return make([]byte, 0), nil
+		return readZeroLengthPayload(wantChecksum)
 	}
 
+	payload, gotChecksum, err := readPayloadChunks(r, size)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(wantChecksum[:], gotChecksum[:]) {
+		return nil, errors.New("invalid envelope checksum")
+	}
+	return payload, nil
+}
+
+func readZeroLengthPayload(wantChecksum [4]byte) ([]byte, error) {
+	if wantChecksum != wireChecksum(nil) {
+		return nil, errors.New("invalid envelope checksum")
+	}
+	return make([]byte, 0), nil
+}
+
+func readPayloadChunks(r io.Reader, size uint32) ([]byte, [4]byte, error) {
 	hasher := sha3.New256()
 	initialCap := int(size)
 	if initialCap > streamReadChunkBytes {
@@ -140,28 +155,28 @@ func readPayloadWithChecksum(r io.Reader, size uint32, wantChecksum [4]byte) ([]
 		chunk := make([]byte, chunkLen)
 		n, err := io.ReadFull(r, chunk)
 		if err != nil {
-			read := wireHeaderSize + len(payload) + n
-			if isReadTimeout(err) {
-				return nil, partialFrameTimeoutError{part: "payload", read: read, want: wireHeaderSize + int(size), err: err}
-			}
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return nil, io.ErrUnexpectedEOF
-			}
-			return nil, err
+			return nil, [4]byte{}, payloadReadError(size, len(payload), n, err)
 		}
 		if _, err := hasher.Write(chunk); err != nil {
-			return nil, err
+			return nil, [4]byte{}, err
 		}
 		payload = append(payload, chunk...)
 		remaining -= chunkLen
 	}
 
 	sum := hasher.Sum(nil)
-	if !bytes.Equal(wantChecksum[:], sum[:4]) {
-		return nil, errors.New("invalid envelope checksum")
-	}
+	return payload, [4]byte{sum[0], sum[1], sum[2], sum[3]}, nil
+}
 
-	return payload, nil
+func payloadReadError(size uint32, payloadLen int, n int, err error) error {
+	read := wireHeaderSize + payloadLen + n
+	if isReadTimeout(err) {
+		return partialFrameTimeoutError{part: "payload", read: read, want: wireHeaderSize + int(size), err: err}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 func readFrameHeader(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32) (frameHeader, error) {
@@ -216,6 +231,19 @@ func encodeVersionPayload(v node.VersionPayloadV1) ([]byte, error) {
 }
 
 func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
+	if err := encodeVersionScalarFields(w, v); err != nil {
+		return err
+	}
+	if _, err := w.Write(v.ChainID[:]); err != nil {
+		return err
+	}
+	if _, err := w.Write(v.GenesisHash[:]); err != nil {
+		return err
+	}
+	return binary.Write(w, binary.LittleEndian, v.BestHeight)
+}
+
+func encodeVersionScalarFields(w io.Writer, v node.VersionPayloadV1) error {
 	if err := binary.Write(w, binary.LittleEndian, v.ProtocolVersion); err != nil {
 		return err
 	}
@@ -232,54 +260,52 @@ func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
 	if err := binary.Write(w, binary.LittleEndian, v.DaMempoolSize); err != nil {
 		return err
 	}
-	if _, err := w.Write(v.ChainID[:]); err != nil {
-		return err
-	}
-	if _, err := w.Write(v.GenesisHash[:]); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, v.BestHeight); err != nil {
-		return err
-	}
 	return nil
 }
 
 func decodeVersionPayload(payload []byte) (node.VersionPayloadV1, error) {
 	var out node.VersionPayloadV1
-	if len(payload) != versionPayloadBytes {
-		if len(payload) < versionPayloadBytes {
-			return out, errors.New("version payload too short")
-		}
-		return out, errors.New("trailing bytes in version payload")
+	if err := validateVersionPayloadLength(payload); err != nil {
+		return out, err
 	}
 	reader := bytes.NewReader(payload)
-	if err := binary.Read(reader, binary.LittleEndian, &out.ProtocolVersion); err != nil {
-		return out, errors.New("version payload too short")
-	}
-	var txRelay [1]byte
-	if _, err := io.ReadFull(reader, txRelay[:]); err != nil {
-		return out, errors.New("version payload too short")
-	}
-	out.TxRelay = txRelay[0] == 1
-	if err := binary.Read(reader, binary.LittleEndian, &out.PrunedBelowHeight); err != nil {
-		return out, errors.New("version payload too short")
-	}
-	if err := binary.Read(reader, binary.LittleEndian, &out.DaMempoolSize); err != nil {
-		return out, errors.New("version payload too short")
-	}
-	if _, err := io.ReadFull(reader, out.ChainID[:]); err != nil {
-		return out, errors.New("version payload too short")
-	}
-	if _, err := io.ReadFull(reader, out.GenesisHash[:]); err != nil {
-		return out, errors.New("version payload too short")
-	}
-	if err := binary.Read(reader, binary.LittleEndian, &out.BestHeight); err != nil {
-		return out, errors.New("version payload too short")
+	if err := decodeVersionPayloadFields(reader, &out); err != nil {
+		return out, err
 	}
 	if reader.Len() != 0 {
 		return out, errors.New("trailing bytes in version payload")
 	}
 	return out, nil
+}
+
+func validateVersionPayloadLength(payload []byte) error {
+	if len(payload) == versionPayloadBytes {
+		return nil
+	}
+	if len(payload) < versionPayloadBytes {
+		return errors.New("version payload too short")
+	}
+	return errors.New("trailing bytes in version payload")
+}
+
+func decodeVersionPayloadFields(reader *bytes.Reader, out *node.VersionPayloadV1) error {
+	var txRelay [1]byte
+	steps := []func() error{
+		func() error { return binary.Read(reader, binary.LittleEndian, &out.ProtocolVersion) },
+		func() error { _, err := io.ReadFull(reader, txRelay[:]); return err },
+		func() error { return binary.Read(reader, binary.LittleEndian, &out.PrunedBelowHeight) },
+		func() error { return binary.Read(reader, binary.LittleEndian, &out.DaMempoolSize) },
+		func() error { _, err := io.ReadFull(reader, out.ChainID[:]); return err },
+		func() error { _, err := io.ReadFull(reader, out.GenesisHash[:]); return err },
+		func() error { return binary.Read(reader, binary.LittleEndian, &out.BestHeight) },
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return errors.New("version payload too short")
+		}
+	}
+	out.TxRelay = txRelay[0] == 1
+	return nil
 }
 
 func buildEnvelopeHeader(magic [4]byte, command string, payload []byte) ([wireHeaderSize]byte, error) {
@@ -323,27 +349,44 @@ func decodeWireCommand(raw []byte) (string, error) {
 	if len(raw) != wireCommandSize {
 		return "", errors.New("invalid command width")
 	}
-	end := wireCommandSize
-	for i, ch := range raw {
-		if ch == 0 {
-			end = i
-			break
-		}
-	}
+	end := wireCommandEnd(raw)
 	if end == 0 {
 		return "", errors.New("empty command")
 	}
-	for _, ch := range raw[end:] {
-		if ch != 0 {
-			return "", errors.New("invalid NUL padding in command")
-		}
+	if err := validateWireCommandPadding(raw[end:]); err != nil {
+		return "", err
 	}
-	for _, ch := range raw[:end] {
-		if ch < 0x21 || ch > 0x7e {
-			return "", errors.New("command is not ASCII printable")
-		}
+	if err := validateWireCommandPrintable(raw[:end]); err != nil {
+		return "", err
 	}
 	return string(raw[:end]), nil
+}
+
+func wireCommandEnd(raw []byte) int {
+	for i, ch := range raw {
+		if ch == 0 {
+			return i
+		}
+	}
+	return wireCommandSize
+}
+
+func validateWireCommandPadding(raw []byte) error {
+	for _, ch := range raw {
+		if ch != 0 {
+			return errors.New("invalid NUL padding in command")
+		}
+	}
+	return nil
+}
+
+func validateWireCommandPrintable(raw []byte) error {
+	for _, ch := range raw {
+		if ch < 0x21 || ch > 0x7e {
+			return errors.New("command is not ASCII printable")
+		}
+	}
+	return nil
 }
 
 func networkMagic(network string) [4]byte {

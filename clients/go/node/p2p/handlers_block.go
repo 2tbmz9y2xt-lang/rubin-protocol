@@ -70,23 +70,44 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
-		if errors.Is(err, node.ErrParentNotFound) {
-			if err := consensus.PowCheck(pb.HeaderBytes, pb.Header.Target); err != nil {
-				p.bumpBan(100, err.Error())
-				return nil, err
-			}
-			p.service.retainOrResolveOrphan(p, blockHash, pb.Header.PrevBlockHash, blockBytes)
-			return nil, nil
-		}
-		if isConsensusApplyBlockError(err) {
-			p.bumpBan(100, err.Error())
-		} else {
-			p.setLastError(err.Error())
-		}
-		return nil, err
+		return p.handleRelayedBlockApplyError(pb, blockHash, blockBytes, err)
 	}
 	p.acceptedRelayedBlock(blockHash, summary)
 	return summary, nil
+}
+
+func (p *peer) handleRelayedBlockApplyError(
+	pb *consensus.ParsedBlock,
+	blockHash [32]byte,
+	blockBytes []byte,
+	err error,
+) (*node.ChainStateConnectSummary, error) {
+	if errors.Is(err, node.ErrParentNotFound) {
+		return p.retainRelayedOrphanIfValid(pb, blockHash, blockBytes)
+	}
+	p.recordRelayedBlockApplyError(err)
+	return nil, err
+}
+
+func (p *peer) retainRelayedOrphanIfValid(
+	pb *consensus.ParsedBlock,
+	blockHash [32]byte,
+	blockBytes []byte,
+) (*node.ChainStateConnectSummary, error) {
+	if err := consensus.PowCheck(pb.HeaderBytes, pb.Header.Target); err != nil {
+		p.bumpBan(100, err.Error())
+		return nil, err
+	}
+	p.service.retainOrResolveOrphan(p, blockHash, pb.Header.PrevBlockHash, blockBytes)
+	return nil, nil
+}
+
+func (p *peer) recordRelayedBlockApplyError(err error) {
+	if isConsensusApplyBlockError(err) {
+		p.bumpBan(100, err.Error())
+		return
+	}
+	p.setLastError(err.Error())
 }
 
 func isConsensusApplyBlockError(err error) bool {

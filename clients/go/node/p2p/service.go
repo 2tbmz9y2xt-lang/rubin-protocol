@@ -106,21 +106,47 @@ type peer struct {
 }
 
 func NewService(cfg ServiceConfig) (*Service, error) {
+	if err := validateServiceConfig(cfg); err != nil {
+		return nil, err
+	}
+	cfg = normalizeServiceConfig(cfg)
+	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
+	addrMgr := newAddrManager(cfg.Now)
+	seedAddrManagerFromBootstrap(addrMgr, outboundAddrs)
+	return &Service{
+		cfg:            cfg,
+		peers:          make(map[string]*peer),
+		inFlightDial:   make(map[string]struct{}),
+		reconnectState: make(map[string]*reconnectEntry),
+		outboundAddrs:  outboundAddrs,
+		addrMgr:        addrMgr,
+		handshakeSlots: make(chan struct{}, cfg.PeerRuntimeConfig.MaxPeers),
+		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
+		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
+		orphans:        newOrphanPool(500),
+	}, nil
+}
+
+func validateServiceConfig(cfg ServiceConfig) error {
 	if strings.TrimSpace(cfg.BindAddr) == "" {
-		return nil, errors.New("bind address is required")
+		return errors.New("bind address is required")
 	}
 	if cfg.PeerManager == nil {
-		return nil, errors.New("nil peer manager")
+		return errors.New("nil peer manager")
 	}
 	if cfg.SyncEngine == nil {
-		return nil, errors.New("nil sync engine")
+		return errors.New("nil sync engine")
 	}
 	if cfg.BlockStore == nil {
-		return nil, errors.New("nil blockstore")
+		return errors.New("nil blockstore")
 	}
 	if cfg.TxMetadataFunc == nil {
-		return nil, errors.New("nil tx metadata func")
+		return errors.New("nil tx metadata func")
 	}
+	return nil
+}
+
+func normalizeServiceConfig(cfg ServiceConfig) ServiceConfig {
 	if cfg.TxPool == nil {
 		cfg.TxPool = NewMemoryTxPool()
 	}
@@ -137,35 +163,30 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if cfg.LocatorLimit <= 0 {
 		cfg.LocatorLimit = defaultLocatorLimit
 	}
-	if cfg.GetBlocksBatchSize == 0 {
-		if cfg.SyncConfig.HeaderBatchLimit > 0 {
-			cfg.GetBlocksBatchSize = cfg.SyncConfig.HeaderBatchLimit
-		} else {
-			cfg.GetBlocksBatchSize = defaultGetBlocksBatchLimit
-		}
-	}
-	cfg.PeerRuntimeConfig = mergePeerRuntimeConfig(cfg.PeerRuntimeConfig)
-	if cfg.PeerRuntimeConfig.Network == "" {
-		cfg.PeerRuntimeConfig.Network = cfg.SyncConfig.Network
-	}
+	cfg.GetBlocksBatchSize = normalizeGetBlocksBatchSize(cfg.GetBlocksBatchSize, cfg.SyncConfig.HeaderBatchLimit)
+	cfg.PeerRuntimeConfig = normalizeServicePeerRuntimeConfig(cfg.PeerRuntimeConfig, cfg.SyncConfig.Network)
 	if cfg.TxRelayFanout <= 0 {
 		cfg.TxRelayFanout = defaultTxRelayFanout
 	}
-	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
-	addrMgr := newAddrManager(cfg.Now)
-	seedAddrManagerFromBootstrap(addrMgr, outboundAddrs)
-	return &Service{
-		cfg:            cfg,
-		peers:          make(map[string]*peer),
-		inFlightDial:   make(map[string]struct{}),
-		reconnectState: make(map[string]*reconnectEntry),
-		outboundAddrs:  outboundAddrs,
-		addrMgr:        addrMgr,
-		handshakeSlots: make(chan struct{}, cfg.PeerRuntimeConfig.MaxPeers),
-		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
-		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
-		orphans:        newOrphanPool(500),
-	}, nil
+	return cfg
+}
+
+func normalizeGetBlocksBatchSize(configured, headerBatchLimit uint64) uint64 {
+	if configured > 0 {
+		return configured
+	}
+	if headerBatchLimit > 0 {
+		return headerBatchLimit
+	}
+	return defaultGetBlocksBatchLimit
+}
+
+func normalizeServicePeerRuntimeConfig(cfg node.PeerRuntimeConfig, syncNetwork string) node.PeerRuntimeConfig {
+	cfg = mergePeerRuntimeConfig(cfg)
+	if cfg.Network == "" {
+		cfg.Network = syncNetwork
+	}
+	return cfg
 }
 
 func (s *Service) AnnounceBlock(blockBytes []byte) error {
@@ -190,28 +211,42 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
 	}
-	_, txid, _, consumed, err := consensus.ParseTx(txBytes)
+	txid, err := parseCanonicalTxID(txBytes)
 	if err != nil {
 		return err
 	}
-	if consumed != len(txBytes) {
-		return errors.New("non-canonical tx bytes")
-	}
-	admitted := s.cfg.TxPool.Has(txid)
-	if !admitted {
-		meta, err := s.relayTxMetadata(txBytes)
-		if err != nil {
-			return err
-		}
-		admitted = s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size)
-	}
-	if !admitted && !s.cfg.TxPool.Has(txid) {
-		return errors.New("tx not admitted to relay pool")
+	if err := s.ensureRelayTxAdmitted(txid, txBytes); err != nil {
+		return err
 	}
 	if !s.txSeen.Add(txid) {
 		return nil
 	}
 	return s.broadcastInventory(nil, []InventoryVector{{Type: MSG_TX, Hash: txid}})
+}
+
+func parseCanonicalTxID(txBytes []byte) ([32]byte, error) {
+	_, txid, _, consumed, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	if consumed != len(txBytes) {
+		return [32]byte{}, errors.New("non-canonical tx bytes")
+	}
+	return txid, nil
+}
+
+func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) error {
+	if s.cfg.TxPool.Has(txid) {
+		return nil
+	}
+	meta, err := s.relayTxMetadata(txBytes)
+	if err != nil {
+		return err
+	}
+	if s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) || s.cfg.TxPool.Has(txid) {
+		return nil
+	}
+	return errors.New("tx not admitted to relay pool")
 }
 
 func normalizePeerAddrs(addrs []string) []string {

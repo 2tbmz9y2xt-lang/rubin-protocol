@@ -10,6 +10,16 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
+type handshakeProgress struct {
+	sentVerAck      bool
+	versionReceived bool
+	verAckReceived  bool
+}
+
+func (h handshakeProgress) complete() bool {
+	return h.versionReceived && h.sentVerAck && h.verAckReceived
+}
+
 func performHandshake(
 	ctx context.Context,
 	conn net.Conn,
@@ -45,44 +55,88 @@ func performHandshake(
 	if err := writeFrame(conn, magic, message{Command: messageVersion, Payload: payload}, cfg.MaxMessageSize); err != nil {
 		return state, err
 	}
-	sentVerAck := false
-	versionReceived := false
-	verAckReceived := false
-	for {
+	progress := handshakeProgress{}
+	if err := progress.run(conn, magic, cfg, local, expectedChainID, expectedGenesisHash, &state); err != nil {
+		return state, err
+	}
+	state.HandshakeComplete = true
+	return state, nil
+}
+
+func (h *handshakeProgress) run(
+	conn net.Conn,
+	magic [4]byte,
+	cfg node.PeerRuntimeConfig,
+	local node.VersionPayloadV1,
+	expectedChainID [32]byte,
+	expectedGenesisHash [32]byte,
+	state *node.PeerState,
+) error {
+	for !h.complete() {
 		frame, err := readFrameWithPayloadLimit(conn, magic, cfg.MaxMessageSize, preHandshakePayloadCap)
 		if err != nil {
-			return state, err
+			return err
 		}
-		switch frame.Command {
-		case messageVersion:
-			remote, err := decodeVersionPayload(frame.Payload)
-			if err != nil {
-				state.LastError = err.Error()
-				return state, err
-			}
-			state.RemoteVersion = remote
-			if err := validateRemoteVersion(remote, local.ProtocolVersion, expectedChainID, expectedGenesisHash, cfg.BanThreshold, &state); err != nil {
-				return state, err
-			}
-			versionReceived = true
-			if !sentVerAck {
-				if err := writeFrame(conn, magic, message{Command: messageVerAck}, cfg.MaxMessageSize); err != nil {
-					return state, err
-				}
-				sentVerAck = true
-			}
-		case messageVerAck:
-			verAckReceived = true
-		default:
-			state.BanScore = cfg.BanThreshold
-			state.LastError = "unexpected pre-handshake command"
-			return state, errors.New("unexpected pre-handshake command")
-		}
-		if versionReceived && sentVerAck && verAckReceived {
-			state.HandshakeComplete = true
-			return state, nil
+		if err := h.handleFrame(conn, magic, cfg.MaxMessageSize, frame, local, expectedChainID, expectedGenesisHash, cfg.BanThreshold, state); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+func (h *handshakeProgress) handleFrame(
+	conn net.Conn,
+	magic [4]byte,
+	maxMessageSize uint32,
+	frame message,
+	local node.VersionPayloadV1,
+	expectedChainID [32]byte,
+	expectedGenesisHash [32]byte,
+	banThreshold int,
+	state *node.PeerState,
+) error {
+	switch frame.Command {
+	case messageVersion:
+		return h.handleVersionFrame(conn, magic, maxMessageSize, frame.Payload, local, expectedChainID, expectedGenesisHash, banThreshold, state)
+	case messageVerAck:
+		h.verAckReceived = true
+		return nil
+	default:
+		state.BanScore = banThreshold
+		state.LastError = "unexpected pre-handshake command"
+		return errors.New("unexpected pre-handshake command")
+	}
+}
+
+func (h *handshakeProgress) handleVersionFrame(
+	conn net.Conn,
+	magic [4]byte,
+	maxMessageSize uint32,
+	payload []byte,
+	local node.VersionPayloadV1,
+	expectedChainID [32]byte,
+	expectedGenesisHash [32]byte,
+	banThreshold int,
+	state *node.PeerState,
+) error {
+	remote, err := decodeVersionPayload(payload)
+	if err != nil {
+		state.LastError = err.Error()
+		return err
+	}
+	state.RemoteVersion = remote
+	if err := validateRemoteVersion(remote, local.ProtocolVersion, expectedChainID, expectedGenesisHash, banThreshold, state); err != nil {
+		return err
+	}
+	h.versionReceived = true
+	if h.sentVerAck {
+		return nil
+	}
+	if err := writeFrame(conn, magic, message{Command: messageVerAck}, maxMessageSize); err != nil {
+		return err
+	}
+	h.sentVerAck = true
+	return nil
 }
 
 func preHandshakePayloadCap(command string) uint32 {

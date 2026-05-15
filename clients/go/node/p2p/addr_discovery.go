@@ -81,7 +81,7 @@ func isDialableDiscoveredIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+	if isSpecialUseNetIP(ip) {
 		return false
 	}
 	addr, ok := netip.AddrFromSlice(ip)
@@ -89,15 +89,27 @@ func isDialableDiscoveredIP(ip net.IP) bool {
 		return false
 	}
 	addr = addr.Unmap()
-	if !addr.IsValid() || !addr.IsGlobalUnicast() {
+	if !isGlobalDiscoveredAddr(addr) {
 		return false
 	}
+	return !isSpecialUseDiscoveredAddr(addr)
+}
+
+func isSpecialUseNetIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+}
+
+func isGlobalDiscoveredAddr(addr netip.Addr) bool {
+	return addr.IsValid() && addr.IsGlobalUnicast()
+}
+
+func isSpecialUseDiscoveredAddr(addr netip.Addr) bool {
 	for _, prefix := range discoveredAddrSpecialUsePrefixes {
 		if prefix.Contains(addr) {
-			return false
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 func (s *Service) inFlightDialCount() int {
