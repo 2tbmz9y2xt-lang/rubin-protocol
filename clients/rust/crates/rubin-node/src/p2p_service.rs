@@ -1108,6 +1108,7 @@ mod tests {
     use std::fs;
     use std::io;
     use std::net::{TcpListener, TcpStream};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1141,6 +1142,20 @@ mod tests {
     use std::collections::HashMap;
 
     static DNS_RESOLVER_TEST_LOCK: Mutex<()> = Mutex::new(());
+    const CLEANUP_TEST_AMOUNT: u64 = 7700;
+    const CLEANUP_TEST_FEE: u64 = 10;
+    const CLEANUP_TEST_WEIGHT: u64 = 9;
+    const MISSING_REQUEUE_BLOCK: [u8; 32] = [0x44; 32];
+
+    struct TempDirCleanupGuard {
+        path: PathBuf,
+    }
+
+    impl Drop for TempDirCleanupGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1238,12 +1253,16 @@ mod tests {
         prefix: &str,
     ) -> (
         SharedServiceState,
-        std::path::PathBuf,
+        TempDirCleanupGuard,
         [u8; 32],
         rubin_consensus::Outpoint,
     ) {
         let (shared, dir) = test_shared_state_after_genesis(prefix);
-        let (state, admitted_raw, _) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (state, admitted_raw, _) = signed_conflicting_p2pk_state_and_txs(
+            CLEANUP_TEST_AMOUNT,
+            CLEANUP_TEST_FEE,
+            CLEANUP_TEST_WEIGHT,
+        );
         {
             let mut engine = shared.sync_engine.lock().expect("sync engine");
             engine.chain_state.utxos = state.utxos.clone();
@@ -1272,7 +1291,12 @@ mod tests {
                 .expect("admit tx before cleanup failure")
         };
         assert_eq!(admitted_txid, parsed_txid);
-        (shared, dir, admitted_txid, conflicting_input)
+        (
+            shared,
+            TempDirCleanupGuard { path: dir },
+            admitted_txid,
+            conflicting_input,
+        )
     }
 
     fn assert_requeue_cleanup_failure(
@@ -1461,14 +1485,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_tx_pool_cleanup_keeps_post_success_best_effort_mutations_on_requeue_failure() {
-        let missing_requeue_block = [0x44; 32];
-        let (shared, dir, admitted_txid, _) =
+    fn apply_tx_pool_cleanup_keeps_confirmed_eviction_on_requeue_failure() {
+        let (shared, _dir, admitted_txid, _) =
             shared_state_with_admitted_tx("rubin-node-p2p-cleanup-best-effort-confirmed");
         let cleanup = TxPoolCleanupPlan::from_parts_for_test(
             vec![admitted_txid],
             Vec::new(),
-            vec![missing_requeue_block],
+            vec![MISSING_REQUEUE_BLOCK],
         );
         assert_requeue_cleanup_failure(
             apply_tx_pool_cleanup(&shared, cleanup),
@@ -1483,14 +1506,16 @@ mod tests {
             None,
             "post-success cleanup keeps confirmed-tx eviction despite later requeue failure"
         );
-        fs::remove_dir_all(dir).expect("cleanup confirmed best-effort");
+    }
 
-        let (shared, dir, admitted_txid, conflicting_input) =
+    #[test]
+    fn apply_tx_pool_cleanup_keeps_conflict_removal_on_requeue_failure() {
+        let (shared, _dir, admitted_txid, conflicting_input) =
             shared_state_with_admitted_tx("rubin-node-p2p-cleanup-best-effort-conflict");
         let cleanup = TxPoolCleanupPlan::from_parts_for_test(
             Vec::new(),
             vec![conflicting_input],
-            vec![missing_requeue_block],
+            vec![MISSING_REQUEUE_BLOCK],
         );
         assert_requeue_cleanup_failure(
             apply_tx_pool_cleanup(&shared, cleanup),
@@ -1505,11 +1530,18 @@ mod tests {
             None,
             "post-success cleanup keeps conflict removal despite later requeue failure"
         );
-        fs::remove_dir_all(dir).expect("cleanup conflict best-effort");
+    }
 
+    #[test]
+    fn apply_tx_pool_cleanup_keeps_accepted_requeue_on_later_requeue_failure() {
         let (shared, dir) =
             test_shared_state_after_genesis("rubin-node-p2p-cleanup-best-effort-requeue");
-        let (state, requeue_raw, _) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let _dir = TempDirCleanupGuard { path: dir };
+        let (state, requeue_raw, _) = signed_conflicting_p2pk_state_and_txs(
+            CLEANUP_TEST_AMOUNT,
+            CLEANUP_TEST_FEE,
+            CLEANUP_TEST_WEIGHT,
+        );
         {
             let mut engine = shared.sync_engine.lock().expect("sync engine");
             engine.chain_state.utxos = state.utxos.clone();
@@ -1519,7 +1551,7 @@ mod tests {
         let cleanup = TxPoolCleanupPlan::from_parts_for_test(
             Vec::new(),
             Vec::new(),
-            vec![missing_requeue_block, requeue_block_hash],
+            vec![MISSING_REQUEUE_BLOCK, requeue_block_hash],
         );
         let summary = assert_requeue_cleanup_failure(
             apply_tx_pool_cleanup(&shared, cleanup),
@@ -1536,7 +1568,6 @@ mod tests {
         );
         assert_eq!(pool.entry_source(&requeue_txid), Some(TxSource::Reorg));
         drop(pool);
-        fs::remove_dir_all(dir).expect("cleanup requeue best-effort");
     }
 
     #[test]
