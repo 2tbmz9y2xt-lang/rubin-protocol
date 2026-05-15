@@ -59,6 +59,8 @@ pub(super) fn openssl_check_sigalg(
     alg: &'static core::ffi::CStr,
     props: &'static core::ffi::CStr,
 ) -> Result<(), TxError> {
+    // SAFETY: `alg` and `props` are static C strings, and the fetched OpenSSL
+    // signature handle is freed exactly once before returning.
     unsafe {
         let sig =
             openssl_sys::EVP_SIGNATURE_fetch(core::ptr::null_mut(), alg.as_ptr(), props.as_ptr());
@@ -80,6 +82,8 @@ pub(super) fn openssl_bootstrap(require_fips: bool) -> Result<(), TxError> {
         std::env::var("RUBIN_OPENSSL_MODULES").ok(),
     );
 
+    // SAFETY: OpenSSL global initialization/provider calls use static C string
+    // arguments and do not transfer Rust-owned memory to OpenSSL.
     unsafe {
         openssl_sys::ERR_clear_error();
         if ffi::OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, core::ptr::null()) != 1 {

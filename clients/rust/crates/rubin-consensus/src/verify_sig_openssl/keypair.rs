@@ -12,6 +12,8 @@ pub struct Mldsa87Keypair {
 
 impl Drop for Mldsa87Keypair {
     fn drop(&mut self) {
+        // SAFETY: `Mldsa87Keypair` uniquely owns `pkey`; the null check and
+        // post-free null assignment preserve the existing single-free invariant.
         unsafe {
             if !self.pkey.is_null() {
                 openssl_sys::EVP_PKEY_free(self.pkey);
@@ -25,6 +27,9 @@ impl Mldsa87Keypair {
     pub fn generate() -> Result<Self, TxError> {
         super::bootstrap::ensure_openssl_bootstrap()?;
         let alg = suite_alg_name(SUITE_ID_ML_DSA_87)?;
+        // SAFETY: the helper calls below validate each OpenSSL allocation and
+        // either transfer ownership into `Mldsa87Keypair` or free `pkey` on the
+        // public-key extraction error path.
         unsafe {
             openssl_sys::ERR_clear_error();
             let pkey = generate_raw_pkey(alg)?;
@@ -50,6 +55,8 @@ impl Mldsa87Keypair {
                 "openssl: nil ML-DSA keypair",
             ));
         }
+        // SAFETY: `self.pkey` was created by OpenSSL, is owned by this keypair,
+        // and the null check above guarantees a valid pointer for signing.
         unsafe { sign_digest32_with_pkey(self.pkey, digest32) }
     }
 }
@@ -64,6 +71,8 @@ impl DigestSigner for Mldsa87Keypair {
     }
 }
 
+// SAFETY: caller must provide a valid OpenSSL signature algorithm name. The
+// returned raw key is owned by the caller on success.
 unsafe fn generate_raw_pkey(alg: &'static CStr) -> Result<*mut openssl_sys::EVP_PKEY, TxError> {
     let ctx = PkeyCtx::new_from_name(alg)?;
     if openssl_sys::EVP_PKEY_keygen_init(ctx.as_mut_ptr()) <= 0 {
@@ -82,6 +91,8 @@ unsafe fn generate_raw_pkey(alg: &'static CStr) -> Result<*mut openssl_sys::EVP_
     Ok(pkey)
 }
 
+// SAFETY: caller must pass a valid OpenSSL key pointer that remains alive for
+// the duration of this raw public-key extraction call.
 unsafe fn read_public_key(pkey: *mut openssl_sys::EVP_PKEY) -> Result<Vec<u8>, TxError> {
     let mut pubkey = vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize];
     let mut pubkey_len = pubkey.len();

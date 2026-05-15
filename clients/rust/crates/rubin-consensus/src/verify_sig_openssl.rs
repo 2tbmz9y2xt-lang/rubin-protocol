@@ -72,6 +72,9 @@ pub fn verify_sig_with_registry(
 /// Non-consensus callers (key generation, signing, CLI tools) should continue
 /// to use the operator-configured bootstrap in the `bootstrap` module.
 fn openssl_consensus_bootstrap() -> Result<(), TxError> {
+    // SAFETY: OpenSSL consensus initialization uses a null settings pointer and
+    // a fixed no-load-config flag, so no Rust-owned memory is transferred and no
+    // operator OpenSSL environment is consulted.
     unsafe {
         openssl_sys::ERR_clear_error();
         bootstrap::map_openssl_init_rc(

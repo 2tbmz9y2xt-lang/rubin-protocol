@@ -25,6 +25,9 @@ pub(crate) fn openssl_verify_sig_digest_oneshot(
         return Err(TxError::new(ErrorCode::TxErrParse, "openssl: empty input"));
     }
 
+    // SAFETY: all pointers passed to OpenSSL are derived from live Rust slices
+    // for the duration of the call; RAII wrappers own and free the created
+    // OpenSSL key/context exactly once.
     unsafe {
         openssl_sys::ERR_clear_error();
         let pkey = VerificationPkey::new_raw_public_key(alg, pubkey)?;

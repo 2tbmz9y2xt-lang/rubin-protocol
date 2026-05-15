@@ -77,6 +77,8 @@ pub(super) struct PkeyCtx {
 }
 
 impl PkeyCtx {
+    /// SAFETY: `alg` must be a valid OpenSSL algorithm name with static storage.
+    /// The returned context is uniquely owned by `PkeyCtx` and freed in `Drop`.
     pub(super) unsafe fn new_from_name(alg: &'static CStr) -> Result<Self, TxError> {
         let ptr =
             EVP_PKEY_CTX_new_from_name(core::ptr::null_mut(), alg.as_ptr(), core::ptr::null());
@@ -96,6 +98,8 @@ impl PkeyCtx {
 
 impl Drop for PkeyCtx {
     fn drop(&mut self) {
+        // SAFETY: `PkeyCtx` uniquely owns `ptr`; OpenSSL accepts null checks here
+        // and the field is nulled after free to prevent double-free on re-entry.
         unsafe {
             if !self.ptr.is_null() {
                 openssl_sys::EVP_PKEY_CTX_free(self.ptr);
@@ -110,6 +114,8 @@ pub(super) struct MdCtx {
 }
 
 impl MdCtx {
+    /// SAFETY: this creates a new OpenSSL digest context and transfers unique
+    /// ownership to `MdCtx`, which releases it exactly once in `Drop`.
     pub(super) unsafe fn new(error_msg: &'static str) -> Result<Self, TxError> {
         let ptr = EVP_MD_CTX_new();
         if ptr.is_null() {
@@ -125,6 +131,8 @@ impl MdCtx {
 
 impl Drop for MdCtx {
     fn drop(&mut self) {
+        // SAFETY: `MdCtx` uniquely owns `ptr`; the null check mirrors OpenSSL
+        // ownership rules and the field is nulled after free.
         unsafe {
             if !self.ptr.is_null() {
                 EVP_MD_CTX_free(self.ptr);
@@ -139,6 +147,9 @@ pub(super) struct VerificationPkey {
 }
 
 impl VerificationPkey {
+    /// SAFETY: `alg` is a static OpenSSL algorithm name and `pubkey` is passed
+    /// as an immutable byte slice for the duration of the FFI call. Ownership of
+    /// the returned key is transferred into `VerificationPkey`.
     pub(super) unsafe fn new_raw_public_key(
         alg: &'static CStr,
         pubkey: &[u8],
@@ -166,6 +177,8 @@ impl VerificationPkey {
 
 impl Drop for VerificationPkey {
     fn drop(&mut self) {
+        // SAFETY: `VerificationPkey` uniquely owns `ptr`; OpenSSL permits the
+        // checked free path and the field is nulled after release.
         unsafe {
             if !self.ptr.is_null() {
                 openssl_sys::EVP_PKEY_free(self.ptr);
