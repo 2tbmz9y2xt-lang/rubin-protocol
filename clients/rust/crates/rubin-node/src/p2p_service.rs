@@ -953,12 +953,21 @@ fn apply_tx_pool_cleanup(
             .tx_pool
             .lock()
             .map_err(|_| "tx pool unavailable".to_string())?;
-        tx_pool_cleanup.apply_with_report(
+        let snapshot = tx_pool
+            .snapshot()
+            .map_err(|err| format!("tx pool cleanup snapshot: {err}"))?;
+        let report = tx_pool_cleanup.apply_with_report(
             &mut tx_pool,
             &chain_state,
             block_store.as_ref(),
             chain_id,
-        )
+        );
+        if report.has_requeue_failures() {
+            tx_pool
+                .restore_snapshot(&snapshot)
+                .map_err(|err| format!("tx pool cleanup rollback: {err}"))?;
+        }
+        report
     };
     if report.has_requeue_failures() {
         return Ok(Some(report.requeue_failure_summary()));
@@ -1108,7 +1117,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use rubin_consensus::{block_hash, constants::POW_LIMIT, BLOCK_HEADER_BYTES};
+    use rubin_consensus::{block_hash, constants::POW_LIMIT, parse_tx, BLOCK_HEADER_BYTES};
 
     use super::{
         apply_tx_pool_cleanup, connect_with_timeout, finalize_live_message_outcome,
@@ -1228,10 +1237,51 @@ mod tests {
         TxPoolCleanupPlan::from_parts_for_test(Vec::new(), Vec::new(), vec![block_hash_bytes])
     }
 
+    fn shared_state_with_admitted_tx(
+        prefix: &str,
+    ) -> (
+        SharedServiceState,
+        std::path::PathBuf,
+        [u8; 32],
+        rubin_consensus::Outpoint,
+    ) {
+        let (shared, dir) = test_shared_state_after_genesis(prefix);
+        let (state, admitted_raw, _) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        {
+            let mut engine = shared.sync_engine.lock().expect("sync engine");
+            engine.chain_state.utxos = state.utxos.clone();
+        }
+        let (tx, parsed_txid, _, consumed) = parse_tx(&admitted_raw).expect("parse admitted tx");
+        assert_eq!(consumed, admitted_raw.len());
+        let input = tx.inputs.first().expect("admitted tx input");
+        let conflicting_input = rubin_consensus::Outpoint {
+            txid: input.prev_txid,
+            vout: input.prev_vout,
+        };
+        let admitted_txid = {
+            let (chain_state, block_store, chain_id) = {
+                let engine = shared.sync_engine.lock().expect("sync engine");
+                (
+                    engine.chain_state_snapshot(),
+                    engine.block_store_snapshot(),
+                    engine.chain_id(),
+                )
+            };
+            shared
+                .tx_pool
+                .lock()
+                .expect("tx pool")
+                .admit(&admitted_raw, &chain_state, block_store.as_ref(), chain_id)
+                .expect("admit tx before cleanup failure")
+        };
+        assert_eq!(admitted_txid, parsed_txid);
+        (shared, dir, admitted_txid, conflicting_input)
+    }
+
     fn assert_requeue_cleanup_failure(
         result: Result<Option<String>, String>,
         expected_bucket: &str,
-    ) {
+    ) -> String {
         let err = result
             .expect("routine requeue failure must not be infrastructure-fatal")
             .expect("requeue cleanup failure must reach live caller");
@@ -1252,6 +1302,7 @@ mod tests {
             err.contains(expected_bucket),
             "missing expected bucket {expected_bucket}: {err}"
         );
+        err
     }
 
     fn wait_until(deadline: Instant, check: impl Fn() -> bool) {
@@ -1410,6 +1461,107 @@ mod tests {
             "requeue_conflict=1",
         );
         fs::remove_dir_all(dir).expect("cleanup conflict");
+    }
+
+    #[test]
+    fn apply_tx_pool_cleanup_rolls_back_partial_mutations_on_requeue_failure() {
+        let missing_requeue_block = [0x44; 32];
+        let (shared, dir, admitted_txid, _) =
+            shared_state_with_admitted_tx("rubin-node-p2p-cleanup-rollback-confirmed");
+        let before = shared
+            .tx_pool
+            .lock()
+            .expect("tx pool")
+            .snapshot()
+            .expect("snapshot before confirmed cleanup failure");
+        let cleanup = TxPoolCleanupPlan::from_parts_for_test(
+            vec![admitted_txid],
+            Vec::new(),
+            vec![missing_requeue_block],
+        );
+        assert_requeue_cleanup_failure(
+            apply_tx_pool_cleanup(&shared, cleanup),
+            "requeue_blocks_unavailable=1",
+        );
+        let after = shared
+            .tx_pool
+            .lock()
+            .expect("tx pool")
+            .snapshot()
+            .expect("snapshot after confirmed cleanup failure");
+        assert_eq!(
+            after, before,
+            "failed requeue must roll back confirmed-tx eviction"
+        );
+        fs::remove_dir_all(dir).expect("cleanup confirmed rollback");
+
+        let (shared, dir, _admitted_txid, conflicting_input) =
+            shared_state_with_admitted_tx("rubin-node-p2p-cleanup-rollback-conflict");
+        let before = shared
+            .tx_pool
+            .lock()
+            .expect("tx pool")
+            .snapshot()
+            .expect("snapshot before conflict cleanup failure");
+        let cleanup = TxPoolCleanupPlan::from_parts_for_test(
+            Vec::new(),
+            vec![conflicting_input],
+            vec![missing_requeue_block],
+        );
+        assert_requeue_cleanup_failure(
+            apply_tx_pool_cleanup(&shared, cleanup),
+            "requeue_blocks_unavailable=1",
+        );
+        let after = shared
+            .tx_pool
+            .lock()
+            .expect("tx pool")
+            .snapshot()
+            .expect("snapshot after conflict cleanup failure");
+        assert_eq!(
+            after, before,
+            "failed requeue must roll back conflict removal"
+        );
+        fs::remove_dir_all(dir).expect("cleanup conflict rollback");
+
+        let (shared, dir) =
+            test_shared_state_after_genesis("rubin-node-p2p-cleanup-rollback-requeue");
+        let (state, requeue_raw, _) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        {
+            let mut engine = shared.sync_engine.lock().expect("sync engine");
+            engine.chain_state.utxos = state.utxos.clone();
+        }
+        let requeue_block_hash = store_requeue_block(&shared, std::slice::from_ref(&requeue_raw));
+        let before = shared
+            .tx_pool
+            .lock()
+            .expect("tx pool")
+            .snapshot()
+            .expect("snapshot before accepted requeue rollback");
+        let cleanup = TxPoolCleanupPlan::from_parts_for_test(
+            Vec::new(),
+            Vec::new(),
+            vec![missing_requeue_block, requeue_block_hash],
+        );
+        let summary = assert_requeue_cleanup_failure(
+            apply_tx_pool_cleanup(&shared, cleanup),
+            "requeue_blocks_unavailable=1",
+        );
+        assert!(
+            summary.contains("requeue_accepted=1"),
+            "test must prove a requeue mutation happened before rollback: {summary}"
+        );
+        let after = shared
+            .tx_pool
+            .lock()
+            .expect("tx pool")
+            .snapshot()
+            .expect("snapshot after accepted requeue rollback");
+        assert_eq!(
+            after, before,
+            "failed requeue must roll back accepted requeue admission state"
+        );
+        fs::remove_dir_all(dir).expect("cleanup requeue rollback");
     }
 
     #[test]
