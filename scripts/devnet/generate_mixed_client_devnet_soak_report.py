@@ -197,7 +197,15 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
         return "restart_source_binding_contradiction:old_pid_aliases_live_node"
     if jint(new_pid) and new_pid != by_impl["rust"]["pid"]:
         return "restart_source_binding_contradiction:new_pid_not_final_rust_pid"
-    target, caught, pre = rr.get("go_target_height"), rr.get("catch_up_height"), rr.get("pre_restart_height", data.get("restart", {}).get("pre_restart_height"))
+    restart = data["restart"]
+    if any(k in restart and not jint(restart.get(k)) for k in ("pre_restart_height", "catch_up_height")):
+        return "restart_source_binding_contradiction:malformed_source_fields"
+    for key in ("pre_restart_height", "catch_up_height"):
+        if key in restart and (key not in rr or rr.get(key) != restart[key]):
+            return f"restart_source_binding_contradiction:{key}_mismatch"
+    if "pre_restart_height" in restart and "catch_up_height" in restart and restart["catch_up_height"] < restart["pre_restart_height"]:
+        return "restart_source_binding_contradiction:catch_up_height_below_pre_restart"
+    target, caught, pre = rr.get("go_target_height"), rr.get("catch_up_height"), rr.get("pre_restart_height", restart.get("pre_restart_height"))
     if pre is not None and (not jint(pre) or not jint(target) or target <= pre):
         return "restart_source_binding_contradiction:target_height_not_advanced"
     if jint(target) and jint(caught):
