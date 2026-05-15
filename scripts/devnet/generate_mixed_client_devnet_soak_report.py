@@ -218,7 +218,7 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
     go_fork, rust_win = proof.get("go_partition_tip"), proof.get("rust_winning_tip")
     if (go_fork is not None or rust_win is not None) and not (isinstance(go_fork, dict) and isinstance(rust_win, dict)):
         return "partition_reorg_source_binding_contradiction:malformed_tip_fields"
-    if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (not jint(go_fork.get("height")) or not jint(rust_win.get("height")) or not is_hex32(go_fork.get("hash")) or not is_hex32(rust_win.get("hash")) or (go_fork.get("height") == rust_win.get("height") and go_fork.get("hash") == rust_win.get("hash"))):
+    if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (not jint(go_fork.get("height")) or not jint(rust_win.get("height")) or not is_hex32(go_fork.get("hash")) or not is_hex32(rust_win.get("hash")) or go_fork.get("hash") == rust_win.get("hash")):
         return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
     if any(a in proof and b in proof and proof[a] != proof[b] for a, b in (("final_go_tip", "go_tip"), ("final_rust_tip", "rust_tip"))):
         return "partition_reorg_source_binding_contradiction:tip_alias_mismatch"
@@ -243,7 +243,7 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
         return section(name, "no_data", f"{name}_artifact_missing", source_fields=fields), None
     path = Path(raw_path).expanduser().resolve(strict=False)
     if not path.is_file():
-        return section(name, "no_data", f"{name}_artifact_missing", source_artifact_path=path, source_fields=fields), None
+        return section(name, "fail", "source_artifact_not_regular", source_artifact_path=path, source_fields=fields), None
     data, err = load(path)
     if err or not isinstance(data, dict):
         return section(name, "fail", err or "root_not_object", source_artifact_path=path), None
@@ -285,7 +285,7 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
     try:
         found: dict[str, int] = {}
         if text.lstrip().startswith("{"):
-            obj = json.loads(text)
+            obj = json.loads(text, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}")))
             if not isinstance(obj, dict):
                 return None, "metrics_malformed"
             for metric in METRICS:
@@ -295,7 +295,7 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
         else:
             for line in text.splitlines():
                 parts = line.split()
-                if parts and parts[0].split("{", 1)[0] in METRICS and (len(parts) not in {2, 3} or ("{" in parts[0]) != parts[0].endswith("}") or ("{" in parts[0] and not re.fullmatch(r'[A-Za-z_:][A-Za-z0-9_:]*\{[A-Za-z_][A-Za-z0-9_]*="[^"]*"(?:,[A-Za-z_][A-Za-z0-9_]*="[^"]*")*\}', parts[0])) or (len(parts) == 3 and not re.fullmatch(r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?", parts[2]))):
+                if parts and parts[0].split("{", 1)[0] in METRICS and (len(parts) not in {2, 3} or "{" in parts[0] or (len(parts) == 3 and not re.fullmatch(r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?", parts[2]))):
                     return None, "metrics_malformed"
                 if len(parts) in {2, 3} and (metric := parts[0].split("{", 1)[0]) in METRICS:
                     if not re.fullmatch(r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?", parts[1]) or not math.isfinite(float(parts[1])) or float(parts[1]) <= 0 or float(parts[1]) > 1_000_000_000 or int(float(parts[1])) != float(parts[1]):
@@ -369,9 +369,12 @@ def main(argv: list[str] | None = None) -> int:
     metrics.add_argument("--rust-reorg-metrics-no-data")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
+    out_path = Path(args.output).expanduser().resolve(strict=False)
+    if any(v and not k.endswith("_no_data") and Path(v).expanduser().resolve(strict=False) == out_path for k, v in vars(args).items() if k != "output"):
+        return print("FAIL: output_overwrites_input", file=sys.stderr) or 1
     report, rc = generate(args)
     try:
-        write_atomic(Path(args.output).expanduser().resolve(strict=False), report)
+        write_atomic(out_path, report)
     except OSError as exc:
         print(f"FAIL: output_write_failed:{exc.__class__.__name__}: {exc}", file=sys.stderr)
         return 1
