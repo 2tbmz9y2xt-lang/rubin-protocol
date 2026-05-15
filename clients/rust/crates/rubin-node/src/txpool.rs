@@ -1003,6 +1003,9 @@ fn validate_txpool_snapshot_entry(
     wtxid: Option<[u8; 32]>,
     entry: &TxPoolEntry,
 ) -> Result<[u8; 32], TxPoolAdmitError> {
+    if txid == [0u8; 32] {
+        return Err(rejected("invalid txpool snapshot entry txid"));
+    }
     if entry.size == 0 {
         return Err(rejected("invalid txpool snapshot entry size"));
     }
@@ -2581,6 +2584,9 @@ mod tests {
         let mut txid_mismatch = guard_snapshot.clone();
         txid_mismatch.entries[0].txid = [0x99; 32];
         reject(txid_mismatch, "txid mismatch");
+        let mut zero_txid = guard_snapshot.clone();
+        zero_txid.entries[0].txid = [0u8; 32];
+        reject(zero_txid, "invalid txpool snapshot entry txid");
         let mut wtxid_mismatch = guard_snapshot.clone();
         wtxid_mismatch.entries[0].wtxid = [0x88; 32];
         reject(wtxid_mismatch, "wtxid mismatch");
