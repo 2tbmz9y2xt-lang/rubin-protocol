@@ -413,7 +413,7 @@ impl TxPool {
                 snapshot.next_heap_id, max_heap_id
             )));
         }
-        if u64::MAX - snapshot.next_heap_id < self.max_transactions as u64 {
+        if u64::MAX - snapshot.next_heap_id <= self.max_transactions as u64 {
             return Err(rejected("txpool snapshot heap near saturation"));
         }
 
