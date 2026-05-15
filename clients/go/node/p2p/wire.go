@@ -214,14 +214,13 @@ func writeFrame(w io.Writer, magic [4]byte, frame message, maxMessageSize uint32
 	if err != nil {
 		return err
 	}
-	if _, err := w.Write(header[:]); err != nil {
+	if err := writeFullBytes(w, header[:]); err != nil {
 		return err
 	}
 	if len(frame.Payload) == 0 {
 		return nil
 	}
-	_, err = w.Write(frame.Payload)
-	return err
+	return writeFullBytes(w, frame.Payload)
 }
 
 func encodeVersionPayload(v node.VersionPayloadV1) ([]byte, error) {
@@ -234,10 +233,10 @@ func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
 	if err := encodeVersionScalarFields(w, v); err != nil {
 		return err
 	}
-	if _, err := w.Write(v.ChainID[:]); err != nil {
+	if err := writeFullBytes(w, v.ChainID[:]); err != nil {
 		return err
 	}
-	if _, err := w.Write(v.GenesisHash[:]); err != nil {
+	if err := writeFullBytes(w, v.GenesisHash[:]); err != nil {
 		return err
 	}
 	return binary.Write(w, binary.LittleEndian, v.BestHeight)
@@ -253,8 +252,18 @@ func encodeVersionScalarFields(w io.Writer, v node.VersionPayloadV1) error {
 	raw[4] = txRelay
 	binary.LittleEndian.PutUint64(raw[5:13], v.PrunedBelowHeight)
 	binary.LittleEndian.PutUint32(raw[13:17], v.DaMempoolSize)
-	_, err := w.Write(raw[:])
-	return err
+	return writeFullBytes(w, raw[:])
+}
+
+func writeFullBytes(w io.Writer, p []byte) error {
+	n, err := w.Write(p)
+	if err != nil {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func decodeVersionPayload(payload []byte) (node.VersionPayloadV1, error) {

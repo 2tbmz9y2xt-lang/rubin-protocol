@@ -228,6 +228,20 @@ func TestWriteFrameErrors(t *testing.T) {
 			t.Fatalf("expected writer error, got %v", err)
 		}
 	})
+
+	t.Run("header short write fails", func(t *testing.T) {
+		err := writeFrame(&shortWriter{shortOnWrite: 1}, networkMagic("devnet"), message{Command: messageInv, Payload: []byte{1}}, 1024)
+		if !errors.Is(err, io.ErrShortWrite) {
+			t.Fatalf("expected short write error, got %v", err)
+		}
+	})
+
+	t.Run("payload short write fails", func(t *testing.T) {
+		err := writeFrame(&shortWriter{shortOnWrite: 2}, networkMagic("devnet"), message{Command: messageInv, Payload: []byte{1}}, 1024)
+		if !errors.Is(err, io.ErrShortWrite) {
+			t.Fatalf("expected short write error, got %v", err)
+		}
+	})
 }
 
 func TestPayloadCapFunctions(t *testing.T) {
@@ -284,6 +298,22 @@ func (r *failingReader) Read(_ []byte) (int, error) {
 	return 0, r.err
 }
 
+type shortWriter struct {
+	shortOnWrite int
+	writes       int
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.shortOnWrite > 0 && w.writes != w.shortOnWrite {
+		return len(p), nil
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
 func TestEncodeDecodeVersionPayload(t *testing.T) {
 	var chainID [32]byte
 	var genesis [32]byte
@@ -311,6 +341,13 @@ func TestEncodeDecodeVersionPayload(t *testing.T) {
 	}
 	if out != in {
 		t.Fatalf("roundtrip mismatch: %#v vs %#v", out, in)
+	}
+}
+
+func TestEncodeVersionPayloadRejectsShortWrite(t *testing.T) {
+	err := encodeVersionPayloadTo(&shortWriter{}, node.VersionPayloadV1{ProtocolVersion: ProtocolVersion})
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("expected ErrShortWrite, got %v", err)
 	}
 }
 
