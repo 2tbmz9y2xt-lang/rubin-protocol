@@ -77,6 +77,14 @@ func nonCoinbaseCoreExtProfilesOrEmpty(coreExtProfiles CoreExtProfileProvider) C
 	return coreExtProfiles
 }
 
+func cloneUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
+	out := make(map[Outpoint]UtxoEntry, len(src))
+	for k, v := range src {
+		out[k] = cloneUtxoEntry(v)
+	}
+	return out
+}
+
 func (ctx *nonCoinbaseApplyContext) prepare() error {
 	if ctx.tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")
@@ -490,10 +498,6 @@ func (ctx *nonCoinbaseApplyContext) validateVaultOutputWhitelist() error {
 	return nil
 }
 
-func addU64ToU128(x u128, v uint64) (u128, error) {
-	return addU64ToU128WithCode(x, v, TX_ERR_PARSE)
-}
-
 func addU64ToU128WithCode(x u128, v uint64, code ErrorCode) (u128, error) {
 	lo, carry := bits.Add64(x.lo, v, 0)
 	hi, carry2 := bits.Add64(x.hi, 0, carry)
@@ -529,11 +533,4 @@ func subU128(a u128, b u128) (u128, error) {
 		return u128{}, txerr(TX_ERR_PARSE, "u128 underflow")
 	}
 	return u128{hi: hi, lo: lo}, nil
-}
-
-func u128ToU64(x u128) (uint64, error) {
-	if x.hi != 0 {
-		return 0, txerr(TX_ERR_PARSE, "u64 overflow")
-	}
-	return x.lo, nil
 }

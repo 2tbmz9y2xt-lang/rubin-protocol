@@ -135,14 +135,6 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 	}, nil
 }
 
-func cloneUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
-	out := make(map[Outpoint]UtxoEntry, len(src))
-	for k, v := range src {
-		out[k] = cloneUtxoEntry(v)
-	}
-	return out
-}
-
 func cloneUtxoEntry(entry UtxoEntry) UtxoEntry {
 	return UtxoEntry{
 		Value:             entry.Value,
@@ -206,6 +198,17 @@ type nonCoinbaseSpendState struct {
 type u128 struct {
 	hi uint64
 	lo uint64
+}
+
+func addU64ToU128(x u128, v uint64) (u128, error) {
+	return addU64ToU128WithCode(x, v, TX_ERR_PARSE)
+}
+
+func u128ToU64(x u128) (uint64, error) {
+	if x.hi != 0 {
+		return 0, txerr(TX_ERR_PARSE, "u64 overflow")
+	}
+	return x.lo, nil
 }
 
 type nonCoinbaseApplyContext struct {
