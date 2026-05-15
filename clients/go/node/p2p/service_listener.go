@@ -80,9 +80,26 @@ func (s *Service) Start(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	if err := s.registerStart(); err != nil {
-		return err
+	// Register this Start invocation with startWG atomically with the
+	// dormant/started check, under the same peersMu that guards closed.
+	// This is critical for sync.WaitGroup correctness: Go panics with
+	// "Add called concurrently with Wait" if Add transitions the counter
+	// from 0 while Wait is running. Close sets s.closed=true under peersMu
+	// and then calls startWG.Wait. By taking the write lock here and
+	// reading s.closed before calling Add, we guarantee that once Close
+	// has published closed=true, no subsequent Start can Add — it will
+	// observe closed=true and return without touching startWG.
+	s.peersMu.Lock()
+	if s.closed {
+		s.peersMu.Unlock()
+		return errors.New("service already closed")
 	}
+	if s.listener != nil {
+		s.peersMu.Unlock()
+		return errors.New("service already started")
+	}
+	s.startWG.Add(1)
+	s.peersMu.Unlock()
 	defer s.startWG.Done()
 
 	listener, err := net.Listen("tcp", s.cfg.BindAddr)
@@ -93,29 +110,14 @@ func (s *Service) Start(ctx context.Context) error {
 		hook(s, listener)
 	}
 
-	if err := s.publishListener(ctx, listener); err != nil {
-		return err
-	}
-	s.startOutboundPeers()
-	return nil
-}
-
-func (s *Service) registerStart() error {
-	// Register this Start invocation with startWG atomically with the
-	// dormant/started check, under the same peersMu that guards closed.
-	s.peersMu.Lock()
-	defer s.peersMu.Unlock()
-	if s.closed {
-		return errors.New("service already closed")
-	}
-	if s.listener != nil {
-		return errors.New("service already started")
-	}
-	s.startWG.Add(1)
-	return nil
-}
-
-func (s *Service) publishListener(ctx context.Context, listener net.Listener) error {
+	// Authoritative transition. Re-check closed/started under the write
+	// lock so that a concurrent Close that ran while net.Listen was still
+	// executing is linearized ahead of the listener publish: if Close won
+	// the race, drop the freshly created listener and surface the same
+	// dormant error as the fast path. loopWG.Add runs under the lock and
+	// BEFORE the goroutines are spawned so a concurrent Close's
+	// loopWG.Wait sees the counter even if scheduling delays acceptLoop
+	// or reconnectLoop past the unlock.
 	newCtx, cancel := context.WithCancel(ctx)
 	s.peersMu.Lock()
 	if s.closed {
@@ -139,10 +141,6 @@ func (s *Service) publishListener(ctx context.Context, listener net.Listener) er
 
 	go s.acceptLoop()
 	go s.reconnectLoop(s.ctx)
-	return nil
-}
-
-func (s *Service) startOutboundPeers() {
 	for _, peerAddr := range s.outboundAddrs {
 		peerAddr = strings.TrimSpace(peerAddr)
 		if peerAddr == "" {
@@ -150,6 +148,7 @@ func (s *Service) startOutboundPeers() {
 		}
 		s.startDialPeer(peerAddr)
 	}
+	return nil
 }
 
 // Close cancels the service context, closes the listener, tears down every

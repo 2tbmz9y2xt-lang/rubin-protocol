@@ -25,11 +25,17 @@ func (e postHandshakeUnknownCommandError) peerReason() string {
 
 func (p *peer) run(ctx context.Context) error {
 	for {
-		if peerRunContextDone(ctx) {
-			return nil
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+			}
 		}
-		if err := p.setReadDeadline(); err != nil {
-			return err
+		if deadline := p.service.cfg.PeerRuntimeConfig.ReadDeadline; deadline > 0 {
+			if err := p.conn.SetReadDeadline(time.Now().Add(deadline)); err != nil {
+				return err
+			}
 		}
 		frame, err := readFrameWithPayloadLimit(
 			p.conn,
@@ -49,26 +55,6 @@ func (p *peer) run(ctx context.Context) error {
 	}
 }
 
-func peerRunContextDone(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	select {
-	case <-ctx.Done():
-		return true
-	default:
-		return false
-	}
-}
-
-func (p *peer) setReadDeadline() error {
-	deadline := p.service.cfg.PeerRuntimeConfig.ReadDeadline
-	if deadline <= 0 {
-		return nil
-	}
-	return p.conn.SetReadDeadline(time.Now().Add(deadline))
-}
-
 func shouldIgnoreReadError(err error) bool {
 	return !isPartialFrameTimeout(err) && isReadTimeout(err)
 }
@@ -84,62 +70,26 @@ func normalizeReadError(err error) error {
 
 func (p *peer) handleMessage(frame message) error {
 	switch frame.Command {
-	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk:
-		return p.handleRelayMessage(frame)
-	case messageGetAddr, messageAddr:
-		return p.handleAddressMessage(frame)
-	case messagePing, messagePong, messageHeaders:
-		return nil
-	case messageVersion:
-		return errors.New("invalid version message after handshake")
-	case messageVerAck:
-		return errors.New("invalid verack after handshake")
-	default:
-		return postHandshakeUnknownCommandError{command: frame.Command}
-	}
-}
-
-func (p *peer) handleRelayMessage(frame message) error {
-	switch frame.Command {
-	case messageInv, messageGetData:
-		return p.handleInventoryRelayMessage(frame)
-	case messageBlock, messageTx, messageGetBlk:
-		return p.handleObjectRelayMessage(frame)
-	default:
-		return postHandshakeUnknownCommandError{command: frame.Command}
-	}
-}
-
-func (p *peer) handleInventoryRelayMessage(frame message) error {
-	switch frame.Command {
 	case messageInv:
 		return p.handleInv(frame.Payload)
 	case messageGetData:
 		return p.handleGetData(frame.Payload)
-	default:
-		return postHandshakeUnknownCommandError{command: frame.Command}
-	}
-}
-
-func (p *peer) handleObjectRelayMessage(frame message) error {
-	switch frame.Command {
 	case messageBlock:
 		return p.handleBlock(frame.Payload)
 	case messageTx:
 		return p.handleTx(frame.Payload)
 	case messageGetBlk:
 		return p.handleGetBlocks(frame.Payload)
-	default:
-		return postHandshakeUnknownCommandError{command: frame.Command}
-	}
-}
-
-func (p *peer) handleAddressMessage(frame message) error {
-	switch frame.Command {
 	case messageGetAddr:
 		return p.handleGetAddr(frame.Payload)
 	case messageAddr:
 		return p.handleAddr(frame.Payload)
+	case messagePing, messagePong, messageHeaders:
+		return nil
+	case messageVersion:
+		return errors.New("invalid version message after handshake")
+	case messageVerAck:
+		return errors.New("invalid verack after handshake")
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
 	}
