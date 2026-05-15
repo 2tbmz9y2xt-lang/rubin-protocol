@@ -387,17 +387,37 @@ def path_field_targets(value: Any, base: Path) -> list[Path]:
         elif isinstance(item, list):
             stack.extend((child, prefix) for child in item)
     return out
+def same_path(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return sys.platform == "darwin" and str(left).lower() == str(right).lower()
+def scan_source_data(path: Path) -> dict[str, Any] | None:
+    data, _ = load(path)
+    if isinstance(data, dict):
+        return data
+    try:
+        with path.open("rb") as src:
+            raw = src.read(MAX_JSON_BYTES + 1)
+        if len(raw) > MAX_JSON_BYTES:
+            return None
+        obj = json.loads(raw.decode("utf-8"))
+        return obj if isinstance(obj, dict) else None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
+        return None
 def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> bool:
     for key, value in vars(args).items():
         if key == "output" or key.endswith("_no_data") or not value:
             continue
         source_path = Path(os.path.realpath(Path(os.path.expanduser(value))))
-        if source_path == out_path:
+        if same_path(source_path, out_path):
             return True
         if not source_path.is_file():
             continue
-        data, _ = load(source_path)
-        if isinstance(data, dict) and out_path in path_field_targets(data, source_path.parent):
+        data = scan_source_data(source_path)
+        if isinstance(data, dict) and any(same_path(target, out_path) for target in path_field_targets(data, source_path.parent)):
             return True
     return False
 def main(argv: list[str] | None = None) -> int:
