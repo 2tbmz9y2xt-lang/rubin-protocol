@@ -173,13 +173,20 @@ func validateSuiteRegistryItem(item SuiteParamsJSON) (consensus.SuiteParams, err
 	// Live node config is canonical-only. Synthetic suite_registry shapes are
 	// reserved for the CLI harness/conformance surface and must never be
 	// accepted here on mainnet/testnet or devnet bootstrap.
+	if err := rejectNoncanonicalSuiteRegistryParams(params); err != nil {
+		return consensus.SuiteParams{}, err
+	}
+	return params, nil
+}
+
+func rejectNoncanonicalSuiteRegistryParams(params consensus.SuiteParams) error {
 	want := defaultSuiteRegistryParams()
 	if params.PubkeyLen != want.PubkeyLen ||
 		params.SigLen != want.SigLen ||
 		params.VerifyCost != want.VerifyCost {
-		return consensus.SuiteParams{}, errors.New("bad suite_registry")
+		return errors.New("bad suite_registry")
 	}
-	return params, nil
+	return nil
 }
 
 func (cfg Config) buildSuiteRegistry() (*consensus.SuiteRegistry, error) {
@@ -229,8 +236,8 @@ func resolveProductionRotationState(
 	localDescriptor *RotationConfigJSON,
 	productionLookup func(string) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, error),
 ) (*consensus.CryptoRotationDescriptor, *consensus.SuiteRegistry, bool, error) {
-	canonicalNetwork, ok := CanonicalNetworkName(network)
-	if !ok || (canonicalNetwork != "mainnet" && canonicalNetwork != "testnet") {
+	canonicalNetwork, ok := productionNetworkName(network)
+	if !ok {
 		return nil, nil, false, nil
 	}
 	if localDescriptor != nil {
@@ -241,11 +248,9 @@ func resolveProductionRotationState(
 		return nil, nil, true, err
 	}
 	if desc == nil {
-		if registry == nil {
-			registry = consensus.DefaultSuiteRegistry()
-		}
-		if !registry.IsCanonicalDefaultLiveManifest() {
-			return nil, nil, true, errors.New("production_rotation_schedule: invalid empty-slot registry")
+		registry, err := canonicalEmptyProductionRotationRegistry(registry)
+		if err != nil {
+			return nil, nil, true, err
 		}
 		return nil, registry, true, nil
 	}
@@ -253,6 +258,24 @@ func resolveProductionRotationState(
 		return nil, nil, true, errors.New("production_rotation_schedule: missing registry")
 	}
 	return desc, registry, true, nil
+}
+
+func productionNetworkName(network string) (string, bool) {
+	canonicalNetwork, ok := CanonicalNetworkName(network)
+	if !ok {
+		return "", false
+	}
+	return canonicalNetwork, canonicalNetwork == "mainnet" || canonicalNetwork == "testnet"
+}
+
+func canonicalEmptyProductionRotationRegistry(registry *consensus.SuiteRegistry) (*consensus.SuiteRegistry, error) {
+	if registry == nil {
+		registry = consensus.DefaultSuiteRegistry()
+	}
+	if !registry.IsCanonicalDefaultLiveManifest() {
+		return nil, errors.New("production_rotation_schedule: invalid empty-slot registry")
+	}
+	return registry, nil
 }
 
 func (cfg Config) buildRotationProviderWithProductionLookup(
@@ -286,11 +309,22 @@ func (cfg Config) buildRotationProviderWithProductionLookup(
 		return nil, nil, fmt.Errorf("suite_registry: %w", err)
 	}
 	if cfg.RotationDescriptor == nil {
-		if explicitRegistry == nil {
-			return nil, nil, nil
-		}
-		return consensus.DefaultRotationProvider{}, explicitRegistry, nil
+		return rotationProviderForExplicitRegistry(explicitRegistry)
 	}
+	return cfg.buildDescriptorRotationProvider(network, explicitRegistry)
+}
+
+func rotationProviderForExplicitRegistry(registry *consensus.SuiteRegistry) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
+	if registry == nil {
+		return nil, nil, nil
+	}
+	return consensus.DefaultRotationProvider{}, registry, nil
+}
+
+func (cfg Config) buildDescriptorRotationProvider(
+	network string,
+	explicitRegistry *consensus.SuiteRegistry,
+) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
 	rd := cfg.RotationDescriptor
 	registry := explicitRegistry
 	if registry == nil {
@@ -365,16 +399,41 @@ func NormalizePeers(raw ...string) []string {
 }
 
 func ValidateConfig(cfg Config) error {
-	if strings.TrimSpace(cfg.Network) == "" {
-		return errors.New("network is required")
-	}
-	network, err := canonicalConfigNetworkName(cfg.Network)
+	network, err := validateConfigRequiredFields(cfg)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(cfg.DataDir) == "" {
-		return errors.New("data_dir is required")
+	if err := validateConfigAddresses(cfg); err != nil {
+		return err
 	}
+	logLevel := strings.ToLower(strings.TrimSpace(cfg.LogLevel))
+	if _, ok := allowedLogLevels[logLevel]; !ok {
+		return fmt.Errorf("invalid log_level %q", cfg.LogLevel)
+	}
+	if err := validateConfigLimits(cfg); err != nil {
+		return err
+	}
+	if err := validateConfigMineAddress(cfg); err != nil {
+		return err
+	}
+	return validateConfigRotationAndRegistry(cfg, network)
+}
+
+func validateConfigRequiredFields(cfg Config) (string, error) {
+	if strings.TrimSpace(cfg.Network) == "" {
+		return "", errors.New("network is required")
+	}
+	network, err := canonicalConfigNetworkName(cfg.Network)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(cfg.DataDir) == "" {
+		return "", errors.New("data_dir is required")
+	}
+	return network, nil
+}
+
+func validateConfigAddresses(cfg Config) error {
 	if err := validateAddr(cfg.BindAddr); err != nil {
 		return fmt.Errorf("invalid bind_addr: %w", err)
 	}
@@ -388,10 +447,10 @@ func ValidateConfig(cfg Config) error {
 			return fmt.Errorf("invalid peer %q: %w", peer, err)
 		}
 	}
-	logLevel := strings.ToLower(strings.TrimSpace(cfg.LogLevel))
-	if _, ok := allowedLogLevels[logLevel]; !ok {
-		return fmt.Errorf("invalid log_level %q", cfg.LogLevel)
-	}
+	return nil
+}
+
+func validateConfigLimits(cfg Config) error {
 	if cfg.MaxPeers <= 0 {
 		return errors.New("max_peers must be > 0")
 	}
@@ -404,6 +463,10 @@ func ValidateConfig(cfg Config) error {
 	if cfg.MempoolMaxBytes <= 0 {
 		return errors.New("mempool_max_bytes must be > 0")
 	}
+	return nil
+}
+
+func validateConfigMineAddress(cfg Config) error {
 	if cfg.MineAddress != "" {
 		raw, err := hex.DecodeString(cfg.MineAddress)
 		if err != nil {
@@ -413,6 +476,10 @@ func ValidateConfig(cfg Config) error {
 			return fmt.Errorf("mine_address must be 32 (key_id) or 33 (suite_id||key_id) bytes, got %d", len(raw))
 		}
 	}
+	return nil
+}
+
+func validateConfigRotationAndRegistry(cfg Config, network string) error {
 	if _, _, productionHandled, err := resolveProductionRotationState(
 		network,
 		cfg.RotationDescriptor,
