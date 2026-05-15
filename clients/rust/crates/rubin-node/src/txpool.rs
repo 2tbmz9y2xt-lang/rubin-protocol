@@ -320,10 +320,7 @@ impl TxPool {
         snapshot: &TxPoolSnapshot,
     ) -> Result<(), TxPoolAdmitError> {
         if self.max_transactions == 0 || self.max_bytes == 0 {
-            return Err(unavailable(format!(
-                "invalid txpool snapshot restore limits: max_txs={} max_bytes={}",
-                self.max_transactions, self.max_bytes
-            )));
+            return Err(unavailable("invalid txpool snapshot restore limits"));
         }
         if snapshot.entries.len() > self.max_transactions {
             return Err(unavailable(format!(
