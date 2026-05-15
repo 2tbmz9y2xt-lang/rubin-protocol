@@ -10,7 +10,11 @@ use super::{
 };
 use crate::error::ErrorCode;
 use std::ffi::OsString;
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
+
+const CONSENSUS_BOOTSTRAP_COLD_START_CHILD: &str =
+    "RUBIN_OPENSSL_CONSENSUS_BOOTSTRAP_COLD_START_CHILD";
 
 fn canonical_default_suite_params() -> crate::suite_registry::SuiteParams {
     crate::suite_registry::SuiteRegistry::default_registry()
@@ -47,19 +51,6 @@ impl OpenSslEnvGuard {
             saved_conf: std::env::var_os("OPENSSL_CONF"),
             saved_modules: std::env::var_os("OPENSSL_MODULES"),
         }
-    }
-
-    fn clear_operator_env(&self) {
-        std::env::remove_var("OPENSSL_CONF");
-        std::env::remove_var("OPENSSL_MODULES");
-    }
-
-    fn poison_operator_env(&self) {
-        std::env::set_var("OPENSSL_CONF", "/tmp/rubin-consensus-invalid-openssl.cnf");
-        std::env::set_var(
-            "OPENSSL_MODULES",
-            "/tmp/rubin-consensus-invalid-ossl-modules",
-        );
     }
 
     fn restore_value(key: &str, value: &Option<OsString>) {
@@ -174,26 +165,33 @@ fn mldsa87_keypair_generate_sign_and_verify_roundtrip() {
 
 #[test]
 fn openssl_consensus_bootstrap_ignores_inherited_openssl_env() {
-    let env_guard = OpenSslEnvGuard::acquire();
-    env_guard.clear_operator_env();
+    if std::env::var_os(CONSENSUS_BOOTSTRAP_COLD_START_CHILD).is_some() {
+        openssl_consensus_bootstrap()
+            .expect("cold-start consensus bootstrap must ignore inherited OPENSSL_* env");
+        return;
+    }
 
-    let keypair = match Mldsa87Keypair::generate() {
-        Ok(value) => value,
-        Err(err) => {
-            assert_eq!(err.code, ErrorCode::TxErrParse);
-            return;
-        }
-    };
-    let pubkey = keypair.pubkey_bytes();
-    let digest = [0x6a; 32];
-    let signature = keypair.sign_digest32(digest).expect("sign digest");
+    let current_exe = std::env::current_exe().expect("current test binary path");
+    let output = Command::new(current_exe)
+        .arg("verify_sig_openssl::tests::openssl_consensus_bootstrap_ignores_inherited_openssl_env")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CONSENSUS_BOOTSTRAP_COLD_START_CHILD, "1")
+        .env("OPENSSL_CONF", "/tmp/rubin-consensus-invalid-openssl.cnf")
+        .env(
+            "OPENSSL_MODULES",
+            "/tmp/rubin-consensus-invalid-ossl-modules",
+        )
+        .output()
+        .expect("spawn cold-start consensus bootstrap child");
 
-    env_guard.poison_operator_env();
-
-    openssl_consensus_bootstrap().expect("consensus bootstrap must ignore inherited OPENSSL_* env");
-    let ok = super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &pubkey, &signature, &digest)
-        .expect("verify signature under poisoned OPENSSL_* env");
-    assert!(ok);
+    assert!(
+        output.status.success(),
+        "cold-start child failed: status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Helper: generate keypair or skip test if OpenSSL state is corrupted
