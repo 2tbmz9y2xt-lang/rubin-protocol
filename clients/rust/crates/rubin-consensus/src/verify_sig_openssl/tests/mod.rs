@@ -4,10 +4,10 @@ use super::binding::{
     runtime_verification_registry_with_default, SuiteVerifierBinding,
 };
 use super::bootstrap::{
-    map_openssl_init_rc, openssl_bootstrap, openssl_consensus_bootstrap, parse_openssl_fips_mode,
-    OpenSslFipsMode,
+    map_openssl_init_rc, openssl_bootstrap, parse_openssl_fips_mode, OpenSslFipsMode,
 };
 use super::digest::map_digest_verify_rc;
+use super::openssl_consensus_bootstrap;
 use super::Mldsa87Keypair;
 use crate::error::ErrorCode;
 use std::sync::{Mutex, OnceLock};

@@ -1,7 +1,6 @@
 use super::alg::openssl_alg_name_cstr;
-use super::bootstrap::ensure_openssl_consensus_init;
 use super::digest::openssl_verify_sig_digest_oneshot;
-use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87};
+use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES};
 use crate::error::{ErrorCode, TxError};
 use crate::live_binding_policy::{
     live_binding_policy_runtime_entry, LiveBindingPolicyLookupError,
@@ -11,24 +10,6 @@ use std::sync::OnceLock;
 
 static DEFAULT_RUNTIME_SUITE_REGISTRY: OnceLock<crate::suite_registry::SuiteRegistry> =
     OnceLock::new();
-
-pub fn verify_sig(
-    suite_id: u8,
-    pubkey: &[u8],
-    signature: &[u8],
-    digest32: &[u8; 32],
-) -> Result<bool, TxError> {
-    if suite_id != SUITE_ID_ML_DSA_87 {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "verify_sig: unsupported suite_id",
-        ));
-    }
-    ensure_openssl_consensus_init()?;
-    let binding =
-        resolve_suite_verifier_binding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)?;
-    verify_sig_with_binding(&binding, pubkey, signature, digest32)
-}
 
 pub(super) enum SuiteVerifierBinding {
     OpenSslDigest32V1 {
@@ -94,7 +75,7 @@ fn canonical_v1_binding_from_entry(
     })
 }
 
-fn verify_sig_with_binding(
+pub(super) fn verify_sig_with_binding(
     binding: &SuiteVerifierBinding,
     pubkey: &[u8],
     signature: &[u8],
@@ -168,26 +149,4 @@ pub(super) fn runtime_suite_params_for_verification_with_default(
             "verify_sig: unsupported suite_id",
         )
     })
-}
-
-/// Registry-aware signature verification. When registry is Some, looks up
-/// the suite's parameters from the registry. When registry is None, the
-/// canonical default live registry is used instead of a separate legacy
-/// verifier path. The nil path also fail-closes if that cached default
-/// registry stops matching the canonical single-suite ML-DSA-87 live manifest.
-/// The registry no longer selects a backend implicitly through `alg_name`;
-/// runtime verification resolves an explicit v1 binding from the suite
-/// parameters instead. Parity with Go `verifySigWithRegistry`.
-pub fn verify_sig_with_registry(
-    suite_id: u8,
-    pubkey: &[u8],
-    signature: &[u8],
-    digest32: &[u8; 32],
-    registry: Option<&crate::suite_registry::SuiteRegistry>,
-) -> Result<bool, TxError> {
-    let params = runtime_suite_params_for_verification(suite_id, registry)?;
-    ensure_openssl_consensus_init()?;
-    let binding =
-        resolve_suite_verifier_binding(params.alg_name, params.pubkey_len, params.sig_len)?;
-    verify_sig_with_binding(&binding, pubkey, signature, digest32)
 }

@@ -3,7 +3,6 @@ use crate::error::{ErrorCode, TxError};
 use std::sync::OnceLock;
 
 const OPENSSL_INIT_LOAD_CONFIG: u64 = 0x0000_0040;
-const OPENSSL_INIT_NO_LOAD_CONFIG: u64 = 0x0000_0080;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenSslFipsMode {
@@ -13,7 +12,6 @@ pub(super) enum OpenSslFipsMode {
 }
 
 static OPENSSL_BOOTSTRAP_STATE: OnceLock<Result<(), TxError>> = OnceLock::new();
-static OPENSSL_CONSENSUS_INIT: OnceLock<Result<(), TxError>> = OnceLock::new();
 
 pub(super) fn parse_openssl_fips_mode(raw: &str) -> Result<OpenSslFipsMode, TxError> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -57,7 +55,7 @@ fn set_env_if_empty(key: &str, value: Option<String>) {
     std::env::set_var(key, trimmed);
 }
 
-fn openssl_check_sigalg(
+pub(super) fn openssl_check_sigalg(
     alg: &'static core::ffi::CStr,
     props: &'static core::ffi::CStr,
 ) -> Result<(), TxError> {
@@ -124,33 +122,6 @@ pub(super) fn map_openssl_init_rc(
     } else {
         Err(TxError::new(ErrorCode::TxErrParse, message))
     }
-}
-
-/// Deterministic OpenSSL initialization for the consensus verification path.
-///
-/// Does NOT read any `RUBIN_OPENSSL_*` environment variables, does NOT load the
-/// FIPS provider, and does NOT set `fips=yes` default properties. This ensures
-/// that consensus signature verification produces identical results across all
-/// nodes regardless of host environment configuration.
-///
-/// Non-consensus callers (key generation, signing, CLI tools) should continue
-/// to use [`ensure_openssl_bootstrap`] which honors operator-configured FIPS.
-pub(super) fn openssl_consensus_bootstrap() -> Result<(), TxError> {
-    unsafe {
-        openssl_sys::ERR_clear_error();
-        map_openssl_init_rc(
-            ffi::OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, core::ptr::null()),
-            "openssl consensus init: OPENSSL_init_crypto failed",
-        )?;
-    }
-    openssl_check_sigalg(c"ML-DSA-87", c"")?;
-    Ok(())
-}
-
-pub(crate) fn ensure_openssl_consensus_init() -> Result<(), TxError> {
-    OPENSSL_CONSENSUS_INIT
-        .get_or_init(openssl_consensus_bootstrap)
-        .clone()
 }
 
 #[cfg(test)]
