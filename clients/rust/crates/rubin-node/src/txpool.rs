@@ -2604,6 +2604,9 @@ mod tests {
         let mut input_mismatch = guard_snapshot.clone();
         input_mismatch.entries[0].entry.inputs.clear();
         reject(input_mismatch, "input list mismatch");
+        let mut zero_size = guard_snapshot.clone();
+        zero_size.entries[0].entry.size = 0;
+        reject(zero_size, "invalid txpool snapshot entry size");
         let reject_live_cap = |max_txs, max_bytes, needle| {
             let mut target = TxPool::new();
             target.set_capacity_for_test(max_txs, max_bytes);
