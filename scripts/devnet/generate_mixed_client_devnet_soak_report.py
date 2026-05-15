@@ -113,22 +113,22 @@ def validate_samples(data: dict[str, Any], prop_dir: str | None, conv_dir: str |
             return "convergence_sample_identity_mismatch"
     return None
 def validate_tx(data: dict[str, Any], converge: bool, rust_submit: bool) -> str | None:
-    _, bad = nodes(data)
-    if bad:
+    by_impl, bad = nodes(data)
+    if bad or by_impl is None:
         return bad
     tx_path = data.get("tx_path")
     if not isinstance(tx_path, dict) or set(tx_path) != {"submitted_at", "observed_at", "tx_id"} or not is_hex32(tx_path.get("tx_id")):
         return "tx_path_invalid"
     txid = tx_path["tx_id"]
-    submit, accept, mine, conv, src, dst, prop, conv_dir = ("rust_submit", "go_accept", "go_mine", "rust_converge", "node-rust", "node-go", "rust->go", "go->rust") if rust_submit else ("go_submit", "rust_accept", "rust_mine", "go_converge", "node-go", "node-rust", "go->rust", "rust->go")
+    submit, accept, mine, conv, src, dst, prop, conv_dir, submit_impl, accept_impl, mine_impl, conv_impl = ("rust_submit", "go_accept", "go_mine", "rust_converge", "node-rust", "node-go", "rust->go", "go->rust", "rust", "go", "go", "rust") if rust_submit else ("go_submit", "rust_accept", "rust_mine", "go_converge", "node-go", "node-rust", "go->rust", "rust->go", "go", "rust", "rust", "go")
     if tx_path.get("submitted_at") != src or tx_path.get("observed_at") != [dst]:
         return "tx_path_direction_invalid"
-    for label in (submit, accept):
-        if not isinstance(data.get(label), dict) or set(data[label]) != {"txid"} or data[label].get("txid") != txid:
+    for label, impl in ((submit, submit_impl), (accept, accept_impl)):
+        if not isinstance(data.get(label), dict) or data[label].get("txid") != txid or ("rpc_endpoint" in data[label] and data[label].get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"]):
             return f"{label}_txid_mismatch"
     if not converge: return validate_samples(data, prop, None, txid)  # noqa: E701
     mined, seen = data.get(mine), data.get(conv)
-    if not isinstance(mined, dict) or not isinstance(seen, dict) or set(mined) != {"txid", "height", "block_hash"} or set(seen) != {"txid", "height", "block_hash"} or mined.get("txid") != txid or seen.get("txid") != txid: return "convergence_identity_mismatch"  # noqa: E701
+    if not isinstance(mined, dict) or not isinstance(seen, dict) or mined.get("txid") != txid or seen.get("txid") != txid or any("rpc_endpoint" in obj and obj.get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"] for obj, impl in ((mined, mine_impl), (seen, conv_impl))) or mined.get("class") not in {None, "mined_included"} or mined.get("mined_by") not in {None, f"node-{mine_impl}"} or seen.get("class") not in {None, "canonical_block_found"} or seen.get("converged_at") not in {None, f"node-{conv_impl}"}: return "convergence_identity_mismatch"  # noqa: E701
     if mined.get("height") != seen.get("height") or mined.get("block_hash") != seen.get("block_hash") or not jint(mined.get("height")) or not jint(seen.get("height")) or not is_hex32(mined.get("block_hash")): return "convergence_identity_mismatch"  # noqa: E701
     return validate_samples(data, prop, conv_dir, txid, mined["height"], mined["block_hash"])
 def restart_contradiction(data: dict[str, Any]) -> str | None:
@@ -310,6 +310,7 @@ def write_atomic(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+def nested_paths(value: Any, depth: int = 0) -> list[str]: return [] if depth > 200 else ([v for v in value.values() if isinstance(v, str)] + sum((nested_paths(v, depth + 1) for v in value.values()), [])) if isinstance(value, dict) else ([v for v in value if isinstance(v, str)] + sum((nested_paths(v, depth + 1) for v in value), [])) if isinstance(value, list) else []  # noqa: E704
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate fail-closed mixed-client devnet soak report v2.")
     for opt, dest in (("--mesh-report", "mesh_report"), ("--go-submit-rust-accept-report", "go_submit_rust_accept_report"), ("--go-submit-rust-mine-go-converge-report", "go_submit_rust_mine_go_converge_report"), ("--rust-submit-go-mine-rust-converge-report", "rust_submit_go_mine_rust_converge_report"), ("--rust-restart-report", "rust_restart_report"), ("--partition-heal-reorg-report", "partition_heal_reorg_report")):
@@ -320,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     out_path = Path(os.path.realpath(Path(args.output).expanduser()))
-    if any(v and not k.endswith("_no_data") and (Path(os.path.realpath(Path(v).expanduser())) == out_path or (not regular_path(v, "nonregular")[1] and isinstance((d := load(Path(os.path.realpath(Path(v).expanduser())))[0]), dict) and isinstance((m := get(d, "legacy_schema_compatibility.marker_path")[0]), str) and Path(os.path.realpath(Path(m).expanduser())) == out_path)) for k, v in vars(args).items() if k != "output"):
+    if any(v and not k.endswith("_no_data") and (Path(os.path.realpath(Path(v).expanduser())) == out_path or (not regular_path(v, "nonregular")[1] and isinstance((d := load(Path(os.path.realpath(Path(v).expanduser())))[0]), dict) and any(Path(os.path.realpath((Path(p).expanduser() if Path(p).expanduser().is_absolute() else Path(os.path.realpath(Path(v).expanduser())).parent / Path(p).expanduser()))) == out_path for p in nested_paths(d)))) for k, v in vars(args).items() if k != "output"):
         return print("FAIL: output_overwrites_input", file=sys.stderr) or 1
     report, rc = generate(args)
     try:
