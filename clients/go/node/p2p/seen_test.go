@@ -50,64 +50,65 @@ func TestBoundedHashSet_ConcurrentSafe(t *testing.T) {
 func TestBoundedHashSet_EvictsOldest(t *testing.T) {
 	const cap = 5
 	s := newBoundedHashSet(cap)
+	hashes := boundedHashSetTestHashes(cap + 3)
 
-	hashes := make([][32]byte, cap+3)
-	for i := range hashes {
-		hashes[i][0] = byte(i + 1)
-	}
+	addBoundedHashes(t, s, hashes[:cap])
+	assertBoundedHashSetLen(t, s, cap, "after fill")
 
-	// Fill to capacity.
-	for i := 0; i < cap; i++ {
-		if !s.Add(hashes[i]) {
-			t.Fatalf("Add(%d) should succeed", i)
-		}
-	}
-	if s.Len() != cap {
-		t.Fatalf("expected Len=%d, got %d", cap, s.Len())
-	}
+	assertBoundedHashesPresent(t, s, hashes[:cap], "before eviction")
 
-	// All entries present.
-	for i := 0; i < cap; i++ {
-		if !s.Has(hashes[i]) {
-			t.Fatalf("hash %d should be present before eviction", i)
-		}
-	}
-
-	// Add one more — oldest (index 0) should be evicted.
 	if !s.Add(hashes[cap]) {
 		t.Fatal("Add beyond capacity should succeed (evicts oldest)")
 	}
-	if s.Len() != cap {
-		t.Fatalf("Len should remain %d after eviction, got %d", cap, s.Len())
-	}
+	assertBoundedHashSetLen(t, s, cap, "after first eviction")
 	if s.Has(hashes[0]) {
 		t.Fatal("oldest hash (index 0) should have been evicted")
 	}
 	if !s.Has(hashes[cap]) {
 		t.Fatal("newly added hash should be present")
 	}
-	// Entries 1..cap-1 should still be present.
-	for i := 1; i < cap; i++ {
-		if !s.Has(hashes[i]) {
-			t.Fatalf("hash %d should still be present", i)
-		}
-	}
+	assertBoundedHashesPresent(t, s, hashes[1:cap], "after first eviction")
 
-	// Add two more — evict indices 1 and 2.
-	if !s.Add(hashes[cap+1]) {
-		t.Fatal("Add should succeed")
-	}
-	if !s.Add(hashes[cap+2]) {
-		t.Fatal("Add should succeed")
-	}
+	addBoundedHashes(t, s, hashes[cap+1:cap+3])
 	if s.Has(hashes[1]) {
 		t.Fatal("hash 1 should have been evicted")
 	}
 	if s.Has(hashes[2]) {
 		t.Fatal("hash 2 should have been evicted")
 	}
-	if s.Len() != cap {
-		t.Fatalf("Len should be %d, got %d", cap, s.Len())
+	assertBoundedHashSetLen(t, s, cap, "after second eviction")
+}
+
+func boundedHashSetTestHashes(count int) [][32]byte {
+	hashes := make([][32]byte, count)
+	for i := range hashes {
+		hashes[i][0] = byte(i + 1)
+	}
+	return hashes
+}
+
+func addBoundedHashes(t *testing.T, s *boundedHashSet, hashes [][32]byte) {
+	t.Helper()
+	for i, hash := range hashes {
+		if !s.Add(hash) {
+			t.Fatalf("Add(%d) should succeed", i)
+		}
+	}
+}
+
+func assertBoundedHashesPresent(t *testing.T, s *boundedHashSet, hashes [][32]byte, phase string) {
+	t.Helper()
+	for i, hash := range hashes {
+		if !s.Has(hash) {
+			t.Fatalf("%s: hash %d should be present", phase, i)
+		}
+	}
+}
+
+func assertBoundedHashSetLen(t *testing.T, s *boundedHashSet, want int, phase string) {
+	t.Helper()
+	if got := s.Len(); got != want {
+		t.Fatalf("%s: Len=%d, want %d", phase, got, want)
 	}
 }
 
