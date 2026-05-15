@@ -314,7 +314,7 @@ impl TxPool {
         if self.next_heap_id < max_heap_id {
             return Err(rejected("txpool snapshot heap high-watermark below max"));
         }
-        if u64::MAX - self.next_heap_id <= self.max_transactions as u64 {
+        if u64::MAX - self.next_heap_id <= (self.max_transactions as u64).saturating_add(1) {
             return Err(rejected("txpool snapshot heap near saturation"));
         }
         let floor = self.cfg.policy_current_mempool_min_fee_rate;
@@ -425,7 +425,7 @@ impl TxPool {
                 snapshot.next_heap_id, max_heap_id
             )));
         }
-        if u64::MAX - snapshot.next_heap_id <= self.max_transactions as u64 {
+        if u64::MAX - snapshot.next_heap_id <= (self.max_transactions as u64).saturating_add(1) {
             return Err(rejected("txpool snapshot heap near saturation"));
         }
 
@@ -2618,14 +2618,14 @@ mod tests {
         high_water.next_heap_id = 1;
         reject(high_water, "high-watermark");
         let mut saturated = guard_snapshot.clone();
-        saturated.next_heap_id = u64::MAX - 1;
+        saturated.next_heap_id = u64::MAX - 8;
         reject(saturated, "heap near saturation");
         target.used_bytes += 1;
         assert!(target.snapshot().is_err());
         target.used_bytes -= 1;
         target.next_heap_id = 1;
         assert!(target.snapshot().is_err());
-        target.next_heap_id = u64::MAX - 1;
+        target.next_heap_id = u64::MAX - 8;
         assert!(target.snapshot().is_err());
     }
 
