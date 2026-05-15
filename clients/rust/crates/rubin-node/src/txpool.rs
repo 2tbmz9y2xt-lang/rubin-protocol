@@ -284,19 +284,21 @@ impl TxPool {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn snapshot(&self) -> Result<TxPoolSnapshot, TxPoolAdmitError> {
         let mut entries = Vec::with_capacity(self.txs.len());
+        let mut used_bytes = 0usize;
+        let mut max_heap_id = 0u64;
         for (txid, entry) in &self.txs {
-            let heap_id = self.heap_seqs.get(txid).copied().ok_or_else(|| {
-                rejected(format!(
-                    "txpool snapshot invariant violated: missing heap sequence for txid {}",
-                    hex::encode(txid)
-                ))
-            })?;
+            let heap_id = self
+                .heap_seqs
+                .get(txid)
+                .copied()
+                .ok_or_else(|| rejected("txpool snapshot missing heap sequence"))?;
             if heap_id == 0 {
-                return Err(rejected(format!(
-                    "txpool snapshot invariant violated: invalid heap sequence for txid {}: heap_id=0",
-                    hex::encode(txid)
-                )));
+                return Err(rejected("invalid txpool snapshot heap id"));
             }
+            used_bytes = used_bytes
+                .checked_add(entry.size)
+                .ok_or_else(|| unavailable("txpool snapshot byte accounting overflow"))?;
+            max_heap_id = max_heap_id.max(heap_id);
             let wtxid = validate_txpool_snapshot_entry(*txid, None, entry)?;
             entries.push(TxPoolSnapshotEntry {
                 txid: *txid,
@@ -306,6 +308,12 @@ impl TxPool {
             });
         }
         entries.sort_by_key(|item| item.txid);
+        if self.used_bytes != used_bytes {
+            return Err(rejected("txpool snapshot used_bytes mismatch"));
+        }
+        if self.next_heap_id < max_heap_id {
+            return Err(rejected("txpool snapshot heap high-watermark below max"));
+        }
         if u64::MAX - self.next_heap_id <= self.max_transactions as u64 {
             return Err(rejected("txpool snapshot heap near saturation"));
         }
@@ -314,7 +322,7 @@ impl TxPool {
             current_mempool_min_fee_rate: floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE),
             entries,
             next_heap_id: self.next_heap_id,
-            used_bytes: self.used_bytes,
+            used_bytes,
         })
     }
 
@@ -996,25 +1004,13 @@ fn validate_txpool_snapshot_entry(
     entry: &TxPoolEntry,
 ) -> Result<[u8; 32], TxPoolAdmitError> {
     if entry.size == 0 {
-        return Err(rejected(format!(
-            "invalid txpool snapshot entry size for txid {}: size=0 raw_len={}",
-            hex::encode(txid),
-            entry.raw.len()
-        )));
+        return Err(rejected("invalid txpool snapshot entry size"));
     }
     if entry.weight == 0 {
-        return Err(rejected(format!(
-            "invalid txpool snapshot entry weight for txid {}: weight=0",
-            hex::encode(txid)
-        )));
+        return Err(rejected("invalid txpool snapshot entry weight"));
     }
     if entry.size != entry.raw.len() {
-        return Err(rejected(format!(
-            "txpool snapshot entry size mismatch for txid {}: size={} raw_len={}",
-            hex::encode(txid),
-            entry.size,
-            entry.raw.len()
-        )));
+        return Err(rejected("txpool snapshot entry size mismatch"));
     }
     let (tx, raw_txid, raw_wtxid, consumed) = parse_tx(&entry.raw).map_err(|err| {
         rejected(format!(
@@ -1023,12 +1019,7 @@ fn validate_txpool_snapshot_entry(
         ))
     })?;
     if consumed != entry.raw.len() {
-        return Err(rejected(format!(
-            "txpool snapshot entry has trailing bytes for txid {}: consumed={} raw_len={}",
-            hex::encode(txid),
-            consumed,
-            entry.raw.len()
-        )));
+        return Err(rejected("txpool snapshot entry has trailing bytes"));
     }
     if raw_txid != txid {
         return Err(rejected(format!(
@@ -1037,18 +1028,18 @@ fn validate_txpool_snapshot_entry(
             hex::encode(raw_txid)
         )));
     }
-    if wtxid.is_some_and(|wtxid| wtxid != raw_wtxid) {
-        return Err(rejected(format!(
-            "txpool snapshot entry wtxid mismatch for txid {}",
-            hex::encode(txid)
-        )));
+    if let Some(wtxid) = wtxid {
+        if wtxid != raw_wtxid {
+            return Err(rejected(format!(
+                "txpool snapshot entry wtxid mismatch: entry={} raw={} txid={}",
+                hex::encode(wtxid),
+                hex::encode(raw_wtxid),
+                hex::encode(txid)
+            )));
+        }
     }
-    let (weight, _, _) = tx_weight_and_stats_public(&tx).map_err(|err| {
-        rejected(format!(
-            "invalid txpool snapshot entry weight for txid {}: {err}",
-            hex::encode(txid)
-        ))
-    })?;
+    let (weight, _, _) = tx_weight_and_stats_public(&tx)
+        .map_err(|err| rejected(format!("invalid txpool snapshot entry weight: {err}")))?;
     if entry.weight != weight {
         return Err(rejected(format!(
             "txpool snapshot entry weight mismatch: entry={} computed={} txid={}",
@@ -1066,10 +1057,7 @@ fn validate_txpool_snapshot_entry(
         })
         .collect();
     if entry.inputs != inputs {
-        return Err(rejected(format!(
-            "txpool snapshot entry input list mismatch for txid {}",
-            hex::encode(txid)
-        )));
+        return Err(rejected("txpool snapshot entry input list mismatch"));
     }
     // Go validates string source; Rust's closed `TxSource` cannot represent invalid values.
     Ok(raw_wtxid)
@@ -2626,6 +2614,11 @@ mod tests {
         let mut saturated = guard_snapshot.clone();
         saturated.next_heap_id = u64::MAX - 1;
         reject(saturated, "heap near saturation");
+        target.used_bytes += 1;
+        assert!(target.snapshot().is_err());
+        target.used_bytes -= 1;
+        target.next_heap_id = 1;
+        assert!(target.snapshot().is_err());
         target.next_heap_id = u64::MAX - 1;
         assert!(target.snapshot().is_err());
     }
