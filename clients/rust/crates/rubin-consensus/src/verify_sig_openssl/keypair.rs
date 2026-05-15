@@ -111,6 +111,8 @@ unsafe fn read_public_key(pkey: *mut openssl_sys::EVP_PKEY) -> Result<Vec<u8>, T
     Ok(pubkey)
 }
 
+// SAFETY: caller must pass a non-null OpenSSL key pointer that remains valid
+// and uniquely owned by its keypair for the full signing call.
 unsafe fn sign_digest32_with_pkey(
     pkey: *mut openssl_sys::EVP_PKEY,
     digest32: [u8; 32],

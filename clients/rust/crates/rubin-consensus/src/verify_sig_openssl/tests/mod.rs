@@ -10,7 +10,8 @@ use super::digest::map_digest_verify_rc;
 use super::openssl_consensus_bootstrap;
 use super::Mldsa87Keypair;
 use crate::error::ErrorCode;
-use std::sync::{Mutex, OnceLock};
+use std::ffi::OsString;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn canonical_default_suite_params() -> crate::suite_registry::SuiteParams {
     crate::suite_registry::SuiteRegistry::default_registry()
@@ -32,6 +33,50 @@ fn drifted_default_runtime_registry(
 fn openssl_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct OpenSslEnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    saved_conf: Option<OsString>,
+    saved_modules: Option<OsString>,
+}
+
+impl OpenSslEnvGuard {
+    fn acquire() -> Self {
+        Self {
+            _lock: openssl_env_lock().lock().expect("env lock"),
+            saved_conf: std::env::var_os("OPENSSL_CONF"),
+            saved_modules: std::env::var_os("OPENSSL_MODULES"),
+        }
+    }
+
+    fn clear_operator_env(&self) {
+        std::env::remove_var("OPENSSL_CONF");
+        std::env::remove_var("OPENSSL_MODULES");
+    }
+
+    fn poison_operator_env(&self) {
+        std::env::set_var("OPENSSL_CONF", "/tmp/rubin-consensus-invalid-openssl.cnf");
+        std::env::set_var(
+            "OPENSSL_MODULES",
+            "/tmp/rubin-consensus-invalid-ossl-modules",
+        );
+    }
+
+    fn restore_value(key: &str, value: &Option<OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+}
+
+impl Drop for OpenSslEnvGuard {
+    fn drop(&mut self) {
+        Self::restore_value("OPENSSL_CONF", &self.saved_conf);
+        Self::restore_value("OPENSSL_MODULES", &self.saved_modules);
+    }
 }
 
 #[test]
@@ -93,11 +138,13 @@ fn parse_openssl_fips_mode_rejects_unknown_value() {
 
 #[test]
 fn openssl_bootstrap_ready_smoke() {
+    let _guard = OpenSslEnvGuard::acquire();
     openssl_bootstrap(false).expect("ready-mode bootstrap should succeed");
 }
 
 #[test]
 fn openssl_bootstrap_only_smoke_or_parse_error() {
+    let _guard = OpenSslEnvGuard::acquire();
     if let Err(err) = openssl_bootstrap(true) {
         assert_eq!(err.code, ErrorCode::TxErrParse);
     }
@@ -105,6 +152,7 @@ fn openssl_bootstrap_only_smoke_or_parse_error() {
 
 #[test]
 fn mldsa87_keypair_generate_sign_and_verify_roundtrip() {
+    let _guard = OpenSslEnvGuard::acquire();
     let keypair = match Mldsa87Keypair::generate() {
         Ok(value) => value,
         Err(err) => {
@@ -127,25 +175,12 @@ fn mldsa87_keypair_generate_sign_and_verify_roundtrip() {
 
 #[test]
 fn openssl_consensus_bootstrap_ignores_inherited_openssl_env() {
-    let _guard = openssl_env_lock().lock().expect("env lock");
-    let saved_conf = std::env::var_os("OPENSSL_CONF");
-    let saved_modules = std::env::var_os("OPENSSL_MODULES");
-    std::env::remove_var("OPENSSL_CONF");
-    std::env::remove_var("OPENSSL_MODULES");
+    let env_guard = OpenSslEnvGuard::acquire();
+    env_guard.clear_operator_env();
 
     let keypair = match Mldsa87Keypair::generate() {
         Ok(value) => value,
         Err(err) => {
-            if let Some(value) = saved_conf {
-                std::env::set_var("OPENSSL_CONF", value);
-            } else {
-                std::env::remove_var("OPENSSL_CONF");
-            }
-            if let Some(value) = saved_modules {
-                std::env::set_var("OPENSSL_MODULES", value);
-            } else {
-                std::env::remove_var("OPENSSL_MODULES");
-            }
             assert_eq!(err.code, ErrorCode::TxErrParse);
             return;
         }
@@ -154,27 +189,12 @@ fn openssl_consensus_bootstrap_ignores_inherited_openssl_env() {
     let digest = [0x6a; 32];
     let signature = keypair.sign_digest32(digest).expect("sign digest");
 
-    std::env::set_var("OPENSSL_CONF", "/tmp/rubin-consensus-invalid-openssl.cnf");
-    std::env::set_var(
-        "OPENSSL_MODULES",
-        "/tmp/rubin-consensus-invalid-ossl-modules",
-    );
+    env_guard.poison_operator_env();
 
     openssl_consensus_bootstrap().expect("consensus bootstrap must ignore inherited OPENSSL_* env");
     let ok = super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &pubkey, &signature, &digest)
         .expect("verify signature under poisoned OPENSSL_* env");
     assert!(ok);
-
-    if let Some(value) = saved_conf {
-        std::env::set_var("OPENSSL_CONF", value);
-    } else {
-        std::env::remove_var("OPENSSL_CONF");
-    }
-    if let Some(value) = saved_modules {
-        std::env::set_var("OPENSSL_MODULES", value);
-    } else {
-        std::env::remove_var("OPENSSL_MODULES");
-    }
 }
 
 /// Helper: generate keypair or skip test if OpenSSL state is corrupted
@@ -182,6 +202,7 @@ fn openssl_consensus_bootstrap_ignores_inherited_openssl_env() {
 /// Only skips the narrow "CTX_new_from_name failed" case — any other
 /// keygen failure is a real regression and must panic.
 fn generate_or_skip() -> Option<Mldsa87Keypair> {
+    let _guard = OpenSslEnvGuard::acquire();
     match Mldsa87Keypair::generate() {
         Ok(kp) => Some(kp),
         Err(err) => {
@@ -309,16 +330,19 @@ fn verify_sig_unknown_suite_errors() {
 // Bootstrap & FIPS (7)
 #[test]
 fn bootstrap_mode_off_noop() {
+    let _guard = OpenSslEnvGuard::acquire();
     super::test_ensure_openssl_bootstrap_for_mode("off").expect("off is noop");
 }
 
 #[test]
 fn bootstrap_invalid_fips_mode_rejected() {
+    let _guard = OpenSslEnvGuard::acquire();
     super::test_ensure_openssl_bootstrap_for_mode("banana").expect_err("bad mode");
 }
 
 #[test]
 fn bootstrap_fips_only_or_skip() {
+    let _guard = OpenSslEnvGuard::acquire();
     let _ = super::test_ensure_openssl_bootstrap_for_mode("only");
 }
 
@@ -716,6 +740,7 @@ fn runtime_suite_params_for_verification_with_default_rejects_noncanonical_defau
 // Error Parsing (2)
 #[test]
 fn parse_fips_mode_valid_values() {
+    let _guard = OpenSslEnvGuard::acquire();
     super::test_ensure_openssl_bootstrap_for_mode("off").expect("off");
     // "ready" mode may fail if FIPS provider not available — not a test failure
     let _ = super::test_ensure_openssl_bootstrap_for_mode("ready");
@@ -723,12 +748,14 @@ fn parse_fips_mode_valid_values() {
 
 #[test]
 fn openssl_check_sigalg_bad_alg_fails() {
+    let _guard = OpenSslEnvGuard::acquire();
     super::test_openssl_check_sigalg_bad_alg().expect_err("bad alg must fail");
 }
 
 // Additional verification (1)
 #[test]
 fn openssl_verify_with_invalid_alg_name() {
+    let _guard = OpenSslEnvGuard::acquire();
     // Test that invalid algorithm names are rejected
     let result = super::test_openssl_verify_sig_digest_oneshot_bad_alg();
     assert!(result.is_err());
