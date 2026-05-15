@@ -125,6 +125,25 @@ pub struct TxPoolEntry {
     pub source: TxSource,
 }
 
+/// Defensive rollback snapshot for Rust `TxPool`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct TxPoolSnapshot {
+    current_mempool_min_fee_rate: u64,
+    entries: Vec<TxPoolSnapshotEntry>,
+    next_heap_id: u64,
+    used_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct TxPoolSnapshotEntry {
+    txid: [u8; 32],
+    wtxid: [u8; 32],
+    entry: TxPoolEntry,
+    heap_id: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TxPool {
     cfg: TxPoolConfig,
@@ -260,6 +279,165 @@ impl TxPool {
 
     pub fn is_empty(&self) -> bool {
         self.txs.is_empty()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn snapshot(&self) -> Result<TxPoolSnapshot, TxPoolAdmitError> {
+        let mut entries = Vec::with_capacity(self.txs.len());
+        let mut used_bytes = 0usize;
+        let mut max_heap_id = 0u64;
+        for (txid, entry) in &self.txs {
+            let heap_id = self
+                .heap_seqs
+                .get(txid)
+                .copied()
+                .ok_or_else(|| rejected("txpool snapshot missing heap sequence"))?;
+            if heap_id == 0 {
+                return Err(rejected("invalid txpool snapshot heap id"));
+            }
+            used_bytes = used_bytes
+                .checked_add(entry.size)
+                .ok_or_else(|| unavailable("txpool snapshot byte accounting overflow"))?;
+            max_heap_id = max_heap_id.max(heap_id);
+            let wtxid = validate_txpool_snapshot_entry(*txid, None, entry)?;
+            entries.push(TxPoolSnapshotEntry {
+                txid: *txid,
+                wtxid,
+                entry: entry.clone(),
+                heap_id,
+            });
+        }
+        entries.sort_by_key(|item| item.txid);
+        if self.used_bytes != used_bytes {
+            return Err(rejected("txpool snapshot used_bytes mismatch"));
+        }
+        if self.next_heap_id < max_heap_id {
+            return Err(rejected("txpool snapshot heap high-watermark below max"));
+        }
+        if u64::MAX - self.next_heap_id <= (self.max_transactions as u64).saturating_add(1) {
+            return Err(rejected("txpool snapshot heap near saturation"));
+        }
+        let floor = self.cfg.policy_current_mempool_min_fee_rate;
+        Ok(TxPoolSnapshot {
+            current_mempool_min_fee_rate: floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE),
+            entries,
+            next_heap_id: self.next_heap_id,
+            used_bytes,
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn restore_snapshot(
+        &mut self,
+        snapshot: &TxPoolSnapshot,
+    ) -> Result<(), TxPoolAdmitError> {
+        if self.max_transactions == 0 || self.max_bytes == 0 {
+            return Err(unavailable("invalid txpool snapshot restore limits"));
+        }
+        if snapshot.entries.len() > self.max_transactions {
+            return Err(unavailable(format!(
+                "txpool snapshot exceeds transaction cap: count={} max={}",
+                snapshot.entries.len(),
+                self.max_transactions
+            )));
+        }
+
+        let mut txs = HashMap::with_capacity(snapshot.entries.len());
+        let mut wtxids = HashMap::with_capacity(snapshot.entries.len());
+        let mut spenders = HashMap::new();
+        let mut heap_seqs = HashMap::with_capacity(snapshot.entries.len());
+        let mut admission_seqs = HashMap::with_capacity(snapshot.entries.len());
+        let mut worst_heap = BinaryHeap::with_capacity(snapshot.entries.len());
+        let mut used_bytes = 0usize;
+        let mut max_heap_id = 0u64;
+
+        for item in &snapshot.entries {
+            if txs.contains_key(&item.txid) {
+                return Err(rejected(format!(
+                    "duplicate txpool snapshot txid {}",
+                    hex::encode(item.txid)
+                )));
+            }
+            let heap_id = item.heap_id;
+            if heap_id == 0 {
+                return Err(rejected(format!(
+                    "invalid txpool snapshot heap id for txid {}: heap_id=0",
+                    hex::encode(item.txid)
+                )));
+            }
+            if let Some(existing) = wtxids.insert(item.wtxid, item.txid) {
+                return Err(rejected(format!(
+                    "duplicate txpool snapshot wtxid {} existing={} new={}",
+                    hex::encode(item.wtxid),
+                    hex::encode(existing),
+                    hex::encode(item.txid)
+                )));
+            }
+            validate_txpool_snapshot_entry(item.txid, Some(item.wtxid), &item.entry)?;
+            if let Some(existing) = admission_seqs.insert(heap_id, item.txid) {
+                return Err(rejected(format!(
+                    "duplicate txpool snapshot heap id {heap_id} existing={} new={}",
+                    hex::encode(existing),
+                    hex::encode(item.txid)
+                )));
+            }
+            let next_used = used_bytes
+                .checked_add(item.entry.size)
+                .ok_or_else(|| unavailable("txpool snapshot byte accounting overflow"))?;
+            if item.entry.size > self.max_bytes || next_used > self.max_bytes {
+                return Err(unavailable(format!(
+                    "txpool snapshot exceeds byte cap: used={} entry={} max={}",
+                    used_bytes, item.entry.size, self.max_bytes
+                )));
+            }
+            for input in &item.entry.inputs {
+                if let Some(existing) = spenders.insert(input.clone(), item.txid) {
+                    return Err(rejected(format!(
+                        "duplicate txpool snapshot spender txid={} vout={} existing={} new={}",
+                        hex::encode(input.txid),
+                        input.vout,
+                        hex::encode(existing),
+                        hex::encode(item.txid)
+                    )));
+                }
+            }
+            used_bytes = next_used;
+            max_heap_id = max_heap_id.max(heap_id);
+            heap_seqs.insert(item.txid, heap_id);
+            worst_heap.push(WorstEntryKey {
+                txid: item.txid,
+                fee: item.entry.fee,
+                weight: item.entry.weight,
+                heap_id,
+            });
+            txs.insert(item.txid, item.entry.clone());
+        }
+
+        if snapshot.used_bytes != used_bytes {
+            return Err(rejected(format!(
+                "txpool snapshot used_bytes mismatch: snapshot={} computed={}",
+                snapshot.used_bytes, used_bytes
+            )));
+        }
+        if snapshot.next_heap_id < max_heap_id {
+            return Err(rejected(format!(
+                "txpool snapshot heap high-watermark below restored max: next={} max={}",
+                snapshot.next_heap_id, max_heap_id
+            )));
+        }
+        if u64::MAX - snapshot.next_heap_id <= (self.max_transactions as u64).saturating_add(1) {
+            return Err(rejected("txpool snapshot heap near saturation"));
+        }
+
+        let floor = snapshot.current_mempool_min_fee_rate;
+        self.cfg.policy_current_mempool_min_fee_rate = floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
+        self.txs = txs;
+        self.spenders = spenders;
+        self.heap_seqs = heap_seqs;
+        self.worst_heap = worst_heap;
+        self.next_heap_id = snapshot.next_heap_id;
+        self.used_bytes = used_bytes;
+        Ok(())
     }
 
     /// Returns the txids of every transaction currently in the pool.
@@ -817,6 +995,75 @@ impl TxPool {
         }
         self.worst_heap = rebuilt;
     }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn validate_txpool_snapshot_entry(
+    txid: [u8; 32],
+    wtxid: Option<[u8; 32]>,
+    entry: &TxPoolEntry,
+) -> Result<[u8; 32], TxPoolAdmitError> {
+    if txid == [0u8; 32] {
+        return Err(rejected("invalid txpool snapshot entry txid"));
+    }
+    if entry.size == 0 {
+        return Err(rejected("invalid txpool snapshot entry size"));
+    }
+    if entry.weight == 0 {
+        return Err(rejected("invalid txpool snapshot entry weight"));
+    }
+    if entry.size != entry.raw.len() {
+        return Err(rejected("txpool snapshot entry size mismatch"));
+    }
+    let (tx, raw_txid, raw_wtxid, consumed) = parse_tx(&entry.raw).map_err(|err| {
+        rejected(format!(
+            "invalid txpool snapshot entry raw for txid {}: {err}",
+            hex::encode(txid)
+        ))
+    })?;
+    if consumed != entry.raw.len() {
+        return Err(rejected("txpool snapshot entry has trailing bytes"));
+    }
+    if raw_txid != txid {
+        return Err(rejected(format!(
+            "txpool snapshot entry txid mismatch: entry={} raw={}",
+            hex::encode(txid),
+            hex::encode(raw_txid)
+        )));
+    }
+    if let Some(wtxid) = wtxid {
+        if wtxid != raw_wtxid {
+            return Err(rejected(format!(
+                "txpool snapshot entry wtxid mismatch: entry={} raw={} txid={}",
+                hex::encode(wtxid),
+                hex::encode(raw_wtxid),
+                hex::encode(txid)
+            )));
+        }
+    }
+    let (weight, _, _) = tx_weight_and_stats_public(&tx)
+        .map_err(|err| rejected(format!("invalid txpool snapshot entry weight: {err}")))?;
+    if entry.weight != weight {
+        return Err(rejected(format!(
+            "txpool snapshot entry weight mismatch: entry={} computed={} txid={}",
+            entry.weight,
+            weight,
+            hex::encode(txid)
+        )));
+    }
+    let inputs: Vec<Outpoint> = tx
+        .inputs
+        .iter()
+        .map(|input| Outpoint {
+            txid: input.prev_txid,
+            vout: input.prev_vout,
+        })
+        .collect();
+    if entry.inputs != inputs {
+        return Err(rejected("txpool snapshot entry input list mismatch"));
+    }
+    // Go validates string source; Rust's closed `TxSource` cannot represent invalid values.
+    Ok(raw_wtxid)
 }
 
 /// Returns the metadata a relay peer needs to forward the transaction
@@ -1828,7 +2075,8 @@ mod tests {
         fee_precheck_p2pk_output_value, mtp_median, next_block_height, next_block_mtp,
         reject_core_ext_tx_oversized_payload, reject_da_anchor_tx_policy, rejected, relay_metadata,
         tx_pool_byte_pressure_target, unavailable, TxPool, TxPoolAdmitErrorKind, TxPoolConfig,
-        TxPoolEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE, MAX_TX_POOL_TRANSACTIONS,
+        TxPoolEntry, TxPoolSnapshot, TxPoolSnapshotEntry, TxSource, DEFAULT_MEMPOOL_MIN_FEE_RATE,
+        MAX_TX_POOL_TRANSACTIONS,
     };
     use crate::{
         block_store_path, default_sync_config, devnet_genesis_block_bytes, devnet_genesis_chain_id,
@@ -1888,6 +2136,68 @@ mod tests {
             size,
             source,
         }
+    }
+
+    fn txpool_snapshot_entry_from_raw(
+        raw: Vec<u8>,
+        fee: u64,
+        source: TxSource,
+        heap_id: u64,
+    ) -> ([u8; 32], TxPoolSnapshotEntry) {
+        let (tx, txid, wtxid, consumed) = parse_tx(&raw).expect("parse snapshot raw");
+        assert_eq!(consumed, raw.len(), "snapshot raw must be canonical");
+        let inputs = tx
+            .inputs
+            .iter()
+            .map(|input| Outpoint {
+                txid: input.prev_txid,
+                vout: input.prev_vout,
+            })
+            .collect();
+        let (weight, _, _) = tx_weight_and_stats_public(&tx).expect("snapshot weight");
+        let size = raw.len();
+        (
+            txid,
+            TxPoolSnapshotEntry {
+                txid,
+                wtxid,
+                entry: TxPoolEntry {
+                    raw,
+                    inputs,
+                    fee,
+                    weight,
+                    size,
+                    source,
+                },
+                heap_id,
+            },
+        )
+    }
+
+    fn txpool_snapshot_test_pool() -> (TxPool, [u8; 32], [u8; 32]) {
+        let (_state_a, raw_a) = signed_p2pk_state_and_tx(
+            20_000,
+            vec![TxOutput {
+                value: 8,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&vec![0x31; 2592]),
+            }],
+            0x00,
+            None,
+            Vec::new(),
+        );
+        let (_state_b, raw_b) = core_ext_spend_state_and_tx(7);
+        let (txid_a, item_a) = txpool_snapshot_entry_from_raw(raw_a, 19_992, TxSource::Remote, 1);
+        let (txid_b, item_b) = txpool_snapshot_entry_from_raw(raw_b, 1, TxSource::Reorg, 2);
+        let max_bytes = item_a.entry.size + item_b.entry.size + 100;
+        let mut pool = TxPool::new_with_config(TxPoolConfig {
+            policy_current_mempool_min_fee_rate: 7,
+            ..TxPoolConfig::default()
+        });
+        pool.set_capacity_for_test(7, max_bytes);
+        pool.insert_entry(txid_a, item_a.entry);
+        pool.insert_entry(txid_b, item_b.entry);
+        (pool, txid_a, txid_b)
     }
 
     fn genesis_coinbase_bytes() -> Vec<u8> {
@@ -2180,6 +2490,143 @@ mod tests {
         let pool = TxPool::default();
         assert!(pool.is_empty());
         assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn txpool_snapshot_round_trip_preserves_rust_state_and_go_field_mapping() {
+        let (mut pool, txid_a, txid_b) = txpool_snapshot_test_pool();
+        let selected_before = pool.select_transactions(10, usize::MAX);
+        let heap_before = pool.worst_heap.clone().into_sorted_vec();
+        let snapshot = pool.snapshot().expect("snapshot");
+
+        pool.evict_txids(&[txid_a, txid_b]);
+        pool.cfg.policy_current_mempool_min_fee_rate = 99;
+        assert!(pool.is_empty(), "live pool mutated before restore");
+
+        pool.restore_snapshot(&snapshot)
+            .expect("valid snapshot restores");
+        assert_eq!(&pool.snapshot().expect("snapshot"), &snapshot);
+        assert_eq!(pool.worst_heap.clone().into_sorted_vec(), heap_before);
+        for item in &snapshot.entries {
+            assert_eq!(pool.heap_seqs.get(&item.txid), Some(&item.heap_id));
+            for input in &item.entry.inputs {
+                assert_eq!(pool.spenders.get(input), Some(&item.txid));
+            }
+        }
+        assert_eq!(pool.select_transactions(10, usize::MAX), selected_before);
+        assert_eq!(pool.cfg.policy_current_mempool_min_fee_rate, 7);
+
+        let lenient_snapshot = TxPool::new_with_config(TxPoolConfig {
+            policy_current_mempool_min_fee_rate: 0,
+            policy_reject_core_ext_pre_activation: false,
+            ..TxPoolConfig::default()
+        })
+        .snapshot()
+        .expect("lenient snapshot");
+        pool.restore_snapshot(&lenient_snapshot)
+            .expect("empty snapshot restores");
+        assert!(pool.cfg.policy_reject_core_ext_pre_activation);
+        assert!(pool.cfg.policy_current_mempool_min_fee_rate == DEFAULT_MEMPOOL_MIN_FEE_RATE);
+    }
+
+    #[test]
+    fn txpool_snapshot_restore_rejects_corruption_without_replacing_live_state() {
+        let (guard_pool, _guard_a, _guard_b) = txpool_snapshot_test_pool();
+        let guard_snapshot = guard_pool.snapshot().expect("guard snapshot");
+        let (mut target, _target_a, _target_b) = txpool_snapshot_test_pool();
+        let mut duplicate_spender = guard_snapshot.clone();
+        let (_conflict_state, raw_a, raw_b) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (_txid_a, item_a) = txpool_snapshot_entry_from_raw(raw_a, 7690, TxSource::Local, 1);
+        let (_txid_b, item_b) = txpool_snapshot_entry_from_raw(raw_b, 7691, TxSource::Remote, 2);
+        duplicate_spender.entries = vec![item_a, item_b];
+        duplicate_spender.used_bytes = duplicate_spender
+            .entries
+            .iter()
+            .map(|item| item.entry.size)
+            .sum();
+        duplicate_spender.next_heap_id = 2;
+        target.set_capacity_for_test(7, duplicate_spender.used_bytes + 1);
+
+        let mut reject = |poison: TxPoolSnapshot, needle: &str| {
+            let before = target.snapshot().expect("target snapshot before poison");
+            let err = target
+                .restore_snapshot(&poison)
+                .expect_err("poison snapshot must fail closed");
+            assert!(
+                err.message.contains(needle),
+                "expected error containing {needle:?}, got: {}",
+                err.message
+            );
+            assert_eq!(
+                &target.snapshot().expect("target snapshot after poison"),
+                &before
+            );
+        };
+
+        let mut duplicate_txid = guard_snapshot.clone();
+        let duplicate_item = duplicate_txid.entries[0].clone();
+        duplicate_txid.entries.push(duplicate_item);
+        reject(duplicate_txid, "duplicate txpool snapshot txid");
+        reject(duplicate_spender, "duplicate txpool snapshot spender");
+        let mut duplicate_heap = guard_snapshot.clone();
+        duplicate_heap.entries[1].heap_id = duplicate_heap.entries[0].heap_id;
+        reject(duplicate_heap, "duplicate txpool snapshot heap id");
+        let mut duplicate_wtxid = guard_snapshot.clone();
+        duplicate_wtxid.entries[1].wtxid = duplicate_wtxid.entries[0].wtxid;
+        reject(duplicate_wtxid, "duplicate txpool snapshot wtxid");
+        let mut missing_heap = guard_snapshot.clone();
+        missing_heap.entries[0].heap_id = 0;
+        reject(missing_heap, "invalid txpool snapshot heap id");
+        let mut invalid_raw = guard_snapshot.clone();
+        invalid_raw.entries[0].entry.raw = vec![0xff];
+        invalid_raw.entries[0].entry.size = 1;
+        reject(invalid_raw, "invalid txpool snapshot entry raw");
+        let mut txid_mismatch = guard_snapshot.clone();
+        txid_mismatch.entries[0].txid = [0x99; 32];
+        reject(txid_mismatch, "txid mismatch");
+        let mut zero_txid = guard_snapshot.clone();
+        zero_txid.entries[0].txid = [0u8; 32];
+        reject(zero_txid, "invalid txpool snapshot entry txid");
+        let mut wtxid_mismatch = guard_snapshot.clone();
+        wtxid_mismatch.entries[0].wtxid = [0x88; 32];
+        reject(wtxid_mismatch, "wtxid mismatch");
+        let mut weight_mismatch = guard_snapshot.clone();
+        weight_mismatch.entries[0].entry.weight += 1;
+        reject(weight_mismatch, "weight mismatch");
+        let mut input_mismatch = guard_snapshot.clone();
+        input_mismatch.entries[0].entry.inputs.clear();
+        reject(input_mismatch, "input list mismatch");
+        let mut zero_size = guard_snapshot.clone();
+        zero_size.entries[0].entry.size = 0;
+        reject(zero_size, "invalid txpool snapshot entry size");
+        let reject_live_cap = |max_txs, max_bytes, needle| {
+            let mut target = TxPool::new();
+            target.set_capacity_for_test(max_txs, max_bytes);
+            let before = target.snapshot().expect("empty target snapshot");
+            let err = target
+                .restore_snapshot(&guard_snapshot)
+                .expect_err("live capacity must fail closed");
+            assert!(err.message.contains(needle), "got: {}", err.message);
+            assert_eq!(&target.snapshot().expect("after"), &before);
+        };
+        reject_live_cap(1, usize::MAX, "transaction cap");
+        reject_live_cap(7, guard_snapshot.entries[0].entry.size, "byte cap");
+        let mut used_mismatch = guard_snapshot.clone();
+        used_mismatch.used_bytes += 1;
+        reject(used_mismatch, "used_bytes mismatch");
+        let mut high_water = guard_snapshot.clone();
+        high_water.next_heap_id = 1;
+        reject(high_water, "high-watermark");
+        let mut saturated = guard_snapshot.clone();
+        saturated.next_heap_id = u64::MAX - 8;
+        reject(saturated, "heap near saturation");
+        target.used_bytes += 1;
+        assert!(target.snapshot().is_err());
+        target.used_bytes -= 1;
+        target.next_heap_id = 1;
+        assert!(target.snapshot().is_err());
+        target.next_heap_id = u64::MAX - 8;
+        assert!(target.snapshot().is_err());
     }
 
     #[test]
