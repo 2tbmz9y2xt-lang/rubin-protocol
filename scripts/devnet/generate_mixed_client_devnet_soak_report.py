@@ -60,7 +60,7 @@ def scenario_reject(scenario: Any) -> str | None:
     if text.startswith(("go_binary_soak", "rust_skeleton")) or "single_client" in text:
         return "same_client_artifact_presented_as_mixed_client"
     return None
-def nodes(data: dict[str, Any], require_alive: bool = True) -> tuple[dict[str, dict[str, Any]] | None, str | None]:
+def nodes(data: dict[str, Any], require_alive: bool = True, require_backing: bool = True) -> tuple[dict[str, dict[str, Any]] | None, str | None]:
     raw = data.get("nodes")
     if not isinstance(raw, list) or len(raw) != 2 or not all(isinstance(n, dict) for n in raw):
         return None, "process_identity_missing_or_invalid"
@@ -72,7 +72,7 @@ def nodes(data: dict[str, Any], require_alive: bool = True) -> tuple[dict[str, d
         node = by_name[name]
         if node.get("implementation") != impl or not jint(node.get("pid")) or (node.get("process_alive") is not True if require_alive else ("process_alive" in node and node.get("process_alive") is not True)):
             return None, "wrong_role_identity"
-        if (not all(isinstance((v := node.get(k)), str) and (m := ENDPOINT.fullmatch(v)) is not None and 1 <= int(m.group(2)) <= 65535 for k in ("rpc_endpoint", "p2p_endpoint"))) or node.get("rpc_endpoint_process_backed") is not True or node.get("p2p_endpoint_process_backed") is not True:
+        if (not all(isinstance((v := node.get(k)), str) and (m := ENDPOINT.fullmatch(v)) is not None and 1 <= int(m.group(2)) <= 65535 for k in ("rpc_endpoint", "p2p_endpoint"))) or (require_backing and (node.get("rpc_endpoint_process_backed") is not True or node.get("p2p_endpoint_process_backed") is not True)):
             return None, "process_identity_missing_or_invalid"
         out[impl] = node
     if out["go"]["pid"] == out["rust"]["pid"] or len({out[i][k] for i in ("go", "rust") for k in ("rpc_endpoint", "p2p_endpoint")}) != 4:
@@ -170,7 +170,7 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
         return "restart_source_binding_contradiction:tip_hash_mismatch"
     return None
 def partition_contradiction(data: dict[str, Any]) -> str | None:
-    _, bad = nodes(data, require_alive=False)
+    _, bad = nodes(data, require_alive=False, require_backing=False)
     proof = data.get("proof")
     if not isinstance(proof, dict):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields" if "proof" in data else bad
