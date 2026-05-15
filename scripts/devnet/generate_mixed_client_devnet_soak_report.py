@@ -28,9 +28,8 @@ def section(name: str, status: str, reason: str | None = None, **kw: Any) -> dic
     return out
 def load(path: Path) -> tuple[Any | None, str | None]:
     try:
-        if path.stat().st_size > MAX_JSON_BYTES:
-            return None, "json_too_large"
-        raw = path.read_bytes()
+        with path.open("rb") as src: raw = src.read(MAX_JSON_BYTES + 1)
+        if len(raw) > MAX_JSON_BYTES: return None, "json_too_large"  # noqa: E701
         return json.loads(raw.decode("utf-8"), object_pairs_hook=NO_DUPES, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}"))), None
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         text = str(exc)
@@ -220,7 +219,7 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
     if data.get("verdict") != "PASS" or bad_marker:
         return section(name, "fail", "source_verdict_not_pass" if data.get("verdict") != "PASS" else "pass_artifact_contains_failure_fields", source_artifact_path=path, scenario=got), data
     missing = [f for f in fields if not get(data, f)[1]]
-    malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and get(data, "legacy_schema_compatibility.marker_path")[1] and (not isinstance(get(data, "legacy_schema_compatibility.marker_path")[0], str) or not get(data, "legacy_schema_compatibility.marker_path")[0] or regular_path(get(data, "legacy_schema_compatibility.marker_path")[0], "legacy_schema_marker_not_regular")[1]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
+    malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and get(data, "legacy_schema_compatibility.marker_path")[1] and (not isinstance((m := get(data, "legacy_schema_compatibility.marker_path")[0]), str) or not m or regular_path(str(Path(os.path.expanduser(m)) if Path(os.path.expanduser(m)).is_absolute() else path.parent / m), "legacy_schema_marker_not_regular")[1]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
     if malformed:
         return section(name, "fail", "malformed_source_fields:" + malformed, source_artifact_path=path, scenario=got), data
     if name in {"rust_restart", "partition_heal_reorg"}:
@@ -238,9 +237,8 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
     return section(name, "no_data", "source_contract_validation_unavailable", source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False), data
 def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
     try:
-        if path.stat().st_size > MAX_JSON_BYTES:
-            return None, "metrics_too_large"
-        raw = path.read_bytes()
+        with path.open("rb") as src: raw = src.read(MAX_JSON_BYTES + 1)
+        if len(raw) > MAX_JSON_BYTES: return None, "metrics_too_large"  # noqa: E701
         text = raw.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return None, f"read_failed:{exc.__class__.__name__}"
