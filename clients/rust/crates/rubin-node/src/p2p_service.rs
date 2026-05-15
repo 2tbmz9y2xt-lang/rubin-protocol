@@ -953,21 +953,17 @@ fn apply_tx_pool_cleanup(
             .tx_pool
             .lock()
             .map_err(|_| "tx pool unavailable".to_string())?;
-        let snapshot = tx_pool
-            .snapshot()
-            .map_err(|err| format!("tx pool cleanup snapshot: {err}"))?;
-        let report = tx_pool_cleanup.apply_with_report(
+        // Cleanup plans are emitted only after the sync engine accepted a
+        // block/reorg, or from pending cleanup for an already accepted orphan
+        // parent. Match Go's post-success best-effort cleanup shape: confirmed
+        // evictions, conflict removals, and successful requeues remain visible
+        // even if another requeue item reports a failure.
+        tx_pool_cleanup.apply_with_report(
             &mut tx_pool,
             &chain_state,
             block_store.as_ref(),
             chain_id,
-        );
-        if report.has_requeue_failures() {
-            tx_pool
-                .restore_snapshot(&snapshot)
-                .map_err(|err| format!("tx pool cleanup rollback: {err}"))?;
-        }
-        report
+        )
     };
     if report.has_requeue_failures() {
         return Ok(Some(report.requeue_failure_summary()));
@@ -1138,6 +1134,7 @@ mod tests {
     use crate::test_helpers::{block_with_txs, signed_conflicting_p2pk_state_and_txs};
     use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
+    use crate::txpool::TxSource;
     use crate::{
         block_store_path, default_sync_config, BlockStore, ChainState, SyncEngine, TxPool,
     };
@@ -1464,16 +1461,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_tx_pool_cleanup_rolls_back_partial_mutations_on_requeue_failure() {
+    fn apply_tx_pool_cleanup_keeps_post_success_best_effort_mutations_on_requeue_failure() {
         let missing_requeue_block = [0x44; 32];
         let (shared, dir, admitted_txid, _) =
-            shared_state_with_admitted_tx("rubin-node-p2p-cleanup-rollback-confirmed");
-        let before = shared
-            .tx_pool
-            .lock()
-            .expect("tx pool")
-            .snapshot()
-            .expect("snapshot before confirmed cleanup failure");
+            shared_state_with_admitted_tx("rubin-node-p2p-cleanup-best-effort-confirmed");
         let cleanup = TxPoolCleanupPlan::from_parts_for_test(
             vec![admitted_txid],
             Vec::new(),
@@ -1483,26 +1474,19 @@ mod tests {
             apply_tx_pool_cleanup(&shared, cleanup),
             "requeue_blocks_unavailable=1",
         );
-        let after = shared
-            .tx_pool
-            .lock()
-            .expect("tx pool")
-            .snapshot()
-            .expect("snapshot after confirmed cleanup failure");
         assert_eq!(
-            after, before,
-            "failed requeue must roll back confirmed-tx eviction"
+            shared
+                .tx_pool
+                .lock()
+                .expect("tx pool")
+                .tx_by_id(&admitted_txid),
+            None,
+            "post-success cleanup keeps confirmed-tx eviction despite later requeue failure"
         );
-        fs::remove_dir_all(dir).expect("cleanup confirmed rollback");
+        fs::remove_dir_all(dir).expect("cleanup confirmed best-effort");
 
-        let (shared, dir, _admitted_txid, conflicting_input) =
-            shared_state_with_admitted_tx("rubin-node-p2p-cleanup-rollback-conflict");
-        let before = shared
-            .tx_pool
-            .lock()
-            .expect("tx pool")
-            .snapshot()
-            .expect("snapshot before conflict cleanup failure");
+        let (shared, dir, admitted_txid, conflicting_input) =
+            shared_state_with_admitted_tx("rubin-node-p2p-cleanup-best-effort-conflict");
         let cleanup = TxPoolCleanupPlan::from_parts_for_test(
             Vec::new(),
             vec![conflicting_input],
@@ -1512,32 +1496,26 @@ mod tests {
             apply_tx_pool_cleanup(&shared, cleanup),
             "requeue_blocks_unavailable=1",
         );
-        let after = shared
-            .tx_pool
-            .lock()
-            .expect("tx pool")
-            .snapshot()
-            .expect("snapshot after conflict cleanup failure");
         assert_eq!(
-            after, before,
-            "failed requeue must roll back conflict removal"
+            shared
+                .tx_pool
+                .lock()
+                .expect("tx pool")
+                .tx_by_id(&admitted_txid),
+            None,
+            "post-success cleanup keeps conflict removal despite later requeue failure"
         );
-        fs::remove_dir_all(dir).expect("cleanup conflict rollback");
+        fs::remove_dir_all(dir).expect("cleanup conflict best-effort");
 
         let (shared, dir) =
-            test_shared_state_after_genesis("rubin-node-p2p-cleanup-rollback-requeue");
+            test_shared_state_after_genesis("rubin-node-p2p-cleanup-best-effort-requeue");
         let (state, requeue_raw, _) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
         {
             let mut engine = shared.sync_engine.lock().expect("sync engine");
             engine.chain_state.utxos = state.utxos.clone();
         }
+        let (_, requeue_txid, _, _) = parse_tx(&requeue_raw).expect("parse requeue tx");
         let requeue_block_hash = store_requeue_block(&shared, std::slice::from_ref(&requeue_raw));
-        let before = shared
-            .tx_pool
-            .lock()
-            .expect("tx pool")
-            .snapshot()
-            .expect("snapshot before accepted requeue rollback");
         let cleanup = TxPoolCleanupPlan::from_parts_for_test(
             Vec::new(),
             Vec::new(),
@@ -1549,19 +1527,16 @@ mod tests {
         );
         assert!(
             summary.contains("requeue_accepted=1"),
-            "test must prove a requeue mutation happened before rollback: {summary}"
+            "test must prove a requeue mutation happened before the later failure: {summary}"
         );
-        let after = shared
-            .tx_pool
-            .lock()
-            .expect("tx pool")
-            .snapshot()
-            .expect("snapshot after accepted requeue rollback");
-        assert_eq!(
-            after, before,
-            "failed requeue must roll back accepted requeue admission state"
+        let pool = shared.tx_pool.lock().expect("tx pool");
+        assert!(
+            pool.tx_by_id(&requeue_txid).is_some(),
+            "post-success cleanup keeps accepted requeue admission despite later requeue failure"
         );
-        fs::remove_dir_all(dir).expect("cleanup requeue rollback");
+        assert_eq!(pool.entry_source(&requeue_txid), Some(TxSource::Reorg));
+        drop(pool);
+        fs::remove_dir_all(dir).expect("cleanup requeue best-effort");
     }
 
     #[test]
