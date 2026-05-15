@@ -244,22 +244,17 @@ func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
 }
 
 func encodeVersionScalarFields(w io.Writer, v node.VersionPayloadV1) error {
+	var raw [versionPayloadBaseBytes]byte
 	txRelay := byte(0)
 	if v.TxRelay {
 		txRelay = 1
 	}
-	steps := []func() error{
-		func() error { return binary.Write(w, binary.LittleEndian, v.ProtocolVersion) },
-		func() error { _, err := w.Write([]byte{txRelay}); return err },
-		func() error { return binary.Write(w, binary.LittleEndian, v.PrunedBelowHeight) },
-		func() error { return binary.Write(w, binary.LittleEndian, v.DaMempoolSize) },
-	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return err
-		}
-	}
-	return nil
+	binary.LittleEndian.PutUint32(raw[0:4], v.ProtocolVersion)
+	raw[4] = txRelay
+	binary.LittleEndian.PutUint64(raw[5:13], v.PrunedBelowHeight)
+	binary.LittleEndian.PutUint32(raw[13:17], v.DaMempoolSize)
+	_, err := w.Write(raw[:])
+	return err
 }
 
 func decodeVersionPayload(payload []byte) (node.VersionPayloadV1, error) {
@@ -267,13 +262,7 @@ func decodeVersionPayload(payload []byte) (node.VersionPayloadV1, error) {
 	if err := validateVersionPayloadLength(payload); err != nil {
 		return out, err
 	}
-	reader := bytes.NewReader(payload)
-	if err := decodeVersionPayloadFields(reader, &out); err != nil {
-		return out, err
-	}
-	if reader.Len() != 0 {
-		return out, errors.New("trailing bytes in version payload")
-	}
+	decodeVersionPayloadFields(payload, &out)
 	return out, nil
 }
 
@@ -287,24 +276,14 @@ func validateVersionPayloadLength(payload []byte) error {
 	return errors.New("trailing bytes in version payload")
 }
 
-func decodeVersionPayloadFields(reader *bytes.Reader, out *node.VersionPayloadV1) error {
-	var txRelay [1]byte
-	steps := []func() error{
-		func() error { return binary.Read(reader, binary.LittleEndian, &out.ProtocolVersion) },
-		func() error { _, err := io.ReadFull(reader, txRelay[:]); return err },
-		func() error { return binary.Read(reader, binary.LittleEndian, &out.PrunedBelowHeight) },
-		func() error { return binary.Read(reader, binary.LittleEndian, &out.DaMempoolSize) },
-		func() error { _, err := io.ReadFull(reader, out.ChainID[:]); return err },
-		func() error { _, err := io.ReadFull(reader, out.GenesisHash[:]); return err },
-		func() error { return binary.Read(reader, binary.LittleEndian, &out.BestHeight) },
-	}
-	for _, step := range steps {
-		if err := step(); err != nil {
-			return errors.New("version payload too short")
-		}
-	}
-	out.TxRelay = txRelay[0] == 1
-	return nil
+func decodeVersionPayloadFields(payload []byte, out *node.VersionPayloadV1) {
+	out.ProtocolVersion = binary.LittleEndian.Uint32(payload[0:4])
+	out.TxRelay = payload[4] == 1
+	out.PrunedBelowHeight = binary.LittleEndian.Uint64(payload[5:13])
+	out.DaMempoolSize = binary.LittleEndian.Uint32(payload[13:17])
+	copy(out.ChainID[:], payload[17:49])
+	copy(out.GenesisHash[:], payload[49:81])
+	out.BestHeight = binary.LittleEndian.Uint64(payload[81:89])
 }
 
 func buildEnvelopeHeader(magic [4]byte, command string, payload []byte) ([wireHeaderSize]byte, error) {
