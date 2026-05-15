@@ -134,9 +134,10 @@ def validate_tx(data: dict[str, Any], converge: bool, rust_submit: bool) -> str 
 def restart_contradiction(data: dict[str, Any]) -> str | None:
     if not isinstance(data.get("restart"), dict) or data["restart"].get("stopped_node") != "node-rust":
         return "wrong_role_identity"
+    by_impl, bad = nodes(data, require_alive=False)
     rr = data.get("rust_restart")
     if not isinstance(rr, dict):
-        return "restart_source_binding_contradiction:malformed_source_fields" if "rust_restart" in data else None
+        return "restart_source_binding_contradiction:malformed_source_fields" if "rust_restart" in data else bad
     if any(k in rr and not isinstance(rr.get(k), bool) for k in ("old_pid_stopped", "same_datadir", "peer_reconnect_observed")) or any(k in rr and not jint(rr.get(k)) for k in ("old_pid", "new_pid", "go_target_height", "catch_up_height")):
         return "restart_source_binding_contradiction:malformed_source_fields"
     if rr.get("old_pid_stopped") is False:
@@ -145,7 +146,6 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
         return "restart_source_binding_contradiction:same_datadir_false"
     if rr.get("peer_reconnect_observed") is False:
         return "restart_source_binding_contradiction:peer_reconnect_not_observed"
-    by_impl, bad = nodes(data, require_alive=False)
     if bad or by_impl is None:
         return bad or "process_identity_missing_or_invalid"
     old_pid, new_pid = rr.get("old_pid"), rr.get("new_pid")
@@ -170,9 +170,10 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
         return "restart_source_binding_contradiction:tip_hash_mismatch"
     return None
 def partition_contradiction(data: dict[str, Any]) -> str | None:
+    _, bad = nodes(data, require_alive=False)
     proof = data.get("proof")
     if not isinstance(proof, dict):
-        return "partition_reorg_source_binding_contradiction:malformed_proof_fields" if "proof" in data else None
+        return "partition_reorg_source_binding_contradiction:malformed_proof_fields" if "proof" in data else bad
     if any(k in proof and not isinstance(proof.get(k), bool) for k in ("partition_changed_peer_state", "fork_diverged", "heal_restored_peer_state", "reorg_converged", "process_identity_rechecked_after_heal")) or ("go_reorg_metrics" in proof and (not isinstance(proof.get("go_reorg_metrics"), dict) or any(not jint(proof["go_reorg_metrics"].get(m)) for m in METRICS))):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     for key, reason in (("partition_changed_peer_state", "partition_no_peer_state_change"), ("fork_diverged", "partition_no_fork_divergence"), ("heal_restored_peer_state", "partition_heal_not_restored"), ("reorg_converged", "partition_reorg_not_converged"), ("process_identity_rechecked_after_heal", "partition_process_identity_not_rechecked_after_heal")):
@@ -197,7 +198,6 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
         if is_hex32(go_tip.get("hash")) and is_hex32(rust_tip.get("hash")) and go_tip.get("hash") != rust_tip.get("hash"):
             return "partition_reorg_source_binding_contradiction:final_tip_hash_mismatch"
         if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (go_tip != rust_win or rust_tip != rust_win): return "partition_reorg_source_binding_contradiction:final_tip_not_winning_tip"  # noqa: E701
-    _, bad = nodes(data, require_alive=False)
     return bad
 def build_section(name: str, attr: str, scenario: str, fields: list[str], args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any] | None]:
     raw_path = getattr(args, attr)
@@ -251,6 +251,7 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
             if not isinstance(obj, dict):
                 return None, "metrics_malformed"
             for metric in METRICS:
+                if metric not in obj: return None, "metrics_missing_or_zero"  # noqa: E701
                 if isinstance((v := obj.get(metric)), bool) or not isinstance(v, (int, float)) or (isinstance(v, float) and not math.isfinite(v)) or v <= 0 or v > 1_000_000_000 or int(v) != v:
                     return None, "metric_value_invalid"
                 found[metric] = int(v)
