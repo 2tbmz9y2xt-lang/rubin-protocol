@@ -416,8 +416,8 @@ impl TxPool {
                 snapshot.next_heap_id, max_heap_id
             )));
         }
-        if snapshot.next_heap_id == u64::MAX {
-            return Err(rejected("txpool snapshot heap high-watermark saturated"));
+        if u64::MAX - snapshot.next_heap_id < self.max_transactions as u64 {
+            return Err(rejected("txpool snapshot heap near saturation"));
         }
 
         self.cfg.policy_current_mempool_min_fee_rate = snapshot.current_mempool_min_fee_rate;
@@ -2626,8 +2626,8 @@ mod tests {
         high_water.next_heap_id = 1;
         reject(high_water, "high-watermark");
         let mut saturated = guard_snapshot.clone();
-        saturated.next_heap_id = u64::MAX;
-        reject(saturated, "high-watermark saturated");
+        saturated.next_heap_id = u64::MAX - 1;
+        reject(saturated, "heap near saturation");
     }
 
     #[test]
