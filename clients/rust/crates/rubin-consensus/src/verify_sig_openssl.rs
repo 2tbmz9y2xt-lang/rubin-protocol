@@ -21,42 +21,22 @@ const OPENSSL_INIT_NO_LOAD_CONFIG: u64 = 0x0000_0080;
 
 static OPENSSL_CONSENSUS_INIT: OnceLock<Result<(), TxError>> = OnceLock::new();
 
-fn generate_mldsa87_keypair() -> Result<(*mut openssl_sys::EVP_PKEY, Vec<u8>), TxError> {
-    ensure_openssl_bootstrap()?;
-    let alg = suite_alg_name(SUITE_ID_ML_DSA_87)?;
-    unsafe {
-        openssl_sys::ERR_clear_error();
-        let ctx =
-            ffi::EVP_PKEY_CTX_new_from_name(core::ptr::null_mut(), alg.as_ptr(), core::ptr::null());
-        if ctx.is_null() {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "openssl: EVP_PKEY_CTX_new_from_name failed",
-            ));
-        }
-        if openssl_sys::EVP_PKEY_keygen_init(ctx) <= 0 {
-            openssl_sys::EVP_PKEY_CTX_free(ctx);
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "openssl: EVP_PKEY_keygen_init failed",
-            ));
-        }
-        let mut pkey: *mut openssl_sys::EVP_PKEY = core::ptr::null_mut();
-        if openssl_sys::EVP_PKEY_keygen(ctx, &mut pkey) <= 0 || pkey.is_null() {
-            openssl_sys::EVP_PKEY_CTX_free(ctx);
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "openssl: EVP_PKEY_keygen failed",
-            ));
-        }
-        openssl_sys::EVP_PKEY_CTX_free(ctx);
+fn openssl_parse_error(message: &'static str) -> TxError {
+    TxError::new(ErrorCode::TxErrParse, message)
+}
 
+fn read_mldsa87_pubkey(pkey: *mut openssl_sys::EVP_PKEY) -> Result<Vec<u8>, TxError> {
+    unsafe {
+        // SAFETY: pkey is a live EVP_PKEY owned by the caller. The output
+        // buffer is ML_DSA_87_PUBKEY_BYTES long, and OpenSSL writes at most the
+        // provided length through pubkey_len. On failure or non-canonical length
+        // this helper consumes and frees pkey so no partially initialized keypair
+        // can leak ownership.
         let mut pubkey = vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize];
         let mut pubkey_len = pubkey.len();
         if ffi::EVP_PKEY_get_raw_public_key(pkey, pubkey.as_mut_ptr(), &mut pubkey_len) <= 0 {
             openssl_sys::EVP_PKEY_free(pkey);
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
+            return Err(openssl_parse_error(
                 "openssl: EVP_PKEY_get_raw_public_key failed",
             ));
         }
@@ -67,28 +47,21 @@ fn generate_mldsa87_keypair() -> Result<(*mut openssl_sys::EVP_PKEY, Vec<u8>), T
                 "openssl: non-canonical ML-DSA public key length",
             ));
         }
-        Ok((pkey, pubkey))
+        Ok(pubkey)
     }
 }
 
-fn sign_mldsa87_digest32(
+fn new_digest_sign_ctx(
     pkey: *mut openssl_sys::EVP_PKEY,
-    digest32: [u8; 32],
-) -> Result<Vec<u8>, TxError> {
-    if pkey.is_null() {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "openssl: nil ML-DSA keypair",
-        ));
-    }
+) -> Result<*mut openssl_sys::EVP_MD_CTX, TxError> {
     unsafe {
-        openssl_sys::ERR_clear_error();
+        // SAFETY: pkey is a non-null live EVP_PKEY owned by Mldsa87Keypair for
+        // the duration of signing. OpenSSL allocates mctx here; every failure
+        // after allocation frees it before returning, while success transfers the
+        // context to sign_mldsa87_digest for exactly one signing operation.
         let mctx = ffi::EVP_MD_CTX_new();
         if mctx.is_null() {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "openssl: EVP_MD_CTX_new failed",
-            ));
+            return Err(openssl_parse_error("openssl: EVP_MD_CTX_new failed"));
         }
         if ffi::EVP_DigestSignInit_ex(
             mctx,
@@ -101,11 +74,21 @@ fn sign_mldsa87_digest32(
         ) <= 0
         {
             ffi::EVP_MD_CTX_free(mctx);
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "openssl: EVP_DigestSignInit_ex failed",
-            ));
+            return Err(openssl_parse_error("openssl: EVP_DigestSignInit_ex failed"));
         }
+        Ok(mctx)
+    }
+}
+
+fn sign_mldsa87_digest(
+    mctx: *mut openssl_sys::EVP_MD_CTX,
+    digest32: [u8; 32],
+) -> Result<Vec<u8>, TxError> {
+    unsafe {
+        // SAFETY: mctx is returned by new_digest_sign_ctx and is valid until this
+        // function frees it on every path. signature is allocated to the maximum
+        // ML-DSA-87 signature size, sig_len points to its current capacity, and
+        // digest32 is an owned 32-byte digest with a stable pointer for the call.
         let mut signature = vec![0u8; ML_DSA_87_SIG_BYTES as usize];
         let mut sig_len = signature.len();
         if ffi::EVP_DigestSign(
@@ -131,6 +114,69 @@ fn sign_mldsa87_digest32(
         }
         signature.truncate(sig_len);
         Ok(signature)
+    }
+}
+
+impl Drop for Mldsa87Keypair {
+    fn drop(&mut self) {
+        unsafe {
+            // SAFETY: pkey ownership is unique to this keypair. The null check
+            // makes Drop idempotent against earlier explicit cleanup paths.
+            if !self.pkey.is_null() {
+                openssl_sys::EVP_PKEY_free(self.pkey);
+                self.pkey = core::ptr::null_mut();
+            }
+        }
+    }
+}
+
+impl Mldsa87Keypair {
+    pub fn generate() -> Result<Self, TxError> {
+        ensure_openssl_bootstrap()?;
+        let alg = suite_alg_name(SUITE_ID_ML_DSA_87)?;
+        unsafe {
+            // SAFETY: alg is a static NUL-terminated CStr selected from the
+            // canonical suite registry. ctx is freed on every error path after
+            // allocation. On successful keygen, pkey ownership is either consumed
+            // by read_mldsa87_pubkey on failure or stored in Mldsa87Keypair.
+            openssl_sys::ERR_clear_error();
+            let ctx = ffi::EVP_PKEY_CTX_new_from_name(
+                core::ptr::null_mut(),
+                alg.as_ptr(),
+                core::ptr::null(),
+            );
+            if ctx.is_null() {
+                return Err(openssl_parse_error(
+                    "openssl: EVP_PKEY_CTX_new_from_name failed",
+                ));
+            }
+            if openssl_sys::EVP_PKEY_keygen_init(ctx) <= 0 {
+                openssl_sys::EVP_PKEY_CTX_free(ctx);
+                return Err(openssl_parse_error("openssl: EVP_PKEY_keygen_init failed"));
+            }
+            let mut pkey: *mut openssl_sys::EVP_PKEY = core::ptr::null_mut();
+            if openssl_sys::EVP_PKEY_keygen(ctx, &mut pkey) <= 0 || pkey.is_null() {
+                openssl_sys::EVP_PKEY_CTX_free(ctx);
+                return Err(openssl_parse_error("openssl: EVP_PKEY_keygen failed"));
+            }
+            openssl_sys::EVP_PKEY_CTX_free(ctx);
+            let pubkey = read_mldsa87_pubkey(pkey)?;
+            Ok(Self { pkey, pubkey })
+        }
+    }
+
+    pub fn pubkey_bytes(&self) -> Vec<u8> {
+        self.pubkey.clone()
+    }
+
+    pub fn sign_digest32(&self, digest32: [u8; 32]) -> Result<Vec<u8>, TxError> {
+        if self.pkey.is_null() {
+            return Err(openssl_parse_error("openssl: nil ML-DSA keypair"));
+        }
+        // SAFETY: ERR_clear_error only resets OpenSSL's thread-local error queue.
+        unsafe { openssl_sys::ERR_clear_error() };
+        let mctx = new_digest_sign_ctx(self.pkey)?;
+        sign_mldsa87_digest(mctx, digest32)
     }
 }
 
