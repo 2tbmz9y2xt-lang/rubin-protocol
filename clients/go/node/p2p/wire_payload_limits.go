@@ -1,0 +1,48 @@
+package p2p
+
+import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+
+func inventoryPayloadCap() uint32 {
+	return uint32(maxInventoryVectors * inventoryVectorSize)
+}
+
+func addrPayloadCap() uint32 {
+	return uint32(maxCompactSizeBytes + maxAddrPayloadEntries*addrPayloadEntrySize)
+}
+
+func getBlocksPayloadCap(locatorLimit int) uint32 {
+	if locatorLimit <= 0 {
+		locatorLimit = defaultLocatorLimit
+	}
+	return uint32(2 + locatorLimit*32 + 32)
+}
+
+func headersPayloadCap(headerBatchLimit uint64) uint32 {
+	if headerBatchLimit == 0 {
+		headerBatchLimit = 512
+	}
+	return uint32(headerBatchLimit * consensus.BLOCK_HEADER_BYTES)
+}
+
+func postHandshakePayloadCap(locatorLimit int, headerBatchLimit uint64) payloadLimitFn {
+	return func(command string) uint32 {
+		switch command {
+		case messageVersion:
+			return versionPayloadBytes
+		case messageVerAck, messageGetAddr, messagePing, messagePong:
+			return 0
+		case messageInv, messageGetData:
+			return inventoryPayloadCap()
+		case messageAddr:
+			return addrPayloadCap()
+		case messageGetBlk:
+			return getBlocksPayloadCap(locatorLimit)
+		case messageHeaders:
+			return headersPayloadCap(headerBatchLimit)
+		case messageBlock, messageTx:
+			return uint32(consensus.MAX_BLOCK_BYTES)
+		default:
+			return 0
+		}
+	}
+}
