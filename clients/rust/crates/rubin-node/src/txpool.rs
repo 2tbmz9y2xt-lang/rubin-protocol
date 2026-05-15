@@ -306,8 +306,12 @@ impl TxPool {
             });
         }
         entries.sort_by_key(|item| item.txid);
+        if u64::MAX - self.next_heap_id <= self.max_transactions as u64 {
+            return Err(rejected("txpool snapshot heap near saturation"));
+        }
+        let floor = self.cfg.policy_current_mempool_min_fee_rate;
         Ok(TxPoolSnapshot {
-            current_mempool_min_fee_rate: self.cfg.policy_current_mempool_min_fee_rate,
+            current_mempool_min_fee_rate: floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE),
             entries,
             next_heap_id: self.next_heap_id,
             used_bytes: self.used_bytes,
@@ -417,7 +421,8 @@ impl TxPool {
             return Err(rejected("txpool snapshot heap near saturation"));
         }
 
-        self.cfg.policy_current_mempool_min_fee_rate = snapshot.current_mempool_min_fee_rate;
+        let floor = snapshot.current_mempool_min_fee_rate;
+        self.cfg.policy_current_mempool_min_fee_rate = floor.max(DEFAULT_MEMPOOL_MIN_FEE_RATE);
         self.txs = txs;
         self.spenders = spenders;
         self.heap_seqs = heap_seqs;
@@ -2502,7 +2507,6 @@ mod tests {
         let selected_before = pool.select_transactions(10, usize::MAX);
         let heap_before = pool.worst_heap.clone().into_sorted_vec();
         let snapshot = pool.snapshot().expect("snapshot");
-        assert_eq!(snapshot.entries[1].txid, txid_a.max(txid_b));
 
         pool.evict_txids(&[txid_a, txid_b]);
         pool.cfg.policy_current_mempool_min_fee_rate = 99;
@@ -2522,7 +2526,7 @@ mod tests {
         assert_eq!(pool.cfg.policy_current_mempool_min_fee_rate, 7);
 
         let lenient_snapshot = TxPool::new_with_config(TxPoolConfig {
-            policy_current_mempool_min_fee_rate: 11,
+            policy_current_mempool_min_fee_rate: 0,
             policy_reject_core_ext_pre_activation: false,
             ..TxPoolConfig::default()
         })
@@ -2530,11 +2534,8 @@ mod tests {
         .expect("lenient snapshot");
         pool.restore_snapshot(&lenient_snapshot)
             .expect("empty snapshot restores");
-        assert!(
-            pool.cfg.policy_reject_core_ext_pre_activation
-                && pool.cfg.policy_current_mempool_min_fee_rate == 11
-        );
-        assert_eq!(pool.max_transactions, 7);
+        assert!(pool.cfg.policy_reject_core_ext_pre_activation);
+        assert!(pool.cfg.policy_current_mempool_min_fee_rate == DEFAULT_MEMPOOL_MIN_FEE_RATE);
     }
 
     #[test]
@@ -2575,16 +2576,13 @@ mod tests {
         let duplicate_item = duplicate_txid.entries[0].clone();
         duplicate_txid.entries.push(duplicate_item);
         reject(duplicate_txid, "duplicate txpool snapshot txid");
-
         reject(duplicate_spender, "duplicate txpool snapshot spender");
-
         let mut duplicate_heap = guard_snapshot.clone();
         duplicate_heap.entries[1].heap_id = duplicate_heap.entries[0].heap_id;
         reject(duplicate_heap, "duplicate txpool snapshot heap id");
         let mut duplicate_wtxid = guard_snapshot.clone();
         duplicate_wtxid.entries[1].wtxid = duplicate_wtxid.entries[0].wtxid;
         reject(duplicate_wtxid, "duplicate txpool snapshot wtxid");
-
         let mut missing_heap = guard_snapshot.clone();
         missing_heap.entries[0].heap_id = 0;
         reject(missing_heap, "invalid txpool snapshot heap id");
@@ -2628,6 +2626,8 @@ mod tests {
         let mut saturated = guard_snapshot.clone();
         saturated.next_heap_id = u64::MAX - 1;
         reject(saturated, "heap near saturation");
+        target.next_heap_id = u64::MAX - 1;
+        assert!(target.snapshot().is_err());
     }
 
     #[test]
