@@ -26,7 +26,7 @@ def raw(prop=None, conv=None):
         if kind == "convergence": sample.update({"height":9,"block_hash":h("2")})
         return {"classification":"observed","path_direction":direction,"reason":None,"samples":[sample],"unit":"seconds"}
     return {"schema_version":"rubin-devnet-process-soak-raw-samples-v1","semantics":"raw samples only; no SLO threshold or pass claim","propagation":bucket("propagation", prop),"convergence":bucket("convergence", conv)}
-base = {"nodes":nodes,"verdict":"PASS","peer_connectivity":{"go_to_rust":True,"rust_to_go":True,"bidirectional_observed":True},"final_verification":{"producer_side":True},"legacy_schema_compatibility":{"marker_path":str(root / "marker.json")}}
+base = {"nodes":nodes,"verdict":"PASS","peer_connectivity":{"go_to_rust":True,"rust_to_go":True,"bidirectional_observed":True},"final_verification":{"producer_side":True},"legacy_schema_compatibility":{"marker_path":"marker.json"}}
 (root / "marker.json").write_text("{}\n", encoding="utf-8")
 dump("mesh.json", {**base,"scenario":"mixed_client_mesh","extra_path":"~definitely_no_such_user_zz/path","raw_samples":raw()})
 dump("go_accept.json", {**base,"scenario":"mixed_client_go_submit_rust_accept","go_submit":{"get_tx_path":str(root/"go-get.json"),"rpc_endpoint":"localhost:5101","tx_hex":"aa","tx_status_path":"go-status.json","txid":h("1")},"rust_accept":{"get_tx_path":str(root/"rust-get.json"),"raw_hex":"aa","rpc_endpoint":"rust-node:5201","tx_status_path":str(root/"rust-status.json"),"txid":h("1")},"tx_path":{"submitted_at":"node-go","observed_at":["node-rust"],"tx_id":h("1")},"raw_samples":raw("go->rust")})
