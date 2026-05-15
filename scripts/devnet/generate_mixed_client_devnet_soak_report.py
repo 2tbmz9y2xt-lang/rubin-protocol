@@ -6,9 +6,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000  # noqa: E702
-HEX32 = re.compile(r"[0-9a-f]{64}"); ENDPOINT = re.compile(r"([^\s:/]+):([0-9]+)")  # noqa: E702
+HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([^\s:/]+):([0-9]+)")  # noqa: E702
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
+SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable"}  # noqa: E702
 PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block"}
+PATH_FIELD_DOTTED_NAMES = {
+    "observations.pre_partition.common_go_block", "observations.pre_partition.common_go_mine", "observations.pre_partition.common_rust_block", "observations.pre_partition.common_rust_tip", "observations.pre_partition.go_peer_snapshot", "observations.pre_partition.rust_peer_snapshot",
+    "observations.partition.go_peer_snapshot", "observations.partition.rust_peer_snapshot", "observations.fork.go_block", "observations.fork.go_mine", "observations.fork.go_peer_snapshot", "observations.fork.go_tip", "observations.fork.rust_block_1", "observations.fork.rust_block_2", "observations.fork.rust_mine_1", "observations.fork.rust_mine_2", "observations.fork.rust_peer_snapshot", "observations.fork.rust_tip",
+    "observations.heal.go_peer_snapshot", "observations.heal.rust_peer_snapshot", "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
+}
 TX_OBJECT_KEYS = {
     "go_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
     "rust_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
@@ -28,6 +34,7 @@ SECTIONS = {
     "partition_heal_reorg": ("partition_heal_reorg_report", "mixed_client_partition_heal_reorg", ["proof.partition_changed_peer_state", "proof.fork_diverged", "proof.heal_restored_peer_state", "proof.reorg_converged", "proof.process_identity_rechecked_after_heal", "proof.go_reorg_metrics", "observations.reorg"]),
 }
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
+def hex_bytes(value: Any) -> bool: return isinstance(value, str) and bool(HEX_BYTES.fullmatch(value))  # noqa: E704
 def jint(value: Any, minimum: int = 1) -> bool: return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000  # noqa: E704
 def section(name: str, status: str, reason: str | None = None, **kw: Any) -> dict[str, Any]:
     out = {"status": status, "claim_type": kw.pop("claim_type", "status_evidence")}
@@ -63,7 +70,7 @@ def source_object_error(obj: Any, label: str) -> str | None:
         return f"{label}_source_fields_invalid"
     if any(not isinstance(obj.get(k), str) or not obj[k] for k in keys & PATH_FIELD_NAMES):
         return f"{label}_source_fields_invalid"
-    if any(k in keys and (not isinstance(obj.get(k), str) or not obj[k]) for k in ("tx_hex", "raw_hex")) or ("tx_count" in keys and not jint(obj.get("tx_count"))):
+    if any(k in keys and not hex_bytes(obj.get(k)) for k in ("tx_hex", "raw_hex")) or ("tx_count" in keys and not jint(obj.get("tx_count"), 2)):
         return f"{label}_source_fields_invalid"
     return None
 def nonfinite(value: Any, label: str = "root") -> str | None:
@@ -130,8 +137,12 @@ def validate_samples(data: dict[str, Any], prop_dir: str | None, conv_dir: str |
         if not isinstance(sample, dict) or set(sample) != keys or sample.get("classification") != "observed" or sample.get("path_direction") != direction or sample.get("source") != f"node-{src}" or sample.get("target") != f"node-{dst}" or sample.get("tx_id") != txid or sample.get("unit") != "seconds":
             return f"{name}_sample_identity_invalid"
         elapsed = sample.get("elapsed")
-        if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool) or elapsed < 0 or elapsed > 1_000_000_000 or (isinstance(elapsed, float) and not math.isfinite(elapsed)):
+        if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool):
+            return f"{name}_sample_elapsed_invalid"
+        if isinstance(elapsed, float) and not math.isfinite(elapsed):
             return f"non_finite_{name}_sample:0"
+        if elapsed < 0 or elapsed > 1_000_000_000:
+            return f"{name}_sample_elapsed_out_of_range"
         if name == "convergence" and (not jint(sample.get("height")) or sample.get("height") != height or sample.get("block_hash") != block_hash):
             return "convergence_sample_identity_mismatch"
     return None
@@ -149,11 +160,18 @@ def validate_tx(data: dict[str, Any], converge: bool, rust_submit: bool) -> str 
     for label, impl in ((submit, submit_impl), (accept, accept_impl)):
         if bad := source_object_error(data.get(label), label):
             return bad
-        if data[label].get("txid") != txid or data[label].get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"]:
+        if data[label].get("txid") != txid:
             return f"{label}_txid_mismatch"
+        if data[label].get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"]:
+            return f"{label}_rpc_endpoint_mismatch"
+    submitted_hex = data[submit]["tx_hex"]
+    if data[accept]["raw_hex"] != submitted_hex:
+        return f"{accept}_raw_hex_mismatch"
     if not converge: return validate_samples(data, prop, None, txid)  # noqa: E701
     mined, seen = data.get(mine), data.get(conv)
     if (bad := source_object_error(mined, mine)) or (bad := source_object_error(seen, conv)): return bad  # noqa: E701
+    if mined.get("raw_hex") != submitted_hex or seen.get("raw_hex") != submitted_hex:
+        return "convergence_identity_mismatch"
     if mined.get("txid") != txid or seen.get("txid") != txid or any(obj.get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"] for obj, impl in ((mined, mine_impl), (seen, conv_impl))) or mined.get("class") not in {None, "mined_included"} or mined.get("mined_by") not in {None, f"node-{mine_impl}"} or seen.get("class") not in {None, "canonical_block_found"} or seen.get("converged_at") not in {None, f"node-{conv_impl}"}: return "convergence_identity_mismatch"  # noqa: E701
     if mined.get("height") != seen.get("height") or mined.get("block_hash") != seen.get("block_hash") or not jint(mined.get("height")) or not jint(seen.get("height")) or not is_hex32(mined.get("block_hash")): return "convergence_identity_mismatch"  # noqa: E701
     return validate_samples(data, prop, conv_dir, txid, mined["height"], mined["block_hash"])
@@ -275,6 +293,8 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
             obj = json.loads(text, object_pairs_hook=NO_DUPES, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}")))
             if not isinstance(obj, dict):
                 return None, "metrics_malformed"
+            if nonfinite(obj):
+                return None, "metrics_malformed"
             for metric in METRICS:
                 if metric not in obj: return None, "metrics_missing_or_zero"  # noqa: E701
                 if isinstance((v := obj.get(metric)), bool) or not isinstance(v, (int, float)) or (isinstance(v, float) and not math.isfinite(v)) or v <= 0 or v > 1_000_000_000 or int(v) != v:
@@ -292,8 +312,17 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
     except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
         return None, str(exc) if str(exc).startswith("duplicate_json_key") else "metrics_malformed"
     return (found, None) if all(found.get(m, 0) > 0 for m in METRICS) else (None, "metrics_missing_or_zero")
+def no_data_source_reason_error(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return "rust_reorg_metrics_no_data_reason_invalid"
+    lowered = value.lower()
+    if any(re.search(rf"(?<![a-z0-9]){re.escape(token).replace('_', '[_-]?')}(?![a-z0-9])", lowered) for token in CLAIM_REASON_TOKENS):
+        return "rust_reorg_metrics_no_data_reason_reserved"
+    return None if SAFE_REASON.fullmatch(value) else "rust_reorg_metrics_no_data_reason_invalid"
 def metric_section(args: argparse.Namespace) -> dict[str, Any]:
     if args.rust_reorg_metrics_no_data:
+        if bad := no_data_source_reason_error(args.rust_reorg_metrics_no_data):
+            return section("reorg_metrics", "fail", bad, claim_type="metric_evidence")
         return section("reorg_metrics", "no_data", "rust_reorg_metrics_no_data", source_reason=args.rust_reorg_metrics_no_data, claim_type="metric_evidence")
     if not args.rust_reorg_metrics:
         return section("reorg_metrics", "no_data", "rust_reorg_metrics_missing", claim_type="metric_evidence")
@@ -335,20 +364,34 @@ def write_atomic(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
-def path_field_targets(value: Any, base: Path, depth: int = 0) -> list[Path]:
-    if depth > 200:
-        return []
+def path_field_targets(value: Any, base: Path) -> list[Path]:
     out: list[Path] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if isinstance(item, str) and (key in PATH_FIELD_NAMES or key.endswith("_path")):
-                raw = Path(os.path.expanduser(item)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
-            else:
-                out.extend(path_field_targets(item, base, depth + 1))
-    elif isinstance(value, list):
-        for item in value:
-            out.extend(path_field_targets(item, base, depth + 1))
+    stack: list[tuple[Any, str]] = [(value, "")]
+    while stack:
+        item, prefix = stack.pop()
+        if isinstance(item, dict):
+            for key, child in item.items():
+                dotted = f"{prefix}.{key}" if prefix else key
+                if isinstance(child, str) and (key in PATH_FIELD_NAMES or key.endswith("_path") or dotted in PATH_FIELD_DOTTED_NAMES):
+                    raw = Path(os.path.expanduser(child)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
+                else:
+                    stack.append((child, dotted))
+        elif isinstance(item, list):
+            stack.extend((child, prefix) for child in item)
     return out
+def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> bool:
+    for key, value in vars(args).items():
+        if key == "output" or key.endswith("_no_data") or not value:
+            continue
+        source_path = Path(os.path.realpath(Path(os.path.expanduser(value))))
+        if source_path == out_path:
+            return True
+        if not source_path.is_file():
+            continue
+        data, _ = load(source_path)
+        if isinstance(data, dict) and out_path in path_field_targets(data, source_path.parent):
+            return True
+    return False
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate fail-closed mixed-client devnet soak report v2.")
     for opt, dest in (("--mesh-report", "mesh_report"), ("--go-submit-rust-accept-report", "go_submit_rust_accept_report"), ("--go-submit-rust-mine-go-converge-report", "go_submit_rust_mine_go_converge_report"), ("--rust-submit-go-mine-rust-converge-report", "rust_submit_go_mine_rust_converge_report"), ("--rust-restart-report", "rust_restart_report"), ("--partition-heal-reorg-report", "partition_heal_reorg_report")):
@@ -359,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     out_path = Path(os.path.realpath(Path(os.path.expanduser(args.output))))
-    if any(v and not k.endswith("_no_data") and (Path(os.path.realpath(Path(os.path.expanduser(v)))) == out_path or (not regular_path(v, "nonregular")[1] and isinstance((d := load(Path(os.path.realpath(Path(os.path.expanduser(v)))))[0]), dict) and out_path in path_field_targets(d, Path(os.path.realpath(Path(os.path.expanduser(v)))).parent))) for k, v in vars(args).items() if k != "output"):
+    if output_overwrites_input(args, out_path):
         return print("FAIL: output_overwrites_input", file=sys.stderr) or 1
     report, rc = generate(args)
     try:
