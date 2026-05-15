@@ -58,16 +58,8 @@ func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte, from
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if _, exists := o.byHash[blockHash]; exists {
-		return false, nil
-	}
-	if o.byteLimit > 0 && len(blockBytes) > o.byteLimit {
-		return false, nil
-	}
-	// Per-peer quota keyed by normalised IP (not ip:port) so that
-	// reconnecting with a new source port does not bypass the quota.
-	quotaKey := peerQuotaKey(fromPeer)
-	if o.perPeerLimit > 0 && quotaKey != "" && o.peerOrphanCnt[quotaKey] >= o.perPeerLimit {
+	quotaKey, ok := o.acceptOrphanLocked(blockHash, blockBytes, fromPeer)
+	if !ok {
 		return false, nil
 	}
 	entry := orphanEntry{
@@ -76,20 +68,57 @@ func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte, from
 		blockBytes: append([]byte(nil), blockBytes...),
 		fromPeer:   quotaKey,
 	}
-	o.pool[parentHash] = append(o.pool[parentHash], entry)
-	o.byHash[blockHash] = orphanMeta{parentHash: parentHash, size: len(entry.blockBytes), fromPeer: quotaKey}
-	o.fifo = append(o.fifo, blockHash)
-	o.totalBytes += len(entry.blockBytes)
-	if quotaKey != "" {
-		o.peerOrphanCnt[quotaKey]++
+	o.storeOrphanLocked(entry)
+	return true, o.evictUntilWithinLimitsLocked()
+}
+
+func (o *orphanPool) acceptOrphanLocked(blockHash [32]byte, blockBytes []byte, fromPeer string) (string, bool) {
+	if o.hasOrphanLocked(blockHash) || !o.orphanFitsLimits(blockBytes) {
+		return "", false
 	}
+	// Per-peer quota keyed by normalised IP (not ip:port) so that
+	// reconnecting with a new source port does not bypass the quota.
+	quotaKey := peerQuotaKey(fromPeer)
+	if !o.peerQuotaAllowsLocked(quotaKey) {
+		return "", false
+	}
+	return quotaKey, true
+}
+
+func (o *orphanPool) hasOrphanLocked(blockHash [32]byte) bool {
+	_, exists := o.byHash[blockHash]
+	return exists
+}
+
+func (o *orphanPool) orphanFitsLimits(blockBytes []byte) bool {
+	return o.byteLimit <= 0 || len(blockBytes) <= o.byteLimit
+}
+
+func (o *orphanPool) peerQuotaAllowsLocked(quotaKey string) bool {
+	if o.perPeerLimit <= 0 || quotaKey == "" {
+		return true
+	}
+	return o.peerOrphanCnt[quotaKey] < o.perPeerLimit
+}
+
+func (o *orphanPool) storeOrphanLocked(entry orphanEntry) {
+	o.pool[entry.parentHash] = append(o.pool[entry.parentHash], entry)
+	o.byHash[entry.blockHash] = orphanMeta{parentHash: entry.parentHash, size: len(entry.blockBytes), fromPeer: entry.fromPeer}
+	o.fifo = append(o.fifo, entry.blockHash)
+	o.totalBytes += len(entry.blockBytes)
+	if entry.fromPeer != "" {
+		o.peerOrphanCnt[entry.fromPeer]++
+	}
+}
+
+func (o *orphanPool) evictUntilWithinLimitsLocked() [][32]byte {
 	evicted := make([][32]byte, 0, 1)
 	for len(o.byHash) > o.limit || (o.byteLimit > 0 && o.totalBytes > o.byteLimit) {
 		if dropped, ok := o.evictOldest(); ok {
 			evicted = append(evicted, dropped)
 		}
 	}
-	return true, evicted
+	return evicted
 }
 
 func (o *orphanPool) TakeChildren(parentHash [32]byte) []orphanEntry {
