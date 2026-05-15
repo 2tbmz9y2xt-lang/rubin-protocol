@@ -2,141 +2,6 @@ package consensus
 
 import "math/bits"
 
-type Outpoint struct {
-	Txid [32]byte
-	Vout uint32
-}
-
-type UtxoEntry struct {
-	CovenantData      []byte
-	Value             uint64
-	CreationHeight    uint64
-	CovenantType      uint16
-	CreatedByCoinbase bool
-}
-
-type UtxoApplySummary struct {
-	Fee       uint64
-	UtxoCount uint64
-}
-
-func ApplyNonCoinbaseTxBasic(tx *Tx, txid [32]byte, utxoSet map[Outpoint]UtxoEntry, height uint64, blockTimestamp uint64, chainID [32]byte) (*UtxoApplySummary, error) {
-	return ApplyNonCoinbaseTxBasicWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp, chainID)
-}
-
-func ApplyNonCoinbaseTxBasicWithMTP(
-	tx *Tx,
-	txid [32]byte,
-	utxoSet map[Outpoint]UtxoEntry,
-	height uint64,
-	blockTimestamp uint64,
-	blockMTP uint64,
-	chainID [32]byte,
-) (*UtxoApplySummary, error) {
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockMTP, chainID)
-	_ = work
-	return summary, err
-}
-
-// ApplyNonCoinbaseTxBasicUpdate applies a non-coinbase transaction to the provided UTXO snapshot
-// and returns the updated UTXO set. This is a stateful helper for block connection logic.
-//
-// NOTE: This function implements end-to-end signature verification (verify_sig) as part of spend
-// validation, and is used to deterministically compute (sum_in - sum_out) fees and update UTXO
-// membership under the "basic" apply ruleset.
-func ApplyNonCoinbaseTxBasicUpdate(
-	tx *Tx,
-	txid [32]byte,
-	utxoSet map[Outpoint]UtxoEntry,
-	height uint64,
-	blockTimestamp uint64,
-	chainID [32]byte,
-) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	return ApplyNonCoinbaseTxBasicUpdateWithMTP(tx, txid, utxoSet, height, blockTimestamp, blockTimestamp, chainID)
-}
-
-func ApplyNonCoinbaseTxBasicUpdateWithMTP(
-	tx *Tx,
-	txid [32]byte,
-	utxoSet map[Outpoint]UtxoEntry,
-	height uint64,
-	blockTimestamp uint64,
-	blockMTP uint64,
-	chainID [32]byte,
-) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
-		tx,
-		txid,
-		utxoSet,
-		height,
-		blockTimestamp,
-		blockMTP,
-		chainID,
-		nil,
-	)
-}
-
-// ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles is a helper for deterministic tooling
-// (conformance/CLI) that need to inject CORE_EXT deployment profiles (CANONICAL §23.2.2).
-//
-// Consensus validity depends on the resolved profile(ext_id, height). Nodes MUST ensure they use
-// the canonical chain-config source for this mapping.
-func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfiles(
-	tx *Tx,
-	txid [32]byte,
-	utxoSet map[Outpoint]UtxoEntry,
-	height uint64,
-	_ uint64,
-	blockMTP uint64,
-	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
-) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
-	return ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
-		tx,
-		txid,
-		utxoSet,
-		height,
-		0,
-		blockMTP,
-		chainID,
-		coreExtProfiles,
-		nil,
-		nil,
-	)
-}
-
-// ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext is the
-// suite-aware variant for deterministic tooling that needs CORE_EXT profiles plus
-// explicit native-suite rotation/registry context for ACTIVE-profile spend checks.
-func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
-	tx *Tx,
-	txid [32]byte,
-	utxoSet map[Outpoint]UtxoEntry,
-	height uint64,
-	_ uint64,
-	blockMTP uint64,
-	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
-	rotation RotationProvider,
-	registry *SuiteRegistry,
-) (map[Outpoint]UtxoEntry, *UtxoApplySummary, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
-	work := cloneUtxoSet(utxoSet)
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, work, height, blockMTP, chainID, coreExtProfiles, rotation, registry)
-	if err != nil {
-		return nil, nil, err
-	}
-	return work, &UtxoApplySummary{
-		Fee:       fee,
-		UtxoCount: uint64(len(work)),
-	}, nil
-}
-
 func applyNonCoinbaseTxBasicWork(
 	tx *Tx,
 	txid [32]byte,
@@ -205,55 +70,424 @@ func (ctx *nonCoinbaseApplyContext) applyPostOutputRules() error {
 	return nil
 }
 
-func cloneUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
-	out := make(map[Outpoint]UtxoEntry, len(src))
-	for k, v := range src {
-		out[k] = cloneUtxoEntry(v)
+func nonCoinbaseCoreExtProfilesOrEmpty(coreExtProfiles CoreExtProfileProvider) CoreExtProfileProvider {
+	if coreExtProfiles == nil {
+		return EmptyCoreExtProfileProvider()
 	}
-	return out
+	return coreExtProfiles
 }
 
-func cloneUtxoEntry(entry UtxoEntry) UtxoEntry {
-	return UtxoEntry{
-		Value:             entry.Value,
-		CovenantType:      entry.CovenantType,
-		CovenantData:      append([]byte(nil), entry.CovenantData...),
-		CreationHeight:    entry.CreationHeight,
-		CreatedByCoinbase: entry.CreatedByCoinbase,
+func (ctx *nonCoinbaseApplyContext) prepare() error {
+	if ctx.tx == nil {
+		return txerr(TX_ERR_PARSE, "nil tx")
 	}
+	if len(ctx.tx.Inputs) == 0 {
+		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	}
+	if ctx.tx.TxNonce == 0 {
+		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
+	}
+	if err := ValidateTxCovenantsGenesis(ctx.tx, ctx.height, ctx.rotation); err != nil {
+		return err
+	}
+	sighashCache, err := NewSighashV1PrehashCache(ctx.tx)
+	if err != nil {
+		return err
+	}
+	ctx.sighashCache = sighashCache
+	return nil
 }
 
-func checkSpendCovenant(
-	covType uint16,
-	covData []byte,
-) error {
-	switch covType {
-	case COV_TYPE_P2PK:
+func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
+	witnessCursor := 0
+	seenInputs := make(map[Outpoint]struct{}, len(ctx.tx.Inputs))
+	var zeroTxid [32]byte
+	ctx.resolved = make([]nonCoinbaseResolvedInput, 0, len(ctx.tx.Inputs))
+	for _, in := range ctx.tx.Inputs {
+		entry, op, err := ctx.resolveInput(in, seenInputs, zeroTxid)
+		if err != nil {
+			return err
+		}
+		slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
+		if err != nil {
+			return err
+		}
+		if slots <= 0 {
+			return txerr(TX_ERR_PARSE, "invalid witness slots")
+		}
+		if witnessCursor+slots > len(ctx.tx.Witness) {
+			return txerr(TX_ERR_PARSE, "witness underflow")
+		}
+		assigned := ctx.tx.Witness[witnessCursor : witnessCursor+slots]
+		ctx.resolved = append(ctx.resolved, nonCoinbaseResolvedInput{
+			entry:    entry,
+			witness:  append([]WitnessItem(nil), assigned...),
+			outpoint: op,
+		})
+		witnessCursor += slots
+	}
+	if witnessCursor != len(ctx.tx.Witness) {
+		return txerr(TX_ERR_PARSE, "witness_count mismatch")
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) resolveInput(in TxInput, seenInputs map[Outpoint]struct{}, zeroTxid [32]byte) (UtxoEntry, Outpoint, error) {
+	if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
+		return UtxoEntry{}, Outpoint{}, err
+	}
+	entry, op, err := ctx.lookupInputEntry(in, seenInputs)
+	if err != nil {
+		return UtxoEntry{}, Outpoint{}, err
+	}
+	if err := ctx.validateResolvedInputEntry(entry); err != nil {
+		return UtxoEntry{}, Outpoint{}, err
+	}
+	return entry, op, nil
+}
+
+func validateNonCoinbaseInputEncoding(in TxInput, zeroTxid [32]byte) error {
+	if len(in.ScriptSig) != 0 {
+		return txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
+	}
+	if in.Sequence > 0x7fffffff {
+		return txerr(TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
+	}
+	if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
+		return txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) lookupInputEntry(in TxInput, seenInputs map[Outpoint]struct{}) (UtxoEntry, Outpoint, error) {
+	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+	if _, exists := seenInputs[op]; exists {
+		return UtxoEntry{}, Outpoint{}, txerr(TX_ERR_PARSE, "duplicate input outpoint")
+	}
+	seenInputs[op] = struct{}{}
+	entry, ok := ctx.work[op]
+	if !ok {
+		return UtxoEntry{}, Outpoint{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+	}
+	return entry, op, nil
+}
+
+func (ctx *nonCoinbaseApplyContext) validateResolvedInputEntry(entry UtxoEntry) error {
+	if isNonSpendableInputCovenant(entry.CovenantType) {
+		return txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
+	}
+	if err := ctx.validateCoinbaseInputMaturity(entry); err != nil {
+		return err
+	}
+	if err := ctx.captureVaultResolvedInput(entry); err != nil {
+		return err
+	}
+	return checkSpendCovenant(entry.CovenantType, entry.CovenantData)
+}
+
+func isNonSpendableInputCovenant(covType uint16) bool {
+	return covType == COV_TYPE_ANCHOR || covType == COV_TYPE_DA_COMMIT
+}
+
+func (ctx *nonCoinbaseApplyContext) validateCoinbaseInputMaturity(entry UtxoEntry) error {
+	if !entry.CreatedByCoinbase {
 		return nil
-	case COV_TYPE_VAULT:
-		_, err := ParseVaultCovenantDataForSpend(covData)
+	}
+	// Guard the subtraction first so the maturity check cannot wrap.
+	if ctx.height < entry.CreationHeight || ctx.height-entry.CreationHeight < COINBASE_MATURITY {
+		return txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) captureVaultResolvedInput(entry UtxoEntry) error {
+	if entry.CovenantType != COV_TYPE_VAULT {
+		return nil
+	}
+	ctx.spend.vaultInputCount++
+	if ctx.spend.vaultInputCount > 1 {
+		return txerr(TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN, "multiple CORE_VAULT inputs forbidden")
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) buildTxContext() error {
+	resolvedEntries := ctx.resolvedEntries()
+	txContextExtIDs, err := collectTxContextExtIDs(resolvedEntries, ctx.height, ctx.coreExtProfiles)
+	if err != nil {
 		return err
+	}
+	if len(txContextExtIDs) == 0 {
+		return nil
+	}
+	outputExtIDCache, err := BuildTxContextOutputExtIDCache(ctx.tx)
+	if err != nil {
+		return err
+	}
+	ctx.txContext, err = BuildTxContext(ctx.tx, resolvedEntries, outputExtIDCache, ctx.height, ctx.coreExtProfiles)
+	return err
+}
+
+func (ctx *nonCoinbaseApplyContext) resolvedEntries() []UtxoEntry {
+	entries := make([]UtxoEntry, 0, len(ctx.resolved))
+	for _, input := range ctx.resolved {
+		entries = append(entries, input.entry)
+	}
+	return entries
+}
+
+func (ctx *nonCoinbaseApplyContext) validateInputSpends() error {
+	for inputIndex, input := range ctx.resolved {
+		if err := ctx.validateInputSpend(inputIndex, input); err != nil {
+			return err
+		}
+		inputLockID := sha3_256(OutputDescriptorBytes(input.entry.CovenantType, input.entry.CovenantData))
+		ctx.spend.inputLockIDs = append(ctx.spend.inputLockIDs, inputLockID)
+		ctx.spend.inputCovTypes = append(ctx.spend.inputCovTypes, input.entry.CovenantType)
+		var err error
+		ctx.spend.sumIn, err = addU64ToU128(ctx.spend.sumIn, input.entry.Value)
+		if err != nil {
+			return err
+		}
+		if input.entry.CovenantType == COV_TYPE_VAULT {
+			ctx.spend.sumInVault, err = addU64ToU128(ctx.spend.sumInVault, input.entry.Value)
+			if err != nil {
+				return err
+			}
+		}
+		delete(ctx.work, input.outpoint)
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input nonCoinbaseResolvedInput) error {
+	entry := input.entry
+	assigned := input.witness
+	switch entry.CovenantType {
+	case COV_TYPE_P2PK:
+		return ctx.validateP2PKInput(inputIndex, entry, assigned)
 	case COV_TYPE_MULTISIG:
-		_, err := ParseMultisigCovenantData(covData)
-		return err
+		return ctx.validateMultisigInput(inputIndex, entry, assigned)
+	case COV_TYPE_VAULT:
+		return ctx.captureVaultInput(inputIndex, entry, assigned)
 	case COV_TYPE_HTLC:
-		_, err := ParseHTLCCovenantData(covData)
-		return err
+		return ctx.validateHTLCInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_EXT:
-		_, err := ParseCoreExtCovenantData(covData)
-		return err
+		return ctx.validateCoreExtInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_STEALTH:
-		_, err := ParseStealthCovenantData(covData)
-		return err
+		return ctx.validateCoreStealthInput(inputIndex, entry, assigned)
 	default:
-		// Reserved/unknown are unsupported in basic apply path.
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply")
+		return nil
 	}
 }
 
-type u128 struct {
-	hi uint64
-	lo uint64
+func (ctx *nonCoinbaseApplyContext) validateP2PKInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
+	if len(assigned) != 1 {
+		return txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
+	}
+	return validateP2PKSpendAtHeight(entry, assigned[0], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.rotation, ctx.registry)
+}
+
+func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
+	m, err := ParseMultisigCovenantData(entry.CovenantData)
+	if err != nil {
+		return err
+	}
+	return validateThresholdSigSpendAtHeight(m.Keys, m.Threshold, assigned, ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.rotation, ctx.registry, "CORE_MULTISIG")
+}
+
+func (ctx *nonCoinbaseApplyContext) captureVaultInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
+	v, err := ParseVaultCovenantDataForSpend(entry.CovenantData)
+	if err != nil {
+		return err
+	}
+	ctx.spend.vaultSigKeys = v.Keys
+	ctx.spend.vaultSigThreshold = v.Threshold
+	ctx.spend.vaultSigWitness = append([]WitnessItem(nil), assigned...)
+	ctx.spend.vaultSigInputIndex = uint32(inputIndex)
+	ctx.spend.vaultSigInputValue = entry.Value
+	ctx.spend.vaultWhitelist = v.Whitelist
+	ctx.spend.vaultOwnerLockID = v.OwnerLockID
+	ctx.spend.haveVaultSig = true
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) validateHTLCInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
+	if len(assigned) != 2 {
+		return txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
+	}
+	return ValidateHTLCSpendAtHeight(entry, assigned[0], assigned[1], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.blockMTP, ctx.sighashCache, ctx.rotation, ctx.registry)
+}
+
+func (ctx *nonCoinbaseApplyContext) validateCoreExtInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
+	if len(assigned) != CORE_EXT_WITNESS_SLOTS {
+		return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
+	}
+	return validateCoreExtSpendWithCache(entry, assigned[0], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.coreExtProfiles, ctx.rotation, ctx.registry, ctx.txContext)
+}
+
+func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
+	if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
+		return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
+	}
+	return validateCoreStealthSpendAtHeight(entry, assigned[0], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.rotation, ctx.registry)
+}
+
+func (ctx *nonCoinbaseApplyContext) addSpendableOutputs() error {
+	for i, out := range ctx.tx.Outputs {
+		var err error
+		ctx.sumOut, err = addU64ToU128(ctx.sumOut, out.Value)
+		if err != nil {
+			return err
+		}
+		if out.CovenantType == COV_TYPE_VAULT {
+			ctx.createsVault = true
+		}
+		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
+			continue
+		}
+		op := Outpoint{Txid: ctx.txid, Vout: uint32(i)}
+		ctx.work[op] = UtxoEntry{
+			Value:             out.Value,
+			CovenantType:      out.CovenantType,
+			CovenantData:      append([]byte(nil), out.CovenantData...),
+			CreationHeight:    ctx.height,
+			CreatedByCoinbase: false,
+		}
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) finalizeValueAndFee() (uint64, error) {
+	valueBase := &TxContextBase{
+		TotalIn:  uint128FromInternal(ctx.spend.sumIn),
+		TotalOut: uint128FromInternal(ctx.sumOut),
+		Height:   ctx.height,
+	}
+	if ctx.txContext != nil {
+		if errTx := requireTxContextBaseMatchesTotals(ctx.txContext.Base, valueBase.TotalIn, valueBase.TotalOut, ctx.height); errTx != nil {
+			return 0, errTx
+		}
+	}
+	if errTx := CheckValueConservationTxWide(valueBase, ctx.spend.vaultInputCount == 1, uint128FromInternal(ctx.spend.sumInVault)); errTx != nil {
+		return 0, errTx
+	}
+	feeU128, err := subU128(ctx.spend.sumIn, ctx.sumOut)
+	if err != nil {
+		return 0, err
+	}
+	return u128ToU64(feeU128)
+}
+
+func (ctx *nonCoinbaseApplyContext) validateVaultCreations() error {
+	for _, out := range ctx.tx.Outputs {
+		if out.CovenantType != COV_TYPE_VAULT {
+			continue
+		}
+		v, err := ParseVaultCovenantData(out.CovenantData)
+		if err != nil {
+			return err
+		}
+		if !hasVaultOwnerAuthorizedInput(ctx.spend.inputLockIDs, ctx.spend.inputCovTypes, v.OwnerLockID) {
+			return txerr(TX_ERR_VAULT_OWNER_AUTH_REQUIRED, "missing owner-authorized input for CORE_VAULT creation")
+		}
+	}
+	return nil
+}
+
+func hasVaultOwnerAuthorizedInput(inputLockIDs [][32]byte, inputCovTypes []uint16, ownerLockID [32]byte) bool {
+	hasOwnerLockID := false
+	hasOwnerLockType := false
+	for i := range inputLockIDs {
+		if inputLockIDs[i] != ownerLockID {
+			continue
+		}
+		hasOwnerLockID = true
+		if inputCovTypes[i] == COV_TYPE_P2PK || inputCovTypes[i] == COV_TYPE_MULTISIG {
+			hasOwnerLockType = true
+		}
+	}
+	return hasOwnerLockID && hasOwnerLockType
+}
+
+func (ctx *nonCoinbaseApplyContext) validateVaultSpend() error {
+	if !ctx.spend.haveVaultSig {
+		return txerr(TX_ERR_PARSE, "missing CORE_VAULT signature context")
+	}
+	if err := ctx.requireVaultOwnerAuthForSpend(); err != nil {
+		return err
+	}
+	if err := ctx.rejectVaultFeeSponsorship(); err != nil {
+		return err
+	}
+	if err := ctx.rejectVaultOutputRecursion(); err != nil {
+		return err
+	}
+	if err := ctx.validateVaultSpendSignature(); err != nil {
+		return err
+	}
+	return ctx.validateVaultOutputWhitelist()
+}
+
+func (ctx *nonCoinbaseApplyContext) requireVaultOwnerAuthForSpend() error {
+	for i := range ctx.spend.inputLockIDs {
+		if ctx.spend.inputLockIDs[i] == ctx.spend.vaultOwnerLockID {
+			return nil
+		}
+	}
+	return txerr(TX_ERR_VAULT_OWNER_AUTH_REQUIRED, "missing owner-authorized input for CORE_VAULT spend")
+}
+
+func (ctx *nonCoinbaseApplyContext) rejectVaultFeeSponsorship() error {
+	for i := range ctx.spend.inputCovTypes {
+		if ctx.spend.inputCovTypes[i] == COV_TYPE_VAULT {
+			continue
+		}
+		if ctx.spend.inputLockIDs[i] != ctx.spend.vaultOwnerLockID {
+			return txerr(TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN, "non-owner non-vault input forbidden in CORE_VAULT spend")
+		}
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) rejectVaultOutputRecursion() error {
+	for _, out := range ctx.tx.Outputs {
+		if out.CovenantType == COV_TYPE_VAULT {
+			return txerr(TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "CORE_VAULT outputs forbidden in CORE_VAULT spend")
+		}
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) validateVaultSpendSignature() error {
+	return validateThresholdSigSpendAtHeight(
+		ctx.spend.vaultSigKeys,
+		ctx.spend.vaultSigThreshold,
+		ctx.spend.vaultSigWitness,
+		ctx.tx,
+		ctx.spend.vaultSigInputIndex,
+		ctx.spend.vaultSigInputValue,
+		ctx.chainID,
+		ctx.height,
+		ctx.sighashCache,
+		ctx.rotation,
+		ctx.registry,
+		"CORE_VAULT",
+	)
+}
+
+func (ctx *nonCoinbaseApplyContext) validateVaultOutputWhitelist() error {
+	for _, out := range ctx.tx.Outputs {
+		if out.CovenantType != COV_TYPE_P2PK && out.CovenantType != COV_TYPE_MULTISIG && out.CovenantType != COV_TYPE_HTLC {
+			return txerr(TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "disallowed destination covenant_type for CORE_VAULT spend")
+		}
+		desc := OutputDescriptorBytes(out.CovenantType, out.CovenantData)
+		h := sha3_256(desc)
+		if !HashInSorted32(ctx.spend.vaultWhitelist, h) {
+			return txerr(TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "output not whitelisted for CORE_VAULT")
+		}
+	}
+	return nil
 }
 
 func addU64ToU128(x u128, v uint64) (u128, error) {
