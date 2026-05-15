@@ -56,9 +56,11 @@ fn new_digest_sign_ctx(
 ) -> Result<*mut openssl_sys::EVP_MD_CTX, TxError> {
     unsafe {
         // SAFETY: pkey is a non-null live EVP_PKEY owned by Mldsa87Keypair for
-        // the duration of signing. OpenSSL allocates mctx here; every failure
-        // after allocation frees it before returning, while success transfers the
-        // context to sign_mldsa87_digest for exactly one signing operation.
+        // the duration of signing. ERR_clear_error only resets OpenSSL's
+        // thread-local error queue. OpenSSL allocates mctx here; every failure
+        // after allocation frees it before returning, while success transfers
+        // the context to sign_mldsa87_digest for exactly one signing operation.
+        openssl_sys::ERR_clear_error();
         let mctx = ffi::EVP_MD_CTX_new();
         if mctx.is_null() {
             return Err(openssl_parse_error("openssl: EVP_MD_CTX_new failed"));
@@ -173,8 +175,6 @@ impl Mldsa87Keypair {
         if self.pkey.is_null() {
             return Err(openssl_parse_error("openssl: nil ML-DSA keypair"));
         }
-        // SAFETY: ERR_clear_error only resets OpenSSL's thread-local error queue.
-        unsafe { openssl_sys::ERR_clear_error() };
         let mctx = new_digest_sign_ctx(self.pkey)?;
         sign_mldsa87_digest(mctx, digest32)
     }
