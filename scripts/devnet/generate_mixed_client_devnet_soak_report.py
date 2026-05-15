@@ -35,7 +35,7 @@ def load(path: Path) -> tuple[Any | None, str | None]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         text = str(exc)
         return None, text if text.startswith(("non_finite_json_constant:", "duplicate_json_key")) else f"malformed_json:{exc.__class__.__name__}"
-def regular_path(raw_path: str, reason: str) -> tuple[Path, str | None]: raw = Path(raw_path).expanduser(); canon = Path(os.path.realpath(raw)); return (canon, None) if raw.is_file() and not raw.is_symlink() else (canon, reason)  # noqa: E704, E702
+def regular_path(raw_path: str, reason: str) -> tuple[Path, str | None]: raw = Path(os.path.expanduser(raw_path)); canon = Path(os.path.realpath(raw)); return (canon, None) if raw.is_file() and not raw.is_symlink() else (canon, reason)  # noqa: E704, E702
 def get(data: Any, dotted: str) -> tuple[Any, bool]:
     cur = data
     for part in dotted.split("."):
@@ -294,7 +294,7 @@ def generate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     sections["deferred_related"] = section("deferred_related", "not_applicable", "deferred_by_rub_227", claim_type="deferred_related_work")
     statuses = {s["status"] for s in sections.values()}
     verdict = "FAIL" if statuses & {"fail", "helper_only"} else "NO_DATA" if "no_data" in statuses else "PASS"
-    inputs = {k: (v if k.endswith("_no_data") else str(Path(os.path.realpath(Path(v).expanduser())))) for k, v in vars(args).items() if k != "output" and v is not None}
+    inputs = {k: (v if k.endswith("_no_data") else str(Path(os.path.realpath(Path(os.path.expanduser(v)))))) for k, v in vars(args).items() if k != "output" and v is not None}
     report = {"schema_version": SCHEMA_VERSION, "verdict": verdict, "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "inputs": inputs, "sections": sections, "claim_inventory": inventory(sections), "non_goals": ["PR-1 report consumer only; no runtime, producer, live scenario, client, schema, or CI changes.", "Restart/reorg behavior evidence remains blocked on RUB-240 source-bound producer sidecars.", "RUB-227 orphan metrics remain deferred/not_applicable."]}
     return report, 1 if verdict == "FAIL" else 0
 def write_atomic(path: Path, data: dict[str, Any]) -> None:
@@ -320,8 +320,8 @@ def main(argv: list[str] | None = None) -> int:
     metrics.add_argument("--rust-reorg-metrics-no-data")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    out_path = Path(os.path.realpath(Path(args.output).expanduser()))
-    if any(v and not k.endswith("_no_data") and (Path(os.path.realpath(Path(v).expanduser())) == out_path or (not regular_path(v, "nonregular")[1] and isinstance((d := load(Path(os.path.realpath(Path(v).expanduser())))[0]), dict) and any(Path(os.path.realpath((Path(p).expanduser() if Path(p).expanduser().is_absolute() else Path(os.path.realpath(Path(v).expanduser())).parent / Path(p).expanduser()))) == out_path for p in nested_paths(d)))) for k, v in vars(args).items() if k != "output"):
+    out_path = Path(os.path.realpath(Path(os.path.expanduser(args.output))))
+    if any(v and not k.endswith("_no_data") and (Path(os.path.realpath(Path(os.path.expanduser(v)))) == out_path or (not regular_path(v, "nonregular")[1] and isinstance((d := load(Path(os.path.realpath(Path(os.path.expanduser(v)))))[0]), dict) and any(Path(os.path.realpath((Path(os.path.expanduser(p)) if Path(os.path.expanduser(p)).is_absolute() else Path(os.path.realpath(Path(os.path.expanduser(v)))).parent / Path(os.path.expanduser(p))))) == out_path for p in nested_paths(d)))) for k, v in vars(args).items() if k != "output"):
         return print("FAIL: output_overwrites_input", file=sys.stderr) or 1
     report, rc = generate(args)
     try:
