@@ -268,7 +268,7 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
     return (found, None) if all(found.get(m, 0) > 0 for m in METRICS) else (None, "metrics_missing_or_zero")
 def metric_section(args: argparse.Namespace) -> dict[str, Any]:
     if args.rust_reorg_metrics_no_data:
-        return section("reorg_metrics", "no_data", "rust_reorg_metrics_no_data", claim_type="metric_evidence")
+        return section("reorg_metrics", "no_data", "rust_reorg_metrics_no_data", source_reason=args.rust_reorg_metrics_no_data, claim_type="metric_evidence")
     if not args.rust_reorg_metrics:
         return section("reorg_metrics", "no_data", "rust_reorg_metrics_missing", claim_type="metric_evidence")
     path, path_err = regular_path(args.rust_reorg_metrics, "metrics_not_regular")

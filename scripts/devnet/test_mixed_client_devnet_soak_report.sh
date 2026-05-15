@@ -47,7 +47,7 @@ import json, re, sys
 c = json.load(open(sys.argv[1], encoding="utf-8")); p = json.load(open(sys.argv[2], encoding="utf-8")); u = json.load(open(sys.argv[3], encoding="utf-8"))
 check = lambda cond, msg: None if cond else (_ for _ in ()).throw(SystemExit(msg)); check(c["verdict"] == "NO_DATA" and c["sections"]["rust_restart"]["status"] == "no_data" and c["sections"]["rust_restart"]["reason"] == "restart_source_binding_unproven" and all(sec.get("claim_type") != "behavior_evidence" for sec in c["sections"].values()), "complete verdict/restart/claim_type")
 check(c["sections"]["partition_heal_reorg"]["status"] == "no_data" and c["sections"]["partition_heal_reorg"]["reason"] == "partition_reorg_source_binding_unproven", "partition no_data")
-check(c["sections"]["reorg_metrics"]["claim_type"] == "metric_evidence" and p["sections"]["reorg_metrics"].get("reason") == "rust_reorg_metrics_no_data" and c["sections"]["deferred_related"]["reason"] == "deferred_by_rub_227", "metrics/deferred")
+check(c["sections"]["reorg_metrics"]["claim_type"] == "metric_evidence" and p["sections"]["reorg_metrics"].get("reason") == "rust_reorg_metrics_no_data" and p["sections"]["reorg_metrics"].get("source_reason") == "rust_metrics_not_collected" and c["sections"]["deferred_related"]["reason"] == "deferred_by_rub_227", "metrics/deferred")
 check(p["verdict"] == "NO_DATA" and p["sections"]["rust_restart"]["status"] == "no_data" and u["sections"]["partition_heal_reorg"]["status"] == "no_data", "partial/unbound")
 tokens = set("ready pass parity converge convergence reorg restart metric no_data not_applicable".split())
 for report in (c, p):
