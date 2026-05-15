@@ -15,8 +15,8 @@ from typing import Any
 
 SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"
 MAX_JSON_BYTES = 1_000_000
-HEX32 = re.compile(r"[0-9a-f]{64}")
-METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth")
+HEX32 = re.compile(r"[0-9a-f]{64}"); ENDPOINT = re.compile(r"([^\s:/]+):([0-9]+)")  # noqa: E702
+METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); TX_SUBMIT = {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"}; TX_ACCEPT = {"get_tx_path", "raw_hex", "rpc_endpoint", "tx_status_path", "txid"}; TX_MINE = {"block_hash", "block_path", "class", "height", "mine_next_path", "mined_by", "raw_hex", "rpc_endpoint", "tx_count", "txid"}; TX_CONV = {"block_hash", "block_path", "class", "converged_at", "height", "raw_hex", "rpc_endpoint", "tip_path", "txid"}; NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SECTIONS = {
     "mesh": ("mesh_report", "mixed_client_mesh", ["nodes", "peer_connectivity", "final_verification", "legacy_schema_compatibility.marker_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "go_to_rust_accept": ("go_submit_rust_accept_report", "mixed_client_go_submit_rust_accept", ["go_submit", "rust_accept", "tx_path", "raw_samples.propagation"]),
@@ -25,13 +25,10 @@ SECTIONS = {
     "rust_restart": ("rust_restart_report", "mixed_client_rust_restart", ["restart.stopped_node", "rust_restart.old_pid", "rust_restart.new_pid", "rust_restart.old_pid_stopped", "rust_restart.same_datadir", "rust_restart.peer_reconnect_observed", "rust_restart.go_target_height", "rust_restart.catch_up_height"]),
     "partition_heal_reorg": ("partition_heal_reorg_report", "mixed_client_partition_heal_reorg", ["proof.partition_changed_peer_state", "proof.fork_diverged", "proof.heal_restored_peer_state", "proof.reorg_converged", "proof.process_identity_rechecked_after_heal", "proof.go_reorg_metrics", "observations.reorg"]),
 }
-def is_hex32(value: Any) -> bool:
-    return isinstance(value, str) and bool(HEX32.fullmatch(value))
+def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
 
 
-def jint(value: Any, minimum: int = 1) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000
-
+def jint(value: Any, minimum: int = 1) -> bool: return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000  # noqa: E704
 
 def section(name: str, status: str, reason: str | None = None, **kw: Any) -> dict[str, Any]:
     out = {"status": status, "claim_type": kw.pop("claim_type", "status_evidence")}
@@ -42,16 +39,18 @@ def section(name: str, status: str, reason: str | None = None, **kw: Any) -> dic
             out[key] = str(value) if isinstance(value, Path) else value
     return out
 
-
 def load(path: Path) -> tuple[Any | None, str | None]:
     try:
         if path.stat().st_size > MAX_JSON_BYTES:
             return None, "json_too_large"
         raw = path.read_bytes()
-        return json.loads(raw.decode("utf-8"), parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}"))), None
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=NO_DUPES, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}"))), None
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
         text = str(exc)
-        return None, text if text.startswith("non_finite_json_constant:") else f"malformed_json:{exc.__class__.__name__}"
+        return None, text if text.startswith(("non_finite_json_constant:", "duplicate_json_key")) else f"malformed_json:{exc.__class__.__name__}"
+
+
+def regular_path(raw_path: str, reason: str) -> tuple[Path, str | None]: raw = Path(raw_path).expanduser(); canon = Path(os.path.realpath(raw)); return (canon, None) if raw.is_file() and not raw.is_symlink() else (canon, reason)  # noqa: E704, E702
 
 
 def get(data: Any, dotted: str) -> tuple[Any, bool]:
@@ -94,9 +93,9 @@ def nodes(data: dict[str, Any], require_alive: bool = True) -> tuple[dict[str, d
     out: dict[str, dict[str, Any]] = {}
     for name, impl in (("node-go", "go"), ("node-rust", "rust")):
         node = by_name[name]
-        if node.get("implementation") != impl or not jint(node.get("pid")) or (require_alive and node.get("process_alive") is not True):
+        if node.get("implementation") != impl or not jint(node.get("pid")) or (node.get("process_alive") is not True if require_alive else ("process_alive" in node and node.get("process_alive") is not True)):
             return None, "wrong_role_identity"
-        if not all(isinstance(node.get(k), str) and node[k] for k in ("rpc_endpoint", "p2p_endpoint")):
+        if not all(isinstance((v := node.get(k)), str) and (m := ENDPOINT.fullmatch(v)) is not None and 1 <= int(m.group(2)) <= 65535 for k in ("rpc_endpoint", "p2p_endpoint")):
             return None, "process_identity_missing_or_invalid"
         out[impl] = node
     if out["go"]["pid"] == out["rust"]["pid"] or len({out[i][k] for i in ("go", "rust") for k in ("rpc_endpoint", "p2p_endpoint")}) != 4:
@@ -143,25 +142,26 @@ def validate_samples(data: dict[str, Any], prop_dir: str | None, conv_dir: str |
 
 
 def validate_tx(data: dict[str, Any], converge: bool, rust_submit: bool) -> str | None:
-    _, bad = nodes(data)
-    if bad:
+    by_impl, bad = nodes(data)
+    if bad or by_impl is None:
         return bad
     tx_path = data.get("tx_path")
-    if not isinstance(tx_path, dict) or not is_hex32(tx_path.get("tx_id")):
+    if not isinstance(tx_path, dict) or set(tx_path) != {"submitted_at", "observed_at", "tx_id"} or not is_hex32(tx_path.get("tx_id")):
         return "tx_path_invalid"
     txid = tx_path["tx_id"]
     submit, accept, mine, conv, src, dst, prop, conv_dir = ("rust_submit", "go_accept", "go_mine", "rust_converge", "node-rust", "node-go", "rust->go", "go->rust") if rust_submit else ("go_submit", "rust_accept", "rust_mine", "go_converge", "node-go", "node-rust", "go->rust", "rust->go")
     if tx_path.get("submitted_at") != src or tx_path.get("observed_at") != [dst]:
         return "tx_path_direction_invalid"
     for label in (submit, accept):
-        if not isinstance(data.get(label), dict) or data[label].get("txid") != txid:
+        if not isinstance(data.get(label), dict) or set(data[label]) not in ({"txid"}, TX_SUBMIT if label.endswith("submit") else TX_ACCEPT) or data[label].get("txid") != txid:
             return f"{label}_txid_mismatch"
-    if not converge:
-        return validate_samples(data, prop, None, txid)
+    txhex = data[submit].get("tx_hex") if set(data[submit]) == TX_SUBMIT else None
+    if txhex is not None and (not isinstance(txhex, str) or len(txhex) % 2 != 0 or not re.fullmatch(r"[0-9a-f]+", txhex) or data[submit].get("rpc_endpoint") != by_impl["rust" if rust_submit else "go"]["rpc_endpoint"] or data[accept].get("raw_hex") != txhex or data[accept].get("rpc_endpoint") != by_impl["go" if rust_submit else "rust"]["rpc_endpoint"]): return "tx_path_identity_invalid"  # noqa: E701
+    if not converge: return validate_samples(data, prop, None, txid)  # noqa: E701
     mined, seen = data.get(mine), data.get(conv)
-    if not isinstance(mined, dict) or not isinstance(seen, dict) or mined.get("txid") != txid or seen.get("txid") != txid:
-        return "convergence_identity_mismatch"
-    if mined.get("height") != seen.get("height") or mined.get("block_hash") != seen.get("block_hash") or not jint(mined.get("height")) or not jint(seen.get("height")) or not is_hex32(mined.get("block_hash")):
+    if not isinstance(mined, dict) or not isinstance(seen, dict) or set(mined) not in ({"txid", "height", "block_hash"}, TX_MINE) or set(seen) not in ({"txid", "height", "block_hash"}, TX_CONV) or mined.get("txid") != txid or seen.get("txid") != txid: return "convergence_identity_mismatch"  # noqa: E701
+    if mined.get("height") != seen.get("height") or mined.get("block_hash") != seen.get("block_hash") or not jint(mined.get("height")) or not jint(seen.get("height")) or not is_hex32(mined.get("block_hash")): return "convergence_identity_mismatch"  # noqa: E701
+    if set(mined) == TX_MINE and (mined.get("raw_hex") != txhex or mined.get("mined_by") != f"node-{mine.split('_', 1)[0]}" or mined.get("rpc_endpoint") != by_impl[mine.split('_', 1)[0]]["rpc_endpoint"] or not jint(mined.get("tx_count"))) or set(seen) == TX_CONV and (seen.get("raw_hex") != txhex or seen.get("converged_at") != f"node-{conv.split('_', 1)[0]}" or seen.get("rpc_endpoint") != by_impl[conv.split('_', 1)[0]]["rpc_endpoint"]):
         return "convergence_identity_mismatch"
     return validate_samples(data, prop, conv_dir, txid, mined["height"], mined["block_hash"])
 
@@ -171,7 +171,7 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
         return "wrong_role_identity"
     rr = data.get("rust_restart")
     if not isinstance(rr, dict):
-        return None
+        return "restart_source_binding_contradiction:malformed_source_fields" if "rust_restart" in data else None
     if any(k in rr and not isinstance(rr.get(k), bool) for k in ("old_pid_stopped", "same_datadir", "peer_reconnect_observed")) or any(k in rr and not jint(rr.get(k)) for k in ("old_pid", "new_pid", "go_target_height", "catch_up_height")):
         return "restart_source_binding_contradiction:malformed_source_fields"
     if rr.get("old_pid_stopped") is False:
@@ -182,7 +182,7 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
         return "restart_source_binding_contradiction:peer_reconnect_not_observed"
     by_impl, bad = nodes(data, require_alive=False)
     if bad or by_impl is None:
-        return None if bad == "process_identity_missing_or_invalid" else (bad or "process_identity_missing_or_invalid")
+        return bad or "process_identity_missing_or_invalid"
     old_pid, new_pid = rr.get("old_pid"), rr.get("new_pid")
     if jint(old_pid) and old_pid in {by_impl["go"]["pid"], by_impl["rust"]["pid"]}:
         return "restart_source_binding_contradiction:old_pid_aliases_live_node"
@@ -209,7 +209,7 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
 def partition_contradiction(data: dict[str, Any]) -> str | None:
     proof = data.get("proof")
     if not isinstance(proof, dict):
-        return None
+        return "partition_reorg_source_binding_contradiction:malformed_proof_fields" if "proof" in data else None
     if any(k in proof and not isinstance(proof.get(k), bool) for k in ("partition_changed_peer_state", "fork_diverged", "heal_restored_peer_state", "reorg_converged", "process_identity_rechecked_after_heal")) or ("go_reorg_metrics" in proof and (not isinstance(proof.get("go_reorg_metrics"), dict) or any(not jint(proof["go_reorg_metrics"].get(m)) for m in METRICS))):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     for key, reason in (("partition_changed_peer_state", "partition_no_peer_state_change"), ("fork_diverged", "partition_no_fork_divergence"), ("heal_restored_peer_state", "partition_heal_not_restored"), ("reorg_converged", "partition_reorg_not_converged"), ("process_identity_rechecked_after_heal", "partition_process_identity_not_rechecked_after_heal")):
@@ -233,17 +233,18 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
             return "partition_reorg_source_binding_contradiction:final_height_mismatch"
         if is_hex32(go_tip.get("hash")) and is_hex32(rust_tip.get("hash")) and go_tip.get("hash") != rust_tip.get("hash"):
             return "partition_reorg_source_binding_contradiction:final_tip_hash_mismatch"
+        if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (go_tip != rust_win or rust_tip != rust_win): return "partition_reorg_source_binding_contradiction:final_tip_not_winning_tip"  # noqa: E701
     _, bad = nodes(data, require_alive=False)
-    return None if bad == "process_identity_missing_or_invalid" else bad
+    return bad
 
 
 def build_section(name: str, attr: str, scenario: str, fields: list[str], args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any] | None]:
     raw_path = getattr(args, attr)
     if not raw_path:
         return section(name, "no_data", f"{name}_artifact_missing", source_fields=fields), None
-    path = Path(raw_path).expanduser().resolve(strict=False)
-    if not path.is_file():
-        return section(name, "fail", "source_artifact_not_regular", source_artifact_path=path, source_fields=fields), None
+    path, path_err = regular_path(raw_path, "source_artifact_not_regular")
+    if path_err:
+        return section(name, "fail", path_err, source_artifact_path=path, source_fields=fields), None
     data, err = load(path)
     if err or not isinstance(data, dict):
         return section(name, "fail", err or "root_not_object", source_artifact_path=path), None
@@ -253,10 +254,10 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
     if got != scenario:
         helper = scenario_reject(got)
         return section(name, "helper_only" if helper and helper.startswith("helper") else "fail", helper or "unsupported_scenario", source_artifact_path=path, scenario=got, source_fields=fields), data
-    if data.get("verdict") != "PASS":
-        return section(name, "fail", "source_verdict_not_pass", source_artifact_path=path, scenario=got), data
+    if data.get("verdict") != "PASS" or BAD_MARKER(data):
+        return section(name, "fail", "source_verdict_not_pass" if data.get("verdict") != "PASS" else "pass_artifact_contains_failure_fields", source_artifact_path=path, scenario=got), data
     missing = [f for f in fields if not get(data, f)[1]]
-    malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and (not isinstance(get(data, "legacy_schema_compatibility.marker_path")[0], str) or not get(data, "legacy_schema_compatibility.marker_path")[0]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
+    malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and get(data, "legacy_schema_compatibility.marker_path")[1] and (not isinstance(get(data, "legacy_schema_compatibility.marker_path")[0], str) or not get(data, "legacy_schema_compatibility.marker_path")[0] or regular_path(get(data, "legacy_schema_compatibility.marker_path")[0], "legacy_schema_marker_not_regular")[1]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
     if malformed:
         return section(name, "fail", "malformed_source_fields:" + malformed, source_artifact_path=path, scenario=got), data
     if name in {"rust_restart", "partition_heal_reorg"}:
@@ -285,7 +286,7 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
     try:
         found: dict[str, int] = {}
         if text.lstrip().startswith("{"):
-            obj = json.loads(text, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}")))
+            obj = json.loads(text, object_pairs_hook=NO_DUPES, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}")))
             if not isinstance(obj, dict):
                 return None, "metrics_malformed"
             for metric in METRICS:
@@ -298,11 +299,11 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
                 if parts and parts[0].split("{", 1)[0] in METRICS and (len(parts) not in {2, 3} or "{" in parts[0] or (len(parts) == 3 and not re.fullmatch(r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?", parts[2]))):
                     return None, "metrics_malformed"
                 if len(parts) in {2, 3} and (metric := parts[0].split("{", 1)[0]) in METRICS:
-                    if not re.fullmatch(r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?", parts[1]) or not math.isfinite(float(parts[1])) or float(parts[1]) <= 0 or float(parts[1]) > 1_000_000_000 or int(float(parts[1])) != float(parts[1]):
-                        return None, "metric_value_invalid"
+                    if metric in found or not re.fullmatch(r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?", parts[1]) or not math.isfinite(float(parts[1])) or float(parts[1]) <= 0 or float(parts[1]) > 1_000_000_000 or int(float(parts[1])) != float(parts[1]):
+                        return None, "metrics_duplicate" if metric in found else "metric_value_invalid"
                     found[metric] = int(float(parts[1]))
-    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
-        return None, "metrics_malformed"
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
+        return None, str(exc) if str(exc).startswith("duplicate_json_key") else "metrics_malformed"
     return (found, None) if all(found.get(m, 0) > 0 for m in METRICS) else (None, "metrics_missing_or_zero")
 
 
@@ -311,13 +312,12 @@ def metric_section(args: argparse.Namespace) -> dict[str, Any]:
         return section("reorg_metrics", "no_data", "rust_reorg_metrics_no_data", claim_type="metric_evidence")
     if not args.rust_reorg_metrics:
         return section("reorg_metrics", "no_data", "rust_reorg_metrics_missing", claim_type="metric_evidence")
-    path = Path(args.rust_reorg_metrics).expanduser().resolve(strict=False)
-    metrics, err = (None, "metrics_not_regular") if not path.is_file() else parse_metrics(path)
+    path, path_err = regular_path(args.rust_reorg_metrics, "metrics_not_regular")
+    metrics, err = (None, path_err) if path_err else parse_metrics(path)
     return section("reorg_metrics", "fail", err, source_artifact_path=path, claim_type="metric_evidence") if err else section("reorg_metrics", "no_data", "metric_source_binding_unavailable", source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
 
 
-def raw_samples_section(sections: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    return section("raw_samples", "fail", "source_sample_section_failed") if any(sections[name]["status"] in {"fail", "helper_only"} for name in ("go_to_rust_accept", "go_to_rust_mine_converge", "rust_to_go_mine_converge")) else section("raw_samples", "no_data", "source_contract_validation_unavailable", source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="sample_evidence")
+def raw_samples_section(sections: dict[str, dict[str, Any]]) -> dict[str, Any]: return section("raw_samples", "fail", "source_sample_section_failed") if any(sections[name]["status"] in {"fail", "helper_only"} for name in ("go_to_rust_accept", "go_to_rust_mine_converge", "rust_to_go_mine_converge")) else section("raw_samples", "no_data", "source_contract_validation_unavailable", source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="sample_evidence")  # noqa: E704
 
 
 def inventory(sections: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -328,7 +328,7 @@ def inventory(sections: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         tokens |= {"reorg"} if "reorg" in name else set()
         tokens |= {"restart"} if "restart" in name else set()
         tokens |= {"metric"} if "metric" in name else set()
-        tokens |= {"not_applicable", "metric"} if name == "deferred_related" else set()
+        tokens |= {"not_applicable"} if name == "deferred_related" else set()
         out.extend({"token": t, "section": name, "source_artifact_path": sec.get("source_artifact_path"), "source_fields": sec.get("source_fields", []), "claim_type": sec.get("claim_type", "status_evidence")} for t in sorted(tokens))
     return out
 
@@ -340,7 +340,7 @@ def generate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     sections["deferred_related"] = section("deferred_related", "not_applicable", "deferred_by_rub_227", claim_type="deferred_related_work")
     statuses = {s["status"] for s in sections.values()}
     verdict = "FAIL" if statuses & {"fail", "helper_only"} else "NO_DATA" if "no_data" in statuses else "PASS"
-    inputs = {k: (v if k.endswith("_no_data") else str(Path(v).expanduser().resolve(strict=False))) for k, v in vars(args).items() if k != "output" and v is not None}
+    inputs = {k: (v if k.endswith("_no_data") else str(Path(os.path.realpath(Path(v).expanduser())))) for k, v in vars(args).items() if k != "output" and v is not None}
     report = {"schema_version": SCHEMA_VERSION, "verdict": verdict, "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "inputs": inputs, "sections": sections, "claim_inventory": inventory(sections), "non_goals": ["PR-1 report consumer only; no runtime, producer, live scenario, client, schema, or CI changes.", "Restart/reorg behavior evidence remains blocked on RUB-240 source-bound producer sidecars.", "RUB-227 orphan metrics remain deferred/not_applicable."]}
     return report, 1 if verdict == "FAIL" else 0
 
@@ -369,8 +369,8 @@ def main(argv: list[str] | None = None) -> int:
     metrics.add_argument("--rust-reorg-metrics-no-data")
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
-    out_path = Path(args.output).expanduser().resolve(strict=False)
-    if any(v and not k.endswith("_no_data") and Path(v).expanduser().resolve(strict=False) == out_path for k, v in vars(args).items() if k != "output"):
+    out_path = Path(os.path.realpath(Path(args.output).expanduser()))
+    if any(v and not k.endswith("_no_data") and (Path(os.path.realpath(Path(v).expanduser())) == out_path or (isinstance((d := load(Path(os.path.realpath(Path(v).expanduser())))[0]), dict) and isinstance((m := get(d, "legacy_schema_compatibility.marker_path")[0]), str) and Path(os.path.realpath(Path(m).expanduser())) == out_path)) for k, v in vars(args).items() if k != "output"):
         return print("FAIL: output_overwrites_input", file=sys.stderr) or 1
     report, rc = generate(args)
     try:
