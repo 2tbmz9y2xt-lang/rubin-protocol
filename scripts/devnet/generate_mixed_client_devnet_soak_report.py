@@ -95,7 +95,7 @@ def nodes(data: dict[str, Any], require_alive: bool = True, require_backing: boo
         node = by_name[name]
         if node.get("implementation") != impl or not jint(node.get("pid")) or (node.get("process_alive") is not True if require_alive else ("process_alive" in node and node.get("process_alive") is not True)):
             return None, "wrong_role_identity"
-        if (not all(isinstance((v := node.get(k)), str) and (m := ENDPOINT.fullmatch(v)) is not None and 1 <= int(m.group(2)) <= 65535 for k in ("rpc_endpoint", "p2p_endpoint"))) or (require_backing and (node.get("rpc_endpoint_process_backed") is not True or node.get("p2p_endpoint_process_backed") is not True)):
+        if (not all(isinstance((v := node.get(k)), str) and (m := ENDPOINT.fullmatch(v)) is not None and 1 <= int(m.group(2)) <= 65535 for k in ("rpc_endpoint", "p2p_endpoint"))) or any(k in node and node.get(k) is not True for k in ("rpc_endpoint_process_backed", "p2p_endpoint_process_backed")) or (require_backing and (node.get("rpc_endpoint_process_backed") is not True or node.get("p2p_endpoint_process_backed") is not True)):
             return None, "process_identity_missing_or_invalid"
         out[impl] = node
     if out["go"]["pid"] == out["rust"]["pid"] or len({out[i][k] for i in ("go", "rust") for k in ("rpc_endpoint", "p2p_endpoint")}) != 4:
@@ -225,43 +225,43 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
             return "partition_reorg_source_binding_contradiction:final_tip_hash_mismatch"
         if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (go_tip != rust_win or rust_tip != rust_win): return "partition_reorg_source_binding_contradiction:final_tip_not_winning_tip"  # noqa: E701
     return bad
-def build_section(name: str, attr: str, scenario: str, fields: list[str], args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def build_section(name: str, attr: str, scenario: str, fields: list[str], args: argparse.Namespace) -> dict[str, Any]:
     raw_path = getattr(args, attr)
     if not raw_path:
-        return section(name, "no_data", f"{name}_artifact_missing", source_fields=fields), None
+        return section(name, "no_data", f"{name}_artifact_missing", source_fields=fields)
     path, path_err = regular_path(raw_path, "source_artifact_not_regular")
     if path_err:
-        return section(name, "fail", path_err, source_artifact_path=path, source_fields=fields), None
+        return section(name, "fail", path_err, source_artifact_path=path, source_fields=fields)
     data, err = load(path)
     if err or not isinstance(data, dict):
-        return section(name, "fail", err or "root_not_object", source_artifact_path=path), None
+        return section(name, "fail", err or "root_not_object", source_artifact_path=path)
     try: bad, bad_marker = nonfinite(data), BAD_MARKER(data)
-    except RecursionError: return section(name, "fail", "malformed_json:RecursionError", source_artifact_path=path), data  # noqa: E701
+    except RecursionError: return section(name, "fail", "malformed_json:RecursionError", source_artifact_path=path)  # noqa: E701
     if bad:
-        return section(name, "fail", bad, source_artifact_path=path, scenario=data.get("scenario")), data
+        return section(name, "fail", bad, source_artifact_path=path, scenario=data.get("scenario"))
     got = data.get("scenario")
     if got != scenario:
         helper = scenario_reject(got)
-        return section(name, "helper_only" if helper and helper.startswith("helper") else "fail", helper or "unsupported_scenario", source_artifact_path=path, scenario=got, source_fields=fields), data
+        return section(name, "helper_only" if helper and helper.startswith("helper") else "fail", helper or "unsupported_scenario", source_artifact_path=path, scenario=got, source_fields=fields)
     if data.get("verdict") != "PASS" or bad_marker:
-        return section(name, "fail", "source_verdict_not_pass" if data.get("verdict") != "PASS" else "pass_artifact_contains_failure_fields", source_artifact_path=path, scenario=got), data
+        return section(name, "fail", "source_verdict_not_pass" if data.get("verdict") != "PASS" else "pass_artifact_contains_failure_fields", source_artifact_path=path, scenario=got)
     missing = [f for f in fields if not get(data, f)[1]]
     malformed = "legacy_schema_compatibility.marker_path" if name == "mesh" and get(data, "legacy_schema_compatibility.marker_path")[1] and (not isinstance((m := get(data, "legacy_schema_compatibility.marker_path")[0]), str) or not m or regular_path(str(Path(os.path.expanduser(m)) if Path(os.path.expanduser(m)).is_absolute() else path.parent / m), "legacy_schema_marker_not_regular")[1]) else "observations.reorg" if name == "partition_heal_reorg" and get(data, "observations.reorg")[1] and not isinstance(get(data, "observations.reorg")[0], dict) else None
     if malformed:
-        return section(name, "fail", "malformed_source_fields:" + malformed, source_artifact_path=path, scenario=got), data
+        return section(name, "fail", "malformed_source_fields:" + malformed, source_artifact_path=path, scenario=got)
     if name in {"rust_restart", "partition_heal_reorg"}:
         bad = restart_contradiction(data) if name == "rust_restart" else partition_contradiction(data)
         if bad:
-            return section(name, "fail", bad, source_artifact_path=path, scenario=got), data
+            return section(name, "fail", bad, source_artifact_path=path, scenario=got)
         base = "restart_source_binding_unproven" if name == "rust_restart" else "partition_reorg_source_binding_unproven"
         reason = base if not missing else f"{base}:missing_source_fields:{','.join(missing)}"
-        return section(name, "no_data", reason, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False), data
+        return section(name, "no_data", reason, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
     if missing:
-        return section(name, "fail", "missing_source_fields:" + ",".join(missing), source_artifact_path=path, scenario=got), data
+        return section(name, "fail", "missing_source_fields:" + ",".join(missing), source_artifact_path=path, scenario=got)
     bad = validate_mesh(data) if name == "mesh" else validate_tx(data, "converge" in name, name.startswith("rust_to_go"))
     if bad:
-        return section(name, "fail", bad, source_artifact_path=path, scenario=got), data
-    return section(name, "no_data", "source_contract_validation_unavailable", source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False), data
+        return section(name, "fail", bad, source_artifact_path=path, scenario=got)
+    return section(name, "no_data", "source_contract_validation_unavailable", source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
 def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
     try:
         with path.open("rb") as src: raw = src.read(MAX_JSON_BYTES + 1)
@@ -313,7 +313,7 @@ def inventory(sections: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         out.extend({"token": t, "section": name, "source_artifact_path": sec.get("source_artifact_path"), "source_fields": sec.get("source_fields", []), "claim_type": sec.get("claim_type", "status_evidence")} for t in sorted(tokens))
     return out
 def generate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    sections = {name: build_section(name, attr, scenario, fields, args)[0] for name, (attr, scenario, fields) in SECTIONS.items()}
+    sections = {name: build_section(name, attr, scenario, fields, args) for name, (attr, scenario, fields) in SECTIONS.items()}
     sections["reorg_metrics"] = metric_section(args)
     sections["raw_samples"] = raw_samples_section(sections)
     sections["deferred_related"] = section("deferred_related", "not_applicable", "deferred_by_rub_227", claim_type="deferred_related_work")
