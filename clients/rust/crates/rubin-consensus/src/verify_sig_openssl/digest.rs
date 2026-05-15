@@ -23,7 +23,7 @@ pub(crate) fn openssl_verify_sig_digest_oneshot(
     if pubkey.is_empty() || signature.is_empty() || msg.is_empty() {
         return Err(TxError::new(ErrorCode::TxErrParse, "openssl: empty input"));
     }
-    super::openssl_verify_sig_digest_oneshot_raw(alg, pubkey, signature, msg)
+    super::openssl_verify_sig_digest_oneshot(alg, pubkey, signature, msg)
 }
 
 #[cfg(test)]
