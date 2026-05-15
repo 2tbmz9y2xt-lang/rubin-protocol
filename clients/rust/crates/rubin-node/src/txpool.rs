@@ -132,9 +132,6 @@ pub(crate) struct TxPoolSnapshot {
     current_mempool_min_fee_rate: u64,
     entries: Vec<TxPoolSnapshotEntry>,
     next_heap_id: u64,
-    max_transactions: usize,
-    max_bytes: usize,
-    low_water_bytes: usize,
     used_bytes: usize,
 }
 
@@ -310,9 +307,6 @@ impl TxPool {
             current_mempool_min_fee_rate: self.cfg.policy_current_mempool_min_fee_rate,
             entries,
             next_heap_id: self.next_heap_id,
-            max_transactions: self.max_transactions,
-            max_bytes: self.max_bytes,
-            low_water_bytes: self.low_water_bytes,
             used_bytes: self.used_bytes,
         })
     }
@@ -322,17 +316,17 @@ impl TxPool {
         &mut self,
         snapshot: &TxPoolSnapshot,
     ) -> Result<(), TxPoolAdmitError> {
-        if snapshot.max_transactions == 0 || snapshot.max_bytes == 0 {
+        if self.max_transactions == 0 || self.max_bytes == 0 {
             return Err(unavailable(format!(
                 "invalid txpool snapshot restore limits: max_txs={} max_bytes={}",
-                snapshot.max_transactions, snapshot.max_bytes
+                self.max_transactions, self.max_bytes
             )));
         }
-        if snapshot.entries.len() > snapshot.max_transactions {
+        if snapshot.entries.len() > self.max_transactions {
             return Err(unavailable(format!(
                 "txpool snapshot exceeds transaction cap: count={} max={}",
                 snapshot.entries.len(),
-                snapshot.max_transactions
+                self.max_transactions
             )));
         }
 
@@ -369,10 +363,10 @@ impl TxPool {
             let next_used = used_bytes
                 .checked_add(item.entry.size)
                 .ok_or_else(|| unavailable("txpool snapshot byte accounting overflow"))?;
-            if item.entry.size > snapshot.max_bytes || next_used > snapshot.max_bytes {
+            if item.entry.size > self.max_bytes || next_used > self.max_bytes {
                 return Err(unavailable(format!(
                     "txpool snapshot exceeds byte cap: used={} entry={} max={}",
-                    used_bytes, item.entry.size, snapshot.max_bytes
+                    used_bytes, item.entry.size, self.max_bytes
                 )));
             }
             for input in &item.entry.inputs {
@@ -417,9 +411,6 @@ impl TxPool {
         self.heap_seqs = heap_seqs;
         self.worst_heap = worst_heap;
         self.next_heap_id = snapshot.next_heap_id;
-        self.max_transactions = snapshot.max_transactions;
-        self.max_bytes = snapshot.max_bytes;
-        self.low_water_bytes = snapshot.low_water_bytes;
         self.used_bytes = used_bytes;
         Ok(())
     }
@@ -2196,9 +2187,6 @@ mod tests {
     fn assert_txpool_snapshot_same(actual: &TxPoolSnapshot, expected: &TxPoolSnapshot) {
         assert_eq!(actual.entries.len(), expected.entries.len());
         assert_eq!(actual.next_heap_id, expected.next_heap_id);
-        assert_eq!(actual.max_transactions, expected.max_transactions);
-        assert_eq!(actual.max_bytes, expected.max_bytes);
-        assert_eq!(actual.low_water_bytes, expected.low_water_bytes);
         assert_eq!(actual.used_bytes, expected.used_bytes);
         assert_eq!(
             actual.current_mempool_min_fee_rate,
@@ -2514,7 +2502,6 @@ mod tests {
 
         pool.evict_txids(&[txid_a, txid_b]);
         pool.cfg.policy_current_mempool_min_fee_rate = 99;
-        pool.set_capacity_for_test(1, 1);
         assert!(pool.is_empty(), "live pool mutated before restore");
 
         pool.restore_snapshot(&snapshot)
@@ -2543,6 +2530,7 @@ mod tests {
             pool.cfg.policy_reject_core_ext_pre_activation
                 && pool.cfg.policy_current_mempool_min_fee_rate == 11
         );
+        assert_eq!(pool.max_transactions, 7);
     }
 
     #[test]
@@ -2550,6 +2538,18 @@ mod tests {
         let (guard_pool, _guard_a, _guard_b) = txpool_snapshot_test_pool();
         let guard_snapshot = guard_pool.snapshot().expect("guard snapshot");
         let (mut target, _target_a, _target_b) = txpool_snapshot_test_pool();
+        let mut duplicate_spender = guard_snapshot.clone();
+        let (_conflict_state, raw_a, raw_b) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
+        let (_txid_a, item_a) = txpool_snapshot_entry_from_raw(raw_a, 7690, TxSource::Local, 1);
+        let (_txid_b, item_b) = txpool_snapshot_entry_from_raw(raw_b, 7691, TxSource::Remote, 2);
+        duplicate_spender.entries = vec![item_a, item_b];
+        duplicate_spender.used_bytes = duplicate_spender
+            .entries
+            .iter()
+            .map(|item| item.entry.size)
+            .sum();
+        duplicate_spender.next_heap_id = 2;
+        target.set_capacity_for_test(7, duplicate_spender.used_bytes + 1);
 
         let mut reject = |poison: TxPoolSnapshot, needle: &str| {
             let before = target.snapshot().expect("target snapshot before poison");
@@ -2572,18 +2572,6 @@ mod tests {
         duplicate_txid.entries.push(duplicate_item);
         reject(duplicate_txid, "duplicate txpool snapshot txid");
 
-        let mut duplicate_spender = guard_snapshot.clone();
-        let (_conflict_state, raw_a, raw_b) = signed_conflicting_p2pk_state_and_txs(7700, 10, 9);
-        let (_txid_a, item_a) = txpool_snapshot_entry_from_raw(raw_a, 7690, TxSource::Local, 1);
-        let (_txid_b, item_b) = txpool_snapshot_entry_from_raw(raw_b, 7691, TxSource::Remote, 2);
-        duplicate_spender.entries = vec![item_a, item_b];
-        duplicate_spender.used_bytes = duplicate_spender
-            .entries
-            .iter()
-            .map(|item| item.entry.size)
-            .sum();
-        duplicate_spender.max_bytes = duplicate_spender.used_bytes + 1;
-        duplicate_spender.next_heap_id = 2;
         reject(duplicate_spender, "duplicate txpool snapshot spender");
 
         let mut duplicate_heap = guard_snapshot.clone();
@@ -2616,12 +2604,18 @@ mod tests {
         let mut zero_weight = guard_snapshot.clone();
         zero_weight.entries[0].entry.weight = 0;
         reject(zero_weight, "invalid txpool snapshot entry weight");
-        let mut count_cap = guard_snapshot.clone();
-        count_cap.max_transactions = 1;
-        reject(count_cap, "transaction cap");
-        let mut byte_cap = guard_snapshot.clone();
-        byte_cap.max_bytes = guard_snapshot.entries[0].entry.size;
-        reject(byte_cap, "byte cap");
+        let reject_live_cap = |max_txs, max_bytes, needle| {
+            let mut target = TxPool::new();
+            target.set_capacity_for_test(max_txs, max_bytes);
+            let before = target.snapshot().expect("empty target snapshot");
+            let err = target
+                .restore_snapshot(&guard_snapshot)
+                .expect_err("live capacity must fail closed");
+            assert!(err.message.contains(needle), "got: {}", err.message);
+            assert_txpool_snapshot_same(&target.snapshot().expect("after"), &before);
+        };
+        reject_live_cap(1, usize::MAX, "transaction cap");
+        reject_live_cap(7, guard_snapshot.entries[0].entry.size, "byte cap");
         let mut used_mismatch = guard_snapshot.clone();
         used_mismatch.used_bytes += 1;
         reject(used_mismatch, "used_bytes mismatch");
