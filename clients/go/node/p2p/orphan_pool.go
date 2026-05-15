@@ -73,19 +73,32 @@ func (o *orphanPool) Add(blockHash, parentHash [32]byte, blockBytes []byte, from
 }
 
 func (o *orphanPool) acceptOrphanLocked(blockHash [32]byte, blockBytes []byte, fromPeer string) (string, bool) {
-	if _, exists := o.byHash[blockHash]; exists {
-		return "", false
-	}
-	if o.byteLimit > 0 && len(blockBytes) > o.byteLimit {
+	if o.hasOrphanLocked(blockHash) || !o.orphanFitsLimits(blockBytes) {
 		return "", false
 	}
 	// Per-peer quota keyed by normalised IP (not ip:port) so that
 	// reconnecting with a new source port does not bypass the quota.
 	quotaKey := peerQuotaKey(fromPeer)
-	if o.perPeerLimit > 0 && quotaKey != "" && o.peerOrphanCnt[quotaKey] >= o.perPeerLimit {
+	if !o.peerQuotaAllowsLocked(quotaKey) {
 		return "", false
 	}
 	return quotaKey, true
+}
+
+func (o *orphanPool) hasOrphanLocked(blockHash [32]byte) bool {
+	_, exists := o.byHash[blockHash]
+	return exists
+}
+
+func (o *orphanPool) orphanFitsLimits(blockBytes []byte) bool {
+	return o.byteLimit <= 0 || len(blockBytes) <= o.byteLimit
+}
+
+func (o *orphanPool) peerQuotaAllowsLocked(quotaKey string) bool {
+	if o.perPeerLimit <= 0 || quotaKey == "" {
+		return true
+	}
+	return o.peerOrphanCnt[quotaKey] < o.perPeerLimit
 }
 
 func (o *orphanPool) storeOrphanLocked(entry orphanEntry) {

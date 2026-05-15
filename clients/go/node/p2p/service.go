@@ -128,20 +128,19 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 }
 
 func validateServiceConfig(cfg ServiceConfig) error {
-	if strings.TrimSpace(cfg.BindAddr) == "" {
-		return errors.New("bind address is required")
-	}
-	if cfg.PeerManager == nil {
-		return errors.New("nil peer manager")
-	}
-	if cfg.SyncEngine == nil {
-		return errors.New("nil sync engine")
-	}
-	if cfg.BlockStore == nil {
-		return errors.New("nil blockstore")
-	}
-	if cfg.TxMetadataFunc == nil {
-		return errors.New("nil tx metadata func")
+	for _, check := range []struct {
+		invalid bool
+		err     string
+	}{
+		{strings.TrimSpace(cfg.BindAddr) == "", "bind address is required"},
+		{cfg.PeerManager == nil, "nil peer manager"},
+		{cfg.SyncEngine == nil, "nil sync engine"},
+		{cfg.BlockStore == nil, "nil blockstore"},
+		{cfg.TxMetadataFunc == nil, "nil tx metadata func"},
+	} {
+		if check.invalid {
+			return errors.New(check.err)
+		}
 	}
 	return nil
 }
@@ -150,6 +149,16 @@ func normalizeServiceConfig(cfg ServiceConfig) ServiceConfig {
 	if cfg.TxPool == nil {
 		cfg.TxPool = NewMemoryTxPool()
 	}
+	cfg = normalizeServiceIdentityConfig(cfg)
+	cfg.GetBlocksBatchSize = normalizeGetBlocksBatchSize(cfg.GetBlocksBatchSize, cfg.SyncConfig.HeaderBatchLimit)
+	cfg.PeerRuntimeConfig = normalizeServicePeerRuntimeConfig(cfg.PeerRuntimeConfig, cfg.SyncConfig.Network)
+	if cfg.TxRelayFanout <= 0 {
+		cfg.TxRelayFanout = defaultTxRelayFanout
+	}
+	return cfg
+}
+
+func normalizeServiceIdentityConfig(cfg ServiceConfig) ServiceConfig {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -162,11 +171,6 @@ func normalizeServiceConfig(cfg ServiceConfig) ServiceConfig {
 	}
 	if cfg.LocatorLimit <= 0 {
 		cfg.LocatorLimit = defaultLocatorLimit
-	}
-	cfg.GetBlocksBatchSize = normalizeGetBlocksBatchSize(cfg.GetBlocksBatchSize, cfg.SyncConfig.HeaderBatchLimit)
-	cfg.PeerRuntimeConfig = normalizeServicePeerRuntimeConfig(cfg.PeerRuntimeConfig, cfg.SyncConfig.Network)
-	if cfg.TxRelayFanout <= 0 {
-		cfg.TxRelayFanout = defaultTxRelayFanout
 	}
 	return cfg
 }

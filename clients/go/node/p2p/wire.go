@@ -244,21 +244,20 @@ func encodeVersionPayloadTo(w io.Writer, v node.VersionPayloadV1) error {
 }
 
 func encodeVersionScalarFields(w io.Writer, v node.VersionPayloadV1) error {
-	if err := binary.Write(w, binary.LittleEndian, v.ProtocolVersion); err != nil {
-		return err
-	}
 	txRelay := byte(0)
 	if v.TxRelay {
 		txRelay = 1
 	}
-	if _, err := w.Write([]byte{txRelay}); err != nil {
-		return err
+	steps := []func() error{
+		func() error { return binary.Write(w, binary.LittleEndian, v.ProtocolVersion) },
+		func() error { _, err := w.Write([]byte{txRelay}); return err },
+		func() error { return binary.Write(w, binary.LittleEndian, v.PrunedBelowHeight) },
+		func() error { return binary.Write(w, binary.LittleEndian, v.DaMempoolSize) },
 	}
-	if err := binary.Write(w, binary.LittleEndian, v.PrunedBelowHeight); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, v.DaMempoolSize); err != nil {
-		return err
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

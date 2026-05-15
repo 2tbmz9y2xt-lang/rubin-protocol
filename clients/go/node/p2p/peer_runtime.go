@@ -101,10 +101,28 @@ func (p *peer) handleMessage(frame message) error {
 
 func (p *peer) handleRelayMessage(frame message) error {
 	switch frame.Command {
+	case messageInv, messageGetData:
+		return p.handleInventoryRelayMessage(frame)
+	case messageBlock, messageTx, messageGetBlk:
+		return p.handleObjectRelayMessage(frame)
+	default:
+		return postHandshakeUnknownCommandError{command: frame.Command}
+	}
+}
+
+func (p *peer) handleInventoryRelayMessage(frame message) error {
+	switch frame.Command {
 	case messageInv:
 		return p.handleInv(frame.Payload)
 	case messageGetData:
 		return p.handleGetData(frame.Payload)
+	default:
+		return postHandshakeUnknownCommandError{command: frame.Command}
+	}
+}
+
+func (p *peer) handleObjectRelayMessage(frame message) error {
+	switch frame.Command {
 	case messageBlock:
 		return p.handleBlock(frame.Payload)
 	case messageTx:

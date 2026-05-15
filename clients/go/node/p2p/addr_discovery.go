@@ -96,7 +96,21 @@ func isDialableDiscoveredIP(ip net.IP) bool {
 }
 
 func isSpecialUseNetIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+	for _, check := range specialUseNetIPChecks {
+		if check(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+var specialUseNetIPChecks = []func(net.IP) bool{
+	net.IP.IsLoopback,
+	net.IP.IsPrivate,
+	net.IP.IsLinkLocalUnicast,
+	net.IP.IsLinkLocalMulticast,
+	net.IP.IsUnspecified,
+	net.IP.IsMulticast,
 }
 
 func isGlobalDiscoveredAddr(addr netip.Addr) bool {
