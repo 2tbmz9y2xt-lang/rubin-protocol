@@ -16,6 +16,17 @@ type handshakeProgress struct {
 	verAckReceived  bool
 }
 
+type handshakeFrameContext struct {
+	conn                net.Conn
+	magic               [4]byte
+	maxMessageSize      uint32
+	local               node.VersionPayloadV1
+	expectedChainID     [32]byte
+	expectedGenesisHash [32]byte
+	banThreshold        int
+	state               *node.PeerState
+}
+
 func (h handshakeProgress) complete() bool {
 	return h.versionReceived && h.sentVerAck && h.verAckReceived
 }
@@ -56,83 +67,72 @@ func performHandshake(
 		return state, err
 	}
 	progress := handshakeProgress{}
-	if err := progress.run(conn, magic, cfg, local, expectedChainID, expectedGenesisHash, &state); err != nil {
+	frameContext := handshakeFrameContext{
+		conn:                conn,
+		magic:               magic,
+		maxMessageSize:      cfg.MaxMessageSize,
+		local:               local,
+		expectedChainID:     expectedChainID,
+		expectedGenesisHash: expectedGenesisHash,
+		banThreshold:        cfg.BanThreshold,
+		state:               &state,
+	}
+	if err := progress.run(frameContext); err != nil {
 		return state, err
 	}
 	state.HandshakeComplete = true
 	return state, nil
 }
 
-func (h *handshakeProgress) run(
-	conn net.Conn,
-	magic [4]byte,
-	cfg node.PeerRuntimeConfig,
-	local node.VersionPayloadV1,
-	expectedChainID [32]byte,
-	expectedGenesisHash [32]byte,
-	state *node.PeerState,
-) error {
+func (h *handshakeProgress) run(frameContext handshakeFrameContext) error {
 	for !h.complete() {
-		frame, err := readFrameWithPayloadLimit(conn, magic, cfg.MaxMessageSize, preHandshakePayloadCap)
+		frame, err := readFrameWithPayloadLimit(frameContext.conn, frameContext.magic, frameContext.maxMessageSize, preHandshakePayloadCap)
 		if err != nil {
 			return err
 		}
-		if err := h.handleFrame(conn, magic, cfg.MaxMessageSize, frame, local, expectedChainID, expectedGenesisHash, cfg.BanThreshold, state); err != nil {
+		if err := h.handleFrame(frameContext, frame); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (h *handshakeProgress) handleFrame(
-	conn net.Conn,
-	magic [4]byte,
-	maxMessageSize uint32,
-	frame message,
-	local node.VersionPayloadV1,
-	expectedChainID [32]byte,
-	expectedGenesisHash [32]byte,
-	banThreshold int,
-	state *node.PeerState,
-) error {
+func (h *handshakeProgress) handleFrame(frameContext handshakeFrameContext, frame message) error {
 	switch frame.Command {
 	case messageVersion:
-		return h.handleVersionFrame(conn, magic, maxMessageSize, frame.Payload, local, expectedChainID, expectedGenesisHash, banThreshold, state)
+		return h.handleVersionFrame(frameContext, frame.Payload)
 	case messageVerAck:
 		h.verAckReceived = true
 		return nil
 	default:
-		state.BanScore = banThreshold
-		state.LastError = "unexpected pre-handshake command"
+		frameContext.state.BanScore = frameContext.banThreshold
+		frameContext.state.LastError = "unexpected pre-handshake command"
 		return errors.New("unexpected pre-handshake command")
 	}
 }
 
-func (h *handshakeProgress) handleVersionFrame(
-	conn net.Conn,
-	magic [4]byte,
-	maxMessageSize uint32,
-	payload []byte,
-	local node.VersionPayloadV1,
-	expectedChainID [32]byte,
-	expectedGenesisHash [32]byte,
-	banThreshold int,
-	state *node.PeerState,
-) error {
+func (h *handshakeProgress) handleVersionFrame(frameContext handshakeFrameContext, payload []byte) error {
 	remote, err := decodeVersionPayload(payload)
 	if err != nil {
-		state.LastError = err.Error()
+		frameContext.state.LastError = err.Error()
 		return err
 	}
-	state.RemoteVersion = remote
-	if err := validateRemoteVersion(remote, local.ProtocolVersion, expectedChainID, expectedGenesisHash, banThreshold, state); err != nil {
+	frameContext.state.RemoteVersion = remote
+	if err := validateRemoteVersion(
+		remote,
+		frameContext.local.ProtocolVersion,
+		frameContext.expectedChainID,
+		frameContext.expectedGenesisHash,
+		frameContext.banThreshold,
+		frameContext.state,
+	); err != nil {
 		return err
 	}
 	h.versionReceived = true
 	if h.sentVerAck {
 		return nil
 	}
-	if err := writeFrame(conn, magic, message{Command: messageVerAck}, maxMessageSize); err != nil {
+	if err := writeFrame(frameContext.conn, frameContext.magic, message{Command: messageVerAck}, frameContext.maxMessageSize); err != nil {
 		return err
 	}
 	h.sentVerAck = true
