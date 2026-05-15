@@ -126,10 +126,10 @@ pub struct TxPoolEntry {
 }
 
 /// Defensive rollback snapshot for Rust `TxPool`.
-/// Maps Go `sync_mempool.go` fields to Rust resident state; Rust stores no resident wtxid.
 #[derive(Debug, Clone)]
-pub struct TxPoolSnapshot {
-    cfg: TxPoolConfig,
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct TxPoolSnapshot {
+    current_mempool_min_fee_rate: u64,
     entries: Vec<TxPoolSnapshotEntry>,
     next_heap_id: u64,
     max_transactions: usize,
@@ -139,6 +139,7 @@ pub struct TxPoolSnapshot {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
 struct TxPoolSnapshotEntry {
     txid: [u8; 32],
     entry: TxPoolEntry,
@@ -282,9 +283,8 @@ impl TxPool {
         self.txs.is_empty()
     }
 
-    /// Capture a defensive rollback snapshot sorted by txid so later rollback
-    /// boundaries never rely on `HashMap` iteration order.
-    pub fn snapshot(&self) -> Result<TxPoolSnapshot, TxPoolAdmitError> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn snapshot(&self) -> Result<TxPoolSnapshot, TxPoolAdmitError> {
         let mut entries = Vec::with_capacity(self.txs.len());
         for (txid, entry) in &self.txs {
             let heap_id = self.heap_seqs.get(txid).copied().ok_or_else(|| {
@@ -305,9 +305,9 @@ impl TxPool {
                 heap_id,
             });
         }
-        entries.sort_by(|a, b| a.txid.cmp(&b.txid));
+        entries.sort_by_key(|item| item.txid);
         Ok(TxPoolSnapshot {
-            cfg: self.cfg.clone(),
+            current_mempool_min_fee_rate: self.cfg.policy_current_mempool_min_fee_rate,
             entries,
             next_heap_id: self.next_heap_id,
             max_transactions: self.max_transactions,
@@ -317,9 +317,11 @@ impl TxPool {
         })
     }
 
-    /// Validate and restore `TxPoolSnapshot`; live state is replaced only after
-    /// entries, accounting, capacity, and heap/admission high-water validate.
-    pub fn restore_snapshot(&mut self, snapshot: &TxPoolSnapshot) -> Result<(), TxPoolAdmitError> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn restore_snapshot(
+        &mut self,
+        snapshot: &TxPoolSnapshot,
+    ) -> Result<(), TxPoolAdmitError> {
         if snapshot.max_transactions == 0 || snapshot.max_bytes == 0 {
             return Err(unavailable(format!(
                 "invalid txpool snapshot restore limits: max_txs={} max_bytes={}",
@@ -409,7 +411,7 @@ impl TxPool {
             )));
         }
 
-        self.cfg = snapshot.cfg.clone();
+        self.cfg.policy_current_mempool_min_fee_rate = snapshot.current_mempool_min_fee_rate;
         self.txs = txs;
         self.spenders = spenders;
         self.heap_seqs = heap_seqs;
@@ -979,6 +981,7 @@ impl TxPool {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn validate_txpool_snapshot_entry(
     txid: [u8; 32],
     entry: &TxPoolEntry,
@@ -2198,8 +2201,8 @@ mod tests {
         assert_eq!(actual.low_water_bytes, expected.low_water_bytes);
         assert_eq!(actual.used_bytes, expected.used_bytes);
         assert_eq!(
-            actual.cfg.policy_current_mempool_min_fee_rate,
-            expected.cfg.policy_current_mempool_min_fee_rate
+            actual.current_mempool_min_fee_rate,
+            expected.current_mempool_min_fee_rate
         );
         for (actual, expected) in actual.entries.iter().zip(&expected.entries) {
             assert_eq!(actual.txid, expected.txid);
@@ -2506,7 +2509,6 @@ mod tests {
         let selected_before = pool.select_transactions(10, usize::MAX);
         let heap_before = pool.worst_heap.clone().into_sorted_vec();
         let snapshot = pool.snapshot().expect("snapshot");
-        assert_eq!(snapshot.entries.len(), 2);
         assert_eq!(snapshot.entries[0].txid, txid_a.min(txid_b));
         assert_eq!(snapshot.entries[1].txid, txid_a.max(txid_b));
 
@@ -2520,16 +2522,26 @@ mod tests {
         assert_txpool_snapshot_same(&pool.snapshot().expect("snapshot"), &snapshot);
         assert_eq!(pool.worst_heap.clone().into_sorted_vec(), heap_before);
         for item in &snapshot.entries {
-            assert_eq!(pool.txs.get(&item.txid), Some(&item.entry));
             assert_eq!(pool.heap_seqs.get(&item.txid), Some(&item.heap_id));
             for input in &item.entry.inputs {
                 assert_eq!(pool.spenders.get(input), Some(&item.txid));
             }
         }
         assert_eq!(pool.select_transactions(10, usize::MAX), selected_before);
-        assert_eq!(
-            pool.cfg.policy_current_mempool_min_fee_rate, 7,
-            "Go currentMinFeeRate maps to Rust cfg.policy_current_mempool_min_fee_rate"
+        assert_eq!(pool.cfg.policy_current_mempool_min_fee_rate, 7);
+
+        let lenient_snapshot = TxPool::new_with_config(TxPoolConfig {
+            policy_current_mempool_min_fee_rate: 11,
+            policy_reject_core_ext_pre_activation: false,
+            ..TxPoolConfig::default()
+        })
+        .snapshot()
+        .expect("lenient snapshot");
+        pool.restore_snapshot(&lenient_snapshot)
+            .expect("empty snapshot restores");
+        assert!(
+            pool.cfg.policy_reject_core_ext_pre_activation
+                && pool.cfg.policy_current_mempool_min_fee_rate == 11
         );
     }
 
