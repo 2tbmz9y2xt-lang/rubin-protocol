@@ -72,7 +72,7 @@ def nodes(data: dict[str, Any], require_alive: bool = True) -> tuple[dict[str, d
         node = by_name[name]
         if node.get("implementation") != impl or not jint(node.get("pid")) or (node.get("process_alive") is not True if require_alive else ("process_alive" in node and node.get("process_alive") is not True)):
             return None, "wrong_role_identity"
-        if not all(isinstance((v := node.get(k)), str) and (m := ENDPOINT.fullmatch(v)) is not None and 1 <= int(m.group(2)) <= 65535 for k in ("rpc_endpoint", "p2p_endpoint")):
+        if (not all(isinstance((v := node.get(k)), str) and (m := ENDPOINT.fullmatch(v)) is not None and 1 <= int(m.group(2)) <= 65535 for k in ("rpc_endpoint", "p2p_endpoint"))) or node.get("rpc_endpoint_process_backed") is not True or node.get("p2p_endpoint_process_backed") is not True:
             return None, "process_identity_missing_or_invalid"
         out[impl] = node
     if out["go"]["pid"] == out["rust"]["pid"] or len({out[i][k] for i in ("go", "rust") for k in ("rpc_endpoint", "p2p_endpoint")}) != 4:
