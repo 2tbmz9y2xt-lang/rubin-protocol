@@ -8,6 +8,17 @@ from typing import Any
 SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000  # noqa: E702
 HEX32 = re.compile(r"[0-9a-f]{64}"); ENDPOINT = re.compile(r"([^\s:/]+):([0-9]+)")  # noqa: E702
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
+PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block"}
+TX_OBJECT_KEYS = {
+    "go_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
+    "rust_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
+    "go_accept": {"get_tx_path", "raw_hex", "rpc_endpoint", "tx_status_path", "txid"},
+    "rust_accept": {"get_tx_path", "raw_hex", "rpc_endpoint", "tx_status_path", "txid"},
+    "go_mine": {"block_hash", "block_path", "class", "height", "mine_next_path", "mined_by", "raw_hex", "rpc_endpoint", "tx_count", "txid"},
+    "rust_mine": {"block_hash", "block_path", "class", "height", "mine_next_path", "mined_by", "raw_hex", "rpc_endpoint", "tx_count", "txid"},
+    "go_converge": {"block_hash", "block_path", "class", "converged_at", "height", "raw_hex", "rpc_endpoint", "tip_path", "txid"},
+    "rust_converge": {"block_hash", "block_path", "class", "converged_at", "height", "raw_hex", "rpc_endpoint", "tip_path", "txid"},
+}
 SECTIONS = {
     "mesh": ("mesh_report", "mixed_client_mesh", ["nodes", "peer_connectivity", "final_verification", "legacy_schema_compatibility.marker_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "go_to_rust_accept": ("go_submit_rust_accept_report", "mixed_client_go_submit_rust_accept", ["go_submit", "rust_accept", "tx_path", "raw_samples.propagation"]),
@@ -42,6 +53,19 @@ def get(data: Any, dotted: str) -> tuple[Any, bool]:
             return None, False
         cur = cur[part]
     return cur, True
+def source_object_error(obj: Any, label: str) -> str | None:
+    keys = TX_OBJECT_KEYS[label]
+    if not isinstance(obj, dict) or set(obj) != keys:
+        return f"{label}_source_fields_invalid"
+    if not isinstance(obj.get("rpc_endpoint"), str) or not obj["rpc_endpoint"]:
+        return f"{label}_source_fields_invalid"
+    if not isinstance(obj.get("txid"), str) or not obj["txid"]:
+        return f"{label}_source_fields_invalid"
+    if any(not isinstance(obj.get(k), str) or not obj[k] for k in keys & PATH_FIELD_NAMES):
+        return f"{label}_source_fields_invalid"
+    if any(k in keys and (not isinstance(obj.get(k), str) or not obj[k]) for k in ("tx_hex", "raw_hex")) or ("tx_count" in keys and not jint(obj.get("tx_count"))):
+        return f"{label}_source_fields_invalid"
+    return None
 def nonfinite(value: Any, label: str = "root") -> str | None:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -123,11 +147,14 @@ def validate_tx(data: dict[str, Any], converge: bool, rust_submit: bool) -> str 
     if tx_path.get("submitted_at") != src or tx_path.get("observed_at") != [dst]:
         return "tx_path_direction_invalid"
     for label, impl in ((submit, submit_impl), (accept, accept_impl)):
-        if not isinstance(data.get(label), dict) or data[label].get("txid") != txid or ("rpc_endpoint" in data[label] and data[label].get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"]):
+        if bad := source_object_error(data.get(label), label):
+            return bad
+        if data[label].get("txid") != txid or data[label].get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"]:
             return f"{label}_txid_mismatch"
     if not converge: return validate_samples(data, prop, None, txid)  # noqa: E701
     mined, seen = data.get(mine), data.get(conv)
-    if not isinstance(mined, dict) or not isinstance(seen, dict) or mined.get("txid") != txid or seen.get("txid") != txid or any("rpc_endpoint" in obj and obj.get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"] for obj, impl in ((mined, mine_impl), (seen, conv_impl))) or mined.get("class") not in {None, "mined_included"} or mined.get("mined_by") not in {None, f"node-{mine_impl}"} or seen.get("class") not in {None, "canonical_block_found"} or seen.get("converged_at") not in {None, f"node-{conv_impl}"}: return "convergence_identity_mismatch"  # noqa: E701
+    if (bad := source_object_error(mined, mine)) or (bad := source_object_error(seen, conv)): return bad  # noqa: E701
+    if mined.get("txid") != txid or seen.get("txid") != txid or any(obj.get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"] for obj, impl in ((mined, mine_impl), (seen, conv_impl))) or mined.get("class") not in {None, "mined_included"} or mined.get("mined_by") not in {None, f"node-{mine_impl}"} or seen.get("class") not in {None, "canonical_block_found"} or seen.get("converged_at") not in {None, f"node-{conv_impl}"}: return "convergence_identity_mismatch"  # noqa: E701
     if mined.get("height") != seen.get("height") or mined.get("block_hash") != seen.get("block_hash") or not jint(mined.get("height")) or not jint(seen.get("height")) or not is_hex32(mined.get("block_hash")): return "convergence_identity_mismatch"  # noqa: E701
     return validate_samples(data, prop, conv_dir, txid, mined["height"], mined["block_hash"])
 def restart_contradiction(data: dict[str, Any]) -> str | None:
@@ -308,7 +335,20 @@ def write_atomic(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
-def nested_paths(value: Any, depth: int = 0) -> list[str]: return [] if depth > 200 else ([v for v in value.values() if isinstance(v, str)] + sum((nested_paths(v, depth + 1) for v in value.values()), [])) if isinstance(value, dict) else ([v for v in value if isinstance(v, str)] + sum((nested_paths(v, depth + 1) for v in value), [])) if isinstance(value, list) else []  # noqa: E704
+def path_field_targets(value: Any, base: Path, depth: int = 0) -> list[Path]:
+    if depth > 200:
+        return []
+    out: list[Path] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, str) and (key in PATH_FIELD_NAMES or key.endswith("_path")):
+                raw = Path(os.path.expanduser(item)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
+            else:
+                out.extend(path_field_targets(item, base, depth + 1))
+    elif isinstance(value, list):
+        for item in value:
+            out.extend(path_field_targets(item, base, depth + 1))
+    return out
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate fail-closed mixed-client devnet soak report v2.")
     for opt, dest in (("--mesh-report", "mesh_report"), ("--go-submit-rust-accept-report", "go_submit_rust_accept_report"), ("--go-submit-rust-mine-go-converge-report", "go_submit_rust_mine_go_converge_report"), ("--rust-submit-go-mine-rust-converge-report", "rust_submit_go_mine_rust_converge_report"), ("--rust-restart-report", "rust_restart_report"), ("--partition-heal-reorg-report", "partition_heal_reorg_report")):
@@ -319,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     out_path = Path(os.path.realpath(Path(os.path.expanduser(args.output))))
-    if any(v and not k.endswith("_no_data") and (Path(os.path.realpath(Path(os.path.expanduser(v)))) == out_path or (not regular_path(v, "nonregular")[1] and isinstance((d := load(Path(os.path.realpath(Path(os.path.expanduser(v)))))[0]), dict) and any(Path(os.path.realpath((Path(os.path.expanduser(p)) if Path(os.path.expanduser(p)).is_absolute() else Path(os.path.realpath(Path(os.path.expanduser(v)))).parent / Path(os.path.expanduser(p))))) == out_path for p in nested_paths(d)))) for k, v in vars(args).items() if k != "output"):
+    if any(v and not k.endswith("_no_data") and (Path(os.path.realpath(Path(os.path.expanduser(v)))) == out_path or (not regular_path(v, "nonregular")[1] and isinstance((d := load(Path(os.path.realpath(Path(os.path.expanduser(v)))))[0]), dict) and out_path in path_field_targets(d, Path(os.path.realpath(Path(os.path.expanduser(v)))).parent))) for k, v in vars(args).items() if k != "output"):
         return print("FAIL: output_overwrites_input", file=sys.stderr) or 1
     report, rc = generate(args)
     try:
