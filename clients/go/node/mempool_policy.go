@@ -108,9 +108,7 @@ func (m *Mempool) withLockedParsedBlock(block *consensus.ParsedBlock, fn func(*c
 	return nil
 }
 
-// checkTransactionWithState validates a transaction against a consistent
-// chainstate snapshot. Mempool bookkeeping lock ordering stays acyclic:
-// chainstate snapshot first, then mempool mutex for admit/conflict checks.
+// policySnapshot returns the current mempool policy under the mempool read lock.
 func (m *Mempool) policySnapshot() MempoolConfig {
 	if m == nil {
 		return MempoolConfig{}
