@@ -10,7 +10,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
@@ -297,6 +296,35 @@ func sortOutpointsDeterministically(outpoints []consensus.Outpoint) {
 	})
 }
 
+// UtxoSetHash returns the deterministic SHA3-256 digest over the current UTXO
+// set. It is bit-identical with the Rust node ChainState::utxo_set_hash() and
+// uses the same canonical encoding as consensus.UtxoSetHash (which produces
+// PostStateDigest in ConnectBlock summaries). On a nil receiver returns the
+// digest of an empty UTXO map for definedness.
+//
+// Cost: O(n log n) over the entire UTXO set (sort by outpoint canonical key)
+// plus one SHA3-256 hash + per-entry allocations for the canonical encoding.
+// Intended for low-frequency inspection / parity-vector verification — do
+// NOT call from hot paths or polling loops. If a caller needs incremental
+// digest updates, fold the maintenance into ConnectBlock / DisconnectTip
+// instead of calling this.
+func (s *ChainState) UtxoSetHash() [32]byte {
+	if s == nil {
+		return consensus.UtxoSetHash(nil)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return consensus.UtxoSetHash(s.Utxos)
+}
+
+// StateDigest is an alias for UtxoSetHash that mirrors the Rust node
+// ChainState::state_digest() surface. Today the chain state digest is exactly
+// the UTXO set hash; the two names are kept in parity with Rust so that
+// inspection callers can reach for either spelling.
+func (s *ChainState) StateDigest() [32]byte {
+	return s.UtxoSetHash()
+}
+
 func ChainStatePath(dataDir string) string {
 	return filepath.Join(dataDir, chainStateFileName)
 }
@@ -335,247 +363,6 @@ func (s *ChainState) Save(path string) error {
 	return writeFileAtomic(path, raw, 0o600)
 }
 
-func (s *ChainState) ConnectBlock(
-	blockBytes []byte,
-	expectedTarget *[32]byte,
-	prevTimestamps []uint64,
-	chainID [32]byte,
-) (*ChainStateConnectSummary, error) {
-	return s.ConnectBlockWithCoreExtProfiles(blockBytes, expectedTarget, prevTimestamps, chainID, nil)
-}
-
-func (s *ChainState) ConnectBlockWithCoreExtProfiles(
-	blockBytes []byte,
-	expectedTarget *[32]byte,
-	prevTimestamps []uint64,
-	chainID [32]byte,
-	coreExtProfiles consensus.CoreExtProfileProvider,
-) (*ChainStateConnectSummary, error) {
-	return s.ConnectBlockWithCoreExtProfilesAndSuiteContext(
-		blockBytes,
-		expectedTarget,
-		prevTimestamps,
-		chainID,
-		coreExtProfiles,
-		s.rotationOrNil(),
-		s.registryOrNil(),
-	)
-}
-
-func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
-	blockBytes []byte,
-	expectedTarget *[32]byte,
-	prevTimestamps []uint64,
-	chainID [32]byte,
-	coreExtProfiles consensus.CoreExtProfileProvider,
-	rotation consensus.RotationProvider,
-	registry *consensus.SuiteRegistry,
-) (*ChainStateConnectSummary, error) {
-	if s == nil {
-		return nil, errors.New("nil chainstate")
-	}
-	s.admissionMu.Lock()
-	defer s.admissionMu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	blockHeight, expectedPrevHash, err := nextBlockContextFromFields(s.HasTip, s.Height, s.TipHash)
-	if err != nil {
-		return nil, err
-	}
-	if s.Utxos == nil {
-		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
-	}
-	workState := consensus.InMemoryChainState{
-		Utxos:            s.Utxos,
-		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
-	}
-	summary, err := consensus.ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
-		blockBytes,
-		expectedPrevHash,
-		expectedTarget,
-		blockHeight,
-		prevTimestamps,
-		&workState,
-		chainID,
-		coreExtProfiles,
-		rotation,
-		registry,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	pb, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return nil, err
-	}
-	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	// Fail-atomic: check overflow BEFORE any state mutation so that an error
-	// does not leave ChainState partially updated.
-	if !workState.AlreadyGenerated.IsUint64() {
-		return nil, errors.New("already_generated overflow")
-	}
-
-	s.HasTip = true
-	s.Height = blockHeight
-	s.TipHash = blockHash
-	s.AlreadyGenerated = workState.AlreadyGenerated.Uint64()
-	s.Utxos = workState.Utxos
-
-	return &ChainStateConnectSummary{
-		BlockHeight:        blockHeight,
-		BlockHash:          blockHash,
-		SumFees:            summary.SumFees,
-		AlreadyGenerated:   summary.AlreadyGenerated,
-		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
-		UtxoCount:          summary.UtxoCount,
-		PostStateDigest:    summary.PostStateDigest,
-	}, nil
-}
-
-// UtxoSetHash returns the deterministic SHA3-256 digest over the current UTXO
-// set. It is bit-identical with the Rust node ChainState::utxo_set_hash() and
-// uses the same canonical encoding as consensus.UtxoSetHash (which produces
-// PostStateDigest in ConnectBlock summaries). On a nil receiver returns the
-// digest of an empty UTXO map for definedness.
-//
-// Cost: O(n log n) over the entire UTXO set (sort by outpoint canonical key)
-// plus one SHA3-256 hash + per-entry allocations for the canonical encoding.
-// Intended for low-frequency inspection / parity-vector verification — do
-// NOT call from hot paths or polling loops. If a caller needs incremental
-// digest updates, fold the maintenance into ConnectBlock / DisconnectTip
-// instead of calling this.
-func (s *ChainState) UtxoSetHash() [32]byte {
-	if s == nil {
-		return consensus.UtxoSetHash(nil)
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return consensus.UtxoSetHash(s.Utxos)
-}
-
-// StateDigest is an alias for UtxoSetHash that mirrors the Rust node
-// ChainState::state_digest() surface. Today the chain state digest is exactly
-// the UTXO set hash; the two names are kept in parity with Rust so that
-// inspection callers can reach for either spelling.
-func (s *ChainState) StateDigest() [32]byte {
-	return s.UtxoSetHash()
-}
-
-// ConnectBlockParallelSigs connects a block using parallel signature
-// verification. This is an IBD optimization: pre-checks are sequential,
-// ML-DSA-87 signature verifications are batched and executed across a
-// goroutine pool. See consensus.ConnectBlockParallelSigVerify for details.
-//
-// workers controls the goroutine pool size. If <= 0, defaults to GOMAXPROCS.
-func (s *ChainState) ConnectBlockParallelSigs(
-	blockBytes []byte,
-	expectedTarget *[32]byte,
-	prevTimestamps []uint64,
-	chainID [32]byte,
-	coreExtProfiles consensus.CoreExtProfileProvider,
-	workers int,
-) (*ChainStateConnectSummary, error) {
-	return s.ConnectBlockParallelSigsWithSuiteContext(
-		blockBytes,
-		expectedTarget,
-		prevTimestamps,
-		chainID,
-		coreExtProfiles,
-		s.rotationOrNil(),
-		s.registryOrNil(),
-		workers,
-	)
-}
-
-func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
-	blockBytes []byte,
-	expectedTarget *[32]byte,
-	prevTimestamps []uint64,
-	chainID [32]byte,
-	coreExtProfiles consensus.CoreExtProfileProvider,
-	rotation consensus.RotationProvider,
-	registry *consensus.SuiteRegistry,
-	workers int,
-) (*ChainStateConnectSummary, error) {
-	if s == nil {
-		return nil, errors.New("nil chainstate")
-	}
-	s.admissionMu.Lock()
-	defer s.admissionMu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	blockHeight, expectedPrevHash, err := nextBlockContextFromFields(s.HasTip, s.Height, s.TipHash)
-	if err != nil {
-		return nil, err
-	}
-	if s.Utxos == nil {
-		s.Utxos = make(map[consensus.Outpoint]consensus.UtxoEntry)
-	}
-	// Clone UTXO set for fail-atomicity (same pattern as ConnectBlockWithCoreExtProfiles
-	// at line 166). A future optimization may use a delta/undo journal, but correctness
-	// requires matching the sequential path's isolation semantics exactly.
-	workState := consensus.InMemoryChainState{
-		Utxos:            copyUtxoSet(s.Utxos),
-		AlreadyGenerated: new(big.Int).SetUint64(s.AlreadyGenerated),
-	}
-	summary, err := consensus.ConnectBlockParallelSigVerifyWithCoreExtProfilesAndSuiteContext(
-		blockBytes,
-		expectedPrevHash,
-		expectedTarget,
-		blockHeight,
-		prevTimestamps,
-		&workState,
-		chainID,
-		coreExtProfiles,
-		rotation,
-		registry,
-		workers,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	pb, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return nil, err
-	}
-	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	// Fail-atomic: check overflow BEFORE any state mutation so that an error
-	// does not leave ChainState partially updated.
-	if !workState.AlreadyGenerated.IsUint64() {
-		return nil, errors.New("already_generated overflow")
-	}
-
-	s.HasTip = true
-	s.Height = blockHeight
-	s.TipHash = blockHash
-	s.AlreadyGenerated = workState.AlreadyGenerated.Uint64()
-	s.Utxos = workState.Utxos
-
-	return &ChainStateConnectSummary{
-		BlockHeight:        blockHeight,
-		BlockHash:          blockHash,
-		SumFees:            summary.SumFees,
-		AlreadyGenerated:   summary.AlreadyGenerated,
-		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
-		UtxoCount:          summary.UtxoCount,
-		PostStateDigest:    summary.PostStateDigest,
-		SigTaskCount:       summary.SigTaskCount,
-		WorkerPanics:       summary.WorkerPanics,
-	}, nil
-}
-
 func DevnetGenesisChainID() [32]byte {
 	return devnetGenesisChainID
 }
@@ -586,26 +373,6 @@ func DevnetGenesisBlockBytes() []byte {
 
 func DevnetGenesisBlockHash() [32]byte {
 	return devnetGenesisBlockHash
-}
-func nextBlockContext(s *ChainState) (uint64, *[32]byte, error) {
-	if s == nil {
-		return 0, nil, errors.New("nil chainstate")
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return nextBlockContextFromFields(s.HasTip, s.Height, s.TipHash)
-}
-
-func nextBlockContextFromFields(hasTip bool, height uint64, tipHash [32]byte) (uint64, *[32]byte, error) {
-	if !hasTip {
-		return 0, nil, nil
-	}
-	if height == math.MaxUint64 {
-		return 0, nil, errors.New("height overflow")
-	}
-	nextHeight := height + 1
-	prev := tipHash
-	return nextHeight, &prev, nil
 }
 
 // copyUtxoEntry is the canonical deep-copy helper for readonly snapshot/work-copy
@@ -662,84 +429,6 @@ func countExistingUniqueOutpoints(src map[consensus.Outpoint]consensus.UtxoEntry
 	return count
 }
 
-func stateToDisk(s *ChainState) (chainStateDisk, error) {
-	if s == nil {
-		return chainStateDisk{}, errors.New("nil chainstate")
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	utxos := make([]utxoDiskEntry, 0, len(s.Utxos))
-	for op, entry := range s.Utxos {
-		utxos = append(utxos, utxoDiskEntry{
-			Txid:              hex.EncodeToString(op.Txid[:]),
-			Vout:              op.Vout,
-			Value:             entry.Value,
-			CovenantType:      entry.CovenantType,
-			CovenantData:      hex.EncodeToString(entry.CovenantData),
-			CreationHeight:    entry.CreationHeight,
-			CreatedByCoinbase: entry.CreatedByCoinbase,
-		})
-	}
-	sort.Slice(utxos, func(i, j int) bool {
-		if utxos[i].Txid != utxos[j].Txid {
-			return utxos[i].Txid < utxos[j].Txid
-		}
-		return utxos[i].Vout < utxos[j].Vout
-	})
-
-	return chainStateDisk{
-		Version:          chainStateDiskVersion,
-		HasTip:           s.HasTip,
-		Height:           s.Height,
-		TipHash:          hex.EncodeToString(s.TipHash[:]),
-		AlreadyGenerated: s.AlreadyGenerated,
-		Utxos:            utxos,
-	}, nil
-}
-
-func chainStateFromDisk(disk chainStateDisk) (*ChainState, error) {
-	if disk.Version != chainStateDiskVersion {
-		return nil, fmt.Errorf("unsupported chainstate version: %d", disk.Version)
-	}
-
-	tipHash, err := parseHex32("tip_hash", disk.TipHash)
-	if err != nil {
-		return nil, err
-	}
-	utxos := make(map[consensus.Outpoint]consensus.UtxoEntry, len(disk.Utxos))
-	for _, item := range disk.Utxos {
-		txid, err := parseHex32("utxo.txid", item.Txid)
-		if err != nil {
-			return nil, err
-		}
-		covData, err := parseHex("utxo.covenant_data", item.CovenantData)
-		if err != nil {
-			return nil, err
-		}
-		op := consensus.Outpoint{
-			Txid: txid,
-			Vout: item.Vout,
-		}
-		if _, exists := utxos[op]; exists {
-			return nil, fmt.Errorf("duplicate utxo outpoint: %s:%d", item.Txid, item.Vout)
-		}
-		utxos[op] = consensus.UtxoEntry{
-			Value:             item.Value,
-			CovenantType:      item.CovenantType,
-			CovenantData:      covData,
-			CreationHeight:    item.CreationHeight,
-			CreatedByCoinbase: item.CreatedByCoinbase,
-		}
-	}
-	return &ChainState{
-		HasTip:           disk.HasTip,
-		Height:           disk.Height,
-		TipHash:          tipHash,
-		AlreadyGenerated: disk.AlreadyGenerated,
-		Utxos:            utxos,
-	}, nil
-}
-
 func decodeHexToBytesExact(value string, expectedLen int) []byte {
 	raw := strings.TrimSpace(value)
 	out, err := hex.DecodeString(raw)
@@ -791,6 +480,27 @@ func parseHex32(name, value string) ([32]byte, error) {
 	}
 	copy(out[:], raw)
 	return out, nil
+}
+
+func nextBlockContext(s *ChainState) (uint64, *[32]byte, error) {
+	if s == nil {
+		return 0, nil, errors.New("nil chainstate")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return nextBlockContextFromFields(s.HasTip, s.Height, s.TipHash)
+}
+
+func nextBlockContextFromFields(hasTip bool, height uint64, tipHash [32]byte) (uint64, *[32]byte, error) {
+	if !hasTip {
+		return 0, nil, nil
+	}
+	if height == math.MaxUint64 {
+		return 0, nil, errors.New("height overflow")
+	}
+	nextHeight := height + 1
+	prev := tipHash
+	return nextHeight, &prev, nil
 }
 
 // writeFileAtomic writes data to path via a temp+rename pattern with an

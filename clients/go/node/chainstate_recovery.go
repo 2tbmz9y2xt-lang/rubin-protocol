@@ -54,26 +54,11 @@ func truncateIncompleteCanonicalSuffix(store *BlockStore) (bool, error) {
 	}
 	validCount := uint64(0)
 	for i, hashHex := range canonical {
-		blockHash, err := parseHex32("canonical hash", hashHex)
+		complete, err := store.canonicalArtifactsComplete(hashHex)
 		if err != nil {
 			return false, err
 		}
-		if _, err := store.GetHeaderByHash(blockHash); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return false, err
-			}
-			break
-		}
-		if _, err := store.GetBlockByHash(blockHash); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return false, err
-			}
-			break
-		}
-		if _, err := store.GetUndo(blockHash); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return false, err
-			}
+		if !complete {
 			break
 		}
 		validCount = uint64(i + 1)
@@ -85,6 +70,48 @@ func truncateIncompleteCanonicalSuffix(store *BlockStore) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (bool, error) {
+	blockHash, err := parseHex32("canonical hash", hashHex)
+	if err != nil {
+		return false, err
+	}
+	if complete, err := canonicalArtifactExists(bs.headerExists, blockHash); err != nil || !complete {
+		return complete, err
+	}
+	if complete, err := canonicalArtifactExists(bs.blockExists, blockHash); err != nil || !complete {
+		return complete, err
+	}
+	if complete, err := canonicalArtifactExists(bs.undoExists, blockHash); err != nil || !complete {
+		return complete, err
+	}
+	return true, nil
+}
+
+func canonicalArtifactExists(check func([32]byte) error, blockHash [32]byte) (bool, error) {
+	if err := check(blockHash); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (bs *BlockStore) headerExists(blockHash [32]byte) error {
+	_, err := bs.GetHeaderByHash(blockHash)
+	return err
+}
+
+func (bs *BlockStore) blockExists(blockHash [32]byte) error {
+	_, err := bs.GetBlockByHash(blockHash)
+	return err
+}
+
+func (bs *BlockStore) undoExists(blockHash [32]byte) error {
+	_, err := bs.GetUndo(blockHash)
+	return err
 }
 
 // ReconcileChainStateWithBlockStore replays any canonical blocks that are present
@@ -107,41 +134,47 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 		return false, err
 	}
 	if !ok {
-		view := state.view()
-		if truncated || view.hasTip || view.utxoCount != 0 || view.alreadyGenerated != 0 || view.height != 0 || view.tipHash != ([32]byte{}) {
-			state.replaceFrom(NewChainState())
-			return true, nil
-		}
-		return false, nil
+		return reconcileEmptyBlockStore(state, truncated), nil
 	}
 
-	replayFrom := uint64(0)
-	changed := truncated
+	replayFrom, changed, replayNeeded, err := reconcileReplayStart(state, store, tipHeight, truncated)
+	if err != nil || !replayNeeded {
+		return changed, err
+	}
+	return replayCanonicalBlocks(state, store, cfg, replayFrom, tipHeight, changed)
+}
+
+func reconcileEmptyBlockStore(state *ChainState, truncated bool) bool {
 	view := state.view()
-	if view.hasTip {
-		if view.height <= tipHeight {
-			canonicalHash, hasHeight, err := store.CanonicalHash(view.height)
-			if err != nil {
-				return false, err
-			}
-			if hasHeight && canonicalHash == view.tipHash {
-				if view.height == tipHeight {
-					return changed, nil
-				}
-				replayFrom = view.height + 1
-			} else {
-				state.replaceFrom(NewChainState())
-				changed = true
-			}
-		} else {
-			state.replaceFrom(NewChainState())
-			changed = true
-		}
-	} else {
+	dirty := view.hasTip || view.utxoCount != 0 || view.alreadyGenerated != 0 || view.height != 0 || view.tipHash != ([32]byte{})
+	if truncated || dirty {
 		state.replaceFrom(NewChainState())
-		changed = true
+		return true
 	}
+	return false
+}
 
+func reconcileReplayStart(state *ChainState, store *BlockStore, tipHeight uint64, changed bool) (uint64, bool, bool, error) {
+	view := state.view()
+	if !view.hasTip || view.height > tipHeight {
+		state.replaceFrom(NewChainState())
+		return 0, true, true, nil
+	}
+	canonicalHash, hasHeight, err := store.CanonicalHash(view.height)
+	if err != nil {
+		return 0, changed, false, err
+	}
+	if !hasHeight || canonicalHash != view.tipHash {
+		state.replaceFrom(NewChainState())
+		return 0, true, true, nil
+	}
+	if view.height == tipHeight {
+		return 0, changed, false, nil
+	}
+	return view.height + 1, changed, true, nil
+}
+
+func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig, replayFrom uint64, tipHeight uint64, changed bool) (bool, error) {
 	for height := replayFrom; height <= tipHeight; height++ {
 		blockHash, ok, err := store.CanonicalHash(height)
 		if err != nil {
@@ -156,40 +189,7 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 			// height instead of having to reconstruct the loop state.
 			return false, fmt.Errorf("missing canonical block hash during chainstate replay at height %d (tip_height=%d)", height, tipHeight)
 		}
-		blockBytes, err := store.GetBlockByHash(blockHash)
-		if err != nil {
-			return false, err
-		}
-		// Defense-in-depth: re-hash the loaded block's header and
-		// confirm it matches the canonical-index entry BEFORE
-		// delegating to ConnectBlockWithCoreExtProfilesAndSuiteContext.
-		// A parseable-but-swapped <hash>.bin (bit-rot, manual disk
-		// repair gone wrong, adversarial replacement that happens to
-		// link to the current tip's prev_hash) would otherwise be
-		// accepted by ConnectBlock, leaving ChainState with a tip
-		// that no longer corresponds to its canonical-index entry.
-		// The prev_hash chain-integrity check inside ConnectBlock
-		// catches some of this class but NOT the same-prev-hash
-		// adversarial case. One hash per replay block is recovery-
-		// path-only cost (N rows, not steady state). Cross-client
-		// symmetric: Rust `clients/rust/crates/rubin-node/src/chainstate_recovery.rs`
-		// reconcile_chain_state_with_block_store performs the
-		// bit-identical check with the same error literal.
-		parsed, err := consensus.ParseBlockBytes(blockBytes)
-		if err != nil {
-			return false, fmt.Errorf("parse block bytes during chainstate replay at height %d: %w", height, err)
-		}
-		observedHash, err := consensus.BlockHash(parsed.HeaderBytes)
-		if err != nil {
-			return false, fmt.Errorf("hash header during chainstate replay at height %d: %w", height, err)
-		}
-		if observedHash != blockHash {
-			return false, fmt.Errorf(
-				"canonical artifact corruption during chainstate replay at height %d: expected %x, on-disk header hashes to %x",
-				height, blockHash, observedHash,
-			)
-		}
-		prevTimestamps, err := prevTimestampsFromStore(store, height)
+		blockBytes, prevTimestamps, err := replayBlockInputs(store, blockHash, height)
 		if err != nil {
 			return false, err
 		}
@@ -207,4 +207,38 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 		changed = true
 	}
 	return changed, nil
+}
+
+func replayBlockInputs(store *BlockStore, blockHash [32]byte, height uint64) ([]byte, []uint64, error) {
+	blockBytes, err := store.GetBlockByHash(blockHash)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := verifyReplayBlockHash(blockBytes, blockHash, height); err != nil {
+		return nil, nil, err
+	}
+	prevTimestamps, err := prevTimestampsFromStore(store, height)
+	if err != nil {
+		return nil, nil, err
+	}
+	return blockBytes, prevTimestamps, nil
+}
+
+func verifyReplayBlockHash(blockBytes []byte, blockHash [32]byte, height uint64) error {
+	// Defense-in-depth: re-hash the loaded block's header before ConnectBlock.
+	parsed, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return fmt.Errorf("parse block bytes during chainstate replay at height %d: %w", height, err)
+	}
+	observedHash, err := consensus.BlockHash(parsed.HeaderBytes)
+	if err != nil {
+		return fmt.Errorf("hash header during chainstate replay at height %d: %w", height, err)
+	}
+	if observedHash != blockHash {
+		return fmt.Errorf(
+			"canonical artifact corruption during chainstate replay at height %d: expected %x, on-disk header hashes to %x",
+			height, blockHash, observedHash,
+		)
+	}
+	return nil
 }

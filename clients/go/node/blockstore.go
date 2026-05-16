@@ -278,24 +278,13 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 	current := tipHash
 	for current != zero {
 		if cached, ok := bs.cachedChainWork(current); ok {
-			total, err := bs.accumulateChainWorkFromTargets(cached, hashes, targets)
-			if err != nil {
-				return nil, err
-			}
-			if cachedTip, ok := bs.cachedChainWork(tipHash); ok {
-				return cachedTip, nil
-			}
-			return total, nil
+			return bs.chainWorkFromCachedBase(tipHash, cached, hashes, targets)
 		}
 		if _, exists := seen[current]; exists {
 			return nil, errors.New("blockstore parent cycle")
 		}
 		seen[current] = struct{}{}
-		headerBytes, err := bs.GetHeaderByHash(current)
-		if err != nil {
-			return nil, err
-		}
-		header, err := consensus.ParseBlockHeaderBytes(headerBytes)
+		header, err := bs.chainWorkHeader(current)
 		if err != nil {
 			return nil, err
 		}
@@ -303,6 +292,21 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 		targets = append(targets, header.Target)
 		current = header.PrevBlockHash
 	}
+	return bs.chainWorkFromRoot(hashes, targets)
+}
+
+func (bs *BlockStore) chainWorkFromCachedBase(tipHash [32]byte, cached *big.Int, hashes [][32]byte, targets [][32]byte) (*big.Int, error) {
+	total, err := bs.accumulateChainWorkFromTargets(cached, hashes, targets)
+	if err != nil {
+		return nil, err
+	}
+	if cachedTip, ok := bs.cachedChainWork(tipHash); ok {
+		return cachedTip, nil
+	}
+	return total, nil
+}
+
+func (bs *BlockStore) chainWorkFromRoot(hashes [][32]byte, targets [][32]byte) (*big.Int, error) {
 	total, err := consensus.ChainWorkFromTargets(targets)
 	if err != nil {
 		return nil, err
@@ -311,6 +315,14 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 		return nil, err
 	}
 	return total, nil
+}
+
+func (bs *BlockStore) chainWorkHeader(blockHash [32]byte) (consensus.BlockHeader, error) {
+	headerBytes, err := bs.GetHeaderByHash(blockHash)
+	if err != nil {
+		return consensus.BlockHeader{}, err
+	}
+	return consensus.ParseBlockHeaderBytes(headerBytes)
 }
 
 func buildCanonicalHeightIndex(canonical []string) (map[[32]byte]uint64, error) {
@@ -596,10 +608,7 @@ func writeFileIfAbsent(path string, content []byte) error {
 	// `_ = ...` discarded the exact failures that MUST reach the
 	// caller. Propagate via `return` instead.
 	if existing, err := readFileByPathFn(path); err == nil {
-		if !bytes.Equal(existing, content) {
-			return fmt.Errorf("file already exists with different content: %s", path)
-		}
-		return syncDir(filepath.Dir(path))
+		return syncMatchingExistingFile(path, content, existing)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -623,23 +632,27 @@ func writeFileIfAbsent(path string, content []byte) error {
 			// Race: destination appeared between the fast-path read
 			// and our link. Verify content matches (idempotent retry)
 			// or surface the drift as an error (never overwrite).
-			existing, err := readFileByPathFn(path)
-			if err != nil {
-				return fmt.Errorf("read existing after link EEXIST %s: %w", path, err)
-			}
-			if !bytes.Equal(existing, content) {
-				return fmt.Errorf("file already exists with different content: %s", path)
-			}
 			// Propagate parent dir-sync result on the EEXIST-retry
 			// branch for the same reason as the fast-path above:
 			// syncDir already applies the permission policy, so
 			// returning its error surfaces only real durability
 			// failures.
-			return syncDir(filepath.Dir(path))
+			existing, err := readFileByPathFn(path)
+			if err != nil {
+				return fmt.Errorf("read existing after link EEXIST %s: %w", path, err)
+			}
+			return syncMatchingExistingFile(path, content, existing)
 		}
 		return fmt.Errorf("link %s -> %s: %w", tmpPath, path, linkErr)
 	}
 	// The new directory entry for `path` must reach stable storage too;
 	// temp's sync_all only covered the inode's data, not the dir.
+	return syncDir(filepath.Dir(path))
+}
+
+func syncMatchingExistingFile(path string, content []byte, existing []byte) error {
+	if !bytes.Equal(existing, content) {
+		return fmt.Errorf("file already exists with different content: %s", path)
+	}
 	return syncDir(filepath.Dir(path))
 }
