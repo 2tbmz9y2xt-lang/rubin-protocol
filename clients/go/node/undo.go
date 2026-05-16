@@ -72,33 +72,11 @@ func buildBlockUndo(prevState *ChainState, pb *consensus.ParsedBlock, blockHeigh
 		if tx == nil {
 			return nil, fmt.Errorf("nil tx at index %d", i)
 		}
-		spent := make([]SpentUndo, 0, len(tx.Inputs))
-		if i > 0 {
-			for _, in := range tx.Inputs {
-				op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-				entry, ok := work[op]
-				if !ok {
-					return nil, fmt.Errorf("undo missing utxo for %x:%d", op.Txid, op.Vout)
-				}
-				spent = append(spent, SpentUndo{
-					Outpoint: op,
-					Entry:    copyUtxoEntry(entry),
-				})
-				delete(work, op)
-			}
+		spent, err := spendUndoInputs(work, tx, i)
+		if err != nil {
+			return nil, err
 		}
-		for outputIndex, out := range tx.Outputs {
-			if !isSpendableOutput(out.CovenantType) {
-				continue
-			}
-			work[consensus.Outpoint{Txid: pb.Txids[i], Vout: uint32(outputIndex)}] = consensus.UtxoEntry{
-				Value:             out.Value,
-				CovenantType:      out.CovenantType,
-				CovenantData:      append([]byte(nil), out.CovenantData...),
-				CreationHeight:    blockHeight,
-				CreatedByCoinbase: i == 0,
-			}
-		}
+		addUndoCreatedOutputs(work, pb.Txids[i], tx, blockHeight, i == 0)
 		txUndos[i] = TxUndo{Spent: spent}
 	}
 
@@ -107,6 +85,41 @@ func buildBlockUndo(prevState *ChainState, pb *consensus.ParsedBlock, blockHeigh
 		PreviousAlreadyGenerated: prevState.AlreadyGenerated,
 		Txs:                      txUndos,
 	}, nil
+}
+
+func spendUndoInputs(work map[consensus.Outpoint]consensus.UtxoEntry, tx *consensus.Tx, txIndex int) ([]SpentUndo, error) {
+	spent := make([]SpentUndo, 0, len(tx.Inputs))
+	if txIndex == 0 {
+		return spent, nil
+	}
+	for _, in := range tx.Inputs {
+		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+		entry, ok := work[op]
+		if !ok {
+			return nil, fmt.Errorf("undo missing utxo for %x:%d", op.Txid, op.Vout)
+		}
+		spent = append(spent, SpentUndo{Outpoint: op, Entry: copyUtxoEntry(entry)})
+		delete(work, op)
+	}
+	return spent, nil
+}
+
+func addUndoCreatedOutputs(work map[consensus.Outpoint]consensus.UtxoEntry, txid [32]byte, tx *consensus.Tx, blockHeight uint64, coinbase bool) {
+	for outputIndex, out := range tx.Outputs {
+		if isSpendableOutput(out.CovenantType) {
+			work[consensus.Outpoint{Txid: txid, Vout: uint32(outputIndex)}] = undoCreatedEntry(out, blockHeight, coinbase)
+		}
+	}
+}
+
+func undoCreatedEntry(out consensus.TxOutput, blockHeight uint64, coinbase bool) consensus.UtxoEntry {
+	return consensus.UtxoEntry{
+		Value:             out.Value,
+		CovenantType:      out.CovenantType,
+		CovenantData:      append([]byte(nil), out.CovenantData...),
+		CreationHeight:    blockHeight,
+		CreatedByCoinbase: coinbase,
+	}
 }
 
 func (s *ChainState) DisconnectBlock(blockBytes []byte, undo *BlockUndo) (*ChainStateDisconnectSummary, error) {
@@ -124,56 +137,20 @@ func (s *ChainState) DisconnectBlock(blockBytes []byte, undo *BlockUndo) (*Chain
 		return nil, errors.New("nil block undo")
 	}
 
-	pb, err := consensus.ParseBlockBytes(blockBytes)
+	pb, blockHash, err := parseDisconnectBlock(blockBytes)
 	if err != nil {
 		return nil, err
 	}
-	if len(pb.Txs) != len(pb.Txids) {
-		return nil, errors.New("parsed block txid length mismatch")
-	}
-	if len(undo.Txs) != len(pb.Txs) {
-		return nil, errors.New("undo tx count mismatch")
-	}
-	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
-	if err != nil {
+	if err := s.validateDisconnectBlockLocked(pb, undo, blockHash); err != nil {
 		return nil, err
-	}
-	if s.TipHash != blockHash {
-		return nil, errors.New("disconnect block is not current tip")
-	}
-	if s.Height != undo.BlockHeight {
-		return nil, fmt.Errorf("disconnect height mismatch: chainstate=%d undo=%d", s.Height, undo.BlockHeight)
 	}
 
 	work := copyUtxoSet(s.Utxos)
-	for txIndex := len(pb.Txs) - 1; txIndex >= 0; txIndex-- {
-		tx := pb.Txs[txIndex]
-		txid := pb.Txids[txIndex]
-		for outputIndex, out := range tx.Outputs {
-			if !isSpendableOutput(out.CovenantType) {
-				continue
-			}
-			delete(work, consensus.Outpoint{Txid: txid, Vout: uint32(outputIndex)})
-		}
-		for _, spent := range undo.Txs[txIndex].Spent {
-			if _, exists := work[spent.Outpoint]; exists {
-				return nil, fmt.Errorf("undo restore collision for %x:%d", spent.Outpoint.Txid, spent.Outpoint.Vout)
-			}
-			work[spent.Outpoint] = copyUtxoEntry(spent.Entry)
-		}
+	if err := applyDisconnectUndo(work, pb, undo); err != nil {
+		return nil, err
 	}
 
-	s.Utxos = work
-	s.AlreadyGenerated = undo.PreviousAlreadyGenerated
-	if s.Height == 0 {
-		s.HasTip = false
-		s.Height = 0
-		s.TipHash = [32]byte{}
-	} else {
-		s.Height--
-		s.TipHash = pb.Header.PrevBlockHash
-		s.HasTip = true
-	}
+	s.applyDisconnectedStateLocked(work, undo.PreviousAlreadyGenerated, pb.Header.PrevBlockHash)
 
 	return &ChainStateDisconnectSummary{
 		DisconnectedHeight: undo.BlockHeight,
@@ -184,6 +161,76 @@ func (s *ChainState) DisconnectBlock(blockBytes []byte, undo *BlockUndo) (*Chain
 		AlreadyGenerated:   s.AlreadyGenerated,
 		UtxoCount:          uint64(len(s.Utxos)),
 	}, nil
+}
+
+func parseDisconnectBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	if len(pb.Txs) != len(pb.Txids) {
+		return nil, [32]byte{}, errors.New("parsed block txid length mismatch")
+	}
+	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	return pb, blockHash, nil
+}
+
+func (s *ChainState) validateDisconnectBlockLocked(pb *consensus.ParsedBlock, undo *BlockUndo, blockHash [32]byte) error {
+	if len(undo.Txs) != len(pb.Txs) {
+		return errors.New("undo tx count mismatch")
+	}
+	if s.TipHash != blockHash {
+		return errors.New("disconnect block is not current tip")
+	}
+	if s.Height != undo.BlockHeight {
+		return fmt.Errorf("disconnect height mismatch: chainstate=%d undo=%d", s.Height, undo.BlockHeight)
+	}
+	return nil
+}
+
+func applyDisconnectUndo(work map[consensus.Outpoint]consensus.UtxoEntry, pb *consensus.ParsedBlock, undo *BlockUndo) error {
+	for txIndex := len(pb.Txs) - 1; txIndex >= 0; txIndex-- {
+		removeDisconnectedOutputs(work, pb.Txids[txIndex], pb.Txs[txIndex])
+		if err := restoreDisconnectedInputs(work, undo.Txs[txIndex].Spent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeDisconnectedOutputs(work map[consensus.Outpoint]consensus.UtxoEntry, txid [32]byte, tx *consensus.Tx) {
+	for outputIndex, out := range tx.Outputs {
+		if isSpendableOutput(out.CovenantType) {
+			delete(work, consensus.Outpoint{Txid: txid, Vout: uint32(outputIndex)})
+		}
+	}
+}
+
+func restoreDisconnectedInputs(work map[consensus.Outpoint]consensus.UtxoEntry, spent []SpentUndo) error {
+	for _, item := range spent {
+		if _, exists := work[item.Outpoint]; exists {
+			return fmt.Errorf("undo restore collision for %x:%d", item.Outpoint.Txid, item.Outpoint.Vout)
+		}
+		work[item.Outpoint] = copyUtxoEntry(item.Entry)
+	}
+	return nil
+}
+
+func (s *ChainState) applyDisconnectedStateLocked(work map[consensus.Outpoint]consensus.UtxoEntry, previousAlreadyGenerated uint64, prevBlockHash [32]byte) {
+	s.Utxos = work
+	s.AlreadyGenerated = previousAlreadyGenerated
+	if s.Height == 0 {
+		s.HasTip = false
+		s.Height = 0
+		s.TipHash = [32]byte{}
+		return
+	}
+	s.Height--
+	s.TipHash = prevBlockHash
+	s.HasTip = true
 }
 
 func isSpendableOutput(covenantType uint16) bool {
