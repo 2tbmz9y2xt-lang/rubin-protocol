@@ -12,7 +12,7 @@ func initializeRotationSchedule(wire productionRotationScheduleWire) *production
 	}
 }
 
-// ensureRegistry ensures we have a valid registry (defaults to DefaultSuiteRegistry)
+// ensureRegistry returns a non-nil SuiteRegistry, defaulting to DefaultSuiteRegistry when nil is passed.
 func ensureRegistry(registry *consensus.SuiteRegistry) *consensus.SuiteRegistry {
 	if registry == nil {
 		return consensus.DefaultSuiteRegistry()

@@ -521,7 +521,7 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	}
 
 	// Prepare policy UTXOs if needed
-	policyUtxos, err := preparePolicyUtxos(tx, policy, snapshot)
+	policyUtxos, err := buildPolicyInputSnapshotIfNeeded(tx, snapshot, policy)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -19,21 +19,7 @@ func validateChainSnapshot(snapshot *chainStateAdmissionSnapshot) (uint64, error
 	return nextHeight, nil
 }
 
-// preparePolicyUtxos prepares policy UTXO snapshot if needed
-func preparePolicyUtxos(tx *consensus.Tx, policy MempoolConfig, snapshot *chainStateAdmissionSnapshot) (map[consensus.Outpoint]consensus.UtxoEntry, error) {
-	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	needs, err := policyNeedsInputSnapshotForTx(tx, policy)
-	if err != nil {
-		return nil, txAdmitRejected(err.Error())
-	}
-	if needs {
-		policyUtxos, err = policyInputSnapshot(tx, snapshot.utxos)
-		if err != nil {
-			return nil, txAdmitRejected(err.Error())
-		}
-	}
-	return policyUtxos, nil
-}
+// preparePolicyUtxos is removed — use buildPolicyInputSnapshotIfNeeded from mempool_precheck.go instead.
 
 // validateTransactionWithConsensus performs consensus validation with configured profiles
 func (m *Mempool) validateTransactionWithConsensus(

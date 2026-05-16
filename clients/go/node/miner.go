@@ -472,14 +472,12 @@ func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]c
 	}
 
 	// Apply CoreExt policy
-	if m.cfg.PolicyRejectCoreExtPreActivation {
-		reject, _, err := RejectCoreExtTxPreActivation(tx, utxos, nextHeight, m.cfg.CoreExtProfiles)
-		if err != nil {
-			return false, policyDaIncluded, err
-		}
-		if reject {
-			return true, policyDaIncluded, nil
-		}
+	reject, err = m.rejectCandidateCoreExtPolicy(tx, utxos, nextHeight)
+	if err != nil {
+		return false, policyDaIncluded, err
+	}
+	if reject {
+		return true, policyDaIncluded, nil
 	}
 
 	return false, policyDaIncluded, nil

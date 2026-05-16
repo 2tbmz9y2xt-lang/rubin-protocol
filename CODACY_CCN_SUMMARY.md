@@ -1,62 +1,42 @@
 # Codacy CCN Cleanup Summary
 
 ## Overview
-Successfully reduced cyclomatic complexity (CCN) for Go node policy, mempool, and miner functions from 6 functions above threshold to only 1 function with CCN = 9 (threshold = 8).
+Successfully reduced cyclomatic complexity (CCN) for Go node policy, mempool, and miner functions. All 7 target functions refactored; helper extraction preserves exact original behavior.
+
+## CCN Results (per-function, before → after)
+| Function | Before | After |
+|---|---|---|
+| `checkParsedTransactionWithSnapshot` | 10 | ≤8 |
+| `applyPolicyAgainstState` | 17 | 9 |
+| `prevTimestampsFromStore` | 9 | ≤8 |
+| `NewMiner` | 9 | ≤8 |
+| `MineOne` | 10 | ≤8 |
+| `rejectCandidate` | 13 | ≤8 |
+| `loadCompiledProductionRotationScheduleFromJSONWithRegistry` | 12 | ≤8 |
+
+Functions above CCN threshold (8): 1 (`applyPolicyAgainstState` at CCN 9). The remaining CCN-9 function is acceptable per task contract (below medium threshold).
 
 ## Changes Made
 
 ### 1. mempool.go
-- **checkParsedTransactionWithSnapshot**: CCN 10 → 4
-  - Extracted `validateChainSnapshot()` helper
-  - Extracted `preparePolicyUtxos()` helper
-  - Extracted `validateTransactionWithConsensus()` method
-  - Extracted `extractTxInputs()` helper
-
-- **applyPolicyAgainstState**: CCN 17 → 9 (improved but still above threshold)
-  - Extracted `applyPolicyAgainstStateDA()` helper for DA fee policy
-  - Extracted `applyPolicyAgainstStateCoreExt()` helper for CoreExt policy
-  - Extracted `applyPolicyAgainstStatePayload()` helper for payload size policy
-
-- **prevTimestampsFromStore**: CCN 9 → 4
-  - Extracted `getBlockTimestamp()` helper
+- **checkParsedTransactionWithSnapshot**: extracted `validateChainSnapshot()` and `validateTransactionWithConsensus()` helpers; reuses existing `buildPolicyInputSnapshotIfNeeded` from mempool_precheck.go and `extractTxInputs()` from mempolicy_helpers.go.
+- **applyPolicyAgainstState**: extracted DA, CoreExt, and payload policy helpers into mempolicy_helpers.go.
+- **prevTimestampsFromStore**: extracted `getBlockTimestamp()` helper.
 
 ### 2. miner.go
-- **NewMiner**: CCN 9 → 4
-  - Extracted `validateNewMinerInputs()` helper
-  - Extracted `validateMinerAliasRequirements()` helper
-  - Extracted `normalizeMinerConfig()` helper
-
-- **MineOne**: CCN 10 → 5
-  - Extracted `validateMineOneInput()` method
-  - Extracted `bootstrapGenesisIfNeeded()` method
-  - Extracted `executeMineOne()` method
-
-- **rejectCandidate**: CCN 13 → 5
-  - Extracted `rejectCandidateDAPolicy()` method for DA anti-abuse
-  - Extracted `rejectCandidateAnchorPolicy()` method for anchor policy
-  - Extracted `rejectCandidateCoreExtPolicy()` method for CoreExt policy
-  - Extracted `getCurrentMinFeeRate()` helper
+- **NewMiner**: extracted validation and config-normalization helpers into miner_config_helpers.go.
+- **MineOne**: extracted state validation, genesis bootstrap, and core mining helpers into miner_mine_helpers.go.
+- **rejectCandidate**: extracted DA, anchor, and CoreExt policy helpers into miner_helpers.go; CoreExt branch delegates to `rejectCandidateCoreExtPolicy`.
 
 ### 3. production_rotation_schedule.go
-- **loadCompiledProductionRotationScheduleFromJSONWithRegistry**: CCN 12 → 5
-  - Extracted `initializeRotationSchedule()` helper
-  - Extracted `ensureRegistry()` helper
-  - Extracted `buildProductionRotationScheduleNetworks()` helper
+- **loadCompiledProductionRotationScheduleFromJSONWithRegistry**: extracted schedule init, registry default-supply, and network builders into rotation_schedule_helpers.go.
 
-### 4. New Helper Files Created
-- `mempolicy_helpers.go` - Mempool policy helpers
-- `miner_helpers.go` - Miner policy helpers
-- `miner_config_helpers.go` - Miner configuration helpers
-- `miner_mine_helpers.go` - Mining operation helpers
-- `rotation_schedule_helpers.go` - Rotation schedule helpers
+### 4. New Helper Files
+- `mempolicy_helpers.go` — mempool validation/policy helpers
+- `miner_helpers.go` — miner candidate-policy helpers
+- `miner_config_helpers.go` — miner constructor/config helpers
+- `miner_mine_helpers.go` — mining-operation helpers
+- `rotation_schedule_helpers.go` — rotation-schedule helpers
 
 ## Test Results
-- All focused tests pass: `Test.*Mempool|Test.*Miner|Test.*Policy|Test.*MineAddress|Test.*Rotation`
-- Code compiles without errors
-- No behavioral changes - all helpers preserve exact original behavior
-
-## Final CCN Count
-- **Before**: 6 functions with CCN > 8 (10, 17, 9, 9, 10, 13, 12, 9)
-- **After**: 1 function with CCN = 9 (applyPolicyAgainstState)
-
-The single remaining function with CCN = 9 is acceptable per the task requirements (below medium threshold).
+All focused tests pass. No behavioral changes — every helper preserves exact original semantics, error classes, and policy ordering.
