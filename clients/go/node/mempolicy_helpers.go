@@ -19,7 +19,7 @@ func validateChainSnapshot(snapshot *chainStateAdmissionSnapshot) (uint64, error
 	return nextHeight, nil
 }
 
-// preparePolicyUtxos is removed — use buildPolicyInputSnapshotIfNeeded from mempool_precheck.go instead.
+// preparePolicyUtxos removed — caller uses buildPolicyInputSnapshotIfNeeded (mempool_precheck.go).
 
 // validateTransactionWithConsensus performs consensus validation with configured profiles
 func (m *Mempool) validateTransactionWithConsensus(

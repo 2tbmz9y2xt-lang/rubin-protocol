@@ -87,7 +87,7 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 		return nil, nil, err
 	}
 
-	// Ensure we have a valid registry
+	// Default registry to DefaultSuiteRegistry when nil is passed.
 	registry = ensureRegistry(registry)
 
 	// Build descriptors for all networks

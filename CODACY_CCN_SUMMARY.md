@@ -38,5 +38,9 @@ Functions above CCN threshold (8): 1 (`applyPolicyAgainstState` at CCN 9). The r
 - `miner_mine_helpers.go` — mining-operation helpers
 - `rotation_schedule_helpers.go` — rotation-schedule helpers
 
-## Test Results
-All focused tests pass. No behavioral changes — every helper preserves exact original semantics, error classes, and policy ordering.
+## Verification
+- `go build ./node` — passes.
+- `go test ./node -run "Test.*Mempool|Test.*Miner|Test.*Policy|Test.*MineAddress|Test.*Rotation" -count=1` — passes.
+- `gocyclo -over 8` on production files — only `applyPolicyAgainstState` remains at CCN 9.
+- `git diff --check` — clean.
+- `go fmt ./node` — no changes.
