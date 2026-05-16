@@ -36,7 +36,7 @@ SECTIONS = {
 }
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
 def hex_bytes(value: Any) -> bool: return isinstance(value, str) and bool(HEX_BYTES.fullmatch(value))  # noqa: E704
-def jint(value: Any, minimum: int = 1) -> bool: return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000  # noqa: E704
+def jint(value: Any, minimum: int = 0) -> bool: return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000  # noqa: E704
 def section(name: str, status: str, reason: str | None = None, **kw: Any) -> dict[str, Any]:
     out = {"status": status, "claim_type": kw.pop("claim_type", "status_evidence")}
     if reason:
