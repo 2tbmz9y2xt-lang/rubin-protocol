@@ -277,6 +277,33 @@ fn keypair_sign_digest_rejects_nil_private_key() {
 }
 
 #[test]
+fn signing_ctx_rejects_public_only_key() {
+    let Some(kp) = generate_or_skip() else { return };
+    let pubkey = kp.pubkey_bytes();
+    unsafe {
+        // SAFETY: public_key is owned by this test after successful OpenSSL
+        // allocation and is freed before return. The pubkey slice lives across
+        // the FFI call and has the canonical ML-DSA-87 public-key length.
+        let public_key = super::ffi::EVP_PKEY_new_raw_public_key_ex(
+            core::ptr::null_mut(),
+            c"ML-DSA-87".as_ptr(),
+            core::ptr::null(),
+            pubkey.as_ptr(),
+            pubkey.len(),
+        );
+        assert!(!public_key.is_null(), "public-only EVP_PKEY allocation");
+
+        let mctx = super::new_digest_sign_ctx(public_key)
+            .expect("OpenSSL accepts public-only key at init before signing fails");
+        let err = super::sign_mldsa87_digest(mctx, [0x42; 32])
+            .expect_err("public-only EVP_PKEY must not sign a digest");
+        openssl_sys::EVP_PKEY_free(public_key);
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "openssl: EVP_DigestSign failed");
+    }
+}
+
+#[test]
 fn keypair_close_idempotent() {
     let Some(kp) = generate_or_skip() else { return };
     drop(kp);

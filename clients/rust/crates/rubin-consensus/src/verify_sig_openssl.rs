@@ -6,6 +6,7 @@ mod ffi;
 mod keypair;
 
 use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87};
+use crate::error::ErrorCode::{TxErrSigInvalid, TxErrSigNoncanonical};
 use crate::error::{ErrorCode, TxError};
 use crate::tx_helpers::DigestSigner;
 use core::ffi::CStr;
@@ -18,6 +19,11 @@ pub use keypair::Mldsa87Keypair;
 
 const OPENSSL_INIT_LOAD_CONFIG: u64 = 0x0000_0040;
 const OPENSSL_INIT_NO_LOAD_CONFIG: u64 = 0x0000_0080;
+const ERR_KEY_CTX: &str = "openssl: EVP_PKEY_CTX_new_from_name failed";
+const ERR_RAW_PUBKEY: &str = "openssl: EVP_PKEY_get_raw_public_key failed";
+const ERR_BAD_PUBKEY_LEN: &str = "openssl: non-canonical ML-DSA public key length";
+const ERR_DIGEST_SIGN: &str = "openssl: EVP_DigestSign failed";
+const ERR_BAD_SIG_LEN: &str = "openssl: non-canonical ML-DSA signature length";
 
 static OPENSSL_CONSENSUS_INIT: OnceLock<Result<(), TxError>> = OnceLock::new();
 
@@ -36,16 +42,11 @@ fn read_mldsa87_pubkey(pkey: *mut openssl_sys::EVP_PKEY) -> Result<Vec<u8>, TxEr
         let mut pubkey_len = pubkey.len();
         if ffi::EVP_PKEY_get_raw_public_key(pkey, pubkey.as_mut_ptr(), &mut pubkey_len) <= 0 {
             openssl_sys::EVP_PKEY_free(pkey);
-            return Err(openssl_parse_error(
-                "openssl: EVP_PKEY_get_raw_public_key failed",
-            ));
+            return Err(openssl_parse_error(ERR_RAW_PUBKEY));
         }
         if pubkey_len != ML_DSA_87_PUBKEY_BYTES as usize {
             openssl_sys::EVP_PKEY_free(pkey);
-            return Err(TxError::new(
-                ErrorCode::TxErrSigNoncanonical,
-                "openssl: non-canonical ML-DSA public key length",
-            ));
+            return Err(TxError::new(TxErrSigNoncanonical, ERR_BAD_PUBKEY_LEN));
         }
         Ok(pubkey)
     }
@@ -102,17 +103,11 @@ fn sign_mldsa87_digest(
         ) <= 0
         {
             ffi::EVP_MD_CTX_free(mctx);
-            return Err(TxError::new(
-                ErrorCode::TxErrSigInvalid,
-                "openssl: EVP_DigestSign failed",
-            ));
+            return Err(TxError::new(TxErrSigInvalid, ERR_DIGEST_SIGN));
         }
         ffi::EVP_MD_CTX_free(mctx);
         if sig_len != ML_DSA_87_SIG_BYTES as usize {
-            return Err(TxError::new(
-                ErrorCode::TxErrSigNoncanonical,
-                "openssl: non-canonical ML-DSA signature length",
-            ));
+            return Err(TxError::new(TxErrSigNoncanonical, ERR_BAD_SIG_LEN));
         }
         signature.truncate(sig_len);
         Ok(signature)
@@ -148,9 +143,7 @@ impl Mldsa87Keypair {
                 core::ptr::null(),
             );
             if ctx.is_null() {
-                return Err(openssl_parse_error(
-                    "openssl: EVP_PKEY_CTX_new_from_name failed",
-                ));
+                return Err(openssl_parse_error(ERR_KEY_CTX));
             }
             if openssl_sys::EVP_PKEY_keygen_init(ctx) <= 0 {
                 openssl_sys::EVP_PKEY_CTX_free(ctx);
