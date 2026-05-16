@@ -137,44 +137,21 @@ func DefaultMinerConfig() MinerConfig {
 }
 
 func NewMiner(chainState *ChainState, blockStore *BlockStore, sync *SyncEngine, cfg MinerConfig) (*Miner, error) {
-	if chainState == nil {
-		return nil, errors.New("nil chainstate")
-	}
-	if blockStore == nil {
-		return nil, errors.New("nil blockstore")
-	}
-	if sync == nil {
-		return nil, errors.New("nil sync engine")
-	}
-	// Miner.MineOne calls SyncEngine.BootstrapCanonicalGenesisIfEmpty which
-	// mutates sync.chainState and persists the canonical genesis through
-	// sync.blockStore, then m.buildBlock reads timestamp context from
-	// m.blockStore and the chainstate snapshot from m.chainState. Both
-	// pointers MUST alias the SyncEngine's instances; otherwise the
-	// bootstrap mutation lands in one pair while the miner reads from
-	// another, and the first devnet mine on an empty chain deterministically
-	// fails with "missing canonical hash at height 0 for timestamp context"
-	// (because blockstore is split) or with "genesis_hash mismatch" (because
-	// chainstate is split and the synthetic block hits the height-0 guard).
-	// Reject both split shapes at NewMiner time so misuse cannot reach
-	// runtime.
-	if chainState != sync.chainState {
-		return nil, errors.New("miner chainstate must alias sync engine chainstate")
-	}
-	if blockStore != sync.blockStore {
-		return nil, errors.New("miner blockstore must alias sync engine blockstore")
-	}
-	if cfg.TimestampSource == nil {
-		cfg.TimestampSource = func() uint64 { return unixNowU64() }
-	}
-	if cfg.MaxTxPerBlock <= 0 {
-		cfg.MaxTxPerBlock = 1024
-	}
-	mineAddress, err := normalizeMineAddress(cfg.MineAddress)
-	if err != nil {
+	// Validate inputs
+	if err := validateNewMinerInputs(chainState, blockStore, sync); err != nil {
 		return nil, err
 	}
-	cfg.MineAddress = mineAddress
+
+	// Validate alias requirements
+	if err := validateMinerAliasRequirements(chainState, blockStore, sync); err != nil {
+		return nil, err
+	}
+
+	// Normalize configuration
+	if err := normalizeMinerConfig(&cfg); err != nil {
+		return nil, err
+	}
+
 	return &Miner{
 		chainState: chainState,
 		blockStore: blockStore,
@@ -199,9 +176,12 @@ func (m *Miner) MineN(ctx context.Context, blocks int, txs [][]byte) ([]MinedBlo
 }
 
 func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) {
-	if m == nil || m.chainState == nil || m.blockStore == nil || m.sync == nil {
-		return nil, errors.New("miner is not initialized")
+	// Validate miner state
+	if err := m.validateMineOneInput(); err != nil {
+		return nil, err
 	}
+
+	// Check context cancellation
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
@@ -210,33 +190,13 @@ func (m *Miner) MineOne(ctx context.Context, txs [][]byte) (*MinedBlock, error) 
 		}
 	}
 
-	// Ensure the chain is bootstrapped at the canonical published genesis
-	// before the miner builds any post-genesis block. The height-0 genesis-
-	// identity guard in sync.go rejects miner-synthesized height-0 blocks
-	// under a devnet ChainID (their hashes differ from the published
-	// genesis), so empty-chain mining must start from the published bytes.
-	// BootstrapCanonicalGenesisIfEmpty is idempotent: a no-op once the
-	// chain has a tip and a no-op for ChainIDs without a published canonical
-	// genesis (e.g. the all-zero ChainID used by some unit tests).
-	if err := m.sync.BootstrapCanonicalGenesisIfEmpty(); err != nil {
+	// Bootstrap genesis if needed
+	if err := m.bootstrapGenesisIfNeeded(); err != nil {
 		return nil, err
 	}
 
-	blockBytes, prevTimestamps, timestamp, nonce, txCount, err := m.buildBlock(ctx, txs)
-	if err != nil {
-		return nil, err
-	}
-	summary, err := m.sync.ApplyBlock(blockBytes, prevTimestamps)
-	if err != nil {
-		return nil, err
-	}
-	return &MinedBlock{
-		Height:    summary.BlockHeight,
-		Hash:      summary.BlockHash,
-		Timestamp: timestamp,
-		Nonce:     nonce,
-		TxCount:   txCount,
-	}, nil
+	// Execute mining
+	return m.executeMineOne(ctx, txs)
 }
 
 func (m *Miner) buildBlock(ctx context.Context, txs [][]byte) ([]byte, []uint64, uint64, uint64, int, error) {
@@ -488,44 +448,30 @@ func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
 }
 
 func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
+	var reject bool
+	var err error
+
+	// Apply DA anti-abuse policy if enabled
 	if m.cfg.PolicyDaAnchorAntiAbuse {
-		var currentMin uint64
-		if fn := m.cfg.CurrentMempoolMinFeeRateFn; fn != nil {
-			currentMin = fn()
-		} else {
-			currentMin = m.cfg.CurrentMempoolMinFeeRate
-		}
-		if currentMin < DefaultMempoolMinFeeRate {
-			currentMin = DefaultMempoolMinFeeRate
-		}
-		reject, daBytes, _, err := RejectDaAnchorTxPolicy(
-			tx,
-			utxos,
-			currentMin,
-			m.cfg.MinDaFeeRate,
-			m.cfg.PolicyDaSurchargePerByte,
-		)
+		reject, policyDaIncluded, err = m.rejectCandidateDAPolicy(tx, utxos, policyDaIncluded)
 		if err != nil {
 			return false, policyDaIncluded, err
 		}
 		if reject {
 			return true, policyDaIncluded, nil
 		}
-		nextDaIncluded, ok := updatedPolicyDaBytes(policyDaIncluded, daBytes, m.cfg.PolicyMaxDaBytesPerBlock)
-		if !ok {
+
+		// Apply anchor policy ONLY when DA anti-abuse is enabled (original behavior)
+		reject, err = m.rejectCandidateAnchorPolicy(tx)
+		if err != nil {
+			return false, policyDaIncluded, err
+		}
+		if reject {
 			return true, policyDaIncluded, nil
 		}
-		policyDaIncluded = nextDaIncluded
-		if m.cfg.PolicyRejectNonCoinbaseAnchorOutputs {
-			reject, _, err := RejectNonCoinbaseAnchorOutputs(tx)
-			if err != nil {
-				return false, policyDaIncluded, err
-			}
-			if reject {
-				return true, policyDaIncluded, nil
-			}
-		}
 	}
+
+	// Apply CoreExt policy
 	if m.cfg.PolicyRejectCoreExtPreActivation {
 		reject, _, err := RejectCoreExtTxPreActivation(tx, utxos, nextHeight, m.cfg.CoreExtProfiles)
 		if err != nil {
@@ -535,6 +481,7 @@ func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]c
 			return true, policyDaIncluded, nil
 		}
 	}
+
 	return false, policyDaIncluded, nil
 }
 
