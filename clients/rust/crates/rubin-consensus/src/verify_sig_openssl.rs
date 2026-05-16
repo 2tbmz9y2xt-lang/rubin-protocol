@@ -355,6 +355,10 @@ pub(crate) fn openssl_verify_sig_digest_oneshot(
         return Err(TxError::new(ErrorCode::TxErrParse, "openssl: empty input"));
     }
 
+    // SAFETY: alg is a static OpenSSL algorithm name, and pubkey, signature,
+    // and msg are immutable slices whose pointers remain valid for each FFI
+    // call. This block owns pkey and mctx after allocation and frees both on
+    // every error and success path before returning.
     unsafe {
         openssl_sys::ERR_clear_error();
 
