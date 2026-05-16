@@ -5157,3 +5157,42 @@ func TestMempoolStatsFeeFloorRejectionDoesNotCount(t *testing.T) {
 		t.Fatalf("EvictedResidentTotal after fee-floor rejection=%d, want 0", got)
 	}
 }
+
+func TestExtractTxInputsReturnsCorrectOutpoints(t *testing.T) {
+	checked := &consensus.CheckedTransaction{
+		Tx: &consensus.Tx{
+			Inputs: []consensus.TxInput{
+				{PrevTxid: [32]byte{0x01}, PrevVout: 7},
+				{PrevTxid: [32]byte{0x02}, PrevVout: 3},
+				{PrevTxid: [32]byte{0xff}, PrevVout: 0},
+			},
+		},
+	}
+	inputs := extractTxInputs(checked)
+	if len(inputs) != 3 {
+		t.Fatalf("got %d inputs, want 3", len(inputs))
+	}
+	for i, want := range []struct {
+		txid [32]byte
+		vout uint32
+	}{
+		{[32]byte{0x01}, 7},
+		{[32]byte{0x02}, 3},
+		{[32]byte{0xff}, 0},
+	} {
+		if inputs[i].Txid != want.txid || inputs[i].Vout != want.vout {
+			t.Fatalf("input[%d] = {%x, %d}, want {%x, %d}", i, inputs[i].Txid, inputs[i].Vout, want.txid, want.vout)
+		}
+	}
+}
+
+func TestValidateChainSnapshotRejectsNil(t *testing.T) {
+	_, err := validateChainSnapshot(nil)
+	if err == nil {
+		t.Fatal("expected error for nil snapshot")
+	}
+	var admit *TxAdmitError
+	if !errors.As(err, &admit) || admit.Kind != TxAdmitUnavailable {
+		t.Fatalf("expected TxAdmitUnavailable, got %T %v", err, err)
+	}
+}
