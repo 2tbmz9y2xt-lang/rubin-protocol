@@ -77,28 +77,24 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 	if err := validateProductionRotationScheduleWire(wire); err != nil {
 		return nil, nil, err
 	}
-	schedule := &productionRotationSchedule{
-		Version:  wire.Version,
-		Networks: make(map[string]*consensus.CryptoRotationDescriptor, len(wire.Networks)),
-	}
+
+	// Initialize schedule structure
+	schedule := initializeRotationSchedule(wire)
+
+	// Parse descriptors
 	parsedDescriptors, err := parseProductionRotationScheduleDescriptors(wire.Networks)
 	if err != nil {
 		return nil, nil, err
 	}
-	// The compiled production schedule is activation-only authority. When the
-	// caller does not supply an explicit canonical registry contract, fail
-	// closed to the default live manifest instead of synthesizing suite params
-	// from schedule IDs.
-	if registry == nil {
-		registry = consensus.DefaultSuiteRegistry()
+
+	// Default registry to DefaultSuiteRegistry when nil is passed.
+	registry = ensureRegistry(registry)
+
+	// Build descriptors for all networks
+	if err := buildProductionRotationScheduleNetworks(parsedDescriptors, schedule, registry); err != nil {
+		return nil, nil, err
 	}
-	for _, network := range []string{"mainnet", "testnet"} {
-		desc, err := buildProductionRotationScheduleDescriptor(parsedDescriptors[network], network, registry)
-		if err != nil {
-			return nil, nil, err
-		}
-		schedule.Networks[network] = desc
-	}
+
 	return schedule, registry, nil
 }
 
