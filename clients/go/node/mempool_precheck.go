@@ -109,9 +109,6 @@ func (m *Mempool) checkTransactionWithSnapshot(txBytes []byte, snapshot *chainSt
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
-	inputs := make([]consensus.Outpoint, 0, len(checked.Tx.Inputs))
-	for _, in := range checked.Tx.Inputs {
-		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
-	}
+	inputs := extractTxInputs(checked)
 	return checked, inputs, nil
 }

@@ -508,54 +508,37 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	snapshot *chainStateAdmissionSnapshot,
 	policy MempoolConfig,
 ) (*consensus.CheckedTransaction, []consensus.Outpoint, error) {
-	if snapshot == nil {
-		return nil, nil, txAdmitUnavailable("nil chainstate")
-	}
-	nextHeight, _, err := nextBlockContextFromFields(snapshot.hasTip, snapshot.height, snapshot.tipHash)
+	// Validate chain snapshot and extract next height
+	nextHeight, err := validateChainSnapshot(snapshot)
 	if err != nil {
-		return nil, nil, txAdmitUnavailable(err.Error())
+		return nil, nil, err
 	}
 
+	// Get block MTP
 	blockMTP, err := m.nextBlockMTP(nextHeight)
 	if err != nil {
 		return nil, nil, txAdmitUnavailable(err.Error())
 	}
 
-	var policyUtxos map[consensus.Outpoint]consensus.UtxoEntry
-	needs, err := policyNeedsInputSnapshotForTx(tx, policy)
+	// Prepare policy UTXOs if needed
+	policyUtxos, err := buildPolicyInputSnapshotIfNeeded(tx, snapshot, policy)
 	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
-	}
-	if needs {
-		policyUtxos, err = policyInputSnapshot(tx, snapshot.utxos)
-		if err != nil {
-			return nil, nil, txAdmitRejected(err.Error())
-		}
+		return nil, nil, err
 	}
 
-	checked, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
-		txBytes,
-		tx,
-		txid,
-		wtxid,
-		snapshot.utxos,
-		nextHeight,
-		blockMTP,
-		m.chainID,
-		policy.CoreExtProfiles,
-		policy.RotationProvider,
-		policy.SuiteRegistry,
-	)
+	// Perform consensus validation
+	checked, err := m.validateTransactionWithConsensus(txBytes, tx, txid, wtxid, snapshot, nextHeight, blockMTP, policy)
 	if err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
+		return nil, nil, err
 	}
+
+	// Apply policy validation
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
 		return nil, nil, txAdmitRejected(err.Error())
 	}
-	inputs := make([]consensus.Outpoint, 0, len(checked.Tx.Inputs))
-	for _, in := range checked.Tx.Inputs {
-		inputs = append(inputs, consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout})
-	}
+
+	// Extract inputs and return
+	inputs := extractTxInputs(checked)
 	return checked, inputs, nil
 }
 
@@ -563,69 +546,26 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 	if checked == nil || checked.Tx == nil {
 		return errors.New("nil checked transaction")
 	}
-	if policy.PolicyRejectNonCoinbaseAnchorOutputs {
-		reject, reason, err := RejectNonCoinbaseAnchorOutputs(checked.Tx)
-		if err != nil {
-			return err
-		}
-		if reject {
-			return errors.New(reason)
-		}
+	// Apply non-coinbase anchor output policy
+	if err := applyPolicyAgainstStateAnchor(checked, policy); err != nil {
+		return err
 	}
-	// Stage C DA fee policy: only enter the helper for DA-bearing tx when
-	// the DA-side floor is configured (MinDaFeeRate > 0) or a per-byte
-	// surcharge applies. Non-DA tx skip the helper entirely on the hot
-	// admit path; their relay-floor handling remains in
-	// validateFeeFloorLocked.
-	//
-	// The mempool admit path enforces the rolling relay-fee floor through
-	// validateFeeFloorLocked (TxAdmitUnavailable — transient/retryable),
-	// so this caller intentionally passes currentMempoolMinFeeRate=0 so
-	// max(relay_fee_floor, da_required_fee) collapses to da_required_fee.
-	// Without the zero override, a DA tx that pays the DA-side floor but
-	// not the rolling relay floor would surface here as TxAdmitRejected
-	// ("DA fee below Stage C floor ... relay_fee_floor=...") instead of
-	// the symmetric TxAdmitUnavailable that non-DA tx receive from
-	// validateFeeFloorLocked. With currentMin=0 the helper enforces only
-	// the DA-specific terms and validateFeeFloorLocked owns relay-floor
-	// classification uniformly for both DA and non-DA admissions.
-	//
-	// The miner caller (rejectCandidate) keeps using the live rolling
-	// floor because it has no validateFeeFloorLocked equivalent — the
-	// miner template needs to skip a tx whenever it fails any floor.
-	if checked.DaBytes > 0 && (policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0) {
-		reject, _, reason, err := RejectDaAnchorTxPolicy(
-			checked.Tx,
-			utxos,
-			0,
-			policy.MinDaFeeRate,
-			policy.PolicyDaSurchargePerByte,
-		)
-		if err != nil {
-			return txAdmitRejected(fmt.Sprintf("%s: %v", reason, err))
-		}
-		if reject {
-			return txAdmitRejected(reason)
-		}
+
+	// Apply DA fee policy
+	if err := applyPolicyAgainstStateDA(checked, policy, utxos); err != nil {
+		return err
 	}
-	if policy.PolicyRejectCoreExtPreActivation {
-		reject, reason, err := RejectCoreExtTxPreActivation(checked.Tx, utxos, nextHeight, policy.CoreExtProfiles)
-		if err != nil {
-			return err
-		}
-		if reject {
-			return errors.New(reason)
-		}
+
+	// Apply CoreExt policy
+	if err := applyPolicyAgainstStateCoreExt(checked, utxos, nextHeight, policy); err != nil {
+		return err
 	}
-	if policy.PolicyMaxExtPayloadBytes > 0 {
-		reject, reason, err := RejectCoreExtTxOversizedPayload(checked.Tx, policy.PolicyMaxExtPayloadBytes)
-		if err != nil {
-			return err
-		}
-		if reject {
-			return errors.New(reason)
-		}
+
+	// Apply payload size policy
+	if err := applyPolicyAgainstStatePayload(checked, policy); err != nil {
+		return err
 	}
+
 	return nil
 }
 
@@ -640,22 +580,31 @@ func prevTimestampsFromStore(store *BlockStore, nextHeight uint64) ([]uint64, er
 	out := make([]uint64, 0, k)
 	for i := uint64(0); i < k; i++ {
 		height := nextHeight - 1 - i
-		hash, ok, err := store.CanonicalHash(height)
+		timestamp, err := getBlockTimestamp(store, height, nextHeight)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			return nil, fmt.Errorf("missing canonical hash at height %d for timestamp context (next_height=%d)", height, nextHeight)
-		}
-		headerBytes, err := store.GetHeaderByHash(hash)
-		if err != nil {
-			return nil, err
-		}
-		header, err := consensus.ParseBlockHeaderBytes(headerBytes)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, header.Timestamp)
+		out = append(out, timestamp)
 	}
 	return out, nil
+}
+
+// getBlockTimestamp retrieves the timestamp from a block at the given height
+func getBlockTimestamp(store *BlockStore, height, nextHeight uint64) (uint64, error) {
+	hash, ok, err := store.CanonicalHash(height)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("missing canonical hash at height %d for timestamp context (next_height=%d)", height, nextHeight)
+	}
+	headerBytes, err := store.GetHeaderByHash(hash)
+	if err != nil {
+		return 0, err
+	}
+	header, err := consensus.ParseBlockHeaderBytes(headerBytes)
+	if err != nil {
+		return 0, err
+	}
+	return header.Timestamp, nil
 }
