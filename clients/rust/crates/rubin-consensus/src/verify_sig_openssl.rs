@@ -137,6 +137,7 @@ impl Mldsa87Keypair {
             // canonical suite registry. ctx is freed on every error path after
             // allocation. On successful keygen, pkey ownership is either consumed
             // by read_mldsa87_pubkey on failure or stored in Mldsa87Keypair.
+            // If keygen fails after writing pkey, this path frees it below.
             openssl_sys::ERR_clear_error();
             let ctx = ffi::EVP_PKEY_CTX_new_from_name(
                 core::ptr::null_mut(),
@@ -153,6 +154,9 @@ impl Mldsa87Keypair {
             let mut pkey: *mut openssl_sys::EVP_PKEY = core::ptr::null_mut();
             if openssl_sys::EVP_PKEY_keygen(ctx, &mut pkey) <= 0 || pkey.is_null() {
                 openssl_sys::EVP_PKEY_CTX_free(ctx);
+                if !pkey.is_null() {
+                    openssl_sys::EVP_PKEY_free(pkey);
+                }
                 return Err(openssl_parse_error("openssl: EVP_PKEY_keygen failed"));
             }
             openssl_sys::EVP_PKEY_CTX_free(ctx);
