@@ -50,10 +50,6 @@ fn selected_network(tag: u8) -> &'static str {
     }
 }
 
-fn max_peers_tag() -> u8 {
-    u8::try_from(MAX_PEERS).expect("fuzz MAX_PEERS fits u8")
-}
-
 fn build_peer_state(addr: String) -> PeerState {
     PeerState {
         addr,
@@ -142,7 +138,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let peer_count = usize::from(data[0] % (max_peers_tag() + 1));
+    let max_peers_tag = u8::try_from(MAX_PEERS).expect("fuzz MAX_PEERS fits u8");
+    let peer_count = usize::from(data[0] % (max_peers_tag + 1));
     let network = selected_network(data[1]);
     let mode = data[2];
     let tx_bytes = sample_tx_bytes(mode, &data[3..]);
