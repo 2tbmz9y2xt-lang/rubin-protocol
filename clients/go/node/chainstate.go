@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -295,6 +296,35 @@ func sortOutpointsDeterministically(outpoints []consensus.Outpoint) {
 	})
 }
 
+// UtxoSetHash returns the deterministic SHA3-256 digest over the current UTXO
+// set. It is bit-identical with the Rust node ChainState::utxo_set_hash() and
+// uses the same canonical encoding as consensus.UtxoSetHash (which produces
+// PostStateDigest in ConnectBlock summaries). On a nil receiver returns the
+// digest of an empty UTXO map for definedness.
+//
+// Cost: O(n log n) over the entire UTXO set (sort by outpoint canonical key)
+// plus one SHA3-256 hash + per-entry allocations for the canonical encoding.
+// Intended for low-frequency inspection / parity-vector verification — do
+// NOT call from hot paths or polling loops. If a caller needs incremental
+// digest updates, fold the maintenance into ConnectBlock / DisconnectTip
+// instead of calling this.
+func (s *ChainState) UtxoSetHash() [32]byte {
+	if s == nil {
+		return consensus.UtxoSetHash(nil)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return consensus.UtxoSetHash(s.Utxos)
+}
+
+// StateDigest is an alias for UtxoSetHash that mirrors the Rust node
+// ChainState::state_digest() surface. Today the chain state digest is exactly
+// the UTXO set hash; the two names are kept in parity with Rust so that
+// inspection callers can reach for either spelling.
+func (s *ChainState) StateDigest() [32]byte {
+	return s.UtxoSetHash()
+}
+
 func ChainStatePath(dataDir string) string {
 	return filepath.Join(dataDir, chainStateFileName)
 }
@@ -450,6 +480,27 @@ func parseHex32(name, value string) ([32]byte, error) {
 	}
 	copy(out[:], raw)
 	return out, nil
+}
+
+func nextBlockContext(s *ChainState) (uint64, *[32]byte, error) {
+	if s == nil {
+		return 0, nil, errors.New("nil chainstate")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return nextBlockContextFromFields(s.HasTip, s.Height, s.TipHash)
+}
+
+func nextBlockContextFromFields(hasTip bool, height uint64, tipHash [32]byte) (uint64, *[32]byte, error) {
+	if !hasTip {
+		return 0, nil, nil
+	}
+	if height == math.MaxUint64 {
+		return 0, nil, errors.New("height overflow")
+	}
+	nextHeight := height + 1
+	prev := tipHash
+	return nextHeight, &prev, nil
 }
 
 // writeFileAtomic writes data to path via a temp+rename pattern with an
