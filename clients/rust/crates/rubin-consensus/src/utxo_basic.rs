@@ -1371,8 +1371,10 @@ mod tests {
 
     fn htlc_selector_payload(preimage: &[u8]) -> Vec<u8> {
         let mut payload = Vec::with_capacity(3 + preimage.len());
+        let preimage_len =
+            u16::try_from(preimage.len()).expect("test htlc preimage length fits u16");
         payload.push(0x00);
-        payload.extend_from_slice(&(preimage.len() as u16).to_le_bytes());
+        payload.extend_from_slice(&preimage_len.to_le_bytes());
         payload.extend_from_slice(preimage);
         payload
     }
