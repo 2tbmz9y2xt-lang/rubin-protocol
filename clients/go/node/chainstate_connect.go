@@ -153,7 +153,10 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 	if err := s.applyConnectedBlockLocked(blockHeight, blockHash, &workState); err != nil {
 		return nil, err
 	}
-	return chainStateParallelConnectSummary(blockHeight, blockHash, summary), nil
+	out := chainStateConnectSummary(blockHeight, blockHash, summary)
+	out.SigTaskCount = summary.SigTaskCount
+	out.WorkerPanics = summary.WorkerPanics
+	return out, nil
 }
 
 func (s *ChainState) connectBlockWorkStateLocked(copyUtxos bool) (uint64, *[32]byte, consensus.InMemoryChainState, error) {
@@ -206,11 +209,4 @@ func chainStateConnectSummary(blockHeight uint64, blockHash [32]byte, summary *c
 		UtxoCount:          summary.UtxoCount,
 		PostStateDigest:    summary.PostStateDigest,
 	}
-}
-
-func chainStateParallelConnectSummary(blockHeight uint64, blockHash [32]byte, summary *consensus.ConnectBlockBasicSummary) *ChainStateConnectSummary {
-	out := chainStateConnectSummary(blockHeight, blockHash, summary)
-	out.SigTaskCount = summary.SigTaskCount
-	out.WorkerPanics = summary.WorkerPanics
-	return out
 }

@@ -637,21 +637,17 @@ func writeFileIfAbsent(path string, content []byte) error {
 			// syncDir already applies the permission policy, so
 			// returning its error surfaces only real durability
 			// failures.
-			return syncExistingFileAfterLink(path, content)
+			existing, err := readFileByPathFn(path)
+			if err != nil {
+				return fmt.Errorf("read existing after link EEXIST %s: %w", path, err)
+			}
+			return syncMatchingExistingFile(path, content, existing)
 		}
 		return fmt.Errorf("link %s -> %s: %w", tmpPath, path, linkErr)
 	}
 	// The new directory entry for `path` must reach stable storage too;
 	// temp's sync_all only covered the inode's data, not the dir.
 	return syncDir(filepath.Dir(path))
-}
-
-func syncExistingFileAfterLink(path string, content []byte) error {
-	existing, err := readFileByPathFn(path)
-	if err != nil {
-		return fmt.Errorf("read existing after link EEXIST %s: %w", path, err)
-	}
-	return syncMatchingExistingFile(path, content, existing)
 }
 
 func syncMatchingExistingFile(path string, content []byte, existing []byte) error {
