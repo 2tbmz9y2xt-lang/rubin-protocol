@@ -113,7 +113,8 @@ fn htlc_entry(covenant_data: Vec<u8>) -> UtxoEntry {
 
 fn htlc_claim_selector(selector_key_id: [u8; 32], preimage: &[u8]) -> WitnessItem {
     let mut sig = vec![0x00];
-    sig.extend_from_slice(&(preimage.len() as u16).to_le_bytes());
+    let preimage_len = u16::try_from(preimage.len()).expect("test preimage length fits u16");
+    sig.extend_from_slice(&preimage_len.to_le_bytes());
     sig.extend_from_slice(preimage);
     WitnessItem {
         suite_id: SUITE_ID_SENTINEL,
@@ -128,6 +129,81 @@ fn htlc_refund_selector(selector_key_id: [u8; 32]) -> WitnessItem {
         pubkey: selector_key_id.to_vec(),
         signature: vec![0x01],
     }
+}
+
+fn sentinel_witness(pubkey: Vec<u8>, signature: Vec<u8>) -> WitnessItem {
+    WitnessItem {
+        suite_id: SUITE_ID_SENTINEL,
+        pubkey,
+        signature,
+    }
+}
+
+fn mldsa_witness(pubkey_fill: u8, signature_fill: u8) -> WitnessItem {
+    WitnessItem {
+        suite_id: SUITE_ID_ML_DSA_87,
+        pubkey: mldsa_pubkey(pubkey_fill),
+        signature: mldsa_signature(signature_fill),
+    }
+}
+
+fn invalid_sig_alg_witness() -> WitnessItem {
+    WitnessItem {
+        suite_id: 0xff,
+        pubkey: vec![],
+        signature: vec![],
+    }
+}
+
+fn htlc_spend_error_code(
+    entry: &UtxoEntry,
+    path: &WitnessItem,
+    sig: &WitnessItem,
+    block_height: u64,
+    block_time: u64,
+) -> ErrorCode {
+    validate_htlc_spend(
+        entry,
+        path,
+        sig,
+        &base_tx(),
+        0,
+        100,
+        dummy_chain_id(),
+        block_height,
+        block_time,
+    )
+    .unwrap_err()
+    .code
+}
+
+fn assert_htlc_error_code(
+    entry: &UtxoEntry,
+    path: &WitnessItem,
+    sig: &WitnessItem,
+    block_height: u64,
+    block_time: u64,
+    expected: ErrorCode,
+) {
+    assert_eq!(
+        htlc_spend_error_code(entry, path, sig, block_height, block_time),
+        expected
+    );
+}
+
+fn assert_mature_htlc_error_code(
+    entry: &UtxoEntry,
+    path: &WitnessItem,
+    sig: &WitnessItem,
+    expected: ErrorCode,
+) {
+    assert_htlc_error_code(entry, path, sig, 0, 100, expected);
+}
+
+fn threshold_spend_error_code(keys: &[[u8; 32]], ws: &[WitnessItem]) -> ErrorCode {
+    validate_threshold_sig_spend(keys, 1, ws, &base_tx(), 0, 100, dummy_chain_id(), 0, "ctx")
+        .unwrap_err()
+        .code
 }
 
 fn openssl_env_lock() -> &'static Mutex<()> {
@@ -257,167 +333,59 @@ fn parse_htlc_covenant_data_rejects_invalid_variants() {
 fn validate_htlc_spend_rejects_selector_shape_errors() {
     let (claim_key_id, _, _, cov) = htlc_components(LOCK_MODE_HEIGHT, 5);
     let entry = htlc_entry(cov);
-    let path = WitnessItem {
+    let sig = mldsa_witness(1, 2);
+    let wrong_suite = WitnessItem {
         suite_id: 1,
         pubkey: vec![],
         signature: vec![],
     };
-    let sig = WitnessItem {
-        suite_id: SUITE_ID_ML_DSA_87,
-        pubkey: mldsa_pubkey(1),
-        signature: mldsa_signature(2),
-    };
-    let err = validate_htlc_spend(
-        &entry,
-        &path,
-        &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        0,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_htlc_error_code(&entry, &wrong_suite, &sig, 0, 0, ErrorCode::TxErrParse);
 
-    let path = WitnessItem {
-        suite_id: SUITE_ID_SENTINEL,
-        pubkey: claim_key_id.to_vec(),
-        signature: vec![],
-    };
-    let err = validate_htlc_spend(
-        &entry,
-        &path,
-        &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        0,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    let empty_signature = sentinel_witness(claim_key_id.to_vec(), vec![]);
+    assert_htlc_error_code(&entry, &empty_signature, &sig, 0, 0, ErrorCode::TxErrParse);
 
-    let path = WitnessItem {
-        suite_id: SUITE_ID_SENTINEL,
-        pubkey: vec![1],
-        signature: vec![0],
-    };
-    let err = validate_htlc_spend(
-        &entry,
-        &path,
-        &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        0,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    let bad_key_len = sentinel_witness(vec![1], vec![0]);
+    assert_htlc_error_code(&entry, &bad_key_len, &sig, 0, 0, ErrorCode::TxErrParse);
 }
 
 #[test]
 fn validate_htlc_spend_rejects_claim_path_errors() {
     let (claim_key_id, _, preimage, cov) = htlc_components(LOCK_MODE_HEIGHT, 5);
     let entry = htlc_entry(cov);
-    let short = WitnessItem {
-        suite_id: SUITE_ID_SENTINEL,
-        pubkey: claim_key_id.to_vec(),
-        signature: vec![0x00, 0x01],
-    };
-    let sig = WitnessItem {
-        suite_id: SUITE_ID_ML_DSA_87,
-        pubkey: mldsa_pubkey(1),
-        signature: mldsa_signature(2),
-    };
-    let err = validate_htlc_spend(
-        &entry,
-        &short,
-        &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        0,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    let sig = mldsa_witness(1, 2);
+    let short = sentinel_witness(claim_key_id.to_vec(), vec![0x00, 0x01]);
+    assert_htlc_error_code(&entry, &short, &sig, 0, 0, ErrorCode::TxErrParse);
 
     let tiny_preimage = htlc_claim_selector(claim_key_id, &[1; 8]);
-    let err = validate_htlc_spend(
-        &entry,
-        &tiny_preimage,
-        &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        0,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_htlc_error_code(&entry, &tiny_preimage, &sig, 0, 0, ErrorCode::TxErrParse);
 
-    let overflow_preimage = WitnessItem {
-        suite_id: SUITE_ID_SENTINEL,
-        pubkey: claim_key_id.to_vec(),
-        signature: {
-            let mut s = vec![0x00];
-            s.extend_from_slice(&257u16.to_le_bytes());
-            s.extend_from_slice(&vec![0u8; 257]);
-            s
-        },
-    };
-    let err = validate_htlc_spend(
+    let mut overflow_sig = vec![0x00];
+    overflow_sig.extend_from_slice(&257u16.to_le_bytes());
+    overflow_sig.extend_from_slice(&vec![0u8; 257]);
+    let overflow_preimage = sentinel_witness(claim_key_id.to_vec(), overflow_sig);
+    assert_htlc_error_code(
         &entry,
         &overflow_preimage,
         &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
         0,
         0,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+        ErrorCode::TxErrParse,
+    );
 
     let mut bad_preimage = preimage;
     bad_preimage[0] ^= 0xff;
     let path = htlc_claim_selector(claim_key_id, &bad_preimage);
-    let err = validate_htlc_spend(
-        &entry,
-        &path,
-        &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        0,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    assert_htlc_error_code(&entry, &path, &sig, 0, 0, ErrorCode::TxErrSigInvalid);
 
     let wrong_selector = htlc_claim_selector([0x33; 32], &preimage);
-    let err = validate_htlc_spend(
+    assert_htlc_error_code(
         &entry,
         &wrong_selector,
         &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
         0,
         0,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        ErrorCode::TxErrSigInvalid,
+    );
 }
 
 #[test]
@@ -425,121 +393,39 @@ fn validate_htlc_spend_rejects_refund_and_signature_errors() {
     let (_, refund_key_id, _, cov) = htlc_components(LOCK_MODE_TIMESTAMP, 50);
     let entry = htlc_entry(cov);
     let path = htlc_refund_selector(refund_key_id);
-    let bad_sig = WitnessItem {
-        suite_id: 0xff,
-        pubkey: vec![],
-        signature: vec![],
-    };
-    let err = validate_htlc_spend(
+    let bad_sig = invalid_sig_alg_witness();
+    assert_htlc_error_code(
         &entry,
         &path,
         &bad_sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
         0,
         10,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrTimelockNotMet);
+        ErrorCode::TxErrTimelockNotMet,
+    );
 
-    let path = htlc_refund_selector(refund_key_id);
     let sig = WitnessItem {
         suite_id: SUITE_ID_ML_DSA_87,
         pubkey: mldsa_pubkey(1),
         signature: vec![0],
     };
-    let err = validate_htlc_spend(
-        &entry,
-        &path,
-        &sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        100,
-    )
-    .unwrap_err();
     assert!(matches!(
-        err.code,
+        htlc_spend_error_code(&entry, &path, &sig, 0, 100),
         ErrorCode::TxErrSigNoncanonical
             | ErrorCode::TxErrSigInvalid
             | ErrorCode::TxErrSighashTypeInvalid
     ));
 
     let wrong_path = htlc_refund_selector([0x77; 32]);
-    let err = validate_htlc_spend(
-        &entry,
-        &wrong_path,
-        &bad_sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        100,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    assert_mature_htlc_error_code(&entry, &wrong_path, &bad_sig, ErrorCode::TxErrSigInvalid);
 
-    let malformed_refund = WitnessItem {
-        suite_id: SUITE_ID_SENTINEL,
-        pubkey: refund_key_id.to_vec(),
-        signature: vec![0x01, 0x00],
-    };
-    let err = validate_htlc_spend(
-        &entry,
-        &malformed_refund,
-        &bad_sig,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        100,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    let malformed_refund = sentinel_witness(refund_key_id.to_vec(), vec![0x01, 0x00]);
+    assert_mature_htlc_error_code(&entry, &malformed_refund, &bad_sig, ErrorCode::TxErrParse);
 
-    let good_sig_shape = WitnessItem {
-        suite_id: SUITE_ID_ML_DSA_87,
-        pubkey: mldsa_pubkey(9),
-        signature: mldsa_signature(8),
-    };
-    let err = validate_htlc_spend(
-        &entry,
-        &path,
-        &good_sig_shape,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        100,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    let good_sig_shape = mldsa_witness(9, 8);
+    assert_mature_htlc_error_code(&entry, &path, &good_sig_shape, ErrorCode::TxErrSigInvalid);
 
-    let wrong_suite = WitnessItem {
-        suite_id: 0xff,
-        pubkey: vec![],
-        signature: vec![],
-    };
-    let err = validate_htlc_spend(
-        &entry,
-        &path,
-        &wrong_suite,
-        &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        0,
-        100,
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+    let wrong_suite = invalid_sig_alg_witness();
+    assert_mature_htlc_error_code(&entry, &path, &wrong_suite, ErrorCode::TxErrSigAlgInvalid);
 }
 
 #[test]
@@ -574,80 +460,44 @@ fn validate_p2pk_spend_rejects_canonicality_and_binding_errors() {
 
 #[test]
 fn validate_threshold_sig_spend_rejects_assignment_and_threshold_errors() {
-    let tx = base_tx();
     let keys = vec![[1u8; 32], [2u8; 32]];
-    let ws = vec![WitnessItem {
-        suite_id: SUITE_ID_SENTINEL,
-        pubkey: vec![],
-        signature: vec![],
-    }];
-    let err = validate_threshold_sig_spend(&keys, 1, &ws, &tx, 0, 100, dummy_chain_id(), 0, "ctx")
-        .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    let empty_selector = sentinel_witness(vec![], vec![]);
+    let bad_selector_key = sentinel_witness(vec![1], vec![]);
 
-    let ws = vec![
-        WitnessItem {
-            suite_id: SUITE_ID_SENTINEL,
-            pubkey: vec![1],
-            signature: vec![],
-        },
-        WitnessItem {
-            suite_id: SUITE_ID_SENTINEL,
-            pubkey: vec![],
-            signature: vec![],
-        },
-    ];
-    let err = validate_threshold_sig_spend(&keys, 1, &ws, &tx, 0, 100, dummy_chain_id(), 0, "ctx")
-        .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrParse);
+    let ws = vec![empty_selector.clone()];
+    assert_eq!(
+        threshold_spend_error_code(&keys, &ws),
+        ErrorCode::TxErrParse
+    );
 
-    let ws = vec![
-        WitnessItem {
-            suite_id: SUITE_ID_SENTINEL,
-            pubkey: vec![],
-            signature: vec![],
-        },
-        WitnessItem {
-            suite_id: SUITE_ID_SENTINEL,
-            pubkey: vec![],
-            signature: vec![],
-        },
-    ];
-    let err = validate_threshold_sig_spend(&keys, 1, &ws, &tx, 0, 100, dummy_chain_id(), 0, "ctx")
-        .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    let ws = vec![bad_selector_key, empty_selector.clone()];
+    assert_eq!(
+        threshold_spend_error_code(&keys, &ws),
+        ErrorCode::TxErrParse
+    );
 
-    let ws = vec![
-        WitnessItem {
-            suite_id: SUITE_ID_ML_DSA_87,
-            pubkey: vec![1],
-            signature: vec![1],
-        },
-        WitnessItem {
-            suite_id: SUITE_ID_SENTINEL,
-            pubkey: vec![],
-            signature: vec![],
-        },
-    ];
-    let err = validate_threshold_sig_spend(&keys, 1, &ws, &tx, 0, 100, dummy_chain_id(), 0, "ctx")
-        .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
+    let ws = vec![empty_selector.clone(), empty_selector.clone()];
+    assert_eq!(
+        threshold_spend_error_code(&keys, &ws),
+        ErrorCode::TxErrSigInvalid
+    );
 
-    let ws = vec![
-        WitnessItem {
-            suite_id: SUITE_ID_ML_DSA_87,
-            pubkey: mldsa_pubkey(1),
-            signature: mldsa_signature(2),
-        },
-        WitnessItem {
-            suite_id: SUITE_ID_SENTINEL,
-            pubkey: vec![],
-            signature: vec![],
-        },
-    ];
-    let err = validate_threshold_sig_spend(&keys, 1, &ws, &tx, 0, 100, dummy_chain_id(), 0, "ctx")
-        .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+    let bad_sig_shape = WitnessItem {
+        suite_id: SUITE_ID_ML_DSA_87,
+        pubkey: vec![1],
+        signature: vec![1],
+    };
+    let ws = vec![bad_sig_shape, empty_selector.clone()];
+    assert_eq!(
+        threshold_spend_error_code(&keys, &ws),
+        ErrorCode::TxErrSigNoncanonical
+    );
+
+    let ws = vec![mldsa_witness(1, 2), empty_selector];
+    assert_eq!(
+        threshold_spend_error_code(&keys, &ws),
+        ErrorCode::TxErrSigInvalid
+    );
 }
 
 #[test]
