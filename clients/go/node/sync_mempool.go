@@ -40,51 +40,12 @@ func restoreMempoolSnapshot(m *Mempool, snapshot mempoolSnapshot) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	maxTxs := m.maxTxs
-	maxBytes := m.maxBytes
-	if maxTxs <= 0 || maxBytes <= 0 {
-		return fmt.Errorf("invalid mempool snapshot restore limits: max_txs=%d max_bytes=%d", maxTxs, maxBytes)
+	if m.maxTxs <= 0 || m.maxBytes <= 0 {
+		return fmt.Errorf("invalid mempool snapshot restore limits: max_txs=%d max_bytes=%d", m.maxTxs, m.maxBytes)
 	}
-	txs := make(map[[32]byte]*mempoolEntry, len(snapshot.entries))
-	wtxids := make(map[[32]byte][32]byte, len(snapshot.entries))
-	spenders := make(map[consensus.Outpoint][32]byte)
-	admissionSeqs := make(map[uint64][32]byte, len(snapshot.entries))
-	usedBytes := 0
-	var maxAdmissionSeq uint64
-	for _, item := range snapshot.entries {
-		entry := cloneMempoolEntry(&item)
-		if _, exists := txs[entry.txid]; exists {
-			return fmt.Errorf("duplicate mempool snapshot txid %x", entry.txid)
-		}
-		if existing, exists := wtxids[entry.wtxid]; exists {
-			return fmt.Errorf("duplicate mempool snapshot wtxid %x existing=%x new=%x", entry.wtxid, existing, entry.txid)
-		}
-		if err := validateMempoolSnapshotEntry(entry); err != nil {
-			return err
-		}
-		if existing, exists := admissionSeqs[entry.admissionSeq]; exists {
-			return fmt.Errorf("duplicate mempool snapshot admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid)
-		}
-		if len(txs) >= maxTxs {
-			return fmt.Errorf("mempool snapshot exceeds transaction cap: count=%d max=%d", len(txs)+1, maxTxs)
-		}
-		if entry.size > maxBytes || usedBytes > maxBytes-entry.size {
-			return fmt.Errorf("mempool snapshot exceeds byte cap: used=%d entry=%d max=%d", usedBytes, entry.size, maxBytes)
-		}
-		for _, op := range entry.inputs {
-			if existing, exists := spenders[op]; exists {
-				return fmt.Errorf("duplicate mempool snapshot spender txid=%x vout=%d existing=%x new=%x", op.Txid, op.Vout, existing, entry.txid)
-			}
-			spenders[op] = entry.txid
-		}
-		entryCopy := entry
-		txs[entryCopy.txid] = &entryCopy
-		wtxids[entryCopy.wtxid] = entryCopy.txid
-		admissionSeqs[entryCopy.admissionSeq] = entryCopy.txid
-		usedBytes += entryCopy.size
-		if entryCopy.admissionSeq > maxAdmissionSeq {
-			maxAdmissionSeq = entryCopy.admissionSeq
-		}
+	txs, wtxids, spenders, maxAdmissionSeq, usedBytes, err := buildMempoolRestoreMaps(snapshot.entries, m.maxTxs, m.maxBytes)
+	if err != nil {
+		return err
 	}
 	if snapshot.lastAdmissionSeq < maxAdmissionSeq {
 		return fmt.Errorf("mempool snapshot admission high-watermark below restored max: last=%d max=%d", snapshot.lastAdmissionSeq, maxAdmissionSeq)
@@ -109,42 +70,7 @@ func validateMempoolSnapshotEntry(entry mempoolEntry) error {
 	if entry.size != len(entry.raw) {
 		return fmt.Errorf("mempool snapshot entry size mismatch for txid %x: size=%d raw_len=%d", entry.txid, entry.size, len(entry.raw))
 	}
-	tx, txid, wtxid, consumed, err := consensus.ParseTx(entry.raw)
-	if err != nil {
-		return fmt.Errorf("invalid mempool snapshot entry raw for txid %x: %w", entry.txid, err)
-	}
-	if consumed != len(entry.raw) {
-		return fmt.Errorf("mempool snapshot entry has trailing bytes for txid %x: consumed=%d raw_len=%d", entry.txid, consumed, len(entry.raw))
-	}
-	if txid != entry.txid {
-		return fmt.Errorf("mempool snapshot entry txid mismatch: entry=%x raw=%x", entry.txid, txid)
-	}
-	if wtxid != entry.wtxid {
-		return fmt.Errorf("mempool snapshot entry wtxid mismatch: entry=%x raw=%x", entry.wtxid, wtxid)
-	}
-	weight, _, _, err := consensus.TxWeightAndStats(tx)
-	if err != nil {
-		return fmt.Errorf("invalid mempool snapshot entry weight for txid %x: %w", entry.txid, err)
-	}
-	if entry.weight != weight {
-		return fmt.Errorf("mempool snapshot entry weight mismatch: entry=%d computed=%d txid=%x", entry.weight, weight, entry.txid)
-	}
-	if entry.admissionSeq == 0 {
-		return fmt.Errorf("invalid mempool snapshot entry admission_seq for txid %x: seq=0", entry.txid)
-	}
-	if !validMempoolTxSource(entry.source) {
-		return fmt.Errorf("invalid mempool snapshot entry source for txid %x: source=%q", entry.txid, entry.source)
-	}
-	if len(entry.inputs) != len(tx.Inputs) {
-		return fmt.Errorf("mempool snapshot entry input count mismatch for txid %x: entry=%d tx=%d", entry.txid, len(entry.inputs), len(tx.Inputs))
-	}
-	for i, in := range tx.Inputs {
-		want := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-		if entry.inputs[i] != want {
-			return fmt.Errorf("mempool snapshot entry input mismatch for txid %x at index=%d", entry.txid, i)
-		}
-	}
-	return nil
+	return validateMempoolEntryParsed(entry)
 }
 
 func cloneMempoolEntry(entry *mempoolEntry) mempoolEntry {

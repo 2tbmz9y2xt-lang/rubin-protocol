@@ -2,8 +2,6 @@ package node
 
 import (
 	"errors"
-
-	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
@@ -23,15 +21,7 @@ func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
 		return nil, errors.New("chainstate tip does not match blockstore tip")
 	}
 
-	blockBytes, err := s.blockStore.GetBlockByHash(tipHash)
-	if err != nil {
-		return nil, err
-	}
-	undo, err := s.blockStore.GetUndo(tipHash)
-	if err != nil {
-		return nil, err
-	}
-	pb, err := consensus.ParseBlockBytes(blockBytes)
+	pb, blockBytes, undo, err := s.fetchDisconnectBlockAndUndo(tipHash)
 	if err != nil {
 		return nil, err
 	}
@@ -40,36 +30,18 @@ func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	newTipTimestamp := uint64(0)
-	if tipHeight > 0 {
-		parentHeaderBytes, err := s.blockStore.GetHeaderByHash(pb.Header.PrevBlockHash)
-		if err != nil {
-			return nil, err
-		}
-		parentHeader, err := consensus.ParseBlockHeaderBytes(parentHeaderBytes)
-		if err != nil {
-			return nil, err
-		}
-		newTipTimestamp = parentHeader.Timestamp
+	newTipTimestamp, err := s.getParentTimestamp(tipHeight, pb.Header.PrevBlockHash)
+	if err != nil {
+		return nil, err
 	}
 
 	summary, err := s.chainState.DisconnectBlock(blockBytes, undo)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.blockStore.TruncateCanonical(uint64(len(rollbackState.canonicalIndex)) - 1); err != nil {
-		return nil, s.rollbackApplyBlock(err, rollbackState)
+	if err := s.finalizeDisconnectState(rollbackState, newTipTimestamp); err != nil {
+		return nil, err
 	}
-	if s.cfg.ChainStatePath != "" {
-		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
-			return nil, s.rollbackApplyBlock(err, rollbackState)
-		}
-	}
-
-	s.mu.Lock()
-	s.tipTimestamp = newTipTimestamp
-	s.bestKnownHeight = rollbackState.bestKnownHeight
-	s.mu.Unlock()
 	return summary, nil
 }
 

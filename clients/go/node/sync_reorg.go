@@ -45,15 +45,19 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 		return nil, err
 	}
 	if !switchToBranch {
-		if _, err := consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, &pb.Header.PrevBlockHash, s.cfg.ExpectedTarget, candidateHeight, prevTimestamps); err != nil {
-			return nil, err
-		}
-		if err := s.blockStore.StoreBlock(blockHash, pb.HeaderBytes, blockBytes); err != nil {
-			return nil, err
-		}
-		return s.syntheticSideChainSummary(candidateHeight, blockHash), nil
+		return s.storeSideBlockAndSummary(blockBytes, blockHash, pb, candidateHeight, prevTimestamps)
 	}
 	return s.applyHeavierBranch(branch, commonAncestorHeight)
+}
+
+func (s *SyncEngine) storeSideBlockAndSummary(blockBytes []byte, blockHash [32]byte, pb *consensus.ParsedBlock, candidateHeight uint64, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
+	if _, err := consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, &pb.Header.PrevBlockHash, s.cfg.ExpectedTarget, candidateHeight, prevTimestamps); err != nil {
+		return nil, err
+	}
+	if err := s.blockStore.StoreBlock(blockHash, pb.HeaderBytes, blockBytes); err != nil {
+		return nil, err
+	}
+	return s.syntheticSideChainSummary(candidateHeight, blockHash), nil
 }
 
 func (s *SyncEngine) applyDirectBlockIfPossible(
