@@ -3,11 +3,12 @@
 from __future__ import annotations
 import argparse, json, math, os, re, sys, tempfile
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000  # noqa: E702
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
-METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})(?:\{{[A-Za-z_:][A-Za-z0-9_:]*=\"[^\"]*\"(?:,[A-Za-z_:][A-Za-z0-9_:]*=\"[^\"]*\")*\}})?\s+({NUM})(?:\s+({NUM}))?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
+METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+({NUM})(?:\s+({NUM}))?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable", "helper_only"}  # noqa: E702
 PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block", "binary"}
 PATH_FIELD_DOTTED_NAMES = {
@@ -299,14 +300,14 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
     try:
         found: dict[str, int] = {}
         if text.lstrip().startswith("{"):
-            obj = json.loads(text, object_pairs_hook=NO_DUPES, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}")))
+            obj = json.loads(text, object_pairs_hook=NO_DUPES, parse_float=Decimal, parse_int=Decimal, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}")))
             if not isinstance(obj, dict):
                 return None, "metrics_malformed"
-            if nonfinite(obj):
+            if nonfinite(obj) or any(key not in METRICS for key in obj):
                 return None, "metrics_malformed"
             for metric in METRICS:
                 if metric not in obj: return None, "metrics_missing_or_zero"  # noqa: E701
-                if isinstance((v := obj.get(metric)), bool) or not isinstance(v, (int, float)) or (isinstance(v, float) and not math.isfinite(v)) or v <= 0 or v > 1_000_000_000 or int(v) != v:
+                if isinstance((v := obj.get(metric)), bool) or not isinstance(v, Decimal) or not v.is_finite() or v <= 0 or v > Decimal(1_000_000_000) or v != v.to_integral_value():
                     return None, "metric_value_invalid"
                 found[metric] = int(v)
         else:
