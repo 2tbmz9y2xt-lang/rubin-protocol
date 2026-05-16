@@ -170,9 +170,6 @@ impl Mldsa87Keypair {
     }
 
     pub fn sign_digest32(&self, digest32: [u8; 32]) -> Result<Vec<u8>, TxError> {
-        if self.pkey.is_null() {
-            return Err(openssl_parse_error("openssl: nil ML-DSA keypair"));
-        }
         let mctx = new_digest_sign_ctx(self)?;
         sign_mldsa87_digest(mctx, digest32)
     }
