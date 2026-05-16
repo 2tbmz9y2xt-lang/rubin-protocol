@@ -305,10 +305,29 @@ fn signing_ctx_rejects_public_only_key() {
 
 #[test]
 fn signing_ctx_rejects_null_key() {
-    let err = super::new_digest_sign_ctx(core::ptr::null_mut())
-        .expect_err("null EVP_PKEY must reject before OpenSSL sign init");
+    let err = unsafe {
+        // SAFETY: null is an explicitly allowed defensive input that must fail
+        // before OpenSSL sees the pointer.
+        super::new_digest_sign_ctx(core::ptr::null_mut())
+    }
+    .expect_err("null EVP_PKEY must reject before OpenSSL sign init");
     assert_eq!(err.code, ErrorCode::TxErrParse);
     assert_eq!(err.msg, "openssl: nil ML-DSA keypair");
+}
+
+#[test]
+fn signing_ctx_rejects_empty_key_at_init() {
+    unsafe {
+        // SAFETY: empty_key is a live EVP_PKEY allocated by OpenSSL and freed
+        // before return. It has no key material, so sign init must reject it.
+        let empty_key = openssl_sys::EVP_PKEY_new();
+        assert!(!empty_key.is_null(), "empty EVP_PKEY allocation");
+        let err = super::new_digest_sign_ctx(empty_key)
+            .expect_err("empty EVP_PKEY must reject during OpenSSL sign init");
+        openssl_sys::EVP_PKEY_free(empty_key);
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+        assert_eq!(err.msg, "openssl: EVP_DigestSignInit_ex failed");
+    }
 }
 
 #[test]

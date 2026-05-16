@@ -52,19 +52,23 @@ fn read_mldsa87_pubkey(pkey: *mut openssl_sys::EVP_PKEY) -> Result<Vec<u8>, TxEr
     }
 }
 
-fn new_digest_sign_ctx(
+/// # Safety
+///
+/// If `pkey` is non-null, it must point to a live `EVP_PKEY` that remains valid
+/// until this function returns. A null pointer is accepted only to fail closed
+/// before any OpenSSL FFI call.
+unsafe fn new_digest_sign_ctx(
     pkey: *mut openssl_sys::EVP_PKEY,
 ) -> Result<*mut openssl_sys::EVP_MD_CTX, TxError> {
     if pkey.is_null() {
         return Err(openssl_parse_error("openssl: nil ML-DSA keypair"));
     }
     unsafe {
-        // SAFETY: the null precheck above keeps this safe wrapper from passing
-        // a null pkey into OpenSSL. Production callers pass a live EVP_PKEY
-        // owned by Mldsa87Keypair for the duration of signing. ERR_clear_error
-        // only resets OpenSSL's thread-local error queue. OpenSSL allocates
-        // mctx here; every failure after allocation frees it before returning,
-        // while success transfers it to sign_mldsa87_digest for one operation.
+        // SAFETY: the function contract requires any non-null pkey to be live
+        // for this call. Production callers pass a Mldsa87Keypair-owned key.
+        // ERR_clear_error only resets OpenSSL's thread-local error queue.
+        // OpenSSL allocates mctx here; every failure after allocation frees it
+        // before returning, while success transfers it to sign_mldsa87_digest.
         openssl_sys::ERR_clear_error();
         let mctx = ffi::EVP_MD_CTX_new();
         if mctx.is_null() {
@@ -172,7 +176,11 @@ impl Mldsa87Keypair {
         if self.pkey.is_null() {
             return Err(openssl_parse_error("openssl: nil ML-DSA keypair"));
         }
-        let mctx = new_digest_sign_ctx(self.pkey)?;
+        let mctx = unsafe {
+            // SAFETY: self.pkey was checked non-null above and is owned by this
+            // keypair for the duration of the signing operation.
+            new_digest_sign_ctx(self.pkey)?
+        };
         sign_mldsa87_digest(mctx, digest32)
     }
 }
