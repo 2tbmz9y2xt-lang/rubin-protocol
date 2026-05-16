@@ -407,19 +407,24 @@ def scan_source_data(path: Path) -> dict[str, Any] | None:
         return obj if isinstance(obj, dict) else None
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
         return None
-def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> bool:
+def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | None:
     for key, value in vars(args).items():
         if key == "output" or key.endswith("_no_data") or not value:
             continue
         source_path = Path(os.path.realpath(Path(os.path.expanduser(value))))
         if same_path(source_path, out_path):
-            return True
+            return "output_overwrites_input"
         if not source_path.is_file():
             continue
         data = scan_source_data(source_path)
-        if isinstance(data, dict) and any(same_path(target, out_path) for target in path_field_targets(data, source_path.parent)):
-            return True
-    return False
+        if data is None:
+            if key == "rust_reorg_metrics":
+                continue
+            _, err = load(source_path)
+            return f"output_scan_failed:{err or 'source_not_object'}"
+        if any(same_path(target, out_path) for target in path_field_targets(data, source_path.parent)):
+            return "output_overwrites_input"
+    return None
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate fail-closed mixed-client devnet soak report v2.")
     for opt, dest in (("--mesh-report", "mesh_report"), ("--go-submit-rust-accept-report", "go_submit_rust_accept_report"), ("--go-submit-rust-mine-go-converge-report", "go_submit_rust_mine_go_converge_report"), ("--rust-submit-go-mine-rust-converge-report", "rust_submit_go_mine_rust_converge_report"), ("--rust-restart-report", "rust_restart_report"), ("--partition-heal-reorg-report", "partition_heal_reorg_report")):
@@ -430,8 +435,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     out_path = Path(os.path.realpath(Path(os.path.expanduser(args.output))))
-    if output_overwrites_input(args, out_path):
-        return print("FAIL: output_overwrites_input", file=sys.stderr) or 1
+    overwrite_reason = output_overwrites_input(args, out_path)
+    if overwrite_reason:
+        return print(f"FAIL: {overwrite_reason}", file=sys.stderr) or 1
     report, rc = generate(args)
     try:
         write_atomic(out_path, report)
