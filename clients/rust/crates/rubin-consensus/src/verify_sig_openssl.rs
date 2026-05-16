@@ -55,12 +55,16 @@ fn read_mldsa87_pubkey(pkey: *mut openssl_sys::EVP_PKEY) -> Result<Vec<u8>, TxEr
 fn new_digest_sign_ctx(
     pkey: *mut openssl_sys::EVP_PKEY,
 ) -> Result<*mut openssl_sys::EVP_MD_CTX, TxError> {
+    if pkey.is_null() {
+        return Err(openssl_parse_error("openssl: nil ML-DSA keypair"));
+    }
     unsafe {
-        // SAFETY: pkey is a non-null live EVP_PKEY owned by Mldsa87Keypair for
-        // the duration of signing. ERR_clear_error only resets OpenSSL's
-        // thread-local error queue. OpenSSL allocates mctx here; every failure
-        // after allocation frees it before returning, while success transfers
-        // the context to sign_mldsa87_digest for exactly one signing operation.
+        // SAFETY: the null precheck above keeps this safe wrapper from passing
+        // a null pkey into OpenSSL. Production callers pass a live EVP_PKEY
+        // owned by Mldsa87Keypair for the duration of signing. ERR_clear_error
+        // only resets OpenSSL's thread-local error queue. OpenSSL allocates
+        // mctx here; every failure after allocation frees it before returning,
+        // while success transfers it to sign_mldsa87_digest for one operation.
         openssl_sys::ERR_clear_error();
         let mctx = ffi::EVP_MD_CTX_new();
         if mctx.is_null() {

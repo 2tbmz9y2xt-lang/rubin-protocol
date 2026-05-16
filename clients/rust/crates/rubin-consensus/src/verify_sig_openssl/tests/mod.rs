@@ -306,9 +306,9 @@ fn signing_ctx_rejects_public_only_key() {
 #[test]
 fn signing_ctx_rejects_null_key() {
     let err = super::new_digest_sign_ctx(core::ptr::null_mut())
-        .expect_err("null EVP_PKEY must reject during OpenSSL sign init");
+        .expect_err("null EVP_PKEY must reject before OpenSSL sign init");
     assert_eq!(err.code, ErrorCode::TxErrParse);
-    assert_eq!(err.msg, "openssl: EVP_DigestSignInit_ex failed");
+    assert_eq!(err.msg, "openssl: nil ML-DSA keypair");
 }
 
 #[test]
