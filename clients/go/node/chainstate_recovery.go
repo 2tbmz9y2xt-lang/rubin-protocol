@@ -77,17 +77,24 @@ func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, exists := range []func([32]byte) error{
-		bs.headerExists,
-		bs.blockExists,
-		bs.undoExists,
-	} {
-		if err := exists(blockHash); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return false, nil
-			}
-			return false, err
+	if complete, err := canonicalArtifactExists(bs.headerExists, blockHash); err != nil || !complete {
+		return complete, err
+	}
+	if complete, err := canonicalArtifactExists(bs.blockExists, blockHash); err != nil || !complete {
+		return complete, err
+	}
+	if complete, err := canonicalArtifactExists(bs.undoExists, blockHash); err != nil || !complete {
+		return complete, err
+	}
+	return true, nil
+}
+
+func canonicalArtifactExists(check func([32]byte) error, blockHash [32]byte) (bool, error) {
+	if err := check(blockHash); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
 		}
+		return false, err
 	}
 	return true, nil
 }
@@ -130,8 +137,8 @@ func ReconcileChainStateWithBlockStore(state *ChainState, store *BlockStore, cfg
 		return reconcileEmptyBlockStore(state, truncated), nil
 	}
 
-	replayFrom, changed, err := reconcileReplayStart(state, store, tipHeight, truncated)
-	if err != nil || replayFrom > tipHeight {
+	replayFrom, changed, replayNeeded, err := reconcileReplayStart(state, store, tipHeight, truncated)
+	if err != nil || !replayNeeded {
 		return changed, err
 	}
 	return replayCanonicalBlocks(state, store, cfg, replayFrom, tipHeight, changed)
@@ -147,24 +154,24 @@ func reconcileEmptyBlockStore(state *ChainState, truncated bool) bool {
 	return false
 }
 
-func reconcileReplayStart(state *ChainState, store *BlockStore, tipHeight uint64, changed bool) (uint64, bool, error) {
+func reconcileReplayStart(state *ChainState, store *BlockStore, tipHeight uint64, changed bool) (uint64, bool, bool, error) {
 	view := state.view()
 	if !view.hasTip || view.height > tipHeight {
 		state.replaceFrom(NewChainState())
-		return 0, true, nil
+		return 0, true, true, nil
 	}
 	canonicalHash, hasHeight, err := store.CanonicalHash(view.height)
 	if err != nil {
-		return 0, changed, err
+		return 0, changed, false, err
 	}
 	if !hasHeight || canonicalHash != view.tipHash {
 		state.replaceFrom(NewChainState())
-		return 0, true, nil
+		return 0, true, true, nil
 	}
 	if view.height == tipHeight {
-		return tipHeight + 1, changed, nil
+		return 0, changed, false, nil
 	}
-	return view.height + 1, changed, nil
+	return view.height + 1, changed, true, nil
 }
 
 func replayCanonicalBlocks(state *ChainState, store *BlockStore, cfg SyncConfig, replayFrom uint64, tipHeight uint64, changed bool) (bool, error) {
