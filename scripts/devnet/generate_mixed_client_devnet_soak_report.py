@@ -388,6 +388,7 @@ def path_field_targets(value: Any, base: Path) -> list[Path]:
             for key, child in item.items():
                 dotted = f"{prefix}.{key}" if prefix else key
                 if isinstance(child, str) and (key in PATH_FIELD_NAMES or key.endswith("_path") or dotted in PATH_FIELD_DOTTED_NAMES):
+                    if "\x00" in child: raise ValueError("path_field_contains_nul")  # noqa: E701
                     raw = Path(os.path.expanduser(child)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
                 else:
                     stack.append((child, dotted))
@@ -395,12 +396,9 @@ def path_field_targets(value: Any, base: Path) -> list[Path]:
             stack.extend((child, prefix) for child in item)
     return out
 def same_path(left: Path, right: Path) -> bool:
-    if left == right:
-        return True
-    try:
-        return os.path.samefile(left, right)
-    except OSError:
-        return sys.platform == "darwin" and str(left).lower() == str(right).lower()
+    if left == right: return True  # noqa: E701
+    try: return os.path.samefile(left, right)  # noqa: E701
+    except (OSError, ValueError): return sys.platform == "darwin" and str(left).lower() == str(right).lower()  # noqa: E701
 def scan_source_data(path: Path) -> dict[str, Any] | None:
     data, err = load(path)
     return data if err is None and isinstance(data, dict) else None
@@ -419,7 +417,9 @@ def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | N
                 continue
             _, err = load(source_path)
             return f"output_scan_failed:{err or 'source_not_object'}"
-        if any(same_path(target, out_path) for target in path_field_targets(data, source_path.parent)):
+        try: targets = path_field_targets(data, source_path.parent)
+        except ValueError as exc: return f"output_scan_failed:{exc}"  # noqa: E701
+        if any(same_path(target, out_path) for target in targets):
             return "output_overwrites_input"
     return None
 def main(argv: list[str] | None = None) -> int:
