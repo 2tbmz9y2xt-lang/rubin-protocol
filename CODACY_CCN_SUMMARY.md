@@ -39,8 +39,9 @@ Functions above CCN threshold (8): 1 (`applyPolicyAgainstState` at CCN 9). The r
 - `rotation_schedule_helpers.go` — rotation-schedule helpers
 
 ## Verification
+Run from `clients/go/`:
 - `go build ./node` — passes.
 - `go test ./node -run "Test.*Mempool|Test.*Miner|Test.*Policy|Test.*MineAddress|Test.*Rotation" -count=1` — passes.
-- `gocyclo -over 8` on production files — only `applyPolicyAgainstState` remains at CCN 9.
+- `gocyclo -over 8 mempolicy_helpers.go miner_helpers.go miner_config_helpers.go miner_mine_helpers.go rotation_schedule_helpers.go mempool.go miner.go mempool_precheck.go production_rotation_schedule.go` — all ≤8.
 - `git diff --check` — clean.
 - `go fmt ./node` — no changes.
