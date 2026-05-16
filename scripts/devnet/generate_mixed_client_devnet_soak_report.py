@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000  # noqa: E702
-HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]+)")  # noqa: E702
+HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable"}  # noqa: E702
 PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block"}
@@ -338,6 +338,11 @@ def metric_section(args: argparse.Namespace) -> dict[str, Any]:
     metrics, err = (None, path_err) if path_err else parse_metrics(path)
     return section("reorg_metrics", "fail", err, source_artifact_path=path, claim_type="metric_evidence") if err else section("reorg_metrics", "no_data", "metric_source_binding_unavailable", source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
 def raw_samples_section(sections: dict[str, dict[str, Any]]) -> dict[str, Any]: return section("raw_samples", "fail", "source_sample_section_failed") if any(sections[name]["status"] in {"fail", "helper_only"} for name in ("go_to_rust_accept", "go_to_rust_mine_converge", "rust_to_go_mine_converge")) else section("raw_samples", "no_data", "source_contract_validation_unavailable", source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="sample_evidence")  # noqa: E704
+def claim_tokens_in_text(value: Any) -> set[str]:
+    if not isinstance(value, str):
+        return set()
+    lowered = value.lower()
+    return {token for token in CLAIM_REASON_TOKENS if re.search(rf"(?<![a-z0-9]){re.escape(token).replace('_', '[_-]?')}(?![a-z0-9])", lowered)}
 def inventory(sections: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for name, sec in sections.items():
@@ -347,6 +352,7 @@ def inventory(sections: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         tokens |= {"restart"} if "restart" in name else set()
         tokens |= {"metric"} if "metric" in name else set()
         tokens |= {"not_applicable"} if name == "deferred_related" else set()
+        tokens |= claim_tokens_in_text(sec.get("reason")) | claim_tokens_in_text(sec.get("source_reason"))
         out.extend({"token": t, "section": name, "source_artifact_path": sec.get("source_artifact_path"), "source_fields": sec.get("source_fields", []), "claim_type": sec.get("claim_type", "status_evidence")} for t in sorted(tokens))
     return out
 def generate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
@@ -395,18 +401,8 @@ def same_path(left: Path, right: Path) -> bool:
     except OSError:
         return sys.platform == "darwin" and str(left).lower() == str(right).lower()
 def scan_source_data(path: Path) -> dict[str, Any] | None:
-    data, _ = load(path)
-    if isinstance(data, dict):
-        return data
-    try:
-        with path.open("rb") as src:
-            raw = src.read(MAX_JSON_BYTES + 1)
-        if len(raw) > MAX_JSON_BYTES:
-            return None
-        obj = json.loads(raw.decode("utf-8"))
-        return obj if isinstance(obj, dict) else None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
-        return None
+    data, err = load(path)
+    return data if err is None and isinstance(data, dict) else None
 def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | None:
     for key, value in vars(args).items():
         if key == "output" or key.endswith("_no_data") or not value:
