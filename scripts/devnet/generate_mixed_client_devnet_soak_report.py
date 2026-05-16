@@ -312,7 +312,7 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
         else:
             for raw_line in text.splitlines():
                 if not (line := raw_line.strip()): continue  # noqa: E701
-                head = re.match(r"[A-Za-z_:][A-Za-z0-9_:]*", line); metric = head.group(0) if head else ""; m = METRIC_LINE.fullmatch(line) if metric in METRICS else None
+                head = re.match(r"[A-Za-z_:][A-Za-z0-9_:]*", line); metric = head.group(0) if head else ""; m = METRIC_LINE.fullmatch(line) if metric in METRICS else None  # noqa: E702
                 if metric in METRICS and not m: return None, "metrics_malformed"  # noqa: E701
                 if m:
                     value = float(m.group(2))
