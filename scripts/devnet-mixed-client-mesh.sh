@@ -381,7 +381,7 @@ if go_submit_mode:
 elif rust_submit_mode:
     allowed_keys |= {"rust_submit", "go_accept", "go_mine", "rust_converge", "tx_path"}
 elif restart_mode:
-    allowed_keys |= {"restart", "rust_restart"}
+    allowed_keys |= {"artifact_created_at_utc", "restart", "run_id", "rust_restart"}
 req(set(data) == allowed_keys, f"report top-level keys mismatch: {sorted(data)}")
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
 legacy_schema = data.get("legacy_schema_compatibility")
@@ -433,12 +433,13 @@ req(nodes_by_impl["go"]["pid"] != nodes_by_impl["rust"]["pid"], "go/rust process
 req(nodes_by_impl["go"]["binary"] != nodes_by_impl["rust"]["binary"] and nodes_by_impl["go"]["command"] != nodes_by_impl["rust"]["command"] and nodes_by_impl["go"].get("command_argv") != nodes_by_impl["rust"].get("command_argv"), "go/rust process evidence is not implementation-distinct")
 req(len({nodes_by_impl[i][f] for i in ("go", "rust") for f in ("rpc_endpoint", "p2p_endpoint")}) == 4, "node rpc/p2p endpoints are not pairwise distinct")
 if restart_mode:
+    req(nonempty_str(data.get("run_id")) and ts(data.get("artifact_created_at_utc")), "restart report run_id/artifact_created_at_utc missing")
     restart = exact_object(data.get("restart"), {"catch_up_height", "pre_restart_height", "stopped_node"}, "restart")
     req(restart.get("stopped_node") == "node-rust", "restart.stopped_node must be node-rust")
     req(isinstance(restart.get("pre_restart_height"), int) and not isinstance(restart.get("pre_restart_height"), bool), "restart.pre_restart_height is not an integer")
     req(isinstance(restart.get("catch_up_height"), int) and not isinstance(restart.get("catch_up_height"), bool), "restart.catch_up_height is not an integer")
     req(restart["catch_up_height"] >= restart["pre_restart_height"], "restart.catch_up_height below pre_restart_height")
-    restart_info = exact_object(data.get("rust_restart"), {"catch_up_has_tip", "catch_up_height", "catch_up_tip", "catch_up_tip_path", "go_target_has_tip", "go_target_height", "go_target_mine_next_path", "go_target_tip", "go_target_tip_path", "go_target_tx_count", "new_command_argv", "new_p2p_endpoint", "new_pid", "new_rpc_endpoint", "new_started_at", "old_command_argv", "old_p2p_endpoint", "old_pid", "old_pid_stopped", "old_rpc_endpoint", "old_started_at", "peer_reconnect_observed", "pre_restart_has_tip", "pre_restart_height", "pre_restart_tip", "pre_restart_tip_path", "same_datadir"}, "rust_restart")
+    restart_info = exact_object(data.get("rust_restart"), {"catch_up_has_tip", "catch_up_height", "catch_up_tip", "catch_up_tip_path", "datadir", "go_target_has_tip", "go_target_height", "go_target_mine_next_path", "go_target_tip", "go_target_tip_path", "go_target_tx_count", "new_command_argv", "new_p2p_endpoint", "new_pid", "new_rpc_endpoint", "new_started_at", "old_command_argv", "old_p2p_endpoint", "old_pid", "old_pid_stopped", "old_rpc_endpoint", "old_started_at", "peer_reconnect_observed", "pre_restart_has_tip", "pre_restart_height", "pre_restart_tip", "pre_restart_tip_path", "same_datadir"}, "rust_restart")
     old_pid = restart_info.get("old_pid")
     new_pid = restart_info.get("new_pid")
     req(isinstance(old_pid, int) and not isinstance(old_pid, bool) and old_pid > 0, "rust_restart.old_pid is not a positive integer")
@@ -452,6 +453,7 @@ if restart_mode:
     req(restart_info.get("old_pid_stopped") is True, "rust_restart does not prove old process stopped")
     req(restart_info.get("peer_reconnect_observed") is True, "rust_restart peer reconnect was not observed")
     req(restart_info.get("same_datadir") is True, "rust_restart does not prove same datadir restart")
+    req(checked_path("rust_restart.datadir", restart_info.get("datadir")) == artifact_root / "node-rust", "rust_restart datadir is not bound to artifact root")
     pre_restart_height = json_int(restart_info.get("pre_restart_height"), "rust_restart.pre_restart_height")
     req(pre_restart_height == restart["pre_restart_height"], "rust_restart pre_restart_height mismatch")
     go_target_height = json_int(restart_info.get("go_target_height"), "rust_restart.go_target_height")
@@ -658,6 +660,8 @@ rules = [
     ("rust_restart new endpoints are not bound", "rust_restart_new_endpoints_mismatch"),
     ("rust_restart timestamps are not bound", "rust_restart_timestamps_mismatch"),
     ("rust_restart does not prove same datadir restart", "rust_restart_datadir_mismatch"),
+    ("rust_restart datadir is not bound", "rust_restart_datadir_not_bound"),
+    ("restart report run_id/artifact_created_at_utc missing", "rust_restart_run_identity_missing"),
     ("rust_restart pre_restart_height mismatch", "rust_restart_pre_restart_height_mismatch"),
     ("rust_restart tip flags are not booleans", "rust_restart_tip_flags_invalid"),
     ("rust_restart pre-restart tip is not proven", "rust_restart_pre_tip_not_proven"),
@@ -1526,7 +1530,7 @@ write_outputs() {
     GO_NODE_BIN RUST_NODE_BIN GO_CMD RUST_CMD GO_ARGV_JSON RUST_ARGV_JSON GO_PEERS_JSON RUST_PEERS_JSON \
     GO_PROCESS_ALIVE RUST_PROCESS_ALIVE GO_RPC_PROCESS_BACKED RUST_RPC_PROCESS_BACKED GO_P2P_PROCESS_BACKED RUST_P2P_PROCESS_BACKED \
     RUST_TO_GO_LOCAL_ADDR FINAL_PROCESS_IDENTITY_RECHECKED FINAL_RUST_OUTBOUND_LINK_RECHECKED FINAL_PEER_SNAPSHOTS_RECHECKED \
-    RUBIN_PROCESS_ARTIFACT_ROOT TX_PATH_MODE TX_ID TX_HEX GO_SUBMIT_STATUS_JSON GO_SUBMIT_GET_TX_JSON RUST_STATUS_JSON RUST_GET_TX_JSON \
+    RUBIN_PROCESS_ARTIFACT_ROOT RUST_DIR TX_PATH_MODE TX_ID TX_HEX GO_SUBMIT_STATUS_JSON GO_SUBMIT_GET_TX_JSON RUST_STATUS_JSON RUST_GET_TX_JSON \
     RUST_SUBMIT_STATUS_JSON RUST_SUBMIT_GET_TX_JSON GO_ACCEPT_STATUS_JSON GO_ACCEPT_GET_TX_JSON \
     RUST_MINE_JSON RUST_MINE_BLOCK_JSON GO_CONVERGE_TIP_JSON GO_CONVERGE_BLOCK_JSON RUST_MINE_HEIGHT RUST_MINE_HASH RUST_MINE_TX_COUNT \
     GO_MINE_JSON GO_MINE_BLOCK_JSON RUST_CONVERGE_TIP_JSON RUST_CONVERGE_BLOCK_JSON GO_MINE_HEIGHT GO_MINE_HASH GO_MINE_TX_COUNT \
@@ -1537,6 +1541,8 @@ write_outputs() {
     RUST_RESTART_SAME_DATADIR RUST_RESTART_PEER_RECONNECTED
   python3 - <<'PY'
 import json, os
+from datetime import datetime, timezone
+from pathlib import Path
 e = os.environ
 verdict = e["verdict"]
 reason = (e.get("reason") or "").strip()
@@ -1657,6 +1663,7 @@ def build_raw_samples():
         "convergence": sample_bucket(convergence_direction, e.get("CONVERGENCE_SAMPLE_SECONDS"), "convergence", e.get("TX_ID", ""), convergence_hash, convergence_height),
     }
 report = {
+    **({"artifact_created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "run_id": Path(e["RUBIN_PROCESS_ARTIFACT_ROOT"]).name} if restart_mode else {}),
     "scenario": scenario,
     "verdict": verdict,
     "artifact_root": e["RUBIN_PROCESS_ARTIFACT_ROOT"],
@@ -1701,6 +1708,7 @@ if restart_mode and verdict == "PASS":
     }
     report["restart"] = restart
     report["rust_restart"] = {
+        "datadir": e["RUST_DIR"],
         "old_pid": int(e["OLD_RUST_PID"]),
         "old_rpc_endpoint": e["OLD_RUST_RPC_ADDR"],
         "old_p2p_endpoint": e["OLD_RUST_P2P_ADDR"],

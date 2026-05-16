@@ -31,7 +31,7 @@ SECTIONS = {
     "go_to_rust_accept": ("go_submit_rust_accept_report", "mixed_client_go_submit_rust_accept", ["go_submit", "rust_accept", "tx_path", "raw_samples.propagation"]),
     "go_to_rust_mine_converge": ("go_submit_rust_mine_go_converge_report", "mixed_client_go_submit_rust_mine_go_converge", ["go_submit", "rust_accept", "rust_mine", "go_converge", "tx_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "rust_to_go_mine_converge": ("rust_submit_go_mine_rust_converge_report", "mixed_client_rust_submit_go_mine_rust_converge", ["rust_submit", "go_accept", "go_mine", "rust_converge", "tx_path", "raw_samples.propagation", "raw_samples.convergence"]),
-    "rust_restart": ("rust_restart_report", "mixed_client_rust_restart", ["restart.stopped_node", "rust_restart.old_pid", "rust_restart.new_pid", "rust_restart.old_pid_stopped", "rust_restart.same_datadir", "rust_restart.peer_reconnect_observed", "rust_restart.go_target_height", "rust_restart.catch_up_height"]),
+    "rust_restart": ("rust_restart_report", "mixed_client_rust_restart", ["run_id", "artifact_created_at_utc", "restart.stopped_node", "rust_restart.datadir", "rust_restart.old_pid", "rust_restart.new_pid", "rust_restart.old_rpc_endpoint", "rust_restart.old_pid_stopped", "rust_restart.same_datadir", "rust_restart.peer_reconnect_observed", "rust_restart.pre_restart_height", "rust_restart.pre_restart_tip", "rust_restart.pre_restart_tip_path", "rust_restart.go_target_height", "rust_restart.go_target_tip", "rust_restart.go_target_tx_count", "rust_restart.go_target_tip_path", "rust_restart.go_target_mine_next_path", "rust_restart.catch_up_height", "rust_restart.catch_up_tip", "rust_restart.catch_up_tip_path"]),
     "partition_heal_reorg": ("partition_heal_reorg_report", "mixed_client_partition_heal_reorg", ["proof.partition_changed_peer_state", "proof.fork_diverged", "proof.heal_restored_peer_state", "proof.reorg_converged", "proof.process_identity_rechecked_after_heal", "proof.go_reorg_metrics", "observations.reorg"]),
 }
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
@@ -223,6 +223,73 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
     if is_hex32(go_tip) and is_hex32(catch_tip) and go_tip != catch_tip:
         return "restart_source_binding_contradiction:tip_hash_mismatch"
     return None
+def restart_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
+    rr = data["rust_restart"]
+    by_impl, _ = nodes(data, require_alive=False)
+    root_raw = data.get("artifact_root")
+    if by_impl is None or not isinstance(root_raw, str):
+        return "restart_source_binding_contradiction:artifact_root_invalid"
+    root = Path(os.path.realpath(os.path.expanduser(root_raw)))
+    if not root.is_dir():
+        return "restart_source_binding_contradiction:artifact_root_invalid"
+    try:
+        Path(os.path.realpath(path)).relative_to(root)
+    except ValueError:
+        return "restart_source_binding_contradiction:report_outside_artifact_root"
+    def artifact(field: str, reason: str) -> tuple[Path | None, str | None]:
+        if not isinstance(rr.get(field), str):
+            return None, reason
+        p, err = regular_path(str(rr[field]), reason)
+        if err:
+            return None, err
+        try:
+            p.relative_to(root)
+        except ValueError:
+            return None, reason
+        return p, None
+    def tip(field: str, impl: str, endpoint: Any, height: Any, tip_hash: Any, reason: str) -> str | None:
+        p, err = artifact(field, reason)
+        sidecar, load_err = (None, err) if err else load(p)  # type: ignore[arg-type]
+        if load_err or not isinstance(sidecar, dict):
+            return reason
+        keys = {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}
+        if set(sidecar) != keys or sidecar.get("implementation") != impl or sidecar.get("rpc_endpoint") != endpoint or sidecar.get("request_path") != "/get_tip":
+            return reason
+        sidecar_height = sidecar.get("height")
+        if sidecar.get("has_tip") is not True or not jint(sidecar_height) or sidecar_height != height or sidecar.get("tip_hash") != tip_hash:
+            return reason
+        if not jint(sidecar.get("best_known_height")) or sidecar["best_known_height"] < sidecar_height or not isinstance(sidecar.get("in_ibd"), bool):
+            return reason
+        return None
+    checks = (
+        ("pre_restart_tip_path", "rust", rr.get("old_rpc_endpoint"), rr.get("pre_restart_height"), rr.get("pre_restart_tip"), "restart_source_binding_contradiction:pre_restart_tip_sidecar_invalid"),
+        ("go_target_tip_path", "go", by_impl["go"]["rpc_endpoint"], rr.get("go_target_height"), rr.get("go_target_tip"), "restart_source_binding_contradiction:go_target_tip_sidecar_invalid"),
+        ("catch_up_tip_path", "rust", by_impl["rust"]["rpc_endpoint"], rr.get("catch_up_height"), rr.get("catch_up_tip"), "restart_source_binding_contradiction:catch_up_tip_sidecar_invalid"),
+    )
+    for check in checks:
+        if err := tip(*check):
+            return err
+    p, err = artifact("go_target_mine_next_path", "restart_source_binding_contradiction:go_target_mine_next_invalid")
+    mine, load_err = (None, err) if err else load(p)  # type: ignore[arg-type]
+    if load_err or not isinstance(mine, dict):
+        return "restart_source_binding_contradiction:go_target_mine_next_invalid"
+    keys = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
+    if set(mine) != keys or mine.get("implementation") != "go" or mine.get("rpc_endpoint") != by_impl["go"]["rpc_endpoint"] or mine.get("request_path") != "/mine_next":
+        return "restart_source_binding_contradiction:go_target_mine_next_invalid"
+    mine_height = mine.get("height")
+    mine_tx_count = mine.get("tx_count")
+    if (
+        mine.get("mined") is not True
+        or not jint(mine_height)
+        or not jint(mine_tx_count)
+        or mine_height != rr.get("go_target_height")
+        or mine.get("block_hash") != rr.get("go_target_tip")
+        or mine_tx_count != rr.get("go_target_tx_count")
+    ):
+        return "restart_source_binding_contradiction:go_target_mine_next_invalid"
+    if not jint(mine.get("nonce")) or not jint(mine.get("timestamp")):
+        return "restart_source_binding_contradiction:go_target_mine_next_invalid"
+    return None
 def partition_contradiction(data: dict[str, Any]) -> str | None:
     _, bad = nodes(data, require_alive=False, require_backing=False)
     proof = data.get("proof")
@@ -283,6 +350,10 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
             return section(name, "fail", bad, source_artifact_path=path, scenario=got)
         base = "restart_source_binding_unproven" if name == "rust_restart" else "partition_reorg_source_binding_unproven"
         reason = base if not missing else f"{base}:missing_source_fields:{','.join(missing)}"
+        if name == "rust_restart" and not missing:
+            if bad := restart_sidecar_error(data, path):
+                return section(name, "fail", bad, source_artifact_path=path, scenario=got)
+            return section(name, "pass", None, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="behavior_evidence", evidence_class="behavior_evidence", behavior_evidence=True)
         return section(name, "no_data", reason, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
     if missing:
         return section(name, "fail", "missing_source_fields:" + ",".join(missing), source_artifact_path=path, scenario=got)
