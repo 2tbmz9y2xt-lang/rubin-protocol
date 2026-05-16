@@ -9,7 +9,6 @@ use rubin_node::tx_relay::{handle_received_tx, PeerOutbox, TxRelayState};
 use rubin_node::{build_coinbase_tx, default_sync_config, ChainState, SyncEngine};
 
 const MAX_PEERS: usize = 6;
-const MAX_PEERS_TAG: u8 = 6;
 const MAX_RAW_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +50,10 @@ fn selected_network(tag: u8) -> &'static str {
     }
 }
 
+fn max_peers_tag() -> u8 {
+    u8::try_from(MAX_PEERS).expect("fuzz MAX_PEERS fits u8")
+}
+
 fn build_peer_state(addr: String) -> PeerState {
     PeerState {
         addr,
@@ -78,7 +81,9 @@ impl ReceiveFixture {
         let outboxes = Mutex::new(HashMap::new());
         for idx in 0..peer_count.min(MAX_PEERS) {
             let addr = format!("peer-{idx}:8333");
-            let _ = peer_manager.add_peer(build_peer_state(addr.clone()));
+            peer_manager
+                .add_peer(build_peer_state(addr.clone()))
+                .expect("fuzz peer insertion");
             outboxes
                 .lock()
                 .expect("peer outboxes")
@@ -137,7 +142,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let peer_count = usize::from(data[0] % (MAX_PEERS_TAG + 1));
+    let peer_count = usize::from(data[0] % (max_peers_tag() + 1));
     let network = selected_network(data[1]);
     let mode = data[2];
     let tx_bytes = sample_tx_bytes(mode, &data[3..]);
