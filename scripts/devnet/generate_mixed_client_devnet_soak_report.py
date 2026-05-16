@@ -364,7 +364,7 @@ def generate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     sections["deferred_related"] = section("deferred_related", "not_applicable", "deferred_by_rub_227", claim_type="deferred_related_work")
     statuses = {s["status"] for s in sections.values()}
     verdict = "FAIL" if statuses & {"fail", "helper_only"} else "NO_DATA" if "no_data" in statuses else "PASS"
-    inputs = {k: (v if k.endswith("_no_data") else str(Path(os.path.realpath(Path(os.path.expanduser(v)))))) for k, v in vars(args).items() if k != "output" and v is not None}
+    inputs = {k: (v if k.endswith("_no_data") else str(Path(os.path.realpath(Path(os.path.expanduser(v)))))) for k, v in vars(args).items() if k != "output" and v}
     report = {"schema_version": SCHEMA_VERSION, "verdict": verdict, "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "inputs": inputs, "sections": sections, "claim_inventory": inventory(sections), "non_goals": ["PR-1 report consumer only; no runtime, producer, live scenario, client, schema, or CI changes.", "Restart/reorg behavior evidence remains blocked on RUB-240 source-bound producer sidecars.", "RUB-227 orphan metrics remain deferred/not_applicable."]}
     return report, 1 if verdict == "FAIL" else 0
 def write_atomic(path: Path, data: dict[str, Any]) -> None:
