@@ -719,63 +719,67 @@ pub(crate) fn encode_core_ext_covenant_data(
 }
 
 pub fn parse_core_ext_covenant_data(cov_data: &[u8]) -> Result<CoreExtCovenant<'_>, TxError> {
+    let (ext_id, payload_start, expected_len) = parse_core_ext_covenant_header(cov_data)?;
+    Ok(CoreExtCovenant {
+        ext_id,
+        ext_payload: &cov_data[payload_start..expected_len],
+    })
+}
+
+fn core_ext_covenant_parse_error(msg: &'static str) -> TxError {
+    TxError::new(ErrorCode::TxErrCovenantTypeInvalid, msg)
+}
+
+fn parse_core_ext_covenant_header(cov_data: &[u8]) -> Result<(u16, usize, usize), TxError> {
     if cov_data.len() as u64 > MAX_COVENANT_DATA_PER_OUTPUT {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+        return Err(core_ext_covenant_parse_error(
             "CORE_EXT covenant_data length exceeds MAX_COVENANT_DATA_PER_OUTPUT",
         ));
     }
     if cov_data.len() < 2 {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
+        return Err(core_ext_covenant_parse_error(
             "CORE_EXT covenant_data too short",
         ));
     }
-    let ext_id = u16::from_le_bytes(
-        cov_data[0..2]
-            .try_into()
-            .expect("cov_data[0..2] is 2 bytes"),
-    );
-
-    let (ext_payload_len_u64, varint_bytes) =
-        read_compact_size_bytes(&cov_data[2..]).map_err(|_| {
-            TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
-                "CORE_EXT ext_payload_len CompactSize invalid",
-            )
-        })?;
-    #[cfg(target_pointer_width = "32")]
-    if ext_payload_len_u64 > usize::MAX as u64 {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_EXT covenant_data ext_payload parse failure",
-        ));
-    }
-    let ext_payload_len = ext_payload_len_u64 as usize;
-    let expected_len = 2usize
-        .checked_add(varint_bytes)
-        .and_then(|v| v.checked_add(ext_payload_len))
-        .ok_or_else(|| {
-            TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
-                "CORE_EXT covenant_data ext_payload parse failure",
-            )
-        })?;
+    let ext_id = u16::from_le_bytes([cov_data[0], cov_data[1]]);
+    let (ext_payload_len, varint_bytes) = parse_core_ext_payload_len(cov_data)?;
+    let expected_len = core_ext_expected_covenant_len(varint_bytes, ext_payload_len)?;
     if cov_data.len() != expected_len {
         let msg = if cov_data.len() < expected_len {
             "CORE_EXT covenant_data ext_payload parse failure"
         } else {
             "CORE_EXT covenant_data length mismatch"
         };
-        return Err(TxError::new(ErrorCode::TxErrCovenantTypeInvalid, msg));
+        return Err(core_ext_covenant_parse_error(msg));
     }
-    let payload_start = 2 + varint_bytes;
-    let ext_payload = &cov_data[payload_start..expected_len];
 
-    Ok(CoreExtCovenant {
-        ext_id,
-        ext_payload,
-    })
+    Ok((ext_id, 2 + varint_bytes, expected_len))
+}
+
+fn parse_core_ext_payload_len(cov_data: &[u8]) -> Result<(usize, usize), TxError> {
+    let (payload_len_u64, varint_bytes) =
+        read_compact_size_bytes(&cov_data[2..]).map_err(|_| {
+            core_ext_covenant_parse_error("CORE_EXT ext_payload_len CompactSize invalid")
+        })?;
+    #[cfg(target_pointer_width = "32")]
+    if payload_len_u64 > usize::MAX as u64 {
+        return Err(core_ext_covenant_parse_error(
+            "CORE_EXT covenant_data ext_payload parse failure",
+        ));
+    }
+    Ok((payload_len_u64 as usize, varint_bytes))
+}
+
+fn core_ext_expected_covenant_len(
+    varint_bytes: usize,
+    payload_len: usize,
+) -> Result<usize, TxError> {
+    2usize
+        .checked_add(varint_bytes)
+        .and_then(|v| v.checked_add(payload_len))
+        .ok_or_else(|| {
+            core_ext_covenant_parse_error("CORE_EXT covenant_data ext_payload parse failure")
+        })
 }
 
 pub fn validate_core_ext_spend(
@@ -1053,8 +1057,10 @@ mod tests {
         COV_TYPE_CORE_EXT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
         VERIFY_COST_ML_DSA_87,
     };
+    use crate::suite_registry::{NativeSuiteSet, SuiteParams};
     use crate::tx::{Tx, TxInput, TxOutput};
     use crate::txcontext::{build_tx_context, build_tx_context_output_ext_id_cache};
+    use std::collections::BTreeMap;
 
     fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -1105,6 +1111,107 @@ mod tests {
             1,
             chain_id,
         )
+    }
+
+    fn deployment_profile(
+        allowed_suite_ids: Vec<u8>,
+        verification_binding: CoreExtVerificationBinding,
+        binding_descriptor: Vec<u8>,
+        tx_context_enabled: bool,
+    ) -> CoreExtDeploymentProfile {
+        CoreExtDeploymentProfile {
+            ext_id: 7,
+            activation_height: 1,
+            tx_context_enabled,
+            allowed_suite_ids,
+            verification_binding,
+            verify_sig_ext_tx_context_fn: None,
+            binding_descriptor,
+            ext_payload_schema: b"schema-a".to_vec(),
+            governance_nonce: 0,
+        }
+    }
+
+    fn openssl_digest32_descriptor() -> (Vec<u8>, CoreExtOpenSslDigest32BindingDescriptor) {
+        let bytes = core_ext_openssl_digest32_binding_descriptor_bytes(
+            "ML-DSA-87",
+            ML_DSA_87_PUBKEY_BYTES,
+            ML_DSA_87_SIG_BYTES,
+        )
+        .expect("descriptor");
+        let descriptor = parse_core_ext_openssl_digest32_binding_descriptor(&bytes).expect("parse");
+        (bytes, descriptor)
+    }
+
+    fn core_ext_openssl_profile(
+        suite_id: u8,
+        verifier: Option<CoreExtVerifySigExtTxContextFn>,
+    ) -> CoreExtProfiles {
+        let (binding_descriptor, descriptor) = openssl_digest32_descriptor();
+        CoreExtProfiles {
+            active: vec![CoreExtActiveProfile {
+                ext_id: 7,
+                tx_context_enabled: true,
+                allowed_suite_ids: vec![suite_id],
+                verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
+                    descriptor,
+                ),
+                verify_sig_ext_tx_context_fn: verifier,
+                binding_descriptor,
+                ext_payload_schema: b"schema".to_vec(),
+            }],
+        }
+    }
+
+    fn signed_mldsa87_txcontext_witness(
+        tx: &Tx,
+        input_index: u32,
+        input_value: u64,
+        chain_id: [u8; 32],
+        suite_id: u8,
+    ) -> WitnessItem {
+        let keypair = crate::verify_sig_openssl::Mldsa87Keypair::generate().expect("keypair");
+        let mut cache = SighashV1PrehashCache::new(tx).expect("cache");
+        let digest =
+            sighash_v1_digest_with_cache(&mut cache, input_index, input_value, chain_id, 0x01)
+                .expect("digest");
+        let mut signature = keypair.sign_digest32(digest).expect("sign");
+        signature.push(0x01);
+        WitnessItem {
+            suite_id,
+            pubkey: keypair.pubkey_bytes(),
+            signature,
+        }
+    }
+
+    struct TestRotationProvider {
+        create: &'static [u8],
+        spend: &'static [u8],
+    }
+
+    impl RotationProvider for TestRotationProvider {
+        fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(self.create)
+        }
+
+        fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
+            NativeSuiteSet::new(self.spend)
+        }
+    }
+
+    fn suite_02_registry() -> SuiteRegistry {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            0x02,
+            SuiteParams {
+                suite_id: 0x02,
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+                verify_cost: VERIFY_COST_ML_DSA_87,
+                alg_name: "ML-DSA-87",
+            },
+        );
+        SuiteRegistry::with_suites(suites)
     }
 
     #[test]
@@ -1334,83 +1441,38 @@ mod tests {
         assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn txcontext_accept_verifier(
-        _ext_id: u16,
-        _suite_id: u8,
-        _pubkey: &[u8],
-        _signature: &[u8],
-        _digest32: &[u8; 32],
-        _ext_payload: &[u8],
-        _ctx_base: &TxContextBase,
-        _ctx_continuing: &TxContextContinuing,
-        _self_input_value: u64,
-    ) -> Result<bool, TxError> {
-        Ok(true)
+    fn txcontext_accept_verifier() -> CoreExtVerifySigExtTxContextFn {
+        |_, _, _, _, _, _, _, _, _| Ok(true)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn txcontext_reject_verifier(
-        _ext_id: u16,
-        _suite_id: u8,
-        _pubkey: &[u8],
-        _signature: &[u8],
-        _digest32: &[u8; 32],
-        _ext_payload: &[u8],
-        _ctx_base: &TxContextBase,
-        _ctx_continuing: &TxContextContinuing,
-        _self_input_value: u64,
-    ) -> Result<bool, TxError> {
-        Ok(false)
+    fn txcontext_reject_verifier() -> CoreExtVerifySigExtTxContextFn {
+        |_, _, _, _, _, _, _, _, _| Ok(false)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn txcontext_error_verifier(
-        _ext_id: u16,
-        _suite_id: u8,
-        _pubkey: &[u8],
-        _signature: &[u8],
-        _digest32: &[u8; 32],
-        _ext_payload: &[u8],
-        _ctx_base: &TxContextBase,
-        _ctx_continuing: &TxContextContinuing,
-        _self_input_value: u64,
-    ) -> Result<bool, TxError> {
-        Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "test txcontext verifier error",
-        ))
+    fn txcontext_error_verifier() -> CoreExtVerifySigExtTxContextFn {
+        |_, _, _, _, _, _, _, _, _| {
+            Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "test txcontext verifier error",
+            ))
+        }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn txcontext_openssl_digest32_verifier(
-        _ext_id: u16,
-        _suite_id: u8,
-        pubkey: &[u8],
-        signature: &[u8],
-        digest32: &[u8; 32],
-        _ext_payload: &[u8],
-        _ctx_base: &TxContextBase,
-        _ctx_continuing: &TxContextContinuing,
-        _self_input_value: u64,
-    ) -> Result<bool, TxError> {
-        let descriptor = CoreExtOpenSslDigest32BindingDescriptor {
-            openssl_alg: "ML-DSA-87".to_string(),
-            pubkey_len: ML_DSA_87_PUBKEY_BYTES,
-            sig_len: ML_DSA_87_SIG_BYTES,
-        };
-        verify_core_ext_openssl_digest32_binding(&descriptor, pubkey, signature, digest32)
+    fn txcontext_openssl_digest32_verifier() -> CoreExtVerifySigExtTxContextFn {
+        |_, _, pubkey, signature, digest32, _, _, _, _| {
+            let descriptor = CoreExtOpenSslDigest32BindingDescriptor {
+                openssl_alg: "ML-DSA-87".to_string(),
+                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
+                sig_len: ML_DSA_87_SIG_BYTES,
+            };
+            verify_core_ext_openssl_digest32_binding(&descriptor, pubkey, signature, digest32)
+        }
     }
 
-    fn build_test_txcontext_bundle(
-        ext_id: u16,
-        height: u64,
-    ) -> (Tx, TxContextBundle, u32, u64, [u8; 32]) {
+    fn txcontext_test_tx(ext_id: u16) -> Tx {
         let mut prev = [0u8; 32];
         prev[0] = 0x44;
-        let mut chain_id = [0u8; 32];
-        chain_id[0] = 0x55;
-        let tx = Tx {
+        Tx {
             version: 1,
             tx_kind: 0x00,
             tx_nonce: 1,
@@ -1434,25 +1496,42 @@ mod tests {
             da_commit_core: None,
             da_chunk_core: None,
             da_payload: vec![],
-        };
-        let resolved_inputs = vec![UtxoEntry {
+        }
+    }
+
+    fn txcontext_resolved_inputs(ext_id: u16) -> Vec<UtxoEntry> {
+        vec![UtxoEntry {
             value: 100,
             covenant_type: COV_TYPE_CORE_EXT,
             covenant_data: core_ext_covdata(ext_id, &[0x99]),
             creation_height: 0,
             created_by_coinbase: false,
-        }];
-        let profiles = CoreExtProfiles {
+        }]
+    }
+
+    fn txcontext_accept_profiles(ext_id: u16) -> CoreExtProfiles {
+        CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
                 ext_id,
                 tx_context_enabled: true,
                 allowed_suite_ids: vec![0x42],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier),
+                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier()),
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
-        };
+        }
+    }
+
+    fn build_test_txcontext_bundle(
+        ext_id: u16,
+        height: u64,
+    ) -> (Tx, TxContextBundle, u32, u64, [u8; 32]) {
+        let mut chain_id = [0u8; 32];
+        chain_id[0] = 0x55;
+        let tx = txcontext_test_tx(ext_id);
+        let resolved_inputs = txcontext_resolved_inputs(ext_id);
+        let profiles = txcontext_accept_profiles(ext_id);
         let cache = build_tx_context_output_ext_id_cache(&tx).expect("txcontext cache");
         let bundle = build_tx_context(&tx, &resolved_inputs, Some(&cache), height, &profiles)
             .expect("txcontext build")
@@ -1475,7 +1554,7 @@ mod tests {
                 tx_context_enabled: true,
                 allowed_suite_ids: vec![0x42],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier),
+                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier()),
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -1549,41 +1628,11 @@ mod tests {
             creation_height: 0,
             created_by_coinbase: false,
         };
-        let binding_descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
-            "ML-DSA-87",
-            ML_DSA_87_PUBKEY_BYTES,
-            ML_DSA_87_SIG_BYTES,
-        )
-        .expect("descriptor");
-        let descriptor =
-            parse_core_ext_openssl_digest32_binding_descriptor(&binding_descriptor).expect("parse");
-        let profiles = CoreExtProfiles {
-            active: vec![CoreExtActiveProfile {
-                ext_id: 7,
-                tx_context_enabled: true,
-                allowed_suite_ids: vec![0x42],
-                verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
-                    descriptor,
-                ),
-                verify_sig_ext_tx_context_fn: None,
-                binding_descriptor,
-                ext_payload_schema: b"schema".to_vec(),
-            }],
-        };
+        let profiles = core_ext_openssl_profile(0x42, None);
         let (mut tx, tx_context, input_index, input_value, chain_id) =
             build_test_txcontext_bundle(7, 55);
-        let keypair = crate::verify_sig_openssl::Mldsa87Keypair::generate().expect("keypair");
-        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-        let digest =
-            sighash_v1_digest_with_cache(&mut cache, input_index, input_value, chain_id, 0x01)
-                .expect("digest");
-        let mut signature = keypair.sign_digest32(digest).expect("sign");
-        signature.push(0x01);
-        let witness = WitnessItem {
-            suite_id: 0x42,
-            pubkey: keypair.pubkey_bytes(),
-            signature,
-        };
+        let witness =
+            signed_mldsa87_txcontext_witness(&tx, input_index, input_value, chain_id, 0x42);
         tx.witness[0] = witness.clone();
         let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
         let err = validate_core_ext_spend_with_cache_and_suite_context(
@@ -1714,7 +1763,7 @@ mod tests {
                 tx_context_enabled: true,
                 allowed_suite_ids: vec![0x42],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier),
+                verify_sig_ext_tx_context_fn: Some(txcontext_accept_verifier()),
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -1761,7 +1810,7 @@ mod tests {
                 tx_context_enabled: true,
                 allowed_suite_ids: vec![0x42],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                verify_sig_ext_tx_context_fn: Some(txcontext_reject_verifier),
+                verify_sig_ext_tx_context_fn: Some(txcontext_reject_verifier()),
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -1808,7 +1857,7 @@ mod tests {
                 tx_context_enabled: true,
                 allowed_suite_ids: vec![0x42],
                 verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-                verify_sig_ext_tx_context_fn: Some(txcontext_error_verifier),
+                verify_sig_ext_tx_context_fn: Some(txcontext_error_verifier()),
                 binding_descriptor: b"accept".to_vec(),
                 ext_payload_schema: b"schema".to_vec(),
             }],
@@ -1863,79 +1912,44 @@ mod tests {
             creation_height: 0,
             created_by_coinbase: false,
         };
-        let binding_descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
-            "ML-DSA-87",
-            ML_DSA_87_PUBKEY_BYTES,
-            ML_DSA_87_SIG_BYTES,
-        )
-        .expect("descriptor");
-        let descriptor =
-            parse_core_ext_openssl_digest32_binding_descriptor(&binding_descriptor).expect("parse");
-        let profiles = CoreExtProfiles {
-            active: vec![CoreExtActiveProfile {
-                ext_id: 7,
-                tx_context_enabled: true,
-                allowed_suite_ids: vec![SUITE_ID_ML_DSA_87],
-                verification_binding: CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(
-                    descriptor,
-                ),
-                verify_sig_ext_tx_context_fn: Some(txcontext_openssl_digest32_verifier),
-                binding_descriptor,
-                ext_payload_schema: b"schema".to_vec(),
-            }],
-        };
+        let profiles = core_ext_openssl_profile(
+            SUITE_ID_ML_DSA_87,
+            Some(txcontext_openssl_digest32_verifier()),
+        );
         let (mut tx, tx_context, input_index, input_value, chain_id) =
             build_test_txcontext_bundle(7, 55);
-        let keypair = crate::verify_sig_openssl::Mldsa87Keypair::generate().expect("keypair");
-        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-        let digest =
-            sighash_v1_digest_with_cache(&mut cache, input_index, input_value, chain_id, 0x01)
-                .expect("digest");
-        let mut signature = keypair.sign_digest32(digest).expect("sign");
-        signature.push(0x01);
-        let witness = WitnessItem {
-            suite_id: SUITE_ID_ML_DSA_87,
-            pubkey: keypair.pubkey_bytes(),
-            signature,
-        };
-        tx.witness[0] = witness.clone();
-
-        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-        validate_core_ext_spend_with_cache_and_suite_context(
-            &entry,
-            &witness,
+        let witness = signed_mldsa87_txcontext_witness(
             &tx,
             input_index,
             input_value,
             chain_id,
-            55,
-            &profiles,
-            None,
-            None,
-            Some(&tx_context),
-            &mut cache,
-        )
-        .unwrap();
+            SUITE_ID_ML_DSA_87,
+        );
+        tx.witness[0] = witness.clone();
+
+        let validate_witness = |tx: &Tx, witness: &WitnessItem| {
+            let mut cache = SighashV1PrehashCache::new(tx).expect("cache");
+            validate_core_ext_spend_with_cache_and_suite_context(
+                &entry,
+                witness,
+                tx,
+                input_index,
+                input_value,
+                chain_id,
+                55,
+                &profiles,
+                None,
+                None,
+                Some(&tx_context),
+                &mut cache,
+            )
+        };
+        validate_witness(&tx, &witness).unwrap();
 
         let mut bad = witness.clone();
         bad.signature[0] ^= 0x01;
         tx.witness[0] = bad.clone();
-        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-        let err = validate_core_ext_spend_with_cache_and_suite_context(
-            &entry,
-            &bad,
-            &tx,
-            input_index,
-            input_value,
-            chain_id,
-            55,
-            &profiles,
-            None,
-            None,
-            Some(&tx_context),
-            &mut cache,
-        )
-        .unwrap_err();
+        let err = validate_witness(&tx, &bad).unwrap_err();
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
         assert_eq!(err.msg, "CORE_EXT signature invalid");
     }
@@ -2199,79 +2213,45 @@ mod tests {
 
     #[test]
     fn core_ext_profile_bytes_v1_rejects_invalid_profiles() {
-        let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
-            ext_id: 7,
-            activation_height: 1,
-            tx_context_enabled: false,
-            allowed_suite_ids: Vec::new(),
-            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
-            verify_sig_ext_tx_context_fn: None,
-            binding_descriptor: Vec::new(),
-            ext_payload_schema: b"schema-a".to_vec(),
-            governance_nonce: 0,
-        })
-        .unwrap_err();
-        assert!(err.contains("must have non-empty allowed_suite_ids"));
-
-        let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
-            ext_id: 7,
-            activation_height: 1,
-            tx_context_enabled: false,
-            allowed_suite_ids: vec![3],
-            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
-            verify_sig_ext_tx_context_fn: None,
-            binding_descriptor: vec![0xa1],
-            ext_payload_schema: b"schema-a".to_vec(),
-            governance_nonce: 0,
-        })
-        .unwrap_err();
-        assert!(err.contains("native-only profile must not carry binding_descriptor"));
-
-        let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
-            ext_id: 7,
-            activation_height: 1,
-            tx_context_enabled: false,
-            allowed_suite_ids: vec![3],
-            verification_binding: CoreExtVerificationBinding::VerifySigExtAccept,
-            verify_sig_ext_tx_context_fn: None,
-            binding_descriptor: Vec::new(),
-            ext_payload_schema: b"schema-a".to_vec(),
-            governance_nonce: 0,
-        })
-        .unwrap_err();
-        assert!(err.contains("verify_sig_ext profile must carry binding_descriptor"));
-
-        let err = core_ext_profile_bytes_v1(&CoreExtDeploymentProfile {
-            ext_id: 7,
-            activation_height: 1,
-            tx_context_enabled: true,
-            allowed_suite_ids: vec![3],
-            verification_binding: CoreExtVerificationBinding::NativeVerifySig,
-            verify_sig_ext_tx_context_fn: None,
-            binding_descriptor: Vec::new(),
-            ext_payload_schema: b"schema-a".to_vec(),
-            governance_nonce: 0,
-        })
-        .unwrap_err();
-        assert!(err.contains("txcontext-enabled profile requires v2 anchor pipeline"));
+        macro_rules! assert_profile_err {
+            ($allowed:expr, $binding:expr, $descriptor:expr, $txctx:expr, $expected:expr) => {{
+                let profile = deployment_profile($allowed, $binding, $descriptor, $txctx);
+                let err = core_ext_profile_bytes_v1(&profile).unwrap_err();
+                assert!(err.contains($expected), "{err}");
+            }};
+        }
+        assert_profile_err!(
+            Vec::new(),
+            CoreExtVerificationBinding::NativeVerifySig,
+            Vec::new(),
+            false,
+            "must have non-empty allowed_suite_ids"
+        );
+        assert_profile_err!(
+            vec![3],
+            CoreExtVerificationBinding::NativeVerifySig,
+            vec![0xa1],
+            false,
+            "native-only profile must not carry binding_descriptor"
+        );
+        assert_profile_err!(
+            vec![3],
+            CoreExtVerificationBinding::VerifySigExtAccept,
+            Vec::new(),
+            false,
+            "verify_sig_ext profile must carry binding_descriptor"
+        );
+        assert_profile_err!(
+            vec![3],
+            CoreExtVerificationBinding::NativeVerifySig,
+            Vec::new(),
+            true,
+            "txcontext-enabled profile requires v2 anchor pipeline"
+        );
     }
 
     #[test]
     fn core_ext_rotated_native_suite_uses_registry_path() {
-        use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteParams, SuiteRegistry};
-        use std::collections::BTreeMap;
-
-        struct RotatedSpend;
-        impl RotationProvider for RotatedSpend {
-            fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
-                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, 0x02])
-            }
-
-            fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
-                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, 0x02])
-            }
-        }
-
         let entry = dummy_entry(7);
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
@@ -2292,18 +2272,11 @@ mod tests {
             signature: sig,
         };
         let (tx, input_index, input_value, chain_id) = dummy_tx();
-        let mut suites = BTreeMap::new();
-        suites.insert(
-            0x02,
-            SuiteParams {
-                suite_id: 0x02,
-                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
-                sig_len: ML_DSA_87_SIG_BYTES,
-                verify_cost: VERIFY_COST_ML_DSA_87,
-                alg_name: "ML-DSA-87",
-            },
-        );
-        let reg = SuiteRegistry::with_suites(suites);
+        let provider = TestRotationProvider {
+            create: &[SUITE_ID_ML_DSA_87, 0x02],
+            spend: &[SUITE_ID_ML_DSA_87, 0x02],
+        };
+        let reg = suite_02_registry();
         let err = validate_core_ext_spend_at_height(
             &entry,
             &w,
@@ -2313,7 +2286,7 @@ mod tests {
             chain_id,
             0,
             &profiles,
-            Some(&RotatedSpend),
+            Some(&provider),
             Some(&reg),
         )
         .unwrap_err();
@@ -2322,20 +2295,6 @@ mod tests {
 
     #[test]
     fn core_ext_registered_native_suite_outside_spend_set_rejected() {
-        use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteParams, SuiteRegistry};
-        use std::collections::BTreeMap;
-
-        struct SunsetSpend;
-        impl RotationProvider for SunsetSpend {
-            fn native_create_suites(&self, _height: u64) -> NativeSuiteSet {
-                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87, 0x02])
-            }
-
-            fn native_spend_suites(&self, _height: u64) -> NativeSuiteSet {
-                NativeSuiteSet::new(&[SUITE_ID_ML_DSA_87])
-            }
-        }
-
         let entry = dummy_entry(7);
         let profiles = CoreExtProfiles {
             active: vec![CoreExtActiveProfile {
@@ -2354,18 +2313,11 @@ mod tests {
             signature: vec![0u8; (ML_DSA_87_SIG_BYTES as usize) + 1],
         };
         let (tx, input_index, input_value, chain_id) = dummy_tx();
-        let mut suites = BTreeMap::new();
-        suites.insert(
-            0x02,
-            SuiteParams {
-                suite_id: 0x02,
-                pubkey_len: ML_DSA_87_PUBKEY_BYTES,
-                sig_len: ML_DSA_87_SIG_BYTES,
-                verify_cost: VERIFY_COST_ML_DSA_87,
-                alg_name: "ML-DSA-87",
-            },
-        );
-        let reg = SuiteRegistry::with_suites(suites);
+        let provider = TestRotationProvider {
+            create: &[SUITE_ID_ML_DSA_87, 0x02],
+            spend: &[SUITE_ID_ML_DSA_87],
+        };
+        let reg = suite_02_registry();
         let err = validate_core_ext_spend_at_height(
             &entry,
             &w,
@@ -2375,7 +2327,7 @@ mod tests {
             chain_id,
             0,
             &profiles,
-            Some(&SunsetSpend),
+            Some(&provider),
             Some(&reg),
         )
         .unwrap_err();
@@ -2388,41 +2340,25 @@ mod tests {
 
     #[test]
     fn core_ext_verification_binding_name_helper_covers_native_and_unsupported() {
-        let native = core_ext_verification_binding_from_name("").expect("native empty");
-        assert!(matches!(
-            native,
-            CoreExtVerificationBinding::NativeVerifySig
-        ));
-        let native_named =
-            core_ext_verification_binding_from_name(" native_verify_sig \n").expect("native named");
-        assert!(matches!(
-            native_named,
-            CoreExtVerificationBinding::NativeVerifySig
-        ));
-        let native_normalized =
+        for binding in [
+            core_ext_verification_binding_from_name("").expect("native empty"),
+            core_ext_verification_binding_from_name(" native_verify_sig \n").expect("native named"),
             core_ext_verification_binding_from_normalized_name_and_descriptor("", &[], &[])
-                .expect("normalized empty native");
-        assert!(matches!(
-            native_normalized,
-            CoreExtVerificationBinding::NativeVerifySig
-        ));
-        let native_named_normalized =
+                .expect("normalized empty native"),
             core_ext_verification_binding_from_normalized_name_and_descriptor(
                 "native_verify_sig",
                 &[],
                 &[],
             )
-            .expect("normalized native alias");
-        assert!(matches!(
-            native_named_normalized,
-            CoreExtVerificationBinding::NativeVerifySig
-        ));
-        let descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
-            "ML-DSA-87",
-            ML_DSA_87_PUBKEY_BYTES,
-            ML_DSA_87_SIG_BYTES,
-        )
-        .expect("descriptor");
+            .expect("normalized native alias"),
+        ] {
+            assert!(matches!(
+                binding,
+                CoreExtVerificationBinding::NativeVerifySig
+            ));
+        }
+
+        let (descriptor, _) = openssl_digest32_descriptor();
         let openssl = core_ext_verification_binding_from_name_and_descriptor(
             &format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"),
             &descriptor,
@@ -2433,6 +2369,7 @@ mod tests {
             openssl,
             CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
         ));
+
         let err = core_ext_verification_binding_from_name_and_descriptor(
             CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
             &descriptor,
@@ -2453,66 +2390,64 @@ mod tests {
 
     #[test]
     fn live_core_ext_binding_helper_rejects_non_manifest_bindings() {
-        let normalized = normalize_live_core_ext_binding_name(&format!(
-            "  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"
-        ))
-        .expect("valid live binding");
+        let padded = format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n");
+        let normalized = normalize_live_core_ext_binding_name(&padded).expect("valid live binding");
         assert_eq!(
             normalized,
             CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
         );
 
-        let err = normalize_live_core_ext_binding_name("").expect_err("empty must fail");
-        assert!(err.contains("unsupported core_ext binding"));
+        macro_rules! assert_normalize_rejects {
+            ($name:expr) => {{
+                let err =
+                    normalize_live_core_ext_binding_name($name).expect_err("non-live must fail");
+                assert!(err.contains("unsupported core_ext binding"), "{err}");
+            }};
+        }
+        assert_normalize_rejects!("");
+        assert_normalize_rejects!(" native_verify_sig ");
+    }
 
-        let err = normalize_live_core_ext_binding_name(" native_verify_sig ")
-            .expect_err("native alias must fail");
-        assert!(err.contains("unsupported core_ext binding"));
-
-        let descriptor = core_ext_openssl_digest32_binding_descriptor_bytes(
-            "ML-DSA-87",
-            ML_DSA_87_PUBKEY_BYTES,
-            ML_DSA_87_SIG_BYTES,
-        )
-        .expect("descriptor");
-        let binding = live_core_ext_verification_binding_from_name_and_descriptor(
-            &format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n"),
+    #[test]
+    fn live_core_ext_binding_helper_accepts_openssl_and_rejects_non_live_names() {
+        let padded = format!("  {CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1}\n");
+        let (descriptor, _) = openssl_digest32_descriptor();
+        macro_rules! assert_openssl {
+            ($binding:expr) => {{
+                assert!(matches!(
+                    $binding,
+                    CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
+                ));
+            }};
+        }
+        assert_openssl!(live_core_ext_verification_binding_from_name_and_descriptor(
+            &padded,
             &descriptor,
-            &[0xb2],
+            &[0xb2]
         )
-        .expect("live binding");
-        assert!(matches!(
-            binding,
-            CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
-        ));
+        .expect("live binding"));
+        assert_openssl!(
+            live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+                CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
+                &descriptor,
+                &[0xb2],
+            )
+            .expect("normalized live binding")
+        );
+        for name in ["", "native_verify_sig"] {
+            let err = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
+                name,
+                &descriptor,
+                &[0xb2],
+            )
+            .expect_err("normalized non-live binding must fail");
+            assert_eq!(err, unsupported_core_ext_binding_error(name));
+        }
+    }
 
-        let normalized = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
-            CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
-            &descriptor,
-            &[0xb2],
-        )
-        .expect("normalized live binding");
-        assert!(matches!(
-            normalized,
-            CoreExtVerificationBinding::VerifySigExtOpenSslDigest32V1(_)
-        ));
-
-        let err = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
-            "",
-            &descriptor,
-            &[0xb2],
-        )
-        .expect_err("empty normalized live binding must fail");
-        assert_eq!(err, unsupported_core_ext_binding_error(""));
-
-        let err = live_core_ext_verification_binding_from_normalized_name_and_descriptor(
-            "native_verify_sig",
-            &descriptor,
-            &[0xb2],
-        )
-        .expect_err("native normalized live binding must fail");
-        assert_eq!(err, unsupported_core_ext_binding_error("native_verify_sig"));
-
+    #[test]
+    fn live_core_ext_binding_helper_rejects_missing_schema() {
+        let (descriptor, _) = openssl_digest32_descriptor();
         let err = live_core_ext_verification_binding_from_name_and_descriptor(
             CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
             &descriptor,
@@ -2731,6 +2666,42 @@ mod tests {
         assert_eq!(
             err.msg,
             "CORE_EXT covenant_data length exceeds MAX_COVENANT_DATA_PER_OUTPUT"
+        );
+    }
+
+    #[test]
+    fn parse_core_ext_covenant_data_pins_success_and_error_order() {
+        macro_rules! assert_parse_ok {
+            ($data:expr, $expected_ext_id:expr, $expected_payload:expr) => {{
+                let data = $data;
+                let expected_payload: &[u8] = $expected_payload;
+                let parsed = parse_core_ext_covenant_data(&data).expect("valid covenant_data");
+                assert_eq!(parsed.ext_id, $expected_ext_id);
+                assert_eq!(parsed.ext_payload, expected_payload);
+            }};
+        }
+        macro_rules! assert_parse_err {
+            ($data:expr, $expected:expr) => {{
+                let data = $data;
+                let err = parse_core_ext_covenant_data(&data).unwrap_err();
+                assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+                assert_eq!(err.msg, $expected);
+            }};
+        }
+        assert_parse_ok!(core_ext_covdata(7, &[]), 7, &[]);
+        assert_parse_ok!(core_ext_covdata(8, &[0xab]), 8, &[0xab]);
+        assert_parse_err!(vec![0x07], "CORE_EXT covenant_data too short");
+        assert_parse_err!(
+            vec![0x07, 0x00, 0xfd],
+            "CORE_EXT ext_payload_len CompactSize invalid"
+        );
+        assert_parse_err!(
+            vec![0x07, 0x00, 0x02, 0xaa],
+            "CORE_EXT covenant_data ext_payload parse failure"
+        );
+        assert_parse_err!(
+            vec![0x07, 0x00, 0x00, 0xaa],
+            "CORE_EXT covenant_data length mismatch"
         );
     }
 }
