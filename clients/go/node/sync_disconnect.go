@@ -2,6 +2,8 @@ package node
 
 import (
 	"errors"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
@@ -94,4 +96,54 @@ func (s *SyncEngine) previewDisconnectCanonicalToAncestor(previewState *ChainSta
 		currentTipHeight--
 	}
 	return disconnectedBlocks, reorgDepth, nil
+}
+
+// fetchDisconnectBlockAndUndo fetches block bytes, undo data, and parses the block.
+func (s *SyncEngine) fetchDisconnectBlockAndUndo(tipHash [32]byte) (*consensus.ParsedBlock, []byte, *BlockUndo, error) {
+	blockBytes, err := s.blockStore.GetBlockByHash(tipHash)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	undo, err := s.blockStore.GetUndo(tipHash)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return pb, blockBytes, undo, nil
+}
+
+// getParentTimestamp returns the timestamp of the parent block, or 0 at height 0.
+func (s *SyncEngine) getParentTimestamp(tipHeight uint64, prevBlockHash [32]byte) (uint64, error) {
+	if tipHeight == 0 {
+		return 0, nil
+	}
+	parentHeaderBytes, err := s.blockStore.GetHeaderByHash(prevBlockHash)
+	if err != nil {
+		return 0, err
+	}
+	parentHeader, err := consensus.ParseBlockHeaderBytes(parentHeaderBytes)
+	if err != nil {
+		return 0, err
+	}
+	return parentHeader.Timestamp, nil
+}
+
+// finalizeDisconnectState updates chain state after disconnect.
+func (s *SyncEngine) finalizeDisconnectState(rollbackState syncRollbackState, newTipTimestamp uint64) error {
+	if err := s.blockStore.TruncateCanonical(uint64(len(rollbackState.canonicalIndex)) - 1); err != nil {
+		return s.rollbackApplyBlock(err, rollbackState)
+	}
+	if s.cfg.ChainStatePath != "" {
+		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
+			return s.rollbackApplyBlock(err, rollbackState)
+		}
+	}
+	s.mu.Lock()
+	s.tipTimestamp = newTipTimestamp
+	s.bestKnownHeight = rollbackState.bestKnownHeight
+	s.mu.Unlock()
+	return nil
 }
