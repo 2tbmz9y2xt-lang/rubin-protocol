@@ -52,20 +52,13 @@ fn read_mldsa87_pubkey(pkey: *mut openssl_sys::EVP_PKEY) -> Result<Vec<u8>, TxEr
     }
 }
 
-/// # Safety
-///
-/// If `pkey` is non-null, it must point to a live `EVP_PKEY` that remains valid
-/// until this function returns. A null pointer is accepted only to fail closed
-/// before any OpenSSL FFI call.
-unsafe fn new_digest_sign_ctx(
-    pkey: *mut openssl_sys::EVP_PKEY,
-) -> Result<*mut openssl_sys::EVP_MD_CTX, TxError> {
+fn new_digest_sign_ctx(keypair: &Mldsa87Keypair) -> Result<*mut openssl_sys::EVP_MD_CTX, TxError> {
+    let pkey = keypair.pkey;
     if pkey.is_null() {
         return Err(openssl_parse_error("openssl: nil ML-DSA keypair"));
     }
     unsafe {
-        // SAFETY: the function contract requires any non-null pkey to be live
-        // for this call. Production callers pass a Mldsa87Keypair-owned key.
+        // SAFETY: Mldsa87Keypair owns pkey and keeps it live for this call.
         // ERR_clear_error only resets OpenSSL's thread-local error queue.
         // OpenSSL allocates mctx here; every failure after allocation frees it
         // before returning, while success transfers it to sign_mldsa87_digest.
@@ -176,11 +169,7 @@ impl Mldsa87Keypair {
         if self.pkey.is_null() {
             return Err(openssl_parse_error("openssl: nil ML-DSA keypair"));
         }
-        let mctx = unsafe {
-            // SAFETY: self.pkey was checked non-null above and is owned by this
-            // keypair for the duration of the signing operation.
-            new_digest_sign_ctx(self.pkey)?
-        };
+        let mctx = new_digest_sign_ctx(self)?;
         sign_mldsa87_digest(mctx, digest32)
     }
 }

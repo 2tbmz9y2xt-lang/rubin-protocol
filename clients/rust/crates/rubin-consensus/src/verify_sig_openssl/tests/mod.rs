@@ -293,11 +293,14 @@ fn signing_ctx_rejects_public_only_key() {
         );
         assert!(!public_key.is_null(), "public-only EVP_PKEY allocation");
 
-        let mctx = super::new_digest_sign_ctx(public_key)
+        let public_only = Mldsa87Keypair {
+            pkey: public_key,
+            pubkey,
+        };
+        let mctx = super::new_digest_sign_ctx(&public_only)
             .expect("OpenSSL accepts public-only key at init before signing fails");
         let err = super::sign_mldsa87_digest(mctx, [0x42; 32])
             .expect_err("public-only EVP_PKEY must not sign a digest");
-        openssl_sys::EVP_PKEY_free(public_key);
         assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
         assert_eq!(err.msg, "openssl: EVP_DigestSign failed");
     }
@@ -305,12 +308,12 @@ fn signing_ctx_rejects_public_only_key() {
 
 #[test]
 fn signing_ctx_rejects_null_key() {
-    let err = unsafe {
-        // SAFETY: null is an explicitly allowed defensive input that must fail
-        // before OpenSSL sees the pointer.
-        super::new_digest_sign_ctx(core::ptr::null_mut())
-    }
-    .expect_err("null EVP_PKEY must reject before OpenSSL sign init");
+    let keypair = Mldsa87Keypair {
+        pkey: core::ptr::null_mut(),
+        pubkey: vec![0; crate::constants::ML_DSA_87_PUBKEY_BYTES as usize],
+    };
+    let err = super::new_digest_sign_ctx(&keypair)
+        .expect_err("null EVP_PKEY must reject before OpenSSL sign init");
     assert_eq!(err.code, ErrorCode::TxErrParse);
     assert_eq!(err.msg, "openssl: nil ML-DSA keypair");
 }
@@ -322,9 +325,12 @@ fn signing_ctx_rejects_empty_key_at_init() {
         // before return. It has no key material, so sign init must reject it.
         let empty_key = openssl_sys::EVP_PKEY_new();
         assert!(!empty_key.is_null(), "empty EVP_PKEY allocation");
-        let err = super::new_digest_sign_ctx(empty_key)
+        let empty_keypair = Mldsa87Keypair {
+            pkey: empty_key,
+            pubkey: vec![0; crate::constants::ML_DSA_87_PUBKEY_BYTES as usize],
+        };
+        let err = super::new_digest_sign_ctx(&empty_keypair)
             .expect_err("empty EVP_PKEY must reject during OpenSSL sign init");
-        openssl_sys::EVP_PKEY_free(empty_key);
         assert_eq!(err.code, ErrorCode::TxErrParse);
         assert_eq!(err.msg, "openssl: EVP_DigestSignInit_ex failed");
     }
