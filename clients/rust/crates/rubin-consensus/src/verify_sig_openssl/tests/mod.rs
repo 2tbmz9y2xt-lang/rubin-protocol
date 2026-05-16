@@ -120,6 +120,22 @@ fn parse_openssl_fips_mode_accepts_supported_values() {
 }
 
 #[test]
+fn parse_openssl_fips_mode_trims_and_ignores_case() {
+    assert_eq!(
+        parse_openssl_fips_mode(" OFF ").expect("trimmed off should parse"),
+        OpenSslFipsMode::Off
+    );
+    assert_eq!(
+        parse_openssl_fips_mode("\tReady\n").expect("trimmed ready should parse"),
+        OpenSslFipsMode::Ready
+    );
+    assert_eq!(
+        parse_openssl_fips_mode("Only").expect("case-insensitive only should parse"),
+        OpenSslFipsMode::Only
+    );
+}
+
+#[test]
 fn parse_openssl_fips_mode_rejects_unknown_value() {
     let err = parse_openssl_fips_mode("definitely-invalid")
         .expect_err("unknown mode must return parse error");
@@ -225,6 +241,19 @@ fn keypair_generate_pubkey_is_expected_length() {
 }
 
 #[test]
+fn read_pubkey_rejects_empty_key_and_consumes_it() {
+    unsafe {
+        // SAFETY: empty_key is allocated by OpenSSL and then transferred to
+        // read_mldsa87_pubkey, which frees it on this error path.
+        let empty_key = openssl_sys::EVP_PKEY_new();
+        assert!(!empty_key.is_null(), "empty EVP_PKEY allocation");
+        let err = super::read_mldsa87_pubkey(empty_key).expect_err("empty key has no raw pubkey");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+        assert_eq!(err.msg, "openssl: EVP_PKEY_get_raw_public_key failed");
+    }
+}
+
+#[test]
 fn keypair_pubkey_bytes_is_copy() {
     let Some(kp) = generate_or_skip() else { return };
     let a = kp.pubkey_bytes();
@@ -237,6 +266,87 @@ fn keypair_sign_digest_produces_expected_length() {
     let Some(kp) = generate_or_skip() else { return };
     let sig = kp.sign_digest32([0x42; 32]).expect("sign");
     assert_eq!(sig.len(), crate::constants::ML_DSA_87_SIG_BYTES as usize);
+}
+
+#[test]
+fn keypair_sign_digest_rejects_nil_private_key() {
+    let kp = Mldsa87Keypair {
+        pkey: core::ptr::null_mut(),
+        pubkey: vec![0xAB; crate::constants::ML_DSA_87_PUBKEY_BYTES as usize],
+    };
+    let pubkey = kp.pubkey_bytes();
+    assert_eq!(
+        pubkey.len(),
+        crate::constants::ML_DSA_87_PUBKEY_BYTES as usize
+    );
+    assert_eq!(pubkey[0], 0xAB);
+
+    let err = kp
+        .sign_digest32([0x42; 32])
+        .expect_err("nil pkey must reject before OpenSSL signing");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: nil ML-DSA keypair");
+    assert_eq!(kp.pubkey_bytes(), pubkey);
+}
+
+#[test]
+fn signing_ctx_rejects_public_only_key() {
+    let Some(kp) = generate_or_skip() else { return };
+    let pubkey = kp.pubkey_bytes();
+    unsafe {
+        // SAFETY: public_key is owned by this test after successful OpenSSL
+        // allocation and is freed before return. The pubkey slice lives across
+        // the FFI call and has the canonical ML-DSA-87 public-key length.
+        let public_key = super::ffi::EVP_PKEY_new_raw_public_key_ex(
+            core::ptr::null_mut(),
+            c"ML-DSA-87".as_ptr(),
+            core::ptr::null(),
+            pubkey.as_ptr(),
+            pubkey.len(),
+        );
+        assert!(!public_key.is_null(), "public-only EVP_PKEY allocation");
+
+        let public_only = Mldsa87Keypair {
+            pkey: public_key,
+            pubkey,
+        };
+        let mctx = super::new_digest_sign_ctx(&public_only)
+            .expect("OpenSSL accepts public-only key at init before signing fails");
+        let err = super::sign_mldsa87_digest(mctx, [0x42; 32])
+            .expect_err("public-only EVP_PKEY must not sign a digest");
+        assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
+        assert_eq!(err.msg, "openssl: EVP_DigestSign failed");
+    }
+}
+
+#[test]
+fn signing_ctx_rejects_null_key() {
+    let keypair = Mldsa87Keypair {
+        pkey: core::ptr::null_mut(),
+        pubkey: vec![0; crate::constants::ML_DSA_87_PUBKEY_BYTES as usize],
+    };
+    let err = super::new_digest_sign_ctx(&keypair)
+        .expect_err("null EVP_PKEY must reject before OpenSSL sign init");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: nil ML-DSA keypair");
+}
+
+#[test]
+fn signing_ctx_rejects_empty_key_at_init() {
+    unsafe {
+        // SAFETY: empty_key is a live EVP_PKEY allocated by OpenSSL and freed
+        // before return. It has no key material, so sign init must reject it.
+        let empty_key = openssl_sys::EVP_PKEY_new();
+        assert!(!empty_key.is_null(), "empty EVP_PKEY allocation");
+        let empty_keypair = Mldsa87Keypair {
+            pkey: empty_key,
+            pubkey: vec![0; crate::constants::ML_DSA_87_PUBKEY_BYTES as usize],
+        };
+        let err = super::new_digest_sign_ctx(&empty_keypair)
+            .expect_err("empty EVP_PKEY must reject during OpenSSL sign init");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+        assert_eq!(err.msg, "openssl: EVP_DigestSignInit_ex failed");
+    }
 }
 
 #[test]
@@ -267,6 +377,24 @@ fn verify_sig_empty_inputs_return_false_or_error() {
         Err(_) => {}
         Ok(true) => panic!("empty inputs must not verify as true"),
     }
+}
+
+#[test]
+fn openssl_digest_oneshot_rejects_empty_input_before_ffi() {
+    let err = super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &[], &[1], &[1])
+        .expect_err("empty pubkey must reject before FFI");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: empty input");
+
+    let err = super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &[1], &[], &[1])
+        .expect_err("empty signature must reject before FFI");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: empty input");
+
+    let err = super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &[1], &[1], &[])
+        .expect_err("empty message must reject before FFI");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: empty input");
 }
 
 #[test]
