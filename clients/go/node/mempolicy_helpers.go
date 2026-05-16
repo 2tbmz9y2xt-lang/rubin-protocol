@@ -128,3 +128,17 @@ func applyPolicyAgainstStatePayload(checked *consensus.CheckedTransaction, polic
 	}
 	return nil
 }
+
+// applyPolicyAgainstStateAnchor handles non-coinbase anchor output policy application
+func applyPolicyAgainstStateAnchor(checked *consensus.CheckedTransaction, policy MempoolConfig) error {
+	if policy.PolicyRejectNonCoinbaseAnchorOutputs {
+		reject, reason, err := RejectNonCoinbaseAnchorOutputs(checked.Tx)
+		if err != nil {
+			return err
+		}
+		if reject {
+			return errors.New(reason)
+		}
+	}
+	return nil
+}

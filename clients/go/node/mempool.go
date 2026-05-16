@@ -547,14 +547,8 @@ func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction,
 		return errors.New("nil checked transaction")
 	}
 	// Apply non-coinbase anchor output policy
-	if policy.PolicyRejectNonCoinbaseAnchorOutputs {
-		reject, reason, err := RejectNonCoinbaseAnchorOutputs(checked.Tx)
-		if err != nil {
-			return err
-		}
-		if reject {
-			return errors.New(reason)
-		}
+	if err := applyPolicyAgainstStateAnchor(checked, policy); err != nil {
+		return err
 	}
 
 	// Apply DA fee policy
