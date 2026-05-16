@@ -170,9 +170,10 @@ def validate_tx(data: dict[str, Any], converge: bool, rust_submit: bool) -> str 
     if not converge: return validate_samples(data, prop, None, txid)  # noqa: E701
     mined, seen = data.get(mine), data.get(conv)
     if (bad := source_object_error(mined, mine)) or (bad := source_object_error(seen, conv)): return bad  # noqa: E701
+    if not isinstance(mined, dict) or not isinstance(seen, dict): return "convergence_identity_mismatch"  # noqa: E701
     if mined.get("raw_hex") != submitted_hex or seen.get("raw_hex") != submitted_hex:
         return "convergence_identity_mismatch"
-    if mined.get("txid") != txid or seen.get("txid") != txid or any(obj.get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"] for obj, impl in ((mined, mine_impl), (seen, conv_impl))) or mined.get("class") not in {None, "mined_included"} or mined.get("mined_by") not in {None, f"node-{mine_impl}"} or seen.get("class") not in {None, "canonical_block_found"} or seen.get("converged_at") not in {None, f"node-{conv_impl}"}: return "convergence_identity_mismatch"  # noqa: E701
+    if mined.get("txid") != txid or seen.get("txid") != txid or any(obj.get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"] for obj, impl in ((mined, mine_impl), (seen, conv_impl))) or mined.get("class") != "mined_included" or mined.get("mined_by") != f"node-{mine_impl}" or seen.get("class") != "canonical_block_found" or seen.get("converged_at") != f"node-{conv_impl}": return "convergence_identity_mismatch"  # noqa: E701
     if mined.get("height") != seen.get("height") or mined.get("block_hash") != seen.get("block_hash") or not jint(mined.get("height")) or not jint(seen.get("height")) or not is_hex32(mined.get("block_hash")): return "convergence_identity_mismatch"  # noqa: E701
     return validate_samples(data, prop, conv_dir, txid, mined["height"], mined["block_hash"])
 def restart_contradiction(data: dict[str, Any]) -> str | None:
