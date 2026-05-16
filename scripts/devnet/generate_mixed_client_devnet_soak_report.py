@@ -381,18 +381,22 @@ def write_atomic(path: Path, data: dict[str, Any]) -> None:
         raise
 def path_field_targets(value: Any, base: Path) -> list[Path]:
     out: list[Path] = []; stack: list[tuple[Any, str]] = [(value, "")]  # noqa: E702
+    def add_path(text: str) -> None:
+        raw = (_ for _ in ()).throw(ValueError("path_field_contains_nul")) if "\x00" in text else Path(os.path.expanduser(text)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
     while stack:
         item, prefix = stack.pop()
         if isinstance(item, dict):
             for key, child in item.items():
-                dotted = f"{prefix}.{key}" if prefix else key
-                if isinstance(child, str) and (key in PATH_FIELD_NAMES or key.endswith("_path") or dotted in PATH_FIELD_DOTTED_NAMES):
-                    raw = (_ for _ in ()).throw(ValueError("path_field_contains_nul")) if "\x00" in child else Path(os.path.expanduser(child)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
-                else:
-                    stack.append((child, dotted))
+                dotted = f"{prefix}.{key}" if prefix else key; is_path = key in PATH_FIELD_NAMES or (key.endswith("_path") and key != "tx_path") or dotted in PATH_FIELD_DOTTED_NAMES  # noqa: E702
+                if is_path and not isinstance(child, str): raise ValueError("path_field_not_string")  # noqa: E701
+                if is_path: add_path(child)  # noqa: E701
+                else: stack.append((child, dotted))  # noqa: E701
         elif isinstance(item, list):
-            if prefix.endswith("command_argv") and any(isinstance(child, str) and "\x00" in child for child in item): raise ValueError("path_field_contains_nul")  # noqa: E701
-            if prefix.endswith("command_argv"): out.extend(Path(os.path.realpath(Path(os.path.expanduser(child)) if Path(os.path.expanduser(child)).is_absolute() else base / Path(os.path.expanduser(child)))) for child in item if isinstance(child, str) and (child.startswith(("~", "/", ".")) or os.sep in child))  # noqa: E701,E501
+            if prefix.endswith("command_argv"):
+                for child in item:
+                    if isinstance(child, str):
+                        for text in (child, child.split("=", 1)[1] if "=" in child else ""):
+                            if text and (text.startswith(("~", "/", ".")) or os.sep in text): add_path(text)  # noqa: E701
             stack.extend((child, prefix) for child in item)
     return out
 def same_path(left: Path, right: Path) -> bool:
