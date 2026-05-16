@@ -1048,3 +1048,71 @@ func TestValidateMainnetGenesisGuard_ExportedWrapperParity(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateMempoolEntryParsedRejectsBadSource(t *testing.T) {
+	fromKey := mustNodeMLDSA87Keypair(t)
+	toKey := mustNodeMLDSA87Keypair(t)
+	fromAddr := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
+	toAddr := consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	st, outpoints := testSpendableChainState(fromAddr, []uint64{1_000_000})
+	txBytes := mustBuildSignedTransferTx(t, st.Utxos, []consensus.Outpoint{outpoints[0]}, 100_000, 100_000, 1, fromKey, fromAddr, toAddr)
+	tx, txid, wtxid, _, err := consensus.ParseTx(txBytes)
+	if err != nil {
+		t.Fatalf("ParseTx: %v", err)
+	}
+	weight, _, _, err := consensus.TxWeightAndStats(tx)
+	if err != nil {
+		t.Fatalf("TxWeightAndStats: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		entry   mempoolEntry
+		wantErr string
+	}{
+		{
+			name: "valid",
+			entry: mempoolEntry{
+				raw: txBytes, txid: txid, wtxid: wtxid,
+				weight: weight, size: len(txBytes),
+				admissionSeq: 1, source: "local",
+				inputs: []consensus.Outpoint{{Txid: outpoints[0].Txid, Vout: outpoints[0].Vout}},
+			},
+		},
+		{
+			name: "bad_txid",
+			entry: mempoolEntry{
+				raw: txBytes, txid: [32]byte{0xff}, wtxid: wtxid,
+				weight: weight, size: len(txBytes),
+				admissionSeq: 1, source: "local",
+				inputs: []consensus.Outpoint{{Txid: outpoints[0].Txid, Vout: outpoints[0].Vout}},
+			},
+			wantErr: "txid mismatch",
+		},
+		{
+			name: "bad_source",
+			entry: mempoolEntry{
+				raw: txBytes, txid: txid, wtxid: wtxid,
+				weight: weight, size: len(txBytes),
+				admissionSeq: 1, source: "bogus_source",
+				inputs: []consensus.Outpoint{{Txid: outpoints[0].Txid, Vout: outpoints[0].Vout}},
+			},
+			wantErr: "invalid mempool snapshot entry source",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMempoolEntryParsed(tc.entry)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want %q, got %v", tc.wantErr, err)
+				}
+			}
+		})
+	}
+}
