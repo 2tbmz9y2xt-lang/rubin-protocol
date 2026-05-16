@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000  # noqa: E702
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
-METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
+METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})(?:\{{[A-Za-z_:][A-Za-z0-9_:]*=\"[^\"]*\"(?:,[A-Za-z_:][A-Za-z0-9_:]*=\"[^\"]*\")*\}})?\s+({NUM})(?:\s+({NUM}))?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable", "helper_only"}  # noqa: E702
 PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block"}
 PATH_FIELD_DOTTED_NAMES = {
@@ -310,14 +310,14 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
                     return None, "metric_value_invalid"
                 found[metric] = int(v)
         else:
-            for line in text.splitlines():
-                parts = line.split()
-                if parts and parts[0].split("{", 1)[0] in METRICS and (len(parts) not in {2, 3} or "{" in parts[0] or (len(parts) == 3 and not re.fullmatch(r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?", parts[2]))):
-                    return None, "metrics_malformed"
-                if len(parts) in {2, 3} and (metric := parts[0].split("{", 1)[0]) in METRICS:
-                    if metric in found or not re.fullmatch(r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?", parts[1]) or not math.isfinite(float(parts[1])) or float(parts[1]) <= 0 or float(parts[1]) > 1_000_000_000 or int(float(parts[1])) != float(parts[1]):
-                        return None, "metrics_duplicate" if metric in found else "metric_value_invalid"
-                    found[metric] = int(float(parts[1]))
+            for raw_line in text.splitlines():
+                if not (line := raw_line.strip()): continue  # noqa: E701
+                head = re.match(r"[A-Za-z_:][A-Za-z0-9_:]*", line); metric = head.group(0) if head else ""; m = METRIC_LINE.fullmatch(line) if metric in METRICS else None
+                if metric in METRICS and not m: return None, "metrics_malformed"  # noqa: E701
+                if m:
+                    value = float(m.group(2))
+                    if metric in found or not math.isfinite(value) or value <= 0 or value > 1_000_000_000 or int(value) != value: return None, "metrics_duplicate" if metric in found else "metric_value_invalid"  # noqa: E701
+                    found[metric] = int(value)
     except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
         return None, str(exc) if str(exc).startswith("duplicate_json_key") else "metrics_malformed"
     return (found, None) if all(found.get(m, 0) > 0 for m in METRICS) else (None, "metrics_missing_or_zero")
