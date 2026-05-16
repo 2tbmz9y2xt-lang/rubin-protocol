@@ -9,7 +9,7 @@ SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})(?:\{{[A-Za-z_:][A-Za-z0-9_:]*=\"[^\"]*\"(?:,[A-Za-z_:][A-Za-z0-9_:]*=\"[^\"]*\")*\}})?\s+({NUM})(?:\s+({NUM}))?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable", "helper_only"}  # noqa: E702
-PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block"}
+PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block", "binary"}
 PATH_FIELD_DOTTED_NAMES = {
     "observations.pre_partition.common_go_block", "observations.pre_partition.common_go_mine", "observations.pre_partition.common_rust_block", "observations.pre_partition.common_rust_tip", "observations.pre_partition.go_peer_snapshot", "observations.pre_partition.rust_peer_snapshot",
     "observations.partition.go_peer_snapshot", "observations.partition.rust_peer_snapshot", "observations.fork.go_block", "observations.fork.go_mine", "observations.fork.go_peer_snapshot", "observations.fork.go_tip", "observations.fork.rust_block_1", "observations.fork.rust_block_2", "observations.fork.rust_mine_1", "observations.fork.rust_mine_2", "observations.fork.rust_peer_snapshot", "observations.fork.rust_tip",
@@ -380,19 +380,19 @@ def write_atomic(path: Path, data: dict[str, Any]) -> None:
             pass
         raise
 def path_field_targets(value: Any, base: Path) -> list[Path]:
-    out: list[Path] = []
-    stack: list[tuple[Any, str]] = [(value, "")]
+    out: list[Path] = []; stack: list[tuple[Any, str]] = [(value, "")]  # noqa: E702
     while stack:
         item, prefix = stack.pop()
         if isinstance(item, dict):
             for key, child in item.items():
                 dotted = f"{prefix}.{key}" if prefix else key
                 if isinstance(child, str) and (key in PATH_FIELD_NAMES or key.endswith("_path") or dotted in PATH_FIELD_DOTTED_NAMES):
-                    if "\x00" in child: raise ValueError("path_field_contains_nul")  # noqa: E701
-                    raw = Path(os.path.expanduser(child)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
+                    raw = (_ for _ in ()).throw(ValueError("path_field_contains_nul")) if "\x00" in child else Path(os.path.expanduser(child)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
                 else:
                     stack.append((child, dotted))
         elif isinstance(item, list):
+            if prefix.endswith("command_argv") and any(isinstance(child, str) and "\x00" in child for child in item): raise ValueError("path_field_contains_nul")  # noqa: E701
+            if prefix.endswith("command_argv"): out.extend(Path(os.path.realpath(Path(os.path.expanduser(child)) if Path(os.path.expanduser(child)).is_absolute() else base / Path(os.path.expanduser(child)))) for child in item if isinstance(child, str) and (child.startswith(("~", "/", ".")) or os.sep in child))  # noqa: E701,E501
             stack.extend((child, prefix) for child in item)
     return out
 def same_path(left: Path, right: Path) -> bool:
