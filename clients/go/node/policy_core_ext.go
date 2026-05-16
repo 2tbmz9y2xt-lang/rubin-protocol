@@ -99,7 +99,15 @@ func RejectCoreExtTxPreActivation(
 			return reject, reason, err
 		}
 	}
+	return rejectCoreExtSpendsPreActivation(tx, utxos, height, profiles)
+}
 
+func rejectCoreExtSpendsPreActivation(
+	tx *consensus.Tx,
+	utxos map[consensus.Outpoint]consensus.UtxoEntry,
+	height uint64,
+	profiles consensus.CoreExtProfileProvider,
+) (reject bool, reason string, err error) {
 	if utxos == nil {
 		return false, "", nil
 	}

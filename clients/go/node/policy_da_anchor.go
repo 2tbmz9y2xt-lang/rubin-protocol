@@ -87,27 +87,17 @@ func RejectDaAnchorTxPolicy(
 		// DA-specific term to non-DA transactions.
 		return false, 0, "", nil
 	}
-	relayFloor, err := mulU64NoOverflow(weight, currentMempoolMinFeeRate)
+	floor, reason, err := computeDaAnchorRequiredFee(
+		weight,
+		daBytes,
+		currentMempoolMinFeeRate,
+		minDaFeeRate,
+		daSurchargePerByte,
+	)
 	if err != nil {
-		return true, daBytes, fmt.Sprintf("relay fee floor overflow (weight=%d current_mempool_min_fee_rate=%d)", weight, currentMempoolMinFeeRate), err
+		return true, daBytes, reason, err
 	}
-	daFloor, err := mulU64NoOverflow(daBytes, minDaFeeRate)
-	if err != nil {
-		return true, daBytes, fmt.Sprintf("DA fee floor overflow (da_payload_len=%d min_da_fee_rate=%d)", daBytes, minDaFeeRate), err
-	}
-	daSurcharge, err := mulU64NoOverflow(daBytes, daSurchargePerByte)
-	if err != nil {
-		return true, daBytes, fmt.Sprintf("DA surcharge overflow (da_payload_len=%d surcharge_per_byte=%d)", daBytes, daSurchargePerByte), err
-	}
-	daRequired := daFloor
-	if err := addU64NoOverflow(&daRequired, daSurcharge); err != nil {
-		return true, daBytes, fmt.Sprintf("DA required fee overflow (da_fee_floor=%d da_surcharge=%d)", daFloor, daSurcharge), err
-	}
-	required := relayFloor
-	if daRequired > required {
-		required = daRequired
-	}
-	if required == 0 {
+	if floor.required == 0 {
 		// DA tx but every Stage C rate-derived fee term is zero: the
 		// relay-floor term is zero and both DA-side terms are zero.
 		// Nothing to enforce; admit without fee compute.
@@ -117,13 +107,62 @@ func RejectDaAnchorTxPolicy(
 	if err != nil {
 		return true, daBytes, "cannot compute fee for DA tx (policy)", err
 	}
-	if fee < required {
+	if fee < floor.required {
 		return true, daBytes, fmt.Sprintf(
 			"DA fee below Stage C floor (fee=%d required_fee=%d relay_fee_floor=%d da_fee_floor=%d da_surcharge=%d weight=%d da_payload_len=%d)",
-			fee, required, relayFloor, daFloor, daSurcharge, weight, daBytes,
+			fee, floor.required, floor.relayFloor, floor.daFloor, floor.daSurcharge, weight, daBytes,
 		), nil
 	}
 	return false, daBytes, "", nil
+}
+
+type daAnchorRequiredFee struct {
+	relayFloor  uint64
+	daFloor     uint64
+	daSurcharge uint64
+	required    uint64
+}
+
+func computeDaAnchorRequiredFee(
+	weight uint64,
+	daBytes uint64,
+	currentMempoolMinFeeRate uint64,
+	minDaFeeRate uint64,
+	daSurchargePerByte uint64,
+) (daAnchorRequiredFee, string, error) {
+	relayFloor, err := mulU64NoOverflow(weight, currentMempoolMinFeeRate)
+	if err != nil {
+		return daAnchorRequiredFee{}, fmt.Sprintf("relay fee floor overflow (weight=%d current_mempool_min_fee_rate=%d)", weight, currentMempoolMinFeeRate), err
+	}
+	daFloor, err := mulU64NoOverflow(daBytes, minDaFeeRate)
+	if err != nil {
+		return daAnchorRequiredFee{}, fmt.Sprintf("DA fee floor overflow (da_payload_len=%d min_da_fee_rate=%d)", daBytes, minDaFeeRate), err
+	}
+	daSurcharge, err := mulU64NoOverflow(daBytes, daSurchargePerByte)
+	if err != nil {
+		return daAnchorRequiredFee{}, fmt.Sprintf("DA surcharge overflow (da_payload_len=%d surcharge_per_byte=%d)", daBytes, daSurchargePerByte), err
+	}
+	required, err := maxDaAnchorRequiredFee(relayFloor, daFloor, daSurcharge)
+	if err != nil {
+		return daAnchorRequiredFee{}, fmt.Sprintf("DA required fee overflow (da_fee_floor=%d da_surcharge=%d)", daFloor, daSurcharge), err
+	}
+	return daAnchorRequiredFee{
+		relayFloor:  relayFloor,
+		daFloor:     daFloor,
+		daSurcharge: daSurcharge,
+		required:    required,
+	}, "", nil
+}
+
+func maxDaAnchorRequiredFee(relayFloor uint64, daFloor uint64, daSurcharge uint64) (uint64, error) {
+	daRequired := daFloor
+	if err := addU64NoOverflow(&daRequired, daSurcharge); err != nil {
+		return 0, err
+	}
+	if daRequired > relayFloor {
+		return daRequired, nil
+	}
+	return relayFloor, nil
 }
 
 func computeFeeNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
@@ -136,6 +175,21 @@ func computeFeeNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus
 	if utxos == nil {
 		return 0, errors.New("nil utxo set")
 	}
+	sumIn, err := sumInputValueNoVerify(tx, utxos)
+	if err != nil {
+		return 0, err
+	}
+	sumOut, err := sumOutputValueNoVerify(tx)
+	if err != nil {
+		return 0, err
+	}
+	if sumOut > sumIn {
+		return 0, errors.New("overspend")
+	}
+	return sumIn - sumOut, nil
+}
+
+func sumInputValueNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry) (uint64, error) {
 	var sumIn uint64
 	for _, in := range tx.Inputs {
 		op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
@@ -149,6 +203,10 @@ func computeFeeNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus
 		}
 		sumIn = next
 	}
+	return sumIn, nil
+}
+
+func sumOutputValueNoVerify(tx *consensus.Tx) (uint64, error) {
 	var sumOut uint64
 	for _, out := range tx.Outputs {
 		next := sumOut + out.Value
@@ -157,10 +215,7 @@ func computeFeeNoVerify(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus
 		}
 		sumOut = next
 	}
-	if sumOut > sumIn {
-		return 0, errors.New("overspend")
-	}
-	return sumIn - sumOut, nil
+	return sumOut, nil
 }
 
 func mulU64NoOverflow(a uint64, b uint64) (uint64, error) {
