@@ -120,6 +120,22 @@ fn parse_openssl_fips_mode_accepts_supported_values() {
 }
 
 #[test]
+fn parse_openssl_fips_mode_trims_and_ignores_case() {
+    assert_eq!(
+        parse_openssl_fips_mode(" OFF ").expect("trimmed off should parse"),
+        OpenSslFipsMode::Off
+    );
+    assert_eq!(
+        parse_openssl_fips_mode("\tReady\n").expect("trimmed ready should parse"),
+        OpenSslFipsMode::Ready
+    );
+    assert_eq!(
+        parse_openssl_fips_mode("Only").expect("case-insensitive only should parse"),
+        OpenSslFipsMode::Only
+    );
+}
+
+#[test]
 fn parse_openssl_fips_mode_rejects_unknown_value() {
     let err = parse_openssl_fips_mode("definitely-invalid")
         .expect_err("unknown mode must return parse error");
@@ -240,6 +256,27 @@ fn keypair_sign_digest_produces_expected_length() {
 }
 
 #[test]
+fn keypair_sign_digest_rejects_nil_private_key() {
+    let kp = Mldsa87Keypair {
+        pkey: core::ptr::null_mut(),
+        pubkey: vec![0xAB; crate::constants::ML_DSA_87_PUBKEY_BYTES as usize],
+    };
+    let pubkey = kp.pubkey_bytes();
+    assert_eq!(
+        pubkey.len(),
+        crate::constants::ML_DSA_87_PUBKEY_BYTES as usize
+    );
+    assert_eq!(pubkey[0], 0xAB);
+
+    let err = kp
+        .sign_digest32([0x42; 32])
+        .expect_err("nil pkey must reject before OpenSSL signing");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: nil ML-DSA keypair");
+    assert_eq!(kp.pubkey_bytes(), pubkey);
+}
+
+#[test]
 fn keypair_close_idempotent() {
     let Some(kp) = generate_or_skip() else { return };
     drop(kp);
@@ -267,6 +304,24 @@ fn verify_sig_empty_inputs_return_false_or_error() {
         Err(_) => {}
         Ok(true) => panic!("empty inputs must not verify as true"),
     }
+}
+
+#[test]
+fn openssl_digest_oneshot_rejects_empty_input_before_ffi() {
+    let err = super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &[], &[1], &[1])
+        .expect_err("empty pubkey must reject before FFI");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: empty input");
+
+    let err = super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &[1], &[], &[1])
+        .expect_err("empty signature must reject before FFI");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: empty input");
+
+    let err = super::openssl_verify_sig_digest_oneshot(c"ML-DSA-87", &[1], &[1], &[])
+        .expect_err("empty message must reject before FFI");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "openssl: empty input");
 }
 
 #[test]
