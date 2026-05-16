@@ -44,7 +44,6 @@ func ParseMineAddress(value string) ([]byte, error) {
 	if strings.HasPrefix(trimmed, "0x") || strings.HasPrefix(trimmed, "0X") {
 		trimmed = trimmed[2:]
 	}
-
 	if len(trimmed)%2 != 0 {
 		return nil, fmt.Errorf("mine_address: odd-length hex")
 	}
@@ -52,6 +51,10 @@ func ParseMineAddress(value string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mine_address: %w", err)
 	}
+	return parseMineAddressRaw(raw)
+}
+
+func parseMineAddressRaw(raw []byte) ([]byte, error) {
 	switch len(raw) {
 	case mineAddressKeyIDBytes:
 		out := make([]byte, 0, consensus.MAX_P2PK_COVENANT_DATA)

@@ -74,39 +74,16 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 	if err := decodeSingleJSONValue(raw, &wire); err != nil {
 		return nil, nil, productionRotationScheduleError("parse embedded artifact: %w", err)
 	}
-	if wire.Version != productionRotationScheduleVersion {
-		return nil, nil, productionRotationScheduleError(
-			"unsupported version %d (want %d)",
-			wire.Version,
-			productionRotationScheduleVersion,
-		)
-	}
-	for key := range wire.Networks {
-		if key != "mainnet" && key != "testnet" {
-			return nil, nil, productionRotationScheduleError(
-				"unknown networks.%s entry",
-				key,
-			)
-		}
+	if err := validateProductionRotationScheduleWire(wire); err != nil {
+		return nil, nil, err
 	}
 	schedule := &productionRotationSchedule{
 		Version:  wire.Version,
 		Networks: make(map[string]*consensus.CryptoRotationDescriptor, len(wire.Networks)),
 	}
-	parsedDescriptors := make(map[string]*RotationConfigJSON, len(wire.Networks))
-	for _, network := range []string{"mainnet", "testnet"} {
-		entryRaw, ok := wire.Networks[network]
-		if !ok {
-			return nil, nil, productionRotationScheduleError(
-				"networks.%s missing",
-				network,
-			)
-		}
-		descriptorJSON, err := parseProductionRotationScheduleDescriptorJSON(entryRaw, network)
-		if err != nil {
-			return nil, nil, err
-		}
-		parsedDescriptors[network] = descriptorJSON
+	parsedDescriptors, err := parseProductionRotationScheduleDescriptors(wire.Networks)
+	if err != nil {
+		return nil, nil, err
 	}
 	// The compiled production schedule is activation-only authority. When the
 	// caller does not supply an explicit canonical registry contract, fail
@@ -116,17 +93,47 @@ func loadCompiledProductionRotationScheduleFromJSONWithRegistry(
 		registry = consensus.DefaultSuiteRegistry()
 	}
 	for _, network := range []string{"mainnet", "testnet"} {
-		desc, err := buildProductionRotationScheduleDescriptor(
-			parsedDescriptors[network],
-			network,
-			registry,
-		)
+		desc, err := buildProductionRotationScheduleDescriptor(parsedDescriptors[network], network, registry)
 		if err != nil {
 			return nil, nil, err
 		}
 		schedule.Networks[network] = desc
 	}
 	return schedule, registry, nil
+}
+
+func validateProductionRotationScheduleWire(wire productionRotationScheduleWire) error {
+	if wire.Version != productionRotationScheduleVersion {
+		return productionRotationScheduleError(
+			"unsupported version %d (want %d)",
+			wire.Version,
+			productionRotationScheduleVersion,
+		)
+	}
+	for key := range wire.Networks {
+		if key != "mainnet" && key != "testnet" {
+			return productionRotationScheduleError("unknown networks.%s entry", key)
+		}
+	}
+	return nil
+}
+
+func parseProductionRotationScheduleDescriptors(
+	networks map[string]json.RawMessage,
+) (map[string]*RotationConfigJSON, error) {
+	parsedDescriptors := make(map[string]*RotationConfigJSON, len(networks))
+	for _, network := range []string{"mainnet", "testnet"} {
+		entryRaw, ok := networks[network]
+		if !ok {
+			return nil, productionRotationScheduleError("networks.%s missing", network)
+		}
+		descriptorJSON, err := parseProductionRotationScheduleDescriptorJSON(entryRaw, network)
+		if err != nil {
+			return nil, err
+		}
+		parsedDescriptors[network] = descriptorJSON
+	}
+	return parsedDescriptors, nil
 }
 
 func parseProductionRotationScheduleDescriptorJSON(
@@ -174,44 +181,67 @@ func buildProductionRotationScheduleDescriptor(
 }
 
 func (wire productionRotationDescriptorWire) toRotationConfigJSON() (RotationConfigJSON, error) {
-	name, err := requireProductionRotationScheduleField("name", wire.Name)
+	fields, err := wire.requiredFields()
 	if err != nil {
 		return RotationConfigJSON{}, err
-	}
-	oldSuiteID, err := requireProductionRotationScheduleField("old_suite_id", wire.OldSuiteID)
-	if err != nil {
-		return RotationConfigJSON{}, err
-	}
-	newSuiteID, err := requireProductionRotationScheduleField("new_suite_id", wire.NewSuiteID)
-	if err != nil {
-		return RotationConfigJSON{}, err
-	}
-	if err := rejectSentinelProductionRotationScheduleSuiteID("old_suite_id", oldSuiteID); err != nil {
-		return RotationConfigJSON{}, err
-	}
-	if err := rejectSentinelProductionRotationScheduleSuiteID("new_suite_id", newSuiteID); err != nil {
-		return RotationConfigJSON{}, err
-	}
-	createHeight, err := requireProductionRotationScheduleField("create_height", wire.CreateHeight)
-	if err != nil {
-		return RotationConfigJSON{}, err
-	}
-	spendHeight, err := requireProductionRotationScheduleField("spend_height", wire.SpendHeight)
-	if err != nil {
-		return RotationConfigJSON{}, err
-	}
-	var sunsetHeight uint64
-	if wire.SunsetHeight != nil {
-		sunsetHeight = *wire.SunsetHeight
 	}
 	return RotationConfigJSON{
-		Name:         name,
-		OldSuiteID:   oldSuiteID,
-		NewSuiteID:   newSuiteID,
-		CreateHeight: createHeight,
-		SpendHeight:  spendHeight,
-		SunsetHeight: sunsetHeight,
+		Name:         fields.name,
+		OldSuiteID:   fields.oldSuiteID,
+		NewSuiteID:   fields.newSuiteID,
+		CreateHeight: fields.createHeight,
+		SpendHeight:  fields.spendHeight,
+		SunsetHeight: fields.sunsetHeight,
 	}, nil
+}
+
+type productionRotationRequiredFields struct {
+	name         string
+	oldSuiteID   uint8
+	newSuiteID   uint8
+	createHeight uint64
+	spendHeight  uint64
+	sunsetHeight uint64
+}
+
+func (wire productionRotationDescriptorWire) requiredFields() (productionRotationRequiredFields, error) {
+	fields, err := requireProductionRotationScheduleIdentityFields(wire)
+	if err != nil {
+		return productionRotationRequiredFields{}, err
+	}
+	if err := rejectSentinelProductionRotationScheduleSuiteID("old_suite_id", fields.oldSuiteID); err != nil {
+		return productionRotationRequiredFields{}, err
+	}
+	if err := rejectSentinelProductionRotationScheduleSuiteID("new_suite_id", fields.newSuiteID); err != nil {
+		return productionRotationRequiredFields{}, err
+	}
+	if fields.createHeight, err = requireProductionRotationScheduleField("create_height", wire.CreateHeight); err != nil {
+		return productionRotationRequiredFields{}, err
+	}
+	if fields.spendHeight, err = requireProductionRotationScheduleField("spend_height", wire.SpendHeight); err != nil {
+		return productionRotationRequiredFields{}, err
+	}
+	if wire.SunsetHeight != nil {
+		fields.sunsetHeight = *wire.SunsetHeight
+	}
+	return fields, nil
+}
+
+func requireProductionRotationScheduleIdentityFields(
+	wire productionRotationDescriptorWire,
+) (productionRotationRequiredFields, error) {
+	var fields productionRotationRequiredFields
+	var err error
+	if fields.name, err = requireProductionRotationScheduleField("name", wire.Name); err != nil {
+		return productionRotationRequiredFields{}, err
+	}
+	if fields.oldSuiteID, err = requireProductionRotationScheduleField("old_suite_id", wire.OldSuiteID); err != nil {
+		return productionRotationRequiredFields{}, err
+	}
+	if fields.newSuiteID, err = requireProductionRotationScheduleField("new_suite_id", wire.NewSuiteID); err != nil {
+		return productionRotationRequiredFields{}, err
+	}
+	return fields, nil
 }
 
 func rejectSentinelProductionRotationScheduleSuiteID(field string, suiteID uint8) error {

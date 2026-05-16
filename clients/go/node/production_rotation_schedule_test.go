@@ -183,6 +183,7 @@ func TestLoadCompiledProductionRotationScheduleRejectsReservedSentinelSuiteID(t 
 		field      string
 		oldSuiteID int
 		newSuiteID int
+		fields     string
 		want       string
 	}{
 		{
@@ -190,6 +191,7 @@ func TestLoadCompiledProductionRotationScheduleRejectsReservedSentinelSuiteID(t 
 			field:      "old_suite_id",
 			oldSuiteID: 0,
 			newSuiteID: 66,
+			fields:     "",
 			want:       `production_rotation_schedule: networks.mainnet: old_suite_id 0x00 is the sentinel suite_id`,
 		},
 		{
@@ -197,6 +199,7 @@ func TestLoadCompiledProductionRotationScheduleRejectsReservedSentinelSuiteID(t 
 			field:      "new_suite_id",
 			oldSuiteID: 1,
 			newSuiteID: 0,
+			fields:     `, "create_height": 10, "spend_height": 20, "sunset_height": 30`,
 			want:       `production_rotation_schedule: networks.mainnet: new_suite_id 0x00 is the sentinel suite_id`,
 		},
 	}
@@ -210,10 +213,7 @@ func TestLoadCompiledProductionRotationScheduleRejectsReservedSentinelSuiteID(t 
 					"mainnet": {
 						"name": "rotation-v1",
 						"old_suite_id": `+strconv.Itoa(tc.oldSuiteID)+`,
-						"new_suite_id": `+strconv.Itoa(tc.newSuiteID)+`,
-						"create_height": 10,
-						"spend_height": 20,
-						"sunset_height": 30
+						"new_suite_id": `+strconv.Itoa(tc.newSuiteID)+tc.fields+`
 					},
 					"testnet": null
 				}
