@@ -241,6 +241,19 @@ fn keypair_generate_pubkey_is_expected_length() {
 }
 
 #[test]
+fn read_pubkey_rejects_empty_key_and_consumes_it() {
+    unsafe {
+        // SAFETY: empty_key is allocated by OpenSSL and then transferred to
+        // read_mldsa87_pubkey, which frees it on this error path.
+        let empty_key = openssl_sys::EVP_PKEY_new();
+        assert!(!empty_key.is_null(), "empty EVP_PKEY allocation");
+        let err = super::read_mldsa87_pubkey(empty_key).expect_err("empty key has no raw pubkey");
+        assert_eq!(err.code, ErrorCode::TxErrParse);
+        assert_eq!(err.msg, "openssl: EVP_PKEY_get_raw_public_key failed");
+    }
+}
+
+#[test]
 fn keypair_pubkey_bytes_is_copy() {
     let Some(kp) = generate_or_skip() else { return };
     let a = kp.pubkey_bytes();
