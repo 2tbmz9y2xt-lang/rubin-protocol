@@ -67,7 +67,8 @@ func TestCoverageResidual_SpendVerifyAndStealthBranches(t *testing.T) {
 
 	keys := [][32]byte{sha3_256(pub)}
 	ws := []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: pub, Signature: sig[:len(sig)-1]}}
-	if err := validateThresholdSigSpend(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_NONCANONICAL {
+	env := testSpendSigEnv{tx: tx, inputIndex: inputIndex, inputValue: inputValue, chainID: chainID, context: "ctx"}
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws, env)); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_NONCANONICAL {
 		t.Fatalf("expected threshold noncanonical rejection, got %v", err)
 	}
 

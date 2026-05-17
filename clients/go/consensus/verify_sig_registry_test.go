@@ -399,9 +399,13 @@ func TestValidateP2PKSpendAtHeight_NilProviders_UseDefaultProviders(t *testing.T
 	entry := UtxoEntry{}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateP2PKSpendAtHeight(entry, w, tx, 0, 1000, [32]byte{}, 100, nil, nil, nil)
+	err := validateP2PKSpendAtHeight(testP2PKSpendCheck(entry, w, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+	}))
 	if err == nil {
-		t.Fatal("expected error for unsupported suite in legacy path")
+		t.Fatal("expected error for unsupported suite with default providers")
 	}
 }
 
@@ -414,7 +418,13 @@ func TestValidateP2PKSpendAtHeight_SuiteNotInSpendSet_RejectsError(t *testing.T)
 	entry := UtxoEntry{}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateP2PKSpendAtHeight(entry, w, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg)
+	err := validateP2PKSpendAtHeight(testP2PKSpendCheck(entry, w, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+	}))
 	if err == nil {
 		t.Fatal("expected error for suite not in spend set")
 	}
@@ -432,7 +442,13 @@ func TestValidateP2PKSpendAtHeight_WrongLengths_Rejects(t *testing.T) {
 	entry := UtxoEntry{}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateP2PKSpendAtHeight(entry, w, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg)
+	err := validateP2PKSpendAtHeight(testP2PKSpendCheck(entry, w, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+	}))
 	if err == nil {
 		t.Fatal("expected error for wrong lengths")
 	}
@@ -446,8 +462,13 @@ func TestValidateThresholdSigSpendAtHeight_NilProviders_FallsBack(t *testing.T) 
 	ws := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	// Sentinel with nil providers → legacy path → threshold not met.
-	err := validateThresholdSigSpendAtHeight(keys, 1, ws, tx, 0, 1000, [32]byte{}, 100, nil, nil, nil, "TEST")
+	// Sentinel with nil providers uses canonical defaults and still enforces threshold.
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		context:     "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected threshold-not-met error")
 	}
@@ -465,7 +486,14 @@ func TestValidateThresholdSigSpendAtHeight_SentinelPassthrough(t *testing.T) {
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
 	// Two sentinels, threshold=0 → should pass.
-	err := validateThresholdSigSpendAtHeight(keys, 0, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 0, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -481,7 +509,14 @@ func TestValidateThresholdSigSpendAtHeight_NonNativeSuiteRejects(t *testing.T) {
 	}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateThresholdSigSpendAtHeight(keys, 1, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected error for non-native suite")
 	}
@@ -498,7 +533,14 @@ func TestValidateThresholdSigSpendAtHeight_SlotMismatch(t *testing.T) {
 	ws := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateThresholdSigSpendAtHeight(keys, 1, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected error for slot mismatch")
 	}
@@ -615,7 +657,13 @@ func TestValidateP2PKSpendAtHeight_ValidSig_Success(t *testing.T) {
 	entry, w, tx, cleanup := buildP2PKTestData(t, SUITE_ID_ML_DSA_87, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
 	defer cleanup()
 
-	err := validateP2PKSpendAtHeight(entry, w, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg)
+	err := validateP2PKSpendAtHeight(testP2PKSpendCheck(entry, w, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -631,7 +679,13 @@ func TestValidateP2PKSpendAtHeight_BadCovenantData_Rejects(t *testing.T) {
 	// Corrupt covenant data.
 	entry.CovenantData = []byte{0x00}
 
-	err := validateP2PKSpendAtHeight(entry, w, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg)
+	err := validateP2PKSpendAtHeight(testP2PKSpendCheck(entry, w, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+	}))
 	if err == nil {
 		t.Fatal("expected error for bad covenant data")
 	}
@@ -652,7 +706,13 @@ func TestValidateP2PKSpendAtHeight_SuiteNotRegistered_Rejects(t *testing.T) {
 	entry := UtxoEntry{}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateP2PKSpendAtHeight(entry, w, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg)
+	err := validateP2PKSpendAtHeight(testP2PKSpendCheck(entry, w, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+	}))
 	if err == nil {
 		t.Fatal("expected error for suite not registered")
 	}
@@ -671,7 +731,13 @@ func TestValidateP2PKSpendAtHeight_KeyBindingMismatch_Rejects(t *testing.T) {
 	// Corrupt key ID in covenant data.
 	entry.CovenantData[1] ^= 0xFF
 
-	err := validateP2PKSpendAtHeight(entry, w, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg)
+	err := validateP2PKSpendAtHeight(testP2PKSpendCheck(entry, w, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+	}))
 	if err == nil {
 		t.Fatal("expected error for key binding mismatch")
 	}
@@ -709,7 +775,14 @@ func TestValidateThresholdSigSpendAtHeight_ValidSigs_MeetsThreshold(t *testing.T
 	}
 
 	// threshold=1, one valid sig + one sentinel → should pass.
-	err := validateThresholdSigSpendAtHeight(keys, 1, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -727,7 +800,14 @@ func TestValidateThresholdSigSpendAtHeight_ThresholdNotMet(t *testing.T) {
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
 	// threshold=1, two sentinels → threshold not met.
-	err := validateThresholdSigSpendAtHeight(keys, 1, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected threshold-not-met error")
 	}
@@ -746,7 +826,14 @@ func TestValidateThresholdSigSpendAtHeight_SentinelWithPayload_Rejects(t *testin
 	}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateThresholdSigSpendAtHeight(keys, 0, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 0, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected error for sentinel with pubkey")
 	}
@@ -762,7 +849,14 @@ func TestValidateThresholdSigSpendAtHeight_WrongLengths_Rejects(t *testing.T) {
 	}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateThresholdSigSpendAtHeight(keys, 1, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected error for wrong lengths")
 	}
@@ -782,7 +876,14 @@ func TestValidateThresholdSigSpendAtHeight_NotRegistered_Rejects(t *testing.T) {
 	}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	err := validateThresholdSigSpendAtHeight(keys, 1, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected error for unregistered suite")
 	}
@@ -806,7 +907,12 @@ func TestVerifyKeyAndSigWithRegistryCache_KeyMismatch(t *testing.T) {
 		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
 	}
 
-	err := verifyKeyAndSigWithRegistryCache(w, wrongKeyID, tx, 0, 1000, [32]byte{}, nil, reg, "TEST")
+	err := verifyKeyAndSigWithRegistryCache(w, wrongKeyID, testSpendKeySigContext(testSpendSigEnv{
+		tx:         tx,
+		inputValue: 1000,
+		registry:   reg,
+		context:    "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected key binding mismatch error")
 	}
@@ -838,7 +944,12 @@ func TestVerifyKeyAndSigWithRegistryCache_SigInvalid(t *testing.T) {
 		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
 	}
 
-	err := verifyKeyAndSigWithRegistryCache(w, keyID, tx, 0, 1000, [32]byte{}, nil, reg, "TEST")
+	err := verifyKeyAndSigWithRegistryCache(w, keyID, testSpendKeySigContext(testSpendSigEnv{
+		tx:         tx,
+		inputValue: 1000,
+		registry:   reg,
+		context:    "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected sig invalid error")
 	}
@@ -870,7 +981,12 @@ func TestVerifyKeyAndSigWithRegistryCache_OpenSSLError(t *testing.T) {
 		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
 	}
 
-	err := verifyKeyAndSigWithRegistryCache(w, keyID, tx, 0, 1000, [32]byte{}, nil, reg, "TEST")
+	err := verifyKeyAndSigWithRegistryCache(w, keyID, testSpendKeySigContext(testSpendSigEnv{
+		tx:         tx,
+		inputValue: 1000,
+		registry:   reg,
+		context:    "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected openssl error")
 	}
@@ -894,7 +1010,12 @@ func TestVerifyKeyAndSigWithRegistryCache_BadSighash(t *testing.T) {
 		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
 	}
 
-	err := verifyKeyAndSigWithRegistryCache(w, keyID, tx, 0, 1000, [32]byte{}, nil, reg, "TEST")
+	err := verifyKeyAndSigWithRegistryCache(w, keyID, testSpendKeySigContext(testSpendSigEnv{
+		tx:         tx,
+		inputValue: 1000,
+		registry:   reg,
+		context:    "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected error for invalid sighash")
 	}
@@ -923,7 +1044,14 @@ func TestValidateThresholdSigSpendAtHeight_SigVerifyError(t *testing.T) {
 		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
 	}
 
-	err := validateThresholdSigSpendAtHeight(keys, 1, ws, tx, 0, 1000, [32]byte{}, 100, nil, rp, reg, "TEST")
+	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
+		tx:          tx,
+		inputValue:  1000,
+		blockHeight: 100,
+		rotation:    rp,
+		registry:    reg,
+		context:     "TEST",
+	}))
 	if err == nil {
 		t.Fatal("expected error from key binding mismatch")
 	}
@@ -955,7 +1083,12 @@ func TestVerifyKeyAndSigWithRegistryCache_Success(t *testing.T) {
 		Outputs: []TxOutput{{Value: 1000, CovenantType: COV_TYPE_P2PK}},
 	}
 
-	err := verifyKeyAndSigWithRegistryCache(w, keyID, tx, 0, 1000, [32]byte{}, nil, reg, "TEST")
+	err := verifyKeyAndSigWithRegistryCache(w, keyID, testSpendKeySigContext(testSpendSigEnv{
+		tx:         tx,
+		inputValue: 1000,
+		registry:   reg,
+		context:    "TEST",
+	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -19,6 +19,66 @@ func p2pkEntryForPub(t *testing.T, suiteID uint8, pub []byte) UtxoEntry {
 	}
 }
 
+type testSpendSigEnv struct {
+	tx          *Tx
+	inputIndex  uint32
+	inputValue  uint64
+	chainID     [32]byte
+	blockHeight uint64
+	cache       *SighashV1PrehashCache
+	rotation    RotationProvider
+	registry    *SuiteRegistry
+	context     string
+}
+
+func testThresholdSigSpendCheck(keys [][32]byte, threshold uint8, ws []WitnessItem, env testSpendSigEnv) thresholdSigSpendCheck {
+	return thresholdSigSpendCheck{
+		keys:        keys,
+		threshold:   threshold,
+		witnesses:   ws,
+		blockHeight: env.blockHeight,
+		rotation:    env.rotation,
+		sig: spendSigContext{
+			tx:         env.tx,
+			inputIndex: env.inputIndex,
+			inputValue: env.inputValue,
+			chainID:    env.chainID,
+			cache:      env.cache,
+			registry:   env.registry,
+			context:    env.context,
+		},
+	}
+}
+
+func testP2PKSpendCheck(entry UtxoEntry, w WitnessItem, env testSpendSigEnv) p2pkSpendCheck {
+	return p2pkSpendCheck{
+		entry:       entry,
+		witness:     w,
+		blockHeight: env.blockHeight,
+		rotation:    env.rotation,
+		sig: spendSigContext{
+			tx:         env.tx,
+			inputIndex: env.inputIndex,
+			inputValue: env.inputValue,
+			chainID:    env.chainID,
+			cache:      env.cache,
+			registry:   env.registry,
+		},
+	}
+}
+
+func testSpendKeySigContext(env testSpendSigEnv) spendSigContext {
+	return spendSigContext{
+		tx:         env.tx,
+		inputIndex: env.inputIndex,
+		inputValue: env.inputValue,
+		chainID:    env.chainID,
+		cache:      env.cache,
+		registry:   env.registry,
+		context:    env.context,
+	}
+}
+
 func TestValidateP2PKSpend_OkAndFailureModes(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	pub := kp.PubkeyBytes()
@@ -65,45 +125,48 @@ func TestValidateP2PKSpend_OkAndFailureModes(t *testing.T) {
 
 func TestValidateThresholdSigSpend_MismatchAndThresholdLogic(t *testing.T) {
 	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	env := testSpendSigEnv{tx: tx, inputIndex: inputIndex, inputValue: inputValue, chainID: chainID, context: "ctx"}
+
 	// witness slot assignment mismatch
-	if err := validateThresholdSigSpend([][32]byte{}, 0, []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}}, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck([][32]byte{}, 0, []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}}, env)); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
 		t.Fatalf("expected TX_ERR_PARSE, got %v", err)
 	}
 
 	// unknown suite id branch (should be unreachable at wire level, but must be deterministic)
 	keys := [][32]byte{hashWithPrefix(0x01)}
 	ws := []WitnessItem{{SuiteID: 0x03, Pubkey: []byte{0x01}, Signature: []byte{0x02}}}
-	if err := validateThresholdSigSpend(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_ALG_INVALID {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws, env)); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_ALG_INVALID {
 		t.Fatalf("expected TX_ERR_SIG_ALG_INVALID, got %v", err)
 	}
 
 	// sentinel witnesses -> threshold not met
 	keys2 := [][32]byte{hashWithPrefix(0x02), hashWithPrefix(0x03)}
 	ws2 := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}, {SuiteID: SUITE_ID_SENTINEL}}
-	if err := validateThresholdSigSpend(keys2, 1, ws2, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_INVALID {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys2, 1, ws2, env)); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_INVALID {
 		t.Fatalf("expected TX_ERR_SIG_INVALID (threshold), got %v", err)
 	}
 }
 
 func TestValidateThresholdSigSpend_SentinelKeylessEnforcement(t *testing.T) {
 	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	env := testSpendSigEnv{tx: tx, inputIndex: inputIndex, inputValue: inputValue, chainID: chainID, context: "ctx"}
 	keys := [][32]byte{hashWithPrefix(0x01)}
 
 	// SENTINEL with non-empty pubkey must be rejected
 	ws1 := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL, Pubkey: []byte{0x01}}}
-	if err := validateThresholdSigSpend(keys, 1, ws1, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws1, env)); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
 		t.Fatalf("expected TX_ERR_PARSE for sentinel with pubkey, got %v", err)
 	}
 
 	// SENTINEL with non-empty signature must be rejected
 	ws2 := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL, Signature: []byte{0x01}}}
-	if err := validateThresholdSigSpend(keys, 1, ws2, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws2, env)); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
 		t.Fatalf("expected TX_ERR_PARSE for sentinel with signature, got %v", err)
 	}
 
 	// SENTINEL with both non-empty must be rejected
 	ws3 := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL, Pubkey: []byte{0x01}, Signature: []byte{0x02}}}
-	if err := validateThresholdSigSpend(keys, 1, ws3, tx, inputIndex, inputValue, chainID, 0, "ctx"); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws3, env)); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
 		t.Fatalf("expected TX_ERR_PARSE for sentinel with pubkey+sig, got %v", err)
 	}
 }
@@ -112,6 +175,7 @@ func TestValidateThresholdSigSpend_OkWithOneValidAndOneSentinel(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	pub := kp.PubkeyBytes()
 	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	env := testSpendSigEnv{tx: tx, inputIndex: inputIndex, inputValue: inputValue, chainID: chainID, context: "ctx"}
 	sig := signDigestWithSighashType(t, kp, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
 
 	key0 := sha3_256(pub)
@@ -121,7 +185,7 @@ func TestValidateThresholdSigSpend_OkWithOneValidAndOneSentinel(t *testing.T) {
 		{SuiteID: SUITE_ID_SENTINEL},
 	}
 
-	if err := validateThresholdSigSpend(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, "ctx"); err != nil {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws, env)); err != nil {
 		t.Fatalf("expected ok, got %v", err)
 	}
 }

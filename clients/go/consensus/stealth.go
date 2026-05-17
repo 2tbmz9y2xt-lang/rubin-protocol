@@ -57,5 +57,13 @@ func validateCoreStealthSpendAtHeight(entry UtxoEntry, w WitnessItem, tx *Tx, in
 	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
 	}
-	return verifyKeyAndSigWithRegistryCache(w, c.OneTimeKeyID, tx, inputIndex, inputValue, chainID, cache, registry, "CORE_STEALTH")
+	return verifyKeyAndSigWithRegistryCache(w, c.OneTimeKeyID, spendSigContext{
+		tx:         tx,
+		inputIndex: inputIndex,
+		inputValue: inputValue,
+		chainID:    chainID,
+		cache:      cache,
+		registry:   registry,
+		context:    "CORE_STEALTH",
+	})
 }
