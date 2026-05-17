@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # ruff: noqa: E302,E305,E401,E701
 from __future__ import annotations
-import argparse, json, math, os, re, subprocess, sys, tempfile  # nosec B404
+import argparse, json, math, os, re, shlex, subprocess, sys, tempfile  # nosec B404
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000; MAX_PARSER_OUTPUT_BYTES = 100_000  # noqa: E702
+SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000; MAX_PARSER_OUTPUT_BYTES = 100_000; MAX_TX_HEX_CHARS = 20_000  # noqa: E702
 REPO_ROOT = Path(__file__).resolve().parents[2]; DEV_ENV = REPO_ROOT / "scripts" / "dev-env.sh"; GO_MODULE_ROOT = REPO_ROOT / "clients" / "go"  # noqa: E702
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+({NUM})(?:\s+({NUM}))?\s*$"); STRICT_METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+([0-9]+)(?:\.0*)?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
@@ -62,6 +62,20 @@ SECTIONS = {
     "rust_restart": ("rust_restart_report", "mixed_client_rust_restart", RESTART_SOURCE_FIELDS),
     "partition_heal_reorg": ("partition_heal_reorg_report", "mixed_client_partition_heal_reorg", PARTITION_SOURCE_FIELDS),
 }
+SOURCE_BASE_TOP_KEYS = {"artifact_root", "final_verification", "legacy_schema_compatibility", "nodes", "peer_connectivity", "raw_samples", "scenario", "verdict"}
+SOURCE_TOP_KEYS = {
+    "mesh": SOURCE_BASE_TOP_KEYS,
+    "go_to_rust_accept": SOURCE_BASE_TOP_KEYS | {"go_submit", "rust_accept", "tx_path"},
+    "go_to_rust_mine_converge": SOURCE_BASE_TOP_KEYS | {"go_submit", "go_converge", "rust_accept", "rust_mine", "tx_path"},
+    "rust_to_go_mine_converge": SOURCE_BASE_TOP_KEYS | {"go_accept", "go_mine", "rust_converge", "rust_submit", "tx_path"},
+}
+SOURCE_PEER_KEYS = {"bidirectional_observed", "counterpart_links", "go_peer_snapshot", "go_to_rust", "rust_peer_snapshot", "rust_to_go"}
+SOURCE_LINK_KEYS = {"go_peer_snapshot_expected_addr", "rust_outbound_local_addr", "rust_outbound_pid", "rust_outbound_remote_addr", "rust_peer_snapshot_expected_addr"}
+SOURCE_LEGACY_PURPOSE = "schema-valid legacy artifact only; not the mesh report verdict"
+SOURCE_LEGACY_REASON = "existing mixed_client_evidence_v1 PASS requires tx_path; mesh process/connectivity PASS lives in this report"
+SOURCE_LEGACY_REASONS = {SOURCE_LEGACY_REASON, "existing mixed_client_evidence_v1 PASS requires tx_path"}
+SOURCE_MESH_MARKER_KEYS = {"evidence_type", "failure_reason", "participants", "scenario", "schema_version", "verdict"}
+SOURCE_TX_MARKER_KEYS = {"evidence_type", "participants", "scenario", "schema_version", "tx_path", "verdict"}
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
 def hex_bytes(value: Any) -> bool: return isinstance(value, str) and bool(HEX_BYTES.fullmatch(value))  # noqa: E704
 def jint(value: Any, minimum: int = 0) -> bool: return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000  # noqa: E704
@@ -107,6 +121,14 @@ def safe_abs_path(value: Any) -> Path | None:
     except (OSError, ValueError):
         return None
 def str_list(value: Any) -> bool: return isinstance(value, list) and all(isinstance(item, str) for item in value)  # noqa: E704
+def command_bound_to_argv(node: dict[str, Any]) -> bool:
+    argv, command = node.get("command_argv"), node.get("command")
+    if not str_list(argv) or not isinstance(command, str) or not command:
+        return False
+    try:
+        return shlex.split(command) == argv
+    except ValueError:
+        return False
 def same_arg_path(left: str, right: str) -> bool:
     try:
         return Path(os.path.realpath(os.path.expanduser(left))) == Path(os.path.realpath(os.path.expanduser(right)))
@@ -184,6 +206,161 @@ def validate_mesh(data: dict[str, Any]) -> str | None:
     if not isinstance(peer, dict) or any(peer.get(k) is not True for k in ("go_to_rust", "rust_to_go", "bidirectional_observed")):
         return "peer_connectivity_invalid"
     return validate_samples(data, None, None, "") if isinstance(final, dict) and final.get("producer_side") is True else "final_verification_invalid"
+def source_peer_final_error(data: dict[str, Any]) -> str | None:
+    by_impl, node_bad = nodes(data)
+    if node_bad or by_impl is None:
+        return node_bad
+    peer, final = data.get("peer_connectivity"), data.get("final_verification")
+    if not isinstance(peer, dict) or set(peer) != SOURCE_PEER_KEYS or any(peer.get(k) is not True for k in ("go_to_rust", "rust_to_go", "bidirectional_observed")):
+        return "peer_connectivity_invalid"
+    links = peer.get("counterpart_links")
+    if not isinstance(links, dict) or set(links) != SOURCE_LINK_KEYS:
+        return "peer_connectivity_invalid"
+    if not all(endpoint(links.get(k)) for k in ("go_peer_snapshot_expected_addr", "rust_peer_snapshot_expected_addr", "rust_outbound_local_addr", "rust_outbound_remote_addr")):
+        return "peer_connectivity_invalid"
+    go_expected, rust_expected = links["go_peer_snapshot_expected_addr"], links["rust_peer_snapshot_expected_addr"]
+    if rust_expected != by_impl["go"]["p2p_endpoint"] or links.get("rust_outbound_remote_addr") != rust_expected or links.get("rust_outbound_local_addr") != go_expected or links.get("rust_outbound_pid") != by_impl["rust"]["pid"]:
+        return "peer_connectivity_invalid"
+    if go_expected in {rust_expected, by_impl["rust"]["p2p_endpoint"], by_impl["go"]["rpc_endpoint"], by_impl["rust"]["rpc_endpoint"]}:
+        return "peer_connectivity_invalid"
+    for snapshot_name, expected in (("go_peer_snapshot", go_expected), ("rust_peer_snapshot", rust_expected)):
+        snapshot = peer.get(snapshot_name)
+        peers = snapshot.get("peers") if isinstance(snapshot, dict) else None
+        if not isinstance(snapshot, dict) or set(snapshot) != RESTART_SNAPSHOT_KEYS or not isinstance(peers, list) or not jint(snapshot.get("count")) or len(peers) != snapshot["count"]:
+            return "peer_connectivity_invalid"
+        if len(peers) != 1 or any(not isinstance(item, dict) or set(item) != RESTART_PEER_ENTRY_KEYS or item.get("addr") != expected or item.get("handshake_complete") is not True for item in peers):
+            return "peer_connectivity_invalid"
+    if not isinstance(final, dict) or set(final) != RESTART_FINAL_KEYS or any(final.get(k) is not True for k in ("producer_side", "process_identity_rechecked", "rust_outbound_link_rechecked", "peer_snapshots_rechecked")):
+        return "final_verification_invalid"
+    return None if final.get("rust_outbound_pid") == by_impl["rust"]["pid"] and final.get("rust_outbound_local_addr") == go_expected and final.get("rust_outbound_remote_addr") == rust_expected else "final_verification_invalid"
+def marker_participants_bound(marker: dict[str, Any], by_impl: dict[str, dict[str, Any]]) -> bool:
+    participants = marker.get("participants")
+    if not isinstance(participants, list) or len(participants) != 2 or any(not isinstance(p, dict) or set(p) != RESTART_MARKER_PARTICIPANT_KEYS or not all(isinstance(p.get(k), str) for k in RESTART_MARKER_PARTICIPANT_KEYS) for p in participants):
+        return False
+    expected = sorted((node["name"], impl, node["rpc_endpoint"], node["started_at"]) for impl, node in by_impl.items())
+    return sorted((p["name"], p["implementation"], p["endpoint"], p["started_at"]) for p in participants) == expected
+def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path) -> str | None:
+    for impl, expected_name, expected_comm in (("go", "node-go", "rubin-node-go"), ("rust", "node-rust", "rubin-node-rust")):
+        node = by_impl[impl]
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not jint(node.get("pid"), 1) or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
+            return "process_identity_missing_or_invalid"
+        binary = safe_abs_path(node.get("binary"))
+        if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
+            return "process_identity_missing_or_invalid"
+        try:
+            binary.relative_to(root)
+        except ValueError:
+            return "process_identity_missing_or_invalid"
+        expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"]] if impl == "rust" else [])
+        if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
+            return "process_identity_missing_or_invalid"
+    return None
+def source_report_contract_error(name: str, data: dict[str, Any], path: Path) -> str | None:
+    if set(data) != SOURCE_TOP_KEYS[name]:
+        return f"{name}_top_level_fields_invalid"
+    root = safe_abs_path(data.get("artifact_root"))
+    if root is None or not root.is_dir():
+        return f"{name}_artifact_root_invalid"
+    try:
+        Path(os.path.realpath(path)).relative_to(root)
+    except ValueError:
+        return f"{name}_artifact_root_invalid"
+    if bad := source_peer_final_error(data):
+        return bad
+    legacy = data.get("legacy_schema_compatibility")
+    marker_raw = legacy.get("marker_path") if isinstance(legacy, dict) else None
+    if not isinstance(legacy, dict) or set(legacy) != {"authoritative", "marker_path", "purpose", "reason"} or legacy.get("authoritative") is not False or not isinstance(marker_raw, str) or not marker_raw:
+        return f"{name}_legacy_marker_invalid"
+    if legacy.get("purpose") != SOURCE_LEGACY_PURPOSE or legacy.get("reason") not in SOURCE_LEGACY_REASONS:
+        return f"{name}_legacy_marker_invalid"
+    marker_path = str(Path(os.path.expanduser(marker_raw)) if Path(os.path.expanduser(marker_raw)).is_absolute() else path.parent / marker_raw)
+    marker_canon, marker_err = regular_path(marker_path, "legacy_schema_marker_not_regular")
+    try:
+        marker_canon.relative_to(root)
+    except ValueError:
+        marker_err = marker_err or "legacy_schema_marker_not_bound"
+    marker = None
+    if marker_err is None:
+        marker, marker_err = load(marker_canon)
+    by_impl, node_bad = nodes(data)
+    if marker_err or not isinstance(marker, dict):
+        return f"{name}_legacy_marker_invalid"
+    if node_bad or by_impl is None:
+        return node_bad
+    if bad := source_node_identity_error(by_impl, root):
+        return bad
+    marker_keys = SOURCE_MESH_MARKER_KEYS if name == "mesh" else SOURCE_TX_MARKER_KEYS
+    if set(marker) != marker_keys:
+        return f"{name}_legacy_marker_invalid"
+    if not marker_participants_bound(marker, by_impl):
+        return f"{name}_legacy_marker_invalid"
+    if marker.get("schema_version") != RESTART_MARKER_SCHEMA_VERSION or marker.get("scenario") != "mixed_client_mesh_schema_marker" or marker.get("evidence_type") != "mixed_client_process_soak":
+        return f"{name}_legacy_marker_invalid"
+    if name == "mesh":
+        return None if marker.get("verdict") == "FAIL" and isinstance(marker.get("failure_reason"), str) and marker["failure_reason"] else f"{name}_legacy_marker_invalid"
+    return None if marker.get("verdict") == "PASS" and marker.get("tx_path") == data.get("tx_path") else f"{name}_legacy_marker_invalid"
+def source_artifact(path_value: Any, root: Path, reason: str) -> tuple[Path | None, str | None]:
+    p, err = regular_abs_path(path_value, reason) if isinstance(path_value, str) else (None, reason)
+    if err or p is None:
+        return None, reason
+    try:
+        p.relative_to(root)
+    except ValueError:
+        return None, reason
+    return p, None
+def source_load_json(path_value: Any, root: Path, reason: str) -> tuple[dict[str, Any] | None, Path | None, str | None]:
+    p, err = source_artifact(path_value, root, reason)
+    data, load_err = (None, err) if err else load(p)  # type: ignore[arg-type]
+    return (data, p, None) if load_err is None and isinstance(data, dict) else (None, p, reason)
+def tx_capture_sidecar_error(label: str, obj: dict[str, Any], impl: str, endpoint: str, root: Path, txid: str, txhex: str) -> tuple[list[Path], str | None]:
+    status, status_path, err = source_load_json(obj.get("tx_status_path"), root, f"{label}_sidecar_invalid")
+    got, get_path, get_err = source_load_json(obj.get("get_tx_path"), root, f"{label}_sidecar_invalid")
+    if err or get_err or status is None or got is None or status_path is None or get_path is None:
+        return [], f"{label}_sidecar_invalid"
+    if set(status) != {"implementation", "request_path", "rpc_endpoint", "status", "txid"} or status.get("implementation") != impl or status.get("rpc_endpoint") != endpoint or status.get("request_path") != f"/tx_status?txid={txid}" or status.get("status") != "pending" or status.get("txid") != txid:
+        return [], f"{label}_sidecar_invalid"
+    if set(got) != {"found", "implementation", "raw_hex", "request_path", "rpc_endpoint", "txid"} or got.get("implementation") != impl or got.get("rpc_endpoint") != endpoint or got.get("request_path") != f"/get_tx?txid={txid}" or got.get("found") is not True or got.get("txid") != txid or got.get("raw_hex") != txhex:
+        return [], f"{label}_sidecar_invalid"
+    return [status_path, get_path], None
+def consensus_cli(request_obj: dict[str, Any], reason_prefix: str) -> tuple[dict[str, Any] | None, str | None]:
+    if not DEV_ENV.is_file() or not GO_MODULE_ROOT.is_dir():
+        return None, f"{reason_prefix}_parser_unavailable"
+    try:
+        proc = subprocess.run(  # nosec B603
+            [str(DEV_ENV), "--", "go", "-C", str(GO_MODULE_ROOT), "run", "./cmd/rubin-consensus-cli"],
+            check=False,
+            env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
+            input=json.dumps(request_obj) + "\n",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"{reason_prefix}_parser_timeout"
+    except OSError:
+        return None, f"{reason_prefix}_parser_unavailable"
+    stdout, stderr = proc.stdout or "", proc.stderr or ""
+    if len(stdout) > MAX_PARSER_OUTPUT_BYTES or len(stderr) > MAX_PARSER_OUTPUT_BYTES:
+        return None, f"{reason_prefix}_parser_output_too_large"
+    if proc.returncode != 0:
+        return None, f"{reason_prefix}_parser_failed"
+    try:
+        parsed = json.loads(stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError):
+        return None, f"{reason_prefix}_parser_malformed_output"
+    return (parsed, None) if isinstance(parsed, dict) else (None, f"{reason_prefix}_parser_malformed_output")
+def tx_hex_txid_error(txhex: Any, txid: str) -> str | None:
+    if not isinstance(txhex, str) or not (2 <= len(txhex) <= MAX_TX_HEX_CHARS) or len(txhex) % 2 != 0 or not HEX_BYTES.fullmatch(txhex):
+        return "tx_hex_malformed_or_unbounded"
+    parsed, err = consensus_cli({"op": "parse_tx", "tx_hex": txhex}, "tx")
+    if err or parsed is None:
+        return err
+    if parsed.get("ok") is not True:
+        return "tx_parser_failed"
+    if parsed.get("txid") != txid:
+        return "tx_hex_txid_mismatch"
+    return None if parsed.get("consumed") == len(txhex) // 2 else "tx_parser_consumed_mismatch"
 def validate_samples(data: dict[str, Any], prop_dir: str | None, conv_dir: str | None, txid: str, height: int | None = None, block_hash: str | None = None) -> str | None:
     raw = data.get("raw_samples")
     if not isinstance(raw, dict) or set(raw) != {"schema_version", "semantics", "propagation", "convergence"} or raw.get("schema_version") != "rubin-devnet-process-soak-raw-samples-v1" or raw.get("semantics") != "raw samples only; no SLO threshold or pass claim":
@@ -244,6 +421,22 @@ def validate_tx(data: dict[str, Any], converge: bool, rust_submit: bool) -> str 
     if mined.get("txid") != txid or seen.get("txid") != txid or any(obj.get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"] for obj, impl in ((mined, mine_impl), (seen, conv_impl))) or mined.get("class") != "mined_included" or mined.get("mined_by") != f"node-{mine_impl}" or seen.get("class") != "canonical_block_found" or seen.get("converged_at") != f"node-{conv_impl}": return "convergence_identity_mismatch"  # noqa: E701
     if mined.get("height") != seen.get("height") or mined.get("block_hash") != seen.get("block_hash") or not jint(mined.get("height")) or not jint(seen.get("height")) or not is_hex32(mined.get("block_hash")): return "convergence_identity_mismatch"  # noqa: E701
     return validate_samples(data, prop, conv_dir, txid, mined["height"], mined["block_hash"])
+def validate_tx_source_sidecars(data: dict[str, Any], converge: bool, rust_submit: bool, root: Path) -> str | None:
+    by_impl, bad = nodes(data)
+    if bad or by_impl is None:
+        return bad
+    txid = data["tx_path"]["tx_id"]
+    submit, accept, submit_impl, accept_impl = ("rust_submit", "go_accept", "rust", "go") if rust_submit else ("go_submit", "rust_accept", "go", "rust")
+    txhex = data[submit]["tx_hex"]
+    if err := tx_hex_txid_error(txhex, txid):
+        return err
+    paths: list[Path] = []
+    for label, impl in ((submit, submit_impl), (accept, accept_impl)):
+        new_paths, err = tx_capture_sidecar_error(label, data[label], impl, by_impl[impl]["rpc_endpoint"], root, txid, txhex)
+        if err:
+            return err
+        paths.extend(new_paths)
+    return None if len(paths) == len(set(paths)) else "tx_sidecar_paths_not_distinct"
 def restart_height_tip_contradiction(rr: dict[str, Any], restart: dict[str, Any] | None) -> str | None:
     pre = rr.get("pre_restart_height", restart.get("pre_restart_height") if isinstance(restart, dict) else None)
     target, caught = rr.get("go_target_height"), rr.get("catch_up_height", restart.get("catch_up_height") if isinstance(restart, dict) else None)
@@ -425,7 +618,7 @@ def restart_pass_contract_error(data: dict[str, Any], path: Path) -> str | None:
         return bad or "process_identity_missing_or_invalid"
     for impl, expected_name, expected_comm in (("go", "node-go", "rubin-node-go"), ("rust", "node-rust", "rubin-node-rust")):
         node = by_impl[impl]
-        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
             return "restart_source_binding_contradiction:node_identity_invalid"
         binary = safe_abs_path(node.get("binary"))
         if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
@@ -437,11 +630,7 @@ def restart_pass_contract_error(data: dict[str, Any], path: Path) -> str | None:
         expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"]] if impl == "rust" else [])
         if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
             return "restart_source_binding_contradiction:node_identity_invalid"
-    participants = marker.get("participants")
-    expected_participants = sorted((node["name"], node["implementation"], node["rpc_endpoint"], node["started_at"]) for node in by_impl.values())
-    if not isinstance(participants, list) or len(participants) != 2 or any(not isinstance(p, dict) or set(p) != RESTART_MARKER_PARTICIPANT_KEYS for p in participants):
-        return "restart_source_binding_contradiction:legacy_marker_invalid"
-    if sorted((p.get("name"), p.get("implementation"), p.get("endpoint"), p.get("started_at")) for p in participants) != expected_participants:
+    if not marker_participants_bound(marker, by_impl):
         return "restart_source_binding_contradiction:legacy_marker_invalid"
     peer = data.get("peer_connectivity")
     links = peer.get("counterpart_links") if isinstance(peer, dict) else None
@@ -577,7 +766,7 @@ def partition_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path
         return "partition_reorg_source_binding_contradiction:node_identity_invalid"
     for impl, expected_name, expected_comm, extra in (("go", "node-go", "rubin-node-go", []), ("rust", "node-rust", "rubin-node-rust", ["--peer", partition_proxy])):
         node = by_impl[impl]
-        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
             return "partition_reorg_source_binding_contradiction:node_identity_invalid"
         binary = safe_abs_path(node.get("binary"))
         if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
@@ -880,10 +1069,21 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
         return section(name, "pass", None, source_artifact_path=path, scenario=got, source_fields=fields + PARTITION_PASS_CONTRACT_FIELDS, claim_type="behavior_evidence", evidence_class="behavior_evidence", behavior_evidence=True)
     if missing:
         return section(name, "fail", "missing_source_fields:" + ",".join(missing), source_artifact_path=path, scenario=got)
+    if name in SOURCE_TOP_KEYS:
+        if bad := source_report_contract_error(name, data, path):
+            return section(name, "fail", bad, source_artifact_path=path, scenario=got)
     bad = validate_mesh(data) if name == "mesh" else validate_tx(data, "converge" in name, name.startswith("rust_to_go"))
     if bad:
         return section(name, "fail", bad, source_artifact_path=path, scenario=got)
-    return section(name, "no_data", "source_contract_validation_unavailable", source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
+    if "converge" in name:
+        return section(name, "no_data", "convergence_block_inclusion_binding_deferred", source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
+    if name != "mesh" and name in SOURCE_TOP_KEYS:
+        root = safe_abs_path(data.get("artifact_root"))
+        if root is None:
+            return section(name, "fail", f"{name}_artifact_root_invalid", source_artifact_path=path, scenario=got)
+        if bad := validate_tx_source_sidecars(data, "converge" in name, name.startswith("rust_to_go"), root):
+            return section(name, "fail", bad, source_artifact_path=path, scenario=got)
+    return section(name, "pass", None, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="source_report_evidence", evidence_class="source_report_evidence", behavior_evidence=False)
 def parse_metrics(path: Path, strict_prometheus: bool = False) -> tuple[dict[str, int] | None, str | None]:
     try:
         with path.open("rb") as src: raw = src.read(MAX_JSON_BYTES + 1)
@@ -934,7 +1134,9 @@ def metric_section(args: argparse.Namespace) -> dict[str, Any]:
         return section("reorg_metrics", "no_data", "rust_reorg_metrics_missing", claim_type="metric_evidence")
     path, path_err = regular_path(args.rust_reorg_metrics, "metrics_not_regular")
     metrics, err = (None, path_err) if path_err else parse_metrics(path)
-    return section("reorg_metrics", "fail", err, source_artifact_path=path, claim_type="metric_evidence") if err else section("reorg_metrics", "no_data", "metric_source_binding_unavailable", source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
+    if err:
+        return section("reorg_metrics", "fail", err, source_artifact_path=path, claim_type="metric_evidence")
+    return section("reorg_metrics", "no_data", "metric_source_binding_unavailable", source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
 def raw_samples_section(sections: dict[str, dict[str, Any]]) -> dict[str, Any]: return section("raw_samples", "fail", "source_sample_section_failed") if any(sections[name]["status"] in {"fail", "helper_only"} for name in ("go_to_rust_accept", "go_to_rust_mine_converge", "rust_to_go_mine_converge")) else section("raw_samples", "no_data", "source_contract_validation_unavailable", source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="sample_evidence")  # noqa: E704
 def claim_tokens_in_text(value: Any) -> set[str]:
     if not isinstance(value, str):
