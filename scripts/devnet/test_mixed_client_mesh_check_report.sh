@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HARNESS="${REPO_ROOT}/scripts/devnet-mixed-client-mesh.sh"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
+GENERATOR="${REPO_ROOT}/scripts/devnet/generate_mixed_client_devnet_soak_report.py"
 GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 MESH_TIMEOUT=1
 export GO_MODULE_ROOT
@@ -14,6 +15,7 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 [[ -x "${HARNESS}" ]] || { echo "mixed-client mesh harness missing or non-executable: ${HARNESS}" >&2; exit 1; }
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
+[[ -r "${GENERATOR}" ]] || { echo "generator unreadable: ${GENERATOR}" >&2; exit 1; }
 
 TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "test TMPDIR parent is not usable: ${TMPDIR:-/tmp}" >&2; exit 1; }
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-mesh-check-report.XXXXXX")"
@@ -92,6 +94,19 @@ expect_fail_check_token() {
   fi
 }
 
+expect_generator_fail_contains() {
+  local label="$1" needle="$2" output_path output
+  shift 2
+  output_path="${TMP_ROOT}/generator-negative.json"
+  if output="$(python3 "${GENERATOR}" "$@" --output "${output_path}" 2>&1)"; then
+    echo "FAIL: ${label} should fail" >&2
+    echo "actual output:" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+  require_contains "${output}" "${needle}" "${label}"
+}
+
 extract_check_report() {
   python3 - "${HARNESS}" "${CHECK_REPORT_LIB}" <<'PY'
 from pathlib import Path
@@ -130,6 +145,205 @@ start = next(i for i, line in enumerate(lines) if line.startswith("prepare_tx_ch
 end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("parse_txid()"))
 Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
 PY
+}
+
+extract_proxy_go_local_addr() {
+  python3 - "${HARNESS}" "${PROXY_GO_LOCAL_ADDR_LIB}" <<'PY'
+from pathlib import Path
+import sys
+
+src, dst = map(Path, sys.argv[1:3])
+lines = src.read_text(encoding="utf-8").splitlines()
+start = next(i for i, line in enumerate(lines) if line.startswith("proxy_go_local_addr()"))
+end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("wait_peer_snapshot_state()"))
+Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
+PY
+}
+
+extract_wait_peer_snapshot() {
+  python3 - "${HARNESS}" "${WAIT_PEER_SNAPSHOT_LIB}" <<'PY'
+from pathlib import Path
+import sys
+
+src, dst = map(Path, sys.argv[1:3])
+lines = src.read_text(encoding="utf-8").splitlines()
+start = next(i for i, line in enumerate(lines) if line.startswith("wait_peer_snapshot()"))
+end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("wait_rust_to_go_link()"))
+Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
+PY
+}
+
+extract_capture_go_reorg_metrics() {
+  python3 - "${HARNESS}" "${CAPTURE_GO_REORG_METRICS_LIB}" <<'PY'
+from pathlib import Path
+import sys
+
+src, dst = map(Path, sys.argv[1:3])
+lines = src.read_text(encoding="utf-8").splitlines()
+start = next(i for i, line in enumerate(lines) if line.startswith("capture_go_reorg_metrics()"))
+end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("run_partition_heal_reorg_scenario()"))
+Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
+PY
+}
+
+extract_wait_peer_snapshot_state() {
+  python3 - "${HARNESS}" "${WAIT_PEER_SNAPSHOT_STATE_LIB}" <<'PY'
+from pathlib import Path
+import sys
+
+src, dst = map(Path, sys.argv[1:3])
+lines = src.read_text(encoding="utf-8").splitlines()
+start = next(i for i, line in enumerate(lines) if line.startswith("wait_peer_snapshot_state()"))
+end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("parse_partition_mine_result()"))
+Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
+PY
+}
+
+check_proxy_go_local_addr_reason() {
+  local probe="${TMP_ROOT}/proxy-go-local-addr-probe.sh"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+RUBIN_PROCESS_ARTIFACT_ROOT="$2"
+MESH_TIMEOUT=1
+PARTITION_PROXY_PID=123
+GO_P2P_ADDR="127.0.0.1:51002"
+PARTITION_REASON=""
+bounded() { return 142; }
+if proxy_go_local_addr partition_pre_proxy_to_go_missing partition_pre_proxy_to_go_ambiguous; then
+  echo "FAIL: proxy_go_local_addr should fail on lsof timeout" >&2
+  exit 1
+fi
+[[ "${PARTITION_REASON}" == "lsof_timeout" ]] || { echo "FAIL: proxy_go_local_addr lost parent-visible reason: ${PARTITION_REASON}" >&2; exit 1; }
+SH
+  bash "${probe}" "${PROXY_GO_LOCAL_ADDR_LIB}" "${TMP_ROOT}"
+}
+
+check_wait_peer_snapshot_normalizes() {
+  local probe="${TMP_ROOT}/wait-peer-snapshot-probe.sh"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"
+MESH_TIMEOUT=1
+RPC_JSON_INPUT=""
+rpc_json() { cat -- "${RPC_JSON_INPUT}"; }
+write_json() { printf '%s\n' "$2" >"$1"; }
+rich="${probe_root}/peer-rich.json"; extra="${probe_root}/peer-secret.json"; out="${probe_root}/peer-out-public.json"
+write_json "${rich}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true,"ban_score":0,"last_error":"","protocol_version":1,"best_height":7,"tx_relay":true,"pruned_below_height":0,"da_mempool_size":0}]}'
+write_json "${extra}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true,"secret":"x"}]}'
+RPC_JSON_INPUT="${rich}"
+PEER_SNAPSHOT_REASON=""
+wait_peer_snapshot node-go "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001" || { echo "FAIL: rich wait_peer_snapshot rejected: ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+python3 - "${out}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+if data != {"count": 1, "peers": [{"addr": "127.0.0.1:51001", "handshake_complete": True}]}:
+    sys.exit(1)
+PY
+RPC_JSON_INPUT="${extra}"
+PEER_SNAPSHOT_REASON=""
+if wait_peer_snapshot node-go "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001"; then
+  echo "FAIL: wait_peer_snapshot accepted secret peer metadata" >&2
+  exit 1
+fi
+[[ "${PEER_SNAPSHOT_REASON}" == "peer_snapshot_invalid_shape" ]] || { echo "FAIL: wait_peer_snapshot reason ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+SH
+  bash "${probe}" "${WAIT_PEER_SNAPSHOT_LIB}" "${TMP_ROOT}"
+}
+
+check_capture_go_reorg_metrics_reason() {
+  local probe="${TMP_ROOT}/capture-go-reorg-metrics-probe.sh"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"
+GO_RPC_ADDR="127.0.0.1:51001"
+PARTITION_GO_METRICS_PROM="${probe_root}/captured.prom"
+PARTITION_GO_METRICS_PARSED=""
+PARTITION_REASON=""
+METRICS_INPUT=""
+rpc_json() { cat -- "${METRICS_INPUT}"; }
+write_case() {
+  local path="$1"
+  shift
+  printf '%s\n' "$@" >"${path}"
+}
+expect_metrics_pass() {
+  METRICS_INPUT="$1"
+  PARTITION_REASON=""
+  PARTITION_GO_METRICS_PARSED=""
+  capture_go_reorg_metrics || { echo "FAIL: metrics parser rejected valid input: ${PARTITION_REASON}" >&2; exit 1; }
+  [[ "${PARTITION_GO_METRICS_PARSED}" == $'2\t3' ]] || { echo "FAIL: metrics parser returned ${PARTITION_GO_METRICS_PARSED}" >&2; exit 1; }
+}
+expect_metrics_reason() {
+  local expected="$2"
+  METRICS_INPUT="$1"
+  PARTITION_REASON=""
+  PARTITION_GO_METRICS_PARSED=""
+  if capture_go_reorg_metrics; then
+    echo "FAIL: metrics parser accepted invalid input ${METRICS_INPUT}" >&2
+    exit 1
+  fi
+  [[ "${PARTITION_REASON}" == "${expected}" ]] || { echo "FAIL: metrics parser reason ${PARTITION_REASON}, want ${expected}" >&2; exit 1; }
+}
+valid="${probe_root}/valid.prom"; timestamp="${probe_root}/timestamp.prom"; json="${probe_root}/metrics.json"; zero="${probe_root}/zero.prom"; duplicate="${probe_root}/duplicate.prom"
+write_case "${valid}" "rubin_node_reorg_total 2" "rubin_node_last_reorg_depth 3"
+write_case "${timestamp}" "rubin_node_reorg_total 2 123" "rubin_node_last_reorg_depth 3"
+write_case "${json}" '{"rubin_node_reorg_total": 2, "rubin_node_last_reorg_depth": 3}'
+write_case "${zero}" "rubin_node_reorg_total 0" "rubin_node_last_reorg_depth 3"
+write_case "${duplicate}" "rubin_node_reorg_total 2" "rubin_node_reorg_total 3" "rubin_node_last_reorg_depth 3"
+expect_metrics_pass "${valid}"
+expect_metrics_reason "${timestamp}" partition_go_metrics_malformed
+expect_metrics_reason "${json}" partition_go_metrics_malformed
+expect_metrics_reason "${zero}" partition_go_metrics_missing_or_zero
+expect_metrics_reason "${duplicate}" partition_go_metrics_duplicate
+SH
+  bash "${probe}" "${CAPTURE_GO_REORG_METRICS_LIB}" "${TMP_ROOT}"
+}
+
+check_wait_peer_snapshot_state_reason() {
+  local probe="${TMP_ROOT}/wait-peer-snapshot-state-probe.sh"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"
+MESH_TIMEOUT=1
+RPC_JSON_INPUT=""
+rpc_json() { cat -- "${RPC_JSON_INPUT}"; }
+write_json() { printf '%s\n' "$2" >"$1"; }
+valid="${probe_root}/peer-valid.json"; rich="${probe_root}/peer-rich.json"; overlong="${probe_root}/peer-overlong-port.json"; extra="${probe_root}/peer-extra-field.json"; out="${probe_root}/peer-out.json"
+write_json "${valid}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true}]}'
+write_json "${rich}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true,"ban_score":0,"last_error":"","protocol_version":1,"best_height":7,"tx_relay":true,"pruned_below_height":0,"da_mempool_size":0}]}'
+write_json "${overlong}" '{"count":1,"peers":[{"addr":"127.0.0.1:123456","handshake_complete":true}]}'
+write_json "${extra}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true,"secret":"x"}]}'
+RPC_JSON_INPUT="${valid}"
+PEER_SNAPSHOT_REASON=""
+wait_peer_snapshot_state node-rust "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001" connected || { echo "FAIL: valid peer snapshot rejected: ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+RPC_JSON_INPUT="${rich}"
+PEER_SNAPSHOT_REASON=""
+wait_peer_snapshot_state node-rust "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001" connected || { echo "FAIL: rich peer snapshot rejected: ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+python3 - "${out}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+if data != {"count": 1, "peers": [{"addr": "127.0.0.1:51001", "handshake_complete": True}]}:
+    sys.exit(1)
+PY
+for invalid in "${overlong}" "${extra}"; do
+  RPC_JSON_INPUT="${invalid}"
+  PEER_SNAPSHOT_REASON=""
+  if wait_peer_snapshot_state node-rust "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001" connected; then
+    echo "FAIL: invalid peer snapshot accepted: ${invalid}" >&2
+    exit 1
+  fi
+  [[ "${PEER_SNAPSHOT_REASON}" == "peer_snapshot_invalid_shape" ]] || { echo "FAIL: peer snapshot reason ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+done
+SH
+  bash "${probe}" "${WAIT_PEER_SNAPSHOT_STATE_LIB}" "${TMP_ROOT}"
 }
 
 check_prepare_tx_chainstate_cleanup() {
@@ -561,7 +775,7 @@ def coinbase_with_witness_commitment(block_height: int, non_coinbase_txs: list[b
     full = core + compact_size(0) + compact_size(0)
     return full, sha3(core), sha3(full)
 
-def build_basic_block(non_coinbase_hex: str, block_height: int) -> tuple[str, str]:
+def build_basic_block(non_coinbase_hex: str, block_height: int, prev_hash=None) -> tuple[str, str]:
     non_coinbase = bytes.fromhex(non_coinbase_hex)
     non_coinbase_txid = txid_kind0(non_coinbase)
     if non_coinbase_hex == tx_hex and non_coinbase_txid.hex() != txid:
@@ -571,7 +785,7 @@ def build_basic_block(non_coinbase_hex: str, block_height: int) -> tuple[str, st
     merkle_root = merkle(txids, 0x00, 0x01)
     header = b"".join([
         (1).to_bytes(4, "little"),
-        bytes(32),
+        bytes(32) if prev_hash is None else bytes.fromhex(prev_hash),
         merkle_root,
         (1).to_bytes(8, "little"),
         b"\xff" * 32,
@@ -585,13 +799,28 @@ def corrupt_merkle_block(block_hex_value: str) -> tuple[str, str]:
     block[4 + 32] ^= 0x01
     return bytes(block).hex(), sha3(bytes(block[:116])).hex()
 
-def block_sidecar(impl: str, endpoint: str, block_hex_value: str, block_hash_value: str) -> dict:
-    return {"block_hex": block_hex_value, "canonical": True, "hash": block_hash_value, "height": height, "implementation": impl, "request_path": f"/get_block?height={height}", "rpc_endpoint": endpoint}
+def block_sidecar(impl: str, endpoint: str, block_hex_value: str, block_hash_value: str, sidecar_height: int = height) -> dict:
+    return {"block_hex": block_hex_value, "canonical": True, "hash": block_hash_value, "height": sidecar_height, "implementation": impl, "request_path": f"/get_block?height={sidecar_height}", "rpc_endpoint": endpoint}
+def tip_sidecar(impl: str, endpoint: str, block_hash_value: str, sidecar_height: int) -> dict:
+    return {"best_known_height": sidecar_height, "has_tip": True, "height": sidecar_height, "implementation": impl, "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": endpoint, "tip_hash": block_hash_value}
+def mine_sidecar(impl: str, endpoint: str, block_hash_value: str, sidecar_height: int, count: int = tx_count) -> dict:
+    return {"block_hash": block_hash_value, "height": sidecar_height, "implementation": impl, "mined": True, "nonce": 0, "request_path": "/mine_next", "rpc_endpoint": endpoint, "timestamp": 1, "tx_count": count}
+def peer_snapshot(addr):
+    peers = [] if addr is None else [{"addr": addr, "handshake_complete": True}]
+    return {"count": len(peers), "peers": peers}
 
-block_hex, block_hash = build_basic_block(tx_hex, height)
+common_height = height - 1
+rust_win_height = height + 1
+common_block_hex, common_hash = build_basic_block(tx_hex, common_height)
+block_hex, block_hash = build_basic_block(tx_hex, height, common_hash)
 mutated_tx = bytearray.fromhex(tx_hex)
 mutated_tx[5] ^= 0x01
 missing_tx_block_hex, missing_tx_hash = build_basic_block(mutated_tx.hex(), height)
+partition_rust_block_1_hex, partition_rust_block_1_hash = build_basic_block(mutated_tx.hex(), height, common_hash)
+rust_win_block_hex, rust_win_hash = build_basic_block(mutated_tx.hex(), rust_win_height, partition_rust_block_1_hash)
+rust_skip_height = height + 3
+rust_skip_block_hex, rust_skip_hash = build_basic_block(mutated_tx.hex(), rust_skip_height, partition_rust_block_1_hash)
+disconnected_go_block_hex, disconnected_go_hash = build_basic_block(tx_hex, height)
 corrupt_block_hex, corrupt_block_hash = corrupt_merkle_block(block_hex)
 
 dump(artifact_root / "rust-mined-block.json", block_sidecar("rust", rust_rpc, block_hex, block_hash))
@@ -619,6 +848,87 @@ dump(artifact_root / "go-missing-tx-tip.json", {"best_known_height": height, "ha
 dump(artifact_root / "go-corrupt-merkle-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "go", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": go_rpc, "tip_hash": corrupt_block_hash})
 dump(artifact_root / "rust-converge-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": block_hash})
 dump(artifact_root / "rust-missing-tx-tip.json", {"best_known_height": height, "has_tip": True, "height": height, "implementation": "rust", "in_ibd": False, "request_path": "/get_tip", "rpc_endpoint": rust_rpc, "tip_hash": missing_tx_hash})
+partition_proxy = "127.0.0.1:53010"
+partition_go_peer = "127.0.0.1:53011"
+partition_nodes = json.loads(json.dumps(nodes))
+partition_nodes[1]["command_argv"][-1] = partition_proxy
+partition_nodes[1]["command"] = " ".join(partition_nodes[1]["command_argv"])
+partition_peer_connectivity = {"bidirectional_observed": False, "counterpart_links": {"go_peer_snapshot_expected_addr": None, "rust_outbound_local_addr": None, "rust_outbound_pid": None, "rust_outbound_remote_addr": None, "rust_peer_snapshot_expected_addr": None}, "go_peer_snapshot": {"count": 0, "peers": []}, "go_to_rust": False, "rust_peer_snapshot": {"count": 0, "peers": []}, "rust_to_go": False}
+partition_final = {"peer_snapshots_rechecked": True, "process_identity_rechecked": True, "producer_side": True, "rust_outbound_link_rechecked": False, "rust_outbound_local_addr": None, "rust_outbound_pid": None, "rust_outbound_remote_addr": None}
+dump(artifact_root / "partition-common-go-mine.json", mine_sidecar("go", go_rpc, common_hash, common_height))
+dump(artifact_root / "partition-common-go-block.json", block_sidecar("go", go_rpc, common_block_hex, common_hash, common_height))
+dump(artifact_root / "partition-common-rust-tip.json", tip_sidecar("rust", rust_rpc, common_hash, common_height))
+dump(artifact_root / "partition-common-rust-block.json", block_sidecar("rust", rust_rpc, common_block_hex, common_hash, common_height))
+dump(artifact_root / "partition-go-mine.json", mine_sidecar("go", go_rpc, block_hash, height))
+dump(artifact_root / "partition-go-tip.json", tip_sidecar("go", go_rpc, block_hash, height))
+dump(artifact_root / "partition-go-block.json", block_sidecar("go", go_rpc, block_hex, block_hash))
+dump(artifact_root / "partition-rust-mine-1.json", mine_sidecar("rust", rust_rpc, partition_rust_block_1_hash, height))
+dump(artifact_root / "partition-rust-block-1.json", block_sidecar("rust", rust_rpc, partition_rust_block_1_hex, partition_rust_block_1_hash))
+dump(artifact_root / "partition-rust-same-fork-mine.json", mine_sidecar("rust", rust_rpc, block_hash, height))
+dump(artifact_root / "partition-rust-same-fork-block.json", block_sidecar("rust", rust_rpc, block_hex, block_hash))
+dump(artifact_root / "partition-rust-mine-2.json", mine_sidecar("rust", rust_rpc, rust_win_hash, rust_win_height))
+dump(artifact_root / "partition-rust-tip.json", tip_sidecar("rust", rust_rpc, rust_win_hash, rust_win_height))
+dump(artifact_root / "partition-rust-block-2.json", block_sidecar("rust", rust_rpc, rust_win_block_hex, rust_win_hash, rust_win_height))
+dump(artifact_root / "partition-rust-skip-mine.json", mine_sidecar("rust", rust_rpc, rust_skip_hash, rust_skip_height))
+dump(artifact_root / "partition-rust-skip-tip.json", tip_sidecar("rust", rust_rpc, rust_skip_hash, rust_skip_height))
+dump(artifact_root / "partition-rust-skip-block.json", block_sidecar("rust", rust_rpc, rust_skip_block_hex, rust_skip_hash, rust_skip_height))
+dump(artifact_root / "partition-final-go-skip-tip.json", tip_sidecar("go", go_rpc, rust_skip_hash, rust_skip_height))
+dump(artifact_root / "partition-final-rust-skip-tip.json", tip_sidecar("rust", rust_rpc, rust_skip_hash, rust_skip_height))
+dump(artifact_root / "partition-final-go-skip-block.json", block_sidecar("go", go_rpc, rust_skip_block_hex, rust_skip_hash, rust_skip_height))
+dump(artifact_root / "partition-final-rust-skip-block.json", block_sidecar("rust", rust_rpc, rust_skip_block_hex, rust_skip_hash, rust_skip_height))
+dump(artifact_root / "partition-final-go-tip.json", tip_sidecar("go", go_rpc, rust_win_hash, rust_win_height))
+dump(artifact_root / "partition-final-rust-tip.json", tip_sidecar("rust", rust_rpc, rust_win_hash, rust_win_height))
+dump(artifact_root / "partition-go-reorg-parent-block.json", block_sidecar("go", go_rpc, partition_rust_block_1_hex, partition_rust_block_1_hash))
+dump(artifact_root / "partition-go-losing-reorg-parent-block.json", block_sidecar("go", go_rpc, block_hex, block_hash))
+dump(artifact_root / "partition-go-reorg-parent-forged-block.json", block_sidecar("go", go_rpc, block_hex, partition_rust_block_1_hash))
+dump(artifact_root / "partition-go-disconnected-mine.json", mine_sidecar("go", go_rpc, disconnected_go_hash, height))
+dump(artifact_root / "partition-go-disconnected-tip.json", tip_sidecar("go", go_rpc, disconnected_go_hash, height))
+dump(artifact_root / "partition-go-disconnected-block.json", block_sidecar("go", go_rpc, disconnected_go_block_hex, disconnected_go_hash))
+dump(artifact_root / "partition-final-go-block.json", block_sidecar("go", go_rpc, rust_win_block_hex, rust_win_hash, rust_win_height))
+dump(artifact_root / "partition-final-rust-block.json", block_sidecar("rust", rust_rpc, rust_win_block_hex, rust_win_hash, rust_win_height))
+(artifact_root / "partition-go-metrics.prom").write_text("rubin_node_reorg_total 1\nrubin_node_last_reorg_depth 1\n", encoding="utf-8")
+(artifact_root / "partition-go-metrics-timestamp.prom").write_text("rubin_node_reorg_total 1 123\nrubin_node_last_reorg_depth 1 123\n", encoding="utf-8")
+(artifact_root / "partition-go-metrics.json").write_text(json.dumps({"rubin_node_reorg_total": 1, "rubin_node_last_reorg_depth": 1}) + "\n", encoding="utf-8")
+for name, addr in (("partition-pre-rust-peers.json", partition_proxy), ("partition-pre-go-peers.json", partition_go_peer), ("partition-drop-rust-peers.json", None), ("partition-drop-go-peers.json", None), ("partition-fork-rust-peers.json", None), ("partition-fork-go-peers.json", None), ("partition-heal-rust-peers.json", partition_proxy), ("partition-heal-go-peers.json", partition_go_peer)):
+    dump(artifact_root / name, peer_snapshot(addr))
+dump(artifact_root / "partition-direct-pre-rust-peers.json", peer_snapshot(go_p2p))
+dump(artifact_root / "partition-direct-heal-rust-peers.json", peer_snapshot(go_p2p))
+bad_peer_snapshot = peer_snapshot(partition_proxy); bad_peer_snapshot["count"] = True; dump(artifact_root / "partition-pre-rust-peers-bool-count.json", bad_peer_snapshot)
+bad_peer_snapshot = peer_snapshot(partition_proxy); bad_peer_snapshot["peers"][0]["secret"] = "x"; dump(artifact_root / "partition-pre-rust-peers-extra-field.json", bad_peer_snapshot)
+bad_tip = tip_sidecar("rust", rust_rpc, rust_win_hash, rust_win_height); bad_tip["height"] = float(rust_win_height); dump(artifact_root / "partition-rust-tip-float-height.json", bad_tip)
+bad_tip = tip_sidecar("go", go_rpc, rust_win_hash, rust_win_height); bad_tip["in_ibd"] = "false"; dump(artifact_root / "partition-final-go-tip-string-ibd.json", bad_tip)
+bad_mine = mine_sidecar("rust", rust_rpc, rust_win_hash, rust_win_height); bad_mine["nonce"] = "0"; dump(artifact_root / "partition-rust-mine-string-nonce.json", bad_mine)
+bad_mine = mine_sidecar("rust", rust_rpc, rust_win_hash, rust_win_height); bad_mine["timestamp"] = "1"; dump(artifact_root / "partition-rust-mine-string-timestamp.json", bad_mine)
+partition_observations = {"pre_partition": {"common_go_block": str(artifact_root / "partition-common-go-block.json"), "common_go_mine": str(artifact_root / "partition-common-go-mine.json"), "common_rust_block": str(artifact_root / "partition-common-rust-block.json"), "common_rust_tip": str(artifact_root / "partition-common-rust-tip.json"), "go_peer_snapshot": str(artifact_root / "partition-pre-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-pre-rust-peers.json")}, "partition": {"go_peer_snapshot": str(artifact_root / "partition-drop-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-drop-rust-peers.json")}, "fork": {"go_block": str(artifact_root / "partition-go-block.json"), "go_mine": str(artifact_root / "partition-go-mine.json"), "go_peer_snapshot": str(artifact_root / "partition-fork-go-peers.json"), "go_tip": str(artifact_root / "partition-go-tip.json"), "rust_block_1": str(artifact_root / "partition-rust-block-1.json"), "rust_block_2": str(artifact_root / "partition-rust-block-2.json"), "rust_mine_1": str(artifact_root / "partition-rust-mine-1.json"), "rust_mine_2": str(artifact_root / "partition-rust-mine-2.json"), "rust_peer_snapshot": str(artifact_root / "partition-fork-rust-peers.json"), "rust_tip": str(artifact_root / "partition-rust-tip.json")}, "heal": {"go_peer_snapshot": str(artifact_root / "partition-heal-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-heal-rust-peers.json")}, "reorg": {"go_metrics": str(artifact_root / "partition-go-metrics.prom"), "go_reorg_parent_block": str(artifact_root / "partition-go-reorg-parent-block.json"), "go_tip": str(artifact_root / "partition-final-go-tip.json"), "go_tip_block": str(artifact_root / "partition-final-go-block.json"), "rust_tip": str(artifact_root / "partition-final-rust-tip.json"), "rust_tip_block": str(artifact_root / "partition-final-rust-block.json")}}
+partition_legacy = {"authoritative": False, "marker_path": str(mesh_marker), "purpose": "schema-valid legacy artifact only; not the partition/heal/reorg report verdict", "reason": "existing mixed_client_evidence_v1 PASS requires tx_path; partition/heal/reorg PASS lives in this report"}
+partition_report = {**mesh_report, "artifact_created_at_utc": "2026-05-12T10:00:02Z", "final_verification": partition_final, "legacy_schema_compatibility": partition_legacy, "nodes": partition_nodes, "observations": partition_observations, "peer_connectivity": partition_peer_connectivity, "proof": {"final_go_tip": {"height": rust_win_height, "hash": rust_win_hash}, "final_rust_tip": {"height": rust_win_height, "hash": rust_win_hash}, "fork_diverged": True, "go_partition_tip": {"height": height, "hash": block_hash}, "go_reorg_metrics": {"rubin_node_last_reorg_depth": 1, "rubin_node_reorg_total": 1}, "heal_go_peer_addr": partition_go_peer, "heal_restored_peer_state": True, "partition_changed_peer_state": True, "partition_proxy_endpoint": partition_proxy, "pre_partition_go_peer_addr": partition_go_peer, "process_identity_rechecked_after_heal": True, "reorg_converged": True, "rust_winning_tip": {"height": rust_win_height, "hash": rust_win_hash}}, "run_id": artifact_root.name, "scenario": "mixed_client_partition_heal_reorg"}
+dump(root / "partition-report.json", partition_report)
+bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["raw_samples"]; dump(artifact_root / "partition-missing-raw-samples-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["nodes"][0]["process_alive"]; dump(artifact_root / "partition-missing-process-alive-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["unexpected_pass_evidence"] = True; dump(artifact_root / "partition-extra-top-level-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["legacy_schema_compatibility"]["purpose"] = "schema-valid legacy artifact only; not the mesh report verdict"; dump(artifact_root / "partition-stale-legacy-purpose-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["legacy_schema_compatibility"]["unexpected"] = True; dump(artifact_root / "partition-extra-legacy-key-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_reorg_parent_block"] = str(artifact_root / "partition-go-losing-reorg-parent-block.json"); dump(root / "partition-losing-parent-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_reorg_parent_block"] = str(artifact_root / "partition-go-reorg-parent-forged-block.json"); dump(root / "partition-forged-parent-payload-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["rust_winning_tip"] = {"height": height, "hash": missing_tx_hash}; bad_partition["proof"]["final_go_tip"] = {"height": height, "hash": missing_tx_hash}; bad_partition["proof"]["final_rust_tip"] = {"height": height, "hash": missing_tx_hash}; dump(root / "partition-same-height-winner-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["peer_connectivity"]["bidirectional_observed"] = True; dump(root / "partition-peer-connectivity-overclaim-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["peer_connectivity"]["go_peer_snapshot"]["count"] = False; dump(artifact_root / "partition-peer-connectivity-bool-count-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["final_verification"]["rust_outbound_link_rechecked"] = True; dump(root / "partition-final-verification-overclaim-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][0]["rpc_endpoint_process_backed"] = False; dump(artifact_root / "partition-unbacked-node-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][1]["command_argv"][-1] = go_p2p; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); dump(artifact_root / "partition-rust-peer-argv-mismatch-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["partition_proxy_endpoint"] = go_p2p; bad_partition["nodes"][1]["command_argv"][-1] = go_p2p; bad_partition["nodes"][1]["command"] = " ".join(bad_partition["nodes"][1]["command_argv"]); bad_partition["observations"]["pre_partition"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-pre-rust-peers.json"); bad_partition["observations"]["heal"]["rust_peer_snapshot"] = str(artifact_root / "partition-direct-heal-rust-peers.json"); dump(artifact_root / "partition-direct-proxy-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["go_partition_tip"] = {"height": height, "hash": disconnected_go_hash}; bad_partition["observations"]["fork"]["go_mine"] = str(artifact_root / "partition-go-disconnected-mine.json"); bad_partition["observations"]["fork"]["go_tip"] = str(artifact_root / "partition-go-disconnected-tip.json"); bad_partition["observations"]["fork"]["go_block"] = str(artifact_root / "partition-go-disconnected-block.json"); dump(root / "partition-disconnected-go-fork-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["fork"]["rust_mine_1"] = str(artifact_root / "partition-rust-same-fork-mine.json"); bad_partition["observations"]["fork"]["rust_block_1"] = str(artifact_root / "partition-rust-same-fork-block.json"); dump(root / "partition-same-first-rust-fork-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["rust_winning_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["proof"]["final_go_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["proof"]["final_rust_tip"] = {"height": rust_skip_height, "hash": rust_skip_hash}; bad_partition["observations"]["fork"]["rust_mine_2"] = str(artifact_root / "partition-rust-skip-mine.json"); bad_partition["observations"]["fork"]["rust_tip"] = str(artifact_root / "partition-rust-skip-tip.json"); bad_partition["observations"]["fork"]["rust_block_2"] = str(artifact_root / "partition-rust-skip-block.json"); bad_partition["observations"]["reorg"]["go_tip"] = str(artifact_root / "partition-final-go-skip-tip.json"); bad_partition["observations"]["reorg"]["rust_tip"] = str(artifact_root / "partition-final-rust-skip-tip.json"); bad_partition["observations"]["reorg"]["go_tip_block"] = str(artifact_root / "partition-final-go-skip-block.json"); bad_partition["observations"]["reorg"]["rust_tip_block"] = str(artifact_root / "partition-final-rust-skip-block.json"); dump(artifact_root / "partition-skip-height-rust-winner-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["go_reorg_metrics"]["rubin_node_reorg_total"] = 2; dump(artifact_root / "partition-forged-metrics-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["pre_partition"]["rust_peer_snapshot"] = str(artifact_root / "partition-pre-rust-peers-bool-count.json"); dump(artifact_root / "partition-peer-sidecar-bool-count-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["pre_partition"]["rust_peer_snapshot"] = str(artifact_root / "partition-pre-rust-peers-extra-field.json"); dump(artifact_root / "partition-peer-sidecar-extra-field-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["fork"]["rust_tip"] = str(artifact_root / "partition-rust-tip-float-height.json"); dump(artifact_root / "partition-rust-tip-float-height-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_tip"] = str(artifact_root / "partition-final-go-tip-string-ibd.json"); dump(artifact_root / "partition-go-tip-string-ibd-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["fork"]["rust_mine_2"] = str(artifact_root / "partition-rust-mine-string-nonce.json"); dump(artifact_root / "partition-rust-mine-string-nonce-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["fork"]["rust_mine_2"] = str(artifact_root / "partition-rust-mine-string-timestamp.json"); dump(artifact_root / "partition-rust-mine-string-timestamp-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_metrics"] = str(artifact_root / "partition-go-metrics-timestamp.prom"); dump(artifact_root / "partition-metrics-timestamp-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_metrics"] = str(artifact_root / "partition-go-metrics.json"); dump(artifact_root / "partition-metrics-json-report.json", bad_partition)
 tx_report = {
     **mesh_report,
     "go_submit": {
@@ -1039,14 +1349,53 @@ print(root / "restart-go-target-tip-sidecar-low-best-known.json")
 print(root / "restart-catch-up-tip-sidecar-low-best-known.json")
 print(root / "restart-stale-artifact-created-at.json")
 print(root / "restart-stale-run-id-mismatch.json")
+print(root / "partition-report.json")
+print(artifact_root / "partition-missing-raw-samples-report.json")
+print(artifact_root / "partition-missing-process-alive-report.json")
+print(artifact_root / "partition-extra-top-level-report.json")
+print(artifact_root / "partition-stale-legacy-purpose-report.json")
+print(artifact_root / "partition-extra-legacy-key-report.json")
+print(root / "partition-losing-parent-report.json")
+print(root / "partition-forged-parent-payload-report.json")
+print(root / "partition-same-height-winner-report.json")
+print(root / "partition-peer-connectivity-overclaim-report.json")
+print(artifact_root / "partition-peer-connectivity-bool-count-report.json")
+print(root / "partition-final-verification-overclaim-report.json")
+print(artifact_root / "partition-unbacked-node-report.json")
+print(artifact_root / "partition-rust-peer-argv-mismatch-report.json")
+print(artifact_root / "partition-direct-proxy-report.json")
+print(root / "partition-disconnected-go-fork-report.json")
+print(root / "partition-same-first-rust-fork-report.json")
+print(artifact_root / "partition-skip-height-rust-winner-report.json")
+print(artifact_root / "partition-forged-metrics-report.json")
+print(artifact_root / "partition-peer-sidecar-bool-count-report.json")
+print(artifact_root / "partition-peer-sidecar-extra-field-report.json")
+print(artifact_root / "partition-rust-tip-float-height-report.json")
+print(artifact_root / "partition-go-tip-string-ibd-report.json")
+print(artifact_root / "partition-rust-mine-string-nonce-report.json")
+print(artifact_root / "partition-rust-mine-string-timestamp-report.json")
+print(artifact_root / "partition-metrics-timestamp-report.json")
+print(artifact_root / "partition-metrics-json-report.json")
 PY
 }
 
 CHECK_REPORT_LIB="${TMP_ROOT}/check-report-lib.sh"
 PREPARE_TX_CHAINSTATE_LIB="${TMP_ROOT}/prepare-tx-chainstate-lib.sh"
+PROXY_GO_LOCAL_ADDR_LIB="${TMP_ROOT}/proxy-go-local-addr-lib.sh"
+WAIT_PEER_SNAPSHOT_LIB="${TMP_ROOT}/wait-peer-snapshot-lib.sh"
+CAPTURE_GO_REORG_METRICS_LIB="${TMP_ROOT}/capture-go-reorg-metrics-lib.sh"
+WAIT_PEER_SNAPSHOT_STATE_LIB="${TMP_ROOT}/wait-peer-snapshot-state-lib.sh"
 extract_check_report
 extract_prepare_tx_chainstate
+extract_proxy_go_local_addr
+extract_wait_peer_snapshot
+extract_capture_go_reorg_metrics
+extract_wait_peer_snapshot_state
 check_prepare_tx_chainstate_cleanup
+check_proxy_go_local_addr_reason
+check_wait_peer_snapshot_normalizes
+check_capture_go_reorg_metrics_reason
+check_wait_peer_snapshot_state_reason
 # shellcheck source=/dev/null
 source "${CHECK_REPORT_LIB}"
 [[ "$(tx_path_prepare_reason go_submit_chainstate_prepare_failed 1)" == "go_submit_chainstate_prepare_failed" ]] || { echo "FAIL: go-submit prep reason should remain go_submit scoped" >&2; exit 1; }
@@ -1119,6 +1468,33 @@ RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '56p' "${REPORT_LI
 RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '57p' "${REPORT_LIST}")"
 RESTART_STALE_ARTIFACT_TIME_REPORT="$(sed -n '58p' "${REPORT_LIST}")"
 RESTART_STALE_RUN_ID_MISMATCH_REPORT="$(sed -n '59p' "${REPORT_LIST}")"
+PARTITION_REPORT="$(sed -n '60p' "${REPORT_LIST}")"
+PARTITION_MISSING_RAW_SAMPLES_REPORT="$(sed -n '61p' "${REPORT_LIST}")"
+PARTITION_MISSING_PROCESS_ALIVE_REPORT="$(sed -n '62p' "${REPORT_LIST}")"
+PARTITION_EXTRA_TOP_LEVEL_REPORT="$(sed -n '63p' "${REPORT_LIST}")"
+PARTITION_STALE_LEGACY_PURPOSE_REPORT="$(sed -n '64p' "${REPORT_LIST}")"
+PARTITION_EXTRA_LEGACY_KEY_REPORT="$(sed -n '65p' "${REPORT_LIST}")"
+PARTITION_LOSING_PARENT_REPORT="$(sed -n '66p' "${REPORT_LIST}")"
+PARTITION_FORGED_PARENT_PAYLOAD_REPORT="$(sed -n '67p' "${REPORT_LIST}")"
+PARTITION_SAME_HEIGHT_WINNER_REPORT="$(sed -n '68p' "${REPORT_LIST}")"
+PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT="$(sed -n '69p' "${REPORT_LIST}")"
+PARTITION_PEER_CONNECTIVITY_BOOL_COUNT_REPORT="$(sed -n '70p' "${REPORT_LIST}")"
+PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT="$(sed -n '71p' "${REPORT_LIST}")"
+PARTITION_UNBACKED_NODE_REPORT="$(sed -n '72p' "${REPORT_LIST}")"
+PARTITION_RUST_PEER_ARGV_MISMATCH_REPORT="$(sed -n '73p' "${REPORT_LIST}")"
+PARTITION_DIRECT_PROXY_REPORT="$(sed -n '74p' "${REPORT_LIST}")"
+PARTITION_DISCONNECTED_GO_FORK_REPORT="$(sed -n '75p' "${REPORT_LIST}")"
+PARTITION_SAME_FIRST_RUST_FORK_REPORT="$(sed -n '76p' "${REPORT_LIST}")"
+PARTITION_SKIP_HEIGHT_RUST_WINNER_REPORT="$(sed -n '77p' "${REPORT_LIST}")"
+PARTITION_FORGED_METRICS_REPORT="$(sed -n '78p' "${REPORT_LIST}")"
+PARTITION_PEER_SIDECAR_BOOL_COUNT_REPORT="$(sed -n '79p' "${REPORT_LIST}")"
+PARTITION_PEER_SIDECAR_EXTRA_FIELD_REPORT="$(sed -n '80p' "${REPORT_LIST}")"
+PARTITION_RUST_TIP_FLOAT_HEIGHT_REPORT="$(sed -n '81p' "${REPORT_LIST}")"
+PARTITION_GO_TIP_STRING_IBD_REPORT="$(sed -n '82p' "${REPORT_LIST}")"
+PARTITION_RUST_MINE_STRING_NONCE_REPORT="$(sed -n '83p' "${REPORT_LIST}")"
+PARTITION_RUST_MINE_STRING_TIMESTAMP_REPORT="$(sed -n '84p' "${REPORT_LIST}")"
+PARTITION_METRICS_TIMESTAMP_REPORT="$(sed -n '85p' "${REPORT_LIST}")"
+PARTITION_METRICS_JSON_REPORT="$(sed -n '86p' "${REPORT_LIST}")"
 TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT="${TMP_ROOT}/tx-huge-int-propagation-sample.json"
 CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-bool-height-sample.json"
 CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-float-height-sample.json"
@@ -1126,9 +1502,63 @@ CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT="${TMP_ROOT}/converge-uppercase-bloc
 [[ -f "${TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT}" && -f "${CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT}" ]] || { echo "failed to build raw sample regression reports" >&2; exit 1; }
 [[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_SLO_CLAIM_SAMPLE_REPORT}" && -n "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" && -n "${MESH_BAD_PROPAGATION_REASON_REPORT}" && -n "${MESH_BAD_CONVERGENCE_REASON_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 [[ -n "${RESTART_REPORT}" && -n "${RESTART_MISSING_RESTART_REPORT}" && -n "${RESTART_MISSING_PROCESS_REPORT}" && -n "${RESTART_SAME_PID_REPORT}" && -n "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" && -n "${RESTART_NO_PEER_RECONNECT_REPORT}" && -n "${RESTART_SAME_DATADIR_FALSE_REPORT}" && -n "${RESTART_DATADIR_MISMATCH_REPORT}" && -n "${RESTART_STALE_RUN_ID_REPORT}" && -n "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" && -n "${RESTART_STALE_CATCH_UP_REPORT}" && -n "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}" && -n "${RESTART_NEW_PID_NOT_FINAL_REPORT}" && -n "${RESTART_PRE_TIP_ABSENT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_ABSENT_REPORT}" && -n "${RESTART_GO_TARGET_NOT_ADVANCED_REPORT}" && -n "${RESTART_PRE_RESTART_HEIGHT_STRING_REPORT}" && -n "${RESTART_GO_TARGET_HEIGHT_STRING_REPORT}" && -n "${RESTART_CATCH_UP_HEIGHT_STRING_REPORT}" && -n "${RESTART_PRE_RESTART_HEIGHT_BOOL_REPORT}" && -n "${RESTART_GO_TARGET_HEIGHT_BOOL_REPORT}" && -n "${RESTART_CATCH_UP_HEIGHT_BOOL_REPORT}" && -n "${RESTART_CATCH_UP_TIP_MISMATCH_REPORT}" && -n "${RESTART_STALE_LEGACY_TEXT_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}" && -n "${RESTART_OLD_PID_ALIAS_GO_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_STALE_ARTIFACT_TIME_REPORT}" && -n "${RESTART_STALE_RUN_ID_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic restart reports" >&2; exit 1; }
+[[ -n "${PARTITION_REPORT}" && -n "${PARTITION_MISSING_RAW_SAMPLES_REPORT}" && -n "${PARTITION_MISSING_PROCESS_ALIVE_REPORT}" && -n "${PARTITION_EXTRA_TOP_LEVEL_REPORT}" && -n "${PARTITION_STALE_LEGACY_PURPOSE_REPORT}" && -n "${PARTITION_EXTRA_LEGACY_KEY_REPORT}" && -n "${PARTITION_LOSING_PARENT_REPORT}" && -n "${PARTITION_FORGED_PARENT_PAYLOAD_REPORT}" && -n "${PARTITION_SAME_HEIGHT_WINNER_REPORT}" && -n "${PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT}" && -n "${PARTITION_PEER_CONNECTIVITY_BOOL_COUNT_REPORT}" && -n "${PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT}" && -n "${PARTITION_UNBACKED_NODE_REPORT}" && -n "${PARTITION_RUST_PEER_ARGV_MISMATCH_REPORT}" && -n "${PARTITION_DIRECT_PROXY_REPORT}" && -n "${PARTITION_DISCONNECTED_GO_FORK_REPORT}" && -n "${PARTITION_SAME_FIRST_RUST_FORK_REPORT}" && -n "${PARTITION_SKIP_HEIGHT_RUST_WINNER_REPORT}" && -n "${PARTITION_FORGED_METRICS_REPORT}" && -n "${PARTITION_PEER_SIDECAR_BOOL_COUNT_REPORT}" && -n "${PARTITION_PEER_SIDECAR_EXTRA_FIELD_REPORT}" && -n "${PARTITION_RUST_TIP_FLOAT_HEIGHT_REPORT}" && -n "${PARTITION_GO_TIP_STRING_IBD_REPORT}" && -n "${PARTITION_RUST_MINE_STRING_NONCE_REPORT}" && -n "${PARTITION_RUST_MINE_STRING_TIMESTAMP_REPORT}" && -n "${PARTITION_METRICS_TIMESTAMP_REPORT}" && -n "${PARTITION_METRICS_JSON_REPORT}" ]] || { echo "failed to build synthetic partition reports" >&2; exit 1; }
+
+for bad_fee in 0 abc 100000001; do
+  if DETERMINISTIC_TX_FEE="${bad_fee}" "${HARNESS}" --partition-heal-reorg >/dev/null 2>"${TMP_ROOT}/bad-fee.err"; then
+    echo "partition mode accepted invalid DETERMINISTIC_TX_FEE=${bad_fee}" >&2
+    exit 1
+  fi
+  grep -Fq "DETERMINISTIC_TX_FEE must be a positive integer <= 100000000" "${TMP_ROOT}/bad-fee.err" || { cat "${TMP_ROOT}/bad-fee.err" >&2; exit 1; }
+done
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_pass_contains "rust restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --rust-restart --check-report "${RESTART_REPORT}"
+expect_pass_contains "partition check-report" "PASS: mixed_client_partition_heal_reorg report structurally accepted" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_REPORT}"
+expect_fail_contains "partition rejects missing raw samples" "report top-level keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_MISSING_RAW_SAMPLES_REPORT}"
+expect_generator_fail_contains "partition generator rejects missing raw samples" "top_level_fields_invalid" --partition-heal-reorg-report "${PARTITION_MISSING_RAW_SAMPLES_REPORT}"
+expect_fail_contains "partition rejects missing process_alive" "go node keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_MISSING_PROCESS_ALIVE_REPORT}"
+expect_generator_fail_contains "partition generator rejects missing process_alive" "process_identity_missing_or_invalid" --partition-heal-reorg-report "${PARTITION_MISSING_PROCESS_ALIVE_REPORT}"
+expect_fail_contains "partition rejects extra top-level evidence" "report top-level keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_EXTRA_TOP_LEVEL_REPORT}"
+expect_generator_fail_contains "partition generator rejects extra top-level evidence" "top_level_fields_invalid" --partition-heal-reorg-report "${PARTITION_EXTRA_TOP_LEVEL_REPORT}"
+expect_fail_contains "partition rejects stale legacy purpose" "legacy_schema_compatibility partition purpose mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_STALE_LEGACY_PURPOSE_REPORT}"
+expect_generator_fail_contains "partition generator rejects stale legacy purpose" "legacy_marker_invalid" --partition-heal-reorg-report "${PARTITION_STALE_LEGACY_PURPOSE_REPORT}"
+expect_fail_contains "partition rejects extra legacy key" "legacy_schema_compatibility missing marker_path" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_EXTRA_LEGACY_KEY_REPORT}"
+expect_generator_fail_contains "partition generator rejects extra legacy key" "legacy_marker_invalid" --partition-heal-reorg-report "${PARTITION_EXTRA_LEGACY_KEY_REPORT}"
+expect_fail_contains "partition rejects losing fork as reorg parent" "observations.reorg.go_reorg_parent_block does not match expected block" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_LOSING_PARENT_REPORT}"
+expect_fail_contains "partition rejects forged parent block payload" "observations.reorg.go_reorg_parent_block parsed block hash mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_FORGED_PARENT_PAYLOAD_REPORT}"
+expect_fail_contains "partition rejects same-height winning fork" "partition fork tips do not prove Rust winning branch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_SAME_HEIGHT_WINNER_REPORT}"
+expect_fail_contains "partition rejects peer_connectivity overclaim" "partition peer_connectivity overclaims direct link" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT}"
+expect_fail_contains "partition rejects peer_connectivity bool count" "partition peer_connectivity.go_peer_snapshot must be empty" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_PEER_CONNECTIVITY_BOOL_COUNT_REPORT}"
+expect_generator_fail_contains "partition generator rejects peer_connectivity bool count" "peer_connectivity_invalid" --partition-heal-reorg-report "${PARTITION_PEER_CONNECTIVITY_BOOL_COUNT_REPORT}"
+expect_fail_contains "partition rejects final_verification overclaim" "partition final verification is incomplete" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT}"
+expect_generator_fail_contains "partition generator rejects unbacked node evidence" "process_identity_missing_or_invalid" --partition-heal-reorg-report "${PARTITION_UNBACKED_NODE_REPORT}"
+expect_fail_contains "partition rejects rust peer argv mismatch" "node command_argv does not match exact launched argv" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_RUST_PEER_ARGV_MISMATCH_REPORT}"
+expect_generator_fail_contains "partition generator rejects rust peer argv mismatch" "node_identity_invalid" --partition-heal-reorg-report "${PARTITION_RUST_PEER_ARGV_MISMATCH_REPORT}"
+expect_fail_contains "partition rejects direct proxy self-validation" "partition proxy endpoint is not proxy-only" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_DIRECT_PROXY_REPORT}"
+expect_generator_fail_contains "partition generator rejects direct proxy self-validation" "node_identity_invalid" --partition-heal-reorg-report "${PARTITION_DIRECT_PROXY_REPORT}"
+expect_fail_contains "partition rejects disconnected fork parent" "observations.fork.go_block block payload check failed" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_DISCONNECTED_GO_FORK_REPORT}"
+expect_fail_contains "partition rejects non-divergent rust fork" "rust fork first mine did not diverge from go fork" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_SAME_FIRST_RUST_FORK_REPORT}"
+expect_fail_contains "partition rejects skipped-height rust winner" "rust winning branch is not contiguous" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_SKIP_HEIGHT_RUST_WINNER_REPORT}"
+expect_generator_fail_contains "partition generator rejects skipped-height rust winner" "rust_winning_branch_not_contiguous" --partition-heal-reorg-report "${PARTITION_SKIP_HEIGHT_RUST_WINNER_REPORT}"
+expect_fail_contains "partition rejects forged reorg metrics" "partition go reorg metrics do not match source sidecar" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_FORGED_METRICS_REPORT}"
+expect_generator_fail_contains "partition generator rejects forged reorg metrics" "reorg_metrics_mismatch" --partition-heal-reorg-report "${PARTITION_FORGED_METRICS_REPORT}"
+expect_fail_contains "partition rejects bool peer sidecar count" "observations.pre_partition.rust_peer_snapshot peer snapshot malformed" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_PEER_SIDECAR_BOOL_COUNT_REPORT}"
+expect_generator_fail_contains "partition generator rejects bool peer sidecar count" "peer_snapshot_invalid" --partition-heal-reorg-report "${PARTITION_PEER_SIDECAR_BOOL_COUNT_REPORT}"
+expect_fail_contains "partition rejects peer sidecar extra field" "observations.pre_partition.rust_peer_snapshot peer entries malformed" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_PEER_SIDECAR_EXTRA_FIELD_REPORT}"
+expect_generator_fail_contains "partition generator rejects peer sidecar extra field" "peer_snapshot_invalid" --partition-heal-reorg-report "${PARTITION_PEER_SIDECAR_EXTRA_FIELD_REPORT}"
+expect_fail_contains "partition rejects float rust tip sidecar height" "observations.fork.rust_tip does not match expected tip" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_RUST_TIP_FLOAT_HEIGHT_REPORT}"
+expect_generator_fail_contains "partition generator rejects float rust tip sidecar height" "tip_sidecar_invalid" --partition-heal-reorg-report "${PARTITION_RUST_TIP_FLOAT_HEIGHT_REPORT}"
+expect_fail_contains "partition rejects string go tip in_ibd" "observations.reorg.go_tip does not match expected tip" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_GO_TIP_STRING_IBD_REPORT}"
+expect_generator_fail_contains "partition generator rejects string go tip in_ibd" "tip_sidecar_invalid" --partition-heal-reorg-report "${PARTITION_GO_TIP_STRING_IBD_REPORT}"
+expect_fail_contains "partition rejects string rust mine nonce" "observations.fork.rust_mine_2 malformed mine result" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_RUST_MINE_STRING_NONCE_REPORT}"
+expect_generator_fail_contains "partition generator rejects string rust mine nonce" "mine_sidecar_invalid" --partition-heal-reorg-report "${PARTITION_RUST_MINE_STRING_NONCE_REPORT}"
+expect_fail_contains "partition rejects string rust mine timestamp" "observations.fork.rust_mine_2 malformed mine result" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_RUST_MINE_STRING_TIMESTAMP_REPORT}"
+expect_generator_fail_contains "partition generator rejects string rust mine timestamp" "mine_sidecar_invalid" --partition-heal-reorg-report "${PARTITION_RUST_MINE_STRING_TIMESTAMP_REPORT}"
+expect_fail_contains "partition rejects timestamped reorg metrics" "observations.reorg.go_metrics malformed metric line" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_METRICS_TIMESTAMP_REPORT}"
+expect_generator_fail_contains "partition generator rejects timestamped metrics sidecar" "metrics_malformed" --partition-heal-reorg-report "${PARTITION_METRICS_TIMESTAMP_REPORT}"
+expect_fail_contains "partition rejects JSON reorg metrics" "observations.reorg.go_metrics malformed metric line" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_METRICS_JSON_REPORT}"
+expect_generator_fail_contains "partition generator rejects JSON metrics sidecar" "metrics_malformed" --partition-heal-reorg-report "${PARTITION_METRICS_JSON_REPORT}"
 expect_fail_contains "public restart check-report" "public restart check-report is unsupported" "${HARNESS}" --check-report "${RESTART_REPORT}"
 expect_fail_contains "restart live check-report unsupported" "--rust-restart --check-report-live is unsupported" "${HARNESS}" --rust-restart --check-report-live "${RESTART_REPORT}"
 expect_fail_contains "restart mode rejects mesh artifact" "rust restart validation requires a mixed_client_rust_restart report" "${HARNESS}" --rust-restart --check-report "${MESH_REPORT}"
