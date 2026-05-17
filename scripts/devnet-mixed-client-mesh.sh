@@ -140,6 +140,32 @@ def mine_sidecar(label: str, p: Path, impl: str, endpoint: str, min_height: int 
     req(mine.get("implementation") == impl and mine.get("rpc_endpoint") == endpoint and mine.get("request_path") == "/mine_next", f"{label} sidecar identity mismatch")
     req(mine.get("mined") is True and is_json_int(mine.get("height"), min_height) and hex32(mine.get("block_hash")) and is_json_int(mine.get("tx_count"), 1), f"{label} malformed mine result")
     return mine
+def metrics_sidecar(label: str, p: Path) -> dict:
+    try:
+        with p.open("rb") as f:
+            raw = f.read(MAX_JSON_BYTES + 1)
+    except OSError as exc:
+        fail(f"{label} read failed: {exc}")
+    req(raw != b"", f"{label} is empty")
+    req(len(raw) <= MAX_JSON_BYTES, f"{label} is too large")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"{label} is not UTF-8: {exc}")
+    found = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        head = re.match(r"[A-Za-z_:][A-Za-z0-9_:]*", line)
+        metric = head.group(0) if head else ""
+        matched = re.fullmatch(r"(rubin_node_reorg_total|rubin_node_last_reorg_depth)\s+([0-9]+)(?:\.0*)?\s*", line) if metric in {"rubin_node_reorg_total", "rubin_node_last_reorg_depth"} else None
+        req(metric not in {"rubin_node_reorg_total", "rubin_node_last_reorg_depth"} or matched is not None, f"{label} malformed metric line")
+        if matched is not None:
+            req(metric not in found, f"{label} duplicate metric")
+            found[metric] = int(matched.group(2))
+    req(set(found) == {"rubin_node_reorg_total", "rubin_node_last_reorg_depth"} and all(value >= 1 for value in found.values()), f"{label} missing reorg metrics")
+    return found
 def peer_snapshot(label: str, p: Path, expected, want_connected: bool) -> None:
     snap = load_json_file(label, p)
     peers = snap.get("peers")
@@ -615,7 +641,7 @@ if partition_mode:
         "partition": {"go_peer_snapshot", "rust_peer_snapshot"},
         "fork": {"go_block", "go_mine", "go_peer_snapshot", "go_tip", "rust_block_1", "rust_block_2", "rust_mine_1", "rust_mine_2", "rust_peer_snapshot", "rust_tip"},
         "heal": {"go_peer_snapshot", "rust_peer_snapshot"},
-        "reorg": {"go_reorg_parent_block", "go_tip", "go_tip_block", "rust_tip", "rust_tip_block"},
+        "reorg": {"go_metrics", "go_reorg_parent_block", "go_tip", "go_tip_block", "rust_tip", "rust_tip_block"},
     }
     obs_paths = {}
     for group, keys in obs_keys.items():
@@ -623,6 +649,7 @@ if partition_mode:
         for key in keys:
             obs_paths[f"{group}.{key}"] = artifact_file(f"observations.{group}.{key}", group_obj.get(key), artifact_root)
     req(len(set(obs_paths.values())) == len(obs_paths), "partition observation sidecar paths are not pairwise distinct")
+    req(metrics_sidecar("observations.reorg.go_metrics", obs_paths["reorg.go_metrics"]) == metrics, "partition go reorg metrics do not match source sidecar")
     peer_snapshot("observations.pre_partition.rust_peer_snapshot", obs_paths["pre_partition.rust_peer_snapshot"], proof["partition_proxy_endpoint"], True)
     peer_snapshot("observations.pre_partition.go_peer_snapshot", obs_paths["pre_partition.go_peer_snapshot"], proof["pre_partition_go_peer_addr"], True)
     peer_snapshot("observations.partition.rust_peer_snapshot", obs_paths["partition.rust_peer_snapshot"], None, False)
@@ -765,7 +792,7 @@ PARTITION_PROXY_SCRIPT="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-proxy.py"; PART
 PARTITION_PRE_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-pre-go-peers.json"; PARTITION_PRE_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-pre-rust-peers.json"; PARTITION_COMMON_GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-go-mine.json"; PARTITION_COMMON_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-go-block.json"; PARTITION_COMMON_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-rust-tip.json"; PARTITION_COMMON_RUST_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-common-rust-block.json"
 PARTITION_DROP_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-drop-go-peers.json"; PARTITION_DROP_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-drop-rust-peers.json"; PARTITION_FORK_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-fork-go-peers.json"; PARTITION_FORK_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-fork-rust-peers.json"; PARTITION_GO_MINE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-mine.json"; PARTITION_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-tip.json"; PARTITION_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-block.json"
 PARTITION_RUST_MINE1_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-mine-1.json"; PARTITION_RUST_MINE2_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-mine-2.json"; PARTITION_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-tip.json"; PARTITION_RUST_BLOCK1_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-block-1.json"; PARTITION_RUST_BLOCK2_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-rust-block-2.json"; PARTITION_HEAL_GO_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-heal-go-peers.json"; PARTITION_HEAL_RUST_PEERS_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-heal-rust-peers.json"
-PARTITION_FINAL_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-go-tip.json"; PARTITION_FINAL_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-rust-tip.json"; PARTITION_GO_REORG_PARENT_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-reorg-parent-block.json"; PARTITION_FINAL_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-go-block.json"; PARTITION_FINAL_RUST_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-rust-block.json"
+PARTITION_FINAL_GO_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-go-tip.json"; PARTITION_FINAL_RUST_TIP_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-rust-tip.json"; PARTITION_GO_REORG_PARENT_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-reorg-parent-block.json"; PARTITION_FINAL_GO_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-go-block.json"; PARTITION_FINAL_RUST_BLOCK_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-final-rust-block.json"; PARTITION_GO_METRICS_PROM="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-metrics.prom"
 GO_PID="" RUST_PID="" GO_RPC_ADDR="" RUST_RPC_ADDR="" GO_P2P_ADDR="" RUST_P2P_ADDR="" GO_STARTED_AT_UTC="" RUST_STARTED_AT_UTC="" GO_COMM="" RUST_COMM="" RUST_TO_GO_LOCAL_ADDR="" GO_CMD="" RUST_CMD="" GO_ARGV_JSON="" RUST_ARGV_JSON="" FINAL_PROCESS_IDENTITY_RECHECKED="" FINAL_RUST_OUTBOUND_LINK_RECHECKED="" FINAL_PEER_SNAPSHOTS_RECHECKED="" PROCESS_IDENTITY_REASON="" START_REASON="" BUILD_REASON="" TX_REASON="" TX_ID="" TX_HEX="" TX_FROM_KEY_FILE="" TX_FROM_KEY_DIR="" TX_TO_KEY="" RUST_MINE_HEIGHT="" RUST_MINE_HASH="" RUST_MINE_TX_COUNT="" GO_MINE_HEIGHT="" GO_MINE_HASH="" GO_MINE_TX_COUNT="" PROPAGATION_SAMPLE_START_SECONDS="" PROPAGATION_SAMPLE_SECONDS="" CONVERGENCE_SAMPLE_SECONDS="" RUST_RESTART_REASON="" RUST_RESTART_TIP_TSV="" OLD_RUST_PID="" OLD_RUST_RPC_ADDR="" OLD_RUST_P2P_ADDR="" OLD_RUST_STARTED_AT_UTC="" OLD_RUST_ARGV_JSON="" PRE_RESTART_RUST_HEIGHT="" PRE_RESTART_RUST_TIP="" PRE_RESTART_RUST_HAS_TIP="" GO_RESTART_TARGET_HEIGHT="" GO_RESTART_TARGET_TIP="" GO_RESTART_TARGET_HAS_TIP="" GO_RESTART_TARGET_TX_COUNT="" POST_RESTART_RUST_HEIGHT="" POST_RESTART_RUST_TIP="" POST_RESTART_RUST_HAS_TIP="" OLD_RUST_PID_STOPPED="" RUST_RESTART_SAME_DATADIR="" RUST_RESTART_PEER_RECONNECTED="" PARTITION_PROXY_PID="" PARTITION_PROXY_ADDR="" PARTITION_PRE_GO_PEER_ADDR="" PARTITION_HEAL_GO_PEER_ADDR="" PARTITION_COMMON_HEIGHT="" PARTITION_COMMON_HASH="" PARTITION_GO_FORK_HEIGHT="" PARTITION_GO_FORK_HASH="" PARTITION_RUST_WIN_HEIGHT="" PARTITION_RUST_WIN_HASH="" PARTITION_FINAL_GO_HEIGHT="" PARTITION_FINAL_GO_HASH="" PARTITION_FINAL_RUST_HEIGHT="" PARTITION_FINAL_RUST_HASH="" PARTITION_REORG_TOTAL="" PARTITION_REORG_DEPTH="" PARTITION_REASON=""
 mkdir -p -- "${GO_DIR}" "${RUST_DIR}"
 run_fips_preflight_before_captured_dev_env() { [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]] && return 0; echo "Running FIPS-only preflight before captured dev-env command streams" >&2; "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2; }
@@ -811,6 +838,14 @@ rules = [
     ("partition final tips are not the Rust winning tip", "partition_final_tip_not_winner"),
     ("partition final verification is incomplete", "partition_final_verification_invalid"),
     ("partition observation sidecar paths are not pairwise distinct", "partition_sidecar_paths_not_distinct"),
+    ("partition go reorg metrics do not match source sidecar", "partition_reorg_metrics_source_mismatch"),
+    ("observations.reorg.go_metrics read failed", "partition_reorg_metrics_read_failed"),
+    ("observations.reorg.go_metrics is empty", "partition_reorg_metrics_empty"),
+    ("observations.reorg.go_metrics is too large", "partition_reorg_metrics_too_large"),
+    ("observations.reorg.go_metrics is not UTF-8", "partition_reorg_metrics_not_utf8"),
+    ("observations.reorg.go_metrics malformed metric line", "partition_reorg_metrics_malformed"),
+    ("observations.reorg.go_metrics duplicate metric", "partition_reorg_metrics_duplicate"),
+    ("observations.reorg.go_metrics missing reorg metrics", "partition_reorg_metrics_missing"),
     ("pre-partition common mine height is not the fork parent", "partition_common_parent_invalid"),
     ("go fork mine sidecar mismatch", "partition_go_mine_sidecar_invalid"),
     ("rust fork first mine height is not parallel to go fork", "partition_rust_parallel_fork_invalid"),
@@ -1748,7 +1783,8 @@ write_outputs() {
     PARTITION_DROP_RUST_PEERS_JSON PARTITION_FORK_GO_PEERS_JSON PARTITION_FORK_RUST_PEERS_JSON PARTITION_GO_MINE_JSON PARTITION_GO_TIP_JSON \
     PARTITION_GO_BLOCK_JSON PARTITION_RUST_MINE1_JSON PARTITION_RUST_MINE2_JSON PARTITION_RUST_TIP_JSON PARTITION_RUST_BLOCK1_JSON \
     PARTITION_RUST_BLOCK2_JSON PARTITION_HEAL_GO_PEERS_JSON PARTITION_HEAL_RUST_PEERS_JSON PARTITION_FINAL_GO_TIP_JSON \
-    PARTITION_FINAL_RUST_TIP_JSON PARTITION_GO_REORG_PARENT_BLOCK_JSON PARTITION_FINAL_GO_BLOCK_JSON PARTITION_FINAL_RUST_BLOCK_JSON
+    PARTITION_FINAL_RUST_TIP_JSON PARTITION_GO_REORG_PARENT_BLOCK_JSON PARTITION_FINAL_GO_BLOCK_JSON PARTITION_FINAL_RUST_BLOCK_JSON \
+    PARTITION_GO_METRICS_PROM
   python3 - <<'PY'
 import json, os
 from datetime import datetime, timezone
@@ -2024,6 +2060,7 @@ if partition_mode and verdict == "PASS":
         "reorg": {
             "go_tip": e["PARTITION_FINAL_GO_TIP_JSON"],
             "rust_tip": e["PARTITION_FINAL_RUST_TIP_JSON"],
+            "go_metrics": e["PARTITION_GO_METRICS_PROM"],
             "go_reorg_parent_block": e["PARTITION_GO_REORG_PARENT_BLOCK_JSON"],
             "go_tip_block": e["PARTITION_FINAL_GO_BLOCK_JSON"],
             "rust_tip_block": e["PARTITION_FINAL_RUST_BLOCK_JSON"],
@@ -2435,9 +2472,8 @@ wait_tip_to_match() {
   return 1
 }
 capture_go_reorg_metrics() {
-  local metrics_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/partition-go-metrics.prom"
-  rpc_json GET "${GO_RPC_ADDR}" /metrics >"${metrics_file}" || { PARTITION_REASON=partition_go_metrics_rpc_failed; return 1; }
-  python3 - "${metrics_file}" <<'PY'
+  rpc_json GET "${GO_RPC_ADDR}" /metrics >"${PARTITION_GO_METRICS_PROM}" || { PARTITION_REASON=partition_go_metrics_rpc_failed; return 1; }
+  python3 - "${PARTITION_GO_METRICS_PROM}" <<'PY'
 import re, sys
 vals = {}
 for raw in open(sys.argv[1], encoding="utf-8"):
@@ -2484,6 +2520,8 @@ run_partition_heal_reorg_scenario() {
   capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${PARTITION_RUST_WIN_HEIGHT}" "${PARTITION_FINAL_GO_BLOCK_JSON}" || { PARTITION_REASON=partition_final_go_block_capture_failed; return 1; }
   capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=${PARTITION_RUST_WIN_HEIGHT}" "${PARTITION_FINAL_RUST_BLOCK_JSON}" || { PARTITION_REASON=partition_final_rust_block_capture_failed; return 1; }
   capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${PARTITION_RUST_FORK_HEIGHT}" "${PARTITION_GO_REORG_PARENT_BLOCK_JSON}" || { PARTITION_REASON=partition_go_reorg_parent_capture_failed; return 1; }
+  verify_process_identity node-go-partition-final go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go partition_go_final_process_identity || { PARTITION_REASON="${PROCESS_IDENTITY_REASON:-partition_go_final_process_identity_unverified}"; return 1; }
+  verify_process_identity node-rust-partition-final rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust partition_rust_final_process_identity || { PARTITION_REASON="${PROCESS_IDENTITY_REASON:-partition_rust_final_process_identity_unverified}"; return 1; }
   parsed="$(capture_go_reorg_metrics)" || return 1
   IFS=$'\t' read -r PARTITION_REORG_TOTAL PARTITION_REORG_DEPTH <<<"${parsed}" || { PARTITION_REASON=partition_go_metrics_parse_failed; return 1; }
   PARTITION_FINAL_GO_HEIGHT="${PARTITION_RUST_WIN_HEIGHT}"; PARTITION_FINAL_GO_HASH="${PARTITION_RUST_WIN_HASH}"

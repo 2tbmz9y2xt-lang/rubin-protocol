@@ -15,7 +15,7 @@ PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path"
 PATH_FIELD_DOTTED_NAMES = {
     "observations.pre_partition.common_go_block", "observations.pre_partition.common_go_mine", "observations.pre_partition.common_rust_block", "observations.pre_partition.common_rust_tip", "observations.pre_partition.go_peer_snapshot", "observations.pre_partition.rust_peer_snapshot",
     "observations.partition.go_peer_snapshot", "observations.partition.rust_peer_snapshot", "observations.fork.go_block", "observations.fork.go_mine", "observations.fork.go_peer_snapshot", "observations.fork.go_tip", "observations.fork.rust_block_1", "observations.fork.rust_block_2", "observations.fork.rust_mine_1", "observations.fork.rust_mine_2", "observations.fork.rust_peer_snapshot", "observations.fork.rust_tip",
-    "observations.heal.go_peer_snapshot", "observations.heal.rust_peer_snapshot", "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
+    "observations.heal.go_peer_snapshot", "observations.heal.rust_peer_snapshot", "observations.reorg.go_metrics", "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
 }
 TX_OBJECT_KEYS = {
     "go_submit": {"get_tx_path", "rpc_endpoint", "tx_hex", "tx_status_path", "txid"},
@@ -48,7 +48,7 @@ PARTITION_SOURCE_FIELDS = [
     "observations.partition.go_peer_snapshot", "observations.partition.rust_peer_snapshot",
     "observations.fork.go_block", "observations.fork.go_mine", "observations.fork.go_peer_snapshot", "observations.fork.go_tip", "observations.fork.rust_block_1", "observations.fork.rust_block_2", "observations.fork.rust_mine_1", "observations.fork.rust_mine_2", "observations.fork.rust_peer_snapshot", "observations.fork.rust_tip",
     "observations.heal.go_peer_snapshot", "observations.heal.rust_peer_snapshot",
-    "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
+    "observations.reorg.go_metrics", "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
 ]
 SECTIONS = {
     "mesh": ("mesh_report", "mixed_client_mesh", ["nodes", "peer_connectivity", "final_verification", "legacy_schema_compatibility.marker_path", "raw_samples.propagation", "raw_samples.convergence"]),
@@ -688,6 +688,9 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     expected_proof_keys = {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}
     if set(proof) != expected_proof_keys:
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
+    proof_metrics = proof.get("go_reorg_metrics")
+    if not isinstance(proof_metrics, dict) or set(proof_metrics) != set(METRICS) or any(not jint(proof_metrics.get(metric), 1) for metric in METRICS):
+        return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     final = data.get("final_verification")
     if not isinstance(final, dict) or set(final) != RESTART_FINAL_KEYS or final.get("producer_side") is not True or final.get("process_identity_rechecked") is not True or final.get("peer_snapshots_rechecked") is not True or final.get("rust_outbound_link_rechecked") is not False or final.get("rust_outbound_local_addr") is not None or final.get("rust_outbound_remote_addr") is not None or final.get("rust_outbound_pid") is not None:
         return "partition_reorg_source_binding_contradiction:final_verification_invalid"
@@ -697,6 +700,11 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     paths, err = partition_obs_paths(data, root)
     if err or paths is None:
         return err or "partition_reorg_source_binding_contradiction:sidecar_invalid"
+    source_metrics, metrics_err = parse_metrics(paths["reorg.go_metrics"])
+    if metrics_err or source_metrics is None:
+        return f"partition_reorg_source_binding_contradiction:{metrics_err or 'metrics_invalid'}"
+    if source_metrics != proof_metrics:
+        return "partition_reorg_source_binding_contradiction:reorg_metrics_mismatch"
     go_fork, rust_win, final_go, final_rust = proof["go_partition_tip"], proof["rust_winning_tip"], proof["final_go_tip"], proof["final_rust_tip"]
     go_rpc, rust_rpc = by_impl["go"]["rpc_endpoint"], by_impl["rust"]["rpc_endpoint"]
     peer_checks = (
