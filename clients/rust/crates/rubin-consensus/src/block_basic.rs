@@ -1,4 +1,4 @@
-use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
+use crate::block::{block_hash, BlockHeader, BLOCK_HEADER_BYTES};
 use crate::constants::{
     COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BATCHES_PER_BLOCK,
     MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
@@ -12,13 +12,15 @@ use std::collections::HashMap;
 
 mod coinbase;
 mod header;
-mod orchestration;
 mod parser;
 mod txs;
 
-pub(crate) use self::orchestration::validate_parsed_block_basic_with_context_at_height;
 use self::parser::parse_block_bytes_impl;
-use self::txs::BlockTxStats;
+use self::{
+    coinbase::validate_coinbase_witness_commitment,
+    header::{validate_header_commitments, validate_timestamp_rules},
+    txs::{accumulate_block_resource_stats, validate_block_tx_semantics, BlockTxStats},
+};
 
 pub(crate) use self::coinbase::{validate_coinbase_apply_outputs, validate_coinbase_value_bound};
 pub(crate) use self::header::median_time_past;
@@ -102,6 +104,39 @@ pub fn validate_block_basic_with_context_at_height(
         block_height,
         prev_timestamps,
     )
+}
+
+/// G.9 / Go parity (`clients/go/consensus/block_basic.go`,
+/// `validateParsedBlockBasicWithContextAtHeight`): validation logic against an
+/// already-parsed block. Callers that need both the parsed block and the
+/// summary parse once via `parse_block_bytes` and then call this helper,
+/// instead of re-parsing in both `validate_*` and `connect_*`.
+pub(crate) fn validate_parsed_block_basic_with_context_at_height(
+    pb: &ParsedBlock,
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&[u64]>,
+) -> Result<BlockBasicSummary, TxError> {
+    validate_header_commitments(pb, expected_prev_hash, expected_target)?;
+    validate_coinbase_witness_commitment(pb)?;
+    validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
+
+    let stats = accumulate_block_resource_stats(pb)?;
+    validate_block_resource_limits(stats)?;
+
+    validate_da_set_integrity(&pb.txs)?;
+    validate_block_tx_semantics(pb, block_height)?;
+
+    let h = block_hash(&pb.header_bytes)
+        .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "failed to hash block header"))?;
+
+    Ok(BlockBasicSummary {
+        tx_count: pb.tx_count,
+        sum_weight: stats.sum_weight,
+        sum_da: stats.sum_da,
+        block_hash: h,
+    })
 }
 
 pub fn validate_block_basic_with_context_and_fees_at_height(
