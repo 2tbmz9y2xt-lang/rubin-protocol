@@ -2,21 +2,37 @@ use super::*;
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_VAULT};
 use crate::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
 use crate::subsidy::block_subsidy;
+use crate::{TxInput, TxOutput};
 
 pub(super) fn is_coinbase_tx(tx: &Tx) -> bool {
-    if tx.tx_kind != 0x00
-        || tx.tx_nonce != 0
-        || tx.inputs.len() != 1
-        || !tx.witness.is_empty()
-        || !tx.da_payload.is_empty()
-    {
+    if !has_coinbase_tx_shape(tx) {
         return false;
     }
     let input = &tx.inputs[0];
-    input.prev_txid == [0u8; 32]
-        && input.prev_vout == u32::MAX
-        && input.script_sig.is_empty()
-        && input.sequence == u32::MAX
+    has_coinbase_input_shape(input)
+}
+
+fn has_coinbase_tx_shape(tx: &Tx) -> bool {
+    [
+        tx.tx_kind == 0x00,
+        tx.tx_nonce == 0,
+        tx.inputs.len() == 1,
+        tx.witness.is_empty(),
+        tx.da_payload.is_empty(),
+    ]
+    .into_iter()
+    .all(core::convert::identity)
+}
+
+fn has_coinbase_input_shape(input: &TxInput) -> bool {
+    [
+        input.prev_txid == [0u8; 32],
+        input.prev_vout == u32::MAX,
+        input.script_sig.is_empty(),
+        input.sequence == u32::MAX,
+    ]
+    .into_iter()
+    .all(core::convert::identity)
 }
 
 pub(super) fn validate_coinbase_structure(
@@ -68,18 +84,8 @@ pub(crate) fn validate_coinbase_value_bound(
         ));
     }
     let coinbase = &pb.txs[0];
-
-    let mut sum_coinbase: u128 = 0;
-    for out in &coinbase.outputs {
-        sum_coinbase = sum_coinbase
-            .checked_add(out.value as u128)
-            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))?;
-    }
-
-    let subsidy = block_subsidy(block_height, already_generated);
-    let limit = (subsidy as u128)
-        .checked_add(sum_fees as u128)
-        .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))?;
+    let sum_coinbase = sum_coinbase_outputs(coinbase)?;
+    let limit = coinbase_value_limit(block_height, already_generated, sum_fees)?;
     if sum_coinbase > limit {
         return Err(TxError::new(
             ErrorCode::BlockErrSubsidyExceeded,
@@ -87,6 +93,24 @@ pub(crate) fn validate_coinbase_value_bound(
         ));
     }
     Ok(())
+}
+
+fn sum_coinbase_outputs(coinbase: &Tx) -> Result<u128, TxError> {
+    coinbase.outputs.iter().try_fold(0u128, |sum, out| {
+        sum.checked_add(out.value as u128)
+            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))
+    })
+}
+
+fn coinbase_value_limit(
+    block_height: u64,
+    already_generated: u128,
+    sum_fees: u64,
+) -> Result<u128, TxError> {
+    let subsidy = block_subsidy(block_height, already_generated);
+    (subsidy as u128)
+        .checked_add(sum_fees as u128)
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "u128 overflow"))
 }
 
 pub(crate) fn validate_coinbase_apply_outputs(coinbase: &Tx) -> Result<(), TxError> {
@@ -102,7 +126,11 @@ pub(crate) fn validate_coinbase_apply_outputs(coinbase: &Tx) -> Result<(), TxErr
 }
 
 pub(super) fn validate_coinbase_witness_commitment(pb: &ParsedBlock) -> Result<(), TxError> {
-    if pb.txs.is_empty() || pb.wtxids.is_empty() {
+    let coinbase = pb
+        .txs
+        .first()
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrCoinbaseInvalid, "missing coinbase"))?;
+    if pb.wtxids.is_empty() {
         return Err(TxError::new(
             ErrorCode::BlockErrCoinbaseInvalid,
             "missing coinbase",
@@ -117,15 +145,12 @@ pub(super) fn validate_coinbase_witness_commitment(pb: &ParsedBlock) -> Result<(
     })?;
     let expected = witness_commitment_hash(wroot);
 
-    let mut matches = 0u64;
-    for out in &pb.txs[0].outputs {
-        if out.covenant_type != COV_TYPE_ANCHOR || out.covenant_data.len() != 32 {
-            continue;
-        }
-        if out.covenant_data.as_slice() == &expected[..] {
-            matches += 1;
-        }
-    }
+    let matches = coinbase
+        .outputs
+        .iter()
+        .filter(|out| is_witness_commitment_match(out, &expected))
+        .take(2)
+        .count();
 
     if matches != 1 {
         return Err(TxError::new(
@@ -134,4 +159,10 @@ pub(super) fn validate_coinbase_witness_commitment(pb: &ParsedBlock) -> Result<(
         ));
     }
     Ok(())
+}
+
+fn is_witness_commitment_match(out: &TxOutput, expected: &[u8; 32]) -> bool {
+    out.covenant_type == COV_TYPE_ANCHOR
+        && out.covenant_data.len() == 32
+        && out.covenant_data.as_slice() == &expected[..]
 }

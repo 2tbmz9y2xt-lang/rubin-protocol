@@ -36,26 +36,8 @@ pub(crate) fn siphash24(msg: &[u8], k0: u64, k1: u64) -> u64 {
 
     let rem = &msg[i..];
     let mut b = (msg.len() as u64) << 56;
-    if !rem.is_empty() {
-        b |= rem[0] as u64;
-    }
-    if rem.len() > 1 {
-        b |= (rem[1] as u64) << 8;
-    }
-    if rem.len() > 2 {
-        b |= (rem[2] as u64) << 16;
-    }
-    if rem.len() > 3 {
-        b |= (rem[3] as u64) << 24;
-    }
-    if rem.len() > 4 {
-        b |= (rem[4] as u64) << 32;
-    }
-    if rem.len() > 5 {
-        b |= (rem[5] as u64) << 40;
-    }
-    if rem.len() > 6 {
-        b |= (rem[6] as u64) << 48;
+    for (offset, byte) in rem.iter().enumerate() {
+        b |= (*byte as u64) << (offset * 8);
     }
 
     v3 ^= b;
