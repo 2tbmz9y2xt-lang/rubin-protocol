@@ -1,5 +1,4 @@
-use crate::block::{block_hash, parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
-use crate::compactsize::read_compact_size;
+use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
 use crate::constants::{
     COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BATCHES_PER_BLOCK,
     MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
@@ -8,17 +7,18 @@ use crate::constants::{
 };
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::tx::{da_core_fields_bytes, parse_tx, Tx};
-use crate::wire_read::Reader;
+use crate::tx::{da_core_fields_bytes, Tx};
 use std::collections::HashMap;
 
 mod coinbase;
 mod header;
+mod orchestration;
+mod parser;
 mod txs;
 
-use self::coinbase::validate_coinbase_witness_commitment;
-use self::header::{validate_header_commitments, validate_timestamp_rules};
-use self::txs::{accumulate_block_resource_stats, validate_block_tx_semantics, BlockTxStats};
+pub(crate) use self::orchestration::validate_parsed_block_basic_with_context_at_height;
+use self::parser::parse_block_bytes_impl;
+use self::txs::BlockTxStats;
 
 pub(crate) use self::coinbase::{validate_coinbase_apply_outputs, validate_coinbase_value_bound};
 pub(crate) use self::header::median_time_past;
@@ -61,66 +61,7 @@ thread_local! {
 pub fn parse_block_bytes(block_bytes: &[u8]) -> Result<ParsedBlock, TxError> {
     #[cfg(test)]
     PARSE_BLOCK_BYTES_CALL_COUNT.with(|c| c.set(c.get() + 1));
-    if block_bytes.len() < BLOCK_HEADER_BYTES + 1 {
-        return Err(TxError::new(ErrorCode::BlockErrParse, "block too short"));
-    }
-
-    let mut header_bytes = [0u8; BLOCK_HEADER_BYTES];
-    header_bytes.copy_from_slice(&block_bytes[..BLOCK_HEADER_BYTES]);
-    let header = parse_block_header_bytes(&header_bytes)
-        .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "invalid block header"))?;
-
-    let mut r = Reader::new(&block_bytes[BLOCK_HEADER_BYTES..]);
-    let (tx_count, _) = read_compact_size(&mut r)
-        .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "invalid tx_count"))?;
-    if tx_count == 0 {
-        return Err(TxError::new(
-            ErrorCode::BlockErrCoinbaseInvalid,
-            "empty block tx list",
-        ));
-    }
-
-    let mut txs: Vec<Tx> = Vec::new();
-    let mut txids: Vec<[u8; 32]> = Vec::new();
-    let mut wtxids: Vec<[u8; 32]> = Vec::new();
-
-    for _ in 0..tx_count {
-        let rem = &block_bytes[BLOCK_HEADER_BYTES + r.offset()..];
-        if rem.is_empty() {
-            return Err(TxError::new(
-                ErrorCode::BlockErrParse,
-                "unexpected EOF in tx list",
-            ));
-        }
-        let (tx, txid, wtxid, consumed) = parse_tx(rem)?;
-        if consumed == 0 {
-            return Err(TxError::new(
-                ErrorCode::BlockErrParse,
-                "zero-length tx parse",
-            ));
-        }
-        txs.push(tx);
-        txids.push(txid);
-        wtxids.push(wtxid);
-        r.read_bytes(consumed)
-            .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "unexpected EOF in tx list"))?;
-    }
-
-    if BLOCK_HEADER_BYTES + r.offset() != block_bytes.len() {
-        return Err(TxError::new(
-            ErrorCode::BlockErrParse,
-            "trailing bytes after tx list",
-        ));
-    }
-
-    Ok(ParsedBlock {
-        header,
-        header_bytes,
-        tx_count,
-        txs,
-        txids,
-        wtxids,
-    })
+    parse_block_bytes_impl(block_bytes)
 }
 
 pub fn validate_block_basic(
@@ -161,39 +102,6 @@ pub fn validate_block_basic_with_context_at_height(
         block_height,
         prev_timestamps,
     )
-}
-
-/// G.9 / Go parity (`clients/go/consensus/block_basic.go`,
-/// `validateParsedBlockBasicWithContextAtHeight`): validation logic against an
-/// already-parsed block. Callers that need both the parsed block and the
-/// summary parse once via `parse_block_bytes` and then call this helper,
-/// instead of re-parsing in both `validate_*` and `connect_*`.
-pub(crate) fn validate_parsed_block_basic_with_context_at_height(
-    pb: &ParsedBlock,
-    expected_prev_hash: Option<[u8; 32]>,
-    expected_target: Option<[u8; 32]>,
-    block_height: u64,
-    prev_timestamps: Option<&[u64]>,
-) -> Result<BlockBasicSummary, TxError> {
-    validate_header_commitments(pb, expected_prev_hash, expected_target)?;
-    validate_coinbase_witness_commitment(pb)?;
-    validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
-
-    let stats = accumulate_block_resource_stats(pb)?;
-    validate_block_resource_limits(stats)?;
-
-    validate_da_set_integrity(&pb.txs)?;
-    validate_block_tx_semantics(pb, block_height)?;
-
-    let h = block_hash(&pb.header_bytes)
-        .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "failed to hash block header"))?;
-
-    Ok(BlockBasicSummary {
-        tx_count: pb.tx_count,
-        sum_weight: stats.sum_weight,
-        sum_da: stats.sum_da,
-        block_hash: h,
-    })
 }
 
 pub fn validate_block_basic_with_context_and_fees_at_height(
