@@ -25,6 +25,26 @@ type TxValidationResult struct {
 	Fee uint64
 }
 
+type txValidationWorkerEnv struct {
+	chainID         [32]byte
+	blockHeight     uint64
+	blockMTP        uint64
+	sighashCache    *SighashV1PrehashCache
+	coreExtProfiles CoreExtProfileProvider
+	sigQueue        *SigCheckQueue
+	rotation        RotationProvider
+	registry        *SuiteRegistry
+	txContext       *TxContextBundle
+}
+
+type txInputSpendCheck struct {
+	entry      UtxoEntry
+	assigned   []WitnessItem
+	tx         *Tx
+	inputIndex uint32
+	inputValue uint64
+}
+
 // ValidateTxLocal validates a single non-coinbase transaction using read-only
 // precomputed context. It creates a per-worker SigCheckQueue to batch ML-DSA-87
 // verifications, calls the existing Q-variant spend validators for each input,
@@ -44,170 +64,203 @@ func ValidateTxLocal(
 	coreExtProfiles CoreExtProfileProvider,
 	sigCache *SigCache,
 ) TxValidationResult {
-	result := TxValidationResult{
-		TxIndex: tvc.TxIndex,
-		Fee:     tvc.Fee,
-	}
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
-	}
-
+	result := TxValidationResult{TxIndex: tvc.TxIndex, Fee: tvc.Fee}
 	tx := tvc.Tx
 	if tx == nil {
 		result.Err = txerr(TX_ERR_PARSE, "nil tx in TxValidationContext")
 		return result
 	}
+	env := newTxValidationWorkerEnv(tvc, chainID, blockHeight, blockMTP, coreExtProfiles, sigCache)
 
-	// Create per-worker sig queue (rotation-aware so Flush uses verifySigWithRegistry).
-	reg := DefaultSuiteRegistry()
-	rot := DefaultRotationProvider{}
-	sigQueue := NewSigCheckQueue(1).WithRegistry(reg)
-	if sigCache != nil {
-		sigQueue.WithCache(sigCache)
-	}
-
-	var txContext *TxContextBundle
-	txContextExtIDs, err := collectTxContextExtIDs(tvc.ResolvedInputs, blockHeight, coreExtProfiles)
+	txContext, err := buildWorkerTxContext(tx, tvc.ResolvedInputs, env)
 	if err != nil {
 		result.Err = err
 		return result
 	}
-	if len(txContextExtIDs) != 0 {
-		outputExtIDCache, err := BuildTxContextOutputExtIDCache(tx)
-		if err != nil {
-			result.Err = err
-			return result
-		}
-		txContext, err = BuildTxContext(tx, tvc.ResolvedInputs, outputExtIDCache, blockHeight, coreExtProfiles)
-		if err != nil {
-			result.Err = err
-			return result
-		}
-	}
+	env.txContext = txContext
 
-	witnessCursor := tvc.WitnessStart
-	for inputIndex, entry := range tvc.ResolvedInputs {
-		slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
-		if err != nil {
-			result.Err = err
-			return result
-		}
-		if witnessCursor+slots > tvc.WitnessEnd {
-			result.Err = txerr(TX_ERR_PARSE, "witness underflow in worker")
-			return result
-		}
-		assigned := tx.Witness[witnessCursor : witnessCursor+slots]
-
-		if err := validateInputSpendQ(
-			entry, assigned, tx, uint32(inputIndex), entry.Value,
-			chainID, blockHeight, blockMTP, tvc.SighashCache,
-			coreExtProfiles, sigQueue, rot, reg, txContext,
-		); err != nil {
-			result.Err = err
-			return result
-		}
-
-		witnessCursor += slots
-	}
-
-	if witnessCursor != len(tx.Witness) {
-		result.Err = txerr(TX_ERR_PARSE, "witness_count mismatch")
-		return result
-	}
-
-	result.SigCount = sigQueue.Len()
-
-	// Flush deferred signature verifications.
-	if err := sigQueue.Flush(); err != nil {
+	if err := validateTxLocalInputs(tvc, tx, env); err != nil {
 		result.Err = err
 		return result
 	}
-
-	result.Valid = true
+	finishTxValidationResult(&result, env.sigQueue)
 	return result
+}
+
+func newTxValidationWorkerEnv(
+	tvc TxValidationContext,
+	chainID [32]byte,
+	blockHeight uint64,
+	blockMTP uint64,
+	coreExtProfiles CoreExtProfileProvider,
+	sigCache *SigCache,
+) txValidationWorkerEnv {
+	if coreExtProfiles == nil {
+		coreExtProfiles = EmptyCoreExtProfileProvider()
+	}
+	registry := DefaultSuiteRegistry()
+	sigQueue := NewSigCheckQueue(1).WithRegistry(registry)
+	if sigCache != nil {
+		sigQueue.WithCache(sigCache)
+	}
+	return txValidationWorkerEnv{
+		chainID:         chainID,
+		blockHeight:     blockHeight,
+		blockMTP:        blockMTP,
+		sighashCache:    tvc.SighashCache,
+		coreExtProfiles: coreExtProfiles,
+		sigQueue:        sigQueue,
+		rotation:        DefaultRotationProvider{},
+		registry:        registry,
+	}
+}
+
+func buildWorkerTxContext(tx *Tx, resolvedInputs []UtxoEntry, env txValidationWorkerEnv) (*TxContextBundle, error) {
+	txContextExtIDs, err := collectTxContextExtIDs(resolvedInputs, env.blockHeight, env.coreExtProfiles)
+	if err != nil {
+		return nil, err
+	}
+	if len(txContextExtIDs) == 0 {
+		return nil, nil
+	}
+	outputExtIDCache, err := BuildTxContextOutputExtIDCache(tx)
+	if err != nil {
+		return nil, err
+	}
+	return BuildTxContext(tx, resolvedInputs, outputExtIDCache, env.blockHeight, env.coreExtProfiles)
+}
+
+func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWorkerEnv) error {
+	witnessCursor := tvc.WitnessStart
+	for inputIndex, entry := range tvc.ResolvedInputs {
+		assigned, slots, err := assignedWorkerWitness(tx, tvc, entry, witnessCursor)
+		if err != nil {
+			return err
+		}
+		check := txInputSpendCheck{
+			entry:      entry,
+			assigned:   assigned,
+			tx:         tx,
+			inputIndex: uint32(inputIndex),
+			inputValue: entry.Value,
+		}
+		if err := validateInputSpendQ(check, env); err != nil {
+			return err
+		}
+		witnessCursor += slots
+	}
+	if witnessCursor != len(tx.Witness) {
+		return txerr(TX_ERR_PARSE, "witness_count mismatch")
+	}
+	return nil
+}
+
+func assignedWorkerWitness(tx *Tx, tvc TxValidationContext, entry UtxoEntry, witnessCursor int) ([]WitnessItem, int, error) {
+	slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
+	if err != nil {
+		return nil, 0, err
+	}
+	witnessEnd := min(tvc.WitnessEnd, len(tx.Witness))
+	if witnessCursor+slots > witnessEnd {
+		return nil, 0, txerr(TX_ERR_PARSE, "witness underflow in worker")
+	}
+	return tx.Witness[witnessCursor : witnessCursor+slots], slots, nil
+}
+
+func finishTxValidationResult(result *TxValidationResult, sigQueue *SigCheckQueue) {
+	result.SigCount = sigQueue.Len()
+	if err := sigQueue.Flush(); err != nil {
+		result.Err = err
+		return
+	}
+	result.Valid = true
 }
 
 // validateInputSpendQ dispatches a single input to the appropriate Q-variant
 // spend validator based on covenant type. This mirrors the switch in
 // applyNonCoinbaseTxBasicWorkQ but without UTXO mutations.
-func validateInputSpendQ(
-	entry UtxoEntry,
-	assigned []WitnessItem,
-	tx *Tx,
-	inputIndex uint32,
-	inputValue uint64,
-	chainID [32]byte,
-	blockHeight uint64,
-	blockMTP uint64,
-	sighashCache *SighashV1PrehashCache,
-	coreExtProfiles CoreExtProfileProvider,
-	sigQueue *SigCheckQueue,
-	rotation RotationProvider,
-	registry *SuiteRegistry,
-	txContext *TxContextBundle,
-) error {
-	switch entry.CovenantType {
+func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	switch check.entry.CovenantType {
 	case COV_TYPE_P2PK:
-		if len(assigned) != 1 {
-			return txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
-		}
-		return validateP2PKSpendQ(entry, assigned[0], tx, inputIndex, inputValue, chainID, blockHeight, sighashCache, sigQueue, rotation, registry)
-
+		return validateP2PKInputSpendQ(check, env)
 	case COV_TYPE_MULTISIG:
-		m, err := ParseMultisigCovenantData(entry.CovenantData)
-		if err != nil {
-			return err
-		}
-		return validateThresholdSigSpendQ(
-			m.Keys, m.Threshold, assigned, tx, inputIndex, inputValue,
-			chainID, blockHeight, sighashCache, sigQueue, "CORE_MULTISIG",
-			rotation, registry,
-		)
-
+		return validateMultisigInputSpendQ(check, env)
 	case COV_TYPE_VAULT:
-		// Vault: only verify threshold signature in the worker.
-		// Full vault policy (whitelist, owner lock, output checks)
-		// is enforced in the sequential commit stage.
-		v, err := ParseVaultCovenantDataForSpend(entry.CovenantData)
-		if err != nil {
-			return err
-		}
-		return validateThresholdSigSpendQ(
-			v.Keys, v.Threshold, assigned, tx, inputIndex, inputValue,
-			chainID, blockHeight, sighashCache, sigQueue, "CORE_VAULT",
-			rotation, registry,
-		)
-
+		return validateVaultInputSpendQ(check, env)
 	case COV_TYPE_HTLC:
-		if len(assigned) != 2 {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
-		}
-		return validateHTLCSpendQ(
-			entry, assigned[0], assigned[1], tx, inputIndex, inputValue,
-			chainID, blockHeight, blockMTP, sighashCache, sigQueue,
-			rotation, registry,
-		)
-
+		return validateHTLCInputSpendQ(check, env)
 	case COV_TYPE_CORE_EXT:
-		if len(assigned) != CORE_EXT_WITNESS_SLOTS {
-			return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
-		}
-		return validateCoreExtSpendQ(
-			entry, assigned[0], tx, inputIndex, inputValue,
-			chainID, blockHeight, sighashCache, coreExtProfiles, sigQueue,
-			rotation, registry, txContext,
-		)
-
+		return validateCoreExtInputSpendQ(check, env)
 	case COV_TYPE_CORE_STEALTH:
-		if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
-			return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
-		}
-		return validateCoreStealthSpendQ(entry, assigned[0], tx, inputIndex, inputValue, chainID, blockHeight, sighashCache, sigQueue, rotation, registry)
-
+		return validateCoreStealthInputSpendQ(check, env)
 	default:
 		// Other covenant types have no spend-time checks in the genesis set.
 		return nil
 	}
+}
+
+func validateP2PKInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	if len(check.assigned) != 1 {
+		return txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
+	}
+	return validateP2PKSpendQ(
+		check.entry, check.assigned[0], check.tx, check.inputIndex, check.inputValue,
+		env.chainID, env.blockHeight, env.sighashCache, env.sigQueue, env.rotation, env.registry,
+	)
+}
+
+func validateMultisigInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	m, err := ParseMultisigCovenantData(check.entry.CovenantData)
+	if err != nil {
+		return err
+	}
+	return validateThresholdSigSpendQ(
+		m.Keys, m.Threshold, check.assigned, check.tx, check.inputIndex,
+		check.inputValue, env.chainID, env.blockHeight, env.sighashCache,
+		env.sigQueue, "CORE_MULTISIG", env.rotation, env.registry,
+	)
+}
+
+func validateVaultInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	// Vault: only verify threshold signature in the worker. Full vault policy
+	// (whitelist, owner lock, output checks) is enforced in the commit stage.
+	v, err := ParseVaultCovenantDataForSpend(check.entry.CovenantData)
+	if err != nil {
+		return err
+	}
+	return validateThresholdSigSpendQ(
+		v.Keys, v.Threshold, check.assigned, check.tx, check.inputIndex,
+		check.inputValue, env.chainID, env.blockHeight, env.sighashCache,
+		env.sigQueue, "CORE_VAULT", env.rotation, env.registry,
+	)
+}
+
+func validateHTLCInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	if len(check.assigned) != 2 {
+		return txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
+	}
+	return validateHTLCSpendQ(
+		check.entry, check.assigned[0], check.assigned[1], check.tx,
+		check.inputIndex, check.inputValue, env.chainID, env.blockHeight,
+		env.blockMTP, env.sighashCache, env.sigQueue, env.rotation, env.registry,
+	)
+}
+
+func validateCoreExtInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	if len(check.assigned) != CORE_EXT_WITNESS_SLOTS {
+		return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
+	}
+	return validateCoreExtSpendQWithEnv(check, check.assigned[0], env)
+}
+
+func validateCoreStealthInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
+	if len(check.assigned) != CORE_STEALTH_WITNESS_SLOTS {
+		return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
+	}
+	return validateCoreStealthSpendQ(
+		check.entry, check.assigned[0], check.tx, check.inputIndex, check.inputValue,
+		env.chainID, env.blockHeight, env.sighashCache, env.sigQueue, env.rotation, env.registry,
+	)
 }
 
 // validateCoreExtSpendQ is the queue-aware CORE_EXT spend validator, extracted
@@ -220,53 +273,70 @@ func validateCoreExtSpendQ(
 	tx *Tx,
 	inputIndex uint32,
 	inputValue uint64,
-	chainID [32]byte,
-	blockHeight uint64,
-	sighashCache *SighashV1PrehashCache,
-	coreExtProfiles CoreExtProfileProvider,
-	sigQueue *SigCheckQueue,
-	rotation RotationProvider,
-	registry *SuiteRegistry,
-	txContext *TxContextBundle,
+	args ...any,
 ) error {
-	cd, err := ParseCoreExtCovenantData(entry.CovenantData)
+	if len(args) != 8 {
+		return txerr(TX_ERR_PARSE, "CORE_EXT validator argument count mismatch")
+	}
+	env, err := func() (env txValidationWorkerEnv, err error) {
+		defer func() {
+			if recover() != nil {
+				err = txerr(TX_ERR_PARSE, "CORE_EXT validator argument type mismatch")
+			}
+		}()
+		return txValidationWorkerEnv{
+			chainID:         args[0].([32]byte),
+			blockHeight:     args[1].(uint64),
+			sighashCache:    typedArgOrZero[*SighashV1PrehashCache](args[2]),
+			coreExtProfiles: typedArgOrZero[CoreExtProfileProvider](args[3]),
+			sigQueue:        typedArgOrZero[*SigCheckQueue](args[4]),
+			rotation:        typedArgOrZero[RotationProvider](args[5]),
+			registry:        typedArgOrZero[*SuiteRegistry](args[6]),
+			txContext:       typedArgOrZero[*TxContextBundle](args[7]),
+		}, nil
+	}()
 	if err != nil {
 		return err
 	}
+	check := txInputSpendCheck{
+		entry:      entry,
+		assigned:   []WitnessItem{w},
+		tx:         tx,
+		inputIndex: inputIndex,
+		inputValue: inputValue,
+	}
+	return validateCoreExtSpendQWithEnv(check, w, env)
+}
 
-	if coreExtProfiles == nil {
+func typedArgOrZero[T any](v any) T {
+	if v == nil {
+		var zero T
+		return zero
+	}
+	return v.(T)
+}
+
+func validateCoreExtSpendQWithEnv(check txInputSpendCheck, w WitnessItem, env txValidationWorkerEnv) error {
+	cd, err := ParseCoreExtCovenantData(check.entry.CovenantData)
+	if err != nil {
+		return err
+	}
+	if env.coreExtProfiles == nil {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
 	}
-
-	profile := CoreExtProfile{}
-	active := false
-	resolved, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
-	if err != nil {
+	profile, ok, err := env.coreExtProfiles.LookupCoreExtProfile(cd.ExtID, env.blockHeight)
+	switch {
+	case err != nil:
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-	}
-	if ok && resolved.Active {
-		active = true
-		profile = resolved
-	}
-
-	if !active {
+	case !ok || !profile.Active:
 		return nil
+	default:
+		return validateCoreExtWitnessAtHeight(
+			cd, profile, w, check.tx, check.inputIndex, check.inputValue,
+			env.chainID, env.blockHeight, env.sighashCache, env.rotation,
+			env.registry, env.txContext, env.sigQueue,
+		)
 	}
-	return validateCoreExtWitnessAtHeight(
-		cd,
-		profile,
-		w,
-		tx,
-		inputIndex,
-		inputValue,
-		chainID,
-		blockHeight,
-		sighashCache,
-		rotation,
-		registry,
-		txContext,
-		sigQueue,
-	)
 }
 
 // RunTxValidationWorkers validates multiple transactions in parallel using
@@ -292,38 +362,37 @@ func RunTxValidationWorkers(
 	})
 }
 
+type txValidationFailure struct {
+	txIndex int
+	err     error
+}
+
 // FirstTxError returns the first error by transaction index from validation
 // results, or nil if all transactions are valid.
 func FirstTxError(results []WorkerResult[TxValidationResult]) error {
-	var (
-		haveErr    bool
-		minTxIndex int
-		minErr     error
-	)
+	var best txValidationFailure
 	for _, r := range results {
 		if r.Err == nil {
 			continue
 		}
-		// Prefer the canonical tx index if available.
-		txIndex := r.Value.TxIndex
-		if txIndex <= 0 {
-			// Defensive fallback: if we somehow lost the tx index, preserve
-			// deterministic behavior by keeping the first such error seen.
-			if !haveErr {
-				haveErr = true
-				minTxIndex = txIndex
-				minErr = r.Err
-			}
+		candidate := txValidationFailure{txIndex: r.Value.TxIndex, err: r.Err}
+		if best.err == nil {
+			best = candidate
 			continue
 		}
-		if !haveErr || minTxIndex <= 0 || txIndex < minTxIndex {
-			haveErr = true
-			minTxIndex = txIndex
-			minErr = r.Err
+		if candidate.isBefore(best) {
+			best = candidate
 		}
 	}
-	if !haveErr {
-		return nil
+	return best.err
+}
+
+func (candidate txValidationFailure) isBefore(best txValidationFailure) bool {
+	if candidate.txIndex <= 0 {
+		return false
 	}
-	return minErr
+	if best.txIndex <= 0 {
+		return true
+	}
+	return candidate.txIndex < best.txIndex
 }

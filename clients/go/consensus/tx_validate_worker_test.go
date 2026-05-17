@@ -514,13 +514,47 @@ func TestFirstTxError_FallsBackWhenTxIndexMissingOrZero(t *testing.T) {
 // validateInputSpendQ branch coverage
 // ─────────────────────────────────────────────────────────────────────────────
 
+func validateTestInputSpendQ(entry UtxoEntry, assigned []WitnessItem, tx *Tx) error {
+	check := txInputSpendCheck{
+		entry:      entry,
+		assigned:   assigned,
+		tx:         tx,
+		inputIndex: 0,
+		inputValue: 100,
+	}
+	return validateInputSpendQ(check, txValidationWorkerEnv{blockHeight: 1})
+}
+
+func validateTestCoreExtSpendQ(
+	entry UtxoEntry,
+	w WitnessItem,
+	tx *Tx,
+	blockHeight uint64,
+	sighashCache *SighashV1PrehashCache,
+	profiles CoreExtProfileProvider,
+) error {
+	check := txInputSpendCheck{
+		entry:      entry,
+		assigned:   []WitnessItem{w},
+		tx:         tx,
+		inputIndex: 0,
+		inputValue: 100,
+	}
+	env := txValidationWorkerEnv{
+		blockHeight:     blockHeight,
+		sighashCache:    sighashCache,
+		coreExtProfiles: profiles,
+	}
+	return validateCoreExtSpendQWithEnv(check, w, env)
+}
+
 func TestValidateInputSpendQ_DefaultCovType(t *testing.T) {
 	// Unknown/unhandled covenant type should return nil (no spend checks).
 	entry := UtxoEntry{
 		CovenantType: 0xFFFF, // unknown type
 		CovenantData: []byte{0x00},
 	}
-	err := validateInputSpendQ(entry, nil, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
+	err := validateTestInputSpendQ(entry, nil, &Tx{})
 	if err != nil {
 		t.Fatalf("expected nil for unknown covenant type, got: %v", err)
 	}
@@ -533,7 +567,7 @@ func TestValidateCoreExtSpendQ_InactiveProfile(t *testing.T) {
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, EmptyCoreExtProfileProvider(), nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, &Tx{}, 1, nil, EmptyCoreExtProfileProvider())
 	if err != nil {
 		t.Fatalf("expected nil for inactive CORE_EXT, got: %v", err)
 	}
@@ -545,7 +579,7 @@ func TestValidateCoreExtSpendQ_MissingProviderRejected(t *testing.T) {
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, nil, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, &Tx{}, 1, nil, nil)
 	if err == nil || err.Error() != "TX_ERR_COVENANT_TYPE_INVALID: CORE_EXT profile provider missing" {
 		t.Fatalf("expected missing provider error, got %v", err)
 	}
@@ -1005,7 +1039,7 @@ func TestValidateInputSpendQ_P2PKWrongSlots(t *testing.T) {
 		CovenantType: COV_TYPE_P2PK,
 		CovenantData: p2pkCovenantDataForPubkey(make([]byte, ML_DSA_87_PUBKEY_BYTES)),
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
+	err := validateTestInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{})
 	if err == nil {
 		t.Fatalf("expected error for wrong slot count")
 	}
@@ -1020,7 +1054,7 @@ func TestValidateInputSpendQ_HTLCWrongSlots(t *testing.T) {
 		CovenantData: covData,
 	}
 	// Only 1 witness item instead of 2.
-	err := validateInputSpendQ(entry, []WitnessItem{{}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
+	err := validateTestInputSpendQ(entry, []WitnessItem{{}}, &Tx{})
 	if err == nil {
 		t.Fatalf("expected error for HTLC wrong slot count")
 	}
@@ -1031,7 +1065,7 @@ func TestValidateInputSpendQ_CoreExtWrongSlots(t *testing.T) {
 		CovenantType: COV_TYPE_CORE_EXT,
 		CovenantData: makeCoreExtCovenantData(0x01),
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
+	err := validateTestInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{})
 	if err == nil {
 		t.Fatalf("expected error for CORE_EXT wrong slot count")
 	}
@@ -1043,7 +1077,7 @@ func TestValidateInputSpendQ_StealthWrongSlots(t *testing.T) {
 		CovenantType: COV_TYPE_CORE_STEALTH,
 		CovenantData: covData,
 	}
-	err := validateInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{}, 0, 100, [32]byte{}, 1, 0, nil, nil, nil, nil, nil, nil)
+	err := validateTestInputSpendQ(entry, []WitnessItem{{}, {}}, &Tx{})
 	if err == nil {
 		t.Fatalf("expected error for CORE_STEALTH wrong slot count")
 	}
@@ -1062,7 +1096,7 @@ func TestValidateCoreExtSpendQ_SentinelForbidden(t *testing.T) {
 		found: true,
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, &Tx{}, 1, nil, profiles)
 	if err == nil {
 		t.Fatalf("expected error for sentinel under active profile")
 	}
@@ -1081,7 +1115,7 @@ func TestValidateCoreExtSpendQ_DisallowedSuite(t *testing.T) {
 		found: true,
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, &Tx{}, 1, nil, profiles)
 	if err == nil {
 		t.Fatalf("expected error for disallowed suite")
 	}
@@ -1125,7 +1159,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifier(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, tx, 1, sighashCache, profiles)
 	if err != nil {
 		t.Fatalf("external verifier: %v", err)
 	}
@@ -1162,7 +1196,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierRejects(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, tx, 1, sighashCache, profiles)
 	if err == nil {
 		t.Fatalf("expected error for rejected external verifier")
 	}
@@ -1196,7 +1230,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierError(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, tx, 1, sighashCache, profiles)
 	if err == nil {
 		t.Fatalf("expected error for ext verifier error")
 	}
@@ -1219,7 +1253,7 @@ func TestValidateCoreExtSpendQ_MLDSA87_NonCanonical(t *testing.T) {
 		Pubkey:    make([]byte, 10), // wrong size
 		Signature: make([]byte, 10), // wrong size
 	}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, &Tx{}, 1, nil, profiles)
 	if err == nil {
 		t.Fatalf("expected error for non-canonical ML-DSA lengths")
 	}
@@ -1251,7 +1285,7 @@ func TestValidateCoreExtSpendQ_NilQueue_MLDSA(t *testing.T) {
 	sighashCache, _ := NewSighashV1PrehashCache(tx)
 
 	// sigQueue=nil → inline verifySig
-	err := validateCoreExtSpendQ(entry, tx.Witness[0], tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, tx.Witness[0], tx, 1, sighashCache, profiles)
 	if err != nil {
 		t.Fatalf("nil queue MLDSA: %v", err)
 	}
@@ -1266,7 +1300,7 @@ func TestValidateCoreExtSpendQ_ProfileLookupError(t *testing.T) {
 		err: txerr(TX_ERR_COVENANT_TYPE_INVALID, "lookup fail"),
 	}
 	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
-	err := validateCoreExtSpendQ(entry, w, &Tx{}, 0, 100, [32]byte{}, 1, nil, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, &Tx{}, 1, nil, profiles)
 	if err == nil {
 		t.Fatalf("expected error for profile lookup failure")
 	}
@@ -1301,7 +1335,7 @@ func TestValidateCoreExtSpendQ_ExternalVerifierNil(t *testing.T) {
 		Pubkey:    make([]byte, 10),
 		Signature: append(make([]byte, 100), SIGHASH_ALL),
 	}
-	err := validateCoreExtSpendQ(entry, w, tx, 0, 100, [32]byte{}, 1, sighashCache, profiles, nil, nil, nil, nil)
+	err := validateTestCoreExtSpendQ(entry, w, tx, 1, sighashCache, profiles)
 	if err == nil {
 		t.Fatalf("expected error for nil external verifier")
 	}
