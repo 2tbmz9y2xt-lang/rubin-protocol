@@ -35,21 +35,7 @@ pub fn retarget_v1_clamped(
     let mut prev = first;
 
     for raw in &window_timestamps[1..] {
-        let lo = prev.checked_add(1).ok_or_else(|| {
-            TxError::new(ErrorCode::TxErrParse, "retarget: timestamp clamp overflow")
-        })?;
-        let hi = prev
-            .checked_add(MAX_TIMESTAMP_STEP_PER_BLOCK)
-            .ok_or_else(|| {
-                TxError::new(ErrorCode::TxErrParse, "retarget: timestamp clamp overflow")
-            })?;
-        let mut v = *raw;
-        if v < lo {
-            v = lo;
-        } else if v > hi {
-            v = hi;
-        }
-        prev = v;
+        prev = clamp_next_retarget_timestamp(prev, *raw)?;
     }
 
     let mut t_actual = prev - first;
@@ -59,9 +45,40 @@ pub fn retarget_v1_clamped(
     retarget_v1_with_actual(target_old, t_actual)
 }
 
+fn clamp_next_retarget_timestamp(prev: u64, raw: u64) -> Result<u64, TxError> {
+    let lo = prev.checked_add(1).ok_or_else(retarget_clamp_overflow)?;
+    let hi = prev
+        .checked_add(MAX_TIMESTAMP_STEP_PER_BLOCK)
+        .ok_or_else(retarget_clamp_overflow)?;
+    Ok(raw.clamp(lo, hi))
+}
+
+fn retarget_clamp_overflow() -> TxError {
+    TxError::new(ErrorCode::TxErrParse, "retarget: timestamp clamp overflow")
+}
+
 fn retarget_v1_with_actual(target_old: [u8; 32], t_actual: u64) -> Result<[u8; 32], TxError> {
     let pow_limit = BigUint::from_bytes_be(&POW_LIMIT);
     let t_old = BigUint::from_bytes_be(&target_old);
+    validate_retarget_old_target(&t_old, &pow_limit)?;
+    let t_expected = retarget_expected_interval()?;
+
+    // floor(target_old * T_actual / T_expected)
+    let mut t_new = (&t_old * BigUint::from(t_actual)) / BigUint::from(t_expected);
+
+    let lower = retarget_lower_bound(&t_old);
+    let upper = retarget_upper_bound(&t_old, pow_limit);
+    if t_new < lower {
+        t_new = lower;
+    }
+    if t_new > upper {
+        t_new = upper;
+    }
+
+    biguint_to_bytes32(&t_new)
+}
+
+fn validate_retarget_old_target(t_old: &BigUint, pow_limit: &BigUint) -> Result<(), TxError> {
     if t_old.is_zero() {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
@@ -74,7 +91,10 @@ fn retarget_v1_with_actual(target_old: [u8; 32], t_actual: u64) -> Result<[u8; 3
             "retarget: target_old above pow_limit",
         ));
     }
+    Ok(())
+}
 
+fn retarget_expected_interval() -> Result<u64, TxError> {
     let t_expected = TARGET_BLOCK_INTERVAL
         .checked_mul(WINDOW_SIZE)
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "retarget: t_expected overflow"))?;
@@ -84,27 +104,15 @@ fn retarget_v1_with_actual(target_old: [u8; 32], t_actual: u64) -> Result<[u8; 3
             "retarget: t_expected is zero",
         ));
     }
+    Ok(t_expected)
+}
 
-    // floor(target_old * T_actual / T_expected)
-    let mut t_new = (&t_old * BigUint::from(t_actual)) / BigUint::from(t_expected);
+fn retarget_lower_bound(t_old: &BigUint) -> BigUint {
+    core::cmp::max(t_old >> 2, BigUint::one())
+}
 
-    // clamp lower = max(1, floor(target_old / 4))
-    let mut lower = &t_old >> 2;
-    if lower < BigUint::one() {
-        lower = BigUint::one();
-    }
-    // upper = target_old * 4
-    let upper_unclamped = &t_old << 2;
-    let upper = core::cmp::min(upper_unclamped, pow_limit);
-
-    if t_new < lower {
-        t_new = lower;
-    }
-    if t_new > upper {
-        t_new = upper;
-    }
-
-    biguint_to_bytes32(&t_new)
+fn retarget_upper_bound(t_old: &BigUint, pow_limit: BigUint) -> BigUint {
+    core::cmp::min(t_old << 2, pow_limit)
 }
 
 pub fn pow_check(header_bytes: &[u8], target: [u8; 32]) -> Result<(), TxError> {
