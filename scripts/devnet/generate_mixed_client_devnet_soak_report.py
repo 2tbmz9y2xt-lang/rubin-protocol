@@ -775,7 +775,7 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         return err
     if rust_mine_2.get("height") != rust_win["height"] or rust_mine_2.get("block_hash") != rust_win["hash"]:
         return "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
-    if rust_mine_2["height"] <= rust_mine_1["height"]:
+    if rust_mine_2["height"] != rust_mine_1["height"] + 1:
         return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
     final_block_checks = (
         partition_block_sidecar(paths["fork.rust_block_2"], "rust", rust_rpc, rust_win["height"], rust_win["hash"], rust_mine_1["block_hash"]),
@@ -851,6 +851,8 @@ def parse_metrics(path: Path, strict_prometheus: bool = False) -> tuple[dict[str
     try:
         found: dict[str, int] = {}
         if text.lstrip().startswith("{"):
+            if strict_prometheus:
+                return None, "metrics_malformed"
             obj = json.loads(text, object_pairs_hook=NO_DUPES, parse_float=Decimal, parse_int=Decimal, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(f"non_finite_json_constant:{c}")))
             if not isinstance(obj, dict):
                 return None, "metrics_malformed"

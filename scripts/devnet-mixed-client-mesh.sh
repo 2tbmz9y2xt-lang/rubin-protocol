@@ -673,6 +673,7 @@ if partition_mode:
     block_sidecar("observations.fork.rust_block_1", obs_paths["fork.rust_block_1"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], mine1["height"], mine1["block_hash"], common_mine["block_hash"])
     mine2 = mine_sidecar("observations.fork.rust_mine_2", obs_paths["fork.rust_mine_2"], "rust", nodes_by_impl["rust"]["rpc_endpoint"])
     req(mine2.get("height") == rust_win["height"] and mine2.get("block_hash") == rust_win["hash"], "rust winning mine sidecar mismatch")
+    req(mine2.get("height") == mine1["height"] + 1, "rust winning branch is not contiguous")
     tip_sidecar("observations.fork.rust_tip", obs_paths["fork.rust_tip"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], rust_win["height"], rust_win["hash"])
     block_sidecar("observations.fork.rust_block_2", obs_paths["fork.rust_block_2"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], rust_win["height"], rust_win["hash"], mine1["block_hash"])
     tip_sidecar("observations.reorg.go_tip", obs_paths["reorg.go_tip"], "go", nodes_by_impl["go"]["rpc_endpoint"], final_go["height"], final_go["hash"])
@@ -850,6 +851,7 @@ rules = [
     ("go fork mine sidecar mismatch", "partition_go_mine_sidecar_invalid"),
     ("rust fork first mine height is not parallel to go fork", "partition_rust_parallel_fork_invalid"),
     ("rust winning mine sidecar mismatch", "partition_rust_winning_mine_invalid"),
+    ("rust winning branch is not contiguous", "partition_rust_winning_branch_not_contiguous"),
     ("sidecar identity mismatch", "partition_sidecar_identity_mismatch"),
     ("does not match expected tip", "partition_tip_sidecar_invalid"),
     ("does not match expected block", "partition_block_sidecar_invalid"),
@@ -2397,17 +2399,18 @@ start_partition_proxy() {
 }
 proxy_go_local_addr() {
   local missing="$1" ambiguous="$2" deadline raw out status err_file err
-  deadline=$((SECONDS + MESH_TIMEOUT)); err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-partition-proxy-established.err"
+  deadline=$((SECONDS + MESH_TIMEOUT)); err_file="${RUBIN_PROCESS_ARTIFACT_ROOT}/lsof-partition-proxy-established.err"; PARTITION_PROXY_GO_LOCAL_ADDR=""
   while (( SECONDS < deadline )); do
     status=0; raw="$(bounded lsof -nP -a -p "${PARTITION_PROXY_PID}" -iTCP -sTCP:ESTABLISHED -Fn 2>"${err_file}")" || status=$?; err="$(<"${err_file}")"
-    (( status == 142 )) && finish_no_data "lsof_timeout"; (( status == 0 || (${#raw} == 0 && ${#err} == 0) )) || finish_no_data "lsof_failed"
-    out="$(REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' <<<"${raw}")" || finish_no_data "perl_failed"
-    out="$(sort -u <<<"${out}")" || finish_no_data "sort_failed"
-    [[ "${out}" != *$'\n'* ]] || finish_no_data "${ambiguous}"
-    [[ -z "${out}" ]] || { printf '%s\n' "${out}"; return 0; }
+    (( status == 142 )) && { PARTITION_REASON=lsof_timeout; return 1; }
+    (( status == 0 || (${#raw} == 0 && ${#err} == 0) )) || { PARTITION_REASON=lsof_failed; return 1; }
+    out="$(REMOTE_ADDR="${GO_P2P_ADDR}" perl -ne 'BEGIN{$r=$ENV{REMOTE_ADDR}} chomp; s/^n// or next; print "$1\n" if /^(127[.]0[.]0[.]1:[0-9]+)->\Q$r\E$/' <<<"${raw}")" || { PARTITION_REASON=perl_failed; return 1; }
+    out="$(sort -u <<<"${out}")" || { PARTITION_REASON=sort_failed; return 1; }
+    [[ "${out}" != *$'\n'* ]] || { PARTITION_REASON="${ambiguous}"; return 1; }
+    [[ -z "${out}" ]] || { PARTITION_PROXY_GO_LOCAL_ADDR="${out}"; return 0; }
     sleep 1
   done
-  finish_no_data "${missing}"
+  PARTITION_REASON="${missing}"; return 1
 }
 wait_peer_snapshot_state() {
   local label="$1" addr="$2" out="$3" timeout="$4" expected="${5:-}" want="${6:-connected}" deadline tmp
@@ -2489,7 +2492,8 @@ run_partition_heal_reorg_scenario() {
   local parsed
   PARTITION_REASON=""
   wait_peer_snapshot_state node-rust-pre-partition "${RUST_RPC_ADDR}" "${PARTITION_PRE_RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${PARTITION_PROXY_ADDR}" connected || { PARTITION_REASON="${PEER_SNAPSHOT_REASON:-partition_pre_rust_peer_missing_proxy}"; return 1; }
-  PARTITION_PRE_GO_PEER_ADDR="$(proxy_go_local_addr partition_pre_proxy_to_go_missing partition_pre_proxy_to_go_ambiguous)" || return 1
+  proxy_go_local_addr partition_pre_proxy_to_go_missing partition_pre_proxy_to_go_ambiguous || return 1
+  PARTITION_PRE_GO_PEER_ADDR="${PARTITION_PROXY_GO_LOCAL_ADDR}"
   wait_peer_snapshot_state node-go-pre-partition "${GO_RPC_ADDR}" "${PARTITION_PRE_GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${PARTITION_PRE_GO_PEER_ADDR}" connected || { PARTITION_REASON="${PEER_SNAPSHOT_REASON:-partition_pre_go_peer_missing_proxy}"; return 1; }
   parsed="$(partition_mine partition_common_go_mine go "${GO_RPC_ADDR}" "${PARTITION_COMMON_GO_MINE_JSON}" "${PARTITION_COMMON_GO_BLOCK_JSON}")" || return 1
   IFS=$'\t' read -r PARTITION_COMMON_HEIGHT PARTITION_COMMON_HASH _ <<<"${parsed}" || { PARTITION_REASON=partition_common_mine_parse_failed; return 1; }
@@ -2513,7 +2517,8 @@ run_partition_heal_reorg_scenario() {
   wait_peer_snapshot_state node-go-fork "${GO_RPC_ADDR}" "${PARTITION_FORK_GO_PEERS_JSON}" "${MESH_TIMEOUT}" "" empty || { PARTITION_REASON="${PEER_SNAPSHOT_REASON:-partition_fork_go_peer_not_empty}"; return 1; }
   set_partition_proxy_state allow || { PARTITION_REASON=partition_proxy_heal_state_failed; return 1; }
   wait_peer_snapshot_state node-rust-heal "${RUST_RPC_ADDR}" "${PARTITION_HEAL_RUST_PEERS_JSON}" "${MESH_TIMEOUT}" "${PARTITION_PROXY_ADDR}" connected || { PARTITION_REASON="${PEER_SNAPSHOT_REASON:-partition_heal_rust_peer_missing_proxy}"; return 1; }
-  PARTITION_HEAL_GO_PEER_ADDR="$(proxy_go_local_addr partition_heal_proxy_to_go_missing partition_heal_proxy_to_go_ambiguous)" || return 1
+  proxy_go_local_addr partition_heal_proxy_to_go_missing partition_heal_proxy_to_go_ambiguous || return 1
+  PARTITION_HEAL_GO_PEER_ADDR="${PARTITION_PROXY_GO_LOCAL_ADDR}"
   wait_peer_snapshot_state node-go-heal "${GO_RPC_ADDR}" "${PARTITION_HEAL_GO_PEERS_JSON}" "${MESH_TIMEOUT}" "${PARTITION_HEAL_GO_PEER_ADDR}" connected || { PARTITION_REASON="${PEER_SNAPSHOT_REASON:-partition_heal_go_peer_missing_proxy}"; return 1; }
   wait_tip_to_match partition_final_go_tip go "${GO_RPC_ADDR}" "${PARTITION_RUST_WIN_HEIGHT}" "${PARTITION_RUST_WIN_HASH}" "${PARTITION_FINAL_GO_TIP_JSON}" || return 1
   wait_tip_to_match partition_final_rust_tip rust "${RUST_RPC_ADDR}" "${PARTITION_RUST_WIN_HEIGHT}" "${PARTITION_RUST_WIN_HASH}" "${PARTITION_FINAL_RUST_TIP_JSON}" || return 1
