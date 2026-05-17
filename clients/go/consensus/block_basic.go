@@ -83,7 +83,7 @@ func ParseBlockBytes(b []byte) (*ParsedBlock, error) {
 	txids := make([][32]byte, 0)
 	wtxids := make([][32]byte, 0)
 	for i := uint64(0); i < txCount; i++ {
-		tx, txid, wtxid, n, err := parseBlockTx(b, &off)
+		tx, txid, wtxid, _, err := parseBlockTx(b, &off)
 		if err != nil {
 			return nil, err
 		}
