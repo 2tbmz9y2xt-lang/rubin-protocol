@@ -16,38 +16,71 @@ type reorgBranchBlock struct {
 	header     consensus.BlockHeader
 }
 
-func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
-	if s == nil || s.chainState == nil {
-		return nil, errors.New("sync engine is not initialized")
-	}
-	pb, err := consensus.ParseBlockBytes(blockBytes)
-	if err != nil {
-		return nil, err
-	}
-	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
-	if err != nil {
-		return nil, err
-	}
+type reorgApplyPlan struct {
+	branch               []reorgBranchBlock
+	commonAncestorHeight uint64
+	switchToBranch       bool
+	candidateHeight      uint64
+}
 
+func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
+	if err := s.validateApplyBlockWithReorgReady(); err != nil {
+		return nil, err
+	}
+	pb, blockHash, err := parseReorgBlock(blockBytes)
+	if err != nil {
+		return nil, err
+	}
 	if summary, handled, err := s.applyDirectBlockIfPossible(pb, blockBytes, prevTimestamps); handled {
 		return summary, err
 	}
-	if s.blockStore == nil {
-		return nil, &consensus.TxError{Code: consensus.BLOCK_ERR_LINKAGE_INVALID, Msg: "missing blockstore for side-chain block"}
-	}
-
-	branch, commonAncestorHash, commonAncestorHeight, err := s.collectBranchToCanonical(blockHash, blockBytes, pb)
+	plan, err := s.planReorgApply(blockHash, blockBytes, pb)
 	if err != nil {
 		return nil, err
+	}
+	if !plan.switchToBranch {
+		return s.storeSideBlockAndSummary(blockBytes, blockHash, pb, plan.candidateHeight, prevTimestamps)
+	}
+	return s.applyHeavierBranch(plan.branch, plan.commonAncestorHeight)
+}
+
+func (s *SyncEngine) validateApplyBlockWithReorgReady() error {
+	if s == nil || s.chainState == nil {
+		return errors.New("sync engine is not initialized")
+	}
+	return nil
+}
+
+func parseReorgBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	return pb, blockHash, nil
+}
+
+func (s *SyncEngine) planReorgApply(blockHash [32]byte, blockBytes []byte, pb *consensus.ParsedBlock) (reorgApplyPlan, error) {
+	if s.blockStore == nil {
+		return reorgApplyPlan{}, &consensus.TxError{Code: consensus.BLOCK_ERR_LINKAGE_INVALID, Msg: "missing blockstore for side-chain block"}
+	}
+	branch, commonAncestorHash, commonAncestorHeight, err := s.collectBranchToCanonical(blockHash, blockBytes, pb)
+	if err != nil {
+		return reorgApplyPlan{}, err
 	}
 	switchToBranch, candidateHeight, err := s.shouldSwitchToBranch(branch, commonAncestorHash, commonAncestorHeight)
 	if err != nil {
-		return nil, err
+		return reorgApplyPlan{}, err
 	}
-	if !switchToBranch {
-		return s.storeSideBlockAndSummary(blockBytes, blockHash, pb, candidateHeight, prevTimestamps)
-	}
-	return s.applyHeavierBranch(branch, commonAncestorHeight)
+	return reorgApplyPlan{
+		branch:               branch,
+		commonAncestorHeight: commonAncestorHeight,
+		switchToBranch:       switchToBranch,
+		candidateHeight:      candidateHeight,
+	}, nil
 }
 
 func (s *SyncEngine) storeSideBlockAndSummary(blockBytes []byte, blockHash [32]byte, pb *consensus.ParsedBlock, candidateHeight uint64, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
@@ -128,36 +161,58 @@ func (s *SyncEngine) applyHeavierBranch(
 	if _, _, err := s.disconnectCanonicalToAncestor(commonAncestorHeight); err != nil {
 		return nil, s.rollbackApplyBlock(err, rollbackState)
 	}
-
-	var summary *ChainStateConnectSummary
-	var pendingAccepted uint64
-	for i, item := range branch {
-		// Derive fresh timestamps from the (updated) canonical index for
-		// each block in the branch.  The stale caller prevTimestamps was
-		// computed for height commonAncestorHeight+1 and is wrong for
-		// blocks 2+ (finding B.9, issue #1166).
-		nextHeight := commonAncestorHeight + 1 + uint64(i)
-		freshTs, tsErr := prevTimestampsFromStore(s.blockStore, nextHeight)
-		if tsErr != nil {
-			return nil, s.rollbackApplyBlock(tsErr, rollbackState)
-		}
-		var outcome blockApplyMetricOutcome
-		summary, outcome, err = s.applyCanonicalParsedBlockTracked(item.parsed, item.blockBytes, freshTs)
-		if err != nil {
-			rollbackErr := s.rollbackApplyBlock(err, rollbackState)
-			if outcome == blockApplyMetricRejected {
-				s.noteBlockApplyRejected()
-			}
-			return nil, rollbackErr
-		}
-		if outcome == blockApplyMetricAccepted {
-			pendingAccepted++
-		}
+	summary, pendingAccepted, err := s.applyBranchBlocks(branch, commonAncestorHeight, rollbackState)
+	if err != nil {
+		return nil, err
 	}
 	s.requeueDisconnectedTransactions(disconnectedBlocks)
 	s.noteBlockApplyAcceptedN(pendingAccepted)
 	s.noteReorg(reorgDepth)
 	return summary, nil
+}
+
+func (s *SyncEngine) applyBranchBlocks(
+	branch []reorgBranchBlock,
+	commonAncestorHeight uint64,
+	rollbackState syncRollbackState,
+) (*ChainStateConnectSummary, uint64, error) {
+	var summary *ChainStateConnectSummary
+	var pendingAccepted uint64
+	for i, item := range branch {
+		freshTs, err := s.branchBlockPrevTimestamps(commonAncestorHeight, i)
+		if err != nil {
+			return nil, 0, s.rollbackApplyBlock(err, rollbackState)
+		}
+		var outcome blockApplyMetricOutcome
+		summary, outcome, err = s.applyCanonicalParsedBlockTracked(item.parsed, item.blockBytes, freshTs)
+		if err != nil {
+			return nil, 0, s.rollbackBranchBlockApply(err, rollbackState, outcome)
+		}
+		if outcome == blockApplyMetricAccepted {
+			pendingAccepted++
+		}
+	}
+	return summary, pendingAccepted, nil
+}
+
+func (s *SyncEngine) branchBlockPrevTimestamps(commonAncestorHeight uint64, branchIndex int) ([]uint64, error) {
+	// Derive fresh timestamps from the (updated) canonical index for each block
+	// in the branch. The stale caller prevTimestamps was computed for height
+	// commonAncestorHeight+1 and is wrong for blocks 2+ (finding B.9, issue #1166).
+	nextHeight := commonAncestorHeight + 1 + uint64(branchIndex)
+	return prevTimestampsFromStore(s.blockStore, nextHeight)
+}
+
+func (s *SyncEngine) rollbackBranchBlockApply(
+	err error,
+	rollbackState syncRollbackState,
+	outcome blockApplyMetricOutcome,
+) error {
+	rollbackErr := s.rollbackApplyBlock(err, rollbackState)
+	if outcome == blockApplyMetricRejected {
+		s.noteBlockApplyRejected()
+	}
+	return rollbackErr
 }
 
 func (s *SyncEngine) prepareHeavierBranch(

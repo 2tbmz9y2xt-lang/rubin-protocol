@@ -6,45 +6,75 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+type disconnectTipContext struct {
+	blockBytes      []byte
+	undo            *BlockUndo
+	rollbackState   syncRollbackState
+	newTipTimestamp uint64
+}
+
 func (s *SyncEngine) DisconnectTip() (*ChainStateDisconnectSummary, error) {
-	if s == nil || s.chainState == nil {
-		return nil, errors.New("sync engine is not initialized")
-	}
-	if s.blockStore == nil {
-		return nil, errors.New("sync engine has no blockstore")
-	}
-
-	tipHeight, tipHash, err := s.currentCanonicalTip()
+	ctx, err := s.prepareDisconnectTip()
 	if err != nil {
 		return nil, err
 	}
-	view := s.chainState.view()
-	if !view.hasTip || view.height != tipHeight || view.tipHash != tipHash {
-		return nil, errors.New("chainstate tip does not match blockstore tip")
-	}
-
-	pb, blockBytes, undo, err := s.fetchDisconnectBlockAndUndo(tipHash)
+	summary, err := s.chainState.DisconnectBlock(ctx.blockBytes, ctx.undo)
 	if err != nil {
 		return nil, err
 	}
-
-	rollbackState, err := s.captureRollbackState()
-	if err != nil {
-		return nil, err
-	}
-	newTipTimestamp, err := s.getParentTimestamp(tipHeight, pb.Header.PrevBlockHash)
-	if err != nil {
-		return nil, err
-	}
-
-	summary, err := s.chainState.DisconnectBlock(blockBytes, undo)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.finalizeDisconnectState(rollbackState, newTipTimestamp); err != nil {
+	if err := s.finalizeDisconnectState(ctx.rollbackState, ctx.newTipTimestamp); err != nil {
 		return nil, err
 	}
 	return summary, nil
+}
+
+func (s *SyncEngine) prepareDisconnectTip() (disconnectTipContext, error) {
+	if err := s.validateDisconnectTipReady(); err != nil {
+		return disconnectTipContext{}, err
+	}
+	tipHeight, tipHash, err := s.currentCanonicalTip()
+	if err != nil {
+		return disconnectTipContext{}, err
+	}
+	if err := s.ensureChainStateTip(tipHeight, tipHash); err != nil {
+		return disconnectTipContext{}, err
+	}
+	pb, blockBytes, undo, err := s.fetchDisconnectBlockAndUndo(tipHash)
+	if err != nil {
+		return disconnectTipContext{}, err
+	}
+	rollbackState, err := s.captureRollbackState()
+	if err != nil {
+		return disconnectTipContext{}, err
+	}
+	newTipTimestamp, err := s.getParentTimestamp(tipHeight, pb.Header.PrevBlockHash)
+	if err != nil {
+		return disconnectTipContext{}, err
+	}
+	return disconnectTipContext{
+		blockBytes:      blockBytes,
+		undo:            undo,
+		rollbackState:   rollbackState,
+		newTipTimestamp: newTipTimestamp,
+	}, nil
+}
+
+func (s *SyncEngine) validateDisconnectTipReady() error {
+	if s == nil || s.chainState == nil {
+		return errors.New("sync engine is not initialized")
+	}
+	if s.blockStore == nil {
+		return errors.New("sync engine has no blockstore")
+	}
+	return nil
+}
+
+func (s *SyncEngine) ensureChainStateTip(tipHeight uint64, tipHash [32]byte) error {
+	view := s.chainState.view()
+	if !view.hasTip || view.height != tipHeight || view.tipHash != tipHash {
+		return errors.New("chainstate tip does not match blockstore tip")
+	}
+	return nil
 }
 
 func (s *SyncEngine) disconnectCanonicalToAncestor(commonAncestorHeight uint64) ([][]byte, uint64, error) {

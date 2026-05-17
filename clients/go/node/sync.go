@@ -355,68 +355,6 @@ func (s *SyncEngine) SetStderr(w io.Writer) {
 	s.stderr = w
 }
 
-func (s *SyncEngine) HeaderSyncRequest() HeaderRequest {
-	if s == nil || s.chainState == nil {
-		return HeaderRequest{}
-	}
-	view := s.chainState.view()
-	if !view.hasTip {
-		return HeaderRequest{Limit: s.cfg.HeaderBatchLimit}
-	}
-	return HeaderRequest{
-		FromHash: view.tipHash,
-		HasFrom:  true,
-		Limit:    s.cfg.HeaderBatchLimit,
-	}
-}
-
-func (s *SyncEngine) RecordBestKnownHeight(height uint64) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if height > s.bestKnownHeight {
-		s.bestKnownHeight = height
-	}
-}
-
-func (s *SyncEngine) BestKnownHeight() uint64 {
-	if s == nil {
-		return 0
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.bestKnownHeight
-}
-
-func (s *SyncEngine) LastReorgDepth() uint64 {
-	if s == nil {
-		return 0
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.lastReorgDepth
-}
-
-func (s *SyncEngine) ReorgCount() uint64 {
-	if s == nil {
-		return 0
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.reorgCount
-}
-
-func (s *SyncEngine) BlockApplyCounts() BlockApplyCounts {
-	if s == nil {
-		return BlockApplyCounts{}
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.blockApply
-}
-
 // isInIBDUnchecked returns true if the engine appears to be in IBD based on
 // the recorded tip timestamp and the configured IBD lag threshold. Unlike
 // IsInIBD, it does not require a nowUnix argument — it uses time.Now().
@@ -506,30 +444,40 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 }
 
 func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) error {
-	restoreErr := s.restoreRollbackChainState(state)
-	if s.blockStore != nil {
-		if bsErr := s.blockStore.RestoreCanonicalIndex(state.canonicalIndex); bsErr != nil && restoreErr == nil {
-			restoreErr = bsErr
-		}
-	}
-	if mpErr := restoreMempoolSnapshot(s.mempool, state.mempool); mpErr != nil && restoreErr == nil {
-		restoreErr = mpErr
-	}
-	if restoreErr == nil && s.cfg.ChainStatePath != "" {
-		if saveErr := s.chainState.Save(s.cfg.ChainStatePath); saveErr != nil {
-			restoreErr = saveErr
-		}
-	}
-	s.mu.Lock()
-	s.tipTimestamp = state.tipTimestamp
-	s.bestKnownHeight = state.bestKnownHeight
-	s.lastReorgDepth = state.lastReorgDepth
-	s.reorgCount = state.reorgCount
-	s.mu.Unlock()
+	restoreErr := s.restoreRollbackPersistentState(state)
+	s.restoreRollbackRuntimeState(state)
 	if restoreErr != nil {
 		return fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
 	}
 	return cause
+}
+
+func (s *SyncEngine) restoreRollbackPersistentState(state syncRollbackState) error {
+	restoreErr := s.restoreRollbackChainState(state)
+	if s.blockStore != nil {
+		restoreErr = firstRollbackRestoreErr(restoreErr, s.blockStore.RestoreCanonicalIndex(state.canonicalIndex))
+	}
+	restoreErr = firstRollbackRestoreErr(restoreErr, restoreMempoolSnapshot(s.mempool, state.mempool))
+	if restoreErr == nil && s.cfg.ChainStatePath != "" {
+		restoreErr = s.chainState.Save(s.cfg.ChainStatePath)
+	}
+	return restoreErr
+}
+
+func firstRollbackRestoreErr(current error, next error) error {
+	if current != nil {
+		return current
+	}
+	return next
+}
+
+func (s *SyncEngine) restoreRollbackRuntimeState(state syncRollbackState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tipTimestamp = state.tipTimestamp
+	s.bestKnownHeight = state.bestKnownHeight
+	s.lastReorgDepth = state.lastReorgDepth
+	s.reorgCount = state.reorgCount
 }
 
 func (s *SyncEngine) restoreRollbackChainState(state syncRollbackState) error {
@@ -554,37 +502,76 @@ func (s *SyncEngine) applyCanonicalParsedBlock(
 	return summary, err
 }
 
+type canonicalBlockApplyContext struct {
+	blockHeight   uint64
+	blockHash     [32]byte
+	rollbackState syncRollbackState
+	prevState     *ChainState
+}
+
 func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	pb *consensus.ParsedBlock,
 	blockBytes []byte,
 	prevTimestamps []uint64,
 ) (*ChainStateConnectSummary, blockApplyMetricOutcome, error) {
-	if s == nil || s.chainState == nil {
-		return nil, blockApplyMetricNone, errors.New("sync engine is not initialized")
+	ctx, outcome, err := s.prepareCanonicalBlockApply(pb)
+	if err != nil {
+		return nil, outcome, err
 	}
-	if pb == nil {
-		return nil, blockApplyMetricNone, errors.New("nil parsed block")
+	summary, err := s.connectCanonicalBlock(pb, blockBytes, prevTimestamps)
+	s.runPVShadowIfActive(blockBytes, prevTimestamps, ctx.prevState, ctx.blockHeight, err, summary)
+	if err != nil {
+		return nil, blockApplyMetricRejected, err
+	}
+	if err := s.finalizeAppliedBlock(summary, ctx.blockHash, pb, blockBytes, ctx.prevState, ctx.rollbackState); err != nil {
+		return nil, blockApplyMetricNone, err
+	}
+	return summary, blockApplyMetricAccepted, nil
+}
+
+func (s *SyncEngine) prepareCanonicalBlockApply(pb *consensus.ParsedBlock) (canonicalBlockApplyContext, blockApplyMetricOutcome, error) {
+	if err := s.validateCanonicalBlockApplyReady(pb); err != nil {
+		return canonicalBlockApplyContext{}, blockApplyMetricNone, err
 	}
 	blockHeight, _, err := nextBlockContext(s.chainState)
 	if err != nil {
-		return nil, blockApplyMetricNone, err
+		return canonicalBlockApplyContext{}, blockApplyMetricNone, err
 	}
 	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
 	if err != nil {
-		return nil, blockApplyMetricNone, err
+		return canonicalBlockApplyContext{}, blockApplyMetricNone, err
 	}
-	// Validate genesis identity at height 0
 	if outcome, err := s.validateGenesisIdentity(blockHeight, blockHash); err != nil {
-		return nil, outcome, err
+		return canonicalBlockApplyContext{}, outcome, err
 	}
-
 	rollbackState, err := s.captureRollbackState()
 	if err != nil {
-		return nil, blockApplyMetricNone, err
+		return canonicalBlockApplyContext{}, blockApplyMetricNone, err
 	}
-	prevState := cloneChainState(rollbackState.chainState)
+	return canonicalBlockApplyContext{
+		blockHeight:   blockHeight,
+		blockHash:     blockHash,
+		rollbackState: rollbackState,
+		prevState:     cloneChainState(rollbackState.chainState),
+	}, blockApplyMetricNone, nil
+}
 
-	summary, err := s.chainState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+func (s *SyncEngine) validateCanonicalBlockApplyReady(pb *consensus.ParsedBlock) error {
+	if s == nil || s.chainState == nil {
+		return errors.New("sync engine is not initialized")
+	}
+	if pb == nil {
+		return errors.New("nil parsed block")
+	}
+	return nil
+}
+
+func (s *SyncEngine) connectCanonicalBlock(
+	pb *consensus.ParsedBlock,
+	blockBytes []byte,
+	prevTimestamps []uint64,
+) (*ChainStateConnectSummary, error) {
+	return s.chainState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		s.cfg.ExpectedTarget,
 		prevTimestamps,
@@ -593,122 +580,4 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 		s.cfg.RotationProvider,
 		s.cfg.SuiteRegistry,
 	)
-
-	// Run PV shadow validation (diagnostics only, never changes verdict)
-	s.runPVShadowIfActive(blockBytes, prevTimestamps, prevState, blockHeight, err, summary)
-
-	if err != nil {
-		return nil, blockApplyMetricRejected, err
-	}
-
-	// Commit persistence, record metrics, update mempool
-	if err := s.finalizeAppliedBlock(summary, blockHash, pb, blockBytes, prevState, rollbackState); err != nil {
-		return nil, blockApplyMetricNone, err
-	}
-	return summary, blockApplyMetricAccepted, nil
-}
-
-// txErrCode extracts the consensus.TxError code string from err for
-// telemetry and event labeling. It uses errors.As so that a wrapped
-// *consensus.TxError (e.g. produced by fmt.Errorf("...: %w", inner)) is
-// still classified correctly instead of falling through to "ERR". A nil
-// error reports "OK"; any non-TxError reports "ERR".
-func txErrCode(err error) string {
-	if err == nil {
-		return "OK"
-	}
-	var te *consensus.TxError
-	if errors.As(err, &te) {
-		return string(te.Code)
-	}
-	return "ERR"
-}
-
-func (s *SyncEngine) persistAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState) error {
-	if s.blockStore != nil {
-		undo, err := buildBlockUndo(prevState, pb, summary.BlockHeight)
-		if err != nil {
-			return err
-		}
-		if err := s.blockStore.CommitCanonicalBlock(summary.BlockHeight, blockHash, pb.HeaderBytes, blockBytes, undo); err != nil {
-			return err
-		}
-	}
-	if s.cfg.ChainStatePath != "" && (s.blockStore == nil || shouldPersistChainStateSnapshot(s.chainState, summary)) {
-		if err := s.chainState.Save(s.cfg.ChainStatePath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *SyncEngine) recordAppliedBlock(height uint64, timestamp uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.tipTimestamp = timestamp
-	if height > s.bestKnownHeight {
-		s.bestKnownHeight = height
-	}
-	s.lastReorgDepth = 0
-}
-
-func (s *SyncEngine) noteBlockApplyAccepted() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.blockApply.Accepted++
-}
-
-func (s *SyncEngine) noteBlockApplyAcceptedN(count uint64) {
-	if s == nil || count == 0 {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.blockApply.Accepted += count
-}
-
-func (s *SyncEngine) noteBlockApplyRejected() {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.blockApply.Rejected++
-}
-
-func (s *SyncEngine) noteBlockApplyOutcome(outcome blockApplyMetricOutcome) {
-	switch outcome {
-	case blockApplyMetricNone:
-		return
-	case blockApplyMetricAccepted:
-		s.noteBlockApplyAccepted()
-	case blockApplyMetricRejected:
-		s.noteBlockApplyRejected()
-	}
-}
-
-func (s *SyncEngine) noteReorg(depth uint64) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lastReorgDepth = depth
-	if depth > 0 {
-		s.reorgCount++
-	}
-}
-
-func (s *SyncEngine) currentCanonicalTip() (uint64, [32]byte, error) {
-	height, tipHash, ok, err := s.blockStore.Tip()
-	if err != nil {
-		return 0, [32]byte{}, err
-	}
-	if !ok {
-		return 0, [32]byte{}, errors.New("blockstore has no canonical tip")
-	}
-	return height, tipHash, nil
 }
