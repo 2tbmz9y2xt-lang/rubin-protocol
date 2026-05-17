@@ -59,233 +59,285 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	var zero [32]byte
 	off := 0
 
-	version, err := readU32le(b, &off)
-	if err != nil {
-		return nil, zero, zero, 0, err
-	}
-	if version != TX_WIRE_VERSION {
-		return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "unsupported tx version")
-	}
-
-	txKind, err := readU8(b, &off)
-	if err != nil {
-		return nil, zero, zero, 0, err
-	}
-	switch txKind {
-	case 0x00, 0x01, 0x02:
-	default:
-		return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "unsupported tx_kind")
-	}
-
-	txNonce, err := readU64le(b, &off)
+	version, txKind, txNonce, err := parseTxHeader(b, &off)
 	if err != nil {
 		return nil, zero, zero, 0, err
 	}
 
-	inCountU64, _, err := readCompactSize(b, &off)
+	inputs, err := parseTxInputs(b, &off)
 	if err != nil {
 		return nil, zero, zero, 0, err
 	}
-	if inCountU64 > MAX_TX_INPUTS {
-		return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "input_count overflow")
-	}
-	inCount := int(inCountU64)
 
-	inputs := make([]TxInput, 0, inCount)
-	for i := 0; i < inCount; i++ {
-		prevTxidBytes, err := readBytes(b, &off, 32)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		var prevTxid [32]byte
-		copy(prevTxid[:], prevTxidBytes)
-
-		prevVout, err := readU32le(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-
-		scriptSigLenU64, _, err := readCompactSize(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		if scriptSigLenU64 > MAX_SCRIPT_SIG_BYTES {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "script_sig_len overflow")
-		}
-		scriptSigLen := int(scriptSigLenU64)
-		scriptSig, err := readBytes(b, &off, scriptSigLen)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-
-		sequence, err := readU32le(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-
-		inputs = append(inputs, TxInput{
-			PrevTxid:  prevTxid,
-			PrevVout:  prevVout,
-			ScriptSig: scriptSig,
-			Sequence:  sequence,
-		})
-	}
-
-	outCountU64, _, err := readCompactSize(b, &off)
+	outputs, err := parseTxOutputs(b, &off)
 	if err != nil {
 		return nil, zero, zero, 0, err
-	}
-	if outCountU64 > MAX_TX_OUTPUTS {
-		return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "output_count overflow")
-	}
-	outCount := int(outCountU64)
-
-	outputs := make([]TxOutput, 0, outCount)
-	for i := 0; i < outCount; i++ {
-		value, err := readU64le(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-
-		covType, err := readU16le(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-
-		covLenU64, _, err := readCompactSize(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		if covLenU64 > uint64(math.MaxInt) {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "covenant_data_len overflows int")
-		}
-		if covLenU64 > MAX_COVENANT_DATA_PER_OUTPUT {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "covenant_data_len exceeds MAX_COVENANT_DATA_PER_OUTPUT")
-		}
-		covLen := int(covLenU64)
-		covData, err := readBytes(b, &off, covLen)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-
-		outputs = append(outputs, TxOutput{
-			Value:        value,
-			CovenantType: covType,
-			CovenantData: covData,
-		})
 	}
 
 	locktime, err := readU32le(b, &off)
 	if err != nil {
 		return nil, zero, zero, 0, err
 	}
-	var daCommitCore *DaCommitCore
-	var daChunkCore *DaChunkCore
-	switch txKind {
-	case 0x01:
-		daIDBytes, err := readBytes(b, &off, 32)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		var daID [32]byte
-		copy(daID[:], daIDBytes)
-		chunkCount, err := readU16le(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		if chunkCount == 0 || uint64(chunkCount) > MAX_DA_CHUNK_COUNT {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "chunk_count out of range for tx_kind=0x01")
-		}
-		retlDomainBytes, err := readBytes(b, &off, 32)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		var retlDomainID [32]byte
-		copy(retlDomainID[:], retlDomainBytes)
-		batchNumber, err := readU64le(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		txDataRootBytes, err := readBytes(b, &off, 32)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		var txDataRoot [32]byte
-		copy(txDataRoot[:], txDataRootBytes)
-		stateRootBytes, err := readBytes(b, &off, 32)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		var stateRoot [32]byte
-		copy(stateRoot[:], stateRootBytes)
-		withdrawalsRootBytes, err := readBytes(b, &off, 32)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		var withdrawalsRoot [32]byte
-		copy(withdrawalsRoot[:], withdrawalsRootBytes)
-		batchSigSuite, err := readU8(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		batchSigLenU64, _, err := readCompactSize(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		if batchSigLenU64 > MAX_DA_MANIFEST_BYTES_PER_TX || batchSigLenU64 > uint64(math.MaxInt) {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "batch_sig_len overflow")
-		}
-		batchSig, err := readBytes(b, &off, int(batchSigLenU64))
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		daCommitCore = &DaCommitCore{
-			DaID:            daID,
-			ChunkCount:      chunkCount,
-			RetlDomainID:    retlDomainID,
-			BatchNumber:     batchNumber,
-			TxDataRoot:      txDataRoot,
-			StateRoot:       stateRoot,
-			WithdrawalsRoot: withdrawalsRoot,
-			BatchSigSuite:   batchSigSuite,
-			BatchSig:        batchSig,
-		}
-	case 0x02:
-		daIDBytes, err := readBytes(b, &off, 32)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		var daID [32]byte
-		copy(daID[:], daIDBytes)
-		chunkIndex, err := readU16le(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		if uint64(chunkIndex) >= MAX_DA_CHUNK_COUNT {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "chunk_index out of range for tx_kind=0x02")
-		}
-		chunkHashBytes, err := readBytes(b, &off, 32)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		var chunkHash [32]byte
-		copy(chunkHash[:], chunkHashBytes)
-		daChunkCore = &DaChunkCore{
-			DaID:       daID,
-			ChunkIndex: chunkIndex,
-			ChunkHash:  chunkHash,
-		}
-	}
 
-	coreEnd := off
-
-	// Witness section.
-	witnessCountU64, witnessCountVarintBytes, err := readCompactSize(b, &off)
+	daCommitCore, daChunkCore, err := parseTxDaCore(b, &off, txKind)
 	if err != nil {
 		return nil, zero, zero, 0, err
 	}
+	coreEnd := off
+
+	witness, err := parseTxWitness(b, &off)
+	if err != nil {
+		return nil, zero, zero, 0, err
+	}
+
+	daPayload, err := parseTxDaPayload(b, &off, txKind)
+	if err != nil {
+		return nil, zero, zero, 0, err
+	}
+
+	tx := &Tx{Version: version, TxKind: txKind, TxNonce: txNonce,
+		Inputs: inputs, Outputs: outputs, Locktime: locktime,
+		DaCommitCore: daCommitCore, DaChunkCore: daChunkCore,
+		Witness: witness, DaPayload: daPayload}
+
+	txid := sha3_256(b[:coreEnd])
+	wtxid := sha3_256(b[:off])
+	return tx, txid, wtxid, off, nil
+}
+
+func parseTxHeader(b []byte, off *int) (uint32, uint8, uint64, error) {
+	version, err := readU32le(b, off)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if version != TX_WIRE_VERSION {
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "unsupported tx version")
+	}
+
+	txKind, err := readU8(b, off)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	switch txKind {
+	case 0x00, 0x01, 0x02:
+	default:
+		return 0, 0, 0, txerr(TX_ERR_PARSE, "unsupported tx_kind")
+	}
+
+	txNonce, err := readU64le(b, off)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return version, txKind, txNonce, nil
+}
+
+func parseTxInputs(b []byte, off *int) ([]TxInput, error) {
+	inCountU64, _, err := readCompactSize(b, off)
+	if err != nil {
+		return nil, err
+	}
+	if inCountU64 > MAX_TX_INPUTS {
+		return nil, txerr(TX_ERR_PARSE, "input_count overflow")
+	}
+	inCount := int(inCountU64)
+
+	inputs := make([]TxInput, 0, inCount)
+	for i := 0; i < inCount; i++ {
+		input, err := parseTxInput(b, off)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, input)
+	}
+	return inputs, nil
+}
+
+func parseTxInput(b []byte, off *int) (TxInput, error) {
+	prevTxid, err := readHash32(b, off)
+	if err != nil {
+		return TxInput{}, err
+	}
+
+	prevVout, err := readU32le(b, off)
+	if err != nil {
+		return TxInput{}, err
+	}
+
+	scriptSigLenU64, _, err := readCompactSize(b, off)
+	if err != nil {
+		return TxInput{}, err
+	}
+	if scriptSigLenU64 > MAX_SCRIPT_SIG_BYTES {
+		return TxInput{}, txerr(TX_ERR_PARSE, "script_sig_len overflow")
+	}
+	scriptSig, err := readBytes(b, off, int(scriptSigLenU64))
+	if err != nil {
+		return TxInput{}, err
+	}
+
+	sequence, err := readU32le(b, off)
+	if err != nil {
+		return TxInput{}, err
+	}
+
+	return TxInput{PrevTxid: prevTxid, PrevVout: prevVout, ScriptSig: scriptSig, Sequence: sequence}, nil
+}
+
+func parseTxOutputs(b []byte, off *int) ([]TxOutput, error) {
+	outCountU64, _, err := readCompactSize(b, off)
+	if err != nil {
+		return nil, err
+	}
+	if outCountU64 > MAX_TX_OUTPUTS {
+		return nil, txerr(TX_ERR_PARSE, "output_count overflow")
+	}
+	outCount := int(outCountU64)
+
+	outputs := make([]TxOutput, 0, outCount)
+	for i := 0; i < outCount; i++ {
+		output, err := parseTxOutput(b, off)
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, output)
+	}
+	return outputs, nil
+}
+
+func parseTxOutput(b []byte, off *int) (TxOutput, error) {
+	value, err := readU64le(b, off)
+	if err != nil {
+		return TxOutput{}, err
+	}
+
+	covType, err := readU16le(b, off)
+	if err != nil {
+		return TxOutput{}, err
+	}
+
+	covLenU64, _, err := readCompactSize(b, off)
+	if err != nil {
+		return TxOutput{}, err
+	}
+	if covLenU64 > uint64(math.MaxInt) {
+		return TxOutput{}, txerr(TX_ERR_PARSE, "covenant_data_len overflows int")
+	}
+	if covLenU64 > MAX_COVENANT_DATA_PER_OUTPUT {
+		return TxOutput{}, txerr(TX_ERR_PARSE, "covenant_data_len exceeds MAX_COVENANT_DATA_PER_OUTPUT")
+	}
+	covData, err := readBytes(b, off, int(covLenU64))
+	if err != nil {
+		return TxOutput{}, err
+	}
+
+	return TxOutput{Value: value, CovenantType: covType, CovenantData: covData}, nil
+}
+
+func parseTxDaCore(b []byte, off *int, txKind uint8) (*DaCommitCore, *DaChunkCore, error) {
+	switch txKind {
+	case 0x00:
+		return nil, nil, nil
+	case 0x01:
+		daCommitCore, err := parseTxDaCommitCore(b, off)
+		return daCommitCore, nil, err
+	case 0x02:
+		daChunkCore, err := parseTxDaChunkCore(b, off)
+		return nil, daChunkCore, err
+	default:
+		return nil, nil, txerr(TX_ERR_PARSE, "unsupported tx_kind")
+	}
+}
+
+func parseTxDaCommitCore(b []byte, off *int) (*DaCommitCore, error) {
+	daID, err := readHash32(b, off)
+	if err != nil {
+		return nil, err
+	}
+
+	chunkCount, err := readU16le(b, off)
+	if err != nil {
+		return nil, err
+	}
+	if invalidDaCommitChunkCount(chunkCount) {
+		return nil, txerr(TX_ERR_PARSE, "chunk_count out of range for tx_kind=0x01")
+	}
+
+	retlDomainID, err := readHash32(b, off)
+	if err != nil {
+		return nil, err
+	}
+	batchNumber, err := readU64le(b, off)
+	if err != nil {
+		return nil, err
+	}
+	txDataRoot, stateRoot, withdrawalsRoot, batchSigSuite, batchSig, err := parseDaCommitTail(b, off)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DaCommitCore{DaID: daID, ChunkCount: chunkCount, RetlDomainID: retlDomainID,
+		BatchNumber: batchNumber, TxDataRoot: txDataRoot, StateRoot: stateRoot,
+		WithdrawalsRoot: withdrawalsRoot, BatchSigSuite: batchSigSuite, BatchSig: batchSig}, nil
+}
+
+func invalidDaCommitChunkCount(chunkCount uint16) bool {
+	return chunkCount == 0 || uint64(chunkCount) > MAX_DA_CHUNK_COUNT
+}
+
+func parseDaCommitTail(b []byte, off *int) ([32]byte, [32]byte, [32]byte, uint8, []byte, error) {
+	txDataRoot, err := readHash32(b, off)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, 0, nil, err
+	}
+	stateRoot, err := readHash32(b, off)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, 0, nil, err
+	}
+	withdrawalsRoot, err := readHash32(b, off)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, 0, nil, err
+	}
+	batchSigSuite, err := readU8(b, off)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, 0, nil, err
+	}
+	batchSigLenU64, _, err := readCompactSize(b, off)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, [32]byte{}, 0, nil, err
+	}
+	if batchSigLenU64 > MAX_DA_MANIFEST_BYTES_PER_TX {
+		return [32]byte{}, [32]byte{}, [32]byte{}, 0, nil, txerr(TX_ERR_PARSE, "batch_sig_len overflow")
+	}
+	batchSig, err := readBytes(b, off, int(batchSigLenU64))
+	return txDataRoot, stateRoot, withdrawalsRoot, batchSigSuite, batchSig, err
+}
+
+func parseTxDaChunkCore(b []byte, off *int) (*DaChunkCore, error) {
+	daID, err := readHash32(b, off)
+	if err != nil {
+		return nil, err
+	}
+	chunkIndex, err := readU16le(b, off)
+	if err != nil {
+		return nil, err
+	}
+	if uint64(chunkIndex) >= MAX_DA_CHUNK_COUNT {
+		return nil, txerr(TX_ERR_PARSE, "chunk_index out of range for tx_kind=0x02")
+	}
+	chunkHash, err := readHash32(b, off)
+	if err != nil {
+		return nil, err
+	}
+	return &DaChunkCore{DaID: daID, ChunkIndex: chunkIndex, ChunkHash: chunkHash}, nil
+}
+
+func parseTxWitness(b []byte, off *int) ([]WitnessItem, error) {
+	witnessCountU64, witnessCountVarintBytes, err := readCompactSize(b, off)
+	if err != nil {
+		return nil, err
+	}
 	if witnessCountU64 > MAX_WITNESS_ITEMS {
-		return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "witness_count overflow")
+		return nil, txerr(TX_ERR_WITNESS_OVERFLOW, "witness_count overflow")
 	}
 	witnessCount := int(witnessCountU64)
 
@@ -293,133 +345,138 @@ func ParseTx(b []byte) (*Tx, [32]byte, [32]byte, int, error) {
 	witness := make([]WitnessItem, 0, witnessCount)
 
 	for i := 0; i < witnessCount; i++ {
-		suiteID, err := readU8(b, &off)
+		item, pubLen, sigLen, itemBytes, err := parseWitnessItemFields(b, off)
 		if err != nil {
-			return nil, zero, zero, 0, err
+			return nil, err
 		}
-		witnessBytes += 1
-
-		pubLenU64, pubLenVarintBytes, err := readCompactSize(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		witnessBytes += pubLenVarintBytes
-		if pubLenU64 > uint64(math.MaxInt) {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "pubkey_length overflows int")
-		}
-		pubLen := int(pubLenU64)
-		pubkey, err := readBytes(b, &off, pubLen)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		witnessBytes += pubLen
-
-		sigLenU64, sigLenVarintBytes, err := readCompactSize(b, &off)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		witnessBytes += sigLenVarintBytes
-		if sigLenU64 > uint64(math.MaxInt) {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "sig_length overflows int")
-		}
-		sigLen := int(sigLenU64)
-		sig, err := readBytes(b, &off, sigLen)
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
-		witnessBytes += sigLen
-
-		if suiteID != SUITE_ID_SENTINEL && sigLen == 0 {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "missing sighash_type byte")
-		}
-
+		witnessBytes += itemBytes
 		if witnessBytes > MAX_WITNESS_BYTES_PER_TX {
-			return nil, zero, zero, 0, txerr(TX_ERR_WITNESS_OVERFLOW, "witness bytes overflow")
+			return nil, txerr(TX_ERR_WITNESS_OVERFLOW, "witness bytes overflow")
 		}
-
-		switch suiteID {
-		case SUITE_ID_SENTINEL:
-			ok := false
-			if pubLen == 0 && sigLen == 0 {
-				ok = true
-			} else if pubLen == 32 {
-				if sigLen == 1 {
-					ok = len(sig) == 1 && sig[0] == 0x01
-				} else if sigLen >= 3 {
-					if len(sig) >= 3 && sig[0] == 0x00 {
-						preLen := int(binary.LittleEndian.Uint16(sig[1:3]))
-						ok = preLen >= MIN_HTLC_PREIMAGE_BYTES && preLen <= MAX_HTLC_PREIMAGE_BYTES && sigLen == 3+preLen
-					}
-				}
-			}
-			if !ok {
-				return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "non-canonical sentinel witness item")
-			}
-		case SUITE_ID_ML_DSA_87:
-			if !(pubLen == ML_DSA_87_PUBKEY_BYTES && sigLen == ML_DSA_87_SIG_BYTES+1) {
-				return nil, zero, zero, 0, txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
-			}
-		default:
-			// Unknown suites are accepted at parse stage (CANONICAL §12.2 / CV-SIG-05).
-			// Semantic suite authorization is enforced at the spend path.
+		if err := validateWitnessItemLengths(item, pubLen, sigLen); err != nil {
+			return nil, err
 		}
-
-		witness = append(witness, WitnessItem{
-			SuiteID:   suiteID,
-			Pubkey:    pubkey,
-			Signature: sig,
-		})
+		witness = append(witness, item)
 	}
+	return witness, nil
+}
 
-	// DA payload.
-	daLenU64, _, err := readCompactSize(b, &off)
+func parseWitnessItemFields(b []byte, off *int) (WitnessItem, int, int, int, error) {
+	suiteID, err := readU8(b, off)
 	if err != nil {
-		return nil, zero, zero, 0, err
+		return WitnessItem{}, 0, 0, 0, err
 	}
-	var daPayload []byte
+
+	pubkey, pubLen, pubBytes, err := parseWitnessBytes(b, off, "pubkey_length overflows int")
+	if err != nil {
+		return WitnessItem{}, 0, 0, 0, err
+	}
+	sig, sigLen, sigBytes, err := parseWitnessBytes(b, off, "sig_length overflows int")
+	if err != nil {
+		return WitnessItem{}, 0, 0, 0, err
+	}
+	if suiteID != SUITE_ID_SENTINEL && sigLen == 0 {
+		return WitnessItem{}, 0, 0, 0, txerr(TX_ERR_PARSE, "missing sighash_type byte")
+	}
+
+	item := WitnessItem{SuiteID: suiteID, Pubkey: pubkey, Signature: sig}
+	return item, pubLen, sigLen, 1 + pubBytes + sigBytes, nil
+}
+
+func parseWitnessBytes(b []byte, off *int, overflowMsg string) ([]byte, int, int, error) {
+	lenU64, varintBytes, err := readCompactSize(b, off)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if lenU64 > uint64(math.MaxInt) {
+		return nil, 0, 0, txerr(TX_ERR_PARSE, overflowMsg)
+	}
+	fieldLen := int(lenU64)
+	field, err := readBytes(b, off, fieldLen)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return field, fieldLen, varintBytes + fieldLen, nil
+}
+
+func validateWitnessItemLengths(item WitnessItem, pubLen int, sigLen int) error {
+	switch item.SuiteID {
+	case SUITE_ID_SENTINEL:
+		if !isCanonicalSentinelWitnessItem(pubLen, item.Signature) {
+			return txerr(TX_ERR_PARSE, "non-canonical sentinel witness item")
+		}
+	case SUITE_ID_ML_DSA_87:
+		if pubLen != ML_DSA_87_PUBKEY_BYTES || sigLen != ML_DSA_87_SIG_BYTES+1 {
+			return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical ML-DSA witness item lengths")
+		}
+	default:
+		// Unknown suites are accepted at parse stage (CANONICAL §12.2 / CV-SIG-05).
+		// Semantic suite authorization is enforced at the spend path.
+	}
+	return nil
+}
+
+func isCanonicalSentinelWitnessItem(pubLen int, sig []byte) bool {
+	if pubLen == 0 {
+		return len(sig) == 0
+	}
+	if pubLen != 32 {
+		return false
+	}
+	if len(sig) == 1 {
+		return sig[0] == 0x01
+	}
+	if len(sig) < 3 {
+		return false
+	}
+	if sig[0] != 0x00 {
+		return false
+	}
+	preLen := int(binary.LittleEndian.Uint16(sig[1:3]))
+	if preLen < MIN_HTLC_PREIMAGE_BYTES || preLen > MAX_HTLC_PREIMAGE_BYTES {
+		return false
+	}
+	return len(sig) == 3+preLen
+}
+
+func parseTxDaPayload(b []byte, off *int, txKind uint8) ([]byte, error) {
+	daLenU64, _, err := readCompactSize(b, off)
+	if err != nil {
+		return nil, err
+	}
 	switch txKind {
 	case 0x00:
 		if daLenU64 != 0 {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len must be 0 for tx_kind=0x00")
+			return nil, txerr(TX_ERR_PARSE, "da_payload_len must be 0 for tx_kind=0x00")
 		}
+		return nil, nil
 	case 0x01:
-		if daLenU64 > MAX_DA_MANIFEST_BYTES_PER_TX || daLenU64 > uint64(math.MaxInt) {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len out of range for tx_kind=0x01")
-		}
-		if daLenU64 != 0 {
-			daPayload, err = readBytes(b, &off, int(daLenU64))
-			if err != nil {
-				return nil, zero, zero, 0, err
-			}
-		}
+		return readDaPayloadBytes(b, off, daLenU64, MAX_DA_MANIFEST_BYTES_PER_TX, true, "da_payload_len out of range for tx_kind=0x01")
 	case 0x02:
-		if daLenU64 == 0 || daLenU64 > CHUNK_BYTES || daLenU64 > uint64(math.MaxInt) {
-			return nil, zero, zero, 0, txerr(TX_ERR_PARSE, "da_payload_len out of range for tx_kind=0x02")
-		}
-		daPayload, err = readBytes(b, &off, int(daLenU64))
-		if err != nil {
-			return nil, zero, zero, 0, err
-		}
+		return readDaPayloadBytes(b, off, daLenU64, CHUNK_BYTES, false, "da_payload_len out of range for tx_kind=0x02")
+	default:
+		return nil, txerr(TX_ERR_PARSE, "unsupported tx_kind")
 	}
-	totalEnd := off
+}
 
-	txid := sha3_256(b[:coreEnd])
-	wtxid := sha3_256(b[:totalEnd])
-
-	tx := &Tx{
-		Version:      version,
-		TxKind:       txKind,
-		TxNonce:      txNonce,
-		Inputs:       inputs,
-		Outputs:      outputs,
-		Locktime:     locktime,
-		DaCommitCore: daCommitCore,
-		DaChunkCore:  daChunkCore,
-		Witness:      witness,
-		DaPayload:    daPayload,
+func readDaPayloadBytes(b []byte, off *int, daLenU64 uint64, maxLen uint64, allowEmpty bool, overflowMsg string) ([]byte, error) {
+	if daLenU64 > maxLen {
+		return nil, txerr(TX_ERR_PARSE, overflowMsg)
 	}
+	if daLenU64 == 0 {
+		if !allowEmpty {
+			return nil, txerr(TX_ERR_PARSE, overflowMsg)
+		}
+		return nil, nil
+	}
+	return readBytes(b, off, int(daLenU64))
+}
 
-	return tx, txid, wtxid, totalEnd, nil
+func readHash32(b []byte, off *int) ([32]byte, error) {
+	hashBytes, err := readBytes(b, off, 32)
+	var hash [32]byte
+	copy(hash[:], hashBytes)
+	return hash, err
 }
 
 func daCoreFieldsBytes(tx *Tx) ([]byte, error) {
