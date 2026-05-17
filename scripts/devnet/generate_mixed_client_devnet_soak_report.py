@@ -76,6 +76,36 @@ SOURCE_LEGACY_REASON = "existing mixed_client_evidence_v1 PASS requires tx_path;
 SOURCE_LEGACY_REASONS = {SOURCE_LEGACY_REASON, "existing mixed_client_evidence_v1 PASS requires tx_path"}
 SOURCE_MESH_MARKER_KEYS = {"evidence_type", "failure_reason", "participants", "scenario", "schema_version", "verdict"}
 SOURCE_TX_MARKER_KEYS = {"evidence_type", "participants", "scenario", "schema_version", "tx_path", "verdict"}
+BLOCK_INCLUSION_GO = r'''
+package main
+import (
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
+type blockResp struct { Hash string `json:"hash"`; Height uint64 `json:"height"`; Canonical bool `json:"canonical"`; BlockHex string `json:"block_hex"` }
+type request struct { Block blockResp `json:"block"`; TxHex string `json:"tx_hex"`; Txid string `json:"txid"`; Height uint64 `json:"height"`; Hash string `json:"hash"`; TxCount uint64 `json:"tx_count"` }
+func die(v any) { fmt.Fprintln(os.Stderr, v); os.Exit(1) }
+func main() {
+	var req request
+	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil { die("decode request: " + err.Error()) }
+	if req.Block.Height != req.Height || strings.ToLower(req.Block.Hash) != strings.ToLower(req.Hash) || !req.Block.Canonical { die("block response height/hash/canonical mismatch") }
+	txBytes, err := hex.DecodeString(strings.TrimSpace(req.TxHex)); if err != nil { die("decode tx_hex: " + err.Error()) }
+	_, wantTxid, _, consumed, err := consensus.ParseTx(txBytes); if err != nil || consumed != len(txBytes) { die("parse tx_hex failed") }
+	if hex.EncodeToString(wantTxid[:]) != strings.ToLower(req.Txid) { die("tx_hex txid mismatch") }
+	blockBytes, err := hex.DecodeString(strings.TrimSpace(req.Block.BlockHex)); if err != nil { die("decode block_hex: " + err.Error()) }
+	pb, err := consensus.ParseBlockBytes(blockBytes); if err != nil { die("parse block_hex failed: " + err.Error()) }
+	gotHash, err := consensus.BlockHash(pb.HeaderBytes); if err != nil || hex.EncodeToString(gotHash[:]) != strings.ToLower(req.Hash) { die("parsed block hash mismatch") }
+	if pb.TxCount != req.TxCount { die("parsed block tx_count mismatch") }
+	if _, err := consensus.ValidateBlockBasicAtHeight(blockBytes, nil, nil, req.Height); err != nil { die("basic block validation failed: " + err.Error()) }
+	_, _, wantWtxid, _, _ := consensus.ParseTx(txBytes)
+	for i, got := range pb.Txids { if i > 0 && got == wantTxid && pb.Wtxids[i] == wantWtxid { return } }
+	die("submitted txid/wtxid missing from parsed block")
+}
+'''
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
 def hex_bytes(value: Any) -> bool: return isinstance(value, str) and bool(HEX_BYTES.fullmatch(value))  # noqa: E704
 def jint(value: Any, minimum: int = 0) -> bool: return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000  # noqa: E704
@@ -361,6 +391,68 @@ def tx_hex_txid_error(txhex: Any, txid: str) -> str | None:
     if parsed.get("txid") != txid:
         return "tx_hex_txid_mismatch"
     return None if parsed.get("consumed") == len(txhex) // 2 else "tx_parser_consumed_mismatch"
+def block_inclusion_error(block: dict[str, Any], txhex: str, txid: str, height: int, block_hash: str, tx_count: int) -> str | None:
+    if not DEV_ENV.is_file() or not GO_MODULE_ROOT.is_dir():
+        return "convergence_block_parser_unavailable"
+    try:
+        with tempfile.TemporaryDirectory(prefix="rubin-block-check-") as tmp:
+            helper = Path(tmp) / "main.go"
+            helper.write_text(BLOCK_INCLUSION_GO, encoding="utf-8")
+            proc = subprocess.run(  # nosec B603
+                [str(DEV_ENV), "--", "go", "-C", str(GO_MODULE_ROOT), "run", str(helper)],
+                check=False,
+                env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
+                input=json.dumps({"block": block, "tx_hex": txhex, "txid": txid, "height": height, "hash": block_hash, "tx_count": tx_count}) + "\n",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=60,
+            )
+    except subprocess.TimeoutExpired:
+        return "convergence_block_parser_timeout"
+    except OSError:
+        return "convergence_block_parser_unavailable"
+    output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    if len(output) > MAX_PARSER_OUTPUT_BYTES:
+        return "convergence_block_parser_output_too_large"
+    if proc.returncode == 0:
+        return None
+    if "tx_hex txid mismatch" in output:
+        return "convergence_tx_hex_txid_mismatch"
+    if "submitted txid/wtxid missing from parsed block" in output:
+        return "convergence_block_missing_submitted_txid"
+    if "parsed block tx_count mismatch" in output:
+        return "convergence_block_tx_count_mismatch"
+    if "parsed block hash mismatch" in output:
+        return "convergence_block_hash_mismatch"
+    if "parse block_hex failed" in output or "decode block_hex:" in output:
+        return "convergence_block_hex_parse_failed"
+    if "basic block validation failed:" in output:
+        return "convergence_block_basic_validation_failed"
+    return "convergence_block_inclusion_failed"
+def tx_converge_sidecar_error(mine: dict[str, Any], seen: dict[str, Any], mine_impl: str, seen_impl: str, by_impl: dict[str, dict[str, Any]], root: Path, txid: str, txhex: str) -> tuple[list[Path], str | None]:
+    reason = "convergence_sidecar_invalid"
+    mine_next, mine_next_path, err = source_load_json(mine.get("mine_next_path"), root, reason)
+    mine_block, mine_block_path, block_err = source_load_json(mine.get("block_path"), root, reason)
+    seen_tip, seen_tip_path, tip_err = source_load_json(seen.get("tip_path"), root, reason)
+    seen_block, seen_block_path, seen_block_err = source_load_json(seen.get("block_path"), root, reason)
+    paths = [p for p in (mine_next_path, mine_block_path, seen_tip_path, seen_block_path) if p is not None]
+    if err or block_err or tip_err or seen_block_err or len(paths) != 4 or len(set(paths)) != 4 or mine_next is None or mine_block is None or seen_tip is None or seen_block is None:
+        return [], reason
+    height, block_hash, tx_count = mine.get("height"), mine.get("block_hash"), mine.get("tx_count")
+    if not jint(height) or not is_hex32(block_hash) or not jint(tx_count, 2):
+        return [], reason
+    if set(mine_next) != {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"} or mine_next.get("implementation") != mine_impl or mine_next.get("rpc_endpoint") != by_impl[mine_impl]["rpc_endpoint"] or mine_next.get("request_path") != "/mine_next" or mine_next.get("mined") is not True or not jint(mine_next.get("height")) or mine_next.get("height") != height or mine_next.get("block_hash") != block_hash or not jint(mine_next.get("tx_count"), 2) or mine_next.get("tx_count") != tx_count or not ju64(mine_next.get("nonce")) or not ju64(mine_next.get("timestamp")):
+        return [], reason
+    block_keys = {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}
+    for block, impl, endpoint in ((mine_block, mine_impl, by_impl[mine_impl]["rpc_endpoint"]), (seen_block, seen_impl, by_impl[seen_impl]["rpc_endpoint"])):
+        if set(block) != block_keys or block.get("implementation") != impl or block.get("rpc_endpoint") != endpoint or block.get("request_path") != f"/get_block?height={height}" or block.get("canonical") is not True or not jint(block.get("height")) or block.get("height") != height or block.get("hash") != block_hash or not hex_bytes(block.get("block_hex")):
+            return [], reason
+        if err := block_inclusion_error(block, txhex, txid, height, block_hash, tx_count):
+            return [], err
+    if set(seen_tip) != {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"} or seen_tip.get("implementation") != seen_impl or seen_tip.get("rpc_endpoint") != by_impl[seen_impl]["rpc_endpoint"] or seen_tip.get("request_path") != "/get_tip" or seen_tip.get("has_tip") is not True or not jint(seen_tip.get("height")) or seen_tip.get("height") != height or seen_tip.get("tip_hash") != block_hash or not jint(seen_tip.get("best_known_height")) or seen_tip["best_known_height"] < height or not isinstance(seen_tip.get("in_ibd"), bool):
+        return [], reason
+    return paths, None
 def validate_samples(data: dict[str, Any], prop_dir: str | None, conv_dir: str | None, txid: str, height: int | None = None, block_hash: str | None = None) -> str | None:
     raw = data.get("raw_samples")
     if not isinstance(raw, dict) or set(raw) != {"schema_version", "semantics", "propagation", "convergence"} or raw.get("schema_version") != "rubin-devnet-process-soak-raw-samples-v1" or raw.get("semantics") != "raw samples only; no SLO threshold or pass claim":
@@ -426,13 +518,18 @@ def validate_tx_source_sidecars(data: dict[str, Any], converge: bool, rust_submi
     if bad or by_impl is None:
         return bad
     txid = data["tx_path"]["tx_id"]
-    submit, accept, submit_impl, accept_impl = ("rust_submit", "go_accept", "rust", "go") if rust_submit else ("go_submit", "rust_accept", "go", "rust")
+    submit, accept, mine, conv, submit_impl, accept_impl, mine_impl, conv_impl = ("rust_submit", "go_accept", "go_mine", "rust_converge", "rust", "go", "go", "rust") if rust_submit else ("go_submit", "rust_accept", "rust_mine", "go_converge", "go", "rust", "rust", "go")
     txhex = data[submit]["tx_hex"]
     if err := tx_hex_txid_error(txhex, txid):
         return err
     paths: list[Path] = []
     for label, impl in ((submit, submit_impl), (accept, accept_impl)):
         new_paths, err = tx_capture_sidecar_error(label, data[label], impl, by_impl[impl]["rpc_endpoint"], root, txid, txhex)
+        if err:
+            return err
+        paths.extend(new_paths)
+    if converge:
+        new_paths, err = tx_converge_sidecar_error(data[mine], data[conv], mine_impl, conv_impl, by_impl, root, txid, txhex)
         if err:
             return err
         paths.extend(new_paths)
@@ -845,7 +942,7 @@ def partition_block_sidecar(path: Path, impl: str, rpc: str, height: int, block_
     keys = {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}
     if set(data) != keys or data.get("implementation") != impl or data.get("rpc_endpoint") != rpc or data.get("request_path") != f"/get_block?height={height}":
         return "partition_reorg_source_binding_contradiction:block_sidecar_invalid"
-    if data.get("canonical") is not True or data.get("height") != height or data.get("hash") != block_hash or not hex_bytes(data.get("block_hex")):
+    if data.get("canonical") is not True or not jint(data.get("height")) or data.get("height") != height or data.get("hash") != block_hash or not hex_bytes(data.get("block_hex")):
         return "partition_reorg_source_binding_contradiction:block_sidecar_invalid"
     if err := partition_block_payload_error(data["block_hex"], height, block_hash, expected_prev_hash):
         return err
@@ -1075,8 +1172,6 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
     bad = validate_mesh(data) if name == "mesh" else validate_tx(data, "converge" in name, name.startswith("rust_to_go"))
     if bad:
         return section(name, "fail", bad, source_artifact_path=path, scenario=got)
-    if "converge" in name:
-        return section(name, "no_data", "convergence_block_inclusion_binding_deferred", source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
     if name != "mesh" and name in SOURCE_TOP_KEYS:
         root = safe_abs_path(data.get("artifact_root"))
         if root is None:
@@ -1125,7 +1220,7 @@ def no_data_source_reason_error(value: Any) -> str | None:
     if any(re.search(rf"(?<![a-z0-9]){re.escape(token).replace('_', '[_-]?')}(?![a-z0-9])", lowered) for token in CLAIM_REASON_TOKENS):
         return "rust_reorg_metrics_no_data_reason_reserved"
     return None if SAFE_REASON.fullmatch(value) else "rust_reorg_metrics_no_data_reason_invalid"
-def metric_section(args: argparse.Namespace) -> dict[str, Any]:
+def metric_section(args: argparse.Namespace, sections: dict[str, dict[str, Any]]) -> dict[str, Any]:
     if args.rust_reorg_metrics_no_data:
         if bad := no_data_source_reason_error(args.rust_reorg_metrics_no_data):
             return section("reorg_metrics", "fail", bad, claim_type="metric_evidence")
@@ -1136,8 +1231,23 @@ def metric_section(args: argparse.Namespace) -> dict[str, Any]:
     metrics, err = (None, path_err) if path_err else parse_metrics(path)
     if err:
         return section("reorg_metrics", "fail", err, source_artifact_path=path, claim_type="metric_evidence")
-    return section("reorg_metrics", "no_data", "metric_source_binding_unavailable", source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
-def raw_samples_section(sections: dict[str, dict[str, Any]]) -> dict[str, Any]: return section("raw_samples", "fail", "source_sample_section_failed") if any(sections[name]["status"] in {"fail", "helper_only"} for name in ("go_to_rust_accept", "go_to_rust_mine_converge", "rust_to_go_mine_converge")) else section("raw_samples", "no_data", "source_contract_validation_unavailable", source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="sample_evidence")  # noqa: E704
+    partition = sections.get("partition_heal_reorg", {})
+    bound = False
+    if partition.get("status") == "pass" and args.partition_heal_reorg_report:
+        pdata, perr = load(Path(args.partition_heal_reorg_report))
+        metric_value, present = get(pdata, "observations.reorg.go_metrics") if perr is None and isinstance(pdata, dict) else (None, False)
+        metric_path, metric_err = regular_abs_path(metric_value, "metrics_not_regular") if present and isinstance(metric_value, str) else (None, "metrics_not_regular")
+        bound = metric_err is None and metric_path == path
+    if not bound:
+        return section("reorg_metrics", "no_data", "metric_source_binding_unavailable", source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
+    return section("reorg_metrics", "pass", None, source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", evidence_class="metric_evidence", behavior_evidence=False, metric_values=metrics)
+def raw_samples_section(sections: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    tx_names = ("go_to_rust_accept", "go_to_rust_mine_converge", "rust_to_go_mine_converge")
+    if any(sections[name]["status"] in {"fail", "helper_only"} for name in tx_names):
+        return section("raw_samples", "fail", "source_sample_section_failed")
+    if all(sections[name]["status"] == "pass" for name in tx_names):
+        return section("raw_samples", "pass", None, source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="raw_samples", evidence_class="raw_samples", slo_claim=False)
+    return section("raw_samples", "no_data", "source_contract_validation_unavailable", source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="raw_samples", evidence_class="raw_samples", slo_claim=False)
 def claim_tokens_in_text(value: Any) -> set[str]:
     if not isinstance(value, str):
         return set()
@@ -1157,7 +1267,7 @@ def inventory(sections: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 def generate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     sections = {name: build_section(name, attr, scenario, fields, args) for name, (attr, scenario, fields) in SECTIONS.items()}
-    sections["reorg_metrics"] = metric_section(args)
+    sections["reorg_metrics"] = metric_section(args, sections)
     sections["raw_samples"] = raw_samples_section(sections)
     sections["deferred_related"] = section("deferred_related", "not_applicable", "deferred_by_rub_227", claim_type="deferred_related_work")
     statuses = {s["status"] for s in sections.values()}
