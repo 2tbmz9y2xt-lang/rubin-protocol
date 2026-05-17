@@ -263,6 +263,22 @@ fn parse_block_bytes_trailing_bytes() {
 
     let err = parse_block_bytes(&block).unwrap_err();
     assert_eq!(err.code, ErrorCode::BlockErrParse);
+    assert_eq!(err.msg, "trailing bytes after tx list");
+}
+
+#[test]
+fn parse_block_bytes_empty_tx_list() {
+    let tx = minimal_tx_bytes();
+    let mut prev = [0u8; 32];
+    prev[0] = 0x78;
+    let target = [0xffu8; 32];
+    let mut block = build_block_bytes(prev, [0u8; 32], target, 20, &[tx]);
+    block.truncate(BLOCK_HEADER_BYTES);
+    crate::compactsize::encode_compact_size(0, &mut block);
+
+    let err = parse_block_bytes(&block).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrCoinbaseInvalid);
+    assert_eq!(err.msg, "empty block tx list");
 }
 
 #[test]
