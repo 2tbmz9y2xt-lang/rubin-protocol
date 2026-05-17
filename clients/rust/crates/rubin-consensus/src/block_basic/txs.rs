@@ -67,7 +67,9 @@ pub(super) fn validate_block_tx_semantics(
 mod tests {
     use super::*;
     use crate::block::BlockHeader;
-    use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, TX_WIRE_VERSION};
+    use crate::constants::{
+        COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, SUITE_ID_SENTINEL, TX_WIRE_VERSION,
+    };
     use crate::hash::sha3_256;
     use crate::tx::{DaChunkCore, TxInput, TxOutput, WitnessItem};
     use crate::tx_helpers::p2pk_covenant_data_for_pubkey;
