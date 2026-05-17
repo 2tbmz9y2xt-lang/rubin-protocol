@@ -41,7 +41,7 @@ NODE_BACKING_KEYS = {"p2p_endpoint_process_backed", "rpc_endpoint_process_backed
 PARTITION_NODE_KEYS = {"implementation", "name", "p2p_endpoint", "pid", "rpc_endpoint", "started_at"}
 PARTITION_SOURCE_FIELDS = [
     "run_id", "artifact_created_at_utc",
-    "proof.partition_proxy_pid", "proof.partition_proxy_endpoint", "proof.pre_partition_go_peer_addr", "proof.heal_go_peer_addr",
+    "proof.partition_proxy_endpoint", "proof.pre_partition_go_peer_addr", "proof.heal_go_peer_addr",
     "proof.partition_changed_peer_state", "proof.fork_diverged", "proof.heal_restored_peer_state", "proof.reorg_converged", "proof.process_identity_rechecked_after_heal", "proof.go_reorg_metrics",
     "proof.go_partition_tip", "proof.rust_winning_tip", "proof.final_go_tip", "proof.final_rust_tip",
     "observations.pre_partition.common_go_block", "observations.pre_partition.common_go_mine", "observations.pre_partition.common_rust_block", "observations.pre_partition.common_rust_tip", "observations.pre_partition.go_peer_snapshot", "observations.pre_partition.rust_peer_snapshot",
@@ -541,8 +541,6 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields" if "proof" in data else bad
     if any(k in proof and not isinstance(proof.get(k), bool) for k in ("partition_changed_peer_state", "fork_diverged", "heal_restored_peer_state", "reorg_converged", "process_identity_rechecked_after_heal")) or ("go_reorg_metrics" in proof and (not isinstance(proof.get("go_reorg_metrics"), dict) or any(not jint(proof["go_reorg_metrics"].get(m), 1) for m in METRICS))):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
-    if "partition_proxy_pid" in proof and not jint(proof.get("partition_proxy_pid"), 1):
-        return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     if any(k in proof and not endpoint(proof.get(k)) for k in ("partition_proxy_endpoint", "pre_partition_go_peer_addr", "heal_go_peer_addr")):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     for key, reason in (("partition_changed_peer_state", "partition_no_peer_state_change"), ("fork_diverged", "partition_no_fork_divergence"), ("heal_restored_peer_state", "partition_heal_not_restored"), ("reorg_converged", "partition_reorg_not_converged"), ("process_identity_rechecked_after_heal", "partition_process_identity_not_rechecked_after_heal")):
@@ -594,7 +592,7 @@ def partition_tip_sidecar(path: Path, impl: str, rpc: str, height: int, block_ha
     if data.get("has_tip") is not True or not jint(data.get("height")) or data["height"] != height or data.get("tip_hash") != block_hash or not jint(data.get("best_known_height")) or data["best_known_height"] < height or not isinstance(data.get("in_ibd"), bool):
         return "partition_reorg_source_binding_contradiction:tip_sidecar_invalid"
     return None
-def partition_block_sidecar(path: Path, impl: str, rpc: str, height: int, block_hash: str) -> str | None:
+def partition_block_sidecar(path: Path, impl: str, rpc: str, height: int, block_hash: str, expected_prev_hash: str | None = None) -> str | None:
     data, err = partition_load_sidecar(path, "partition_reorg_source_binding_contradiction:block_sidecar_invalid")
     if err or data is None:
         return err
@@ -603,13 +601,16 @@ def partition_block_sidecar(path: Path, impl: str, rpc: str, height: int, block_
         return "partition_reorg_source_binding_contradiction:block_sidecar_invalid"
     if data.get("canonical") is not True or data.get("height") != height or data.get("hash") != block_hash or not hex_bytes(data.get("block_hex")):
         return "partition_reorg_source_binding_contradiction:block_sidecar_invalid"
-    if err := partition_block_payload_error(data["block_hex"], height, block_hash):
+    if err := partition_block_payload_error(data["block_hex"], height, block_hash, expected_prev_hash):
         return err
     return None
-def partition_block_payload_error(block_hex: str, height: int, block_hash: str) -> str | None:
+def partition_block_payload_error(block_hex: str, height: int, block_hash: str, expected_prev_hash: str | None = None) -> str | None:
     if not DEV_ENV.is_file() or not GO_MODULE_ROOT.is_dir():
         return "partition_reorg_source_binding_contradiction:block_parser_unavailable"
-    request = json.dumps({"op": "block_basic_check", "block_hex": block_hex, "height": height}) + "\n"
+    request_obj = {"op": "block_basic_check", "block_hex": block_hex, "height": height}
+    if expected_prev_hash is not None:
+        request_obj["expected_prev_hash"] = expected_prev_hash
+    request = json.dumps(request_obj) + "\n"
     try:
         # Fixed repo-local argv with no shell; report-controlled block bytes are passed on stdin.
         proc = subprocess.run(  # nosec B603
@@ -684,7 +685,7 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     if bad:
         return bad
     proof = data["proof"]
-    expected_proof_keys = {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "partition_proxy_pid", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}
+    expected_proof_keys = {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}
     if set(proof) != expected_proof_keys:
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     final = data.get("final_verification")
@@ -716,13 +717,10 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         partition_tip_sidecar(paths["pre_partition.common_rust_tip"], "rust", rust_rpc, common["height"], common["block_hash"]),
         partition_block_sidecar(paths["pre_partition.common_rust_block"], "rust", rust_rpc, common["height"], common["block_hash"]),
         partition_tip_sidecar(paths["fork.go_tip"], "go", go_rpc, go_fork["height"], go_fork["hash"]),
-        partition_block_sidecar(paths["fork.go_block"], "go", go_rpc, go_fork["height"], go_fork["hash"]),
+        partition_block_sidecar(paths["fork.go_block"], "go", go_rpc, go_fork["height"], go_fork["hash"], common["block_hash"]),
         partition_tip_sidecar(paths["fork.rust_tip"], "rust", rust_rpc, rust_win["height"], rust_win["hash"]),
-        partition_block_sidecar(paths["fork.rust_block_2"], "rust", rust_rpc, rust_win["height"], rust_win["hash"]),
         partition_tip_sidecar(paths["reorg.go_tip"], "go", go_rpc, final_go["height"], final_go["hash"]),
         partition_tip_sidecar(paths["reorg.rust_tip"], "rust", rust_rpc, final_rust["height"], final_rust["hash"]),
-        partition_block_sidecar(paths["reorg.go_tip_block"], "go", go_rpc, final_go["height"], final_go["hash"]),
-        partition_block_sidecar(paths["reorg.rust_tip_block"], "rust", rust_rpc, final_rust["height"], final_rust["hash"]),
     )
     if bad := next((item for item in sidecar_checks if item), None):
         return bad
@@ -736,9 +734,9 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         return err
     if rust_mine_1.get("height") != go_fork["height"] or rust_mine_1.get("block_hash") == go_fork["hash"]:
         return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
-    if err := partition_block_sidecar(paths["fork.rust_block_1"], "rust", rust_rpc, rust_mine_1["height"], rust_mine_1["block_hash"]):
+    if err := partition_block_sidecar(paths["fork.rust_block_1"], "rust", rust_rpc, rust_mine_1["height"], rust_mine_1["block_hash"], common["block_hash"]):
         return err
-    if err := partition_block_sidecar(paths["reorg.go_reorg_parent_block"], "go", go_rpc, rust_mine_1["height"], rust_mine_1["block_hash"]):
+    if err := partition_block_sidecar(paths["reorg.go_reorg_parent_block"], "go", go_rpc, rust_mine_1["height"], rust_mine_1["block_hash"], common["block_hash"]):
         return err
     rust_mine_2, err = partition_mine_sidecar(paths["fork.rust_mine_2"], "rust", rust_rpc)
     if err or rust_mine_2 is None:
@@ -747,6 +745,13 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         return "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
     if rust_mine_2["height"] <= rust_mine_1["height"]:
         return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
+    final_block_checks = (
+        partition_block_sidecar(paths["fork.rust_block_2"], "rust", rust_rpc, rust_win["height"], rust_win["hash"], rust_mine_1["block_hash"]),
+        partition_block_sidecar(paths["reorg.go_tip_block"], "go", go_rpc, final_go["height"], final_go["hash"], rust_mine_1["block_hash"]),
+        partition_block_sidecar(paths["reorg.rust_tip_block"], "rust", rust_rpc, final_rust["height"], final_rust["hash"], rust_mine_1["block_hash"]),
+    )
+    if bad := next((item for item in final_block_checks if item), None):
+        return bad
     return None
 def build_section(name: str, attr: str, scenario: str, fields: list[str], args: argparse.Namespace) -> dict[str, Any]:
     raw_path = getattr(args, attr)
@@ -879,7 +884,10 @@ def generate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     statuses = {s["status"] for s in sections.values()}
     verdict = "FAIL" if statuses & {"fail", "helper_only"} else "NO_DATA" if "no_data" in statuses else "PASS"
     inputs = {k: (v if k.endswith("_no_data") else str(Path(os.path.realpath(Path(os.path.expanduser(v)))))) for k, v in vars(args).items() if k != "output" and v}
-    report = {"schema_version": SCHEMA_VERSION, "verdict": verdict, "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "inputs": inputs, "sections": sections, "claim_inventory": inventory(sections), "non_goals": ["PR-1 report consumer only; no runtime, producer, live scenario, client, schema, or CI changes.", "Reorg behavior evidence remains blocked on RUB-240 source-bound producer sidecars.", "RUB-227 orphan metrics remain deferred/not_applicable."]}
+    non_goals = ["No runtime/client/schema/CI changes are claimed by this aggregate report.", "RUB-227 orphan metrics remain deferred/not_applicable."]
+    if sections["partition_heal_reorg"].get("behavior_evidence") is not True:
+        non_goals.append("Partition/heal/reorg behavior evidence requires source-bound producer sidecars before classification.")
+    report = {"schema_version": SCHEMA_VERSION, "verdict": verdict, "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "inputs": inputs, "sections": sections, "claim_inventory": inventory(sections), "non_goals": non_goals}
     return report, 1 if verdict == "FAIL" else 0
 def write_atomic(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

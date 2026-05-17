@@ -105,12 +105,15 @@ def tip_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, bloc
     req(set(tip) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"{label} keys mismatch: {sorted(tip)}")
     req(tip.get("implementation") == impl and tip.get("rpc_endpoint") == endpoint and tip.get("request_path") == "/get_tip", f"{label} sidecar identity mismatch")
     req(tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height, f"{label} does not match expected tip")
-def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str) -> None:
+def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str, expected_prev_hash=None) -> None:
     block = load_json_file(label, p)
     req(set(block) == {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}, f"{label} keys mismatch: {sorted(block)}")
     req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == f"/get_block?height={height}", f"{label} sidecar identity mismatch")
     req(block.get("canonical") is True and block.get("height") == height and block.get("hash") == block_hash and isinstance(block.get("block_hex"), str) and re.fullmatch(r"[0-9a-f]+", block["block_hex"] or "") is not None, f"{label} does not match expected block")
-    request = json.dumps({"op": "block_basic_check", "block_hex": block["block_hex"], "height": height}) + "\n"
+    request_obj = {"op": "block_basic_check", "block_hex": block["block_hex"], "height": height}
+    if expected_prev_hash is not None:
+        request_obj["expected_prev_hash"] = expected_prev_hash
+    request = json.dumps(request_obj) + "\n"
     try:
         proc = subprocess.run([dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=max(30, min(LIVE_TIMEOUT, 60)))
     except subprocess.TimeoutExpired:
@@ -590,10 +593,9 @@ if partition_mode:
     req(nonempty_str(data.get("run_id")), "partition report run_id missing")
     req(data.get("run_id") == artifact_root.name, "partition report run_id mismatch")
     req(ts(data.get("artifact_created_at_utc")), "partition report artifact_created_at_utc invalid")
-    proof = exact_object(data.get("proof"), {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "partition_proxy_pid", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}, "proof")
+    proof = exact_object(data.get("proof"), {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}, "proof")
     req(all(proof.get(key) is True for key in ("partition_changed_peer_state", "fork_diverged", "heal_restored_peer_state", "reorg_converged", "process_identity_rechecked_after_heal")), "partition proof booleans are not all true")
     req(ep(proof.get("partition_proxy_endpoint")) and ep(proof.get("pre_partition_go_peer_addr")) and ep(proof.get("heal_go_peer_addr")), "partition proxy endpoints are malformed")
-    req(isinstance(proof.get("partition_proxy_pid"), int) and not isinstance(proof.get("partition_proxy_pid"), bool) and proof["partition_proxy_pid"] > 0, "partition proxy pid is malformed")
     metrics = exact_object(proof.get("go_reorg_metrics"), {"rubin_node_last_reorg_depth", "rubin_node_reorg_total"}, "proof.go_reorg_metrics")
     req(json_int(metrics.get("rubin_node_reorg_total"), "proof.go_reorg_metrics.rubin_node_reorg_total", 1) >= 1 and json_int(metrics.get("rubin_node_last_reorg_depth"), "proof.go_reorg_metrics.rubin_node_last_reorg_depth", 1) >= 1, "partition go reorg metrics do not prove reorg")
     go_fork, rust_win = tip_obj(proof.get("go_partition_tip"), "proof.go_partition_tip"), tip_obj(proof.get("rust_winning_tip"), "proof.rust_winning_tip")
@@ -637,19 +639,20 @@ if partition_mode:
     go_mine = mine_sidecar("observations.fork.go_mine", obs_paths["fork.go_mine"], "go", nodes_by_impl["go"]["rpc_endpoint"])
     req(go_mine.get("height") == go_fork["height"] and go_mine.get("block_hash") == go_fork["hash"], "go fork mine sidecar mismatch")
     tip_sidecar("observations.fork.go_tip", obs_paths["fork.go_tip"], "go", nodes_by_impl["go"]["rpc_endpoint"], go_fork["height"], go_fork["hash"])
-    block_sidecar("observations.fork.go_block", obs_paths["fork.go_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], go_fork["height"], go_fork["hash"])
+    block_sidecar("observations.fork.go_block", obs_paths["fork.go_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], go_fork["height"], go_fork["hash"], common_mine["block_hash"])
     mine1 = mine_sidecar("observations.fork.rust_mine_1", obs_paths["fork.rust_mine_1"], "rust", nodes_by_impl["rust"]["rpc_endpoint"])
     req(mine1.get("height") == go_fork["height"], "rust fork first mine height is not parallel to go fork")
-    block_sidecar("observations.fork.rust_block_1", obs_paths["fork.rust_block_1"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], mine1["height"], mine1["block_hash"])
+    req(mine1.get("block_hash") != go_fork["hash"], "rust fork first mine did not diverge from go fork")
+    block_sidecar("observations.fork.rust_block_1", obs_paths["fork.rust_block_1"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], mine1["height"], mine1["block_hash"], common_mine["block_hash"])
     mine2 = mine_sidecar("observations.fork.rust_mine_2", obs_paths["fork.rust_mine_2"], "rust", nodes_by_impl["rust"]["rpc_endpoint"])
     req(mine2.get("height") == rust_win["height"] and mine2.get("block_hash") == rust_win["hash"], "rust winning mine sidecar mismatch")
     tip_sidecar("observations.fork.rust_tip", obs_paths["fork.rust_tip"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], rust_win["height"], rust_win["hash"])
-    block_sidecar("observations.fork.rust_block_2", obs_paths["fork.rust_block_2"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], rust_win["height"], rust_win["hash"])
+    block_sidecar("observations.fork.rust_block_2", obs_paths["fork.rust_block_2"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], rust_win["height"], rust_win["hash"], mine1["block_hash"])
     tip_sidecar("observations.reorg.go_tip", obs_paths["reorg.go_tip"], "go", nodes_by_impl["go"]["rpc_endpoint"], final_go["height"], final_go["hash"])
     tip_sidecar("observations.reorg.rust_tip", obs_paths["reorg.rust_tip"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], final_rust["height"], final_rust["hash"])
-    block_sidecar("observations.reorg.go_reorg_parent_block", obs_paths["reorg.go_reorg_parent_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], mine1["height"], mine1["block_hash"])
-    block_sidecar("observations.reorg.go_tip_block", obs_paths["reorg.go_tip_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], final_go["height"], final_go["hash"])
-    block_sidecar("observations.reorg.rust_tip_block", obs_paths["reorg.rust_tip_block"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], final_rust["height"], final_rust["hash"])
+    block_sidecar("observations.reorg.go_reorg_parent_block", obs_paths["reorg.go_reorg_parent_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], mine1["height"], mine1["block_hash"], common_mine["block_hash"])
+    block_sidecar("observations.reorg.go_tip_block", obs_paths["reorg.go_tip_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], final_go["height"], final_go["hash"], mine1["block_hash"])
+    block_sidecar("observations.reorg.rust_tip_block", obs_paths["reorg.rust_tip_block"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], final_rust["height"], final_rust["hash"], mine1["block_hash"])
     final = exact_object(data.get("final_verification"), {"peer_snapshots_rechecked", "process_identity_rechecked", "producer_side", "rust_outbound_link_rechecked", "rust_outbound_local_addr", "rust_outbound_pid", "rust_outbound_remote_addr"}, "final_verification")
     req(final.get("producer_side") is True and final.get("process_identity_rechecked") is True and final.get("peer_snapshots_rechecked") is True and final.get("rust_outbound_link_rechecked") is False and final.get("rust_outbound_local_addr") is None and final.get("rust_outbound_pid") is None and final.get("rust_outbound_remote_addr") is None, "partition final verification is incomplete")
 if tx_mode:
@@ -804,7 +807,6 @@ rules = [
     ("partition report artifact_created_at_utc invalid", "partition_artifact_created_at_invalid"),
     ("partition proof booleans are not all true", "partition_proof_booleans_invalid"),
     ("partition proxy endpoints are malformed", "partition_proxy_endpoint_invalid"),
-    ("partition proxy pid is malformed", "partition_proxy_pid_invalid"),
     ("partition fork tips do not prove Rust winning branch", "partition_fork_winner_invalid"),
     ("partition final tips are not the Rust winning tip", "partition_final_tip_not_winner"),
     ("partition final verification is incomplete", "partition_final_verification_invalid"),
@@ -1973,7 +1975,6 @@ if restart_mode and verdict == "PASS":
 if partition_mode and verdict == "PASS":
     tip = lambda height_key, hash_key: {"height": int(e[height_key]), "hash": e[hash_key]}
     report["proof"] = {
-        "partition_proxy_pid": int(e["PARTITION_PROXY_PID"]),
         "partition_proxy_endpoint": e["PARTITION_PROXY_ADDR"],
         "pre_partition_go_peer_addr": e["PARTITION_PRE_GO_PEER_ADDR"],
         "heal_go_peer_addr": e["PARTITION_HEAL_GO_PEER_ADDR"],
