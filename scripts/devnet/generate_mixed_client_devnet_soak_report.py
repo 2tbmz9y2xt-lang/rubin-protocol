@@ -39,6 +39,7 @@ RESTART_SNAPSHOT_KEYS = {"count", "peers"}; RESTART_PEER_ENTRY_KEYS = {"addr", "
 NODE_OBJECT_KEYS = {"binary", "command", "command_argv", "implementation", "name", "p2p_endpoint", "pid", "process_alive", "process_comm", "rpc_endpoint", "started_at"}
 NODE_BACKING_KEYS = {"p2p_endpoint_process_backed", "rpc_endpoint_process_backed"}
 PARTITION_NODE_KEYS = {"implementation", "name", "p2p_endpoint", "pid", "rpc_endpoint", "started_at"}
+PARTITION_TOP_KEYS = {"artifact_created_at_utc", "artifact_root", "final_verification", "legacy_schema_compatibility", "nodes", "observations", "peer_connectivity", "proof", "raw_samples", "run_id", "scenario", "verdict"}
 PARTITION_SOURCE_FIELDS = [
     "run_id", "artifact_created_at_utc",
     "proof.partition_proxy_endpoint", "proof.pre_partition_go_peer_addr", "proof.heal_go_peer_addr",
@@ -50,6 +51,7 @@ PARTITION_SOURCE_FIELDS = [
     "observations.heal.go_peer_snapshot", "observations.heal.rust_peer_snapshot",
     "observations.reorg.go_metrics", "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
 ]
+PARTITION_PASS_CONTRACT_FIELDS = ["legacy_schema_compatibility.marker_path", "nodes", "raw_samples.propagation", "raw_samples.convergence"]
 SECTIONS = {
     "mesh": ("mesh_report", "mixed_client_mesh", ["nodes", "peer_connectivity", "final_verification", "legacy_schema_compatibility.marker_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "go_to_rust_accept": ("go_submit_rust_accept_report", "mixed_client_go_submit_rust_accept", ["go_submit", "rust_accept", "tx_path", "raw_samples.propagation"]),
@@ -584,6 +586,37 @@ def partition_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path
         if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
             return "partition_reorg_source_binding_contradiction:node_identity_invalid"
     return None
+def partition_pass_contract_error(data: dict[str, Any], path: Path) -> str | None:
+    if set(data) != PARTITION_TOP_KEYS:
+        return "partition_reorg_source_binding_contradiction:top_level_fields_invalid"
+    root = safe_abs_path(data.get("artifact_root"))
+    if root is None or not root.is_dir() or root.is_symlink():
+        return "partition_reorg_source_binding_contradiction:artifact_root_invalid"
+    try:
+        Path(os.path.realpath(path)).relative_to(root)
+    except ValueError:
+        return "partition_reorg_source_binding_contradiction:report_outside_artifact_root"
+    legacy = data.get("legacy_schema_compatibility")
+    if not isinstance(legacy, dict) or legacy.get("authoritative") is not False or "verdict" in legacy:
+        return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
+    marker_raw = legacy.get("marker_path")
+    if not isinstance(marker_raw, str) or not marker_raw:
+        return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
+    marker_path, marker_err = regular_abs_path(marker_raw, "partition_reorg_source_binding_contradiction:legacy_marker_invalid")
+    if marker_err:
+        return marker_err
+    try:
+        marker_path.relative_to(root)
+    except ValueError:
+        return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
+    marker, marker_load_err = load(marker_path)
+    if marker_load_err or not isinstance(marker, dict) or marker.get("schema_version") != RESTART_MARKER_SCHEMA_VERSION or marker.get("scenario") != "mixed_client_mesh_schema_marker" or marker.get("evidence_type") != "mixed_client_process_soak" or marker.get("verdict") != "FAIL":
+        return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
+    _, node_bad = nodes(data, require_alive=True, require_backing=True)
+    if node_bad:
+        return node_bad
+    sample_bad = validate_samples(data, None, None, "")
+    return f"partition_reorg_source_binding_contradiction:{sample_bad}" if sample_bad else None
 def partition_load_sidecar(path: Path, reason: str) -> tuple[dict[str, Any] | None, str | None]:
     data, err = load(path)
     return (data, None) if err is None and isinstance(data, dict) else (None, reason)
@@ -832,9 +865,11 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
             return section(name, "fail", bad, source_artifact_path=path, scenario=got)
         if missing:
             return section(name, "no_data", reason, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
+        if bad := partition_pass_contract_error(data, path):
+            return section(name, "fail", bad, source_artifact_path=path, scenario=got)
         if bad := partition_sidecar_error(data, path):
             return section(name, "fail", bad, source_artifact_path=path, scenario=got)
-        return section(name, "pass", None, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="behavior_evidence", evidence_class="behavior_evidence", behavior_evidence=True)
+        return section(name, "pass", None, source_artifact_path=path, scenario=got, source_fields=fields + PARTITION_PASS_CONTRACT_FIELDS, claim_type="behavior_evidence", evidence_class="behavior_evidence", behavior_evidence=True)
     if missing:
         return section(name, "fail", "missing_source_fields:" + ",".join(missing), source_artifact_path=path, scenario=got)
     bad = validate_mesh(data) if name == "mesh" else validate_tx(data, "converge" in name, name.startswith("rust_to_go"))

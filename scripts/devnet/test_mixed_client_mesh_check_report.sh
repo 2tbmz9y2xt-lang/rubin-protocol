@@ -730,6 +730,9 @@ bad_peer_snapshot = peer_snapshot(partition_proxy); bad_peer_snapshot["count"] =
 partition_observations = {"pre_partition": {"common_go_block": str(artifact_root / "partition-common-go-block.json"), "common_go_mine": str(artifact_root / "partition-common-go-mine.json"), "common_rust_block": str(artifact_root / "partition-common-rust-block.json"), "common_rust_tip": str(artifact_root / "partition-common-rust-tip.json"), "go_peer_snapshot": str(artifact_root / "partition-pre-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-pre-rust-peers.json")}, "partition": {"go_peer_snapshot": str(artifact_root / "partition-drop-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-drop-rust-peers.json")}, "fork": {"go_block": str(artifact_root / "partition-go-block.json"), "go_mine": str(artifact_root / "partition-go-mine.json"), "go_peer_snapshot": str(artifact_root / "partition-fork-go-peers.json"), "go_tip": str(artifact_root / "partition-go-tip.json"), "rust_block_1": str(artifact_root / "partition-rust-block-1.json"), "rust_block_2": str(artifact_root / "partition-rust-block-2.json"), "rust_mine_1": str(artifact_root / "partition-rust-mine-1.json"), "rust_mine_2": str(artifact_root / "partition-rust-mine-2.json"), "rust_peer_snapshot": str(artifact_root / "partition-fork-rust-peers.json"), "rust_tip": str(artifact_root / "partition-rust-tip.json")}, "heal": {"go_peer_snapshot": str(artifact_root / "partition-heal-go-peers.json"), "rust_peer_snapshot": str(artifact_root / "partition-heal-rust-peers.json")}, "reorg": {"go_metrics": str(artifact_root / "partition-go-metrics.prom"), "go_reorg_parent_block": str(artifact_root / "partition-go-reorg-parent-block.json"), "go_tip": str(artifact_root / "partition-final-go-tip.json"), "go_tip_block": str(artifact_root / "partition-final-go-block.json"), "rust_tip": str(artifact_root / "partition-final-rust-tip.json"), "rust_tip_block": str(artifact_root / "partition-final-rust-block.json")}}
 partition_report = {**mesh_report, "artifact_created_at_utc": "2026-05-12T10:00:02Z", "final_verification": partition_final, "legacy_schema_compatibility": {**mesh_report["legacy_schema_compatibility"], "marker_path": str(mesh_marker)}, "nodes": partition_nodes, "observations": partition_observations, "peer_connectivity": partition_peer_connectivity, "proof": {"final_go_tip": {"height": rust_win_height, "hash": rust_win_hash}, "final_rust_tip": {"height": rust_win_height, "hash": rust_win_hash}, "fork_diverged": True, "go_partition_tip": {"height": height, "hash": block_hash}, "go_reorg_metrics": {"rubin_node_last_reorg_depth": 1, "rubin_node_reorg_total": 1}, "heal_go_peer_addr": partition_go_peer, "heal_restored_peer_state": True, "partition_changed_peer_state": True, "partition_proxy_endpoint": partition_proxy, "pre_partition_go_peer_addr": partition_go_peer, "process_identity_rechecked_after_heal": True, "reorg_converged": True, "rust_winning_tip": {"height": rust_win_height, "hash": rust_win_hash}}, "run_id": artifact_root.name, "scenario": "mixed_client_partition_heal_reorg"}
 dump(root / "partition-report.json", partition_report)
+bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["raw_samples"]; dump(artifact_root / "partition-missing-raw-samples-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); del bad_partition["nodes"][0]["process_alive"]; dump(artifact_root / "partition-missing-process-alive-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["unexpected_pass_evidence"] = True; dump(artifact_root / "partition-extra-top-level-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_reorg_parent_block"] = str(artifact_root / "partition-go-losing-reorg-parent-block.json"); dump(root / "partition-losing-parent-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_reorg_parent_block"] = str(artifact_root / "partition-go-reorg-parent-forged-block.json"); dump(root / "partition-forged-parent-payload-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["rust_winning_tip"] = {"height": height, "hash": missing_tx_hash}; bad_partition["proof"]["final_go_tip"] = {"height": height, "hash": missing_tx_hash}; bad_partition["proof"]["final_rust_tip"] = {"height": height, "hash": missing_tx_hash}; dump(root / "partition-same-height-winner-report.json", bad_partition)
@@ -1166,6 +1169,9 @@ print(root / "restart-catch-up-tip-sidecar-low-best-known.json")
 print(root / "restart-stale-artifact-created-at.json")
 print(root / "restart-stale-run-id-mismatch.json")
 print(root / "partition-report.json")
+print(artifact_root / "partition-missing-raw-samples-report.json")
+print(artifact_root / "partition-missing-process-alive-report.json")
+print(artifact_root / "partition-extra-top-level-report.json")
 print(root / "partition-losing-parent-report.json")
 print(root / "partition-forged-parent-payload-report.json")
 print(root / "partition-same-height-winner-report.json")
@@ -1265,21 +1271,24 @@ RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT="$(sed -n '57p' "${REPORT_LIS
 RESTART_STALE_ARTIFACT_TIME_REPORT="$(sed -n '58p' "${REPORT_LIST}")"
 RESTART_STALE_RUN_ID_MISMATCH_REPORT="$(sed -n '59p' "${REPORT_LIST}")"
 PARTITION_REPORT="$(sed -n '60p' "${REPORT_LIST}")"
-PARTITION_LOSING_PARENT_REPORT="$(sed -n '61p' "${REPORT_LIST}")"
-PARTITION_FORGED_PARENT_PAYLOAD_REPORT="$(sed -n '62p' "${REPORT_LIST}")"
-PARTITION_SAME_HEIGHT_WINNER_REPORT="$(sed -n '63p' "${REPORT_LIST}")"
-PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT="$(sed -n '64p' "${REPORT_LIST}")"
-PARTITION_PEER_CONNECTIVITY_BOOL_COUNT_REPORT="$(sed -n '65p' "${REPORT_LIST}")"
-PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT="$(sed -n '66p' "${REPORT_LIST}")"
-PARTITION_UNBACKED_NODE_REPORT="$(sed -n '67p' "${REPORT_LIST}")"
-PARTITION_RUST_PEER_ARGV_MISMATCH_REPORT="$(sed -n '68p' "${REPORT_LIST}")"
-PARTITION_DISCONNECTED_GO_FORK_REPORT="$(sed -n '69p' "${REPORT_LIST}")"
-PARTITION_SAME_FIRST_RUST_FORK_REPORT="$(sed -n '70p' "${REPORT_LIST}")"
-PARTITION_SKIP_HEIGHT_RUST_WINNER_REPORT="$(sed -n '71p' "${REPORT_LIST}")"
-PARTITION_FORGED_METRICS_REPORT="$(sed -n '72p' "${REPORT_LIST}")"
-PARTITION_PEER_SIDECAR_BOOL_COUNT_REPORT="$(sed -n '73p' "${REPORT_LIST}")"
-PARTITION_METRICS_TIMESTAMP_REPORT="$(sed -n '74p' "${REPORT_LIST}")"
-PARTITION_METRICS_JSON_REPORT="$(sed -n '75p' "${REPORT_LIST}")"
+PARTITION_MISSING_RAW_SAMPLES_REPORT="$(sed -n '61p' "${REPORT_LIST}")"
+PARTITION_MISSING_PROCESS_ALIVE_REPORT="$(sed -n '62p' "${REPORT_LIST}")"
+PARTITION_EXTRA_TOP_LEVEL_REPORT="$(sed -n '63p' "${REPORT_LIST}")"
+PARTITION_LOSING_PARENT_REPORT="$(sed -n '64p' "${REPORT_LIST}")"
+PARTITION_FORGED_PARENT_PAYLOAD_REPORT="$(sed -n '65p' "${REPORT_LIST}")"
+PARTITION_SAME_HEIGHT_WINNER_REPORT="$(sed -n '66p' "${REPORT_LIST}")"
+PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT="$(sed -n '67p' "${REPORT_LIST}")"
+PARTITION_PEER_CONNECTIVITY_BOOL_COUNT_REPORT="$(sed -n '68p' "${REPORT_LIST}")"
+PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT="$(sed -n '69p' "${REPORT_LIST}")"
+PARTITION_UNBACKED_NODE_REPORT="$(sed -n '70p' "${REPORT_LIST}")"
+PARTITION_RUST_PEER_ARGV_MISMATCH_REPORT="$(sed -n '71p' "${REPORT_LIST}")"
+PARTITION_DISCONNECTED_GO_FORK_REPORT="$(sed -n '72p' "${REPORT_LIST}")"
+PARTITION_SAME_FIRST_RUST_FORK_REPORT="$(sed -n '73p' "${REPORT_LIST}")"
+PARTITION_SKIP_HEIGHT_RUST_WINNER_REPORT="$(sed -n '74p' "${REPORT_LIST}")"
+PARTITION_FORGED_METRICS_REPORT="$(sed -n '75p' "${REPORT_LIST}")"
+PARTITION_PEER_SIDECAR_BOOL_COUNT_REPORT="$(sed -n '76p' "${REPORT_LIST}")"
+PARTITION_METRICS_TIMESTAMP_REPORT="$(sed -n '77p' "${REPORT_LIST}")"
+PARTITION_METRICS_JSON_REPORT="$(sed -n '78p' "${REPORT_LIST}")"
 TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT="${TMP_ROOT}/tx-huge-int-propagation-sample.json"
 CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-bool-height-sample.json"
 CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-float-height-sample.json"
@@ -1287,11 +1296,17 @@ CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT="${TMP_ROOT}/converge-uppercase-bloc
 [[ -f "${TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT}" && -f "${CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT}" ]] || { echo "failed to build raw sample regression reports" >&2; exit 1; }
 [[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_SLO_CLAIM_SAMPLE_REPORT}" && -n "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" && -n "${MESH_BAD_PROPAGATION_REASON_REPORT}" && -n "${MESH_BAD_CONVERGENCE_REASON_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 [[ -n "${RESTART_REPORT}" && -n "${RESTART_MISSING_RESTART_REPORT}" && -n "${RESTART_MISSING_PROCESS_REPORT}" && -n "${RESTART_SAME_PID_REPORT}" && -n "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" && -n "${RESTART_NO_PEER_RECONNECT_REPORT}" && -n "${RESTART_SAME_DATADIR_FALSE_REPORT}" && -n "${RESTART_DATADIR_MISMATCH_REPORT}" && -n "${RESTART_STALE_RUN_ID_REPORT}" && -n "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" && -n "${RESTART_STALE_CATCH_UP_REPORT}" && -n "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}" && -n "${RESTART_NEW_PID_NOT_FINAL_REPORT}" && -n "${RESTART_PRE_TIP_ABSENT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_ABSENT_REPORT}" && -n "${RESTART_GO_TARGET_NOT_ADVANCED_REPORT}" && -n "${RESTART_PRE_RESTART_HEIGHT_STRING_REPORT}" && -n "${RESTART_GO_TARGET_HEIGHT_STRING_REPORT}" && -n "${RESTART_CATCH_UP_HEIGHT_STRING_REPORT}" && -n "${RESTART_PRE_RESTART_HEIGHT_BOOL_REPORT}" && -n "${RESTART_GO_TARGET_HEIGHT_BOOL_REPORT}" && -n "${RESTART_CATCH_UP_HEIGHT_BOOL_REPORT}" && -n "${RESTART_CATCH_UP_TIP_MISMATCH_REPORT}" && -n "${RESTART_STALE_LEGACY_TEXT_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}" && -n "${RESTART_OLD_PID_ALIAS_GO_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_STALE_ARTIFACT_TIME_REPORT}" && -n "${RESTART_STALE_RUN_ID_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic restart reports" >&2; exit 1; }
-[[ -n "${PARTITION_REPORT}" && -n "${PARTITION_LOSING_PARENT_REPORT}" && -n "${PARTITION_FORGED_PARENT_PAYLOAD_REPORT}" && -n "${PARTITION_SAME_HEIGHT_WINNER_REPORT}" && -n "${PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT}" && -n "${PARTITION_PEER_CONNECTIVITY_BOOL_COUNT_REPORT}" && -n "${PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT}" && -n "${PARTITION_UNBACKED_NODE_REPORT}" && -n "${PARTITION_RUST_PEER_ARGV_MISMATCH_REPORT}" && -n "${PARTITION_DISCONNECTED_GO_FORK_REPORT}" && -n "${PARTITION_SAME_FIRST_RUST_FORK_REPORT}" && -n "${PARTITION_SKIP_HEIGHT_RUST_WINNER_REPORT}" && -n "${PARTITION_FORGED_METRICS_REPORT}" && -n "${PARTITION_PEER_SIDECAR_BOOL_COUNT_REPORT}" && -n "${PARTITION_METRICS_TIMESTAMP_REPORT}" && -n "${PARTITION_METRICS_JSON_REPORT}" ]] || { echo "failed to build synthetic partition reports" >&2; exit 1; }
+[[ -n "${PARTITION_REPORT}" && -n "${PARTITION_MISSING_RAW_SAMPLES_REPORT}" && -n "${PARTITION_MISSING_PROCESS_ALIVE_REPORT}" && -n "${PARTITION_EXTRA_TOP_LEVEL_REPORT}" && -n "${PARTITION_LOSING_PARENT_REPORT}" && -n "${PARTITION_FORGED_PARENT_PAYLOAD_REPORT}" && -n "${PARTITION_SAME_HEIGHT_WINNER_REPORT}" && -n "${PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT}" && -n "${PARTITION_PEER_CONNECTIVITY_BOOL_COUNT_REPORT}" && -n "${PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT}" && -n "${PARTITION_UNBACKED_NODE_REPORT}" && -n "${PARTITION_RUST_PEER_ARGV_MISMATCH_REPORT}" && -n "${PARTITION_DISCONNECTED_GO_FORK_REPORT}" && -n "${PARTITION_SAME_FIRST_RUST_FORK_REPORT}" && -n "${PARTITION_SKIP_HEIGHT_RUST_WINNER_REPORT}" && -n "${PARTITION_FORGED_METRICS_REPORT}" && -n "${PARTITION_PEER_SIDECAR_BOOL_COUNT_REPORT}" && -n "${PARTITION_METRICS_TIMESTAMP_REPORT}" && -n "${PARTITION_METRICS_JSON_REPORT}" ]] || { echo "failed to build synthetic partition reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_pass_contains "rust restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --rust-restart --check-report "${RESTART_REPORT}"
 expect_pass_contains "partition check-report" "PASS: mixed_client_partition_heal_reorg report structurally accepted" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_REPORT}"
+expect_fail_contains "partition rejects missing raw samples" "report top-level keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_MISSING_RAW_SAMPLES_REPORT}"
+expect_generator_fail_contains "partition generator rejects missing raw samples" "top_level_fields_invalid" --partition-heal-reorg-report "${PARTITION_MISSING_RAW_SAMPLES_REPORT}"
+expect_fail_contains "partition rejects missing process_alive" "go node keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_MISSING_PROCESS_ALIVE_REPORT}"
+expect_generator_fail_contains "partition generator rejects missing process_alive" "process_identity_missing_or_invalid" --partition-heal-reorg-report "${PARTITION_MISSING_PROCESS_ALIVE_REPORT}"
+expect_fail_contains "partition rejects extra top-level evidence" "report top-level keys mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_EXTRA_TOP_LEVEL_REPORT}"
+expect_generator_fail_contains "partition generator rejects extra top-level evidence" "top_level_fields_invalid" --partition-heal-reorg-report "${PARTITION_EXTRA_TOP_LEVEL_REPORT}"
 expect_fail_contains "partition rejects losing fork as reorg parent" "observations.reorg.go_reorg_parent_block does not match expected block" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_LOSING_PARENT_REPORT}"
 expect_fail_contains "partition rejects forged parent block payload" "observations.reorg.go_reorg_parent_block parsed block hash mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_FORGED_PARENT_PAYLOAD_REPORT}"
 expect_fail_contains "partition rejects same-height winning fork" "partition fork tips do not prove Rust winning branch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_SAME_HEIGHT_WINNER_REPORT}"
