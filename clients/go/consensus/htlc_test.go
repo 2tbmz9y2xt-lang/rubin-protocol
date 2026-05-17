@@ -74,6 +74,40 @@ func htlcTestDigest(t *testing.T, sighashType uint8) [32]byte {
 	return digest
 }
 
+func TestValidateHTLCSpend_MalformedArgumentList(t *testing.T) {
+	_, _, claimKeyID, refundKeyID := makeMLKeyMaterial(0x20)
+	entry := makeHTLCEntry(sha3_256([]byte("x")), LOCK_MODE_HEIGHT, 1, claimKeyID, refundKeyID)
+	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: claimKeyID[:], Signature: []byte{0x00}}
+	sig := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87}
+
+	badCalls := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "missing arguments",
+			err:  ValidateHTLCSpend(entry, path, sig, nil, uint32(0)),
+		},
+		{
+			name: "bad input index type",
+			err:  ValidateHTLCSpend(entry, path, sig, nil, "bad-index", uint64(0), [32]byte{}, uint64(0), uint64(0)),
+		},
+		{
+			name: "bad rotation type",
+			err:  ValidateHTLCSpendAtHeight(entry, path, sig, nil, uint32(0), uint64(0), [32]byte{}, uint64(0), uint64(0), nil, "bad-rotation", nil),
+		},
+	}
+
+	for _, tc := range badCalls {
+		if tc.err == nil {
+			t.Fatalf("%s: expected error", tc.name)
+		}
+		if got := mustTxErrCode(t, tc.err); got != TX_ERR_PARSE {
+			t.Fatalf("%s: code=%s, want %s", tc.name, got, TX_ERR_PARSE)
+		}
+	}
+}
+
 func TestParseHTLCCovenantData_OK(t *testing.T) {
 	preimage := []byte("rubin-htlc")
 	hash := sha3_256(preimage)
