@@ -86,24 +86,25 @@ import (
 	"strings"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
+const reasonPrefix = "RUBIN_BLOCK_CHECK_REASON:"
 type blockResp struct { Hash string `json:"hash"`; Height uint64 `json:"height"`; Canonical bool `json:"canonical"`; BlockHex string `json:"block_hex"` }
 type request struct { Block blockResp `json:"block"`; TxHex string `json:"tx_hex"`; Txid string `json:"txid"`; Height uint64 `json:"height"`; Hash string `json:"hash"`; TxCount uint64 `json:"tx_count"` }
-func die(v any) { fmt.Fprintln(os.Stderr, v); os.Exit(1) }
+func die(reason string, detail any) { fmt.Fprintln(os.Stderr, reasonPrefix + reason); fmt.Fprintln(os.Stderr, detail); os.Exit(1) }
 func main() {
 	var req request
-	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil { die("decode request: " + err.Error()) }
-	if req.Block.Height != req.Height || strings.ToLower(req.Block.Hash) != strings.ToLower(req.Hash) || !req.Block.Canonical { die("block response height/hash/canonical mismatch") }
-	txBytes, err := hex.DecodeString(strings.TrimSpace(req.TxHex)); if err != nil { die("decode tx_hex: " + err.Error()) }
-	_, wantTxid, _, consumed, err := consensus.ParseTx(txBytes); if err != nil || consumed != len(txBytes) { die("parse tx_hex failed") }
-	if hex.EncodeToString(wantTxid[:]) != strings.ToLower(req.Txid) { die("tx_hex txid mismatch") }
-	blockBytes, err := hex.DecodeString(strings.TrimSpace(req.Block.BlockHex)); if err != nil { die("decode block_hex: " + err.Error()) }
-	pb, err := consensus.ParseBlockBytes(blockBytes); if err != nil { die("parse block_hex failed: " + err.Error()) }
-	gotHash, err := consensus.BlockHash(pb.HeaderBytes); if err != nil || hex.EncodeToString(gotHash[:]) != strings.ToLower(req.Hash) { die("parsed block hash mismatch") }
-	if pb.TxCount != req.TxCount { die("parsed block tx_count mismatch") }
-	if _, err := consensus.ValidateBlockBasicAtHeight(blockBytes, nil, nil, req.Height); err != nil { die("basic block validation failed: " + err.Error()) }
+	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil { die("convergence_block_parser_malformed_input", err) }
+	if req.Block.Height != req.Height || strings.ToLower(req.Block.Hash) != strings.ToLower(req.Hash) || !req.Block.Canonical { die("convergence_block_sidecar_mismatch", "block response height/hash/canonical mismatch") }
+	txBytes, err := hex.DecodeString(strings.TrimSpace(req.TxHex)); if err != nil { die("convergence_tx_hex_parse_failed", err) }
+	_, wantTxid, _, consumed, err := consensus.ParseTx(txBytes); if err != nil || consumed != len(txBytes) { die("convergence_tx_hex_parse_failed", "parse tx_hex failed") }
+	if hex.EncodeToString(wantTxid[:]) != strings.ToLower(req.Txid) { die("convergence_tx_hex_txid_mismatch", "tx_hex txid mismatch") }
+	blockBytes, err := hex.DecodeString(strings.TrimSpace(req.Block.BlockHex)); if err != nil { die("convergence_block_hex_parse_failed", err) }
+	pb, err := consensus.ParseBlockBytes(blockBytes); if err != nil { die("convergence_block_hex_parse_failed", err) }
+	gotHash, err := consensus.BlockHash(pb.HeaderBytes); if err != nil || hex.EncodeToString(gotHash[:]) != strings.ToLower(req.Hash) { die("convergence_block_hash_mismatch", "parsed block hash mismatch") }
+	if pb.TxCount != req.TxCount { die("convergence_block_tx_count_mismatch", "parsed block tx_count mismatch") }
+	if _, err := consensus.ValidateBlockBasicAtHeight(blockBytes, nil, nil, req.Height); err != nil { die("convergence_block_basic_validation_failed", err) }
 	_, _, wantWtxid, _, _ := consensus.ParseTx(txBytes)
 	for i, got := range pb.Txids { if i > 0 && got == wantTxid && pb.Wtxids[i] == wantWtxid { return } }
-	die("submitted txid/wtxid missing from parsed block")
+	die("convergence_block_missing_submitted_txid", "submitted txid/wtxid missing from parsed block")
 }
 '''
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
@@ -425,19 +426,9 @@ def block_inclusion_error(block: dict[str, Any], txhex: str, txid: str, height: 
         return "convergence_block_parser_output_too_large"
     if proc.returncode == 0:
         return None
-    if "tx_hex txid mismatch" in output:
-        return "convergence_tx_hex_txid_mismatch"
-    if "submitted txid/wtxid missing from parsed block" in output:
-        return "convergence_block_missing_submitted_txid"
-    if "parsed block tx_count mismatch" in output:
-        return "convergence_block_tx_count_mismatch"
-    if "parsed block hash mismatch" in output:
-        return "convergence_block_hash_mismatch"
-    if "parse block_hex failed" in output or "decode block_hex:" in output:
-        return "convergence_block_hex_parse_failed"
-    if "basic block validation failed:" in output:
-        return "convergence_block_basic_validation_failed"
-    return "convergence_block_inclusion_failed"
+    if match := re.search(r"RUBIN_BLOCK_CHECK_REASON:([a-z0-9_:-]+)", output):
+        return match.group(1) if SAFE_REASON.fullmatch(match.group(1)) else "convergence_block_parser_malformed_output"
+    return "convergence_block_parser_failed"
 def tx_converge_sidecar_error(mine: dict[str, Any], seen: dict[str, Any], mine_impl: str, seen_impl: str, by_impl: dict[str, dict[str, Any]], root: Path, txid: str, txhex: str) -> tuple[list[Path], str | None]:
     reason = "convergence_sidecar_invalid"
     mine_next, mine_next_path, err = source_load_json_detailed(mine.get("mine_next_path"), root, "convergence_sidecar_path_invalid", "convergence_sidecar_nonobject")
