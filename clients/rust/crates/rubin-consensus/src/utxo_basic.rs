@@ -614,7 +614,7 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
             height,
             "CORE_VAULT",
             &mut sighash_cache,
-            sig_queue.as_deref_mut(),
+            sig_queue,
             rotation,
             registry,
         )?;
