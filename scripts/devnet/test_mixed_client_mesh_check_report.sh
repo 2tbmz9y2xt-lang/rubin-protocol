@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HARNESS="${REPO_ROOT}/scripts/devnet-mixed-client-mesh.sh"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 VALIDATOR="${REPO_ROOT}/scripts/devnet/validate_mixed_client_evidence.py"
+GENERATOR="${REPO_ROOT}/scripts/devnet/generate_mixed_client_devnet_soak_report.py"
 GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 MESH_TIMEOUT=1
 export GO_MODULE_ROOT
@@ -14,6 +15,7 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; 
 [[ -x "${HARNESS}" ]] || { echo "mixed-client mesh harness missing or non-executable: ${HARNESS}" >&2; exit 1; }
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
 [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
+[[ -r "${GENERATOR}" ]] || { echo "generator unreadable: ${GENERATOR}" >&2; exit 1; }
 
 TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "test TMPDIR parent is not usable: ${TMPDIR:-/tmp}" >&2; exit 1; }
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-mesh-check-report.XXXXXX")"
@@ -90,6 +92,19 @@ expect_fail_check_token() {
     printf '%s\n' "${output}" >&2
     exit 1
   fi
+}
+
+expect_generator_fail_contains() {
+  local label="$1" needle="$2" output_path output
+  shift 2
+  output_path="${TMP_ROOT}/generator-negative.json"
+  if output="$(python3 "${GENERATOR}" "$@" --output "${output_path}" 2>&1)"; then
+    echo "FAIL: ${label} should fail" >&2
+    echo "actual output:" >&2
+    printf '%s\n' "${output}" >&2
+    exit 1
+  fi
+  require_contains "${output}" "${needle}" "${label}"
 }
 
 extract_check_report() {
@@ -665,6 +680,8 @@ bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observa
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["observations"]["reorg"]["go_reorg_parent_block"] = str(artifact_root / "partition-go-reorg-parent-forged-block.json"); dump(root / "partition-forged-parent-payload-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["proof"]["rust_winning_tip"] = {"height": height, "hash": missing_tx_hash}; bad_partition["proof"]["final_go_tip"] = {"height": height, "hash": missing_tx_hash}; bad_partition["proof"]["final_rust_tip"] = {"height": height, "hash": missing_tx_hash}; dump(root / "partition-same-height-winner-report.json", bad_partition)
 bad_partition = json.loads(json.dumps(partition_report)); bad_partition["peer_connectivity"]["bidirectional_observed"] = True; dump(root / "partition-peer-connectivity-overclaim-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["final_verification"]["rust_outbound_link_rechecked"] = True; dump(root / "partition-final-verification-overclaim-report.json", bad_partition)
+bad_partition = json.loads(json.dumps(partition_report)); bad_partition["nodes"][0]["rpc_endpoint_process_backed"] = False; dump(root / "partition-unbacked-node-report.json", bad_partition)
 tx_report = {
     **mesh_report,
     "go_submit": {
@@ -1090,6 +1107,8 @@ print(root / "partition-losing-parent-report.json")
 print(root / "partition-forged-parent-payload-report.json")
 print(root / "partition-same-height-winner-report.json")
 print(root / "partition-peer-connectivity-overclaim-report.json")
+print(root / "partition-final-verification-overclaim-report.json")
+print(root / "partition-unbacked-node-report.json")
 PY
 }
 
@@ -1175,6 +1194,8 @@ PARTITION_LOSING_PARENT_REPORT="$(sed -n '61p' "${REPORT_LIST}")"
 PARTITION_FORGED_PARENT_PAYLOAD_REPORT="$(sed -n '62p' "${REPORT_LIST}")"
 PARTITION_SAME_HEIGHT_WINNER_REPORT="$(sed -n '63p' "${REPORT_LIST}")"
 PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT="$(sed -n '64p' "${REPORT_LIST}")"
+PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT="$(sed -n '65p' "${REPORT_LIST}")"
+PARTITION_UNBACKED_NODE_REPORT="$(sed -n '66p' "${REPORT_LIST}")"
 TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT="${TMP_ROOT}/tx-huge-int-propagation-sample.json"
 CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-bool-height-sample.json"
 CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT="${TMP_ROOT}/converge-float-height-sample.json"
@@ -1182,7 +1203,7 @@ CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT="${TMP_ROOT}/converge-uppercase-bloc
 [[ -f "${TX_HUGE_INT_PROPAGATION_SAMPLE_REPORT}" && -f "${CONVERGE_BOOL_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_FLOAT_HEIGHT_SAMPLE_REPORT}" && -f "${CONVERGE_UPPERCASE_BLOCK_HASH_SAMPLE_REPORT}" ]] || { echo "failed to build raw sample regression reports" >&2; exit 1; }
 [[ -n "${MESH_REPORT}" && -n "${TX_REPORT}" && -n "${CONVERGE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_REPORT}" && -n "${TX_MISSING_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_NONFINITE_PROPAGATION_SAMPLE_REPORT}" && -n "${TX_SLO_CLAIM_SAMPLE_REPORT}" && -n "${CONVERGE_MISSING_CONVERGENCE_SAMPLE_REPORT}" && -n "${MESH_BAD_PROPAGATION_REASON_REPORT}" && -n "${MESH_BAD_CONVERGENCE_REASON_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_TXID_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_GO_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_BAD_RUST_CONVERGE_CLASS_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_DUPLICATE_SIDECAR_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MALFORMED_BLOCK_REPORT}" && -n "${RUST_SUBMIT_GO_MINE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_WRONG_TXID_REPORT}" && -n "${CONVERGE_BAD_RUST_CLASS_REPORT}" && -n "${CONVERGE_DUPLICATE_SIDECAR_REPORT}" && -n "${CONVERGE_WRONG_SIDECAR_SOURCE_REPORT}" && -n "${CONVERGE_MALFORMED_BLOCK_REPORT}" && -n "${CONVERGE_MISSING_TX_BLOCK_REPORT}" && -n "${CONVERGE_BAD_MERKLE_BLOCK_REPORT}" && -n "${CONVERGE_TX_COUNT_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic reports" >&2; exit 1; }
 [[ -n "${RESTART_REPORT}" && -n "${RESTART_MISSING_RESTART_REPORT}" && -n "${RESTART_MISSING_PROCESS_REPORT}" && -n "${RESTART_SAME_PID_REPORT}" && -n "${RESTART_OLD_PID_NOT_STOPPED_REPORT}" && -n "${RESTART_NO_PEER_RECONNECT_REPORT}" && -n "${RESTART_SAME_DATADIR_FALSE_REPORT}" && -n "${RESTART_DATADIR_MISMATCH_REPORT}" && -n "${RESTART_STALE_RUN_ID_REPORT}" && -n "${RESTART_CATCH_UP_BELOW_PRE_RESTART_REPORT}" && -n "${RESTART_STALE_CATCH_UP_REPORT}" && -n "${RESTART_LEGACY_MARKER_MISMATCH_REPORT}" && -n "${RESTART_NEW_PID_NOT_FINAL_REPORT}" && -n "${RESTART_PRE_TIP_ABSENT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_ABSENT_REPORT}" && -n "${RESTART_GO_TARGET_NOT_ADVANCED_REPORT}" && -n "${RESTART_PRE_RESTART_HEIGHT_STRING_REPORT}" && -n "${RESTART_GO_TARGET_HEIGHT_STRING_REPORT}" && -n "${RESTART_CATCH_UP_HEIGHT_STRING_REPORT}" && -n "${RESTART_PRE_RESTART_HEIGHT_BOOL_REPORT}" && -n "${RESTART_GO_TARGET_HEIGHT_BOOL_REPORT}" && -n "${RESTART_CATCH_UP_HEIGHT_BOOL_REPORT}" && -n "${RESTART_CATCH_UP_TIP_MISMATCH_REPORT}" && -n "${RESTART_STALE_LEGACY_TEXT_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_TIP_FLOAT_HEIGHT_REPORT}" && -n "${RESTART_GO_TARGET_MINE_BOOL_TX_COUNT_REPORT}" && -n "${RESTART_OLD_PID_ALIAS_GO_REPORT}" && -n "${RESTART_PRE_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_GO_TARGET_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_CATCH_UP_TIP_SIDECAR_LOW_BEST_KNOWN_REPORT}" && -n "${RESTART_STALE_ARTIFACT_TIME_REPORT}" && -n "${RESTART_STALE_RUN_ID_MISMATCH_REPORT}" ]] || { echo "failed to build synthetic restart reports" >&2; exit 1; }
-[[ -n "${PARTITION_REPORT}" && -n "${PARTITION_LOSING_PARENT_REPORT}" && -n "${PARTITION_FORGED_PARENT_PAYLOAD_REPORT}" && -n "${PARTITION_SAME_HEIGHT_WINNER_REPORT}" && -n "${PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT}" ]] || { echo "failed to build synthetic partition reports" >&2; exit 1; }
+[[ -n "${PARTITION_REPORT}" && -n "${PARTITION_LOSING_PARENT_REPORT}" && -n "${PARTITION_FORGED_PARENT_PAYLOAD_REPORT}" && -n "${PARTITION_SAME_HEIGHT_WINNER_REPORT}" && -n "${PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT}" && -n "${PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT}" && -n "${PARTITION_UNBACKED_NODE_REPORT}" ]] || { echo "failed to build synthetic partition reports" >&2; exit 1; }
 
 expect_pass_contains "public mesh check-report" "PASS: mixed_client_mesh report structurally accepted" "${HARNESS}" --check-report "${MESH_REPORT}"
 expect_pass_contains "rust restart check-report" "PASS: mixed_client_rust_restart report structurally accepted" "${HARNESS}" --rust-restart --check-report "${RESTART_REPORT}"
@@ -1191,6 +1212,8 @@ expect_fail_contains "partition rejects losing fork as reorg parent" "observatio
 expect_fail_contains "partition rejects forged parent block payload" "observations.reorg.go_reorg_parent_block parsed block hash mismatch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_FORGED_PARENT_PAYLOAD_REPORT}"
 expect_fail_contains "partition rejects same-height winning fork" "partition fork tips do not prove Rust winning branch" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_SAME_HEIGHT_WINNER_REPORT}"
 expect_fail_contains "partition rejects peer_connectivity overclaim" "partition peer_connectivity overclaims direct link" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_PEER_CONNECTIVITY_OVERCLAIM_REPORT}"
+expect_fail_contains "partition rejects final_verification overclaim" "partition final verification is incomplete" "${HARNESS}" --partition-heal-reorg --check-report "${PARTITION_FINAL_VERIFICATION_OVERCLAIM_REPORT}"
+expect_generator_fail_contains "partition generator rejects unbacked node evidence" "process_identity_missing_or_invalid" --partition-heal-reorg-report "${PARTITION_UNBACKED_NODE_REPORT}"
 expect_fail_contains "public restart check-report" "public restart check-report is unsupported" "${HARNESS}" --check-report "${RESTART_REPORT}"
 expect_fail_contains "restart live check-report unsupported" "--rust-restart --check-report-live is unsupported" "${HARNESS}" --rust-restart --check-report-live "${RESTART_REPORT}"
 expect_fail_contains "restart mode rejects mesh artifact" "rust restart validation requires a mixed_client_rust_restart report" "${HARNESS}" --rust-restart --check-report "${MESH_REPORT}"

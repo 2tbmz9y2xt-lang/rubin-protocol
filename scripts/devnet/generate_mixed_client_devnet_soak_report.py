@@ -680,7 +680,7 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         path.relative_to(root)
     except ValueError:
         return "partition_reorg_source_binding_contradiction:report_outside_artifact_root"
-    by_impl, bad = nodes(data, require_alive=False, require_backing=False)
+    by_impl, bad = nodes(data, require_alive=False, require_backing=True)
     if bad:
         return bad
     proof = data["proof"]

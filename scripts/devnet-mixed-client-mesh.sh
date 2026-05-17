@@ -650,8 +650,8 @@ if partition_mode:
     block_sidecar("observations.reorg.go_reorg_parent_block", obs_paths["reorg.go_reorg_parent_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], mine1["height"], mine1["block_hash"])
     block_sidecar("observations.reorg.go_tip_block", obs_paths["reorg.go_tip_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], final_go["height"], final_go["hash"])
     block_sidecar("observations.reorg.rust_tip_block", obs_paths["reorg.rust_tip_block"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], final_rust["height"], final_rust["hash"])
-    final = data.get("final_verification")
-    req(isinstance(final, dict) and final.get("producer_side") is True and final.get("process_identity_rechecked") is True and final.get("peer_snapshots_rechecked") is True, "partition final verification is incomplete")
+    final = exact_object(data.get("final_verification"), {"peer_snapshots_rechecked", "process_identity_rechecked", "producer_side", "rust_outbound_link_rechecked", "rust_outbound_local_addr", "rust_outbound_pid", "rust_outbound_remote_addr"}, "final_verification")
+    req(final.get("producer_side") is True and final.get("process_identity_rechecked") is True and final.get("peer_snapshots_rechecked") is True and final.get("rust_outbound_link_rechecked") is False and final.get("rust_outbound_local_addr") is None and final.get("rust_outbound_pid") is None and final.get("rust_outbound_remote_addr") is None, "partition final verification is incomplete")
 if tx_mode:
     req(sorted((p.get("name"), p.get("implementation"), p.get("endpoint"), p.get("started_at")) for p in marker.get("participants", []) if isinstance(p, dict)) == sorted((n["name"], n["implementation"], n["rpc_endpoint"], n["started_at"]) for n in nodes), "legacy marker participants are not bound to report nodes")
 if tx_mode:
