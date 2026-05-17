@@ -485,10 +485,13 @@ elif partition_mode:
 req(set(data) == allowed_keys, f"report top-level keys mismatch: {sorted(data)}")
 artifact_root_arg = data.get("artifact_root"); artifact_root = checked_path("artifact_root", artifact_root_arg)
 legacy_schema = data.get("legacy_schema_compatibility")
-req(isinstance(legacy_schema, dict) and legacy_schema.get("authoritative") is False and "verdict" not in legacy_schema and nonempty_str(legacy_schema.get("marker_path")), "legacy_schema_compatibility missing marker_path")
+req(isinstance(legacy_schema, dict) and set(legacy_schema) == {"authoritative", "marker_path", "purpose", "reason"} and legacy_schema.get("authoritative") is False and nonempty_str(legacy_schema.get("marker_path")), "legacy_schema_compatibility missing marker_path")
 if restart_mode:
     req(legacy_schema.get("purpose") == "schema-valid legacy artifact only; not the Rust restart report verdict", "legacy_schema_compatibility restart purpose mismatch")
     req(legacy_schema.get("reason") == "existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report", "legacy_schema_compatibility restart reason mismatch")
+if partition_mode:
+    req(legacy_schema.get("purpose") == "schema-valid legacy artifact only; not the partition/heal/reorg report verdict", "legacy_schema_compatibility partition purpose mismatch")
+    req(legacy_schema.get("reason") == "existing mixed_client_evidence_v1 PASS requires tx_path; partition/heal/reorg PASS lives in this report", "legacy_schema_compatibility partition reason mismatch")
 marker_path = checked_path("legacy_schema_compatibility.marker_path", legacy_schema.get("marker_path"))
 try: marker_path.relative_to(artifact_root)
 except ValueError: fail("legacy marker is outside artifact_root")

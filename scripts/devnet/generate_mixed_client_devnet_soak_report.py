@@ -40,6 +40,8 @@ NODE_OBJECT_KEYS = {"binary", "command", "command_argv", "implementation", "name
 NODE_BACKING_KEYS = {"p2p_endpoint_process_backed", "rpc_endpoint_process_backed"}
 PARTITION_NODE_KEYS = {"implementation", "name", "p2p_endpoint", "pid", "rpc_endpoint", "started_at"}
 PARTITION_TOP_KEYS = {"artifact_created_at_utc", "artifact_root", "final_verification", "legacy_schema_compatibility", "nodes", "observations", "peer_connectivity", "proof", "raw_samples", "run_id", "scenario", "verdict"}
+PARTITION_LEGACY_PURPOSE = "schema-valid legacy artifact only; not the partition/heal/reorg report verdict"
+PARTITION_LEGACY_REASON = "existing mixed_client_evidence_v1 PASS requires tx_path; partition/heal/reorg PASS lives in this report"
 PARTITION_SOURCE_FIELDS = [
     "run_id", "artifact_created_at_utc",
     "proof.partition_proxy_endpoint", "proof.pre_partition_go_peer_addr", "proof.heal_go_peer_addr",
@@ -597,7 +599,9 @@ def partition_pass_contract_error(data: dict[str, Any], path: Path) -> str | Non
     except ValueError:
         return "partition_reorg_source_binding_contradiction:report_outside_artifact_root"
     legacy = data.get("legacy_schema_compatibility")
-    if not isinstance(legacy, dict) or legacy.get("authoritative") is not False or "verdict" in legacy:
+    if not isinstance(legacy, dict) or set(legacy) != {"authoritative", "marker_path", "purpose", "reason"} or legacy.get("authoritative") is not False:
+        return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
+    if legacy.get("purpose") != PARTITION_LEGACY_PURPOSE or legacy.get("reason") != PARTITION_LEGACY_REASON:
         return "partition_reorg_source_binding_contradiction:legacy_marker_invalid"
     marker_raw = legacy.get("marker_path")
     if not isinstance(marker_raw, str) or not marker_raw:
@@ -809,7 +813,7 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     if rust_mine_2.get("height") != rust_win["height"] or rust_mine_2.get("block_hash") != rust_win["hash"]:
         return "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
     if rust_mine_2["height"] != rust_mine_1["height"] + 1:
-        return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
+        return "partition_reorg_source_binding_contradiction:rust_winning_branch_not_contiguous"
     final_block_checks = (
         partition_block_sidecar(paths["fork.rust_block_2"], "rust", rust_rpc, rust_win["height"], rust_win["hash"], rust_mine_1["block_hash"]),
         partition_block_sidecar(paths["reorg.go_tip_block"], "go", go_rpc, final_go["height"], final_go["hash"], rust_mine_1["block_hash"]),
