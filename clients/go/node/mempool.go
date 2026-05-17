@@ -91,7 +91,6 @@ type Mempool struct {
 	evictedResidentTotal atomic.Uint64
 }
 
-
 // AllTxIDs returns the txids of every transaction currently in the mempool.
 // The slice ordering is not guaranteed to be stable between calls.
 func (m *Mempool) AllTxIDs() [][32]byte {

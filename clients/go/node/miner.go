@@ -569,4 +569,3 @@ func mineHeaderNonce(ctx context.Context, blockWithoutNonce []byte, target [32]b
 		nonce++
 	}
 }
-

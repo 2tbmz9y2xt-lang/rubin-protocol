@@ -495,4 +495,3 @@ func (ctx *nonCoinbaseApplyContext) validateVaultOutputWhitelist() error {
 	}
 	return nil
 }
-
