@@ -135,16 +135,7 @@ fn parse_vault_covenant_data_inner(
     })
 }
 
-pub fn parse_multisig_covenant_data(covenant_data: &[u8]) -> Result<MultisigCovenant, TxError> {
-    if covenant_data.len() < 34 {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_MULTISIG covenant_data too short",
-        ));
-    }
-
-    let threshold = covenant_data[0];
-    let key_count = covenant_data[1];
+fn validate_multisig_counts(threshold: u8, key_count: u8) -> Result<(), TxError> {
     if key_count == 0 || key_count > MAX_MULTISIG_KEYS {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
@@ -157,15 +148,14 @@ pub fn parse_multisig_covenant_data(covenant_data: &[u8]) -> Result<MultisigCove
             "CORE_MULTISIG threshold out of range",
         ));
     }
+    Ok(())
+}
 
-    let expected_len = 2 + (key_count as usize) * 32;
-    if covenant_data.len() != expected_len {
-        return Err(TxError::new(
-            ErrorCode::TxErrCovenantTypeInvalid,
-            "CORE_MULTISIG covenant_data length mismatch",
-        ));
-    }
+fn multisig_expected_len(key_count: u8) -> usize {
+    2 + (key_count as usize) * 32
+}
 
+fn parse_multisig_keys(covenant_data: &[u8], key_count: u8) -> Vec<[u8; 32]> {
     let mut keys = Vec::with_capacity(key_count as usize);
     let mut offset = 2usize;
     for _ in 0..key_count {
@@ -174,6 +164,30 @@ pub fn parse_multisig_covenant_data(covenant_data: &[u8]) -> Result<MultisigCove
         offset += 32;
         keys.push(k);
     }
+    keys
+}
+
+pub fn parse_multisig_covenant_data(covenant_data: &[u8]) -> Result<MultisigCovenant, TxError> {
+    if covenant_data.len() < 34 {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_MULTISIG covenant_data too short",
+        ));
+    }
+
+    let threshold = covenant_data[0];
+    let key_count = covenant_data[1];
+    validate_multisig_counts(threshold, key_count)?;
+
+    let expected_len = multisig_expected_len(key_count);
+    if covenant_data.len() != expected_len {
+        return Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "CORE_MULTISIG covenant_data length mismatch",
+        ));
+    }
+
+    let keys = parse_multisig_keys(covenant_data, key_count);
     if !strictly_sorted_unique_32(&keys) {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
