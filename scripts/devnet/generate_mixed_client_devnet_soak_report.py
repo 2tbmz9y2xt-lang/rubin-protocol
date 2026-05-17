@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ruff: noqa: E302,E305,E401,E701
 from __future__ import annotations
-import argparse, json, math, os, re, subprocess, sys, tempfile  # nosec B404
+import argparse, json, math, os, re, shlex, subprocess, sys, tempfile  # nosec B404
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -122,8 +122,13 @@ def safe_abs_path(value: Any) -> Path | None:
         return None
 def str_list(value: Any) -> bool: return isinstance(value, list) and all(isinstance(item, str) for item in value)  # noqa: E704
 def command_bound_to_argv(node: dict[str, Any]) -> bool:
-    argv = node.get("command_argv")
-    return str_list(argv) and node.get("command") == " ".join(argv)
+    argv, command = node.get("command_argv"), node.get("command")
+    if not str_list(argv) or not isinstance(command, str) or not command:
+        return False
+    try:
+        return shlex.split(command) == argv
+    except ValueError:
+        return False
 def same_arg_path(left: str, right: str) -> bool:
     try:
         return Path(os.path.realpath(os.path.expanduser(left))) == Path(os.path.realpath(os.path.expanduser(right)))

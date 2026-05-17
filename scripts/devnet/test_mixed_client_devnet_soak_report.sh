@@ -6,11 +6,13 @@ TMP_PARENT="$(cd -- "${TMPDIR:-/tmp}" && pwd -P)" || { echo "TMPDIR not canonica
 TMP_ROOT="$(mktemp -d "${TMP_PARENT%/}/rubin-soak-report-pr1.XXXXXX")" || { echo "mktemp failed" >&2; exit 1; }
 LINK_PARENT="${TMP_ROOT}-parent-link"
 ALIAS_ROOT="${LINK_PARENT}/$(basename "${TMP_ROOT}")"
-trap 'rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}"' EXIT
+SPACE_LINK_PARENT="${TMP_ROOT}-parent link"
+SPACE_ALIAS_ROOT="${SPACE_LINK_PARENT}/$(basename "${TMP_ROOT}")"
+trap 'rm -rf -- "${TMP_ROOT}" "${LINK_PARENT}" "${SPACE_LINK_PARENT}"' EXIT
 python3 - "${TMP_ROOT}" <<'PY'
 import hashlib, json, os, sys; from pathlib import Path
 root = Path(os.path.realpath(sys.argv[1])); root.mkdir(exist_ok=True)
-link_parent = root.parent / f"{root.name}-parent-link"; link_parent.symlink_to(root.parent, target_is_directory=True); alias_root = link_parent / root.name
+link_parent = root.parent / f"{root.name}-parent-link"; link_parent.symlink_to(root.parent, target_is_directory=True); alias_root = link_parent / root.name; space_link_parent = root.parent / f"{root.name}-parent link"; space_link_parent.symlink_to(root.parent, target_is_directory=True); space_alias_root = space_link_parent / root.name
 h = lambda ch: ch * 64
 def cs(n):
     return bytes([n]) if n < 0xfd else b"\xfd" + n.to_bytes(2, "little")
@@ -55,11 +57,14 @@ def dump(name, obj):
     path = root / name
     path.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return str(path)
-def rewrite_root_paths(value):
-    if isinstance(value, str): return value.replace(str(root), str(alias_root))
-    if isinstance(value, list): return [rewrite_root_paths(item) for item in value]
-    if isinstance(value, dict): return {key: rewrite_root_paths(item) for key, item in value.items()}
+def rewrite_root_paths(value, target_root=None):
+    target = str(alias_root if target_root is None else target_root)
+    if isinstance(value, str): return value.replace(str(root), target)
+    if isinstance(value, list): return [rewrite_root_paths(item, target_root) for item in value]
+    if isinstance(value, dict): return {key: rewrite_root_paths(item, target_root) for key, item in value.items()}
     return value
+def space_escaped_arg(arg):
+    return arg.replace("\\", "\\\\").replace(" ", "\\ ")
 def raw(prop=None, conv=None, txid=h("1"), block_hash=h("2"), height=9):
     def bucket(kind, direction):
         if direction is None:
@@ -96,6 +101,10 @@ sample_tx_hex, sample_txid = sample_tx[0].hex(), sample_tx[1].hex()
 base = {"artifact_root":str(root),"nodes":nodes,"verdict":"PASS","peer_connectivity":{"go_to_rust":True,"rust_to_go":True,"bidirectional_observed":True,"counterpart_links":{"go_peer_snapshot_expected_addr":"rust-local:5300","rust_peer_snapshot_expected_addr":"localhost:5102","rust_outbound_local_addr":"rust-local:5300","rust_outbound_remote_addr":"localhost:5102","rust_outbound_pid":102},"go_peer_snapshot":{"count":1,"peers":[{"addr":"rust-local:5300","handshake_complete":True}]},"rust_peer_snapshot":{"count":1,"peers":[{"addr":"localhost:5102","handshake_complete":True}]}},"final_verification":{"producer_side":True,"process_identity_rechecked":True,"rust_outbound_link_rechecked":True,"peer_snapshots_rechecked":True,"rust_outbound_pid":102,"rust_outbound_local_addr":"rust-local:5300","rust_outbound_remote_addr":"localhost:5102"},"legacy_schema_compatibility":{"authoritative":False,"marker_path":str(root/"marker.json"),"purpose":"schema-valid legacy artifact only; not the mesh report verdict","reason":"existing mixed_client_evidence_v1 PASS requires tx_path; mesh process/connectivity PASS lives in this report"}}
 (root / "marker.json").write_text(json.dumps(marker("FAIL", failure_reason="schema v1 PASS requires tx_path; mesh PASS lives in sibling report"), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 dump("mesh.json", {**base,"scenario":"mixed_client_mesh","raw_samples":raw()})
+escaped_mesh = rewrite_root_paths(json.loads((root / "mesh.json").read_text()), space_alias_root)
+for node in escaped_mesh["nodes"]:
+    node["command"] = " ".join(space_escaped_arg(arg) for arg in node["command_argv"])
+(space_alias_root / "mesh_escaped_command.json").write_text(json.dumps(escaped_mesh, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 go_accept_tx = {"submitted_at":"node-go","observed_at":["node-rust"],"tx_id":sample_txid}
 go_conv_tx = {"submitted_at":"node-go","observed_at":["node-rust"],"tx_id":sample_txid}
 rust_conv_tx = {"submitted_at":"node-rust","observed_at":["node-go"],"tx_id":sample_txid}
@@ -185,12 +194,12 @@ bad = json.loads((root / "mesh.json").read_text()); bad["nodes"][0]["started_at"
 bad = json.loads((root / "mesh.json").read_text()); bad["nodes"][0]["pid"] = 0; dump("mesh_bad_pid_zero.json", bad)
 bad = json.loads((root / "mesh.json").read_text()); marker_bad = marker("FAIL", failure_reason="bad participant type"); marker_bad["participants"][0]["started_at"] = ["2026-05-12T10:00:00Z"]; bad["legacy_schema_compatibility"]["marker_path"] = dump("mesh-marker-bad-participant-type.json", marker_bad); dump("mesh_marker_bad_participant_type.json", bad)
 PY
-complete="${TMP_ROOT}/complete.json"; partial="${TMP_ROOT}/partial.json"; empty_input="${TMP_ROOT}/empty-input.json"; unbound_metrics="${TMP_ROOT}/unbound-metrics.json"; zero_height="${TMP_ROOT}/restart-zero-height-out.json"; symlink_parent="${TMP_ROOT}/restart-symlink-parent-out.json"; mesh_symlink_parent="${TMP_ROOT}/mesh-symlink-parent-out.json"; base_args=(--mesh-report "${TMP_ROOT}/mesh.json" --go-submit-rust-accept-report "${TMP_ROOT}/go_accept.json" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/go_conv.json" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/rust_conv.json" --rust-restart-report "${TMP_ROOT}/restart.json" --partition-heal-reorg-report "${TMP_ROOT}/partition.json")
+complete="${TMP_ROOT}/complete.json"; partial="${TMP_ROOT}/partial.json"; empty_input="${TMP_ROOT}/empty-input.json"; unbound_metrics="${TMP_ROOT}/unbound-metrics.json"; zero_height="${TMP_ROOT}/restart-zero-height-out.json"; symlink_parent="${TMP_ROOT}/restart-symlink-parent-out.json"; mesh_symlink_parent="${TMP_ROOT}/mesh-symlink-parent-out.json"; mesh_escaped_command="${TMP_ROOT}/mesh-escaped-command-out.json"; base_args=(--mesh-report "${TMP_ROOT}/mesh.json" --go-submit-rust-accept-report "${TMP_ROOT}/go_accept.json" --go-submit-rust-mine-go-converge-report "${TMP_ROOT}/go_conv.json" --rust-submit-go-mine-rust-converge-report "${TMP_ROOT}/rust_conv.json" --rust-restart-report "${TMP_ROOT}/restart.json" --partition-heal-reorg-report "${TMP_ROOT}/partition.json")
 missing_top="${TMP_ROOT}/restart-missing-top-pre-height-out.json"
-python3 "${GEN}" "${base_args[@]}" --rust-reorg-metrics "${TMP_ROOT}/partition-metrics.prom" --output "${complete}"; python3 "${GEN}" "${base_args[@]}" --rust-reorg-metrics "${TMP_ROOT}/metrics.prom" --output "${unbound_metrics}"; python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --rust-reorg-metrics-no-data rust_metrics_not_collected --output "${partial}"; python3 "${GEN}" --mesh-report "" --output "${empty_input}"; python3 "${GEN}" --partition-heal-reorg-report "${TMP_ROOT}/partition_unbound_nodes.json" --output "${TMP_ROOT}/unbound.json"; python3 "${GEN}" --rust-restart-report "${TMP_ROOT}/restart_missing_top_pre_height.json" --output "${missing_top}"; python3 "${GEN}" --rust-restart-report "${TMP_ROOT}/restart_zero_height.json" --output "${zero_height}"; python3 "${GEN}" --rust-restart-report "${TMP_ROOT}/restart_symlink_parent.json" --output "${symlink_parent}"; python3 "${GEN}" --mesh-report "${ALIAS_ROOT}/mesh_symlink_parent.json" --output "${mesh_symlink_parent}"; python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${TMP_ROOT}/PASS" >/dev/null; python3 "${GEN}" --go-submit-rust-accept-report "${TMP_ROOT}/go_accept.json" --output "${TMP_ROOT}/localhost:5101" >/dev/null
-python3 - "${complete}" "${partial}" "${TMP_ROOT}/unbound.json" "${empty_input}" "${missing_top}" "${zero_height}" "${symlink_parent}" "${unbound_metrics}" "${mesh_symlink_parent}" <<'PY'
+python3 "${GEN}" "${base_args[@]}" --rust-reorg-metrics "${TMP_ROOT}/partition-metrics.prom" --output "${complete}"; python3 "${GEN}" --mesh-report "${SPACE_ALIAS_ROOT}/mesh_escaped_command.json" --output "${mesh_escaped_command}"; python3 "${GEN}" "${base_args[@]}" --rust-reorg-metrics "${TMP_ROOT}/metrics.prom" --output "${unbound_metrics}"; python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --rust-reorg-metrics-no-data rust_metrics_not_collected --output "${partial}"; python3 "${GEN}" --mesh-report "" --output "${empty_input}"; python3 "${GEN}" --partition-heal-reorg-report "${TMP_ROOT}/partition_unbound_nodes.json" --output "${TMP_ROOT}/unbound.json"; python3 "${GEN}" --rust-restart-report "${TMP_ROOT}/restart_missing_top_pre_height.json" --output "${missing_top}"; python3 "${GEN}" --rust-restart-report "${TMP_ROOT}/restart_zero_height.json" --output "${zero_height}"; python3 "${GEN}" --rust-restart-report "${TMP_ROOT}/restart_symlink_parent.json" --output "${symlink_parent}"; python3 "${GEN}" --mesh-report "${ALIAS_ROOT}/mesh_symlink_parent.json" --output "${mesh_symlink_parent}"; python3 "${GEN}" --mesh-report "${TMP_ROOT}/mesh.json" --output "${TMP_ROOT}/PASS" >/dev/null; python3 "${GEN}" --go-submit-rust-accept-report "${TMP_ROOT}/go_accept.json" --output "${TMP_ROOT}/localhost:5101" >/dev/null
+python3 - "${complete}" "${partial}" "${TMP_ROOT}/unbound.json" "${empty_input}" "${missing_top}" "${zero_height}" "${symlink_parent}" "${unbound_metrics}" "${mesh_symlink_parent}" "${mesh_escaped_command}" <<'PY'
 import json, re, sys
-c = json.load(open(sys.argv[1], encoding="utf-8")); p = json.load(open(sys.argv[2], encoding="utf-8")); u = json.load(open(sys.argv[3], encoding="utf-8")); e = json.load(open(sys.argv[4], encoding="utf-8")); m = json.load(open(sys.argv[5], encoding="utf-8")); z = json.load(open(sys.argv[6], encoding="utf-8")); s = json.load(open(sys.argv[7], encoding="utf-8")); um = json.load(open(sys.argv[8], encoding="utf-8")); ms = json.load(open(sys.argv[9], encoding="utf-8"))
+c = json.load(open(sys.argv[1], encoding="utf-8")); p = json.load(open(sys.argv[2], encoding="utf-8")); u = json.load(open(sys.argv[3], encoding="utf-8")); e = json.load(open(sys.argv[4], encoding="utf-8")); m = json.load(open(sys.argv[5], encoding="utf-8")); z = json.load(open(sys.argv[6], encoding="utf-8")); s = json.load(open(sys.argv[7], encoding="utf-8")); um = json.load(open(sys.argv[8], encoding="utf-8")); ms = json.load(open(sys.argv[9], encoding="utf-8")); me = json.load(open(sys.argv[10], encoding="utf-8"))
 check = lambda cond, msg: None if cond else (_ for _ in ()).throw(SystemExit(msg)); rr = c["sections"]["rust_restart"]; check(c["verdict"] == "NO_DATA" and rr["status"] == "pass" and rr["claim_type"] == "behavior_evidence" and rr["behavior_evidence"] is True, "complete verdict/restart/claim_type")
 check(c["sections"]["partition_heal_reorg"]["status"] == "pass" and c["sections"]["partition_heal_reorg"]["claim_type"] == "behavior_evidence", "partition behavior evidence")
 check(c["sections"]["reorg_metrics"]["status"] == "no_data" and c["sections"]["reorg_metrics"]["reason"] == "metric_source_binding_unavailable" and c["sections"]["reorg_metrics"]["claim_type"] == "metric_evidence" and p["sections"]["reorg_metrics"].get("reason") == "rust_reorg_metrics_no_data" and p["sections"]["reorg_metrics"].get("source_reason") == "rust_metrics_not_collected" and c["sections"]["deferred_related"]["reason"] == "deferred_by_rub_227", "metrics/deferred")
@@ -201,6 +210,7 @@ check(m["sections"]["rust_restart"]["status"] == "no_data" and "restart.pre_rest
 check(z["sections"]["rust_restart"]["status"] == "pass" and z["sections"]["rust_restart"].get("behavior_evidence") is True, "zero-height restart evidence must pass")
 check(s["sections"]["rust_restart"]["status"] == "pass" and s["sections"]["rust_restart"].get("behavior_evidence") is True, "symlink-parent restart evidence must pass")
 check(ms["sections"]["mesh"]["status"] == "pass" and ms["sections"]["mesh"]["claim_type"] == "source_report_evidence", "symlink-parent mesh evidence must pass")
+check(me["sections"]["mesh"]["status"] == "pass" and me["sections"]["mesh"]["claim_type"] == "source_report_evidence", "escaped command mesh evidence must pass")
 check("mesh_report" not in e["inputs"] and e["sections"]["mesh"]["reason"] == "mesh_artifact_missing", "empty input omitted")
 tokens = set("ready pass parity converge convergence reorg restart metric no_data not_applicable".split())
 for report in (c, p):
