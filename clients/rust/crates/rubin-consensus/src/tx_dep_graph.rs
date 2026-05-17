@@ -89,6 +89,78 @@ fn compute_tx_dep_level_order(contexts: &[TxValidationContext], levels: &[usize]
     order
 }
 
+fn txid_index(contexts: &[TxValidationContext]) -> HashMap<[u8; 32], usize> {
+    let mut txid_to_idx = HashMap::with_capacity(contexts.len());
+    for (idx, ctx) in contexts.iter().enumerate() {
+        txid_to_idx.insert(ctx.txid, idx);
+    }
+    txid_to_idx
+}
+
+fn parent_child_edge(
+    txid_to_idx: &HashMap<[u8; 32], usize>,
+    consumer_idx: usize,
+    outpoint: &Outpoint,
+) -> Option<TxDepEdge> {
+    let producer_idx = *txid_to_idx.get(&outpoint.txid)?;
+    (producer_idx < consumer_idx).then_some(TxDepEdge {
+        producer_idx,
+        consumer_idx,
+        kind: TxDepEdgeKind::ParentChild,
+    })
+}
+
+fn push_same_prevout_edge(
+    outpoint_first_consumer: &mut HashMap<Outpoint, usize>,
+    edges: &mut Vec<TxDepEdge>,
+    consumer_idx: usize,
+    outpoint: &Outpoint,
+) {
+    match outpoint_first_consumer.get(outpoint).copied() {
+        Some(first_idx) if first_idx != consumer_idx => {
+            let (producer_idx, consumer_idx) = if first_idx < consumer_idx {
+                (first_idx, consumer_idx)
+            } else {
+                (consumer_idx, first_idx)
+            };
+            edges.push(TxDepEdge {
+                producer_idx,
+                consumer_idx,
+                kind: TxDepEdgeKind::SamePrevout,
+            });
+        }
+        None => {
+            outpoint_first_consumer.insert(outpoint.clone(), consumer_idx);
+        }
+        Some(_) => {}
+    }
+}
+
+fn collect_tx_dep_edges(
+    contexts: &[TxValidationContext],
+    txid_to_idx: &HashMap<[u8; 32], usize>,
+) -> Vec<TxDepEdge> {
+    let mut outpoint_first_consumer: HashMap<Outpoint, usize> = HashMap::new();
+    let mut edges = Vec::new();
+
+    for (consumer_idx, ctx) in contexts.iter().enumerate() {
+        for outpoint in &ctx.input_outpoints {
+            if let Some(edge) = parent_child_edge(txid_to_idx, consumer_idx, outpoint) {
+                edges.push(edge);
+                continue;
+            }
+            push_same_prevout_edge(
+                &mut outpoint_first_consumer,
+                &mut edges,
+                consumer_idx,
+                outpoint,
+            );
+        }
+    }
+
+    edges
+}
+
 /// Build the deterministic dependency graph over non-coinbase transactions.
 ///
 /// The graph detects:
@@ -105,48 +177,8 @@ pub fn build_tx_dep_graph(contexts: &[TxValidationContext]) -> TxDepGraph {
         return TxDepGraph::default();
     }
 
-    let mut txid_to_idx = HashMap::with_capacity(tx_count);
-    for (idx, ctx) in contexts.iter().enumerate() {
-        txid_to_idx.insert(ctx.txid, idx);
-    }
-
-    let mut outpoint_first_consumer: HashMap<Outpoint, usize> = HashMap::new();
-    let mut edges = Vec::new();
-
-    for (consumer_idx, ctx) in contexts.iter().enumerate() {
-        for outpoint in &ctx.input_outpoints {
-            if let Some(&producer_idx) = txid_to_idx.get(&outpoint.txid) {
-                if producer_idx < consumer_idx {
-                    edges.push(TxDepEdge {
-                        producer_idx,
-                        consumer_idx,
-                        kind: TxDepEdgeKind::ParentChild,
-                    });
-                    continue;
-                }
-            }
-
-            match outpoint_first_consumer.get(outpoint).copied() {
-                Some(first_idx) if first_idx != consumer_idx => {
-                    let (producer_idx, consumer_idx) = if first_idx < consumer_idx {
-                        (first_idx, consumer_idx)
-                    } else {
-                        (consumer_idx, first_idx)
-                    };
-                    edges.push(TxDepEdge {
-                        producer_idx,
-                        consumer_idx,
-                        kind: TxDepEdgeKind::SamePrevout,
-                    });
-                }
-                None => {
-                    outpoint_first_consumer.insert(outpoint.clone(), consumer_idx);
-                }
-                Some(_) => {}
-            }
-        }
-    }
-
+    let txid_to_idx = txid_index(contexts);
+    let mut edges = collect_tx_dep_edges(contexts, &txid_to_idx);
     sort_tx_dep_edges(&mut edges);
     let (levels, max_level) = compute_tx_dep_levels(tx_count, &edges);
     let level_order = compute_tx_dep_level_order(contexts, &levels);

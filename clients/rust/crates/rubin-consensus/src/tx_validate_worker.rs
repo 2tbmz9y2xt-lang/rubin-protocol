@@ -45,6 +45,104 @@ pub struct TxValidationResult {
     pub fee: u64,
 }
 
+struct TxLocalSpendContext<'a> {
+    chain_id: [u8; 32],
+    block_height: u64,
+    block_mtp: u64,
+    core_ext_profiles: &'a CoreExtProfiles,
+    rotation: &'a dyn RotationProvider,
+    registry: &'a SuiteRegistry,
+    tx_context: Option<&'a TxContextBundle>,
+}
+
+fn pending_tx_validation_result(ptc: &PrecomputedTxContext) -> TxValidationResult {
+    TxValidationResult {
+        tx_index: ptc.tx_index,
+        valid: false,
+        err: None,
+        sig_count: 0,
+        fee: ptc.fee,
+    }
+}
+
+fn tx_validation_error_result(ptc: &PrecomputedTxContext, err: TxError) -> TxValidationResult {
+    let mut result = pending_tx_validation_result(ptc);
+    result.err = Some(err);
+    result
+}
+
+fn sig_queue_with_optional_cache(
+    registry: &SuiteRegistry,
+    sig_cache: Option<&SigCache>,
+) -> SigCheckQueue {
+    let sig_queue = SigCheckQueue::new(1).with_registry(registry);
+    match sig_cache {
+        Some(sig_cache) => sig_queue.with_cache(sig_cache.clone()),
+        None => sig_queue,
+    }
+}
+
+fn assigned_worker_witness(
+    tx: &Tx,
+    witness_cursor: usize,
+    slots: usize,
+    witness_end: usize,
+) -> Result<&[WitnessItem], TxError> {
+    let next_cursor = witness_cursor + slots;
+    if next_cursor > witness_end {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "witness underflow in worker",
+        ));
+    }
+    Ok(&tx.witness[witness_cursor..next_cursor])
+}
+
+fn validate_worker_inputs(
+    ptc: &PrecomputedTxContext,
+    tx: &Tx,
+    ctx: &TxLocalSpendContext<'_>,
+    sighash_cache: &mut SighashV1PrehashCache<'_>,
+    sig_queue: &mut SigCheckQueue,
+) -> Result<usize, TxError> {
+    let mut witness_cursor = ptc.witness_start;
+    for (input_index, entry) in ptc.resolved_inputs.iter().enumerate() {
+        let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
+        let assigned = assigned_worker_witness(tx, witness_cursor, slots, ptc.witness_end)?;
+
+        validate_input_spend(
+            entry,
+            assigned,
+            input_index as u32,
+            entry.value,
+            ctx.chain_id,
+            ctx.block_height,
+            ctx.block_mtp,
+            sighash_cache,
+            ctx.core_ext_profiles,
+            ctx.rotation,
+            ctx.registry,
+            ctx.tx_context,
+            Some(&mut *sig_queue),
+        )?;
+
+        witness_cursor += slots;
+    }
+    Ok(witness_cursor)
+}
+
+fn build_tx_local_preflight<'a>(
+    tx: &'a Tx,
+    resolved_inputs: &[UtxoEntry],
+    block_height: u64,
+    core_ext_profiles: &CoreExtProfiles,
+) -> Result<(SighashV1PrehashCache<'a>, Option<TxContextBundle>), TxError> {
+    let sighash_cache = SighashV1PrehashCache::new(tx)?;
+    let tx_context =
+        build_tx_context_if_needed(tx, resolved_inputs, block_height, core_ext_profiles)?;
+    Ok((sighash_cache, tx_context))
+}
+
 /// Validate a single non-coinbase transaction using read-only precomputed
 /// context. Iterates resolved inputs, dispatches per-covenant-type spend
 /// validators, and counts signature verifications.
@@ -65,91 +163,41 @@ pub fn validate_tx_local(
     core_ext_profiles: &CoreExtProfiles,
     sig_cache: Option<&SigCache>,
 ) -> TxValidationResult {
-    let mut result = TxValidationResult {
-        tx_index: ptc.tx_index,
-        valid: false,
-        err: None,
-        sig_count: 0,
-        fee: ptc.fee,
-    };
-
     let tx = &pb.txs[ptc.tx_block_idx];
 
-    // Build sighash cache for this transaction.
-    let mut sighash_cache = match SighashV1PrehashCache::new(tx) {
-        Ok(c) => c,
-        Err(e) => {
-            result.err = Some(e);
-            return result;
-        }
-    };
-
-    // Build TxContext if any input requires CORE_EXT context.
-    let tx_context =
-        match build_tx_context_if_needed(tx, &ptc.resolved_inputs, block_height, core_ext_profiles)
-        {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                result.err = Some(e);
-                return result;
-            }
+    let (mut sighash_cache, tx_context) =
+        match build_tx_local_preflight(tx, &ptc.resolved_inputs, block_height, core_ext_profiles) {
+            Ok(preflight) => preflight,
+            Err(e) => return tx_validation_error_result(ptc, e),
         };
 
     let rotation = DefaultRotationProvider;
     let registry = SuiteRegistry::default_registry();
-    let mut sig_queue = SigCheckQueue::new(1).with_registry(&registry);
-    if let Some(sig_cache) = sig_cache {
-        sig_queue = sig_queue.with_cache(sig_cache.clone());
-    }
+    let mut sig_queue = sig_queue_with_optional_cache(&registry, sig_cache);
+    let spend_context = TxLocalSpendContext {
+        chain_id,
+        block_height,
+        block_mtp,
+        core_ext_profiles,
+        rotation: &rotation,
+        registry: &registry,
+        tx_context: tx_context.as_ref(),
+    };
 
-    let mut witness_cursor = ptc.witness_start;
-    for (input_index, entry) in ptc.resolved_inputs.iter().enumerate() {
-        let slots = match witness_slots(entry.covenant_type, &entry.covenant_data) {
-            Ok(s) => s,
-            Err(e) => {
-                result.err = Some(e);
-                return result;
-            }
+    let witness_cursor =
+        match validate_worker_inputs(ptc, tx, &spend_context, &mut sighash_cache, &mut sig_queue) {
+            Ok(witness_cursor) => witness_cursor,
+            Err(e) => return tx_validation_error_result(ptc, e),
         };
-        if witness_cursor + slots > ptc.witness_end {
-            result.err = Some(TxError::new(
-                ErrorCode::TxErrParse,
-                "witness underflow in worker",
-            ));
-            return result;
-        }
-        let assigned = &tx.witness[witness_cursor..witness_cursor + slots];
-
-        if let Err(e) = validate_input_spend(
-            entry,
-            assigned,
-            input_index as u32,
-            entry.value,
-            chain_id,
-            block_height,
-            block_mtp,
-            &mut sighash_cache,
-            core_ext_profiles,
-            &rotation,
-            &registry,
-            tx_context.as_ref(),
-            Some(&mut sig_queue),
-        ) {
-            result.err = Some(e);
-            return result;
-        }
-
-        witness_cursor += slots;
-    }
 
     if witness_cursor != ptc.witness_end {
-        result.err = Some(TxError::new(
-            ErrorCode::TxErrParse,
-            "witness_count mismatch",
-        ));
-        return result;
+        return tx_validation_error_result(
+            ptc,
+            TxError::new(ErrorCode::TxErrParse, "witness_count mismatch"),
+        );
     }
 
+    let mut result = pending_tx_validation_result(ptc);
     result.sig_count = sig_queue.len();
     if let Err(e) = sig_queue.flush() {
         result.err = Some(e);
