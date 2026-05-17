@@ -573,6 +573,8 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
 def partition_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path, partition_proxy: str) -> str | None:
     if not endpoint(partition_proxy):
         return "partition_reorg_source_binding_contradiction:node_identity_invalid"
+    if partition_proxy in {node.get(field) for node in by_impl.values() for field in ("rpc_endpoint", "p2p_endpoint")}:
+        return "partition_reorg_source_binding_contradiction:node_identity_invalid"
     for impl, expected_name, expected_comm, extra in (("go", "node-go", "rubin-node-go", []), ("rust", "node-rust", "rubin-node-rust", ["--peer", partition_proxy])):
         node = by_impl[impl]
         if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
@@ -743,6 +745,8 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     expected_proof_keys = {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}
     if set(proof) != expected_proof_keys:
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
+    if proof.get("partition_proxy_endpoint") in {proof.get("pre_partition_go_peer_addr"), proof.get("heal_go_peer_addr")}:
+        return "partition_reorg_source_binding_contradiction:node_identity_invalid"
     if bad := partition_node_identity_error(by_impl, root, proof.get("partition_proxy_endpoint")):
         return bad
     proof_metrics = proof.get("go_reorg_metrics")

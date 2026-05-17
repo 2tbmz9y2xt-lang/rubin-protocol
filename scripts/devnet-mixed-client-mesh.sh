@@ -628,6 +628,8 @@ if partition_mode:
     proof = exact_object(data.get("proof"), {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}, "proof")
     req(all(proof.get(key) is True for key in ("partition_changed_peer_state", "fork_diverged", "heal_restored_peer_state", "reorg_converged", "process_identity_rechecked_after_heal")), "partition proof booleans are not all true")
     req(ep(proof.get("partition_proxy_endpoint")) and ep(proof.get("pre_partition_go_peer_addr")) and ep(proof.get("heal_go_peer_addr")), "partition proxy endpoints are malformed")
+    node_endpoints = {node[field] for node in nodes_by_impl.values() for field in ("rpc_endpoint", "p2p_endpoint")}
+    req(proof["partition_proxy_endpoint"] not in node_endpoints and proof["partition_proxy_endpoint"] not in {proof["pre_partition_go_peer_addr"], proof["heal_go_peer_addr"]}, "partition proxy endpoint is not proxy-only")
     metrics = exact_object(proof.get("go_reorg_metrics"), {"rubin_node_last_reorg_depth", "rubin_node_reorg_total"}, "proof.go_reorg_metrics")
     req(json_int(metrics.get("rubin_node_reorg_total"), "proof.go_reorg_metrics.rubin_node_reorg_total", 1) >= 1 and json_int(metrics.get("rubin_node_last_reorg_depth"), "proof.go_reorg_metrics.rubin_node_last_reorg_depth", 1) >= 1, "partition go reorg metrics do not prove reorg")
     go_fork, rust_win = tip_obj(proof.get("go_partition_tip"), "proof.go_partition_tip"), tip_obj(proof.get("rust_winning_tip"), "proof.rust_winning_tip")
@@ -780,7 +782,7 @@ PY
 }
 [[ "${MESH_TIMEOUT}" =~ ^[0-9]{1,3}$ ]] || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; MESH_TIMEOUT="$((10#${MESH_TIMEOUT}))"; (( MESH_TIMEOUT >= 1 && MESH_TIMEOUT <= 600 )) || { echo "MESH_TIMEOUT must be an integer in [1, 600]" >&2; exit 2; }; export MESH_TIMEOUT
 if [[ -n "${CHECK_REPORT_MODE}" ]]; then need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }; CHECK_EXPECTED_MODE=public; (( RUST_RESTART_MODE == 1 )) && CHECK_EXPECTED_MODE=rust-restart; (( PARTITION_HEAL_REORG_MODE == 1 )) && CHECK_EXPECTED_MODE=partition-heal-reorg; check_report "${CHECK_REPORT}" "${CHECK_REPORT_MODE}" "${CHECK_EXPECTED_MODE}"; exit 0; fi
-if (( TX_PATH_MODE >= 1 )); then validate_deterministic_tx_fee; fi
+if (( TX_PATH_MODE >= 1 || PARTITION_HEAL_REORG_MODE == 1 )); then validate_deterministic_tx_fee; fi
 need_tool python3; [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }; [[ -r "${VALIDATOR}" ]] || { echo "validator unreadable: ${VALIDATOR}" >&2; exit 1; }
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
