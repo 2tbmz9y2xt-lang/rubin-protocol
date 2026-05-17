@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ruff: noqa: E302,E305,E401,E701
 from __future__ import annotations
-import argparse, json, math, os, re, subprocess, sys, tempfile
+import argparse, json, math, os, re, subprocess, sys, tempfile  # nosec B404
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -611,7 +611,17 @@ def partition_block_payload_error(block_hex: str, height: int, block_hash: str) 
         return "partition_reorg_source_binding_contradiction:block_parser_unavailable"
     request = json.dumps({"op": "block_basic_check", "block_hex": block_hex, "height": height}) + "\n"
     try:
-        proc = subprocess.run([str(DEV_ENV), "--", "go", "-C", str(GO_MODULE_ROOT), "run", "./cmd/rubin-consensus-cli"], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        # Fixed repo-local argv with no shell; report-controlled block bytes are passed on stdin.
+        proc = subprocess.run(  # nosec B603
+            [str(DEV_ENV), "--", "go", "-C", str(GO_MODULE_ROOT), "run", "./cmd/rubin-consensus-cli"],
+            check=False,
+            env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
+            input=request,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
     except subprocess.TimeoutExpired:
         return "partition_reorg_source_binding_contradiction:block_parser_timeout"
     except OSError:
