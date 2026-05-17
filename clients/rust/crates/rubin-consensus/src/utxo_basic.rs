@@ -45,6 +45,19 @@ pub struct UtxoApplySummary {
     pub utxo_count: u64,
 }
 
+struct UtxoApplyImplContext<'a> {
+    tx: &'a Tx,
+    txid: [u8; 32],
+    utxo_set: &'a HashMap<Outpoint, UtxoEntry>,
+    height: u64,
+    block_timestamp: u64,
+    block_mtp: u64,
+    chain_id: [u8; 32],
+    core_ext_profiles_at_height: &'a CoreExtProfiles,
+    rotation: Option<&'a dyn RotationProvider>,
+    registry: Option<&'a SuiteRegistry>,
+}
+
 pub fn apply_non_coinbase_tx_basic_update(
     tx: &Tx,
     txid: [u8; 32],
@@ -124,16 +137,18 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     registry: Option<&SuiteRegistry>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
-        tx,
-        txid,
-        utxo_set,
-        height,
-        block_timestamp,
-        block_mtp,
-        chain_id,
-        core_ext_profiles_at_height,
-        rotation,
-        registry,
+        UtxoApplyImplContext {
+            tx,
+            txid,
+            utxo_set,
+            height,
+            block_timestamp,
+            block_mtp,
+            chain_id,
+            core_ext_profiles_at_height,
+            rotation,
+            registry,
+        },
         None,
     )
 }
@@ -153,16 +168,18 @@ pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_
     sig_queue: &mut SigCheckQueue,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
-        tx,
-        txid,
-        utxo_set,
-        height,
-        block_timestamp,
-        block_mtp,
-        chain_id,
-        core_ext_profiles_at_height,
-        rotation,
-        registry,
+        UtxoApplyImplContext {
+            tx,
+            txid,
+            utxo_set,
+            height,
+            block_timestamp,
+            block_mtp,
+            chain_id,
+            core_ext_profiles_at_height,
+            rotation,
+            registry,
+        },
         Some(sig_queue),
     )
 }
@@ -207,20 +224,22 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     Ok((work, summary))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
-    tx: &Tx,
-    txid: [u8; 32],
-    utxo_set: &HashMap<Outpoint, UtxoEntry>,
-    height: u64,
-    block_timestamp: u64,
-    block_mtp: u64,
-    chain_id: [u8; 32],
-    core_ext_profiles_at_height: &CoreExtProfiles,
-    rotation: Option<&dyn RotationProvider>,
-    registry: Option<&SuiteRegistry>,
+    ctx: UtxoApplyImplContext<'_>,
     sig_queue: Option<&mut SigCheckQueue>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    let UtxoApplyImplContext {
+        tx,
+        txid,
+        utxo_set,
+        height,
+        block_timestamp,
+        block_mtp,
+        chain_id,
+        core_ext_profiles_at_height,
+        rotation,
+        registry,
+    } = ctx;
     let _ = block_timestamp;
     let mut sig_queue = sig_queue;
     if tx.inputs.is_empty() {
@@ -372,65 +391,35 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
                         "CORE_P2PK witness_slots must be 1",
                     ));
                 }
-                match sig_queue.as_mut() {
-                    Some(queue) => validate_p2pk_spend_q(
-                        entry,
-                        &assigned[0],
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        &mut sighash_cache,
-                        Some(&mut **queue),
-                        rotation,
-                        registry,
-                    )?,
-                    None => validate_p2pk_spend_q(
-                        entry,
-                        &assigned[0],
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        &mut sighash_cache,
-                        None,
-                        rotation,
-                        registry,
-                    )?,
-                }
+                validate_p2pk_spend_q(
+                    entry,
+                    &assigned[0],
+                    input_index as u32,
+                    entry.value,
+                    chain_id,
+                    height,
+                    &mut sighash_cache,
+                    sig_queue.as_deref_mut(),
+                    rotation,
+                    registry,
+                )?;
             }
             COV_TYPE_MULTISIG => {
                 let m = parse_multisig_covenant_data(&entry.covenant_data)?;
-                match sig_queue.as_mut() {
-                    Some(queue) => validate_threshold_sig_spend_q(
-                        &m.keys,
-                        m.threshold,
-                        assigned,
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        "CORE_MULTISIG",
-                        &mut sighash_cache,
-                        Some(&mut **queue),
-                        rotation,
-                        registry,
-                    )?,
-                    None => validate_threshold_sig_spend_q(
-                        &m.keys,
-                        m.threshold,
-                        assigned,
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        "CORE_MULTISIG",
-                        &mut sighash_cache,
-                        None,
-                        rotation,
-                        registry,
-                    )?,
-                }
+                validate_threshold_sig_spend_q(
+                    &m.keys,
+                    m.threshold,
+                    assigned,
+                    input_index as u32,
+                    entry.value,
+                    chain_id,
+                    height,
+                    "CORE_MULTISIG",
+                    &mut sighash_cache,
+                    sig_queue.as_deref_mut(),
+                    rotation,
+                    registry,
+                )?;
             }
             COV_TYPE_VAULT => {
                 let v = parse_vault_covenant_data_for_spend(&entry.covenant_data)?;
@@ -452,36 +441,20 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
                         "CORE_HTLC witness_slots must be 2",
                     ));
                 }
-                match sig_queue.as_mut() {
-                    Some(queue) => validate_htlc_spend_q(
-                        entry,
-                        &assigned[0],
-                        &assigned[1],
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        block_mtp,
-                        &mut sighash_cache,
-                        Some(&mut **queue),
-                        rotation,
-                        registry,
-                    )?,
-                    None => validate_htlc_spend_q(
-                        entry,
-                        &assigned[0],
-                        &assigned[1],
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        block_mtp,
-                        &mut sighash_cache,
-                        None,
-                        rotation,
-                        registry,
-                    )?,
-                }
+                validate_htlc_spend_q(
+                    entry,
+                    &assigned[0],
+                    &assigned[1],
+                    input_index as u32,
+                    entry.value,
+                    chain_id,
+                    height,
+                    block_mtp,
+                    &mut sighash_cache,
+                    sig_queue.as_deref_mut(),
+                    rotation,
+                    registry,
+                )?;
             }
             COV_TYPE_CORE_EXT => {
                 if assigned.len() != 1 {
@@ -490,36 +463,20 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
                         "CORE_EXT witness_slots must be 1",
                     ));
                 }
-                match sig_queue.as_mut() {
-                    Some(queue) => validate_core_ext_spend_with_cache_and_suite_context_q(
-                        entry,
-                        &assigned[0],
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        core_ext_profiles_at_height,
-                        rotation,
-                        registry,
-                        tx_context.as_ref(),
-                        Some(&mut **queue),
-                        &mut sighash_cache,
-                    )?,
-                    None => validate_core_ext_spend_with_cache_and_suite_context_q(
-                        entry,
-                        &assigned[0],
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        core_ext_profiles_at_height,
-                        rotation,
-                        registry,
-                        tx_context.as_ref(),
-                        None,
-                        &mut sighash_cache,
-                    )?,
-                }
+                validate_core_ext_spend_with_cache_and_suite_context_q(
+                    entry,
+                    &assigned[0],
+                    input_index as u32,
+                    entry.value,
+                    chain_id,
+                    height,
+                    core_ext_profiles_at_height,
+                    rotation,
+                    registry,
+                    tx_context.as_ref(),
+                    sig_queue.as_deref_mut(),
+                    &mut sighash_cache,
+                )?;
             }
             COV_TYPE_CORE_STEALTH => {
                 if assigned.len() != 1 {
@@ -528,32 +485,18 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
                         "CORE_STEALTH witness_slots must be 1",
                     ));
                 }
-                match sig_queue.as_mut() {
-                    Some(queue) => validate_stealth_spend_q(
-                        entry,
-                        &assigned[0],
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        &mut sighash_cache,
-                        Some(&mut **queue),
-                        rotation,
-                        registry,
-                    )?,
-                    None => validate_stealth_spend_q(
-                        entry,
-                        &assigned[0],
-                        input_index as u32,
-                        entry.value,
-                        chain_id,
-                        height,
-                        &mut sighash_cache,
-                        None,
-                        rotation,
-                        registry,
-                    )?,
-                }
+                validate_stealth_spend_q(
+                    entry,
+                    &assigned[0],
+                    input_index as u32,
+                    entry.value,
+                    chain_id,
+                    height,
+                    &mut sighash_cache,
+                    sig_queue.as_deref_mut(),
+                    rotation,
+                    registry,
+                )?;
             }
             _ => {}
         }
@@ -661,36 +604,20 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
             Some(range) => &tx.witness[range.clone()],
             None => unreachable!("vault witness range must exist when have_vault_sig is true"),
         };
-        match sig_queue.as_mut() {
-            Some(queue) => validate_threshold_sig_spend_q(
-                &vault_sig_keys,
-                vault_sig_threshold,
-                vault_sig_witness,
-                vault_sig_input_index,
-                vault_sig_input_value,
-                chain_id,
-                height,
-                "CORE_VAULT",
-                &mut sighash_cache,
-                Some(&mut **queue),
-                rotation,
-                registry,
-            )?,
-            None => validate_threshold_sig_spend_q(
-                &vault_sig_keys,
-                vault_sig_threshold,
-                vault_sig_witness,
-                vault_sig_input_index,
-                vault_sig_input_value,
-                chain_id,
-                height,
-                "CORE_VAULT",
-                &mut sighash_cache,
-                None,
-                rotation,
-                registry,
-            )?,
-        }
+        validate_threshold_sig_spend_q(
+            &vault_sig_keys,
+            vault_sig_threshold,
+            vault_sig_witness,
+            vault_sig_input_index,
+            vault_sig_input_value,
+            chain_id,
+            height,
+            "CORE_VAULT",
+            &mut sighash_cache,
+            sig_queue.as_deref_mut(),
+            rotation,
+            registry,
+        )?;
 
         // Whitelist enforcement: all outputs must be whitelisted.
         for out in &tx.outputs {
@@ -810,33 +737,33 @@ fn non_vault_inputs_owned_by(
 
 #[allow(dead_code)]
 fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), TxError> {
-    if covenant_type == COV_TYPE_P2PK {
-        return Ok(());
+    match covenant_type {
+        COV_TYPE_P2PK => Ok(()),
+        COV_TYPE_CORE_EXT => {
+            let _ = crate::core_ext::parse_core_ext_covenant_data(covenant_data)?;
+            Ok(())
+        }
+        COV_TYPE_CORE_STEALTH => {
+            let _ = parse_stealth_covenant_data(covenant_data)?;
+            Ok(())
+        }
+        COV_TYPE_VAULT => {
+            parse_vault_covenant_data_for_spend(covenant_data)?;
+            Ok(())
+        }
+        COV_TYPE_MULTISIG => {
+            parse_multisig_covenant_data(covenant_data)?;
+            Ok(())
+        }
+        COV_TYPE_HTLC => {
+            parse_htlc_covenant_data(covenant_data)?;
+            Ok(())
+        }
+        _ => Err(TxError::new(
+            ErrorCode::TxErrCovenantTypeInvalid,
+            "unsupported covenant in basic apply",
+        )),
     }
-    if covenant_type == COV_TYPE_CORE_EXT {
-        let _ = crate::core_ext::parse_core_ext_covenant_data(covenant_data)?;
-        return Ok(());
-    }
-    if covenant_type == COV_TYPE_CORE_STEALTH {
-        let _ = parse_stealth_covenant_data(covenant_data)?;
-        return Ok(());
-    }
-    if covenant_type == COV_TYPE_VAULT {
-        parse_vault_covenant_data_for_spend(covenant_data)?;
-        return Ok(());
-    }
-    if covenant_type == COV_TYPE_MULTISIG {
-        parse_multisig_covenant_data(covenant_data)?;
-        return Ok(());
-    }
-    if covenant_type == COV_TYPE_HTLC {
-        parse_htlc_covenant_data(covenant_data)?;
-        return Ok(());
-    }
-    Err(TxError::new(
-        ErrorCode::TxErrCovenantTypeInvalid,
-        "unsupported covenant in basic apply",
-    ))
 }
 
 #[cfg(test)]
