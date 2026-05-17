@@ -273,20 +273,16 @@ func validateCoreExtSpendQ(
 	inputIndex uint32,
 	inputValue uint64,
 	args ...any,
-) error {
-	env := coreExtSpendEnvFromArgs(args)
-	check := txInputSpendCheck{
-		entry:      entry,
-		assigned:   []WitnessItem{w},
-		tx:         tx,
-		inputIndex: inputIndex,
-		inputValue: inputValue,
+) (err error) {
+	if len(args) != 8 {
+		return txerr(TX_ERR_PARSE, "CORE_EXT validator argument count mismatch")
 	}
-	return validateCoreExtSpendQWithEnv(check, w, env)
-}
-
-func coreExtSpendEnvFromArgs(args []any) txValidationWorkerEnv {
-	return txValidationWorkerEnv{
+	defer func() {
+		if recover() != nil {
+			err = txerr(TX_ERR_PARSE, "CORE_EXT validator argument type mismatch")
+		}
+	}()
+	env := txValidationWorkerEnv{
 		chainID:         args[0].([32]byte),
 		blockHeight:     args[1].(uint64),
 		sighashCache:    typedArgOrZero[*SighashV1PrehashCache](args[2]),
@@ -296,6 +292,14 @@ func coreExtSpendEnvFromArgs(args []any) txValidationWorkerEnv {
 		registry:        typedArgOrZero[*SuiteRegistry](args[6]),
 		txContext:       typedArgOrZero[*TxContextBundle](args[7]),
 	}
+	check := txInputSpendCheck{
+		entry:      entry,
+		assigned:   []WitnessItem{w},
+		tx:         tx,
+		inputIndex: inputIndex,
+		inputValue: inputValue,
+	}
+	return validateCoreExtSpendQWithEnv(check, w, env)
 }
 
 func typedArgOrZero[T any](v any) T {
@@ -330,13 +334,16 @@ func activeCoreExtSpendProfile(provider CoreExtProfileProvider, extID uint16, bl
 		return CoreExtProfile{}, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
 	}
 	profile, ok, err := provider.LookupCoreExtProfile(extID, blockHeight)
-	if err != nil {
+	switch {
+	case err != nil:
 		return CoreExtProfile{}, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-	}
-	if !ok || !profile.Active {
+	case !ok:
 		return CoreExtProfile{}, false, nil
+	case !profile.Active:
+		return CoreExtProfile{}, false, nil
+	default:
+		return profile, true, nil
 	}
-	return profile, true, nil
 }
 
 // RunTxValidationWorkers validates multiple transactions in parallel using
@@ -371,19 +378,14 @@ type txValidationFailure struct {
 // results, or nil if all transactions are valid.
 func FirstTxError(results []WorkerResult[TxValidationResult]) error {
 	var best txValidationFailure
-	haveBest := false
 	for _, r := range results {
 		if r.Err == nil {
 			continue
 		}
 		candidate := txValidationFailure{txIndex: r.Value.TxIndex, err: r.Err}
-		if !haveBest || candidate.isBefore(best) {
+		if best.err == nil || candidate.isBefore(best) {
 			best = candidate
-			haveBest = true
 		}
-	}
-	if !haveBest {
-		return nil
 	}
 	return best.err
 }
