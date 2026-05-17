@@ -127,6 +127,7 @@ func (s *ChainState) Save(path string) error {
 		return fmt.Errorf("encode chainstate: %w", err)
 	}
 	raw = append(raw, '\n')
+	// nosemgrep: directory permissions require execute bit for traversal; 0o600 would block directory access
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -408,6 +409,7 @@ func allocateAndWriteTemp(path string, data []byte, mode os.FileMode) (string, e
 // before returning so callers (allocateAndWriteTemp / writeFileAtomic
 // / writeFileIfAbsent) do not need to clean up the error path.
 func writeAndSyncTemp(tmpPath string, data []byte, mode os.FileMode) error {
+	// nosemgrep: tmpPath derived from os.Getpid + atomic counter, zero external input; O_EXCL prevents overwrite
 	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
