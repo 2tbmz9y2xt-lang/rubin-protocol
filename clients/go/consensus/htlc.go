@@ -78,78 +78,136 @@ func ValidateHTLCSpendAtHeight(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) error {
-	if rotation == nil {
-		rotation = DefaultRotationProvider{}
-	}
-	if registry == nil {
-		registry = DefaultSuiteRegistry()
-	}
+	rotation, registry = resolveHTLCSpendProviders(rotation, registry)
 
 	c, err := ParseHTLCCovenantData(entry.CovenantData)
 	if err != nil {
 		return err
 	}
 
-	var expectedKeyID [32]byte
+	expectedKeyID, err := expectedHTLCSpendKeyID(c, pathItem, blockHeight, blockMTP)
+	if err != nil {
+		return err
+	}
+
+	if err := validateHTLCSignaturePrecheck(sigItem, expectedKeyID, blockHeight, rotation, registry); err != nil {
+		return err
+	}
+
+	cryptoSig, digest, err := extractSigAndDigestWithCache(sigItem, tx, inputIndex, inputValue, chainID, cache)
+	if err != nil {
+		return err
+	}
+	ok, err := verifySigWithRegistry(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, registry)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature invalid")
+	}
+	return nil
+}
+
+func resolveHTLCSpendProviders(rotation RotationProvider, registry *SuiteRegistry) (RotationProvider, *SuiteRegistry) {
+	if rotation == nil {
+		rotation = DefaultRotationProvider{}
+	}
+	if registry == nil {
+		registry = DefaultSuiteRegistry()
+	}
+	return rotation, registry
+}
+
+func expectedHTLCSpendKeyID(
+	c *HTLCCovenant,
+	pathItem WitnessItem,
+	blockHeight uint64,
+	blockMTP uint64,
+) ([32]byte, error) {
+	pathSig, pathKeyID, pathID, err := parseHTLCSelector(pathItem)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	switch pathID {
+	case 0x00:
+		return validateHTLCClaimPath(c, pathSig, pathKeyID)
+	case 0x01:
+		return validateHTLCRefundPath(c, pathSig, pathKeyID, blockHeight, blockMTP)
+	default:
+		return [32]byte{}, txerr(TX_ERR_PARSE, "CORE_HTLC unknown spend path")
+	}
+}
+
+func parseHTLCSelector(pathItem WitnessItem) ([]byte, [32]byte, byte, error) {
 	if pathItem.SuiteID != SUITE_ID_SENTINEL {
-		return txerr(TX_ERR_PARSE, "CORE_HTLC selector suite_id invalid")
+		return nil, [32]byte{}, 0, txerr(TX_ERR_PARSE, "CORE_HTLC selector suite_id invalid")
 	}
 	pathSig := pathItem.Signature
 	if len(pathItem.Pubkey) != 32 {
-		return txerr(TX_ERR_PARSE, "CORE_HTLC selector key_id length invalid")
+		return nil, [32]byte{}, 0, txerr(TX_ERR_PARSE, "CORE_HTLC selector key_id length invalid")
 	}
 	if len(pathSig) < 1 {
-		return txerr(TX_ERR_PARSE, "CORE_HTLC selector payload too short")
+		return nil, [32]byte{}, 0, txerr(TX_ERR_PARSE, "CORE_HTLC selector payload too short")
 	}
-	pathID := pathSig[0]
-	switch pathID {
-	case 0x00: // claim
-		var pathKeyID [32]byte
-		copy(pathKeyID[:], pathItem.Pubkey)
-		if pathKeyID != c.ClaimKeyID {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC claim key_id mismatch")
-		}
-		if len(pathSig) < 3 {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC claim payload too short")
-		}
-		preLen := int(binary.LittleEndian.Uint16(pathSig[1:3]))
-		if preLen < MIN_HTLC_PREIMAGE_BYTES {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC preimage_len must be >= 16")
-		}
-		if preLen > MAX_HTLC_PREIMAGE_BYTES {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC preimage length overflow")
-		}
-		if len(pathSig) != 3+preLen {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC claim payload length mismatch")
-		}
-		preimage := pathSig[3:]
-		if sha3_256(preimage) != c.Hash {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC claim preimage hash mismatch")
-		}
-		expectedKeyID = c.ClaimKeyID
+	var pathKeyID [32]byte
+	copy(pathKeyID[:], pathItem.Pubkey)
+	return pathSig, pathKeyID, pathSig[0], nil
+}
 
-	case 0x01: // refund
-		if len(pathSig) != 1 {
-			return txerr(TX_ERR_PARSE, "CORE_HTLC refund payload length mismatch")
-		}
-		var pathKeyID [32]byte
-		copy(pathKeyID[:], pathItem.Pubkey)
-		if pathKeyID != c.RefundKeyID {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC refund key_id mismatch")
-		}
-		if c.LockMode == LOCK_MODE_HEIGHT {
-			if blockHeight < c.LockValue {
-				return txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC height lock not met")
-			}
-		} else if blockMTP < c.LockValue {
-			return txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC timestamp lock not met")
-		}
-		expectedKeyID = c.RefundKeyID
-
-	default:
-		return txerr(TX_ERR_PARSE, "CORE_HTLC unknown spend path")
+func validateHTLCClaimPath(c *HTLCCovenant, pathSig []byte, pathKeyID [32]byte) ([32]byte, error) {
+	if pathKeyID != c.ClaimKeyID {
+		return [32]byte{}, txerr(TX_ERR_SIG_INVALID, "CORE_HTLC claim key_id mismatch")
 	}
+	if len(pathSig) < 3 {
+		return [32]byte{}, txerr(TX_ERR_PARSE, "CORE_HTLC claim payload too short")
+	}
+	preLen := int(binary.LittleEndian.Uint16(pathSig[1:3]))
+	if preLen < MIN_HTLC_PREIMAGE_BYTES {
+		return [32]byte{}, txerr(TX_ERR_PARSE, "CORE_HTLC preimage_len must be >= 16")
+	}
+	if preLen > MAX_HTLC_PREIMAGE_BYTES {
+		return [32]byte{}, txerr(TX_ERR_PARSE, "CORE_HTLC preimage length overflow")
+	}
+	if len(pathSig) != 3+preLen {
+		return [32]byte{}, txerr(TX_ERR_PARSE, "CORE_HTLC claim payload length mismatch")
+	}
+	preimage := pathSig[3:]
+	if sha3_256(preimage) != c.Hash {
+		return [32]byte{}, txerr(TX_ERR_SIG_INVALID, "CORE_HTLC claim preimage hash mismatch")
+	}
+	return c.ClaimKeyID, nil
+}
 
+func validateHTLCRefundPath(
+	c *HTLCCovenant,
+	pathSig []byte,
+	pathKeyID [32]byte,
+	blockHeight uint64,
+	blockMTP uint64,
+) ([32]byte, error) {
+	if len(pathSig) != 1 {
+		return [32]byte{}, txerr(TX_ERR_PARSE, "CORE_HTLC refund payload length mismatch")
+	}
+	if pathKeyID != c.RefundKeyID {
+		return [32]byte{}, txerr(TX_ERR_SIG_INVALID, "CORE_HTLC refund key_id mismatch")
+	}
+	if c.LockMode == LOCK_MODE_HEIGHT {
+		if blockHeight < c.LockValue {
+			return [32]byte{}, txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC height lock not met")
+		}
+	} else if blockMTP < c.LockValue {
+		return [32]byte{}, txerr(TX_ERR_TIMELOCK_NOT_MET, "CORE_HTLC timestamp lock not met")
+	}
+	return c.RefundKeyID, nil
+}
+
+func validateHTLCSignaturePrecheck(
+	sigItem WitnessItem,
+	expectedKeyID [32]byte,
+	blockHeight uint64,
+	rotation RotationProvider,
+	registry *SuiteRegistry,
+) error {
 	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	if !nativeSpend.Contains(sigItem.SuiteID) {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not in native spend set")
@@ -166,18 +224,6 @@ func ValidateHTLCSpendAtHeight(
 
 	if sha3_256(sigItem.Pubkey) != expectedKeyID {
 		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature key binding mismatch")
-	}
-
-	cryptoSig, digest, err := extractSigAndDigestWithCache(sigItem, tx, inputIndex, inputValue, chainID, cache)
-	if err != nil {
-		return err
-	}
-	ok, err = verifySigWithRegistry(sigItem.SuiteID, sigItem.Pubkey, cryptoSig, digest, registry)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return txerr(TX_ERR_SIG_INVALID, "CORE_HTLC signature invalid")
 	}
 	return nil
 }
