@@ -1,37 +1,11 @@
 use super::ParsedBlock;
-use crate::block::{parse_block_header_bytes, BlockHeader, BLOCK_HEADER_BYTES};
+use crate::block::{parse_block_header_bytes, BLOCK_HEADER_BYTES};
 use crate::compactsize::read_compact_size;
 use crate::error::{ErrorCode, TxError};
 use crate::tx::{parse_tx, Tx};
 use crate::wire_read::Reader;
 
-struct ParsedBlockTxs {
-    txs: Vec<Tx>,
-    txids: Vec<[u8; 32]>,
-    wtxids: Vec<[u8; 32]>,
-}
-
 pub(super) fn parse_block_bytes_impl(block_bytes: &[u8]) -> Result<ParsedBlock, TxError> {
-    let (header, header_bytes) = parse_block_header(block_bytes)?;
-    let mut r = Reader::new(&block_bytes[BLOCK_HEADER_BYTES..]);
-    let tx_count = read_block_tx_count(&mut r)?;
-    let ParsedBlockTxs { txs, txids, wtxids } =
-        parse_block_transactions(block_bytes, tx_count, &mut r)?;
-    validate_block_tx_list_consumed(block_bytes, r.offset())?;
-
-    Ok(ParsedBlock {
-        header,
-        header_bytes,
-        tx_count,
-        txs,
-        txids,
-        wtxids,
-    })
-}
-
-fn parse_block_header(
-    block_bytes: &[u8],
-) -> Result<(BlockHeader, [u8; BLOCK_HEADER_BYTES]), TxError> {
     if block_bytes.len() < BLOCK_HEADER_BYTES + 1 {
         return Err(TxError::new(ErrorCode::BlockErrParse, "block too short"));
     }
@@ -41,11 +15,8 @@ fn parse_block_header(
     let header = parse_block_header_bytes(&header_bytes)
         .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "invalid block header"))?;
 
-    Ok((header, header_bytes))
-}
-
-fn read_block_tx_count(r: &mut Reader<'_>) -> Result<u64, TxError> {
-    let (tx_count, _) = read_compact_size(r)
+    let mut r = Reader::new(&block_bytes[BLOCK_HEADER_BYTES..]);
+    let (tx_count, _) = read_compact_size(&mut r)
         .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "invalid tx_count"))?;
     if tx_count == 0 {
         return Err(TxError::new(
@@ -53,26 +24,33 @@ fn read_block_tx_count(r: &mut Reader<'_>) -> Result<u64, TxError> {
             "empty block tx list",
         ));
     }
-    Ok(tx_count)
-}
 
-fn parse_block_transactions(
-    block_bytes: &[u8],
-    tx_count: u64,
-    r: &mut Reader<'_>,
-) -> Result<ParsedBlockTxs, TxError> {
     let mut txs: Vec<Tx> = Vec::new();
     let mut txids: Vec<[u8; 32]> = Vec::new();
     let mut wtxids: Vec<[u8; 32]> = Vec::new();
 
     for _ in 0..tx_count {
-        let (tx, txid, wtxid) = parse_next_block_tx(block_bytes, r)?;
+        let (tx, txid, wtxid) = parse_next_block_tx(block_bytes, &mut r)?;
         txs.push(tx);
         txids.push(txid);
         wtxids.push(wtxid);
     }
 
-    Ok(ParsedBlockTxs { txs, txids, wtxids })
+    if BLOCK_HEADER_BYTES + r.offset() != block_bytes.len() {
+        return Err(TxError::new(
+            ErrorCode::BlockErrParse,
+            "trailing bytes after tx list",
+        ));
+    }
+
+    Ok(ParsedBlock {
+        header,
+        header_bytes,
+        tx_count,
+        txs,
+        txids,
+        wtxids,
+    })
 }
 
 fn parse_next_block_tx(
@@ -99,17 +77,4 @@ fn parse_next_block_tx(
         .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "unexpected EOF in tx list"))?;
 
     Ok((tx, txid, wtxid))
-}
-
-fn validate_block_tx_list_consumed(
-    block_bytes: &[u8],
-    consumed_tail: usize,
-) -> Result<(), TxError> {
-    if BLOCK_HEADER_BYTES + consumed_tail != block_bytes.len() {
-        return Err(TxError::new(
-            ErrorCode::BlockErrParse,
-            "trailing bytes after tx list",
-        ));
-    }
-    Ok(())
 }

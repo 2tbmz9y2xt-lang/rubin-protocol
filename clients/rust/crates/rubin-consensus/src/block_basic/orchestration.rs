@@ -26,7 +26,8 @@ pub(crate) fn validate_parsed_block_basic_with_context_at_height(
         block_height,
         prev_timestamps,
     )?;
-    let h = hash_parsed_block_header(pb)?;
+    let h = block_hash(&pb.header_bytes)
+        .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "failed to hash block header"))?;
 
     Ok(BlockBasicSummary {
         tx_count: pb.tx_count,
@@ -43,44 +44,17 @@ fn validate_parsed_block_basic_checks(
     block_height: u64,
     prev_timestamps: Option<&[u64]>,
 ) -> Result<BlockTxStats, TxError> {
-    validate_block_header_and_time(
-        pb,
-        expected_prev_hash,
-        expected_target,
-        block_height,
-        prev_timestamps,
-    )?;
-    let stats = validate_block_resources(pb)?;
-    validate_block_body_semantics(pb, block_height)?;
-    Ok(stats)
-}
+    validate_header_commitments(pb, expected_prev_hash, expected_target)
+        .and_then(|_| validate_coinbase_witness_commitment(pb))
+        .and_then(|_| {
+            validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)
+        })?;
 
-fn validate_block_header_and_time(
-    pb: &ParsedBlock,
-    expected_prev_hash: Option<[u8; 32]>,
-    expected_target: Option<[u8; 32]>,
-    block_height: u64,
-    prev_timestamps: Option<&[u64]>,
-) -> Result<(), TxError> {
-    validate_header_commitments(pb, expected_prev_hash, expected_target)?;
-    validate_coinbase_witness_commitment(pb)?;
-    validate_timestamp_rules(pb.header.timestamp, block_height, prev_timestamps)?;
-    Ok(())
-}
-
-fn validate_block_resources(pb: &ParsedBlock) -> Result<BlockTxStats, TxError> {
     let stats = accumulate_block_resource_stats(pb)?;
     validate_block_resource_limits(stats)?;
+
+    validate_da_set_integrity(&pb.txs)
+        .and_then(|_| validate_block_tx_semantics(pb, block_height))?;
+
     Ok(stats)
-}
-
-fn validate_block_body_semantics(pb: &ParsedBlock, block_height: u64) -> Result<(), TxError> {
-    validate_da_set_integrity(&pb.txs)?;
-    validate_block_tx_semantics(pb, block_height)?;
-    Ok(())
-}
-
-fn hash_parsed_block_header(pb: &ParsedBlock) -> Result<[u8; 32], TxError> {
-    block_hash(&pb.header_bytes)
-        .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "failed to hash block header"))
 }
