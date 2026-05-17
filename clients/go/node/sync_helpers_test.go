@@ -3,6 +3,8 @@ package node
 import (
 	"strings"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func TestGetParentTimestampAtHeightZero(t *testing.T) {
@@ -51,5 +53,42 @@ func TestNoteBlockApplyOutcome(t *testing.T) {
 	s.noteBlockApplyOutcome(blockApplyMetricRejected)
 	if s.blockApply.Rejected != 1 {
 		t.Fatalf("expected Rejected=1, got %d", s.blockApply.Rejected)
+	}
+}
+
+func TestNoteReorgNilReceiver(t *testing.T) {
+	(*SyncEngine)(nil).noteReorg(3)
+}
+
+func TestFetchDisconnectBlockAndUndoWithMissingBlock(t *testing.T) {
+	_, _, _, err := (&SyncEngine{blockStore: &BlockStore{}}).fetchDisconnectBlockAndUndo([32]byte{0xff})
+	if err == nil {
+		t.Fatal("expected error for missing block")
+	}
+}
+
+func TestCurrentCanonicalTipNoTip(t *testing.T) {
+	_, _, err := (&SyncEngine{blockStore: &BlockStore{}}).currentCanonicalTip()
+	if err == nil || !strings.Contains(err.Error(), "no canonical tip") {
+		t.Fatalf("expected no canonical tip error, got %v", err)
+	}
+}
+
+func TestRecordAppliedBlock(t *testing.T) {
+	s := &SyncEngine{}
+	s.recordAppliedBlock(5, 1000)
+	s.mu.RLock()
+	if s.tipTimestamp != 1000 || s.bestKnownHeight != 5 || s.lastReorgDepth != 0 {
+		t.Fatalf("recordAppliedBlock: ts=%d height=%d reorg=%d", s.tipTimestamp, s.bestKnownHeight, s.lastReorgDepth)
+	}
+	s.mu.RUnlock()
+}
+
+func TestStoreSideBlockAndSummaryInvalidBlock(t *testing.T) {
+	bs := &BlockStore{}
+	s := &SyncEngine{blockStore: bs, cfg: SyncConfig{}}
+	_, err := s.storeSideBlockAndSummary([]byte{}, [32]byte{}, &consensus.ParsedBlock{}, 1, nil)
+	if err == nil {
+		t.Fatal("expected validation error for empty block")
 	}
 }
