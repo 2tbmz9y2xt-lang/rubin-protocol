@@ -74,7 +74,6 @@ fn parse_next_block_tx(
     }
 
     r.read_bytes(consumed)
-        .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "unexpected EOF in tx list"))?;
-
-    Ok((tx, txid, wtxid))
+        .map(|_| (tx, txid, wtxid))
+        .map_err(|_| TxError::new(ErrorCode::BlockErrParse, "unexpected EOF in tx list"))
 }
