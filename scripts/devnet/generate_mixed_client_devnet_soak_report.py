@@ -9,6 +9,7 @@ from typing import Any
 SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000; MAX_PARSER_OUTPUT_BYTES = 100_000; MAX_TX_HEX_CHARS = 20_000  # noqa: E702
 REPO_ROOT = Path(__file__).resolve().parents[2]; DEV_ENV = REPO_ROOT / "scripts" / "dev-env.sh"; GO_MODULE_ROOT = REPO_ROOT / "clients" / "go"  # noqa: E702
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
+BLOCK_REASON_PREFIX = "RUBIN_BLOCK_CHECK_REASON:"
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+({NUM})(?:\s+({NUM}))?\s*$"); STRICT_METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+([0-9]+)(?:\.0*)?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable", "helper_only"}  # noqa: E702
 PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block", "binary", "datadir"}; DIRECTORY_PATH_FIELD_NAMES = {"datadir"}  # noqa: E702
@@ -89,24 +90,32 @@ import (
 const reasonPrefix = "RUBIN_BLOCK_CHECK_REASON:"
 type blockResp struct { Hash string `json:"hash"`; Height uint64 `json:"height"`; Canonical bool `json:"canonical"`; BlockHex string `json:"block_hex"` }
 type request struct { Block blockResp `json:"block"`; TxHex string `json:"tx_hex"`; Txid string `json:"txid"`; Height uint64 `json:"height"`; Hash string `json:"hash"`; TxCount uint64 `json:"tx_count"` }
-func die(reason string, detail any) { fmt.Fprintln(os.Stderr, reasonPrefix + reason); fmt.Fprintln(os.Stderr, detail); os.Exit(1) }
+func die(reason string, detail any) {
+	text := fmt.Sprint(detail)
+	if strings.HasPrefix(text, reasonPrefix) { text = "detail:" + text }
+	fmt.Fprintln(os.Stderr, reasonPrefix + reason)
+	fmt.Fprintln(os.Stderr, text)
+	os.Exit(1)
+}
 func main() {
 	var req request
 	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil { die("convergence_block_parser_malformed_input", err) }
 	if req.Block.Height != req.Height || strings.ToLower(req.Block.Hash) != strings.ToLower(req.Hash) || !req.Block.Canonical { die("convergence_block_sidecar_mismatch", "block response height/hash/canonical mismatch") }
 	txBytes, err := hex.DecodeString(strings.TrimSpace(req.TxHex)); if err != nil { die("convergence_tx_hex_parse_failed", err) }
-	_, wantTxid, _, consumed, err := consensus.ParseTx(txBytes); if err != nil || consumed != len(txBytes) { die("convergence_tx_hex_parse_failed", "parse tx_hex failed") }
+	_, wantTxid, wantWtxid, consumed, err := consensus.ParseTx(txBytes); if err != nil || consumed != len(txBytes) { die("convergence_tx_hex_parse_failed", "parse tx_hex failed") }
 	if hex.EncodeToString(wantTxid[:]) != strings.ToLower(req.Txid) { die("convergence_tx_hex_txid_mismatch", "tx_hex txid mismatch") }
 	blockBytes, err := hex.DecodeString(strings.TrimSpace(req.Block.BlockHex)); if err != nil { die("convergence_block_hex_parse_failed", err) }
 	pb, err := consensus.ParseBlockBytes(blockBytes); if err != nil { die("convergence_block_hex_parse_failed", err) }
 	gotHash, err := consensus.BlockHash(pb.HeaderBytes); if err != nil || hex.EncodeToString(gotHash[:]) != strings.ToLower(req.Hash) { die("convergence_block_hash_mismatch", "parsed block hash mismatch") }
 	if pb.TxCount != req.TxCount { die("convergence_block_tx_count_mismatch", "parsed block tx_count mismatch") }
 	if _, err := consensus.ValidateBlockBasicAtHeight(blockBytes, nil, nil, req.Height); err != nil { die("convergence_block_basic_validation_failed", err) }
-	_, _, wantWtxid, _, _ := consensus.ParseTx(txBytes)
 	for i, got := range pb.Txids { if i > 0 && got == wantTxid && pb.Wtxids[i] == wantWtxid { return } }
 	die("convergence_block_missing_submitted_txid", "submitted txid/wtxid missing from parsed block")
 }
 '''
+_BLOCK_HELPER_DIR: tempfile.TemporaryDirectory[str] | None = None
+_BLOCK_HELPER_BIN: Path | None = None
+_BLOCK_HELPER_ERR: str | None = None
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
 def hex_bytes(value: Any) -> bool: return isinstance(value, str) and bool(HEX_BYTES.fullmatch(value))  # noqa: E704
 def jint(value: Any, minimum: int = 0) -> bool: return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000  # noqa: E704
@@ -400,34 +409,70 @@ def tx_hex_txid_error(txhex: Any, txid: str) -> str | None:
     if parsed.get("txid") != txid:
         return "tx_hex_txid_mismatch"
     return None if parsed.get("consumed") == len(txhex) // 2 else "tx_parser_consumed_mismatch"
-def block_inclusion_error(block: dict[str, Any], txhex: str, txid: str, height: int, block_hash: str, tx_count: int) -> str | None:
+def block_helper_binary() -> tuple[Path | None, str | None]:
+    global _BLOCK_HELPER_BIN, _BLOCK_HELPER_DIR, _BLOCK_HELPER_ERR
     if not DEV_ENV.is_file() or not GO_MODULE_ROOT.is_dir():
-        return "convergence_block_parser_unavailable"
+        return None, "convergence_block_tooling_unavailable"
+    if _BLOCK_HELPER_BIN is not None and _BLOCK_HELPER_BIN.is_file():
+        return _BLOCK_HELPER_BIN, None
+    if _BLOCK_HELPER_ERR is not None:
+        return None, _BLOCK_HELPER_ERR
     try:
-        with tempfile.TemporaryDirectory(prefix="rubin-block-check-") as tmp:
-            helper = Path(tmp) / "main.go"
-            helper.write_text(BLOCK_INCLUSION_GO, encoding="utf-8")
-            proc = subprocess.run(  # nosec B603
-                [str(DEV_ENV), "--", "go", "-C", str(GO_MODULE_ROOT), "run", str(helper)],
-                check=False,
-                env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
-                input=json.dumps({"block": block, "tx_hex": txhex, "txid": txid, "height": height, "hash": block_hash, "tx_count": tx_count}) + "\n",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=60,
-            )
+        tmp = tempfile.TemporaryDirectory(prefix="rubin-block-check-")
+        helper = Path(tmp.name) / "main.go"; binary = Path(tmp.name) / "rubin-block-check"  # noqa: E702
+        helper.write_text(BLOCK_INCLUSION_GO, encoding="utf-8")
+        proc = subprocess.run(  # nosec B603
+            [str(DEV_ENV), "--", "go", "-C", str(GO_MODULE_ROOT), "build", "-o", str(binary), str(helper)],
+            check=False,
+            env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        _BLOCK_HELPER_ERR = "convergence_block_tooling_timeout"
+        return None, _BLOCK_HELPER_ERR
+    except OSError:
+        _BLOCK_HELPER_ERR = "convergence_block_tooling_unavailable"
+        return None, _BLOCK_HELPER_ERR
+    output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    if len(output) > MAX_PARSER_OUTPUT_BYTES:
+        _BLOCK_HELPER_ERR = "convergence_block_tooling_output_too_large"
+        return None, _BLOCK_HELPER_ERR
+    if proc.returncode != 0:
+        _BLOCK_HELPER_ERR = "convergence_block_tooling_build_failed"
+        return None, _BLOCK_HELPER_ERR
+    _BLOCK_HELPER_DIR = tmp; _BLOCK_HELPER_BIN = binary  # noqa: E702
+    return _BLOCK_HELPER_BIN, None
+def block_inclusion_error(block: dict[str, Any], txhex: str, txid: str, height: int, block_hash: str, tx_count: int) -> str | None:
+    binary, build_err = block_helper_binary()
+    if build_err or binary is None:
+        return build_err or "convergence_block_tooling_unavailable"
+    try:
+        proc = subprocess.run(  # nosec B603
+            [str(binary)],
+            check=False,
+            env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"},
+            input=json.dumps({"block": block, "tx_hex": txhex, "txid": txid, "height": height, "hash": block_hash, "tx_count": tx_count}) + "\n",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
     except subprocess.TimeoutExpired:
         return "convergence_block_parser_timeout"
     except OSError:
-        return "convergence_block_parser_unavailable"
+        return "convergence_block_tooling_unavailable"
     output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
     if len(output) > MAX_PARSER_OUTPUT_BYTES:
         return "convergence_block_parser_output_too_large"
     if proc.returncode == 0:
         return None
-    if match := re.search(r"RUBIN_BLOCK_CHECK_REASON:([a-z0-9_:-]+)", output):
-        return match.group(1) if SAFE_REASON.fullmatch(match.group(1)) else "convergence_block_parser_malformed_output"
+    for line in output.splitlines():
+        if line.startswith(BLOCK_REASON_PREFIX):
+            reason = line[len(BLOCK_REASON_PREFIX):]
+            return reason if SAFE_REASON.fullmatch(reason) else "convergence_block_parser_malformed_output"
     return "convergence_block_parser_failed"
 def tx_converge_sidecar_error(mine: dict[str, Any], seen: dict[str, Any], mine_impl: str, seen_impl: str, by_impl: dict[str, dict[str, Any]], root: Path, txid: str, txhex: str) -> tuple[list[Path], str | None]:
     reason = "convergence_sidecar_invalid"
@@ -1234,21 +1279,41 @@ def metric_section(args: argparse.Namespace, sections: dict[str, dict[str, Any]]
     if err:
         return section("reorg_metrics", "fail", err, source_artifact_path=path, claim_type="metric_evidence")
     partition = sections.get("partition_heal_reorg", {})
-    bound = False
+    binding_reason = "metric_source_binding_unavailable"
     if partition.get("status") == "pass" and isinstance(partition.get("source_artifact_path"), str):
         partition_path, partition_err = regular_abs_path(partition["source_artifact_path"], "partition_source_not_regular")
         pdata, perr = load(partition_path) if partition_err is None else (None, partition_err)
         metric_value, present = get(pdata, "observations.reorg.go_metrics") if perr is None and isinstance(pdata, dict) else (None, False)
         metric_path, metric_err = regular_abs_path(metric_value, "metrics_not_regular") if present and isinstance(metric_value, str) else (None, "metrics_not_regular")
-        bound = metric_err is None and metric_path == path
-    if not bound:
-        return section("reorg_metrics", "no_data", "metric_source_binding_unavailable", source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
-    return section("reorg_metrics", "pass", None, source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", evidence_class="metric_evidence", behavior_evidence=False, metric_values=metrics)
+        binding_reason = "metric_source_binding_path_mismatch" if metric_err is None and metric_path != path else binding_reason
+        if metric_err is None and metric_path == path:
+            return section("reorg_metrics", "pass", None, source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", evidence_class="metric_evidence", behavior_evidence=False, metric_values=metrics)
+    if binding_reason == "metric_source_binding_path_mismatch":
+        return section("reorg_metrics", "no_data", binding_reason, source_artifact_path=path, expected_source_artifact_path=metric_path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
+    return section("reorg_metrics", "no_data", binding_reason, source_artifact_path=path, source_fields=sorted(METRICS), claim_type="metric_evidence", metric_values=metrics)
+def raw_sample_observed(path_value: Any, fields: tuple[str, ...]) -> bool:
+    path, err = regular_abs_path(path_value, "raw_samples_source_not_regular") if isinstance(path_value, str) else (None, "raw_samples_source_not_regular")
+    data, load_err = load(path) if err is None and path is not None else (None, err)
+    if load_err or not isinstance(data, dict):
+        return False
+    for field in fields:
+        value, present = get(data, field)
+        samples = value.get("samples") if isinstance(value, dict) else None
+        if not present or not isinstance(samples, list) or not samples or any(not isinstance(item, dict) for item in samples):
+            return False
+    return True
 def raw_samples_section(sections: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    tx_names = ("go_to_rust_accept", "go_to_rust_mine_converge", "rust_to_go_mine_converge")
+    tx_requirements = {
+        "go_to_rust_accept": ("raw_samples.propagation",),
+        "go_to_rust_mine_converge": ("raw_samples.propagation", "raw_samples.convergence"),
+        "rust_to_go_mine_converge": ("raw_samples.propagation", "raw_samples.convergence"),
+    }
+    tx_names = tuple(tx_requirements)
     if any(sections[name]["status"] in {"fail", "helper_only"} for name in tx_names):
         return section("raw_samples", "fail", "source_sample_section_failed")
     if all(sections[name]["status"] == "pass" for name in tx_names):
+        if not all(raw_sample_observed(sections[name].get("source_artifact_path"), tx_requirements[name]) for name in tx_names):
+            return section("raw_samples", "no_data", "raw_samples_source_observation_unavailable", source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="raw_samples", evidence_class="raw_samples", slo_claim=False)
         return section("raw_samples", "pass", None, source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="raw_samples", evidence_class="raw_samples", slo_claim=False)
     return section("raw_samples", "no_data", "source_contract_validation_unavailable", source_fields=["raw_samples.propagation", "raw_samples.convergence"], claim_type="raw_samples", evidence_class="raw_samples", slo_claim=False)
 def claim_tokens_in_text(value: Any) -> set[str]:
