@@ -342,6 +342,14 @@ def source_load_json(path_value: Any, root: Path, reason: str) -> tuple[dict[str
     p, err = source_artifact(path_value, root, reason)
     data, load_err = (None, err) if err else load(p)  # type: ignore[arg-type]
     return (data, p, None) if load_err is None and isinstance(data, dict) else (None, p, reason)
+def source_load_json_detailed(path_value: Any, root: Path, path_reason: str, nonobject_reason: str) -> tuple[dict[str, Any] | None, Path | None, str | None]:
+    p, err = source_artifact(path_value, root, path_reason)
+    if err or p is None:
+        return None, p, path_reason
+    data, load_err = load(p)
+    if load_err:
+        return None, p, load_err
+    return (data, p, None) if isinstance(data, dict) else (None, p, nonobject_reason)
 def tx_capture_sidecar_error(label: str, obj: dict[str, Any], impl: str, endpoint: str, root: Path, txid: str, txhex: str) -> tuple[list[Path], str | None]:
     status, status_path, err = source_load_json(obj.get("tx_status_path"), root, f"{label}_sidecar_invalid")
     got, get_path, get_err = source_load_json(obj.get("get_tx_path"), root, f"{label}_sidecar_invalid")
@@ -432,13 +440,16 @@ def block_inclusion_error(block: dict[str, Any], txhex: str, txid: str, height: 
     return "convergence_block_inclusion_failed"
 def tx_converge_sidecar_error(mine: dict[str, Any], seen: dict[str, Any], mine_impl: str, seen_impl: str, by_impl: dict[str, dict[str, Any]], root: Path, txid: str, txhex: str) -> tuple[list[Path], str | None]:
     reason = "convergence_sidecar_invalid"
-    mine_next, mine_next_path, err = source_load_json(mine.get("mine_next_path"), root, reason)
-    mine_block, mine_block_path, block_err = source_load_json(mine.get("block_path"), root, reason)
-    seen_tip, seen_tip_path, tip_err = source_load_json(seen.get("tip_path"), root, reason)
-    seen_block, seen_block_path, seen_block_err = source_load_json(seen.get("block_path"), root, reason)
+    mine_next, mine_next_path, err = source_load_json_detailed(mine.get("mine_next_path"), root, "convergence_sidecar_path_invalid", "convergence_sidecar_nonobject")
+    mine_block, mine_block_path, block_err = source_load_json_detailed(mine.get("block_path"), root, "convergence_sidecar_path_invalid", "convergence_sidecar_nonobject")
+    seen_tip, seen_tip_path, tip_err = source_load_json_detailed(seen.get("tip_path"), root, "convergence_sidecar_path_invalid", "convergence_sidecar_nonobject")
+    seen_block, seen_block_path, seen_block_err = source_load_json_detailed(seen.get("block_path"), root, "convergence_sidecar_path_invalid", "convergence_sidecar_nonobject")
+    for load_err in (err, block_err, tip_err, seen_block_err):
+        if load_err:
+            return [], load_err
     paths = [p for p in (mine_next_path, mine_block_path, seen_tip_path, seen_block_path) if p is not None]
-    if err or block_err or tip_err or seen_block_err or len(paths) != 4 or len(set(paths)) != 4 or mine_next is None or mine_block is None or seen_tip is None or seen_block is None:
-        return [], reason
+    if len(paths) != 4 or len(set(paths)) != 4 or mine_next is None or mine_block is None or seen_tip is None or seen_block is None:
+        return [], "convergence_sidecar_paths_not_distinct"
     height, block_hash, tx_count = mine.get("height"), mine.get("block_hash"), mine.get("tx_count")
     if not jint(height) or not is_hex32(block_hash) or not jint(tx_count, 2):
         return [], reason
@@ -1233,8 +1244,9 @@ def metric_section(args: argparse.Namespace, sections: dict[str, dict[str, Any]]
         return section("reorg_metrics", "fail", err, source_artifact_path=path, claim_type="metric_evidence")
     partition = sections.get("partition_heal_reorg", {})
     bound = False
-    if partition.get("status") == "pass" and args.partition_heal_reorg_report:
-        pdata, perr = load(Path(args.partition_heal_reorg_report))
+    if partition.get("status") == "pass" and isinstance(partition.get("source_artifact_path"), str):
+        partition_path, partition_err = regular_abs_path(partition["source_artifact_path"], "partition_source_not_regular")
+        pdata, perr = load(partition_path) if partition_err is None else (None, partition_err)
         metric_value, present = get(pdata, "observations.reorg.go_metrics") if perr is None and isinstance(pdata, dict) else (None, False)
         metric_path, metric_err = regular_abs_path(metric_value, "metrics_not_regular") if present and isinstance(metric_value, str) else (None, "metrics_not_regular")
         bound = metric_err is None and metric_path == path
