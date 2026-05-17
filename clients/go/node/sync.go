@@ -506,17 +506,7 @@ func (s *SyncEngine) captureRollbackState() (syncRollbackState, error) {
 }
 
 func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) error {
-	restoreErr := func() error {
-		if s.chainState == nil {
-			return errors.New("nil chainstate destination")
-		}
-		recovered := cloneChainState(state.chainState)
-		if recovered == nil {
-			return errors.New("nil rollback chainstate")
-		}
-		s.chainState.replaceFrom(recovered)
-		return nil
-	}()
+	restoreErr := s.restoreRollbackChainState(state)
 	if s.blockStore != nil {
 		if bsErr := s.blockStore.RestoreCanonicalIndex(state.canonicalIndex); bsErr != nil && restoreErr == nil {
 			restoreErr = bsErr
@@ -540,6 +530,18 @@ func (s *SyncEngine) rollbackApplyBlock(cause error, state syncRollbackState) er
 		return fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
 	}
 	return cause
+}
+
+func (s *SyncEngine) restoreRollbackChainState(state syncRollbackState) error {
+	if s.chainState == nil {
+		return errors.New("nil chainstate destination")
+	}
+	recovered := cloneChainState(state.chainState)
+	if recovered == nil {
+		return errors.New("nil rollback chainstate")
+	}
+	s.chainState.replaceFrom(recovered)
+	return nil
 }
 
 func (s *SyncEngine) applyCanonicalParsedBlock(
@@ -567,42 +569,13 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	if err != nil {
 		return nil, blockApplyMetricNone, err
 	}
-	var zeroID [32]byte
-	if blockHeight == 0 && s.cfg.ChainID != zeroID && s.cfg.ChainID != devnetGenesisChainID {
-		// Both genesis-identity rejects on the height-0 admission path are
-		// consensus-invalid block classes from a peer's perspective: a
-		// peer-relayed wrong-identity block must escalate ban score in the
-		// P2P handler (clients/go/node/p2p/handlers_block.go gates ban
-		// escalation via `var txErr *consensus.TxError; errors.As(err, &txErr)`).
-		// Wrap with a TxError so peer attribution is class-closed for both
-		// genesis-identity classes (chain_id mismatch and genesis_hash
-		// mismatch below).
-		return nil, blockApplyMetricRejected, &consensus.TxError{
-			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
-			Msg:  "genesis chain_id mismatch",
-		}
-	}
 	blockHash, err := consensus.BlockHash(pb.HeaderBytes)
 	if err != nil {
 		return nil, blockApplyMetricNone, err
 	}
-	// Defense in depth on top of the chain_id guard above: at height 0 on a
-	// devnet runtime, the block must be the published devnet genesis. Without
-	// this, a malformed or relayed block whose ChainID matches devnet but
-	// whose contents differ (different timestamp, txs, merkle root, etc.)
-	// would otherwise be admitted as the local genesis and lock the chain
-	// onto a wrong identity. Test mode (zero ChainID) skip-checks to mirror
-	// the chain_id guard pattern above; non-devnet ChainID is already
-	// rejected by that guard. TxError wrap matches the chain_id guard so
-	// the P2P inbound block path can hard-ban peers relaying either flavor
-	// of wrong-genesis block via the standard
-	// `var txErr *consensus.TxError; errors.As(err, &txErr)` pattern in
-	// p2p/handlers_block.go.
-	if blockHeight == 0 && s.cfg.ChainID == devnetGenesisChainID && blockHash != devnetGenesisBlockHash {
-		return nil, blockApplyMetricRejected, &consensus.TxError{
-			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
-			Msg:  "genesis_hash mismatch",
-		}
+	// Validate genesis identity at height 0
+	if outcome, err := s.validateGenesisIdentity(blockHeight, blockHash); err != nil {
+		return nil, outcome, err
 	}
 
 	rollbackState, err := s.captureRollbackState()
@@ -611,11 +584,7 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 	}
 	prevState := cloneChainState(rollbackState.chainState)
 
-	var summary *ChainStateConnectSummary
-	// Q-PV-12 shadow rollout: sequential truth path. Parallel validation runs on a
-	// cloned state and is used for bounded diagnostics only (never changes verdict).
-	pvActive := (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
-	summary, err = s.chainState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
+	summary, err := s.chainState.ConnectBlockWithCoreExtProfilesAndSuiteContext(
 		blockBytes,
 		s.cfg.ExpectedTarget,
 		prevTimestamps,
@@ -624,82 +593,17 @@ func (s *SyncEngine) applyCanonicalParsedBlockTracked(
 		s.cfg.RotationProvider,
 		s.cfg.SuiteRegistry,
 	)
+
+	// Run PV shadow validation (diagnostics only, never changes verdict)
+	s.runPVShadowIfActive(blockBytes, prevTimestamps, prevState, blockHeight, err, summary)
+
 	if err != nil {
-		if pvActive {
-			s.pvTelemetry.RecordBlockValidated()
-			validateStart := time.Now()
-			shadowState := cloneChainState(prevState)
-			_, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
-				blockBytes,
-				s.cfg.ExpectedTarget,
-				prevTimestamps,
-				s.cfg.ChainID,
-				s.cfg.CoreExtProfiles,
-				s.cfg.RotationProvider,
-				s.cfg.SuiteRegistry,
-				0,
-			)
-			s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
-			seqCode, parCode := txErrCode(err), txErrCode(parErr)
-			if seqCode != parCode {
-				s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_err=%s par_err=%s", blockHeight, seqCode, parCode))
-				_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_err=%s par_err=%s\n", blockHeight, seqCode, parCode)
-				if parErr == nil {
-					// seq reject vs par accept = verdict divergence
-					s.pvTelemetry.RecordMismatchVerdict()
-				} else {
-					s.pvTelemetry.RecordMismatchError()
-				}
-			}
-		} else {
-			s.pvTelemetry.RecordBlockSkipped()
-		}
 		return nil, blockApplyMetricRejected, err
 	}
-	if pvActive {
-		s.pvTelemetry.RecordBlockValidated()
-		validateStart := time.Now()
-		shadowState := cloneChainState(prevState)
-		parSummary, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
-			blockBytes,
-			s.cfg.ExpectedTarget,
-			prevTimestamps,
-			s.cfg.ChainID,
-			s.cfg.CoreExtProfiles,
-			s.cfg.RotationProvider,
-			s.cfg.SuiteRegistry,
-			0,
-		)
-		s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
-		if parSummary != nil {
-			s.pvTelemetry.RecordWorkerTasks(parSummary.SigTaskCount)
-			for i := uint64(0); i < parSummary.WorkerPanics; i++ {
-				s.pvTelemetry.RecordWorkerPanic()
-			}
-		}
-		if parErr != nil {
-			s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_ok par_err=%s", blockHeight, txErrCode(parErr)))
-			_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_ok par_err=%s\n", blockHeight, txErrCode(parErr))
-			s.pvTelemetry.RecordMismatchVerdict()
-		} else if parSummary.PostStateDigest != summary.PostStateDigest {
-			s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): post_state_digest", blockHeight))
-			_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d post_state_digest\n", blockHeight)
-			s.pvTelemetry.RecordMismatchState()
-		}
-	} else {
-		s.pvTelemetry.RecordBlockSkipped()
-	}
-	commitStart := time.Now()
-	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
-		return nil, blockApplyMetricNone, s.rollbackApplyBlock(err, rollbackState)
-	}
-	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
 
-	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
-	if s.mempool != nil {
-		if err := s.mempool.applyConnectedBlockParsed(pb); err != nil {
-			_, _ = fmt.Fprintf(s.stderr, "mempool: apply-connected-block: %v\n", err)
-		}
+	// Commit persistence, record metrics, update mempool
+	if err := s.finalizeAppliedBlock(summary, blockHash, pb, blockBytes, prevState, rollbackState); err != nil {
+		return nil, blockApplyMetricNone, err
 	}
 	return summary, blockApplyMetricAccepted, nil
 }
@@ -807,4 +711,103 @@ func (s *SyncEngine) currentCanonicalTip() (uint64, [32]byte, error) {
 		return 0, [32]byte{}, errors.New("blockstore has no canonical tip")
 	}
 	return height, tipHash, nil
+}
+
+// validateGenesisIdentity checks genesis block identity at height 0.
+func (s *SyncEngine) validateGenesisIdentity(blockHeight uint64, blockHash [32]byte) (blockApplyMetricOutcome, error) {
+	var zeroID [32]byte
+	if blockHeight == 0 && s.cfg.ChainID != zeroID && s.cfg.ChainID != devnetGenesisChainID {
+		return blockApplyMetricRejected, &consensus.TxError{
+			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
+			Msg:  "genesis chain_id mismatch",
+		}
+	}
+	if blockHeight == 0 && s.cfg.ChainID == devnetGenesisChainID && blockHash != devnetGenesisBlockHash {
+		return blockApplyMetricRejected, &consensus.TxError{
+			Code: consensus.BLOCK_ERR_LINKAGE_INVALID,
+			Msg:  "genesis_hash mismatch",
+		}
+	}
+	return blockApplyMetricNone, nil
+}
+
+// runPVShadowOnError runs parallel validation when sequential connect failed.
+func (s *SyncEngine) runPVShadowOnError(blockBytes []byte, prevTimestamps []uint64, prevState *ChainState, blockHeight uint64, seqErr error) {
+	s.pvTelemetry.RecordBlockValidated()
+	validateStart := time.Now()
+	shadowState := cloneChainState(prevState)
+	_, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
+		blockBytes,
+		s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID,
+		s.cfg.CoreExtProfiles, s.cfg.RotationProvider, s.cfg.SuiteRegistry, 0,
+	)
+	s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
+	seqCode, parCode := txErrCode(seqErr), txErrCode(parErr)
+	if seqCode != parCode {
+		s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_err=%s par_err=%s", blockHeight, seqCode, parCode))
+		_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_err=%s par_err=%s\n", blockHeight, seqCode, parCode)
+		if parErr == nil {
+			s.pvTelemetry.RecordMismatchVerdict()
+		} else {
+			s.pvTelemetry.RecordMismatchError()
+		}
+	}
+}
+
+// runPVShadowOnSuccess runs parallel validation when sequential connect succeeded.
+func (s *SyncEngine) runPVShadowOnSuccess(blockBytes []byte, prevTimestamps []uint64, prevState *ChainState, blockHeight uint64, seqSummary *ChainStateConnectSummary) {
+	s.pvTelemetry.RecordBlockValidated()
+	validateStart := time.Now()
+	shadowState := cloneChainState(prevState)
+	parSummary, parErr := shadowState.ConnectBlockParallelSigsWithSuiteContext(
+		blockBytes,
+		s.cfg.ExpectedTarget, prevTimestamps, s.cfg.ChainID,
+		s.cfg.CoreExtProfiles, s.cfg.RotationProvider, s.cfg.SuiteRegistry, 0,
+	)
+	s.pvTelemetry.RecordValidateLatency(time.Since(validateStart))
+	if parSummary != nil {
+		s.pvTelemetry.RecordWorkerTasks(parSummary.SigTaskCount)
+		for i := uint64(0); i < parSummary.WorkerPanics; i++ {
+			s.pvTelemetry.RecordWorkerPanic()
+		}
+	}
+	if parErr != nil {
+		s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): seq_ok par_err=%s", blockHeight, txErrCode(parErr)))
+		_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d seq_ok par_err=%s\n", blockHeight, txErrCode(parErr))
+		s.pvTelemetry.RecordMismatchVerdict()
+	} else if parSummary.PostStateDigest != seqSummary.PostStateDigest {
+		s.recordPVShadowMismatch(fmt.Sprintf("pv_shadow mismatch(height=%d): post_state_digest", blockHeight))
+		_, _ = fmt.Fprintf(s.stderr, "pv_shadow: mismatch height=%d post_state_digest\n", blockHeight)
+		s.pvTelemetry.RecordMismatchState()
+	}
+}
+
+// runPVShadowIfActive runs the appropriate PV shadow validation.
+func (s *SyncEngine) runPVShadowIfActive(blockBytes []byte, prevTimestamps []uint64, prevState *ChainState, blockHeight uint64, seqErr error, seqSummary *ChainStateConnectSummary) {
+	pvActive := (s.pvMode == pvModeShadow || s.pvMode == pvModeOn) && s.isInIBDUnchecked()
+	if !pvActive {
+		s.pvTelemetry.RecordBlockSkipped()
+		return
+	}
+	if seqErr != nil {
+		s.runPVShadowOnError(blockBytes, prevTimestamps, prevState, blockHeight, seqErr)
+	} else {
+		s.runPVShadowOnSuccess(blockBytes, prevTimestamps, prevState, blockHeight, seqSummary)
+	}
+}
+
+// finalizeAppliedBlock commits persistence, records metrics, and updates mempool.
+func (s *SyncEngine) finalizeAppliedBlock(summary *ChainStateConnectSummary, blockHash [32]byte, pb *consensus.ParsedBlock, blockBytes []byte, prevState *ChainState, rollbackState syncRollbackState) error {
+	commitStart := time.Now()
+	if err := s.persistAppliedBlock(summary, blockHash, pb, blockBytes, prevState); err != nil {
+		return s.rollbackApplyBlock(err, rollbackState)
+	}
+	s.pvTelemetry.RecordCommitLatency(time.Since(commitStart))
+	s.recordAppliedBlock(summary.BlockHeight, pb.Header.Timestamp)
+	if s.mempool != nil {
+		if err := s.mempool.applyConnectedBlockParsed(pb); err != nil {
+			_, _ = fmt.Fprintf(s.stderr, "mempool: apply-connected-block: %v\n", err)
+		}
+	}
+	return nil
 }

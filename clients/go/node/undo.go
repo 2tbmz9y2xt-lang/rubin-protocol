@@ -66,6 +66,19 @@ func buildBlockUndo(prevState *ChainState, pb *consensus.ParsedBlock, blockHeigh
 	}
 
 	work := copyUtxoSet(prevState.Utxos)
+	txUndos, err := buildTxUndos(work, pb, blockHeight)
+	if err != nil {
+		return nil, err
+	}
+	return &BlockUndo{
+		BlockHeight:              blockHeight,
+		PreviousAlreadyGenerated: prevState.AlreadyGenerated,
+		Txs:                      txUndos,
+	}, nil
+}
+
+// buildTxUndos iterates transactions and builds undo entries.
+func buildTxUndos(work map[consensus.Outpoint]consensus.UtxoEntry, pb *consensus.ParsedBlock, blockHeight uint64) ([]TxUndo, error) {
 	txUndos := make([]TxUndo, len(pb.Txs))
 	for i := 0; i < len(pb.Txs); i++ {
 		tx := pb.Txs[i]
@@ -79,12 +92,7 @@ func buildBlockUndo(prevState *ChainState, pb *consensus.ParsedBlock, blockHeigh
 		addUndoCreatedOutputs(work, pb.Txids[i], tx, blockHeight, i == 0)
 		txUndos[i] = TxUndo{Spent: spent}
 	}
-
-	return &BlockUndo{
-		BlockHeight:              blockHeight,
-		PreviousAlreadyGenerated: prevState.AlreadyGenerated,
-		Txs:                      txUndos,
-	}, nil
+	return txUndos, nil
 }
 
 func spendUndoInputs(work map[consensus.Outpoint]consensus.UtxoEntry, tx *consensus.Tx, txIndex int) ([]SpentUndo, error) {
@@ -133,11 +141,8 @@ func (s *ChainState) DisconnectBlock(blockBytes []byte, undo *BlockUndo) (*Chain
 		return nil, errors.New("nil block undo")
 	}
 
-	pb, blockHash, err := parseDisconnectBlock(blockBytes)
+	pb, blockHash, err := parseAndValidateDisconnectBlock(blockBytes, undo, s.TipHash, s.Height)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.validateDisconnectBlockLocked(pb, undo, blockHash); err != nil {
 		return nil, err
 	}
 
@@ -169,6 +174,24 @@ func (s *ChainState) DisconnectBlock(blockBytes []byte, undo *BlockUndo) (*Chain
 	}, nil
 }
 
+// parseAndValidateDisconnectBlock parses block bytes and validates undo against chain state.
+func parseAndValidateDisconnectBlock(blockBytes []byte, undo *BlockUndo, tipHash [32]byte, height uint64) (*consensus.ParsedBlock, [32]byte, error) {
+	pb, blockHash, err := parseDisconnectBlock(blockBytes)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	if len(undo.Txs) != len(pb.Txs) {
+		return nil, [32]byte{}, errors.New("undo tx count mismatch")
+	}
+	if tipHash != blockHash {
+		return nil, [32]byte{}, errors.New("disconnect block is not current tip")
+	}
+	if height != undo.BlockHeight {
+		return nil, [32]byte{}, fmt.Errorf("disconnect height mismatch: chainstate=%d undo=%d", height, undo.BlockHeight)
+	}
+	return pb, blockHash, nil
+}
+
 func parseDisconnectBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
 	pb, err := consensus.ParseBlockBytes(blockBytes)
 	if err != nil {
@@ -182,19 +205,6 @@ func parseDisconnectBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, 
 		return nil, [32]byte{}, err
 	}
 	return pb, blockHash, nil
-}
-
-func (s *ChainState) validateDisconnectBlockLocked(pb *consensus.ParsedBlock, undo *BlockUndo, blockHash [32]byte) error {
-	if len(undo.Txs) != len(pb.Txs) {
-		return errors.New("undo tx count mismatch")
-	}
-	if s.TipHash != blockHash {
-		return errors.New("disconnect block is not current tip")
-	}
-	if s.Height != undo.BlockHeight {
-		return fmt.Errorf("disconnect height mismatch: chainstate=%d undo=%d", s.Height, undo.BlockHeight)
-	}
-	return nil
 }
 
 func applyDisconnectUndo(work map[consensus.Outpoint]consensus.UtxoEntry, pb *consensus.ParsedBlock, undo *BlockUndo) error {
