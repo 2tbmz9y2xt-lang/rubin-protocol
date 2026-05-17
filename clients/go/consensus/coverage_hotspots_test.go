@@ -136,8 +136,9 @@ func TestCoverage_SpendVerifyBranches(t *testing.T) {
 	}
 
 	keys := [][32]byte{{0x01}, {0x02}}
+	env := testSpendSigEnv{tx: tx, inputValue: 1, context: "ctx"}
 	ws := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}}
-	if err := validateThresholdSigSpend(keys, 1, ws, tx, 0, 1, [32]byte{}, 0, "ctx"); err == nil {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws, env)); err == nil {
 		t.Fatalf("expected witness slot mismatch")
 	}
 
@@ -145,7 +146,7 @@ func TestCoverage_SpendVerifyBranches(t *testing.T) {
 		{SuiteID: SUITE_ID_SENTINEL, Pubkey: []byte{0x01}},
 		{SuiteID: SUITE_ID_SENTINEL},
 	}
-	if err := validateThresholdSigSpend(keys, 1, ws, tx, 0, 1, [32]byte{}, 0, "ctx"); err == nil {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws, env)); err == nil {
 		t.Fatalf("expected sentinel keyless guard")
 	}
 
@@ -153,7 +154,7 @@ func TestCoverage_SpendVerifyBranches(t *testing.T) {
 		{SuiteID: SUITE_ID_SENTINEL},
 		{SuiteID: 0x99},
 	}
-	if err := validateThresholdSigSpend(keys, 1, ws, tx, 0, 1, [32]byte{}, 0, "ctx"); err == nil {
+	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws, env)); err == nil {
 		t.Fatalf("expected unknown suite rejection")
 	}
 }
