@@ -160,7 +160,8 @@ func assignedWorkerWitness(tx *Tx, tvc TxValidationContext, entry UtxoEntry, wit
 	if err != nil {
 		return nil, 0, err
 	}
-	if witnessCursor+slots > tvc.WitnessEnd {
+	witnessEnd := min(tvc.WitnessEnd, len(tx.Witness))
+	if witnessCursor+slots > witnessEnd {
 		return nil, 0, txerr(TX_ERR_PARSE, "witness underflow in worker")
 	}
 	return tx.Witness[witnessCursor : witnessCursor+slots], slots, nil
@@ -273,24 +274,29 @@ func validateCoreExtSpendQ(
 	inputIndex uint32,
 	inputValue uint64,
 	args ...any,
-) (err error) {
+) error {
 	if len(args) != 8 {
 		return txerr(TX_ERR_PARSE, "CORE_EXT validator argument count mismatch")
 	}
-	defer func() {
-		if recover() != nil {
-			err = txerr(TX_ERR_PARSE, "CORE_EXT validator argument type mismatch")
-		}
+	env, err := func() (env txValidationWorkerEnv, err error) {
+		defer func() {
+			if recover() != nil {
+				err = txerr(TX_ERR_PARSE, "CORE_EXT validator argument type mismatch")
+			}
+		}()
+		return txValidationWorkerEnv{
+			chainID:         args[0].([32]byte),
+			blockHeight:     args[1].(uint64),
+			sighashCache:    typedArgOrZero[*SighashV1PrehashCache](args[2]),
+			coreExtProfiles: typedArgOrZero[CoreExtProfileProvider](args[3]),
+			sigQueue:        typedArgOrZero[*SigCheckQueue](args[4]),
+			rotation:        typedArgOrZero[RotationProvider](args[5]),
+			registry:        typedArgOrZero[*SuiteRegistry](args[6]),
+			txContext:       typedArgOrZero[*TxContextBundle](args[7]),
+		}, nil
 	}()
-	env := txValidationWorkerEnv{
-		chainID:         args[0].([32]byte),
-		blockHeight:     args[1].(uint64),
-		sighashCache:    typedArgOrZero[*SighashV1PrehashCache](args[2]),
-		coreExtProfiles: typedArgOrZero[CoreExtProfileProvider](args[3]),
-		sigQueue:        typedArgOrZero[*SigCheckQueue](args[4]),
-		rotation:        typedArgOrZero[RotationProvider](args[5]),
-		registry:        typedArgOrZero[*SuiteRegistry](args[6]),
-		txContext:       typedArgOrZero[*TxContextBundle](args[7]),
+	if err != nil {
+		return err
 	}
 	check := txInputSpendCheck{
 		entry:      entry,
@@ -315,34 +321,21 @@ func validateCoreExtSpendQWithEnv(check txInputSpendCheck, w WitnessItem, env tx
 	if err != nil {
 		return err
 	}
-	profile, active, err := activeCoreExtSpendProfile(env.coreExtProfiles, cd.ExtID, env.blockHeight)
-	if err != nil {
-		return err
+	if env.coreExtProfiles == nil {
+		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
 	}
-	if !active {
-		return nil
-	}
-	return validateCoreExtWitnessAtHeight(
-		cd, profile, w, check.tx, check.inputIndex, check.inputValue,
-		env.chainID, env.blockHeight, env.sighashCache, env.rotation,
-		env.registry, env.txContext, env.sigQueue,
-	)
-}
-
-func activeCoreExtSpendProfile(provider CoreExtProfileProvider, extID uint16, blockHeight uint64) (CoreExtProfile, bool, error) {
-	if provider == nil {
-		return CoreExtProfile{}, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
-	}
-	profile, ok, err := provider.LookupCoreExtProfile(extID, blockHeight)
+	profile, ok, err := env.coreExtProfiles.LookupCoreExtProfile(cd.ExtID, env.blockHeight)
 	switch {
 	case err != nil:
-		return CoreExtProfile{}, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-	case !ok:
-		return CoreExtProfile{}, false, nil
-	case !profile.Active:
-		return CoreExtProfile{}, false, nil
+		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
+	case !ok || !profile.Active:
+		return nil
 	default:
-		return profile, true, nil
+		return validateCoreExtWitnessAtHeight(
+			cd, profile, w, check.tx, check.inputIndex, check.inputValue,
+			env.chainID, env.blockHeight, env.sighashCache, env.rotation,
+			env.registry, env.txContext, env.sigQueue,
+		)
 	}
 }
 
@@ -383,7 +376,11 @@ func FirstTxError(results []WorkerResult[TxValidationResult]) error {
 			continue
 		}
 		candidate := txValidationFailure{txIndex: r.Value.TxIndex, err: r.Err}
-		if best.err == nil || candidate.isBefore(best) {
+		if best.err == nil {
+			best = candidate
+			continue
+		}
+		if candidate.isBefore(best) {
 			best = candidate
 		}
 	}
