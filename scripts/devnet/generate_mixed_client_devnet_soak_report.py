@@ -227,9 +227,26 @@ def source_peer_final_error(data: dict[str, Any]) -> str | None:
     return None if final.get("rust_outbound_pid") == by_impl["rust"]["pid"] and final.get("rust_outbound_local_addr") == go_expected and final.get("rust_outbound_remote_addr") == rust_expected else "final_verification_invalid"
 def marker_participants_bound(marker: dict[str, Any], by_impl: dict[str, dict[str, Any]]) -> bool:
     participants = marker.get("participants")
+    if not isinstance(participants, list) or len(participants) != 2 or any(not isinstance(p, dict) or set(p) != RESTART_MARKER_PARTICIPANT_KEYS or not all(isinstance(p.get(k), str) for k in RESTART_MARKER_PARTICIPANT_KEYS) for p in participants):
+        return False
     expected = sorted((node["name"], impl, node["rpc_endpoint"], node["started_at"]) for impl, node in by_impl.items())
-    got = sorted((p.get("name"), p.get("implementation"), p.get("endpoint"), p.get("started_at")) for p in participants) if isinstance(participants, list) and all(isinstance(p, dict) and set(p) == RESTART_MARKER_PARTICIPANT_KEYS for p in participants) else []
-    return got == expected
+    return sorted((p["name"], p["implementation"], p["endpoint"], p["started_at"]) for p in participants) == expected
+def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path) -> str | None:
+    for impl, expected_name, expected_comm in (("go", "node-go", "rubin-node-go"), ("rust", "node-rust", "rubin-node-rust")):
+        node = by_impl[impl]
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not jint(node.get("pid"), 1) or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
+            return "process_identity_missing_or_invalid"
+        binary = safe_abs_path(node.get("binary"))
+        if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
+            return "process_identity_missing_or_invalid"
+        try:
+            binary.relative_to(root)
+        except ValueError:
+            return "process_identity_missing_or_invalid"
+        expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"]] if impl == "rust" else [])
+        if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
+            return "process_identity_missing_or_invalid"
+    return None
 def source_report_contract_error(name: str, data: dict[str, Any], path: Path) -> str | None:
     if set(data) != SOURCE_TOP_KEYS[name]:
         return f"{name}_top_level_fields_invalid"
@@ -264,6 +281,8 @@ def source_report_contract_error(name: str, data: dict[str, Any], path: Path) ->
         return f"{name}_legacy_marker_invalid"
     if node_bad or by_impl is None:
         return node_bad
+    if bad := source_node_identity_error(by_impl, root):
+        return bad
     marker_keys = SOURCE_MESH_MARKER_KEYS if name == "mesh" else SOURCE_TX_MARKER_KEYS
     if set(marker) != marker_keys:
         return f"{name}_legacy_marker_invalid"
@@ -603,11 +622,7 @@ def restart_pass_contract_error(data: dict[str, Any], path: Path) -> str | None:
         expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"]] if impl == "rust" else [])
         if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
             return "restart_source_binding_contradiction:node_identity_invalid"
-    participants = marker.get("participants")
-    expected_participants = sorted((node["name"], node["implementation"], node["rpc_endpoint"], node["started_at"]) for node in by_impl.values())
-    if not isinstance(participants, list) or len(participants) != 2 or any(not isinstance(p, dict) or set(p) != RESTART_MARKER_PARTICIPANT_KEYS for p in participants):
-        return "restart_source_binding_contradiction:legacy_marker_invalid"
-    if sorted((p.get("name"), p.get("implementation"), p.get("endpoint"), p.get("started_at")) for p in participants) != expected_participants:
+    if not marker_participants_bound(marker, by_impl):
         return "restart_source_binding_contradiction:legacy_marker_invalid"
     peer = data.get("peer_connectivity")
     links = peer.get("counterpart_links") if isinstance(peer, dict) else None
