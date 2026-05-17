@@ -10,7 +10,7 @@ SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+({NUM})(?:\s+({NUM}))?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable", "helper_only"}  # noqa: E702
-PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block", "binary"}
+PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block", "binary", "datadir"}; DIRECTORY_PATH_FIELD_NAMES = {"datadir"}  # noqa: E702
 PATH_FIELD_DOTTED_NAMES = {
     "observations.pre_partition.common_go_block", "observations.pre_partition.common_go_mine", "observations.pre_partition.common_rust_block", "observations.pre_partition.common_rust_tip", "observations.pre_partition.go_peer_snapshot", "observations.pre_partition.rust_peer_snapshot",
     "observations.partition.go_peer_snapshot", "observations.partition.rust_peer_snapshot", "observations.fork.go_block", "observations.fork.go_mine", "observations.fork.go_peer_snapshot", "observations.fork.go_tip", "observations.fork.rust_block_1", "observations.fork.rust_block_2", "observations.fork.rust_mine_1", "observations.fork.rust_mine_2", "observations.fork.rust_peer_snapshot", "observations.fork.rust_tip",
@@ -26,17 +26,40 @@ TX_OBJECT_KEYS = {
     "go_converge": {"block_hash", "block_path", "class", "converged_at", "height", "raw_hex", "rpc_endpoint", "tip_path", "txid"},
     "rust_converge": {"block_hash", "block_path", "class", "converged_at", "height", "raw_hex", "rpc_endpoint", "tip_path", "txid"},
 }
+RESTART_OBJECT_KEYS = {"catch_up_has_tip", "catch_up_height", "catch_up_tip", "catch_up_tip_path", "datadir", "go_target_has_tip", "go_target_height", "go_target_mine_next_path", "go_target_tip", "go_target_tip_path", "go_target_tx_count", "new_command_argv", "new_p2p_endpoint", "new_pid", "new_rpc_endpoint", "new_started_at", "old_command_argv", "old_p2p_endpoint", "old_pid", "old_pid_stopped", "old_rpc_endpoint", "old_started_at", "peer_reconnect_observed", "pre_restart_has_tip", "pre_restart_height", "pre_restart_tip", "pre_restart_tip_path", "same_datadir"}
+RESTART_SUMMARY_KEYS = {"catch_up_height", "pre_restart_height", "stopped_node"}
+RESTART_SOURCE_FIELDS = ["run_id", "restart.stopped_node", "restart.pre_restart_height", "restart.catch_up_height"] + [f"rust_restart.{key}" for key in sorted(RESTART_OBJECT_KEYS)]
+RESTART_TOP_KEYS = {"artifact_created_at_utc", "artifact_root", "final_verification", "legacy_schema_compatibility", "nodes", "peer_connectivity", "raw_samples", "restart", "run_id", "rust_restart", "scenario", "verdict"}
+RESTART_FINAL_KEYS = {"peer_snapshots_rechecked", "process_identity_rechecked", "producer_side", "rust_outbound_link_rechecked", "rust_outbound_local_addr", "rust_outbound_pid", "rust_outbound_remote_addr"}
+RESTART_LINK_KEYS = {"go_peer_snapshot_expected_addr", "rust_outbound_local_addr", "rust_outbound_pid", "rust_outbound_remote_addr", "rust_peer_snapshot_expected_addr"}
+RESTART_PEER_KEYS = {"bidirectional_observed", "counterpart_links", "go_peer_snapshot", "go_to_rust", "rust_peer_snapshot", "rust_to_go"}
+RESTART_MARKER_SCHEMA_VERSION = "rubin-mixed-client-devnet-evidence-v1"; RESTART_MARKER_PARTICIPANT_KEYS = {"endpoint", "implementation", "name", "started_at"}  # noqa: E702
+RESTART_SNAPSHOT_KEYS = {"count", "peers"}; RESTART_PEER_ENTRY_KEYS = {"addr", "handshake_complete"}  # noqa: E702
+NODE_OBJECT_KEYS = {"binary", "command", "command_argv", "implementation", "name", "p2p_endpoint", "pid", "process_alive", "process_comm", "rpc_endpoint", "started_at"}
+NODE_BACKING_KEYS = {"p2p_endpoint_process_backed", "rpc_endpoint_process_backed"}
+PARTITION_NODE_KEYS = {"implementation", "name", "p2p_endpoint", "pid", "rpc_endpoint", "started_at"}
 SECTIONS = {
     "mesh": ("mesh_report", "mixed_client_mesh", ["nodes", "peer_connectivity", "final_verification", "legacy_schema_compatibility.marker_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "go_to_rust_accept": ("go_submit_rust_accept_report", "mixed_client_go_submit_rust_accept", ["go_submit", "rust_accept", "tx_path", "raw_samples.propagation"]),
     "go_to_rust_mine_converge": ("go_submit_rust_mine_go_converge_report", "mixed_client_go_submit_rust_mine_go_converge", ["go_submit", "rust_accept", "rust_mine", "go_converge", "tx_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "rust_to_go_mine_converge": ("rust_submit_go_mine_rust_converge_report", "mixed_client_rust_submit_go_mine_rust_converge", ["rust_submit", "go_accept", "go_mine", "rust_converge", "tx_path", "raw_samples.propagation", "raw_samples.convergence"]),
-    "rust_restart": ("rust_restart_report", "mixed_client_rust_restart", ["restart.stopped_node", "rust_restart.old_pid", "rust_restart.new_pid", "rust_restart.old_pid_stopped", "rust_restart.same_datadir", "rust_restart.peer_reconnect_observed", "rust_restart.go_target_height", "rust_restart.catch_up_height"]),
+    "rust_restart": ("rust_restart_report", "mixed_client_rust_restart", RESTART_SOURCE_FIELDS),
     "partition_heal_reorg": ("partition_heal_reorg_report", "mixed_client_partition_heal_reorg", ["proof.partition_changed_peer_state", "proof.fork_diverged", "proof.heal_restored_peer_state", "proof.reorg_converged", "proof.process_identity_rechecked_after_heal", "proof.go_reorg_metrics", "observations.reorg"]),
 }
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
 def hex_bytes(value: Any) -> bool: return isinstance(value, str) and bool(HEX_BYTES.fullmatch(value))  # noqa: E704
 def jint(value: Any, minimum: int = 0) -> bool: return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000  # noqa: E704
+def ju64(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 18_446_744_073_709_551_615
+def endpoint(value: Any) -> bool:
+    return isinstance(value, str) and (m := ENDPOINT.fullmatch(value)) is not None and 1 <= int(m.group(2)) <= 65535
+def utc_z(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 20 or value[-1] != "Z":
+        return False
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") == value
+    except ValueError:
+        return False
 def section(name: str, status: str, reason: str | None = None, **kw: Any) -> dict[str, Any]:
     out = {"status": status, "claim_type": kw.pop("claim_type", "status_evidence")}
     if reason:
@@ -54,6 +77,27 @@ def load(path: Path) -> tuple[Any | None, str | None]:
         text = str(exc)
         return None, text if text.startswith(("non_finite_json_constant:", "duplicate_json_key")) else f"malformed_json:{exc.__class__.__name__}"
 def regular_path(raw_path: str, reason: str) -> tuple[Path, str | None]: raw = Path(os.path.expanduser(raw_path)); canon = Path(os.path.realpath(raw)); return (canon, None) if raw.is_file() and not raw.is_symlink() else (canon, reason)  # noqa: E704, E702
+def regular_abs_path(raw_path: str, reason: str) -> tuple[Path, str | None]:
+    raw = Path(os.path.expanduser(raw_path)); canon = Path(os.path.realpath(raw))  # noqa: E702
+    return (canon, None) if raw.is_absolute() and raw.is_file() and not raw.is_symlink() else (canon, reason)
+def safe_abs_path(value: Any) -> Path | None:
+    if not isinstance(value, str) or value.strip() != value or not value or value[0] in "'\"" or value[-1] in "'\"" or "\0" in value or any(ord(c) < 32 for c in value):
+        return None
+    raw = Path(value)
+    if not raw.is_absolute():
+        return None
+    try:
+        return Path(os.path.realpath(raw))
+    except (OSError, ValueError):
+        return None
+def str_list(value: Any) -> bool: return isinstance(value, list) and all(isinstance(item, str) for item in value)  # noqa: E704
+def same_arg_path(left: str, right: str) -> bool:
+    try:
+        return Path(os.path.realpath(os.path.expanduser(left))) == Path(os.path.realpath(os.path.expanduser(right)))
+    except (OSError, ValueError):
+        return False
+def argv_eq(actual: Any, expected: Any, path_indexes: set[int]) -> bool:
+    return str_list(actual) and str_list(expected) and len(actual) == len(expected) and all(same_arg_path(actual[i], expected[i]) if i in path_indexes else actual[i] == expected[i] for i in range(len(expected)))
 def get(data: Any, dotted: str) -> tuple[Any, bool]:
     cur = data
     for part in dotted.split("."):
@@ -99,8 +143,12 @@ def nodes(data: dict[str, Any], require_alive: bool = True, require_backing: boo
     if set(by_name) != {"node-go", "node-rust"}:
         return None, "wrong_role_identity"
     out: dict[str, dict[str, Any]] = {}
+    expected_node_keys = NODE_OBJECT_KEYS | NODE_BACKING_KEYS if require_backing else PARTITION_NODE_KEYS
+    allowed_node_key_sets = {frozenset(expected_node_keys)} if require_alive else {frozenset(expected_node_keys), frozenset(expected_node_keys - {"process_alive"})}
     for name, impl in (("node-go", "go"), ("node-rust", "rust")):
         node = by_name[name]
+        if frozenset(node) not in allowed_node_key_sets:
+            return None, "process_identity_missing_or_invalid"
         if node.get("implementation") != impl or not jint(node.get("pid")) or (node.get("process_alive") is not True if require_alive else ("process_alive" in node and node.get("process_alive") is not True)):
             return None, "wrong_role_identity"
         if (not all(isinstance((v := node.get(k)), str) and (m := ENDPOINT.fullmatch(v)) is not None and 1 <= int(m.group(2)) <= 65535 for k in ("rpc_endpoint", "p2p_endpoint"))) or any(k in node and node.get(k) is not True for k in ("rpc_endpoint_process_backed", "p2p_endpoint_process_backed")) or (require_backing and (node.get("rpc_endpoint_process_backed") is not True or node.get("p2p_endpoint_process_backed") is not True)):
@@ -177,14 +225,39 @@ def validate_tx(data: dict[str, Any], converge: bool, rust_submit: bool) -> str 
     if mined.get("txid") != txid or seen.get("txid") != txid or any(obj.get("rpc_endpoint") != by_impl[impl]["rpc_endpoint"] for obj, impl in ((mined, mine_impl), (seen, conv_impl))) or mined.get("class") != "mined_included" or mined.get("mined_by") != f"node-{mine_impl}" or seen.get("class") != "canonical_block_found" or seen.get("converged_at") != f"node-{conv_impl}": return "convergence_identity_mismatch"  # noqa: E701
     if mined.get("height") != seen.get("height") or mined.get("block_hash") != seen.get("block_hash") or not jint(mined.get("height")) or not jint(seen.get("height")) or not is_hex32(mined.get("block_hash")): return "convergence_identity_mismatch"  # noqa: E701
     return validate_samples(data, prop, conv_dir, txid, mined["height"], mined["block_hash"])
+def restart_height_tip_contradiction(rr: dict[str, Any], restart: dict[str, Any] | None) -> str | None:
+    pre = rr.get("pre_restart_height", restart.get("pre_restart_height") if isinstance(restart, dict) else None)
+    target, caught = rr.get("go_target_height"), rr.get("catch_up_height", restart.get("catch_up_height") if isinstance(restart, dict) else None)
+    if pre is not None and target is not None and (not jint(pre) or not jint(target) or target <= pre):
+        return "restart_source_binding_contradiction:target_height_not_advanced"
+    if target is not None and caught is not None:
+        if not jint(target) or not jint(caught):
+            return "restart_source_binding_contradiction:malformed_source_fields"
+        if caught < target:
+            return "restart_source_binding_contradiction:catch_up_height_below_target"
+        if caught != target:
+            return "restart_source_binding_contradiction:catch_up_height_not_target"
+    present_tips = [rr[key] for key in ("pre_restart_tip", "go_target_tip", "catch_up_tip") if key in rr]
+    if any(not is_hex32(tip) for tip in present_tips):
+        return "restart_source_binding_contradiction:tip_hash_invalid"
+    if "go_target_tip" in rr and "catch_up_tip" in rr and rr.get("go_target_tip") != rr.get("catch_up_tip"):
+        return "restart_source_binding_contradiction:tip_hash_mismatch"
+    return None
 def restart_contradiction(data: dict[str, Any]) -> str | None:
-    if not isinstance(data.get("restart"), dict) or data["restart"].get("stopped_node") != "node-rust":
+    restart = data.get("restart")
+    if not isinstance(restart, dict):
+        return "wrong_role_identity"
+    if set(restart) != RESTART_SUMMARY_KEYS:
+        return "restart_source_binding_contradiction:malformed_source_fields"
+    if restart.get("stopped_node") != "node-rust":
         return "wrong_role_identity"
     by_impl, bad = nodes(data, require_alive=False)
     rr = data.get("rust_restart")
     if not isinstance(rr, dict):
         return "restart_source_binding_contradiction:malformed_source_fields" if "rust_restart" in data else bad
-    if any(k in rr and not isinstance(rr.get(k), bool) for k in ("old_pid_stopped", "same_datadir", "peer_reconnect_observed")) or any(k in rr and not jint(rr.get(k)) for k in ("old_pid", "new_pid", "go_target_height", "catch_up_height")):
+    if set(rr) != RESTART_OBJECT_KEYS:
+        return "restart_source_binding_contradiction:malformed_source_fields"
+    if any(not isinstance(rr.get(k), bool) for k in ("old_pid_stopped", "same_datadir", "peer_reconnect_observed", "pre_restart_has_tip", "go_target_has_tip", "catch_up_has_tip")) or any(not jint(rr.get(k), 1) for k in ("old_pid", "new_pid", "go_target_tx_count")) or any(not jint(rr.get(k)) for k in ("pre_restart_height", "go_target_height", "catch_up_height")):
         return "restart_source_binding_contradiction:malformed_source_fields"
     if rr.get("old_pid_stopped") is False:
         return "restart_source_binding_contradiction:old_pid_stopped_false"
@@ -192,14 +265,21 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
         return "restart_source_binding_contradiction:same_datadir_false"
     if rr.get("peer_reconnect_observed") is False:
         return "restart_source_binding_contradiction:peer_reconnect_not_observed"
+    if rr.get("pre_restart_has_tip") is not True or rr.get("go_target_has_tip") is not True or rr.get("catch_up_has_tip") is not True:
+        return "restart_source_binding_contradiction:tip_flags_not_true"
+    if not endpoint(rr.get("old_rpc_endpoint")) or not endpoint(rr.get("old_p2p_endpoint")) or not endpoint(rr.get("new_rpc_endpoint")) or not endpoint(rr.get("new_p2p_endpoint")) or not utc_z(rr.get("old_started_at")) or not utc_z(rr.get("new_started_at")) or not str_list(rr.get("old_command_argv")) or not str_list(rr.get("new_command_argv")):
+        return "restart_source_binding_contradiction:malformed_source_fields"
     if bad or by_impl is None:
         return bad or "process_identity_missing_or_invalid"
     old_pid, new_pid = rr.get("old_pid"), rr.get("new_pid")
+    if old_pid == new_pid:
+        return "restart_source_binding_contradiction:old_pid_aliases_live_node"
     if jint(old_pid) and old_pid in {by_impl["go"]["pid"], by_impl["rust"]["pid"]}:
         return "restart_source_binding_contradiction:old_pid_aliases_live_node"
     if jint(new_pid) and new_pid != by_impl["rust"]["pid"]:
         return "restart_source_binding_contradiction:new_pid_not_final_rust_pid"
-    restart = data["restart"]
+    if rr.get("new_rpc_endpoint") != by_impl["rust"]["rpc_endpoint"] or rr.get("new_p2p_endpoint") != by_impl["rust"]["p2p_endpoint"] or rr.get("new_started_at") != by_impl["rust"].get("started_at"):
+        return "restart_source_binding_contradiction:new_process_identity_mismatch"
     if any(k in restart and not jint(restart.get(k)) for k in ("pre_restart_height", "catch_up_height")):
         return "restart_source_binding_contradiction:malformed_source_fields"
     for key in ("pre_restart_height", "catch_up_height"):
@@ -207,21 +287,237 @@ def restart_contradiction(data: dict[str, Any]) -> str | None:
             return f"restart_source_binding_contradiction:{key}_mismatch"
     if "pre_restart_height" in restart and "catch_up_height" in restart and restart["catch_up_height"] < restart["pre_restart_height"]:
         return "restart_source_binding_contradiction:catch_up_height_below_pre_restart"
-    target, caught, pre = rr.get("go_target_height"), rr.get("catch_up_height"), rr.get("pre_restart_height", restart.get("pre_restart_height"))
-    if pre is not None and (not jint(pre) or not jint(target) or target <= pre):
-        return "restart_source_binding_contradiction:target_height_not_advanced"
-    if jint(target) and jint(caught):
-        if caught < target:
-            return "restart_source_binding_contradiction:catch_up_height_below_target"
-        if caught != target:
-            return "restart_source_binding_contradiction:catch_up_height_not_target"
-    go_tip, catch_tip = rr.get("go_target_tip"), rr.get("catch_up_tip")
-    if go_tip is not None and not is_hex32(go_tip):
-        return "restart_source_binding_contradiction:go_target_tip_invalid"
-    if catch_tip is not None and not is_hex32(catch_tip):
-        return "restart_source_binding_contradiction:catch_up_tip_invalid"
-    if is_hex32(go_tip) and is_hex32(catch_tip) and go_tip != catch_tip:
-        return "restart_source_binding_contradiction:tip_hash_mismatch"
+    if bad := restart_height_tip_contradiction(rr, restart):
+        return bad
+    return None
+def restart_present_contradiction(data: dict[str, Any]) -> str | None:
+    restart, rr = data.get("restart"), data.get("rust_restart")
+    if bad := restart_identity_binding_error(data):
+        return bad
+    if "restart" in data and not isinstance(restart, dict):
+        return "restart_source_binding_contradiction:malformed_source_fields"
+    if isinstance(restart, dict):
+        if any(k not in RESTART_SUMMARY_KEYS for k in restart):
+            return "restart_source_binding_contradiction:malformed_source_fields"
+        if "stopped_node" in restart and restart.get("stopped_node") != "node-rust":
+            return "wrong_role_identity"
+        if any(k in restart and not jint(restart.get(k)) for k in ("pre_restart_height", "catch_up_height")):
+            return "restart_source_binding_contradiction:malformed_source_fields"
+    if not isinstance(rr, dict):
+        return None
+    if any(k not in RESTART_OBJECT_KEYS for k in rr):
+        return "restart_source_binding_contradiction:malformed_source_fields"
+    bools = ("old_pid_stopped", "same_datadir", "peer_reconnect_observed", "pre_restart_has_tip", "go_target_has_tip", "catch_up_has_tip")
+    if any(k in rr and not isinstance(rr.get(k), bool) for k in bools) or any(k in rr and not jint(rr.get(k), 1) for k in ("old_pid", "new_pid", "go_target_tx_count")) or any(k in rr and not jint(rr.get(k)) for k in ("pre_restart_height", "go_target_height", "catch_up_height")):
+        return "restart_source_binding_contradiction:malformed_source_fields"
+    if rr.get("old_pid_stopped") is False:
+        return "restart_source_binding_contradiction:old_pid_stopped_false"
+    if rr.get("same_datadir") is False:
+        return "restart_source_binding_contradiction:same_datadir_false"
+    if rr.get("peer_reconnect_observed") is False:
+        return "restart_source_binding_contradiction:peer_reconnect_not_observed"
+    if any(k in rr and rr.get(k) is not True for k in ("pre_restart_has_tip", "go_target_has_tip", "catch_up_has_tip")):
+        return "restart_source_binding_contradiction:tip_flags_not_true"
+    if any(k in rr and not endpoint(rr.get(k)) for k in ("old_rpc_endpoint", "old_p2p_endpoint", "new_rpc_endpoint", "new_p2p_endpoint")) or any(k in rr and not utc_z(rr.get(k)) for k in ("old_started_at", "new_started_at")) or any(k in rr and not str_list(rr.get(k)) for k in ("old_command_argv", "new_command_argv")):
+        return "restart_source_binding_contradiction:malformed_source_fields"
+    by_impl, bad = nodes(data, require_alive=False)
+    if bad or by_impl is None:
+        return None
+    old_pid, new_pid = rr.get("old_pid"), rr.get("new_pid")
+    if jint(old_pid) and (old_pid == new_pid or old_pid in {by_impl["go"]["pid"], by_impl["rust"]["pid"]}):
+        return "restart_source_binding_contradiction:old_pid_aliases_live_node"
+    if jint(new_pid) and new_pid != by_impl["rust"]["pid"]:
+        return "restart_source_binding_contradiction:new_pid_not_final_rust_pid"
+    for key in ("pre_restart_height", "catch_up_height"):
+        if isinstance(restart, dict) and key in restart and key in rr and rr.get(key) != restart[key]:
+            return f"restart_source_binding_contradiction:{key}_mismatch"
+    if isinstance(restart, dict) and "pre_restart_height" in restart and "catch_up_height" in restart and restart["catch_up_height"] < restart["pre_restart_height"]:
+        return "restart_source_binding_contradiction:catch_up_height_below_pre_restart"
+    return restart_height_tip_contradiction(rr, restart if isinstance(restart, dict) else None)
+def restart_identity_binding_error(data: dict[str, Any]) -> str | None:
+    root = None
+    if "artifact_root" in data:
+        root_raw = data.get("artifact_root")
+        if not isinstance(root_raw, str):
+            return "restart_source_binding_contradiction:artifact_root_invalid"
+        root = safe_abs_path(root_raw)
+        if root is None or not root.is_dir():
+            return "restart_source_binding_contradiction:artifact_root_invalid"
+    if "run_id" in data:
+        run_id = data.get("run_id")
+        if not isinstance(run_id, str) or run_id.strip() != run_id or not run_id or (root is not None and run_id != root.name):
+            return "restart_source_binding_contradiction:run_identity_invalid"
+    if "artifact_created_at_utc" in data and not utc_z(data.get("artifact_created_at_utc")):
+        return "restart_source_binding_contradiction:run_identity_invalid"
+    rr = data.get("rust_restart")
+    if isinstance(rr, dict) and "datadir" in rr:
+        if root is None:
+            return "restart_source_binding_contradiction:artifact_root_invalid"
+        datadir_raw = rr.get("datadir")
+        datadir = safe_abs_path(datadir_raw)
+        root_datadir = root / "node-rust"
+        if not isinstance(datadir_raw, str) or Path(os.path.expanduser(datadir_raw)).name != "node-rust" or datadir != root_datadir or not root_datadir.is_dir() or root_datadir.is_symlink():
+            return "restart_source_binding_contradiction:datadir_not_bound"
+    return None
+def restart_peer_snapshot_error(peer: dict[str, Any], field: str, expected_addr: Any) -> str | None:
+    snap = peer.get(field)
+    entries = snap.get("peers") if isinstance(snap, dict) else None
+    if not isinstance(snap, dict) or set(snap) != RESTART_SNAPSHOT_KEYS or not jint(snap.get("count"), 1) or snap.get("count") != 1 or not isinstance(entries, list) or len(entries) != 1:
+        return "restart_source_binding_contradiction:peer_connectivity_invalid"
+    entry = entries[0]
+    if not isinstance(entry, dict) or set(entry) != RESTART_PEER_ENTRY_KEYS or entry.get("addr") != expected_addr or entry.get("handshake_complete") is not True:
+        return "restart_source_binding_contradiction:peer_connectivity_invalid"
+    return None
+def restart_pass_contract_error(data: dict[str, Any], path: Path) -> str | None:
+    if set(data) != RESTART_TOP_KEYS:
+        return "restart_source_binding_contradiction:top_level_fields_invalid"
+    root_raw = data.get("artifact_root")
+    if not isinstance(root_raw, str):
+        return "restart_source_binding_contradiction:artifact_root_invalid"
+    root = safe_abs_path(root_raw)
+    if root is None or not root.is_dir():
+        return "restart_source_binding_contradiction:artifact_root_invalid"
+    try:
+        Path(os.path.realpath(path)).relative_to(root)
+    except ValueError:
+        return "restart_source_binding_contradiction:report_outside_artifact_root"
+    legacy = data.get("legacy_schema_compatibility")
+    if not isinstance(legacy, dict) or set(legacy) != {"authoritative", "marker_path", "purpose", "reason"} or legacy.get("authoritative") is not False:
+        return "restart_source_binding_contradiction:legacy_marker_invalid"
+    if legacy.get("purpose") != "schema-valid legacy artifact only; not the Rust restart report verdict" or legacy.get("reason") != "existing mixed_client_evidence_v1 PASS requires tx_path; Rust restart PASS lives in this report":
+        return "restart_source_binding_contradiction:legacy_marker_invalid"
+    marker_path_raw = legacy.get("marker_path")
+    if not isinstance(marker_path_raw, str):
+        return "restart_source_binding_contradiction:legacy_marker_invalid"
+    marker_path, marker_err = regular_abs_path(marker_path_raw, "restart_source_binding_contradiction:legacy_marker_invalid")
+    if marker_err:
+        return marker_err
+    try:
+        marker_path.relative_to(root)
+    except ValueError:
+        return "restart_source_binding_contradiction:legacy_marker_invalid"
+    marker, marker_load_err = load(marker_path)
+    if marker_load_err or not isinstance(marker, dict) or set(marker) != {"evidence_type", "failure_reason", "participants", "restart", "scenario", "schema_version", "verdict"}:
+        return "restart_source_binding_contradiction:legacy_marker_invalid"
+    if marker.get("schema_version") != RESTART_MARKER_SCHEMA_VERSION or marker.get("scenario") != "mixed_client_mesh_schema_marker" or marker.get("evidence_type") != "mixed_client_process_soak" or marker.get("verdict") != "FAIL" or marker.get("restart") != data.get("restart") or not isinstance(marker.get("failure_reason"), str) or not marker["failure_reason"]:
+        return "restart_source_binding_contradiction:legacy_marker_invalid"
+    by_impl, bad = nodes(data, require_alive=True)
+    if bad or by_impl is None:
+        return bad or "process_identity_missing_or_invalid"
+    for impl, expected_name, expected_comm in (("go", "node-go", "rubin-node-go"), ("rust", "node-rust", "rubin-node-rust")):
+        node = by_impl[impl]
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
+            return "restart_source_binding_contradiction:node_identity_invalid"
+        binary = safe_abs_path(node.get("binary"))
+        if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
+            return "restart_source_binding_contradiction:node_identity_invalid"
+        try:
+            binary.relative_to(root)
+        except ValueError:
+            return "restart_source_binding_contradiction:node_identity_invalid"
+        expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + (["--peer", by_impl["go"]["p2p_endpoint"]] if impl == "rust" else [])
+        if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
+            return "restart_source_binding_contradiction:node_identity_invalid"
+    participants = marker.get("participants")
+    expected_participants = sorted((node["name"], node["implementation"], node["rpc_endpoint"], node["started_at"]) for node in by_impl.values())
+    if not isinstance(participants, list) or len(participants) != 2 or any(not isinstance(p, dict) or set(p) != RESTART_MARKER_PARTICIPANT_KEYS for p in participants):
+        return "restart_source_binding_contradiction:legacy_marker_invalid"
+    if sorted((p.get("name"), p.get("implementation"), p.get("endpoint"), p.get("started_at")) for p in participants) != expected_participants:
+        return "restart_source_binding_contradiction:legacy_marker_invalid"
+    peer = data.get("peer_connectivity")
+    links = peer.get("counterpart_links") if isinstance(peer, dict) else None
+    if not isinstance(peer, dict) or set(peer) != RESTART_PEER_KEYS or any(peer.get(k) is not True for k in ("go_to_rust", "rust_to_go", "bidirectional_observed")) or not isinstance(links, dict) or set(links) != RESTART_LINK_KEYS:
+        return "restart_source_binding_contradiction:peer_connectivity_invalid"
+    go_expected, rust_expected = links.get("go_peer_snapshot_expected_addr"), links.get("rust_peer_snapshot_expected_addr")
+    if (
+        not endpoint(go_expected)
+        or not endpoint(rust_expected)
+        or links.get("rust_outbound_local_addr") != go_expected
+        or links.get("rust_outbound_remote_addr") != rust_expected
+        or rust_expected != by_impl["go"]["p2p_endpoint"]
+        or links.get("rust_outbound_pid") != by_impl["rust"]["pid"]
+        or go_expected in {rust_expected, by_impl["rust"]["p2p_endpoint"], by_impl["go"]["rpc_endpoint"], by_impl["rust"]["rpc_endpoint"]}
+    ):
+        return "restart_source_binding_contradiction:peer_connectivity_invalid"
+    if bad := (restart_peer_snapshot_error(peer, "go_peer_snapshot", go_expected) or restart_peer_snapshot_error(peer, "rust_peer_snapshot", rust_expected)):
+        return bad
+    final = data.get("final_verification")
+    if not isinstance(final, dict) or set(final) != RESTART_FINAL_KEYS or any(final.get(k) is not True for k in ("producer_side", "process_identity_rechecked", "rust_outbound_link_rechecked", "peer_snapshots_rechecked")):
+        return "restart_source_binding_contradiction:final_verification_invalid"
+    if final.get("rust_outbound_pid") != by_impl["rust"]["pid"] or final.get("rust_outbound_local_addr") != go_expected or final.get("rust_outbound_remote_addr") != rust_expected:
+        return "restart_source_binding_contradiction:final_verification_invalid"
+    return validate_samples(data, None, None, "")
+def restart_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
+    rr = data["rust_restart"]
+    by_impl, _ = nodes(data, require_alive=False)
+    root_raw = data.get("artifact_root")
+    if by_impl is None or not isinstance(root_raw, str):
+        return "restart_source_binding_contradiction:artifact_root_invalid"
+    root = safe_abs_path(root_raw)
+    if root is None or not root.is_dir():
+        return "restart_source_binding_contradiction:artifact_root_invalid"
+    if bad := restart_identity_binding_error(data):
+        return bad
+    expected_old_argv = [by_impl["rust"].get("binary"), "--network", "devnet", "--datadir", str(root / "node-rust"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0", "--peer", by_impl["go"]["p2p_endpoint"]]
+    if not argv_eq(rr.get("old_command_argv"), expected_old_argv, {0, 4}) or not argv_eq(rr.get("new_command_argv"), by_impl["rust"].get("command_argv"), {0, 4}):
+        return "restart_source_binding_contradiction:argv_mismatch"
+    try:
+        Path(os.path.realpath(path)).relative_to(root)
+    except ValueError:
+        return "restart_source_binding_contradiction:report_outside_artifact_root"
+    def artifact(field: str, reason: str) -> tuple[Path | None, str | None]:
+        if not isinstance(rr.get(field), str):
+            return None, reason
+        p, err = regular_abs_path(str(rr[field]), reason)
+        if err:
+            return None, err
+        try:
+            p.relative_to(root)
+        except ValueError:
+            return None, reason
+        return p, None
+    def tip(field: str, impl: str, endpoint: Any, height: Any, tip_hash: Any, reason: str) -> str | None:
+        p, err = artifact(field, reason)
+        sidecar, load_err = (None, err) if err else load(p)  # type: ignore[arg-type]
+        if load_err or not isinstance(sidecar, dict):
+            return reason
+        keys = {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}
+        if set(sidecar) != keys or sidecar.get("implementation") != impl or sidecar.get("rpc_endpoint") != endpoint or sidecar.get("request_path") != "/get_tip":
+            return reason
+        sidecar_height = sidecar.get("height")
+        if sidecar.get("has_tip") is not True or not jint(sidecar_height) or sidecar_height != height or sidecar.get("tip_hash") != tip_hash:
+            return reason
+        if not jint(sidecar.get("best_known_height")) or sidecar["best_known_height"] < sidecar_height or not isinstance(sidecar.get("in_ibd"), bool):
+            return reason
+        return None
+    checks = (
+        ("pre_restart_tip_path", "rust", rr.get("old_rpc_endpoint"), rr.get("pre_restart_height"), rr.get("pre_restart_tip"), "restart_source_binding_contradiction:pre_restart_tip_sidecar_invalid"),
+        ("go_target_tip_path", "go", by_impl["go"]["rpc_endpoint"], rr.get("go_target_height"), rr.get("go_target_tip"), "restart_source_binding_contradiction:go_target_tip_sidecar_invalid"),
+        ("catch_up_tip_path", "rust", by_impl["rust"]["rpc_endpoint"], rr.get("catch_up_height"), rr.get("catch_up_tip"), "restart_source_binding_contradiction:catch_up_tip_sidecar_invalid"),
+    )
+    for check in checks:
+        if err := tip(*check):
+            return err
+    p, err = artifact("go_target_mine_next_path", "restart_source_binding_contradiction:go_target_mine_next_invalid")
+    mine, load_err = (None, err) if err else load(p)  # type: ignore[arg-type]
+    if load_err or not isinstance(mine, dict):
+        return "restart_source_binding_contradiction:go_target_mine_next_invalid"
+    keys = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
+    if set(mine) != keys or mine.get("implementation") != "go" or mine.get("rpc_endpoint") != by_impl["go"]["rpc_endpoint"] or mine.get("request_path") != "/mine_next":
+        return "restart_source_binding_contradiction:go_target_mine_next_invalid"
+    mine_height = mine.get("height")
+    mine_tx_count = mine.get("tx_count")
+    if (
+        mine.get("mined") is not True
+        or not jint(mine_height)
+        or not jint(mine_tx_count, 1)
+        or mine_height != rr.get("go_target_height")
+        or mine.get("block_hash") != rr.get("go_target_tip")
+        or mine_tx_count != rr.get("go_target_tx_count")
+    ):
+        return "restart_source_binding_contradiction:go_target_mine_next_invalid"
+    if not ju64(mine.get("nonce")) or not ju64(mine.get("timestamp")):
+        return "restart_source_binding_contradiction:go_target_mine_next_invalid"
     return None
 def partition_contradiction(data: dict[str, Any]) -> str | None:
     _, bad = nodes(data, require_alive=False, require_backing=False)
@@ -278,11 +574,26 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
     if malformed:
         return section(name, "fail", "malformed_source_fields:" + malformed, source_artifact_path=path, scenario=got)
     if name in {"rust_restart", "partition_heal_reorg"}:
-        bad = restart_contradiction(data) if name == "rust_restart" else partition_contradiction(data)
-        if bad:
-            return section(name, "fail", bad, source_artifact_path=path, scenario=got)
         base = "restart_source_binding_unproven" if name == "rust_restart" else "partition_reorg_source_binding_unproven"
         reason = base if not missing else f"{base}:missing_source_fields:{','.join(missing)}"
+        if name == "rust_restart":
+            if "rust_restart" in data and not isinstance(data.get("rust_restart"), dict):
+                return section(name, "fail", restart_contradiction(data) or "restart_source_binding_contradiction:malformed_source_fields", source_artifact_path=path, scenario=got)
+            if missing:
+                _, node_bad = nodes(data, require_alive=False)
+                if node_bad:
+                    return section(name, "fail", node_bad, source_artifact_path=path, scenario=got)
+                if bad := restart_present_contradiction(data):
+                    return section(name, "fail", bad, source_artifact_path=path, scenario=got)
+                return section(name, "no_data", reason, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
+            if bad := (restart_contradiction(data) or restart_pass_contract_error(data, path)):
+                return section(name, "fail", bad, source_artifact_path=path, scenario=got)
+            if bad := restart_sidecar_error(data, path):
+                return section(name, "fail", bad, source_artifact_path=path, scenario=got)
+            return section(name, "pass", None, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="behavior_evidence", evidence_class="behavior_evidence", behavior_evidence=True)
+        bad = partition_contradiction(data)
+        if bad:
+            return section(name, "fail", bad, source_artifact_path=path, scenario=got)
         return section(name, "no_data", reason, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
     if missing:
         return section(name, "fail", "missing_source_fields:" + ",".join(missing), source_artifact_path=path, scenario=got)
@@ -365,7 +676,7 @@ def generate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     statuses = {s["status"] for s in sections.values()}
     verdict = "FAIL" if statuses & {"fail", "helper_only"} else "NO_DATA" if "no_data" in statuses else "PASS"
     inputs = {k: (v if k.endswith("_no_data") else str(Path(os.path.realpath(Path(os.path.expanduser(v)))))) for k, v in vars(args).items() if k != "output" and v}
-    report = {"schema_version": SCHEMA_VERSION, "verdict": verdict, "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "inputs": inputs, "sections": sections, "claim_inventory": inventory(sections), "non_goals": ["PR-1 report consumer only; no runtime, producer, live scenario, client, schema, or CI changes.", "Restart/reorg behavior evidence remains blocked on RUB-240 source-bound producer sidecars.", "RUB-227 orphan metrics remain deferred/not_applicable."]}
+    report = {"schema_version": SCHEMA_VERSION, "verdict": verdict, "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "inputs": inputs, "sections": sections, "claim_inventory": inventory(sections), "non_goals": ["PR-1 report consumer only; no runtime, producer, live scenario, client, schema, or CI changes.", "Reorg behavior evidence remains blocked on RUB-240 source-bound producer sidecars.", "RUB-227 orphan metrics remain deferred/not_applicable."]}
     return report, 1 if verdict == "FAIL" else 0
 def write_atomic(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -380,17 +691,17 @@ def write_atomic(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
-def path_field_targets(value: Any, base: Path) -> list[Path]:
-    out: list[Path] = []; stack: list[tuple[Any, str]] = [(value, "")]  # noqa: E702
-    def add_path(text: str) -> None:
-        raw = (_ for _ in ()).throw(ValueError("path_field_contains_nul")) if "\x00" in text else Path(os.path.expanduser(text)); out.append(Path(os.path.realpath(raw if raw.is_absolute() else base / raw)))  # noqa: E702
+def path_field_targets(value: Any, base: Path) -> list[tuple[Path, bool]]:
+    out: list[tuple[Path, bool]] = []; stack: list[tuple[Any, str]] = [(value, "")]  # noqa: E702
+    def add_path(text: str, directory: bool = False) -> None:
+        raw = (_ for _ in ()).throw(ValueError("path_field_contains_nul")) if "\x00" in text else Path(os.path.expanduser(text)); out.append((Path(os.path.realpath(raw if raw.is_absolute() else base / raw)), directory))  # noqa: E702
     while stack:
         item, prefix = stack.pop()
         if isinstance(item, dict):
             for key, child in item.items():
                 dotted = f"{prefix}.{key}" if prefix else key; is_path = key in PATH_FIELD_NAMES or (key.endswith("_path") and key != "tx_path") or dotted in PATH_FIELD_DOTTED_NAMES  # noqa: E702
                 if is_path and not isinstance(child, str): raise ValueError("path_field_not_string")  # noqa: E701
-                if is_path: add_path(child)  # noqa: E701
+                if is_path: add_path(child, key in DIRECTORY_PATH_FIELD_NAMES)  # noqa: E701
                 else: stack.append((child, dotted))  # noqa: E701
         elif isinstance(item, list):
             if prefix.endswith("command_argv"):
@@ -404,6 +715,12 @@ def same_path(left: Path, right: Path) -> bool:
     if left == right: return True  # noqa: E701
     try: return os.path.samefile(left, right)  # noqa: E701
     except (OSError, ValueError): return sys.platform == "darwin" and str(left).lower() == str(right).lower()  # noqa: E701
+def path_contains(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return sys.platform == "darwin" and str(child).lower().startswith(str(parent).rstrip(os.sep).lower() + os.sep)
 def scan_source_data(path: Path) -> dict[str, Any] | None:
     data, err = load(path)
     return data if err is None and isinstance(data, dict) else None
@@ -424,7 +741,7 @@ def output_overwrites_input(args: argparse.Namespace, out_path: Path) -> str | N
             return f"output_scan_failed:{err or 'source_not_object'}"
         try: targets = path_field_targets(data, source_path.parent)
         except ValueError as exc: return f"output_scan_failed:{exc}"  # noqa: E701
-        if any(same_path(target, out_path) for target in targets):
+        if any(same_path(target, out_path) or (is_dir and path_contains(target, out_path)) for target, is_dir in targets):
             return "output_overwrites_input"
     return None
 def main(argv: list[str] | None = None) -> int:
