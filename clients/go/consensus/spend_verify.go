@@ -64,9 +64,9 @@ type spendSigContext struct {
 }
 
 // verifyKeyAndSigWithRegistryCache verifies a witness item's key binding and
-// cryptographic signature using registry-aware algorithm dispatch. When registry
-// is nil, the canonical default live registry is used; callers do not get a
-// separate implicit legacy verifier path.
+// cryptographic signature using registry-aware algorithm dispatch. When
+// ctx.registry is nil, the canonical default live registry is used; callers do
+// not get a separate implicit legacy verifier path.
 func verifyKeyAndSigWithRegistryCache(w WitnessItem, expectedKeyID [32]byte, ctx spendSigContext) error {
 	if sha3_256(w.Pubkey) != expectedKeyID {
 		return txerr(TX_ERR_SIG_INVALID, ctx.context+" key binding mismatch")

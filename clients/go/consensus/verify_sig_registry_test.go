@@ -462,7 +462,7 @@ func TestValidateThresholdSigSpendAtHeight_NilProviders_FallsBack(t *testing.T) 
 	ws := []WitnessItem{{SuiteID: SUITE_ID_SENTINEL}}
 	tx := &Tx{Version: TX_WIRE_VERSION}
 
-	// Sentinel with nil providers -> default providers -> threshold not met.
+	// Sentinel with nil providers uses canonical defaults and still enforces threshold.
 	err := validateThresholdSigSpendAtHeight(testThresholdSigSpendCheck(keys, 1, ws, testSpendSigEnv{
 		tx:          tx,
 		inputValue:  1000,
