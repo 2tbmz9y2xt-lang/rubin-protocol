@@ -105,23 +105,8 @@ func buildMempoolRestoreMaps(snapshotEntries []mempoolEntry, maxTxs int, maxByte
 	admissionSeqs := make(map[uint64][32]byte, len(snapshotEntries))
 	for _, item := range snapshotEntries {
 		entry := cloneMempoolEntry(&item)
-		if _, exists := txs[entry.txid]; exists {
-			return nil, nil, nil, 0, 0, fmt.Errorf("duplicate mempool snapshot txid %x", entry.txid)
-		}
-		if existing, exists := wtxids[entry.wtxid]; exists {
-			return nil, nil, nil, 0, 0, fmt.Errorf("duplicate mempool snapshot wtxid %x existing=%x new=%x", entry.wtxid, existing, entry.txid)
-		}
-		if err := validateMempoolSnapshotEntry(entry); err != nil {
+		if err := validateMempoolRestoreEntry(entry, txs, wtxids, admissionSeqs, len(txs), usedBytes, maxTxs, maxBytes); err != nil {
 			return nil, nil, nil, 0, 0, err
-		}
-		if existing, exists := admissionSeqs[entry.admissionSeq]; exists {
-			return nil, nil, nil, 0, 0, fmt.Errorf("duplicate mempool snapshot admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid)
-		}
-		if len(txs) >= maxTxs {
-			return nil, nil, nil, 0, 0, fmt.Errorf("mempool snapshot exceeds transaction cap: count=%d max=%d", len(txs)+1, maxTxs)
-		}
-		if entry.size > maxBytes || usedBytes > maxBytes-entry.size {
-			return nil, nil, nil, 0, 0, fmt.Errorf("mempool snapshot exceeds byte cap: used=%d entry=%d max=%d", usedBytes, entry.size, maxBytes)
 		}
 		for _, op := range entry.inputs {
 			if existing, exists := spenders[op]; exists {
@@ -141,21 +126,64 @@ func buildMempoolRestoreMaps(snapshotEntries []mempoolEntry, maxTxs int, maxByte
 	return
 }
 
+func validateMempoolRestoreEntry(
+	entry mempoolEntry,
+	txs map[[32]byte]*mempoolEntry,
+	wtxids map[[32]byte][32]byte,
+	admissionSeqs map[uint64][32]byte,
+	txCount int,
+	usedBytes int,
+	maxTxs int,
+	maxBytes int,
+) error {
+	if _, exists := txs[entry.txid]; exists {
+		return fmt.Errorf("duplicate mempool snapshot txid %x", entry.txid)
+	}
+	if existing, exists := wtxids[entry.wtxid]; exists {
+		return fmt.Errorf("duplicate mempool snapshot wtxid %x existing=%x new=%x", entry.wtxid, existing, entry.txid)
+	}
+	if err := validateMempoolSnapshotEntry(entry); err != nil {
+		return err
+	}
+	if existing, exists := admissionSeqs[entry.admissionSeq]; exists {
+		return fmt.Errorf("duplicate mempool snapshot admission_seq %d existing=%x new=%x", entry.admissionSeq, existing, entry.txid)
+	}
+	if txCount >= maxTxs {
+		return fmt.Errorf("mempool snapshot exceeds transaction cap: count=%d max=%d", txCount+1, maxTxs)
+	}
+	if entry.size > maxBytes || usedBytes > maxBytes-entry.size {
+		return fmt.Errorf("mempool snapshot exceeds byte cap: used=%d entry=%d max=%d", usedBytes, entry.size, maxBytes)
+	}
+	return nil
+}
+
 // validateMempoolEntryParsed parses raw tx bytes inside a mempool entry and validates consistency.
 func validateMempoolEntryParsed(entry mempoolEntry) error {
+	tx, err := parseMempoolEntryRaw(entry)
+	if err != nil {
+		return err
+	}
+	return validateMempoolEntryParsedTx(entry, tx)
+}
+
+func parseMempoolEntryRaw(entry mempoolEntry) (*consensus.Tx, error) {
 	tx, txid, wtxid, consumed, err := consensus.ParseTx(entry.raw)
 	if err != nil {
-		return fmt.Errorf("invalid mempool snapshot entry raw for txid %x: %w", entry.txid, err)
+		return nil, fmt.Errorf("invalid mempool snapshot entry raw for txid %x: %w", entry.txid, err)
 	}
 	if consumed != len(entry.raw) {
-		return fmt.Errorf("mempool snapshot entry has trailing bytes for txid %x: consumed=%d raw_len=%d", entry.txid, consumed, len(entry.raw))
+		return nil, fmt.Errorf("mempool snapshot entry has trailing bytes for txid %x: consumed=%d raw_len=%d", entry.txid, consumed, len(entry.raw))
 	}
 	if txid != entry.txid {
-		return fmt.Errorf("mempool snapshot entry txid mismatch: entry=%x raw=%x", entry.txid, txid)
+		return nil, fmt.Errorf("mempool snapshot entry txid mismatch: entry=%x raw=%x", entry.txid, txid)
 	}
 	if wtxid != entry.wtxid {
-		return fmt.Errorf("mempool snapshot entry wtxid mismatch: entry=%x raw=%x", entry.wtxid, wtxid)
+		return nil, fmt.Errorf("mempool snapshot entry wtxid mismatch: entry=%x raw=%x", entry.wtxid, wtxid)
 	}
+	return tx, nil
+}
+
+func validateMempoolEntryParsedTx(entry mempoolEntry, tx *consensus.Tx) error {
 	weight, _, _, err := consensus.TxWeightAndStats(tx)
 	if err != nil {
 		return fmt.Errorf("invalid mempool snapshot entry weight for txid %x: %w", entry.txid, err)
