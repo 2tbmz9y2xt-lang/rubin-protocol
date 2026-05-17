@@ -623,7 +623,8 @@ func TestValidateDAPayloadCommitments_MissingOutput(t *testing.T) {
 	}
 }
 
-func TestComputeTxBaseSize_Valid(t *testing.T) {
+func TestComputeTxBaseSize_WithDaCommitCore(t *testing.T) {
+	// tx_kind=0x00 (coinbase) with non-nil DaCommitCore — base size includes da_core fields
 	tx := &Tx{Version: 1, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
 	_, _, err := computeTxBaseSize(tx)
 	if err != nil {
