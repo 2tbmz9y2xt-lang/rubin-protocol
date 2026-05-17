@@ -169,7 +169,7 @@ def metrics_sidecar(label: str, p: Path) -> dict:
 def peer_snapshot(label: str, p: Path, expected, want_connected: bool) -> None:
     snap = load_json_file(label, p)
     peers = snap.get("peers")
-    req(set(snap) == {"count", "peers"} and isinstance(peers, list) and snap.get("count") == len(peers), f"{label} peer snapshot malformed")
+    req(set(snap) == {"count", "peers"} and is_json_int(snap.get("count")) and isinstance(peers, list) and snap.get("count") == len(peers), f"{label} peer snapshot malformed")
     req(all(isinstance(peer, dict) and ep(peer.get("addr")) and isinstance(peer.get("handshake_complete"), bool) for peer in peers), f"{label} peer entries malformed")
     req(len({peer.get("addr") for peer in peers}) == len(peers), f"{label} peer entries are duplicated")
     complete = [peer["addr"] for peer in peers if peer.get("handshake_complete") is True]
@@ -634,7 +634,7 @@ if partition_mode:
     req(all(links.get(key) is None for key in links), "partition peer_connectivity counterpart links must be null")
     for field in ("go_peer_snapshot", "rust_peer_snapshot"):
         snapshot = exact_object(connectivity.get(field), {"count", "peers"}, f"peer_connectivity.{field}")
-        req(snapshot.get("count") == 0 and snapshot.get("peers") == [], f"partition peer_connectivity.{field} must be empty")
+        req(is_json_int(snapshot.get("count")) and snapshot.get("count") == 0 and snapshot.get("peers") == [], f"partition peer_connectivity.{field} must be empty")
     obs = exact_object(data.get("observations"), {"fork", "heal", "partition", "pre_partition", "reorg"}, "observations")
     obs_keys = {
         "pre_partition": {"common_go_block", "common_go_mine", "common_rust_block", "common_rust_tip", "go_peer_snapshot", "rust_peer_snapshot"},

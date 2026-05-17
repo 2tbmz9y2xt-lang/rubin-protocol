@@ -9,7 +9,7 @@ from typing import Any
 SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000; MAX_PARSER_OUTPUT_BYTES = 100_000  # noqa: E702
 REPO_ROOT = Path(__file__).resolve().parents[2]; DEV_ENV = REPO_ROOT / "scripts" / "dev-env.sh"; GO_MODULE_ROOT = REPO_ROOT / "clients" / "go"  # noqa: E702
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
-METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+({NUM})(?:\s+({NUM}))?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
+METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+({NUM})(?:\s+({NUM}))?\s*$"); STRICT_METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+([0-9]+)(?:\.0*)?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable", "helper_only"}  # noqa: E702
 PATH_FIELD_NAMES = {"marker_path", "get_tx_path", "tx_status_path", "block_path", "mine_next_path", "tip_path", "go_tip_block", "rust_tip_block", "binary", "datadir"}; DIRECTORY_PATH_FIELD_NAMES = {"datadir"}  # noqa: E702
 PATH_FIELD_DOTTED_NAMES = {
@@ -566,6 +566,24 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
             return "partition_reorg_source_binding_contradiction:final_tip_hash_mismatch"
         if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (go_tip != rust_win or rust_tip != rust_win): return "partition_reorg_source_binding_contradiction:final_tip_not_winning_tip"  # noqa: E701
     return bad
+def partition_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path, partition_proxy: str) -> str | None:
+    if not endpoint(partition_proxy):
+        return "partition_reorg_source_binding_contradiction:node_identity_invalid"
+    for impl, expected_name, expected_comm, extra in (("go", "node-go", "rubin-node-go", []), ("rust", "node-rust", "rubin-node-rust", ["--peer", partition_proxy])):
+        node = by_impl[impl]
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
+            return "partition_reorg_source_binding_contradiction:node_identity_invalid"
+        binary = safe_abs_path(node.get("binary"))
+        if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
+            return "partition_reorg_source_binding_contradiction:node_identity_invalid"
+        try:
+            binary.relative_to(root)
+        except ValueError:
+            return "partition_reorg_source_binding_contradiction:node_identity_invalid"
+        expected_argv = [str(binary), "--network", "devnet", "--datadir", str(root / f"node-{impl}"), "--bind", "127.0.0.1:0", "--rpc-bind", "127.0.0.1:0"] + extra
+        if not argv_eq(node.get("command_argv"), expected_argv, {0, 4}):
+            return "partition_reorg_source_binding_contradiction:node_identity_invalid"
+    return None
 def partition_load_sidecar(path: Path, reason: str) -> tuple[dict[str, Any] | None, str | None]:
     data, err = load(path)
     return (data, None) if err is None and isinstance(data, dict) else (None, reason)
@@ -688,6 +706,8 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     expected_proof_keys = {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}
     if set(proof) != expected_proof_keys:
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
+    if bad := partition_node_identity_error(by_impl, root, proof.get("partition_proxy_endpoint")):
+        return bad
     proof_metrics = proof.get("go_reorg_metrics")
     if not isinstance(proof_metrics, dict) or set(proof_metrics) != set(METRICS) or any(not jint(proof_metrics.get(metric), 1) for metric in METRICS):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
@@ -697,10 +717,14 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     connectivity = data.get("peer_connectivity")
     if not isinstance(connectivity, dict) or set(connectivity) != RESTART_PEER_KEYS or any(connectivity.get(key) is not False for key in ("go_to_rust", "rust_to_go", "bidirectional_observed")) or not isinstance(connectivity.get("counterpart_links"), dict) or set(connectivity["counterpart_links"]) != RESTART_LINK_KEYS or any(connectivity["counterpart_links"].get(key) is not None for key in RESTART_LINK_KEYS):
         return "partition_reorg_source_binding_contradiction:peer_connectivity_overclaim"
+    for field in ("go_peer_snapshot", "rust_peer_snapshot"):
+        snap = connectivity.get(field)
+        if not isinstance(snap, dict) or set(snap) != RESTART_SNAPSHOT_KEYS or not jint(snap.get("count")) or snap.get("count") != 0 or snap.get("peers") != []:
+            return "partition_reorg_source_binding_contradiction:peer_connectivity_invalid"
     paths, err = partition_obs_paths(data, root)
     if err or paths is None:
         return err or "partition_reorg_source_binding_contradiction:sidecar_invalid"
-    source_metrics, metrics_err = parse_metrics(paths["reorg.go_metrics"])
+    source_metrics, metrics_err = parse_metrics(paths["reorg.go_metrics"], strict_prometheus=True)
     if metrics_err or source_metrics is None:
         return f"partition_reorg_source_binding_contradiction:{metrics_err or 'metrics_invalid'}"
     if source_metrics != proof_metrics:
@@ -817,7 +841,7 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
     if bad:
         return section(name, "fail", bad, source_artifact_path=path, scenario=got)
     return section(name, "no_data", "source_contract_validation_unavailable", source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
-def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
+def parse_metrics(path: Path, strict_prometheus: bool = False) -> tuple[dict[str, int] | None, str | None]:
     try:
         with path.open("rb") as src: raw = src.read(MAX_JSON_BYTES + 1)
         if len(raw) > MAX_JSON_BYTES: return None, "metrics_too_large"  # noqa: E701
@@ -840,7 +864,7 @@ def parse_metrics(path: Path) -> tuple[dict[str, int] | None, str | None]:
         else:
             for raw_line in text.splitlines():
                 if not (line := raw_line.strip()): continue  # noqa: E701
-                head = re.match(r"[A-Za-z_:][A-Za-z0-9_:]*", line); metric = head.group(0) if head else ""; m = METRIC_LINE.fullmatch(line) if metric in METRICS else None  # noqa: E702
+                head = re.match(r"[A-Za-z_:][A-Za-z0-9_:]*", line); metric = head.group(0) if head else ""; m = (STRICT_METRIC_LINE if strict_prometheus else METRIC_LINE).fullmatch(line) if metric in METRICS else None  # noqa: E702
                 if metric in METRICS and not m: return None, "metrics_malformed"  # noqa: E701
                 if m:
                     value = float(m.group(2))
