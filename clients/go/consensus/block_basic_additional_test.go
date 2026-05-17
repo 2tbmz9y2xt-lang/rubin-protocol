@@ -623,11 +623,31 @@ func TestValidateDAPayloadCommitments_MissingOutput(t *testing.T) {
 	}
 }
 
-func TestComputeTxBaseSize_NilDACore(t *testing.T) {
-	tx := &Tx{Version: 1, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
-	_, _, err := computeTxBaseSize(tx)
+func TestComputeTxBaseSize_WithDaCommitCore(t *testing.T) {
+	// tx_kind=0x01 adds da_core fields to base size; tx_kind=0x00 ignores
+	// da_core fields even when the core pointer is non-nil. Both txs share the
+	// same non-DA skeleton — the size delta must exactly match
+	// len(daCoreFieldsBytes(...)).
+	txWithDA := &Tx{Version: 1, TxKind: 0x01, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
+	txKind00 := &Tx{Version: 1, TxKind: 0x00, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
+
+	withSize, _, err := computeTxBaseSize(txWithDA)
 	if err != nil {
-		t.Fatalf("valid tx should not error: %v", err)
+		t.Fatalf("tx_kind=0x01 with DaCommitCore: %v", err)
+	}
+	withoutSize, _, err := computeTxBaseSize(txKind00)
+	if err != nil {
+		t.Fatalf("tx_kind=0x00 baseline: %v", err)
+	}
+
+	daCoreBytes, err := daCoreFieldsBytes(txWithDA)
+	if err != nil {
+		t.Fatalf("daCoreFieldsBytes: %v", err)
+	}
+	wantDelta := uint64(len(daCoreBytes))
+
+	if withSize != withoutSize+wantDelta {
+		t.Fatalf("withDa=%d withoutDa=%d daCoreBytes=%d — delta should be exact", withSize, withoutSize, wantDelta)
 	}
 }
 
@@ -723,11 +743,6 @@ func TestValidateParsedBlockBasicNil(t *testing.T) {
 	}
 }
 
-func TestValidateBlockHeaderChecksNilPb(t *testing.T) {
-	// validateBlockHeaderChecks accesses pb.Header, but is called from validateParsedBlockChecks after nil check
-	// Just test the happy path through existing tests — this line is covered by TestValidateBlockBasic_OK
-}
-
 func TestAddWitnessItemSizeSentinel(t *testing.T) {
 	w := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
 	_, sigCost, err := addWitnessItemSize(0, 5, w, func(w WitnessItem) (uint64, error) { return 10, nil })
@@ -745,10 +760,6 @@ func TestAddWitnessItemSizeSigCostError(t *testing.T) {
 	if err == nil {
 		t.Fatal("sigCostFn error should propagate")
 	}
-}
-
-func TestValidateBlockBodyChecksNilStats(t *testing.T) {
-	// accumulateBlockResourceStats returns err on nil, covered by existing tests
 }
 
 func TestValidateDACommitChunkIndexes(t *testing.T) {
