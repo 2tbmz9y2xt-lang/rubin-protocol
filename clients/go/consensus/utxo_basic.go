@@ -291,7 +291,20 @@ func (ctx *nonCoinbaseApplyContext) validateP2PKInput(inputIndex int, entry Utxo
 	if len(assigned) != 1 {
 		return txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 	}
-	return validateP2PKSpendAtHeight(entry, assigned[0], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.rotation, ctx.registry)
+	return validateP2PKSpendAtHeight(p2pkSpendCheck{
+		entry:       entry,
+		witness:     assigned[0],
+		blockHeight: ctx.height,
+		rotation:    ctx.rotation,
+		sig: spendSigContext{
+			tx:         ctx.tx,
+			inputIndex: uint32(inputIndex),
+			inputValue: entry.Value,
+			chainID:    ctx.chainID,
+			cache:      ctx.sighashCache,
+			registry:   ctx.registry,
+		},
+	})
 }
 
 func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
@@ -299,7 +312,22 @@ func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry 
 	if err != nil {
 		return err
 	}
-	return validateThresholdSigSpendAtHeight(m.Keys, m.Threshold, assigned, ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.rotation, ctx.registry, "CORE_MULTISIG")
+	return validateThresholdSigSpendAtHeight(thresholdSigSpendCheck{
+		keys:        m.Keys,
+		threshold:   m.Threshold,
+		witnesses:   assigned,
+		blockHeight: ctx.height,
+		rotation:    ctx.rotation,
+		sig: spendSigContext{
+			tx:         ctx.tx,
+			inputIndex: uint32(inputIndex),
+			inputValue: entry.Value,
+			chainID:    ctx.chainID,
+			cache:      ctx.sighashCache,
+			registry:   ctx.registry,
+			context:    "CORE_MULTISIG",
+		},
+	})
 }
 
 func (ctx *nonCoinbaseApplyContext) captureVaultInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
@@ -466,20 +494,22 @@ func (ctx *nonCoinbaseApplyContext) rejectVaultOutputRecursion() error {
 }
 
 func (ctx *nonCoinbaseApplyContext) validateVaultSpendSignature() error {
-	return validateThresholdSigSpendAtHeight(
-		ctx.spend.vaultSigKeys,
-		ctx.spend.vaultSigThreshold,
-		ctx.spend.vaultSigWitness,
-		ctx.tx,
-		ctx.spend.vaultSigInputIndex,
-		ctx.spend.vaultSigInputValue,
-		ctx.chainID,
-		ctx.height,
-		ctx.sighashCache,
-		ctx.rotation,
-		ctx.registry,
-		"CORE_VAULT",
-	)
+	return validateThresholdSigSpendAtHeight(thresholdSigSpendCheck{
+		keys:        ctx.spend.vaultSigKeys,
+		threshold:   ctx.spend.vaultSigThreshold,
+		witnesses:   ctx.spend.vaultSigWitness,
+		blockHeight: ctx.height,
+		rotation:    ctx.rotation,
+		sig: spendSigContext{
+			tx:         ctx.tx,
+			inputIndex: ctx.spend.vaultSigInputIndex,
+			inputValue: ctx.spend.vaultSigInputValue,
+			chainID:    ctx.chainID,
+			cache:      ctx.sighashCache,
+			registry:   ctx.registry,
+			context:    "CORE_VAULT",
+		},
+	})
 }
 
 func (ctx *nonCoinbaseApplyContext) validateVaultOutputWhitelist() error {
