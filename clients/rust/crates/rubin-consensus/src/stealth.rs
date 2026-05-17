@@ -4,7 +4,9 @@ use crate::hash::sha3_256;
 use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
 use crate::sighash::{sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::spend_verify::extract_crypto_sig_and_sighash;
-use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
+use crate::suite_registry::{
+    DefaultRotationProvider, RotationProvider, SuiteParams, SuiteRegistry,
+};
 use crate::tx::{Tx, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
 
@@ -114,6 +116,48 @@ pub(crate) fn validate_stealth_spend_at_height(
     )
 }
 
+fn stealth_suite_params<'a>(
+    rotation: &dyn RotationProvider,
+    registry: &'a SuiteRegistry,
+    suite_id: u8,
+    block_height: u64,
+) -> Result<&'a SuiteParams, TxError> {
+    let native_spend = rotation.native_spend_suites(block_height);
+    if !native_spend.contains(suite_id) {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_STEALTH suite not in native spend set",
+        ));
+    }
+    registry.lookup(suite_id).ok_or_else(|| {
+        TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_STEALTH suite not registered",
+        )
+    })
+}
+
+fn validate_stealth_witness_shape(w: &WitnessItem, params: &SuiteParams) -> Result<(), TxError> {
+    if w.pubkey.len() as u64 != params.pubkey_len || w.signature.len() as u64 != params.sig_len + 1
+    {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigNoncanonical,
+            "non-canonical witness item lengths",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stealth_key_binding(w: &WitnessItem, cov: &StealthCovenant) -> Result<(), TxError> {
+    if sha3_256(&w.pubkey) != cov.one_time_key_id {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "CORE_STEALTH key binding mismatch",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_stealth_spend_q(
     entry: &UtxoEntry,
@@ -136,35 +180,9 @@ pub(crate) fn validate_stealth_spend_q(
     let cov = parse_stealth_covenant_data(&entry.covenant_data)?;
     let _ = cov.ciphertext;
 
-    let native_spend = rp.native_spend_suites(block_height);
-    if !native_spend.contains(w.suite_id) {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "CORE_STEALTH suite not in native spend set",
-        ));
-    }
-
-    let params = reg.lookup(w.suite_id).ok_or_else(|| {
-        TxError::new(
-            ErrorCode::TxErrSigAlgInvalid,
-            "CORE_STEALTH suite not registered",
-        )
-    })?;
-
-    if w.pubkey.len() as u64 != params.pubkey_len || w.signature.len() as u64 != params.sig_len + 1
-    {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigNoncanonical,
-            "non-canonical witness item lengths",
-        ));
-    }
-
-    if sha3_256(&w.pubkey) != cov.one_time_key_id {
-        return Err(TxError::new(
-            ErrorCode::TxErrSigInvalid,
-            "CORE_STEALTH key binding mismatch",
-        ));
-    }
+    let params = stealth_suite_params(rp, reg, w.suite_id, block_height)?;
+    validate_stealth_witness_shape(w, params)?;
+    validate_stealth_key_binding(w, &cov)?;
 
     let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(w)?;
     let digest =
