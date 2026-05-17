@@ -624,11 +624,20 @@ func TestValidateDAPayloadCommitments_MissingOutput(t *testing.T) {
 }
 
 func TestComputeTxBaseSize_WithDaCommitCore(t *testing.T) {
-	// tx_kind=0x00 (coinbase) with non-nil DaCommitCore — base size includes da_core fields
-	tx := &Tx{Version: 1, TxKind: 0x00, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
-	_, _, err := computeTxBaseSize(tx)
+	// tx_kind=0x01 (DA commit) with non-nil DaCommitCore — base size must include da_core fields
+	txWith := &Tx{Version: 1, TxKind: 0x01, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
+	txWithout := &Tx{Version: 1, TxKind: 0x01, Inputs: []TxInput{{}}}
+	withSize, _, err := computeTxBaseSize(txWith)
 	if err != nil {
-		t.Fatalf("valid tx should not error: %v", err)
+		t.Fatalf("with DaCommitCore: %v", err)
+	}
+	withoutSize, _, err := computeTxBaseSize(txWithout)
+	if err == nil {
+		t.Fatalf("missing DaCommitCore for tx_kind=0x01 should error")
+	}
+	// da_core fields = compact_size(0) + 32 + 2 + 32 + 8 + 32 + 32 + 32 + 1 + compact_size(0) >= 172 bytes
+	if withSize < withoutSize+172 {
+		t.Fatalf("base size with da core=%d, too close to without=%d", withSize, withoutSize)
 	}
 }
 
