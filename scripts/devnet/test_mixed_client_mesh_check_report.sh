@@ -160,6 +160,19 @@ Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
 PY
 }
 
+extract_wait_peer_snapshot() {
+  python3 - "${HARNESS}" "${WAIT_PEER_SNAPSHOT_LIB}" <<'PY'
+from pathlib import Path
+import sys
+
+src, dst = map(Path, sys.argv[1:3])
+lines = src.read_text(encoding="utf-8").splitlines()
+start = next(i for i, line in enumerate(lines) if line.startswith("wait_peer_snapshot()"))
+end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("wait_rust_to_go_link()"))
+Path(dst).write_text("\n".join(lines[start:end]) + "\n", encoding="utf-8")
+PY
+}
+
 extract_capture_go_reorg_metrics() {
   python3 - "${HARNESS}" "${CAPTURE_GO_REORG_METRICS_LIB}" <<'PY'
 from pathlib import Path
@@ -205,6 +218,40 @@ fi
 [[ "${PARTITION_REASON}" == "lsof_timeout" ]] || { echo "FAIL: proxy_go_local_addr lost parent-visible reason: ${PARTITION_REASON}" >&2; exit 1; }
 SH
   bash "${probe}" "${PROXY_GO_LOCAL_ADDR_LIB}" "${TMP_ROOT}"
+}
+
+check_wait_peer_snapshot_normalizes() {
+  local probe="${TMP_ROOT}/wait-peer-snapshot-probe.sh"
+  cat >"${probe}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$1"
+probe_root="$2"
+MESH_TIMEOUT=1
+RPC_JSON_INPUT=""
+rpc_json() { cat -- "${RPC_JSON_INPUT}"; }
+write_json() { printf '%s\n' "$2" >"$1"; }
+rich="${probe_root}/peer-rich.json"; extra="${probe_root}/peer-secret.json"; out="${probe_root}/peer-out-public.json"
+write_json "${rich}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true,"ban_score":0,"last_error":"","protocol_version":1,"best_height":7,"tx_relay":true,"pruned_below_height":0,"da_mempool_size":0}]}'
+write_json "${extra}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true,"secret":"x"}]}'
+RPC_JSON_INPUT="${rich}"
+PEER_SNAPSHOT_REASON=""
+wait_peer_snapshot node-go "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001" || { echo "FAIL: rich wait_peer_snapshot rejected: ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+python3 - "${out}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+if data != {"count": 1, "peers": [{"addr": "127.0.0.1:51001", "handshake_complete": True}]}:
+    sys.exit(1)
+PY
+RPC_JSON_INPUT="${extra}"
+PEER_SNAPSHOT_REASON=""
+if wait_peer_snapshot node-go "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001"; then
+  echo "FAIL: wait_peer_snapshot accepted secret peer metadata" >&2
+  exit 1
+fi
+[[ "${PEER_SNAPSHOT_REASON}" == "peer_snapshot_invalid_shape" ]] || { echo "FAIL: wait_peer_snapshot reason ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+SH
+  bash "${probe}" "${WAIT_PEER_SNAPSHOT_LIB}" "${TMP_ROOT}"
 }
 
 check_capture_go_reorg_metrics_reason() {
@@ -269,13 +316,23 @@ MESH_TIMEOUT=1
 RPC_JSON_INPUT=""
 rpc_json() { cat -- "${RPC_JSON_INPUT}"; }
 write_json() { printf '%s\n' "$2" >"$1"; }
-valid="${probe_root}/peer-valid.json"; overlong="${probe_root}/peer-overlong-port.json"; extra="${probe_root}/peer-extra-field.json"; out="${probe_root}/peer-out.json"
+valid="${probe_root}/peer-valid.json"; rich="${probe_root}/peer-rich.json"; overlong="${probe_root}/peer-overlong-port.json"; extra="${probe_root}/peer-extra-field.json"; out="${probe_root}/peer-out.json"
 write_json "${valid}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true}]}'
+write_json "${rich}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true,"ban_score":0,"last_error":"","protocol_version":1,"best_height":7,"tx_relay":true,"pruned_below_height":0,"da_mempool_size":0}]}'
 write_json "${overlong}" '{"count":1,"peers":[{"addr":"127.0.0.1:123456","handshake_complete":true}]}'
 write_json "${extra}" '{"count":1,"peers":[{"addr":"127.0.0.1:51001","handshake_complete":true,"secret":"x"}]}'
 RPC_JSON_INPUT="${valid}"
 PEER_SNAPSHOT_REASON=""
 wait_peer_snapshot_state node-rust "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001" connected || { echo "FAIL: valid peer snapshot rejected: ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+RPC_JSON_INPUT="${rich}"
+PEER_SNAPSHOT_REASON=""
+wait_peer_snapshot_state node-rust "${RPC_JSON_INPUT}" "${out}" 1 "127.0.0.1:51001" connected || { echo "FAIL: rich peer snapshot rejected: ${PEER_SNAPSHOT_REASON}" >&2; exit 1; }
+python3 - "${out}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+if data != {"count": 1, "peers": [{"addr": "127.0.0.1:51001", "handshake_complete": True}]}:
+    sys.exit(1)
+PY
 for invalid in "${overlong}" "${extra}"; do
   RPC_JSON_INPUT="${invalid}"
   PEER_SNAPSHOT_REASON=""
@@ -1321,15 +1378,18 @@ PY
 CHECK_REPORT_LIB="${TMP_ROOT}/check-report-lib.sh"
 PREPARE_TX_CHAINSTATE_LIB="${TMP_ROOT}/prepare-tx-chainstate-lib.sh"
 PROXY_GO_LOCAL_ADDR_LIB="${TMP_ROOT}/proxy-go-local-addr-lib.sh"
+WAIT_PEER_SNAPSHOT_LIB="${TMP_ROOT}/wait-peer-snapshot-lib.sh"
 CAPTURE_GO_REORG_METRICS_LIB="${TMP_ROOT}/capture-go-reorg-metrics-lib.sh"
 WAIT_PEER_SNAPSHOT_STATE_LIB="${TMP_ROOT}/wait-peer-snapshot-state-lib.sh"
 extract_check_report
 extract_prepare_tx_chainstate
 extract_proxy_go_local_addr
+extract_wait_peer_snapshot
 extract_capture_go_reorg_metrics
 extract_wait_peer_snapshot_state
 check_prepare_tx_chainstate_cleanup
 check_proxy_go_local_addr_reason
+check_wait_peer_snapshot_normalizes
 check_capture_go_reorg_metrics_reason
 check_wait_peer_snapshot_state_reason
 # shellcheck source=/dev/null

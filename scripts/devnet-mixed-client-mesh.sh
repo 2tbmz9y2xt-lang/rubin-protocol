@@ -2126,7 +2126,8 @@ wait_peer_snapshot() {
       PEER_SNAPSHOT_REASON=""
       if python3 - "${tmp}" "${expected}" <<'PY' >/dev/null 2>&1
 import json, sys
-with open(sys.argv[1], encoding="utf-8") as f:
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
     try:
         data = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -2134,11 +2135,17 @@ with open(sys.argv[1], encoding="utf-8") as f:
 if not isinstance(data, dict):
     sys.exit(5)
 expected, peers, count = sys.argv[2], data.get("peers"), data.get("count")
+allowed_peer_keys = {"addr", "handshake_complete", "ban_score", "last_error", "protocol_version", "best_height", "tx_relay", "pruned_below_height", "da_mempool_size"}
 def ep(v): return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and (p := v.rsplit(":", 1)[-1]).isdigit() and 1 <= len(p) <= 5 and 1 <= int(p) <= 65535
-shape = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and set(p) == {"addr", "handshake_complete"} and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers)
+shape = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and {"addr", "handshake_complete"} <= set(p) <= allowed_peer_keys and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers)
 has_expected_complete = isinstance(peers, list) and any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
 has_expected_incomplete = isinstance(peers, list) and any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is False for p in peers)
-sys.exit(0 if shape and has_expected_complete and count == 1 else 3 if shape and has_expected_complete else 5 if not shape else 6 if has_expected_incomplete else 7)
+if shape and has_expected_complete and count == 1:
+    with open(path, "w", encoding="utf-8") as dst:
+        json.dump({"count": count, "peers": [{"addr": p["addr"], "handshake_complete": p["handshake_complete"]} for p in peers]}, dst, sort_keys=True)
+        dst.write("\n")
+    sys.exit(0)
+sys.exit(3 if shape and has_expected_complete else 5 if not shape else 6 if has_expected_incomplete else 7)
 PY
       then mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
       else rc=$?; [[ ${rc} -eq 3 ]] && PEER_SNAPSHOT_REASON=unexpected_peer_snapshot_peer; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_handshake_incomplete; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
@@ -2431,14 +2438,20 @@ try:
 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
     sys.exit(4)
 peers, count = data.get("peers"), data.get("count")
+allowed_peer_keys = {"addr", "handshake_complete", "ban_score", "last_error", "protocol_version", "best_height", "tx_relay", "pruned_below_height", "da_mempool_size"}
 def ep(v):
     return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and (port := v.rsplit(":", 1)[-1]).isdigit() and 1 <= len(port) <= 5 and 1 <= int(port) <= 65535
-if not isinstance(count, int) or isinstance(count, bool) or not isinstance(peers, list) or count != len(peers) or not all(isinstance(p, dict) and set(p) == {"addr", "handshake_complete"} and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) or len({p.get("addr") for p in peers}) != len(peers):
+if not isinstance(count, int) or isinstance(count, bool) or not isinstance(peers, list) or count != len(peers) or not all(isinstance(p, dict) and {"addr", "handshake_complete"} <= set(p) <= allowed_peer_keys and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) or len({p.get("addr") for p in peers}) != len(peers):
     sys.exit(5)
 complete = [p["addr"] for p in peers if p.get("handshake_complete") is True]
 if want == "empty":
-    sys.exit(0 if count == 0 and complete == [] else 6)
-sys.exit(0 if count == 1 and complete == [expected] else 7)
+    if count != 0 or complete != []:
+        sys.exit(6)
+elif count != 1 or complete != [expected]:
+    sys.exit(7)
+with open(path, "w", encoding="utf-8") as dst:
+    json.dump({"count": count, "peers": [{"addr": p["addr"], "handshake_complete": p["handshake_complete"]} for p in peers]}, dst, sort_keys=True)
+    dst.write("\n")
 PY
       then mv -- "${tmp}" "${out}" || { PEER_SNAPSHOT_REASON=peer_snapshot_artifact_write_failed; rm -f -- "${tmp}" "${tmp}.err"; return 1; }; return 0
       else rc=$?; [[ ${rc} -eq 4 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_malformed_json; [[ ${rc} -eq 5 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_invalid_shape; [[ ${rc} -eq 6 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_not_empty; [[ ${rc} -eq 7 ]] && PEER_SNAPSHOT_REASON=peer_snapshot_expected_peer_absent; fi
