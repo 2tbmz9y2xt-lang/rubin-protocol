@@ -9,7 +9,11 @@ func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, err
 	if bs == nil {
 		return 0, false, errors.New("nil blockstore")
 	}
+	return findCanonicalHeightWithRetry(bs, blockHash)
+}
 
+// findCanonicalHeightWithRetry runs the scan-validate-cache loop.
+func findCanonicalHeightWithRetry(bs *BlockStore, blockHash [32]byte) (uint64, bool, error) {
 	for {
 		height, found, staleCache, err := bs.scanCanonicalHeight(blockHash)
 		if err != nil {
@@ -21,7 +25,6 @@ func (bs *BlockStore) FindCanonicalHeight(blockHash [32]byte) (uint64, bool, err
 			}
 			return 0, false, nil
 		}
-
 		current, err := bs.cacheCanonicalHeightIfCurrent(blockHash, height, staleCache)
 		if err != nil {
 			return 0, false, err
@@ -100,7 +103,10 @@ func (bs *BlockStore) LocatorHashes(limit int) ([][32]byte, error) {
 	if err != nil || !ok {
 		return nil, err
 	}
+	return buildLocatorHashes(bs, limit, tipHeight)
+}
 
+func buildLocatorHashes(bs *BlockStore, limit int, tipHeight uint64) ([][32]byte, error) {
 	out := make([][32]byte, 0, limit)
 	step := uint64(1)
 	for {
@@ -162,7 +168,10 @@ func (bs *BlockStore) HashesAfterLocators(locatorHashes [][32]byte, stopHash [32
 	if err != nil || !ok {
 		return nil, err
 	}
+	return computeHashesAfterLocators(bs, locatorHashes, stopHash, tipHeight, limit)
+}
 
+func computeHashesAfterLocators(bs *BlockStore, locatorHashes [][32]byte, stopHash [32]byte, tipHeight uint64, limit uint64) ([][32]byte, error) {
 	startHeight, err := bs.firstHeightAfterLocators(locatorHashes)
 	if err != nil {
 		return nil, err
