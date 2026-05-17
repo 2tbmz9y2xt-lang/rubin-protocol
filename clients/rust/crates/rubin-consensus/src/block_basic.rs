@@ -1,21 +1,20 @@
 use crate::block::{BlockHeader, BLOCK_HEADER_BYTES};
 use crate::constants::{
-    COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BATCHES_PER_BLOCK,
-    MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
-    SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL, VERIFY_COST_ML_DSA_87, VERIFY_COST_UNKNOWN_SUITE,
-    WITNESS_DISCOUNT_DIVISOR,
+    COV_TYPE_DA_COMMIT, MAX_ANCHOR_BYTES_PER_BLOCK, MAX_BLOCK_WEIGHT, MAX_DA_BYTES_PER_BLOCK,
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    VERIFY_COST_ML_DSA_87, VERIFY_COST_UNKNOWN_SUITE, WITNESS_DISCOUNT_DIVISOR,
 };
 use crate::error::{ErrorCode, TxError};
-use crate::hash::sha3_256;
 use crate::tx::{da_core_fields_bytes, Tx};
-use std::collections::HashMap;
 
 mod coinbase;
+mod da_set;
 mod header;
 mod orchestration;
 mod parser;
 mod txs;
 
+use self::da_set::validate_da_set_integrity;
 pub(crate) use self::orchestration::validate_parsed_block_basic_with_context_at_height;
 use self::parser::parse_block_bytes_impl;
 use self::txs::BlockTxStats;
@@ -39,12 +38,6 @@ pub struct BlockBasicSummary {
     pub sum_weight: u64,
     pub sum_da: u64,
     pub block_hash: [u8; 32],
-}
-
-#[derive(Clone, Debug)]
-struct DaCommitSet {
-    tx: Tx,
-    chunk_count: u16,
 }
 
 // G.9 instrumentation: per-thread counter of `parse_block_bytes`
@@ -147,194 +140,6 @@ fn validate_block_resource_limits(stats: BlockTxStats) -> Result<(), TxError> {
         ));
     }
     Ok(())
-}
-
-fn validate_da_set_integrity(txs: &[Tx]) -> Result<(), TxError> {
-    let mut commits: HashMap<[u8; 32], DaCommitSet> = HashMap::new();
-    let mut chunks: HashMap<[u8; 32], HashMap<u16, Tx>> = HashMap::new();
-
-    for tx in txs {
-        match tx.tx_kind {
-            0x01 => {
-                let Some(core) = tx.da_commit_core.as_ref() else {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrParse,
-                        "missing da_commit_core for tx_kind=0x01",
-                    ));
-                };
-                if commits
-                    .insert(
-                        core.da_id,
-                        DaCommitSet {
-                            tx: tx.clone(),
-                            chunk_count: core.chunk_count,
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(TxError::new(
-                        ErrorCode::BlockErrDaSetInvalid,
-                        "duplicate DA commit for da_id",
-                    ));
-                }
-            }
-            0x02 => {
-                let Some(core) = tx.da_chunk_core.as_ref() else {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrParse,
-                        "missing da_chunk_core for tx_kind=0x02",
-                    ));
-                };
-                if sha3_256(&tx.da_payload) != core.chunk_hash {
-                    return Err(TxError::new(
-                        ErrorCode::BlockErrDaChunkHashInvalid,
-                        "chunk_hash mismatch",
-                    ));
-                }
-                let set = chunks.entry(core.da_id).or_default();
-                if set.insert(core.chunk_index, tx.clone()).is_some() {
-                    return Err(TxError::new(
-                        ErrorCode::BlockErrDaSetInvalid,
-                        "duplicate DA chunk index",
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    validate_da_set_maps(&commits, &chunks)
-}
-
-fn da_commit_for_id<'a>(
-    commits: &'a HashMap<[u8; 32], DaCommitSet>,
-    da_id: &[u8; 32],
-) -> Result<&'a DaCommitSet, TxError> {
-    commits.get(da_id).ok_or_else(|| {
-        TxError::new(
-            ErrorCode::BlockErrDaSetInvalid,
-            "missing DA commit for da_id",
-        )
-    })
-}
-
-fn da_chunk_set_for_id<'a>(
-    chunks: &'a HashMap<[u8; 32], HashMap<u16, Tx>>,
-    da_id: &[u8; 32],
-) -> Result<&'a HashMap<u16, Tx>, TxError> {
-    chunks
-        .get(da_id)
-        .ok_or_else(|| TxError::new(ErrorCode::BlockErrDaIncomplete, "DA commit without chunks"))
-}
-
-fn da_chunk_tx_for_index(set: &HashMap<u16, Tx>, index: u16) -> Result<&Tx, TxError> {
-    set.get(&index)
-        .ok_or_else(|| TxError::new(ErrorCode::BlockErrDaIncomplete, "missing DA chunk index"))
-}
-
-fn validate_da_set_maps(
-    commits: &HashMap<[u8; 32], DaCommitSet>,
-    chunks: &HashMap<[u8; 32], HashMap<u16, Tx>>,
-) -> Result<(), TxError> {
-    // Go parity (clients/go/consensus/block_basic.go, `validateDASetIntegrity`):
-    // the batch-count guard runs BEFORE the sortedDAIDs loops so a block that
-    // exceeds `MAX_DA_BATCHES_PER_BLOCK` surfaces as `BLOCK_ERR_DA_BATCH_EXCEEDED`,
-    // not as `BLOCK_ERR_DA_SET_INVALID` / `BLOCK_ERR_DA_INCOMPLETE` from a
-    // stray chunk or bad chunk_count inside the overflowing set.
-    if commits.len() > MAX_DA_BATCHES_PER_BLOCK as usize {
-        return Err(TxError::new(
-            ErrorCode::BlockErrDaBatchExceeded,
-            "too many DA commits in block",
-        ));
-    }
-
-    let commit_ids = sorted_da_ids(commits);
-    let chunk_ids = sorted_da_ids(chunks);
-
-    for da_id in &chunk_ids {
-        if !commits.contains_key(da_id) {
-            return Err(TxError::new(
-                ErrorCode::BlockErrDaSetInvalid,
-                "DA chunks without DA commit",
-            ));
-        }
-    }
-
-    for da_id in &commit_ids {
-        let commit = da_commit_for_id(commits, da_id)?;
-        if commit.chunk_count == 0 || u64::from(commit.chunk_count) > MAX_DA_CHUNK_COUNT {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "chunk_count out of range for tx_kind=0x01",
-            ));
-        }
-        let set = da_chunk_set_for_id(chunks, da_id)?;
-        if set.len() != commit.chunk_count as usize {
-            return Err(TxError::new(
-                ErrorCode::BlockErrDaIncomplete,
-                "DA chunk count mismatch",
-            ));
-        }
-        for i in 0..commit.chunk_count {
-            let _ = da_chunk_tx_for_index(set, i)?;
-        }
-    }
-
-    for da_id in &commit_ids {
-        let commit = da_commit_for_id(commits, da_id)?;
-        let set = da_chunk_set_for_id(chunks, da_id)?;
-        let mut concat = Vec::<u8>::new();
-        for i in 0..commit.chunk_count {
-            let tx = da_chunk_tx_for_index(set, i)?;
-            concat.extend_from_slice(&tx.da_payload);
-        }
-        let payload_commitment = sha3_256(&concat);
-
-        let mut da_commit_outputs: u32 = 0;
-        let mut got_commitment = [0u8; 32];
-        for o in &commit.tx.outputs {
-            if o.covenant_type != COV_TYPE_DA_COMMIT {
-                continue;
-            }
-            da_commit_outputs += 1;
-            // Go parity (clients/go/consensus/block_basic.go,
-            // `validateDASetIntegrity` payload-commitment loop): a DA commit
-            // output whose covenant payload is not exactly 32 bytes is
-            // rejected as `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID /
-            // "DA commitment output has invalid length"` BEFORE the
-            // missing/duplicated count check and BEFORE the commitment
-            // mismatch check. Silently zero-filling `got_commitment` would
-            // collapse this case into `payload commitment mismatch`, losing
-            // the dedicated length-classification surface.
-            if o.covenant_data.len() != 32 {
-                return Err(TxError::new(
-                    ErrorCode::BlockErrDaPayloadCommitInvalid,
-                    "DA commitment output has invalid length",
-                ));
-            }
-            got_commitment.copy_from_slice(&o.covenant_data);
-        }
-        if da_commit_outputs != 1 {
-            return Err(TxError::new(
-                ErrorCode::BlockErrDaPayloadCommitInvalid,
-                "DA commitment output missing or duplicated",
-            ));
-        }
-        if payload_commitment != got_commitment {
-            return Err(TxError::new(
-                ErrorCode::BlockErrDaPayloadCommitInvalid,
-                "payload commitment mismatch",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn sorted_da_ids<T>(m: &HashMap<[u8; 32], T>) -> Vec<[u8; 32]> {
-    let mut ids: Vec<[u8; 32]> = m.keys().copied().collect();
-    ids.sort_unstable();
-    ids
 }
 
 /// Shared weight-computation skeleton. `sig_cost_fn` receives each witness item
@@ -497,179 +302,6 @@ fn compact_size_len(n: u64) -> u64 {
         0xfd..=0xffff => 3,
         0x1_0000..=0xffff_ffff => 5,
         _ => 9,
-    }
-}
-
-#[cfg(test)]
-mod internal_tests {
-    use super::{
-        da_chunk_set_for_id, da_chunk_tx_for_index, da_commit_for_id, validate_da_set_maps,
-        DaCommitSet,
-    };
-    use crate::constants::{COV_TYPE_DA_COMMIT, MAX_DA_BATCHES_PER_BLOCK};
-    use crate::error::ErrorCode;
-    use crate::tx::{Tx, TxOutput};
-    use std::collections::HashMap;
-
-    fn dummy_da_commit_tx(payload_commitment: [u8; 32]) -> Tx {
-        dummy_da_commit_tx_with_covenant_data(payload_commitment.to_vec())
-    }
-
-    fn dummy_da_commit_tx_with_covenant_data(covenant_data: Vec<u8>) -> Tx {
-        Tx {
-            version: 1,
-            tx_kind: 0x01,
-            tx_nonce: 0,
-            inputs: Vec::new(),
-            outputs: vec![TxOutput {
-                value: 0,
-                covenant_type: COV_TYPE_DA_COMMIT,
-                covenant_data,
-            }],
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: Vec::new(),
-            da_payload: Vec::new(),
-        }
-    }
-
-    fn dummy_da_chunk_tx(payload: &[u8]) -> Tx {
-        Tx {
-            version: 1,
-            tx_kind: 0x02,
-            tx_nonce: 0,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            locktime: 0,
-            da_commit_core: None,
-            da_chunk_core: None,
-            witness: Vec::new(),
-            da_payload: payload.to_vec(),
-        }
-    }
-
-    #[test]
-    fn da_commit_for_id_missing_returns_block_err_da_set_invalid() {
-        let commits: HashMap<[u8; 32], DaCommitSet> = HashMap::new();
-        let err = da_commit_for_id(&commits, &[0x11; 32]).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BlockErrDaSetInvalid);
-    }
-
-    #[test]
-    fn da_chunk_set_for_id_missing_returns_block_err_da_incomplete() {
-        let chunks: HashMap<[u8; 32], HashMap<u16, Tx>> = HashMap::new();
-        let err = da_chunk_set_for_id(&chunks, &[0x22; 32]).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
-    }
-
-    #[test]
-    fn da_chunk_tx_for_index_missing_returns_block_err_da_incomplete() {
-        let set: HashMap<u16, Tx> = HashMap::new();
-        let err = da_chunk_tx_for_index(&set, 0).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
-    }
-
-    #[test]
-    fn validate_da_set_maps_rejects_missing_chunk_index_without_panic() {
-        let da_id = [0x33; 32];
-        let mut commits = HashMap::new();
-        commits.insert(
-            da_id,
-            DaCommitSet {
-                tx: dummy_da_commit_tx([0x44; 32]),
-                chunk_count: 2,
-            },
-        );
-
-        let mut set = HashMap::new();
-        set.insert(0, dummy_da_chunk_tx(b"chunk-0"));
-        let mut chunks = HashMap::new();
-        chunks.insert(da_id, set);
-
-        let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BlockErrDaIncomplete);
-    }
-
-    /// Go parity for G.1: a DA commit output whose covenant payload is not
-    /// exactly 32 bytes is classified as
-    /// `BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID / "DA commitment output has
-    /// invalid length"`, not collapsed into the generic
-    /// `"payload commitment mismatch"` surface.
-    #[test]
-    fn validate_da_set_maps_rejects_non_32_covenant_data_as_invalid_length() {
-        let da_id = [0x55; 32];
-        let payload = b"payload-short-covenant".to_vec();
-
-        let mut commits = HashMap::new();
-        // covenant_data deliberately 31 bytes (not 32).
-        let bad_covenant: Vec<u8> = (0..31).collect();
-        commits.insert(
-            da_id,
-            DaCommitSet {
-                tx: dummy_da_commit_tx_with_covenant_data(bad_covenant),
-                chunk_count: 1,
-            },
-        );
-
-        let mut set = HashMap::new();
-        set.insert(0, dummy_da_chunk_tx(&payload));
-        let mut chunks = HashMap::new();
-        chunks.insert(da_id, set);
-
-        let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BlockErrDaPayloadCommitInvalid);
-        // Exact-message parity: the Go reference returns this exact string
-        // (`clients/go/consensus/block_basic.go`, `validateDASetIntegrity`).
-        // A substring check would mask future drift that still happens to
-        // contain "invalid length".
-        assert_eq!(err.msg, "DA commitment output has invalid length");
-    }
-
-    /// Go parity for G.2: the `MAX_DA_BATCHES_PER_BLOCK` guard runs BEFORE the
-    /// sortedDAIDs loops, so an oversize block whose excess sets also contain
-    /// structural problems (orphaned chunks, missing chunk index, chunk_count
-    /// OOB) surfaces as `BLOCK_ERR_DA_BATCH_EXCEEDED` rather than the
-    /// downstream `BLOCK_ERR_DA_SET_INVALID` / `BLOCK_ERR_DA_INCOMPLETE`
-    /// classification of an inner set.
-    #[test]
-    fn validate_da_set_maps_batch_exceeded_fires_before_set_invalid() {
-        let mut commits = HashMap::new();
-        // `i` is u32 and we write 4 bytes of `da_id` so the counter stays
-        // injective even if `MAX_DA_BATCHES_PER_BLOCK` is ever raised past
-        // `u16::MAX`. `assert_eq!(commits.len(), MAX+1)` below is the
-        // fail-fast guard; the wider counter keeps that guard meaningful.
-        let limit: u32 = MAX_DA_BATCHES_PER_BLOCK as u32;
-        for i in 0..=limit {
-            // commit_count == MAX + 1 triggers the batch-exceeded guard.
-            let mut da_id = [0u8; 32];
-            da_id[0..4].copy_from_slice(&i.to_le_bytes());
-            commits.insert(
-                da_id,
-                DaCommitSet {
-                    tx: dummy_da_commit_tx([0xAA; 32]),
-                    chunk_count: 1,
-                },
-            );
-        }
-
-        // Seed chunk map with an orphaned DA set (no matching commit) —
-        // without the reorder, this would surface as `BlockErrDaSetInvalid`.
-        let mut orphan_set = HashMap::new();
-        orphan_set.insert(0, dummy_da_chunk_tx(b"orphan"));
-        let mut chunks = HashMap::new();
-        chunks.insert([0xFF; 32], orphan_set);
-
-        assert_eq!(commits.len(), MAX_DA_BATCHES_PER_BLOCK as usize + 1);
-
-        let err = validate_da_set_maps(&commits, &chunks).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BlockErrDaBatchExceeded);
-        // Exact-message parity with Go (`clients/go/consensus/block_basic.go`,
-        // `validateDASetIntegrity`): lock the full reject message, not just
-        // the code, so future wording drift is caught alongside the
-        // ordering invariant. Mirrors the same assertion style used by the
-        // G.1 length-reject test above.
-        assert_eq!(err.msg, "too many DA commits in block");
     }
 }
 
