@@ -627,7 +627,7 @@ def partition_peer_sidecar(path: Path, expected: str | None, connected: bool) ->
     peers = data.get("peers")
     if set(data) != RESTART_SNAPSHOT_KEYS or not isinstance(data.get("count"), int) or isinstance(data.get("count"), bool) or not isinstance(peers, list) or data["count"] != len(peers):
         return "partition_reorg_source_binding_contradiction:peer_snapshot_invalid"
-    if any(not isinstance(peer, dict) or not endpoint(peer.get("addr")) or not isinstance(peer.get("handshake_complete"), bool) for peer in peers) or len({peer.get("addr") for peer in peers}) != len(peers):
+    if any(not isinstance(peer, dict) or set(peer) != {"addr", "handshake_complete"} or not endpoint(peer.get("addr")) or not isinstance(peer.get("handshake_complete"), bool) for peer in peers) or len({peer.get("addr") for peer in peers}) != len(peers):
         return "partition_reorg_source_binding_contradiction:peer_snapshot_invalid"
     complete = [peer["addr"] for peer in peers if peer.get("handshake_complete") is True]
     if connected:

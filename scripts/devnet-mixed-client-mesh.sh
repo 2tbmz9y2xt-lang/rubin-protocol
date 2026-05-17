@@ -96,6 +96,8 @@ def hex32(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 def is_json_int(value: object, minimum: int = 0) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 1_000_000_000
+def is_json_u64(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 18_446_744_073_709_551_615
 def tip_obj(value: object, label: str) -> dict:
     req(isinstance(value, dict) and set(value) == {"height", "hash"}, f"{label} keys mismatch")
     req(is_json_int(value.get("height")) and hex32(value.get("hash")), f"{label} malformed")
@@ -104,7 +106,7 @@ def tip_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, bloc
     tip = load_json_file(label, p)
     req(set(tip) == {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}, f"{label} keys mismatch: {sorted(tip)}")
     req(tip.get("implementation") == impl and tip.get("rpc_endpoint") == endpoint and tip.get("request_path") == "/get_tip", f"{label} sidecar identity mismatch")
-    req(tip.get("has_tip") is True and tip.get("height") == height and tip.get("tip_hash") == block_hash and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height, f"{label} does not match expected tip")
+    req(tip.get("has_tip") is True and is_json_int(tip.get("height")) and tip.get("height") == height and tip.get("tip_hash") == block_hash and is_json_int(tip.get("best_known_height")) and tip["best_known_height"] >= height and isinstance(tip.get("in_ibd"), bool), f"{label} does not match expected tip")
 def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, block_hash: str, expected_prev_hash=None) -> None:
     block = load_json_file(label, p)
     req(set(block) == {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}, f"{label} keys mismatch: {sorted(block)}")
@@ -138,7 +140,7 @@ def mine_sidecar(label: str, p: Path, impl: str, endpoint: str, min_height: int 
     mine = load_json_file(label, p)
     req(set(mine) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"{label} keys mismatch: {sorted(mine)}")
     req(mine.get("implementation") == impl and mine.get("rpc_endpoint") == endpoint and mine.get("request_path") == "/mine_next", f"{label} sidecar identity mismatch")
-    req(mine.get("mined") is True and is_json_int(mine.get("height"), min_height) and hex32(mine.get("block_hash")) and is_json_int(mine.get("tx_count"), 1), f"{label} malformed mine result")
+    req(mine.get("mined") is True and is_json_int(mine.get("height"), min_height) and hex32(mine.get("block_hash")) and is_json_int(mine.get("tx_count"), 1) and is_json_u64(mine.get("nonce")) and is_json_u64(mine.get("timestamp")), f"{label} malformed mine result")
     return mine
 def metrics_sidecar(label: str, p: Path) -> dict:
     try:
@@ -157,6 +159,7 @@ def metrics_sidecar(label: str, p: Path) -> dict:
         line = raw_line.strip()
         if not line:
             continue
+        req(not line.startswith("{"), f"{label} malformed metric line")
         head = re.match(r"[A-Za-z_:][A-Za-z0-9_:]*", line)
         metric = head.group(0) if head else ""
         matched = re.fullmatch(r"(rubin_node_reorg_total|rubin_node_last_reorg_depth)\s+([0-9]+)(?:\.0*)?\s*", line) if metric in {"rubin_node_reorg_total", "rubin_node_last_reorg_depth"} else None
@@ -170,7 +173,7 @@ def peer_snapshot(label: str, p: Path, expected, want_connected: bool) -> None:
     snap = load_json_file(label, p)
     peers = snap.get("peers")
     req(set(snap) == {"count", "peers"} and is_json_int(snap.get("count")) and isinstance(peers, list) and snap.get("count") == len(peers), f"{label} peer snapshot malformed")
-    req(all(isinstance(peer, dict) and ep(peer.get("addr")) and isinstance(peer.get("handshake_complete"), bool) for peer in peers), f"{label} peer entries malformed")
+    req(all(isinstance(peer, dict) and set(peer) == {"addr", "handshake_complete"} and ep(peer.get("addr")) and isinstance(peer.get("handshake_complete"), bool) for peer in peers), f"{label} peer entries malformed")
     req(len({peer.get("addr") for peer in peers}) == len(peers), f"{label} peer entries are duplicated")
     complete = [peer["addr"] for peer in peers if peer.get("handshake_complete") is True]
     if want_connected:
@@ -2129,7 +2132,7 @@ if not isinstance(data, dict):
     sys.exit(5)
 expected, peers, count = sys.argv[2], data.get("peers"), data.get("count")
 def ep(v): return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and (p := v.rsplit(":", 1)[-1]).isdigit() and 1 <= len(p) <= 5 and 1 <= int(p) <= 65535
-shape = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers)
+shape = isinstance(count, int) and not isinstance(count, bool) and isinstance(peers, list) and count == len(peers) and all(isinstance(p, dict) and set(p) == {"addr", "handshake_complete"} and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) and len({p.get("addr") for p in peers}) == len(peers)
 has_expected_complete = isinstance(peers, list) and any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is True for p in peers)
 has_expected_incomplete = isinstance(peers, list) and any(isinstance(p, dict) and p.get("addr") == expected and p.get("handshake_complete") is False for p in peers)
 sys.exit(0 if shape and has_expected_complete and count == 1 else 3 if shape and has_expected_complete else 5 if not shape else 6 if has_expected_incomplete else 7)
@@ -2425,8 +2428,9 @@ try:
 except (OSError, json.JSONDecodeError, UnicodeDecodeError):
     sys.exit(4)
 peers, count = data.get("peers"), data.get("count")
-def ep(v): return isinstance(v, str) and v.startswith("127.0.0.1:") and (p := v.rsplit(":", 1)[-1]).isdigit() and 1 <= int(p) <= 65535
-if not isinstance(count, int) or isinstance(count, bool) or not isinstance(peers, list) or count != len(peers) or not all(isinstance(p, dict) and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) or len({p.get("addr") for p in peers}) != len(peers):
+def ep(v):
+    return isinstance(v, str) and v.count(":") == 1 and v.startswith("127.0.0.1:") and (port := v.rsplit(":", 1)[-1]).isdigit() and 1 <= len(port) <= 5 and 1 <= int(port) <= 65535
+if not isinstance(count, int) or isinstance(count, bool) or not isinstance(peers, list) or count != len(peers) or not all(isinstance(p, dict) and set(p) == {"addr", "handshake_complete"} and ep(p.get("addr")) and isinstance(p.get("handshake_complete"), bool) for p in peers) or len({p.get("addr") for p in peers}) != len(peers):
     sys.exit(5)
 complete = [p["addr"] for p in peers if p.get("handshake_complete") is True]
 if want == "empty":
@@ -2475,18 +2479,44 @@ wait_tip_to_match() {
   return 1
 }
 capture_go_reorg_metrics() {
+  local parsed
+  PARTITION_GO_METRICS_PARSED=""
   rpc_json GET "${GO_RPC_ADDR}" /metrics >"${PARTITION_GO_METRICS_PROM}" || { PARTITION_REASON=partition_go_metrics_rpc_failed; return 1; }
-  python3 - "${PARTITION_GO_METRICS_PROM}" <<'PY'
+  parsed="$(python3 - "${PARTITION_GO_METRICS_PROM}" <<'PY'
 import re, sys
+metrics = {"rubin_node_reorg_total", "rubin_node_last_reorg_depth"}
 vals = {}
-for raw in open(sys.argv[1], encoding="utf-8"):
-    m = re.fullmatch(r"(rubin_node_reorg_total|rubin_node_last_reorg_depth)\s+([0-9]+)(?:\.0*)?\s*", raw.strip())
-    if m:
-        vals[m.group(1)] = int(m.group(2))
+try:
+    lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+except (OSError, UnicodeDecodeError):
+    print("partition_go_metrics_read_failed")
+    sys.exit(1)
+for raw in lines:
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    if line.startswith("{"):
+        print("partition_go_metrics_malformed")
+        sys.exit(1)
+    head = re.match(r"[A-Za-z_:][A-Za-z0-9_:]*", line)
+    metric = head.group(0) if head else ""
+    if metric not in metrics:
+        continue
+    m = re.fullmatch(r"(rubin_node_reorg_total|rubin_node_last_reorg_depth)\s+([0-9]+)(?:\.0*)?\s*", line)
+    if m is None:
+        print("partition_go_metrics_malformed")
+        sys.exit(1)
+    if metric in vals:
+        print("partition_go_metrics_duplicate")
+        sys.exit(1)
+    vals[m.group(1)] = int(m.group(2))
 if vals.get("rubin_node_reorg_total", 0) < 1 or vals.get("rubin_node_last_reorg_depth", 0) < 1:
+    print("partition_go_metrics_missing_or_zero")
     sys.exit(1)
 print(vals["rubin_node_reorg_total"], vals["rubin_node_last_reorg_depth"], sep="\t")
 PY
+)" || { PARTITION_REASON="${parsed:-partition_go_metrics_malformed}"; return 1; }
+  PARTITION_GO_METRICS_PARSED="${parsed}"
 }
 run_partition_heal_reorg_scenario() {
   local parsed
@@ -2527,8 +2557,8 @@ run_partition_heal_reorg_scenario() {
   capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${PARTITION_RUST_FORK_HEIGHT}" "${PARTITION_GO_REORG_PARENT_BLOCK_JSON}" || { PARTITION_REASON=partition_go_reorg_parent_capture_failed; return 1; }
   verify_process_identity node-go-partition-final go "${GO_PID}" "${GO_RPC_ADDR}" "${GO_P2P_ADDR}" rubin-node-go partition_go_final_process_identity || { PARTITION_REASON="${PROCESS_IDENTITY_REASON:-partition_go_final_process_identity_unverified}"; return 1; }
   verify_process_identity node-rust-partition-final rust "${RUST_PID}" "${RUST_RPC_ADDR}" "${RUST_P2P_ADDR}" rubin-node-rust partition_rust_final_process_identity || { PARTITION_REASON="${PROCESS_IDENTITY_REASON:-partition_rust_final_process_identity_unverified}"; return 1; }
-  parsed="$(capture_go_reorg_metrics)" || return 1
-  IFS=$'\t' read -r PARTITION_REORG_TOTAL PARTITION_REORG_DEPTH <<<"${parsed}" || { PARTITION_REASON=partition_go_metrics_parse_failed; return 1; }
+  capture_go_reorg_metrics || return 1
+  IFS=$'\t' read -r PARTITION_REORG_TOTAL PARTITION_REORG_DEPTH <<<"${PARTITION_GO_METRICS_PARSED}" || { PARTITION_REASON=partition_go_metrics_parse_failed; return 1; }
   PARTITION_FINAL_GO_HEIGHT="${PARTITION_RUST_WIN_HEIGHT}"; PARTITION_FINAL_GO_HASH="${PARTITION_RUST_WIN_HASH}"
   PARTITION_FINAL_RUST_HEIGHT="${PARTITION_RUST_WIN_HEIGHT}"; PARTITION_FINAL_RUST_HASH="${PARTITION_RUST_WIN_HASH}"
   FINAL_PROCESS_IDENTITY_RECHECKED=true
