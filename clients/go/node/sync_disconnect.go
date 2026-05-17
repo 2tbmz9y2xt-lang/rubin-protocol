@@ -36,8 +36,19 @@ func (s *SyncEngine) prepareDisconnectTip() (disconnectTipContext, error) {
 	if err != nil {
 		return disconnectTipContext{}, err
 	}
-	if err := s.ensureChainStateTip(tipHeight, tipHash); err != nil {
-		return disconnectTipContext{}, err
+	view := s.chainState.view()
+	gotTip := struct {
+		hasTip bool
+		height uint64
+		hash   [32]byte
+	}{hasTip: view.hasTip, height: view.height, hash: view.tipHash}
+	wantTip := struct {
+		hasTip bool
+		height uint64
+		hash   [32]byte
+	}{hasTip: true, height: tipHeight, hash: tipHash}
+	if gotTip != wantTip {
+		return disconnectTipContext{}, errors.New("chainstate tip does not match blockstore tip")
 	}
 	pb, blockBytes, undo, err := s.fetchDisconnectBlockAndUndo(tipHash)
 	if err != nil {
@@ -65,14 +76,6 @@ func (s *SyncEngine) validateDisconnectTipReady() error {
 	}
 	if s.blockStore == nil {
 		return errors.New("sync engine has no blockstore")
-	}
-	return nil
-}
-
-func (s *SyncEngine) ensureChainStateTip(tipHeight uint64, tipHash [32]byte) error {
-	view := s.chainState.view()
-	if !view.hasTip || view.height != tipHeight || view.tipHash != tipHash {
-		return errors.New("chainstate tip does not match blockstore tip")
 	}
 	return nil
 }
