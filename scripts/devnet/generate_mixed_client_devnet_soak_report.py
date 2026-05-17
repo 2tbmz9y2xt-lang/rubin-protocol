@@ -250,10 +250,8 @@ def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path) -
 def source_report_contract_error(name: str, data: dict[str, Any], path: Path) -> str | None:
     if set(data) != SOURCE_TOP_KEYS[name]:
         return f"{name}_top_level_fields_invalid"
-    root_raw = data.get("artifact_root")
-    root = safe_abs_path(root_raw)
-    raw_root = Path(os.path.abspath(os.path.expanduser(root_raw))) if isinstance(root_raw, str) else None
-    if root is None or raw_root is None or raw_root != root or not root.is_dir():
+    root = safe_abs_path(data.get("artifact_root"))
+    if root is None or not root.is_dir():
         return f"{name}_artifact_root_invalid"
     try:
         Path(os.path.realpath(path)).relative_to(root)
