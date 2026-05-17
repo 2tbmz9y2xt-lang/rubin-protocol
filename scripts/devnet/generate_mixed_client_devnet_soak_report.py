@@ -38,13 +38,24 @@ RESTART_SNAPSHOT_KEYS = {"count", "peers"}; RESTART_PEER_ENTRY_KEYS = {"addr", "
 NODE_OBJECT_KEYS = {"binary", "command", "command_argv", "implementation", "name", "p2p_endpoint", "pid", "process_alive", "process_comm", "rpc_endpoint", "started_at"}
 NODE_BACKING_KEYS = {"p2p_endpoint_process_backed", "rpc_endpoint_process_backed"}
 PARTITION_NODE_KEYS = {"implementation", "name", "p2p_endpoint", "pid", "rpc_endpoint", "started_at"}
+PARTITION_SOURCE_FIELDS = [
+    "run_id", "artifact_created_at_utc",
+    "proof.partition_proxy_pid", "proof.partition_proxy_endpoint", "proof.pre_partition_go_peer_addr", "proof.heal_go_peer_addr",
+    "proof.partition_changed_peer_state", "proof.fork_diverged", "proof.heal_restored_peer_state", "proof.reorg_converged", "proof.process_identity_rechecked_after_heal", "proof.go_reorg_metrics",
+    "proof.go_partition_tip", "proof.rust_winning_tip", "proof.final_go_tip", "proof.final_rust_tip",
+    "observations.pre_partition.common_go_block", "observations.pre_partition.common_go_mine", "observations.pre_partition.common_rust_block", "observations.pre_partition.common_rust_tip", "observations.pre_partition.go_peer_snapshot", "observations.pre_partition.rust_peer_snapshot",
+    "observations.partition.go_peer_snapshot", "observations.partition.rust_peer_snapshot",
+    "observations.fork.go_block", "observations.fork.go_mine", "observations.fork.go_peer_snapshot", "observations.fork.go_tip", "observations.fork.rust_block_1", "observations.fork.rust_block_2", "observations.fork.rust_mine_1", "observations.fork.rust_mine_2", "observations.fork.rust_peer_snapshot", "observations.fork.rust_tip",
+    "observations.heal.go_peer_snapshot", "observations.heal.rust_peer_snapshot",
+    "observations.reorg.go_reorg_parent_block", "observations.reorg.go_tip", "observations.reorg.go_tip_block", "observations.reorg.rust_tip", "observations.reorg.rust_tip_block",
+]
 SECTIONS = {
     "mesh": ("mesh_report", "mixed_client_mesh", ["nodes", "peer_connectivity", "final_verification", "legacy_schema_compatibility.marker_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "go_to_rust_accept": ("go_submit_rust_accept_report", "mixed_client_go_submit_rust_accept", ["go_submit", "rust_accept", "tx_path", "raw_samples.propagation"]),
     "go_to_rust_mine_converge": ("go_submit_rust_mine_go_converge_report", "mixed_client_go_submit_rust_mine_go_converge", ["go_submit", "rust_accept", "rust_mine", "go_converge", "tx_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "rust_to_go_mine_converge": ("rust_submit_go_mine_rust_converge_report", "mixed_client_rust_submit_go_mine_rust_converge", ["rust_submit", "go_accept", "go_mine", "rust_converge", "tx_path", "raw_samples.propagation", "raw_samples.convergence"]),
     "rust_restart": ("rust_restart_report", "mixed_client_rust_restart", RESTART_SOURCE_FIELDS),
-    "partition_heal_reorg": ("partition_heal_reorg_report", "mixed_client_partition_heal_reorg", ["proof.partition_changed_peer_state", "proof.fork_diverged", "proof.heal_restored_peer_state", "proof.reorg_converged", "proof.process_identity_rechecked_after_heal", "proof.go_reorg_metrics", "observations.reorg"]),
+    "partition_heal_reorg": ("partition_heal_reorg_report", "mixed_client_partition_heal_reorg", PARTITION_SOURCE_FIELDS),
 }
 def is_hex32(value: Any) -> bool: return isinstance(value, str) and bool(HEX32.fullmatch(value))  # noqa: E704
 def hex_bytes(value: Any) -> bool: return isinstance(value, str) and bool(HEX_BYTES.fullmatch(value))  # noqa: E704
@@ -145,6 +156,9 @@ def nodes(data: dict[str, Any], require_alive: bool = True, require_backing: boo
     out: dict[str, dict[str, Any]] = {}
     expected_node_keys = NODE_OBJECT_KEYS | NODE_BACKING_KEYS if require_backing else PARTITION_NODE_KEYS
     allowed_node_key_sets = {frozenset(expected_node_keys)} if require_alive else {frozenset(expected_node_keys), frozenset(expected_node_keys - {"process_alive"})}
+    if not require_backing:
+        full_keys = NODE_OBJECT_KEYS | NODE_BACKING_KEYS
+        allowed_node_key_sets |= {frozenset(full_keys), frozenset(full_keys - {"process_alive"})}
     for name, impl in (("node-go", "go"), ("node-rust", "rust")):
         node = by_name[name]
         if frozenset(node) not in allowed_node_key_sets:
@@ -526,6 +540,10 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields" if "proof" in data else bad
     if any(k in proof and not isinstance(proof.get(k), bool) for k in ("partition_changed_peer_state", "fork_diverged", "heal_restored_peer_state", "reorg_converged", "process_identity_rechecked_after_heal")) or ("go_reorg_metrics" in proof and (not isinstance(proof.get("go_reorg_metrics"), dict) or any(not jint(proof["go_reorg_metrics"].get(m), 1) for m in METRICS))):
         return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
+    if "partition_proxy_pid" in proof and not jint(proof.get("partition_proxy_pid"), 1):
+        return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
+    if any(k in proof and not endpoint(proof.get(k)) for k in ("partition_proxy_endpoint", "pre_partition_go_peer_addr", "heal_go_peer_addr")):
+        return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
     for key, reason in (("partition_changed_peer_state", "partition_no_peer_state_change"), ("fork_diverged", "partition_no_fork_divergence"), ("heal_restored_peer_state", "partition_heal_not_restored"), ("reorg_converged", "partition_reorg_not_converged"), ("process_identity_rechecked_after_heal", "partition_process_identity_not_rechecked_after_heal")):
         if proof.get(key) is False:
             return f"partition_reorg_source_binding_contradiction:{reason}"
@@ -549,6 +567,145 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
             return "partition_reorg_source_binding_contradiction:final_tip_hash_mismatch"
         if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (go_tip != rust_win or rust_tip != rust_win): return "partition_reorg_source_binding_contradiction:final_tip_not_winning_tip"  # noqa: E701
     return bad
+def partition_load_sidecar(path: Path, reason: str) -> tuple[dict[str, Any] | None, str | None]:
+    data, err = load(path)
+    return (data, None) if err is None and isinstance(data, dict) else (None, reason)
+def partition_peer_sidecar(path: Path, expected: str | None, connected: bool) -> str | None:
+    data, err = partition_load_sidecar(path, "partition_reorg_source_binding_contradiction:peer_snapshot_invalid")
+    if err or data is None:
+        return err
+    peers = data.get("peers")
+    if set(data) != RESTART_SNAPSHOT_KEYS or not isinstance(data.get("count"), int) or isinstance(data.get("count"), bool) or not isinstance(peers, list) or data["count"] != len(peers):
+        return "partition_reorg_source_binding_contradiction:peer_snapshot_invalid"
+    if any(not isinstance(peer, dict) or not endpoint(peer.get("addr")) or not isinstance(peer.get("handshake_complete"), bool) for peer in peers) or len({peer.get("addr") for peer in peers}) != len(peers):
+        return "partition_reorg_source_binding_contradiction:peer_snapshot_invalid"
+    complete = [peer["addr"] for peer in peers if peer.get("handshake_complete") is True]
+    if connected:
+        return None if expected and complete == [expected] and len(peers) == 1 else "partition_reorg_source_binding_contradiction:peer_snapshot_invalid"
+    return None if expected is None and complete == [] and len(peers) == 0 else "partition_reorg_source_binding_contradiction:peer_snapshot_invalid"
+def partition_tip_sidecar(path: Path, impl: str, rpc: str, height: int, block_hash: str) -> str | None:
+    data, err = partition_load_sidecar(path, "partition_reorg_source_binding_contradiction:tip_sidecar_invalid")
+    if err or data is None:
+        return err
+    keys = {"best_known_height", "has_tip", "height", "implementation", "in_ibd", "request_path", "rpc_endpoint", "tip_hash"}
+    if set(data) != keys or data.get("implementation") != impl or data.get("rpc_endpoint") != rpc or data.get("request_path") != "/get_tip":
+        return "partition_reorg_source_binding_contradiction:tip_sidecar_invalid"
+    if data.get("has_tip") is not True or not jint(data.get("height")) or data["height"] != height or data.get("tip_hash") != block_hash or not jint(data.get("best_known_height")) or data["best_known_height"] < height or not isinstance(data.get("in_ibd"), bool):
+        return "partition_reorg_source_binding_contradiction:tip_sidecar_invalid"
+    return None
+def partition_block_sidecar(path: Path, impl: str, rpc: str, height: int, block_hash: str) -> str | None:
+    data, err = partition_load_sidecar(path, "partition_reorg_source_binding_contradiction:block_sidecar_invalid")
+    if err or data is None:
+        return err
+    keys = {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}
+    if set(data) != keys or data.get("implementation") != impl or data.get("rpc_endpoint") != rpc or data.get("request_path") != f"/get_block?height={height}":
+        return "partition_reorg_source_binding_contradiction:block_sidecar_invalid"
+    if data.get("canonical") is not True or data.get("height") != height or data.get("hash") != block_hash or not hex_bytes(data.get("block_hex")):
+        return "partition_reorg_source_binding_contradiction:block_sidecar_invalid"
+    return None
+def partition_mine_sidecar(path: Path, impl: str, rpc: str, minimum: int = 1) -> tuple[dict[str, Any] | None, str | None]:
+    data, err = partition_load_sidecar(path, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid")
+    if err or data is None:
+        return None, err
+    keys = {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}
+    if set(data) != keys or data.get("implementation") != impl or data.get("rpc_endpoint") != rpc or data.get("request_path") != "/mine_next":
+        return None, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
+    if data.get("mined") is not True or not jint(data.get("height"), minimum) or not is_hex32(data.get("block_hash")) or not jint(data.get("tx_count"), 1) or not ju64(data.get("nonce")) or not ju64(data.get("timestamp")):
+        return None, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
+    return data, None
+def partition_obs_paths(data: dict[str, Any], root: Path) -> tuple[dict[str, Path] | None, str | None]:
+    paths: dict[str, Path] = {}
+    for dotted in PATH_FIELD_DOTTED_NAMES:
+        value, present = get(data, dotted)
+        if not present:
+            return None, "partition_reorg_source_binding_contradiction:malformed_source_fields"
+        sidecar, err = regular_abs_path(value, "partition_reorg_source_binding_contradiction:sidecar_invalid") if isinstance(value, str) else (None, "partition_reorg_source_binding_contradiction:sidecar_invalid")
+        if err or sidecar is None:
+            return None, err or "partition_reorg_source_binding_contradiction:sidecar_invalid"
+        try:
+            sidecar.relative_to(root)
+        except ValueError:
+            return None, "partition_reorg_source_binding_contradiction:sidecar_outside_artifact_root"
+        paths[dotted.removeprefix("observations.")] = sidecar
+    if len(set(paths.values())) != len(paths):
+        return None, "partition_reorg_source_binding_contradiction:sidecar_paths_not_distinct"
+    return paths, None
+def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
+    root_raw = data.get("artifact_root")
+    root = safe_abs_path(root_raw)
+    if root is None or not root.is_dir() or root.is_symlink():
+        return "partition_reorg_source_binding_contradiction:artifact_root_invalid"
+    if data.get("run_id") != root.name or not utc_z(data.get("artifact_created_at_utc")):
+        return "partition_reorg_source_binding_contradiction:run_identity_invalid"
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return "partition_reorg_source_binding_contradiction:report_outside_artifact_root"
+    by_impl, bad = nodes(data, require_alive=False, require_backing=False)
+    if bad:
+        return bad
+    proof = data["proof"]
+    expected_proof_keys = {"final_go_tip", "final_rust_tip", "fork_diverged", "go_partition_tip", "go_reorg_metrics", "heal_go_peer_addr", "heal_restored_peer_state", "partition_changed_peer_state", "partition_proxy_endpoint", "partition_proxy_pid", "pre_partition_go_peer_addr", "process_identity_rechecked_after_heal", "reorg_converged", "rust_winning_tip"}
+    if set(proof) != expected_proof_keys:
+        return "partition_reorg_source_binding_contradiction:malformed_proof_fields"
+    final = data.get("final_verification")
+    if not isinstance(final, dict) or set(final) != RESTART_FINAL_KEYS or final.get("producer_side") is not True or final.get("process_identity_rechecked") is not True or final.get("peer_snapshots_rechecked") is not True or final.get("rust_outbound_link_rechecked") is not False or final.get("rust_outbound_local_addr") is not None or final.get("rust_outbound_remote_addr") is not None or final.get("rust_outbound_pid") is not None:
+        return "partition_reorg_source_binding_contradiction:final_verification_invalid"
+    connectivity = data.get("peer_connectivity")
+    if not isinstance(connectivity, dict) or set(connectivity) != RESTART_PEER_KEYS or any(connectivity.get(key) is not False for key in ("go_to_rust", "rust_to_go", "bidirectional_observed")) or not isinstance(connectivity.get("counterpart_links"), dict) or set(connectivity["counterpart_links"]) != RESTART_LINK_KEYS or any(connectivity["counterpart_links"].get(key) is not None for key in RESTART_LINK_KEYS):
+        return "partition_reorg_source_binding_contradiction:peer_connectivity_overclaim"
+    paths, err = partition_obs_paths(data, root)
+    if err or paths is None:
+        return err or "partition_reorg_source_binding_contradiction:sidecar_invalid"
+    go_fork, rust_win, final_go, final_rust = proof["go_partition_tip"], proof["rust_winning_tip"], proof["final_go_tip"], proof["final_rust_tip"]
+    go_rpc, rust_rpc = by_impl["go"]["rpc_endpoint"], by_impl["rust"]["rpc_endpoint"]
+    peer_checks = (
+        ("pre_partition.rust_peer_snapshot", proof["partition_proxy_endpoint"], True), ("pre_partition.go_peer_snapshot", proof["pre_partition_go_peer_addr"], True),
+        ("partition.rust_peer_snapshot", None, False), ("partition.go_peer_snapshot", None, False), ("fork.rust_peer_snapshot", None, False), ("fork.go_peer_snapshot", None, False),
+        ("heal.rust_peer_snapshot", proof["partition_proxy_endpoint"], True), ("heal.go_peer_snapshot", proof["heal_go_peer_addr"], True),
+    )
+    for key, expected, connected in peer_checks:
+        if err := partition_peer_sidecar(paths[key], expected, connected):
+            return err
+    common, err = partition_mine_sidecar(paths["pre_partition.common_go_mine"], "go", go_rpc)
+    if err or common is None:
+        return err
+    if common.get("height") != go_fork["height"] - 1:
+        return "partition_reorg_source_binding_contradiction:common_parent_invalid"
+    sidecar_checks = (
+        partition_block_sidecar(paths["pre_partition.common_go_block"], "go", go_rpc, common["height"], common["block_hash"]),
+        partition_tip_sidecar(paths["pre_partition.common_rust_tip"], "rust", rust_rpc, common["height"], common["block_hash"]),
+        partition_block_sidecar(paths["pre_partition.common_rust_block"], "rust", rust_rpc, common["height"], common["block_hash"]),
+        partition_tip_sidecar(paths["fork.go_tip"], "go", go_rpc, go_fork["height"], go_fork["hash"]),
+        partition_block_sidecar(paths["fork.go_block"], "go", go_rpc, go_fork["height"], go_fork["hash"]),
+        partition_tip_sidecar(paths["fork.rust_tip"], "rust", rust_rpc, rust_win["height"], rust_win["hash"]),
+        partition_block_sidecar(paths["fork.rust_block_2"], "rust", rust_rpc, rust_win["height"], rust_win["hash"]),
+        partition_tip_sidecar(paths["reorg.go_tip"], "go", go_rpc, final_go["height"], final_go["hash"]),
+        partition_tip_sidecar(paths["reorg.rust_tip"], "rust", rust_rpc, final_rust["height"], final_rust["hash"]),
+        partition_block_sidecar(paths["reorg.go_reorg_parent_block"], "go", go_rpc, go_fork["height"], go_fork["hash"]),
+        partition_block_sidecar(paths["reorg.go_tip_block"], "go", go_rpc, final_go["height"], final_go["hash"]),
+        partition_block_sidecar(paths["reorg.rust_tip_block"], "rust", rust_rpc, final_rust["height"], final_rust["hash"]),
+    )
+    if bad := next((item for item in sidecar_checks if item), None):
+        return bad
+    go_mine, err = partition_mine_sidecar(paths["fork.go_mine"], "go", go_rpc)
+    if err or go_mine is None:
+        return err
+    if go_mine.get("height") != go_fork["height"] or go_mine.get("block_hash") != go_fork["hash"]:
+        return "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
+    rust_mine_1, err = partition_mine_sidecar(paths["fork.rust_mine_1"], "rust", rust_rpc)
+    if err or rust_mine_1 is None:
+        return err
+    if rust_mine_1.get("height") != go_fork["height"] or rust_mine_1.get("block_hash") == go_fork["hash"]:
+        return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
+    if err := partition_block_sidecar(paths["fork.rust_block_1"], "rust", rust_rpc, rust_mine_1["height"], rust_mine_1["block_hash"]):
+        return err
+    rust_mine_2, err = partition_mine_sidecar(paths["fork.rust_mine_2"], "rust", rust_rpc)
+    if err or rust_mine_2 is None:
+        return err
+    if rust_mine_2.get("height") != rust_win["height"] or rust_mine_2.get("block_hash") != rust_win["hash"]:
+        return "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
+    return None
 def build_section(name: str, attr: str, scenario: str, fields: list[str], args: argparse.Namespace) -> dict[str, Any]:
     raw_path = getattr(args, attr)
     if not raw_path:
@@ -594,7 +751,11 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
         bad = partition_contradiction(data)
         if bad:
             return section(name, "fail", bad, source_artifact_path=path, scenario=got)
-        return section(name, "no_data", reason, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
+        if missing:
+            return section(name, "no_data", base, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
+        if bad := partition_sidecar_error(data, path):
+            return section(name, "fail", bad, source_artifact_path=path, scenario=got)
+        return section(name, "pass", None, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="behavior_evidence", evidence_class="behavior_evidence", behavior_evidence=True)
     if missing:
         return section(name, "fail", "missing_source_fields:" + ",".join(missing), source_artifact_path=path, scenario=got)
     bad = validate_mesh(data) if name == "mesh" else validate_tx(data, "converge" in name, name.startswith("rust_to_go"))
