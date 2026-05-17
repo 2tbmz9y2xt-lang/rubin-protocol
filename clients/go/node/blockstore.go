@@ -594,6 +594,34 @@ func canonicalTipHeight(canonical []string) (uint64, bool) {
 //	                    double-swallowed EIO through syncDir's own
 //	                    best-effort wrapper (Copilot P1 wave-7 on
 //	                    PR #1220).
+//
+// writeFileIfAbsent writes content to path only if the file does not already
+// exist with matching bytes. It returns an error when an existing file has
+// different content (never overwrites).
+//
+// Fast path: destination already exists. Read once and verify match
+// before attempting any writes. Same behavior as the Rust helper
+// via `write_file_exclusive` + EEXIST branch, but short-circuited
+// here to avoid a useless temp write when the file is already
+// present with the right bytes (dominant case during idempotent
+// replay on sync-engine restart).
+//
+// Copilot P1 on PR #1220: a previous call may have successfully
+// created the destination but returned an error from the final
+// syncDir step. If the caller retries, we land in this fast-path
+// and would silently report nil without ever making the directory
+// entry durable. Re-run syncDir on the idempotent match branch and
+// PROPAGATE its result — syncDir already applies the intended
+// permission policy internally (execute-only/hardened parents are
+// treated as nil return), so propagating does NOT break the
+// idempotent-replay-on-hardened-dir contract; it only surfaces
+// real durability failures (EIO / ENOENT) that would otherwise be
+// silent.
+//
+// Copilot P1 wave-7 on PR #1220: `_ = syncDir(...)` double-
+// swallowed errors — syncDir is already best-effort, so the outer
+// `_ = ...` discarded the exact failures that MUST reach the
+// caller. Propagate via `return` instead.
 func writeFileIfAbsent(path string, content []byte) error {
 	existing, err := readFileByPathFn(path)
 	if err == nil {
