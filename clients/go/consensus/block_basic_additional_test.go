@@ -623,7 +623,7 @@ func TestValidateDAPayloadCommitments_MissingOutput(t *testing.T) {
 	}
 }
 
-func TestComputeTxBaseSize_NilDACore(t *testing.T) {
+func TestComputeTxBaseSize_Valid(t *testing.T) {
 	tx := &Tx{Version: 1, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
 	_, _, err := computeTxBaseSize(tx)
 	if err != nil {
@@ -723,11 +723,6 @@ func TestValidateParsedBlockBasicNil(t *testing.T) {
 	}
 }
 
-func TestValidateBlockHeaderChecksNilPb(t *testing.T) {
-	// validateBlockHeaderChecks accesses pb.Header, but is called from validateParsedBlockChecks after nil check
-	// Just test the happy path through existing tests — this line is covered by TestValidateBlockBasic_OK
-}
-
 func TestAddWitnessItemSizeSentinel(t *testing.T) {
 	w := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
 	_, sigCost, err := addWitnessItemSize(0, 5, w, func(w WitnessItem) (uint64, error) { return 10, nil })
@@ -745,10 +740,6 @@ func TestAddWitnessItemSizeSigCostError(t *testing.T) {
 	if err == nil {
 		t.Fatal("sigCostFn error should propagate")
 	}
-}
-
-func TestValidateBlockBodyChecksNilStats(t *testing.T) {
-	// accumulateBlockResourceStats returns err on nil, covered by existing tests
 }
 
 func TestValidateDACommitChunkIndexes(t *testing.T) {
