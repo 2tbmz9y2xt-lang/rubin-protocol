@@ -121,6 +121,9 @@ def safe_abs_path(value: Any) -> Path | None:
     except (OSError, ValueError):
         return None
 def str_list(value: Any) -> bool: return isinstance(value, list) and all(isinstance(item, str) for item in value)  # noqa: E704
+def command_bound_to_argv(node: dict[str, Any]) -> bool:
+    argv = node.get("command_argv")
+    return str_list(argv) and node.get("command") == " ".join(argv)
 def same_arg_path(left: str, right: str) -> bool:
     try:
         return Path(os.path.realpath(os.path.expanduser(left))) == Path(os.path.realpath(os.path.expanduser(right)))
@@ -234,7 +237,7 @@ def marker_participants_bound(marker: dict[str, Any], by_impl: dict[str, dict[st
 def source_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path) -> str | None:
     for impl, expected_name, expected_comm in (("go", "node-go", "rubin-node-go"), ("rust", "node-rust", "rubin-node-rust")):
         node = by_impl[impl]
-        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not jint(node.get("pid"), 1) or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not jint(node.get("pid"), 1) or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
             return "process_identity_missing_or_invalid"
         binary = safe_abs_path(node.get("binary"))
         if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
@@ -610,7 +613,7 @@ def restart_pass_contract_error(data: dict[str, Any], path: Path) -> str | None:
         return bad or "process_identity_missing_or_invalid"
     for impl, expected_name, expected_comm in (("go", "node-go", "rubin-node-go"), ("rust", "node-rust", "rubin-node-rust")):
         node = by_impl[impl]
-        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
             return "restart_source_binding_contradiction:node_identity_invalid"
         binary = safe_abs_path(node.get("binary"))
         if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
@@ -758,7 +761,7 @@ def partition_node_identity_error(by_impl: dict[str, dict[str, Any]], root: Path
         return "partition_reorg_source_binding_contradiction:node_identity_invalid"
     for impl, expected_name, expected_comm, extra in (("go", "node-go", "rubin-node-go", []), ("rust", "node-rust", "rubin-node-rust", ["--peer", partition_proxy])):
         node = by_impl[impl]
-        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not str_list(node.get("command_argv")) or not isinstance(node.get("command"), str) or not node.get("command"):
+        if node.get("name") != expected_name or node.get("process_comm") != expected_comm or not utc_z(node.get("started_at")) or not command_bound_to_argv(node):
             return "partition_reorg_source_binding_contradiction:node_identity_invalid"
         binary = safe_abs_path(node.get("binary"))
         if binary is None or binary.name != expected_comm or not binary.is_file() or not os.access(binary, os.X_OK):
