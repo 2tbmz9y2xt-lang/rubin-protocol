@@ -48,20 +48,17 @@ func truncateIncompleteCanonicalSuffix(store *BlockStore) (bool, error) {
 	if store == nil {
 		return false, errors.New("nil blockstore")
 	}
+	return scanAndTruncateCanonicalSuffix(store)
+}
+
+func scanAndTruncateCanonicalSuffix(store *BlockStore) (bool, error) {
 	canonical, err := store.CanonicalIndexSnapshot()
 	if err != nil {
 		return false, err
 	}
-	validCount := uint64(0)
-	for i, hashHex := range canonical {
-		complete, err := store.canonicalArtifactsComplete(hashHex)
-		if err != nil {
-			return false, err
-		}
-		if !complete {
-			break
-		}
-		validCount = uint64(i + 1)
+	validCount, err := countCompleteCanonicalPrefix(store, canonical)
+	if err != nil {
+		return false, err
 	}
 	if validCount == uint64(len(canonical)) {
 		return false, nil
@@ -70,6 +67,21 @@ func truncateIncompleteCanonicalSuffix(store *BlockStore) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func countCompleteCanonicalPrefix(store *BlockStore, canonical []string) (uint64, error) {
+	validCount := uint64(0)
+	for i, hashHex := range canonical {
+		complete, err := store.canonicalArtifactsComplete(hashHex)
+		if err != nil {
+			return 0, err
+		}
+		if !complete {
+			break
+		}
+		validCount = uint64(i + 1)
+	}
+	return validCount, nil
 }
 
 func (bs *BlockStore) canonicalArtifactsComplete(hashHex string) (bool, error) {

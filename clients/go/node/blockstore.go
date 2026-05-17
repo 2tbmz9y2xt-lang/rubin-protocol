@@ -278,7 +278,7 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 	current := tipHash
 	for current != zero {
 		if cached, ok := bs.cachedChainWork(current); ok {
-			return bs.chainWorkFromCachedBase(tipHash, cached, hashes, targets)
+			return bs.chainWorkFromCachedBaseErr(tipHash, cached, hashes, targets)
 		}
 		if _, exists := seen[current]; exists {
 			return nil, errors.New("blockstore parent cycle")
@@ -293,6 +293,17 @@ func (bs *BlockStore) ChainWork(tipHash [32]byte) (*big.Int, error) {
 		current = header.PrevBlockHash
 	}
 	return bs.chainWorkFromRoot(hashes, targets)
+}
+
+func (bs *BlockStore) chainWorkFromCachedBaseErr(tipHash [32]byte, cached *big.Int, hashes [][32]byte, targets [][32]byte) (*big.Int, error) {
+	total, err := bs.accumulateChainWorkFromTargets(cached, hashes, targets)
+	if err != nil {
+		return nil, err
+	}
+	if cachedTip, ok := bs.cachedChainWork(tipHash); ok {
+		return cachedTip, nil
+	}
+	return total, nil
 }
 
 func (bs *BlockStore) chainWorkFromCachedBase(tipHash [32]byte, cached *big.Int, hashes [][32]byte, targets [][32]byte) (*big.Int, error) {
@@ -583,71 +594,68 @@ func canonicalTipHeight(canonical []string) (uint64, bool) {
 //	                    double-swallowed EIO through syncDir's own
 //	                    best-effort wrapper (Copilot P1 wave-7 on
 //	                    PR #1220).
+//
+// writeFileIfAbsent writes content to path only if the file does not already
+// exist with matching bytes. It returns an error when an existing file has
+// different content (never overwrites).
+//
+// Fast path: destination already exists. Read once and verify match
+// before attempting any writes. Same behavior as the Rust helper
+// via `write_file_exclusive` + EEXIST branch, but short-circuited
+// here to avoid a useless temp write when the file is already
+// present with the right bytes (dominant case during idempotent
+// replay on sync-engine restart).
+//
+// Copilot P1 on PR #1220: a previous call may have successfully
+// created the destination but returned an error from the final
+// syncDir step. If the caller retries, we land in this fast-path
+// and would silently report nil without ever making the directory
+// entry durable. Re-run syncDir on the idempotent match branch and
+// PROPAGATE its result — syncDir already applies the intended
+// permission policy internally (execute-only/hardened parents are
+// treated as nil return), so propagating does NOT break the
+// idempotent-replay-on-hardened-dir contract; it only surfaces
+// real durability failures (EIO / ENOENT) that would otherwise be
+// silent.
+//
+// Copilot P1 wave-7 on PR #1220: `_ = syncDir(...)` double-
+// swallowed errors — syncDir is already best-effort, so the outer
+// `_ = ...` discarded the exact failures that MUST reach the
+// caller. Propagate via `return` instead.
 func writeFileIfAbsent(path string, content []byte) error {
-	// Fast path: destination already exists. Read once and verify match
-	// before attempting any writes. Same behavior as the Rust helper
-	// via `write_file_exclusive` + EEXIST branch, but short-circuited
-	// here to avoid a useless temp write when the file is already
-	// present with the right bytes (dominant case during idempotent
-	// replay on sync-engine restart).
-	//
-	// Copilot P1 on PR #1220: a previous call may have successfully
-	// created the destination but returned an error from the final
-	// syncDir step. If the caller retries, we land in this fast-path
-	// and would silently report nil without ever making the directory
-	// entry durable. Re-run syncDir on the idempotent match branch and
-	// PROPAGATE its result — syncDir already applies the intended
-	// permission policy internally (execute-only/hardened parents are
-	// treated as nil return), so propagating does NOT break the
-	// idempotent-replay-on-hardened-dir contract; it only surfaces
-	// real durability failures (EIO / ENOENT) that would otherwise be
-	// silent.
-	//
-	// Copilot P1 wave-7 on PR #1220: `_ = syncDir(...)` double-
-	// swallowed errors — syncDir is already best-effort, so the outer
-	// `_ = ...` discarded the exact failures that MUST reach the
-	// caller. Propagate via `return` instead.
-	if existing, err := readFileByPathFn(path); err == nil {
+	existing, err := readFileByPathFn(path)
+	if err == nil {
 		return syncMatchingExistingFile(path, content, existing)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	return writeFileViaTempLink(path, content)
+}
 
-	// Destination is absent at this moment. Write to a unique temp and
-	// link it atomically — os.Link fails with os.ErrExist if the
-	// destination appears in the meantime, so we cannot silently
-	// overwrite under concurrent racing writers.
+// writeFileViaTempLink writes content to a temp file and atomically links it to path.
+func writeFileViaTempLink(path string, content []byte) error {
 	tmpPath, err := allocateAndWriteTemp(path, content, 0o600)
 	if err != nil {
 		return err
 	}
 	linkErr := os.Link(tmpPath, path)
-	// Best-effort unlink of the temp name: the link (if it succeeded) or
-	// a pre-existing destination (on EEXIST) holds its own inode ref, so
-	// removing the temp path never drops data. A Remove error here is a
-	// leaked temp, not a correctness issue, and is intentionally ignored.
 	_ = os.Remove(tmpPath)
 	if linkErr != nil {
 		if errors.Is(linkErr, os.ErrExist) {
-			// Race: destination appeared between the fast-path read
-			// and our link. Verify content matches (idempotent retry)
-			// or surface the drift as an error (never overwrite).
-			// Propagate parent dir-sync result on the EEXIST-retry
-			// branch for the same reason as the fast-path above:
-			// syncDir already applies the permission policy, so
-			// returning its error surfaces only real durability
-			// failures.
-			existing, err := readFileByPathFn(path)
-			if err != nil {
-				return fmt.Errorf("read existing after link EEXIST %s: %w", path, err)
-			}
-			return syncMatchingExistingFile(path, content, existing)
+			return handleLinkEEXIST(path, content)
 		}
 		return fmt.Errorf("link %s -> %s: %w", tmpPath, path, linkErr)
 	}
-	// The new directory entry for `path` must reach stable storage too;
-	// temp's sync_all only covered the inode's data, not the dir.
 	return syncDir(filepath.Dir(path))
+}
+
+func handleLinkEEXIST(path string, content []byte) error {
+	existing, err := readFileByPathFn(path)
+	if err != nil {
+		return fmt.Errorf("read existing after link EEXIST %s: %w", path, err)
+	}
+	return syncMatchingExistingFile(path, content, existing)
 }
 
 func syncMatchingExistingFile(path string, content []byte, existing []byte) error {
