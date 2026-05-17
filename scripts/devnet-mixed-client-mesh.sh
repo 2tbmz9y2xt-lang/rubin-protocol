@@ -600,6 +600,13 @@ if partition_mode:
     final_go, final_rust = tip_obj(proof.get("final_go_tip"), "proof.final_go_tip"), tip_obj(proof.get("final_rust_tip"), "proof.final_rust_tip")
     req(go_fork["hash"] != rust_win["hash"] and rust_win["height"] > go_fork["height"], "partition fork tips do not prove Rust winning branch")
     req(final_go == rust_win and final_rust == rust_win, "partition final tips are not the Rust winning tip")
+    connectivity = exact_object(data.get("peer_connectivity"), {"bidirectional_observed", "counterpart_links", "go_peer_snapshot", "go_to_rust", "rust_peer_snapshot", "rust_to_go"}, "peer_connectivity")
+    req(connectivity.get("go_to_rust") is False and connectivity.get("rust_to_go") is False and connectivity.get("bidirectional_observed") is False, "partition peer_connectivity overclaims direct link")
+    links = exact_object(connectivity.get("counterpart_links"), {"go_peer_snapshot_expected_addr", "rust_outbound_local_addr", "rust_outbound_pid", "rust_outbound_remote_addr", "rust_peer_snapshot_expected_addr"}, "peer_connectivity.counterpart_links")
+    req(all(links.get(key) is None for key in links), "partition peer_connectivity counterpart links must be null")
+    for field in ("go_peer_snapshot", "rust_peer_snapshot"):
+        snapshot = exact_object(connectivity.get(field), {"count", "peers"}, f"peer_connectivity.{field}")
+        req(snapshot.get("count") == 0 and snapshot.get("peers") == [], f"partition peer_connectivity.{field} must be empty")
     obs = exact_object(data.get("observations"), {"fork", "heal", "partition", "pre_partition", "reorg"}, "observations")
     obs_keys = {
         "pre_partition": {"common_go_block", "common_go_mine", "common_rust_block", "common_rust_tip", "go_peer_snapshot", "rust_peer_snapshot"},

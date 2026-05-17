@@ -551,7 +551,7 @@ def partition_contradiction(data: dict[str, Any]) -> str | None:
     go_fork, rust_win = proof.get("go_partition_tip"), proof.get("rust_winning_tip")
     if (go_fork is not None or rust_win is not None) and not (isinstance(go_fork, dict) and isinstance(rust_win, dict)):
         return "partition_reorg_source_binding_contradiction:malformed_tip_fields"
-    if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (not jint(go_fork.get("height")) or not jint(rust_win.get("height")) or not is_hex32(go_fork.get("hash")) or not is_hex32(rust_win.get("hash")) or go_fork.get("hash") == rust_win.get("hash")):
+    if isinstance(go_fork, dict) and isinstance(rust_win, dict) and (not jint(go_fork.get("height")) or not jint(rust_win.get("height")) or not is_hex32(go_fork.get("hash")) or not is_hex32(rust_win.get("hash")) or go_fork.get("hash") == rust_win.get("hash") or rust_win.get("height") <= go_fork.get("height")):
         return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
     if any(a in proof and b in proof and proof[a] != proof[b] for a, b in (("final_go_tip", "go_tip"), ("final_rust_tip", "rust_tip"))):
         return "partition_reorg_source_binding_contradiction:tip_alias_mismatch"
@@ -745,6 +745,8 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         return err
     if rust_mine_2.get("height") != rust_win["height"] or rust_mine_2.get("block_hash") != rust_win["hash"]:
         return "partition_reorg_source_binding_contradiction:mine_sidecar_invalid"
+    if rust_mine_2["height"] <= rust_mine_1["height"]:
+        return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
     return None
 def build_section(name: str, attr: str, scenario: str, fields: list[str], args: argparse.Namespace) -> dict[str, Any]:
     raw_path = getattr(args, attr)
@@ -792,7 +794,7 @@ def build_section(name: str, attr: str, scenario: str, fields: list[str], args: 
         if bad:
             return section(name, "fail", bad, source_artifact_path=path, scenario=got)
         if missing:
-            return section(name, "no_data", base, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
+            return section(name, "no_data", reason, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="structural_only", evidence_class="structural_only", behavior_evidence=False)
         if bad := partition_sidecar_error(data, path):
             return section(name, "fail", bad, source_artifact_path=path, scenario=got)
         return section(name, "pass", None, source_artifact_path=path, scenario=got, source_fields=fields, claim_type="behavior_evidence", evidence_class="behavior_evidence", behavior_evidence=True)
