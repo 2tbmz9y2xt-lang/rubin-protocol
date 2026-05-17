@@ -110,6 +110,27 @@ def block_sidecar(label: str, p: Path, impl: str, endpoint: str, height: int, bl
     req(set(block) == {"block_hex", "canonical", "hash", "height", "implementation", "request_path", "rpc_endpoint"}, f"{label} keys mismatch: {sorted(block)}")
     req(block.get("implementation") == impl and block.get("rpc_endpoint") == endpoint and block.get("request_path") == f"/get_block?height={height}", f"{label} sidecar identity mismatch")
     req(block.get("canonical") is True and block.get("height") == height and block.get("hash") == block_hash and isinstance(block.get("block_hex"), str) and re.fullmatch(r"[0-9a-f]+", block["block_hex"] or "") is not None, f"{label} does not match expected block")
+    request = json.dumps({"op": "block_basic_check", "block_hex": block["block_hex"], "height": height}) + "\n"
+    try:
+        proc = subprocess.run([dev_env, "--", "go", "-C", go_module_root, "run", "./cmd/rubin-consensus-cli"], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=max(30, min(LIVE_TIMEOUT, 60)))
+    except subprocess.TimeoutExpired:
+        fail(f"{label} block payload check timeout")
+    except OSError as exc:
+        fail(f"{label} block payload checker unavailable: {exc}")
+    stdout, stderr = proc.stdout or "", proc.stderr or ""
+    req(len(stdout) <= MAX_PARSER_OUTPUT_BYTES and len(stderr) <= MAX_PARSER_OUTPUT_BYTES, f"{label} block payload check output too large")
+    if proc.returncode != 0:
+        detail = ((stderr or stdout).strip().splitlines() or ["block checker returned nonzero"])[0]
+        fail(f"{label} block payload check failed: {detail}")
+    try:
+        parsed = json.loads(stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError) as exc:
+        fail(f"{label} block payload checker malformed output: {exc}")
+    req(isinstance(parsed, dict), f"{label} block payload checker root is not an object")
+    if parsed.get("ok") is not True:
+        detail = parsed.get("err")
+        fail(f"{label} block payload check failed: {detail if isinstance(detail, str) else 'block_basic_check rejected block'}")
+    req(parsed.get("block_hash") == block_hash, f"{label} parsed block hash mismatch")
 def mine_sidecar(label: str, p: Path, impl: str, endpoint: str, min_height: int = 1) -> dict:
     mine = load_json_file(label, p)
     req(set(mine) == {"block_hash", "height", "implementation", "mined", "nonce", "request_path", "rpc_endpoint", "timestamp", "tx_count"}, f"{label} keys mismatch: {sorted(mine)}")
@@ -619,7 +640,7 @@ if partition_mode:
     block_sidecar("observations.fork.rust_block_2", obs_paths["fork.rust_block_2"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], rust_win["height"], rust_win["hash"])
     tip_sidecar("observations.reorg.go_tip", obs_paths["reorg.go_tip"], "go", nodes_by_impl["go"]["rpc_endpoint"], final_go["height"], final_go["hash"])
     tip_sidecar("observations.reorg.rust_tip", obs_paths["reorg.rust_tip"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], final_rust["height"], final_rust["hash"])
-    block_sidecar("observations.reorg.go_reorg_parent_block", obs_paths["reorg.go_reorg_parent_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], go_fork["height"], go_fork["hash"])
+    block_sidecar("observations.reorg.go_reorg_parent_block", obs_paths["reorg.go_reorg_parent_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], mine1["height"], mine1["block_hash"])
     block_sidecar("observations.reorg.go_tip_block", obs_paths["reorg.go_tip_block"], "go", nodes_by_impl["go"]["rpc_endpoint"], final_go["height"], final_go["hash"])
     block_sidecar("observations.reorg.rust_tip_block", obs_paths["reorg.rust_tip_block"], "rust", nodes_by_impl["rust"]["rpc_endpoint"], final_rust["height"], final_rust["hash"])
     final = data.get("final_verification")
@@ -788,6 +809,13 @@ rules = [
     ("sidecar identity mismatch", "partition_sidecar_identity_mismatch"),
     ("does not match expected tip", "partition_tip_sidecar_invalid"),
     ("does not match expected block", "partition_block_sidecar_invalid"),
+    ("block payload checker unavailable", "partition_block_payload_checker_unavailable"),
+    ("block payload check timeout", "partition_block_payload_check_timeout"),
+    ("block payload check output too large", "partition_block_payload_check_output_too_large"),
+    ("block payload checker malformed output", "partition_block_payload_checker_malformed"),
+    ("block payload checker root is not an object", "partition_block_payload_checker_malformed"),
+    ("block payload check failed", "partition_block_payload_invalid"),
+    ("parsed block hash mismatch", "partition_block_hash_mismatch"),
     ("malformed mine result", "partition_mine_sidecar_invalid"),
     ("does not prove partitioned peer state", "partition_peer_state_not_changed"),
     ("does not prove expected connected peer", "partition_peer_state_not_restored"),
@@ -2447,7 +2475,7 @@ run_partition_heal_reorg_scenario() {
   wait_tip_to_match partition_final_rust_tip rust "${RUST_RPC_ADDR}" "${PARTITION_RUST_WIN_HEIGHT}" "${PARTITION_RUST_WIN_HASH}" "${PARTITION_FINAL_RUST_TIP_JSON}" || return 1
   capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${PARTITION_RUST_WIN_HEIGHT}" "${PARTITION_FINAL_GO_BLOCK_JSON}" || { PARTITION_REASON=partition_final_go_block_capture_failed; return 1; }
   capture_rpc_sidecar rust GET "${RUST_RPC_ADDR}" "/get_block?height=${PARTITION_RUST_WIN_HEIGHT}" "${PARTITION_FINAL_RUST_BLOCK_JSON}" || { PARTITION_REASON=partition_final_rust_block_capture_failed; return 1; }
-  cp -- "${PARTITION_GO_BLOCK_JSON}" "${PARTITION_GO_REORG_PARENT_BLOCK_JSON}" || { PARTITION_REASON=partition_go_reorg_parent_copy_failed; return 1; }
+  capture_rpc_sidecar go GET "${GO_RPC_ADDR}" "/get_block?height=${PARTITION_RUST_FORK_HEIGHT}" "${PARTITION_GO_REORG_PARENT_BLOCK_JSON}" || { PARTITION_REASON=partition_go_reorg_parent_capture_failed; return 1; }
   parsed="$(capture_go_reorg_metrics)" || return 1
   IFS=$'\t' read -r PARTITION_REORG_TOTAL PARTITION_REORG_DEPTH <<<"${parsed}" || { PARTITION_REASON=partition_go_metrics_parse_failed; return 1; }
   PARTITION_FINAL_GO_HEIGHT="${PARTITION_RUST_WIN_HEIGHT}"; PARTITION_FINAL_GO_HASH="${PARTITION_RUST_WIN_HASH}"

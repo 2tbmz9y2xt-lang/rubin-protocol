@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # ruff: noqa: E302,E305,E401,E701
 from __future__ import annotations
-import argparse, json, math, os, re, sys, tempfile
+import argparse, json, math, os, re, subprocess, sys, tempfile
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000  # noqa: E702
+SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000; MAX_PARSER_OUTPUT_BYTES = 100_000  # noqa: E702
+REPO_ROOT = Path(__file__).resolve().parents[2]; DEV_ENV = REPO_ROOT / "scripts" / "dev-env.sh"; GO_MODULE_ROOT = REPO_ROOT / "clients" / "go"  # noqa: E702
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+({NUM})(?:\s+({NUM}))?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
 SAFE_REASON = re.compile(r"[a-z0-9_:-]{1,160}"); CLAIM_REASON_TOKENS = {"ready", "pass", "parity", "converge", "convergence", "reorg", "restart", "metric", "fail", "no_data", "not_applicable", "helper_only"}  # noqa: E702
@@ -602,6 +603,34 @@ def partition_block_sidecar(path: Path, impl: str, rpc: str, height: int, block_
         return "partition_reorg_source_binding_contradiction:block_sidecar_invalid"
     if data.get("canonical") is not True or data.get("height") != height or data.get("hash") != block_hash or not hex_bytes(data.get("block_hex")):
         return "partition_reorg_source_binding_contradiction:block_sidecar_invalid"
+    if err := partition_block_payload_error(data["block_hex"], height, block_hash):
+        return err
+    return None
+def partition_block_payload_error(block_hex: str, height: int, block_hash: str) -> str | None:
+    if not DEV_ENV.is_file() or not GO_MODULE_ROOT.is_dir():
+        return "partition_reorg_source_binding_contradiction:block_parser_unavailable"
+    request = json.dumps({"op": "block_basic_check", "block_hex": block_hex, "height": height}) + "\n"
+    try:
+        proc = subprocess.run([str(DEV_ENV), "--", "go", "-C", str(GO_MODULE_ROOT), "run", "./cmd/rubin-consensus-cli"], check=False, env={**os.environ, "RUBIN_OPENSSL_SKIP_FIPS_GUARD": "1"}, input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return "partition_reorg_source_binding_contradiction:block_parser_timeout"
+    except OSError:
+        return "partition_reorg_source_binding_contradiction:block_parser_unavailable"
+    stdout, stderr = proc.stdout or "", proc.stderr or ""
+    if len(stdout) > MAX_PARSER_OUTPUT_BYTES or len(stderr) > MAX_PARSER_OUTPUT_BYTES:
+        return "partition_reorg_source_binding_contradiction:block_parser_output_too_large"
+    if proc.returncode != 0:
+        return "partition_reorg_source_binding_contradiction:block_parser_failed"
+    try:
+        parsed = json.loads(stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError):
+        return "partition_reorg_source_binding_contradiction:block_parser_malformed_output"
+    if not isinstance(parsed, dict):
+        return "partition_reorg_source_binding_contradiction:block_parser_malformed_output"
+    if parsed.get("ok") is not True:
+        return "partition_reorg_source_binding_contradiction:block_payload_invalid"
+    if parsed.get("block_hash") != block_hash:
+        return "partition_reorg_source_binding_contradiction:block_hash_mismatch"
     return None
 def partition_mine_sidecar(path: Path, impl: str, rpc: str, minimum: int = 1) -> tuple[dict[str, Any] | None, str | None]:
     data, err = partition_load_sidecar(path, "partition_reorg_source_binding_contradiction:mine_sidecar_invalid")
@@ -682,7 +711,6 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
         partition_block_sidecar(paths["fork.rust_block_2"], "rust", rust_rpc, rust_win["height"], rust_win["hash"]),
         partition_tip_sidecar(paths["reorg.go_tip"], "go", go_rpc, final_go["height"], final_go["hash"]),
         partition_tip_sidecar(paths["reorg.rust_tip"], "rust", rust_rpc, final_rust["height"], final_rust["hash"]),
-        partition_block_sidecar(paths["reorg.go_reorg_parent_block"], "go", go_rpc, go_fork["height"], go_fork["hash"]),
         partition_block_sidecar(paths["reorg.go_tip_block"], "go", go_rpc, final_go["height"], final_go["hash"]),
         partition_block_sidecar(paths["reorg.rust_tip_block"], "rust", rust_rpc, final_rust["height"], final_rust["hash"]),
     )
@@ -699,6 +727,8 @@ def partition_sidecar_error(data: dict[str, Any], path: Path) -> str | None:
     if rust_mine_1.get("height") != go_fork["height"] or rust_mine_1.get("block_hash") == go_fork["hash"]:
         return "partition_reorg_source_binding_contradiction:fork_tip_not_diverged"
     if err := partition_block_sidecar(paths["fork.rust_block_1"], "rust", rust_rpc, rust_mine_1["height"], rust_mine_1["block_hash"]):
+        return err
+    if err := partition_block_sidecar(paths["reorg.go_reorg_parent_block"], "go", go_rpc, rust_mine_1["height"], rust_mine_1["block_hash"]):
         return err
     rust_mine_2, err = partition_mine_sidecar(paths["fork.rust_mine_2"], "rust", rust_rpc)
     if err or rust_mine_2 is None:
