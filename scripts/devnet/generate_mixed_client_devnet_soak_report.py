@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000; MAX_PARSER_OUTPUT_BYTES = 100_000  # noqa: E702
+SCHEMA_VERSION = "rubin-mixed-client-devnet-soak-report-v2"; MAX_JSON_BYTES = 1_000_000; MAX_PARSER_OUTPUT_BYTES = 100_000; MAX_TX_HEX_CHARS = 20_000  # noqa: E702
 REPO_ROOT = Path(__file__).resolve().parents[2]; DEV_ENV = REPO_ROOT / "scripts" / "dev-env.sh"; GO_MODULE_ROOT = REPO_ROOT / "clients" / "go"  # noqa: E702
 HEX32 = re.compile(r"[0-9a-f]{64}"); HEX_BYTES = re.compile(r"(?:[0-9a-f]{2})+"); ENDPOINT = re.compile(r"([0-9A-Za-z._-]+):([0-9]{1,5})")  # noqa: E702
 METRICS = ("rubin_node_reorg_total", "rubin_node_last_reorg_depth"); NUM = r"[0-9]+(?:\.0*)?(?:[eE][+]?\d+)?"; METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+({NUM})(?:\s+({NUM}))?\s*$"); STRICT_METRIC_LINE = re.compile(rf"^({'|'.join(METRICS)})\s+([0-9]+)(?:\.0*)?\s*$"); NO_DUPES = lambda pairs: dict(pairs) if len({k for k, _ in pairs}) == len(pairs) else (_ for _ in ()).throw(ValueError("duplicate_json_key")); BAD_MARKER = lambda value: any(k == "schema_marker" or k.startswith("failure_") or BAD_MARKER(v) for k, v in value.items()) if isinstance(value, dict) else any(BAD_MARKER(v) for v in value) if isinstance(value, list) else False  # noqa: E702, E731
@@ -342,7 +342,9 @@ def consensus_cli(request_obj: dict[str, Any], reason_prefix: str) -> tuple[dict
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError):
         return None, f"{reason_prefix}_parser_malformed_output"
     return (parsed, None) if isinstance(parsed, dict) else (None, f"{reason_prefix}_parser_malformed_output")
-def tx_hex_txid_error(txhex: str, txid: str) -> str | None:
+def tx_hex_txid_error(txhex: Any, txid: str) -> str | None:
+    if not isinstance(txhex, str) or not (2 <= len(txhex) <= MAX_TX_HEX_CHARS) or len(txhex) % 2 != 0 or not HEX_BYTES.fullmatch(txhex):
+        return "tx_hex_malformed_or_unbounded"
     parsed, err = consensus_cli({"op": "parse_tx", "tx_hex": txhex}, "tx")
     if err or parsed is None:
         return err
