@@ -624,19 +624,20 @@ func TestValidateDAPayloadCommitments_MissingOutput(t *testing.T) {
 }
 
 func TestComputeTxBaseSize_WithDaCommitCore(t *testing.T) {
-	// tx_kind=0x01 adds da_core fields to base size; tx_kind=0x00 ignores them.
-	// Both txs share the same non-DA skeleton — the size delta must exactly
-	// match len(daCoreFieldsBytes(...)).
+	// tx_kind=0x01 adds da_core fields to base size; tx_kind=0x00 ignores
+	// da_core fields even when the core pointer is non-nil. Both txs share the
+	// same non-DA skeleton — the size delta must exactly match
+	// len(daCoreFieldsBytes(...)).
 	txWithDA := &Tx{Version: 1, TxKind: 0x01, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
-	txCoinbase := &Tx{Version: 1, TxKind: 0x00, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
+	txKind00 := &Tx{Version: 1, TxKind: 0x00, Inputs: []TxInput{{}}, DaCommitCore: &DaCommitCore{}}
 
 	withSize, _, err := computeTxBaseSize(txWithDA)
 	if err != nil {
 		t.Fatalf("tx_kind=0x01 with DaCommitCore: %v", err)
 	}
-	withoutSize, _, err := computeTxBaseSize(txCoinbase)
+	withoutSize, _, err := computeTxBaseSize(txKind00)
 	if err != nil {
-		t.Fatalf("tx_kind=0x00: %v", err)
+		t.Fatalf("tx_kind=0x00 baseline: %v", err)
 	}
 
 	daCoreBytes, err := daCoreFieldsBytes(txWithDA)
