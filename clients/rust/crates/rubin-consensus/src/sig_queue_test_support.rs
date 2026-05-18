@@ -124,7 +124,7 @@ pub(super) fn core_ext_profiles(ext_id: u16) -> CoreExtProfiles {
     }
 }
 
-// --- Helper: build a valid HTLC claim fixture, returns (entry, path_item, sig_item, queue) ---
+// Build a valid HTLC claim fixture shared by queued-spend tests.
 pub(super) fn htlc_claim_fixture() -> (
     UtxoEntry,
     WitnessItem,
