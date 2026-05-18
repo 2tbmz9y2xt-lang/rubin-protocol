@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 import pathlib
-import subprocess
+# This conformance runner invokes fixed local tool commands with shell=False.
+import subprocess  # nosec B404
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -64,7 +65,9 @@ def normalized_vector_op(gate: str, vector: Dict[str, Any]) -> Optional[str]:
 
 
 def run(cmd: List[str], cwd: pathlib.Path) -> None:
-    p = subprocess.run(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    p = subprocess.run(  # nosec B603
+        cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     if p.returncode != 0:
         out = p.stdout.decode("utf-8", errors="replace")
         raise RuntimeError(f"command failed: {' '.join(cmd)}\n{out}")
@@ -98,7 +101,7 @@ def build_tools() -> Tuple[pathlib.Path, pathlib.Path]:
 
 
 def call_tool(tool_path: pathlib.Path, req: Dict[str, Any]) -> Dict[str, Any]:
-    p = subprocess.run(
+    p = subprocess.run(  # nosec B603
         [str(tool_path)],
         input=(json.dumps(req) + "\n").encode("utf-8"),
         stdout=subprocess.PIPE,
@@ -1387,6 +1390,7 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
         locktime_ok = bool(v.get("locktime_ok", True))
         suite_id = int(v.get("suite_id", 1))
         _block_height = int(v.get("block_height", 0))
+        selector_payload_len_ok = bool(v.get("selector_payload_len_ok", True))
         lengths_ok = bool(v.get("lengths_ok", True))
         key_binding_ok = bool(v.get("key_binding_ok", True))
         preimage_ok = bool(v.get("preimage_ok", True))
@@ -1395,6 +1399,8 @@ def validate_local_vector(gate: str, v: Dict[str, Any]) -> List[str]:
         verify_called = False
         err = None
         if not structural_ok:
+            err = "TX_ERR_PARSE"
+        elif path == "refund" and not selector_payload_len_ok:
             err = "TX_ERR_PARSE"
         elif path == "refund" and not locktime_ok:
             err = "TX_ERR_TIMELOCK_NOT_MET"
@@ -1845,6 +1851,7 @@ def validate_vector(
         req["locktime_ok"] = bool(v.get("locktime_ok", True))
         req["suite_id"] = int(v.get("suite_id", 1))
         req["height"] = int(v.get("block_height", 0))
+        req["selector_payload_len_ok"] = bool(v.get("selector_payload_len_ok", True))
         req["key_binding_ok"] = bool(v.get("key_binding_ok", True))
         req["preimage_ok"] = bool(v.get("preimage_ok", True))
         req["verify_ok"] = bool(v.get("verify_ok", True))

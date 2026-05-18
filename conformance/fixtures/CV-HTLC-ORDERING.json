@@ -43,6 +43,22 @@
       "key_binding_ok": false,
       "preimage_ok": false,
       "verify_ok": false
+    },
+    {
+      "id": "CV-H-RefundSelectorLengthBeforeKey",
+      "op": "htlc_ordering_policy",
+      "expect_ok": false,
+      "expect_err": "TX_ERR_PARSE",
+      "expect_verify_called": false,
+      "path": "refund",
+      "structural_ok": true,
+      "suite_id": 1,
+      "block_height": 1000000,
+      "locktime_ok": true,
+      "selector_payload_len_ok": false,
+      "key_binding_ok": false,
+      "preimage_ok": true,
+      "verify_ok": true
     }
   ]
 }
