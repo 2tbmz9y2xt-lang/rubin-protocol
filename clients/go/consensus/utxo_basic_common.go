@@ -125,7 +125,17 @@ func ApplyNonCoinbaseTxBasicUpdateWithMTPAndCoreExtProfilesAndSuiteContext(
 		coreExtProfiles = EmptyCoreExtProfileProvider()
 	}
 	work := cloneUtxoSet(utxoSet)
-	work, fee, err := applyNonCoinbaseTxBasicWork(tx, txid, work, height, blockMTP, chainID, coreExtProfiles, rotation, registry)
+	work, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
+		tx:              tx,
+		txid:            txid,
+		utxoSet:         work,
+		height:          height,
+		blockMTP:        blockMTP,
+		chainID:         chainID,
+		coreExtProfiles: coreExtProfiles,
+		rotation:        rotation,
+		registry:        registry,
+	})
 	if err != nil {
 		return nil, nil, err
 	}

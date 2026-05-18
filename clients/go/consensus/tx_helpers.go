@@ -133,17 +133,17 @@ func CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 	if err != nil {
 		return nil, err
 	}
-	_, fee, err := applyNonCoinbaseTxBasicWork(
-		tx,
-		txid,
-		workUtxos,
-		height,
-		blockMTP,
-		chainID,
-		coreExtProfiles,
-		rotation,
-		registry,
-	)
+	_, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
+		tx:              tx,
+		txid:            txid,
+		utxoSet:         workUtxos,
+		height:          height,
+		blockMTP:        blockMTP,
+		chainID:         chainID,
+		coreExtProfiles: coreExtProfiles,
+		rotation:        rotation,
+		registry:        registry,
+	})
 	if err != nil {
 		return nil, err
 	}

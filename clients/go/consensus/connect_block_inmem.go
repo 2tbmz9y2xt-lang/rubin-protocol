@@ -236,17 +236,17 @@ func applyInMemoryNonCoinbaseTxs(
 ) (map[Outpoint]UtxoEntry, uint64, error) {
 	var sumFees uint64
 	for i := 1; i < len(pb.Txs); i++ {
-		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(
-			pb.Txs[i],
-			pb.Txids[i],
-			workUtxos,
-			blockHeight,
-			blockMTP,
-			validation.chainID,
-			validation.coreExtProfiles,
-			validation.rotation,
-			validation.registry,
-		)
+		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
+			tx:              pb.Txs[i],
+			txid:            pb.Txids[i],
+			utxoSet:         workUtxos,
+			height:          blockHeight,
+			blockMTP:        blockMTP,
+			chainID:         validation.chainID,
+			coreExtProfiles: validation.coreExtProfiles,
+			rotation:        validation.rotation,
+			registry:        validation.registry,
+		})
 		if err != nil {
 			return nil, 0, err
 		}

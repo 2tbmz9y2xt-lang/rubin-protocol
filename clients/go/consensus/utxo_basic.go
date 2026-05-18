@@ -1,26 +1,28 @@
 package consensus
 
-func applyNonCoinbaseTxBasicWork(
-	tx *Tx,
-	txid [32]byte,
-	utxoSet map[Outpoint]UtxoEntry,
-	height uint64,
-	blockMTP uint64,
-	chainID [32]byte,
-	coreExtProfiles CoreExtProfileProvider,
-	rotation RotationProvider,
-	registry *SuiteRegistry,
-) (map[Outpoint]UtxoEntry, uint64, error) {
+type nonCoinbaseApplyWorkInput struct {
+	tx              *Tx
+	txid            [32]byte
+	utxoSet         map[Outpoint]UtxoEntry
+	height          uint64
+	blockMTP        uint64
+	chainID         [32]byte
+	coreExtProfiles CoreExtProfileProvider
+	rotation        RotationProvider
+	registry        *SuiteRegistry
+}
+
+func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]UtxoEntry, uint64, error) {
 	return (&nonCoinbaseApplyContext{
-		tx:              tx,
-		txid:            txid,
-		work:            utxoSet,
-		height:          height,
-		blockMTP:        blockMTP,
-		chainID:         chainID,
-		coreExtProfiles: nonCoinbaseCoreExtProfilesOrEmpty(coreExtProfiles),
-		rotation:        rotation,
-		registry:        registry,
+		tx:              input.tx,
+		txid:            input.txid,
+		work:            input.utxoSet,
+		height:          input.height,
+		blockMTP:        input.blockMTP,
+		chainID:         input.chainID,
+		coreExtProfiles: nonCoinbaseCoreExtProfilesOrEmpty(input.coreExtProfiles),
+		rotation:        input.rotation,
+		registry:        input.registry,
 	}).apply()
 }
 
