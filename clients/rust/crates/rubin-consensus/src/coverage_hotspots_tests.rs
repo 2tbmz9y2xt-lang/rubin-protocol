@@ -10,7 +10,7 @@ use crate::error::ErrorCode;
 use crate::featurebits::{
     featurebit_state_at_height_from_window_counts, FeatureBitDeployment, FeatureBitState,
 };
-use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend};
+use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcSpendContext};
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_type};
 use crate::spend_verify::{validate_p2pk_spend, validate_threshold_sig_spend};
 use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend};
@@ -167,11 +167,13 @@ fn htlc_spend_error_code(
         path,
         sig,
         &base_tx(),
-        0,
-        100,
-        dummy_chain_id(),
-        block_height,
-        block_time,
+        HtlcSpendContext {
+            input_index: 0,
+            input_value: 100,
+            chain_id: dummy_chain_id(),
+            block_height,
+            block_mtp: block_time,
+        },
     )
     .unwrap_err()
     .code
