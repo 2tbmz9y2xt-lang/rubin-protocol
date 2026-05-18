@@ -4,11 +4,11 @@ use sha3::{Digest, Sha3_256};
 
 use crate::block_basic::{
     median_time_past, parse_block_bytes, validate_coinbase_apply_outputs,
-    validate_coinbase_value_bound, validate_parsed_block_basic_with_context_at_height,
+    validate_coinbase_value_bound, validate_parsed_block_basic_with_context_at_height, ParsedBlock,
 };
 use crate::compactsize::encode_compact_size;
 use crate::constants::{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT};
-use crate::core_ext::CoreExtDeploymentProfiles;
+use crate::core_ext::{CoreExtDeploymentProfiles, CoreExtProfiles};
 use crate::error::{ErrorCode, TxError};
 use crate::sig_queue::SigCheckQueue;
 use crate::subsidy::block_subsidy;
@@ -40,6 +40,25 @@ pub struct ConnectBlockBasicSummary {
     pub sig_task_count: u64,
     /// Number of recovered worker panics. Zero on successful validation.
     pub worker_panics: u64,
+}
+
+struct ConnectBlockContext<'a> {
+    expected_prev_hash: Option<[u8; 32]>,
+    expected_target: Option<[u8; 32]>,
+    block_height: u64,
+    prev_timestamps: Option<&'a [u64]>,
+    chain_id: [u8; 32],
+    core_ext_deployments: &'a CoreExtDeploymentProfiles,
+    rotation: Option<&'a dyn RotationProvider>,
+    registry: Option<&'a SuiteRegistry>,
+}
+
+struct PreparedConnectBlock {
+    pb: ParsedBlock,
+    block_height: u64,
+    already_generated: u128,
+    block_mtp: u64,
+    core_ext_profiles: CoreExtProfiles,
 }
 
 /// ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory chainstate and enforces
@@ -105,101 +124,17 @@ pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_sui
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
-    // G.9: parse once, then run stateless checks against the parsed block;
-    // previously this path called validate_*_with_context_at_height (which
-    // parsed internally) and then re-parsed via parse_block_bytes.
-    let pb = parse_block_bytes(block_bytes)?;
-    validate_parsed_block_basic_with_context_at_height(
-        &pb,
+    let ctx = ConnectBlockContext {
         expected_prev_hash,
         expected_target,
         block_height,
         prev_timestamps,
-    )?;
-    if pb.txs.is_empty() || pb.txids.len() != pb.txs.len() {
-        return Err(TxError::new(
-            ErrorCode::BlockErrParse,
-            "invalid parsed block",
-        ));
-    }
-
-    let already_generated = state.already_generated;
-    let block_mtp = median_time_past(block_height, prev_timestamps)?.unwrap_or(pb.header.timestamp);
-    let core_ext_profiles = core_ext_deployments.active_profiles_at_height(block_height)?;
-    let mut work_utxos = None;
-
-    let mut sum_fees: u64 = 0;
-    for i in 1..pb.txs.len() {
-        let base_utxos = work_utxos.as_ref().unwrap_or(&state.utxos);
-        let (next_utxos, s) =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &pb.txs[i],
-                pb.txids[i],
-                base_utxos,
-                block_height,
-                pb.header.timestamp,
-                block_mtp,
-                chain_id,
-                &core_ext_profiles,
-                rotation,
-                registry,
-            )?;
-        work_utxos = Some(next_utxos);
-        sum_fees = sum_fees
-            .checked_add(s.fee)
-            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "sum_fees overflow"))?;
-    }
-
-    let mut work_utxos = work_utxos.unwrap_or_else(|| state.utxos.clone());
-
-    validate_coinbase_value_bound(&pb, block_height, already_generated, sum_fees)?;
-    validate_coinbase_apply_outputs(&pb.txs[0])?;
-
-    // Add coinbase spendable outputs to UTXO set.
-    let coinbase_txid = pb.txids[0];
-    for (i, out) in pb.txs[0].outputs.iter().enumerate() {
-        if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
-            continue;
-        }
-        work_utxos.insert(
-            Outpoint {
-                txid: coinbase_txid,
-                vout: i as u32,
-            },
-            UtxoEntry {
-                value: out.value,
-                covenant_type: out.covenant_type,
-                covenant_data: out.covenant_data.clone(),
-                creation_height: block_height,
-                created_by_coinbase: true,
-            },
-        );
-    }
-
-    let mut already_generated_n1 = already_generated;
-    if block_height != 0 {
-        let subsidy = block_subsidy(block_height, already_generated);
-        already_generated_n1 = already_generated
-            .checked_add(u128::from(subsidy))
-            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "already_generated overflow"))?;
-    }
-
-    state.utxos = work_utxos;
-    if block_height != 0 {
-        state.already_generated = already_generated_n1;
-    }
-
-    let post_state_digest = utxo_set_hash(&state.utxos);
-
-    Ok(ConnectBlockBasicSummary {
-        sum_fees,
-        already_generated,
-        already_generated_n1,
-        utxo_count: state.utxos.len() as u64,
-        post_state_digest,
-        sig_task_count: 0,
-        worker_panics: 0,
-    })
+        chain_id,
+        core_ext_deployments,
+        rotation,
+        registry,
+    };
+    connect_block_basic_in_memory_with_context(block_bytes, state, &ctx)
 }
 
 /// Go-style block-level deferred signature orchestration. Structural and
@@ -270,15 +205,32 @@ pub fn connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_con
     registry: Option<&SuiteRegistry>,
     workers: usize,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
-    // G.9: parse once and validate against the parsed block, mirroring the
-    // sequential connect path above.
-    let pb = parse_block_bytes(block_bytes)?;
-    validate_parsed_block_basic_with_context_at_height(
-        &pb,
+    let ctx = ConnectBlockContext {
         expected_prev_hash,
         expected_target,
         block_height,
         prev_timestamps,
+        chain_id,
+        core_ext_deployments,
+        rotation,
+        registry,
+    };
+    connect_block_parallel_sig_verify_with_context(block_bytes, state, &ctx, workers)
+}
+
+fn prepare_connect_block(
+    block_bytes: &[u8],
+    already_generated: u128,
+    ctx: &ConnectBlockContext<'_>,
+) -> Result<PreparedConnectBlock, TxError> {
+    // G.9: parse once and validate against the parsed block.
+    let pb = parse_block_bytes(block_bytes)?;
+    validate_parsed_block_basic_with_context_at_height(
+        &pb,
+        ctx.expected_prev_hash,
+        ctx.expected_target,
+        ctx.block_height,
+        ctx.prev_timestamps,
     )?;
     if pb.txs.is_empty() || pb.txids.len() != pb.txs.len() {
         return Err(TxError::new(
@@ -287,45 +239,155 @@ pub fn connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_con
         ));
     }
 
-    let already_generated = state.already_generated;
-    let block_mtp = median_time_past(block_height, prev_timestamps)?.unwrap_or(pb.header.timestamp);
-    let core_ext_profiles = core_ext_deployments.active_profiles_at_height(block_height)?;
-    let mut work_utxos = state.utxos.clone();
-    let mut sig_queue = match registry {
+    Ok(PreparedConnectBlock {
+        block_mtp: median_time_past(ctx.block_height, ctx.prev_timestamps)?
+            .unwrap_or(pb.header.timestamp),
+        core_ext_profiles: ctx
+            .core_ext_deployments
+            .active_profiles_at_height(ctx.block_height)?,
+        pb,
+        block_height: ctx.block_height,
+        already_generated,
+    })
+}
+
+fn connect_block_basic_in_memory_with_context(
+    block_bytes: &[u8],
+    state: &mut InMemoryChainState,
+    ctx: &ConnectBlockContext<'_>,
+) -> Result<ConnectBlockBasicSummary, TxError> {
+    let prepared = prepare_connect_block(block_bytes, state.already_generated, ctx)?;
+    let (work_utxos, sum_fees) = apply_non_coinbase_txs_sequential(&prepared, &state.utxos, ctx)?;
+    finalize_connected_block(state, &prepared, work_utxos, sum_fees, 0)
+}
+
+fn apply_non_coinbase_txs_sequential(
+    prepared: &PreparedConnectBlock,
+    state_utxos: &HashMap<Outpoint, UtxoEntry>,
+    ctx: &ConnectBlockContext<'_>,
+) -> Result<(HashMap<Outpoint, UtxoEntry>, u64), TxError> {
+    let mut work_utxos = None;
+    let mut sum_fees: u64 = 0;
+    for i in 1..prepared.pb.txs.len() {
+        let base_utxos = work_utxos.as_ref().unwrap_or(state_utxos);
+        let (next_utxos, summary) =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+                &prepared.pb.txs[i],
+                prepared.pb.txids[i],
+                base_utxos,
+                prepared.block_height,
+                prepared.pb.header.timestamp,
+                prepared.block_mtp,
+                ctx.chain_id,
+                &prepared.core_ext_profiles,
+                ctx.rotation,
+                ctx.registry,
+            )?;
+        work_utxos = Some(next_utxos);
+        sum_fees = add_block_fee(sum_fees, summary.fee)?;
+    }
+
+    Ok((work_utxos.unwrap_or_else(|| state_utxos.clone()), sum_fees))
+}
+
+fn connect_block_parallel_sig_verify_with_context(
+    block_bytes: &[u8],
+    state: &mut InMemoryChainState,
+    ctx: &ConnectBlockContext<'_>,
+    workers: usize,
+) -> Result<ConnectBlockBasicSummary, TxError> {
+    let prepared = prepare_connect_block(block_bytes, state.already_generated, ctx)?;
+    let (work_utxos, sum_fees, sig_task_count) =
+        apply_non_coinbase_txs_parallel(&prepared, &state.utxos, ctx, workers)?;
+    finalize_connected_block(state, &prepared, work_utxos, sum_fees, sig_task_count)
+}
+
+fn apply_non_coinbase_txs_parallel(
+    prepared: &PreparedConnectBlock,
+    state_utxos: &HashMap<Outpoint, UtxoEntry>,
+    ctx: &ConnectBlockContext<'_>,
+    workers: usize,
+) -> Result<(HashMap<Outpoint, UtxoEntry>, u64, u64), TxError> {
+    let mut work_utxos = state_utxos.clone();
+    let mut sig_queue = match ctx.registry {
         Some(registry) => SigCheckQueue::new(workers).with_registry(registry),
         None => SigCheckQueue::new(workers),
     };
 
     let mut sum_fees: u64 = 0;
-    for i in 1..pb.txs.len() {
+    for i in 1..prepared.pb.txs.len() {
         let (next_utxos, summary) =
             apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
-                &pb.txs[i],
-                pb.txids[i],
+                &prepared.pb.txs[i],
+                prepared.pb.txids[i],
                 &work_utxos,
-                block_height,
-                pb.header.timestamp,
-                block_mtp,
-                chain_id,
-                &core_ext_profiles,
-                rotation,
-                registry,
+                prepared.block_height,
+                prepared.pb.header.timestamp,
+                prepared.block_mtp,
+                ctx.chain_id,
+                &prepared.core_ext_profiles,
+                ctx.rotation,
+                ctx.registry,
                 &mut sig_queue,
             )?;
         work_utxos = next_utxos;
-        sum_fees = sum_fees
-            .checked_add(summary.fee)
-            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "sum_fees overflow"))?;
+        sum_fees = add_block_fee(sum_fees, summary.fee)?;
     }
 
     let sig_task_count = sig_queue.len() as u64;
     sig_queue.flush()?;
 
-    validate_coinbase_value_bound(&pb, block_height, already_generated, sum_fees)?;
-    validate_coinbase_apply_outputs(&pb.txs[0])?;
+    Ok((work_utxos, sum_fees, sig_task_count))
+}
 
-    let coinbase_txid = pb.txids[0];
-    for (i, out) in pb.txs[0].outputs.iter().enumerate() {
+fn add_block_fee(sum_fees: u64, fee: u64) -> Result<u64, TxError> {
+    sum_fees
+        .checked_add(fee)
+        .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "sum_fees overflow"))
+}
+
+fn finalize_connected_block(
+    state: &mut InMemoryChainState,
+    prepared: &PreparedConnectBlock,
+    mut work_utxos: HashMap<Outpoint, UtxoEntry>,
+    sum_fees: u64,
+    sig_task_count: u64,
+) -> Result<ConnectBlockBasicSummary, TxError> {
+    validate_coinbase_value_bound(
+        &prepared.pb,
+        prepared.block_height,
+        prepared.already_generated,
+        sum_fees,
+    )?;
+    validate_coinbase_apply_outputs(&prepared.pb.txs[0])?;
+    add_coinbase_outputs(&mut work_utxos, prepared);
+    let already_generated_n1 =
+        already_generated_after_block(prepared.block_height, prepared.already_generated)?;
+
+    state.utxos = work_utxos;
+    if prepared.block_height != 0 {
+        state.already_generated = already_generated_n1;
+    }
+
+    let post_state_digest = utxo_set_hash(&state.utxos);
+
+    Ok(ConnectBlockBasicSummary {
+        sum_fees,
+        already_generated: prepared.already_generated,
+        already_generated_n1,
+        utxo_count: state.utxos.len() as u64,
+        post_state_digest,
+        sig_task_count,
+        worker_panics: 0,
+    })
+}
+
+fn add_coinbase_outputs(
+    work_utxos: &mut HashMap<Outpoint, UtxoEntry>,
+    prepared: &PreparedConnectBlock,
+) {
+    let coinbase_txid = prepared.pb.txids[0];
+    for (i, out) in prepared.pb.txs[0].outputs.iter().enumerate() {
         if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
             continue;
         }
@@ -338,36 +400,24 @@ pub fn connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_con
                 value: out.value,
                 covenant_type: out.covenant_type,
                 covenant_data: out.covenant_data.clone(),
-                creation_height: block_height,
+                creation_height: prepared.block_height,
                 created_by_coinbase: true,
             },
         );
     }
+}
 
-    let mut already_generated_n1 = already_generated;
+fn already_generated_after_block(
+    block_height: u64,
+    already_generated: u128,
+) -> Result<u128, TxError> {
     if block_height != 0 {
         let subsidy = block_subsidy(block_height, already_generated);
-        already_generated_n1 = already_generated
+        return already_generated
             .checked_add(u128::from(subsidy))
-            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "already_generated overflow"))?;
+            .ok_or_else(|| TxError::new(ErrorCode::BlockErrParse, "already_generated overflow"));
     }
-
-    state.utxos = work_utxos;
-    if block_height != 0 {
-        state.already_generated = already_generated_n1;
-    }
-
-    let post_state_digest = utxo_set_hash(&state.utxos);
-
-    Ok(ConnectBlockBasicSummary {
-        sum_fees,
-        already_generated,
-        already_generated_n1,
-        utxo_count: state.utxos.len() as u64,
-        post_state_digest,
-        sig_task_count,
-        worker_panics: 0,
-    })
+    Ok(already_generated)
 }
 
 /// utxo_set_hash computes a deterministic SHA3-256 digest over the UTXO set.

@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -203,132 +204,61 @@ func TestStaticCoreExtProfileProviderNilReceiverAndUnknownExtID(t *testing.T) {
 	}
 }
 
-func TestWrapCoreExtVerifySigExtWithTxContextNilAndForwarding(t *testing.T) {
-	if wrapCoreExtVerifySigExtWithTxContext(nil) != nil {
-		t.Fatalf("nil verify_sig_ext function must stay nil after wrapping")
-	}
-
-	digest := [32]byte{0: 0xaa, 31: 0x55}
-	pubkey := []byte{0x01, 0x02}
-	signature := []byte{0x03, 0x04}
-	extPayload := []byte{0x05, 0x06}
-
+func TestVerifyCoreExtProfileTxContextLegacyFallback(t *testing.T) {
 	called := false
-	wrapped := wrapCoreExtVerifySigExtWithTxContext(func(
-		extID uint16,
-		suiteID uint8,
-		gotPubkey []byte,
-		gotSignature []byte,
-		gotDigest [32]byte,
-		gotPayload []byte,
-	) (bool, error) {
-		called = true
-		if extID != 7 || suiteID != 3 {
-			t.Fatalf("unexpected ext dispatch: ext_id=%d suite_id=%d", extID, suiteID)
-		}
-		if string(gotPubkey) != string(pubkey) {
-			t.Fatalf("unexpected pubkey: %x", gotPubkey)
-		}
-		if string(gotSignature) != string(signature) {
-			t.Fatalf("unexpected signature: %x", gotSignature)
-		}
-		if gotDigest != digest {
-			t.Fatalf("unexpected digest: %x", gotDigest)
-		}
-		if string(gotPayload) != string(extPayload) {
-			t.Fatalf("unexpected payload: %x", gotPayload)
-		}
-		return true, nil
-	})
-	if wrapped == nil {
-		t.Fatalf("expected wrapped verifier")
+	call := testCoreExtVerifySigExtTxContextCall()
+	var forwarded coreExtVerifySigExtTxContextCall
+	ok, err := verifyCoreExtProfileTxContext(CoreExtProfile{
+		VerifySigExtFn: func(extID uint16, suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, extPayload []byte) (bool, error) {
+			called = true
+			forwarded = coreExtVerifySigExtTxContextCall{
+				extID:      extID,
+				suiteID:    suiteID,
+				pubkey:     pubkey,
+				signature:  signature,
+				digest32:   digest32,
+				extPayload: extPayload,
+			}
+			return true, nil
+		},
+	}, call)
+	got := struct {
+		ok     bool
+		called bool
+		err    error
+	}{ok: ok, called: called, err: err}
+	want := struct {
+		ok     bool
+		called bool
+		err    error
+	}{ok: true, called: true}
+	if got != want {
+		t.Fatalf("legacy fallback result=%+v", got)
 	}
-	ok, err := wrapped(
-		7,
-		3,
-		pubkey,
-		signature,
-		digest,
-		extPayload,
-		&TxContextBase{},
-		&TxContextContinuing{},
-		42,
-	)
-	if err != nil {
-		t.Fatalf("wrapped verifier error: %v", err)
-	}
-	if !ok {
-		t.Fatalf("wrapped verifier must preserve legacy success result")
-	}
-	if !called {
-		t.Fatalf("wrapped verifier did not call legacy verifier")
+	assertCoreExtVerifySigExtCall(t, forwarded, call)
+}
+
+func testCoreExtVerifySigExtTxContextCall() coreExtVerifySigExtTxContextCall {
+	var digest [32]byte
+	digest[0] = 0xd1
+	digest[31] = 0xd2
+	return coreExtVerifySigExtTxContextCall{
+		extID:          0x0a0b,
+		suiteID:        0x0c,
+		pubkey:         []byte{0x01, 0x02},
+		signature:      []byte{0x03, 0x04},
+		digest32:       digest,
+		extPayload:     []byte{0x05, 0x06},
+		ctxBase:        &TxContextBase{Height: 7},
+		ctxContinuing:  &TxContextContinuing{ContinuingOutputCount: 1},
+		selfInputValue: 11,
 	}
 }
 
-func TestCoreExtVerifySigExtTxContextFnPrefersExplicitBinding(t *testing.T) {
-	explicitCalled := false
-	legacyCalled := false
-	explicitFn := func(
-		uint16,
-		uint8,
-		[]byte,
-		[]byte,
-		[32]byte,
-		[]byte,
-		*TxContextBase,
-		*TxContextContinuing,
-		uint64,
-	) (bool, error) {
-		explicitCalled = true
-		return true, nil
-	}
-	legacyFn := func(uint16, uint8, []byte, []byte, [32]byte, []byte) (bool, error) {
-		legacyCalled = true
-		return true, nil
-	}
-
-	preferred := coreExtVerifySigExtTxContextFn(CoreExtProfile{
-		VerifySigExtFn:          legacyFn,
-		VerifySigExtTxContextFn: explicitFn,
-	})
-	if preferred == nil {
-		t.Fatalf("expected explicit txcontext verifier")
-	}
-	ok, err := preferred(7, 3, nil, nil, [32]byte{}, nil, &TxContextBase{}, &TxContextContinuing{}, 1)
-	if err != nil {
-		t.Fatalf("preferred verifier error: %v", err)
-	}
-	if !ok {
-		t.Fatalf("preferred verifier must return explicit success result")
-	}
-	if !explicitCalled {
-		t.Fatalf("explicit txcontext verifier not called")
-	}
-	if legacyCalled {
-		t.Fatalf("legacy verifier must not be used when explicit txcontext binding exists")
-	}
-
-	explicitCalled = false
-	legacyCalled = false
-	fallback := coreExtVerifySigExtTxContextFn(CoreExtProfile{VerifySigExtFn: legacyFn})
-	if fallback == nil {
-		t.Fatalf("expected wrapped legacy verifier fallback")
-	}
-	ok, err = fallback(7, 3, nil, nil, [32]byte{}, nil, &TxContextBase{}, &TxContextContinuing{}, 2)
-	if err != nil {
-		t.Fatalf("fallback verifier error: %v", err)
-	}
-	if !ok {
-		t.Fatalf("fallback verifier must preserve legacy success result")
-	}
-	if !legacyCalled {
-		t.Fatalf("legacy verifier fallback not called")
-	}
-	if explicitCalled {
-		t.Fatalf("explicit verifier state leaked into fallback path")
-	}
-	if coreExtVerifySigExtTxContextFn(CoreExtProfile{}) != nil {
-		t.Fatalf("empty profile must not synthesize verify_sig_ext binding")
+func assertCoreExtVerifySigExtCall(t *testing.T, got, want coreExtVerifySigExtTxContextCall) {
+	t.Helper()
+	if got.extID != want.extID || got.suiteID != want.suiteID || !bytes.Equal(got.pubkey, want.pubkey) || !bytes.Equal(got.signature, want.signature) || got.digest32 != want.digest32 || !bytes.Equal(got.extPayload, want.extPayload) {
+		t.Fatalf("verify_sig_ext forwarded call=%+v, want %+v", got, want)
 	}
 }
 
@@ -643,10 +573,15 @@ func TestValidateCoreExtWitnessAtHeight_TxContextEnabledDispatchesNineParam(t *t
 	}
 
 	called := false
+	legacyCalled := false
 	profile := CoreExtProfile{
 		Active:           true,
 		TxContextEnabled: true,
 		AllowedSuites:    map[uint8]struct{}{0x42: {}},
+		VerifySigExtFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte) (bool, error) {
+			legacyCalled = true
+			return false, nil
+		},
 		VerifySigExtTxContextFn: func(
 			extID uint16,
 			suiteID uint8,
@@ -662,8 +597,21 @@ func TestValidateCoreExtWitnessAtHeight_TxContextEnabledDispatchesNineParam(t *t
 			if extID != 7 || suiteID != 0x42 {
 				t.Fatalf("extID/suiteID=%d/%d", extID, suiteID)
 			}
+			if !bytes.Equal(pubkey, []byte{0x01, 0x02, 0x03}) {
+				t.Fatalf("pubkey=%x", pubkey)
+			}
+			if !bytes.Equal(signature, []byte{0x04}) {
+				t.Fatalf("signature=%x", signature)
+			}
 			if string(extPayload) != string([]byte{0xaa}) {
 				t.Fatalf("extPayload=%x", extPayload)
+			}
+			wantDigest, err := SighashV1DigestWithCache(sighashCache, 0, 100, [32]byte{0: 0x55}, SIGHASH_ALL)
+			if err != nil {
+				t.Fatalf("SighashV1DigestWithCache: %v", err)
+			}
+			if digest32 != wantDigest {
+				t.Fatalf("digest32=%x, want %x", digest32, wantDigest)
 			}
 			if ctxBase == nil || ctxBase.TotalIn != (Uint128{Lo: 100, Hi: 0}) || ctxBase.TotalOut != (Uint128{Lo: 90, Hi: 0}) || ctxBase.Height != 55 {
 				t.Fatalf("ctxBase=%+v", ctxBase)
@@ -677,9 +625,6 @@ func TestValidateCoreExtWitnessAtHeight_TxContextEnabledDispatchesNineParam(t *t
 			if selfInputValue != 100 {
 				t.Fatalf("selfInputValue=%d", selfInputValue)
 			}
-			_ = pubkey
-			_ = signature
-			_ = digest32
 			return true, nil
 		},
 		BindingDescriptor: []byte{0xa1},
@@ -705,6 +650,9 @@ func TestValidateCoreExtWitnessAtHeight_TxContextEnabledDispatchesNineParam(t *t
 	}
 	if !called {
 		t.Fatalf("expected 9-parameter verifier to run")
+	}
+	if legacyCalled {
+		t.Fatalf("legacy verifier must not run when explicit txcontext verifier is present")
 	}
 }
 
