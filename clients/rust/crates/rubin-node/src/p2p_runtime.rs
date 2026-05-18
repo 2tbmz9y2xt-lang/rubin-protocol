@@ -63,6 +63,7 @@ const MAX_HEADERS_PAYLOAD_BYTES: u64 =
 const STREAM_READ_CHUNK_BYTES: usize = 32 * 1024;
 
 static GLOBAL_ORPHAN_TOTAL_BYTES: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_ORPHAN_TOTAL_BLOCKS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
@@ -191,6 +192,21 @@ pub struct PeerSession {
 pub struct PeerManager {
     peers: RwLock<HashMap<String, PeerState>>,
     cfg: PeerRuntimeConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OrphanPoolMetricsSnapshot {
+    pub live_blocks: usize,
+    pub live_bytes: usize,
+}
+
+/// Live Rust P2P orphan-pool observability for `/metrics`.
+/// This is not consensus state and is not mixed-client readiness evidence.
+pub(crate) fn orphan_pool_metrics_snapshot() -> OrphanPoolMetricsSnapshot {
+    OrphanPoolMetricsSnapshot {
+        live_blocks: GLOBAL_ORPHAN_TOTAL_BLOCKS.load(Ordering::Acquire),
+        live_bytes: GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::Acquire),
+    }
 }
 
 pub fn default_peer_runtime_config(network: &str, max_peers: usize) -> PeerRuntimeConfig {
@@ -1784,6 +1800,7 @@ impl OrphanBlockPool {
                 size: block_bytes.len(),
             },
         );
+        GLOBAL_ORPHAN_TOTAL_BLOCKS.fetch_add(1, Ordering::AcqRel);
         self.total_bytes = self.total_bytes.saturating_add(block_bytes.len());
         self.fifo.push_back(block_hash);
         // Evict until under limits, but remove at least MIN_EVICT_BATCH entries
@@ -1819,6 +1836,7 @@ impl OrphanBlockPool {
         for child in &children {
             if let Some(meta) = self.by_hash.remove(&child.block_hash) {
                 self.total_bytes = self.total_bytes.saturating_sub(meta.size);
+                GLOBAL_ORPHAN_TOTAL_BLOCKS.fetch_sub(1, Ordering::AcqRel);
                 GLOBAL_ORPHAN_TOTAL_BYTES.fetch_sub(meta.size, Ordering::AcqRel);
             }
         }
@@ -1837,6 +1855,7 @@ impl OrphanBlockPool {
                 continue;
             };
             self.total_bytes = self.total_bytes.saturating_sub(meta.size);
+            GLOBAL_ORPHAN_TOTAL_BLOCKS.fetch_sub(1, Ordering::AcqRel);
             GLOBAL_ORPHAN_TOTAL_BYTES.fetch_sub(meta.size, Ordering::AcqRel);
             let mut remove_parent = false;
             if let Some(children) = self.pool.get_mut(&meta.parent_hash) {
@@ -1856,6 +1875,7 @@ impl OrphanBlockPool {
 
 impl Drop for OrphanBlockPool {
     fn drop(&mut self) {
+        GLOBAL_ORPHAN_TOTAL_BLOCKS.fetch_sub(self.by_hash.len(), Ordering::AcqRel);
         GLOBAL_ORPHAN_TOTAL_BYTES.fetch_sub(self.total_bytes, Ordering::AcqRel);
     }
 }
@@ -1915,6 +1935,12 @@ mod tests {
     static ORPHAN_POOL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     static NEXT_TEST_ROOT_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn reset_orphan_pool_metrics_for_test() {
+        GLOBAL_ORPHAN_TOTAL_BLOCKS.store(0, Ordering::SeqCst);
+        GLOBAL_ORPHAN_TOTAL_BYTES.store(0, Ordering::SeqCst);
+        GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(0, Ordering::SeqCst);
+    }
 
     #[derive(Deserialize)]
     struct SharedRuntimeVectors {
@@ -2638,6 +2664,9 @@ mod tests {
 
     #[test]
     fn handle_block_retains_orphan_until_parent_arrives() {
+        let _guard = ORPHAN_POOL_TEST_LOCK.lock().expect("lock orphan tests");
+        reset_orphan_pool_metrics_for_test();
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
 
@@ -2662,6 +2691,14 @@ mod tests {
             session
                 .handle_block(&block2, &mut engine)
                 .expect("orphan block should be retained");
+            assert_eq!(
+                orphan_pool_metrics_snapshot(),
+                OrphanPoolMetricsSnapshot {
+                    live_blocks: 1,
+                    live_bytes: block2.len()
+                },
+                "retained orphan must be visible in live observability only"
+            );
             assert_eq!(engine.chain_state.height, 0, "orphan must not advance tip");
             assert_eq!(
                 engine.chain_state.tip_hash, genesis_hash,
@@ -2679,6 +2716,14 @@ mod tests {
                 .expect("parent block should connect and resolve orphan");
 
             assert_eq!(session.orphans.len(), 0, "orphan pool should drain");
+            assert_eq!(
+                orphan_pool_metrics_snapshot(),
+                OrphanPoolMetricsSnapshot {
+                    live_blocks: 0,
+                    live_bytes: 0
+                },
+                "resolved orphan must drain live observability"
+            );
             assert!(engine.has_block(block1_hash).expect("block1 applied"));
             assert!(engine.has_block(block2_hash).expect("block2 resolved"));
             assert_eq!(engine.chain_state.height, 2);
@@ -2686,10 +2731,14 @@ mod tests {
 
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
+        reset_orphan_pool_metrics_for_test();
     }
 
     #[test]
     fn handle_block_surfaces_invalid_orphan_after_parent_arrives() {
+        let _guard = ORPHAN_POOL_TEST_LOCK.lock().expect("lock orphan tests");
+        reset_orphan_pool_metrics_for_test();
+
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
 
@@ -2715,6 +2764,14 @@ mod tests {
             session
                 .handle_block(&block2, &mut engine)
                 .expect("orphan should be retained until parent arrives");
+            assert_eq!(
+                orphan_pool_metrics_snapshot(),
+                OrphanPoolMetricsSnapshot {
+                    live_blocks: 1,
+                    live_bytes: block2.len()
+                },
+                "invalid orphan remains live only until its parent arrives"
+            );
             assert!(
                 !engine
                     .has_block(block2_hash)
@@ -2727,6 +2784,14 @@ mod tests {
             let pending_cleanup = session.take_pending_tx_pool_cleanup();
 
             assert_eq!(session.orphans.len(), 0, "invalid orphan should be dropped");
+            assert_eq!(
+                orphan_pool_metrics_snapshot(),
+                OrphanPoolMetricsSnapshot {
+                    live_blocks: 0,
+                    live_bytes: 0
+                },
+                "invalid orphan must not remain counted after surfacing"
+            );
             assert_eq!(
                 engine.chain_state.height, 1,
                 "parent block must remain connected"
@@ -2754,12 +2819,51 @@ mod tests {
 
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
+        reset_orphan_pool_metrics_for_test();
+    }
+
+    #[test]
+    fn orphan_pool_metrics_start_zero_and_track_take_children() {
+        let _guard = ORPHAN_POOL_TEST_LOCK.lock().expect("lock orphan tests");
+        reset_orphan_pool_metrics_for_test();
+
+        assert_eq!(
+            orphan_pool_metrics_snapshot(),
+            OrphanPoolMetricsSnapshot {
+                live_blocks: 0,
+                live_bytes: 0
+            }
+        );
+
+        let mut pool = OrphanBlockPool::new(16, usize::MAX);
+        let block = vec![7u8; 123];
+        let block_hash = [1u8; 32];
+        let parent_hash = [2u8; 32];
+
+        pool.add(block_hash, parent_hash, &block, global_orphan_byte_limit());
+        assert_eq!(
+            orphan_pool_metrics_snapshot(),
+            OrphanPoolMetricsSnapshot {
+                live_blocks: 1,
+                live_bytes: block.len()
+            }
+        );
+
+        let children = pool.take_children(parent_hash);
+        assert_eq!(children.len(), 1);
+        assert_eq!(
+            orphan_pool_metrics_snapshot(),
+            OrphanPoolMetricsSnapshot {
+                live_blocks: 0,
+                live_bytes: 0
+            }
+        );
     }
 
     #[test]
     fn orphan_pool_replaces_local_oldest_when_global_limit_reached() {
         let _guard = ORPHAN_POOL_TEST_LOCK.lock().expect("lock orphan tests");
-        GLOBAL_ORPHAN_TOTAL_BYTES.store(0, Ordering::SeqCst);
+        reset_orphan_pool_metrics_for_test();
         GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(1024, Ordering::SeqCst);
 
         let mut pool = OrphanBlockPool::new(16, usize::MAX);
@@ -2770,6 +2874,13 @@ mod tests {
         pool.add([3u8; 32], [4u8; 32], &second, global_orphan_byte_limit());
 
         assert_eq!(pool.len(), 1, "global cap should still permit local churn");
+        assert_eq!(
+            orphan_pool_metrics_snapshot(),
+            OrphanPoolMetricsSnapshot {
+                live_blocks: 1,
+                live_bytes: 800
+            }
+        );
         assert!(
             pool.by_hash.contains_key(&[3u8; 32]),
             "new orphan should be retained"
@@ -2781,14 +2892,21 @@ mod tests {
         assert_eq!(GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::SeqCst), 800);
 
         drop(pool);
-        GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(0, Ordering::SeqCst);
-        assert_eq!(GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            orphan_pool_metrics_snapshot(),
+            OrphanPoolMetricsSnapshot {
+                live_blocks: 0,
+                live_bytes: 0
+            },
+            "dropping the orphan pool must drain live observability"
+        );
+        reset_orphan_pool_metrics_for_test();
     }
 
     #[test]
     fn orphan_pool_enforces_global_byte_limit_across_sessions() {
         let _guard = ORPHAN_POOL_TEST_LOCK.lock().expect("lock orphan tests");
-        GLOBAL_ORPHAN_TOTAL_BYTES.store(0, Ordering::SeqCst);
+        reset_orphan_pool_metrics_for_test();
         GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(1024, Ordering::SeqCst);
 
         let mut pool_a = OrphanBlockPool::new(16, usize::MAX);
@@ -2805,11 +2923,19 @@ mod tests {
             "second session should be capped by global limit"
         );
         assert_eq!(GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::SeqCst), 800);
+        assert_eq!(GLOBAL_ORPHAN_TOTAL_BLOCKS.load(Ordering::SeqCst), 1);
 
         drop(pool_a);
         drop(pool_b);
-        GLOBAL_ORPHAN_BYTE_LIMIT_OVERRIDE.store(0, Ordering::SeqCst);
-        assert_eq!(GLOBAL_ORPHAN_TOTAL_BYTES.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            orphan_pool_metrics_snapshot(),
+            OrphanPoolMetricsSnapshot {
+                live_blocks: 0,
+                live_bytes: 0
+            },
+            "dropping all sessions must drain live observability"
+        );
+        reset_orphan_pool_metrics_for_test();
     }
 
     #[test]
