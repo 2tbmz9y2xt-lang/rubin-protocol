@@ -11,6 +11,23 @@ Policy:
 
 ---
 
+## 2026-05-18 — HTLC refund selector first-error ordering vector (RUB-295)
+
+Причина:
+- добавить test-first executable coverage для CORE_HTLC refund selector case, где `path_id=0x01`, selector payload length malformed, и selector key id не совпадает с `refund_key_id`;
+- закрепить ожидаемый first error `TX_ERR_PARSE` перед key-id mismatch, чтобы `RUB-294` чинил Rust под уже существующий conformance gate.
+
+Инструменты:
+- ручное добавление одного `CV-HTLC-ORDERING` vector;
+- расширение существующего `htlc_ordering_policy` conformance replay request полем `selector_payload_len_ok`;
+- обновление generated Lean conformance replay companion через `tools/formal/gen_lean_conformance_vectors.py`;
+- проверка через `conformance/runner/run_cv_bundle.py --only-gates CV-HTLC-ORDERING`.
+
+Изменённые fixtures:
+- `CV-HTLC-ORDERING.json`
+
+Не затронуто: Go/Rust consensus behavior, serialized `TxBytes` fixtures, conformance schema family.
+
 ## 2026-05-07 — CV-MEMPOOL relay metadata executable vectors (RUB-54)
 
 Причина:

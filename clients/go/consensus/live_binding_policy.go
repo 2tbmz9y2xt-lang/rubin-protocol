@@ -101,15 +101,6 @@ type liveBindingPolicyJSONScope struct {
 func rejectDuplicateLiveBindingPolicyJSONKeys(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	stack := make([]liveBindingPolicyJSONScope, 0, 8)
-	markValueComplete := func() {
-		if len(stack) == 0 {
-			return
-		}
-		top := &stack[len(stack)-1]
-		if top.object && !top.expectingKey {
-			top.expectingKey = true
-		}
-	}
 
 	for {
 		token, err := decoder.Token()
@@ -119,43 +110,8 @@ func rejectDuplicateLiveBindingPolicyJSONKeys(data []byte) error {
 		if err != nil {
 			return err
 		}
-		switch v := token.(type) {
-		case json.Delim:
-			switch v {
-			case '{':
-				stack = append(stack, liveBindingPolicyJSONScope{
-					object:       true,
-					keys:         make(map[string]struct{}),
-					expectingKey: true,
-				})
-			case '[':
-				stack = append(stack, liveBindingPolicyJSONScope{})
-			case '}':
-				if len(stack) == 0 || !stack[len(stack)-1].object {
-					return fmt.Errorf("unexpected json object close")
-				}
-				stack = stack[:len(stack)-1]
-				markValueComplete()
-			case ']':
-				if len(stack) == 0 || stack[len(stack)-1].object {
-					return fmt.Errorf("unexpected json array close")
-				}
-				stack = stack[:len(stack)-1]
-				markValueComplete()
-			}
-		case string:
-			if len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectingKey {
-				scope := &stack[len(stack)-1]
-				if _, ok := scope.keys[v]; ok {
-					return fmt.Errorf("duplicate JSON key %q", v)
-				}
-				scope.keys[v] = struct{}{}
-				scope.expectingKey = false
-				continue
-			}
-			markValueComplete()
-		default:
-			markValueComplete()
+		if err := handleLiveBindingPolicyJSONToken(&stack, token); err != nil {
+			return err
 		}
 	}
 
@@ -163,6 +119,72 @@ func rejectDuplicateLiveBindingPolicyJSONKeys(data []byte) error {
 		return fmt.Errorf("incomplete JSON value")
 	}
 	return nil
+}
+
+func handleLiveBindingPolicyJSONToken(stack *[]liveBindingPolicyJSONScope, token json.Token) error {
+	switch v := token.(type) {
+	case json.Delim:
+		return handleLiveBindingPolicyJSONDelim(stack, v)
+	case string:
+		return handleLiveBindingPolicyJSONString(stack, v)
+	default:
+		markLiveBindingPolicyJSONValueComplete(*stack)
+		return nil
+	}
+}
+
+func handleLiveBindingPolicyJSONDelim(stack *[]liveBindingPolicyJSONScope, delim json.Delim) error {
+	switch delim {
+	case '{':
+		*stack = append(*stack, liveBindingPolicyJSONScope{
+			object:       true,
+			keys:         make(map[string]struct{}),
+			expectingKey: true,
+		})
+	case '[':
+		*stack = append(*stack, liveBindingPolicyJSONScope{})
+	case '}':
+		return closeLiveBindingPolicyJSONScope(stack, true)
+	case ']':
+		return closeLiveBindingPolicyJSONScope(stack, false)
+	}
+	return nil
+}
+
+func closeLiveBindingPolicyJSONScope(stack *[]liveBindingPolicyJSONScope, object bool) error {
+	if len(*stack) == 0 || (*stack)[len(*stack)-1].object != object {
+		if object {
+			return fmt.Errorf("unexpected json object close")
+		}
+		return fmt.Errorf("unexpected json array close")
+	}
+	*stack = (*stack)[:len(*stack)-1]
+	markLiveBindingPolicyJSONValueComplete(*stack)
+	return nil
+}
+
+func handleLiveBindingPolicyJSONString(stack *[]liveBindingPolicyJSONScope, value string) error {
+	if len(*stack) > 0 && (*stack)[len(*stack)-1].object && (*stack)[len(*stack)-1].expectingKey {
+		scope := &(*stack)[len(*stack)-1]
+		if _, ok := scope.keys[value]; ok {
+			return fmt.Errorf("duplicate JSON key %q", value)
+		}
+		scope.keys[value] = struct{}{}
+		scope.expectingKey = false
+		return nil
+	}
+	markLiveBindingPolicyJSONValueComplete(*stack)
+	return nil
+}
+
+func markLiveBindingPolicyJSONValueComplete(stack []liveBindingPolicyJSONScope) {
+	if len(stack) == 0 {
+		return
+	}
+	top := &stack[len(stack)-1]
+	if top.object && !top.expectingKey {
+		top.expectingKey = true
+	}
 }
 
 func decodeSingleLiveBindingPolicyJSONValue(data []byte, dest any) error {
@@ -206,32 +228,43 @@ func (manifest liveBindingPolicyManifestJSON) materialize() (*liveBindingPolicyM
 }
 
 func (entry liveBindingPolicyEntryJSON) materialize(index int) (liveBindingPolicyEntry, error) {
-	if entry.AlgName == nil || *entry.AlgName == "" {
-		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: alg_name missing", index)
+	var (
+		out liveBindingPolicyEntry
+		err error
+	)
+	if out.AlgName, err = requiredLiveBindingPolicyEntryString(index, "alg_name", entry.AlgName); err != nil {
+		return liveBindingPolicyEntry{}, err
 	}
-	if entry.PubkeyLen == nil {
-		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: pubkey_len missing", index)
+	if out.PubkeyLen, err = requiredLiveBindingPolicyEntryInt(index, "pubkey_len", entry.PubkeyLen); err != nil {
+		return liveBindingPolicyEntry{}, err
 	}
-	if entry.SigLen == nil {
-		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: sig_len missing", index)
+	if out.SigLen, err = requiredLiveBindingPolicyEntryInt(index, "sig_len", entry.SigLen); err != nil {
+		return liveBindingPolicyEntry{}, err
 	}
-	if entry.RuntimeBinding == nil || *entry.RuntimeBinding == "" {
-		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: runtime_binding missing", index)
+	if out.RuntimeBinding, err = requiredLiveBindingPolicyEntryString(index, "runtime_binding", entry.RuntimeBinding); err != nil {
+		return liveBindingPolicyEntry{}, err
 	}
-	if entry.OpenSSLAlg == nil || *entry.OpenSSLAlg == "" {
-		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: openssl_alg missing", index)
+	if out.OpenSSLAlg, err = requiredLiveBindingPolicyEntryString(index, "openssl_alg", entry.OpenSSLAlg); err != nil {
+		return liveBindingPolicyEntry{}, err
 	}
-	if entry.CoreExtLiveBindingName == nil || *entry.CoreExtLiveBindingName == "" {
-		return liveBindingPolicyEntry{}, liveBindingPolicyError("entries[%d]: core_ext_live_binding_name missing", index)
+	if out.CoreExtLiveBindingName, err = requiredLiveBindingPolicyEntryString(index, "core_ext_live_binding_name", entry.CoreExtLiveBindingName); err != nil {
+		return liveBindingPolicyEntry{}, err
 	}
-	return liveBindingPolicyEntry{
-		AlgName:                *entry.AlgName,
-		PubkeyLen:              *entry.PubkeyLen,
-		SigLen:                 *entry.SigLen,
-		RuntimeBinding:         *entry.RuntimeBinding,
-		OpenSSLAlg:             *entry.OpenSSLAlg,
-		CoreExtLiveBindingName: *entry.CoreExtLiveBindingName,
-	}, nil
+	return out, nil
+}
+
+func requiredLiveBindingPolicyEntryString(index int, name string, value *string) (string, error) {
+	if value == nil || *value == "" {
+		return "", liveBindingPolicyError("entries[%d]: %s missing", index, name)
+	}
+	return *value, nil
+}
+
+func requiredLiveBindingPolicyEntryInt(index int, name string, value *int) (int, error) {
+	if value == nil {
+		return 0, liveBindingPolicyError("entries[%d]: %s missing", index, name)
+	}
+	return *value, nil
 }
 
 func loadLiveBindingPolicyFromJSON(raw []byte) (*liveBindingPolicyManifest, error) {
