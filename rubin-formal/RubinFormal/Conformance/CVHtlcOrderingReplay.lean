@@ -7,6 +7,8 @@ def htlcOrderingEval (v : CVHtlcOrderingVector) : (Bool × Option String × Bool
   let errPre : Option String :=
     if !v.structuralOk then
       some "TX_ERR_PARSE"
+    else if path == "refund" && !v.selectorPayloadLenOk then
+      some "TX_ERR_PARSE"
     else if path == "refund" && !v.locktimeOk then
       some "TX_ERR_TIMELOCK_NOT_MET"
     else if v.suiteId != 1 then

@@ -3,7 +3,10 @@ mod txctx_harness;
 
 use num_bigint::BigUint;
 use num_traits::Zero;
-use rubin_consensus::constants::MAX_WITNESS_BYTES_PER_TX;
+use rubin_consensus::constants::{
+    COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, MAX_HTLC_COVENANT_DATA,
+    MAX_WITNESS_BYTES_PER_TX, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_SENTINEL,
+};
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::{
     apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
@@ -13,12 +16,13 @@ use rubin_consensus::{
     flagday_active_at_height, merkle_root_txids, parse_core_ext_covenant_data, parse_tx, pow_check,
     retarget_v1, retarget_v1_clamped, sighash_v1_digest, tx_weight_and_stats_at_height,
     tx_weight_and_stats_public, validate_block_basic_with_context_and_fees_at_height,
-    validate_block_basic_with_context_at_height, validate_rotation_descriptor_for_network,
-    validate_rotation_set_for_network, validate_tx_covenants_genesis, work_from_target,
-    CoreExtDeploymentProfile, CoreExtDeploymentProfiles, CryptoRotationDescriptor,
-    DescriptorRotationProvider, ErrorCode, FeatureBitDeployment, FeatureBitState,
-    FlagDayDeployment, InMemoryChainState, Outpoint, RotationProvider, SuiteParams, SuiteRegistry,
-    UtxoEntry, ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
+    validate_block_basic_with_context_at_height, validate_htlc_spend,
+    validate_rotation_descriptor_for_network, validate_rotation_set_for_network,
+    validate_tx_covenants_genesis, work_from_target, CoreExtDeploymentProfile,
+    CoreExtDeploymentProfiles, CryptoRotationDescriptor, DescriptorRotationProvider, ErrorCode,
+    FeatureBitDeployment, FeatureBitState, FlagDayDeployment, HtlcSpendContext, InMemoryChainState,
+    Outpoint, RotationProvider, SuiteParams, SuiteRegistry, Tx, TxInput, TxOutput, UtxoEntry,
+    WitnessItem, ROTATION_V1_PRODUCTION_AT_MOST_ONE_DESCRIPTOR_ERR_STEM,
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
 use rubin_node::{devnet_genesis_chain_id, ChainState, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
@@ -247,6 +251,9 @@ struct Request {
 
     #[serde(default)]
     locktime_ok: Option<bool>,
+
+    #[serde(default)]
+    selector_payload_len_ok: Option<bool>,
 
     #[serde(default)]
     suite_id: Option<u8>,
@@ -967,6 +974,95 @@ struct Response {
 
 fn err_code(code: ErrorCode) -> String {
     code.as_str().to_string()
+}
+
+fn htlc_refund_ordering_policy_response(
+    req: &Request,
+    suite_id: u8,
+    key_binding_ok: bool,
+    selector_payload_len_ok: bool,
+) -> Response {
+    let mut claim_key_id = [0u8; 32];
+    let mut refund_key_id = [0u8; 32];
+    claim_key_id[0] = 0x11;
+    refund_key_id[0] = 0x22;
+
+    let mut covenant_data = Vec::with_capacity(MAX_HTLC_COVENANT_DATA as usize);
+    covenant_data.extend_from_slice(&[0u8; 32]);
+    covenant_data.push(LOCK_MODE_HEIGHT);
+    covenant_data.extend_from_slice(&1u64.to_le_bytes());
+    covenant_data.extend_from_slice(&claim_key_id);
+    covenant_data.extend_from_slice(&refund_key_id);
+
+    let entry = UtxoEntry {
+        value: 100,
+        covenant_type: COV_TYPE_HTLC,
+        covenant_data,
+        creation_height: 0,
+        created_by_coinbase: false,
+    };
+    let selector_key_id = if key_binding_ok {
+        refund_key_id
+    } else {
+        claim_key_id
+    };
+    let selector_payload = if selector_payload_len_ok {
+        vec![0x01]
+    } else {
+        vec![0x01, 0x02]
+    };
+    let path_item = WitnessItem {
+        suite_id: SUITE_ID_SENTINEL,
+        pubkey: selector_key_id.to_vec(),
+        signature: selector_payload,
+    };
+    let sig_item = WitnessItem {
+        suite_id,
+        pubkey: vec![0u8; ML_DSA_87_PUBKEY_BYTES as usize],
+        signature: vec![0u8; (ML_DSA_87_SIG_BYTES + 1) as usize],
+    };
+    let tx = Tx {
+        version: 1,
+        tx_kind: 0x00,
+        tx_nonce: 1,
+        inputs: vec![TxInput {
+            prev_txid: [0u8; 32],
+            prev_vout: 0,
+            script_sig: Vec::new(),
+            sequence: 0,
+        }],
+        outputs: vec![TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_P2PK,
+            covenant_data: Vec::new(),
+        }],
+        locktime: 0,
+        da_commit_core: None,
+        da_chunk_core: None,
+        witness: Vec::new(),
+        da_payload: Vec::new(),
+    };
+    let ctx = HtlcSpendContext {
+        input_index: 0,
+        input_value: 100,
+        chain_id: [0u8; 32],
+        block_height: req.height,
+        block_mtp: req.block_mtp.unwrap_or(0),
+    };
+
+    match validate_htlc_spend(&entry, &path_item, &sig_item, &tx, ctx) {
+        Ok(()) => Response {
+            ok: true,
+            verify_called: Some(true),
+            ..Default::default()
+        },
+        Err(err) => Response {
+            ok: false,
+            err: Some(err_code(err.code)),
+            verify_called: Some(false),
+            ..Default::default()
+        },
+    }
 }
 
 fn parse_hex_u256_to_32(s: &str) -> Result<[u8; 32], ()> {
@@ -4880,6 +4976,7 @@ fn main() {
             let structural_ok = req.structural_ok.unwrap_or(true);
             let locktime_ok = req.locktime_ok.unwrap_or(true);
             let suite_id = req.suite_id.unwrap_or(0x01);
+            let selector_payload_len_ok = req.selector_payload_len_ok.unwrap_or(true);
             let key_binding_ok = req.key_binding_ok.unwrap_or(true);
             let preimage_ok = req.preimage_ok.unwrap_or(true);
             let verify_ok = req.verify_ok.unwrap_or(true);
@@ -4889,6 +4986,15 @@ fn main() {
 
             if !structural_ok {
                 err = Some(err_code(ErrorCode::TxErrParse));
+            } else if path == "refund" && (!selector_payload_len_ok || !key_binding_ok) {
+                let resp = htlc_refund_ordering_policy_response(
+                    &req,
+                    suite_id,
+                    key_binding_ok,
+                    selector_payload_len_ok,
+                );
+                let _ = serde_json::to_writer(std::io::stdout(), &resp);
+                return;
             } else if path == "refund" && !locktime_ok {
                 err = Some(err_code(ErrorCode::TxErrTimelockNotMet));
             } else if suite_id != 0x01 {

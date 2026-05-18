@@ -41,6 +41,7 @@ type Request struct {
 	InIBD                *bool          `json:"in_ibd,omitempty"`
 	SentinelVerifyCalled *bool          `json:"sentinel_verify_called,omitempty"`
 	LocktimeOK           *bool          `json:"locktime_ok,omitempty"`
+	SelectorPayloadLenOK *bool          `json:"selector_payload_len_ok,omitempty"`
 	Telemetry            map[string]any `json:"telemetry,omitempty"`
 	GetblocktxnOK        *bool          `json:"getblocktxn_ok,omitempty"`
 	InitialCommitSeen    *bool          `json:"initial_commit_seen,omitempty"`
@@ -1188,6 +1189,75 @@ func uint64OrDefault(v *uint64, def uint64) uint64 {
 		return def
 	}
 	return *v
+}
+
+func htlcRefundOrderingPolicyResp(req Request, suiteID uint8, keyBindingOK bool, selectorPayloadLenOK bool) Response {
+	var claimKeyID [32]byte
+	var refundKeyID [32]byte
+	claimKeyID[0] = 0x11
+	refundKeyID[0] = 0x22
+
+	cov := make([]byte, 0, consensus.MAX_HTLC_COVENANT_DATA)
+	cov = append(cov, make([]byte, 32)...)
+	cov = append(cov, consensus.LOCK_MODE_HEIGHT)
+	var lockValue [8]byte
+	binary.LittleEndian.PutUint64(lockValue[:], 1)
+	cov = append(cov, lockValue[:]...)
+	cov = append(cov, claimKeyID[:]...)
+	cov = append(cov, refundKeyID[:]...)
+
+	entry := consensus.UtxoEntry{
+		Value:        100,
+		CovenantType: consensus.COV_TYPE_HTLC,
+		CovenantData: cov,
+	}
+	selectorKeyID := refundKeyID
+	if !keyBindingOK {
+		selectorKeyID = claimKeyID
+	}
+	selectorPayload := []byte{0x01}
+	if !selectorPayloadLenOK {
+		selectorPayload = []byte{0x01, 0x02}
+	}
+
+	pathItem := consensus.WitnessItem{
+		SuiteID:   consensus.SUITE_ID_SENTINEL,
+		Pubkey:    selectorKeyID[:],
+		Signature: selectorPayload,
+	}
+	sigItem := consensus.WitnessItem{
+		SuiteID:   suiteID,
+		Pubkey:    make([]byte, consensus.ML_DSA_87_PUBKEY_BYTES),
+		Signature: make([]byte, consensus.ML_DSA_87_SIG_BYTES+1),
+	}
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: 1,
+		Inputs:  []consensus.TxInput{{Sequence: 0}},
+		Outputs: []consensus.TxOutput{{Value: 90, CovenantType: consensus.COV_TYPE_P2PK}},
+	}
+	if err := consensus.ValidateHTLCSpendAtHeight(
+		entry,
+		pathItem,
+		sigItem,
+		tx,
+		0,
+		100,
+		[32]byte{},
+		req.Height,
+		uint64OrDefault(req.BlockMTP, 0),
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		var te *consensus.TxError
+		if errors.As(err, &te) {
+			return Response{Ok: false, Err: string(te.Code), VerifyCalled: false}
+		}
+		return Response{Ok: false, Err: err.Error(), VerifyCalled: false}
+	}
+	return Response{Ok: true, VerifyCalled: true}
 }
 
 func parseKeyBytes(item any) ([]byte, error) {
@@ -2754,6 +2824,7 @@ func runFromStdin() {
 		structuralOK := boolOrDefault(req.StructuralOK, true)
 		locktimeOK := boolOrDefault(req.LocktimeOK, true)
 		suiteID := uint8OrDefault(req.SuiteID, 1)
+		selectorPayloadLenOK := boolOrDefault(req.SelectorPayloadLenOK, true)
 		keyBindingOK := boolOrDefault(req.KeyBindingOK, true)
 		preimageOK := boolOrDefault(req.PreimageOK, true)
 		verifyOK := boolOrDefault(req.VerifyOK, true)
@@ -2763,6 +2834,9 @@ func runFromStdin() {
 		switch {
 		case !structuralOK:
 			errCode = string(consensus.TX_ERR_PARSE)
+		case path == "refund" && (!selectorPayloadLenOK || !keyBindingOK):
+			writeResp(os.Stdout, htlcRefundOrderingPolicyResp(req, suiteID, keyBindingOK, selectorPayloadLenOK))
+			return
 		case path == "refund" && !locktimeOK:
 			errCode = string(consensus.TX_ERR_TIMELOCK_NOT_MET)
 		case suiteID != consensus.SUITE_ID_ML_DSA_87:
