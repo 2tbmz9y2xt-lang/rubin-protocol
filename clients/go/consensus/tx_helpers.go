@@ -162,20 +162,7 @@ func CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
 
 // SignTransaction currently supports ML-DSA CORE_P2PK inputs only.
 func SignTransaction(tx *Tx, utxoSet map[Outpoint]UtxoEntry, chainID [32]byte, signer DigestSigner) error {
-	if tx == nil {
-		return txerr(TX_ERR_PARSE, "nil tx")
-	}
-	if len(tx.Inputs) == 0 {
-		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
-	}
-	if signer == nil {
-		return fmt.Errorf("nil signer")
-	}
-	pub, keyID, err := signerBinding(signer)
-	if err != nil {
-		return err
-	}
-	sighashCache, err := NewSighashV1PrehashCache(tx)
+	pub, keyID, sighashCache, err := prepareSignTransaction(tx, signer)
 	if err != nil {
 		return err
 	}
@@ -195,6 +182,27 @@ func SignTransaction(tx *Tx, utxoSet map[Outpoint]UtxoEntry, chainID [32]byte, s
 
 	tx.Witness = witness
 	return nil
+}
+
+func prepareSignTransaction(tx *Tx, signer DigestSigner) ([]byte, [32]byte, *SighashV1PrehashCache, error) {
+	if tx == nil {
+		return nil, [32]byte{}, nil, txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if len(tx.Inputs) == 0 {
+		return nil, [32]byte{}, nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	}
+	if signer == nil {
+		return nil, [32]byte{}, nil, fmt.Errorf("nil signer")
+	}
+	pub, keyID, err := signerBinding(signer)
+	if err != nil {
+		return nil, [32]byte{}, nil, err
+	}
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		return nil, [32]byte{}, nil, err
+	}
+	return pub, keyID, sighashCache, nil
 }
 
 func signerBinding(signer DigestSigner) ([]byte, [32]byte, error) {
