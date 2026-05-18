@@ -331,106 +331,149 @@ func validateCoreExtNativeWitness(w WitnessItem, params SuiteParams) error {
 	return nil
 }
 
-func validateCoreExtWitnessAtHeight(
-	cd *CoreExtCovenantData,
-	profile CoreExtProfile,
-	w WitnessItem,
-	tx *Tx,
-	inputIndex uint32,
-	inputValue uint64,
-	chainID [32]byte,
-	blockHeight uint64,
-	sighashCache *SighashV1PrehashCache,
-	rotation RotationProvider,
-	registry *SuiteRegistry,
-	txContext *TxContextBundle,
-	sigQueue *SigCheckQueue,
-) error {
-	rotation, registry = normalizeCoreExtSuiteContext(rotation, registry)
-	if !hasSuite(profile.AllowedSuites, w.SuiteID) {
+type coreExtWitnessValidation struct {
+	cd           *CoreExtCovenantData
+	profile      CoreExtProfile
+	w            WitnessItem
+	tx           *Tx
+	inputIndex   uint32
+	inputValue   uint64
+	chainID      [32]byte
+	blockHeight  uint64
+	sighashCache *SighashV1PrehashCache
+	rotation     RotationProvider
+	registry     *SuiteRegistry
+	txContext    *TxContextBundle
+	sigQueue     *SigCheckQueue
+}
+
+func validateCoreExtWitnessAtHeight(check coreExtWitnessValidation) error {
+	check.rotation, check.registry = normalizeCoreExtSuiteContext(check.rotation, check.registry)
+	if !hasSuite(check.profile.AllowedSuites, check.w.SuiteID) {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT suite disallowed under ACTIVE profile")
 	}
-	if w.SuiteID == SUITE_ID_SENTINEL {
+	if check.w.SuiteID == SUITE_ID_SENTINEL {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT sentinel forbidden under ACTIVE profile")
 	}
 
-	extractSigDigest := func() ([]byte, [32]byte, error) {
-		return extractSigAndDigestWithCache(w, tx, inputIndex, inputValue, chainID, sighashCache)
-	}
-
-	nativeSpendSuites := rotation.NativeSpendSuites(blockHeight)
-	params, nativeRegistered := registry.Lookup(w.SuiteID)
+	nativeSpendSuites := check.rotation.NativeSpendSuites(check.blockHeight)
+	params, nativeRegistered := check.registry.Lookup(check.w.SuiteID)
 
 	// Per CANONICAL §12.5 / §23.2.2, registry-known native suites stay on the
 	// native path only while currently spend-permitted at this height; suites
 	// outside the current native spend set reject here and never fall through to
 	// verify_sig_ext.
 	if nativeRegistered {
-		if !nativeSpendSuites.Contains(w.SuiteID) {
+		if !nativeSpendSuites.Contains(check.w.SuiteID) {
 			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT registered native suite not spend-permitted at this height")
 		}
-		if err := validateCoreExtNativeWitness(w, params); err != nil {
-			return err
-		}
-		cryptoSig, digest, err := extractSigDigest()
-		if err != nil {
-			return err
-		}
-		if sigQueue != nil {
-			sigQueue.Push(w.SuiteID, w.Pubkey, cryptoSig, digest, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid"))
-			return nil
-		}
-		ok, err := verifySigWithRegistry(w.SuiteID, w.Pubkey, cryptoSig, digest, registry)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
-		}
-		return nil
+		return check.validateCoreExtNativeWitnessPath(params)
 	}
-	if nativeSpendSuites.Contains(w.SuiteID) {
+	if nativeSpendSuites.Contains(check.w.SuiteID) {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT registered native suite missing from registry")
 	}
 
-	cryptoSig, digest, err := extractSigDigest()
+	return check.validateCoreExtProfilePath()
+}
+
+func (check coreExtWitnessValidation) extractSigDigest() ([]byte, [32]byte, error) {
+	return extractSigAndDigestWithCache(
+		check.w,
+		check.tx,
+		check.inputIndex,
+		check.inputValue,
+		check.chainID,
+		check.sighashCache,
+	)
+}
+
+func (check coreExtWitnessValidation) validateCoreExtNativeWitnessPath(params SuiteParams) error {
+	if err := validateCoreExtNativeWitness(check.w, params); err != nil {
+		return err
+	}
+	cryptoSig, digest, err := check.extractSigDigest()
 	if err != nil {
 		return err
 	}
-	if profile.TxContextEnabled {
-		if profile.VerifySigExtFn == nil && profile.VerifySigExtTxContextFn == nil {
-			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
-		}
-		if txContext == nil || txContext.Base == nil {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext bundle missing")
-		}
-		ctxContinuing, ok := txContext.Continuing(cd.ExtID)
-		if !ok || ctxContinuing == nil {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext continuing bundle missing")
-		}
-		ok, err := verifyCoreExtProfileTxContext(profile, coreExtVerifySigExtTxContextCall{
-			extID:          cd.ExtID,
-			suiteID:        w.SuiteID,
-			pubkey:         w.Pubkey,
-			signature:      cryptoSig,
-			digest32:       digest,
-			extPayload:     cd.ExtPayload,
-			ctxBase:        txContext.Base,
-			ctxContinuing:  ctxContinuing,
-			selfInputValue: inputValue,
-		})
-		if err != nil {
-			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
-		}
-		if !ok {
-			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
-		}
+	if check.sigQueue != nil {
+		check.sigQueue.Push(check.w.SuiteID, check.w.Pubkey, cryptoSig, digest, txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid"))
 		return nil
 	}
-	if profile.VerifySigExtFn == nil {
+	ok, err := verifySigWithRegistry(check.w.SuiteID, check.w.Pubkey, cryptoSig, digest, check.registry)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
+	}
+	return nil
+}
+
+func (check coreExtWitnessValidation) validateCoreExtProfilePath() error {
+	cryptoSig, digest, err := check.extractSigDigest()
+	if err != nil {
+		return err
+	}
+	if check.profile.TxContextEnabled {
+		return check.validateCoreExtTxContextVerifier(cryptoSig, digest)
+	}
+	return check.validateCoreExtLegacyVerifier(cryptoSig, digest)
+}
+
+func (check coreExtWitnessValidation) validateCoreExtTxContextVerifier(cryptoSig []byte, digest [32]byte) error {
+	if coreExtTxContextVerifierUnsupported(check.profile) {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
 	}
-	ok, err := profile.VerifySigExtFn(cd.ExtID, w.SuiteID, w.Pubkey, cryptoSig, digest, cd.ExtPayload)
+	ctxBase, ctxContinuing, err := check.txContextVerifierBundles()
+	if err != nil {
+		return err
+	}
+	ok, err := verifyCoreExtProfileTxContext(check.profile, coreExtVerifySigExtTxContextCall{
+		extID:          check.cd.ExtID,
+		suiteID:        check.w.SuiteID,
+		pubkey:         check.w.Pubkey,
+		signature:      cryptoSig,
+		digest32:       digest,
+		extPayload:     check.cd.ExtPayload,
+		ctxBase:        ctxBase,
+		ctxContinuing:  ctxContinuing,
+		selfInputValue: check.inputValue,
+	})
+	if err != nil {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
+	}
+	if !ok {
+		return txerr(TX_ERR_SIG_INVALID, "CORE_EXT signature invalid")
+	}
+	return nil
+}
+
+func coreExtTxContextVerifierUnsupported(profile CoreExtProfile) bool {
+	return profile.VerifySigExtFn == nil && profile.VerifySigExtTxContextFn == nil
+}
+
+func (check coreExtWitnessValidation) txContextVerifierBundles() (*TxContextBase, *TxContextContinuing, error) {
+	if check.txContext == nil {
+		return nil, nil, txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext bundle missing")
+	}
+	if check.txContext.Base == nil {
+		return nil, nil, txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext bundle missing")
+	}
+	ctxContinuing, ok := check.txContext.Continuing(check.cd.ExtID)
+	if !ok {
+		return nil, nil, txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext continuing bundle missing")
+	}
+	if ctxContinuing == nil {
+		return nil, nil, txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext continuing bundle missing")
+	}
+	return check.txContext.Base, ctxContinuing, nil
+}
+
+func (check coreExtWitnessValidation) validateCoreExtLegacyVerifier(cryptoSig []byte, digest [32]byte) error {
+	if check.profile.VerifySigExtFn == nil {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
+	}
+	ok, err := check.profile.VerifySigExtFn(check.cd.ExtID, check.w.SuiteID, check.w.Pubkey, cryptoSig, digest, check.cd.ExtPayload)
 	if err != nil {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
 	}
@@ -479,19 +522,18 @@ func validateCoreExtSpendWithCache(check coreExtSpendValidation) error {
 		return nil
 	}
 
-	return validateCoreExtWitnessAtHeight(
-		cd,
-		profile,
-		check.w,
-		check.tx,
-		check.inputIndex,
-		check.inputValue,
-		check.chainID,
-		check.blockHeight,
-		check.sighashCache,
-		check.rotation,
-		check.registry,
-		check.txContext,
-		nil,
-	)
+	return validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
+		cd:           cd,
+		profile:      profile,
+		w:            check.w,
+		tx:           check.tx,
+		inputIndex:   check.inputIndex,
+		inputValue:   check.inputValue,
+		chainID:      check.chainID,
+		blockHeight:  check.blockHeight,
+		sighashCache: check.sighashCache,
+		rotation:     check.rotation,
+		registry:     check.registry,
+		txContext:    check.txContext,
+	})
 }
