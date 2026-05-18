@@ -116,6 +116,20 @@ func CollectDAChunkHashTasks(txs []*Tx) []DAChunkHashTask {
 // sequential validateDASetIntegrity phase MUST re-enforce this contiguity
 // contract independently before calling this helper.
 func CollectDAPayloadCommitTasks(txs []*Tx) []DAPayloadCommitTask {
+	commits, chunks := collectDAPayloadCommitInputs(txs)
+	if len(commits) == 0 {
+		return nil
+	}
+
+	ids := sortedDAIDs(commits)
+	tasks := make([]DAPayloadCommitTask, 0, len(ids))
+	for _, daID := range ids {
+		tasks = append(tasks, buildDAPayloadCommitTask(daID, commits[daID], chunks[daID]))
+	}
+	return tasks
+}
+
+func collectDAPayloadCommitInputs(txs []*Tx) (map[[32]byte]*Tx, map[[32]byte]map[uint16]*Tx) {
 	commits := make(map[[32]byte]*Tx)
 	chunks := make(map[[32]byte]map[uint16]*Tx)
 
@@ -137,42 +151,36 @@ func CollectDAPayloadCommitTasks(txs []*Tx) []DAPayloadCommitTask {
 			chunks[daID][tx.DaChunkCore.ChunkIndex] = tx
 		}
 	}
+	return commits, chunks
+}
 
-	if len(commits) == 0 {
-		return nil
+func buildDAPayloadCommitTask(daID [32]byte, commitTx *Tx, chunkSet map[uint16]*Tx) DAPayloadCommitTask {
+	chunkCount := commitTx.DaCommitCore.ChunkCount
+	return DAPayloadCommitTask{
+		DaID:           daID,
+		ChunkCount:     chunkCount,
+		ChunkPayloads:  collectDAChunkPayloads(chunkCount, chunkSet),
+		ExpectedCommit: collectDAExpectedCommitment(commitTx),
 	}
+}
 
-	ids := sortedDAIDs(commits)
-	tasks := make([]DAPayloadCommitTask, 0, len(ids))
-
-	for _, daID := range ids {
-		commitTx := commits[daID]
-		chunkCount := commitTx.DaCommitCore.ChunkCount
-		chunkSet := chunks[daID]
-
-		payloads := make([][]byte, chunkCount)
-		for i := uint16(0); i < chunkCount; i++ {
-			if chunkTx, ok := chunkSet[i]; ok {
-				payloads[i] = chunkTx.DaPayload
-			}
+func collectDAChunkPayloads(chunkCount uint16, chunkSet map[uint16]*Tx) [][]byte {
+	payloads := make([][]byte, chunkCount)
+	for i := uint16(0); i < chunkCount; i++ {
+		if chunkTx, ok := chunkSet[i]; ok {
+			payloads[i] = chunkTx.DaPayload
 		}
-
-		// Extract expected commitment from DA_COMMIT output.
-		var expectedCommit [32]byte
-		for _, out := range commitTx.Outputs {
-			if out.CovenantType == COV_TYPE_DA_COMMIT && len(out.CovenantData) == 32 {
-				copy(expectedCommit[:], out.CovenantData)
-				break
-			}
-		}
-
-		tasks = append(tasks, DAPayloadCommitTask{
-			DaID:           daID,
-			ChunkCount:     chunkCount,
-			ChunkPayloads:  payloads,
-			ExpectedCommit: expectedCommit,
-		})
 	}
+	return payloads
+}
 
-	return tasks
+func collectDAExpectedCommitment(commitTx *Tx) [32]byte {
+	var expectedCommit [32]byte
+	for _, out := range commitTx.Outputs {
+		if out.CovenantType == COV_TYPE_DA_COMMIT && len(out.CovenantData) == 32 {
+			copy(expectedCommit[:], out.CovenantData)
+			break
+		}
+	}
+	return expectedCommit
 }
