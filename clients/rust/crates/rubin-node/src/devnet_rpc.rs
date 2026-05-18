@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::miner::{Miner, MinerConfig};
-use crate::p2p_runtime::PeerManager;
+use crate::p2p_runtime::{orphan_pool_metrics_snapshot, PeerManager};
 use crate::txpool::TxSource;
 use crate::{BlockStore, SyncEngine, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
 
@@ -1990,6 +1990,7 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
         Err(_) => 0,
     };
     let peer_count = state.peer_manager.snapshot().len() as u64;
+    let orphan_metrics = orphan_pool_metrics_snapshot();
     let (route_status, submit_results) = state.metrics.snapshot();
 
     let mut lines = vec![
@@ -2015,6 +2016,20 @@ fn render_prometheus_metrics(state: &DevnetRPCState) -> String {
         "# HELP rubin_node_peer_count Currently tracked peers.".to_string(),
         "# TYPE rubin_node_peer_count gauge".to_string(),
         format!("rubin_node_peer_count {peer_count}"),
+        "# HELP rubin_node_p2p_orphan_pool_blocks Live Rust P2P orphan blocks retained in memory across peer sessions."
+            .to_string(),
+        "# TYPE rubin_node_p2p_orphan_pool_blocks gauge".to_string(),
+        format!(
+            "rubin_node_p2p_orphan_pool_blocks {}",
+            orphan_metrics.live_blocks
+        ),
+        "# HELP rubin_node_p2p_orphan_pool_bytes Live Rust P2P orphan block bytes retained in memory across peer sessions."
+            .to_string(),
+        "# TYPE rubin_node_p2p_orphan_pool_bytes gauge".to_string(),
+        format!(
+            "rubin_node_p2p_orphan_pool_bytes {}",
+            orphan_metrics.live_bytes
+        ),
         "# HELP rubin_node_mempool_txs Number of transactions currently in the mempool."
             .to_string(),
         "# TYPE rubin_node_mempool_txs gauge".to_string(),
@@ -4956,6 +4971,8 @@ mod tests {
 
     #[test]
     fn metrics_render_includes_v1_names() {
+        let _orphan_guard = crate::p2p_runtime::orphan_pool_metrics_test_guard();
+        crate::p2p_runtime::reset_orphan_pool_metrics_for_test();
         let (state, dir) = build_state(true);
         let _ = route_request(
             &state,
@@ -4981,6 +4998,8 @@ mod tests {
             "rubin_node_reorg_total",
             "rubin_node_last_reorg_depth",
             "rubin_node_peer_count",
+            "rubin_node_p2p_orphan_pool_blocks",
+            "rubin_node_p2p_orphan_pool_bytes",
             "rubin_node_mempool_txs",
             "rubin_node_rpc_requests_total",
             "rubin_node_submit_tx_total",
@@ -5024,6 +5043,15 @@ mod tests {
         assert!(body.contains(r#"rubin_pv_mode{mode="off"} 1"#));
         assert!(body.contains("rubin_node_reorg_total 0"), "{body}");
         assert!(body.contains("rubin_node_last_reorg_depth 0"), "{body}");
+        assert!(
+            body.contains("rubin_node_p2p_orphan_pool_blocks 0"),
+            "{body}"
+        );
+        assert!(
+            body.contains("rubin_node_p2p_orphan_pool_bytes 0"),
+            "{body}"
+        );
+        crate::p2p_runtime::reset_orphan_pool_metrics_for_test();
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
