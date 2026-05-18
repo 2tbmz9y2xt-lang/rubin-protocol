@@ -73,22 +73,8 @@ func (p *WorkerPool[T, R]) Run(ctx context.Context, tasks []T) ([]WorkerResult[R
 	if n == 0 {
 		return nil, nil
 	}
-	if p.MaxTasks <= 0 {
-		return nil, ErrWorkerPoolInvalidMaxTasks
-	}
-	if n > p.MaxTasks {
-		return nil, &WorkerPoolRunError{TaskCount: n, MaxTasks: p.MaxTasks}
-	}
-
-	workers := p.MaxWorkers
-	if workers <= 0 {
-		workers = runtime.GOMAXPROCS(0)
-		if workers < 1 {
-			workers = 1
-		}
-	}
-	if workers > n {
-		workers = n
+	if err := p.validateRunTaskCount(n); err != nil {
+		return nil, err
 	}
 
 	results := make([]WorkerResult[R], n)
@@ -99,9 +85,38 @@ func (p *WorkerPool[T, R]) Run(ctx context.Context, tasks []T) ([]WorkerResult[R
 		return results, nil
 	}
 
+	p.runParallel(ctx, tasks, results, workerCount(p.MaxWorkers, n))
+	return results, nil
+}
+
+func (p *WorkerPool[T, R]) validateRunTaskCount(n int) error {
+	if p.MaxTasks <= 0 {
+		return ErrWorkerPoolInvalidMaxTasks
+	}
+	if n > p.MaxTasks {
+		return &WorkerPoolRunError{TaskCount: n, MaxTasks: p.MaxTasks}
+	}
+	return nil
+}
+
+func workerCount(maxWorkers int, taskCount int) int {
+	workers := maxWorkers
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
+		if workers < 1 {
+			workers = 1
+		}
+	}
+	if workers > taskCount {
+		workers = taskCount
+	}
+	return workers
+}
+
+func (p *WorkerPool[T, R]) runParallel(ctx context.Context, tasks []T, results []WorkerResult[R], workers int) {
 	// Fan out via buffered channel of indices.
-	taskCh := make(chan int, n)
-	for i := 0; i < n; i++ {
+	taskCh := make(chan int, len(tasks))
+	for i := 0; i < len(tasks); i++ {
 		taskCh <- i
 	}
 	close(taskCh)
@@ -118,7 +133,6 @@ func (p *WorkerPool[T, R]) Run(ctx context.Context, tasks []T) ([]WorkerResult[R
 	}
 
 	wg.Wait()
-	return results, nil
 }
 
 // execTask runs a single task with panic recovery and context check.

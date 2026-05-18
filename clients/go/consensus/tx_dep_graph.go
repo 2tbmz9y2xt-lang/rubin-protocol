@@ -74,7 +74,22 @@ func BuildTxDepGraph(contexts []TxValidationContext) *TxDepGraph {
 		return &TxDepGraph{}
 	}
 
-	// Map txid → context index for parent-child detection.
+	edges := buildTxDepEdges(contexts)
+	levels, maxLevel := computeTxDepLevels(n, edges)
+	order := txDepLevelOrder(contexts, levels)
+
+	return &TxDepGraph{
+		TxCount:    n,
+		Edges:      edges,
+		Levels:     levels,
+		LevelOrder: order,
+		MaxLevel:   maxLevel,
+	}
+}
+
+func buildTxDepEdges(contexts []TxValidationContext) []TxDepEdge {
+	n := len(contexts)
+	// Map txid to context index for parent-child detection.
 	txidToIdx := make(map[[32]byte]int, n)
 	for i := range contexts {
 		txidToIdx[contexts[i].Txid] = i
@@ -87,34 +102,53 @@ func BuildTxDepGraph(contexts []TxValidationContext) *TxDepGraph {
 
 	for i := range contexts {
 		for _, op := range contexts[i].InputOutpoints {
-			// Parent-child: does this outpoint reference an earlier tx in the block?
-			if producerIdx, ok := txidToIdx[op.Txid]; ok && producerIdx < i {
-				edges = append(edges, TxDepEdge{
-					ProducerIdx: producerIdx,
-					ConsumerIdx: i,
-					Kind:        DepParentChild,
-				})
-				continue
-			}
-
-			// Same-prevout: another tx already consumed this outpoint.
-			if firstIdx, ok := outpointFirstConsumer[op]; ok && firstIdx != i {
-				// Lower index is always "producer" for determinism.
-				lo, hi := firstIdx, i
-				if lo > hi {
-					lo, hi = hi, lo
-				}
-				edges = append(edges, TxDepEdge{
-					ProducerIdx: lo,
-					ConsumerIdx: hi,
-					Kind:        DepSamePrevout,
-				})
-			} else if !ok {
-				outpointFirstConsumer[op] = i
-			}
+			edges = appendTxDepInputEdges(edges, txidToIdx, outpointFirstConsumer, i, op)
 		}
 	}
 
+	sortTxDepEdges(edges)
+	return edges
+}
+
+func appendTxDepInputEdges(
+	edges []TxDepEdge,
+	txidToIdx map[[32]byte]int,
+	outpointFirstConsumer map[Outpoint]int,
+	consumerIdx int,
+	op Outpoint,
+) []TxDepEdge {
+	if producerIdx, ok := txidToIdx[op.Txid]; ok && producerIdx < consumerIdx {
+		return append(edges, TxDepEdge{
+			ProducerIdx: producerIdx,
+			ConsumerIdx: consumerIdx,
+			Kind:        DepParentChild,
+		})
+	}
+
+	firstIdx, ok := outpointFirstConsumer[op]
+	if !ok {
+		outpointFirstConsumer[op] = consumerIdx
+		return edges
+	}
+	if firstIdx == consumerIdx {
+		return edges
+	}
+	lo, hi := orderedTxDepIndexes(firstIdx, consumerIdx)
+	return append(edges, TxDepEdge{
+		ProducerIdx: lo,
+		ConsumerIdx: hi,
+		Kind:        DepSamePrevout,
+	})
+}
+
+func orderedTxDepIndexes(a int, b int) (int, int) {
+	if a > b {
+		return b, a
+	}
+	return a, b
+}
+
+func sortTxDepEdges(edges []TxDepEdge) {
 	// Sort edges deterministically: by ConsumerIdx, then ProducerIdx, then Kind.
 	sort.Slice(edges, func(a, b int) bool {
 		if edges[a].ConsumerIdx != edges[b].ConsumerIdx {
@@ -125,7 +159,9 @@ func BuildTxDepGraph(contexts []TxValidationContext) *TxDepGraph {
 		}
 		return edges[a].Kind < edges[b].Kind
 	})
+}
 
+func computeTxDepLevels(n int, edges []TxDepEdge) ([]int, int) {
 	// Compute topological levels using longest-path from roots.
 	levels := make([]int, n)
 	for _, e := range edges {
@@ -140,7 +176,11 @@ func BuildTxDepGraph(contexts []TxValidationContext) *TxDepGraph {
 			maxLevel = l
 		}
 	}
+	return levels, maxLevel
+}
 
+func txDepLevelOrder(contexts []TxValidationContext, levels []int) []int {
+	n := len(contexts)
 	// Build level order with lexicographic txid tie-break.
 	order := make([]int, n)
 	for i := range order {
@@ -153,12 +193,5 @@ func BuildTxDepGraph(contexts []TxValidationContext) *TxDepGraph {
 		}
 		return bytes.Compare(contexts[order[a]].Txid[:], contexts[order[b]].Txid[:]) < 0
 	})
-
-	return &TxDepGraph{
-		TxCount:    n,
-		Edges:      edges,
-		Levels:     levels,
-		LevelOrder: order,
-		MaxLevel:   maxLevel,
-	}
+	return order
 }

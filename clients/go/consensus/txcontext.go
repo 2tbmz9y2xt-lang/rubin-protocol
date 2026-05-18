@@ -168,21 +168,14 @@ func collectTxContextExtIDs(
 
 	wanted := make(map[uint16]struct{})
 	for _, entry := range resolvedInputs {
-		if entry.CovenantType != COV_TYPE_CORE_EXT {
-			continue
-		}
-		cd, err := ParseCoreExtCovenantData(entry.CovenantData)
+		extID, ok, err := txContextWantedExtID(entry, blockHeight, coreExtProfiles)
 		if err != nil {
 			return nil, err
 		}
-		profile, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
-		if err != nil {
-			return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
-		}
-		if !ok || !profile.Active || !profile.TxContextEnabled {
+		if !ok {
 			continue
 		}
-		wanted[cd.ExtID] = struct{}{}
+		wanted[extID] = struct{}{}
 	}
 
 	extIDs := make([]uint16, 0, len(wanted))
@@ -191,6 +184,28 @@ func collectTxContextExtIDs(
 	}
 	sort.Slice(extIDs, func(i, j int) bool { return extIDs[i] < extIDs[j] })
 	return extIDs, nil
+}
+
+func txContextWantedExtID(
+	entry UtxoEntry,
+	blockHeight uint64,
+	coreExtProfiles CoreExtProfileProvider,
+) (uint16, bool, error) {
+	if entry.CovenantType != COV_TYPE_CORE_EXT {
+		return 0, false, nil
+	}
+	cd, err := ParseCoreExtCovenantData(entry.CovenantData)
+	if err != nil {
+		return 0, false, err
+	}
+	profile, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
+	if err != nil {
+		return 0, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
+	}
+	if !ok || !profile.Active || !profile.TxContextEnabled {
+		return 0, false, nil
+	}
+	return cd.ExtID, true, nil
 }
 
 func sumTxContextInputValues(resolvedInputs []UtxoEntry, initial u128) (u128, error) {
@@ -227,11 +242,8 @@ func BuildTxContext(
 	blockHeight uint64,
 	coreExtProfiles CoreExtProfileProvider,
 ) (*TxContextBundle, error) {
-	if tx == nil {
-		return nil, txerr(TX_ERR_PARSE, "nil tx")
-	}
-	if len(tx.Inputs) != len(resolvedInputs) {
-		return nil, txerr(TX_ERR_PARSE, "txcontext resolved input count mismatch")
+	if err := validateBuildTxContextInputs(tx, resolvedInputs); err != nil {
+		return nil, err
 	}
 	extIDs, err := collectTxContextExtIDs(resolvedInputs, blockHeight, coreExtProfiles)
 	if err != nil {
@@ -253,6 +265,26 @@ func BuildTxContext(
 		return nil, err
 	}
 
+	return buildTxContextBundle(totalIn, totalOut, blockHeight, extIDs, outputExtIDCache)
+}
+
+func validateBuildTxContextInputs(tx *Tx, resolvedInputs []UtxoEntry) error {
+	if tx == nil {
+		return txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if len(tx.Inputs) != len(resolvedInputs) {
+		return txerr(TX_ERR_PARSE, "txcontext resolved input count mismatch")
+	}
+	return nil
+}
+
+func buildTxContextBundle(
+	totalIn u128,
+	totalOut u128,
+	blockHeight uint64,
+	extIDs []uint16,
+	outputExtIDCache map[uint16][]ExtIDCacheEntry,
+) (*TxContextBundle, error) {
 	bundle := &TxContextBundle{
 		Base: &TxContextBase{
 			TotalIn:  uint128FromInternal(totalIn),
@@ -264,20 +296,27 @@ func BuildTxContext(
 	}
 
 	for _, extID := range extIDs {
-		continuing := &TxContextContinuing{}
-		for _, entry := range outputExtIDCache[extID] {
-			if int(continuing.ContinuingOutputCount) >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
-				return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, fmt.Sprintf("too many continuing outputs for ext_id=%d", extID))
-			}
-			idx := int(continuing.ContinuingOutputCount)
-			continuing.ContinuingOutputs[idx] = TxOutputView{
-				Value:      entry.Value,
-				ExtPayload: cloneTxContextPayload(entry.ExtPayload),
-			}
-			continuing.ContinuingOutputCount++
+		continuing, err := buildTxContextContinuing(extID, outputExtIDCache[extID])
+		if err != nil {
+			return nil, err
 		}
 		bundle.ContinuingByExt[extID] = continuing
 	}
-
 	return bundle, nil
+}
+
+func buildTxContextContinuing(extID uint16, entries []ExtIDCacheEntry) (*TxContextContinuing, error) {
+	continuing := &TxContextContinuing{}
+	for _, entry := range entries {
+		if int(continuing.ContinuingOutputCount) >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
+			return nil, txerr(TX_ERR_COVENANT_TYPE_INVALID, fmt.Sprintf("too many continuing outputs for ext_id=%d", extID))
+		}
+		idx := int(continuing.ContinuingOutputCount)
+		continuing.ContinuingOutputs[idx] = TxOutputView{
+			Value:      entry.Value,
+			ExtPayload: cloneTxContextPayload(entry.ExtPayload),
+		}
+		continuing.ContinuingOutputCount++
+	}
+	return continuing, nil
 }
