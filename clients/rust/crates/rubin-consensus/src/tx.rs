@@ -66,328 +66,14 @@ pub struct DaChunkCore {
 /// and `b[..total_end]` for `wtxid`; this helper only parses wire structure.
 pub(crate) fn parse_tx_without_hashes(b: &[u8]) -> Result<(Tx, usize, usize), TxError> {
     let mut r = Reader::new(b);
-
-    let version = r.read_u32_le()?;
-    if version != TX_WIRE_VERSION {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "unsupported tx version",
-        ));
-    }
-
-    let tx_kind = r.read_u8()?;
-    if tx_kind != 0x00 && tx_kind != 0x01 && tx_kind != 0x02 {
-        return Err(TxError::new(ErrorCode::TxErrParse, "unsupported tx_kind"));
-    }
-
-    let tx_nonce = r.read_u64_le()?;
-
-    let (in_count, _) = read_compact_size(&mut r)?;
-    if in_count > MAX_TX_INPUTS {
-        return Err(TxError::new(ErrorCode::TxErrParse, "input_count overflow"));
-    }
-    let in_count_usize = in_count as usize;
-
-    let mut inputs = Vec::with_capacity(in_count_usize);
-    for _ in 0..in_count_usize {
-        let prev = r.read_bytes(32)?;
-        let mut prev_txid = [0u8; 32];
-        prev_txid.copy_from_slice(prev);
-
-        let prev_vout = r.read_u32_le()?;
-
-        let (script_sig_len, _) = read_compact_size(&mut r)?;
-        if script_sig_len > MAX_SCRIPT_SIG_BYTES {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "script_sig_len overflow",
-            ));
-        }
-        let script_sig_len_usize = script_sig_len as usize;
-        let script_sig = r.read_bytes(script_sig_len_usize)?.to_vec();
-
-        let sequence = r.read_u32_le()?;
-
-        inputs.push(TxInput {
-            prev_txid,
-            prev_vout,
-            script_sig,
-            sequence,
-        });
-    }
-
-    let (out_count, _) = read_compact_size(&mut r)?;
-    if out_count > MAX_TX_OUTPUTS {
-        return Err(TxError::new(ErrorCode::TxErrParse, "output_count overflow"));
-    }
-    let out_count_usize = out_count as usize;
-
-    let mut outputs = Vec::with_capacity(out_count_usize);
-    for _ in 0..out_count_usize {
-        let value = r.read_u64_le()?;
-        let covenant_type = r.read_u16_le()?;
-
-        let (cov_len_u64, _) = read_compact_size(&mut r)?;
-        if cov_len_u64 > usize::MAX as u64 {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "covenant_data_len overflows usize",
-            ));
-        }
-        if cov_len_u64 > MAX_COVENANT_DATA_PER_OUTPUT {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "covenant_data_len exceeds MAX_COVENANT_DATA_PER_OUTPUT",
-            ));
-        }
-        let cov_len = cov_len_u64 as usize;
-        let covenant_data = r.read_bytes(cov_len)?.to_vec();
-
-        outputs.push(TxOutput {
-            value,
-            covenant_type,
-            covenant_data,
-        });
-    }
-
+    let (version, tx_kind, tx_nonce) = parse_tx_prefix(&mut r)?;
+    let inputs = parse_tx_inputs(&mut r)?;
+    let outputs = parse_tx_outputs(&mut r)?;
     let locktime = r.read_u32_le()?;
-
-    let mut da_commit_core: Option<DaCommitCore> = None;
-    let mut da_chunk_core: Option<DaChunkCore> = None;
-    match tx_kind {
-        0x01 => {
-            let da_id_bytes = r.read_bytes(32)?;
-            let mut da_id = [0u8; 32];
-            da_id.copy_from_slice(da_id_bytes);
-
-            let chunk_count = r.read_u16_le()?;
-            if chunk_count == 0 || (chunk_count as u64) > MAX_DA_CHUNK_COUNT {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "chunk_count out of range for tx_kind=0x01",
-                ));
-            }
-
-            let retl_domain_id_bytes = r.read_bytes(32)?;
-            let mut retl_domain_id = [0u8; 32];
-            retl_domain_id.copy_from_slice(retl_domain_id_bytes);
-
-            let batch_number = r.read_u64_le()?;
-
-            let tx_data_root_bytes = r.read_bytes(32)?;
-            let mut tx_data_root = [0u8; 32];
-            tx_data_root.copy_from_slice(tx_data_root_bytes);
-
-            let state_root_bytes = r.read_bytes(32)?;
-            let mut state_root = [0u8; 32];
-            state_root.copy_from_slice(state_root_bytes);
-
-            let withdrawals_root_bytes = r.read_bytes(32)?;
-            let mut withdrawals_root = [0u8; 32];
-            withdrawals_root.copy_from_slice(withdrawals_root_bytes);
-
-            let batch_sig_suite = r.read_u8()?;
-
-            let (batch_sig_len_u64, _) = read_compact_size(&mut r)?;
-            if batch_sig_len_u64 > MAX_DA_MANIFEST_BYTES_PER_TX
-                || batch_sig_len_u64 > usize::MAX as u64
-            {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "batch_sig_len overflow",
-                ));
-            }
-            let batch_sig = r.read_bytes(batch_sig_len_u64 as usize)?.to_vec();
-
-            da_commit_core = Some(DaCommitCore {
-                da_id,
-                chunk_count,
-                retl_domain_id,
-                batch_number,
-                tx_data_root,
-                state_root,
-                withdrawals_root,
-                batch_sig_suite,
-                batch_sig,
-            });
-        }
-        0x02 => {
-            let da_id_bytes = r.read_bytes(32)?;
-            let mut da_id = [0u8; 32];
-            da_id.copy_from_slice(da_id_bytes);
-
-            let chunk_index = r.read_u16_le()?;
-            if (chunk_index as u64) >= MAX_DA_CHUNK_COUNT {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "chunk_index out of range for tx_kind=0x02",
-                ));
-            }
-
-            let chunk_hash_bytes = r.read_bytes(32)?;
-            let mut chunk_hash = [0u8; 32];
-            chunk_hash.copy_from_slice(chunk_hash_bytes);
-
-            da_chunk_core = Some(DaChunkCore {
-                da_id,
-                chunk_index,
-                chunk_hash,
-            });
-        }
-        _ => {}
-    }
-
+    let (da_commit_core, da_chunk_core) = parse_da_core(&mut r, tx_kind)?;
     let core_end = r.offset();
-
-    // Witness section.
-    let (witness_count_u64, witness_count_varint_bytes) = read_compact_size(&mut r)?;
-    if witness_count_u64 > MAX_WITNESS_ITEMS {
-        return Err(TxError::new(
-            ErrorCode::TxErrWitnessOverflow,
-            "witness_count overflow",
-        ));
-    }
-    let witness_count = witness_count_u64 as usize;
-
-    let mut witness_bytes = witness_count_varint_bytes;
-    let mut witness = Vec::with_capacity(witness_count);
-
-    for _ in 0..witness_count {
-        let suite_id = r.read_u8()?;
-        witness_bytes += 1;
-
-        let (pub_len_u64, pub_len_varint_bytes) = read_compact_size(&mut r)?;
-        witness_bytes += pub_len_varint_bytes;
-        if pub_len_u64 > usize::MAX as u64 {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "pubkey_length overflows usize",
-            ));
-        }
-        let pub_len = pub_len_u64 as usize;
-        let pubkey = r.read_bytes(pub_len)?.to_vec();
-        witness_bytes += pub_len;
-
-        let (sig_len_u64, sig_len_varint_bytes) = read_compact_size(&mut r)?;
-        witness_bytes += sig_len_varint_bytes;
-        if sig_len_u64 > usize::MAX as u64 {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "sig_length overflows usize",
-            ));
-        }
-        let sig_len = sig_len_u64 as usize;
-        let signature = r.read_bytes(sig_len)?.to_vec();
-        witness_bytes += sig_len;
-
-        if suite_id != SUITE_ID_SENTINEL && sig_len == 0 {
-            return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "missing sighash_type byte",
-            ));
-        }
-
-        if witness_bytes > MAX_WITNESS_BYTES_PER_TX {
-            return Err(TxError::new(
-                ErrorCode::TxErrWitnessOverflow,
-                "witness bytes overflow",
-            ));
-        }
-
-        match suite_id {
-            SUITE_ID_SENTINEL => {
-                let ok = if pub_len == 0 && sig_len == 0 {
-                    true
-                } else if pub_len == 32 {
-                    if sig_len == 1 {
-                        signature.first() == Some(&0x01)
-                    } else if sig_len >= 3 {
-                        if signature.first() != Some(&0x00) {
-                            false
-                        } else {
-                            let pre_len = u16::from_le_bytes(
-                                signature[1..3]
-                                    .try_into()
-                                    .expect("signature[1..3] is 2 bytes"),
-                            ) as usize;
-                            if (pre_len as u64) < MIN_HTLC_PREIMAGE_BYTES
-                                || pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES
-                            {
-                                false
-                            } else {
-                                sig_len == 3 + pre_len
-                            }
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !ok {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrParse,
-                        "non-canonical sentinel witness item",
-                    ));
-                }
-            }
-            SUITE_ID_ML_DSA_87
-                if !(pub_len_u64 == ML_DSA_87_PUBKEY_BYTES
-                    && sig_len_u64 == ML_DSA_87_SIG_BYTES + 1) =>
-            {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigNoncanonical,
-                    "non-canonical ML-DSA witness item lengths",
-                ));
-            }
-            SUITE_ID_ML_DSA_87 => {}
-            _ => {}
-        }
-
-        witness.push(WitnessItem {
-            suite_id,
-            pubkey,
-            signature,
-        });
-    }
-
-    // DA payload.
-    let (da_len_u64, _) = read_compact_size(&mut r)?;
-    let mut da_payload: Vec<u8> = Vec::new();
-    match tx_kind {
-        0x00 => {
-            if da_len_u64 != 0 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "da_payload_len must be 0 for tx_kind=0x00",
-                ));
-            }
-        }
-        0x01 => {
-            if da_len_u64 > MAX_DA_MANIFEST_BYTES_PER_TX || da_len_u64 > usize::MAX as u64 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "da_payload_len out of range for tx_kind=0x01",
-                ));
-            }
-            if da_len_u64 != 0 {
-                da_payload = r.read_bytes(da_len_u64 as usize)?.to_vec();
-            }
-        }
-        0x02 => {
-            if da_len_u64 == 0 || da_len_u64 > CHUNK_BYTES || da_len_u64 > usize::MAX as u64 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "da_payload_len out of range for tx_kind=0x02",
-                ));
-            }
-            da_payload = r.read_bytes(da_len_u64 as usize)?.to_vec();
-        }
-        _ => {
-            return Err(TxError::new(ErrorCode::TxErrParse, "unsupported tx_kind"));
-        }
-    }
+    let witness = parse_witnesses(&mut r)?;
+    let da_payload = parse_da_payload(&mut r, tx_kind)?;
     let total_end = r.offset();
 
     let tx = Tx {
@@ -404,6 +90,361 @@ pub(crate) fn parse_tx_without_hashes(b: &[u8]) -> Result<(Tx, usize, usize), Tx
     };
 
     Ok((tx, core_end, total_end))
+}
+
+fn parse_tx_prefix(r: &mut Reader<'_>) -> Result<(u32, u8, u64), TxError> {
+    let version = r.read_u32_le()?;
+    if version != TX_WIRE_VERSION {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "unsupported tx version",
+        ));
+    }
+    let tx_kind = r.read_u8()?;
+    if tx_kind != 0x00 && tx_kind != 0x01 && tx_kind != 0x02 {
+        return Err(TxError::new(ErrorCode::TxErrParse, "unsupported tx_kind"));
+    }
+    let tx_nonce = r.read_u64_le()?;
+    Ok((version, tx_kind, tx_nonce))
+}
+
+fn parse_tx_inputs(r: &mut Reader<'_>) -> Result<Vec<TxInput>, TxError> {
+    let (in_count, _) = read_compact_size(r)?;
+    if in_count > MAX_TX_INPUTS {
+        return Err(TxError::new(ErrorCode::TxErrParse, "input_count overflow"));
+    }
+    let mut inputs = Vec::with_capacity(in_count as usize);
+    for _ in 0..in_count as usize {
+        inputs.push(parse_tx_input(r)?);
+    }
+    Ok(inputs)
+}
+
+fn parse_tx_input(r: &mut Reader<'_>) -> Result<TxInput, TxError> {
+    let prev_txid = read_32(r)?;
+    let prev_vout = r.read_u32_le()?;
+    let (script_sig_len, _) = read_compact_size(r)?;
+    if script_sig_len > MAX_SCRIPT_SIG_BYTES {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "script_sig_len overflow",
+        ));
+    }
+    let script_sig = r.read_bytes(script_sig_len as usize)?.to_vec();
+    let sequence = r.read_u32_le()?;
+    Ok(TxInput {
+        prev_txid,
+        prev_vout,
+        script_sig,
+        sequence,
+    })
+}
+
+fn parse_tx_outputs(r: &mut Reader<'_>) -> Result<Vec<TxOutput>, TxError> {
+    let (out_count, _) = read_compact_size(r)?;
+    if out_count > MAX_TX_OUTPUTS {
+        return Err(TxError::new(ErrorCode::TxErrParse, "output_count overflow"));
+    }
+    let mut outputs = Vec::with_capacity(out_count as usize);
+    for _ in 0..out_count as usize {
+        outputs.push(parse_tx_output(r)?);
+    }
+    Ok(outputs)
+}
+
+fn parse_tx_output(r: &mut Reader<'_>) -> Result<TxOutput, TxError> {
+    let value = r.read_u64_le()?;
+    let covenant_type = r.read_u16_le()?;
+    let (cov_len_u64, _) = read_compact_size(r)?;
+    if cov_len_u64 > usize::MAX as u64 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "covenant_data_len overflows usize",
+        ));
+    }
+    if cov_len_u64 > MAX_COVENANT_DATA_PER_OUTPUT {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "covenant_data_len exceeds MAX_COVENANT_DATA_PER_OUTPUT",
+        ));
+    }
+    let covenant_data = r.read_bytes(cov_len_u64 as usize)?.to_vec();
+    Ok(TxOutput {
+        value,
+        covenant_type,
+        covenant_data,
+    })
+}
+
+fn parse_da_core(
+    r: &mut Reader<'_>,
+    tx_kind: u8,
+) -> Result<(Option<DaCommitCore>, Option<DaChunkCore>), TxError> {
+    match tx_kind {
+        0x01 => Ok((Some(parse_da_commit_core(r)?), None)),
+        0x02 => Ok((None, Some(parse_da_chunk_core(r)?))),
+        _ => Ok((None, None)),
+    }
+}
+
+fn parse_da_commit_core(r: &mut Reader<'_>) -> Result<DaCommitCore, TxError> {
+    let da_id = read_32(r)?;
+    let chunk_count = read_da_commit_chunk_count(r)?;
+    let fields = read_da_commit_fields(r)?;
+    let batch_sig_suite = r.read_u8()?;
+    let batch_sig = read_da_batch_sig(r)?;
+    Ok(DaCommitCore {
+        da_id,
+        chunk_count,
+        retl_domain_id: fields.retl_domain_id,
+        batch_number: fields.batch_number,
+        tx_data_root: fields.tx_data_root,
+        state_root: fields.state_root,
+        withdrawals_root: fields.withdrawals_root,
+        batch_sig_suite,
+        batch_sig,
+    })
+}
+
+struct DaCommitFields {
+    retl_domain_id: [u8; 32],
+    batch_number: u64,
+    tx_data_root: [u8; 32],
+    state_root: [u8; 32],
+    withdrawals_root: [u8; 32],
+}
+
+fn read_da_commit_chunk_count(r: &mut Reader<'_>) -> Result<u16, TxError> {
+    let chunk_count = r.read_u16_le()?;
+    if chunk_count == 0 || (chunk_count as u64) > MAX_DA_CHUNK_COUNT {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "chunk_count out of range for tx_kind=0x01",
+        ));
+    }
+    Ok(chunk_count)
+}
+
+fn read_da_commit_fields(r: &mut Reader<'_>) -> Result<DaCommitFields, TxError> {
+    Ok(DaCommitFields {
+        retl_domain_id: read_32(r)?,
+        batch_number: r.read_u64_le()?,
+        tx_data_root: read_32(r)?,
+        state_root: read_32(r)?,
+        withdrawals_root: read_32(r)?,
+    })
+}
+
+fn read_da_batch_sig(r: &mut Reader<'_>) -> Result<Vec<u8>, TxError> {
+    let (batch_sig_len_u64, _) = read_compact_size(r)?;
+    if batch_sig_len_u64 > MAX_DA_MANIFEST_BYTES_PER_TX || batch_sig_len_u64 > usize::MAX as u64 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "batch_sig_len overflow",
+        ));
+    }
+    Ok(r.read_bytes(batch_sig_len_u64 as usize)?.to_vec())
+}
+
+fn parse_da_chunk_core(r: &mut Reader<'_>) -> Result<DaChunkCore, TxError> {
+    let da_id = read_32(r)?;
+    let chunk_index = r.read_u16_le()?;
+    if (chunk_index as u64) >= MAX_DA_CHUNK_COUNT {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "chunk_index out of range for tx_kind=0x02",
+        ));
+    }
+    let chunk_hash = read_32(r)?;
+    Ok(DaChunkCore {
+        da_id,
+        chunk_index,
+        chunk_hash,
+    })
+}
+
+fn parse_witnesses(r: &mut Reader<'_>) -> Result<Vec<WitnessItem>, TxError> {
+    let (witness_count_u64, witness_count_varint_bytes) = read_compact_size(r)?;
+    if witness_count_u64 > MAX_WITNESS_ITEMS {
+        return Err(TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "witness_count overflow",
+        ));
+    }
+    let mut witness_bytes = witness_count_varint_bytes;
+    let mut witness = Vec::with_capacity(witness_count_u64 as usize);
+    for _ in 0..witness_count_u64 as usize {
+        witness.push(parse_witness_item(r, &mut witness_bytes)?);
+    }
+    Ok(witness)
+}
+
+fn parse_witness_item(
+    r: &mut Reader<'_>,
+    witness_bytes: &mut usize,
+) -> Result<WitnessItem, TxError> {
+    let suite_id = r.read_u8()?;
+    *witness_bytes += 1;
+    let (pub_len_u64, pubkey) =
+        read_witness_bytes(r, witness_bytes, "pubkey_length overflows usize")?;
+    let (sig_len_u64, signature) =
+        read_witness_bytes(r, witness_bytes, "sig_length overflows usize")?;
+    validate_witness_item_ordered(
+        suite_id,
+        pub_len_u64,
+        sig_len_u64,
+        *witness_bytes,
+        &signature,
+    )?;
+    Ok(WitnessItem {
+        suite_id,
+        pubkey,
+        signature,
+    })
+}
+
+fn read_witness_bytes(
+    r: &mut Reader<'_>,
+    witness_bytes: &mut usize,
+    overflow_msg: &'static str,
+) -> Result<(u64, Vec<u8>), TxError> {
+    let (len_u64, len_varint_bytes) = read_compact_size(r)?;
+    *witness_bytes += len_varint_bytes;
+    let len = checked_usize_len(len_u64, overflow_msg)?;
+    let bytes = r.read_bytes(len)?.to_vec();
+    *witness_bytes += len;
+    Ok((len_u64, bytes))
+}
+
+fn checked_usize_len(len: u64, msg: &'static str) -> Result<usize, TxError> {
+    if len > usize::MAX as u64 {
+        return Err(TxError::new(ErrorCode::TxErrParse, msg));
+    }
+    Ok(len as usize)
+}
+
+fn validate_witness_item_ordered(
+    suite_id: u8,
+    pub_len_u64: u64,
+    sig_len_u64: u64,
+    witness_bytes: usize,
+    signature: &[u8],
+) -> Result<(), TxError> {
+    if suite_id != SUITE_ID_SENTINEL && sig_len_u64 == 0 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "missing sighash_type byte",
+        ));
+    }
+    if witness_bytes > MAX_WITNESS_BYTES_PER_TX {
+        return Err(TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "witness bytes overflow",
+        ));
+    }
+    validate_witness_item_shape(suite_id, pub_len_u64, sig_len_u64, signature)
+}
+
+fn validate_witness_item_shape(
+    suite_id: u8,
+    pub_len_u64: u64,
+    sig_len_u64: u64,
+    signature: &[u8],
+) -> Result<(), TxError> {
+    match suite_id {
+        SUITE_ID_SENTINEL => validate_sentinel_witness(pub_len_u64 as usize, signature),
+        SUITE_ID_ML_DSA_87
+            if !(pub_len_u64 == ML_DSA_87_PUBKEY_BYTES
+                && sig_len_u64 == ML_DSA_87_SIG_BYTES + 1) =>
+        {
+            Err(TxError::new(
+                ErrorCode::TxErrSigNoncanonical,
+                "non-canonical ML-DSA witness item lengths",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_sentinel_witness(pub_len: usize, signature: &[u8]) -> Result<(), TxError> {
+    if is_canonical_sentinel_witness(pub_len, signature) {
+        return Ok(());
+    }
+    Err(TxError::new(
+        ErrorCode::TxErrParse,
+        "non-canonical sentinel witness item",
+    ))
+}
+
+fn is_canonical_sentinel_witness(pub_len: usize, signature: &[u8]) -> bool {
+    match (pub_len, signature.len()) {
+        (0, 0) => true,
+        (32, 1) => signature.first() == Some(&0x01),
+        (32, sig_len) if sig_len >= 3 => is_canonical_htlc_claim_signature(signature),
+        _ => false,
+    }
+}
+
+fn is_canonical_htlc_claim_signature(signature: &[u8]) -> bool {
+    if signature.first() != Some(&0x00) {
+        return false;
+    }
+    let Some(len_bytes) = signature.get(1..3) else {
+        return false;
+    };
+    let Ok(len_bytes) = <[u8; 2]>::try_from(len_bytes) else {
+        return false;
+    };
+    let pre_len = u16::from_le_bytes(len_bytes) as usize;
+    (MIN_HTLC_PREIMAGE_BYTES..=MAX_HTLC_PREIMAGE_BYTES).contains(&(pre_len as u64))
+        && signature.len() == 3 + pre_len
+}
+
+fn parse_da_payload(r: &mut Reader<'_>, tx_kind: u8) -> Result<Vec<u8>, TxError> {
+    let (da_len_u64, _) = read_compact_size(r)?;
+    match tx_kind {
+        0x00 => parse_standard_da_payload(da_len_u64),
+        0x01 => parse_da_commit_payload(r, da_len_u64),
+        0x02 => parse_da_chunk_payload(r, da_len_u64),
+        _ => Err(TxError::new(ErrorCode::TxErrParse, "unsupported tx_kind")),
+    }
+}
+
+fn parse_standard_da_payload(da_len_u64: u64) -> Result<Vec<u8>, TxError> {
+    if da_len_u64 != 0 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "da_payload_len must be 0 for tx_kind=0x00",
+        ));
+    }
+    Ok(Vec::new())
+}
+
+fn parse_da_commit_payload(r: &mut Reader<'_>, da_len_u64: u64) -> Result<Vec<u8>, TxError> {
+    if da_len_u64 > MAX_DA_MANIFEST_BYTES_PER_TX || da_len_u64 > usize::MAX as u64 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "da_payload_len out of range for tx_kind=0x01",
+        ));
+    }
+    Ok(r.read_bytes(da_len_u64 as usize)?.to_vec())
+}
+
+fn parse_da_chunk_payload(r: &mut Reader<'_>, da_len_u64: u64) -> Result<Vec<u8>, TxError> {
+    if da_len_u64 == 0 || da_len_u64 > CHUNK_BYTES || da_len_u64 > usize::MAX as u64 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "da_payload_len out of range for tx_kind=0x02",
+        ));
+    }
+    Ok(r.read_bytes(da_len_u64 as usize)?.to_vec())
+}
+
+fn read_32(r: &mut Reader<'_>) -> Result<[u8; 32], TxError> {
+    let bytes = r.read_bytes(32)?;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(bytes);
+    Ok(out)
 }
 
 pub fn parse_tx(b: &[u8]) -> Result<(Tx, [u8; 32], [u8; 32], usize), TxError> {
