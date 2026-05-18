@@ -550,6 +550,21 @@ func TestLoadLiveBindingPolicyRejectsMalformedAndTrailingJSON(t *testing.T) {
 			want: `live_binding_policy: parse embedded artifact: json: unknown field "bogus"`,
 		},
 		{
+			name: "wrong_field_type",
+			raw: `{
+				"version": 1,
+				"entries": [{
+					"alg_name": "ML-DSA-87",
+					"pubkey_len": "2592",
+					"sig_len": 4627,
+					"runtime_binding": "openssl_digest32_v1",
+					"openssl_alg": "ML-DSA-87",
+					"core_ext_live_binding_name": "verify_sig_ext_openssl_digest32_v1"
+				}]
+			}`,
+			want: `live_binding_policy: parse embedded artifact: json: cannot unmarshal string into Go struct field liveBindingPolicyEntryJSON.entries.pubkey_len of type int`,
+		},
+		{
 			name: "trailing_tokens",
 			raw: `{
 				"version": 1,
