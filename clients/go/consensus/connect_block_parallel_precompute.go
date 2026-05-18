@@ -57,6 +57,13 @@ type TxValidationContext struct {
 	Fee uint64
 }
 
+type precomputeTxInputs struct {
+	ResolvedInputs    []UtxoEntry
+	InputOutpoints    []Outpoint
+	TotalWitnessSlots int
+	SumIn             u128
+}
+
 // PrecomputeTxContexts builds an immutable TxValidationContext slice for all
 // non-coinbase transactions in a parsed block. It resolves inputs against the
 // provided block-start UTXO snapshot, computes witness slice boundaries using
@@ -87,154 +94,221 @@ func PrecomputeTxContexts(
 		return nil, nil // coinbase-only block
 	}
 
-	// Build a working UTXO overlay that tracks same-block produced outputs.
-	// We start from the immutable snapshot and add outputs created by earlier
-	// transactions in the same block. The original snapshot is never modified.
+	overlay := clonePrecomputeOverlay(utxoSnapshot)
+	results := make([]TxValidationContext, txCount)
+
+	for i := 1; i < len(pb.Txs); i++ {
+		ctx, err := precomputeTxContext(i, pb.Txs[i], pb.Txids[i], overlay, blockHeight)
+		if err != nil {
+			return nil, err
+		}
+		results[i-1] = ctx
+		updatePrecomputeOverlay(overlay, ctx, blockHeight)
+	}
+
+	return results, nil
+}
+
+func clonePrecomputeOverlay(utxoSnapshot map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
 	overlay := make(map[Outpoint]UtxoEntry, len(utxoSnapshot))
 	for k, v := range utxoSnapshot {
 		overlay[k] = v
 	}
+	return overlay
+}
 
-	results := make([]TxValidationContext, txCount)
+func precomputeTxContext(
+	txIndex int,
+	tx *Tx,
+	txid [32]byte,
+	overlay map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+) (TxValidationContext, error) {
+	if tx == nil {
+		return TxValidationContext{}, txerr(TX_ERR_PARSE, "nil tx")
+	}
+	if len(tx.Inputs) == 0 {
+		return TxValidationContext{}, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	}
 
-	for i := 1; i < len(pb.Txs); i++ {
-		// Witness cursor is per-transaction (reset to 0 for each tx),
-		// matching the sequential path in applyNonCoinbaseTxBasicWorkQ.
-		witnessCursor := 0
-		tx := pb.Txs[i]
-		txid := pb.Txids[i]
-		idx := i - 1 // 0-based index into results
+	inputs, err := collectPrecomputeTxInputs(tx, overlay, blockHeight)
+	if err != nil {
+		return TxValidationContext{}, err
+	}
 
-		if tx == nil {
-			return nil, txerr(TX_ERR_PARSE, "nil tx")
-		}
-		if len(tx.Inputs) == 0 {
-			return nil, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
-		}
+	witnessStart, witnessEnd, err := precomputeWitnessBounds(tx, inputs.TotalWitnessSlots)
+	if err != nil {
+		return TxValidationContext{}, err
+	}
 
-		// Resolve inputs and compute witness boundaries.
-		resolvedInputs := make([]UtxoEntry, len(tx.Inputs))
-		inputOutpoints := make([]Outpoint, len(tx.Inputs))
-		seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
-		var zeroTxid [32]byte
-		totalWitnessSlots := 0
+	fee, err := computePrecomputeFee(inputs.SumIn, tx.Outputs)
+	if err != nil {
+		return TxValidationContext{}, err
+	}
 
-		var sumIn u128
-		for j, in := range tx.Inputs {
-			// Basic input validation (matches sequential path).
-			if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
-				return nil, txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
-			}
-			op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-			if _, exists := seenInputs[op]; exists {
-				return nil, txerr(TX_ERR_PARSE, "duplicate input outpoint")
-			}
-			seenInputs[op] = struct{}{}
+	sighashCache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		return TxValidationContext{}, err
+	}
 
-			entry, ok := overlay[op]
-			if !ok {
-				return nil, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
-			}
+	return TxValidationContext{
+		TxIndex:        txIndex,
+		Tx:             tx,
+		Txid:           txid,
+		ResolvedInputs: inputs.ResolvedInputs,
+		WitnessStart:   witnessStart,
+		WitnessEnd:     witnessEnd,
+		SighashCache:   sighashCache,
+		InputOutpoints: inputs.InputOutpoints,
+		Fee:            fee,
+	}, nil
+}
 
-			// Early-reject immature coinbase outputs (defense-in-depth;
-			// also checked downstream in the sequential validation path).
-			if entry.CreatedByCoinbase && (blockHeight < entry.CreationHeight || blockHeight-entry.CreationHeight < COINBASE_MATURITY) {
-				return nil, txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
-			}
+func collectPrecomputeTxInputs(
+	tx *Tx,
+	overlay map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+) (precomputeTxInputs, error) {
+	out := precomputeTxInputs{
+		ResolvedInputs: make([]UtxoEntry, len(tx.Inputs)),
+		InputOutpoints: make([]Outpoint, len(tx.Inputs)),
+	}
+	seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
 
-			if entry.CovenantType == COV_TYPE_ANCHOR || entry.CovenantType == COV_TYPE_DA_COMMIT {
-				return nil, txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
-			}
-
-			slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
-			if err != nil {
-				return nil, err
-			}
-			if slots <= 0 {
-				return nil, txerr(TX_ERR_PARSE, "invalid witness slots")
-			}
-			newTotal, err3 := addWitnessSlots(totalWitnessSlots, slots)
-			if err3 != nil {
-				return nil, err3
-			}
-			totalWitnessSlots = newTotal
-
-			resolvedInputs[j] = entry
-			inputOutpoints[j] = op
-			var err2 error
-			sumIn, err2 = addU64ToU128(sumIn, entry.Value)
-			if err2 != nil {
-				return nil, err2
-			}
-		}
-
-		// Witness boundary check.
-		witnessStart := witnessCursor
-		witnessEnd := witnessCursor + totalWitnessSlots
-		if witnessEnd > len(tx.Witness) {
-			return nil, txerr(TX_ERR_PARSE, "witness underflow")
-		}
-		witnessCursor = witnessEnd
-		if witnessCursor != len(tx.Witness) {
-			return nil, txerr(TX_ERR_PARSE, "witness_count mismatch")
-		}
-
-		// Compute fee (sumIn - sumOut), matching sequential path value conservation.
-		var sumOut u128
-		for _, out := range tx.Outputs {
-			var err2 error
-			sumOut, err2 = addU64ToU128(sumOut, out.Value)
-			if err2 != nil {
-				return nil, err2
-			}
-		}
-		if cmpU128(sumIn, sumOut) < 0 {
-			return nil, txerr(TX_ERR_VALUE_CONSERVATION, "outputs exceed inputs")
-		}
-		feeBig, err := subU128(sumIn, sumOut)
+	for j, in := range tx.Inputs {
+		entry, op, slots, err := resolvePrecomputeInput(in, seenInputs, overlay, blockHeight)
 		if err != nil {
-			return nil, err
+			return precomputeTxInputs{}, err
 		}
-		if feeBig.hi != 0 {
-			return nil, txerr(TX_ERR_VALUE_CONSERVATION, "fee overflow u64")
+		if out.TotalWitnessSlots, err = addWitnessSlots(out.TotalWitnessSlots, slots); err != nil {
+			return precomputeTxInputs{}, err
 		}
-
-		// Precompute sighash cache.
-		sighashCache, err := NewSighashV1PrehashCache(tx)
-		if err != nil {
-			return nil, err
-		}
-
-		results[idx] = TxValidationContext{
-			TxIndex:        i,
-			Tx:             tx,
-			Txid:           txid,
-			ResolvedInputs: resolvedInputs,
-			WitnessStart:   witnessStart,
-			WitnessEnd:     witnessEnd,
-			SighashCache:   sighashCache,
-			InputOutpoints: inputOutpoints,
-			Fee:            feeBig.lo,
-		}
-
-		// Track same-block outputs: remove spent UTXOs, add created outputs.
-		// This ensures later transactions can resolve parent-child dependencies.
-		for _, op := range inputOutpoints {
-			delete(overlay, op)
-		}
-		for j, out := range tx.Outputs {
-			if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
-				continue
-			}
-			op := Outpoint{Txid: txid, Vout: uint32(j)}
-			overlay[op] = UtxoEntry{
-				Value:          out.Value,
-				CovenantType:   out.CovenantType,
-				CovenantData:   append([]byte(nil), out.CovenantData...),
-				CreationHeight: blockHeight,
-			}
+		out.ResolvedInputs[j] = entry
+		out.InputOutpoints[j] = op
+		if out.SumIn, err = addU64ToU128(out.SumIn, entry.Value); err != nil {
+			return precomputeTxInputs{}, err
 		}
 	}
 
-	return results, nil
+	return out, nil
+}
+
+func resolvePrecomputeInput(
+	in TxInput,
+	seenInputs map[Outpoint]struct{},
+	overlay map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+) (UtxoEntry, Outpoint, int, error) {
+	var zeroTxid [32]byte
+	if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
+		return UtxoEntry{}, Outpoint{}, 0, txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+	}
+
+	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+	if err := rememberPrecomputeInput(op, seenInputs); err != nil {
+		return UtxoEntry{}, Outpoint{}, 0, err
+	}
+
+	entry, ok := overlay[op]
+	if !ok {
+		return UtxoEntry{}, Outpoint{}, 0, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+	}
+	if err := validatePrecomputeEntry(entry, blockHeight); err != nil {
+		return UtxoEntry{}, Outpoint{}, 0, err
+	}
+
+	slots, err := precomputeWitnessSlots(entry)
+	if err != nil {
+		return UtxoEntry{}, Outpoint{}, 0, err
+	}
+	return entry, op, slots, nil
+}
+
+func rememberPrecomputeInput(op Outpoint, seenInputs map[Outpoint]struct{}) error {
+	if _, exists := seenInputs[op]; exists {
+		return txerr(TX_ERR_PARSE, "duplicate input outpoint")
+	}
+	seenInputs[op] = struct{}{}
+	return nil
+}
+
+func validatePrecomputeEntry(entry UtxoEntry, blockHeight uint64) error {
+	if entry.CreatedByCoinbase && (blockHeight < entry.CreationHeight || blockHeight-entry.CreationHeight < COINBASE_MATURITY) {
+		return txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
+	}
+	if entry.CovenantType == COV_TYPE_ANCHOR || entry.CovenantType == COV_TYPE_DA_COMMIT {
+		return txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
+	}
+	return nil
+}
+
+func precomputeWitnessSlots(entry UtxoEntry) (int, error) {
+	slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
+	if err != nil {
+		return 0, err
+	}
+	if slots <= 0 {
+		return 0, txerr(TX_ERR_PARSE, "invalid witness slots")
+	}
+	return slots, nil
+}
+
+func precomputeWitnessBounds(tx *Tx, totalWitnessSlots int) (int, int, error) {
+	// Witness cursor is per-transaction (reset to 0 for each tx), matching
+	// the sequential path in applyNonCoinbaseTxBasicWorkQ.
+	witnessCursor := 0
+	witnessStart := witnessCursor
+	witnessEnd := witnessCursor + totalWitnessSlots
+	if witnessEnd > len(tx.Witness) {
+		return 0, 0, txerr(TX_ERR_PARSE, "witness underflow")
+	}
+	witnessCursor = witnessEnd
+	if witnessCursor != len(tx.Witness) {
+		return 0, 0, txerr(TX_ERR_PARSE, "witness_count mismatch")
+	}
+	return witnessStart, witnessEnd, nil
+}
+
+func computePrecomputeFee(sumIn u128, outputs []TxOutput) (uint64, error) {
+	var sumOut u128
+	for _, out := range outputs {
+		var err error
+		sumOut, err = addU64ToU128(sumOut, out.Value)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if cmpU128(sumIn, sumOut) < 0 {
+		return 0, txerr(TX_ERR_VALUE_CONSERVATION, "outputs exceed inputs")
+	}
+	feeBig, err := subU128(sumIn, sumOut)
+	if err != nil {
+		return 0, err
+	}
+	if feeBig.hi != 0 {
+		return 0, txerr(TX_ERR_VALUE_CONSERVATION, "fee overflow u64")
+	}
+	return feeBig.lo, nil
+}
+
+func updatePrecomputeOverlay(
+	overlay map[Outpoint]UtxoEntry,
+	ctx TxValidationContext,
+	blockHeight uint64,
+) {
+	for _, op := range ctx.InputOutpoints {
+		delete(overlay, op)
+	}
+	for j, out := range ctx.Tx.Outputs {
+		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
+			continue
+		}
+		op := Outpoint{Txid: ctx.Txid, Vout: uint32(j)}
+		overlay[op] = UtxoEntry{
+			Value:          out.Value,
+			CovenantType:   out.CovenantType,
+			CovenantData:   append([]byte(nil), out.CovenantData...),
+			CreationHeight: blockHeight,
+		}
+	}
 }
