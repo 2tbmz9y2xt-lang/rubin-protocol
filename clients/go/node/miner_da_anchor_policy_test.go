@@ -43,6 +43,103 @@ func daCommitTxBytesForMinerPolicyTest(txNonce uint64, manifest []byte) []byte {
 	return b
 }
 
+func minerMasterSwitchAnchorTx(t *testing.T, marker byte) (*consensus.Tx, map[consensus.Outpoint]consensus.UtxoEntry) {
+	t.Helper()
+	var prev [32]byte
+	prev[0] = marker
+	var anchor [32]byte
+	anchor[0] = marker
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x00,
+		TxNonce: uint64(marker),
+		Inputs:  []consensus.TxInput{{PrevTxid: prev, PrevVout: 0}},
+		Outputs: []consensus.TxOutput{{
+			Value:        0,
+			CovenantType: consensus.COV_TYPE_ANCHOR,
+			CovenantData: anchor[:],
+		}},
+	}
+	if _, _, _, err := consensus.TxWeightAndStats(tx); err != nil {
+		t.Fatalf("TxWeightAndStats: %v", err)
+	}
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: testP2PKCovenantData(marker),
+		},
+	}
+	return tx, utxos
+}
+
+func requireMinerCandidateReject(t *testing.T, cfg MinerConfig, tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, wantReject bool, wantNextDa uint64) {
+	t.Helper()
+	reject, nextDa, err := (&Miner{cfg: cfg}).rejectCandidate(tx, utxos, 0, 0)
+	if err != nil {
+		t.Fatalf("rejectCandidate: %v", err)
+	}
+	if reject != wantReject {
+		t.Fatalf("reject=%v want %v", reject, wantReject)
+	}
+	if nextDa != wantNextDa {
+		t.Fatalf("nextDa=%d want %d", nextDa, wantNextDa)
+	}
+}
+
+func TestMinerDaAnchorMasterSwitchOffIgnoresAnchorSubflag(t *testing.T) {
+	tx, utxos := minerMasterSwitchAnchorTx(t, 0x71)
+	cfg := DefaultMinerConfig()
+	cfg.PolicyDaAnchorAntiAbuse = false
+	cfg.PolicyRejectNonCoinbaseAnchorOutputs = true
+
+	requireMinerCandidateReject(t, cfg, tx, utxos, false, 0)
+}
+
+func TestMinerDaAnchorMasterSwitchOnRejectsNonCoinbaseAnchorWhenSubflagOn(t *testing.T) {
+	tx, utxos := minerMasterSwitchAnchorTx(t, 0x72)
+	cfg := DefaultMinerConfig()
+	cfg.PolicyDaAnchorAntiAbuse = true
+	cfg.PolicyRejectNonCoinbaseAnchorOutputs = true
+
+	requireMinerCandidateReject(t, cfg, tx, utxos, true, 0)
+}
+
+func TestMinerDaAnchorMasterSwitchOnAllowsAnchorWhenSubflagOff(t *testing.T) {
+	tx, utxos := minerMasterSwitchAnchorTx(t, 0x73)
+	cfg := DefaultMinerConfig()
+	cfg.PolicyDaAnchorAntiAbuse = true
+	cfg.PolicyRejectNonCoinbaseAnchorOutputs = false
+
+	requireMinerCandidateReject(t, cfg, tx, utxos, false, 0)
+
+	daTx, daUtxos, _ := daTestTx(t, 0x74, 1_000_000, 900_000, 11)
+	cfg.PolicyMaxDaBytesPerBlock = 10
+	cfg.MinDaFeeRate = 0
+	cfg.PolicyDaSurchargePerByte = 0
+	requireMinerCandidateReject(t, cfg, daTx, daUtxos, true, 0)
+}
+
+func TestMinerCoreExtPolicyStillRunsWhenDaAnchorMasterOff(t *testing.T) {
+	var prev [32]byte
+	prev[0] = 0x75
+	raw := txWithOneInputOneOutput(prev, 0, 1, consensus.COV_TYPE_CORE_EXT, coreExtCovenantData(7, nil), nil)
+	tx := mustParseTx(t, raw)
+	utxos := map[consensus.Outpoint]consensus.UtxoEntry{
+		{Txid: prev, Vout: 0}: {
+			Value:        100,
+			CovenantType: consensus.COV_TYPE_P2PK,
+			CovenantData: testP2PKCovenantData(0x75),
+		},
+	}
+	cfg := DefaultMinerConfig()
+	cfg.PolicyDaAnchorAntiAbuse = false
+	cfg.PolicyRejectCoreExtPreActivation = true
+	cfg.CoreExtProfiles = nil
+
+	requireMinerCandidateReject(t, cfg, tx, utxos, true, 0)
+}
+
 func TestMinerPolicyRejectsNonCoinbaseAnchorOutputs(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)

@@ -19,11 +19,14 @@ type MinerConfig struct {
 	// used for the subsidy-bearing coinbase output.
 	MineAddress []byte
 
-	// PolicyDaAnchorAntiAbuse enables non-consensus miner policy hardening for DA/anchor abuse mitigation.
-	// Consensus validity rules are unchanged; this only affects which transactions the miner includes.
+	// PolicyDaAnchorAntiAbuse is the master switch for the whole DA/anchor
+	// anti-abuse miner-template policy package. When false,
+	// PolicyRejectNonCoinbaseAnchorOutputs is ignored. This is policy-only
+	// and does not change consensus validity.
 	PolicyDaAnchorAntiAbuse bool
 
-	// PolicyRejectNonCoinbaseAnchorOutputs rejects transactions that create CORE_ANCHOR outputs.
+	// PolicyRejectNonCoinbaseAnchorOutputs rejects transactions that create
+	// CORE_ANCHOR outputs when PolicyDaAnchorAntiAbuse is enabled.
 	// (Non-coinbase CORE_ANCHOR is treated as non-standard by policy.)
 	PolicyRejectNonCoinbaseAnchorOutputs bool
 
@@ -450,7 +453,8 @@ func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]c
 	var reject bool
 	var err error
 
-	// Apply DA anti-abuse policy if enabled
+	// PolicyDaAnchorAntiAbuse gates the full DA/anchor policy package,
+	// including the non-coinbase CORE_ANCHOR sub-flag.
 	if m.cfg.PolicyDaAnchorAntiAbuse {
 		reject, policyDaIncluded, err = m.rejectCandidateDAPolicy(tx, utxos, policyDaIncluded)
 		if err != nil {
@@ -460,7 +464,6 @@ func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]c
 			return true, policyDaIncluded, nil
 		}
 
-		// Apply anchor policy ONLY when DA anti-abuse is enabled (original behavior)
 		reject, err = m.rejectCandidateAnchorPolicy(tx)
 		if err != nil {
 			return false, policyDaIncluded, err
