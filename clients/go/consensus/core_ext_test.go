@@ -412,21 +412,20 @@ func TestValidateCoreExtWitnessAtHeightMixedProfileNativeSuiteUsesNativePath(t *
 		AlgName:    "ML-DSA-87",
 	}})
 	queue := NewSigCheckQueue(0).WithRegistry(registry)
-	if err := validateCoreExtWitnessAtHeight(
-		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
-		profile,
-		w,
-		tx,
-		0,
-		100,
-		[32]byte{0: 0x42},
-		0,
-		cache,
-		nativeRotationProvider{},
-		registry,
-		nil,
-		queue,
-	); err != nil {
+	if err := validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
+		cd:           &CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
+		profile:      profile,
+		w:            w,
+		tx:           tx,
+		inputIndex:   0,
+		inputValue:   100,
+		chainID:      [32]byte{0: 0x42},
+		blockHeight:  0,
+		sighashCache: cache,
+		rotation:     nativeRotationProvider{},
+		registry:     registry,
+		sigQueue:     queue,
+	}); err != nil {
 		t.Fatalf("validateCoreExtWitnessAtHeight: %v", err)
 	}
 	if called {
@@ -459,21 +458,19 @@ func TestValidateCoreExtWitnessAtHeightNativeSuiteMissingRegistryFailsClosed(t *
 		Pubkey:    []byte{0x01, 0x02, 0x03, 0x04},
 		Signature: []byte{0x05, 0x06, 0x07, 0x01},
 	}
-	err = validateCoreExtWitnessAtHeight(
-		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
-		profile,
-		w,
-		tx,
-		0,
-		100,
-		[32]byte{0: 0x43},
-		0,
-		cache,
-		nativeRotationProvider{},
-		NewSuiteRegistryFromParams(nil),
-		nil,
-		nil,
-	)
+	err = validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
+		cd:           &CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
+		profile:      profile,
+		w:            w,
+		tx:           tx,
+		inputIndex:   0,
+		inputValue:   100,
+		chainID:      [32]byte{0: 0x43},
+		blockHeight:  0,
+		sighashCache: cache,
+		rotation:     nativeRotationProvider{},
+		registry:     NewSuiteRegistryFromParams(nil),
+	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -510,27 +507,25 @@ func TestValidateCoreExtWitnessAtHeightRegisteredNativeSuiteOutsideSpendSetRejec
 		Pubkey:    []byte{0x01, 0x02, 0x03, 0x04},
 		Signature: []byte{0x05, 0x06, 0x07, 0x01},
 	}
-	err = validateCoreExtWitnessAtHeight(
-		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
-		profile,
-		w,
-		tx,
-		0,
-		100,
-		[32]byte{0: 0x44},
-		0,
-		cache,
-		sunsetNativeRotationProvider{},
-		NewSuiteRegistryFromParams([]SuiteParams{{
+	err = validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
+		cd:           &CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0x99}},
+		profile:      profile,
+		w:            w,
+		tx:           tx,
+		inputIndex:   0,
+		inputValue:   100,
+		chainID:      [32]byte{0: 0x44},
+		blockHeight:  0,
+		sighashCache: cache,
+		rotation:     sunsetNativeRotationProvider{},
+		registry: NewSuiteRegistryFromParams([]SuiteParams{{
 			SuiteID:    0x02,
 			PubkeyLen:  len(w.Pubkey),
 			SigLen:     len(w.Signature) - 1,
 			VerifyCost: 1,
 			AlgName:    "ML-DSA-87",
 		}}),
-		nil,
-		nil,
-	)
+	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -631,21 +626,19 @@ func TestValidateCoreExtWitnessAtHeight_TxContextEnabledDispatchesNineParam(t *t
 		ExtPayloadSchema:  []byte{0xb2},
 	}
 
-	if err := validateCoreExtWitnessAtHeight(
-		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0xaa}},
-		profile,
-		tx.Witness[0],
-		tx,
-		0,
-		100,
-		[32]byte{0: 0x55},
-		55,
-		sighashCache,
-		nativeRotationProvider{},
-		nil,
-		txContext,
-		nil,
-	); err != nil {
+	if err := validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
+		cd:           &CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0xaa}},
+		profile:      profile,
+		w:            tx.Witness[0],
+		tx:           tx,
+		inputIndex:   0,
+		inputValue:   100,
+		chainID:      [32]byte{0: 0x55},
+		blockHeight:  55,
+		sighashCache: sighashCache,
+		rotation:     nativeRotationProvider{},
+		txContext:    txContext,
+	}); err != nil {
 		t.Fatalf("validateCoreExtWitnessAtHeight: %v", err)
 	}
 	if !called {
@@ -684,21 +677,18 @@ func TestValidateCoreExtWitnessAtHeight_TxContextEnabledNilBundleFailsClosed(t *
 		ExtPayloadSchema:  []byte{0xb2},
 	}
 
-	err = validateCoreExtWitnessAtHeight(
-		&CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0xaa}},
-		profile,
-		tx.Witness[0],
-		tx,
-		0,
-		100,
-		[32]byte{0: 0x56},
-		55,
-		sighashCache,
-		nativeRotationProvider{},
-		nil,
-		nil,
-		nil,
-	)
+	err = validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
+		cd:           &CoreExtCovenantData{ExtID: 7, ExtPayload: []byte{0xaa}},
+		profile:      profile,
+		w:            tx.Witness[0],
+		tx:           tx,
+		inputIndex:   0,
+		inputValue:   100,
+		chainID:      [32]byte{0: 0x56},
+		blockHeight:  55,
+		sighashCache: sighashCache,
+		rotation:     nativeRotationProvider{},
+	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
