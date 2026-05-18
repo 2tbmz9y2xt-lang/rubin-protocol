@@ -2102,6 +2102,7 @@ class HtlcOrderingVector:
     path: str
     structural_ok: bool
     locktime_ok: bool
+    selector_payload_len_ok: bool
     suite_id: int
     block_height: int
     key_binding_ok: bool
@@ -2132,6 +2133,7 @@ def load_cv_htlc_ordering(path: Path) -> list[HtlcOrderingVector]:
                 path=str(v.get("path", "claim")),
                 structural_ok=bool(v.get("structural_ok", True)),
                 locktime_ok=bool(v.get("locktime_ok", True)),
+                selector_payload_len_ok=bool(v.get("selector_payload_len_ok", True)),
                 suite_id=int(v.get("suite_id", 1)),
                 block_height=int(v.get("block_height", 0)),
                 key_binding_ok=bool(v.get("key_binding_ok", True)),
@@ -2156,6 +2158,7 @@ def render_cv_htlc_ordering_lean(vectors: list[HtlcOrderingVector]) -> str:
             + f'path := "{v.path}", '
             + f"structuralOk := {'true' if v.structural_ok else 'false'}, "
             + f"locktimeOk := {'true' if v.locktime_ok else 'false'}, "
+            + f"selectorPayloadLenOk := {'true' if v.selector_payload_len_ok else 'false'}, "
             + f"suiteId := {v.suite_id}, "
             + f"blockHeight := {v.block_height}, "
             + f"keyBindingOk := {'true' if v.key_binding_ok else 'false'}, "
@@ -2178,6 +2181,7 @@ def render_cv_htlc_ordering_lean(vectors: list[HtlcOrderingVector]) -> str:
         "  path : String\n"
         "  structuralOk : Bool\n"
         "  locktimeOk : Bool\n"
+        "  selectorPayloadLenOk : Bool\n"
         "  suiteId : Nat\n"
         "  blockHeight : Nat\n"
         "  keyBindingOk : Bool\n"

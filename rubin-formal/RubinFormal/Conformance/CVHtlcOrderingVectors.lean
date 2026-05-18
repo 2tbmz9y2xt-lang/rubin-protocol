@@ -11,6 +11,7 @@ structure CVHtlcOrderingVector where
   path : String
   structuralOk : Bool
   locktimeOk : Bool
+  selectorPayloadLenOk : Bool
   suiteId : Nat
   blockHeight : Nat
   keyBindingOk : Bool
@@ -21,9 +22,10 @@ structure CVHtlcOrderingVector where
   expectVerifyCalled : Bool
 
 def cvHtlcOrderingVectors : List CVHtlcOrderingVector := [
-  { id := "CV-H-Ordering", path := "claim", structuralOk := true, locktimeOk := true, suiteId := 2, blockHeight := 999999, keyBindingOk := true, preimageOk := true, verifyOk := true, expectOk := false, expectErr := some "TX_ERR_SIG_ALG_INVALID", expectVerifyCalled := false },
-  { id := "CV-H-UnknownSuite-WrongLength", path := "claim", structuralOk := true, locktimeOk := true, suiteId := 2, blockHeight := 999999, keyBindingOk := true, preimageOk := true, verifyOk := true, expectOk := false, expectErr := some "TX_ERR_SIG_ALG_INVALID", expectVerifyCalled := false },
-  { id := "CV-H-Structural-first", path := "claim", structuralOk := false, locktimeOk := true, suiteId := 1, blockHeight := 1000000, keyBindingOk := false, preimageOk := false, verifyOk := false, expectOk := false, expectErr := some "TX_ERR_PARSE", expectVerifyCalled := false }
+  { id := "CV-H-Ordering", path := "claim", structuralOk := true, locktimeOk := true, selectorPayloadLenOk := true, suiteId := 2, blockHeight := 999999, keyBindingOk := true, preimageOk := true, verifyOk := true, expectOk := false, expectErr := some "TX_ERR_SIG_ALG_INVALID", expectVerifyCalled := false },
+  { id := "CV-H-UnknownSuite-WrongLength", path := "claim", structuralOk := true, locktimeOk := true, selectorPayloadLenOk := true, suiteId := 2, blockHeight := 999999, keyBindingOk := true, preimageOk := true, verifyOk := true, expectOk := false, expectErr := some "TX_ERR_SIG_ALG_INVALID", expectVerifyCalled := false },
+  { id := "CV-H-Structural-first", path := "claim", structuralOk := false, locktimeOk := true, selectorPayloadLenOk := true, suiteId := 1, blockHeight := 1000000, keyBindingOk := false, preimageOk := false, verifyOk := false, expectOk := false, expectErr := some "TX_ERR_PARSE", expectVerifyCalled := false },
+  { id := "CV-H-RefundSelectorLengthBeforeKey", path := "refund", structuralOk := true, locktimeOk := true, selectorPayloadLenOk := false, suiteId := 1, blockHeight := 1000000, keyBindingOk := false, preimageOk := true, verifyOk := true, expectOk := false, expectErr := some "TX_ERR_PARSE", expectVerifyCalled := false }
 ]
 
 end RubinFormal.Conformance
