@@ -33,17 +33,13 @@ func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGene
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "nil coinbase")
 	}
 
-	var sumCoinbase u128
-	for _, out := range coinbase.Outputs {
-		var err error
-		sumCoinbase, err = addU64ToU128Block(sumCoinbase, out.Value)
-		if err != nil {
-			return err
-		}
+	sumCoinbase, err := sumCoinbaseOutputValues(coinbase.Outputs)
+	if err != nil {
+		return err
 	}
 	subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
 	limit := u128{hi: 0, lo: subsidy}
-	limit, err := addU64ToU128Block(limit, sumFees)
+	limit, err = addU64ToU128Block(limit, sumFees)
 	if err != nil {
 		return err
 	}
@@ -51,6 +47,18 @@ func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGene
 		return txerr(BLOCK_ERR_SUBSIDY_EXCEEDED, "coinbase outputs exceed subsidy+fees bound")
 	}
 	return nil
+}
+
+func sumCoinbaseOutputValues(outputs []TxOutput) (u128, error) {
+	var total u128
+	for _, out := range outputs {
+		next, err := addU64ToU128Block(total, out.Value)
+		if err != nil {
+			return u128{}, err
+		}
+		total = next
+	}
+	return total, nil
 }
 
 func validateCoinbaseApplyOutputs(coinbase *Tx) error {
@@ -80,8 +88,16 @@ func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
 	}
 	expected := WitnessCommitmentHash(wroot)
 
+	matches := countWitnessCommitmentMatches(pb.Txs[0].Outputs, expected)
+	if matches != 1 {
+		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated")
+	}
+	return nil
+}
+
+func countWitnessCommitmentMatches(outputs []TxOutput, expected [32]byte) int {
 	matches := 0
-	for _, out := range pb.Txs[0].Outputs {
+	for _, out := range outputs {
 		if out.CovenantType != COV_TYPE_ANCHOR || len(out.CovenantData) != 32 {
 			continue
 		}
@@ -89,9 +105,5 @@ func validateCoinbaseWitnessCommitment(pb *ParsedBlock) error {
 			matches++
 		}
 	}
-
-	if matches != 1 {
-		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated")
-	}
-	return nil
+	return matches
 }
