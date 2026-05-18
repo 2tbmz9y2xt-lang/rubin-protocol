@@ -77,6 +77,19 @@ func TestParseTx_TxKind00RejectsNonZeroDaPayloadLen(t *testing.T) {
 	expectParseErrCode(t, bad, TX_ERR_PARSE)
 }
 
+func TestParseTx_ScriptSigBytesTruncated(t *testing.T) {
+	b := make([]byte, 0, 64)
+	b = AppendU32le(b, 1)
+	b = append(b, 0x00) // tx_kind
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, 1) // input_count
+	b = append(b, make([]byte, 32)...)
+	b = AppendU32le(b, 0)
+	b = AppendCompactSize(b, 1) // script_sig_len, but no script_sig byte follows
+
+	expectParseErrCode(t, b, TX_ERR_PARSE)
+}
+
 func TestParseTx_DACommitAndChunk_MinimalOK(t *testing.T) {
 	daID := filled32ForParseTests(0xa1)
 	payload := []byte("abc")
@@ -186,6 +199,62 @@ func TestParseTx_DAChunk_RejectsChunkIndexOutOfRange(t *testing.T) {
 	}
 }
 
+func TestParseTx_DAHelpersRejectUnsupportedKind(t *testing.T) {
+	off := 0
+	_, _, err := parseTxDaCore(nil, &off, 0xff)
+	assertTxErrCode(t, err, TX_ERR_PARSE)
+
+	off = 0
+	_, err = parseTxDaPayload([]byte{0x00}, &off, 0xff)
+	assertTxErrCode(t, err, TX_ERR_PARSE)
+}
+
+func TestParseTx_DACommitCoreTruncatedFields(t *testing.T) {
+	daID := filled32ForParseTests(0xc1)
+	retlDomainID := filled32ForParseTests(0xc2)
+	txDataRoot := filled32ForParseTests(0xc3)
+	stateRoot := filled32ForParseTests(0xc4)
+	withdrawalsRoot := filled32ForParseTests(0xc5)
+
+	core := make([]byte, 0, 172)
+	core = append(core, daID[:]...)
+	core = AppendU16le(core, 1)
+	core = append(core, retlDomainID[:]...)
+	core = AppendU64le(core, 1)
+	core = append(core, txDataRoot[:]...)
+	core = append(core, stateRoot[:]...)
+	core = append(core, withdrawalsRoot[:]...)
+	core = append(core, 0x00) // batch_sig_suite
+	core = AppendCompactSize(core, 1)
+
+	for _, n := range []int{0, 32, 34, 66, 74, 106, 138, 170, 171, 172} {
+		b := daCommitTxPrefix()
+		b = append(b, core[:n]...)
+		expectParseErrCode(t, b, TX_ERR_PARSE)
+	}
+}
+
+func TestParseTx_DACommitCoreBatchSigLenOverflow(t *testing.T) {
+	b := daCommitTxWithTailPrefix(0xe0)
+	b = AppendCompactSize(b, MAX_DA_MANIFEST_BYTES_PER_TX+1)
+
+	expectParseErrCode(t, b, TX_ERR_PARSE)
+}
+
+func TestParseTx_DAChunkCoreTruncatedFields(t *testing.T) {
+	daID := filled32ForParseTests(0xf1)
+
+	core := make([]byte, 0, 34)
+	core = append(core, daID[:]...)
+	core = AppendU16le(core, 0)
+
+	for _, n := range []int{0, 32, 34} {
+		b := daChunkTxPrefix()
+		b = append(b, core[:n]...)
+		expectParseErrCode(t, b, TX_ERR_PARSE)
+	}
+}
+
 func TestParseTx_WitnessPubkeyLengthOverflowsInt(t *testing.T) {
 	// Trigger: pubkey_length CompactSize decodes to a value > math.MaxInt.
 	section := make([]byte, 0, 16)
@@ -197,4 +266,45 @@ func TestParseTx_WitnessPubkeyLengthOverflowsInt(t *testing.T) {
 	}
 
 	expectParseErrCode(t, txWithWitnessSection(section), TX_ERR_PARSE)
+}
+
+func daCommitTxPrefix() []byte {
+	b := make([]byte, 0, 192)
+	b = AppendU32le(b, 1)
+	b = append(b, 0x01) // tx_kind
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, 0) // input_count
+	b = AppendCompactSize(b, 0) // output_count
+	b = AppendU32le(b, 0)       // locktime
+	return b
+}
+
+func daCommitTxWithTailPrefix(seed byte) []byte {
+	daID := filled32ForParseTests(seed)
+	retlDomainID := filled32ForParseTests(seed + 1)
+	txDataRoot := filled32ForParseTests(seed + 2)
+	stateRoot := filled32ForParseTests(seed + 3)
+	withdrawalsRoot := filled32ForParseTests(seed + 4)
+
+	b := daCommitTxPrefix()
+	b = append(b, daID[:]...)
+	b = AppendU16le(b, 1)
+	b = append(b, retlDomainID[:]...)
+	b = AppendU64le(b, 1)
+	b = append(b, txDataRoot[:]...)
+	b = append(b, stateRoot[:]...)
+	b = append(b, withdrawalsRoot[:]...)
+	b = append(b, 0x00) // batch_sig_suite
+	return b
+}
+
+func daChunkTxPrefix() []byte {
+	b := make([]byte, 0, 96)
+	b = AppendU32le(b, 1)
+	b = append(b, 0x02) // tx_kind
+	b = AppendU64le(b, 0)
+	b = AppendCompactSize(b, 0) // input_count
+	b = AppendCompactSize(b, 0) // output_count
+	b = AppendU32le(b, 0)       // locktime
+	return b
 }
