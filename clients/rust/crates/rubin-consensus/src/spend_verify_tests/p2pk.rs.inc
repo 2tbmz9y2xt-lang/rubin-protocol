@@ -1,5 +1,3 @@
-use super::*;
-
 // ======== P2PK Spend at Height Tests (7) ========
 
 #[test]

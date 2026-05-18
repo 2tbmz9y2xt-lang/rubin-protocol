@@ -101,7 +101,22 @@ fn make_p2pk_entry(pubkey: &[u8]) -> UtxoEntry {
     }
 }
 
-mod key_sig;
-mod p2pk;
-mod registry;
-mod threshold;
+mod key_sig {
+    use super::*;
+    include!("key_sig.rs.inc");
+}
+
+mod p2pk {
+    use super::*;
+    include!("p2pk.rs.inc");
+}
+
+mod registry {
+    use super::*;
+    include!("registry.rs.inc");
+}
+
+mod threshold {
+    use super::*;
+    include!("threshold.rs.inc");
+}

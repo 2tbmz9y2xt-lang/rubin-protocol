@@ -1,5 +1,3 @@
-use super::*;
-
 #[test]
 fn extract_crypto_sig_and_sighash_rejects_missing_trailer() {
     let w = WitnessItem {

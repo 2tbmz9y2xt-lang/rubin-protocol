@@ -1,5 +1,3 @@
-use super::*;
-
 // ======== Key & Sig with Registry Cache Tests (5) ========
 
 #[test]
