@@ -420,6 +420,14 @@ fn validate_htlc_spend_rejects_refund_and_signature_errors() {
     let wrong_path = htlc_refund_selector([0x77; 32]);
     assert_mature_htlc_error_code(&entry, &wrong_path, &bad_sig, ErrorCode::TxErrSigInvalid);
 
+    let malformed_wrong_path = sentinel_witness(vec![0x77; 32], vec![0x01, 0x00]);
+    assert_mature_htlc_error_code(
+        &entry,
+        &malformed_wrong_path,
+        &bad_sig,
+        ErrorCode::TxErrParse,
+    );
+
     let malformed_refund = sentinel_witness(refund_key_id.to_vec(), vec![0x01, 0x00]);
     assert_mature_htlc_error_code(&entry, &malformed_refund, &bad_sig, ErrorCode::TxErrParse);
 
