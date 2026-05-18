@@ -209,13 +209,9 @@ func hasCoreExtVerifySigExtBinding(profile CoreExtDeploymentProfile) bool {
 	return profile.VerifySigExtFn != nil || profile.VerifySigExtTxContextFn != nil
 }
 
-func hasCoreExtVerifySigExtProfileBinding(profile CoreExtProfile) bool {
-	return profile.VerifySigExtFn != nil || profile.VerifySigExtTxContextFn != nil
-}
-
-func verifyCoreExtProfileTxContext(profile CoreExtProfile, call coreExtVerifySigExtTxContextCall) (bool, bool, error) {
+func verifyCoreExtProfileTxContext(profile CoreExtProfile, call coreExtVerifySigExtTxContextCall) (bool, error) {
 	if profile.VerifySigExtTxContextFn != nil {
-		ok, err := profile.VerifySigExtTxContextFn(
+		return profile.VerifySigExtTxContextFn(
 			call.extID,
 			call.suiteID,
 			call.pubkey,
@@ -226,13 +222,11 @@ func verifyCoreExtProfileTxContext(profile CoreExtProfile, call coreExtVerifySig
 			call.ctxContinuing,
 			call.selfInputValue,
 		)
-		return ok, true, err
 	}
 	if profile.VerifySigExtFn != nil {
-		ok, err := profile.VerifySigExtFn(call.extID, call.suiteID, call.pubkey, call.signature, call.digest32, call.extPayload)
-		return ok, true, err
+		return profile.VerifySigExtFn(call.extID, call.suiteID, call.pubkey, call.signature, call.digest32, call.extPayload)
 	}
-	return false, false, nil
+	return false, nil
 }
 
 func sortedAllowedSuites(allowed map[uint8]struct{}) []uint8 {
@@ -404,7 +398,7 @@ func validateCoreExtWitnessAtHeight(
 		return err
 	}
 	if profile.TxContextEnabled {
-		if !hasCoreExtVerifySigExtProfileBinding(profile) {
+		if profile.VerifySigExtFn == nil && profile.VerifySigExtTxContextFn == nil {
 			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
 		}
 		if txContext == nil || txContext.Base == nil {
@@ -414,7 +408,7 @@ func validateCoreExtWitnessAtHeight(
 		if !ok || ctxContinuing == nil {
 			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext continuing bundle missing")
 		}
-		ok, _, err := verifyCoreExtProfileTxContext(profile, coreExtVerifySigExtTxContextCall{
+		ok, err := verifyCoreExtProfileTxContext(profile, coreExtVerifySigExtTxContextCall{
 			extID:          cd.ExtID,
 			suiteID:        w.SuiteID,
 			pubkey:         w.Pubkey,

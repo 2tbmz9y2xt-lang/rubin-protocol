@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -205,26 +206,59 @@ func TestStaticCoreExtProfileProviderNilReceiverAndUnknownExtID(t *testing.T) {
 
 func TestVerifyCoreExtProfileTxContextLegacyFallback(t *testing.T) {
 	called := false
-	ok, handled, err := verifyCoreExtProfileTxContext(CoreExtProfile{
-		VerifySigExtFn: func(uint16, uint8, []byte, []byte, [32]byte, []byte) (bool, error) {
+	call := testCoreExtVerifySigExtTxContextCall()
+	var forwarded coreExtVerifySigExtTxContextCall
+	ok, err := verifyCoreExtProfileTxContext(CoreExtProfile{
+		VerifySigExtFn: func(extID uint16, suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte, extPayload []byte) (bool, error) {
 			called = true
+			forwarded = coreExtVerifySigExtTxContextCall{
+				extID:      extID,
+				suiteID:    suiteID,
+				pubkey:     pubkey,
+				signature:  signature,
+				digest32:   digest32,
+				extPayload: extPayload,
+			}
 			return true, nil
 		},
-	}, coreExtVerifySigExtTxContextCall{})
+	}, call)
 	got := struct {
-		ok      bool
-		handled bool
-		called  bool
-		err     error
-	}{ok: ok, handled: handled, called: called, err: err}
+		ok     bool
+		called bool
+		err    error
+	}{ok: ok, called: called, err: err}
 	want := struct {
-		ok      bool
-		handled bool
-		called  bool
-		err     error
-	}{ok: true, handled: true, called: true}
+		ok     bool
+		called bool
+		err    error
+	}{ok: true, called: true}
 	if got != want {
 		t.Fatalf("legacy fallback result=%+v", got)
+	}
+	assertCoreExtVerifySigExtCall(t, forwarded, call)
+}
+
+func testCoreExtVerifySigExtTxContextCall() coreExtVerifySigExtTxContextCall {
+	var digest [32]byte
+	digest[0] = 0xd1
+	digest[31] = 0xd2
+	return coreExtVerifySigExtTxContextCall{
+		extID:          0x0a0b,
+		suiteID:        0x0c,
+		pubkey:         []byte{0x01, 0x02},
+		signature:      []byte{0x03, 0x04},
+		digest32:       digest,
+		extPayload:     []byte{0x05, 0x06},
+		ctxBase:        &TxContextBase{Height: 7},
+		ctxContinuing:  &TxContextContinuing{ContinuingOutputCount: 1},
+		selfInputValue: 11,
+	}
+}
+
+func assertCoreExtVerifySigExtCall(t *testing.T, got, want coreExtVerifySigExtTxContextCall) {
+	t.Helper()
+	if got.extID != want.extID || got.suiteID != want.suiteID || !bytes.Equal(got.pubkey, want.pubkey) || !bytes.Equal(got.signature, want.signature) || got.digest32 != want.digest32 || !bytes.Equal(got.extPayload, want.extPayload) {
+		t.Fatalf("verify_sig_ext forwarded call=%+v, want %+v", got, want)
 	}
 }
 
@@ -563,8 +597,21 @@ func TestValidateCoreExtWitnessAtHeight_TxContextEnabledDispatchesNineParam(t *t
 			if extID != 7 || suiteID != 0x42 {
 				t.Fatalf("extID/suiteID=%d/%d", extID, suiteID)
 			}
+			if !bytes.Equal(pubkey, []byte{0x01, 0x02, 0x03}) {
+				t.Fatalf("pubkey=%x", pubkey)
+			}
+			if !bytes.Equal(signature, []byte{0x04}) {
+				t.Fatalf("signature=%x", signature)
+			}
 			if string(extPayload) != string([]byte{0xaa}) {
 				t.Fatalf("extPayload=%x", extPayload)
+			}
+			wantDigest, err := SighashV1DigestWithCache(sighashCache, 0, 100, [32]byte{0: 0x55}, SIGHASH_ALL)
+			if err != nil {
+				t.Fatalf("SighashV1DigestWithCache: %v", err)
+			}
+			if digest32 != wantDigest {
+				t.Fatalf("digest32=%x, want %x", digest32, wantDigest)
 			}
 			if ctxBase == nil || ctxBase.TotalIn != (Uint128{Lo: 100, Hi: 0}) || ctxBase.TotalOut != (Uint128{Lo: 90, Hi: 0}) || ctxBase.Height != 55 {
 				t.Fatalf("ctxBase=%+v", ctxBase)
@@ -578,9 +625,6 @@ func TestValidateCoreExtWitnessAtHeight_TxContextEnabledDispatchesNineParam(t *t
 			if selfInputValue != 100 {
 				t.Fatalf("selfInputValue=%d", selfInputValue)
 			}
-			_ = pubkey
-			_ = signature
-			_ = digest32
 			return true, nil
 		},
 		BindingDescriptor: []byte{0xa1},
