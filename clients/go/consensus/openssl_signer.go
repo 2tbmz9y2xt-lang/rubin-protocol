@@ -245,29 +245,8 @@ func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exa
 	if err := ensureOpenSSLBootstrap(); err != nil {
 		return nil, err
 	}
-	// Reject three classes of unusable inputs at this package-local FFI
-	// boundary so a degenerate caller cannot reach the make([]byte, ...)
-	// allocation, the C-pointer take-address site, or the C helper with
-	// inputs the call cannot satisfy: nil pkey (which the C helper would
-	// dereference), non-positive maxSigBytes (which the take-address site
-	// cannot index), and exactSigBytes greater than maxSigBytes (which
-	// the C helper cannot satisfy because it writes at most maxSigBytes
-	// and the post-call length check then rejects). Mirrors the
-	// conformance-only path's nil/zero-receiver guard. Covered by
-	// TestSignOpenSSLDigest32_NilPKeyErrors,
-	// TestSignOpenSSLDigest32_NonPositiveMaxSigBytesErrors, and
-	// TestSignOpenSSLDigest32_ExactGreaterThanMaxErrors.
-	if pkey == nil {
-		return nil, fmt.Errorf("nil openssl key")
-	}
-	if maxSigBytes <= 0 {
-		return nil, fmt.Errorf("openssl maxSigBytes must be positive, got %d", maxSigBytes)
-	}
-	if exactSigBytes > maxSigBytes {
-		return nil, fmt.Errorf(
-			"openssl exactSigBytes=%d exceeds maxSigBytes=%d",
-			exactSigBytes, maxSigBytes,
-		)
+	if err := validateSignOpenSSLDigest32Inputs(pkey, maxSigBytes, exactSigBytes); err != nil {
+		return nil, err
 	}
 
 	errBuf := newOpenSSLErrorBuffer()
@@ -288,15 +267,47 @@ func signOpenSSLDigest32(pkey *C.EVP_PKEY, digest [32]byte, maxSigBytes int, exa
 		return nil, fmt.Errorf("openssl sign failed: %s", cStringTrim0(errBuf))
 	}
 
-	if exactSigBytes > 0 {
-		if int(signatureLen) != exactSigBytes {
-			return nil, fmt.Errorf("openssl sig length=%d, want %d", int(signatureLen), exactSigBytes)
-		}
-	} else if signatureLen == 0 || int(signatureLen) > maxSigBytes {
-		return nil, fmt.Errorf("openssl sig length=%d, want 1..%d", int(signatureLen), maxSigBytes)
+	if err := validateSignOpenSSLSignatureLen(signatureLen, maxSigBytes, exactSigBytes); err != nil {
+		return nil, err
 	}
 
 	return signature[:int(signatureLen)], nil
+}
+
+// Reject three classes of unusable inputs at this package-local FFI boundary so
+// a degenerate caller cannot reach the allocation, C-pointer take-address site,
+// or C helper with inputs the call cannot satisfy. Covered by
+// TestSignOpenSSLDigest32_NilPKeyErrors,
+// TestSignOpenSSLDigest32_NonPositiveMaxSigBytesErrors, and
+// TestSignOpenSSLDigest32_ExactGreaterThanMaxErrors.
+func validateSignOpenSSLDigest32Inputs(pkey *C.EVP_PKEY, maxSigBytes int, exactSigBytes int) error {
+	if pkey == nil {
+		return fmt.Errorf("nil openssl key")
+	}
+	if maxSigBytes <= 0 {
+		return fmt.Errorf("openssl maxSigBytes must be positive, got %d", maxSigBytes)
+	}
+	if exactSigBytes > maxSigBytes {
+		return fmt.Errorf(
+			"openssl exactSigBytes=%d exceeds maxSigBytes=%d",
+			exactSigBytes, maxSigBytes,
+		)
+	}
+	return nil
+}
+
+func validateSignOpenSSLSignatureLen(signatureLen C.size_t, maxSigBytes int, exactSigBytes int) error {
+	got := int(signatureLen)
+	if exactSigBytes > 0 {
+		if got != exactSigBytes {
+			return fmt.Errorf("openssl sig length=%d, want %d", got, exactSigBytes)
+		}
+		return nil
+	}
+	if signatureLen == 0 || got > maxSigBytes {
+		return fmt.Errorf("openssl sig length=%d, want 1..%d", got, maxSigBytes)
+	}
+	return nil
 }
 
 // MLDSA87Keypair is a non-consensus helper used by tests and conformance tooling
