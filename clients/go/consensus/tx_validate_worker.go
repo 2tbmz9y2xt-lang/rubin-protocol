@@ -331,11 +331,21 @@ func validateCoreExtSpendQWithEnv(check txInputSpendCheck, w WitnessItem, env tx
 	case !ok || !profile.Active:
 		return nil
 	default:
-		return validateCoreExtWitnessAtHeight(
-			cd, profile, w, check.tx, check.inputIndex, check.inputValue,
-			env.chainID, env.blockHeight, env.sighashCache, env.rotation,
-			env.registry, env.txContext, env.sigQueue,
-		)
+		return validateCoreExtWitnessAtHeight(coreExtWitnessValidation{
+			cd:           cd,
+			profile:      profile,
+			w:            w,
+			tx:           check.tx,
+			inputIndex:   check.inputIndex,
+			inputValue:   check.inputValue,
+			chainID:      env.chainID,
+			blockHeight:  env.blockHeight,
+			sighashCache: env.sighashCache,
+			rotation:     env.rotation,
+			registry:     env.registry,
+			txContext:    env.txContext,
+			sigQueue:     env.sigQueue,
+		})
 	}
 }
 
