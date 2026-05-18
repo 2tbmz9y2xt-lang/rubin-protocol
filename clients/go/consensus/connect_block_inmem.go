@@ -27,6 +27,26 @@ type ConnectBlockBasicSummary struct {
 	WorkerPanics uint64
 }
 
+type connectBlockBasicInMemorySuiteContext struct {
+	BlockBytes       []byte
+	ExpectedPrevHash *[32]byte
+	ExpectedTarget   *[32]byte
+	BlockHeight      uint64
+	PrevTimestamps   []uint64
+	State            *InMemoryChainState
+	ChainID          [32]byte
+	CoreExtProfiles  CoreExtProfileProvider
+	Rotation         RotationProvider
+	Registry         *SuiteRegistry
+}
+
+type connectBlockInMemoryValidationContext struct {
+	chainID         [32]byte
+	coreExtProfiles CoreExtProfileProvider
+	rotation        RotationProvider
+	registry        *SuiteRegistry
+}
+
 // ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory UTXO snapshot and an
 // in-memory subsidy counter, and enforces the coinbase subsidy/value bound (CANONICAL §19.2)
 // using locally computed fees.
@@ -95,11 +115,77 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	rotation RotationProvider,
 	registry *SuiteRegistry,
 ) (*ConnectBlockBasicSummary, error) {
-	if coreExtProfiles == nil {
-		coreExtProfiles = EmptyCoreExtProfileProvider()
+	return connectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(connectBlockBasicInMemorySuiteContext{
+		BlockBytes:       blockBytes,
+		ExpectedPrevHash: expectedPrevHash,
+		ExpectedTarget:   expectedTarget,
+		BlockHeight:      blockHeight,
+		PrevTimestamps:   prevTimestamps,
+		State:            state,
+		ChainID:          chainID,
+		CoreExtProfiles:  normalizedCoreExtProfiles(coreExtProfiles),
+		Rotation:         rotation,
+		Registry:         registry,
+	})
+}
+
+func connectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
+	input connectBlockBasicInMemorySuiteContext,
+) (*ConnectBlockBasicSummary, error) {
+	if err := prepareInMemoryChainState(input.State); err != nil {
+		return nil, err
 	}
+
+	pb, err := parseInMemoryConnectBlock(input)
+	if err != nil {
+		return nil, err
+	}
+
+	alreadyGenerated := new(big.Int).Set(input.State.AlreadyGenerated)
+	blockMTP, err := inMemoryConnectBlockMTP(input.BlockHeight, input.PrevTimestamps, pb.Header.Timestamp)
+	if err != nil {
+		return nil, err
+	}
+
+	validation := connectBlockInMemoryValidationContext{
+		chainID:         input.ChainID,
+		coreExtProfiles: input.CoreExtProfiles,
+		rotation:        input.Rotation,
+		registry:        input.Registry,
+	}
+	workUtxos, sumFees, err := applyInMemoryNonCoinbaseTxs(
+		pb,
+		cloneUtxoSet(input.State.Utxos),
+		input.BlockHeight,
+		blockMTP,
+		validation,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateCoinbaseValueBound(pb, input.BlockHeight, alreadyGenerated, sumFees); err != nil {
+		return nil, err
+	}
+	if err := validateCoinbaseApplyOutputs(pb.Txs[0]); err != nil {
+		return nil, err
+	}
+
+	applyInMemoryCoinbaseOutputs(pb, workUtxos, input.BlockHeight)
+	alreadyGeneratedN1 := advanceAlreadyGenerated(input.BlockHeight, alreadyGenerated)
+	return commitInMemoryConnectSummary(input.State, workUtxos, input.BlockHeight, alreadyGenerated, alreadyGeneratedN1, sumFees)
+}
+
+func normalizedCoreExtProfiles(coreExtProfiles CoreExtProfileProvider) CoreExtProfileProvider {
+	if coreExtProfiles == nil {
+		return EmptyCoreExtProfileProvider()
+	}
+	return coreExtProfiles
+}
+
+func prepareInMemoryChainState(state *InMemoryChainState) error {
 	if state == nil {
-		return nil, txerr(BLOCK_ERR_PARSE, "nil chainstate")
+		return txerr(BLOCK_ERR_PARSE, "nil chainstate")
 	}
 	if state.Utxos == nil {
 		state.Utxos = make(map[Outpoint]UtxoEntry)
@@ -108,16 +194,18 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 		state.AlreadyGenerated = new(big.Int)
 	}
 	if state.AlreadyGenerated.Sign() < 0 {
-		return nil, txerr(BLOCK_ERR_PARSE, "already_generated must be unsigned")
+		return txerr(BLOCK_ERR_PARSE, "already_generated must be unsigned")
 	}
+	return nil
+}
 
-	// Stateless checks first (wire, merkle root, PoW/target, covenant creation, etc).
+func parseInMemoryConnectBlock(input connectBlockBasicInMemorySuiteContext) (*ParsedBlock, error) {
 	pb, _, err := parseAndValidateBlockBasicWithContextAtHeight(
-		blockBytes,
-		expectedPrevHash,
-		expectedTarget,
-		blockHeight,
-		prevTimestamps,
+		input.BlockBytes,
+		input.ExpectedPrevHash,
+		input.ExpectedTarget,
+		input.BlockHeight,
+		input.PrevTimestamps,
 	)
 	if err != nil {
 		return nil, err
@@ -125,52 +213,53 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	if pb == nil || len(pb.Txs) == 0 || len(pb.Txids) != len(pb.Txs) {
 		return nil, txerr(BLOCK_ERR_PARSE, "invalid parsed block")
 	}
+	return pb, nil
+}
 
-	alreadyGenerated := new(big.Int).Set(state.AlreadyGenerated)
-	blockMTP := pb.Header.Timestamp
-	if median, ok, err := medianTimePast(blockHeight, prevTimestamps); err != nil {
-		return nil, err
-	} else if ok {
-		blockMTP = median
+func inMemoryConnectBlockMTP(blockHeight uint64, prevTimestamps []uint64, headerTimestamp uint64) (uint64, error) {
+	median, ok, err := medianTimePast(blockHeight, prevTimestamps)
+	if err != nil {
+		return 0, err
 	}
-	workUtxos := cloneUtxoSet(state.Utxos)
+	if ok {
+		return median, nil
+	}
+	return headerTimestamp, nil
+}
 
-	// Compute fees and update UTXO set by applying all non-coinbase transactions.
+func applyInMemoryNonCoinbaseTxs(
+	pb *ParsedBlock,
+	workUtxos map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+	blockMTP uint64,
+	validation connectBlockInMemoryValidationContext,
+) (map[Outpoint]UtxoEntry, uint64, error) {
 	var sumFees uint64
 	for i := 1; i < len(pb.Txs); i++ {
-		tx := pb.Txs[i]
-		txid := pb.Txids[i]
-
 		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(
-			tx,
-			txid,
+			pb.Txs[i],
+			pb.Txids[i],
 			workUtxos,
 			blockHeight,
 			blockMTP,
-			chainID,
-			coreExtProfiles,
-			rotation,
-			registry,
+			validation.chainID,
+			validation.coreExtProfiles,
+			validation.rotation,
+			validation.registry,
 		)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		workUtxos = nextUtxos
 		sumFees, err = addU64(sumFees, fee)
 		if err != nil {
-			return nil, txerr(BLOCK_ERR_PARSE, "sum_fees overflow")
+			return nil, 0, txerr(BLOCK_ERR_PARSE, "sum_fees overflow")
 		}
 	}
+	return workUtxos, sumFees, nil
+}
 
-	// Enforce coinbase bound using locally computed fees.
-	if err := validateCoinbaseValueBound(pb, blockHeight, alreadyGenerated, sumFees); err != nil {
-		return nil, err
-	}
-	if err := validateCoinbaseApplyOutputs(pb.Txs[0]); err != nil {
-		return nil, err
-	}
-
-	// Add coinbase outputs to UTXO set (spendable outputs only).
+func applyInMemoryCoinbaseOutputs(pb *ParsedBlock, workUtxos map[Outpoint]UtxoEntry, blockHeight uint64) {
 	coinbase := pb.Txs[0]
 	coinbaseTxid := pb.Txids[0]
 	for i, out := range coinbase.Outputs {
@@ -186,13 +275,25 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 			CreatedByCoinbase: true,
 		}
 	}
+}
 
-	// Update already_generated(h) -> already_generated(h+1) by adding subsidy(h).
+func advanceAlreadyGenerated(blockHeight uint64, alreadyGenerated *big.Int) *big.Int {
 	alreadyGeneratedN1 := new(big.Int).Set(alreadyGenerated)
 	if blockHeight != 0 {
 		subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
 		alreadyGeneratedN1 = new(big.Int).Add(alreadyGeneratedN1, new(big.Int).SetUint64(subsidy))
 	}
+	return alreadyGeneratedN1
+}
+
+func commitInMemoryConnectSummary(
+	state *InMemoryChainState,
+	workUtxos map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+	alreadyGenerated *big.Int,
+	alreadyGeneratedN1 *big.Int,
+	sumFees uint64,
+) (*ConnectBlockBasicSummary, error) {
 	alreadyGeneratedU64, err := bigIntToUint64(alreadyGenerated)
 	if err != nil {
 		return nil, txerr(BLOCK_ERR_PARSE, "already_generated overflow")
@@ -206,7 +307,6 @@ func ConnectBlockBasicInMemoryAtHeightAndCoreExtProfilesAndSuiteContext(
 	if blockHeight != 0 {
 		state.AlreadyGenerated = new(big.Int).Set(alreadyGeneratedN1)
 	}
-
 	return &ConnectBlockBasicSummary{
 		SumFees:            sumFees,
 		AlreadyGenerated:   alreadyGeneratedU64,
