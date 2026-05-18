@@ -2834,7 +2834,7 @@ func runFromStdin() {
 		switch {
 		case !structuralOK:
 			errCode = string(consensus.TX_ERR_PARSE)
-		case path == "refund" && (!selectorPayloadLenOK || !keyBindingOK):
+		case path == "refund" && !selectorPayloadLenOK:
 			writeResp(os.Stdout, htlcRefundOrderingPolicyResp(req, suiteID, keyBindingOK, selectorPayloadLenOK))
 			return
 		case path == "refund" && !locktimeOK:
