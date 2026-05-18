@@ -30,7 +30,13 @@ pub struct MinerConfig {
     pub max_tx_per_block: usize,
     pub target: [u8; 32],
     pub mine_address: Vec<u8>,
+    /// Master switch for the whole DA/anchor anti-abuse miner-template
+    /// policy package. When false,
+    /// `policy_reject_non_coinbase_anchor_outputs` is ignored. This is
+    /// policy-only and does not change consensus validity.
     pub policy_da_anchor_anti_abuse: bool,
+    /// Sub-flag for non-coinbase CORE_ANCHOR rejection. It is effective
+    /// only when `policy_da_anchor_anti_abuse` is true.
     pub policy_reject_non_coinbase_anchor_outputs: bool,
     pub policy_max_da_bytes_per_block: u64,
     pub policy_da_surcharge_per_byte: u64,
@@ -251,6 +257,8 @@ impl<'a> Miner<'a> {
             } else {
                 0
             },
+            // Anchor rejection is nested under the DA/anchor master switch
+            // by policy contract; this does not change consensus validity.
             policy_reject_non_coinbase_anchor_outputs: self.cfg.policy_da_anchor_anti_abuse
                 && self.cfg.policy_reject_non_coinbase_anchor_outputs,
             policy_reject_core_ext_pre_activation: self.cfg.policy_reject_core_ext_pre_activation,
@@ -423,11 +431,18 @@ pub fn parse_mine_address_arg(value: &str) -> Result<Option<Vec<u8>>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
 
-    use rubin_consensus::constants::MAX_BLOCK_WEIGHT;
+    use rubin_consensus::constants::{
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_P2PK, MAX_BLOCK_WEIGHT, TX_WIRE_VERSION,
+    };
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
+    use rubin_consensus::{
+        encode_compact_size, p2pk_covenant_data_for_pubkey, tx_weight_and_stats_public,
+        CoreExtDeploymentProfiles, DaCommitCore, Outpoint, Tx, TxInput, TxOutput, UtxoEntry,
+    };
 
     use crate::txpool::TxSource;
     use crate::{
@@ -462,6 +477,204 @@ mod tests {
 
     fn coinbase_bytes(height: u64) -> Vec<u8> {
         super::build_coinbase_tx(height, 0, &default_mine_address(), [0u8; 32]).expect("coinbase")
+    }
+
+    fn p2pk_utxos(marker: u8, value: u64) -> ([u8; 32], HashMap<Outpoint, UtxoEntry>) {
+        let prev = [marker; 32];
+        let mut utxos = HashMap::new();
+        utxos.insert(
+            Outpoint {
+                txid: prev,
+                vout: 0,
+            },
+            UtxoEntry {
+                value,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&[marker; 32]),
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        );
+        (prev, utxos)
+    }
+
+    fn one_input_policy_tx(
+        marker: u8,
+        out_value: u64,
+        covenant_type: u16,
+        covenant_data: Vec<u8>,
+    ) -> (Tx, HashMap<Outpoint, UtxoEntry>) {
+        let (prev, utxos) = p2pk_utxos(marker, 100);
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x00,
+            tx_nonce: marker as u64,
+            inputs: vec![TxInput {
+                prev_txid: prev,
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: out_value,
+                covenant_type,
+                covenant_data,
+            }],
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        };
+        tx_weight_and_stats_public(&tx).expect("policy tx weight");
+        (tx, utxos)
+    }
+
+    fn anchor_policy_tx(marker: u8) -> (Tx, HashMap<Outpoint, UtxoEntry>) {
+        one_input_policy_tx(marker, 0, COV_TYPE_ANCHOR, vec![marker; 32])
+    }
+
+    fn core_ext_policy_tx(marker: u8) -> (Tx, HashMap<Outpoint, UtxoEntry>) {
+        let mut cov = 7u16.to_le_bytes().to_vec();
+        encode_compact_size(0, &mut cov);
+        one_input_policy_tx(marker, 1, COV_TYPE_CORE_EXT, cov)
+    }
+
+    fn da_budget_policy_tx(marker: u8) -> (Tx, HashMap<Outpoint, UtxoEntry>) {
+        let (prev, utxos) = p2pk_utxos(marker, 1_000_000);
+        let tx = Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind: 0x01,
+            tx_nonce: marker as u64,
+            inputs: vec![TxInput {
+                prev_txid: prev,
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: vec![TxOutput {
+                value: 100_000,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: p2pk_covenant_data_for_pubkey(&[marker; 32]),
+            }],
+            locktime: 0,
+            da_commit_core: Some(DaCommitCore {
+                da_id: [marker; 32],
+                chunk_count: 1,
+                retl_domain_id: [marker.wrapping_add(1); 32],
+                batch_number: 1,
+                tx_data_root: [marker.wrapping_add(2); 32],
+                state_root: [marker.wrapping_add(3); 32],
+                withdrawals_root: [marker.wrapping_add(4); 32],
+                batch_sig_suite: 0,
+                batch_sig: Vec::new(),
+            }),
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: vec![marker; 11],
+        };
+        tx_weight_and_stats_public(&tx).expect("DA policy tx weight");
+        (tx, utxos)
+    }
+
+    #[test]
+    fn miner_da_anchor_master_switch_off_ignores_anchor_subflag() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-da-anchor-master-off");
+        let (tx, utxos) = anchor_policy_tx(0x71);
+        sync.chain_state.utxos = utxos;
+        let cfg = MinerConfig {
+            policy_da_anchor_anti_abuse: false,
+            policy_reject_non_coinbase_anchor_outputs: true,
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+
+        let (reject, next_da) = miner.reject_candidate(&tx, 0, 0).expect("reject candidate");
+        assert!(
+            !reject,
+            "master=false must ignore policy_reject_non_coinbase_anchor_outputs=true"
+        );
+        assert_eq!(next_da, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn miner_da_anchor_master_switch_on_rejects_non_coinbase_anchor_when_subflag_on() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-da-anchor-subflag-on");
+        let (tx, utxos) = anchor_policy_tx(0x72);
+        sync.chain_state.utxos = utxos;
+        let cfg = MinerConfig {
+            policy_da_anchor_anti_abuse: true,
+            policy_reject_non_coinbase_anchor_outputs: true,
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+
+        let (reject, next_da) = miner.reject_candidate(&tx, 0, 0).expect("reject candidate");
+        assert!(
+            reject,
+            "master=true and subflag=true must reject non-coinbase CORE_ANCHOR"
+        );
+        assert_eq!(next_da, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn miner_da_anchor_master_switch_on_allows_anchor_when_subflag_off() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-da-anchor-subflag-off");
+        let (tx, utxos) = anchor_policy_tx(0x73);
+        sync.chain_state.utxos = utxos;
+        let cfg = MinerConfig {
+            policy_da_anchor_anti_abuse: true,
+            policy_reject_non_coinbase_anchor_outputs: false,
+            policy_max_da_bytes_per_block: 10,
+            policy_da_surcharge_per_byte: 0,
+            policy_current_mempool_min_fee_rate: 0,
+            policy_min_da_fee_rate: 0,
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+
+        let (reject, next_da) = miner.reject_candidate(&tx, 0, 0).expect("anchor candidate");
+        assert!(
+            !reject,
+            "master=true and subflag=false must allow CORE_ANCHOR through anchor policy"
+        );
+        assert_eq!(next_da, 0);
+
+        let (da_tx, da_utxos) = da_budget_policy_tx(0x74);
+        miner.sync.chain_state.utxos = da_utxos;
+        let (reject, next_da) = miner.reject_candidate(&da_tx, 0, 0).expect("DA candidate");
+        assert!(
+            reject,
+            "master=true must keep DA byte-budget policy active when anchor subflag=false"
+        );
+        assert_eq!(next_da, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn miner_core_ext_policy_still_runs_when_da_anchor_master_off() {
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-core-ext-master-off");
+        let (tx, utxos) = core_ext_policy_tx(0x75);
+        sync.chain_state.utxos = utxos;
+        let cfg = MinerConfig {
+            policy_da_anchor_anti_abuse: false,
+            policy_reject_core_ext_pre_activation: true,
+            core_ext_deployments: CoreExtDeploymentProfiles::empty(),
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+
+        let (reject, next_da) = miner
+            .reject_candidate(&tx, 0, 0)
+            .expect("CORE_EXT candidate");
+        assert!(
+            reject,
+            "CORE_EXT pre-activation policy must still run when DA/anchor master is off"
+        );
+        assert_eq!(next_da, 0);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
