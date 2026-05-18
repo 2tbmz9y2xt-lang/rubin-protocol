@@ -48,18 +48,9 @@ func evalFeatureBitsNextState(
 ) FeatureBitState {
 	switch prev {
 	case FEATUREBIT_DEFINED:
-		if boundaryHeight >= d.StartHeight {
-			return FEATUREBIT_STARTED
-		}
-		return FEATUREBIT_DEFINED
+		return evalFeatureBitsDefinedState(boundaryHeight, d)
 	case FEATUREBIT_STARTED:
-		if prevWindowSignalCount >= SIGNAL_THRESHOLD {
-			return FEATUREBIT_LOCKED_IN
-		}
-		if boundaryHeight >= d.TimeoutHeight {
-			return FEATUREBIT_FAILED
-		}
-		return FEATUREBIT_STARTED
+		return evalFeatureBitsStartedState(boundaryHeight, prevWindowSignalCount, d)
 	case FEATUREBIT_LOCKED_IN:
 		return FEATUREBIT_ACTIVE
 	case FEATUREBIT_ACTIVE:
@@ -69,6 +60,27 @@ func evalFeatureBitsNextState(
 	default:
 		return prev
 	}
+}
+
+func evalFeatureBitsDefinedState(boundaryHeight uint64, d FeatureBitDeployment) FeatureBitState {
+	if boundaryHeight >= d.StartHeight {
+		return FEATUREBIT_STARTED
+	}
+	return FEATUREBIT_DEFINED
+}
+
+func evalFeatureBitsStartedState(
+	boundaryHeight uint64,
+	prevWindowSignalCount uint32,
+	d FeatureBitDeployment,
+) FeatureBitState {
+	if prevWindowSignalCount >= SIGNAL_THRESHOLD {
+		return FEATUREBIT_LOCKED_IN
+	}
+	if boundaryHeight >= d.TimeoutHeight {
+		return FEATUREBIT_FAILED
+	}
+	return FEATUREBIT_STARTED
 }
 
 func FeatureBitStateAtHeightFromWindowCounts(
