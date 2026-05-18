@@ -30,6 +30,12 @@ pub struct HtlcSpendContext {
     pub block_mtp: u64,
 }
 
+struct HtlcSelector<'a> {
+    key_id: [u8; 32],
+    path_id: u8,
+    payload: &'a [u8],
+}
+
 pub fn parse_htlc_covenant_data(cov_data: &[u8]) -> Result<HtlcCovenant, TxError> {
     if cov_data.len() as u64 != MAX_HTLC_COVENANT_DATA {
         return Err(TxError::new(
@@ -127,6 +133,52 @@ pub(crate) fn validate_htlc_spend_q(
 ) -> Result<(), TxError> {
     let cov = parse_htlc_covenant_data(&entry.covenant_data)?;
 
+    let selector = parse_htlc_selector(path_item)?;
+    let expected_key_id = expected_htlc_spend_key_id(&cov, selector, ctx)?;
+
+    let default_rp = DefaultRotationProvider;
+    let default_reg = SuiteRegistry::default_registry();
+    let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
+    let reg = registry.unwrap_or(&default_reg);
+    let mut sig_queue = sig_queue;
+
+    validate_htlc_signature_precheck(sig_item, expected_key_id, ctx.block_height, rp, reg)?;
+
+    let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(sig_item)?;
+    let digest32 = sighash_v1_digest_with_cache(
+        cache,
+        ctx.input_index,
+        ctx.input_value,
+        ctx.chain_id,
+        sighash_type,
+    )?;
+    queue_or_verify_signature(
+        sig_item.suite_id,
+        &sig_item.pubkey,
+        crypto_sig,
+        digest32,
+        reg,
+        &mut sig_queue,
+        TxError::new(ErrorCode::TxErrSigInvalid, "CORE_HTLC signature invalid"),
+    )
+}
+
+fn expected_htlc_spend_key_id(
+    cov: &HtlcCovenant,
+    selector: HtlcSelector<'_>,
+    ctx: HtlcSpendContext,
+) -> Result<[u8; 32], TxError> {
+    match selector.path_id {
+        0x00 => validate_htlc_claim_path(cov, selector.payload, selector.key_id),
+        0x01 => validate_htlc_refund_path(cov, selector.payload, selector.key_id, ctx),
+        _ => Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC unknown spend path",
+        )),
+    }
+}
+
+fn parse_htlc_selector(path_item: &WitnessItem) -> Result<HtlcSelector<'_>, TxError> {
     if path_item.suite_id != SUITE_ID_SENTINEL {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
@@ -146,100 +198,107 @@ pub(crate) fn validate_htlc_spend_q(
         ));
     }
 
-    let mut selector_key_id = [0u8; 32];
-    selector_key_id.copy_from_slice(&path_item.pubkey);
+    let mut key_id = [0u8; 32];
+    key_id.copy_from_slice(&path_item.pubkey);
+    Ok(HtlcSelector {
+        key_id,
+        path_id: path_item.signature[0],
+        payload: &path_item.signature,
+    })
+}
 
-    let path_id = path_item.signature[0];
-    let expected_key_id = match path_id {
-        0x00 => {
-            // Claim path.
-            if selector_key_id != cov.claim_key_id {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigInvalid,
-                    "CORE_HTLC claim key_id mismatch",
-                ));
-            }
-            if path_item.signature.len() < 3 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC claim payload too short",
-                ));
-            }
-            let pre_len =
-                u16::from_le_bytes(path_item.signature[1..3].try_into().map_err(|_| {
-                    TxError::new(ErrorCode::TxErrParse, "bad CORE_HTLC preimage_len")
-                })?) as usize;
-            if (pre_len as u64) < MIN_HTLC_PREIMAGE_BYTES {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC preimage_len must be >= 16",
-                ));
-            }
-            if pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC preimage length overflow",
-                ));
-            }
-            if path_item.signature.len() != 3 + pre_len {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC claim payload length mismatch",
-                ));
-            }
-            let preimage = &path_item.signature[3..];
-            if sha3_256(preimage) != cov.hash {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigInvalid,
-                    "CORE_HTLC claim preimage hash mismatch",
-                ));
-            }
-            cov.claim_key_id
-        }
-        0x01 => {
-            // Refund path.
-            if selector_key_id != cov.refund_key_id {
-                return Err(TxError::new(
-                    ErrorCode::TxErrSigInvalid,
-                    "CORE_HTLC refund key_id mismatch",
-                ));
-            }
-            if path_item.signature.len() != 1 {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_HTLC refund payload length mismatch",
-                ));
-            }
-            if cov.lock_mode == LOCK_MODE_HEIGHT {
-                if ctx.block_height < cov.lock_value {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrTimelockNotMet,
-                        "CORE_HTLC height lock not met",
-                    ));
-                }
-            } else if ctx.block_mtp < cov.lock_value {
-                return Err(TxError::new(
-                    ErrorCode::TxErrTimelockNotMet,
-                    "CORE_HTLC timestamp lock not met",
-                ));
-            }
-            cov.refund_key_id
-        }
-        _ => {
+fn validate_htlc_claim_path(
+    cov: &HtlcCovenant,
+    path_sig: &[u8],
+    selector_key_id: [u8; 32],
+) -> Result<[u8; 32], TxError> {
+    if selector_key_id != cov.claim_key_id {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "CORE_HTLC claim key_id mismatch",
+        ));
+    }
+    if path_sig.len() < 3 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC claim payload too short",
+        ));
+    }
+    let pre_len = u16::from_le_bytes(
+        path_sig[1..3]
+            .try_into()
+            .map_err(|_| TxError::new(ErrorCode::TxErrParse, "bad CORE_HTLC preimage_len"))?,
+    ) as usize;
+    if (pre_len as u64) < MIN_HTLC_PREIMAGE_BYTES {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC preimage_len must be >= 16",
+        ));
+    }
+    if pre_len as u64 > MAX_HTLC_PREIMAGE_BYTES {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC preimage length overflow",
+        ));
+    }
+    if path_sig.len() != 3 + pre_len {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC claim payload length mismatch",
+        ));
+    }
+    let preimage = &path_sig[3..];
+    if sha3_256(preimage) != cov.hash {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "CORE_HTLC claim preimage hash mismatch",
+        ));
+    }
+    Ok(cov.claim_key_id)
+}
+
+fn validate_htlc_refund_path(
+    cov: &HtlcCovenant,
+    path_sig: &[u8],
+    selector_key_id: [u8; 32],
+    ctx: HtlcSpendContext,
+) -> Result<[u8; 32], TxError> {
+    if selector_key_id != cov.refund_key_id {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigInvalid,
+            "CORE_HTLC refund key_id mismatch",
+        ));
+    }
+    if path_sig.len() != 1 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC refund payload length mismatch",
+        ));
+    }
+    if cov.lock_mode == LOCK_MODE_HEIGHT {
+        if ctx.block_height < cov.lock_value {
             return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "CORE_HTLC unknown spend path",
+                ErrorCode::TxErrTimelockNotMet,
+                "CORE_HTLC height lock not met",
             ));
         }
-    };
+    } else if ctx.block_mtp < cov.lock_value {
+        return Err(TxError::new(
+            ErrorCode::TxErrTimelockNotMet,
+            "CORE_HTLC timestamp lock not met",
+        ));
+    }
+    Ok(cov.refund_key_id)
+}
 
-    let default_rp = DefaultRotationProvider;
-    let default_reg = SuiteRegistry::default_registry();
-    let rp: &dyn RotationProvider = rotation.unwrap_or(&default_rp);
-    let reg = registry.unwrap_or(&default_reg);
-    let mut sig_queue = sig_queue;
-
-    let native_spend = rp.native_spend_suites(ctx.block_height);
+fn validate_htlc_signature_precheck(
+    sig_item: &WitnessItem,
+    expected_key_id: [u8; 32],
+    block_height: u64,
+    rotation: &dyn RotationProvider,
+    registry: &SuiteRegistry,
+) -> Result<(), TxError> {
+    let native_spend = rotation.native_spend_suites(block_height);
     if !native_spend.contains(sig_item.suite_id) {
         return Err(TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
@@ -247,15 +306,17 @@ pub(crate) fn validate_htlc_spend_q(
         ));
     }
 
-    let params = reg.lookup(sig_item.suite_id).ok_or_else(|| {
+    let params = registry.lookup(sig_item.suite_id).ok_or_else(|| {
         TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
             "CORE_HTLC suite not registered",
         )
     })?;
 
-    if sig_item.pubkey.len() as u64 != params.pubkey_len
-        || sig_item.signature.len() as u64 != params.sig_len + 1
+    if (
+        sig_item.pubkey.len() as u64,
+        sig_item.signature.len() as u64,
+    ) != (params.pubkey_len, params.sig_len + 1)
     {
         return Err(TxError::new(
             ErrorCode::TxErrSigNoncanonical,
@@ -269,24 +330,7 @@ pub(crate) fn validate_htlc_spend_q(
             "CORE_HTLC signature key binding mismatch",
         ));
     }
-
-    let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(sig_item)?;
-    let digest32 = sighash_v1_digest_with_cache(
-        cache,
-        ctx.input_index,
-        ctx.input_value,
-        ctx.chain_id,
-        sighash_type,
-    )?;
-    queue_or_verify_signature(
-        sig_item.suite_id,
-        &sig_item.pubkey,
-        crypto_sig,
-        digest32,
-        reg,
-        &mut sig_queue,
-        TxError::new(ErrorCode::TxErrSigInvalid, "CORE_HTLC signature invalid"),
-    )
+    Ok(())
 }
 
 #[cfg(test)]
