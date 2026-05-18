@@ -29,21 +29,44 @@ type CryptoRotationDescriptor struct {
 // Validate checks the descriptor's invariants against the given registry.
 // Returns nil if the descriptor is valid.
 func (d CryptoRotationDescriptor) Validate(registry *SuiteRegistry) error {
+	if err := d.validateDescriptorShape(); err != nil {
+		return err
+	}
+	registry = rotationRegistryOrDefault(registry)
+	if err := d.validateRegisteredSuites(registry); err != nil {
+		return err
+	}
+	return d.validateHeights()
+}
+
+func (d CryptoRotationDescriptor) validateDescriptorShape() error {
 	if d.Name == "" {
 		return fmt.Errorf("rotation: name required")
 	}
 	if d.OldSuiteID == d.NewSuiteID {
 		return fmt.Errorf("rotation: old suite (0x%02x) must differ from new suite", d.OldSuiteID)
 	}
+	return nil
+}
+
+func rotationRegistryOrDefault(registry *SuiteRegistry) *SuiteRegistry {
 	if registry == nil {
-		registry = DefaultSuiteRegistry()
+		return DefaultSuiteRegistry()
 	}
+	return registry
+}
+
+func (d CryptoRotationDescriptor) validateRegisteredSuites(registry *SuiteRegistry) error {
 	if !registry.IsRegistered(d.OldSuiteID) {
 		return fmt.Errorf("rotation: old suite 0x%02x not registered", d.OldSuiteID)
 	}
 	if !registry.IsRegistered(d.NewSuiteID) {
 		return fmt.Errorf("rotation: new suite 0x%02x not registered", d.NewSuiteID)
 	}
+	return nil
+}
+
+func (d CryptoRotationDescriptor) validateHeights() error {
 	if d.CreateHeight >= d.SpendHeight {
 		return fmt.Errorf("rotation: create_height (%d) must be < spend_height (%d)", d.CreateHeight, d.SpendHeight)
 	}
