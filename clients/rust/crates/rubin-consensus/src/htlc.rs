@@ -20,6 +20,7 @@ pub struct HtlcCovenant {
     pub refund_key_id: [u8; 32],
 }
 
+/// Per-input and block context required for CORE_HTLC spend validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HtlcSpendContext {
     pub input_index: u32,
