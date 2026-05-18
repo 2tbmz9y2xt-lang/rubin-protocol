@@ -4971,6 +4971,8 @@ mod tests {
 
     #[test]
     fn metrics_render_includes_v1_names() {
+        let _orphan_guard = crate::p2p_runtime::orphan_pool_metrics_test_guard();
+        crate::p2p_runtime::reset_orphan_pool_metrics_for_test();
         let (state, dir) = build_state(true);
         let _ = route_request(
             &state,
@@ -5041,6 +5043,15 @@ mod tests {
         assert!(body.contains(r#"rubin_pv_mode{mode="off"} 1"#));
         assert!(body.contains("rubin_node_reorg_total 0"), "{body}");
         assert!(body.contains("rubin_node_last_reorg_depth 0"), "{body}");
+        assert!(
+            body.contains("rubin_node_p2p_orphan_pool_blocks 0"),
+            "{body}"
+        );
+        assert!(
+            body.contains("rubin_node_p2p_orphan_pool_bytes 0"),
+            "{body}"
+        );
+        crate::p2p_runtime::reset_orphan_pool_metrics_for_test();
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
