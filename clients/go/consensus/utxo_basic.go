@@ -357,7 +357,20 @@ func (ctx *nonCoinbaseApplyContext) validateCoreExtInput(inputIndex int, entry U
 	if len(assigned) != CORE_EXT_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_EXT witness_slots must be 1")
 	}
-	return validateCoreExtSpendWithCache(entry, assigned[0], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.coreExtProfiles, ctx.rotation, ctx.registry, ctx.txContext)
+	return validateCoreExtSpendWithCache(coreExtSpendValidation{
+		entry:           entry,
+		w:               assigned[0],
+		tx:              ctx.tx,
+		inputIndex:      uint32(inputIndex),
+		inputValue:      entry.Value,
+		chainID:         ctx.chainID,
+		blockHeight:     ctx.height,
+		sighashCache:    ctx.sighashCache,
+		coreExtProfiles: ctx.coreExtProfiles,
+		rotation:        ctx.rotation,
+		registry:        ctx.registry,
+		txContext:       ctx.txContext,
+	})
 }
 
 func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
