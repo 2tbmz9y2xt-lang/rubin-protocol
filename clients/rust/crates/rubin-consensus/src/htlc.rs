@@ -313,10 +313,8 @@ fn validate_htlc_signature_precheck(
         )
     })?;
 
-    if (
-        sig_item.pubkey.len() as u64,
-        sig_item.signature.len() as u64,
-    ) != (params.pubkey_len, params.sig_len + 1)
+    if sig_item.pubkey.len() as u64 != params.pubkey_len
+        || sig_item.signature.len() as u64 != params.sig_len + 1
     {
         return Err(TxError::new(
             ErrorCode::TxErrSigNoncanonical,
