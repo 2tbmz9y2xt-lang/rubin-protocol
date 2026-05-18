@@ -151,38 +151,58 @@ func ParseCoreExtOpenSSLDigest32BindingDescriptor(raw []byte) (CoreExtOpenSSLDig
 		return CoreExtOpenSSLDigest32BindingDescriptor{}, fmt.Errorf("bad core_ext binding_descriptor")
 	}
 	off := len(coreExtOpenSSLDigest32BindingDescriptorPrefix)
-	algLenU64, _, err := readCompactSize(raw, &off)
+	algBytes, err := readCoreExtOpenSSLBindingAlg(raw, &off)
 	if err != nil {
-		return CoreExtOpenSSLDigest32BindingDescriptor{}, fmt.Errorf("bad core_ext binding_descriptor")
+		return CoreExtOpenSSLDigest32BindingDescriptor{}, err
 	}
-	if algLenU64 > uint64(math.MaxInt) {
-		return CoreExtOpenSSLDigest32BindingDescriptor{}, fmt.Errorf("bad core_ext binding_descriptor")
-	}
-	algBytes, err := readBytes(raw, &off, int(algLenU64))
+	pubkeyLen, sigLen, err := readCoreExtOpenSSLBindingLengths(raw, &off)
 	if err != nil {
-		return CoreExtOpenSSLDigest32BindingDescriptor{}, fmt.Errorf("bad core_ext binding_descriptor")
-	}
-	pubkeyLenU64, _, err := readCompactSize(raw, &off)
-	if err != nil {
-		return CoreExtOpenSSLDigest32BindingDescriptor{}, fmt.Errorf("bad core_ext binding_descriptor")
-	}
-	sigLenU64, _, err := readCompactSize(raw, &off)
-	if err != nil {
-		return CoreExtOpenSSLDigest32BindingDescriptor{}, fmt.Errorf("bad core_ext binding_descriptor")
-	}
-	if off != len(raw) || pubkeyLenU64 > uint64(math.MaxInt) || sigLenU64 > uint64(math.MaxInt) {
-		return CoreExtOpenSSLDigest32BindingDescriptor{}, fmt.Errorf("bad core_ext binding_descriptor")
+		return CoreExtOpenSSLDigest32BindingDescriptor{}, err
 	}
 
 	desc := CoreExtOpenSSLDigest32BindingDescriptor{
 		OpenSSLAlg: string(algBytes),
-		PubkeyLen:  int(pubkeyLenU64),
-		SigLen:     int(sigLenU64),
+		PubkeyLen:  pubkeyLen,
+		SigLen:     sigLen,
 	}
 	if err := validateCoreExtOpenSSLBindingDescriptor(desc.OpenSSLAlg, desc.PubkeyLen, desc.SigLen); err != nil {
 		return CoreExtOpenSSLDigest32BindingDescriptor{}, err
 	}
 	return desc, nil
+}
+
+func badCoreExtBindingDescriptorError() error {
+	return fmt.Errorf("bad core_ext binding_descriptor")
+}
+
+func readCoreExtOpenSSLBindingAlg(raw []byte, off *int) ([]byte, error) {
+	algLenU64, _, err := readCompactSize(raw, off)
+	if err != nil {
+		return nil, badCoreExtBindingDescriptorError()
+	}
+	if algLenU64 > uint64(math.MaxInt) {
+		return nil, badCoreExtBindingDescriptorError()
+	}
+	algBytes, err := readBytes(raw, off, int(algLenU64))
+	if err != nil {
+		return nil, badCoreExtBindingDescriptorError()
+	}
+	return algBytes, nil
+}
+
+func readCoreExtOpenSSLBindingLengths(raw []byte, off *int) (int, int, error) {
+	pubkeyLenU64, _, err := readCompactSize(raw, off)
+	if err != nil {
+		return 0, 0, badCoreExtBindingDescriptorError()
+	}
+	sigLenU64, _, err := readCompactSize(raw, off)
+	if err != nil {
+		return 0, 0, badCoreExtBindingDescriptorError()
+	}
+	if *off != len(raw) || pubkeyLenU64 > uint64(math.MaxInt) || sigLenU64 > uint64(math.MaxInt) {
+		return 0, 0, badCoreExtBindingDescriptorError()
+	}
+	return int(pubkeyLenU64), int(sigLenU64), nil
 }
 
 func validateCoreExtOpenSSLBindingDescriptor(opensslAlg string, pubkeyLen int, sigLen int) error {

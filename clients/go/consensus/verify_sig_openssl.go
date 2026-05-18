@@ -326,17 +326,8 @@ func parseOpenSSLErrorBuffer(errBuf []byte, fallback string) error {
 }
 
 func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []byte) (bool, error) {
-	if alg == "" {
-		return false, fmt.Errorf("openssl: empty algorithm")
-	}
-	if len(pubkey) == 0 {
-		return false, fmt.Errorf("openssl: empty pubkey")
-	}
-	if len(signature) == 0 {
-		return false, fmt.Errorf("openssl: empty signature")
-	}
-	if len(msg) == 0 {
-		return false, fmt.Errorf("openssl: empty message")
+	if err := validateOpenSSLVerifySigOneShotInputs(alg, pubkey, signature, msg); err != nil {
+		return false, err
 	}
 
 	cAlg := C.CString(alg)
@@ -360,12 +351,32 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 	case 0:
 		return false, nil
 	default:
-		n := 0
-		for n < len(errBuf) && errBuf[n] != 0 {
-			n++
-		}
-		return false, fmt.Errorf("openssl verify failed: %s", string(errBuf[:n]))
+		return false, openSSLVerifySigOneShotError(errBuf)
 	}
+}
+
+func validateOpenSSLVerifySigOneShotInputs(alg string, pubkey []byte, signature []byte, msg []byte) error {
+	if alg == "" {
+		return fmt.Errorf("openssl: empty algorithm")
+	}
+	if len(pubkey) == 0 {
+		return fmt.Errorf("openssl: empty pubkey")
+	}
+	if len(signature) == 0 {
+		return fmt.Errorf("openssl: empty signature")
+	}
+	if len(msg) == 0 {
+		return fmt.Errorf("openssl: empty message")
+	}
+	return nil
+}
+
+func openSSLVerifySigOneShotError(errBuf []byte) error {
+	n := 0
+	for n < len(errBuf) && errBuf[n] != 0 {
+		n++
+	}
+	return fmt.Errorf("openssl verify failed: %s", string(errBuf[:n]))
 }
 
 // verifySig is the legacy single-suite dispatcher kept alongside the
