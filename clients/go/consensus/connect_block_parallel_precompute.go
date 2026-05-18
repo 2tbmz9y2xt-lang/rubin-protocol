@@ -94,7 +94,10 @@ func PrecomputeTxContexts(
 		return nil, nil // coinbase-only block
 	}
 
-	overlay := clonePrecomputeOverlay(utxoSnapshot)
+	overlay := make(map[Outpoint]UtxoEntry, len(utxoSnapshot))
+	for k, v := range utxoSnapshot {
+		overlay[k] = v
+	}
 	results := make([]TxValidationContext, txCount)
 
 	for i := 1; i < len(pb.Txs); i++ {
@@ -107,14 +110,6 @@ func PrecomputeTxContexts(
 	}
 
 	return results, nil
-}
-
-func clonePrecomputeOverlay(utxoSnapshot map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
-	overlay := make(map[Outpoint]UtxoEntry, len(utxoSnapshot))
-	for k, v := range utxoSnapshot {
-		overlay[k] = v
-	}
-	return overlay
 }
 
 func precomputeTxContext(
