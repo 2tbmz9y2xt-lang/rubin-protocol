@@ -32,38 +32,10 @@ func siphash24(msg []byte, k0, k1 uint64) uint64 {
 
 	i := 0
 	for ; i+8 <= len(msg); i += 8 {
-		m := binary.LittleEndian.Uint64(msg[i : i+8])
-		v3 ^= m
-		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
-		v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
-		v0 ^= m
+		siphashBlock(&v0, &v1, &v2, &v3, binary.LittleEndian.Uint64(msg[i:i+8]))
 	}
 
-	var b uint64 = uint64(len(msg)) << 56
-	rem := msg[i:]
-	switch len(rem) {
-	case 7:
-		b |= uint64(rem[6]) << 48
-		fallthrough
-	case 6:
-		b |= uint64(rem[5]) << 40
-		fallthrough
-	case 5:
-		b |= uint64(rem[4]) << 32
-		fallthrough
-	case 4:
-		b |= uint64(rem[3]) << 24
-		fallthrough
-	case 3:
-		b |= uint64(rem[2]) << 16
-		fallthrough
-	case 2:
-		b |= uint64(rem[1]) << 8
-		fallthrough
-	case 1:
-		b |= uint64(rem[0])
-	}
-
+	b := siphashFinalBlock(msg, i)
 	v3 ^= b
 	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
 	v0, v1, v2, v3 = sipRound(v0, v1, v2, v3)
@@ -75,6 +47,21 @@ func siphash24(msg []byte, k0, k1 uint64) uint64 {
 	}
 
 	return v0 ^ v1 ^ v2 ^ v3
+}
+
+func siphashBlock(v0, v1, v2, v3 *uint64, m uint64) {
+	*v3 ^= m
+	*v0, *v1, *v2, *v3 = sipRound(*v0, *v1, *v2, *v3)
+	*v0, *v1, *v2, *v3 = sipRound(*v0, *v1, *v2, *v3)
+	*v0 ^= m
+}
+
+func siphashFinalBlock(msg []byte, off int) uint64 {
+	b := uint64(len(msg)) << 56
+	for shift := uint(0); off < len(msg); off, shift = off+1, shift+8 {
+		b |= uint64(msg[off]) << shift
+	}
+	return b
 }
 
 // CompactShortID computes a 6-byte short ID from WTXID using SipHash-2-4.
