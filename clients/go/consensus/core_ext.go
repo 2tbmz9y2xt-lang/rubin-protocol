@@ -193,34 +193,46 @@ func cloneAllowedSuites(allowed map[uint8]struct{}) map[uint8]struct{} {
 	return out
 }
 
-func wrapCoreExtVerifySigExtWithTxContext(fn CoreExtVerifySigExtFunc) CoreExtVerifySigExtTxContextFunc {
-	if fn == nil {
-		return nil
-	}
-	return func(
-		extID uint16,
-		suiteID uint8,
-		pubkey []byte,
-		signature []byte,
-		digest32 [32]byte,
-		extPayload []byte,
-		_ *TxContextBase,
-		_ *TxContextContinuing,
-		_ uint64,
-	) (bool, error) {
-		return fn(extID, suiteID, pubkey, signature, digest32, extPayload)
-	}
+type coreExtVerifySigExtTxContextCall struct {
+	extID          uint16
+	suiteID        uint8
+	pubkey         []byte
+	signature      []byte
+	digest32       [32]byte
+	extPayload     []byte
+	ctxBase        *TxContextBase
+	ctxContinuing  *TxContextContinuing
+	selfInputValue uint64
 }
 
 func hasCoreExtVerifySigExtBinding(profile CoreExtDeploymentProfile) bool {
 	return profile.VerifySigExtFn != nil || profile.VerifySigExtTxContextFn != nil
 }
 
-func coreExtVerifySigExtTxContextFn(profile CoreExtProfile) CoreExtVerifySigExtTxContextFunc {
+func hasCoreExtVerifySigExtProfileBinding(profile CoreExtProfile) bool {
+	return profile.VerifySigExtFn != nil || profile.VerifySigExtTxContextFn != nil
+}
+
+func verifyCoreExtProfileTxContext(profile CoreExtProfile, call coreExtVerifySigExtTxContextCall) (bool, bool, error) {
 	if profile.VerifySigExtTxContextFn != nil {
-		return profile.VerifySigExtTxContextFn
+		ok, err := profile.VerifySigExtTxContextFn(
+			call.extID,
+			call.suiteID,
+			call.pubkey,
+			call.signature,
+			call.digest32,
+			call.extPayload,
+			call.ctxBase,
+			call.ctxContinuing,
+			call.selfInputValue,
+		)
+		return ok, true, err
 	}
-	return wrapCoreExtVerifySigExtWithTxContext(profile.VerifySigExtFn)
+	if profile.VerifySigExtFn != nil {
+		ok, err := profile.VerifySigExtFn(call.extID, call.suiteID, call.pubkey, call.signature, call.digest32, call.extPayload)
+		return ok, true, err
+	}
+	return false, false, nil
 }
 
 func sortedAllowedSuites(allowed map[uint8]struct{}) []uint8 {
@@ -392,8 +404,7 @@ func validateCoreExtWitnessAtHeight(
 		return err
 	}
 	if profile.TxContextEnabled {
-		verifyTxContextFn := coreExtVerifySigExtTxContextFn(profile)
-		if verifyTxContextFn == nil {
+		if !hasCoreExtVerifySigExtProfileBinding(profile) {
 			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext unsupported")
 		}
 		if txContext == nil || txContext.Base == nil {
@@ -403,17 +414,17 @@ func validateCoreExtWitnessAtHeight(
 		if !ok || ctxContinuing == nil {
 			return txerr(TX_ERR_SIG_INVALID, "CORE_EXT txcontext continuing bundle missing")
 		}
-		ok, err := verifyTxContextFn(
-			cd.ExtID,
-			w.SuiteID,
-			w.Pubkey,
-			cryptoSig,
-			digest,
-			cd.ExtPayload,
-			txContext.Base,
-			ctxContinuing,
-			inputValue,
-		)
+		ok, _, err := verifyCoreExtProfileTxContext(profile, coreExtVerifySigExtTxContextCall{
+			extID:          cd.ExtID,
+			suiteID:        w.SuiteID,
+			pubkey:         w.Pubkey,
+			signature:      cryptoSig,
+			digest32:       digest,
+			extPayload:     cd.ExtPayload,
+			ctxBase:        txContext.Base,
+			ctxContinuing:  ctxContinuing,
+			selfInputValue: inputValue,
+		})
 		if err != nil {
 			return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_EXT verify_sig_ext error")
 		}
@@ -435,32 +446,34 @@ func validateCoreExtWitnessAtHeight(
 	return nil
 }
 
-func validateCoreExtSpendWithCache(
-	entry UtxoEntry,
-	w WitnessItem,
-	tx *Tx,
-	inputIndex uint32,
-	inputValue uint64,
-	chainID [32]byte,
-	blockHeight uint64,
-	sighashCache *SighashV1PrehashCache,
-	coreExtProfiles CoreExtProfileProvider,
-	rotation RotationProvider,
-	registry *SuiteRegistry,
-	txContext *TxContextBundle,
-) error {
-	cd, err := ParseCoreExtCovenantData(entry.CovenantData)
+type coreExtSpendValidation struct {
+	entry           UtxoEntry
+	w               WitnessItem
+	tx              *Tx
+	inputIndex      uint32
+	inputValue      uint64
+	chainID         [32]byte
+	blockHeight     uint64
+	sighashCache    *SighashV1PrehashCache
+	coreExtProfiles CoreExtProfileProvider
+	rotation        RotationProvider
+	registry        *SuiteRegistry
+	txContext       *TxContextBundle
+}
+
+func validateCoreExtSpendWithCache(check coreExtSpendValidation) error {
+	cd, err := ParseCoreExtCovenantData(check.entry.CovenantData)
 	if err != nil {
 		return err
 	}
 
-	if coreExtProfiles == nil {
+	if check.coreExtProfiles == nil {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile provider missing")
 	}
 
 	profile := CoreExtProfile{}
 	active := false
-	resolved, ok, err := coreExtProfiles.LookupCoreExtProfile(cd.ExtID, blockHeight)
+	resolved, ok, err := check.coreExtProfiles.LookupCoreExtProfile(cd.ExtID, check.blockHeight)
 	if err != nil {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_EXT profile lookup failure")
 	}
@@ -475,16 +488,16 @@ func validateCoreExtSpendWithCache(
 	return validateCoreExtWitnessAtHeight(
 		cd,
 		profile,
-		w,
-		tx,
-		inputIndex,
-		inputValue,
-		chainID,
-		blockHeight,
-		sighashCache,
-		rotation,
-		registry,
-		txContext,
+		check.w,
+		check.tx,
+		check.inputIndex,
+		check.inputValue,
+		check.chainID,
+		check.blockHeight,
+		check.sighashCache,
+		check.rotation,
+		check.registry,
+		check.txContext,
 		nil,
 	)
 }
