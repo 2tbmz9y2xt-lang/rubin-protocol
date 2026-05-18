@@ -263,16 +263,16 @@ fn validate_htlc_refund_path(
     selector_key_id: [u8; 32],
     ctx: HtlcSpendContext,
 ) -> Result<[u8; 32], TxError> {
-    if path_sig.len() != 1 {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "CORE_HTLC refund payload length mismatch",
-        ));
-    }
     if selector_key_id != cov.refund_key_id {
         return Err(TxError::new(
             ErrorCode::TxErrSigInvalid,
             "CORE_HTLC refund key_id mismatch",
+        ));
+    }
+    if path_sig.len() != 1 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC refund payload length mismatch",
         ));
     }
     if cov.lock_mode == LOCK_MODE_HEIGHT {
