@@ -1,10 +1,12 @@
 use super::*;
 use sha3::{Digest, Sha3_256};
 
-fn make_outpoint(txid_byte: u8, vout: u32) -> Outpoint {
-    let mut txid = [0u8; 32];
-    txid[0] = txid_byte;
-    Outpoint { txid, vout }
+macro_rules! make_outpoint {
+    ($txid_byte:expr, $vout:expr) => {{
+        let mut txid = [0u8; 32];
+        txid[0] = $txid_byte;
+        Outpoint { txid, vout: $vout }
+    }};
 }
 
 fn make_entry(
@@ -46,7 +48,7 @@ fn state_digest_empty_set() {
 #[test]
 fn state_digest_single_utxo_manual() {
     let mut utxos = HashMap::new();
-    let op = make_outpoint(0x42, 7);
+    let op = make_outpoint!(0x42, 7);
     let entry = make_entry(1_000_000, 0x0000, &[], 100, false);
     utxos.insert(op.clone(), entry);
 
@@ -82,9 +84,9 @@ fn state_digest_single_utxo_manual() {
 
 #[test]
 fn state_digest_deterministic_insertion_order() {
-    let op_a = make_outpoint(0x01, 0);
-    let op_b = make_outpoint(0x02, 0);
-    let op_c = make_outpoint(0x03, 0);
+    let op_a = make_outpoint!(0x01, 0);
+    let op_b = make_outpoint!(0x02, 0);
+    let op_c = make_outpoint!(0x03, 0);
     let entry_a = make_entry(100, 0x0000, &[], 1, false);
     let entry_b = make_entry(200, 0x0100, &[0xAB], 2, true);
     let entry_c = make_entry(300, 0x0101, &[0xCD, 0xEF], 3, false);
@@ -110,7 +112,7 @@ fn state_digest_deterministic_insertion_order() {
 
 #[test]
 fn state_digest_different_sets_differ() {
-    let op = make_outpoint(0x01, 0);
+    let op = make_outpoint!(0x01, 0);
     let entry_a = make_entry(100, 0x0000, &[], 1, false);
     let entry_b = make_entry(101, 0x0000, &[], 1, false); // different value
 
@@ -129,7 +131,7 @@ fn state_digest_different_sets_differ() {
 
 #[test]
 fn state_digest_sensitive_to_value() {
-    let op = make_outpoint(0x01, 0);
+    let op = make_outpoint!(0x01, 0);
     let mut s1 = HashMap::new();
     s1.insert(op.clone(), make_entry(100, 0, &[], 0, false));
     let mut s2 = HashMap::new();
@@ -139,7 +141,7 @@ fn state_digest_sensitive_to_value() {
 
 #[test]
 fn state_digest_sensitive_to_covenant_type() {
-    let op = make_outpoint(0x01, 0);
+    let op = make_outpoint!(0x01, 0);
     let mut s1 = HashMap::new();
     s1.insert(op.clone(), make_entry(100, 0x0000, &[], 0, false));
     let mut s2 = HashMap::new();
@@ -149,7 +151,7 @@ fn state_digest_sensitive_to_covenant_type() {
 
 #[test]
 fn state_digest_sensitive_to_covenant_data() {
-    let op = make_outpoint(0x01, 0);
+    let op = make_outpoint!(0x01, 0);
     let mut s1 = HashMap::new();
     s1.insert(op.clone(), make_entry(100, 0, &[0x01], 0, false));
     let mut s2 = HashMap::new();
@@ -159,7 +161,7 @@ fn state_digest_sensitive_to_covenant_data() {
 
 #[test]
 fn state_digest_sensitive_to_creation_height() {
-    let op = make_outpoint(0x01, 0);
+    let op = make_outpoint!(0x01, 0);
     let mut s1 = HashMap::new();
     s1.insert(op.clone(), make_entry(100, 0, &[], 10, false));
     let mut s2 = HashMap::new();
@@ -169,7 +171,7 @@ fn state_digest_sensitive_to_creation_height() {
 
 #[test]
 fn state_digest_sensitive_to_coinbase_flag() {
-    let op = make_outpoint(0x01, 0);
+    let op = make_outpoint!(0x01, 0);
     let mut s1 = HashMap::new();
     s1.insert(op.clone(), make_entry(100, 0, &[], 0, false));
     let mut s2 = HashMap::new();
@@ -179,8 +181,8 @@ fn state_digest_sensitive_to_coinbase_flag() {
 
 #[test]
 fn state_digest_sensitive_to_txid() {
-    let op_a = make_outpoint(0x01, 0);
-    let op_b = make_outpoint(0x02, 0);
+    let op_a = make_outpoint!(0x01, 0);
+    let op_b = make_outpoint!(0x02, 0);
     let entry = make_entry(100, 0, &[], 0, false);
     let mut s1 = HashMap::new();
     s1.insert(op_a, entry.clone());
@@ -191,8 +193,8 @@ fn state_digest_sensitive_to_txid() {
 
 #[test]
 fn state_digest_sensitive_to_vout() {
-    let op_a = make_outpoint(0x01, 0);
-    let op_b = make_outpoint(0x01, 1);
+    let op_a = make_outpoint!(0x01, 0);
+    let op_b = make_outpoint!(0x01, 1);
     let entry = make_entry(100, 0, &[], 0, false);
     let mut s1 = HashMap::new();
     s1.insert(op_a, entry.clone());
@@ -208,9 +210,9 @@ fn state_digest_sensitive_to_vout() {
 #[test]
 fn state_digest_sorting_by_outpoint() {
     // Insert in descending vout order, verify hash equals ascending order
-    let op_0 = make_outpoint(0x01, 0);
-    let op_1 = make_outpoint(0x01, 1);
-    let op_2 = make_outpoint(0x01, 2);
+    let op_0 = make_outpoint!(0x01, 0);
+    let op_1 = make_outpoint!(0x01, 1);
+    let op_2 = make_outpoint!(0x01, 2);
     let e0 = make_entry(100, 0, &[], 0, false);
     let e1 = make_entry(200, 0, &[], 0, false);
     let e2 = make_entry(300, 0, &[], 0, false);
@@ -234,7 +236,7 @@ fn state_digest_sorting_by_outpoint() {
 
 #[test]
 fn state_digest_large_covenant_data() {
-    let op = make_outpoint(0x01, 0);
+    let op = make_outpoint!(0x01, 0);
     let cov_data = vec![0xABu8; 300]; // 300 bytes → 0xfd prefix (3-byte compact size)
     let entry = make_entry(500, 0x0102, &cov_data, 42, true);
 
@@ -271,9 +273,9 @@ fn state_digest_large_covenant_data() {
 #[test]
 fn state_digest_idempotent() {
     let mut utxos = HashMap::new();
-    utxos.insert(make_outpoint(0x01, 0), make_entry(100, 0, &[], 1, false));
+    utxos.insert(make_outpoint!(0x01, 0), make_entry(100, 0, &[], 1, false));
     utxos.insert(
-        make_outpoint(0x02, 5),
+        make_outpoint!(0x02, 5),
         make_entry(200, 0x0100, &[0xFF], 2, true),
     );
 
@@ -302,8 +304,8 @@ fn state_digest_includes_dst() {
 
 #[test]
 fn state_digest_count_changes_hash() {
-    let op_a = make_outpoint(0x01, 0);
-    let op_b = make_outpoint(0x02, 0);
+    let op_a = make_outpoint!(0x01, 0);
+    let op_b = make_outpoint!(0x02, 0);
     let entry = make_entry(100, 0, &[], 0, false);
 
     let mut one = HashMap::new();
@@ -322,7 +324,7 @@ fn state_digest_count_changes_hash() {
 
 #[test]
 fn state_digest_coinbase_flag_encoding() {
-    let op = make_outpoint(0x01, 0);
+    let op = make_outpoint!(0x01, 0);
     let entry = make_entry(100, 0, &[], 0, true);
 
     let mut utxos = HashMap::new();
@@ -377,9 +379,9 @@ fn state_digest_sort_by_txid_then_vout() {
     // op_b: txid[0]=0x01, vout=3
     // op_c: txid[0]=0x02, vout=0
     // Expected sort: op_b (01..., vout=3) < op_a (01..., vout=5) < op_c (02..., vout=0)
-    let op_a = make_outpoint(0x01, 5);
-    let op_b = make_outpoint(0x01, 3);
-    let op_c = make_outpoint(0x02, 0);
+    let op_a = make_outpoint!(0x01, 5);
+    let op_b = make_outpoint!(0x01, 3);
+    let op_c = make_outpoint!(0x02, 0);
 
     let e_a = make_entry(100, 0, &[], 0, false);
     let e_b = make_entry(200, 0, &[], 0, false);
