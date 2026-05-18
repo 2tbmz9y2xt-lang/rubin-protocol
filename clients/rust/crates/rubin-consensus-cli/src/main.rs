@@ -4986,7 +4986,7 @@ fn main() {
 
             if !structural_ok {
                 err = Some(err_code(ErrorCode::TxErrParse));
-            } else if path == "refund" && (!selector_payload_len_ok || !key_binding_ok) {
+            } else if path == "refund" && !selector_payload_len_ok {
                 let resp = htlc_refund_ordering_policy_response(
                     &req,
                     suite_id,
