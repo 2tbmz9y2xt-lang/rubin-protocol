@@ -82,7 +82,7 @@ pub use flagday::{flagday_active_at_height, FlagDayDeployment};
 pub use fork_choice::{chain_work_from_targets, work_from_target};
 #[allow(deprecated)]
 pub use fork_choice::{fork_chainwork_from_targets, fork_work_from_target};
-pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant};
+pub use htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcCovenant, HtlcSpendContext};
 pub use merkle::merkle_root_txids;
 pub use pow::{pow_check, retarget_v1, retarget_v1_clamped};
 pub use precompute::{precompute_tx_contexts, PrecomputedTxContext};
