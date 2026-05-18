@@ -20,6 +20,16 @@ pub struct HtlcCovenant {
     pub refund_key_id: [u8; 32],
 }
 
+/// Per-input and block context required for CORE_HTLC spend validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HtlcSpendContext {
+    pub input_index: u32,
+    pub input_value: u64,
+    pub chain_id: [u8; 32],
+    pub block_height: u64,
+    pub block_mtp: u64,
+}
+
 pub fn parse_htlc_covenant_data(cov_data: &[u8]) -> Result<HtlcCovenant, TxError> {
     if cov_data.len() as u64 != MAX_HTLC_COVENANT_DATA {
         return Err(TxError::new(
@@ -69,90 +79,38 @@ pub fn parse_htlc_covenant_data(cov_data: &[u8]) -> Result<HtlcCovenant, TxError
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn validate_htlc_spend(
     entry: &UtxoEntry,
     path_item: &WitnessItem,
     sig_item: &WitnessItem,
     tx: &Tx,
-    input_index: u32,
-    input_value: u64,
-    chain_id: [u8; 32],
-    block_height: u64,
-    block_mtp: u64,
+    ctx: HtlcSpendContext,
 ) -> Result<(), TxError> {
     let mut cache = SighashV1PrehashCache::new(tx)?;
-    validate_htlc_spend_with_cache(
-        entry,
-        path_item,
-        sig_item,
-        tx,
-        input_index,
-        input_value,
-        chain_id,
-        block_height,
-        block_mtp,
-        &mut cache,
-    )
+    validate_htlc_spend_with_cache(entry, path_item, sig_item, ctx, &mut cache)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_htlc_spend_with_cache(
     entry: &UtxoEntry,
     path_item: &WitnessItem,
     sig_item: &WitnessItem,
-    _tx: &Tx,
-    input_index: u32,
-    input_value: u64,
-    chain_id: [u8; 32],
-    block_height: u64,
-    block_mtp: u64,
+    ctx: HtlcSpendContext,
     cache: &mut SighashV1PrehashCache<'_>,
 ) -> Result<(), TxError> {
-    validate_htlc_spend_at_height(
-        entry,
-        path_item,
-        sig_item,
-        _tx,
-        input_index,
-        input_value,
-        chain_id,
-        block_height,
-        block_mtp,
-        cache,
-        None,
-        None,
-    )
+    validate_htlc_spend_at_height(entry, path_item, sig_item, ctx, cache, None, None)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_htlc_spend_at_height(
     entry: &UtxoEntry,
     path_item: &WitnessItem,
     sig_item: &WitnessItem,
-    _tx: &Tx,
-    input_index: u32,
-    input_value: u64,
-    chain_id: [u8; 32],
-    block_height: u64,
-    block_mtp: u64,
+    ctx: HtlcSpendContext,
     cache: &mut SighashV1PrehashCache<'_>,
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<(), TxError> {
     validate_htlc_spend_q(
-        entry,
-        path_item,
-        sig_item,
-        input_index,
-        input_value,
-        chain_id,
-        block_height,
-        block_mtp,
-        cache,
-        None,
-        rotation,
-        registry,
+        entry, path_item, sig_item, ctx, cache, None, rotation, registry,
     )
 }
 
@@ -161,11 +119,7 @@ pub(crate) fn validate_htlc_spend_q(
     entry: &UtxoEntry,
     path_item: &WitnessItem,
     sig_item: &WitnessItem,
-    input_index: u32,
-    input_value: u64,
-    chain_id: [u8; 32],
-    block_height: u64,
-    block_mtp: u64,
+    ctx: HtlcSpendContext,
     cache: &mut SighashV1PrehashCache<'_>,
     sig_queue: Option<&mut SigCheckQueue>,
     rotation: Option<&dyn RotationProvider>,
@@ -257,13 +211,13 @@ pub(crate) fn validate_htlc_spend_q(
                 ));
             }
             if cov.lock_mode == LOCK_MODE_HEIGHT {
-                if block_height < cov.lock_value {
+                if ctx.block_height < cov.lock_value {
                     return Err(TxError::new(
                         ErrorCode::TxErrTimelockNotMet,
                         "CORE_HTLC height lock not met",
                     ));
                 }
-            } else if block_mtp < cov.lock_value {
+            } else if ctx.block_mtp < cov.lock_value {
                 return Err(TxError::new(
                     ErrorCode::TxErrTimelockNotMet,
                     "CORE_HTLC timestamp lock not met",
@@ -285,7 +239,7 @@ pub(crate) fn validate_htlc_spend_q(
     let reg = registry.unwrap_or(&default_reg);
     let mut sig_queue = sig_queue;
 
-    let native_spend = rp.native_spend_suites(block_height);
+    let native_spend = rp.native_spend_suites(ctx.block_height);
     if !native_spend.contains(sig_item.suite_id) {
         return Err(TxError::new(
             ErrorCode::TxErrSigAlgInvalid,
@@ -317,8 +271,13 @@ pub(crate) fn validate_htlc_spend_q(
     }
 
     let (crypto_sig, sighash_type) = extract_crypto_sig_and_sighash(sig_item)?;
-    let digest32 =
-        sighash_v1_digest_with_cache(cache, input_index, input_value, chain_id, sighash_type)?;
+    let digest32 = sighash_v1_digest_with_cache(
+        cache,
+        ctx.input_index,
+        ctx.input_value,
+        ctx.chain_id,
+        sighash_type,
+    )?;
     queue_or_verify_signature(
         sig_item.suite_id,
         &sig_item.pubkey,
@@ -460,12 +419,13 @@ mod tests {
             &entry,
             &path_item,
             &sig_item,
-            &tx,
-            0,
-            1000,
-            [0u8; 32],
-            15,
-            0,
+            HtlcSpendContext {
+                input_index: 0,
+                input_value: 1000,
+                chain_id: [0u8; 32],
+                block_height: 15,
+                block_mtp: 0,
+            },
             &mut cache,
             Some(&rotation),
             Some(&registry),
@@ -506,12 +466,13 @@ mod tests {
             &entry,
             &path_item,
             &sig_item,
-            &tx,
-            0,
-            1000,
-            [0u8; 32],
-            7,
-            0,
+            HtlcSpendContext {
+                input_index: 0,
+                input_value: 1000,
+                chain_id: [0u8; 32],
+                block_height: 7,
+                block_mtp: 0,
+            },
             &mut cache,
             Some(&rotation),
             Some(&registry),

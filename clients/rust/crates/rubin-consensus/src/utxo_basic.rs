@@ -9,7 +9,7 @@ use crate::core_ext::{validate_core_ext_spend_with_cache_and_suite_context_q, Co
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend_q};
+use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend_q, HtlcSpendContext};
 use crate::sig_queue::SigCheckQueue;
 use crate::sighash::SighashV1PrehashCache;
 use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
@@ -445,11 +445,13 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_c
                     entry,
                     &assigned[0],
                     &assigned[1],
-                    input_index as u32,
-                    entry.value,
-                    chain_id,
-                    height,
-                    block_mtp,
+                    HtlcSpendContext {
+                        input_index: input_index as u32,
+                        input_value: entry.value,
+                        chain_id,
+                        block_height: height,
+                        block_mtp,
+                    },
                     &mut sighash_cache,
                     sig_queue.as_deref_mut(),
                     rotation,

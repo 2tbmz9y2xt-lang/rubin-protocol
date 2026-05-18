@@ -5,7 +5,7 @@ use crate::constants::{
 };
 use crate::core_ext::{validate_core_ext_spend_with_cache_and_suite_context_q, CoreExtProfiles};
 use crate::error::{ErrorCode, TxError};
-use crate::htlc::validate_htlc_spend_q;
+use crate::htlc::{validate_htlc_spend_q, HtlcSpendContext};
 use crate::precompute::PrecomputedTxContext;
 use crate::sig_cache::SigCache;
 use crate::sig_queue::SigCheckQueue;
@@ -300,11 +300,13 @@ fn validate_input_spend(
                 entry,
                 &assigned[0], // path_item
                 &assigned[1], // sig_item
-                input_index,
-                input_value,
-                chain_id,
-                block_height,
-                block_mtp,
+                HtlcSpendContext {
+                    input_index,
+                    input_value,
+                    chain_id,
+                    block_height,
+                    block_mtp,
+                },
                 sighash_cache,
                 sig_queue,
                 Some(rotation),
