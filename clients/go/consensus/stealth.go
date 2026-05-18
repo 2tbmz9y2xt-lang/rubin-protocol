@@ -25,45 +25,67 @@ func validateCoreStealthSpend(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex
 }
 
 func validateCoreStealthSpendWithCache(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64, cache *SighashV1PrehashCache) error {
-	return validateCoreStealthSpendAtHeight(entry, w, tx, inputIndex, inputValue, chainID, blockHeight, cache, nil, nil)
+	return validateCoreStealthSpendAtHeight(coreStealthSpendValidation{
+		entry:       entry,
+		w:           w,
+		tx:          tx,
+		inputIndex:  inputIndex,
+		inputValue:  inputValue,
+		chainID:     chainID,
+		blockHeight: blockHeight,
+		cache:       cache,
+	})
+}
+
+type coreStealthSpendValidation struct {
+	entry       UtxoEntry
+	w           WitnessItem
+	tx          *Tx
+	inputIndex  uint32
+	inputValue  uint64
+	chainID     [32]byte
+	blockHeight uint64
+	cache       *SighashV1PrehashCache
+	rotation    RotationProvider
+	registry    *SuiteRegistry
 }
 
 // validateCoreStealthSpendAtHeight validates a stealth spend using the suite
 // registry and rotation provider. When rotation or registry is nil, defaults
 // are used (ML-DSA-87 genesis set).
-func validateCoreStealthSpendAtHeight(entry UtxoEntry, w WitnessItem, tx *Tx, inputIndex uint32, inputValue uint64, chainID [32]byte, blockHeight uint64, cache *SighashV1PrehashCache, rotation RotationProvider, registry *SuiteRegistry) error {
-	if rotation == nil {
-		rotation = DefaultRotationProvider{}
+func validateCoreStealthSpendAtHeight(input coreStealthSpendValidation) error {
+	if input.rotation == nil {
+		input.rotation = DefaultRotationProvider{}
 	}
-	if registry == nil {
-		registry = DefaultSuiteRegistry()
+	if input.registry == nil {
+		input.registry = DefaultSuiteRegistry()
 	}
 
-	c, err := ParseStealthCovenantData(entry.CovenantData)
+	c, err := ParseStealthCovenantData(input.entry.CovenantData)
 	if err != nil {
 		return err
 	}
 
-	nativeSpend := rotation.NativeSpendSuites(blockHeight)
-	if !nativeSpend.Contains(w.SuiteID) {
+	nativeSpend := input.rotation.NativeSpendSuites(input.blockHeight)
+	if !nativeSpend.Contains(input.w.SuiteID) {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not in native spend set")
 	}
 
-	params, ok := registry.Lookup(w.SuiteID)
+	params, ok := input.registry.Lookup(input.w.SuiteID)
 	if !ok {
 		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not registered")
 	}
 
-	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
+	if len(input.w.Pubkey) != params.PubkeyLen || len(input.w.Signature) != params.SigLen+1 {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
 	}
-	return verifyKeyAndSigWithRegistryCache(w, c.OneTimeKeyID, spendSigContext{
-		tx:         tx,
-		inputIndex: inputIndex,
-		inputValue: inputValue,
-		chainID:    chainID,
-		cache:      cache,
-		registry:   registry,
+	return verifyKeyAndSigWithRegistryCache(input.w, c.OneTimeKeyID, spendSigContext{
+		tx:         input.tx,
+		inputIndex: input.inputIndex,
+		inputValue: input.inputValue,
+		chainID:    input.chainID,
+		cache:      input.cache,
+		registry:   input.registry,
 		context:    "CORE_STEALTH",
 	})
 }
