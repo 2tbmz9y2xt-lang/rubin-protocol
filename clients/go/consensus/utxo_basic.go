@@ -379,7 +379,18 @@ func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, ent
 	if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
 		return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
 	}
-	return validateCoreStealthSpendAtHeight(entry, assigned[0], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.rotation, ctx.registry)
+	return validateCoreStealthSpendAtHeight(coreStealthSpendValidation{
+		entry:       entry,
+		w:           assigned[0],
+		tx:          ctx.tx,
+		inputIndex:  uint32(inputIndex),
+		inputValue:  entry.Value,
+		chainID:     ctx.chainID,
+		blockHeight: ctx.height,
+		cache:       ctx.sighashCache,
+		rotation:    ctx.rotation,
+		registry:    ctx.registry,
+	})
 }
 
 func (ctx *nonCoinbaseApplyContext) addSpendableOutputs() error {
