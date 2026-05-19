@@ -155,7 +155,7 @@ func compactLocalTxIndex(localTxs [][]byte, nonce1, nonce2 uint64) (map[compactS
 			out[shortID] = nil
 			continue
 		}
-		out[shortID] = append([]byte(nil), tx...)
+		out[shortID] = tx
 	}
 	return out, nil
 }

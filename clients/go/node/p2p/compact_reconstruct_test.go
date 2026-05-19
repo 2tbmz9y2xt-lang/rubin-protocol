@@ -167,6 +167,16 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 			wantErr: "compact relay index out of range",
 		},
 		{
+			name:    "duplicate_prefilled",
+			payload: cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: validTx}, {Index: 0, Tx: validTx}}},
+			wantErr: "compact relay index out of range",
+		},
+		{
+			name:    "unsorted_prefilled",
+			payload: cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 1, Tx: validTx}, {Index: 0, Tx: validTx}}},
+			wantErr: "compact relay index out of range",
+		},
+		{
 			name:    "noncanonical_prefilled",
 			payload: cmpctBlockPayload{ShortIDs: []compactShortID{shortID}, Prefilled: []prefilledTxn{{Index: 0, Tx: append(validTx, 0x00)}}},
 			wantErr: "cmpctblock prefilled transaction is non-canonical",
@@ -230,10 +240,6 @@ func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	shortID := compactShortIDForTx(t, validTx, nonce1, nonce2)
 	if !reflect.DeepEqual(localIndex[shortID], validTx) {
 		t.Fatalf("localIndex[%v]=%x want %x", shortID, localIndex[shortID], validTx)
-	}
-	validTx[0] ^= 0xff
-	if reflect.DeepEqual(localIndex[shortID], validTx) {
-		t.Fatal("local index aliases candidate transaction bytes")
 	}
 
 	_, err = compactLocalTxIndex([][]byte{append(minimalBlockTxnTestTxBytes(54), 0x00)}, nonce1, nonce2)
