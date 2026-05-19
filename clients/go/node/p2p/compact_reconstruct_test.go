@@ -86,7 +86,7 @@ func TestReconstructCompactBlockDoesNotUseTxIDShortIDs(t *testing.T) {
 	}
 }
 
-func TestReconstructCompactBlockFailsClosedOnAmbiguousShortIDs(t *testing.T) {
+func TestReconstructCompactBlockFailsClosedOnDuplicatePayloadShortIDs(t *testing.T) {
 	nonce1, nonce2 := uint64(8), uint64(9)
 	prefilledTx := minimalBlockTxnTestTxBytes(31)
 	localTx := minimalBlockTxnTestTxBytes(32)
@@ -107,14 +107,48 @@ func TestReconstructCompactBlockFailsClosedOnAmbiguousShortIDs(t *testing.T) {
 	if !reflect.DeepEqual(result.MissingIndexes, []uint64{1, 2}) || result.Transactions != nil {
 		t.Fatalf("result=%+v, want duplicate short IDs as bounded missing indexes", result)
 	}
+}
 
-	payload.ShortIDs = []compactShortID{shortID}
-	result, err = reconstructCompactBlock(payload, [][]byte{localTx, append([]byte(nil), localTx...)})
+func TestReconstructCompactBlockFailsClosedOnAmbiguousLocalShortID(t *testing.T) {
+	nonce1, nonce2 := uint64(8), uint64(9)
+	prefilledTx := minimalBlockTxnTestTxBytes(31)
+	localTx := minimalBlockTxnTestTxBytes(32)
+	payload := cmpctBlockPayload{
+		Nonce1:   nonce1,
+		Nonce2:   nonce2,
+		ShortIDs: []compactShortID{compactShortIDForTx(t, localTx, nonce1, nonce2)},
+		Prefilled: []prefilledTxn{
+			{Index: 0, Tx: prefilledTx},
+		},
+	}
+
+	result, err := reconstructCompactBlock(payload, [][]byte{localTx, append([]byte(nil), localTx...)})
 	if err != nil {
 		t.Fatalf("reconstructCompactBlock duplicate local: %v", err)
 	}
 	if !reflect.DeepEqual(result.MissingIndexes, []uint64{1}) || result.Transactions != nil {
 		t.Fatalf("result=%+v, want ambiguous local short ID as missing index", result)
+	}
+}
+
+func TestReconstructCompactBlockFailsClosedOnPrefilledShortIDCollision(t *testing.T) {
+	nonce1, nonce2 := uint64(8), uint64(9)
+	prefilledTx := minimalBlockTxnTestTxBytes(31)
+	payload := cmpctBlockPayload{
+		Nonce1:   nonce1,
+		Nonce2:   nonce2,
+		ShortIDs: []compactShortID{compactShortIDForTx(t, prefilledTx, nonce1, nonce2)},
+		Prefilled: []prefilledTxn{
+			{Index: 0, Tx: prefilledTx},
+		},
+	}
+
+	result, err := reconstructCompactBlock(payload, [][]byte{prefilledTx})
+	if err != nil {
+		t.Fatalf("reconstructCompactBlock prefilled collision: %v", err)
+	}
+	if !reflect.DeepEqual(result.MissingIndexes, []uint64{1}) || result.Transactions != nil {
+		t.Fatalf("result=%+v, want prefilled short ID collision as missing index", result)
 	}
 }
 
@@ -148,6 +182,37 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 			t.Fatalf("%s: err=%v, want %q", tc.name, err, tc.wantErr)
 		}
+	}
+}
+
+func TestReconstructCompactBlockLocalLookupHasNoAggregateBlocktxnCap(t *testing.T) {
+	nonce1, nonce2 := uint64(51), uint64(52)
+	validTx := minimalBlockTxnTestTxBytes(53)
+	localTxs := make([][]byte, consensus.MAX_BLOCK_BYTES/len(validTx)+1)
+	for i := range localTxs {
+		localTxs[i] = validTx
+	}
+	result, err := reconstructCompactBlock(cmpctBlockPayload{
+		Nonce1:   nonce1,
+		Nonce2:   nonce2,
+		ShortIDs: []compactShortID{compactShortID{0xaa}},
+		Prefilled: []prefilledTxn{
+			{Index: 0, Tx: validTx},
+		},
+	}, localTxs)
+	if err != nil {
+		t.Fatalf("reconstructCompactBlock: %v", err)
+	}
+	if !reflect.DeepEqual(result.MissingIndexes, []uint64{1}) || result.Transactions != nil {
+		t.Fatalf("result=%+v, want missing without local aggregate cap failure", result)
+	}
+
+	result, err = reconstructCompactBlock(cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: validTx}}}, [][]byte{{0xff}})
+	if err != nil {
+		t.Fatalf("prefilled-only compact block should not index local candidates: %v", err)
+	}
+	if !reflect.DeepEqual(result.Transactions, [][]byte{validTx}) || result.MissingIndexes != nil {
+		t.Fatalf("result=%+v, want prefilled-only reconstruction", result)
 	}
 }
 

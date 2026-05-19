@@ -14,10 +14,15 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 	totalEntries := len(p.ShortIDs) + len(p.Prefilled)
 	shortIDIndexes := compactShortIDIndexes(totalEntries, p.Prefilled)
 	txs := make([][]byte, totalEntries)
+	blockedShortIDs := compactDuplicateShortIDs(p.ShortIDs)
 	for _, entry := range p.Prefilled {
 		txs[int(entry.Index)] = append([]byte(nil), entry.Tx...) // #nosec G115 -- encodeCmpctBlockPayload bounds-checks prefilled indexes.
+		_, _, wtxid, _, _ := consensus.ParseTx(entry.Tx)         // validated by encodeCmpctBlockPayload above.
+		blockedShortIDs[compactShortID(consensus.CompactShortID(wtxid, p.Nonce1, p.Nonce2))] = true
 	}
-	blockedShortIDs := compactDuplicateShortIDs(p.ShortIDs)
+	if len(p.ShortIDs) == 0 {
+		return compactReconstructionResult{Transactions: txs}, nil
+	}
 	index, err := compactLocalTxIndex(localTxs, p.Nonce1, p.Nonce2, blockedShortIDs)
 	if err != nil {
 		return compactReconstructionResult{}, err
@@ -59,15 +64,15 @@ func compactShortIDIndexes(totalEntries int, prefilled []prefilledTxn) []uint64 
 }
 
 func compactLocalTxIndex(localTxs [][]byte, nonce1, nonce2 uint64, blocked map[compactShortID]bool) (map[compactShortID][]byte, error) {
-	if err := validateCompactRelayTransactions(localTxs, "compact local transaction is non-canonical"); err != nil {
-		return nil, err
-	}
 	out := make(map[compactShortID][]byte, len(localTxs)+len(blocked))
 	for shortID := range blocked {
 		out[shortID] = nil
 	}
 	for _, tx := range localTxs {
-		_, _, wtxid, _, _ := consensus.ParseTx(tx) // validated by validateCompactRelayTransactions above.
+		if _, _, _, err := decodeCompactRelayTxEnvelope(tx, uint64(len(tx)), 0, "compact local transaction is non-canonical"); err != nil {
+			return nil, err
+		}
+		_, _, wtxid, _, _ := consensus.ParseTx(tx) // validated by decodeCompactRelayTxEnvelope above.
 		shortID := compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
 		if _, ok := out[shortID]; ok {
 			out[shortID] = nil
