@@ -86,6 +86,8 @@ func (p *peer) handleMessage(frame message) error {
 	switch frame.Command {
 	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk:
 		return p.handleRelayMessage(frame)
+	case messageSendCmpct:
+		return p.handleSendCmpct(frame.Payload)
 	case messageGetAddr, messageAddr:
 		return p.handleAddressMessage(frame)
 	case messagePing, messagePong, messageHeaders:

@@ -47,6 +47,8 @@ func postHandshakePayloadCap(locatorLimit int, headerBatchLimit uint64) payloadL
 			return versionPayloadBytes
 		case messageVerAck, messageGetAddr, messagePing, messagePong:
 			return 0
+		case messageSendCmpct:
+			return compactRelayPayloadCap(command)
 		case messageInv, messageGetData:
 			return inventoryPayloadCap()
 		case messageAddr:

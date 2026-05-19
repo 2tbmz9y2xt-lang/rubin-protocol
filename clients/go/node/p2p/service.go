@@ -103,6 +103,9 @@ type peer struct {
 	state   node.PeerState
 
 	writeMu sync.Mutex
+
+	compactMu sync.Mutex
+	compact   peerCompactRelayState
 }
 
 func NewService(cfg ServiceConfig) (*Service, error) {
