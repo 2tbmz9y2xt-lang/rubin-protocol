@@ -34,6 +34,20 @@ type blockTxnPayload struct {
 	Transactions [][]byte
 }
 
+type compactShortID [compactShortIDBytes]byte
+
+type prefilledTxn struct {
+	Index uint64
+	Tx    []byte
+}
+
+type cmpctBlockPayload struct {
+	Header    [consensus.BLOCK_HEADER_BYTES]byte
+	Nonce     uint64
+	ShortIDs  []compactShortID
+	Prefilled []prefilledTxn
+}
+
 func encodeSendCmpctPayload(p sendCmpctPayload) ([]byte, error) {
 	if p.Mode > 2 {
 		return nil, errors.New("unsupported compact relay mode")
@@ -170,6 +184,100 @@ func decodeBlockTxnPayload(payload []byte) (blockTxnPayload, error) {
 	}
 	out.Transactions = transactions
 	return out, nil
+}
+
+func encodeCmpctBlockPayload(p cmpctBlockPayload) ([]byte, error) {
+	out := make([]byte, 0)
+	out = append(out, p.Header[:]...)
+	out = consensus.AppendU64le(out, p.Nonce)
+	out = consensus.AppendCompactSize(out, uint64(len(p.ShortIDs)))
+	for _, shortID := range p.ShortIDs {
+		out = append(out, shortID[:]...)
+	}
+	out = consensus.AppendCompactSize(out, uint64(len(p.Prefilled)))
+	var prevPlusOne uint64
+	prefilledTxs := make([][]byte, 0, len(p.Prefilled))
+	for _, tx := range p.Prefilled {
+		delta := tx.Index - prevPlusOne
+		out = consensus.AppendCompactSize(out, delta)
+		out = append(out, tx.Tx...)
+		prevPlusOne = tx.Index + 1
+		prefilledTxs = append(prefilledTxs, tx.Tx)
+	}
+	if _, err := encodeBlockTxnPayload(blockTxnPayload{Transactions: prefilledTxs}); err != nil {
+		return nil, err
+	}
+	_, err := decodeCmpctBlockPayload(out)
+	return out, err
+}
+
+func decodeCmpctBlockPayload(payload []byte) (cmpctBlockPayload, error) {
+	out, prefilledCount, totalEntries, offset, err := decodeCmpctBlockPrefix(payload)
+	if err != nil {
+		return cmpctBlockPayload{}, err
+	}
+	out.Prefilled = make([]prefilledTxn, 0, int(prefilledCount)) // #nosec G115 -- totalEntries is capped by decodeCmpctBlockPrefix.
+	var prev uint64
+	var totalTxBytes uint64
+	for i := uint64(0); i < prefilledCount; i++ {
+		delta, n, err := consensus.DecodeCompactSize(payload[offset:])
+		if err != nil {
+			return cmpctBlockPayload{}, err
+		}
+		idx, err := getBlockTxnAbsoluteIndex(prev, delta, i == 0)
+		if err != nil {
+			return cmpctBlockPayload{}, err
+		}
+		if idx >= totalEntries {
+			return cmpctBlockPayload{}, errors.New("compact relay index out of range")
+		}
+		tx, txConsumed, nextTotal, err := decodeBlockTxnTransaction(payload[offset+n:], totalTxBytes)
+		if err != nil {
+			return cmpctBlockPayload{}, err
+		}
+		out.Prefilled = append(out.Prefilled, prefilledTxn{Index: idx, Tx: append([]byte(nil), tx...)})
+		offset += n + txConsumed
+		prev = idx
+		totalTxBytes = nextTotal
+	}
+	if offset != len(payload) {
+		return cmpctBlockPayload{}, errors.New("cmpctblock payload has trailing bytes")
+	}
+	return out, nil
+}
+
+func decodeCmpctBlockPrefix(payload []byte) (cmpctBlockPayload, uint64, uint64, int, error) {
+	var out cmpctBlockPayload
+	if len(payload) < consensus.BLOCK_HEADER_BYTES+8 {
+		return out, 0, 0, 0, errors.New("cmpctblock payload missing header or nonce")
+	}
+	copy(out.Header[:], payload[:consensus.BLOCK_HEADER_BYTES])
+	out.Nonce = binary.LittleEndian.Uint64(payload[consensus.BLOCK_HEADER_BYTES:])
+	offset := consensus.BLOCK_HEADER_BYTES + 8
+	shortCount, consumed, err := consensus.DecodeCompactSize(payload[offset:])
+	if err != nil {
+		return cmpctBlockPayload{}, 0, 0, 0, err
+	}
+	offset += consumed
+	if shortCount > uint64(len(payload[offset:]))/compactShortIDBytes {
+		return cmpctBlockPayload{}, 0, 0, 0, errors.New("cmpctblock payload truncated short IDs")
+	}
+	shortIDEnd := offset + int(shortCount)*compactShortIDBytes // #nosec G115 -- shortCount is bounded by remaining payload width above.
+	prefilledCount, consumed, err := consensus.DecodeCompactSize(payload[shortIDEnd:])
+	if err != nil {
+		return cmpctBlockPayload{}, 0, 0, 0, err
+	}
+	totalEntries := shortCount + prefilledCount
+	if totalEntries > maxCompactRelayEntries || totalEntries < shortCount {
+		return cmpctBlockPayload{}, 0, 0, 0, errors.New("too many compact relay entries")
+	}
+	out.ShortIDs = make([]compactShortID, 0, int(shortCount)) // #nosec G115 -- totalEntries is capped above.
+	for ; offset < shortIDEnd; offset += compactShortIDBytes {
+		var shortID compactShortID
+		copy(shortID[:], payload[offset:offset+compactShortIDBytes])
+		out.ShortIDs = append(out.ShortIDs, shortID)
+	}
+	return out, prefilledCount, totalEntries, shortIDEnd + consumed, nil
 }
 
 func decodeBlockTxnTransaction(payload []byte, totalTxBytes uint64) ([]byte, int, uint64, error) {
