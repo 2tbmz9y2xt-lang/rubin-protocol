@@ -29,6 +29,11 @@ type getBlockTxnPayload struct {
 	Indexes   []uint64
 }
 
+type blockTxnPayload struct {
+	BlockHash    [32]byte
+	Transactions [][]byte
+}
+
 func encodeSendCmpctPayload(p sendCmpctPayload) ([]byte, error) {
 	if p.Mode > 2 {
 		return nil, errors.New("unsupported compact relay mode")
@@ -107,6 +112,88 @@ func decodeGetBlockTxnPayload(payload []byte) (getBlockTxnPayload, error) {
 	}
 	out.Indexes = indexes
 	return out, nil
+}
+
+func encodeBlockTxnPayload(p blockTxnPayload) ([]byte, error) {
+	if len(p.Transactions) > maxCompactRelayEntries {
+		return nil, errors.New("too many compact relay transactions")
+	}
+	var totalTxBytes uint64
+	for _, tx := range p.Transactions {
+		txLen := uint64(len(tx))
+		if txLen == 0 {
+			return nil, errors.New("blocktxn transaction is empty")
+		}
+		if txLen > consensus.MAX_BLOCK_BYTES {
+			return nil, errors.New("blocktxn transaction too large")
+		}
+		if totalTxBytes > consensus.MAX_BLOCK_BYTES-txLen {
+			return nil, errors.New("blocktxn transactions exceed block size")
+		}
+		totalTxBytes += txLen
+	}
+	capHint := 32 + maxCompactSizeBytes + len(p.Transactions)*maxCompactSizeBytes + int(totalTxBytes) // #nosec G115 -- totalTxBytes is capped at consensus.MAX_BLOCK_BYTES above.
+	out := make([]byte, 0, capHint)
+	out = append(out, p.BlockHash[:]...)
+	out = consensus.AppendCompactSize(out, uint64(len(p.Transactions)))
+	for _, tx := range p.Transactions {
+		out = consensus.AppendCompactSize(out, uint64(len(tx)))
+		out = append(out, tx...)
+	}
+	return out, nil
+}
+
+func decodeBlockTxnPayload(payload []byte) (blockTxnPayload, error) {
+	var out blockTxnPayload
+	if len(payload) < 32 {
+		return out, errors.New("blocktxn payload missing block hash")
+	}
+	copy(out.BlockHash[:], payload[:32])
+	count, consumed, err := consensus.DecodeCompactSize(payload[32:])
+	if err != nil {
+		return blockTxnPayload{}, err
+	}
+	if count > maxCompactRelayEntries {
+		return blockTxnPayload{}, errors.New("too many compact relay transactions")
+	}
+	offset := 32 + consumed
+	transactions := make([][]byte, 0, int(count)) // #nosec G115 -- count is capped at maxCompactRelayEntries above.
+	var totalTxBytes uint64
+	for i := uint64(0); i < count; i++ {
+		tx, n, nextTotal, err := decodeBlockTxnTransaction(payload[offset:], totalTxBytes)
+		if err != nil {
+			return blockTxnPayload{}, err
+		}
+		transactions = append(transactions, tx)
+		offset += n
+		totalTxBytes = nextTotal
+	}
+	if offset != len(payload) {
+		return blockTxnPayload{}, errors.New("blocktxn payload has trailing bytes")
+	}
+	out.Transactions = transactions
+	return out, nil
+}
+
+func decodeBlockTxnTransaction(payload []byte, totalTxBytes uint64) ([]byte, int, uint64, error) {
+	txLen, consumed, err := consensus.DecodeCompactSize(payload)
+	if err != nil {
+		return nil, 0, totalTxBytes, err
+	}
+	if txLen == 0 {
+		return nil, 0, totalTxBytes, errors.New("blocktxn transaction is empty")
+	}
+	if txLen > consensus.MAX_BLOCK_BYTES {
+		return nil, 0, totalTxBytes, errors.New("blocktxn transaction too large")
+	}
+	if totalTxBytes > consensus.MAX_BLOCK_BYTES-txLen {
+		return nil, 0, totalTxBytes, errors.New("blocktxn transactions exceed block size")
+	}
+	txLenInt := int(txLen) // #nosec G115 -- txLen is capped at consensus.MAX_BLOCK_BYTES above.
+	if txLenInt > len(payload)-consumed {
+		return nil, 0, totalTxBytes, errors.New("blocktxn transaction truncated")
+	}
+	return append([]byte(nil), payload[consumed:consumed+txLenInt]...), consumed + txLenInt, totalTxBytes + txLen, nil
 }
 
 func getBlockTxnAbsoluteIndex(prev, delta uint64, first bool) (uint64, error) {
