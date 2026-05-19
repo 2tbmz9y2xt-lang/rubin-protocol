@@ -28,6 +28,10 @@ type ServiceConfig struct {
 	GetBlocksBatchSize uint64
 	TxRelayFanout      int
 	CompactRelayMode   uint8
+	CompactRelayReady  bool
+	CompactMissRatePct float64
+	CompactMissBlocks  int
+	CompactPeerScore   func(node.PeerState) int
 	PeerRuntimeConfig  node.PeerRuntimeConfig
 	PeerManager        *node.PeerManager
 	SyncConfig         node.SyncConfig
@@ -143,6 +147,7 @@ func validateServiceConfig(cfg ServiceConfig) error {
 		{cfg.BlockStore == nil, "nil blockstore"},
 		{cfg.TxMetadataFunc == nil, "nil tx metadata func"},
 		{cfg.CompactRelayMode > 2, "unsupported compact relay mode"},
+		{cfg.CompactMissRatePct < 0, "negative compact miss rate"},
 	} {
 		if check.invalid {
 			return errors.New(check.err)
@@ -160,6 +165,9 @@ func normalizeServiceConfig(cfg ServiceConfig) ServiceConfig {
 	cfg.PeerRuntimeConfig = normalizeServicePeerRuntimeConfig(cfg.PeerRuntimeConfig, cfg.SyncConfig.Network)
 	if cfg.TxRelayFanout <= 0 {
 		cfg.TxRelayFanout = defaultTxRelayFanout
+	}
+	if cfg.CompactPeerScore == nil {
+		cfg.CompactPeerScore = func(node.PeerState) int { return 50 }
 	}
 	return cfg
 }

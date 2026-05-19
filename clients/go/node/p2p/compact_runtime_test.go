@@ -36,41 +36,69 @@ func TestSendCmpctPostHandshakeCommandPathRecordsPeerMode(t *testing.T) {
 	}
 }
 
-func TestPostHandshakeAdvertisesSendCmpctWhenEnabled(t *testing.T) {
-	h := newTestHarness(t, 2, "127.0.0.1:0", nil)
-	h.service.ctx = context.Background()
-	h.service.cfg.CompactRelayMode = 1
-	markCompactRelayReadyNow(t, h)
-
-	local, remote := net.Pipe()
-	defer local.Close()
-	defer remote.Close()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- h.service.handleConn(local, "")
-	}()
-	remoteVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)
-	if err := completeRemoteHandshake(remote, h.service.cfg.PeerRuntimeConfig, remoteVersion); err != nil {
-		t.Fatalf("remote handshake: %v", err)
-	}
-	assertSendCmpctFrame(t, remote, h.service.cfg.PeerRuntimeConfig, 1)
-	_ = remote.Close()
-	select {
-	case <-errCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handleConn did not exit after remote close")
+func TestPostHandshakeSendCmpctPhaseGate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		blocks   int
+		mode     uint8
+		ready    bool
+		missRate float64
+		want     string
+		wantMode uint8
+	}{
+		{"ready mode1 advertises", 2, 1, true, 0.2, messageSendCmpct, 1},
+		{"warmup keeps full block", 2, 2, false, 0.0, messageGetAddr, 0},
+		{"ibd keeps full block", 0, 2, true, 0.2, messageGetBlk, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHarness(t, tc.blocks, "127.0.0.1:0", nil)
+			h.service.ctx = context.Background()
+			h.service.cfg.CompactRelayMode = tc.mode
+			h.service.cfg.CompactRelayReady = tc.ready
+			h.service.cfg.CompactMissRatePct = tc.missRate
+			if tc.blocks > 0 {
+				markCompactRelayReadyNow(t, h)
+			}
+			local, remote := net.Pipe()
+			defer local.Close()
+			defer remote.Close()
+			errCh := make(chan error, 1)
+			go func() { errCh <- h.service.handleConn(local, "") }()
+			remoteVersion := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)
+			if err := completeRemoteHandshake(remote, h.service.cfg.PeerRuntimeConfig, remoteVersion); err != nil {
+				t.Fatalf("remote handshake: %v", err)
+			}
+			frame, err := readFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+			if err != nil {
+				t.Fatalf("read post-handshake frame: %v", err)
+			}
+			if frame.Command != tc.want {
+				t.Fatalf("first post-handshake command=%q, want %q", frame.Command, tc.want)
+			}
+			if tc.want == messageSendCmpct {
+				assertSendCmpctPayload(t, frame.Payload, tc.wantMode)
+			}
+			_ = remote.Close()
+			select {
+			case <-errCh:
+			case <-time.After(2 * time.Second):
+				t.Fatal("handleConn did not exit after remote close")
+			}
+		})
 	}
 }
 
 func TestCompactModeHighBandwidthCap(t *testing.T) {
 	h := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	h.service.cfg.CompactRelayMode = 2
+	h.service.cfg.CompactRelayReady = true
+	h.service.cfg.CompactMissRatePct = 0.2
+	h.service.cfg.CompactPeerScore = func(node.PeerState) int { return 90 }
 	markCompactRelayReadyNow(t, h)
 
 	sinks := make([]compactFrameSink, 0, 4)
-	for i, score := range []int{90, 89, 88, 87} {
-		sink := registerCompactFrameSink(t, h.service, fmt.Sprintf("compact-peer-%d", i), score)
+	for i := 0; i < 4; i++ {
+		sink := registerCompactFrameSink(t, h.service, fmt.Sprintf("compact-peer-%d", i))
 		sinks = append(sinks, sink)
 		if err := h.service.advertiseCompactRelayMode(sink.peer); err != nil {
 			t.Fatalf("advertiseCompactRelayMode: %v", err)
@@ -91,11 +119,18 @@ func TestCompactModeHighBandwidthCap(t *testing.T) {
 	}
 }
 
-func TestCompactRelayReadyBlocksIBD(t *testing.T) {
-	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+func TestCompactMissRateDowngradesToFullBlockMode(t *testing.T) {
+	h := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	h.service.cfg.CompactRelayMode = 2
-	if h.service.compactRelayReady() {
-		t.Fatal("compact relay must not advertise while service is still in IBD")
+	h.service.cfg.CompactRelayReady = true
+	h.service.cfg.CompactMissRatePct = 12.0
+	h.service.cfg.CompactMissBlocks = 5
+	h.service.cfg.CompactPeerScore = func(node.PeerState) int { return 90 }
+	markCompactRelayReadyNow(t, h)
+
+	p := testPeerForService(h.service, "compact-peer-miss", 0)
+	if got := h.service.desiredCompactMode(p); got != 0 {
+		t.Fatalf("compact mode after high miss rate=%d, want 0", got)
 	}
 }
 
@@ -105,13 +140,12 @@ type compactFrameSink struct {
 	errs   chan error
 }
 
-func registerCompactFrameSink(t *testing.T, svc *Service, addr string, score int) compactFrameSink {
+func registerCompactFrameSink(t *testing.T, svc *Service, addr string) compactFrameSink {
 	t.Helper()
 	local, remote := net.Pipe()
 	p := testPeerForService(svc, addr, 0)
 	p.state.Addr = addr
 	p.conn = local
-	p.setCompactQualityScore(score)
 	t.Cleanup(func() {
 		_ = local.Close()
 		_ = remote.Close()
@@ -154,16 +188,9 @@ func (s compactFrameSink) read(t *testing.T) sendCmpctPayload {
 	return sendCmpctPayload{}
 }
 
-func assertSendCmpctFrame(t *testing.T, conn net.Conn, cfg node.PeerRuntimeConfig, wantMode uint8) {
+func assertSendCmpctPayload(t *testing.T, payload []byte, wantMode uint8) {
 	t.Helper()
-	frame, err := readFrame(conn, networkMagic(cfg.Network), cfg.MaxMessageSize)
-	if err != nil {
-		t.Fatalf("read sendcmpct: %v", err)
-	}
-	if frame.Command != messageSendCmpct {
-		t.Fatalf("command=%q, want %q", frame.Command, messageSendCmpct)
-	}
-	got, err := decodeSendCmpctPayload(frame.Payload)
+	got, err := decodeSendCmpctPayload(payload)
 	if err != nil {
 		t.Fatalf("decode sendcmpct: %v", err)
 	}

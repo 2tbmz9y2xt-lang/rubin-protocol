@@ -5,12 +5,7 @@ import (
 	"errors"
 )
 
-const (
-	maxHighBandwidthCompactPeers = 3
-	defaultCompactPeerScore      = 50
-	compactModeOneScore          = 40
-	compactModeTwoScore          = 75
-)
+const maxHighBandwidthCompactPeers = 3
 
 type compactModeSnapshot struct {
 	Mode    uint8
@@ -20,8 +15,6 @@ type compactModeSnapshot struct {
 type peerCompactRelayState struct {
 	localMode  compactModeSnapshot
 	remoteMode compactModeSnapshot
-	score      int
-	scoreSet   bool
 }
 
 func (p *peer) handleSendCmpct(payload []byte) error {
@@ -55,7 +48,7 @@ func (s *Service) advertiseCompactRelayMode(p *peer) error {
 	s.compactMu.Lock()
 	defer s.compactMu.Unlock()
 
-	mode := desiredCompactMode(s.cfg.CompactRelayMode, p.compactScore())
+	mode := s.desiredCompactMode(p)
 	if mode == 2 && p.localCompactMode().Mode != 2 && s.localCompactModeCount(2) >= maxHighBandwidthCompactPeers {
 		mode = 1
 	}
@@ -73,6 +66,26 @@ func (s *Service) compactRelayReady() bool {
 	return !s.cfg.SyncEngine.IsInIBD(uint64(now)) // #nosec G115 -- negative Unix times are rejected above.
 }
 
+func (s *Service) desiredCompactMode(p *peer) uint8 {
+	if s.cfg.CompactRelayMode == 0 || !s.cfg.CompactRelayReady {
+		return 0
+	}
+	if s.cfg.CompactMissRatePct > 10.0 && s.cfg.CompactMissBlocks >= 5 {
+		return 0
+	}
+	if s.cfg.CompactMissRatePct > 0.5 {
+		return 1
+	}
+	score := s.cfg.CompactPeerScore(p.snapshotState())
+	if s.cfg.CompactRelayMode >= 2 && score >= 75 {
+		return 2
+	}
+	if score >= 40 {
+		return 1
+	}
+	return 0
+}
+
 func (s *Service) localCompactModeCount(mode uint8) int {
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
@@ -88,16 +101,6 @@ func (s *Service) localCompactModeCount(mode uint8) int {
 		}
 	}
 	return count
-}
-
-func desiredCompactMode(configured uint8, score int) uint8 {
-	if configured == 0 || score < compactModeOneScore {
-		return 0
-	}
-	if configured >= 2 && score >= compactModeTwoScore {
-		return 2
-	}
-	return 1
 }
 
 func (p *peer) sendLocalCompactMode(mode uint8) error {
@@ -125,22 +128,6 @@ func (p *peer) setLocalCompactMode(mode compactModeSnapshot) {
 	p.compactMu.Lock()
 	p.compact.localMode = mode
 	p.compactMu.Unlock()
-}
-
-func (p *peer) setCompactQualityScore(score int) {
-	p.compactMu.Lock()
-	p.compact.score = score
-	p.compact.scoreSet = true
-	p.compactMu.Unlock()
-}
-
-func (p *peer) compactScore() int {
-	p.compactMu.Lock()
-	defer p.compactMu.Unlock()
-	if !p.compact.scoreSet {
-		return defaultCompactPeerScore
-	}
-	return p.compact.score
 }
 
 func (p *peer) localCompactMode() compactModeSnapshot {
