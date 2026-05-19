@@ -28,7 +28,7 @@ func TestReconstructCompactBlockCompletesExactPositionsFromWTxID(t *testing.T) {
 	}
 	want := [][]byte{prefilledTx, tx2, tx3}
 	if !reflect.DeepEqual(result.Transactions, want) || len(result.MissingIndexes) != 0 {
-		t.Fatalf("result=%+v want txs=%x", result, want)
+		t.Fatalf("result=%+v want txs=%v", result, want)
 	}
 
 	tx2[0] ^= 0xff
@@ -56,7 +56,7 @@ func TestReconstructCompactBlockReportsAbsoluteMissingIndexes(t *testing.T) {
 		t.Fatalf("reconstructCompactBlock: %v", err)
 	}
 	if !reflect.DeepEqual(result.MissingIndexes, []uint64{0}) || result.Transactions != nil {
-		t.Fatalf("missing=%v txs=%x, want absolute missing [0] and no completed block", result.MissingIndexes, result.Transactions)
+		t.Fatalf("missing=%v txs=%v, want absolute missing [0] and no completed block", result.MissingIndexes, result.Transactions)
 	}
 }
 

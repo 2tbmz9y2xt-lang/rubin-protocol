@@ -162,9 +162,12 @@ func compactLocalTxIndex(localTxs [][]byte, nonce1, nonce2 uint64) (map[compactS
 
 func compactLocalTxWTxID(tx []byte) ([32]byte, error) {
 	var zero [32]byte
-	if _, _, _, err := decodeCompactRelayTxEnvelope(tx, uint64(len(tx)), 0, "compact local transaction is non-canonical"); err != nil {
+	if _, err := validateBlockTxnTransactionSize(uint64(len(tx)), 0); err != nil {
 		return zero, err
 	}
-	_, _, wtxid, _, _ := consensus.ParseTx(tx) // validated by decodeCompactRelayTxEnvelope above.
+	_, _, wtxid, consumed, err := consensus.ParseTx(tx)
+	if err != nil || consumed != len(tx) {
+		return zero, errors.New("compact local transaction is non-canonical")
+	}
 	return wtxid, nil
 }
