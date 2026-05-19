@@ -63,11 +63,11 @@ exclude_paths:
   #      lenses (see review-thread chains on PR #1422 waves 4..16 for
   #      worked examples) so the Codacy exclusion does not silently
   #      relax review quality.
-  # If Codacy adds per-rule exclude-paths in the future, narrow this to
-  # complexity rule only (issue id 73247 / "Method has cyclomatic
-  # complexity > 8"). Today (.codacy.yml v3) supports only per-tool
-  # exclusions (engines.duplication.exclude_paths) and top-level
-  # exclude_paths.
+  # Keep these as top-level exclusions until this accepted-risk class is
+  # revisited: they intentionally suppress all Codacy analyses for the
+  # listed files. For new complexity-only accepted-risk files, prefer
+  # engines.metric.exclude_paths below so other non-excluded analyses can
+  # still run.
   - "clients/go/node/mempool_precheck.go"
   - "clients/go/node/mempool_precheck_floor.go"
   - "clients/go/node/mempool_precheck_input.go"
@@ -81,8 +81,9 @@ engines:
       # Keep this list narrow and explicit: these files are branch-dense protocol,
       # consensus, crypto, or node lifecycle surfaces where mechanical simplification
       # is more likely to change validation order, public errors, or runtime state
-      # than to improve production safety. Other Codacy analyses should continue
-      # to run on these files.
+      # than to improve production safety. This metric block must not broaden
+      # top-level exclusions; other analyses remain controlled by their own
+      # existing engine-specific settings.
       #
       # Go node runtime branch closures; exact current files, no future-file wildcard.
       - "clients/go/node/blockstore.go"
