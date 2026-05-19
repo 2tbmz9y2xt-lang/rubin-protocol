@@ -28,6 +28,12 @@ func TestSendCmpctPostHandshakeCommandPathRecordsPeerMode(t *testing.T) {
 	if got := p.remoteCompactMode(); got.Mode != 0 || got.Version != compactRelayVersion+1 {
 		t.Fatalf("unsupported version mode=%+v, want downgraded", got)
 	}
+	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 3, compactRelayVersion+1)}); err != nil {
+		t.Fatalf("future version with future mode should downgrade without disconnect: %v", err)
+	}
+	if got := p.remoteCompactMode(); got.Mode != 0 || got.Version != compactRelayVersion+1 {
+		t.Fatalf("future version/future mode=%+v, want downgraded", got)
+	}
 	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: []byte{1, 2}}); err == nil {
 		t.Fatal("short sendcmpct payload must fail")
 	}

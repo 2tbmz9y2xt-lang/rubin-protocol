@@ -35,7 +35,7 @@ func parseSendCmpctRuntimePayload(payload []byte) (sendCmpctPayload, error) {
 		return sendCmpctPayload{}, errors.New("sendcmpct payload width mismatch")
 	}
 	out := sendCmpctPayload{Mode: payload[0], Version: binary.LittleEndian.Uint64(payload[1:])}
-	if out.Mode > 2 {
+	if out.Version == compactRelayVersion && out.Mode > 2 {
 		return sendCmpctPayload{}, errors.New("unsupported compact relay mode")
 	}
 	return out, nil
