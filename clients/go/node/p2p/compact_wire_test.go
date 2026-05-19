@@ -13,7 +13,7 @@ func TestCompactWireCommandConstantsAndPayloadCaps(t *testing.T) {
 	commands := []string{messageSendCmpct, messageGetBlockTxn, messageCmpctBlock, messageBlockTxn}
 	caps := []uint32{
 		sendCmpctPayloadBytes,
-		uint32(32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes),
+		uint32(32 + maxCompactSizeBytes + maxCompactRelayEntries*compactRelayIndexBytes),
 		uint32(consensus.MAX_RELAY_MSG_BYTES),
 		uint32(consensus.MAX_BLOCK_BYTES + 32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes),
 	}
@@ -42,8 +42,9 @@ func TestGetBlockTxnPayloadCodec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeGetBlockTxnPayload: %v", err)
 	}
-	if gotDeltas := raw[32:]; !reflect.DeepEqual(gotDeltas, []byte{3, 0, 1, 2}) {
-		t.Fatalf("getblocktxn differential indexes=%x, want 03000102", gotDeltas)
+	wantWire := []byte{3, 0, 0, 0, 0, 2, 0, 0, 0, 5, 0, 0, 0}
+	if gotWire := raw[32:]; !reflect.DeepEqual(gotWire, wantWire) {
+		t.Fatalf("getblocktxn absolute index wire=%x, want %x", gotWire, wantWire)
 	}
 	got, err := decodeGetBlockTxnPayload(raw)
 	if err != nil {
@@ -65,8 +66,8 @@ func TestBlockTxnPayloadCodec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeBlockTxnPayload: %v", err)
 	}
-	wantEntries := append(consensus.AppendCompactSize(nil, 2), tx1...)
-	wantEntries = append(wantEntries, tx2...)
+	wantEntries := append(consensus.AppendCompactSize(nil, 2), cmpctBlockTxEnvelope(tx1)...)
+	wantEntries = append(wantEntries, cmpctBlockTxEnvelope(tx2)...)
 	if gotEntries := raw[32:]; !reflect.DeepEqual(gotEntries, wantEntries) {
 		t.Fatalf("blocktxn entries=%x, want %x", gotEntries, wantEntries)
 	}
@@ -80,15 +81,29 @@ func TestBlockTxnPayloadCodec(t *testing.T) {
 }
 
 func TestCmpctBlockPayloadCodec(t *testing.T) {
+	tx := minimalBlockTxnTestTxBytes(10)
 	want := cmpctBlockPayload{
 		Header:    [consensus.BLOCK_HEADER_BYTES]byte{0x01, 0x02, 0x03},
-		Nonce:     0x1122334455667788,
+		Nonce1:    0x1122334455667788,
+		Nonce2:    0x8877665544332211,
 		ShortIDs:  []compactShortID{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}},
-		Prefilled: []prefilledTxn{{Index: 0, Tx: minimalBlockTxnTestTxBytes(10)}},
+		Prefilled: []prefilledTxn{{Index: 1, Tx: tx}},
 	}
 	raw, err := encodeCmpctBlockPayload(want)
 	if err != nil {
 		t.Fatalf("encodeCmpctBlockPayload: %v", err)
+	}
+	wantRaw := append([]byte(nil), want.Header[:]...)
+	wantRaw = consensus.AppendU64le(wantRaw, want.Nonce1)
+	wantRaw = consensus.AppendU64le(wantRaw, want.Nonce2)
+	wantRaw = consensus.AppendCompactSize(wantRaw, uint64(len(want.ShortIDs)))
+	wantRaw = append(wantRaw, want.ShortIDs[0][:]...)
+	wantRaw = consensus.AppendCompactSize(wantRaw, uint64(len(want.Prefilled)))
+	wantRaw = consensus.AppendU32le(wantRaw, uint32(want.Prefilled[0].Index))
+	wantRaw = consensus.AppendCompactSize(wantRaw, uint64(len(tx)))
+	wantRaw = append(wantRaw, tx...)
+	if !reflect.DeepEqual(raw, wantRaw) {
+		t.Fatalf("cmpctblock wire layout=%x, want %x", raw, wantRaw)
 	}
 	got, err := decodeCmpctBlockPayload(raw)
 	if err != nil {
@@ -117,15 +132,24 @@ func TestCmpctBlockPayloadRejectsMalformed(t *testing.T) {
 	assertCmpctBlockEncodeFails(t, "trailing_prefilled_tx", cmpctBlockPayload{Prefilled: []prefilledTxn{{Tx: append(validTx, 0x00)}}}, "cmpctblock prefilled transaction is non-canonical")
 	assertCmpctBlockEncodeFails(t, "trailing_prefilled_tx_before_next_delta", cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: append(validTx, 0x00)}, {Index: 1, Tx: validTx}}}, "cmpctblock prefilled transaction is non-canonical")
 
-	assertCmpctBlockDecodeFails(t, "short_header", make([]byte, consensus.BLOCK_HEADER_BYTES+7), "cmpctblock payload missing header or nonce")
+	assertCmpctBlockDecodeFails(t, "short_header", make([]byte, consensus.BLOCK_HEADER_BYTES+15), "cmpctblock payload missing header or nonce")
 	assertCmpctBlockDecodeFails(t, "empty", cmpctBlockTestPayload([]byte{0, 0}), "invalid compact relay entry count")
 	assertCmpctBlockDecodeFails(t, "payload_above_wire_cap", make([]byte, consensus.MAX_RELAY_MSG_BYTES+1), "cmpctblock payload too large")
 	assertCmpctBlockDecodeFails(t, "nonminimal_short_count", cmpctBlockTestPayload([]byte{0xfd, 0x00, 0x00}), "non-minimal")
 	assertCmpctBlockDecodeFails(t, "truncated_short_ids", cmpctBlockTestPayload([]byte{1, 0x01, 0x02}), "cmpctblock payload truncated short IDs")
 	assertCmpctBlockDecodeFails(t, "nonminimal_prefilled_count", cmpctBlockTestPayload([]byte{0, 0xfd, 0x00, 0x00}), "non-minimal")
-	assertCmpctBlockDecodeFails(t, "huge_prefilled_count_without_entries", cmpctBlockTestPayload(consensus.AppendCompactSize([]byte{0}, consensus.MAX_BLOCK_BYTES)), "EOF")
+	assertCmpctBlockDecodeFails(t, "huge_prefilled_count_without_entries", cmpctBlockTestPayload(consensus.AppendCompactSize([]byte{0}, consensus.MAX_BLOCK_BYTES)), "cmpctblock payload truncated prefilled index")
+	assertCmpctBlockDecodeFails(t, "truncated_prefilled_index", cmpctBlockTestPayload([]byte{0, 1, 0x01, 0x02}), "cmpctblock payload truncated prefilled index")
+	assertCmpctBlockDecodeFails(t, "truncated_prefilled_tx", cmpctBlockTestPayload(cmpctBlockPrefilledPayload(0, append(consensus.AppendCompactSize(nil, uint64(len(validTx)+1)), validTx...))), "compact relay transaction truncated")
+	duplicatePrefilled := consensus.AppendCompactSize(nil, 0)
+	duplicatePrefilled = consensus.AppendCompactSize(duplicatePrefilled, 2)
+	duplicatePrefilled = consensus.AppendU32le(duplicatePrefilled, 0)
+	duplicatePrefilled = append(duplicatePrefilled, cmpctBlockTxEnvelope(validTx)...)
+	duplicatePrefilled = consensus.AppendU32le(duplicatePrefilled, 0)
+	duplicatePrefilled = append(duplicatePrefilled, cmpctBlockTxEnvelope(validTx)...)
+	assertCmpctBlockDecodeFails(t, "duplicate_prefilled_index", cmpctBlockTestPayload(duplicatePrefilled), "compact relay index out of range")
 
-	rangeBeforeTx := consensus.AppendCompactSize(consensus.AppendCompactSize(consensus.AppendCompactSize(nil, 0), 1), 1)
+	rangeBeforeTx := consensus.AppendU32le(consensus.AppendCompactSize(consensus.AppendCompactSize(nil, 0), 1), 1)
 	assertCmpctBlockDecodeFails(t, "prefilled_index_range_before_tx", cmpctBlockTestPayload(rangeBeforeTx), "compact relay index out of range")
 	assertCmpctBlockDecodeFails(t, "trailing", append(cmpctBlockTestPayload([]byte{1, 0, 0, 0, 0, 0, 0, 0}), 0x00), "cmpctblock payload has trailing bytes")
 }
@@ -162,8 +186,10 @@ func TestBlockTxnPayloadRejectsMalformed(t *testing.T) {
 		{name: "short_hash", raw: make([]byte, 31), wantErr: "blocktxn payload missing block hash"},
 		{name: "nonminimal_count", raw: blockTxnTestPayload([]byte{0xfd, 0x00, 0x00}), wantErr: "non-minimal"},
 		{name: "count_too_large", raw: blockTxnTestPayload(consensus.AppendCompactSize(nil, maxCompactRelayEntries+1)), wantErr: "too many compact relay transactions"},
-		{name: "empty_tx", raw: blockTxnTestPayload([]byte{1}), wantErr: "unexpected EOF"},
-		{name: "truncated_tx", raw: blockTxnTestPayload([]byte{1, 1}), wantErr: "unexpected EOF"},
+		{name: "missing_tx_len", raw: blockTxnTestPayload([]byte{1}), wantErr: "EOF"},
+		{name: "empty_tx", raw: blockTxnTestPayload([]byte{1, 0}), wantErr: "blocktxn transaction is empty"},
+		{name: "truncated_tx", raw: blockTxnTestPayload(append(consensus.AppendCompactSize([]byte{1}, uint64(len(minimalBlockTxnTestTxBytes(5)))), minimalBlockTxnTestTxBytes(5)[:3]...)), wantErr: "compact relay transaction truncated"},
+		{name: "raw_concatenated_txbytes", raw: blockTxnTestPayload(append(consensus.AppendCompactSize(nil, 2), minimalBlockTxnTestTxBytes(5)...)), wantErr: "blocktxn transaction is non-canonical"},
 		{name: "trailing", raw: append(mustEncodeBlockTxnPayload(t, [][]byte{minimalBlockTxnTestTxBytes(4)}), 0x00), wantErr: "blocktxn payload has trailing bytes"},
 	} {
 		_, err := decodeBlockTxnPayload(tc.raw)
@@ -224,11 +250,23 @@ func assertCmpctBlockDecodeFails(t *testing.T, name string, raw []byte, wantErr 
 }
 
 func cmpctBlockTestPayload(tail []byte) []byte {
-	return append(make([]byte, consensus.BLOCK_HEADER_BYTES+8), tail...)
+	return append(make([]byte, consensus.BLOCK_HEADER_BYTES+16), tail...)
+}
+
+func cmpctBlockPrefilledPayload(index uint32, entry []byte) []byte {
+	tail := consensus.AppendCompactSize(nil, 0)
+	tail = consensus.AppendCompactSize(tail, 1)
+	tail = consensus.AppendU32le(tail, index)
+	return append(tail, entry...)
+}
+
+func cmpctBlockTxEnvelope(tx []byte) []byte {
+	out := consensus.AppendCompactSize(nil, uint64(len(tx)))
+	return append(out, tx...)
 }
 
 func TestGetBlockTxnPayloadAllowsIndexesAboveRequestCountCap(t *testing.T) {
-	want := getBlockTxnPayload{Indexes: []uint64{0, maxCompactRelayEntries, maxCompactRelayEntries + 2}}
+	want := getBlockTxnPayload{Indexes: []uint64{maxCompactRelayEntries + 2, 0, 0, maxCompactRelayEntries}}
 	raw, err := encodeGetBlockTxnPayload(want)
 	if err != nil {
 		t.Fatalf("encodeGetBlockTxnPayload: %v", err)
@@ -247,8 +285,6 @@ func TestGetBlockTxnPayloadRejectsMalformed(t *testing.T) {
 		name string
 		in   getBlockTxnPayload
 	}{
-		{name: "duplicate", in: getBlockTxnPayload{Indexes: []uint64{1, 1}}},
-		{name: "descending", in: getBlockTxnPayload{Indexes: []uint64{2, 1}}},
 		{name: "range", in: getBlockTxnPayload{Indexes: []uint64{maxCompactRelayIndexValue + 1}}},
 		{name: "max", in: getBlockTxnPayload{Indexes: []uint64{^uint64(0)}}},
 	} {
@@ -264,11 +300,8 @@ func TestGetBlockTxnPayloadRejectsMalformed(t *testing.T) {
 		{name: "short_hash", raw: make([]byte, 31)},
 		{name: "nonminimal", raw: getBlockTxnTestPayload([]byte{0xfd, 0x00, 0x00})},
 		{name: "count_too_large", raw: getBlockTxnTestPayload(consensus.AppendCompactSize(nil, maxCompactRelayEntries+1))},
-		{name: "truncated_index", raw: getBlockTxnTestPayload([]byte{1, 0xfd})},
+		{name: "truncated_index", raw: getBlockTxnTestPayload([]byte{1, 0x01, 0x00, 0x00})},
 		{name: "range", raw: getBlockTxnIndexedPayload(maxCompactRelayIndexValue + 1)},
-		{name: "max", raw: getBlockTxnIndexedPayload(^uint64(0))},
-		{name: "range_after_first", raw: getBlockTxnIndexedPayload(0, maxCompactRelayIndexValue)},
-		{name: "overflow_after_first", raw: getBlockTxnIndexedPayload(0, ^uint64(0))},
 		{name: "trailing", raw: append(mustEncodeGetBlockTxnPayload(t, []uint64{0}), 0x00)},
 	} {
 		if _, err := decodeGetBlockTxnPayload(tc.raw); err == nil {
@@ -281,10 +314,10 @@ func getBlockTxnTestPayload(tail []byte) []byte {
 	return append(make([]byte, 32), tail...)
 }
 
-func getBlockTxnIndexedPayload(deltas ...uint64) []byte {
-	tail := consensus.AppendCompactSize(nil, uint64(len(deltas)))
-	for _, delta := range deltas {
-		tail = consensus.AppendCompactSize(tail, delta)
+func getBlockTxnIndexedPayload(indexes ...uint64) []byte {
+	tail := consensus.AppendCompactSize(nil, uint64(len(indexes)))
+	for _, idx := range indexes {
+		tail = consensus.AppendU32le(tail, uint32(idx))
 	}
 	return getBlockTxnTestPayload(tail)
 }
