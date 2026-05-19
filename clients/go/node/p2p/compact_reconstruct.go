@@ -1,6 +1,12 @@
 package p2p
 
-import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+import (
+	"errors"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
+
+const maxCompactReconstructionEntries = maxCompactRelayEntries
 
 type compactReconstructionResult struct {
 	Transactions   [][]byte
@@ -8,10 +14,13 @@ type compactReconstructionResult struct {
 }
 
 func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactReconstructionResult, error) {
+	totalEntries, err := compactReconstructionEntryCount(len(p.ShortIDs), len(p.Prefilled))
+	if err != nil {
+		return compactReconstructionResult{}, err
+	}
 	if _, err := encodeCmpctBlockPayload(p); err != nil {
 		return compactReconstructionResult{}, err
 	}
-	totalEntries := len(p.ShortIDs) + len(p.Prefilled)
 	shortIDIndexes := compactShortIDIndexes(totalEntries, p.Prefilled)
 	txs := make([][]byte, totalEntries)
 	blockedShortIDs := compactDuplicateShortIDs(p.ShortIDs)
@@ -33,6 +42,17 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 		return compactReconstructionResult{MissingIndexes: missing}, nil
 	}
 	return compactReconstructionResult{Transactions: txs}, nil
+}
+
+func compactReconstructionEntryCount(shortIDCount, prefilledCount int) (int, error) {
+	if shortIDCount > maxCompactReconstructionEntries || prefilledCount > maxCompactReconstructionEntries {
+		return 0, errors.New("too many compact reconstruction entries")
+	}
+	totalEntries := shortIDCount + prefilledCount
+	if totalEntries > maxCompactReconstructionEntries {
+		return 0, errors.New("too many compact reconstruction entries")
+	}
+	return totalEntries, nil
 }
 
 func compactFillShortIDTransactions(txs [][]byte, absoluteIndexes []uint64, shortIDs []compactShortID, index map[compactShortID][]byte) []uint64 {

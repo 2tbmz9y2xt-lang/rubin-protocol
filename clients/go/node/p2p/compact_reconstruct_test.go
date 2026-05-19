@@ -177,6 +177,12 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 			local:   [][]byte{append(validTx, 0x00)},
 			wantErr: "compact local transaction is non-canonical",
 		},
+		{
+			name:    "too_many_reconstruction_entries",
+			payload: cmpctBlockPayload{ShortIDs: make([]compactShortID, maxCompactReconstructionEntries+1)},
+			local:   [][]byte{{0xff}},
+			wantErr: "too many compact reconstruction entries",
+		},
 	} {
 		_, err := reconstructCompactBlock(tc.payload, tc.local)
 		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
