@@ -55,16 +55,20 @@ func TestGetBlockTxnPayloadCodec(t *testing.T) {
 }
 
 func TestBlockTxnPayloadCodec(t *testing.T) {
+	tx1 := minimalBlockTxnTestTxBytes(1)
+	tx2 := minimalBlockTxnTestTxBytes(2)
 	want := blockTxnPayload{
 		BlockHash:    [32]byte{0x04, 0x05, 0x06},
-		Transactions: [][]byte{{0x01, 0x02}, {0x03}},
+		Transactions: [][]byte{tx1, tx2},
 	}
 	raw, err := encodeBlockTxnPayload(want)
 	if err != nil {
 		t.Fatalf("encodeBlockTxnPayload: %v", err)
 	}
-	if gotEntries := raw[32:]; !reflect.DeepEqual(gotEntries, []byte{2, 2, 1, 2, 1, 3}) {
-		t.Fatalf("blocktxn entries=%x, want 020201020103", gotEntries)
+	wantEntries := append(consensus.AppendCompactSize(nil, 2), tx1...)
+	wantEntries = append(wantEntries, tx2...)
+	if gotEntries := raw[32:]; !reflect.DeepEqual(gotEntries, wantEntries) {
+		t.Fatalf("blocktxn entries=%x, want %x", gotEntries, wantEntries)
 	}
 	got, err := decodeBlockTxnPayload(raw)
 	if err != nil {
@@ -78,6 +82,7 @@ func TestBlockTxnPayloadCodec(t *testing.T) {
 func TestBlockTxnPayloadRejectsMalformed(t *testing.T) {
 	tooMany := make([][]byte, maxCompactRelayEntries+1)
 	tooLarge := make([]byte, consensus.MAX_BLOCK_BYTES+1)
+	validWithTrailing := append(minimalBlockTxnTestTxBytes(3), 0x00)
 	for _, tc := range []struct {
 		name    string
 		in      blockTxnPayload
@@ -86,6 +91,8 @@ func TestBlockTxnPayloadRejectsMalformed(t *testing.T) {
 		{name: "too_many", in: blockTxnPayload{Transactions: tooMany}, wantErr: "too many compact relay transactions"},
 		{name: "empty", in: blockTxnPayload{Transactions: [][]byte{{}}}, wantErr: "blocktxn transaction is empty"},
 		{name: "too_large", in: blockTxnPayload{Transactions: [][]byte{tooLarge}}, wantErr: "blocktxn transaction too large"},
+		{name: "malformed_nonempty", in: blockTxnPayload{Transactions: [][]byte{{0x01}}}, wantErr: "blocktxn transaction is non-canonical"},
+		{name: "valid_with_trailing", in: blockTxnPayload{Transactions: [][]byte{validWithTrailing}}, wantErr: "blocktxn transaction is non-canonical"},
 	} {
 		_, err := encodeBlockTxnPayload(tc.in)
 		if err == nil {
@@ -104,11 +111,9 @@ func TestBlockTxnPayloadRejectsMalformed(t *testing.T) {
 		{name: "short_hash", raw: make([]byte, 31), wantErr: "blocktxn payload missing block hash"},
 		{name: "nonminimal_count", raw: blockTxnTestPayload([]byte{0xfd, 0x00, 0x00}), wantErr: "non-minimal"},
 		{name: "count_too_large", raw: blockTxnTestPayload(consensus.AppendCompactSize(nil, maxCompactRelayEntries+1)), wantErr: "too many compact relay transactions"},
-		{name: "empty_tx", raw: blockTxnSizedPayload(0), wantErr: "blocktxn transaction is empty"},
-		{name: "tx_too_large", raw: blockTxnSizedPayload(consensus.MAX_BLOCK_BYTES + 1), wantErr: "blocktxn transaction too large"},
-		{name: "truncated_tx_len", raw: blockTxnTestPayload([]byte{1, 0xfd}), wantErr: "unexpected EOF"},
-		{name: "truncated_tx", raw: blockTxnTestPayload([]byte{1, 2, 0xaa}), wantErr: "blocktxn transaction truncated"},
-		{name: "trailing", raw: append(mustEncodeBlockTxnPayload(t, [][]byte{{0xaa}}), 0x00), wantErr: "blocktxn payload has trailing bytes"},
+		{name: "empty_tx", raw: blockTxnTestPayload([]byte{1}), wantErr: "unexpected EOF"},
+		{name: "truncated_tx", raw: blockTxnTestPayload([]byte{1, 1}), wantErr: "unexpected EOF"},
+		{name: "trailing", raw: append(mustEncodeBlockTxnPayload(t, [][]byte{minimalBlockTxnTestTxBytes(4)}), 0x00), wantErr: "blocktxn payload has trailing bytes"},
 	} {
 		_, err := decodeBlockTxnPayload(tc.raw)
 		if err == nil {
@@ -120,14 +125,20 @@ func TestBlockTxnPayloadRejectsMalformed(t *testing.T) {
 	}
 }
 
-func blockTxnTestPayload(tail []byte) []byte {
-	return append(make([]byte, 32), tail...)
+func minimalBlockTxnTestTxBytes(nonce uint64) []byte {
+	out := consensus.AppendU32le(nil, consensus.TX_WIRE_VERSION)
+	out = append(out, 0x00) // tx_kind
+	out = consensus.AppendU64le(out, nonce)
+	out = consensus.AppendCompactSize(out, 0) // input_count
+	out = consensus.AppendCompactSize(out, 0) // output_count
+	out = consensus.AppendU32le(out, 0)       // locktime
+	out = consensus.AppendCompactSize(out, 0) // witness_count
+	out = consensus.AppendCompactSize(out, 0) // da_payload_len
+	return out
 }
 
-func blockTxnSizedPayload(txLen uint64) []byte {
-	tail := consensus.AppendCompactSize(nil, 1)
-	tail = consensus.AppendCompactSize(tail, txLen)
-	return blockTxnTestPayload(tail)
+func blockTxnTestPayload(tail []byte) []byte {
+	return append(make([]byte, 32), tail...)
 }
 
 func mustEncodeBlockTxnPayload(t *testing.T, txs [][]byte) []byte {
