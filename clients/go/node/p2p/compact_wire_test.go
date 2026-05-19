@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -51,6 +52,102 @@ func TestGetBlockTxnPayloadCodec(t *testing.T) {
 	if got.BlockHash != want.BlockHash || !reflect.DeepEqual(got.Indexes, want.Indexes) {
 		t.Fatalf("getblocktxn roundtrip got=%+v want=%+v", got, want)
 	}
+}
+
+func TestBlockTxnPayloadCodec(t *testing.T) {
+	tx1 := minimalBlockTxnTestTxBytes(1)
+	tx2 := minimalBlockTxnTestTxBytes(2)
+	want := blockTxnPayload{
+		BlockHash:    [32]byte{0x04, 0x05, 0x06},
+		Transactions: [][]byte{tx1, tx2},
+	}
+	raw, err := encodeBlockTxnPayload(want)
+	if err != nil {
+		t.Fatalf("encodeBlockTxnPayload: %v", err)
+	}
+	wantEntries := append(consensus.AppendCompactSize(nil, 2), tx1...)
+	wantEntries = append(wantEntries, tx2...)
+	if gotEntries := raw[32:]; !reflect.DeepEqual(gotEntries, wantEntries) {
+		t.Fatalf("blocktxn entries=%x, want %x", gotEntries, wantEntries)
+	}
+	got, err := decodeBlockTxnPayload(raw)
+	if err != nil {
+		t.Fatalf("decodeBlockTxnPayload: %v", err)
+	}
+	if got.BlockHash != want.BlockHash || !reflect.DeepEqual(got.Transactions, want.Transactions) {
+		t.Fatalf("blocktxn roundtrip got=%+v want=%+v", got, want)
+	}
+}
+
+func TestBlockTxnPayloadRejectsMalformed(t *testing.T) {
+	tooMany := make([][]byte, maxCompactRelayEntries+1)
+	tooLarge := make([]byte, consensus.MAX_BLOCK_BYTES+1)
+	validWithTrailing := append(minimalBlockTxnTestTxBytes(3), 0x00)
+	for _, tc := range []struct {
+		name    string
+		in      blockTxnPayload
+		wantErr string
+	}{
+		{name: "too_many", in: blockTxnPayload{Transactions: tooMany}, wantErr: "too many compact relay transactions"},
+		{name: "empty", in: blockTxnPayload{Transactions: [][]byte{{}}}, wantErr: "blocktxn transaction is empty"},
+		{name: "too_large", in: blockTxnPayload{Transactions: [][]byte{tooLarge}}, wantErr: "blocktxn transaction too large"},
+		{name: "malformed_nonempty", in: blockTxnPayload{Transactions: [][]byte{{0x01}}}, wantErr: "blocktxn transaction is non-canonical"},
+		{name: "valid_with_trailing", in: blockTxnPayload{Transactions: [][]byte{validWithTrailing}}, wantErr: "blocktxn transaction is non-canonical"},
+	} {
+		_, err := encodeBlockTxnPayload(tc.in)
+		if err == nil {
+			t.Fatalf("%s: expected encode failure", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s: encode error=%q, want %q", tc.name, err, tc.wantErr)
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		raw     []byte
+		wantErr string
+	}{
+		{name: "short_hash", raw: make([]byte, 31), wantErr: "blocktxn payload missing block hash"},
+		{name: "nonminimal_count", raw: blockTxnTestPayload([]byte{0xfd, 0x00, 0x00}), wantErr: "non-minimal"},
+		{name: "count_too_large", raw: blockTxnTestPayload(consensus.AppendCompactSize(nil, maxCompactRelayEntries+1)), wantErr: "too many compact relay transactions"},
+		{name: "empty_tx", raw: blockTxnTestPayload([]byte{1}), wantErr: "unexpected EOF"},
+		{name: "truncated_tx", raw: blockTxnTestPayload([]byte{1, 1}), wantErr: "unexpected EOF"},
+		{name: "trailing", raw: append(mustEncodeBlockTxnPayload(t, [][]byte{minimalBlockTxnTestTxBytes(4)}), 0x00), wantErr: "blocktxn payload has trailing bytes"},
+	} {
+		_, err := decodeBlockTxnPayload(tc.raw)
+		if err == nil {
+			t.Fatalf("%s: expected decode failure", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s: decode error=%q, want %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+func minimalBlockTxnTestTxBytes(nonce uint64) []byte {
+	out := consensus.AppendU32le(nil, consensus.TX_WIRE_VERSION)
+	out = append(out, 0x00) // tx_kind
+	out = consensus.AppendU64le(out, nonce)
+	out = consensus.AppendCompactSize(out, 0) // input_count
+	out = consensus.AppendCompactSize(out, 0) // output_count
+	out = consensus.AppendU32le(out, 0)       // locktime
+	out = consensus.AppendCompactSize(out, 0) // witness_count
+	out = consensus.AppendCompactSize(out, 0) // da_payload_len
+	return out
+}
+
+func blockTxnTestPayload(tail []byte) []byte {
+	return append(make([]byte, 32), tail...)
+}
+
+func mustEncodeBlockTxnPayload(t *testing.T, txs [][]byte) []byte {
+	t.Helper()
+	raw, err := encodeBlockTxnPayload(blockTxnPayload{Transactions: txs})
+	if err != nil {
+		t.Fatalf("encodeBlockTxnPayload: %v", err)
+	}
+	return raw
 }
 
 func TestGetBlockTxnPayloadAllowsIndexesAboveRequestCountCap(t *testing.T) {
