@@ -72,39 +72,40 @@ exclude_paths:
   - "clients/go/node/mempool_precheck_floor.go"
   - "clients/go/node/mempool_precheck_input.go"
   - "clients/go/node/mempool_precheck_output.go"
-  # Aggregate complexity accepted-risk exclusions (2026-05-19).
-  # Codacy currently gates aggregate complexity even when there are no issue rows.
-  # Keep this list narrow and explicit: these files are branch-dense protocol,
-  # consensus, crypto, or node lifecycle surfaces where mechanical simplification
-  # is more likely to change validation order, public errors, or runtime state
-  # than to improve production safety. Behavior remains covered by tests,
-  # conformance, review, and runtime/devnet evidence instead of Codacy aggregate
-  # complexity.
-  #
-  # Go node runtime mirrors the already-excluded Rust node runtime surface above.
-  - "clients/go/node/**"
-  # Consensus parser / UTXO / CORE_EXT / block-policy branch closures.
-  - "clients/go/consensus/block_basic.go"
-  - "clients/go/consensus/block_basic_weight.go"
-  - "clients/go/consensus/core_ext.go"
-  - "clients/go/consensus/live_binding_policy.go"
-  - "clients/go/consensus/tx_parse.go"
-  - "clients/go/consensus/tx_validate_worker.go"
-  - "clients/go/consensus/utxo_basic.go"
-  - "clients/rust/crates/rubin-consensus/src/block_basic/da_set.rs"
-  - "clients/rust/crates/rubin-consensus/src/block_basic/weight.rs"
-  - "clients/rust/crates/rubin-consensus/src/core_ext.rs"
-  - "clients/rust/crates/rubin-consensus/src/da_verify_parallel.rs"
-  - "clients/rust/crates/rubin-consensus/src/live_binding_policy.rs"
-  - "clients/rust/crates/rubin-consensus/src/sig_queue.rs"
-  - "clients/rust/crates/rubin-consensus/src/suite_registry.rs"
-  - "clients/rust/crates/rubin-consensus/src/tx.rs"
-  - "clients/rust/crates/rubin-consensus/src/utxo_basic.rs"
-  # OpenSSL binding code is intentionally explicit and branch-heavy.
-  - "clients/go/consensus/openssl_signer.go"
-  - "clients/go/consensus/verify_sig_openssl.go"
 
 engines:
+  metric:
+    exclude_paths:
+      # Aggregate complexity accepted-risk exclusions (2026-05-19).
+      # Codacy currently gates aggregate complexity even when there are no issue rows.
+      # Keep this list narrow and explicit: these files are branch-dense protocol,
+      # consensus, crypto, or node lifecycle surfaces where mechanical simplification
+      # is more likely to change validation order, public errors, or runtime state
+      # than to improve production safety. Other Codacy analyses should continue
+      # to run on these files.
+      #
+      # Go node runtime mirrors the already-excluded Rust node runtime surface above.
+      - "clients/go/node/**"
+      # Consensus parser / UTXO / CORE_EXT / block-policy branch closures.
+      - "clients/go/consensus/block_basic.go"
+      - "clients/go/consensus/block_basic_weight.go"
+      - "clients/go/consensus/core_ext.go"
+      - "clients/go/consensus/live_binding_policy.go"
+      - "clients/go/consensus/tx_parse.go"
+      - "clients/go/consensus/tx_validate_worker.go"
+      - "clients/go/consensus/utxo_basic.go"
+      - "clients/rust/crates/rubin-consensus/src/block_basic/da_set.rs"
+      - "clients/rust/crates/rubin-consensus/src/block_basic/weight.rs"
+      - "clients/rust/crates/rubin-consensus/src/core_ext.rs"
+      - "clients/rust/crates/rubin-consensus/src/da_verify_parallel.rs"
+      - "clients/rust/crates/rubin-consensus/src/live_binding_policy.rs"
+      - "clients/rust/crates/rubin-consensus/src/sig_queue.rs"
+      - "clients/rust/crates/rubin-consensus/src/suite_registry.rs"
+      - "clients/rust/crates/rubin-consensus/src/tx.rs"
+      - "clients/rust/crates/rubin-consensus/src/utxo_basic.rs"
+      # OpenSSL binding code is intentionally explicit and branch-heavy.
+      - "clients/go/consensus/openssl_signer.go"
+      - "clients/go/consensus/verify_sig_openssl.go"
   duplication:
     # CLI dispatchers, fixture generators, and node integration code contain
     # inherent structural repetition (dispatch boilerplate, tx-building
