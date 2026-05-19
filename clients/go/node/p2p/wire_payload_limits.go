@@ -24,6 +24,19 @@ func headersPayloadCap(headerBatchLimit uint64) uint32 {
 	return uint32(headerBatchLimit * consensus.BLOCK_HEADER_BYTES)
 }
 
+func compactRelayPayloadCap(command string) uint32 {
+	if command == messageSendCmpct {
+		return sendCmpctPayloadBytes
+	}
+	if command == messageGetBlockTxn {
+		return uint32(32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes)
+	}
+	if command == messageCmpctBlock || command == messageBlockTxn {
+		return uint32(consensus.MAX_BLOCK_BYTES)
+	}
+	return 0
+}
+
 func postHandshakePayloadCap(locatorLimit int, headerBatchLimit uint64) payloadLimitFn {
 	return func(command string) uint32 {
 		switch command {
