@@ -11,7 +11,6 @@ type compactModeSnapshot struct {
 }
 
 type peerCompactRelayState struct {
-	localMode  compactModeSnapshot
 	remoteMode compactModeSnapshot
 }
 
@@ -39,60 +38,10 @@ func parseSendCmpctRuntimePayload(payload []byte) (sendCmpctPayload, error) {
 	return out, nil
 }
 
-func (s *Service) advertiseCompactRelayMode(p *peer) error {
-	if p == nil || !s.compactRelayReady() || !s.canAdvertiseCompactRelay(p) {
-		return nil
-	}
-	return p.sendLocalCompactMode(0)
-}
-
-func (s *Service) compactRelayReady() bool {
-	if s == nil || s.cfg.CompactRelayMode == 0 || s.cfg.Now == nil || s.cfg.SyncEngine == nil {
-		return false
-	}
-	now := s.cfg.Now().Unix()
-	if now < 0 {
-		return false
-	}
-	return !s.cfg.SyncEngine.IsInIBD(uint64(now)) // #nosec G115 -- negative Unix times are rejected above.
-}
-
-func (s *Service) canAdvertiseCompactRelay(p *peer) bool {
-	return s.cfg.CompactRelayPeerOK != nil && s.cfg.CompactRelayPeerOK(p.snapshotState())
-}
-
-func (p *peer) sendLocalCompactMode(mode uint8) error {
-	current := p.localCompactMode()
-	if current.Mode == mode && current.Version == compactRelayVersion {
-		return nil
-	}
-	payload, err := encodeSendCmpctPayload(sendCmpctPayload{Mode: mode, Version: compactRelayVersion})
-	if err != nil {
-		return err
-	}
-	if err := p.send(messageSendCmpct, payload); err != nil {
-		return err
-	}
-	p.setLocalCompactMode(compactModeSnapshot{Mode: mode, Version: compactRelayVersion})
-	return nil
-}
-
 func (p *peer) setRemoteCompactMode(mode compactModeSnapshot) {
 	p.compactMu.Lock()
 	p.compact.remoteMode = mode
 	p.compactMu.Unlock()
-}
-
-func (p *peer) setLocalCompactMode(mode compactModeSnapshot) {
-	p.compactMu.Lock()
-	p.compact.localMode = mode
-	p.compactMu.Unlock()
-}
-
-func (p *peer) localCompactMode() compactModeSnapshot {
-	p.compactMu.Lock()
-	defer p.compactMu.Unlock()
-	return p.compact.localMode
 }
 
 func (p *peer) remoteCompactMode() compactModeSnapshot {

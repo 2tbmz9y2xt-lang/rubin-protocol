@@ -27,8 +27,6 @@ type ServiceConfig struct {
 	LocatorLimit       int
 	GetBlocksBatchSize uint64
 	TxRelayFanout      int
-	CompactRelayMode   uint8
-	CompactRelayPeerOK func(node.PeerState) bool
 	PeerRuntimeConfig  node.PeerRuntimeConfig
 	PeerManager        *node.PeerManager
 	SyncConfig         node.SyncConfig
@@ -142,7 +140,6 @@ func validateServiceConfig(cfg ServiceConfig) error {
 		{cfg.SyncEngine == nil, "nil sync engine"},
 		{cfg.BlockStore == nil, "nil blockstore"},
 		{cfg.TxMetadataFunc == nil, "nil tx metadata func"},
-		{cfg.CompactRelayMode > 2, "unsupported compact relay mode"},
 	} {
 		if check.invalid {
 			return errors.New(check.err)

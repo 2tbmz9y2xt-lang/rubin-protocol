@@ -51,10 +51,6 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 	defer s.unregisterPeer(current)
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
-	if err := s.advertiseCompactRelayMode(current); err != nil {
-		current.setLastError(err.Error())
-		return err
-	}
 	if err := s.requestBlocksIfBehind(current); err != nil {
 		current.setLastError(err.Error())
 		return err
