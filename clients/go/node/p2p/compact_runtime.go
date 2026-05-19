@@ -42,7 +42,7 @@ func parseSendCmpctRuntimePayload(payload []byte) (sendCmpctPayload, error) {
 }
 
 func (s *Service) advertiseCompactRelayMode(p *peer) error {
-	if p == nil || !s.compactRelayReady() {
+	if p == nil || !s.compactRelayReady() || !s.canAdvertiseCompactRelay(p) {
 		return nil
 	}
 	s.compactMu.Lock()
@@ -64,6 +64,10 @@ func (s *Service) compactRelayReady() bool {
 		return false
 	}
 	return !s.cfg.SyncEngine.IsInIBD(uint64(now)) // #nosec G115 -- negative Unix times are rejected above.
+}
+
+func (s *Service) canAdvertiseCompactRelay(p *peer) bool {
+	return s.cfg.CompactRelayPeerOK != nil && s.cfg.CompactRelayPeerOK(p.snapshotState())
 }
 
 func (s *Service) desiredCompactMode(p *peer) uint8 {

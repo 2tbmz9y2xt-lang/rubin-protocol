@@ -31,6 +31,7 @@ type ServiceConfig struct {
 	CompactRelayReady  bool
 	CompactMissRatePct float64
 	CompactMissBlocks  int
+	CompactRelayPeerOK func(node.PeerState) bool
 	CompactPeerScore   func(node.PeerState) int
 	PeerRuntimeConfig  node.PeerRuntimeConfig
 	PeerManager        *node.PeerManager

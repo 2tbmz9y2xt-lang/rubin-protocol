@@ -42,13 +42,16 @@ func TestPostHandshakeSendCmpctPhaseGate(t *testing.T) {
 		blocks   int
 		mode     uint8
 		ready    bool
+		peerOK   bool
 		missRate float64
 		want     string
 		wantMode uint8
 	}{
-		{"ready mode1 advertises", 2, 1, true, 0.2, messageSendCmpct, 1},
-		{"warmup keeps full block", 2, 2, false, 0.0, messageGetAddr, 0},
-		{"ibd keeps full block", 0, 2, true, 0.2, messageGetBlk, 0},
+		{"ready eligible mode1 advertises", 2, 1, true, true, 0.2, messageSendCmpct, 1},
+		{"unknown capability keeps full block", 2, 1, true, false, 0.2, messageGetAddr, 0},
+		{"warmup keeps full block", 2, 2, false, true, 0.0, messageGetAddr, 0},
+		{"ibd keeps full block", 0, 2, true, true, 0.2, messageGetBlk, 0},
+		{"high miss rate keeps full block", 2, 2, true, true, 12.0, messageGetAddr, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHarness(t, tc.blocks, "127.0.0.1:0", nil)
@@ -56,6 +59,10 @@ func TestPostHandshakeSendCmpctPhaseGate(t *testing.T) {
 			h.service.cfg.CompactRelayMode = tc.mode
 			h.service.cfg.CompactRelayReady = tc.ready
 			h.service.cfg.CompactMissRatePct = tc.missRate
+			h.service.cfg.CompactMissBlocks = 5
+			if tc.peerOK {
+				h.service.cfg.CompactRelayPeerOK = func(node.PeerState) bool { return true }
+			}
 			if tc.blocks > 0 {
 				markCompactRelayReadyNow(t, h)
 			}
@@ -93,6 +100,7 @@ func TestCompactModeHighBandwidthCap(t *testing.T) {
 	h.service.cfg.CompactRelayMode = 2
 	h.service.cfg.CompactRelayReady = true
 	h.service.cfg.CompactMissRatePct = 0.2
+	h.service.cfg.CompactRelayPeerOK = func(node.PeerState) bool { return true }
 	h.service.cfg.CompactPeerScore = func(node.PeerState) int { return 90 }
 	markCompactRelayReadyNow(t, h)
 
@@ -116,21 +124,6 @@ func TestCompactModeHighBandwidthCap(t *testing.T) {
 	}
 	if modeTwo != maxHighBandwidthCompactPeers {
 		t.Fatalf("mode=2 peers=%d, want %d", modeTwo, maxHighBandwidthCompactPeers)
-	}
-}
-
-func TestCompactMissRateDowngradesToFullBlockMode(t *testing.T) {
-	h := newTestHarness(t, 2, "127.0.0.1:0", nil)
-	h.service.cfg.CompactRelayMode = 2
-	h.service.cfg.CompactRelayReady = true
-	h.service.cfg.CompactMissRatePct = 12.0
-	h.service.cfg.CompactMissBlocks = 5
-	h.service.cfg.CompactPeerScore = func(node.PeerState) int { return 90 }
-	markCompactRelayReadyNow(t, h)
-
-	p := testPeerForService(h.service, "compact-peer-miss", 0)
-	if got := h.service.desiredCompactMode(p); got != 0 {
-		t.Fatalf("compact mode after high miss rate=%d, want 0", got)
 	}
 }
 
