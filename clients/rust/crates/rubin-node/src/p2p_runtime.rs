@@ -37,6 +37,9 @@ const MESSAGE_TX: &str = "tx";
 const MESSAGE_GETBLOCKS: &str = "getblocks";
 const MESSAGE_GETADDR: &str = "getaddr";
 const MESSAGE_ADDR: &str = "addr";
+const MESSAGE_SENDCMPCT: &str = "sendcmpct";
+const COMPACT_RELAY_VERSION: u64 = 1;
+const SENDCMPCT_PAYLOAD_BYTES: u64 = 9;
 pub const MSG_BLOCK: u8 = 0x01;
 pub const MSG_TX: u8 = 0x02;
 const INVENTORY_VECTOR_SIZE: usize = 33;
@@ -169,6 +172,12 @@ pub struct LiveMessageOutcome {
     pub tx_pool_cleanup: TxPoolCleanupPlan,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CompactModeSnapshot {
+    mode: u8,
+    version: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OrphanBlockEntry {
     block_hash: [u8; 32],
@@ -199,6 +208,7 @@ pub struct PeerSession {
     orphans: OrphanBlockPool,
     pending_tx_pool_cleanup: TxPoolCleanupPlan,
     prefetched_read_byte: Option<u8>,
+    remote_compact_mode: CompactModeSnapshot,
 }
 
 pub struct PeerManager {
@@ -316,6 +326,7 @@ impl PeerSession {
             orphans: OrphanBlockPool::new(DEFAULT_ORPHAN_LIMIT, DEFAULT_ORPHAN_BYTE_LIMIT),
             pending_tx_pool_cleanup: TxPoolCleanupPlan::default(),
             prefetched_read_byte: None,
+            remote_compact_mode: CompactModeSnapshot::default(),
         })
     }
 
@@ -458,6 +469,9 @@ impl PeerSession {
                 }
                 "tx" | "block" | "headers" | "getaddr" | "addr" => {
                     // accepted runtime commands (stub)
+                }
+                MESSAGE_SENDCMPCT => {
+                    self.handle_sendcmpct(&msg.payload)?;
                 }
                 other => {
                     self.peer.last_error = format!("unknown command: {other}");
@@ -713,6 +727,13 @@ impl PeerSession {
                 responses: Vec::new(),
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
             }),
+            MESSAGE_SENDCMPCT => {
+                self.handle_sendcmpct(&msg.payload)?;
+                Ok(LiveMessageOutcome {
+                    responses: Vec::new(),
+                    tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                })
+            }
             "ping" => Ok(LiveMessageOutcome {
                 responses: vec![WireMessage {
                     command: "pong".to_string(),
@@ -752,6 +773,22 @@ impl PeerSession {
             self.write_message(&response)?;
         }
         Ok(outcome.tx_pool_cleanup)
+    }
+
+    fn handle_sendcmpct(&mut self, payload: &[u8]) -> io::Result<()> {
+        let msg = parse_sendcmpct_runtime_payload(payload)?;
+        if msg.version != COMPACT_RELAY_VERSION {
+            self.remote_compact_mode = CompactModeSnapshot {
+                mode: 0,
+                version: msg.version,
+            };
+            return Ok(());
+        }
+        self.remote_compact_mode = CompactModeSnapshot {
+            mode: msg.mode,
+            version: msg.version,
+        };
+        Ok(())
     }
 
     // Historically used by the inline run_block_sync_loop match; preserved under
@@ -1751,12 +1788,35 @@ fn runtime_payload_cap(command: &str) -> u64 {
     match command {
         "version" => VERSION_PAYLOAD_BYTES,
         "verack" | "ping" | "pong" | MESSAGE_GETADDR => 0,
+        MESSAGE_SENDCMPCT => SENDCMPCT_PAYLOAD_BYTES,
         MESSAGE_INV | MESSAGE_GETDATA | MESSAGE_GETBLOCKS => MAX_INVENTORY_PAYLOAD_BYTES,
         MESSAGE_ADDR => MAX_ADDR_PAYLOAD_BYTES,
         MESSAGE_BLOCK | MESSAGE_TX => MAX_BLOCK_BYTES,
         "headers" => MAX_HEADERS_PAYLOAD_BYTES,
         _ => 0,
     }
+}
+
+fn parse_sendcmpct_runtime_payload(payload: &[u8]) -> io::Result<CompactModeSnapshot> {
+    if payload.len() != SENDCMPCT_PAYLOAD_BYTES as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sendcmpct payload width mismatch",
+        ));
+    }
+    let mut version = [0u8; 8];
+    version.copy_from_slice(&payload[1..]);
+    let out = CompactModeSnapshot {
+        mode: payload[0],
+        version: u64::from_le_bytes(version),
+    };
+    if out.version == COMPACT_RELAY_VERSION && out.mode > 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported compact relay mode",
+        ));
+    }
+    Ok(out)
 }
 
 fn pre_handshake_payload_cap(command: &str) -> u64 {
@@ -2081,6 +2141,13 @@ mod tests {
             .apply_block(&devnet_genesis_block_bytes(), None)
             .expect("apply genesis");
         engine
+    }
+
+    fn sendcmpct_runtime_payload(mode: u8, version: u64) -> Vec<u8> {
+        let mut payload = vec![0u8; SENDCMPCT_PAYLOAD_BYTES as usize];
+        payload[0] = mode;
+        payload[1..].copy_from_slice(&version.to_le_bytes());
+        payload
     }
 
     fn build_block_bytes(
@@ -2983,6 +3050,7 @@ mod tests {
         assert!(runtime_payload_cap(MESSAGE_GETBLOCKS) > 0);
         assert!(runtime_payload_cap(MESSAGE_GETDATA) > 0);
         assert!(runtime_payload_cap(MESSAGE_ADDR) > 0);
+        assert!(runtime_payload_cap(MESSAGE_SENDCMPCT) == SENDCMPCT_PAYLOAD_BYTES);
 
         // headers gets an explicit cap matching MAX_HEADERS_PAYLOAD_BYTES.
         assert_eq!(runtime_payload_cap("headers"), MAX_HEADERS_PAYLOAD_BYTES);
@@ -2992,6 +3060,79 @@ mod tests {
         assert_eq!(runtime_payload_cap("unknown"), 0);
         assert_eq!(runtime_payload_cap("malicious_cmd"), 0);
         assert_eq!(runtime_payload_cap(""), 0);
+    }
+
+    #[test]
+    fn sendcmpct_live_dispatch_records_peer_mode() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        let mut session =
+            PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
+        let mut engine = test_sync_engine_with_genesis();
+
+        let outcome = session
+            .collect_live_responses(
+                WireMessage {
+                    command: MESSAGE_SENDCMPCT.to_string(),
+                    payload: sendcmpct_runtime_payload(2, COMPACT_RELAY_VERSION),
+                },
+                &mut engine,
+                None,
+            )
+            .expect("current sendcmpct");
+        assert!(outcome.responses.is_empty());
+        assert_eq!(
+            session.remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 2,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
+
+        session
+            .collect_live_responses(
+                WireMessage {
+                    command: MESSAGE_SENDCMPCT.to_string(),
+                    payload: sendcmpct_runtime_payload(3, COMPACT_RELAY_VERSION + 1),
+                },
+                &mut engine,
+                None,
+            )
+            .expect("future version downgrades before future-mode validation");
+        assert_eq!(
+            session.remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 0,
+                version: COMPACT_RELAY_VERSION + 1
+            }
+        );
+
+        let err = session
+            .collect_live_responses(
+                WireMessage {
+                    command: MESSAGE_SENDCMPCT.to_string(),
+                    payload: vec![1, 2],
+                },
+                &mut engine,
+                None,
+            )
+            .err()
+            .expect("short sendcmpct payload must fail");
+        assert!(err.to_string().contains("sendcmpct payload width mismatch"));
+        let err = session
+            .collect_live_responses(
+                WireMessage {
+                    command: MESSAGE_SENDCMPCT.to_string(),
+                    payload: sendcmpct_runtime_payload(3, COMPACT_RELAY_VERSION),
+                },
+                &mut engine,
+                None,
+            )
+            .err()
+            .expect("current-version unknown mode must fail");
+        assert!(err.to_string().contains("unsupported compact relay mode"));
+        drop(client);
     }
 
     #[test]
