@@ -9,7 +9,12 @@ import (
 func TestCompactWireCommandConstantsAndPayloadCaps(t *testing.T) {
 	liveCaps := postHandshakePayloadCap(defaultLocatorLimit, 512)
 	commands := []string{messageSendCmpct, messageGetBlockTxn, messageCmpctBlock, messageBlockTxn}
-	caps := []uint32{sendCmpctPayloadBytes, uint32(32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes), uint32(consensus.MAX_BLOCK_BYTES), uint32(consensus.MAX_BLOCK_BYTES)}
+	caps := []uint32{
+		sendCmpctPayloadBytes,
+		uint32(32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes),
+		uint32(consensus.MAX_BLOCK_BYTES + consensus.BLOCK_HEADER_BYTES + 8 + 2*maxCompactSizeBytes + maxCompactRelayEntries*(compactShortIDBytes+maxCompactSizeBytes)),
+		uint32(consensus.MAX_BLOCK_BYTES + 32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes),
+	}
 	for i, command := range commands {
 		if _, err := encodeWireCommand(command); err != nil {
 			t.Fatalf("compact command %q should be wire-encodable: %v", command, err)

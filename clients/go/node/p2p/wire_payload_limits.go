@@ -31,8 +31,11 @@ func compactRelayPayloadCap(command string) uint32 {
 	if command == messageGetBlockTxn {
 		return uint32(32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes)
 	}
-	if command == messageCmpctBlock || command == messageBlockTxn {
-		return uint32(consensus.MAX_BLOCK_BYTES)
+	if command == messageCmpctBlock {
+		return uint32(consensus.MAX_BLOCK_BYTES + consensus.BLOCK_HEADER_BYTES + 8 + 2*maxCompactSizeBytes + maxCompactRelayEntries*(compactShortIDBytes+maxCompactSizeBytes))
+	}
+	if command == messageBlockTxn {
+		return uint32(consensus.MAX_BLOCK_BYTES + 32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes)
 	}
 	return 0
 }

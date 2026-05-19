@@ -14,6 +14,7 @@ const (
 	messageBlockTxn               = "blocktxn"
 	compactRelayVersion    uint64 = 1
 	sendCmpctPayloadBytes         = 9
+	compactShortIDBytes           = 6
 	maxCompactRelayEntries        = maxInventoryVectors
 )
 
