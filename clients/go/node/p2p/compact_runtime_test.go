@@ -15,17 +15,14 @@ func TestSendCmpctPostHandshakeCommandPathRecordsPeerMode(t *testing.T) {
 		t.Fatalf("remote compact mode=%+v, want mode=2 version=%d", got, compactRelayVersion)
 	}
 
-	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 1, compactRelayVersion+1)}); err != nil {
-		t.Fatalf("unsupported version should downgrade without disconnect: %v", err)
+	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 1, compactRelayVersion+1)}); err == nil || err.Error() != "unsupported compact relay version" {
+		t.Fatalf("unsupported version err=%v, want version rejection", err)
 	}
-	if got := p.remoteCompactMode(); got.Mode != 0 || got.Version != compactRelayVersion+1 {
-		t.Fatalf("unsupported version mode=%+v, want downgraded", got)
+	if got := p.remoteCompactMode(); got.Mode != 2 || got.Version != compactRelayVersion {
+		t.Fatalf("unsupported version changed remote compact mode: %+v", got)
 	}
-	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 3, compactRelayVersion+1)}); err != nil {
-		t.Fatalf("future version with future mode should downgrade without disconnect: %v", err)
-	}
-	if got := p.remoteCompactMode(); got.Mode != 0 || got.Version != compactRelayVersion+1 {
-		t.Fatalf("future version/future mode=%+v, want downgraded", got)
+	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 3, compactRelayVersion+1)}); err == nil || err.Error() != "unsupported compact relay version" {
+		t.Fatalf("future version/future mode err=%v, want version rejection", err)
 	}
 	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: []byte{1, 2}}); err == nil {
 		t.Fatal("short sendcmpct payload must fail")

@@ -777,13 +777,6 @@ impl PeerSession {
 
     fn handle_sendcmpct(&mut self, payload: &[u8]) -> io::Result<()> {
         let msg = parse_sendcmpct_runtime_payload(payload)?;
-        if msg.version != COMPACT_RELAY_VERSION {
-            self.remote_compact_mode = CompactModeSnapshot {
-                mode: 0,
-                version: msg.version,
-            };
-            return Ok(());
-        }
         self.remote_compact_mode = CompactModeSnapshot {
             mode: msg.mode,
             version: msg.version,
@@ -1810,7 +1803,13 @@ fn parse_sendcmpct_runtime_payload(payload: &[u8]) -> io::Result<CompactModeSnap
         mode: payload[0],
         version: u64::from_le_bytes(version),
     };
-    if out.version == COMPACT_RELAY_VERSION && out.mode > 2 {
+    if out.version != COMPACT_RELAY_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported compact relay version",
+        ));
+    }
+    if out.mode > 2 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unsupported compact relay mode",
@@ -3090,7 +3089,7 @@ mod tests {
             }
         );
 
-        session
+        let err = session
             .collect_live_responses(
                 WireMessage {
                     command: MESSAGE_SENDCMPCT.to_string(),
@@ -3099,12 +3098,16 @@ mod tests {
                 &mut engine,
                 None,
             )
-            .expect("future version downgrades before future-mode validation");
+            .err()
+            .expect("future version must fail before future-mode validation");
+        assert!(err
+            .to_string()
+            .contains("unsupported compact relay version"));
         assert_eq!(
             session.remote_compact_mode,
             CompactModeSnapshot {
-                mode: 0,
-                version: COMPACT_RELAY_VERSION + 1
+                mode: 2,
+                version: COMPACT_RELAY_VERSION
             }
         );
 
