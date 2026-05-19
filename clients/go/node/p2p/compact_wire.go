@@ -120,9 +120,13 @@ func encodeBlockTxnPayload(p blockTxnPayload) ([]byte, error) {
 	}
 	var totalTxBytes uint64
 	for _, tx := range p.Transactions {
-		nextTotal, err := validateBlockTxnTransactionBytes(tx, totalTxBytes)
+		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(tx)), totalTxBytes)
 		if err != nil {
 			return nil, err
+		}
+		_, _, _, consumed, err := consensus.ParseTx(tx)
+		if err != nil || consumed != len(tx) {
+			return nil, errors.New("blocktxn transaction is non-canonical")
 		}
 		totalTxBytes = nextTotal
 	}
@@ -157,7 +161,7 @@ func decodeBlockTxnPayload(payload []byte) (blockTxnPayload, error) {
 		if err != nil {
 			return blockTxnPayload{}, err
 		}
-		transactions = append(transactions, tx)
+		transactions = append(transactions, append([]byte(nil), tx...))
 		offset += n
 		totalTxBytes = nextTotal
 	}
@@ -175,22 +179,7 @@ func decodeBlockTxnTransaction(payload []byte, totalTxBytes uint64) ([]byte, int
 	}
 	txLen := uint64(consumed) // #nosec G115 -- consumed is non-negative and bounded by len(payload).
 	nextTotal, err := validateBlockTxnTransactionSize(txLen, totalTxBytes)
-	if err != nil {
-		return nil, 0, totalTxBytes, err
-	}
-	return append([]byte(nil), payload[:consumed]...), consumed, nextTotal, nil
-}
-
-func validateBlockTxnTransactionBytes(tx []byte, totalTxBytes uint64) (uint64, error) {
-	nextTotal, err := validateBlockTxnTransactionSize(uint64(len(tx)), totalTxBytes)
-	if err != nil {
-		return totalTxBytes, err
-	}
-	_, _, _, consumed, err := consensus.ParseTx(tx)
-	if err != nil || consumed != len(tx) {
-		return totalTxBytes, errors.New("blocktxn transaction is non-canonical")
-	}
-	return nextTotal, nil
+	return payload[:consumed], consumed, nextTotal, err
 }
 
 func validateBlockTxnTransactionSize(txLen, totalTxBytes uint64) (uint64, error) {
