@@ -185,29 +185,31 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 	}
 }
 
-func TestReconstructCompactBlockLocalLookupHasNoAggregateBlocktxnCap(t *testing.T) {
+func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	nonce1, nonce2 := uint64(51), uint64(52)
 	validTx := minimalBlockTxnTestTxBytes(53)
-	localTxs := make([][]byte, consensus.MAX_BLOCK_BYTES/len(validTx)+1)
-	for i := range localTxs {
-		localTxs[i] = validTx
-	}
-	result, err := reconstructCompactBlock(cmpctBlockPayload{
-		Nonce1:   nonce1,
-		Nonce2:   nonce2,
-		ShortIDs: []compactShortID{compactShortID{0xaa}},
-		Prefilled: []prefilledTxn{
-			{Index: 0, Tx: validTx},
-		},
-	}, localTxs)
+	localIndex, err := compactLocalTxIndex([][]byte{validTx}, nonce1, nonce2, nil)
 	if err != nil {
-		t.Fatalf("reconstructCompactBlock: %v", err)
+		t.Fatalf("compactLocalTxIndex: %v", err)
 	}
-	if !reflect.DeepEqual(result.MissingIndexes, []uint64{1}) || result.Transactions != nil {
-		t.Fatalf("result=%+v, want missing without local aggregate cap failure", result)
+	shortID := compactShortIDForTx(t, validTx, nonce1, nonce2)
+	if !reflect.DeepEqual(localIndex[shortID], validTx) {
+		t.Fatalf("localIndex[%v]=%x want %x", shortID, localIndex[shortID], validTx)
+	}
+	validTx[0] ^= 0xff
+	if reflect.DeepEqual(localIndex[shortID], validTx) {
+		t.Fatal("local index aliases candidate transaction bytes")
 	}
 
-	result, err = reconstructCompactBlock(cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: validTx}}}, [][]byte{{0xff}})
+	_, err = compactLocalTxIndex([][]byte{append(minimalBlockTxnTestTxBytes(54), 0x00)}, nonce1, nonce2, nil)
+	if err == nil || !strings.Contains(err.Error(), "compact local transaction is non-canonical") {
+		t.Fatalf("compactLocalTxIndex noncanonical err=%v", err)
+	}
+}
+
+func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing.T) {
+	validTx := minimalBlockTxnTestTxBytes(61)
+	result, err := reconstructCompactBlock(cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: validTx}}}, [][]byte{{0xff}})
 	if err != nil {
 		t.Fatalf("prefilled-only compact block should not index local candidates: %v", err)
 	}

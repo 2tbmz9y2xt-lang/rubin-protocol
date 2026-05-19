@@ -69,10 +69,10 @@ func compactLocalTxIndex(localTxs [][]byte, nonce1, nonce2 uint64, blocked map[c
 		out[shortID] = nil
 	}
 	for _, tx := range localTxs {
-		if _, _, _, err := decodeCompactRelayTxEnvelope(tx, uint64(len(tx)), 0, "compact local transaction is non-canonical"); err != nil {
+		wtxid, err := compactLocalTxWTxID(tx)
+		if err != nil {
 			return nil, err
 		}
-		_, _, wtxid, _, _ := consensus.ParseTx(tx) // validated by decodeCompactRelayTxEnvelope above.
 		shortID := compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
 		if _, ok := out[shortID]; ok {
 			out[shortID] = nil
@@ -81,6 +81,15 @@ func compactLocalTxIndex(localTxs [][]byte, nonce1, nonce2 uint64, blocked map[c
 		out[shortID] = append([]byte(nil), tx...)
 	}
 	return out, nil
+}
+
+func compactLocalTxWTxID(tx []byte) ([32]byte, error) {
+	var zero [32]byte
+	if _, _, _, err := decodeCompactRelayTxEnvelope(tx, uint64(len(tx)), 0, "compact local transaction is non-canonical"); err != nil {
+		return zero, err
+	}
+	_, _, wtxid, _, _ := consensus.ParseTx(tx) // validated by decodeCompactRelayTxEnvelope above.
+	return wtxid, nil
 }
 
 func compactDuplicateShortIDs(shortIDs []compactShortID) map[compactShortID]bool {
