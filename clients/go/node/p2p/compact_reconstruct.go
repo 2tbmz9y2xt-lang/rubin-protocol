@@ -18,7 +18,7 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 	if err != nil {
 		return compactReconstructionResult{}, err
 	}
-	prefilledShortIDs, err := compactPrefilledShortIDs(p.Prefilled, totalEntries, p.Nonce1, p.Nonce2)
+	prefilledShortIDs, prefilledTxBytes, err := compactPrefilledShortIDs(p.Prefilled, totalEntries, p.Nonce1, p.Nonce2)
 	if err != nil {
 		return compactReconstructionResult{}, err
 	}
@@ -38,7 +38,9 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 	}
 	txs := make([][]byte, totalEntries)
 	compactFillPrefilledTransactions(txs, p.Prefilled)
-	compactFillShortIDTransactions(txs, totalEntries, p.Prefilled, p.ShortIDs, index)
+	if err := compactFillShortIDTransactions(txs, totalEntries, p.Prefilled, p.ShortIDs, index, prefilledTxBytes); err != nil {
+		return compactReconstructionResult{}, err
+	}
 	return compactReconstructionResult{Transactions: txs}, nil
 }
 
@@ -53,27 +55,27 @@ func compactReconstructionEntryCount(shortIDCount int, prefilled []prefilledTxn)
 	return int(totalEntries), nil // #nosec G115 -- validateCmpctBlockEntryCount caps at maxCmpctBlockEntries.
 }
 
-func compactPrefilledShortIDs(prefilled []prefilledTxn, totalEntries int, nonce1, nonce2 uint64) (map[compactShortID]bool, error) {
+func compactPrefilledShortIDs(prefilled []prefilledTxn, totalEntries int, nonce1, nonce2 uint64) (map[compactShortID]bool, uint64, error) {
 	out := make(map[compactShortID]bool, len(prefilled))
 	var prev uint64
 	var totalTxBytes uint64
 	for i, entry := range prefilled {
 		if entry.Index >= uint64(totalEntries) || (i > 0 && entry.Index <= prev) {
-			return nil, errors.New("compact relay index out of range")
+			return nil, 0, errors.New("compact relay index out of range")
 		}
 		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(entry.Tx)), totalTxBytes)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		_, _, wtxid, consumed, err := consensus.ParseTx(entry.Tx)
 		if err != nil || consumed != len(entry.Tx) {
-			return nil, errors.New("cmpctblock prefilled transaction is non-canonical")
+			return nil, 0, errors.New("cmpctblock prefilled transaction is non-canonical")
 		}
 		out[compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))] = true
 		totalTxBytes = nextTotal
 		prev = entry.Index
 	}
-	return out, nil
+	return out, totalTxBytes, nil
 }
 
 func compactFillPrefilledTransactions(txs [][]byte, prefilled []prefilledTxn) {
@@ -82,15 +84,22 @@ func compactFillPrefilledTransactions(txs [][]byte, prefilled []prefilledTxn) {
 	}
 }
 
-func compactFillShortIDTransactions(txs [][]byte, totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte) {
+func compactFillShortIDTransactions(txs [][]byte, totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, totalTxBytes uint64) error {
 	shortPos, prefilledPos := 0, 0
 	for absoluteIndex := 0; absoluteIndex < totalEntries && shortPos < len(shortIDs); absoluteIndex++ {
 		if compactIndexIsPrefilled(uint64(absoluteIndex), prefilled, &prefilledPos) {
 			continue
 		}
-		txs[absoluteIndex] = append([]byte(nil), index[shortIDs[shortPos]]...)
+		tx := index[shortIDs[shortPos]]
+		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(tx)), totalTxBytes)
+		if err != nil {
+			return err
+		}
+		txs[absoluteIndex] = append([]byte(nil), tx...)
+		totalTxBytes = nextTotal
 		shortPos++
 	}
+	return nil
 }
 
 func compactMissingShortIDIndexes(totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, blocked map[compactShortID]bool) []uint64 {

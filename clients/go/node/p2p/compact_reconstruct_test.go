@@ -200,6 +200,26 @@ func TestReconstructCompactBlockReportsBoundedMissingForLargeCodecValidPayload(t
 	}
 }
 
+func TestCompactFillShortIDTransactionsRejectsCumulativeOversize(t *testing.T) {
+	tx := minimalBlockTxnTestTxBytes(51)
+	shortID := compactShortID{0x51}
+	txs := make([][]byte, 1)
+	err := compactFillShortIDTransactions(
+		txs,
+		1,
+		nil,
+		[]compactShortID{shortID},
+		map[compactShortID][]byte{shortID: tx},
+		uint64(consensus.MAX_BLOCK_BYTES-len(tx)+1),
+	)
+	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
+		t.Fatalf("compactFillShortIDTransactions err=%v, want cumulative size failure", err)
+	}
+	if txs[0] != nil {
+		t.Fatalf("compactFillShortIDTransactions mutated txs before validation: %x", txs[0])
+	}
+}
+
 func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	nonce1, nonce2 := uint64(51), uint64(52)
 	validTx := minimalBlockTxnTestTxBytes(53)
