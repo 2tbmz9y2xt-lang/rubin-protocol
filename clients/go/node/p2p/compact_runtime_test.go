@@ -3,7 +3,6 @@ package p2p
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -47,25 +46,18 @@ func TestPostHandshakeSendCmpctPhaseGate(t *testing.T) {
 		name     string
 		blocks   int
 		mode     uint8
-		ready    bool
 		peerOK   bool
-		missRate float64
 		want     string
 		wantMode uint8
 	}{
-		{"ready eligible mode1 advertises", 2, 1, true, true, 0.2, messageSendCmpct, 1},
-		{"unknown capability keeps full block", 2, 1, true, false, 0.2, messageGetAddr, 0},
-		{"warmup keeps full block", 2, 2, false, true, 0.0, messageGetAddr, 0},
-		{"ibd keeps full block", 0, 2, true, true, 0.2, messageGetBlk, 0},
-		{"high miss rate keeps full block", 2, 2, true, true, 12.0, messageGetAddr, 0},
+		{"eligible peer advertises full-block mode", 2, 1, true, messageSendCmpct, 0},
+		{"unknown capability keeps full block", 2, 1, false, messageGetAddr, 0},
+		{"ibd keeps full block", 0, 2, true, messageGetBlk, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHarness(t, tc.blocks, "127.0.0.1:0", nil)
 			h.service.ctx = context.Background()
 			h.service.cfg.CompactRelayMode = tc.mode
-			h.service.cfg.CompactRelayReady = tc.ready
-			h.service.cfg.CompactMissRatePct = tc.missRate
-			h.service.cfg.CompactMissBlocks = 5
 			if tc.peerOK {
 				h.service.cfg.CompactRelayPeerOK = func(node.PeerState) bool { return true }
 			}
@@ -99,92 +91,6 @@ func TestPostHandshakeSendCmpctPhaseGate(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCompactModeHighBandwidthCap(t *testing.T) {
-	h := newTestHarness(t, 2, "127.0.0.1:0", nil)
-	h.service.cfg.CompactRelayMode = 2
-	h.service.cfg.CompactRelayReady = true
-	h.service.cfg.CompactMissRatePct = 0.2
-	h.service.cfg.CompactRelayPeerOK = func(node.PeerState) bool { return true }
-	h.service.cfg.CompactPeerScore = func(node.PeerState) int { return 90 }
-	markCompactRelayReadyNow(t, h)
-
-	sinks := make([]compactFrameSink, 0, 4)
-	for i := 0; i < 4; i++ {
-		sink := registerCompactFrameSink(t, h.service, fmt.Sprintf("compact-peer-%d", i))
-		sinks = append(sinks, sink)
-		if err := h.service.advertiseCompactRelayMode(sink.peer); err != nil {
-			t.Fatalf("advertiseCompactRelayMode: %v", err)
-		}
-	}
-	modeTwo := 0
-	for _, sink := range sinks {
-		frame := sink.read(t)
-		if frame.Mode == 2 {
-			modeTwo++
-		}
-		if frame.Mode != sink.peer.localCompactMode().Mode {
-			t.Fatalf("%s wire mode=%d local mode=%d", sink.peer.addr(), frame.Mode, sink.peer.localCompactMode().Mode)
-		}
-	}
-	if modeTwo != maxHighBandwidthCompactPeers {
-		t.Fatalf("mode=2 peers=%d, want %d", modeTwo, maxHighBandwidthCompactPeers)
-	}
-}
-
-type compactFrameSink struct {
-	peer   *peer
-	frames chan sendCmpctPayload
-	errs   chan error
-}
-
-func registerCompactFrameSink(t *testing.T, svc *Service, addr string) compactFrameSink {
-	t.Helper()
-	local, remote := net.Pipe()
-	p := testPeerForService(svc, addr, 0)
-	p.state.Addr = addr
-	p.conn = local
-	t.Cleanup(func() {
-		_ = local.Close()
-		_ = remote.Close()
-	})
-	svc.peersMu.Lock()
-	svc.peers[p.addr()] = p
-	svc.peersMu.Unlock()
-
-	sink := compactFrameSink{peer: p, frames: make(chan sendCmpctPayload, 1), errs: make(chan error, 1)}
-	go func() {
-		frame, err := readFrame(remote, networkMagic(svc.cfg.PeerRuntimeConfig.Network), svc.cfg.PeerRuntimeConfig.MaxMessageSize)
-		if err != nil {
-			sink.errs <- err
-			return
-		}
-		if frame.Command != messageSendCmpct {
-			sink.errs <- fmt.Errorf("command=%q, want %q", frame.Command, messageSendCmpct)
-			return
-		}
-		payload, err := decodeSendCmpctPayload(frame.Payload)
-		if err != nil {
-			sink.errs <- err
-			return
-		}
-		sink.frames <- payload
-	}()
-	return sink
-}
-
-func (s compactFrameSink) read(t *testing.T) sendCmpctPayload {
-	t.Helper()
-	select {
-	case frame := <-s.frames:
-		return frame
-	case err := <-s.errs:
-		t.Fatalf("read compact frame: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out reading compact frame")
-	}
-	return sendCmpctPayload{}
 }
 
 func assertSendCmpctPayload(t *testing.T, payload []byte, wantMode uint8) {

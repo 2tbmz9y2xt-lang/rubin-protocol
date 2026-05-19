@@ -5,8 +5,6 @@ import (
 	"errors"
 )
 
-const maxHighBandwidthCompactPeers = 3
-
 type compactModeSnapshot struct {
 	Mode    uint8
 	Version uint64
@@ -45,14 +43,7 @@ func (s *Service) advertiseCompactRelayMode(p *peer) error {
 	if p == nil || !s.compactRelayReady() || !s.canAdvertiseCompactRelay(p) {
 		return nil
 	}
-	s.compactMu.Lock()
-	defer s.compactMu.Unlock()
-
-	mode := s.desiredCompactMode(p)
-	if mode == 2 && p.localCompactMode().Mode != 2 && s.localCompactModeCount(2) >= maxHighBandwidthCompactPeers {
-		mode = 1
-	}
-	return p.sendLocalCompactMode(mode)
+	return p.sendLocalCompactMode(0)
 }
 
 func (s *Service) compactRelayReady() bool {
@@ -70,45 +61,9 @@ func (s *Service) canAdvertiseCompactRelay(p *peer) bool {
 	return s.cfg.CompactRelayPeerOK != nil && s.cfg.CompactRelayPeerOK(p.snapshotState())
 }
 
-func (s *Service) desiredCompactMode(p *peer) uint8 {
-	if s.cfg.CompactRelayMode == 0 || !s.cfg.CompactRelayReady {
-		return 0
-	}
-	if s.cfg.CompactMissRatePct > 10.0 && s.cfg.CompactMissBlocks >= 5 {
-		return 0
-	}
-	if s.cfg.CompactMissRatePct > 0.5 {
-		return 1
-	}
-	score := s.cfg.CompactPeerScore(p.snapshotState())
-	if s.cfg.CompactRelayMode >= 2 && score >= 75 {
-		return 2
-	}
-	if score >= 40 {
-		return 1
-	}
-	return 0
-}
-
-func (s *Service) localCompactModeCount(mode uint8) int {
-	s.peersMu.RLock()
-	defer s.peersMu.RUnlock()
-	seen := make(map[*peer]struct{}, len(s.peers))
-	count := 0
-	for _, p := range s.peers {
-		if _, ok := seen[p]; ok {
-			continue
-		}
-		seen[p] = struct{}{}
-		if p.localCompactMode().Mode == mode {
-			count++
-		}
-	}
-	return count
-}
-
 func (p *peer) sendLocalCompactMode(mode uint8) error {
-	if p.localCompactMode().Mode == mode {
+	current := p.localCompactMode()
+	if current.Mode == mode && current.Version == compactRelayVersion {
 		return nil
 	}
 	payload, err := encodeSendCmpctPayload(sendCmpctPayload{Mode: mode, Version: compactRelayVersion})
