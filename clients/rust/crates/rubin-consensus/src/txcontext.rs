@@ -210,6 +210,54 @@ pub(crate) fn collect_txcontext_ext_ids(
     Ok(ext_ids.into_iter().collect())
 }
 
+fn build_tx_context_base(
+    tx: &Tx,
+    resolved_inputs: &[UtxoEntry],
+    height: u64,
+) -> Result<Arc<TxContextBase>, TxError> {
+    Ok(Arc::new(TxContextBase {
+        total_in: Uint128::from_native(sum_input_values(resolved_inputs)?),
+        total_out: Uint128::from_native(sum_output_values(&tx.outputs)?),
+        height,
+    }))
+}
+
+fn build_tx_context_continuing_for_ext_id(
+    entries: Option<&[ExtIdCacheEntry]>,
+) -> Result<TxContextContinuing, TxError> {
+    let mut bundle = TxContextContinuing::default();
+    if let Some(entries) = entries {
+        for entry in entries {
+            if bundle.continuing_output_count as usize >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
+                return Err(TxError::new(
+                    ErrorCode::TxErrCovenantTypeInvalid,
+                    TXCONTEXT_TOO_MANY_CONTINUING_OUTPUTS,
+                ));
+            }
+            let index = bundle.continuing_output_count as usize;
+            bundle.continuing_outputs[index] = Some(TxOutputView {
+                value: entry.value,
+                ext_payload: Arc::clone(&entry.ext_payload),
+            });
+            bundle.continuing_output_count += 1;
+        }
+    }
+    Ok(bundle)
+}
+
+fn build_tx_context_continuing(
+    ext_ids: Vec<u16>,
+    output_ext_id_cache: &BTreeMap<u16, Vec<ExtIdCacheEntry>>,
+) -> Result<HashMap<u16, Arc<TxContextContinuing>>, TxError> {
+    let mut continuing = HashMap::with_capacity(ext_ids.len());
+    for ext_id in ext_ids {
+        let entries = output_ext_id_cache.get(&ext_id).map(Vec::as_slice);
+        let bundle = build_tx_context_continuing_for_ext_id(entries)?;
+        continuing.insert(ext_id, Arc::new(bundle));
+    }
+    Ok(continuing)
+}
+
 pub fn build_tx_context(
     tx: &Tx,
     resolved_inputs: &[UtxoEntry],
@@ -236,33 +284,8 @@ pub fn build_tx_context(
         )
     })?;
 
-    let base = Arc::new(TxContextBase {
-        total_in: Uint128::from_native(sum_input_values(resolved_inputs)?),
-        total_out: Uint128::from_native(sum_output_values(&tx.outputs)?),
-        height,
-    });
-
-    let mut continuing = HashMap::with_capacity(ext_ids.len());
-    for ext_id in ext_ids {
-        let mut bundle = TxContextContinuing::default();
-        if let Some(entries) = output_ext_id_cache.get(&ext_id) {
-            for entry in entries {
-                if bundle.continuing_output_count as usize >= TXCONTEXT_MAX_CONTINUING_OUTPUTS {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        TXCONTEXT_TOO_MANY_CONTINUING_OUTPUTS,
-                    ));
-                }
-                let index = bundle.continuing_output_count as usize;
-                bundle.continuing_outputs[index] = Some(TxOutputView {
-                    value: entry.value,
-                    ext_payload: Arc::clone(&entry.ext_payload),
-                });
-                bundle.continuing_output_count += 1;
-            }
-        }
-        continuing.insert(ext_id, Arc::new(bundle));
-    }
+    let base = build_tx_context_base(tx, resolved_inputs, height)?;
+    let continuing = build_tx_context_continuing(ext_ids, output_ext_id_cache)?;
 
     Ok(Some(TxContextBundle { base, continuing }))
 }
