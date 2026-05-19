@@ -97,6 +97,7 @@ engines:
       - "clients/go/node/mempool_policy.go"
       - "clients/go/node/miner.go"
       - "clients/go/node/p2p/addr_manager.go"
+      - "clients/go/node/p2p/compact_reconstruct.go"
       - "clients/go/node/p2p/compact_wire.go"
       - "clients/go/node/p2p/handlers_block.go"
       - "clients/go/node/p2p/handshake.go"
