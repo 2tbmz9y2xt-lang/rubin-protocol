@@ -177,12 +177,6 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 			local:   [][]byte{append(validTx, 0x00)},
 			wantErr: "compact local transaction is non-canonical",
 		},
-		{
-			name:    "too_many_reconstruction_entries",
-			payload: cmpctBlockPayload{ShortIDs: make([]compactShortID, maxCompactReconstructionEntries+1)},
-			local:   [][]byte{{0xff}},
-			wantErr: "too many compact reconstruction entries",
-		},
 	} {
 		_, err := reconstructCompactBlock(tc.payload, tc.local)
 		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -191,10 +185,25 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 	}
 }
 
+func TestReconstructCompactBlockReportsBoundedMissingForLargeCodecValidPayload(t *testing.T) {
+	result, err := reconstructCompactBlock(cmpctBlockPayload{
+		ShortIDs: make([]compactShortID, maxCompactRelayEntries+1),
+	}, nil)
+	if err != nil {
+		t.Fatalf("reconstructCompactBlock: %v", err)
+	}
+	if result.Transactions != nil || len(result.MissingIndexes) != maxCompactRelayEntries {
+		t.Fatalf("result=%+v, want bounded missing indexes", result)
+	}
+	if result.MissingIndexes[0] != 0 || result.MissingIndexes[len(result.MissingIndexes)-1] != maxCompactRelayEntries-1 {
+		t.Fatalf("missing bounds got first=%d last=%d", result.MissingIndexes[0], result.MissingIndexes[len(result.MissingIndexes)-1])
+	}
+}
+
 func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	nonce1, nonce2 := uint64(51), uint64(52)
 	validTx := minimalBlockTxnTestTxBytes(53)
-	localIndex, err := compactLocalTxIndex([][]byte{validTx}, nonce1, nonce2, nil)
+	localIndex, err := compactLocalTxIndex([][]byte{validTx}, nonce1, nonce2)
 	if err != nil {
 		t.Fatalf("compactLocalTxIndex: %v", err)
 	}
@@ -207,7 +216,7 @@ func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 		t.Fatal("local index aliases candidate transaction bytes")
 	}
 
-	_, err = compactLocalTxIndex([][]byte{append(minimalBlockTxnTestTxBytes(54), 0x00)}, nonce1, nonce2, nil)
+	_, err = compactLocalTxIndex([][]byte{append(minimalBlockTxnTestTxBytes(54), 0x00)}, nonce1, nonce2)
 	if err == nil || !strings.Contains(err.Error(), "compact local transaction is non-canonical") {
 		t.Fatalf("compactLocalTxIndex noncanonical err=%v", err)
 	}
