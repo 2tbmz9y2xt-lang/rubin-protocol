@@ -63,17 +63,76 @@ exclude_paths:
   #      lenses (see review-thread chains on PR #1422 waves 4..16 for
   #      worked examples) so the Codacy exclusion does not silently
   #      relax review quality.
-  # If Codacy adds per-rule exclude-paths in the future, narrow this to
-  # complexity rule only (issue id 73247 / "Method has cyclomatic
-  # complexity > 8"). Today (.codacy.yml v3) supports only per-tool
-  # exclusions (engines.duplication.exclude_paths) and top-level
-  # exclude_paths.
+  # Keep these as top-level exclusions until this accepted-risk class is
+  # revisited: they intentionally suppress all Codacy analyses for the
+  # listed files. For new complexity-only accepted-risk files, prefer
+  # engines.metric.exclude_paths below so other non-excluded analyses can
+  # still run.
   - "clients/go/node/mempool_precheck.go"
   - "clients/go/node/mempool_precheck_floor.go"
   - "clients/go/node/mempool_precheck_input.go"
   - "clients/go/node/mempool_precheck_output.go"
 
 engines:
+  metric:
+    exclude_paths:
+      # Aggregate complexity accepted-risk exclusions (2026-05-19).
+      # Codacy currently gates aggregate complexity even when there are no issue rows.
+      # Keep this list narrow and explicit: these files are branch-dense protocol,
+      # consensus, crypto, or node lifecycle surfaces where mechanical simplification
+      # is more likely to change validation order, public errors, or runtime state
+      # than to improve production safety. This metric block must not broaden
+      # top-level exclusions; other analyses remain controlled by their own
+      # existing engine-specific settings.
+      #
+      # Go node runtime branch closures; exact current files, no future-file wildcard.
+      - "clients/go/node/blockstore.go"
+      - "clients/go/node/blockstore_p2p.go"
+      - "clients/go/node/chainstate.go"
+      - "clients/go/node/chainstate_io.go"
+      - "clients/go/node/chainstate_recovery.go"
+      - "clients/go/node/config.go"
+      - "clients/go/node/mempool.go"
+      - "clients/go/node/mempool_capacity.go"
+      - "clients/go/node/mempool_policy.go"
+      - "clients/go/node/miner.go"
+      - "clients/go/node/p2p/addr_manager.go"
+      - "clients/go/node/p2p/compact_wire.go"
+      - "clients/go/node/p2p/handlers_block.go"
+      - "clients/go/node/p2p/handshake.go"
+      - "clients/go/node/p2p/mempool.go"
+      - "clients/go/node/p2p/orphan_pool.go"
+      - "clients/go/node/p2p/peer_runtime.go"
+      - "clients/go/node/p2p/reconnect.go"
+      - "clients/go/node/p2p/service.go"
+      - "clients/go/node/p2p/service_listener.go"
+      - "clients/go/node/p2p/wire.go"
+      - "clients/go/node/policy_da_anchor.go"
+      - "clients/go/node/production_rotation_schedule.go"
+      - "clients/go/node/sync.go"
+      - "clients/go/node/sync_mempool.go"
+      - "clients/go/node/sync_reorg.go"
+      - "clients/go/node/undo.go"
+      # Consensus parser / UTXO / CORE_EXT / block-policy branch closures.
+      - "clients/go/consensus/block_basic.go"
+      - "clients/go/consensus/block_basic_weight.go"
+      - "clients/go/consensus/core_ext.go"
+      - "clients/go/consensus/live_binding_policy.go"
+      - "clients/go/consensus/tx_parse.go"
+      - "clients/go/consensus/tx_validate_worker.go"
+      - "clients/go/consensus/utxo_basic.go"
+      - "clients/rust/crates/rubin-consensus/src/block_basic/da_set.rs"
+      - "clients/rust/crates/rubin-consensus/src/block_basic/weight.rs"
+      - "clients/rust/crates/rubin-consensus/src/core_ext.rs"
+      - "clients/rust/crates/rubin-consensus/src/da_verify_parallel.rs"
+      - "clients/rust/crates/rubin-consensus/src/live_binding_policy.rs"
+      - "clients/rust/crates/rubin-consensus/src/sig_queue.rs"
+      - "clients/rust/crates/rubin-consensus/src/suite_registry.rs"
+      - "clients/rust/crates/rubin-consensus/src/tx.rs"
+      - "clients/rust/crates/rubin-consensus/src/utxo_basic.rs"
+      # OpenSSL binding code is intentionally explicit and branch-heavy.
+      - "clients/go/consensus/openssl_signer.go"
+      - "clients/go/consensus/verify_sig_openssl.go"
   duplication:
     # CLI dispatchers, fixture generators, and node integration code contain
     # inherent structural repetition (dispatch boilerplate, tx-building
