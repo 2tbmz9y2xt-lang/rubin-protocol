@@ -14,7 +14,7 @@ func TestCompactWireCommandConstantsAndPayloadCaps(t *testing.T) {
 	caps := []uint32{
 		sendCmpctPayloadBytes,
 		uint32(32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes),
-		uint32(consensus.MAX_BLOCK_BYTES + consensus.BLOCK_HEADER_BYTES + 8 + 2*maxCompactSizeBytes + maxCompactRelayEntries*(compactShortIDBytes+maxCompactSizeBytes)),
+		uint32(consensus.MAX_RELAY_MSG_BYTES),
 		uint32(consensus.MAX_BLOCK_BYTES + 32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes),
 	}
 	for i, command := range commands {
@@ -30,6 +30,24 @@ func TestCompactWireCommandConstantsAndPayloadCaps(t *testing.T) {
 		if got := liveCaps(command); got != 0 {
 			t.Fatalf("%s live cap=%d, want 0 until runtime handler slice", command, got)
 		}
+	}
+}
+
+func TestCmpctBlockPayloadAllowsShortIDCountAboveInventoryVectorLimit(t *testing.T) {
+	shortIDs := make([]compactShortID, maxCompactRelayEntries+1)
+	for i := range shortIDs {
+		shortIDs[i] = compactShortID{byte(i), byte(i >> 8), byte(i >> 16), byte(i >> 24), 0xaa, 0xbb}
+	}
+	raw, err := encodeCmpctBlockPayload(cmpctBlockPayload{ShortIDs: shortIDs})
+	if err != nil {
+		t.Fatalf("encodeCmpctBlockPayload above inventory vector limit: %v", err)
+	}
+	got, err := decodeCmpctBlockPayload(raw)
+	if err != nil {
+		t.Fatalf("decodeCmpctBlockPayload above inventory vector limit: %v", err)
+	}
+	if !reflect.DeepEqual(got.ShortIDs, shortIDs) {
+		t.Fatalf("short IDs above inventory vector limit did not roundtrip")
 	}
 }
 
@@ -109,30 +127,18 @@ func TestCmpctBlockPayloadCodec(t *testing.T) {
 
 func TestCmpctBlockPayloadRejectsMalformed(t *testing.T) {
 	validTx := minimalBlockTxnTestTxBytes(12)
-	tooManyShortIDs := make([]compactShortID, maxCompactRelayEntries+1)
-	tooManyPrefilled := make([]prefilledTxn, maxCompactRelayEntries+1)
-	for i := range tooManyPrefilled {
-		tooManyPrefilled[i] = prefilledTxn{Index: uint64(i), Tx: validTx}
-	}
-	assertCmpctBlockEncodeFails(t, "too_many_short_ids", cmpctBlockPayload{ShortIDs: tooManyShortIDs}, "too many compact relay entries")
-	assertCmpctBlockEncodeFails(t, "too_many_prefilled", cmpctBlockPayload{Prefilled: tooManyPrefilled}, "too many compact relay")
 	assertCmpctBlockEncodeFails(t, "duplicate_prefilled", cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 1, Tx: validTx}, {Index: 1, Tx: validTx}}}, "compact relay index")
 	assertCmpctBlockEncodeFails(t, "prefilled_index_outside_vector", cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 1, Tx: validTx}}}, "compact relay index out of range")
 	assertCmpctBlockEncodeFails(t, "prefilled_index_range", cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: maxCompactRelayIndexValue + 1, Tx: validTx}}}, "compact relay index out of range")
 	assertCmpctBlockEncodeFails(t, "empty_prefilled_tx", cmpctBlockPayload{Prefilled: []prefilledTxn{{Tx: nil}}}, "blocktxn transaction is empty")
-	assertCmpctBlockEncodeFails(t, "trailing_prefilled_tx", cmpctBlockPayload{Prefilled: []prefilledTxn{{Tx: append(validTx, 0x00)}}}, "blocktxn transaction is non-canonical")
-	assertCmpctBlockEncodeFails(t, "trailing_prefilled_tx_before_next_delta", cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: append(validTx, 0x00)}, {Index: 1, Tx: validTx}}}, "blocktxn transaction is non-canonical")
+	assertCmpctBlockEncodeFails(t, "trailing_prefilled_tx", cmpctBlockPayload{Prefilled: []prefilledTxn{{Tx: append(validTx, 0x00)}}}, "cmpctblock prefilled transaction is non-canonical")
+	assertCmpctBlockEncodeFails(t, "trailing_prefilled_tx_before_next_delta", cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: append(validTx, 0x00)}, {Index: 1, Tx: validTx}}}, "cmpctblock prefilled transaction is non-canonical")
 
 	assertCmpctBlockDecodeFails(t, "short_header", make([]byte, consensus.BLOCK_HEADER_BYTES+7), "cmpctblock payload missing header or nonce")
 	assertCmpctBlockDecodeFails(t, "nonminimal_short_count", cmpctBlockTestPayload([]byte{0xfd, 0x00, 0x00}), "non-minimal")
-	tooManyShortIDPayload := consensus.AppendCompactSize(nil, maxCompactRelayEntries+1)
-	tooManyShortIDPayload = append(tooManyShortIDPayload, make([]byte, (maxCompactRelayEntries+1)*compactShortIDBytes)...)
-	tooManyShortIDPayload = consensus.AppendCompactSize(tooManyShortIDPayload, 0)
-	assertCmpctBlockDecodeFails(t, "too_many_short_ids", cmpctBlockTestPayload(tooManyShortIDPayload), "too many compact relay entries")
 	assertCmpctBlockDecodeFails(t, "truncated_short_ids", cmpctBlockTestPayload([]byte{1, 0x01, 0x02}), "cmpctblock payload truncated short IDs")
 	assertCmpctBlockDecodeFails(t, "nonminimal_prefilled_count", cmpctBlockTestPayload([]byte{0, 0xfd, 0x00, 0x00}), "non-minimal")
-	aggregate := consensus.AppendCompactSize(append(consensus.AppendCompactSize(nil, maxCompactRelayEntries), make([]byte, maxCompactRelayEntries*compactShortIDBytes)...), 1)
-	assertCmpctBlockDecodeFails(t, "aggregate_count", cmpctBlockTestPayload(aggregate), "too many compact relay entries")
+	assertCmpctBlockDecodeFails(t, "huge_prefilled_count_without_entries", cmpctBlockTestPayload(consensus.AppendCompactSize([]byte{0}, maxCompactBlockTransactions)), "EOF")
 
 	rangeBeforeTx := consensus.AppendCompactSize(consensus.AppendCompactSize(consensus.AppendCompactSize(nil, 0), 1), 1)
 	rangeBeforeTx = append(rangeBeforeTx, make([]byte, consensus.MAX_BLOCK_BYTES)...)
