@@ -6,6 +6,7 @@
     "node": "24.14.0"
   },
   "scripts": {
+    "duplication:check": "python3 tools/check_duplication.py",
     "spec:location": "echo 'Spec moved to private repo: https://github.com/2tbmz9y2xt-lang/rubin-spec'",
     "formal:coverage": "python3 tools/check_formal_coverage.py",
     "formal:bridge": "python3 tools/check_formal_refinement_bridge.py",

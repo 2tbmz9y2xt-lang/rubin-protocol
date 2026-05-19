@@ -1,12 +1,20 @@
 {
-  "threshold": 5,
-  "minLines": 25,
-  "minTokens": 100,
+  "threshold": 2,
+  "minLines": 20,
+  "minTokens": 80,
+  "maxLines": 5000,
+  "maxSize": "1mb",
+  "format": ["go", "rust"],
   "reporters": ["console"],
   "ignore": [
     "spec/**", "conformance/**", "rubin-formal/**",
     "tools/**", "scripts/**", ".github/**", "analysis/**",
     "**/*_test.go", "**/tests/**", "**/benches/**",
-    "**/*.gen.go", "**/*_generated.rs", "package-lock.json"
+    "**/*_tests.rs", "**/*_tests/**", "**/*_test_support.rs",
+    "clients/rust/fuzz/**",
+    "**/*.gen.go", "**/*_generated.rs", "package-lock.json",
+    "clients/go/cmd/**",
+    "clients/rust/crates/rubin-consensus-cli/**",
+    "clients/go/node/**"
   ]
 }
