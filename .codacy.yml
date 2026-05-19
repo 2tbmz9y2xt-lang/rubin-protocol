@@ -136,15 +136,15 @@ engines:
   duplication:
     # CLI dispatchers, fixture generators, and node integration code contain
     # inherent structural repetition (dispatch boilerplate, tx-building
-    # templates, IBD vs sequential paths) that cannot be eliminated without
-    # sacrificing readability.  Raise the minimum clone threshold so only
-    # substantive duplications (>35 lines) are reported.
+    # templates, IBD vs sequential paths) that cannot be eliminated safely.
+    # Codacy's documented duplication knob is token-based (`minTokenMatch`),
+    # not line-based; keep the threshold aligned with the local `.jscpd.json`
+    # informational PR check (`minTokens: 100`).
     exclude_paths:
       - "clients/go/cmd/**"
       - "clients/rust/crates/rubin-consensus-cli/**"
       - "clients/go/node/**"
-    config:
-      minLines: 35
+    minTokenMatch: 100
 
 languages:
   # Product code lives in Go/Rust. Everything below is docs/tooling/fixtures or
