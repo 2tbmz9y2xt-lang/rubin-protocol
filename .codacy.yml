@@ -84,8 +84,34 @@ engines:
       # than to improve production safety. Other Codacy analyses should continue
       # to run on these files.
       #
-      # Go node runtime mirrors the already-excluded Rust node runtime surface above.
-      - "clients/go/node/**"
+      # Go node runtime branch closures; exact current files, no future-file wildcard.
+      - "clients/go/node/blockstore.go"
+      - "clients/go/node/blockstore_p2p.go"
+      - "clients/go/node/chainstate.go"
+      - "clients/go/node/chainstate_io.go"
+      - "clients/go/node/chainstate_recovery.go"
+      - "clients/go/node/config.go"
+      - "clients/go/node/mempool.go"
+      - "clients/go/node/mempool_capacity.go"
+      - "clients/go/node/mempool_policy.go"
+      - "clients/go/node/miner.go"
+      - "clients/go/node/p2p/addr_manager.go"
+      - "clients/go/node/p2p/compact_wire.go"
+      - "clients/go/node/p2p/handlers_block.go"
+      - "clients/go/node/p2p/handshake.go"
+      - "clients/go/node/p2p/mempool.go"
+      - "clients/go/node/p2p/orphan_pool.go"
+      - "clients/go/node/p2p/peer_runtime.go"
+      - "clients/go/node/p2p/reconnect.go"
+      - "clients/go/node/p2p/service.go"
+      - "clients/go/node/p2p/service_listener.go"
+      - "clients/go/node/p2p/wire.go"
+      - "clients/go/node/policy_da_anchor.go"
+      - "clients/go/node/production_rotation_schedule.go"
+      - "clients/go/node/sync.go"
+      - "clients/go/node/sync_mempool.go"
+      - "clients/go/node/sync_reorg.go"
+      - "clients/go/node/undo.go"
       # Consensus parser / UTXO / CORE_EXT / block-policy branch closures.
       - "clients/go/consensus/block_basic.go"
       - "clients/go/consensus/block_basic_weight.go"
