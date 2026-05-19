@@ -8,16 +8,16 @@ import (
 )
 
 const (
-	messageSendCmpct                   = "sendcmpct"
-	messageCmpctBlock                  = "cmpctblock"
-	messageGetBlockTxn                 = "getblocktxn"
-	messageBlockTxn                    = "blocktxn"
-	compactRelayVersion         uint64 = 1
-	sendCmpctPayloadBytes              = 9
-	compactShortIDBytes                = 6
-	maxCompactRelayEntries             = maxInventoryVectors
-	maxCompactBlockTransactions        = consensus.MAX_BLOCK_BYTES
-	maxCompactRelayIndexValue          = consensus.MAX_BLOCK_BYTES - 1
+	messageSendCmpct                 = "sendcmpct"
+	messageCmpctBlock                = "cmpctblock"
+	messageGetBlockTxn               = "getblocktxn"
+	messageBlockTxn                  = "blocktxn"
+	compactRelayVersion       uint64 = 1
+	sendCmpctPayloadBytes            = 9
+	compactShortIDBytes              = 6
+	maxCompactRelayEntries           = maxInventoryVectors
+	maxCmpctBlockEntries             = consensus.MAX_BLOCK_BYTES
+	maxCompactRelayIndexValue        = consensus.MAX_BLOCK_BYTES - 1
 )
 
 type sendCmpctPayload struct {
@@ -183,8 +183,12 @@ func decodeBlockTxnPayload(payload []byte) (blockTxnPayload, error) {
 }
 
 func encodeCmpctBlockPayload(p cmpctBlockPayload) ([]byte, error) {
-	if len(p.ShortIDs) > maxCompactBlockTransactions-len(p.Prefilled) {
+	if len(p.ShortIDs) > maxCmpctBlockEntries-len(p.Prefilled) {
 		return nil, errors.New("too many compact block transactions")
+	}
+	capHint, err := cmpctBlockPayloadByteLen(uint64(len(p.ShortIDs)), p.Prefilled)
+	if err != nil {
+		return nil, err
 	}
 	prefilledTxs := make([][]byte, 0, len(p.Prefilled))
 	for _, tx := range p.Prefilled {
@@ -193,7 +197,7 @@ func encodeCmpctBlockPayload(p cmpctBlockPayload) ([]byte, error) {
 	if err := validateCompactRelayTransactions(prefilledTxs, "cmpctblock prefilled transaction is non-canonical"); err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0)
+	out := make([]byte, 0, int(capHint)) // #nosec G115 -- cmpctBlockPayloadByteLen caps capHint at MAX_RELAY_MSG_BYTES.
 	out = append(out, p.Header[:]...)
 	out = consensus.AppendU64le(out, p.Nonce)
 	out = consensus.AppendCompactSize(out, uint64(len(p.ShortIDs)))
@@ -208,11 +212,14 @@ func encodeCmpctBlockPayload(p cmpctBlockPayload) ([]byte, error) {
 		out = append(out, tx.Tx...)
 		prevPlusOne = tx.Index + 1
 	}
-	_, err := decodeCmpctBlockPayload(out)
+	_, err = decodeCmpctBlockPayload(out)
 	return out, err
 }
 
 func decodeCmpctBlockPayload(payload []byte) (cmpctBlockPayload, error) {
+	if len(payload) > consensus.MAX_RELAY_MSG_BYTES {
+		return cmpctBlockPayload{}, errors.New("cmpctblock payload too large")
+	}
 	out, prefilledCount, totalEntries, offset, err := decodeCmpctBlockPrefix(payload)
 	if err != nil {
 		return cmpctBlockPayload{}, err
@@ -240,10 +247,7 @@ func decodeCmpctBlockPayload(payload []byte) (cmpctBlockPayload, error) {
 		prev = idx
 		totalTxBytes = nextTotal
 	}
-	if offset != len(payload) {
-		return cmpctBlockPayload{}, errors.New("cmpctblock payload has trailing bytes")
-	}
-	return out, nil
+	return finishCmpctBlockPayload(out, offset, len(payload))
 }
 
 func decodeCmpctBlockPrefix(payload []byte) (cmpctBlockPayload, uint64, uint64, int, error) {
@@ -268,8 +272,8 @@ func decodeCmpctBlockPrefix(payload []byte) (cmpctBlockPayload, uint64, uint64, 
 		return cmpctBlockPayload{}, 0, 0, 0, err
 	}
 	totalEntries := shortCount + prefilledCount
-	if totalEntries > maxCompactBlockTransactions || totalEntries < shortCount {
-		return cmpctBlockPayload{}, 0, 0, 0, errors.New("too many compact relay entries")
+	if totalEntries-1 >= maxCmpctBlockEntries || totalEntries < shortCount {
+		return cmpctBlockPayload{}, 0, 0, 0, errors.New("invalid compact relay entry count")
 	}
 	out.ShortIDs = make([]compactShortID, 0, int(shortCount)) // #nosec G115 -- totalEntries is capped above.
 	for ; offset < shortIDEnd; offset += compactShortIDBytes {
@@ -317,6 +321,37 @@ func validateCompactRelayTransactions(transactions [][]byte, nonCanonicalErr str
 		totalTxBytes = nextTotal
 	}
 	return nil
+}
+
+func finishCmpctBlockPayload(out cmpctBlockPayload, offset, payloadLen int) (cmpctBlockPayload, error) {
+	if offset != payloadLen {
+		return cmpctBlockPayload{}, errors.New("cmpctblock payload has trailing bytes")
+	}
+	return out, nil
+}
+
+func cmpctBlockPayloadByteLen(shortCount uint64, prefilled []prefilledTxn) (uint64, error) {
+	limit := uint64(consensus.MAX_RELAY_MSG_BYTES)
+	total := uint64(consensus.BLOCK_HEADER_BYTES + 8 + len(consensus.EncodeCompactSize(shortCount)) + len(consensus.EncodeCompactSize(uint64(len(prefilled)))))
+	if shortCount > (limit-total)/compactShortIDBytes {
+		return 0, errors.New("cmpctblock payload too large")
+	}
+	total += shortCount * compactShortIDBytes
+	totalEntries := shortCount + uint64(len(prefilled))
+	var prevPlusOne uint64
+	for _, tx := range prefilled {
+		if tx.Index < prevPlusOne || tx.Index >= totalEntries {
+			return 0, errors.New("compact relay index out of range")
+		}
+		delta := tx.Index - prevPlusOne
+		add := uint64(len(consensus.EncodeCompactSize(delta)) + len(tx.Tx))
+		if add > limit-total {
+			return 0, errors.New("cmpctblock payload too large")
+		}
+		total += add
+		prevPlusOne = tx.Index + 1
+	}
+	return total, nil
 }
 
 func getBlockTxnAbsoluteIndex(prev, delta uint64, first bool) (uint64, error) {
