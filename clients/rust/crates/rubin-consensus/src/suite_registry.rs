@@ -411,9 +411,8 @@ pub fn validate_v1_production_rotation_set(
 }
 
 #[cfg(test)]
-mod tests {
-    include!("tests/suite_registry.rs");
-}
+#[path = "tests/suite_registry.rs"]
+mod tests;
 
 // NOTE: Kani proofs removed — all three (default_registry_contains_only_ml_dsa_87,
 // native_suite_set_contains_len_consistency, default_rotation_provider_always_ml_dsa_87)
