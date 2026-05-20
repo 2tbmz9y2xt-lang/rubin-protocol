@@ -44,7 +44,7 @@ Severity policy:
 - P0: concrete path to invalid block/transaction acceptance, valid block/transaction rejection that can split clients, fund loss, private key exposure, or bypass of required signature/authorization checks.
 - P1: concrete path to merge-unsafe behavior in consensus, crypto, P2P relay, storage, runtime lifecycle, policy guardrails, governance gates, or test/fixture coverage. Missing required evidence in safety-sensitive code is P1.
 - P2: non-blocking but safety-adjacent risk, including lock contention on large data, avoidable large allocation/copy on error paths, unclear ownership contracts, missing negative tests for non-consensus behavior, or maintainability that can reasonably hide a future P0/P1. Report these in a separate "Non-blocking observations" section, not as merge blockers.
-- Do not raise P3/style findings as Codex review findings.
+- Do not raise style-only findings as Codex review findings.
 
 Every finding must include:
 
