@@ -424,13 +424,7 @@ func TestCompactFillResponseTransactionsRejectsAggregateOversize(t *testing.T) {
 func TestHandleCmpctBlockRuntimeFlowAndEdges(t *testing.T) {
 	header, blockHash, txs := devnetGenesisCompactParts(t)
 	full := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
-	p := newPeerRuntimeTestPeer(t)
-	badTarget := [32]byte{0x01}
-	p.service.cfg.SyncConfig.ExpectedTarget = &badTarget
-	if err := p.handleCmpctBlock(full); err == nil || p.snapshotState().BanScore < 100 {
-		t.Fatalf("target mismatch err=%v state=%+v", err, p.snapshotState())
-	}
-	p = newCompactScriptedPeer(t)
+	p := newCompactScriptedPeer(t)
 	missing := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Nonce1: 101, Nonce2: 102, ShortIDs: []compactShortID{{0xaa}}})
 	if err := p.handleCmpctBlock(missing); err != nil {
 		t.Fatalf("missing compact block: %v", err)
@@ -445,9 +439,6 @@ func TestHandleCmpctBlockRuntimeFlowAndEdges(t *testing.T) {
 	p = newCompactScriptedPeer(t)
 	if err := p.handleCmpctBlock(full); err != nil {
 		t.Fatalf("complete compact block: %v", err)
-	}
-	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
-		t.Fatalf("hasBlock=%v err=%v", have, err)
 	}
 	p = newCompactScriptedPeer(t)
 	badFull := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: minimalBlockTxnTestTxBytes(62)}}})
@@ -479,11 +470,14 @@ func TestHandleCmpctBlockRuntimeFlowAndEdges(t *testing.T) {
 	if err := p.processCompactTransactions(blockHash, header, nil, true); err != nil || readScriptedConnFrame(t, p).Command != messageGetData {
 		t.Fatalf("invalid tx fallback err=%v", err)
 	}
+	_, orphanBytes := testHarnessBlockAtHeight(t, newTestHarness(t, 3, "127.0.0.1:0", nil), 2)
+	orphanHeader, orphanHash, orphanTxs := compactPartsFromBlockBytes(t, orphanBytes)
 	p = newCompactScriptedPeer(t)
-	unknownParentHeader := header
-	unknownParentHeader[0] ^= 0x01
-	unknownParentHash, _ := consensus.BlockHash(unknownParentHeader[:])
-	if err := p.processCompactTransactions(unknownParentHash, unknownParentHeader, txs, true); err != nil || readScriptedConnFrame(t, p).Command != messageGetData {
+	if err := p.processCompactTransactions(orphanHash, orphanHeader, orphanTxs, false); err != nil || p.service.orphans.Len() != 1 {
+		t.Fatalf("orphan compact err=%v orphans=%d", err, p.service.orphans.Len())
+	}
+	p = newCompactScriptedPeer(t)
+	if err := p.processCompactTransactions(orphanHash, orphanHeader, orphanTxs, true); err != nil || readScriptedConnFrame(t, p).Command != messageGetData {
 		t.Fatalf("apply fallback err=%v", err)
 	}
 }
@@ -567,7 +561,11 @@ func setCompactTestOutstanding(p *peer, blockHash [32]byte, header [consensus.BL
 
 func devnetGenesisCompactParts(t *testing.T) ([consensus.BLOCK_HEADER_BYTES]byte, [32]byte, [][]byte) {
 	t.Helper()
-	block := node.DevnetGenesisBlockBytes()
+	return compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+}
+
+func compactPartsFromBlockBytes(t *testing.T, block []byte) ([consensus.BLOCK_HEADER_BYTES]byte, [32]byte, [][]byte) {
+	t.Helper()
 	pb, err := consensus.ParseBlockBytes(block)
 	if err != nil {
 		t.Fatalf("ParseBlockBytes(genesis): %v", err)

@@ -368,6 +368,10 @@ func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []by
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
+		if errors.Is(err, node.ErrParentNotFound) && !fallbackOnApply {
+			_, err := p.retainRelayedOrphanIfValid(pb, blockHash, blockBytes)
+			return false, false, err
+		}
 		if fallbackOnApply && (errors.Is(err, node.ErrParentNotFound) || isConsensusApplyBlockError(err)) {
 			return false, true, err
 		}
