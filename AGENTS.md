@@ -1,10 +1,22 @@
 # AGENTS.md
 
-This repository contains the RUBIN protocol implementation and related verification tooling. Treat reviews as merge-safety reviews, not summaries.
+This repository contains the RUBIN protocol implementation and related verification tooling.
+
+Scope: this `AGENTS.md` is repository-visible guidance for the Codex GitHub/cloud PR review bot and Codex review tasks. It is not a general implementation runbook. Non-review implementation agents must not treat the review-only rules, four-pass review protocol, or clean-review output format as instructions to refuse edits, spawn reviewers, or change their implementation workflow. For explicit implementation, fix, CI, merge, release, or documentation-authoring tasks, follow the direct user request, issue/PR contract, repository scripts, and applicable implementation profiles.
+
+Treat review requests as merge-safety reviews, not summaries.
 
 ## Review guidelines
 
-Codex review is read-only. When performing a review, do not create, edit, delete, stage, commit, push, or open pull requests. Review output only.
+These guidelines apply to review requests such as `@codex review`, Codex GitHub review, Codex cloud PR review, and explicit local "review this PR/diff" tasks. They do not apply to explicit implementation requests such as "fix", "address feedback", "edit", "commit", "push", or "open a PR".
+
+### Review-only mode
+
+When performing a review, do not create, edit, delete, stage, commit, push, or open pull requests. Review output only.
+
+This rule applies to review requests. It does not apply to explicit implementation tasks.
+
+### PR-head discipline
 
 When asked to review a GitHub pull request, do not review `main` alone. Fetch or otherwise inspect the PR head and compare it against the base branch. If the PR number, PR head, or base ref is unavailable, return `INSUFFICIENT_EVIDENCE` for the PR review instead of reviewing an unrelated checkout.
 
@@ -55,13 +67,18 @@ Use this precedence when reviewing conflicts:
 
 ## Spec repository discovery
 
+Canonical spec files may be absent from this public protocol checkout. Before requiring private specs, read `SPEC_LOCATION.md` when present.
+
 The canonical specification repository is `2tbmz9y2xt-lang/rubin-spec`, default branch `main`. Local developer checkouts may be named `rubin-spec` or `rubin-spec-private`; verify the remote origin before treating them as authoritative.
 
 When a review depends on normative specs, search in this order:
 
-1. This repository, if a current `spec/` directory exists in the PR/base checkout.
-2. A sibling checkout whose remote is `github.com/2tbmz9y2xt-lang/rubin-spec`, commonly `../rubin-spec` or `../rubin-spec-private`.
-3. The GitHub repository `2tbmz9y2xt-lang/rubin-spec` at `origin/main`, if the Codex environment has access.
+1. `SPEC_LOCATION.md` in this repository, which defines the current cross-repo convention.
+2. `RUBIN_SPEC_ROOT`, when set. Treat it as the spec root only after verifying it contains the required spec files.
+3. An explicit tool `--spec-root` value, when the task or script provides one.
+4. This repository, if a current `spec/` directory exists in the PR/base checkout.
+5. A sibling checkout whose remote is `github.com/2tbmz9y2xt-lang/rubin-spec`, commonly `../rubin-spec` or `../rubin-spec-private`.
+6. The GitHub repository `2tbmz9y2xt-lang/rubin-spec` at `origin/main`, if the Codex environment has access.
 
 Required normative files by surface:
 
