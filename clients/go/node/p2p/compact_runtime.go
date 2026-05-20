@@ -3,6 +3,8 @@ package p2p
 import (
 	"encoding/binary"
 	"errors"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 type compactModeSnapshot struct {
@@ -17,6 +19,12 @@ type peerCompactRelayState struct {
 
 type compactOutstandingRequest struct {
 	BlockHash          [32]byte
+	Header             [consensus.BLOCK_HEADER_BYTES]byte
+	MissingIndexes     []uint64
+	MissingShortIDs    []compactShortID
+	Transactions       [][]byte
+	Nonce1             uint64
+	Nonce2             uint64
 	BlockTxnPayloadCap uint32
 }
 
@@ -53,6 +61,32 @@ func (p *peer) remoteCompactMode() compactModeSnapshot {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	return p.compact.remoteMode
+}
+
+func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
+	p.compactMu.Lock()
+	p.compact.outstanding = &req
+	p.compactMu.Unlock()
+}
+
+func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, bool) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding == nil {
+		return compactOutstandingRequest{}, false
+	}
+	return *p.compact.outstanding, true
+}
+
+func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding == nil {
+		return compactOutstandingRequest{}, false
+	}
+	req := *p.compact.outstanding
+	p.compact.outstanding = nil
+	return req, true
 }
 
 func (p *peer) blockTxnPayloadCap() uint32 {

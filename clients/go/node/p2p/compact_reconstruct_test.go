@@ -250,6 +250,25 @@ func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	}
 }
 
+func TestCompactFillResponseTransactionsValidatesExpectedShortIDs(t *testing.T) {
+	nonce1, nonce2 := uint64(71), uint64(72)
+	tx1 := minimalBlockTxnTestTxBytes(73)
+	tx2 := minimalBlockTxnTestTxBytes(74)
+	req := compactOutstandingRequest{
+		Transactions:    [][]byte{nil, tx2},
+		MissingIndexes:  []uint64{0},
+		MissingShortIDs: []compactShortID{compactShortIDForTx(t, tx1, nonce1, nonce2)},
+		Nonce1:          nonce1,
+		Nonce2:          nonce2,
+	}
+	if _, err := compactFillResponseTransactions(req, [][]byte{tx1}, [][32]byte{compactWTxIDForTx(t, tx1)}); err != nil {
+		t.Fatalf("compactFillResponseTransactions: %v", err)
+	}
+	if _, err := compactFillResponseTransactions(req, [][]byte{tx2}, [][32]byte{compactWTxIDForTx(t, tx2)}); err == nil || !strings.Contains(err.Error(), "short id mismatch") {
+		t.Fatalf("wrong short ID err=%v, want short id mismatch", err)
+	}
+}
+
 func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing.T) {
 	validTx := minimalBlockTxnTestTxBytes(61)
 	result, err := reconstructCompactBlock(cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: validTx}}}, [][]byte{{0xff}})
@@ -263,9 +282,15 @@ func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing
 
 func compactShortIDForTx(t *testing.T, tx []byte, nonce1, nonce2 uint64) compactShortID {
 	t.Helper()
+	wtxid := compactWTxIDForTx(t, tx)
+	return compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
+}
+
+func compactWTxIDForTx(t *testing.T, tx []byte) [32]byte {
+	t.Helper()
 	_, _, wtxid, consumed, err := consensus.ParseTx(tx)
 	if err != nil || consumed != len(tx) {
 		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
 	}
-	return compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
+	return wtxid
 }
