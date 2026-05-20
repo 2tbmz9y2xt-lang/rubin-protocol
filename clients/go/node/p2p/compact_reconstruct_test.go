@@ -324,7 +324,8 @@ func TestNewCompactOutstandingRequestBuildsPartialState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newCompactOutstandingRequest: %v", err)
 	}
-	if req.BlockHash != blockHash || req.Header != block.Header || req.Nonce1 != block.Nonce1 || req.Nonce2 != block.Nonce2 || req.BlockTxnPayloadCap != compactRelayPayloadCap(messageBlockTxn) {
+	wantPayloadCap := uint32(32 + len(consensus.EncodeCompactSize(1)) + maxCompactSizeBytes + consensus.MAX_BLOCK_BYTES - len(tx))
+	if req.BlockHash != blockHash || req.Header != block.Header || req.Nonce1 != block.Nonce1 || req.Nonce2 != block.Nonce2 || req.BlockTxnPayloadCap != wantPayloadCap {
 		t.Fatalf("request metadata mismatch: %+v", req)
 	}
 	if !reflect.DeepEqual(req.MissingIndexes, []uint64{0}) || !reflect.DeepEqual(req.MissingShortIDs, []compactShortID{shortID}) || !reflect.DeepEqual(req.Transactions, [][]byte{nil, tx}) {
@@ -335,6 +336,33 @@ func TestNewCompactOutstandingRequestBuildsPartialState(t *testing.T) {
 	}
 	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{MissingIndexes: []uint64{0}}); err == nil {
 		t.Fatal("mismatched missing short-id request should fail")
+	}
+	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{PartialTransactions: [][]byte{tx}, MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{shortID}}); err == nil {
+		t.Fatal("non-missing partial slot should fail")
+	}
+}
+
+func TestCompactMissingRequestCapPrecedesPartialTableAllocation(t *testing.T) {
+	shortIDs := make([]compactShortID, maxCompactRelayEntries+1)
+	_, _, overflow, err := compactFillOrCollectMissing(nil, len(shortIDs), nil, shortIDs, nil, nil)
+	if err != nil || !overflow {
+		t.Fatal("missing-heavy compact block should hit request cap before partial table allocation")
+	}
+}
+
+func TestCompactBlockTxnResponsePayloadCapUsesRemainingBudget(t *testing.T) {
+	tx := minimalBlockTxnTestTxBytes(93)
+	cap, err := compactBlockTxnResponsePayloadCap([][]byte{tx, nil}, 1)
+	if err != nil {
+		t.Fatalf("compactBlockTxnResponsePayloadCap: %v", err)
+	}
+	want := uint32(32 + len(consensus.EncodeCompactSize(1)) + maxCompactSizeBytes + consensus.MAX_BLOCK_BYTES - len(tx))
+	if cap != want || cap >= compactRelayPayloadCap(messageBlockTxn) {
+		t.Fatalf("cap=%d want=%d and below global cap %d", cap, want, compactRelayPayloadCap(messageBlockTxn))
+	}
+	wantFull := uint32(32 + len(consensus.EncodeCompactSize(maxCompactRelayEntries)) + maxCompactRelayEntries*maxCompactSizeBytes + consensus.MAX_BLOCK_BYTES)
+	if full, err := compactBlockTxnResponsePayloadCap(nil, maxCompactRelayEntries); err != nil || full != wantFull || full >= compactRelayPayloadCap(messageBlockTxn) {
+		t.Fatalf("full missing cap=%d err=%v want %d below global %d", full, err, wantFull, compactRelayPayloadCap(messageBlockTxn))
 	}
 }
 

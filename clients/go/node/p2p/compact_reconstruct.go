@@ -36,6 +36,11 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 		return compactReconstructionResult{}, err
 	}
 
+	if _, _, overflow, err := compactFillOrCollectMissing(nil, totalEntries, p.Prefilled, p.ShortIDs, index, prefilledShortIDs); overflow {
+		return compactReconstructionResult{}, errCompactRelayMissingRequestTooLarge
+	} else if err != nil {
+		return compactReconstructionResult{}, err
+	}
 	txs := make([][]byte, totalEntries)
 	compactStagePrefilledTransactions(txs, p.Prefilled)
 	missing, missingShortIDs, overflow, err := compactFillOrCollectMissing(
@@ -148,10 +153,12 @@ func compactFillOrCollectMissing(txs [][]byte, totalEntries int, prefilled []pre
 		}
 		shortPos++
 	}
-	if err := compactValidatePresentTransactions(txs, false); err != nil {
-		return nil, nil, false, err
+	if txs != nil {
+		if err := compactValidatePresentTransactions(txs, false); err != nil {
+			return nil, nil, false, err
+		}
+		cloneCompactTransactionsInPlace(txs)
 	}
-	cloneCompactTransactionsInPlace(txs)
 	return ctx.missing, ctx.missingShortIDs, false, nil
 }
 
@@ -172,7 +179,9 @@ func (c *compactFillContext) fill(absoluteIndex uint64, shortID compactShortID, 
 		return c.handleDuplicate(firstIndex, absoluteIndex, shortID), nil
 	}
 	c.firstHit[shortID] = absoluteIndex
-	c.txs[int(absoluteIndex)] = tx // #nosec G115 -- absoluteIndex is bounded by totalEntries.
+	if c.txs != nil {
+		c.txs[int(absoluteIndex)] = tx // #nosec G115 -- absoluteIndex is bounded by totalEntries.
+	}
 	return false, nil
 }
 
@@ -182,7 +191,9 @@ func compactShortIDUnavailable(tx []byte, blocked bool) bool {
 
 func (c *compactFillContext) handleDuplicate(firstIndex uint64, absoluteIndex uint64, shortID compactShortID) bool {
 	if firstIndex != compactDuplicateReportedIndex {
-		c.txs[int(firstIndex)] = nil // #nosec G115 -- firstIndex was produced by the bounded fill loop.
+		if c.txs != nil {
+			c.txs[int(firstIndex)] = nil // #nosec G115 -- firstIndex was produced by the bounded fill loop.
+		}
 		c.firstHit[shortID] = compactDuplicateReportedIndex
 		if c.appendMissing(firstIndex, shortID) {
 			return true
@@ -241,6 +252,13 @@ func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, r
 	if len(result.MissingIndexes) == 0 || len(result.MissingIndexes) != len(result.MissingShortIDs) {
 		return compactOutstandingRequest{}, errors.New("compact reconstruction missing request mismatch")
 	}
+	if err := compactValidateOutstandingShape(result.PartialTransactions, result.MissingIndexes); err != nil {
+		return compactOutstandingRequest{}, err
+	}
+	payloadCap, err := compactBlockTxnResponsePayloadCap(result.PartialTransactions, len(result.MissingIndexes))
+	if err != nil {
+		return compactOutstandingRequest{}, err
+	}
 	// Take ownership of reconstruction slices; peer state clones at the mutex boundary.
 	return compactOutstandingRequest{
 		BlockHash:          blockHash,
@@ -250,8 +268,36 @@ func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, r
 		Transactions:       result.PartialTransactions,
 		Nonce1:             block.Nonce1,
 		Nonce2:             block.Nonce2,
-		BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn),
+		BlockTxnPayloadCap: payloadCap,
 	}, nil
+}
+
+func compactValidateOutstandingShape(partial [][]byte, missing []uint64) error {
+	for _, idx := range missing {
+		if idx >= uint64(len(partial)) {
+			return errors.New("compact relay index out of range")
+		}
+		if partial[int(idx)] != nil { // #nosec G115 -- idx is bounded by len(partial) above.
+			return errors.New("compact reconstruction missing request mismatch")
+		}
+	}
+	return nil
+}
+
+func compactBlockTxnResponsePayloadCap(partial [][]byte, missingCount int) (uint32, error) {
+	if missingCount <= 0 || missingCount > maxCompactRelayEntries {
+		return 0, errors.New("compact reconstruction missing request mismatch")
+	}
+	presentBytes, err := compactPresentTransactionBytes(partial)
+	if err != nil {
+		return 0, err
+	}
+	remainingBytes := uint64(consensus.MAX_BLOCK_BYTES) - presentBytes
+	capBytes := uint64(32+len(consensus.EncodeCompactSize(uint64(missingCount)))) + remainingBytes + uint64(missingCount)*maxCompactSizeBytes
+	if capBytes > uint64(compactRelayPayloadCap(messageBlockTxn)) {
+		return 0, errors.New("blocktxn payload cap overflow")
+	}
+	return uint32(capBytes), nil
 }
 
 func compactFillResponseTransactions(req compactOutstandingRequest, responseTxs [][]byte, responseWTxIDs [][32]byte) ([][]byte, error) {
