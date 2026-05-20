@@ -232,6 +232,29 @@ func TestCompactFillShortIDTransactionsRejectsCumulativeOversize(t *testing.T) {
 	}
 }
 
+func TestCompactFillOrCollectMissingRecomputesSizeAfterDuplicateReclassification(t *testing.T) {
+	dup := compactShortID{0x01}
+	later := compactShortID{0x02}
+	txs := make([][]byte, 3)
+	missing, _, overflow, err := compactFillOrCollectMissing(
+		txs,
+		3,
+		nil,
+		[]compactShortID{dup, dup, later},
+		map[compactShortID][]byte{
+			dup:   make([]byte, consensus.MAX_BLOCK_BYTES),
+			later: {0x01},
+		},
+		nil,
+	)
+	if err != nil || overflow {
+		t.Fatalf("compactFillOrCollectMissing duplicate reclassification err=%v overflow=%v", err, overflow)
+	}
+	if !reflect.DeepEqual(missing, []uint64{0, 1}) || txs[0] != nil || !reflect.DeepEqual(txs[2], []byte{0x01}) {
+		t.Fatalf("missing=%v txs[0]=%v txs[2]=%v, want duplicate missing and later tx retained", missing, txs[0], txs[2])
+	}
+}
+
 func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	nonce1, nonce2 := uint64(51), uint64(52)
 	validTx := minimalBlockTxnTestTxBytes(53)
@@ -266,6 +289,22 @@ func TestCompactFillResponseTransactionsValidatesExpectedShortIDs(t *testing.T) 
 	}
 	if _, err := compactFillResponseTransactions(req, [][]byte{tx2}, [][32]byte{compactWTxIDForTx(t, tx2)}); err == nil || !strings.Contains(err.Error(), "short id mismatch") {
 		t.Fatalf("wrong short ID err=%v, want short id mismatch", err)
+	}
+}
+
+func TestCompactFillResponseTransactionsRejectsAggregateOversize(t *testing.T) {
+	nonce1, nonce2 := uint64(81), uint64(82)
+	wtxid := [32]byte{0x01}
+	req := compactOutstandingRequest{
+		Transactions:    [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES), nil},
+		MissingIndexes:  []uint64{1},
+		MissingShortIDs: []compactShortID{compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))},
+		Nonce1:          nonce1,
+		Nonce2:          nonce2,
+	}
+	_, err := compactFillResponseTransactions(req, [][]byte{{0x01}}, [][32]byte{wtxid})
+	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
+		t.Fatalf("aggregate oversize err=%v, want block size rejection", err)
 	}
 }
 
