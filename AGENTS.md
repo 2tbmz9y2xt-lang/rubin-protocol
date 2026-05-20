@@ -101,9 +101,10 @@ Run commands through `scripts/dev-env.sh` when available. If `scripts/dev-env.sh
 Full baseline checks for consensus, conformance, spec, generated artifact, formal, cross-client, or release-gate changes:
 
 ```bash
-scripts/dev-env.sh -- python3 tools/check_conformance_ids.py
-scripts/dev-env.sh -- node scripts/check-spec-invariants.mjs
-scripts/dev-env.sh -- node scripts/check-section-hashes.mjs
+# Set RUBIN_SPEC_ROOT per SPEC_LOCATION.md before running spec-dependent checks.
+RUBIN_SPEC_ROOT=/path/to/private/spec scripts/dev-env.sh -- python3 tools/check_conformance_ids.py
+RUBIN_SPEC_ROOT=/path/to/private/spec scripts/dev-env.sh -- node scripts/check-spec-invariants.mjs
+RUBIN_SPEC_ROOT=/path/to/private/spec scripts/dev-env.sh -- node scripts/check-section-hashes.mjs
 scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py
 scripts/dev-env.sh -- bash -lc 'cd clients/go && go test ./...'
 scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
