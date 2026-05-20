@@ -1,0 +1,264 @@
+package p2p
+
+import (
+	"context"
+	"io"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
+
+func TestCompactBlockTxnFlowRequestsAndAcceptsMatchingResponse(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 11, 12)
+
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock): %v", err)
+	}
+
+	frame := readCompactTestFrame(t, p, conn)
+	if frame.Command != messageGetBlockTxn {
+		t.Fatalf("command=%q, want getblocktxn", frame.Command)
+	}
+	req, err := decodeGetBlockTxnPayload(frame.Payload)
+	if err != nil {
+		t.Fatalf("decodeGetBlockTxnPayload: %v", err)
+	}
+	if req.BlockHash != blockHash || !reflect.DeepEqual(req.Indexes, []uint64{0}) {
+		t.Fatalf("getblocktxn=%+v, want block %x index [0]", req, blockHash)
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); !ok || outstanding.BlockHash != blockHash {
+		t.Fatalf("outstanding=%+v ok=%v, want block %x", outstanding, ok, blockHash)
+	}
+
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, txs[:1])}); err != nil {
+		t.Fatalf("handleMessage(blocktxn): %v", err)
+	}
+	assertHarnessTip(t, sink, 1, blockHash)
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("outstanding survived matching blocktxn: %+v", outstanding)
+	}
+}
+
+func TestCmpctBlockUsesLocalTxPoolBeforeRequest(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 21, 22)
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+	_, txid, _, consumed, err := consensus.ParseTx(txs[0])
+	if err != nil || consumed != len(txs[0]) {
+		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
+	}
+	if !sink.service.cfg.TxPool.Put(txid, txs[0], uint64(len(txs[0])), len(txs[0])) {
+		t.Fatalf("Put local compact tx failed")
+	}
+
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock): %v", err)
+	}
+	assertHarnessTip(t, sink, 1, blockHash)
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("local reconstruction wrote %d response bytes, want none", conn.Buffer.Len())
+	}
+}
+
+func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 31, 32)
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+
+	p, _ := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, txs[:1])}); err == nil || !strings.Contains(err.Error(), "unexpected blocktxn response") {
+		t.Fatalf("unsolicited blocktxn err=%v, want unexpected response", err)
+	}
+	assertHarnessTip(t, sink, 0, nodeGenesisHash(t, sink))
+
+	p, _ = compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock): %v", err)
+	}
+	wrongHash := blockHash
+	wrongHash[0] ^= 0xff
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, wrongHash, txs[:1])}); err == nil || !strings.Contains(err.Error(), "unexpected blocktxn response") {
+		t.Fatalf("wrong-hash blocktxn err=%v, want unexpected response", err)
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("wrong-hash blocktxn did not clear outstanding: %+v", outstanding)
+	}
+	assertHarnessTip(t, sink, 0, nodeGenesisHash(t, sink))
+
+	p, _ = compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock): %v", err)
+	}
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, nil)}); err == nil || !strings.Contains(err.Error(), "blocktxn transaction count mismatch") {
+		t.Fatalf("count-mismatch blocktxn err=%v, want count mismatch", err)
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("count-mismatch blocktxn did not clear outstanding: %+v", outstanding)
+	}
+	assertHarnessTip(t, sink, 0, nodeGenesisHash(t, sink))
+}
+
+func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	txA := minimalBlockTxnTestTxBytes(101)
+	txB := minimalBlockTxnTestTxBytes(102)
+	nonce1, nonce2 := uint64(41), uint64(42)
+	hash := [32]byte{0xab}
+	shortA, err := compactTransactionShortID(txA, nonce1, nonce2)
+	if err != nil {
+		t.Fatalf("short A: %v", err)
+	}
+	shortB, err := compactTransactionShortID(txB, nonce1, nonce2)
+	if err != nil {
+		t.Fatalf("short B: %v", err)
+	}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:       hash,
+		MissingIndexes:  []uint64{0, 1},
+		MissingShortIDs: []compactShortID{shortA, shortB},
+		Transactions:    make([][]byte, 2),
+		Nonce1:          nonce1,
+		Nonce2:          nonce2,
+	})
+
+	err = p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, hash, [][]byte{txB, txA})})
+	if err == nil || !strings.Contains(err.Error(), "blocktxn transaction short id mismatch") {
+		t.Fatalf("order-mismatch blocktxn err=%v, want short id mismatch", err)
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("order-mismatch blocktxn did not clear outstanding: %+v", outstanding)
+	}
+}
+
+func TestCompactOutstandingRequestClearsOnReadTimeout(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{reads: []scriptedRead{{err: timeoutErr{}}, {err: io.EOF}}}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:       [32]byte{0xcd},
+		MissingIndexes:  []uint64{0},
+		MissingShortIDs: []compactShortID{{0x01}},
+		Transactions:    make([][]byte, 1),
+	})
+
+	if err := p.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("read timeout did not clear outstanding request: %+v", outstanding)
+	}
+}
+
+func TestGetBlockTxnRespondsWithRequestedTransactions(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+
+	p, conn := compactTestPeerWithConn(source)
+	if err := p.handleMessage(message{Command: messageGetBlockTxn, Payload: mustEncodeGetBlockTxnForHash(t, blockHash, []uint64{0})}); err != nil {
+		t.Fatalf("handleMessage(getblocktxn): %v", err)
+	}
+	frame := readCompactTestFrame(t, p, conn)
+	if frame.Command != messageBlockTxn {
+		t.Fatalf("command=%q, want blocktxn", frame.Command)
+	}
+	response, err := decodeBlockTxnPayload(frame.Payload)
+	if err != nil {
+		t.Fatalf("decodeBlockTxnPayload: %v", err)
+	}
+	if response.BlockHash != blockHash || !reflect.DeepEqual(response.Transactions, txs[:1]) {
+		t.Fatalf("blocktxn=%+v, want block %x tx0", response, blockHash)
+	}
+}
+
+func compactTestPayloadFromBlock(t *testing.T, blockBytes []byte, nonce1, nonce2 uint64) cmpctBlockPayload {
+	t.Helper()
+	header, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+	shortIDs := make([]compactShortID, 0, len(txs))
+	for _, tx := range txs {
+		shortID, err := compactTransactionShortID(tx, nonce1, nonce2)
+		if err != nil {
+			t.Fatalf("compactTransactionShortID: %v", err)
+		}
+		shortIDs = append(shortIDs, shortID)
+	}
+	return cmpctBlockPayload{Header: header, Nonce1: nonce1, Nonce2: nonce2, ShortIDs: shortIDs}
+}
+
+func compactTestPeerWithConn(h *testHarness) (*peer, *scriptedConn) {
+	conn := &scriptedConn{}
+	p := testPeerForService(h.service, "rubin-go/test-peer", 1)
+	p.conn = conn
+	return p, conn
+}
+
+func readCompactTestFrame(t *testing.T, p *peer, conn *scriptedConn) message {
+	t.Helper()
+	frame, err := readFrame(&conn.Buffer, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if err != nil {
+		t.Fatalf("readFrame: %v", err)
+	}
+	return frame
+}
+
+func mustEncodeCmpctBlockPayload(t *testing.T, block cmpctBlockPayload) []byte {
+	t.Helper()
+	raw, err := encodeCmpctBlockPayload(block)
+	if err != nil {
+		t.Fatalf("encodeCmpctBlockPayload: %v", err)
+	}
+	return raw
+}
+
+func mustEncodeBlockTxnForHash(t *testing.T, blockHash [32]byte, txs [][]byte) []byte {
+	t.Helper()
+	raw, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: txs})
+	if err != nil {
+		t.Fatalf("encodeBlockTxnPayload: %v", err)
+	}
+	return raw
+}
+
+func mustEncodeGetBlockTxnForHash(t *testing.T, blockHash [32]byte, indexes []uint64) []byte {
+	t.Helper()
+	raw, err := encodeGetBlockTxnPayload(getBlockTxnPayload{BlockHash: blockHash, Indexes: indexes})
+	if err != nil {
+		t.Fatalf("encodeGetBlockTxnPayload: %v", err)
+	}
+	return raw
+}
+
+func nodeGenesisHash(t *testing.T, h *testHarness) [32]byte {
+	t.Helper()
+	_, hash, ok, err := h.blockStore.Tip()
+	if err != nil || !ok {
+		t.Fatalf("tip: ok=%v err=%v", ok, err)
+	}
+	return hash
+}

@@ -27,14 +27,8 @@ func TestCompactWireCommandConstantsAndPayloadCaps(t *testing.T) {
 		if (command == messageCmpctBlock || command == messageBlockTxn) && caps[i] <= uint32(consensus.MAX_BLOCK_BYTES) {
 			t.Fatalf("%s explicit cap=%d, want above MAX_BLOCK_BYTES", command, caps[i])
 		}
-		if command == messageSendCmpct {
-			if got := liveCaps(command); got != sendCmpctPayloadBytes {
-				t.Fatalf("%s live cap=%d, want %d", command, got, sendCmpctPayloadBytes)
-			}
-			continue
-		}
-		if got := liveCaps(command); got != 0 {
-			t.Fatalf("%s live cap=%d, want 0 until runtime handler slice", command, got)
+		if got := liveCaps(command); got != caps[i] {
+			t.Fatalf("%s live cap=%d, want %d", command, got, caps[i])
 		}
 	}
 }

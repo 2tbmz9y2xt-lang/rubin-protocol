@@ -36,6 +36,12 @@ type blockTxnPayload struct {
 	Transactions [][]byte
 }
 
+type blockTxnRuntimePayload struct {
+	BlockHash    [32]byte
+	Transactions [][]byte
+	WTxIDs       [][32]byte
+}
+
 type compactShortID [compactShortIDBytes]byte
 
 type prefilledTxn struct {
@@ -141,40 +147,49 @@ func encodeBlockTxnPayload(p blockTxnPayload) ([]byte, error) {
 }
 
 func decodeBlockTxnPayload(payload []byte) (blockTxnPayload, error) {
+	runtimePayload, err := decodeBlockTxnRuntimePayload(payload)
+	if err != nil {
+		return blockTxnPayload{}, err
+	}
+	return blockTxnPayload{BlockHash: runtimePayload.BlockHash, Transactions: runtimePayload.Transactions}, nil
+}
+
+func decodeBlockTxnRuntimePayload(payload []byte) (blockTxnRuntimePayload, error) {
 	var out blockTxnPayload
 	if len(payload) < 32 {
-		return out, errors.New("blocktxn payload missing block hash")
+		return blockTxnRuntimePayload{}, errors.New("blocktxn payload missing block hash")
 	}
 	copy(out.BlockHash[:], payload[:32])
 	count, consumed, err := consensus.DecodeCompactSize(payload[32:])
 	if err != nil {
-		return blockTxnPayload{}, err
+		return blockTxnRuntimePayload{}, err
 	}
 	if count > maxCompactRelayEntries {
-		return blockTxnPayload{}, errors.New("too many compact relay transactions")
+		return blockTxnRuntimePayload{}, errors.New("too many compact relay transactions")
 	}
 	offset := 32 + consumed
 	transactions := make([][]byte, 0, int(count)) // #nosec G115 -- count is capped at maxCompactRelayEntries above.
+	wtxids := make([][32]byte, 0, int(count))     // #nosec G115 -- count is capped at maxCompactRelayEntries above.
 	var totalTxBytes uint64
 	for i := uint64(0); i < count; i++ {
 		txLen, n, err := consensus.DecodeCompactSize(payload[offset:])
 		if err != nil {
-			return blockTxnPayload{}, err
+			return blockTxnRuntimePayload{}, err
 		}
 		offset += n
-		tx, txConsumed, nextTotal, err := decodeCompactRelayTxEnvelope(payload[offset:], txLen, totalTxBytes, "blocktxn transaction is non-canonical")
+		tx, wtxid, txConsumed, nextTotal, err := decodeCompactRelayTxEnvelope(payload[offset:], txLen, totalTxBytes, "blocktxn transaction is non-canonical")
 		if err != nil {
-			return blockTxnPayload{}, err
+			return blockTxnRuntimePayload{}, err
 		}
 		transactions = append(transactions, append([]byte(nil), tx...))
+		wtxids = append(wtxids, wtxid)
 		offset += txConsumed
 		totalTxBytes = nextTotal
 	}
 	if offset != len(payload) {
-		return blockTxnPayload{}, errors.New("blocktxn payload has trailing bytes")
+		return blockTxnRuntimePayload{}, errors.New("blocktxn payload has trailing bytes")
 	}
-	out.Transactions = transactions
-	return out, nil
+	return blockTxnRuntimePayload{BlockHash: out.BlockHash, Transactions: transactions, WTxIDs: wtxids}, nil
 }
 
 func encodeCmpctBlockPayload(p cmpctBlockPayload) ([]byte, error) {
@@ -282,7 +297,7 @@ func decodeCmpctBlockPrefilled(payload []byte, offset int, entryPos, prev, total
 		return prefilledTxn{}, 0, totalTxBytes, err
 	}
 	offset += n
-	tx, txConsumed, nextTotal, err := decodeCompactRelayTxEnvelope(payload[offset:], txLen, totalTxBytes, "cmpctblock prefilled transaction is non-canonical")
+	tx, _, txConsumed, nextTotal, err := decodeCompactRelayTxEnvelope(payload[offset:], txLen, totalTxBytes, "cmpctblock prefilled transaction is non-canonical")
 	if err != nil {
 		return prefilledTxn{}, 0, totalTxBytes, err
 	}
@@ -338,20 +353,21 @@ func validateCmpctBlockEntryCount(shortCount, prefilledCount uint64) (uint64, er
 	return totalEntries, nil
 }
 
-func decodeCompactRelayTxEnvelope(payload []byte, txLen, totalTxBytes uint64, nonCanonicalErr string) ([]byte, int, uint64, error) {
+func decodeCompactRelayTxEnvelope(payload []byte, txLen, totalTxBytes uint64, nonCanonicalErr string) ([]byte, [32]byte, int, uint64, error) {
+	var zero [32]byte
 	if txLen > uint64(len(payload)) {
-		return nil, 0, totalTxBytes, errors.New("compact relay transaction truncated")
+		return nil, zero, 0, totalTxBytes, errors.New("compact relay transaction truncated")
 	}
 	tx := payload[:int(txLen)] // #nosec G115 -- txLen is bounded by len(payload) above.
 	nextTotal, err := validateBlockTxnTransactionSize(txLen, totalTxBytes)
 	if err != nil {
-		return nil, 0, totalTxBytes, err
+		return nil, zero, 0, totalTxBytes, err
 	}
-	_, _, _, consumed, err := consensus.ParseTx(tx)
+	_, _, wtxid, consumed, err := consensus.ParseTx(tx)
 	if err != nil || consumed != len(tx) {
-		return nil, 0, totalTxBytes, errors.New(nonCanonicalErr)
+		return nil, zero, 0, totalTxBytes, errors.New(nonCanonicalErr)
 	}
-	return tx, len(tx), nextTotal, nil
+	return tx, wtxid, len(tx), nextTotal, nil
 }
 
 func finishCmpctBlockPayload(out cmpctBlockPayload, offset, payloadLen int) (cmpctBlockPayload, error) {

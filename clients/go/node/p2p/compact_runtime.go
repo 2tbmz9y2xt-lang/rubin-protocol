@@ -11,7 +11,8 @@ type compactModeSnapshot struct {
 }
 
 type peerCompactRelayState struct {
-	remoteMode compactModeSnapshot
+	remoteMode  compactModeSnapshot
+	outstanding *compactOutstandingRequest
 }
 
 func (p *peer) handleSendCmpct(payload []byte) error {

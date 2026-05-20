@@ -39,6 +39,7 @@ func (p *peer) run(ctx context.Context) error {
 		)
 		if err != nil {
 			if shouldIgnoreReadError(err) {
+				p.clearCompactOutstandingRequest()
 				continue
 			}
 			return normalizeReadError(err)
@@ -84,7 +85,7 @@ func normalizeReadError(err error) error {
 
 func (p *peer) handleMessage(frame message) error {
 	switch frame.Command {
-	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk:
+	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
 		return p.handleRelayMessage(frame)
 	case messageSendCmpct:
 		return p.handleSendCmpct(frame.Payload)
@@ -105,7 +106,7 @@ func (p *peer) handleRelayMessage(frame message) error {
 	switch frame.Command {
 	case messageInv, messageGetData:
 		return p.handleInventoryRelayMessage(frame)
-	case messageBlock, messageTx, messageGetBlk:
+	case messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
 		return p.handleObjectRelayMessage(frame)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
@@ -131,6 +132,12 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 		return p.handleTx(frame.Payload)
 	case messageGetBlk:
 		return p.handleGetBlocks(frame.Payload)
+	case messageCmpctBlock:
+		return p.handleCmpctBlock(frame.Payload)
+	case messageGetBlockTxn:
+		return p.handleGetBlockTxn(frame.Payload)
+	case messageBlockTxn:
+		return p.handleBlockTxn(frame.Payload)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
 	}
