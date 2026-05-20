@@ -8,6 +8,8 @@ import (
 
 const compactDuplicateReportedIndex = ^uint64(0)
 
+var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
+
 type compactReconstructionResult struct {
 	Transactions   [][]byte
 	MissingIndexes []uint64
@@ -32,7 +34,10 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 		return compactReconstructionResult{}, err
 	}
 
-	missing := compactMissingShortIDIndexes(totalEntries, p.Prefilled, p.ShortIDs, index, prefilledShortIDs)
+	missing, overflow := compactMissingShortIDIndexes(totalEntries, p.Prefilled, p.ShortIDs, index, prefilledShortIDs)
+	if overflow {
+		return compactReconstructionResult{}, errCompactRelayMissingRequestTooLarge
+	}
 	if len(missing) > 0 {
 		return compactReconstructionResult{MissingIndexes: missing}, nil
 	}
@@ -102,7 +107,7 @@ func compactFillShortIDTransactions(txs [][]byte, totalEntries int, prefilled []
 	return nil
 }
 
-func compactMissingShortIDIndexes(totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, blocked map[compactShortID]bool) []uint64 {
+func compactMissingShortIDIndexes(totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, blocked map[compactShortID]bool) ([]uint64, bool) {
 	missing := make([]uint64, 0)
 	firstHit := make(map[compactShortID]uint64)
 	shortPos, prefilledPos := 0, 0
@@ -112,12 +117,12 @@ func compactMissingShortIDIndexes(totalEntries int, prefilled []prefilledTxn, sh
 		}
 		shortID := shortIDs[shortPos]
 		missing = compactAppendMissingIndex(missing, firstHit, shortID, uint64(absoluteIndex), index[shortID], blocked[shortID])
-		if len(missing) >= maxCompactRelayEntries {
-			return missing[:maxCompactRelayEntries]
+		if len(missing) > maxCompactRelayEntries {
+			return missing[:maxCompactRelayEntries], true
 		}
 		shortPos++
 	}
-	return missing
+	return missing, false
 }
 
 func compactIndexIsPrefilled(index uint64, prefilled []prefilledTxn, pos *int) bool {

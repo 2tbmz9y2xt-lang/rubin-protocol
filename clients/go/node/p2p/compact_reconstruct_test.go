@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -195,18 +196,19 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 	}
 }
 
-func TestReconstructCompactBlockReportsBoundedMissingForLargeCodecValidPayload(t *testing.T) {
-	result, err := reconstructCompactBlock(cmpctBlockPayload{
+func TestReconstructCompactBlockFailsClosedWhenMissingRequestExceedsCap(t *testing.T) {
+	exact, err := reconstructCompactBlock(cmpctBlockPayload{ShortIDs: make([]compactShortID, maxCompactRelayEntries)}, nil)
+	if err != nil || len(exact.MissingIndexes) != maxCompactRelayEntries {
+		t.Fatalf("exact max result=%+v err=%v", exact, err)
+	}
+	_, err = reconstructCompactBlock(cmpctBlockPayload{
 		ShortIDs: make([]compactShortID, maxCompactRelayEntries+1),
 	}, nil)
-	if err != nil {
-		t.Fatalf("reconstructCompactBlock: %v", err)
+	if !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		t.Fatalf("overflow err=%v", err)
 	}
-	if result.Transactions != nil || len(result.MissingIndexes) != maxCompactRelayEntries {
-		t.Fatalf("result=%+v, want bounded missing indexes", result)
-	}
-	if result.MissingIndexes[0] != 0 || result.MissingIndexes[len(result.MissingIndexes)-1] != maxCompactRelayEntries-1 {
-		t.Fatalf("missing bounds got first=%d last=%d", result.MissingIndexes[0], result.MissingIndexes[len(result.MissingIndexes)-1])
+	if exact.MissingIndexes[0] != 0 || exact.MissingIndexes[len(exact.MissingIndexes)-1] != maxCompactRelayEntries-1 {
+		t.Fatalf("missing bounds got first=%d last=%d", exact.MissingIndexes[0], exact.MissingIndexes[len(exact.MissingIndexes)-1])
 	}
 }
 
