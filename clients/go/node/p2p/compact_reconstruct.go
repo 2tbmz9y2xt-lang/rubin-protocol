@@ -931,6 +931,9 @@ func (p *peer) setLateBlockTxnReply(req compactOutstandingRequest) {
 		return
 	}
 	p.compactMu.Lock()
+	if p.compact.lateBlockTxnReply != nil && p.compact.lateBlockTxnReply.Cap > cap {
+		cap = p.compact.lateBlockTxnReply.Cap
+	}
 	p.compact.lateBlockTxnReply = &compactLateBlockTxnReply{
 		BlockHash: req.BlockHash,
 		Cap:       cap,
@@ -949,6 +952,7 @@ func (p *peer) clearKnownCompactOutstandingRequest() error {
 		return err
 	}
 	if have {
+		p.setLateBlockTxnReply(req)
 		p.clearCompactOutstandingRequestForHash(req.BlockHash)
 	}
 	return nil
@@ -960,10 +964,6 @@ func (p *peer) clearCompactOutstandingRequestForHash(blockHash [32]byte) bool {
 	cleared := false
 	if p.compact.outstanding != nil && p.compact.outstanding.BlockHash == blockHash {
 		p.compact.outstanding = nil
-		cleared = true
-	}
-	if p.compact.lateBlockTxnReply != nil && p.compact.lateBlockTxnReply.BlockHash == blockHash {
-		p.compact.lateBlockTxnReply = nil
 		cleared = true
 	}
 	return cleared

@@ -651,6 +651,10 @@ func TestCompactOutstandingClearsWhenBlockIsLearnedExternally(t *testing.T) {
 		t.Fatalf("external ApplyBlock(A): %v", err)
 	}
 	assertHarnessTip(t, sink, 1, hashA)
+	assertCompactCommandCapEnabled(t, p.postHandshakePayloadCap(), messageBlockTxn)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, hashA, [][]byte{minimalBlockTxnTestTxBytes(108)})}); err != nil {
+		t.Fatalf("known-block in-flight blocktxn A: %v", err)
+	}
 	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
 	assertNoCompactOutstanding(t, p, "externally learned block")
 
@@ -676,6 +680,10 @@ func TestCompactOutstandingKnownBlockCleanupBranches(t *testing.T) {
 	knownReq := compactOutstandingRequest{BlockHash: node.DevnetGenesisBlockHash(), MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{{0x01}}, Transactions: make([][]byte, 1)}
 	p.setCompactOutstandingRequest(knownReq)
 	p.setLateBlockTxnReply(knownReq)
+	assertCompactCommandCapEnabled(t, p.postHandshakePayloadCap(), messageBlockTxn)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, knownReq.BlockHash, [][]byte{minimalBlockTxnTestTxBytes(107)})}); err != nil {
+		t.Fatalf("known-block late blocktxn: %v", err)
+	}
 	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
 	assertNoCompactOutstanding(t, p, "known block cap cleanup")
 
