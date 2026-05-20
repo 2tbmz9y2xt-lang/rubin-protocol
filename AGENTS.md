@@ -101,7 +101,6 @@ Run commands through `scripts/dev-env.sh` when available. If `scripts/dev-env.sh
 Full baseline checks for consensus, conformance, spec, generated artifact, formal, cross-client, or release-gate changes:
 
 ```bash
-scripts/dev-env.sh -- python3 tools/check_readme_index.py
 scripts/dev-env.sh -- python3 tools/check_conformance_ids.py
 scripts/dev-env.sh -- node scripts/check-spec-invariants.mjs
 scripts/dev-env.sh -- node scripts/check-section-hashes.mjs
@@ -110,7 +109,7 @@ scripts/dev-env.sh -- bash -lc 'cd clients/go && go test ./...'
 scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo test --workspace'
 ```
 
-For spec-dependent checks, first resolve the spec root through `SPEC_LOCATION.md`, `RUBIN_SPEC_ROOT`, or `--spec-root`. Do not run protocol-local tools that require `spec/SECTION_HASHES.json` from this repository unless a current `spec/` directory is present.
+For spec-dependent checks, first resolve the spec root through `SPEC_LOCATION.md`, `RUBIN_SPEC_ROOT`, or `--spec-root`. Do not list or run Python spec-repo-only checks such as `tools/check_readme_index.py` or `tools/check_section_hashes.py` as protocol-repo baseline commands unless executing from a current spec repository root with `spec/README.md` and `spec/SECTION_HASHES.json`.
 
 Formal/refinement changes or any PR making formal claims:
 
