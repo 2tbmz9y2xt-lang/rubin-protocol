@@ -154,27 +154,31 @@ func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
 	}
 	assertHarnessTip(t, sink, 0, nodeGenesisHash(t, sink))
 
-	p, _ = compactTestPeerWithConn(sink)
+	p, conn := compactTestPeerWithConn(sink)
 	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
 		t.Fatalf("handleMessage(cmpctblock): %v", err)
 	}
+	_ = mustReadCompactGetBlockTxn(t, p, conn)
 	wrongHash := blockHash
 	wrongHash[0] ^= 0xff
-	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, wrongHash, txs[:1])}); err == nil || !strings.Contains(err.Error(), "unexpected blocktxn response") {
-		t.Fatalf("wrong-hash blocktxn err=%v, want unexpected response", err)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, wrongHash, txs[:1])}); err != nil {
+		t.Fatalf("wrong-hash blocktxn fallback: %v", err)
 	}
+	assertCompactFullBlockRequest(t, p, conn, blockHash)
 	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatalf("wrong-hash blocktxn did not clear outstanding: %+v", outstanding)
 	}
 	assertHarnessTip(t, sink, 0, nodeGenesisHash(t, sink))
 
-	p, _ = compactTestPeerWithConn(sink)
+	p, conn = compactTestPeerWithConn(sink)
 	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
 		t.Fatalf("handleMessage(cmpctblock): %v", err)
 	}
-	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, nil)}); err == nil || !strings.Contains(err.Error(), "blocktxn transaction count mismatch") {
-		t.Fatalf("count-mismatch blocktxn err=%v, want count mismatch", err)
+	_ = mustReadCompactGetBlockTxn(t, p, conn)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, nil)}); err != nil {
+		t.Fatalf("count-mismatch blocktxn fallback: %v", err)
 	}
+	assertCompactFullBlockRequest(t, p, conn, blockHash)
 	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatalf("count-mismatch blocktxn did not clear outstanding: %+v", outstanding)
 	}
@@ -183,6 +187,8 @@ func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
 
 func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
+	conn := &scriptedConn{}
+	p.conn = conn
 	txA := minimalBlockTxnTestTxBytes(101)
 	txB := minimalBlockTxnTestTxBytes(102)
 	nonce1, nonce2 := uint64(41), uint64(42)
@@ -205,12 +211,47 @@ func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
 	})
 
 	err = p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, hash, [][]byte{txB, txA})})
-	if err == nil || !strings.Contains(err.Error(), "blocktxn transaction short id mismatch") {
-		t.Fatalf("order-mismatch blocktxn err=%v, want short id mismatch", err)
+	if err != nil {
+		t.Fatalf("order-mismatch blocktxn fallback: %v", err)
 	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
 	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatalf("order-mismatch blocktxn did not clear outstanding: %+v", outstanding)
 	}
+}
+
+func TestBlockTxnMalformedAndProcessFailureFallback(t *testing.T) {
+	hash := [32]byte{0xbe}
+	p := newPeerRuntimeTestPeer(t)
+	conn := &scriptedConn{}
+	p.conn = conn
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: hash})
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: []byte{0x01}}); err != nil {
+		t.Fatalf("malformed blocktxn fallback: %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
+
+	p = newPeerRuntimeTestPeer(t)
+	conn = &scriptedConn{}
+	p.conn = conn
+	tx := minimalBlockTxnTestTxBytes(103)
+	nonce1, nonce2 := uint64(43), uint64(44)
+	shortID, err := compactTransactionShortID(tx, nonce1, nonce2)
+	if err != nil {
+		t.Fatalf("compactTransactionShortID: %v", err)
+	}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:       hash,
+		MissingIndexes:  []uint64{0},
+		MissingShortIDs: []compactShortID{shortID},
+		Transactions:    make([][]byte, 1),
+		Nonce1:          nonce1,
+		Nonce2:          nonce2,
+	})
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, hash, [][]byte{tx})}); err != nil {
+		t.Fatalf("process-failure blocktxn fallback: %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
 }
 
 func TestCompactOutstandingRequestClearsOnReadTimeout(t *testing.T) {
@@ -270,10 +311,10 @@ func TestGetBlockTxnRejectsDuplicateIndexesBeforeResponse(t *testing.T) {
 	}
 }
 
-func TestCmpctBlockMissingAboveRequestCapDefersFallbackWithoutRequest(t *testing.T) {
+func TestCmpctBlockMissingAboveRequestCapRequestsFullBlockFallback(t *testing.T) {
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	_, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
 	block := compactTestPayloadFromBlock(t, blockBytes, 51, 52)
 	block.ShortIDs = make([]compactShortID, maxCompactRelayEntries+1)
 
@@ -281,9 +322,7 @@ func TestCmpctBlockMissingAboveRequestCapDefersFallbackWithoutRequest(t *testing
 	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
 		t.Fatalf("handleMessage(cmpctblock many missing): %v", err)
 	}
-	if conn.Buffer.Len() != 0 {
-		t.Fatalf("many-missing cmpctblock wrote %d bytes, want no getblocktxn in RUB-326", conn.Buffer.Len())
-	}
+	assertCompactFullBlockRequest(t, p, conn, blockHash)
 	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatalf("many-missing cmpctblock left outstanding: %+v", outstanding)
 	}
@@ -360,6 +399,22 @@ func mustReadCompactGetBlockTxn(t *testing.T, p *peer, conn *scriptedConn) getBl
 		t.Fatalf("decodeGetBlockTxnPayload: %v", err)
 	}
 	return req
+}
+
+func assertCompactFullBlockRequest(t *testing.T, p *peer, conn *scriptedConn, blockHash [32]byte) {
+	t.Helper()
+	frame := readCompactTestFrame(t, p, conn)
+	if frame.Command != messageGetData {
+		t.Fatalf("command=%q, want getdata full-block fallback", frame.Command)
+	}
+	items, err := decodeInventoryVectors(frame.Payload)
+	if err != nil {
+		t.Fatalf("decodeInventoryVectors: %v", err)
+	}
+	want := []InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}}
+	if !reflect.DeepEqual(items, want) {
+		t.Fatalf("fallback inventory=%+v, want %+v", items, want)
+	}
 }
 
 func mustEncodeCmpctBlockPayload(t *testing.T, block cmpctBlockPayload) []byte {

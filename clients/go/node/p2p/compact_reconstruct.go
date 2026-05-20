@@ -248,7 +248,7 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	}
 	result, err := reconstructCompactBlock(block, compactRelayLocalTransactions(p.service.cfg.TxPool))
 	if errors.Is(err, errCompactRelayMissingRequestTooLarge) {
-		return nil
+		return p.requestCompactFullBlockFallback(blockHash)
 	}
 	if err != nil {
 		return err
@@ -299,20 +299,23 @@ func (p *peer) handleGetBlockTxn(payload []byte) error {
 func (p *peer) handleBlockTxn(payload []byte) error {
 	response, err := decodeBlockTxnRuntimePayload(payload)
 	if err != nil {
-		return err
+		return p.requestCompactFullBlockFallbackForOutstanding(err)
 	}
-	req, ok := p.takeCompactOutstandingRequest(response.BlockHash)
+	req, ok := p.popCompactOutstandingRequest()
 	if !ok {
 		return errors.New("unexpected blocktxn response")
 	}
-	if len(response.Transactions) != len(req.MissingIndexes) {
-		return errors.New("blocktxn transaction count mismatch")
+	if response.BlockHash != req.BlockHash {
+		return p.requestCompactFullBlockFallback(req.BlockHash)
 	}
 	txs, err := compactFillResponseTransactions(req, response.Transactions, response.WTxIDs)
 	if err != nil {
-		return err
+		return p.requestCompactFullBlockFallback(req.BlockHash)
 	}
-	return p.processCompactTransactions(req.Header, txs)
+	if err := p.processCompactTransactions(req.Header, txs); err != nil {
+		return p.requestCompactFullBlockFallback(req.BlockHash)
+	}
+	return nil
 }
 
 func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) (compactOutstandingRequest, error) {
@@ -372,6 +375,22 @@ func (p *peer) processCompactTransactions(header [consensus.BLOCK_HEADER_BYTES]b
 		return err
 	}
 	return p.service.requestBlocksIfBehind(p)
+}
+
+func (p *peer) requestCompactFullBlockFallbackForOutstanding(cause error) error {
+	req, ok := p.popCompactOutstandingRequest()
+	if !ok {
+		return cause
+	}
+	return p.requestCompactFullBlockFallback(req.BlockHash)
+}
+
+func (p *peer) requestCompactFullBlockFallback(blockHash [32]byte) error {
+	body, err := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
+	if err != nil {
+		return err
+	}
+	return p.send(messageGetData, body)
 }
 
 func compactBlockBytes(header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte) ([]byte, error) {
@@ -523,7 +542,7 @@ func (p *peer) clearCompactOutstandingRequest() {
 	p.compactMu.Unlock()
 }
 
-func (p *peer) takeCompactOutstandingRequest(blockHash [32]byte) (compactOutstandingRequest, bool) {
+func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil {
@@ -531,7 +550,7 @@ func (p *peer) takeCompactOutstandingRequest(blockHash [32]byte) (compactOutstan
 	}
 	req := cloneCompactOutstandingRequest(*p.compact.outstanding)
 	p.compact.outstanding = nil
-	return req, req.BlockHash == blockHash
+	return req, true
 }
 
 func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, bool) {
