@@ -221,7 +221,6 @@ func TestCompactFillShortIDTransactionsRejectsCumulativeOversize(t *testing.T) {
 		[]prefilledTxn{{Index: 0, Tx: txs[0]}},
 		[]compactShortID{shortID},
 		map[compactShortID][]byte{shortID: {0x01}},
-		0,
 	)
 	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
 		t.Fatalf("compactFillShortIDTransactions err=%v, want cumulative size failure", err)
@@ -242,7 +241,6 @@ func TestCompactFillShortIDTransactionsDoesNotDoubleCountPrefilledBytes(t *testi
 		[]prefilledTxn{{Index: 0, Tx: prefilledTx}},
 		[]compactShortID{shortID},
 		map[compactShortID][]byte{shortID: shortTx},
-		uint64(len(prefilledTx)),
 	)
 	if err != nil {
 		t.Fatalf("compactFillShortIDTransactions double-counted prefilled bytes: %v", err)
@@ -254,14 +252,14 @@ func TestCompactFillShortIDTransactionsDoesNotDoubleCountPrefilledBytes(t *testi
 
 func TestCompactFillShortIDTransactionsRejectsInvalidCompletionShapes(t *testing.T) {
 	shortID := compactShortID{0x61}
-	if err := compactFillShortIDTransactions(make([][]byte, 1), 1, nil, []compactShortID{shortID}, nil, 0); err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
+	if err := compactFillShortIDTransactions(make([][]byte, 1), 1, nil, []compactShortID{shortID}, nil); err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
 		t.Fatalf("missing short-id err=%v, want missing", err)
 	}
-	if err := compactFillShortIDTransactions(make([][]byte, maxCompactRelayEntries+1), maxCompactRelayEntries+1, nil, make([]compactShortID, maxCompactRelayEntries+1), nil, 0); !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+	if err := compactFillShortIDTransactions(make([][]byte, maxCompactRelayEntries+1), maxCompactRelayEntries+1, nil, make([]compactShortID, maxCompactRelayEntries+1), nil); !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
 		t.Fatalf("overflow err=%v", err)
 	}
 	txs := make([][]byte, 2)
-	err := compactFillShortIDTransactions(txs, 2, nil, []compactShortID{shortID}, map[compactShortID][]byte{shortID: minimalBlockTxnTestTxBytes(60)}, 0)
+	err := compactFillShortIDTransactions(txs, 2, nil, []compactShortID{shortID}, map[compactShortID][]byte{shortID: minimalBlockTxnTestTxBytes(60)})
 	if err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
 		t.Fatalf("incomplete staged txs err=%v, want completion failure", err)
 	}

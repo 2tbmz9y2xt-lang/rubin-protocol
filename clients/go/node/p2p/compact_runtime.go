@@ -64,8 +64,9 @@ func (p *peer) remoteCompactMode() compactModeSnapshot {
 }
 
 func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
+	stored := cloneCompactOutstandingRequest(req)
 	p.compactMu.Lock()
-	p.compact.outstanding = &req
+	p.compact.outstanding = &stored
 	p.compactMu.Unlock()
 }
 
@@ -75,7 +76,7 @@ func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, b
 	if p.compact.outstanding == nil {
 		return compactOutstandingRequest{}, false
 	}
-	return *p.compact.outstanding, true
+	return cloneCompactOutstandingRequest(*p.compact.outstanding), true
 }
 
 func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) {
@@ -84,9 +85,16 @@ func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) 
 	if p.compact.outstanding == nil {
 		return compactOutstandingRequest{}, false
 	}
-	req := *p.compact.outstanding
+	req := cloneCompactOutstandingRequest(*p.compact.outstanding)
 	p.compact.outstanding = nil
 	return req, true
+}
+
+func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutstandingRequest {
+	req.MissingIndexes = append([]uint64(nil), req.MissingIndexes...)
+	req.MissingShortIDs = append([]compactShortID(nil), req.MissingShortIDs...)
+	req.Transactions = cloneCompactTransactions(req.Transactions)
+	return req
 }
 
 func (p *peer) blockTxnPayloadCap() uint32 {
