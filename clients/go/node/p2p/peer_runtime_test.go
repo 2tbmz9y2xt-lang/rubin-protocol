@@ -88,6 +88,48 @@ func TestShouldIgnoreAndNormalizeReadError(t *testing.T) {
 	}
 }
 
+func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	limiter := p.postHandshakePayloadCap()
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+		if got := limiter(command); got != 0 {
+			t.Fatalf("pre-negotiation %s cap=%d, want 0", command, got)
+		}
+	}
+
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	limiter = p.postHandshakePayloadCap()
+	p.compactMu.Lock()
+	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1}
+	p.compactMu.Unlock()
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+		if got := limiter(command); got != 0 {
+			t.Fatalf("negotiated %s cap=%d, want 0 until handler slice", command, got)
+		}
+	}
+}
+
+func TestBlockTxnPayloadCapIsOutstandingBounded(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	if got := p.blockTxnPayloadCap(); got != 0 {
+		t.Fatalf("blocktxn cap without outstanding=%d, want 0", got)
+	}
+
+	p.compactMu.Lock()
+	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: 64}
+	p.compactMu.Unlock()
+	if got := p.blockTxnPayloadCap(); got != 64 {
+		t.Fatalf("blocktxn bounded cap=%d, want 64", got)
+	}
+
+	p.compactMu.Lock()
+	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1}
+	p.compactMu.Unlock()
+	if got := p.blockTxnPayloadCap(); got != compactRelayPayloadCap(messageBlockTxn) {
+		t.Fatalf("blocktxn oversized cap=%d, want max %d", got, compactRelayPayloadCap(messageBlockTxn))
+	}
+}
+
 func TestRunDisconnectsOnPartialHeaderTimeoutBeforeFakeFrame(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Millisecond

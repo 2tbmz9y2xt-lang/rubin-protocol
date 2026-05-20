@@ -42,25 +42,40 @@ func compactRelayPayloadCap(command string) uint32 {
 
 func postHandshakePayloadCap(locatorLimit int, headerBatchLimit uint64) payloadLimitFn {
 	return func(command string) uint32 {
-		switch command {
-		case messageVersion:
-			return versionPayloadBytes
-		case messageVerAck, messageGetAddr, messagePing, messagePong:
-			return 0
-		case messageSendCmpct:
-			return compactRelayPayloadCap(command)
-		case messageInv, messageGetData:
-			return inventoryPayloadCap()
-		case messageAddr:
-			return addrPayloadCap()
-		case messageGetBlk:
-			return getBlocksPayloadCap(locatorLimit)
-		case messageHeaders:
-			return headersPayloadCap(headerBatchLimit)
-		case messageBlock, messageTx:
-			return uint32(consensus.MAX_BLOCK_BYTES)
-		default:
-			return 0
+		if cap, ok := fixedPostHandshakePayloadCap(command); ok {
+			return cap
 		}
+		if cap := compactRelayPayloadCap(command); cap != 0 {
+			return cap
+		}
+		return variablePostHandshakePayloadCap(command, locatorLimit, headerBatchLimit)
+	}
+}
+
+func fixedPostHandshakePayloadCap(command string) (uint32, bool) {
+	switch command {
+	case messageVersion:
+		return versionPayloadBytes, true
+	case messageVerAck, messageGetAddr, messagePing, messagePong:
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+func variablePostHandshakePayloadCap(command string, locatorLimit int, headerBatchLimit uint64) uint32 {
+	switch command {
+	case messageInv, messageGetData:
+		return inventoryPayloadCap()
+	case messageAddr:
+		return addrPayloadCap()
+	case messageGetBlk:
+		return getBlocksPayloadCap(locatorLimit)
+	case messageHeaders:
+		return headersPayloadCap(headerBatchLimit)
+	case messageBlock, messageTx:
+		return uint32(consensus.MAX_BLOCK_BYTES)
+	default:
+		return 0
 	}
 }
