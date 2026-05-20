@@ -27,14 +27,8 @@ func TestCompactWireCommandConstantsAndPayloadCaps(t *testing.T) {
 		if (command == messageCmpctBlock || command == messageBlockTxn) && caps[i] <= uint32(consensus.MAX_BLOCK_BYTES) {
 			t.Fatalf("%s explicit cap=%d, want above MAX_BLOCK_BYTES", command, caps[i])
 		}
-		if command == messageSendCmpct {
-			if got := liveCaps(command); got != sendCmpctPayloadBytes {
-				t.Fatalf("%s live cap=%d, want %d", command, got, sendCmpctPayloadBytes)
-			}
-			continue
-		}
-		if got := liveCaps(command); got != 0 {
-			t.Fatalf("%s live cap=%d, want 0 until runtime handler slice", command, got)
+		if got := liveCaps(command); got != caps[i] {
+			t.Fatalf("%s live cap=%d, want %d", command, got, caps[i])
 		}
 	}
 }
@@ -83,6 +77,24 @@ func TestBlockTxnPayloadCodec(t *testing.T) {
 	}
 	if got.BlockHash != want.BlockHash || !reflect.DeepEqual(got.Transactions, want.Transactions) {
 		t.Fatalf("blocktxn roundtrip got=%+v want=%+v", got, want)
+	}
+	runtimePayload, err := decodeBlockTxnRuntimePayload(raw)
+	if err != nil {
+		t.Fatalf("decodeBlockTxnRuntimePayload: %v", err)
+	}
+	_, _, wantWTxID1, _, err := consensus.ParseTx(tx1)
+	if err != nil {
+		t.Fatalf("ParseTx(tx1): %v", err)
+	}
+	_, _, wantWTxID2, _, err := consensus.ParseTx(tx2)
+	if err != nil {
+		t.Fatalf("ParseTx(tx2): %v", err)
+	}
+	if runtimePayload.BlockHash != want.BlockHash || !reflect.DeepEqual(runtimePayload.WTxIDs, [][32]byte{wantWTxID1, wantWTxID2}) {
+		t.Fatalf("runtime blocktxn payload=%+v, want hash %x and WTXIDs", runtimePayload, want.BlockHash)
+	}
+	if !reflect.DeepEqual(runtimePayload.Transactions, want.Transactions) {
+		t.Fatalf("runtime blocktxn transactions=%x, want %x", runtimePayload.Transactions, want.Transactions)
 	}
 }
 

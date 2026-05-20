@@ -35,7 +35,7 @@ func (p *peer) run(ctx context.Context) error {
 			p.conn,
 			networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
 			p.service.cfg.PeerRuntimeConfig.MaxMessageSize,
-			postHandshakePayloadCap(p.service.cfg.LocatorLimit, p.service.cfg.SyncConfig.HeaderBatchLimit),
+			p.postHandshakePayloadCap(),
 		)
 		if err != nil {
 			if shouldIgnoreReadError(err) {
@@ -46,6 +46,16 @@ func (p *peer) run(ctx context.Context) error {
 		if err := p.handleMessage(frame); err != nil {
 			return err
 		}
+	}
+}
+
+func (p *peer) postHandshakePayloadCap() payloadLimitFn {
+	base := postHandshakePayloadCap(p.service.cfg.LocatorLimit, p.service.cfg.SyncConfig.HeaderBatchLimit)
+	return func(command string) uint32 {
+		if isCompactRelayObjectCommand(command) {
+			return 0
+		}
+		return base(command)
 	}
 }
 
@@ -133,6 +143,15 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 		return p.handleGetBlocks(frame.Payload)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
+	}
+}
+
+func isCompactRelayObjectCommand(command string) bool {
+	switch command {
+	case messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
+		return true
+	default:
+		return false
 	}
 }
 

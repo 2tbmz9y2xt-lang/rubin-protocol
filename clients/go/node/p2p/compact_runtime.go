@@ -11,7 +11,13 @@ type compactModeSnapshot struct {
 }
 
 type peerCompactRelayState struct {
-	remoteMode compactModeSnapshot
+	remoteMode  compactModeSnapshot
+	outstanding *compactOutstandingRequest
+}
+
+type compactOutstandingRequest struct {
+	BlockHash          [32]byte
+	BlockTxnPayloadCap uint32
 }
 
 func (p *peer) handleSendCmpct(payload []byte) error {
@@ -47,4 +53,16 @@ func (p *peer) remoteCompactMode() compactModeSnapshot {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	return p.compact.remoteMode
+}
+
+func (p *peer) blockTxnPayloadCap() uint32 {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding == nil {
+		return 0
+	}
+	if maxCap := compactRelayPayloadCap(messageBlockTxn); p.compact.outstanding.BlockTxnPayloadCap > maxCap {
+		return maxCap
+	}
+	return p.compact.outstanding.BlockTxnPayloadCap
 }
