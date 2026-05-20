@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -195,7 +196,7 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 	}
 }
 
-func TestReconstructCompactBlockReportsBoundedMissingForLargeCodecValidPayload(t *testing.T) {
+func TestReconstructCompactBlockFailsClosedWhenMissingRequestExceedsCap(t *testing.T) {
 	exact, err := reconstructCompactBlock(cmpctBlockPayload{ShortIDs: make([]compactShortID, maxCompactRelayEntries)}, nil)
 	if err != nil || len(exact.MissingIndexes) != maxCompactRelayEntries {
 		t.Fatalf("exact max result=%+v err=%v", exact, err)
@@ -203,7 +204,7 @@ func TestReconstructCompactBlockReportsBoundedMissingForLargeCodecValidPayload(t
 	_, err = reconstructCompactBlock(cmpctBlockPayload{
 		ShortIDs: make([]compactShortID, maxCompactRelayEntries+1),
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "too many compact relay missing transactions") {
+	if !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
 		t.Fatalf("overflow err=%v", err)
 	}
 	if exact.MissingIndexes[0] != 0 || exact.MissingIndexes[len(exact.MissingIndexes)-1] != maxCompactRelayEntries-1 {
