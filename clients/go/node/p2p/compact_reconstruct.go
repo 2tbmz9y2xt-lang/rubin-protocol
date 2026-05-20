@@ -223,23 +223,8 @@ type compactOutstandingRequest struct {
 }
 
 func (p *peer) handleCmpctBlock(payload []byte) error {
-	header, blockHash, err := compactBlockHeaderAndHash(payload)
-	if err != nil {
-		return err
-	}
-	if err := p.validateCompactBlockHeader(header); err != nil {
-		return err
-	}
-	fallback, err := p.preflightCompactBlockRuntimeEntries(payload, blockHash)
-	if err != nil || fallback {
-		return err
-	}
-	block, err := decodeCmpctBlockPayload(payload)
-	if err != nil {
-		return err
-	}
-	have, err := p.service.hasBlock(blockHash)
-	if err != nil || have {
+	block, blockHash, done, err := p.prepareCmpctBlock(payload)
+	if err != nil || done {
 		return err
 	}
 	result, err := reconstructCompactBlock(block, compactRelayLocalTransactions(p.service.cfg.TxPool))
@@ -252,6 +237,33 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	if result.Transactions != nil {
 		return p.processCompactTransactions(blockHash, block.Header, result.Transactions)
 	}
+	return p.requestMissingCompactTransactions(block, blockHash, result)
+}
+
+func (p *peer) prepareCmpctBlock(payload []byte) (cmpctBlockPayload, [32]byte, bool, error) {
+	header, blockHash, err := compactBlockHeaderAndHash(payload)
+	if err != nil {
+		return cmpctBlockPayload{}, blockHash, false, err
+	}
+	if err := p.validateCompactBlockHeader(header); err != nil {
+		return cmpctBlockPayload{}, blockHash, false, err
+	}
+	fallback, err := p.preflightCompactBlockRuntimeEntries(payload, blockHash)
+	if err != nil || fallback {
+		return cmpctBlockPayload{}, blockHash, true, err
+	}
+	block, err := decodeCmpctBlockPayload(payload)
+	if err != nil {
+		return cmpctBlockPayload{}, blockHash, false, err
+	}
+	have, err := p.service.hasBlock(blockHash)
+	if err != nil || have {
+		return cmpctBlockPayload{}, blockHash, true, err
+	}
+	return block, blockHash, false, nil
+}
+
+func (p *peer) requestMissingCompactTransactions(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) error {
 	req, err := newCompactOutstandingRequest(block, blockHash, result)
 	if err != nil {
 		return err
@@ -619,21 +631,30 @@ func compactRequestedTransactionsFromBlock(blockBytes []byte, indexes []uint64) 
 	if err != nil {
 		return nil, err
 	}
+	requested, maxRequested, err := compactRequestedIndexPositions(indexes, txCount)
+	if err != nil {
+		return nil, err
+	}
+	return compactScanRequestedTransactions(blockBytes, offset, maxRequested, requested, len(indexes))
+}
+
+func compactRequestedIndexPositions(indexes []uint64, txCount uint64) (map[uint64]int, uint64, error) {
 	requested := make(map[uint64]int, len(indexes))
 	var maxRequested uint64
 	for pos, idx := range indexes {
 		if idx >= txCount {
-			return nil, errors.New("compact relay index out of range")
+			return nil, 0, errors.New("compact relay index out of range")
 		}
 		requested[idx] = pos
 		if idx > maxRequested {
 			maxRequested = idx
 		}
 	}
-	out := make([][]byte, 0, len(indexes))
-	for range indexes {
-		out = append(out, nil)
-	}
+	return requested, maxRequested, nil
+}
+
+func compactScanRequestedTransactions(blockBytes []byte, offset int, maxRequested uint64, requested map[uint64]int, count int) ([][]byte, error) {
+	out := make([][]byte, count)
 	var totalTxBytes uint64
 	for idx := uint64(0); idx <= maxRequested; idx++ {
 		_, _, _, consumed, err := consensus.ParseTx(blockBytes[offset:])
@@ -685,31 +706,39 @@ func validateCompactRequestedIndexShape(indexes []uint64) error {
 func compactRelayLocalTransactions(pool TxPool) [][]byte {
 	switch pool := pool.(type) {
 	case *MemoryTxPool:
-		if pool == nil {
-			return nil
-		}
-		pool.mu.RLock()
-		defer pool.mu.RUnlock()
-		out := make([][]byte, 0, len(pool.txs))
-		for _, entry := range pool.txs {
-			out = append(out, entry.raw)
-		}
-		return out
+		return compactRelayMemoryPoolTransactions(pool)
 	case *CanonicalMempoolTxPool:
-		if pool == nil || pool.mempool == nil {
-			return nil
-		}
-		ids := pool.mempool.AllTxIDs()
-		out := make([][]byte, 0, len(ids))
-		for _, txid := range ids {
-			if tx, ok := pool.mempool.TxByID(txid); ok {
-				out = append(out, tx)
-			}
-		}
-		return out
+		return compactRelayCanonicalPoolTransactions(pool)
 	default:
 		return nil
 	}
+}
+
+func compactRelayMemoryPoolTransactions(pool *MemoryTxPool) [][]byte {
+	if pool == nil {
+		return nil
+	}
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	out := make([][]byte, 0, len(pool.txs))
+	for _, entry := range pool.txs {
+		out = append(out, entry.raw)
+	}
+	return out
+}
+
+func compactRelayCanonicalPoolTransactions(pool *CanonicalMempoolTxPool) [][]byte {
+	if pool == nil || pool.mempool == nil {
+		return nil
+	}
+	ids := pool.mempool.AllTxIDs()
+	out := make([][]byte, 0, len(ids))
+	for _, txid := range ids {
+		if tx, ok := pool.mempool.TxByID(txid); ok {
+			out = append(out, tx)
+		}
+	}
+	return out
 }
 
 func compactTransactionShortID(tx []byte, nonce1, nonce2 uint64) (compactShortID, error) {
