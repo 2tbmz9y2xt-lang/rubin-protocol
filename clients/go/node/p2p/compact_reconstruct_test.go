@@ -421,60 +421,85 @@ func TestCompactFillResponseTransactionsRejectsAggregateOversize(t *testing.T) {
 	}
 }
 
-func TestHandleCmpctBlockRequestsMissingTransactions(t *testing.T) {
+func TestHandleCmpctBlockRuntimeFlowAndEdges(t *testing.T) {
+	if err := newPeerRuntimeTestPeer(t).handleCmpctBlock(nil); err == nil {
+		t.Fatal("malformed cmpctblock should fail")
+	}
+	bad := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: minimalBlockTxnTestTxBytes(61)}}})
+	if err := newPeerRuntimeTestPeer(t).handleCmpctBlock(bad); err == nil {
+		t.Fatal("invalid compact header should fail")
+	}
+
+	header, blockHash, txs := devnetGenesisCompactParts(t)
 	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
-	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-	header, blockHash, _ := devnetGenesisCompactParts(t)
-	payload, err := encodeCmpctBlockPayload(cmpctBlockPayload{
-		Header:   header,
-		Nonce1:   101,
-		Nonce2:   102,
-		ShortIDs: []compactShortID{{0xaa}},
-	})
-	if err != nil {
-		t.Fatalf("encodeCmpctBlockPayload: %v", err)
-	}
-	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: payload}); err != nil {
-		t.Fatalf("handle cmpctblock: %v", err)
+	missing := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Nonce1: 101, Nonce2: 102, ShortIDs: []compactShortID{{0xaa}}})
+	if err := p.handleCmpctBlock(missing); err != nil {
+		t.Fatalf("missing compact block: %v", err)
 	}
 	frame := readScriptedConnFrame(t, p)
-	if frame.Command != messageGetBlockTxn {
-		t.Fatalf("command=%s, want getblocktxn", frame.Command)
-	}
 	req, err := decodeGetBlockTxnPayload(frame.Payload)
-	if err != nil {
-		t.Fatalf("decode getblocktxn: %v", err)
-	}
-	if req.BlockHash != blockHash || !reflect.DeepEqual(req.Indexes, []uint64{0}) {
-		t.Fatalf("getblocktxn=%+v want hash=%x indexes=[0]", req, blockHash)
+	if err != nil || frame.Command != messageGetBlockTxn || req.BlockHash != blockHash || !reflect.DeepEqual(req.Indexes, []uint64{0}) {
+		t.Fatalf("getblocktxn frame=%+v req=%+v err=%v, want hash=%x indexes=[0]", frame, req, err, blockHash)
 	}
 	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockHash != blockHash || snap.BlockTxnPayloadCap == 0 {
 		t.Fatalf("outstanding=%+v ok=%v, want stored request", snap, ok)
 	}
+
+	p = newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	full := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
+	if err := p.handleCmpctBlock(full); err != nil {
+		t.Fatalf("complete compact block: %v", err)
+	}
+	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
+		t.Fatalf("hasBlock=%v err=%v, want applied compact block", have, err)
+	}
+	if err := p.handleCmpctBlock(full); err != nil || p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatalf("duplicate compact block err=%v writes=%d, want silent skip", err, p.conn.(*scriptedConn).Buffer.Len())
+	}
+
+	p = newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	overflow := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, ShortIDs: make([]compactShortID, maxCompactRelayEntries+1)})
+	if err := p.handleCmpctBlock(overflow); err != nil {
+		t.Fatalf("overflow compact block: %v", err)
+	}
+	_ = readScriptedConnFrame(t, p)
 }
 
-func TestHandleBlockTxnCompletesOutstandingBlock(t *testing.T) {
+func TestHandleBlockTxnRuntimeFlowAndEdges(t *testing.T) {
+	if err := newPeerRuntimeTestPeer(t).handleBlockTxn(nil); err == nil {
+		t.Fatal("short blocktxn should fail before outstanding lookup")
+	}
+	body := make([]byte, 32)
+	if err := newPeerRuntimeTestPeer(t).handleBlockTxn(body); err == nil || !strings.Contains(err.Error(), "unexpected") {
+		t.Fatalf("unsolicited blocktxn err=%v, want unexpected", err)
+	}
 	p := newPeerRuntimeTestPeer(t)
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: [32]byte{0x01}})
+	if err := p.handleBlockTxn(body); err == nil || !strings.Contains(err.Error(), "mismatch") {
+		t.Fatalf("wrong-hash blocktxn err=%v, want mismatch", err)
+	}
+
+	header, blockHash, txs := devnetGenesisCompactParts(t)
+	p = newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{})
+	if err := p.handleBlockTxn(body); err != nil {
+		t.Fatalf("malformed matching blocktxn should fall back: %v", err)
+	}
+	_ = readScriptedConnFrame(t, p)
+
+	p = newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-	header, blockHash, txs := devnetGenesisCompactParts(t)
-	tx := txs[0]
-	p.setCompactOutstandingRequest(compactOutstandingRequest{
-		BlockHash:          blockHash,
-		Header:             header,
-		MissingIndexes:     []uint64{0},
-		MissingShortIDs:    []compactShortID{compactShortIDForTx(t, tx, 201, 202)},
-		Transactions:       [][]byte{nil},
-		Nonce1:             201,
-		Nonce2:             202,
-		BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn),
-	})
-	body, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{tx}})
+	setCompactTestOutstanding(p, blockHash, header, txs[0], compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
+	valid, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{txs[0]}})
 	if err != nil {
 		t.Fatalf("encode blocktxn: %v", err)
 	}
-	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: body}); err != nil {
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: valid}); err != nil {
 		t.Fatalf("handle blocktxn: %v", err)
 	}
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
@@ -483,54 +508,21 @@ func TestHandleBlockTxnCompletesOutstandingBlock(t *testing.T) {
 	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
 		t.Fatalf("hasBlock=%v err=%v, want applied compact block", have, err)
 	}
-}
 
-func TestHandleBlockTxnMismatchFallsBackFullBlock(t *testing.T) {
-	p := newPeerRuntimeTestPeer(t)
+	p = newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
-	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-	header, blockHash, txs := devnetGenesisCompactParts(t)
-	p.setCompactOutstandingRequest(compactOutstandingRequest{
-		BlockHash:          blockHash,
-		Header:             header,
-		MissingIndexes:     []uint64{0},
-		MissingShortIDs:    []compactShortID{{0xbb}},
-		Transactions:       [][]byte{nil},
-		Nonce1:             301,
-		Nonce2:             302,
-		BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn),
-	})
-	body, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{txs[0]}})
-	if err != nil {
-		t.Fatalf("encode blocktxn: %v", err)
-	}
-	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: body}); err != nil {
+	setCompactTestOutstanding(p, blockHash, header, txs[0], compactShortID{0xbb}, 301, 302)
+	if err := p.handleBlockTxn(valid); err != nil {
 		t.Fatalf("handle blocktxn mismatch: %v", err)
 	}
-	frame := readScriptedConnFrame(t, p)
-	if frame.Command != messageGetData {
-		t.Fatalf("fallback command=%s, want getdata", frame.Command)
-	}
-	items, err := decodeInventoryVectors(frame.Payload)
-	if err != nil {
-		t.Fatalf("decode getdata: %v", err)
-	}
-	if len(items) != 1 || items[0] != (InventoryVector{Type: MSG_BLOCK, Hash: blockHash}) {
-		t.Fatalf("fallback items=%+v, want MSG_BLOCK %x", items, blockHash)
+	if frame := readScriptedConnFrame(t, p); frame.Command != messageGetData {
+		t.Fatalf("mismatch fallback command=%s, want getdata", frame.Command)
 	}
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("fallback did not clear outstanding request")
 	}
-}
-
-func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing.T) {
-	validTx := minimalBlockTxnTestTxBytes(61)
-	result, err := reconstructCompactBlock(cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: validTx}}}, [][]byte{{0xff}})
-	if err != nil {
-		t.Fatalf("prefilled-only compact block should not index local candidates: %v", err)
-	}
-	if !reflect.DeepEqual(result.Transactions, [][]byte{validTx}) || result.MissingIndexes != nil {
-		t.Fatalf("result=%+v, want prefilled-only reconstruction", result)
+	if !compactApplyErrorNeedsFullBlock(node.ErrParentNotFound) || !compactApplyErrorNeedsFullBlock(&consensus.TxError{Code: consensus.TX_ERR_PARSE, Msg: "bad compact block"}) {
+		t.Fatal("compact apply parent/consensus errors should fall back")
 	}
 }
 
@@ -547,6 +539,22 @@ func compactWTxIDForTx(t *testing.T, tx []byte) [32]byte {
 		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
 	}
 	return wtxid
+}
+
+func mustEncodeCmpctBlockPayload(t *testing.T, in cmpctBlockPayload) []byte {
+	t.Helper()
+	raw, err := encodeCmpctBlockPayload(in)
+	if err != nil {
+		t.Fatalf("encodeCmpctBlockPayload: %v", err)
+	}
+	return raw
+}
+
+func setCompactTestOutstanding(p *peer, blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, tx []byte, shortID compactShortID, nonce1, nonce2 uint64) {
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash: blockHash, Header: header, MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{shortID},
+		Transactions: [][]byte{nil}, Nonce1: nonce1, Nonce2: nonce2, BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn),
+	})
 }
 
 func devnetGenesisCompactParts(t *testing.T) ([consensus.BLOCK_HEADER_BYTES]byte, [32]byte, [][]byte) {

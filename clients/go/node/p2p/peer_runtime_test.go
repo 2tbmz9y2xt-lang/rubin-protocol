@@ -96,6 +96,9 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 			t.Fatalf("pre-negotiation %s cap=%d, want 0", command, got)
 		}
 	}
+	if err := p.handleObjectRelayMessage(message{Command: messageCmpctBlock}); err == nil || !strings.Contains(err.Error(), "not negotiated") {
+		t.Fatalf("unnegotiated compact object err=%v, want not negotiated", err)
+	}
 
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	limiter = p.postHandshakePayloadCap()

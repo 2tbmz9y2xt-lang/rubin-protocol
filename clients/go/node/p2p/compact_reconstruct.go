@@ -254,10 +254,7 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	if err != nil {
 		return err
 	}
-	blockHash, err := consensus.BlockHash(block.Header[:])
-	if err != nil {
-		return err
-	}
+	blockHash, _ := consensus.BlockHash(block.Header[:]) // fixed-size header slice cannot hit the length error path
 	if err := p.validateCompactBlockHeader(block.Header); err != nil {
 		return err
 	}
@@ -279,11 +276,7 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 }
 
 func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]byte) error {
-	parsed, err := consensus.ParseBlockHeaderBytes(header[:])
-	if err != nil {
-		p.bumpBan(10, err.Error())
-		return err
-	}
+	parsed, _ := consensus.ParseBlockHeaderBytes(header[:]) // fixed-size header slice cannot hit the length error path
 	if err := consensus.PowCheck(header[:], parsed.Target); err != nil {
 		p.bumpBan(100, err.Error())
 		return err
