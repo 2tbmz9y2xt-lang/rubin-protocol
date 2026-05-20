@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 const compactDuplicateReportedIndex = ^uint64(0)
@@ -439,6 +440,10 @@ func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []by
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
+		if errors.Is(err, node.ErrParentNotFound) {
+			_, retainErr := p.retainRelayedOrphanIfValid(pb, blockHash, blockBytes)
+			return false, retainErr
+		}
 		return false, err
 	}
 	p.acceptedRelayedBlock(blockHash, summary)

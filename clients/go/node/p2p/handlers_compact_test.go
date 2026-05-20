@@ -139,6 +139,33 @@ func TestBlockTxnFlowPreservesLocalMatchesAcrossResponse(t *testing.T) {
 	assertHarnessTip(t, sink, 1, blockHash)
 }
 
+func TestCompactReconstructedMissingParentIsRetainedAsOrphan(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 2)
+	block := compactTestPayloadFromBlock(t, blockBytes, 23, 24)
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock): %v", err)
+	}
+	_ = mustReadCompactGetBlockTxn(t, p, conn)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, txs)}); err != nil {
+		t.Fatalf("handleMessage(blocktxn): %v", err)
+	}
+	assertOrphanPoolLen(t, sink.service, 1)
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("orphan compact reconstruction wrote %d fallback bytes, want none", conn.Buffer.Len())
+	}
+	if got := p.snapshotState().BanScore; got != 0 {
+		t.Fatalf("orphan compact reconstruction ban score=%d, want 0", got)
+	}
+}
+
 func TestCmpctBlockWithPendingRequestFallsBackNewBlockWithoutOverwrite(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
