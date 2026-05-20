@@ -196,17 +196,18 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 }
 
 func TestReconstructCompactBlockReportsBoundedMissingForLargeCodecValidPayload(t *testing.T) {
-	result, err := reconstructCompactBlock(cmpctBlockPayload{
+	exact, err := reconstructCompactBlock(cmpctBlockPayload{ShortIDs: make([]compactShortID, maxCompactRelayEntries)}, nil)
+	if err != nil || len(exact.MissingIndexes) != maxCompactRelayEntries {
+		t.Fatalf("exact max result=%+v err=%v", exact, err)
+	}
+	_, err = reconstructCompactBlock(cmpctBlockPayload{
 		ShortIDs: make([]compactShortID, maxCompactRelayEntries+1),
 	}, nil)
-	if err != nil {
-		t.Fatalf("reconstructCompactBlock: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "too many compact relay missing transactions") {
+		t.Fatalf("overflow err=%v", err)
 	}
-	if result.Transactions != nil || len(result.MissingIndexes) != maxCompactRelayEntries {
-		t.Fatalf("result=%+v, want bounded missing indexes", result)
-	}
-	if result.MissingIndexes[0] != 0 || result.MissingIndexes[len(result.MissingIndexes)-1] != maxCompactRelayEntries-1 {
-		t.Fatalf("missing bounds got first=%d last=%d", result.MissingIndexes[0], result.MissingIndexes[len(result.MissingIndexes)-1])
+	if exact.MissingIndexes[0] != 0 || exact.MissingIndexes[len(exact.MissingIndexes)-1] != maxCompactRelayEntries-1 {
+		t.Fatalf("missing bounds got first=%d last=%d", exact.MissingIndexes[0], exact.MissingIndexes[len(exact.MissingIndexes)-1])
 	}
 }
 
@@ -259,6 +260,62 @@ func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing
 	}
 }
 
+func TestCompactBlockTxnFlowRequestsMissingTransactions(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestBlockWithoutPrefill(t, blockBytes, 11, 12)
+	_, txs, err := compactTestBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactTestBlockTransactions: %v", err)
+	}
+
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock): %v", err)
+	}
+	req := mustReadCompactGetBlockTxn(t, p, conn)
+	if req.BlockHash != blockHash || !reflect.DeepEqual(req.Indexes, []uint64{0}) {
+		t.Fatalf("getblocktxn=%+v, want block %x index [0]", req, blockHash)
+	}
+	body, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: txs[:1]})
+	if err != nil {
+		t.Fatalf("encodeBlockTxnPayload: %v", err)
+	}
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: body}); err != nil {
+		t.Fatalf("handleMessage(blocktxn): %v", err)
+	}
+	assertHarnessTip(t, sink, 1, blockHash)
+
+}
+
+func TestCompactBlockTxnFallsBackWhenResponseCannotComplete(t *testing.T) {
+	p, conn := compactTestPeerWithConn(newTestHarness(t, 1, "127.0.0.1:0", nil))
+	blockHash := [32]byte{1}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: blockHash, MissingShortIDs: []compactShortID{{2}}, BlockTxnPayloadCap: 64})
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: append(make([]byte, 32), 0)}); err == nil {
+		t.Fatal("wrong blocktxn hash accepted")
+	}
+	if got := p.blockTxnPayloadCap(); got == 0 {
+		t.Fatal("wrong blocktxn hash cleared outstanding request")
+	}
+	body := append(append([]byte(nil), blockHash[:]...), 0)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: body}); err != nil {
+		t.Fatalf("handleMessage(blocktxn fallback): %v", err)
+	}
+	frame, err := readFrame(&conn.Buffer, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if err != nil {
+		t.Fatalf("readFrame: %v", err)
+	}
+	items, err := decodeInventoryVectors(frame.Payload)
+	if err != nil {
+		t.Fatalf("decodeInventoryVectors: %v", err)
+	}
+	if frame.Command != messageGetData || len(items) != 1 || items[0].Type != MSG_BLOCK {
+		t.Fatalf("fallback frame command=%q items=%+v, want getdata MSG_BLOCK", frame.Command, items)
+	}
+}
+
 func compactShortIDForTx(t *testing.T, tx []byte, nonce1, nonce2 uint64) compactShortID {
 	t.Helper()
 	_, _, wtxid, consumed, err := consensus.ParseTx(tx)
@@ -266,4 +323,68 @@ func compactShortIDForTx(t *testing.T, tx []byte, nonce1, nonce2 uint64) compact
 		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
 	}
 	return compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
+}
+
+func compactTestBlockTransactions(blockBytes []byte) ([consensus.BLOCK_HEADER_BYTES]byte, [][]byte, error) {
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	pb, err := consensus.ParseBlockBytes(blockBytes)
+	if err != nil {
+		return header, nil, err
+	}
+	copy(header[:], pb.HeaderBytes)
+	txs := make([][]byte, 0, len(pb.Txs))
+	for _, tx := range pb.Txs {
+		raw, err := consensus.MarshalTx(tx)
+		if err != nil {
+			return header, nil, err
+		}
+		txs = append(txs, raw)
+	}
+	return header, txs, nil
+}
+
+func compactTestBlockWithoutPrefill(t *testing.T, blockBytes []byte, nonce1, nonce2 uint64) cmpctBlockPayload {
+	t.Helper()
+	header, txs, err := compactTestBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactTestBlockTransactions: %v", err)
+	}
+	shortIDs := make([]compactShortID, len(txs))
+	for i, tx := range txs {
+		shortIDs[i] = compactShortIDForTx(t, tx, nonce1, nonce2)
+	}
+	return cmpctBlockPayload{Header: header, Nonce1: nonce1, Nonce2: nonce2, ShortIDs: shortIDs}
+}
+
+func compactTestPeerWithConn(h *testHarness) (*peer, *scriptedConn) {
+	conn := &scriptedConn{}
+	p := testPeerForService(h.service, "rubin-go/test-peer", 1)
+	p.conn = conn
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 2, Version: compactRelayVersion})
+	return p, conn
+}
+
+func mustReadCompactGetBlockTxn(t *testing.T, p *peer, conn *scriptedConn) getBlockTxnPayload {
+	t.Helper()
+	frame, err := readFrame(&conn.Buffer, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if err != nil {
+		t.Fatalf("readFrame: %v", err)
+	}
+	if frame.Command != messageGetBlockTxn {
+		t.Fatalf("command=%q, want getblocktxn", frame.Command)
+	}
+	req, err := decodeGetBlockTxnPayload(frame.Payload)
+	if err != nil {
+		t.Fatalf("decodeGetBlockTxnPayload: %v", err)
+	}
+	return req
+}
+
+func mustEncodeCmpctBlockPayload(t *testing.T, block cmpctBlockPayload) []byte {
+	t.Helper()
+	raw, err := encodeCmpctBlockPayload(block)
+	if err != nil {
+		t.Fatalf("encodeCmpctBlockPayload: %v", err)
+	}
+	return raw
 }
