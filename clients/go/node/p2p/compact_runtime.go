@@ -3,6 +3,8 @@ package p2p
 import (
 	"encoding/binary"
 	"errors"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 type compactModeSnapshot struct {
@@ -17,6 +19,12 @@ type peerCompactRelayState struct {
 
 type compactOutstandingRequest struct {
 	BlockHash          [32]byte
+	Header             [consensus.BLOCK_HEADER_BYTES]byte
+	MissingIndexes     []uint64
+	MissingShortIDs    []compactShortID
+	Transactions       [][]byte
+	Nonce1             uint64
+	Nonce2             uint64
 	BlockTxnPayloadCap uint32
 }
 
@@ -53,6 +61,45 @@ func (p *peer) remoteCompactMode() compactModeSnapshot {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	return p.compact.remoteMode
+}
+
+func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
+	stored := cloneCompactOutstandingRequest(req)
+	p.compactMu.Lock()
+	p.compact.outstanding = &stored
+	p.compactMu.Unlock()
+}
+
+func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, bool) {
+	p.compactMu.Lock()
+	if p.compact.outstanding == nil {
+		p.compactMu.Unlock()
+		return compactOutstandingRequest{}, false
+	}
+	// Stored outstanding requests are immutable; keep large tx-byte cloning outside compactMu.
+	req := *p.compact.outstanding
+	p.compactMu.Unlock()
+	return cloneCompactOutstandingRequest(req), true
+}
+
+func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) {
+	p.compactMu.Lock()
+	if p.compact.outstanding == nil {
+		p.compactMu.Unlock()
+		return compactOutstandingRequest{}, false
+	}
+	// Stored outstanding requests are immutable; keep large tx-byte cloning outside compactMu.
+	req := *p.compact.outstanding
+	p.compact.outstanding = nil
+	p.compactMu.Unlock()
+	return cloneCompactOutstandingRequest(req), true
+}
+
+func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutstandingRequest {
+	req.MissingIndexes = append([]uint64(nil), req.MissingIndexes...)
+	req.MissingShortIDs = append([]compactShortID(nil), req.MissingShortIDs...)
+	req.Transactions = cloneCompactTransactions(req.Transactions)
+	return req
 }
 
 func (p *peer) blockTxnPayloadCap() uint32 {

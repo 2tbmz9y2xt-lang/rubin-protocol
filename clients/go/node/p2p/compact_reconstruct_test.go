@@ -36,6 +36,10 @@ func TestReconstructCompactBlockCompletesExactPositionsFromWTxID(t *testing.T) {
 	if reflect.DeepEqual(result.Transactions[1], tx2) {
 		t.Fatal("result aliases local transaction bytes")
 	}
+	prefilledTx[0] ^= 0xff
+	if reflect.DeepEqual(result.Transactions[0], prefilledTx) {
+		t.Fatal("result aliases prefilled transaction bytes")
+	}
 }
 
 func TestReconstructCompactBlockReportsAbsoluteMissingIndexes(t *testing.T) {
@@ -213,22 +217,82 @@ func TestReconstructCompactBlockFailsClosedWhenMissingRequestExceedsCap(t *testi
 }
 
 func TestCompactFillShortIDTransactionsRejectsCumulativeOversize(t *testing.T) {
-	tx := minimalBlockTxnTestTxBytes(51)
 	shortID := compactShortID{0x51}
-	txs := make([][]byte, 1)
+	txs := [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES), nil}
 	err := compactFillShortIDTransactions(
 		txs,
-		1,
-		nil,
+		2,
+		[]prefilledTxn{{Index: 0, Tx: txs[0]}},
 		[]compactShortID{shortID},
-		map[compactShortID][]byte{shortID: tx},
-		uint64(consensus.MAX_BLOCK_BYTES-len(tx)+1),
+		map[compactShortID][]byte{shortID: {0x01}},
 	)
 	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
 		t.Fatalf("compactFillShortIDTransactions err=%v, want cumulative size failure", err)
 	}
-	if txs[0] != nil {
-		t.Fatalf("compactFillShortIDTransactions mutated txs before validation: %x", txs[0])
+	if txs[1] != nil {
+		t.Fatalf("compactFillShortIDTransactions mutated short-id tx before validation: %x", txs[1])
+	}
+}
+
+func TestCompactFillShortIDTransactionsDoesNotDoubleCountPrefilledBytes(t *testing.T) {
+	prefilledTx := minimalBlockTxnTestTxBytes(50)
+	shortTx := minimalBlockTxnTestTxBytes(51)
+	shortID := compactShortID{0x51}
+	txs := [][]byte{prefilledTx, nil}
+	err := compactFillShortIDTransactions(
+		txs,
+		2,
+		[]prefilledTxn{{Index: 0, Tx: prefilledTx}},
+		[]compactShortID{shortID},
+		map[compactShortID][]byte{shortID: shortTx},
+	)
+	if err != nil {
+		t.Fatalf("compactFillShortIDTransactions double-counted prefilled bytes: %v", err)
+	}
+	if !reflect.DeepEqual(txs[1], shortTx) {
+		t.Fatalf("filled tx=%x, want %x", txs[1], shortTx)
+	}
+	prefilledTx[0], shortTx[0] = 0xff, 0xee
+	if txs[0][0] == 0xff || txs[1][0] == 0xee {
+		t.Fatal("filled txs alias source bytes")
+	}
+}
+
+func TestCompactFillShortIDTransactionsRejectsInvalidCompletionShapes(t *testing.T) {
+	shortID := compactShortID{0x61}
+	if err := compactFillShortIDTransactions(make([][]byte, 1), 1, nil, []compactShortID{shortID}, nil); err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
+		t.Fatalf("missing short-id err=%v, want missing", err)
+	}
+	if err := compactFillShortIDTransactions(make([][]byte, maxCompactRelayEntries+1), maxCompactRelayEntries+1, nil, make([]compactShortID, maxCompactRelayEntries+1), nil); !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		t.Fatalf("overflow err=%v", err)
+	}
+	txs := make([][]byte, 2)
+	err := compactFillShortIDTransactions(txs, 2, nil, []compactShortID{shortID}, map[compactShortID][]byte{shortID: minimalBlockTxnTestTxBytes(60)})
+	if err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
+		t.Fatalf("incomplete staged txs err=%v, want completion failure", err)
+	}
+}
+
+func TestCompactFillOrCollectMissingRecomputesSizeAfterDuplicateReclassification(t *testing.T) {
+	dup := compactShortID{0x01}
+	later := compactShortID{0x02}
+	txs := make([][]byte, 3)
+	missing, _, overflow, err := compactFillOrCollectMissing(
+		txs,
+		3,
+		nil,
+		[]compactShortID{dup, later, dup},
+		map[compactShortID][]byte{
+			dup:   make([]byte, consensus.MAX_BLOCK_BYTES),
+			later: {0x01},
+		},
+		nil,
+	)
+	if err != nil || overflow {
+		t.Fatalf("compactFillOrCollectMissing duplicate reclassification err=%v overflow=%v", err, overflow)
+	}
+	if !reflect.DeepEqual(missing, []uint64{0, 2}) || txs[0] != nil || !reflect.DeepEqual(txs[1], []byte{0x01}) {
+		t.Fatalf("missing=%v txs[0]=%v txs[1]=%v, want late duplicate missing and intervening tx retained", missing, txs[0], txs[1])
 	}
 }
 
@@ -250,6 +314,111 @@ func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	}
 }
 
+func TestNewCompactOutstandingRequestBuildsPartialState(t *testing.T) {
+	tx := minimalBlockTxnTestTxBytes(90)
+	shortID := compactShortIDForTx(t, tx, 91, 92)
+	blockHash := [32]byte{0x33}
+	block := cmpctBlockPayload{Header: [consensus.BLOCK_HEADER_BYTES]byte{0x44}, Nonce1: 91, Nonce2: 92}
+	result := compactReconstructionResult{PartialTransactions: [][]byte{nil, tx}, MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{shortID}}
+	req, err := newCompactOutstandingRequest(block, blockHash, result)
+	if err != nil {
+		t.Fatalf("newCompactOutstandingRequest: %v", err)
+	}
+	wantPayloadCap := uint32(32 + len(consensus.EncodeCompactSize(1)) + maxCompactSizeBytes + consensus.MAX_BLOCK_BYTES - len(tx))
+	if req.BlockHash != blockHash || req.Header != block.Header || req.Nonce1 != block.Nonce1 || req.Nonce2 != block.Nonce2 || req.BlockTxnPayloadCap != wantPayloadCap {
+		t.Fatalf("request metadata mismatch: %+v", req)
+	}
+	if !reflect.DeepEqual(req.MissingIndexes, []uint64{0}) || !reflect.DeepEqual(req.MissingShortIDs, []compactShortID{shortID}) || !reflect.DeepEqual(req.Transactions, [][]byte{nil, tx}) {
+		t.Fatalf("request state mismatch: %+v", req)
+	}
+	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{}); err == nil {
+		t.Fatal("empty missing request should fail")
+	}
+	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{MissingIndexes: []uint64{0}}); err == nil {
+		t.Fatal("mismatched missing short-id request should fail")
+	}
+	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{PartialTransactions: [][]byte{tx}, MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{shortID}}); err == nil {
+		t.Fatal("non-missing partial slot should fail")
+	}
+}
+
+func TestCompactMissingRequestCapPrecedesPartialTableAllocation(t *testing.T) {
+	shortIDs := make([]compactShortID, maxCompactRelayEntries+1)
+	_, _, overflow, err := compactFillOrCollectMissing(nil, len(shortIDs), nil, shortIDs, nil, nil)
+	if err != nil || !overflow {
+		t.Fatal("missing-heavy compact block should hit request cap before partial table allocation")
+	}
+}
+
+func TestCompactBlockTxnResponsePayloadCapUsesRemainingBudget(t *testing.T) {
+	tx := minimalBlockTxnTestTxBytes(93)
+	cap, err := compactBlockTxnResponsePayloadCap([][]byte{tx, nil}, 1)
+	if err != nil {
+		t.Fatalf("compactBlockTxnResponsePayloadCap: %v", err)
+	}
+	want := uint32(32 + len(consensus.EncodeCompactSize(1)) + maxCompactSizeBytes + consensus.MAX_BLOCK_BYTES - len(tx))
+	if cap != want || cap >= compactRelayPayloadCap(messageBlockTxn) {
+		t.Fatalf("cap=%d want=%d and below global cap %d", cap, want, compactRelayPayloadCap(messageBlockTxn))
+	}
+	wantFull := uint32(32 + len(consensus.EncodeCompactSize(maxCompactRelayEntries)) + maxCompactRelayEntries*maxCompactSizeBytes + consensus.MAX_BLOCK_BYTES)
+	if full, err := compactBlockTxnResponsePayloadCap(nil, maxCompactRelayEntries); err != nil || full != wantFull || full >= compactRelayPayloadCap(messageBlockTxn) {
+		t.Fatalf("full missing cap=%d err=%v want %d below global %d", full, err, wantFull, compactRelayPayloadCap(messageBlockTxn))
+	}
+}
+
+func TestCompactFillResponseTransactionsValidatesExpectedShortIDs(t *testing.T) {
+	blockHash := [32]byte{0x71}
+	nonce1, nonce2 := uint64(71), uint64(72)
+	tx1 := minimalBlockTxnTestTxBytes(73)
+	tx2 := minimalBlockTxnTestTxBytes(74)
+	req := compactOutstandingRequest{
+		BlockHash:       blockHash,
+		Transactions:    [][]byte{nil, tx2},
+		MissingIndexes:  []uint64{0},
+		MissingShortIDs: []compactShortID{compactShortIDForTx(t, tx1, nonce1, nonce2)},
+		Nonce1:          nonce1,
+		Nonce2:          nonce2,
+	}
+	response := blockTxnRuntimePayload{BlockHash: blockHash, Transactions: [][]byte{tx1}, WTxIDs: [][32]byte{compactWTxIDForTx(t, tx1)}}
+	filled, err := compactFillResponseTransactions(req, response)
+	if err != nil {
+		t.Fatalf("compactFillResponseTransactions: %v", err)
+	}
+	tx1[0] ^= 0xff
+	if filled[0][0] == tx1[0] {
+		t.Fatal("filled blocktxn response aliases source bytes")
+	}
+	wrongShortIDResponse := blockTxnRuntimePayload{BlockHash: blockHash, Transactions: [][]byte{tx2}, WTxIDs: [][32]byte{compactWTxIDForTx(t, tx2)}}
+	if _, err := compactFillResponseTransactions(req, wrongShortIDResponse); err == nil || !strings.Contains(err.Error(), "short id mismatch") {
+		t.Fatalf("wrong short ID err=%v, want short id mismatch", err)
+	}
+	mismatchedWTxIDResponse := blockTxnRuntimePayload{BlockHash: blockHash, Transactions: [][]byte{tx2}, WTxIDs: [][32]byte{compactWTxIDForTx(t, filled[0])}}
+	if _, err := compactFillResponseTransactions(req, mismatchedWTxIDResponse); err == nil || !strings.Contains(err.Error(), "wtxid mismatch") {
+		t.Fatalf("mismatched response wtxid err=%v, want wtxid mismatch", err)
+	}
+	wrongHashResponse := response
+	wrongHashResponse.BlockHash[0] ^= 0xff
+	if _, err := compactFillResponseTransactions(req, wrongHashResponse); err == nil || !strings.Contains(err.Error(), "block hash mismatch") {
+		t.Fatalf("wrong response block hash err=%v, want block hash mismatch", err)
+	}
+}
+
+func TestCompactFillResponseTransactionsRejectsAggregateOversize(t *testing.T) {
+	nonce1, nonce2 := uint64(81), uint64(82)
+	wtxid := [32]byte{0x01}
+	req := compactOutstandingRequest{
+		Transactions:    [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES), nil},
+		MissingIndexes:  []uint64{1},
+		MissingShortIDs: []compactShortID{compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))},
+		Nonce1:          nonce1,
+		Nonce2:          nonce2,
+	}
+	_, err := compactFillResponseTransactions(req, blockTxnRuntimePayload{Transactions: [][]byte{{0x01}}, WTxIDs: [][32]byte{wtxid}})
+	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
+		t.Fatalf("aggregate oversize err=%v, want block size rejection", err)
+	}
+}
+
 func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing.T) {
 	validTx := minimalBlockTxnTestTxBytes(61)
 	result, err := reconstructCompactBlock(cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: validTx}}}, [][]byte{{0xff}})
@@ -263,9 +432,15 @@ func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing
 
 func compactShortIDForTx(t *testing.T, tx []byte, nonce1, nonce2 uint64) compactShortID {
 	t.Helper()
+	wtxid := compactWTxIDForTx(t, tx)
+	return compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
+}
+
+func compactWTxIDForTx(t *testing.T, tx []byte) [32]byte {
+	t.Helper()
 	_, _, wtxid, consumed, err := consensus.ParseTx(tx)
 	if err != nil || consumed != len(tx) {
 		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
 	}
-	return compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
+	return wtxid
 }
