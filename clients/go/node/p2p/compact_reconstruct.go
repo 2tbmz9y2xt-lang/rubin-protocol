@@ -126,14 +126,10 @@ type compactFillContext struct {
 	missing         []uint64
 	missingShortIDs []compactShortID
 	firstHit        map[compactShortID]uint64
-	totalTxBytes    uint64
 }
 
 func compactFillOrCollectMissing(txs [][]byte, totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, blocked map[compactShortID]bool) ([]uint64, []compactShortID, bool, error) {
-	ctx, err := newCompactFillContext(txs)
-	if err != nil {
-		return nil, nil, false, err
-	}
+	ctx := newCompactFillContext(txs)
 	shortPos, prefilledPos := 0, 0
 	for absoluteIndex := 0; absoluteIndex < totalEntries && shortPos < len(shortIDs); absoluteIndex++ {
 		if compactIndexIsPrefilled(uint64(absoluteIndex), prefilled, &prefilledPos) {
@@ -146,22 +142,20 @@ func compactFillOrCollectMissing(txs [][]byte, totalEntries int, prefilled []pre
 		}
 		shortPos++
 	}
+	if err := compactValidatePresentTransactions(txs, false); err != nil {
+		return nil, nil, false, err
+	}
 	cloneCompactTransactionsInPlace(txs)
 	return ctx.missing, ctx.missingShortIDs, false, nil
 }
 
-func newCompactFillContext(txs [][]byte) (*compactFillContext, error) {
-	totalTxBytes, err := compactPresentTransactionBytes(txs)
-	if err != nil {
-		return nil, err
-	}
+func newCompactFillContext(txs [][]byte) *compactFillContext {
 	return &compactFillContext{
 		txs:             txs,
 		missing:         make([]uint64, 0),
 		missingShortIDs: make([]compactShortID, 0),
 		firstHit:        make(map[compactShortID]uint64),
-		totalTxBytes:    totalTxBytes,
-	}, nil
+	}
 }
 
 func (c *compactFillContext) fill(absoluteIndex uint64, shortID compactShortID, tx []byte, blocked bool) (bool, error) {
@@ -171,12 +165,7 @@ func (c *compactFillContext) fill(absoluteIndex uint64, shortID compactShortID, 
 	if firstIndex, ok := c.firstHit[shortID]; ok {
 		return c.handleDuplicate(firstIndex, absoluteIndex, shortID), nil
 	}
-	nextTotal, err := validateBlockTxnTransactionSize(uint64(len(tx)), c.totalTxBytes)
-	if err != nil {
-		return false, err
-	}
 	c.firstHit[shortID] = absoluteIndex
-	c.totalTxBytes = nextTotal
 	c.txs[int(absoluteIndex)] = tx // #nosec G115 -- absoluteIndex is bounded by totalEntries.
 	return false, nil
 }
@@ -187,8 +176,6 @@ func compactShortIDUnavailable(tx []byte, blocked bool) bool {
 
 func (c *compactFillContext) handleDuplicate(firstIndex uint64, absoluteIndex uint64, shortID compactShortID) bool {
 	if firstIndex != compactDuplicateReportedIndex {
-		firstTx := c.txs[int(firstIndex)] // #nosec G115 -- firstIndex was produced by the bounded fill loop.
-		c.totalTxBytes -= uint64(len(firstTx))
 		c.txs[int(firstIndex)] = nil // #nosec G115 -- firstIndex was produced by the bounded fill loop.
 		c.firstHit[shortID] = compactDuplicateReportedIndex
 		if c.appendMissing(firstIndex, shortID) {

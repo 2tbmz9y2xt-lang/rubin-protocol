@@ -273,7 +273,7 @@ func TestCompactFillOrCollectMissingRecomputesSizeAfterDuplicateReclassification
 		txs,
 		3,
 		nil,
-		[]compactShortID{dup, dup, later},
+		[]compactShortID{dup, later, dup},
 		map[compactShortID][]byte{
 			dup:   make([]byte, consensus.MAX_BLOCK_BYTES),
 			later: {0x01},
@@ -283,8 +283,8 @@ func TestCompactFillOrCollectMissingRecomputesSizeAfterDuplicateReclassification
 	if err != nil || overflow {
 		t.Fatalf("compactFillOrCollectMissing duplicate reclassification err=%v overflow=%v", err, overflow)
 	}
-	if !reflect.DeepEqual(missing, []uint64{0, 1}) || txs[0] != nil || !reflect.DeepEqual(txs[2], []byte{0x01}) {
-		t.Fatalf("missing=%v txs[0]=%v txs[2]=%v, want duplicate missing and later tx retained", missing, txs[0], txs[2])
+	if !reflect.DeepEqual(missing, []uint64{0, 2}) || txs[0] != nil || !reflect.DeepEqual(txs[1], []byte{0x01}) {
+		t.Fatalf("missing=%v txs[0]=%v txs[1]=%v, want late duplicate missing and intervening tx retained", missing, txs[0], txs[1])
 	}
 }
 
