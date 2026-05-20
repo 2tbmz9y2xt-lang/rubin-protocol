@@ -213,22 +213,42 @@ func TestReconstructCompactBlockFailsClosedWhenMissingRequestExceedsCap(t *testi
 }
 
 func TestCompactFillShortIDTransactionsRejectsCumulativeOversize(t *testing.T) {
-	tx := minimalBlockTxnTestTxBytes(51)
 	shortID := compactShortID{0x51}
-	txs := make([][]byte, 1)
+	txs := [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES), nil}
 	err := compactFillShortIDTransactions(
 		txs,
-		1,
-		nil,
+		2,
+		[]prefilledTxn{{Index: 0, Tx: txs[0]}},
 		[]compactShortID{shortID},
-		map[compactShortID][]byte{shortID: tx},
-		uint64(consensus.MAX_BLOCK_BYTES-len(tx)+1),
+		map[compactShortID][]byte{shortID: {0x01}},
+		0,
 	)
 	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
 		t.Fatalf("compactFillShortIDTransactions err=%v, want cumulative size failure", err)
 	}
-	if txs[0] != nil {
-		t.Fatalf("compactFillShortIDTransactions mutated txs before validation: %x", txs[0])
+	if txs[1] != nil {
+		t.Fatalf("compactFillShortIDTransactions mutated short-id tx before validation: %x", txs[1])
+	}
+}
+
+func TestCompactFillShortIDTransactionsDoesNotDoubleCountPrefilledBytes(t *testing.T) {
+	prefilledTx := minimalBlockTxnTestTxBytes(50)
+	shortTx := minimalBlockTxnTestTxBytes(51)
+	shortID := compactShortID{0x51}
+	txs := [][]byte{prefilledTx, nil}
+	err := compactFillShortIDTransactions(
+		txs,
+		2,
+		[]prefilledTxn{{Index: 0, Tx: prefilledTx}},
+		[]compactShortID{shortID},
+		map[compactShortID][]byte{shortID: shortTx},
+		uint64(len(prefilledTx)),
+	)
+	if err != nil {
+		t.Fatalf("compactFillShortIDTransactions double-counted prefilled bytes: %v", err)
+	}
+	if !reflect.DeepEqual(txs[1], shortTx) {
+		t.Fatalf("filled tx=%x, want %x", txs[1], shortTx)
 	}
 }
 

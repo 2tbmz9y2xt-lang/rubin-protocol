@@ -102,7 +102,7 @@ func compactFillPrefilledTransactions(txs [][]byte, prefilled []prefilledTxn) {
 	}
 }
 
-func compactFillShortIDTransactions(txs [][]byte, totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, totalTxBytes uint64) error {
+func compactFillShortIDTransactions(txs [][]byte, totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, _ uint64) error {
 	staged := cloneCompactTransactions(txs)
 	missing, _, overflow, err := compactFillOrCollectMissing(staged, totalEntries, prefilled, shortIDs, index, nil)
 	if overflow {
@@ -114,7 +114,7 @@ func compactFillShortIDTransactions(txs [][]byte, totalEntries int, prefilled []
 	if len(missing) > 0 {
 		return errors.New("compact block transaction missing")
 	}
-	if err := compactValidatePresentTransactionsFrom(staged, true, totalTxBytes); err != nil {
+	if err := compactValidatePresentTransactions(staged, true); err != nil {
 		return err
 	}
 	copy(txs, staged)
