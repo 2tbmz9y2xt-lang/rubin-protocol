@@ -68,11 +68,31 @@ func TestCompactRelayObjectCommandsRequireNegotiation(t *testing.T) {
 	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatalf("non-negotiated compact command left outstanding: %+v", outstanding)
 	}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 2, Version: compactRelayVersion})
+	if got := capFn(messageCmpctBlock); got != 0 {
+		t.Fatalf("disabled compact object cap=%d, want 0 before local enable", got)
+	}
 	enableCompactRelayForTest(p)
 	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
 		if got := capFn(command); got == 0 {
 			t.Fatalf("negotiated %s cap=0, want enabled compact cap", command)
 		}
+	}
+}
+
+func TestCmpctBlockKnownBlockStillValidatesFullPayloadShape(t *testing.T) {
+	h := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, h, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 13, 14)
+	payload := append(mustEncodeCmpctBlockPayload(t, block), 0xff)
+
+	p, conn := compactTestPeerWithConn(h)
+	err := p.handleMessage(message{Command: messageCmpctBlock, Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "cmpctblock payload has trailing bytes") {
+		t.Fatalf("known-block malformed cmpctblock err=%v, want full payload validation", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("known-block malformed cmpctblock wrote %d bytes, want none", conn.Buffer.Len())
 	}
 }
 
@@ -473,6 +493,7 @@ func compactTestPeerWithConn(h *testHarness) (*peer, *scriptedConn) {
 }
 
 func enableCompactRelayForTest(p *peer) {
+	p.service.cfg.CompactRelayObjectsEnabled = true
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 2, Version: compactRelayVersion})
 }
 

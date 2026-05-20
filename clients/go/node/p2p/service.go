@@ -35,6 +35,11 @@ type ServiceConfig struct {
 	TxPool             TxPool
 	TxMetadataFunc     func([]byte) (node.RelayTxMetadata, error)
 	Now                func() time.Time
+	// CompactRelayObjectsEnabled gates Go-only compact object commands until
+	// the Rust runtime lands the matching cmpctblock/getblocktxn/blocktxn
+	// handlers. sendcmpct parsing remains active, but object payload caps and
+	// dispatch stay closed by default for mixed-client parity.
+	CompactRelayObjectsEnabled bool
 }
 
 type Service struct {

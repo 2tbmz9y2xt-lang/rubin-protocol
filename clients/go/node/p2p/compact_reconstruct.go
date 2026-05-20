@@ -242,12 +242,12 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	if err := p.validateCompactBlockHeader(header); err != nil {
 		return err
 	}
-	have, err := p.service.hasBlock(blockHash)
-	if err != nil || have {
-		return err
-	}
 	block, err := decodeCmpctBlockPayload(payload)
 	if err != nil {
+		return err
+	}
+	have, err := p.service.hasBlock(blockHash)
+	if err != nil || have {
 		return err
 	}
 	result, err := reconstructCompactBlock(block, compactRelayLocalTransactions(p.service.cfg.TxPool))

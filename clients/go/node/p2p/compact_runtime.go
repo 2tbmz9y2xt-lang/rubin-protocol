@@ -51,6 +51,9 @@ func (p *peer) remoteCompactMode() compactModeSnapshot {
 }
 
 func (p *peer) compactRelayEnabled() bool {
+	if p == nil || p.service == nil || !p.service.cfg.CompactRelayObjectsEnabled {
+		return false
+	}
 	mode := p.remoteCompactMode()
 	return mode.Version == compactRelayVersion && mode.Mode > 0
 }
