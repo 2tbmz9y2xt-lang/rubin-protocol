@@ -1,9 +1,11 @@
 package p2p
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -212,6 +214,223 @@ func TestCompactValidateTransactionTotalRejectsCumulativeOversize(t *testing.T) 
 	}
 }
 
+func TestCompactReconstructionHelperErrorBranches(t *testing.T) {
+	validTx := minimalBlockTxnTestTxBytes(81)
+	shortID := compactShortIDForTx(t, validTx, 1, 2)
+
+	if _, _, err := compactBlockHeaderAndHash(make([]byte, consensus.MAX_RELAY_MSG_BYTES+1)); err == nil || !strings.Contains(err.Error(), "cmpctblock payload too large") {
+		t.Fatalf("compactBlockHeaderAndHash oversized err=%v, want payload cap", err)
+	}
+	if _, _, err := compactBlockHeaderAndHash(make([]byte, consensus.BLOCK_HEADER_BYTES-1)); err == nil || !strings.Contains(err.Error(), "cmpctblock payload missing header or nonce") {
+		t.Fatalf("compactBlockHeaderAndHash short err=%v, want missing header", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		wantErr string
+	}{
+		{
+			name:    "oversized",
+			payload: make([]byte, consensus.MAX_RELAY_MSG_BYTES+1),
+			wantErr: "cmpctblock payload too large",
+		},
+		{
+			name:    "missing nonce",
+			payload: make([]byte, consensus.BLOCK_HEADER_BYTES+15),
+			wantErr: "cmpctblock payload missing header or nonce",
+		},
+		{
+			name:    "short count varint",
+			payload: append(make([]byte, consensus.BLOCK_HEADER_BYTES+16), 0xfd),
+			wantErr: "EOF",
+		},
+		{
+			name:    "truncated short ids",
+			payload: append(make([]byte, consensus.BLOCK_HEADER_BYTES+16), 0x02, 1, 2, 3, 4, 5),
+			wantErr: "cmpctblock payload truncated short IDs",
+		},
+		{
+			name:    "prefilled count varint",
+			payload: append(make([]byte, consensus.BLOCK_HEADER_BYTES+16), 0x00, 0xfd),
+			wantErr: "EOF",
+		},
+		{
+			name:    "zero entries",
+			payload: append(make([]byte, consensus.BLOCK_HEADER_BYTES+16), 0x00, 0x00),
+			wantErr: "invalid compact relay entry count",
+		},
+	} {
+		if _, err := compactBlockRuntimeEntryCount(tc.payload); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s: compactBlockRuntimeEntryCount err=%v, want %q", tc.name, err, tc.wantErr)
+		}
+	}
+
+	if _, _, err := compactAppendMissingIndex(make([]uint64, maxCompactRelayEntries), nil, 0, shortID); !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		t.Fatalf("compactAppendMissingIndex cap err=%v, want missing request cap", err)
+	}
+	if _, _, err := compactAppendResolvedShortID(make([][]byte, 1), make([]uint64, maxCompactRelayEntries), nil, map[compactShortID]uint64{shortID: 0}, shortID, 0, validTx, false); !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		t.Fatalf("compactAppendResolvedShortID duplicate cap err=%v, want missing request cap", err)
+	}
+	if _, _, err := compactResolveShortIDTransactions(make([][]byte, 1), 1, nil, []compactShortID{shortID}, map[compactShortID][]byte{shortID: validTx}, map[compactShortID]bool{shortID: true}); err != nil {
+		t.Fatalf("compactResolveShortIDTransactions blocked short id should become missing without error: %v", err)
+	}
+
+	if err := compactValidateTransactionTotal([][]byte{nil}); err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
+		t.Fatalf("compactValidateTransactionTotal nil err=%v, want missing tx", err)
+	}
+}
+
+func TestCompactBlockByteAndTransactionHelperErrors(t *testing.T) {
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	validTx := minimalBlockTxnTestTxBytes(82)
+	validBlock, err := compactBlockBytes(header, [][]byte{validTx})
+	if err != nil {
+		t.Fatalf("compactBlockBytes(valid): %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		txs  [][]byte
+		want string
+	}{
+		{name: "empty", txs: nil, want: "compact block has no transactions"},
+		{name: "nil tx", txs: [][]byte{nil}, want: "compact block transaction missing"},
+		{name: "tx too large", txs: [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES+1)}, want: "blocktxn transaction too large"},
+		{name: "block too large", txs: [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES)}, want: "compact block exceeds block size"},
+	} {
+		if _, err := compactBlockBytes(header, tc.txs); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: compactBlockBytes err=%v, want %q", tc.name, err, tc.want)
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		block []byte
+		want  string
+	}{
+		{name: "short", block: make([]byte, consensus.BLOCK_HEADER_BYTES), want: "block too short"},
+		{name: "bad varint", block: append(make([]byte, consensus.BLOCK_HEADER_BYTES), 0xfd), want: "EOF"},
+		{name: "zero tx count", block: append(make([]byte, consensus.BLOCK_HEADER_BYTES), 0x00), want: "invalid compact relay entry count"},
+		{name: "bad tx", block: append(make([]byte, consensus.BLOCK_HEADER_BYTES), 0x01, 0x00), want: "unexpected EOF"},
+		{name: "trailing", block: append(append([]byte(nil), validBlock...), 0xff), want: "trailing bytes after tx list"},
+	} {
+		if _, _, err := compactBlockTransactions(tc.block); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: compactBlockTransactions err=%v, want %q", tc.name, err, tc.want)
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		block []byte
+		want  string
+	}{
+		{name: "short", block: make([]byte, consensus.BLOCK_HEADER_BYTES), want: "block too short"},
+		{name: "bad varint", block: append(make([]byte, consensus.BLOCK_HEADER_BYTES), 0xfd), want: "EOF"},
+		{name: "zero tx count", block: append(make([]byte, consensus.BLOCK_HEADER_BYTES), 0x00), want: "invalid compact relay entry count"},
+	} {
+		if _, _, err := compactBlockTransactionCount(tc.block); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: compactBlockTransactionCount err=%v, want %q", tc.name, err, tc.want)
+		}
+	}
+
+	if got, err := compactRequestedTransactionsFromBlock(validBlock, nil); err != nil || len(got) != 0 {
+		t.Fatalf("compactRequestedTransactionsFromBlock empty indexes=%x err=%v, want empty", got, err)
+	}
+	if _, err := compactRequestedTransactionsFromBlock(validBlock, []uint64{1}); err == nil || !strings.Contains(err.Error(), "compact relay index out of range") {
+		t.Fatalf("compactRequestedTransactionsFromBlock high in-block index err=%v, want out of range", err)
+	}
+	if _, err := compactRequestedTransactionsFromBlock(append(make([]byte, consensus.BLOCK_HEADER_BYTES), 0x01, 0x00), []uint64{0}); err == nil || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("compactRequestedTransactionsFromBlock bad tx err=%v, want parse error", err)
+	}
+	secondTx := minimalBlockTxnTestTxBytes(83)
+	twoTxBlock, err := compactBlockBytes(header, [][]byte{validTx, secondTx})
+	if err != nil {
+		t.Fatalf("compactBlockBytes(two): %v", err)
+	}
+	if got, err := compactRequestedTransactionsFromBlock(twoTxBlock, []uint64{1}); err != nil || !reflect.DeepEqual(got, [][]byte{secondTx}) {
+		t.Fatalf("compactRequestedTransactionsFromBlock index 1=%x err=%v, want second tx", got, err)
+	}
+}
+
+func TestCompactFallbackAndOutstandingHelperBranches(t *testing.T) {
+	if !errors.Is(compactFullBlockFallbackError(nil), errCompactFullBlockFallbackRequired) {
+		t.Fatal("compactFullBlockFallbackError(nil) did not preserve fallback sentinel")
+	}
+	if !compactTxErrorNeedsFallback(consensus.ErrorCode("TX_ERR_TEST")) {
+		t.Fatal("TX_ERR_* should require compact full-block fallback")
+	}
+	if !compactTxErrorNeedsFallback(consensus.BLOCK_ERR_DA_BATCH_EXCEEDED) {
+		t.Fatal("DA body error should require compact full-block fallback")
+	}
+	if compactTxErrorNeedsFallback(consensus.BLOCK_ERR_TARGET_INVALID) {
+		t.Fatal("header-context target error must not be hidden by full-block fallback")
+	}
+
+	p := newPeerRuntimeTestPeer(t)
+	cause := errors.New("test cause")
+	if got := p.requestCompactFullBlockFallbackForOutstanding(cause); got != cause {
+		t.Fatalf("requestCompactFullBlockFallbackForOutstanding no outstanding=%v, want original cause", got)
+	}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:       [32]byte{0x01},
+		MissingIndexes:  []uint64{0},
+		MissingShortIDs: []compactShortID{{0x01}},
+		Transactions:    make([][]byte, 1),
+	})
+	p.clearCompactOutstandingRequest()
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("clearCompactOutstandingRequest left outstanding=%+v", outstanding)
+	}
+
+	bare := &peer{}
+	if bare.compactOutstandingTTL() != defaultCompactOutstandingTTL {
+		t.Fatalf("bare peer TTL=%s, want default", bare.compactOutstandingTTL())
+	}
+	if bare.compactNow().Before(time.Unix(1, 0)) {
+		t.Fatalf("bare peer compactNow returned invalid timestamp")
+	}
+
+	if got := compactRelayLocalTransactions((*MemoryTxPool)(nil)); got != nil {
+		t.Fatalf("nil MemoryTxPool local txs=%x, want nil", got)
+	}
+	if got := compactRelayLocalTransactions((*CanonicalMempoolTxPool)(nil)); got != nil {
+		t.Fatalf("nil CanonicalMempoolTxPool local txs=%x, want nil", got)
+	}
+	if got := compactRelayLocalTransactions(&CanonicalMempoolTxPool{}); got != nil {
+		t.Fatalf("empty CanonicalMempoolTxPool local txs=%x, want nil", got)
+	}
+	if got := compactRelayLocalTransactions(compactNoopTxPool{}); got != nil {
+		t.Fatalf("unsupported TxPool local txs=%x, want nil", got)
+	}
+	if _, err := compactTransactionShortID([]byte{0x00}, 1, 2); err == nil || !strings.Contains(err.Error(), "compact local transaction is non-canonical") {
+		t.Fatalf("compactTransactionShortID malformed err=%v, want canonical error", err)
+	}
+}
+
+func TestCompactOutstandingRequestValidationBranches(t *testing.T) {
+	if _, err := newCompactOutstandingRequest(cmpctBlockPayload{}, [32]byte{}, compactReconstructionResult{}); err == nil || !strings.Contains(err.Error(), "compact reconstruction missing request mismatch") {
+		t.Fatalf("newCompactOutstandingRequest empty err=%v, want mismatch", err)
+	}
+	tx := minimalBlockTxnTestTxBytes(84)
+	shortID, err := compactTransactionShortID(tx, 0, 0)
+	if err != nil {
+		t.Fatalf("compactTransactionShortID: %v", err)
+	}
+	_, _, wtxid, consumed, err := consensus.ParseTx(tx)
+	if err != nil || consumed != len(tx) {
+		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
+	}
+	req := compactOutstandingRequest{
+		MissingIndexes:  []uint64{1},
+		MissingShortIDs: []compactShortID{shortID},
+		Transactions:    make([][]byte, 1),
+	}
+	if _, err := compactFillResponseTransactions(req, [][]byte{tx}, [][32]byte{wtxid}); err == nil || !strings.Contains(err.Error(), "compact relay index out of range") {
+		t.Fatalf("compactFillResponseTransactions out-of-range err=%v, want range error", err)
+	}
+}
+
 func TestCompactRequestedTransactionsRejectsDuplicateBeforeBlockScan(t *testing.T) {
 	var header [consensus.BLOCK_HEADER_BYTES]byte
 	blockBytes, err := compactBlockBytes(header, [][]byte{minimalBlockTxnTestTxBytes(71), minimalBlockTxnTestTxBytes(72)})
@@ -271,4 +490,12 @@ func compactShortIDForTx(t *testing.T, tx []byte, nonce1, nonce2 uint64) compact
 		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
 	}
 	return compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
+}
+
+type compactNoopTxPool struct{}
+
+func (compactNoopTxPool) Get([32]byte) ([]byte, bool) { return nil, false }
+func (compactNoopTxPool) Has([32]byte) bool           { return false }
+func (compactNoopTxPool) Put([32]byte, []byte, uint64, int) bool {
+	return false
 }
