@@ -256,6 +256,40 @@ func TestGetBlockTxnRespondsWithRequestedTransactions(t *testing.T) {
 	}
 }
 
+func TestGetBlockTxnRejectsDuplicateIndexesBeforeResponse(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	blockHash, _ := testHarnessBlockAtHeight(t, source, 1)
+	p, conn := compactTestPeerWithConn(source)
+
+	err := p.handleMessage(message{Command: messageGetBlockTxn, Payload: mustEncodeGetBlockTxnForHash(t, blockHash, []uint64{0, 0})})
+	if err == nil || !strings.Contains(err.Error(), "duplicate compact relay index") {
+		t.Fatalf("handleMessage(getblocktxn duplicate) err=%v, want duplicate rejection", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("duplicate getblocktxn wrote %d bytes, want no response", conn.Buffer.Len())
+	}
+}
+
+func TestCmpctBlockMissingAboveRequestCapDefersFallbackWithoutRequest(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 51, 52)
+	block.ShortIDs = make([]compactShortID, maxCompactRelayEntries+1)
+
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock many missing): %v", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("many-missing cmpctblock wrote %d bytes, want no getblocktxn in RUB-326", conn.Buffer.Len())
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("many-missing cmpctblock left outstanding: %+v", outstanding)
+	}
+	assertHarnessTip(t, sink, 0, nodeGenesisHash(t, sink))
+}
+
 func compactTestMinedBlockWithSpend(t *testing.T) (*testHarness, *testHarness, [32]byte, []byte, []byte) {
 	t.Helper()
 	source := newTestHarness(t, 1, "127.0.0.1:0", nil)

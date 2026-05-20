@@ -8,6 +8,8 @@ import (
 
 const compactDuplicateReportedIndex = ^uint64(0)
 
+var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing indexes")
+
 type compactReconstructionResult struct {
 	Transactions        [][]byte
 	PartialTransactions [][]byte
@@ -153,8 +155,11 @@ func compactAppendResolvedShortID(
 	if firstIndex, ok := firstHit[shortID]; ok {
 		if firstIndex != compactDuplicateReportedIndex {
 			txs[int(firstIndex)] = nil // #nosec G115 -- firstIndex was captured from bounded loop index.
-			missing = append(missing, firstIndex)
-			missingShortIDs = append(missingShortIDs, shortID)
+			var err error
+			missing, missingShortIDs, err = compactAppendMissingIndex(missing, missingShortIDs, firstIndex, shortID)
+			if err != nil {
+				return nil, nil, err
+			}
 			firstHit[shortID] = compactDuplicateReportedIndex
 		}
 		return compactAppendMissingIndex(missing, missingShortIDs, absoluteIndex, shortID)
@@ -166,7 +171,7 @@ func compactAppendResolvedShortID(
 
 func compactAppendMissingIndex(missing []uint64, missingShortIDs []compactShortID, absoluteIndex uint64, shortID compactShortID) ([]uint64, []compactShortID, error) {
 	if len(missing) >= maxCompactRelayEntries {
-		return nil, nil, errors.New("too many compact relay missing indexes")
+		return nil, nil, errCompactRelayMissingRequestTooLarge
 	}
 	return append(missing, absoluteIndex), append(missingShortIDs, shortID), nil
 }
@@ -242,6 +247,9 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 		return err
 	}
 	result, err := reconstructCompactBlock(block, compactRelayLocalTransactions(p.service.cfg.TxPool))
+	if errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -421,14 +429,34 @@ func compactBlockTransactions(blockBytes []byte) ([consensus.BLOCK_HEADER_BYTES]
 }
 
 func compactRequestedTransactions(txs [][]byte, indexes []uint64) ([][]byte, error) {
+	if err := validateCompactRequestedTransactionIndexes(txs, indexes); err != nil {
+		return nil, err
+	}
 	out := make([][]byte, 0, len(indexes))
 	for _, idx := range indexes {
-		if idx >= uint64(len(txs)) {
-			return nil, errors.New("compact relay index out of range")
-		}
 		out = append(out, append([]byte(nil), txs[int(idx)]...)) // #nosec G115 -- idx is bounded by len(txs) above.
 	}
 	return out, nil
+}
+
+func validateCompactRequestedTransactionIndexes(txs [][]byte, indexes []uint64) error {
+	seen := make(map[uint64]struct{}, len(indexes))
+	var totalTxBytes uint64
+	for _, idx := range indexes {
+		if idx >= uint64(len(txs)) {
+			return errors.New("compact relay index out of range")
+		}
+		if _, ok := seen[idx]; ok {
+			return errors.New("duplicate compact relay index")
+		}
+		seen[idx] = struct{}{}
+		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(txs[int(idx)])), totalTxBytes) // #nosec G115 -- idx is bounded by len(txs) above.
+		if err != nil {
+			return err
+		}
+		totalTxBytes = nextTotal
+	}
+	return nil
 }
 
 func compactRelayLocalTransactions(pool TxPool) [][]byte {
