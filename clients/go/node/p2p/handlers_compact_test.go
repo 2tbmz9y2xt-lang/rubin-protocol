@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 func TestCompactBlockTxnFlowRequestsAndAcceptsMatchingResponse(t *testing.T) {
@@ -294,6 +295,40 @@ func TestCompactRelayedBlockPropagatesLocalServiceErrors(t *testing.T) {
 				t.Fatalf("local %s wrote %d fallback bytes, want none", tc.name, conn.Buffer.Len())
 			}
 		})
+	}
+}
+
+func TestCompactRelayedBlockRecordsHeaderContextConsensusErrors(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 43, 44)
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+	wrongTarget := consensus.POW_LIMIT
+	wrongTarget[0] = 0x7f
+	syncEngine, err := node.NewSyncEngine(
+		sink.chainState,
+		sink.blockStore,
+		node.DefaultSyncConfig(&wrongTarget, node.DevnetGenesisChainID(), node.ChainStatePath(t.TempDir())),
+	)
+	if err != nil {
+		t.Fatalf("NewSyncEngine(wrong target): %v", err)
+	}
+	sink.service.cfg.SyncEngine = syncEngine
+
+	p, conn := compactTestPeerWithConn(sink)
+	err = p.processCompactTransactions(blockHash, block.Header, txs)
+	if err == nil || !strings.Contains(err.Error(), string(consensus.BLOCK_ERR_TARGET_INVALID)) {
+		t.Fatalf("processCompactTransactions err=%v, want target invalid", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("target-invalid compact block wrote %d fallback bytes, want none", conn.Buffer.Len())
+	}
+	if state := p.snapshotState(); state.BanScore < 100 {
+		t.Fatalf("ban_score=%d, want >= 100 for header-context consensus error", state.BanScore)
 	}
 }
 

@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -502,6 +503,7 @@ func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []by
 		if compactApplyErrorNeedsFallback(err) {
 			return false, compactFullBlockFallbackError(err)
 		}
+		p.recordRelayedBlockApplyError(err)
 		return false, err
 	}
 	p.acceptedRelayedBlock(blockHash, summary)
@@ -520,7 +522,33 @@ func compactApplyErrorNeedsFallback(err error) bool {
 		return true
 	}
 	var txErr *consensus.TxError
-	return errors.As(err, &txErr)
+	if !errors.As(err, &txErr) {
+		return false
+	}
+	return compactTxErrorNeedsFallback(txErr.Code)
+}
+
+func compactTxErrorNeedsFallback(code consensus.ErrorCode) bool {
+	if strings.HasPrefix(string(code), "TX_ERR_") {
+		return true
+	}
+	switch code {
+	case consensus.BLOCK_ERR_PARSE,
+		consensus.BLOCK_ERR_WEIGHT_EXCEEDED,
+		consensus.BLOCK_ERR_ANCHOR_BYTES_EXCEEDED,
+		consensus.BLOCK_ERR_MERKLE_INVALID,
+		consensus.BLOCK_ERR_WITNESS_COMMITMENT,
+		consensus.BLOCK_ERR_COINBASE_INVALID,
+		consensus.BLOCK_ERR_SUBSIDY_EXCEEDED,
+		consensus.BLOCK_ERR_DA_INCOMPLETE,
+		consensus.BLOCK_ERR_DA_CHUNK_HASH_INVALID,
+		consensus.BLOCK_ERR_DA_SET_INVALID,
+		consensus.BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID,
+		consensus.BLOCK_ERR_DA_BATCH_EXCEEDED:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *peer) requestCompactFullBlockFallbackForOutstanding(cause error) error {
