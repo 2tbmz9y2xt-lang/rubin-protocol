@@ -577,6 +577,41 @@ func TestBlockTxnLateAllowanceExpires(t *testing.T) {
 	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
 }
 
+func TestCompactOutstandingClearsWhenBlockIsLearnedExternally(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	hashA, bytesA := testHarnessBlockAtHeight(t, source, 1)
+	hashB, bytesB := testHarnessBlockAtHeight(t, source, 2)
+	blockA := compactTestPayloadFromBlock(t, bytesA, 61, 62)
+	blockB := compactTestPayloadFromBlock(t, bytesB, 63, 64)
+	p, conn := compactTestPeerWithConn(sink)
+
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, blockA)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock A): %v", err)
+	}
+	reqA := mustReadCompactGetBlockTxn(t, p, conn)
+	if reqA.BlockHash != hashA {
+		t.Fatalf("request A hash=%x, want %x", reqA.BlockHash, hashA)
+	}
+	assertCompactCommandCapEnabled(t, p.postHandshakePayloadCap(), messageBlockTxn)
+	if _, err := sink.syncEngine.ApplyBlock(bytesA, nil); err != nil {
+		t.Fatalf("external ApplyBlock(A): %v", err)
+	}
+	assertHarnessTip(t, sink, 1, hashA)
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
+	assertNoCompactOutstanding(t, p, "externally learned block")
+
+	conn.Buffer.Reset()
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, blockB)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock B): %v", err)
+	}
+	reqB := mustReadCompactGetBlockTxn(t, p, conn)
+	if reqB.BlockHash != hashB {
+		t.Fatalf("request B hash=%x, want %x", reqB.BlockHash, hashB)
+	}
+	assertCompactOutstandingHash(t, p, hashB)
+}
+
 func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	enableCompactRelayForTest(p)
