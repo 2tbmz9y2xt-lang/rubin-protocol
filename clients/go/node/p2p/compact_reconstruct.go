@@ -328,10 +328,7 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 		p.bumpBan(10, err.Error())
 		return err
 	}
-	req, ok = p.popCompactOutstandingRequest()
-	if !ok {
-		return errors.New("unexpected blocktxn response")
-	}
+	req, _ = p.popCompactOutstandingRequest() // snapshot above guarantees presence in the single-reader peer loop.
 	txs, err := compactFillResponseTransactions(req, response)
 	if err != nil {
 		p.bumpBan(10, err.Error())
@@ -345,41 +342,40 @@ func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.
 	if err != nil {
 		return p.requestCompactFullBlockFallback(blockHash)
 	}
-	accepted, fallback, err := p.processCompactRelayedBlock(blockHash, blockBytes, fallbackOnApply)
+	if !fallbackOnApply {
+		return p.handleBlock(blockBytes)
+	}
+	fallback, err := p.processCompactRelayedBlockWithFallback(blockHash, blockBytes)
 	if fallback {
 		return p.requestCompactFullBlockFallback(blockHash)
 	}
-	if err != nil || !accepted {
+	if err != nil {
 		return err
 	}
 	return p.service.requestBlocksIfBehind(p)
 }
 
-func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []byte, fallbackOnApply bool) (bool, bool, error) {
+func (p *peer) processCompactRelayedBlockWithFallback(expectedHash [32]byte, blockBytes []byte) (bool, error) {
 	pb, blockHash, err := parseRelayedBlock(blockBytes)
 	if err != nil || pb == nil || blockHash != expectedHash {
-		return false, true, err
+		return true, err
 	}
 	have, err := p.service.hasBlock(blockHash)
 	if err != nil || have {
-		return false, false, err
+		return false, err
 	}
 	p.service.chainMu.Lock()
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
-		if errors.Is(err, node.ErrParentNotFound) && !fallbackOnApply {
-			_, err := p.retainRelayedOrphanIfValid(pb, blockHash, blockBytes)
-			return false, false, err
-		}
-		if fallbackOnApply && (errors.Is(err, node.ErrParentNotFound) || isConsensusApplyBlockError(err)) {
-			return false, true, err
+		if errors.Is(err, node.ErrParentNotFound) || isConsensusApplyBlockError(err) {
+			return true, err
 		}
 		p.recordRelayedBlockApplyError(err)
-		return false, false, err
+		return false, err
 	}
 	p.acceptedRelayedBlock(blockHash, summary)
-	return true, false, nil
+	return false, nil
 }
 
 func (p *peer) requestCompactFullBlockFallback(blockHash [32]byte) error {
