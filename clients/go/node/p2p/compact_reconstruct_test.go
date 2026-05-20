@@ -252,6 +252,21 @@ func TestCompactFillShortIDTransactionsDoesNotDoubleCountPrefilledBytes(t *testi
 	}
 }
 
+func TestCompactFillShortIDTransactionsRejectsInvalidCompletionShapes(t *testing.T) {
+	shortID := compactShortID{0x61}
+	if err := compactFillShortIDTransactions(make([][]byte, 1), 1, nil, []compactShortID{shortID}, nil, 0); err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
+		t.Fatalf("missing short-id err=%v, want missing", err)
+	}
+	if err := compactFillShortIDTransactions(make([][]byte, maxCompactRelayEntries+1), maxCompactRelayEntries+1, nil, make([]compactShortID, maxCompactRelayEntries+1), nil, 0); !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		t.Fatalf("overflow err=%v", err)
+	}
+	txs := make([][]byte, 2)
+	err := compactFillShortIDTransactions(txs, 2, nil, []compactShortID{shortID}, map[compactShortID][]byte{shortID: minimalBlockTxnTestTxBytes(60)}, 0)
+	if err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
+		t.Fatalf("incomplete staged txs err=%v, want completion failure", err)
+	}
+}
+
 func TestCompactFillOrCollectMissingRecomputesSizeAfterDuplicateReclassification(t *testing.T) {
 	dup := compactShortID{0x01}
 	later := compactShortID{0x02}
@@ -290,6 +305,31 @@ func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	_, err = compactLocalTxIndex([][]byte{append(minimalBlockTxnTestTxBytes(54), 0x00)}, nonce1, nonce2)
 	if err == nil || !strings.Contains(err.Error(), "compact local transaction is non-canonical") {
 		t.Fatalf("compactLocalTxIndex noncanonical err=%v", err)
+	}
+}
+
+func TestNewCompactOutstandingRequestCopiesPartialState(t *testing.T) {
+	tx := minimalBlockTxnTestTxBytes(90)
+	shortID := compactShortIDForTx(t, tx, 91, 92)
+	blockHash := [32]byte{0x33}
+	block := cmpctBlockPayload{Header: [consensus.BLOCK_HEADER_BYTES]byte{0x44}, Nonce1: 91, Nonce2: 92}
+	result := compactReconstructionResult{PartialTransactions: [][]byte{nil, tx}, MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{shortID}}
+	req, err := newCompactOutstandingRequest(block, blockHash, result)
+	if err != nil {
+		t.Fatalf("newCompactOutstandingRequest: %v", err)
+	}
+	if req.BlockHash != blockHash || req.Header != block.Header || req.Nonce1 != block.Nonce1 || req.Nonce2 != block.Nonce2 || req.BlockTxnPayloadCap != compactRelayPayloadCap(messageBlockTxn) {
+		t.Fatalf("request metadata mismatch: %+v", req)
+	}
+	result.MissingIndexes[0], result.MissingShortIDs[0], result.PartialTransactions[1][0] = 7, compactShortID{0x55}, 0xff
+	if !reflect.DeepEqual(req.MissingIndexes, []uint64{0}) || !reflect.DeepEqual(req.MissingShortIDs, []compactShortID{shortID}) || req.Transactions[1][0] == 0xff {
+		t.Fatalf("request aliases reconstruction result: %+v", req)
+	}
+	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{}); err == nil {
+		t.Fatal("empty missing request should fail")
+	}
+	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{MissingIndexes: []uint64{0}}); err == nil {
+		t.Fatal("mismatched missing short-id request should fail")
 	}
 }
 

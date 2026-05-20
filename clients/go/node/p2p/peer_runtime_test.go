@@ -109,22 +109,33 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 
 func TestBlockTxnPayloadCapIsOutstandingBounded(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("snapshot without outstanding should be absent")
+	}
+	if _, ok := p.popCompactOutstandingRequest(); ok {
+		t.Fatal("pop without outstanding should be absent")
+	}
 	if got := p.blockTxnPayloadCap(); got != 0 {
 		t.Fatalf("blocktxn cap without outstanding=%d, want 0", got)
 	}
 
-	p.compactMu.Lock()
-	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: 64}
-	p.compactMu.Unlock()
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: 64})
+	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockTxnPayloadCap != 64 {
+		t.Fatalf("snapshot cap=%+v ok=%v, want 64", snap, ok)
+	}
 	if got := p.blockTxnPayloadCap(); got != 64 {
 		t.Fatalf("blocktxn bounded cap=%d, want 64", got)
 	}
 
-	p.compactMu.Lock()
-	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1}
-	p.compactMu.Unlock()
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1})
 	if got := p.blockTxnPayloadCap(); got != compactRelayPayloadCap(messageBlockTxn) {
 		t.Fatalf("blocktxn oversized cap=%d, want max %d", got, compactRelayPayloadCap(messageBlockTxn))
+	}
+	if popped, ok := p.popCompactOutstandingRequest(); !ok || popped.BlockTxnPayloadCap != compactRelayPayloadCap(messageBlockTxn)+1 {
+		t.Fatalf("popped cap=%+v ok=%v, want oversized request", popped, ok)
+	}
+	if got := p.blockTxnPayloadCap(); got != 0 {
+		t.Fatalf("blocktxn cap after pop=%d, want 0", got)
 	}
 }
 
