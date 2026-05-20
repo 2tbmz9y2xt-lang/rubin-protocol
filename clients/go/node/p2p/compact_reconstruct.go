@@ -58,9 +58,6 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 			MissingShortIDs:     missingShortIDs,
 		}, nil
 	}
-	if err := compactValidateTransactionTotal(txs); err != nil {
-		return compactReconstructionResult{}, err
-	}
 	return compactReconstructionResult{Transactions: cloneCompactTransactions(txs)}, nil
 }
 
@@ -212,21 +209,6 @@ func compactLocalTxWTxID(tx []byte) ([32]byte, error) {
 		return zero, errors.New("compact local transaction is non-canonical")
 	}
 	return wtxid, nil
-}
-
-func compactValidateTransactionTotal(txs [][]byte) error {
-	var totalTxBytes uint64
-	for _, tx := range txs {
-		if tx == nil {
-			return errors.New("compact block transaction missing")
-		}
-		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(tx)), totalTxBytes)
-		if err != nil {
-			return err
-		}
-		totalTxBytes = nextTotal
-	}
-	return nil
 }
 
 type compactOutstandingRequest struct {
@@ -684,7 +666,7 @@ func compactBlockTransactionCount(blockBytes []byte) (uint64, int, error) {
 func validateCompactRequestedIndexShape(indexes []uint64) error {
 	seen := make(map[uint64]struct{}, len(indexes))
 	for _, idx := range indexes {
-		if idx >= maxCompactRelayEntries {
+		if idx > maxCompactRelayIndexValue {
 			return errors.New("compact relay index exceeds runtime cap")
 		}
 		if _, ok := seen[idx]; ok {

@@ -206,14 +206,6 @@ func TestReconstructCompactBlockRejectsMissingAboveRequestCap(t *testing.T) {
 	}
 }
 
-func TestCompactValidateTransactionTotalRejectsCumulativeOversize(t *testing.T) {
-	txs := [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES), []byte{0x01}}
-	err := compactValidateTransactionTotal(txs)
-	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
-		t.Fatalf("compactValidateTransactionTotal err=%v, want cumulative size failure", err)
-	}
-}
-
 func TestCompactReconstructionHelperErrorBranches(t *testing.T) {
 	validTx := minimalBlockTxnTestTxBytes(81)
 	shortID := compactShortIDForTx(t, validTx, 1, 2)
@@ -276,9 +268,6 @@ func TestCompactReconstructionHelperErrorBranches(t *testing.T) {
 		t.Fatalf("compactResolveShortIDTransactions blocked short id should become missing without error: %v", err)
 	}
 
-	if err := compactValidateTransactionTotal([][]byte{nil}); err == nil || !strings.Contains(err.Error(), "compact block transaction missing") {
-		t.Fatalf("compactValidateTransactionTotal nil err=%v, want missing tx", err)
-	}
 }
 
 func TestCompactBlockByteAndTransactionHelperErrors(t *testing.T) {
@@ -350,6 +339,18 @@ func TestCompactBlockByteAndTransactionHelperErrors(t *testing.T) {
 	}
 	if got, err := compactRequestedTransactionsFromBlock(twoTxBlock, []uint64{1}); err != nil || !reflect.DeepEqual(got, [][]byte{secondTx}) {
 		t.Fatalf("compactRequestedTransactionsFromBlock index 1=%x err=%v, want second tx", got, err)
+	}
+	manyTxs := make([][]byte, maxCompactRelayEntries+1)
+	for i := range manyTxs {
+		manyTxs[i] = minimalBlockTxnTestTxBytes(uint64(1000 + i))
+	}
+	manyTxBlock, err := compactBlockBytes(header, manyTxs)
+	if err != nil {
+		t.Fatalf("compactBlockBytes(many): %v", err)
+	}
+	highIndexTxs, err := compactRequestedTransactionsFromBlock(manyTxBlock, []uint64{maxCompactRelayEntries})
+	if err != nil || !reflect.DeepEqual(highIndexTxs, [][]byte{manyTxs[maxCompactRelayEntries]}) {
+		t.Fatalf("compactRequestedTransactionsFromBlock high valid index=%x err=%v, want tx at request-count cap", highIndexTxs, err)
 	}
 }
 
@@ -442,16 +443,28 @@ func TestCompactRequestedTransactionsRejectsDuplicateBeforeBlockScan(t *testing.
 	}
 }
 
-func TestCompactRequestedTransactionsRejectsRuntimeIndexCapBeforeScan(t *testing.T) {
+func TestCompactRequestedTransactionsRejectsWireIndexCapBeforeScan(t *testing.T) {
 	var header [consensus.BLOCK_HEADER_BYTES]byte
 	blockBytes, err := compactBlockBytes(header, [][]byte{minimalBlockTxnTestTxBytes(73)})
 	if err != nil {
 		t.Fatalf("compactBlockBytes: %v", err)
 	}
-	_, err = compactRequestedTransactionsFromBlock(blockBytes, []uint64{maxCompactRelayEntries})
+	_, err = compactRequestedTransactionsFromBlock(blockBytes, []uint64{maxCompactRelayIndexValue + 1})
 	if err == nil || !strings.Contains(err.Error(), "compact relay index exceeds runtime cap") {
 		t.Fatalf("compactRequestedTransactionsFromBlock high index err=%v, want runtime cap rejection", err)
 	}
+}
+
+func TestProcessCompactTransactionsAssemblyFailureRequestsFullBlockFallback(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	conn := &scriptedConn{}
+	p.conn = conn
+	hash := [32]byte{0x91}
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	if err := p.processCompactTransactions(hash, header, [][]byte{nil}); err != nil {
+		t.Fatalf("processCompactTransactions assembly failure: %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
 }
 
 func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {

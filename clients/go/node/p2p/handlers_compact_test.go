@@ -594,14 +594,14 @@ func TestGetBlockTxnRejectsDuplicateIndexesBeforeResponse(t *testing.T) {
 	}
 }
 
-func TestGetBlockTxnRejectsRuntimeIndexCapBeforeResponse(t *testing.T) {
+func TestGetBlockTxnRejectsOutOfRangeIndexBeforeResponse(t *testing.T) {
 	source := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	blockHash := [32]byte{0xef}
+	blockHash, _ := testHarnessBlockAtHeight(t, source, 0)
 	p, conn := compactTestPeerWithConn(source)
 
 	err := p.handleMessage(message{Command: messageGetBlockTxn, Payload: mustEncodeGetBlockTxnForHash(t, blockHash, []uint64{maxCompactRelayEntries})})
-	if err == nil || !strings.Contains(err.Error(), "compact relay index exceeds runtime cap") {
-		t.Fatalf("handleMessage(getblocktxn high index) err=%v, want runtime cap rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "compact relay index out of range") {
+		t.Fatalf("handleMessage(getblocktxn high index) err=%v, want out-of-range rejection", err)
 	}
 	if conn.Buffer.Len() != 0 {
 		t.Fatalf("high-index getblocktxn wrote %d bytes, want no response", conn.Buffer.Len())
