@@ -99,9 +99,7 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	limiter = p.postHandshakePayloadCap()
-	p.compactMu.Lock()
-	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1}
-	p.compactMu.Unlock()
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1})
 	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
 		if got := limiter(command); got != 0 {
 			t.Fatalf("negotiated %s cap=%d, want 0 until handler slice", command, got)
@@ -115,18 +113,33 @@ func TestBlockTxnPayloadCapIsOutstandingBounded(t *testing.T) {
 		t.Fatalf("blocktxn cap without outstanding=%d, want 0", got)
 	}
 
-	p.compactMu.Lock()
-	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: 64}
-	p.compactMu.Unlock()
+	tx := minimalBlockTxnTestTxBytes(81)
+	req := compactOutstandingRequest{MissingIndexes: []uint64{1}, MissingShortIDs: []compactShortID{{0x01}}, Transactions: [][]byte{tx}, BlockTxnPayloadCap: 64}
+	p.setCompactOutstandingRequest(req)
+	req.MissingIndexes[0], req.MissingShortIDs[0], req.Transactions[0][0] = 9, compactShortID{0x02}, 0xff
+	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockTxnPayloadCap != 64 {
+		t.Fatalf("snapshot cap=%+v ok=%v, want 64", snap, ok)
+	} else if snap.MissingIndexes[0] != 1 || snap.MissingShortIDs[0] != (compactShortID{0x01}) || snap.Transactions[0][0] == 0xff {
+		t.Fatalf("snapshot aliases original request: %+v", snap)
+	} else {
+		snap.MissingIndexes[0], snap.Transactions[0][0] = 7, 0xee
+	}
 	if got := p.blockTxnPayloadCap(); got != 64 {
 		t.Fatalf("blocktxn bounded cap=%d, want 64", got)
 	}
+	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.MissingIndexes[0] != 1 || snap.Transactions[0][0] == 0xee {
+		t.Fatalf("snapshot aliases previous snapshot: %+v ok=%v", snap, ok)
+	}
 
-	p.compactMu.Lock()
-	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1}
-	p.compactMu.Unlock()
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1})
 	if got := p.blockTxnPayloadCap(); got != compactRelayPayloadCap(messageBlockTxn) {
 		t.Fatalf("blocktxn oversized cap=%d, want max %d", got, compactRelayPayloadCap(messageBlockTxn))
+	}
+	if popped, ok := p.popCompactOutstandingRequest(); !ok || popped.BlockTxnPayloadCap != compactRelayPayloadCap(messageBlockTxn)+1 {
+		t.Fatalf("popped cap=%+v ok=%v, want oversized request", popped, ok)
+	}
+	if got := p.blockTxnPayloadCap(); got != 0 {
+		t.Fatalf("blocktxn cap after pop=%d, want 0", got)
 	}
 }
 
