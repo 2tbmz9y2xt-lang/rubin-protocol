@@ -2,12 +2,15 @@ package p2p
 
 import (
 	"errors"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 const compactDuplicateReportedIndex = ^uint64(0)
+
+const defaultCompactOutstandingTTL = 15 * time.Second
 
 var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing indexes")
 
@@ -232,6 +235,7 @@ type compactOutstandingRequest struct {
 	Transactions    [][]byte
 	Nonce1          uint64
 	Nonce2          uint64
+	ExpiresAt       time.Time
 }
 
 func (p *peer) handleCmpctBlock(payload []byte) error {
@@ -240,6 +244,10 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 		return err
 	}
 	if err := p.validateCompactBlockHeader(header); err != nil {
+		return err
+	}
+	fallback, err := p.preflightCompactBlockRuntimeEntries(payload, blockHash)
+	if err != nil || fallback {
 		return err
 	}
 	block, err := decodeCmpctBlockPayload(payload)
@@ -262,6 +270,9 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	}
 	req, err := newCompactOutstandingRequest(block, blockHash, result)
 	if err != nil {
+		return err
+	}
+	if err := p.expireCompactOutstandingRequest(); err != nil {
 		return err
 	}
 	if p.hasCompactOutstandingRequest() {
@@ -362,6 +373,49 @@ func compactBlockHeaderAndHash(payload []byte) ([consensus.BLOCK_HEADER_BYTES]by
 		return header, blockHash, err
 	}
 	return header, hash, nil
+}
+
+func (p *peer) preflightCompactBlockRuntimeEntries(payload []byte, blockHash [32]byte) (bool, error) {
+	_, err := compactBlockRuntimeEntryCount(payload)
+	if !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		return false, err
+	}
+	have, haveErr := p.service.hasBlock(blockHash)
+	if haveErr != nil || have {
+		return true, haveErr
+	}
+	return true, p.requestCompactFullBlockFallback(blockHash)
+}
+
+func compactBlockRuntimeEntryCount(payload []byte) (uint64, error) {
+	if len(payload) > consensus.MAX_RELAY_MSG_BYTES {
+		return 0, errors.New("cmpctblock payload too large")
+	}
+	if len(payload) < consensus.BLOCK_HEADER_BYTES+16 {
+		return 0, errors.New("cmpctblock payload missing header or nonce")
+	}
+	offset := consensus.BLOCK_HEADER_BYTES + 16
+	shortCount, consumed, err := consensus.DecodeCompactSize(payload[offset:])
+	if err != nil {
+		return 0, err
+	}
+	offset += consumed
+	if shortCount > uint64(len(payload[offset:]))/compactShortIDBytes {
+		return 0, errors.New("cmpctblock payload truncated short IDs")
+	}
+	shortIDEnd := offset + int(shortCount)*compactShortIDBytes // #nosec G115 -- shortCount is bounded by remaining payload width above.
+	prefilledCount, _, err := consensus.DecodeCompactSize(payload[shortIDEnd:])
+	if err != nil {
+		return 0, err
+	}
+	totalEntries, err := validateCmpctBlockEntryCount(shortCount, prefilledCount)
+	if err != nil {
+		return 0, errors.New("invalid compact relay entry count")
+	}
+	if totalEntries > maxCompactRelayEntries {
+		return totalEntries, errCompactRelayMissingRequestTooLarge
+	}
+	return totalEntries, nil
 }
 
 func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]byte) error {
@@ -645,8 +699,50 @@ func cloneCompactTransactions(txs [][]byte) [][]byte {
 func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
 	p.compactMu.Lock()
 	clone := cloneCompactOutstandingRequest(req)
+	clone.ExpiresAt = p.compactOutstandingExpiry()
 	p.compact.outstanding = &clone
 	p.compactMu.Unlock()
+}
+
+func (p *peer) expireCompactOutstandingRequest() error {
+	req, ok := p.expiredCompactOutstandingRequest()
+	if !ok {
+		return nil
+	}
+	return p.requestCompactFullBlockFallback(req.BlockHash)
+}
+
+func (p *peer) expiredCompactOutstandingRequest() (compactOutstandingRequest, bool) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding == nil || !p.compactOutstandingExpired(*p.compact.outstanding) {
+		return compactOutstandingRequest{}, false
+	}
+	req := cloneCompactOutstandingRequest(*p.compact.outstanding)
+	p.compact.outstanding = nil
+	return req, true
+}
+
+func (p *peer) compactOutstandingExpired(req compactOutstandingRequest) bool {
+	return !req.ExpiresAt.IsZero() && !p.compactNow().Before(req.ExpiresAt)
+}
+
+func (p *peer) compactOutstandingExpiry() time.Time {
+	return p.compactNow().Add(p.compactOutstandingTTL())
+}
+
+func (p *peer) compactOutstandingTTL() time.Duration {
+	if p != nil && p.service != nil && p.service.cfg.PeerRuntimeConfig.ReadDeadline > 0 {
+		return p.service.cfg.PeerRuntimeConfig.ReadDeadline
+	}
+	return defaultCompactOutstandingTTL
+}
+
+func (p *peer) compactNow() time.Time {
+	if p != nil && p.service != nil && p.service.cfg.Now != nil {
+		return p.service.cfg.Now()
+	}
+	return time.Now()
 }
 
 func (p *peer) hasCompactOutstandingRequest() bool {

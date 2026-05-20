@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -93,6 +94,23 @@ func TestCmpctBlockKnownBlockStillValidatesFullPayloadShape(t *testing.T) {
 	}
 	if conn.Buffer.Len() != 0 {
 		t.Fatalf("known-block malformed cmpctblock wrote %d bytes, want none", conn.Buffer.Len())
+	}
+}
+
+func TestCmpctBlockOversizedEntriesFallbackBeforeFullDecode(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 15, 16)
+	block.ShortIDs = make([]compactShortID, maxCompactRelayEntries+1)
+
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(oversized cmpctblock): %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, blockHash)
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("oversized cmpctblock left outstanding: %+v", outstanding)
 	}
 }
 
@@ -382,6 +400,31 @@ func TestCompactOutstandingRequestClearsOnReadTimeout(t *testing.T) {
 		t.Fatalf("read timeout did not clear outstanding request: %+v", outstanding)
 	}
 	assertCompactFullBlockRequest(t, p, conn, hash)
+}
+
+func TestCompactOutstandingRequestExpiresBeforeUnrelatedFrame(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	conn := &scriptedConn{}
+	p.conn = conn
+	now := time.Unix(1_777_000_000, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
+	hash := [32]byte{0xce}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:       hash,
+		MissingIndexes:  []uint64{0},
+		MissingShortIDs: []compactShortID{{0x02}},
+		Transactions:    make([][]byte, 1),
+	})
+
+	now = now.Add(time.Second)
+	if err := p.handleMessage(message{Command: messagePing}); err != nil {
+		t.Fatalf("handleMessage(ping after compact expiry): %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("expired compact request still outstanding: %+v", outstanding)
+	}
 }
 
 func TestGetBlockTxnRespondsWithRequestedTransactions(t *testing.T) {

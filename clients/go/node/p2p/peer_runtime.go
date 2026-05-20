@@ -99,6 +99,9 @@ func normalizeReadError(err error) error {
 }
 
 func (p *peer) handleMessage(frame message) error {
+	if err := p.expireCompactOutstandingRequest(); err != nil {
+		return err
+	}
 	switch frame.Command {
 	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
 		return p.handleRelayMessage(frame)
