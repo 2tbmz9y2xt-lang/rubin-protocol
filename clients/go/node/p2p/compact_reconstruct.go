@@ -802,19 +802,10 @@ func (p *peer) refreshCompactOutstandingExpiry() {
 }
 
 func (p *peer) expireCompactOutstandingRequest() error {
-	req, ok := p.expiredCompactOutstandingRequest()
-	if !ok {
-		return nil
-	}
-	have, err := p.service.hasBlock(req.BlockHash)
-	if err != nil {
+	if err := p.clearKnownCompactOutstandingRequest(); err != nil {
 		return err
 	}
-	if have {
-		p.clearCompactOutstandingRequestForHash(req.BlockHash)
-		return nil
-	}
-	req, ok = p.popCompactOutstandingRequestForHash(req.BlockHash)
+	req, ok := p.expiredCompactOutstandingRequest()
 	if !ok {
 		return nil
 	}
@@ -827,7 +818,9 @@ func (p *peer) expiredCompactOutstandingRequest() (compactOutstandingRequest, bo
 	if p.compact.outstanding == nil || !p.compactOutstandingExpired(*p.compact.outstanding) {
 		return compactOutstandingRequest{}, false
 	}
-	return cloneCompactOutstandingRequest(*p.compact.outstanding), true
+	req := cloneCompactOutstandingRequest(*p.compact.outstanding)
+	p.compact.outstanding = nil
+	return req, true
 }
 
 func (p *peer) compactOutstandingExpired(req compactOutstandingRequest) bool {
@@ -859,10 +852,10 @@ func (p *peer) hasCompactOutstandingRequest() bool {
 }
 
 func (p *peer) fallbackCompactOutstandingRequest() error {
-	req, ok, err := p.popCompactOutstandingRequestForFallback()
-	if err != nil {
+	if err := p.clearKnownCompactOutstandingRequest(); err != nil {
 		return err
 	}
+	req, ok := p.popCompactOutstandingRequest()
 	if !ok {
 		return nil
 	}
@@ -887,34 +880,6 @@ func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) 
 	return req, true
 }
 
-func (p *peer) popCompactOutstandingRequestForHash(blockHash [32]byte) (compactOutstandingRequest, bool) {
-	p.compactMu.Lock()
-	defer p.compactMu.Unlock()
-	if p.compact.outstanding == nil || p.compact.outstanding.BlockHash != blockHash {
-		return compactOutstandingRequest{}, false
-	}
-	req := cloneCompactOutstandingRequest(*p.compact.outstanding)
-	p.compact.outstanding = nil
-	return req, true
-}
-
-func (p *peer) popCompactOutstandingRequestForFallback() (compactOutstandingRequest, bool, error) {
-	req, ok := p.compactOutstandingRequestSnapshot()
-	if !ok {
-		return compactOutstandingRequest{}, false, nil
-	}
-	have, err := p.service.hasBlock(req.BlockHash)
-	if err != nil {
-		return compactOutstandingRequest{}, false, err
-	}
-	if have {
-		p.clearCompactOutstandingRequestForHash(req.BlockHash)
-		return compactOutstandingRequest{}, false, nil
-	}
-	req, ok = p.popCompactOutstandingRequestForHash(req.BlockHash)
-	return req, ok, nil
-}
-
 func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, bool) {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
@@ -932,7 +897,7 @@ func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutsta
 }
 
 func (p *peer) blockTxnPayloadCap() uint32 {
-	p.clearKnownCompactOutstandingRequestBestEffort()
+	_ = p.clearKnownCompactOutstandingRequest()
 	now := p.compactNow()
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
@@ -981,10 +946,6 @@ func (p *peer) clearKnownCompactOutstandingRequest() error {
 		p.clearCompactOutstandingRequestForHash(req.BlockHash)
 	}
 	return nil
-}
-
-func (p *peer) clearKnownCompactOutstandingRequestBestEffort() {
-	_ = p.clearKnownCompactOutstandingRequest()
 }
 
 func (p *peer) clearCompactOutstandingRequestForHash(blockHash [32]byte) bool {
