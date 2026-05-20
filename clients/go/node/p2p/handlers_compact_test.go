@@ -612,6 +612,73 @@ func TestCompactOutstandingClearsWhenBlockIsLearnedExternally(t *testing.T) {
 	assertCompactOutstandingHash(t, p, hashB)
 }
 
+func TestCompactOutstandingKnownBlockCleanupBranches(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	conn := &scriptedConn{}
+	p.conn = conn
+	enableCompactRelayForTest(p)
+	if _, err := p.service.cfg.SyncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	knownReq := compactOutstandingRequest{BlockHash: node.DevnetGenesisBlockHash(), MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{{0x01}}, Transactions: make([][]byte, 1)}
+	p.setCompactOutstandingRequest(knownReq)
+	p.setLateBlockTxnReply(knownReq)
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
+	assertNoCompactOutstanding(t, p, "known block cap cleanup")
+
+	unknownReq := compactOutstandingRequest{BlockHash: [32]byte{0x77}, MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{{0x02}}, Transactions: make([][]byte, 1)}
+	p.setCompactOutstandingRequest(unknownReq)
+	if err := p.clearKnownCompactOutstandingRequest(); err != nil {
+		t.Fatalf("clear unknown outstanding: %v", err)
+	}
+	assertCompactOutstandingHash(t, p, unknownReq.BlockHash)
+	if !p.clearCompactOutstandingRequestForHash(unknownReq.BlockHash) {
+		t.Fatal("clearCompactOutstandingRequestForHash did not clear matching outstanding")
+	}
+
+	p.setCompactOutstandingRequest(knownReq)
+	if err := p.fallbackCompactOutstandingRequest(); err != nil {
+		t.Fatalf("fallback known outstanding: %v", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("known fallback wrote %d bytes, want no fallback request", conn.Buffer.Len())
+	}
+	assertNoCompactOutstanding(t, p, "known block fallback cleanup")
+}
+
+func TestCompactPrepareRejectsShortAndSkipsKnownBlock(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	if _, _, _, err := p.prepareCmpctBlock([]byte{0x01}); err == nil || !strings.Contains(err.Error(), "cmpctblock payload missing header") {
+		t.Fatalf("prepare short cmpctblock err=%v, want missing header", err)
+	}
+	if _, err := p.service.cfg.SyncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	block := compactTestPayloadFromBlock(t, node.DevnetGenesisBlockBytes(), 71, 72)
+	_, blockHash, done, err := p.prepareCmpctBlock(mustEncodeCmpctBlockPayload(t, block))
+	if err != nil || !done || blockHash != node.DevnetGenesisBlockHash() {
+		t.Fatalf("prepare known block hash=%x done=%v err=%v, want known genesis done", blockHash, done, err)
+	}
+}
+
+func TestRequestMissingCompactTransactionsRejectsInvalidShape(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	if err := p.requestMissingCompactTransactions(cmpctBlockPayload{}, [32]byte{0x51}, compactReconstructionResult{}); err == nil || !strings.Contains(err.Error(), "missing request mismatch") {
+		t.Fatalf("request missing invalid shape err=%v, want mismatch", err)
+	}
+}
+
+func TestRequestMissingCompactTransactionsRejectsTooManyIndexes(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	missing := make([]uint64, maxCompactRelayEntries+1)
+	if err := p.requestMissingCompactTransactions(cmpctBlockPayload{}, [32]byte{0x52}, compactReconstructionResult{MissingIndexes: missing, MissingShortIDs: make([]compactShortID, len(missing))}); err == nil || !strings.Contains(err.Error(), "too many compact relay indexes") {
+		t.Fatalf("request missing too many indexes err=%v, want encode rejection", err)
+	}
+}
+
 func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	enableCompactRelayForTest(p)
