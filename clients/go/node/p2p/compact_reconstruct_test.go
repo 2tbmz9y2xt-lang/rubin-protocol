@@ -367,17 +367,20 @@ func TestCompactBlockTxnResponsePayloadCapUsesRemainingBudget(t *testing.T) {
 }
 
 func TestCompactFillResponseTransactionsValidatesExpectedShortIDs(t *testing.T) {
+	blockHash := [32]byte{0x71}
 	nonce1, nonce2 := uint64(71), uint64(72)
 	tx1 := minimalBlockTxnTestTxBytes(73)
 	tx2 := minimalBlockTxnTestTxBytes(74)
 	req := compactOutstandingRequest{
+		BlockHash:       blockHash,
 		Transactions:    [][]byte{nil, tx2},
 		MissingIndexes:  []uint64{0},
 		MissingShortIDs: []compactShortID{compactShortIDForTx(t, tx1, nonce1, nonce2)},
 		Nonce1:          nonce1,
 		Nonce2:          nonce2,
 	}
-	filled, err := compactFillResponseTransactions(req, [][]byte{tx1}, [][32]byte{compactWTxIDForTx(t, tx1)})
+	response := blockTxnRuntimePayload{BlockHash: blockHash, Transactions: [][]byte{tx1}, WTxIDs: [][32]byte{compactWTxIDForTx(t, tx1)}}
+	filled, err := compactFillResponseTransactions(req, response)
 	if err != nil {
 		t.Fatalf("compactFillResponseTransactions: %v", err)
 	}
@@ -385,11 +388,18 @@ func TestCompactFillResponseTransactionsValidatesExpectedShortIDs(t *testing.T) 
 	if filled[0][0] == tx1[0] {
 		t.Fatal("filled blocktxn response aliases source bytes")
 	}
-	if _, err := compactFillResponseTransactions(req, [][]byte{tx2}, [][32]byte{compactWTxIDForTx(t, tx2)}); err == nil || !strings.Contains(err.Error(), "short id mismatch") {
+	wrongShortIDResponse := blockTxnRuntimePayload{BlockHash: blockHash, Transactions: [][]byte{tx2}, WTxIDs: [][32]byte{compactWTxIDForTx(t, tx2)}}
+	if _, err := compactFillResponseTransactions(req, wrongShortIDResponse); err == nil || !strings.Contains(err.Error(), "short id mismatch") {
 		t.Fatalf("wrong short ID err=%v, want short id mismatch", err)
 	}
-	if _, err := compactFillResponseTransactions(req, [][]byte{tx2}, [][32]byte{compactWTxIDForTx(t, filled[0])}); err == nil || !strings.Contains(err.Error(), "wtxid mismatch") {
+	mismatchedWTxIDResponse := blockTxnRuntimePayload{BlockHash: blockHash, Transactions: [][]byte{tx2}, WTxIDs: [][32]byte{compactWTxIDForTx(t, filled[0])}}
+	if _, err := compactFillResponseTransactions(req, mismatchedWTxIDResponse); err == nil || !strings.Contains(err.Error(), "wtxid mismatch") {
 		t.Fatalf("mismatched response wtxid err=%v, want wtxid mismatch", err)
+	}
+	wrongHashResponse := response
+	wrongHashResponse.BlockHash[0] ^= 0xff
+	if _, err := compactFillResponseTransactions(req, wrongHashResponse); err == nil || !strings.Contains(err.Error(), "block hash mismatch") {
+		t.Fatalf("wrong response block hash err=%v, want block hash mismatch", err)
 	}
 }
 
@@ -403,7 +413,7 @@ func TestCompactFillResponseTransactionsRejectsAggregateOversize(t *testing.T) {
 		Nonce1:          nonce1,
 		Nonce2:          nonce2,
 	}
-	_, err := compactFillResponseTransactions(req, [][]byte{{0x01}}, [][32]byte{wtxid})
+	_, err := compactFillResponseTransactions(req, blockTxnRuntimePayload{Transactions: [][]byte{{0x01}}, WTxIDs: [][32]byte{wtxid}})
 	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
 		t.Fatalf("aggregate oversize err=%v, want block size rejection", err)
 	}

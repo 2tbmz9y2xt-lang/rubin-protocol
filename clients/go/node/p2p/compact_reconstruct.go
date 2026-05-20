@@ -300,7 +300,11 @@ func compactBlockTxnResponsePayloadCap(partial [][]byte, missingCount int) (uint
 	return uint32(capBytes), nil
 }
 
-func compactFillResponseTransactions(req compactOutstandingRequest, responseTxs [][]byte, responseWTxIDs [][32]byte) ([][]byte, error) {
+func compactFillResponseTransactions(req compactOutstandingRequest, response blockTxnRuntimePayload) ([][]byte, error) {
+	if response.BlockHash != req.BlockHash {
+		return nil, errors.New("blocktxn block hash mismatch")
+	}
+	responseTxs, responseWTxIDs := response.Transactions, response.WTxIDs
 	if len(req.MissingIndexes) != len(req.MissingShortIDs) || len(responseTxs) != len(req.MissingIndexes) || len(responseWTxIDs) != len(responseTxs) {
 		return nil, errors.New("blocktxn transaction count mismatch")
 	}
