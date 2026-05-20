@@ -72,22 +72,27 @@ func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
 
 func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, bool) {
 	p.compactMu.Lock()
-	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil {
+		p.compactMu.Unlock()
 		return compactOutstandingRequest{}, false
 	}
-	return cloneCompactOutstandingRequest(*p.compact.outstanding), true
+	// Stored outstanding requests are immutable; keep large tx-byte cloning outside compactMu.
+	req := *p.compact.outstanding
+	p.compactMu.Unlock()
+	return cloneCompactOutstandingRequest(req), true
 }
 
 func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) {
 	p.compactMu.Lock()
-	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil {
+		p.compactMu.Unlock()
 		return compactOutstandingRequest{}, false
 	}
-	req := cloneCompactOutstandingRequest(*p.compact.outstanding)
+	// Stored outstanding requests are immutable; keep large tx-byte cloning outside compactMu.
+	req := *p.compact.outstanding
 	p.compact.outstanding = nil
-	return req, true
+	p.compactMu.Unlock()
+	return cloneCompactOutstandingRequest(req), true
 }
 
 func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutstandingRequest {
