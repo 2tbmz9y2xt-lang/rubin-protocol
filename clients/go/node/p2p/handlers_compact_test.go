@@ -52,7 +52,14 @@ func TestCompactBlockTxnFlowRequestsAndAcceptsMatchingResponse(t *testing.T) {
 func TestCompactRelayObjectCommandsRequireNegotiation(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
+	capFn := p.postHandshakePayloadCap()
+	if got := capFn(messageSendCmpct); got != sendCmpctPayloadBytes {
+		t.Fatalf("sendcmpct cap=%d, want %d", got, sendCmpctPayloadBytes)
+	}
 	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+		if got := capFn(command); got != 0 {
+			t.Fatalf("non-negotiated %s cap=%d, want 0", command, got)
+		}
 		err := p.handleMessage(message{Command: command, Payload: nil})
 		if err == nil || !strings.Contains(err.Error(), "compact relay not negotiated") {
 			t.Fatalf("handleMessage(%s) err=%v, want negotiation rejection", command, err)
@@ -60,6 +67,12 @@ func TestCompactRelayObjectCommandsRequireNegotiation(t *testing.T) {
 	}
 	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatalf("non-negotiated compact command left outstanding: %+v", outstanding)
+	}
+	enableCompactRelayForTest(p)
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+		if got := capFn(command); got == 0 {
+			t.Fatalf("negotiated %s cap=0, want enabled compact cap", command)
+		}
 	}
 }
 
@@ -272,6 +285,9 @@ func TestBlockTxnMalformedAndProcessFailureFallback(t *testing.T) {
 		t.Fatalf("malformed blocktxn fallback: %v", err)
 	}
 	assertCompactFullBlockRequest(t, p, conn, hash)
+	if got := p.snapshotState().BanScore; got != 0 {
+		t.Fatalf("malformed compact response ban score=%d, want fallback without ban", got)
+	}
 
 	p = newPeerRuntimeTestPeer(t)
 	enableCompactRelayForTest(p)
@@ -295,6 +311,9 @@ func TestBlockTxnMalformedAndProcessFailureFallback(t *testing.T) {
 		t.Fatalf("process-failure blocktxn fallback: %v", err)
 	}
 	assertCompactFullBlockRequest(t, p, conn, hash)
+	if got := p.snapshotState().BanScore; got != 0 {
+		t.Fatalf("compact reconstruction failure ban score=%d, want fallback without ban", got)
+	}
 }
 
 func TestCompactOutstandingRequestClearsOnReadTimeout(t *testing.T) {

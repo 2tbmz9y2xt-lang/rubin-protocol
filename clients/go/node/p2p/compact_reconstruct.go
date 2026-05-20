@@ -22,6 +22,9 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 	if err != nil {
 		return compactReconstructionResult{}, err
 	}
+	if totalEntries > maxCompactRelayEntries {
+		return compactReconstructionResult{}, errCompactRelayMissingRequestTooLarge
+	}
 	prefilledShortIDs, _, err := compactPrefilledShortIDs(p.Prefilled, totalEntries, p.Nonce1, p.Nonce2)
 	if err != nil {
 		return compactReconstructionResult{}, err
@@ -254,7 +257,7 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 		return err
 	}
 	if result.Transactions != nil {
-		return p.processCompactTransactions(block.Header, result.Transactions)
+		return p.processCompactTransactions(blockHash, block.Header, result.Transactions)
 	}
 	req, err := newCompactOutstandingRequest(block, blockHash, result)
 	if err != nil {
@@ -322,8 +325,8 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	if err != nil {
 		return p.requestCompactFullBlockFallback(req.BlockHash)
 	}
-	if err := p.processCompactTransactions(req.Header, txs); err != nil {
-		return p.requestCompactFullBlockFallback(req.BlockHash)
+	if err := p.processCompactTransactions(req.BlockHash, req.Header, txs); err != nil {
+		return err
 	}
 	return nil
 }
@@ -401,16 +404,45 @@ func compactFillResponseTransactions(req compactOutstandingRequest, responseTxs 
 	return txs, nil
 }
 
-func (p *peer) processCompactTransactions(header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte) error {
+func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte) error {
 	blockBytes, err := compactBlockBytes(header, txs)
 	if err != nil {
-		return err
+		return p.requestCompactFullBlockFallback(blockHash)
 	}
-	summary, err := p.processRelayedBlock(blockBytes)
-	if err != nil || summary == nil {
-		return err
+	accepted, err := p.processCompactRelayedBlock(blockHash, blockBytes)
+	if err != nil {
+		return p.requestCompactFullBlockFallback(blockHash)
+	}
+	if !accepted {
+		return nil
 	}
 	return p.service.requestBlocksIfBehind(p)
+}
+
+func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []byte) (bool, error) {
+	pb, blockHash, err := parseRelayedBlock(blockBytes)
+	if err != nil {
+		return false, err
+	}
+	if pb == nil {
+		return false, errors.New("nil parsed block")
+	}
+	if blockHash != expectedHash {
+		return false, errors.New("compact block hash mismatch")
+	}
+	have, err := p.service.hasBlock(blockHash)
+	if err != nil || have {
+		return false, err
+	}
+
+	p.service.chainMu.Lock()
+	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
+	p.service.chainMu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	p.acceptedRelayedBlock(blockHash, summary)
+	return true, nil
 }
 
 func (p *peer) requestCompactFullBlockFallbackForOutstanding(cause error) error {
