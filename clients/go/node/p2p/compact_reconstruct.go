@@ -324,7 +324,8 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	response, err := decodeBlockTxnRuntimePayload(payload)
 	if err != nil {
 		p.popCompactOutstandingRequest()
-		return p.requestCompactFullBlockFallback(req.BlockHash)
+		p.bumpBan(10, err.Error())
+		return err
 	}
 	req, ok = p.popCompactOutstandingRequest()
 	if !ok {
@@ -332,7 +333,8 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	}
 	txs, err := compactFillResponseTransactions(req, response)
 	if err != nil {
-		return p.requestCompactFullBlockFallback(req.BlockHash)
+		p.bumpBan(10, err.Error())
+		return err
 	}
 	return p.processCompactTransactions(req.BlockHash, req.Header, txs, true)
 }
