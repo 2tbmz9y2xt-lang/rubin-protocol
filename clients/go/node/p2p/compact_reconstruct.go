@@ -9,9 +9,10 @@ import (
 const compactDuplicateReportedIndex = ^uint64(0)
 
 type compactReconstructionResult struct {
-	Transactions    [][]byte
-	MissingIndexes  []uint64
-	MissingShortIDs []compactShortID
+	Transactions        [][]byte
+	PartialTransactions [][]byte
+	MissingIndexes      []uint64
+	MissingShortIDs     []compactShortID
 }
 
 func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactReconstructionResult, error) {
@@ -19,7 +20,7 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 	if err != nil {
 		return compactReconstructionResult{}, err
 	}
-	prefilledShortIDs, prefilledTxBytes, err := compactPrefilledShortIDs(p.Prefilled, totalEntries, p.Nonce1, p.Nonce2)
+	prefilledShortIDs, _, err := compactPrefilledShortIDs(p.Prefilled, totalEntries, p.Nonce1, p.Nonce2)
 	if err != nil {
 		return compactReconstructionResult{}, err
 	}
@@ -33,16 +34,23 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 		return compactReconstructionResult{}, err
 	}
 
-	missingIndexes, missingShortIDs := compactMissingShortIDIndexes(totalEntries, p.Prefilled, p.ShortIDs, index, prefilledShortIDs)
-	if len(missingIndexes) > 0 {
-		return compactReconstructionResult{MissingIndexes: missingIndexes, MissingShortIDs: missingShortIDs}, nil
-	}
 	txs := make([][]byte, totalEntries)
 	compactFillPrefilledTransactions(txs, p.Prefilled)
-	if err := compactFillShortIDTransactions(txs, totalEntries, p.Prefilled, p.ShortIDs, index, prefilledTxBytes); err != nil {
+	missingIndexes, missingShortIDs, err := compactResolveShortIDTransactions(txs, totalEntries, p.Prefilled, p.ShortIDs, index, prefilledShortIDs)
+	if err != nil {
 		return compactReconstructionResult{}, err
 	}
-	return compactReconstructionResult{Transactions: txs}, nil
+	if len(missingIndexes) > 0 {
+		return compactReconstructionResult{
+			PartialTransactions: cloneCompactTransactions(txs),
+			MissingIndexes:      missingIndexes,
+			MissingShortIDs:     missingShortIDs,
+		}, nil
+	}
+	if err := compactValidateTransactionTotal(txs); err != nil {
+		return compactReconstructionResult{}, err
+	}
+	return compactReconstructionResult{Transactions: cloneCompactTransactions(txs)}, nil
 }
 
 func compactReconstructionEntryCount(shortIDCount int, prefilled []prefilledTxn) (int, error) {
@@ -85,25 +93,14 @@ func compactFillPrefilledTransactions(txs [][]byte, prefilled []prefilledTxn) {
 	}
 }
 
-func compactFillShortIDTransactions(txs [][]byte, totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, totalTxBytes uint64) error {
-	shortPos, prefilledPos := 0, 0
-	for absoluteIndex := 0; absoluteIndex < totalEntries && shortPos < len(shortIDs); absoluteIndex++ {
-		if compactIndexIsPrefilled(uint64(absoluteIndex), prefilled, &prefilledPos) {
-			continue
-		}
-		tx := index[shortIDs[shortPos]]
-		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(tx)), totalTxBytes)
-		if err != nil {
-			return err
-		}
-		txs[absoluteIndex] = append([]byte(nil), tx...)
-		totalTxBytes = nextTotal
-		shortPos++
-	}
-	return nil
-}
-
-func compactMissingShortIDIndexes(totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte, blocked map[compactShortID]bool) ([]uint64, []compactShortID) {
+func compactResolveShortIDTransactions(
+	txs [][]byte,
+	totalEntries int,
+	prefilled []prefilledTxn,
+	shortIDs []compactShortID,
+	index map[compactShortID][]byte,
+	blocked map[compactShortID]bool,
+) ([]uint64, []compactShortID, error) {
 	missing := make([]uint64, 0)
 	missingShortIDs := make([]compactShortID, 0)
 	firstHit := make(map[compactShortID]uint64)
@@ -113,13 +110,23 @@ func compactMissingShortIDIndexes(totalEntries int, prefilled []prefilledTxn, sh
 			continue
 		}
 		shortID := shortIDs[shortPos]
-		missing, missingShortIDs = compactAppendMissingIndex(missing, missingShortIDs, firstHit, shortID, uint64(absoluteIndex), index[shortID], blocked[shortID])
-		if len(missing) >= maxCompactRelayEntries {
-			return missing[:maxCompactRelayEntries], missingShortIDs[:maxCompactRelayEntries]
+		var err error
+		missing, missingShortIDs, err = compactAppendResolvedShortID(
+			txs,
+			missing,
+			missingShortIDs,
+			firstHit,
+			shortID,
+			uint64(absoluteIndex),
+			index[shortID],
+			blocked[shortID],
+		)
+		if err != nil {
+			return nil, nil, err
 		}
 		shortPos++
 	}
-	return missing, missingShortIDs
+	return missing, missingShortIDs, nil
 }
 
 func compactIndexIsPrefilled(index uint64, prefilled []prefilledTxn, pos *int) bool {
@@ -130,7 +137,8 @@ func compactIndexIsPrefilled(index uint64, prefilled []prefilledTxn, pos *int) b
 	return false
 }
 
-func compactAppendMissingIndex(
+func compactAppendResolvedShortID(
+	txs [][]byte,
 	missing []uint64,
 	missingShortIDs []compactShortID,
 	firstHit map[compactShortID]uint64,
@@ -138,20 +146,29 @@ func compactAppendMissingIndex(
 	absoluteIndex uint64,
 	tx []byte,
 	blocked bool,
-) ([]uint64, []compactShortID) {
+) ([]uint64, []compactShortID, error) {
 	if tx == nil || blocked {
-		return append(missing, absoluteIndex), append(missingShortIDs, shortID)
+		return compactAppendMissingIndex(missing, missingShortIDs, absoluteIndex, shortID)
 	}
 	if firstIndex, ok := firstHit[shortID]; ok {
 		if firstIndex != compactDuplicateReportedIndex {
+			txs[int(firstIndex)] = nil // #nosec G115 -- firstIndex was captured from bounded loop index.
 			missing = append(missing, firstIndex)
 			missingShortIDs = append(missingShortIDs, shortID)
 			firstHit[shortID] = compactDuplicateReportedIndex
 		}
-		return append(missing, absoluteIndex), append(missingShortIDs, shortID)
+		return compactAppendMissingIndex(missing, missingShortIDs, absoluteIndex, shortID)
 	}
 	firstHit[shortID] = absoluteIndex
-	return missing, missingShortIDs
+	txs[int(absoluteIndex)] = tx // #nosec G115 -- absoluteIndex is bounded by totalEntries loop.
+	return missing, missingShortIDs, nil
+}
+
+func compactAppendMissingIndex(missing []uint64, missingShortIDs []compactShortID, absoluteIndex uint64, shortID compactShortID) ([]uint64, []compactShortID, error) {
+	if len(missing) >= maxCompactRelayEntries {
+		return nil, nil, errors.New("too many compact relay missing indexes")
+	}
+	return append(missing, absoluteIndex), append(missingShortIDs, shortID), nil
 }
 
 func compactLocalTxIndex(localTxs [][]byte, nonce1, nonce2 uint64) (map[compactShortID][]byte, error) {
@@ -183,6 +200,21 @@ func compactLocalTxWTxID(tx []byte) ([32]byte, error) {
 	return wtxid, nil
 }
 
+func compactValidateTransactionTotal(txs [][]byte) error {
+	var totalTxBytes uint64
+	for _, tx := range txs {
+		if tx == nil {
+			return errors.New("compact block transaction missing")
+		}
+		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(tx)), totalTxBytes)
+		if err != nil {
+			return err
+		}
+		totalTxBytes = nextTotal
+	}
+	return nil
+}
+
 type compactOutstandingRequest struct {
 	BlockHash       [32]byte
 	Header          [consensus.BLOCK_HEADER_BYTES]byte
@@ -200,6 +232,9 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	}
 	blockHash, err := consensus.BlockHash(block.Header[:])
 	if err != nil {
+		return err
+	}
+	if err := p.validateCompactBlockHeader(block.Header); err != nil {
 		return err
 	}
 	have, err := p.service.hasBlock(blockHash)
@@ -273,24 +308,31 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 }
 
 func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) (compactOutstandingRequest, error) {
-	totalEntries, err := compactReconstructionEntryCount(len(block.ShortIDs), block.Prefilled)
-	if err != nil {
-		return compactOutstandingRequest{}, err
-	}
 	if len(result.MissingIndexes) == 0 || len(result.MissingIndexes) != len(result.MissingShortIDs) {
 		return compactOutstandingRequest{}, errors.New("compact reconstruction missing request mismatch")
 	}
-	txs := make([][]byte, totalEntries)
-	compactFillPrefilledTransactions(txs, block.Prefilled)
 	return compactOutstandingRequest{
 		BlockHash:       blockHash,
 		Header:          block.Header,
 		MissingIndexes:  append([]uint64(nil), result.MissingIndexes...),
 		MissingShortIDs: append([]compactShortID(nil), result.MissingShortIDs...),
-		Transactions:    cloneCompactTransactions(txs),
+		Transactions:    cloneCompactTransactions(result.PartialTransactions),
 		Nonce1:          block.Nonce1,
 		Nonce2:          block.Nonce2,
 	}, nil
+}
+
+func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]byte) error {
+	parsed, err := consensus.ParseBlockHeaderBytes(header[:])
+	if err != nil {
+		p.bumpBan(10, err.Error())
+		return err
+	}
+	if err := consensus.PowCheck(header[:], parsed.Target); err != nil {
+		p.bumpBan(100, err.Error())
+		return err
+	}
+	return nil
 }
 
 func compactFillResponseTransactions(req compactOutstandingRequest, responseTxs [][]byte, responseWTxIDs [][32]byte) ([][]byte, error) {

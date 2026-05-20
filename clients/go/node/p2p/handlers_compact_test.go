@@ -76,6 +76,68 @@ func TestCmpctBlockUsesLocalTxPoolBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestBlockTxnFlowPreservesLocalMatchesAcrossResponse(t *testing.T) {
+	_, sink, blockHash, blockBytes, localTx := compactTestMinedBlockWithSpend(t)
+	block := compactTestPayloadFromBlock(t, blockBytes, 23, 24)
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+	if !reflect.DeepEqual(txs[1], localTx) {
+		t.Fatalf("test setup tx[1] does not match local tx")
+	}
+	_, txid, _, consumed, err := consensus.ParseTx(localTx)
+	if err != nil || consumed != len(localTx) {
+		t.Fatalf("ParseTx(local): consumed=%d err=%v", consumed, err)
+	}
+	if !sink.service.cfg.TxPool.Put(txid, localTx, uint64(len(localTx)), len(localTx)) {
+		t.Fatalf("Put local compact tx failed")
+	}
+
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock): %v", err)
+	}
+	req := mustReadCompactGetBlockTxn(t, p, conn)
+	if !reflect.DeepEqual(req.Indexes, []uint64{0}) {
+		t.Fatalf("getblocktxn indexes=%v, want only missing coinbase index 0", req.Indexes)
+	}
+	outstanding, ok := p.compactOutstandingRequestSnapshot()
+	if !ok || outstanding.Transactions[0] != nil || !reflect.DeepEqual(outstanding.Transactions[1], localTx) {
+		t.Fatalf("outstanding partial txs=%+v ok=%v, want nil/local tx", outstanding.Transactions, ok)
+	}
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, txs[:1])}); err != nil {
+		t.Fatalf("handleMessage(blocktxn): %v", err)
+	}
+	assertHarnessTip(t, sink, 1, blockHash)
+}
+
+func TestCmpctBlockRejectsInvalidHeaderBeforeRequest(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 25, 26)
+	const targetOffset = 4 + 32 + 32 + 8
+	for i := range block.Header[targetOffset : targetOffset+32] {
+		block.Header[targetOffset+i] = 0
+	}
+
+	p, conn := compactTestPeerWithConn(sink)
+	err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)})
+	if err == nil || !strings.Contains(err.Error(), "target out of range") {
+		t.Fatalf("handleMessage(cmpctblock invalid header) err=%v, want target rejection", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("invalid compact header wrote %d bytes, want no request", conn.Buffer.Len())
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("invalid compact header left outstanding: %+v", outstanding)
+	}
+	if p.snapshotState().BanScore == 0 {
+		t.Fatalf("invalid compact header did not bump ban score")
+	}
+}
+
 func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -194,6 +256,32 @@ func TestGetBlockTxnRespondsWithRequestedTransactions(t *testing.T) {
 	}
 }
 
+func compactTestMinedBlockWithSpend(t *testing.T) (*testHarness, *testHarness, [32]byte, []byte, []byte) {
+	t.Helper()
+	source := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	txBytes, _, utxos := signedCanonicalP2PTxWithoutSeeding(t, 326)
+	seedHarnessUtxos(source, utxos)
+	seedHarnessUtxos(sink, utxos)
+	mempool := wireCanonicalMempoolForP2PTest(t, source)
+	if err := mempool.AddTx(txBytes); err != nil {
+		t.Fatalf("AddTx(local spend): %v", err)
+	}
+	blockBytes := source.mineNextBlockBytes(t)
+	blockHash, err := consensus.BlockHash(blockBytes[:consensus.BLOCK_HEADER_BYTES])
+	if err != nil {
+		t.Fatalf("BlockHash: %v", err)
+	}
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+	if len(txs) != 2 {
+		t.Fatalf("mined tx count=%d, want coinbase + spend", len(txs))
+	}
+	return source, sink, blockHash, blockBytes, txBytes
+}
+
 func compactTestPayloadFromBlock(t *testing.T, blockBytes []byte, nonce1, nonce2 uint64) cmpctBlockPayload {
 	t.Helper()
 	header, txs, err := compactBlockTransactions(blockBytes)
@@ -225,6 +313,19 @@ func readCompactTestFrame(t *testing.T, p *peer, conn *scriptedConn) message {
 		t.Fatalf("readFrame: %v", err)
 	}
 	return frame
+}
+
+func mustReadCompactGetBlockTxn(t *testing.T, p *peer, conn *scriptedConn) getBlockTxnPayload {
+	t.Helper()
+	frame := readCompactTestFrame(t, p, conn)
+	if frame.Command != messageGetBlockTxn {
+		t.Fatalf("command=%q, want getblocktxn", frame.Command)
+	}
+	req, err := decodeGetBlockTxnPayload(frame.Payload)
+	if err != nil {
+		t.Fatalf("decodeGetBlockTxnPayload: %v", err)
+	}
+	return req
 }
 
 func mustEncodeCmpctBlockPayload(t *testing.T, block cmpctBlockPayload) []byte {

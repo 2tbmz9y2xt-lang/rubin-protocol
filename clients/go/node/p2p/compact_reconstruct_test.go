@@ -195,38 +195,20 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 	}
 }
 
-func TestReconstructCompactBlockReportsBoundedMissingForLargeCodecValidPayload(t *testing.T) {
-	result, err := reconstructCompactBlock(cmpctBlockPayload{
+func TestReconstructCompactBlockRejectsMissingAboveRequestCap(t *testing.T) {
+	_, err := reconstructCompactBlock(cmpctBlockPayload{
 		ShortIDs: make([]compactShortID, maxCompactRelayEntries+1),
 	}, nil)
-	if err != nil {
-		t.Fatalf("reconstructCompactBlock: %v", err)
-	}
-	if result.Transactions != nil || len(result.MissingIndexes) != maxCompactRelayEntries {
-		t.Fatalf("result=%+v, want bounded missing indexes", result)
-	}
-	if result.MissingIndexes[0] != 0 || result.MissingIndexes[len(result.MissingIndexes)-1] != maxCompactRelayEntries-1 {
-		t.Fatalf("missing bounds got first=%d last=%d", result.MissingIndexes[0], result.MissingIndexes[len(result.MissingIndexes)-1])
+	if err == nil || !strings.Contains(err.Error(), "too many compact relay missing indexes") {
+		t.Fatalf("reconstructCompactBlock err=%v, want missing cap rejection", err)
 	}
 }
 
-func TestCompactFillShortIDTransactionsRejectsCumulativeOversize(t *testing.T) {
-	tx := minimalBlockTxnTestTxBytes(51)
-	shortID := compactShortID{0x51}
-	txs := make([][]byte, 1)
-	err := compactFillShortIDTransactions(
-		txs,
-		1,
-		nil,
-		[]compactShortID{shortID},
-		map[compactShortID][]byte{shortID: tx},
-		uint64(consensus.MAX_BLOCK_BYTES-len(tx)+1),
-	)
+func TestCompactValidateTransactionTotalRejectsCumulativeOversize(t *testing.T) {
+	txs := [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES), {0x01}}
+	err := compactValidateTransactionTotal(txs)
 	if err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
-		t.Fatalf("compactFillShortIDTransactions err=%v, want cumulative size failure", err)
-	}
-	if txs[0] != nil {
-		t.Fatalf("compactFillShortIDTransactions mutated txs before validation: %x", txs[0])
+		t.Fatalf("compactValidateTransactionTotal err=%v, want cumulative size failure", err)
 	}
 }
 
