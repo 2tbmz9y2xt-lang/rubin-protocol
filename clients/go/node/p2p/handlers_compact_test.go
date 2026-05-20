@@ -157,6 +157,27 @@ func TestCmpctBlockOversizedEntriesFallbackBeforeFullDecode(t *testing.T) {
 	}
 }
 
+func TestCmpctBlockOversizedMalformedPrefixRejectsBeforeFallback(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 15, 16)
+	payload := append([]byte{}, block.Header[:]...)
+	payload = consensus.AppendU64le(payload, block.Nonce1)
+	payload = consensus.AppendU64le(payload, block.Nonce2)
+	payload = consensus.AppendCompactSize(payload, 0)
+	payload = consensus.AppendCompactSize(payload, maxCompactRelayEntries+1)
+
+	p, conn := compactTestPeerWithConn(sink)
+	err := p.handleMessage(message{Command: messageCmpctBlock, Payload: payload})
+	if err == nil || !strings.Contains(err.Error(), "cmpctblock payload truncated prefilled index") {
+		t.Fatalf("handleMessage(malformed oversized cmpctblock) err=%v, want truncated prefilled rejection", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("malformed oversized cmpctblock wrote %d bytes, want no fallback request", conn.Buffer.Len())
+	}
+}
+
 func TestCmpctBlockUsesLocalTxPoolBeforeRequest(t *testing.T) {
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -574,6 +595,38 @@ func TestBlockTxnLateAllowanceExpires(t *testing.T) {
 	assertCompactFullBlockRequest(t, p, conn, hash)
 	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, activeCap)
 	now = now.Add(time.Second)
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
+}
+
+func TestBlockTxnLateAllowanceConsumesWrongHash(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	enableCompactRelayForTest(p)
+	conn := &scriptedConn{}
+	p.conn = conn
+	now := time.Unix(1_777_000_350, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
+	hash := [32]byte{0xd3}
+	tx := minimalBlockTxnTestTxBytes(106)
+	shortID := mustCompactTransactionShortID(t, tx, 49, 50)
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:       hash,
+		MissingIndexes:  []uint64{0},
+		MissingShortIDs: []compactShortID{shortID},
+		Transactions:    make([][]byte, 1),
+		Nonce1:          49,
+		Nonce2:          50,
+	})
+
+	now = now.Add(time.Second)
+	if err := p.expireCompactOutstandingRequest(); err != nil {
+		t.Fatalf("expire compact outstanding: %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
+	assertCompactCommandCapEnabled(t, p.postHandshakePayloadCap(), messageBlockTxn)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, [32]byte{0xee}, [][]byte{tx})}); err != nil {
+		t.Fatalf("wrong-hash late blocktxn: %v", err)
+	}
 	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
 }
 

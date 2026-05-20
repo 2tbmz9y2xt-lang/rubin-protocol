@@ -346,14 +346,17 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 func (p *peer) compactOutstandingForBlockTxn(responseHash [32]byte, hasHash bool) (compactOutstandingRequest, bool, error) {
 	req, ok := p.compactOutstandingRequestSnapshot()
 	if !ok {
-		p.clearLateBlockTxnReplyForHash(responseHash, hasHash)
+		p.consumeLateBlockTxnReply()
 		return compactOutstandingRequest{}, false, nil
 	}
-	if !hasHash || responseHash == req.BlockHash {
+	if hasHash && responseHash == req.BlockHash {
 		return req, true, nil
 	}
-	if p.clearLateBlockTxnReplyForHash(responseHash, true) {
+	if p.consumeLateBlockTxnReply() {
 		return compactOutstandingRequest{}, false, nil
+	}
+	if !hasHash {
+		return req, true, nil
 	}
 	return req, true, errors.New("unexpected blocktxn response")
 }
@@ -393,6 +396,9 @@ func compactBlockHeaderAndHash(payload []byte) ([consensus.BLOCK_HEADER_BYTES]by
 func (p *peer) preflightCompactBlockRuntimeEntries(payload []byte, blockHash [32]byte) (bool, error) {
 	_, err := compactBlockRuntimeEntryCount(payload)
 	if !errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		return false, err
+	}
+	if _, err := decodeCmpctBlockPayload(payload); err != nil {
 		return false, err
 	}
 	have, haveErr := p.service.hasBlock(blockHash)
@@ -963,7 +969,7 @@ func (p *peer) clearCompactOutstandingRequestForHash(blockHash [32]byte) bool {
 	return cleared
 }
 
-func (p *peer) clearLateBlockTxnReplyForHash(blockHash [32]byte, hasHash bool) bool {
+func (p *peer) consumeLateBlockTxnReply() bool {
 	now := p.compactNow()
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
@@ -971,11 +977,8 @@ func (p *peer) clearLateBlockTxnReplyForHash(blockHash [32]byte, hasHash bool) b
 	if p.compact.lateBlockTxnReply == nil {
 		return false
 	}
-	if !hasHash || p.compact.lateBlockTxnReply.BlockHash == blockHash {
-		p.compact.lateBlockTxnReply = nil
-		return true
-	}
-	return false
+	p.compact.lateBlockTxnReply = nil
+	return true
 }
 
 func (p *peer) clearExpiredLateBlockTxnReplyLocked(now time.Time) {
