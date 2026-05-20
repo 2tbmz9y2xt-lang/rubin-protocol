@@ -429,7 +429,6 @@ func TestHandleCmpctBlockRuntimeFlowAndEdges(t *testing.T) {
 	if err := newPeerRuntimeTestPeer(t).handleCmpctBlock(bad); err == nil {
 		t.Fatal("invalid compact header should fail")
 	}
-
 	header, blockHash, txs := devnetGenesisCompactParts(t)
 	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
@@ -445,7 +444,6 @@ func TestHandleCmpctBlockRuntimeFlowAndEdges(t *testing.T) {
 	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockHash != blockHash || snap.BlockTxnPayloadCap == 0 {
 		t.Fatalf("outstanding=%+v ok=%v, want stored request", snap, ok)
 	}
-
 	p = newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
 	full := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
@@ -458,7 +456,15 @@ func TestHandleCmpctBlockRuntimeFlowAndEdges(t *testing.T) {
 	if err := p.handleCmpctBlock(full); err != nil || p.conn.(*scriptedConn).Buffer.Len() != 0 {
 		t.Fatalf("duplicate compact block err=%v writes=%d, want silent skip", err, p.conn.(*scriptedConn).Buffer.Len())
 	}
-
+	p = newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	badFull := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: minimalBlockTxnTestTxBytes(62)}}})
+	if err := p.handleCmpctBlock(badFull); err == nil {
+		t.Fatal("fully prefilled invalid compact block should fail")
+	}
+	if state := p.snapshotState(); state.BanScore < 100 || p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatalf("fully prefilled invalid compact state=%+v writes=%d, want ban without fallback", state, p.conn.(*scriptedConn).Buffer.Len())
+	}
 	p = newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
 	overflow := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, ShortIDs: make([]compactShortID, maxCompactRelayEntries+1)})
@@ -481,7 +487,6 @@ func TestHandleBlockTxnRuntimeFlowAndEdges(t *testing.T) {
 	if err := p.handleBlockTxn(body); err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("wrong-hash blocktxn err=%v, want mismatch", err)
 	}
-
 	header, blockHash, txs := devnetGenesisCompactParts(t)
 	p = newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
@@ -490,7 +495,6 @@ func TestHandleBlockTxnRuntimeFlowAndEdges(t *testing.T) {
 		t.Fatalf("malformed matching blocktxn should fall back: %v", err)
 	}
 	_ = readScriptedConnFrame(t, p)
-
 	p = newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
@@ -508,7 +512,6 @@ func TestHandleBlockTxnRuntimeFlowAndEdges(t *testing.T) {
 	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
 		t.Fatalf("hasBlock=%v err=%v, want applied compact block", have, err)
 	}
-
 	p = newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
 	setCompactTestOutstanding(p, blockHash, header, txs[0], compactShortID{0xbb}, 301, 302)

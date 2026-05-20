@@ -270,7 +270,7 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 		return err
 	}
 	if result.Transactions != nil {
-		return p.processCompactTransactions(blockHash, block.Header, result.Transactions)
+		return p.processCompactTransactions(blockHash, block.Header, result.Transactions, len(block.ShortIDs) > 0)
 	}
 	return p.requestMissingCompactTransactions(block, blockHash, result)
 }
@@ -334,7 +334,7 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	if err != nil {
 		return p.requestCompactFullBlockFallback(req.BlockHash)
 	}
-	return p.processCompactTransactions(req.BlockHash, req.Header, txs)
+	return p.processCompactTransactions(req.BlockHash, req.Header, txs, true)
 }
 
 func compactBlockTxnPayloadHash(payload []byte) ([32]byte, error) {
@@ -346,12 +346,12 @@ func compactBlockTxnPayloadHash(payload []byte) ([32]byte, error) {
 	return blockHash, nil
 }
 
-func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte) error {
+func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte, fallbackOnApply bool) error {
 	blockBytes, err := compactBlockBytes(header, txs)
 	if err != nil {
 		return p.requestCompactFullBlockFallback(blockHash)
 	}
-	accepted, fallback, err := p.processCompactRelayedBlock(blockHash, blockBytes)
+	accepted, fallback, err := p.processCompactRelayedBlock(blockHash, blockBytes, fallbackOnApply)
 	if fallback {
 		return p.requestCompactFullBlockFallback(blockHash)
 	}
@@ -361,7 +361,7 @@ func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.
 	return p.service.requestBlocksIfBehind(p)
 }
 
-func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []byte) (bool, bool, error) {
+func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []byte, fallbackOnApply bool) (bool, bool, error) {
 	pb, blockHash, err := parseRelayedBlock(blockBytes)
 	if err != nil || pb == nil || blockHash != expectedHash {
 		return false, true, err
@@ -374,7 +374,7 @@ func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []by
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
-		if compactApplyErrorNeedsFullBlock(err) {
+		if fallbackOnApply && compactApplyErrorNeedsFullBlock(err) {
 			return false, true, err
 		}
 		p.recordRelayedBlockApplyError(err)
