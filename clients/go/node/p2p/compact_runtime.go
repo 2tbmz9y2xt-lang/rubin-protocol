@@ -49,3 +49,8 @@ func (p *peer) remoteCompactMode() compactModeSnapshot {
 	defer p.compactMu.Unlock()
 	return p.compact.remoteMode
 }
+
+func (p *peer) compactRelayEnabled() bool {
+	mode := p.remoteCompactMode()
+	return mode.Version == compactRelayVersion && mode.Mode > 0
+}

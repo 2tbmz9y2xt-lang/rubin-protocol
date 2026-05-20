@@ -127,6 +127,9 @@ func (p *peer) handleInventoryRelayMessage(frame message) error {
 }
 
 func (p *peer) handleObjectRelayMessage(frame message) error {
+	if isCompactRelayObjectCommand(frame.Command) && !p.compactRelayEnabled() {
+		return errors.New("compact relay not negotiated")
+	}
 	switch frame.Command {
 	case messageBlock:
 		return p.handleBlock(frame.Payload)
@@ -142,6 +145,15 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 		return p.handleBlockTxn(frame.Payload)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
+	}
+}
+
+func isCompactRelayObjectCommand(command string) bool {
+	switch command {
+	case messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
+		return true
+	default:
+		return false
 	}
 }
 

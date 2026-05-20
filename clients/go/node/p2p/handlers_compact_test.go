@@ -49,6 +49,20 @@ func TestCompactBlockTxnFlowRequestsAndAcceptsMatchingResponse(t *testing.T) {
 	}
 }
 
+func TestCompactRelayObjectCommandsRequireNegotiation(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+		err := p.handleMessage(message{Command: command, Payload: nil})
+		if err == nil || !strings.Contains(err.Error(), "compact relay not negotiated") {
+			t.Fatalf("handleMessage(%s) err=%v, want negotiation rejection", command, err)
+		}
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("non-negotiated compact command left outstanding: %+v", outstanding)
+	}
+}
+
 func TestCmpctBlockUsesLocalTxPoolBeforeRequest(t *testing.T) {
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -213,6 +227,7 @@ func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
 
 func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
+	enableCompactRelayForTest(p)
 	conn := &scriptedConn{}
 	p.conn = conn
 	txA := minimalBlockTxnTestTxBytes(101)
@@ -249,6 +264,7 @@ func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
 func TestBlockTxnMalformedAndProcessFailureFallback(t *testing.T) {
 	hash := [32]byte{0xbe}
 	p := newPeerRuntimeTestPeer(t)
+	enableCompactRelayForTest(p)
 	conn := &scriptedConn{}
 	p.conn = conn
 	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: hash})
@@ -258,6 +274,7 @@ func TestBlockTxnMalformedAndProcessFailureFallback(t *testing.T) {
 	assertCompactFullBlockRequest(t, p, conn, hash)
 
 	p = newPeerRuntimeTestPeer(t)
+	enableCompactRelayForTest(p)
 	conn = &scriptedConn{}
 	p.conn = conn
 	tx := minimalBlockTxnTestTxBytes(103)
@@ -405,7 +422,12 @@ func compactTestPeerWithConn(h *testHarness) (*peer, *scriptedConn) {
 	conn := &scriptedConn{}
 	p := testPeerForService(h.service, "rubin-go/test-peer", 1)
 	p.conn = conn
+	enableCompactRelayForTest(p)
 	return p, conn
+}
+
+func enableCompactRelayForTest(p *peer) {
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 2, Version: compactRelayVersion})
 }
 
 func readCompactTestFrame(t *testing.T, p *peer, conn *scriptedConn) message {
