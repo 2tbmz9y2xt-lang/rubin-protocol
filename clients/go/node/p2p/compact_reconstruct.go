@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
-	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 const compactDuplicateReportedIndex = ^uint64(0)
@@ -287,6 +286,7 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 		p.clearCompactOutstandingRequest()
 		return err
 	}
+	p.refreshCompactOutstandingExpiry()
 	return nil
 }
 
@@ -494,10 +494,6 @@ func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []by
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
-		if errors.Is(err, node.ErrParentNotFound) {
-			_, retainErr := p.retainRelayedOrphanIfValid(pb, blockHash, blockBytes)
-			return false, retainErr
-		}
 		return false, err
 	}
 	p.acceptedRelayedBlock(blockHash, summary)
@@ -701,6 +697,14 @@ func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
 	clone := cloneCompactOutstandingRequest(req)
 	clone.ExpiresAt = p.compactOutstandingExpiry()
 	p.compact.outstanding = &clone
+	p.compactMu.Unlock()
+}
+
+func (p *peer) refreshCompactOutstandingExpiry() {
+	p.compactMu.Lock()
+	if p.compact.outstanding != nil {
+		p.compact.outstanding.ExpiresAt = p.compactOutstandingExpiry()
+	}
 	p.compactMu.Unlock()
 }
 

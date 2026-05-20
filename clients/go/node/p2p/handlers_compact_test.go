@@ -50,6 +50,54 @@ func TestCompactBlockTxnFlowRequestsAndAcceptsMatchingResponse(t *testing.T) {
 	}
 }
 
+func TestCmpctBlockRefreshesOutstandingExpiryAfterSend(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 11, 12)
+	start := time.Unix(1_777_000_010, 0)
+	now := start
+	sink.service.cfg.Now = func() time.Time { return now }
+	sink.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
+
+	conn := &compactAdvancingConn{onWrite: func() {
+		now = start.Add(500 * time.Millisecond)
+	}}
+	p := testPeerForService(sink.service, "rubin-go/test-peer", 1)
+	p.conn = conn
+	enableCompactRelayForTest(p)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(cmpctblock): %v", err)
+	}
+	frame, err := readFrame(&conn.Buffer, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if err != nil {
+		t.Fatalf("readFrame: %v", err)
+	}
+	if frame.Command != messageGetBlockTxn {
+		t.Fatalf("command=%q, want getblocktxn", frame.Command)
+	}
+	outstanding, ok := p.compactOutstandingRequestSnapshot()
+	if !ok || outstanding.BlockHash != blockHash {
+		t.Fatalf("outstanding=%+v ok=%v, want block %x", outstanding, ok, blockHash)
+	}
+	wantExpiry := start.Add(1500 * time.Millisecond)
+	if !outstanding.ExpiresAt.Equal(wantExpiry) {
+		t.Fatalf("outstanding expiry=%s, want refreshed expiry %s", outstanding.ExpiresAt, wantExpiry)
+	}
+}
+
+type compactAdvancingConn struct {
+	scriptedConn
+	onWrite func()
+}
+
+func (c *compactAdvancingConn) Write(p []byte) (int, error) {
+	if c.onWrite != nil {
+		c.onWrite()
+	}
+	return c.scriptedConn.Write(p)
+}
+
 func TestCompactRelayObjectCommandsRequireNegotiation(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
@@ -177,7 +225,7 @@ func TestBlockTxnFlowPreservesLocalMatchesAcrossResponse(t *testing.T) {
 	assertHarnessTip(t, sink, 1, blockHash)
 }
 
-func TestCompactReconstructedMissingParentIsRetainedAsOrphan(t *testing.T) {
+func TestCompactReconstructedMissingParentRequestsFullBlockFallback(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 2)
@@ -195,12 +243,13 @@ func TestCompactReconstructedMissingParentIsRetainedAsOrphan(t *testing.T) {
 	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, txs)}); err != nil {
 		t.Fatalf("handleMessage(blocktxn): %v", err)
 	}
-	assertOrphanPoolLen(t, sink.service, 1)
-	if conn.Buffer.Len() != 0 {
-		t.Fatalf("orphan compact reconstruction wrote %d fallback bytes, want none", conn.Buffer.Len())
+	assertCompactFullBlockRequest(t, p, conn, blockHash)
+	assertOrphanPoolLen(t, sink.service, 0)
+	if sink.service.blockSeen.Has(blockHash) {
+		t.Fatalf("compact reconstructed missing-parent block must not mark blockSeen before full-block validation")
 	}
 	if got := p.snapshotState().BanScore; got != 0 {
-		t.Fatalf("orphan compact reconstruction ban score=%d, want 0", got)
+		t.Fatalf("missing-parent compact reconstruction ban score=%d, want 0", got)
 	}
 }
 
