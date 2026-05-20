@@ -313,6 +313,7 @@ func (p *peer) handleGetBlockTxn(payload []byte) error {
 func (p *peer) handleBlockTxn(payload []byte) error {
 	req, ok := p.compactOutstandingRequestSnapshot()
 	if !ok {
+		p.clearLateBlockTxnReply()
 		return nil
 	}
 	responseHash, err := compactBlockTxnPayloadHash(payload)
@@ -558,6 +559,11 @@ func (p *peer) requestCompactFullBlockFallbackForOutstanding(cause error) error 
 	return p.requestCompactFullBlockFallback(req.BlockHash)
 }
 
+func (p *peer) requestCompactFullBlockFallbackForAbandonedOutstanding(req compactOutstandingRequest) error {
+	p.setLateBlockTxnReply(req)
+	return p.requestCompactFullBlockFallback(req.BlockHash)
+}
+
 func (p *peer) requestCompactFullBlockFallback(blockHash [32]byte) error {
 	body, err := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
 	if err != nil {
@@ -767,6 +773,7 @@ func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
 	clone := cloneCompactOutstandingRequest(req)
 	clone.ExpiresAt = p.compactOutstandingExpiry()
 	p.compact.outstanding = &clone
+	p.compact.lateBlockTxnReply = nil
 	p.compactMu.Unlock()
 }
 
@@ -783,7 +790,7 @@ func (p *peer) expireCompactOutstandingRequest() error {
 	if !ok {
 		return nil
 	}
-	return p.requestCompactFullBlockFallback(req.BlockHash)
+	return p.requestCompactFullBlockFallbackForAbandonedOutstanding(req)
 }
 
 func (p *peer) expiredCompactOutstandingRequest() (compactOutstandingRequest, bool) {
@@ -830,12 +837,13 @@ func (p *peer) fallbackCompactOutstandingRequest() error {
 	if !ok {
 		return nil
 	}
-	return p.requestCompactFullBlockFallback(req.BlockHash)
+	return p.requestCompactFullBlockFallbackForAbandonedOutstanding(req)
 }
 
 func (p *peer) clearCompactOutstandingRequest() {
 	p.compactMu.Lock()
 	p.compact.outstanding = nil
+	p.compact.lateBlockTxnReply = nil
 	p.compactMu.Unlock()
 }
 
@@ -864,4 +872,42 @@ func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutsta
 	req.MissingShortIDs = append([]compactShortID(nil), req.MissingShortIDs...)
 	req.Transactions = cloneCompactTransactions(req.Transactions)
 	return req
+}
+
+func (p *peer) blockTxnPayloadCap() uint32 {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding != nil {
+		return compactBlockTxnResponsePayloadCap(len(p.compact.outstanding.MissingIndexes))
+	}
+	if p.compact.lateBlockTxnReply != nil {
+		return p.compact.lateBlockTxnReply.Cap
+	}
+	return 0
+}
+
+func compactBlockTxnResponsePayloadCap(txCount int) uint32 {
+	if txCount <= 0 {
+		return 0
+	}
+	return uint32(32 + maxCompactSizeBytes + consensus.MAX_BLOCK_BYTES + uint64(txCount)*maxCompactSizeBytes)
+}
+
+func (p *peer) setLateBlockTxnReply(req compactOutstandingRequest) {
+	cap := compactBlockTxnResponsePayloadCap(len(req.MissingIndexes))
+	if cap == 0 {
+		return
+	}
+	p.compactMu.Lock()
+	p.compact.lateBlockTxnReply = &compactLateBlockTxnReply{Cap: cap}
+	p.compactMu.Unlock()
+}
+
+func (p *peer) clearLateBlockTxnReply() {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.lateBlockTxnReply == nil {
+		return
+	}
+	p.compact.lateBlockTxnReply = nil
 }

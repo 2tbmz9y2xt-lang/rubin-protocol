@@ -11,8 +11,13 @@ type compactModeSnapshot struct {
 }
 
 type peerCompactRelayState struct {
-	remoteMode  compactModeSnapshot
-	outstanding *compactOutstandingRequest
+	remoteMode        compactModeSnapshot
+	outstanding       *compactOutstandingRequest
+	lateBlockTxnReply *compactLateBlockTxnReply
+}
+
+type compactLateBlockTxnReply struct {
+	Cap uint32
 }
 
 func (p *peer) handleSendCmpct(payload []byte) error {

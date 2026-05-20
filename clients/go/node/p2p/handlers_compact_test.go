@@ -104,31 +104,24 @@ func TestCompactRelayObjectCommandsRequireNegotiation(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{}
 	capFn := p.postHandshakePayloadCap()
-	if got := capFn(messageSendCmpct); got != sendCmpctPayloadBytes {
-		t.Fatalf("sendcmpct cap=%d, want %d", got, sendCmpctPayloadBytes)
-	}
+	assertCompactCommandCap(t, capFn, messageSendCmpct, sendCmpctPayloadBytes)
 	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
-		if got := capFn(command); got != 0 {
-			t.Fatalf("non-negotiated %s cap=%d, want 0", command, got)
-		}
+		assertCompactCommandCap(t, capFn, command, 0)
 		err := p.handleMessage(message{Command: command, Payload: nil})
 		if err == nil || !strings.Contains(err.Error(), "compact relay not negotiated") {
 			t.Fatalf("handleMessage(%s) err=%v, want negotiation rejection", command, err)
 		}
 	}
-	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
-		t.Fatalf("non-negotiated compact command left outstanding: %+v", outstanding)
-	}
+	assertNoCompactOutstanding(t, p, "non-negotiated compact command")
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 2, Version: compactRelayVersion})
-	if got := capFn(messageCmpctBlock); got != 0 {
-		t.Fatalf("disabled compact object cap=%d, want 0 before local enable", got)
-	}
+	assertCompactCommandCap(t, capFn, messageCmpctBlock, 0)
 	enableCompactRelayForTest(p)
-	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
-		if got := capFn(command); got == 0 {
-			t.Fatalf("negotiated %s cap=0, want enabled compact cap", command)
-		}
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn} {
+		assertCompactCommandCapEnabled(t, capFn, command)
 	}
+	assertCompactCommandCap(t, capFn, messageBlockTxn, 0)
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: [32]byte{0x01}, MissingIndexes: []uint64{0}})
+	assertBoundedBlockTxnCap(t, p)
 }
 
 func TestCmpctBlockKnownBlockStillValidatesFullPayloadShape(t *testing.T) {
@@ -438,6 +431,9 @@ func TestBlockTxnIgnoresUnsolicitedWithoutOutstanding(t *testing.T) {
 	}
 
 	p, conn := compactTestPeerWithConn(sink)
+	if got := p.postHandshakePayloadCap()(messageBlockTxn); got != 0 {
+		t.Fatalf("unsolicited blocktxn cap=%d, want 0", got)
+	}
 	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, txs[:1])}); err != nil {
 		t.Fatalf("unsolicited blocktxn: %v", err)
 	}
@@ -496,10 +492,7 @@ func TestBlockTxnLateAfterExpiredOutstandingIsIgnored(t *testing.T) {
 	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
 	hash := [32]byte{0xd1}
 	tx := minimalBlockTxnTestTxBytes(104)
-	shortID, err := compactTransactionShortID(tx, 45, 46)
-	if err != nil {
-		t.Fatalf("compactTransactionShortID: %v", err)
-	}
+	shortID := mustCompactTransactionShortID(t, tx, 45, 46)
 	p.setCompactOutstandingRequest(compactOutstandingRequest{
 		BlockHash:       hash,
 		MissingIndexes:  []uint64{0},
@@ -508,15 +501,19 @@ func TestBlockTxnLateAfterExpiredOutstandingIsIgnored(t *testing.T) {
 		Nonce1:          45,
 		Nonce2:          46,
 	})
+	activeCap := assertBoundedBlockTxnCap(t, p)
 
 	now = now.Add(time.Second)
+	if err := p.expireCompactOutstandingRequest(); err != nil {
+		t.Fatalf("expire compact outstanding: %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
+	assertNoCompactOutstanding(t, p, "expired compact request")
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, activeCap)
 	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, hash, [][]byte{tx})}); err != nil {
 		t.Fatalf("late blocktxn after fallback: %v", err)
 	}
-	assertCompactFullBlockRequest(t, p, conn, hash)
-	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
-		t.Fatalf("expired compact request still outstanding: %+v", outstanding)
-	}
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
 }
 
 func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
@@ -785,6 +782,45 @@ func compactTestPeerWithConn(h *testHarness) (*peer, *scriptedConn) {
 func enableCompactRelayForTest(p *peer) {
 	p.service.cfg.CompactRelayObjectsEnabled = true
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 2, Version: compactRelayVersion})
+}
+
+func assertCompactCommandCap(t *testing.T, capFn payloadLimitFn, command string, want uint32) {
+	t.Helper()
+	if got := capFn(command); got != want {
+		t.Fatalf("%s cap=%d, want %d", command, got, want)
+	}
+}
+
+func assertCompactCommandCapEnabled(t *testing.T, capFn payloadLimitFn, command string) {
+	t.Helper()
+	if got := capFn(command); got == 0 {
+		t.Fatalf("%s cap=0, want enabled compact cap", command)
+	}
+}
+
+func assertBoundedBlockTxnCap(t *testing.T, p *peer) uint32 {
+	t.Helper()
+	got := p.postHandshakePayloadCap()(messageBlockTxn)
+	if got == 0 || got >= compactRelayPayloadCap(messageBlockTxn) {
+		t.Fatalf("blocktxn cap=%d, want bounded non-zero cap", got)
+	}
+	return got
+}
+
+func assertNoCompactOutstanding(t *testing.T, p *peer, context string) {
+	t.Helper()
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("%s left outstanding: %+v", context, outstanding)
+	}
+}
+
+func mustCompactTransactionShortID(t *testing.T, tx []byte, nonce1, nonce2 uint64) compactShortID {
+	t.Helper()
+	shortID, err := compactTransactionShortID(tx, nonce1, nonce2)
+	if err != nil {
+		t.Fatalf("compactTransactionShortID: %v", err)
+	}
+	return shortID
 }
 
 func readCompactTestFrame(t *testing.T, p *peer, conn *scriptedConn) message {

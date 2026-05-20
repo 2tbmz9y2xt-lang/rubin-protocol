@@ -61,6 +61,9 @@ func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 		if isCompactRelayObjectCommand(command) && !p.compactRelayEnabled() {
 			return 0
 		}
+		if command == messageBlockTxn {
+			return p.blockTxnPayloadCap()
+		}
 		return limiter.cap(command)
 	}
 }

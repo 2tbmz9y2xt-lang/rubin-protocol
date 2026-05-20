@@ -88,6 +88,29 @@ func TestShouldIgnoreAndNormalizeReadError(t *testing.T) {
 	}
 }
 
+func TestBlockTxnCapRejectsUnsolicitedBeforePayloadRead(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	enableCompactRelayForTest(p)
+	payload := []byte{0x01}
+	header, err := buildEnvelopeHeader(networkMagic("devnet"), messageBlockTxn, payload)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	reader := io.MultiReader(
+		bytes.NewReader(header[:]),
+		&failingReader{err: errors.New("payload should not be read")},
+	)
+	_, err = readFrameWithPayloadLimit(
+		reader,
+		networkMagic("devnet"),
+		p.service.cfg.PeerRuntimeConfig.MaxMessageSize,
+		p.postHandshakePayloadCap(),
+	)
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("unsolicited blocktxn cap err=%v, want command cap rejection", err)
+	}
+}
+
 func TestRunDisconnectsOnPartialHeaderTimeoutBeforeFakeFrame(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Millisecond
