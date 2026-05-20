@@ -27,7 +27,8 @@ type scriptedRead struct {
 }
 
 type scriptedConn struct {
-	reads []scriptedRead
+	reads    []scriptedRead
+	writeErr error
 	bytes.Buffer
 }
 
@@ -51,7 +52,12 @@ func (c *scriptedConn) Read(p []byte) (int, error) {
 	return 0, err
 }
 
-func (c *scriptedConn) Write(p []byte) (int, error) { return c.Buffer.Write(p) }
+func (c *scriptedConn) Write(p []byte) (int, error) {
+	if c.writeErr != nil {
+		return 0, c.writeErr
+	}
+	return c.Buffer.Write(p)
+}
 func (c *scriptedConn) Close() error                { return nil }
 func (c *scriptedConn) LocalAddr() net.Addr         { return stubAddr("local") }
 func (c *scriptedConn) RemoteAddr() net.Addr        { return stubAddr("remote") }
@@ -113,6 +119,13 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 	p.compactMu.Unlock()
 	if got := limiter(messageBlockTxn); got != 64 {
 		t.Fatalf("negotiated blocktxn cap=%d, want outstanding cap 64", got)
+	}
+}
+
+func TestCompactObjectRelayRejectsBeforeNegotiation(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	if err := p.handleObjectRelayMessage(message{Command: messageCmpctBlock}); err == nil || err.Error() != "compact relay not negotiated" {
+		t.Fatalf("pre-negotiation compact object err=%v, want compact relay not negotiated", err)
 	}
 }
 

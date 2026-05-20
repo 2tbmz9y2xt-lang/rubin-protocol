@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -287,6 +288,90 @@ func TestCompactBlockTxnFlowRequestsMissingTransactions(t *testing.T) {
 	}
 	assertHarnessTip(t, sink, 1, blockHash)
 
+}
+
+func TestHandleCmpctBlockRejectsMalformedAndSkipsKnownBlock(t *testing.T) {
+	p, conn := compactTestPeerWithConn(newTestHarness(t, 1, "127.0.0.1:0", nil))
+	if err := p.handleMessage(message{Command: messageCmpctBlock}); err == nil {
+		t.Fatal("malformed cmpctblock accepted")
+	}
+	if conn.Len() != 0 {
+		t.Fatalf("malformed cmpctblock wrote %d bytes", conn.Len())
+	}
+
+	known := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, known, 1)
+	p, conn = compactTestPeerWithConn(known)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, compactTestBlockWithoutPrefill(t, blockBytes, 21, 22))}); err != nil {
+		t.Fatalf("known cmpctblock should be ignored: %v", err)
+	}
+	if conn.Len() != 0 {
+		t.Fatalf("known cmpctblock wrote %d bytes", conn.Len())
+	}
+}
+
+func TestHandleCmpctBlockPrefilledOnlyAppliesBlock(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	header, txs, err := compactTestBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactTestBlockTransactions: %v", err)
+	}
+	p, conn := compactTestPeerWithConn(sink)
+	block := cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}}
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
+		t.Fatalf("handleMessage(prefilled cmpctblock): %v", err)
+	}
+	if conn.Len() != 0 {
+		t.Fatalf("prefilled cmpctblock wrote %d bytes", conn.Len())
+	}
+	assertHarnessTip(t, sink, 1, blockHash)
+}
+
+func TestRequestMissingCompactTransactionsFallbackAndSendFailure(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestBlockWithoutPrefill(t, blockBytes, 31, 32)
+	p, conn := compactTestPeerWithConn(newTestHarness(t, 1, "127.0.0.1:0", nil))
+
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: [32]byte{0xee}, BlockTxnPayloadCap: 64})
+	if err := p.requestMissingCompactTransactions(block, blockHash, []uint64{0}); err != nil {
+		t.Fatalf("requestMissingCompactTransactions(existing): %v", err)
+	}
+	frame, err := readFrame(&conn.Buffer, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if err != nil {
+		t.Fatalf("read fallback frame: %v", err)
+	}
+	if frame.Command != messageGetData {
+		t.Fatalf("fallback command=%q, want getdata", frame.Command)
+	}
+
+	p.clearCompactOutstandingRequest()
+	if err := p.requestMissingCompactTransactions(block, blockHash, nil); err == nil {
+		t.Fatal("empty missing request accepted")
+	}
+	conn.writeErr = errWriterFailed
+	if err := p.requestMissingCompactTransactions(block, blockHash, []uint64{0}); !errors.Is(err, errWriterFailed) {
+		t.Fatalf("send failure err=%v, want %v", err, errWriterFailed)
+	}
+	if _, ok := p.compactOutstandingRequest(); ok {
+		t.Fatal("send failure left outstanding request")
+	}
+}
+
+func TestHandleBlockTxnRejectsUnsolicitedAndShortPayload(t *testing.T) {
+	p, _ := compactTestPeerWithConn(newTestHarness(t, 1, "127.0.0.1:0", nil))
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: make([]byte, 32)}); err == nil {
+		t.Fatal("unsolicited blocktxn accepted")
+	}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: [32]byte{0x01}, BlockTxnPayloadCap: 64})
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: make([]byte, 31)}); err == nil {
+		t.Fatal("short blocktxn accepted")
+	}
+	if _, ok := p.compactOutstandingRequest(); ok {
+		t.Fatal("short blocktxn did not clear outstanding request")
+	}
 }
 
 func TestCompactBlockTxnFallsBackWhenResponseCannotComplete(t *testing.T) {
