@@ -311,17 +311,16 @@ func (p *peer) handleGetBlockTxn(payload []byte) error {
 }
 
 func (p *peer) handleBlockTxn(payload []byte) error {
-	req, ok := p.compactOutstandingRequestSnapshot()
+	responseHash, err := compactBlockTxnPayloadHash(payload)
+	req, ok, mismatchErr := p.compactOutstandingForBlockTxn(responseHash, err == nil)
 	if !ok {
-		p.clearLateBlockTxnReply()
 		return nil
 	}
-	responseHash, err := compactBlockTxnPayloadHash(payload)
 	if err != nil {
 		return p.requestCompactFullBlockFallbackForOutstanding(err)
 	}
-	if responseHash != req.BlockHash {
-		return p.requestCompactFullBlockFallbackForOutstanding(errors.New("unexpected blocktxn response"))
+	if mismatchErr != nil {
+		return p.requestCompactFullBlockFallbackForOutstanding(mismatchErr)
 	}
 	response, err := decodeBlockTxnRuntimePayload(payload)
 	if err != nil {
@@ -339,6 +338,21 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 		return err
 	}
 	return nil
+}
+
+func (p *peer) compactOutstandingForBlockTxn(responseHash [32]byte, hasHash bool) (compactOutstandingRequest, bool, error) {
+	req, ok := p.compactOutstandingRequestSnapshot()
+	if !ok {
+		p.clearLateBlockTxnReplyForHash(responseHash, hasHash)
+		return compactOutstandingRequest{}, false, nil
+	}
+	if !hasHash || responseHash == req.BlockHash {
+		return req, true, nil
+	}
+	if p.clearLateBlockTxnReplyForHash(responseHash, true) {
+		return compactOutstandingRequest{}, false, nil
+	}
+	return req, true, errors.New("unexpected blocktxn response")
 }
 
 func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) (compactOutstandingRequest, error) {
@@ -773,7 +787,6 @@ func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
 	clone := cloneCompactOutstandingRequest(req)
 	clone.ExpiresAt = p.compactOutstandingExpiry()
 	p.compact.outstanding = &clone
-	p.compact.lateBlockTxnReply = nil
 	p.compactMu.Unlock()
 }
 
@@ -875,15 +888,18 @@ func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutsta
 }
 
 func (p *peer) blockTxnPayloadCap() uint32 {
+	now := p.compactNow()
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
+	p.clearExpiredLateBlockTxnReplyLocked(now)
+	var cap uint32
 	if p.compact.outstanding != nil {
-		return compactBlockTxnResponsePayloadCap(len(p.compact.outstanding.MissingIndexes))
+		cap = compactBlockTxnResponsePayloadCap(len(p.compact.outstanding.MissingIndexes))
 	}
-	if p.compact.lateBlockTxnReply != nil {
-		return p.compact.lateBlockTxnReply.Cap
+	if p.compact.lateBlockTxnReply != nil && p.compact.lateBlockTxnReply.Cap > cap {
+		cap = p.compact.lateBlockTxnReply.Cap
 	}
-	return 0
+	return cap
 }
 
 func compactBlockTxnResponsePayloadCap(txCount int) uint32 {
@@ -899,15 +915,34 @@ func (p *peer) setLateBlockTxnReply(req compactOutstandingRequest) {
 		return
 	}
 	p.compactMu.Lock()
-	p.compact.lateBlockTxnReply = &compactLateBlockTxnReply{Cap: cap}
+	p.compact.lateBlockTxnReply = &compactLateBlockTxnReply{
+		BlockHash: req.BlockHash,
+		Cap:       cap,
+		ExpiresAt: p.compactOutstandingExpiry(),
+	}
 	p.compactMu.Unlock()
 }
 
-func (p *peer) clearLateBlockTxnReply() {
+func (p *peer) clearLateBlockTxnReplyForHash(blockHash [32]byte, hasHash bool) bool {
+	now := p.compactNow()
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
+	p.clearExpiredLateBlockTxnReplyLocked(now)
+	if p.compact.lateBlockTxnReply == nil {
+		return false
+	}
+	if !hasHash || p.compact.lateBlockTxnReply.BlockHash == blockHash {
+		p.compact.lateBlockTxnReply = nil
+		return true
+	}
+	return false
+}
+
+func (p *peer) clearExpiredLateBlockTxnReplyLocked(now time.Time) {
 	if p.compact.lateBlockTxnReply == nil {
 		return
 	}
-	p.compact.lateBlockTxnReply = nil
+	if !p.compact.lateBlockTxnReply.ExpiresAt.IsZero() && !now.Before(p.compact.lateBlockTxnReply.ExpiresAt) {
+		p.compact.lateBlockTxnReply = nil
+	}
 }

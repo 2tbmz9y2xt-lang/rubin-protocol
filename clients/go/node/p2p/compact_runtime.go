@@ -3,6 +3,7 @@ package p2p
 import (
 	"encoding/binary"
 	"errors"
+	"time"
 )
 
 type compactModeSnapshot struct {
@@ -17,7 +18,9 @@ type peerCompactRelayState struct {
 }
 
 type compactLateBlockTxnReply struct {
-	Cap uint32
+	BlockHash [32]byte
+	Cap       uint32
+	ExpiresAt time.Time
 }
 
 func (p *peer) handleSendCmpct(payload []byte) error {

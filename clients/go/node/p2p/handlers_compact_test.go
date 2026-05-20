@@ -516,6 +516,67 @@ func TestBlockTxnLateAfterExpiredOutstandingIsIgnored(t *testing.T) {
 	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
 }
 
+func TestBlockTxnLateAllowanceSurvivesNextOutstanding(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	enableCompactRelayForTest(p)
+	conn := &scriptedConn{}
+	p.conn = conn
+	now := time.Unix(1_777_000_200, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
+	hashA := [32]byte{0xa1}
+	hashB := [32]byte{0xb2}
+	txA := minimalBlockTxnTestTxBytes(105)
+	shortA := mustCompactTransactionShortID(t, txA, 47, 48)
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:       hashA,
+		MissingIndexes:  []uint64{0, 1},
+		MissingShortIDs: []compactShortID{shortA, compactShortID{0x02}},
+		Transactions:    make([][]byte, 2),
+		Nonce1:          47,
+		Nonce2:          48,
+	})
+	lateCap := assertBoundedBlockTxnCap(t, p)
+
+	now = now.Add(time.Second)
+	if err := p.expireCompactOutstandingRequest(); err != nil {
+		t.Fatalf("expire compact outstanding A: %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hashA)
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: hashB, MissingIndexes: []uint64{0}})
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, lateCap)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, hashA, [][]byte{txA})}); err != nil {
+		t.Fatalf("late blocktxn A while B outstanding: %v", err)
+	}
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, compactBlockTxnResponsePayloadCap(1))
+	assertCompactOutstandingHash(t, p, hashB)
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("late blocktxn A wrote %d bytes, want no fallback for B", conn.Buffer.Len())
+	}
+}
+
+func TestBlockTxnLateAllowanceExpires(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	enableCompactRelayForTest(p)
+	conn := &scriptedConn{}
+	p.conn = conn
+	now := time.Unix(1_777_000_300, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
+	hash := [32]byte{0xd2}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: hash, MissingIndexes: []uint64{0}})
+	activeCap := assertBoundedBlockTxnCap(t, p)
+
+	now = now.Add(time.Second)
+	if err := p.expireCompactOutstandingRequest(); err != nil {
+		t.Fatalf("expire compact outstanding: %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, activeCap)
+	now = now.Add(time.Second)
+	assertCompactCommandCap(t, p.postHandshakePayloadCap(), messageBlockTxn, 0)
+}
+
 func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	enableCompactRelayForTest(p)
@@ -811,6 +872,14 @@ func assertNoCompactOutstanding(t *testing.T, p *peer, context string) {
 	t.Helper()
 	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatalf("%s left outstanding: %+v", context, outstanding)
+	}
+}
+
+func assertCompactOutstandingHash(t *testing.T, p *peer, want [32]byte) {
+	t.Helper()
+	outstanding, ok := p.compactOutstandingRequestSnapshot()
+	if !ok || outstanding.BlockHash != want {
+		t.Fatalf("outstanding=%+v ok=%v, want block %x", outstanding, ok, want)
 	}
 }
 
