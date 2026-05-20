@@ -313,7 +313,7 @@ func (p *peer) handleGetBlockTxn(payload []byte) error {
 func (p *peer) handleBlockTxn(payload []byte) error {
 	req, ok := p.compactOutstandingRequestSnapshot()
 	if !ok {
-		return errors.New("unexpected blocktxn response")
+		return nil
 	}
 	responseHash, err := compactBlockTxnPayloadHash(payload)
 	if err != nil {
@@ -328,7 +328,7 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	}
 	req, ok = p.popCompactOutstandingRequest()
 	if !ok {
-		return errors.New("unexpected blocktxn response")
+		return nil
 	}
 	txs, err := compactFillResponseTransactions(req, response.Transactions, response.WTxIDs)
 	if err != nil {

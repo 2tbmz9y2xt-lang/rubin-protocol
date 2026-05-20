@@ -155,11 +155,11 @@ func decodeBlockTxnPayload(payload []byte) (blockTxnPayload, error) {
 }
 
 func decodeBlockTxnRuntimePayload(payload []byte) (blockTxnRuntimePayload, error) {
-	var out blockTxnPayload
+	var blockHash [32]byte
 	if len(payload) < 32 {
 		return blockTxnRuntimePayload{}, errors.New("blocktxn payload missing block hash")
 	}
-	copy(out.BlockHash[:], payload[:32])
+	copy(blockHash[:], payload[:32])
 	count, consumed, err := consensus.DecodeCompactSize(payload[32:])
 	if err != nil {
 		return blockTxnRuntimePayload{}, err
@@ -189,7 +189,7 @@ func decodeBlockTxnRuntimePayload(payload []byte) (blockTxnRuntimePayload, error
 	if offset != len(payload) {
 		return blockTxnRuntimePayload{}, errors.New("blocktxn payload has trailing bytes")
 	}
-	return blockTxnRuntimePayload{BlockHash: out.BlockHash, Transactions: transactions, WTxIDs: wtxids}, nil
+	return blockTxnRuntimePayload{BlockHash: blockHash, Transactions: transactions, WTxIDs: wtxids}, nil
 }
 
 func encodeCmpctBlockPayload(p cmpctBlockPayload) ([]byte, error) {

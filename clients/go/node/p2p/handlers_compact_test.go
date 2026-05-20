@@ -428,21 +428,30 @@ func TestCmpctBlockRejectsWrongTargetBeforeOversizedFallback(t *testing.T) {
 	}
 }
 
-func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
+func TestBlockTxnIgnoresUnsolicitedWithoutOutstanding(t *testing.T) {
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
-	block := compactTestPayloadFromBlock(t, blockBytes, 31, 32)
 	_, txs, err := compactBlockTransactions(blockBytes)
 	if err != nil {
 		t.Fatalf("compactBlockTransactions: %v", err)
 	}
 
-	p, _ := compactTestPeerWithConn(sink)
-	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, txs[:1])}); err == nil || !strings.Contains(err.Error(), "unexpected blocktxn response") {
-		t.Fatalf("unsolicited blocktxn err=%v, want unexpected response", err)
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, blockHash, txs[:1])}); err != nil {
+		t.Fatalf("unsolicited blocktxn: %v", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("unsolicited blocktxn wrote %d bytes, want none", conn.Buffer.Len())
 	}
 	assertHarnessTip(t, sink, 0, nodeGenesisHash(t, sink))
+}
+
+func TestBlockTxnRejectsWrongHashAndCount(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 31, 32)
 
 	p, conn := compactTestPeerWithConn(sink)
 	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)}); err != nil {
@@ -475,6 +484,39 @@ func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
 		t.Fatalf("count-mismatch blocktxn did not clear outstanding: %+v", outstanding)
 	}
 	assertHarnessTip(t, sink, 0, nodeGenesisHash(t, sink))
+}
+
+func TestBlockTxnLateAfterExpiredOutstandingIsIgnored(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	enableCompactRelayForTest(p)
+	conn := &scriptedConn{}
+	p.conn = conn
+	now := time.Unix(1_777_000_100, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
+	hash := [32]byte{0xd1}
+	tx := minimalBlockTxnTestTxBytes(104)
+	shortID, err := compactTransactionShortID(tx, 45, 46)
+	if err != nil {
+		t.Fatalf("compactTransactionShortID: %v", err)
+	}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:       hash,
+		MissingIndexes:  []uint64{0},
+		MissingShortIDs: []compactShortID{shortID},
+		Transactions:    make([][]byte, 1),
+		Nonce1:          45,
+		Nonce2:          46,
+	})
+
+	now = now.Add(time.Second)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, hash, [][]byte{tx})}); err != nil {
+		t.Fatalf("late blocktxn after fallback: %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("expired compact request still outstanding: %+v", outstanding)
+	}
 }
 
 func TestBlockTxnRejectsResponseOrderMismatch(t *testing.T) {
