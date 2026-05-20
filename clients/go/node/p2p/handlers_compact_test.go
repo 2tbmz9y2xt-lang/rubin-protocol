@@ -112,6 +112,29 @@ func TestBlockTxnFlowPreservesLocalMatchesAcrossResponse(t *testing.T) {
 	assertHarnessTip(t, sink, 1, blockHash)
 }
 
+func TestCmpctBlockWithPendingRequestFallsBackNewBlockWithoutOverwrite(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	firstHash, firstBytes := testHarnessBlockAtHeight(t, source, 1)
+	secondHash, secondBytes := testHarnessBlockAtHeight(t, source, 2)
+	first := compactTestPayloadFromBlock(t, firstBytes, 25, 26)
+	second := compactTestPayloadFromBlock(t, secondBytes, 27, 28)
+
+	p, conn := compactTestPeerWithConn(sink)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, first)}); err != nil {
+		t.Fatalf("handleMessage(first cmpctblock): %v", err)
+	}
+	_ = mustReadCompactGetBlockTxn(t, p, conn)
+	if err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, second)}); err != nil {
+		t.Fatalf("handleMessage(second cmpctblock): %v", err)
+	}
+	assertCompactFullBlockRequest(t, p, conn, secondHash)
+	outstanding, ok := p.compactOutstandingRequestSnapshot()
+	if !ok || outstanding.BlockHash != firstHash {
+		t.Fatalf("outstanding after second cmpctblock=%+v ok=%v, want first block %x", outstanding, ok, firstHash)
+	}
+}
+
 func TestCmpctBlockRejectsInvalidHeaderBeforeRequest(t *testing.T) {
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -122,8 +145,9 @@ func TestCmpctBlockRejectsInvalidHeaderBeforeRequest(t *testing.T) {
 		block.Header[targetOffset+i] = 0
 	}
 
+	payload := append(mustEncodeCmpctBlockPayload(t, block), 0xff)
 	p, conn := compactTestPeerWithConn(sink)
-	err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)})
+	err := p.handleMessage(message{Command: messageCmpctBlock, Payload: payload})
 	if err == nil || !strings.Contains(err.Error(), "target out of range") {
 		t.Fatalf("handleMessage(cmpctblock invalid header) err=%v, want target rejection", err)
 	}
@@ -161,7 +185,9 @@ func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
 	_ = mustReadCompactGetBlockTxn(t, p, conn)
 	wrongHash := blockHash
 	wrongHash[0] ^= 0xff
-	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: mustEncodeBlockTxnForHash(t, wrongHash, txs[:1])}); err != nil {
+	malformedWrongHash := append([]byte(nil), wrongHash[:]...)
+	malformedWrongHash = append(malformedWrongHash, 0xff)
+	if err := p.handleMessage(message{Command: messageBlockTxn, Payload: malformedWrongHash}); err != nil {
 		t.Fatalf("wrong-hash blocktxn fallback: %v", err)
 	}
 	assertCompactFullBlockRequest(t, p, conn, blockHash)
@@ -256,9 +282,11 @@ func TestBlockTxnMalformedAndProcessFailureFallback(t *testing.T) {
 
 func TestCompactOutstandingRequestClearsOnReadTimeout(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
-	p.conn = &scriptedConn{reads: []scriptedRead{{err: timeoutErr{}}, {err: io.EOF}}}
+	conn := &scriptedConn{reads: []scriptedRead{{err: timeoutErr{}}, {err: io.EOF}}}
+	p.conn = conn
+	hash := [32]byte{0xcd}
 	p.setCompactOutstandingRequest(compactOutstandingRequest{
-		BlockHash:       [32]byte{0xcd},
+		BlockHash:       hash,
 		MissingIndexes:  []uint64{0},
 		MissingShortIDs: []compactShortID{{0x01}},
 		Transactions:    make([][]byte, 1),
@@ -270,6 +298,7 @@ func TestCompactOutstandingRequestClearsOnReadTimeout(t *testing.T) {
 	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatalf("read timeout did not clear outstanding request: %+v", outstanding)
 	}
+	assertCompactFullBlockRequest(t, p, conn, hash)
 }
 
 func TestGetBlockTxnRespondsWithRequestedTransactions(t *testing.T) {
@@ -298,8 +327,8 @@ func TestGetBlockTxnRespondsWithRequestedTransactions(t *testing.T) {
 }
 
 func TestGetBlockTxnRejectsDuplicateIndexesBeforeResponse(t *testing.T) {
-	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
-	blockHash, _ := testHarnessBlockAtHeight(t, source, 1)
+	source := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash := [32]byte{0xee}
 	p, conn := compactTestPeerWithConn(source)
 
 	err := p.handleMessage(message{Command: messageGetBlockTxn, Payload: mustEncodeGetBlockTxnForHash(t, blockHash, []uint64{0, 0})})

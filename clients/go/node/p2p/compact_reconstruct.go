@@ -231,19 +231,19 @@ type compactOutstandingRequest struct {
 }
 
 func (p *peer) handleCmpctBlock(payload []byte) error {
-	block, err := decodeCmpctBlockPayload(payload)
+	header, blockHash, err := compactBlockHeaderAndHash(payload)
 	if err != nil {
 		return err
 	}
-	blockHash, err := consensus.BlockHash(block.Header[:])
-	if err != nil {
-		return err
-	}
-	if err := p.validateCompactBlockHeader(block.Header); err != nil {
+	if err := p.validateCompactBlockHeader(header); err != nil {
 		return err
 	}
 	have, err := p.service.hasBlock(blockHash)
 	if err != nil || have {
+		return err
+	}
+	block, err := decodeCmpctBlockPayload(payload)
+	if err != nil {
 		return err
 	}
 	result, err := reconstructCompactBlock(block, compactRelayLocalTransactions(p.service.cfg.TxPool))
@@ -259,6 +259,9 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	req, err := newCompactOutstandingRequest(block, blockHash, result)
 	if err != nil {
 		return err
+	}
+	if p.hasCompactOutstandingRequest() {
+		return p.requestCompactFullBlockFallback(blockHash)
 	}
 	body, err := encodeGetBlockTxnPayload(getBlockTxnPayload{BlockHash: blockHash, Indexes: req.MissingIndexes})
 	if err != nil {
@@ -277,15 +280,14 @@ func (p *peer) handleGetBlockTxn(payload []byte) error {
 	if err != nil {
 		return err
 	}
+	if err := validateCompactRequestedIndexShape(req.Indexes); err != nil {
+		return err
+	}
 	blockBytes, ok, err := p.blockBytes(req.BlockHash)
 	if err != nil || !ok {
 		return err
 	}
-	_, txs, err := compactBlockTransactions(blockBytes)
-	if err != nil {
-		return err
-	}
-	responseTxs, err := compactRequestedTransactions(txs, req.Indexes)
+	responseTxs, err := compactRequestedTransactionsFromBlock(blockBytes, req.Indexes)
 	if err != nil {
 		return err
 	}
@@ -297,16 +299,24 @@ func (p *peer) handleGetBlockTxn(payload []byte) error {
 }
 
 func (p *peer) handleBlockTxn(payload []byte) error {
+	req, ok := p.compactOutstandingRequestSnapshot()
+	if !ok {
+		return errors.New("unexpected blocktxn response")
+	}
+	responseHash, err := compactBlockTxnPayloadHash(payload)
+	if err != nil {
+		return p.requestCompactFullBlockFallbackForOutstanding(err)
+	}
+	if responseHash != req.BlockHash {
+		return p.requestCompactFullBlockFallbackForOutstanding(errors.New("unexpected blocktxn response"))
+	}
 	response, err := decodeBlockTxnRuntimePayload(payload)
 	if err != nil {
 		return p.requestCompactFullBlockFallbackForOutstanding(err)
 	}
-	req, ok := p.popCompactOutstandingRequest()
+	req, ok = p.popCompactOutstandingRequest()
 	if !ok {
 		return errors.New("unexpected blocktxn response")
-	}
-	if response.BlockHash != req.BlockHash {
-		return p.requestCompactFullBlockFallback(req.BlockHash)
 	}
 	txs, err := compactFillResponseTransactions(req, response.Transactions, response.WTxIDs)
 	if err != nil {
@@ -333,6 +343,23 @@ func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, r
 	}, nil
 }
 
+func compactBlockHeaderAndHash(payload []byte) ([consensus.BLOCK_HEADER_BYTES]byte, [32]byte, error) {
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	var blockHash [32]byte
+	if len(payload) > consensus.MAX_RELAY_MSG_BYTES {
+		return header, blockHash, errors.New("cmpctblock payload too large")
+	}
+	if len(payload) < consensus.BLOCK_HEADER_BYTES {
+		return header, blockHash, errors.New("cmpctblock payload missing header or nonce")
+	}
+	copy(header[:], payload[:consensus.BLOCK_HEADER_BYTES])
+	hash, err := consensus.BlockHash(header[:])
+	if err != nil {
+		return header, blockHash, err
+	}
+	return header, hash, nil
+}
+
 func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]byte) error {
 	parsed, err := consensus.ParseBlockHeaderBytes(header[:])
 	if err != nil {
@@ -344,6 +371,15 @@ func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]b
 		return err
 	}
 	return nil
+}
+
+func compactBlockTxnPayloadHash(payload []byte) ([32]byte, error) {
+	var blockHash [32]byte
+	if len(payload) < 32 {
+		return blockHash, errors.New("blocktxn payload missing block hash")
+	}
+	copy(blockHash[:], payload[:32])
+	return blockHash, nil
 }
 
 func compactFillResponseTransactions(req compactOutstandingRequest, responseTxs [][]byte, responseWTxIDs [][32]byte) ([][]byte, error) {
@@ -447,33 +483,73 @@ func compactBlockTransactions(blockBytes []byte) ([consensus.BLOCK_HEADER_BYTES]
 	return header, txs, nil
 }
 
-func compactRequestedTransactions(txs [][]byte, indexes []uint64) ([][]byte, error) {
-	if err := validateCompactRequestedTransactionIndexes(txs, indexes); err != nil {
+func compactRequestedTransactionsFromBlock(blockBytes []byte, indexes []uint64) ([][]byte, error) {
+	if err := validateCompactRequestedIndexShape(indexes); err != nil {
 		return nil, err
 	}
+	if len(indexes) == 0 {
+		return [][]byte{}, nil
+	}
+	txCount, offset, err := compactBlockTransactionCount(blockBytes)
+	if err != nil {
+		return nil, err
+	}
+	requested := make(map[uint64]int, len(indexes))
+	var maxRequested uint64
+	for pos, idx := range indexes {
+		if idx >= txCount {
+			return nil, errors.New("compact relay index out of range")
+		}
+		requested[idx] = pos
+		if idx > maxRequested {
+			maxRequested = idx
+		}
+	}
 	out := make([][]byte, 0, len(indexes))
-	for _, idx := range indexes {
-		out = append(out, append([]byte(nil), txs[int(idx)]...)) // #nosec G115 -- idx is bounded by len(txs) above.
+	for range indexes {
+		out = append(out, nil)
+	}
+	var totalTxBytes uint64
+	for idx := uint64(0); idx <= maxRequested; idx++ {
+		_, _, _, consumed, err := consensus.ParseTx(blockBytes[offset:])
+		if err != nil {
+			return nil, err
+		}
+		if pos, ok := requested[idx]; ok {
+			nextTotal, err := validateBlockTxnTransactionSize(uint64(consumed), totalTxBytes)
+			if err != nil {
+				return nil, err
+			}
+			out[pos] = append([]byte(nil), blockBytes[offset:offset+consumed]...)
+			totalTxBytes = nextTotal
+		}
+		offset += consumed
 	}
 	return out, nil
 }
 
-func validateCompactRequestedTransactionIndexes(txs [][]byte, indexes []uint64) error {
+func compactBlockTransactionCount(blockBytes []byte) (uint64, int, error) {
+	if len(blockBytes) < consensus.BLOCK_HEADER_BYTES+1 {
+		return 0, 0, errors.New("block too short")
+	}
+	offset := consensus.BLOCK_HEADER_BYTES
+	txCount, consumed, err := consensus.DecodeCompactSize(blockBytes[offset:])
+	if err != nil {
+		return 0, 0, err
+	}
+	if txCount == 0 || txCount > maxCmpctBlockEntries {
+		return 0, 0, errors.New("invalid compact relay entry count")
+	}
+	return txCount, offset + consumed, nil
+}
+
+func validateCompactRequestedIndexShape(indexes []uint64) error {
 	seen := make(map[uint64]struct{}, len(indexes))
-	var totalTxBytes uint64
 	for _, idx := range indexes {
-		if idx >= uint64(len(txs)) {
-			return errors.New("compact relay index out of range")
-		}
 		if _, ok := seen[idx]; ok {
 			return errors.New("duplicate compact relay index")
 		}
 		seen[idx] = struct{}{}
-		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(txs[int(idx)])), totalTxBytes) // #nosec G115 -- idx is bounded by len(txs) above.
-		if err != nil {
-			return err
-		}
-		totalTxBytes = nextTotal
 	}
 	return nil
 }
@@ -534,6 +610,20 @@ func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
 	clone := cloneCompactOutstandingRequest(req)
 	p.compact.outstanding = &clone
 	p.compactMu.Unlock()
+}
+
+func (p *peer) hasCompactOutstandingRequest() bool {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	return p.compact.outstanding != nil
+}
+
+func (p *peer) fallbackCompactOutstandingRequest() error {
+	req, ok := p.popCompactOutstandingRequest()
+	if !ok {
+		return nil
+	}
+	return p.requestCompactFullBlockFallback(req.BlockHash)
 }
 
 func (p *peer) clearCompactOutstandingRequest() {

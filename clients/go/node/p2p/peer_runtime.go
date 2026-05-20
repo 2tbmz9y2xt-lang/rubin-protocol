@@ -39,7 +39,9 @@ func (p *peer) run(ctx context.Context) error {
 		)
 		if err != nil {
 			if shouldIgnoreReadError(err) {
-				p.clearCompactOutstandingRequest()
+				if err := p.fallbackCompactOutstandingRequest(); err != nil {
+					return err
+				}
 				continue
 			}
 			return normalizeReadError(err)

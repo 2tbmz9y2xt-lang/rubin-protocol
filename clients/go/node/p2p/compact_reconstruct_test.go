@@ -212,14 +212,14 @@ func TestCompactValidateTransactionTotalRejectsCumulativeOversize(t *testing.T) 
 	}
 }
 
-func TestCompactRequestedTransactionsRejectsDuplicateAndCumulativeOversize(t *testing.T) {
-	txs := [][]byte{minimalBlockTxnTestTxBytes(71), minimalBlockTxnTestTxBytes(72)}
-	if _, err := compactRequestedTransactions(txs, []uint64{0, 0}); err == nil || !strings.Contains(err.Error(), "duplicate compact relay index") {
-		t.Fatalf("compactRequestedTransactions duplicate err=%v, want duplicate rejection", err)
+func TestCompactRequestedTransactionsRejectsDuplicateBeforeBlockScan(t *testing.T) {
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	blockBytes, err := compactBlockBytes(header, [][]byte{minimalBlockTxnTestTxBytes(71), minimalBlockTxnTestTxBytes(72)})
+	if err != nil {
+		t.Fatalf("compactBlockBytes: %v", err)
 	}
-	oversize := [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES), []byte{0x01}}
-	if _, err := compactRequestedTransactions(oversize, []uint64{0, 1}); err == nil || !strings.Contains(err.Error(), "blocktxn transactions exceed block size") {
-		t.Fatalf("compactRequestedTransactions oversize err=%v, want cumulative size rejection", err)
+	if _, err := compactRequestedTransactionsFromBlock(blockBytes, []uint64{0, 0}); err == nil || !strings.Contains(err.Error(), "duplicate compact relay index") {
+		t.Fatalf("compactRequestedTransactionsFromBlock duplicate err=%v, want duplicate rejection", err)
 	}
 }
 
