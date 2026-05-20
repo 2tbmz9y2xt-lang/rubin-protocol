@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 const compactDuplicateReportedIndex = ^uint64(0)
@@ -246,6 +247,222 @@ func compactLocalTxWTxID(tx []byte) ([32]byte, error) {
 		return zero, errors.New("compact local transaction is non-canonical")
 	}
 	return wtxid, nil
+}
+
+func (p *peer) handleCmpctBlock(payload []byte) error {
+	block, err := decodeCmpctBlockPayload(payload)
+	if err != nil {
+		return err
+	}
+	blockHash, err := consensus.BlockHash(block.Header[:])
+	if err != nil {
+		return err
+	}
+	if err := p.validateCompactBlockHeader(block.Header); err != nil {
+		return err
+	}
+	have, err := p.service.hasBlock(blockHash)
+	if err != nil || have {
+		return err
+	}
+	result, err := reconstructCompactBlock(block, compactRelayLocalTransactions(p.service.cfg.TxPool))
+	if errors.Is(err, errCompactRelayMissingRequestTooLarge) {
+		return p.requestCompactFullBlockFallback(blockHash)
+	}
+	if err != nil {
+		return err
+	}
+	if result.Transactions != nil {
+		return p.processCompactTransactions(blockHash, block.Header, result.Transactions)
+	}
+	return p.requestMissingCompactTransactions(block, blockHash, result)
+}
+
+func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]byte) error {
+	parsed, err := consensus.ParseBlockHeaderBytes(header[:])
+	if err != nil {
+		p.bumpBan(10, err.Error())
+		return err
+	}
+	if err := consensus.PowCheck(header[:], parsed.Target); err != nil {
+		p.bumpBan(100, err.Error())
+		return err
+	}
+	if expected := p.service.cfg.SyncConfig.ExpectedTarget; expected != nil && parsed.Target != *expected {
+		err := &consensus.TxError{Code: consensus.BLOCK_ERR_TARGET_INVALID, Msg: "target mismatch"}
+		p.bumpBan(100, err.Error())
+		return err
+	}
+	return nil
+}
+
+func (p *peer) requestMissingCompactTransactions(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) error {
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		return p.requestCompactFullBlockFallback(blockHash)
+	}
+	req, err := newCompactOutstandingRequest(block, blockHash, result)
+	if err != nil {
+		return err
+	}
+	body, err := encodeGetBlockTxnPayload(getBlockTxnPayload{BlockHash: blockHash, Indexes: req.MissingIndexes})
+	if err != nil {
+		return err
+	}
+	p.setCompactOutstandingRequest(req)
+	if err := p.send(messageGetBlockTxn, body); err != nil {
+		p.popCompactOutstandingRequest()
+		return err
+	}
+	return nil
+}
+
+func (p *peer) handleBlockTxn(payload []byte) error {
+	responseHash, err := compactBlockTxnPayloadHash(payload)
+	if err != nil {
+		return err
+	}
+	req, ok := p.compactOutstandingRequestSnapshot()
+	if !ok {
+		return errors.New("unexpected blocktxn response")
+	}
+	if responseHash != req.BlockHash {
+		return errors.New("blocktxn block hash mismatch")
+	}
+	response, err := decodeBlockTxnRuntimePayload(payload)
+	if err != nil {
+		p.popCompactOutstandingRequest()
+		return p.requestCompactFullBlockFallback(req.BlockHash)
+	}
+	req, ok = p.popCompactOutstandingRequest()
+	if !ok {
+		return errors.New("unexpected blocktxn response")
+	}
+	txs, err := compactFillResponseTransactions(req, response)
+	if err != nil {
+		return p.requestCompactFullBlockFallback(req.BlockHash)
+	}
+	return p.processCompactTransactions(req.BlockHash, req.Header, txs)
+}
+
+func compactBlockTxnPayloadHash(payload []byte) ([32]byte, error) {
+	var blockHash [32]byte
+	if len(payload) < 32 {
+		return blockHash, errors.New("blocktxn payload missing block hash")
+	}
+	copy(blockHash[:], payload[:32])
+	return blockHash, nil
+}
+
+func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte) error {
+	blockBytes, err := compactBlockBytes(header, txs)
+	if err != nil {
+		return p.requestCompactFullBlockFallback(blockHash)
+	}
+	accepted, fallback, err := p.processCompactRelayedBlock(blockHash, blockBytes)
+	if fallback {
+		return p.requestCompactFullBlockFallback(blockHash)
+	}
+	if err != nil || !accepted {
+		return err
+	}
+	return p.service.requestBlocksIfBehind(p)
+}
+
+func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []byte) (bool, bool, error) {
+	pb, blockHash, err := parseRelayedBlock(blockBytes)
+	if err != nil || pb == nil || blockHash != expectedHash {
+		return false, true, err
+	}
+	have, err := p.service.hasBlock(blockHash)
+	if err != nil || have {
+		return false, false, err
+	}
+	p.service.chainMu.Lock()
+	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
+	p.service.chainMu.Unlock()
+	if err != nil {
+		if compactApplyErrorNeedsFullBlock(err) {
+			return false, true, err
+		}
+		p.recordRelayedBlockApplyError(err)
+		return false, false, err
+	}
+	p.acceptedRelayedBlock(blockHash, summary)
+	return true, false, nil
+}
+
+func compactApplyErrorNeedsFullBlock(err error) bool {
+	return errors.Is(err, node.ErrParentNotFound) || isConsensusApplyBlockError(err)
+}
+
+func (p *peer) requestCompactFullBlockFallback(blockHash [32]byte) error {
+	body, err := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
+	if err != nil {
+		return err
+	}
+	return p.send(messageGetData, body)
+}
+
+func compactBlockBytes(header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte) ([]byte, error) {
+	if len(txs) == 0 {
+		return nil, errors.New("compact block has no transactions")
+	}
+	out := append([]byte(nil), header[:]...)
+	out = consensus.AppendCompactSize(out, uint64(len(txs)))
+	var totalTxBytes uint64
+	for _, tx := range txs {
+		if tx == nil {
+			return nil, errors.New("compact block transaction missing")
+		}
+		nextTotal, err := validateBlockTxnTransactionSize(uint64(len(tx)), totalTxBytes)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tx...)
+		totalTxBytes = nextTotal
+		if len(out) > consensus.MAX_BLOCK_BYTES {
+			return nil, errors.New("compact block exceeds block size")
+		}
+	}
+	return out, nil
+}
+
+func compactRelayLocalTransactions(pool TxPool) [][]byte {
+	switch pool := pool.(type) {
+	case *MemoryTxPool:
+		return compactRelayMemoryPoolTransactions(pool)
+	case *CanonicalMempoolTxPool:
+		return compactRelayCanonicalPoolTransactions(pool)
+	default:
+		return nil
+	}
+}
+
+func compactRelayMemoryPoolTransactions(pool *MemoryTxPool) [][]byte {
+	if pool == nil {
+		return nil
+	}
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	out := make([][]byte, 0, len(pool.txs))
+	for _, entry := range pool.txs {
+		out = append(out, entry.raw)
+	}
+	return out
+}
+
+func compactRelayCanonicalPoolTransactions(pool *CanonicalMempoolTxPool) [][]byte {
+	if pool == nil || pool.mempool == nil {
+		return nil
+	}
+	ids := pool.mempool.AllTxIDs()
+	out := make([][]byte, 0, len(ids))
+	for _, txid := range ids {
+		if tx, ok := pool.mempool.TxByID(txid); ok {
+			out = append(out, tx)
+		}
+	}
+	return out
 }
 
 func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) (compactOutstandingRequest, error) {
