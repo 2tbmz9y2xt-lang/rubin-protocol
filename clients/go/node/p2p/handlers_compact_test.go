@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"encoding/binary"
 	"io"
 	"reflect"
 	"strings"
@@ -382,6 +383,51 @@ func TestCmpctBlockRejectsInvalidHeaderBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestCmpctBlockRejectsWrongTargetBeforeMissingRequest(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadWithWrongHeaderTarget(t, compactTestPayloadFromBlock(t, blockBytes, 57, 58))
+
+	p, conn := compactTestPeerWithConn(sink)
+	err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)})
+	if err == nil || !strings.Contains(err.Error(), string(consensus.BLOCK_ERR_TARGET_INVALID)) {
+		t.Fatalf("handleMessage(cmpctblock wrong target) err=%v, want target rejection", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("wrong-target compact header wrote %d bytes, want no getblocktxn request", conn.Buffer.Len())
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("wrong-target compact header left outstanding: %+v", outstanding)
+	}
+	if state := p.snapshotState(); state.BanScore < 100 {
+		t.Fatalf("ban_score=%d, want >= 100 for wrong compact target", state.BanScore)
+	}
+}
+
+func TestCmpctBlockRejectsWrongTargetBeforeOversizedFallback(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadWithWrongHeaderTarget(t, compactTestPayloadFromBlock(t, blockBytes, 59, 60))
+	block.ShortIDs = make([]compactShortID, maxCompactRelayEntries+1)
+
+	p, conn := compactTestPeerWithConn(sink)
+	err := p.handleMessage(message{Command: messageCmpctBlock, Payload: mustEncodeCmpctBlockPayload(t, block)})
+	if err == nil || !strings.Contains(err.Error(), string(consensus.BLOCK_ERR_TARGET_INVALID)) {
+		t.Fatalf("handleMessage(oversized cmpctblock wrong target) err=%v, want target rejection", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("wrong-target oversized compact block wrote %d bytes, want no fallback request", conn.Buffer.Len())
+	}
+	if outstanding, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("wrong-target oversized compact block left outstanding: %+v", outstanding)
+	}
+	if state := p.snapshotState(); state.BanScore < 100 {
+		t.Fatalf("ban_score=%d, want >= 100 for wrong compact target", state.BanScore)
+	}
+}
+
 func TestBlockTxnRejectsUnsolicitedWrongHashAndCount(t *testing.T) {
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -667,6 +713,23 @@ func compactTestPayloadFromBlock(t *testing.T, blockBytes []byte, nonce1, nonce2
 		shortIDs = append(shortIDs, shortID)
 	}
 	return cmpctBlockPayload{Header: header, Nonce1: nonce1, Nonce2: nonce2, ShortIDs: shortIDs}
+}
+
+func compactTestPayloadWithWrongHeaderTarget(t *testing.T, block cmpctBlockPayload) cmpctBlockPayload {
+	t.Helper()
+	const targetOffset = 4 + 32 + 32 + 8
+	const nonceOffset = targetOffset + 32
+	target := consensus.POW_LIMIT
+	target[0] = 0xfe
+	copy(block.Header[targetOffset:nonceOffset], target[:])
+	for nonce := uint64(0); nonce < 1_000_000; nonce++ {
+		binary.LittleEndian.PutUint64(block.Header[nonceOffset:], nonce)
+		if err := consensus.PowCheck(block.Header[:], target); err == nil {
+			return block
+		}
+	}
+	t.Fatal("failed to mine wrong-target compact test header")
+	return cmpctBlockPayload{}
 }
 
 func compactTestPeerWithConn(h *testHarness) (*peer, *scriptedConn) {

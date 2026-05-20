@@ -413,6 +413,11 @@ func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]b
 		p.bumpBan(100, err.Error())
 		return err
 	}
+	if expected := p.service.cfg.SyncConfig.ExpectedTarget; expected != nil && parsed.Target != *expected {
+		err := &consensus.TxError{Code: consensus.BLOCK_ERR_TARGET_INVALID, Msg: "target mismatch"}
+		p.bumpBan(100, err.Error())
+		return err
+	}
 	return nil
 }
 
