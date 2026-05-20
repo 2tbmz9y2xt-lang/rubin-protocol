@@ -17,8 +17,6 @@ type peerCompactRelayState struct {
 
 type compactOutstandingRequest struct {
 	BlockHash          [32]byte
-	Block              cmpctBlockPayload
-	MissingShortIDs    []compactShortID
 	BlockTxnPayloadCap uint32
 }
 

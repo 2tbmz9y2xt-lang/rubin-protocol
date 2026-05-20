@@ -52,20 +52,10 @@ func (p *peer) run(ctx context.Context) error {
 func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 	base := postHandshakePayloadCap(p.service.cfg.LocatorLimit, p.service.cfg.SyncConfig.HeaderBatchLimit)
 	return func(command string) uint32 {
-		if !isCompactRelayObjectCommand(command) {
-			return base(command)
-		}
-		mode := p.remoteCompactMode()
-		if mode.Version != compactRelayVersion || mode.Mode == 0 {
+		if isCompactRelayObjectCommand(command) {
 			return 0
 		}
-		if command == messageGetBlockTxn {
-			return 0
-		}
-		if command == messageBlockTxn {
-			return p.blockTxnPayloadCap()
-		}
-		return compactRelayPayloadCap(command)
+		return base(command)
 	}
 }
 
@@ -104,7 +94,7 @@ func normalizeReadError(err error) error {
 
 func (p *peer) handleMessage(frame message) error {
 	switch frame.Command {
-	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageBlockTxn:
+	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk:
 		return p.handleRelayMessage(frame)
 	case messageSendCmpct:
 		return p.handleSendCmpct(frame.Payload)
@@ -125,7 +115,7 @@ func (p *peer) handleRelayMessage(frame message) error {
 	switch frame.Command {
 	case messageInv, messageGetData:
 		return p.handleInventoryRelayMessage(frame)
-	case messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageBlockTxn:
+	case messageBlock, messageTx, messageGetBlk:
 		return p.handleObjectRelayMessage(frame)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
@@ -144,10 +134,6 @@ func (p *peer) handleInventoryRelayMessage(frame message) error {
 }
 
 func (p *peer) handleObjectRelayMessage(frame message) error {
-	mode := p.remoteCompactMode()
-	if isCompactRelayObjectCommand(frame.Command) && (mode.Version != compactRelayVersion || mode.Mode == 0) {
-		return errors.New("compact relay not negotiated")
-	}
 	switch frame.Command {
 	case messageBlock:
 		return p.handleBlock(frame.Payload)
@@ -155,10 +141,6 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 		return p.handleTx(frame.Payload)
 	case messageGetBlk:
 		return p.handleGetBlocks(frame.Payload)
-	case messageCmpctBlock:
-		return p.handleCmpctBlock(frame.Payload)
-	case messageBlockTxn:
-		return p.handleBlockTxn(frame.Payload)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
 	}

@@ -27,8 +27,7 @@ type scriptedRead struct {
 }
 
 type scriptedConn struct {
-	reads    []scriptedRead
-	writeErr error
+	reads []scriptedRead
 	bytes.Buffer
 }
 
@@ -52,12 +51,7 @@ func (c *scriptedConn) Read(p []byte) (int, error) {
 	return 0, err
 }
 
-func (c *scriptedConn) Write(p []byte) (int, error) {
-	if c.writeErr != nil {
-		return 0, c.writeErr
-	}
-	return c.Buffer.Write(p)
-}
+func (c *scriptedConn) Write(p []byte) (int, error) { return c.Buffer.Write(p) }
 func (c *scriptedConn) Close() error                { return nil }
 func (c *scriptedConn) LocalAddr() net.Addr         { return stubAddr("local") }
 func (c *scriptedConn) RemoteAddr() net.Addr        { return stubAddr("remote") }
@@ -105,27 +99,13 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	limiter = p.postHandshakePayloadCap()
-	if got := limiter(messageCmpctBlock); got != compactRelayPayloadCap(messageCmpctBlock) {
-		t.Fatalf("negotiated cmpctblock cap=%d, want %d", got, compactRelayPayloadCap(messageCmpctBlock))
-	}
-	if got := limiter(messageGetBlockTxn); got != 0 {
-		t.Fatalf("negotiated getblocktxn cap=%d, want 0 until serve-request slice", got)
-	}
-	if got := limiter(messageBlockTxn); got != 0 {
-		t.Fatalf("negotiated blocktxn cap without outstanding=%d, want 0", got)
-	}
 	p.compactMu.Lock()
-	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: 64}
+	p.compact.outstanding = &compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1}
 	p.compactMu.Unlock()
-	if got := limiter(messageBlockTxn); got != 64 {
-		t.Fatalf("negotiated blocktxn cap=%d, want outstanding cap 64", got)
-	}
-}
-
-func TestCompactObjectRelayRejectsBeforeNegotiation(t *testing.T) {
-	p := newPeerRuntimeTestPeer(t)
-	if err := p.handleObjectRelayMessage(message{Command: messageCmpctBlock}); err == nil || err.Error() != "compact relay not negotiated" {
-		t.Fatalf("pre-negotiation compact object err=%v, want compact relay not negotiated", err)
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+		if got := limiter(command); got != 0 {
+			t.Fatalf("negotiated %s cap=%d, want 0 until handler slice", command, got)
+		}
 	}
 }
 
