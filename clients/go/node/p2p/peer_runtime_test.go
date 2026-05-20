@@ -105,6 +105,9 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 	if got := limiter(messageCmpctBlock); got != compactRelayPayloadCap(messageCmpctBlock) {
 		t.Fatalf("negotiated cmpctblock cap=%d, want %d", got, compactRelayPayloadCap(messageCmpctBlock))
 	}
+	if err := p.handleObjectRelayMessage(message{Command: messageCmpctBlock}); err == nil {
+		t.Fatal("negotiated malformed cmpctblock should reach handler and fail")
+	}
 	if got := limiter(messageGetBlockTxn); got != 0 {
 		t.Fatalf("getblocktxn serve-side cap=%d, want 0", got)
 	}

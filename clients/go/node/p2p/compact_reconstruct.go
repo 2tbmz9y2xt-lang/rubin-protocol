@@ -310,10 +310,11 @@ func (p *peer) requestMissingCompactTransactions(block cmpctBlockPayload, blockH
 }
 
 func (p *peer) handleBlockTxn(payload []byte) error {
-	responseHash, err := compactBlockTxnPayloadHash(payload)
-	if err != nil {
-		return err
+	if len(payload) < 32 {
+		return errors.New("blocktxn payload missing block hash")
 	}
+	var responseHash [32]byte
+	copy(responseHash[:], payload[:32])
 	req, ok := p.compactOutstandingRequestSnapshot()
 	if !ok {
 		return errors.New("unexpected blocktxn response")
@@ -337,15 +338,6 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 		return err
 	}
 	return p.processCompactTransactions(req.BlockHash, req.Header, txs, true)
-}
-
-func compactBlockTxnPayloadHash(payload []byte) ([32]byte, error) {
-	var blockHash [32]byte
-	if len(payload) < 32 {
-		return blockHash, errors.New("blocktxn payload missing block hash")
-	}
-	copy(blockHash[:], payload[:32])
-	return blockHash, nil
 }
 
 func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte, fallbackOnApply bool) error {
@@ -376,7 +368,7 @@ func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []by
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
-		if fallbackOnApply && compactApplyErrorNeedsFullBlock(err) {
+		if fallbackOnApply && (errors.Is(err, node.ErrParentNotFound) || isConsensusApplyBlockError(err)) {
 			return false, true, err
 		}
 		p.recordRelayedBlockApplyError(err)
@@ -384,10 +376,6 @@ func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []by
 	}
 	p.acceptedRelayedBlock(blockHash, summary)
 	return true, false, nil
-}
-
-func compactApplyErrorNeedsFullBlock(err error) bool {
-	return errors.Is(err, node.ErrParentNotFound) || isConsensusApplyBlockError(err)
 }
 
 func (p *peer) requestCompactFullBlockFallback(blockHash [32]byte) error {
@@ -425,39 +413,31 @@ func compactBlockBytes(header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte) 
 func compactRelayLocalTransactions(pool TxPool) [][]byte {
 	switch pool := pool.(type) {
 	case *MemoryTxPool:
-		return compactRelayMemoryPoolTransactions(pool)
+		if pool == nil {
+			return nil
+		}
+		pool.mu.RLock()
+		defer pool.mu.RUnlock()
+		out := make([][]byte, 0, len(pool.txs))
+		for _, entry := range pool.txs {
+			out = append(out, entry.raw)
+		}
+		return out
 	case *CanonicalMempoolTxPool:
-		return compactRelayCanonicalPoolTransactions(pool)
+		if pool == nil || pool.mempool == nil {
+			return nil
+		}
+		ids := pool.mempool.AllTxIDs()
+		out := make([][]byte, 0, len(ids))
+		for _, txid := range ids {
+			if tx, ok := pool.mempool.TxByID(txid); ok {
+				out = append(out, tx)
+			}
+		}
+		return out
 	default:
 		return nil
 	}
-}
-
-func compactRelayMemoryPoolTransactions(pool *MemoryTxPool) [][]byte {
-	if pool == nil {
-		return nil
-	}
-	pool.mu.RLock()
-	defer pool.mu.RUnlock()
-	out := make([][]byte, 0, len(pool.txs))
-	for _, entry := range pool.txs {
-		out = append(out, entry.raw)
-	}
-	return out
-}
-
-func compactRelayCanonicalPoolTransactions(pool *CanonicalMempoolTxPool) [][]byte {
-	if pool == nil || pool.mempool == nil {
-		return nil
-	}
-	ids := pool.mempool.AllTxIDs()
-	out := make([][]byte, 0, len(ids))
-	for _, txid := range ids {
-		if tx, ok := pool.mempool.TxByID(txid); ok {
-			out = append(out, tx)
-		}
-	}
-	return out
 }
 
 func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) (compactOutstandingRequest, error) {
