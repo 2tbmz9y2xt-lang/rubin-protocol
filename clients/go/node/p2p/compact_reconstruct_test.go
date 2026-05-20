@@ -248,6 +248,10 @@ func TestCompactFillShortIDTransactionsDoesNotDoubleCountPrefilledBytes(t *testi
 	if !reflect.DeepEqual(txs[1], shortTx) {
 		t.Fatalf("filled tx=%x, want %x", txs[1], shortTx)
 	}
+	prefilledTx[0], shortTx[0] = 0xff, 0xee
+	if txs[0][0] == 0xff || txs[1][0] == 0xee {
+		t.Fatal("filled txs alias source bytes")
+	}
 }
 
 func TestCompactFillShortIDTransactionsRejectsInvalidCompletionShapes(t *testing.T) {

@@ -103,7 +103,7 @@ func compactFillPrefilledTransactions(txs [][]byte, prefilled []prefilledTxn) {
 }
 
 func compactFillShortIDTransactions(txs [][]byte, totalEntries int, prefilled []prefilledTxn, shortIDs []compactShortID, index map[compactShortID][]byte) error {
-	staged := cloneCompactTransactions(txs)
+	staged := append([][]byte(nil), txs...)
 	missing, _, overflow, err := compactFillOrCollectMissing(staged, totalEntries, prefilled, shortIDs, index, nil)
 	if overflow {
 		return errCompactRelayMissingRequestTooLarge
