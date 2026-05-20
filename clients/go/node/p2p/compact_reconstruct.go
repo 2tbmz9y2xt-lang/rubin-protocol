@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 const compactDuplicateReportedIndex = ^uint64(0)
@@ -12,6 +13,7 @@ const compactDuplicateReportedIndex = ^uint64(0)
 const defaultCompactOutstandingTTL = 15 * time.Second
 
 var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing indexes")
+var errCompactFullBlockFallbackRequired = errors.New("compact full-block fallback required")
 
 type compactReconstructionResult struct {
 	Transactions        [][]byte
@@ -466,6 +468,9 @@ func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.
 	}
 	accepted, err := p.processCompactRelayedBlock(blockHash, blockBytes)
 	if err != nil {
+		if !errors.Is(err, errCompactFullBlockFallbackRequired) {
+			return err
+		}
 		return p.requestCompactFullBlockFallback(blockHash)
 	}
 	if !accepted {
@@ -477,13 +482,13 @@ func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.
 func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []byte) (bool, error) {
 	pb, blockHash, err := parseRelayedBlock(blockBytes)
 	if err != nil {
-		return false, err
+		return false, compactFullBlockFallbackError(err)
 	}
 	if pb == nil {
-		return false, errors.New("nil parsed block")
+		return false, compactFullBlockFallbackError(errors.New("nil parsed block"))
 	}
 	if blockHash != expectedHash {
-		return false, errors.New("compact block hash mismatch")
+		return false, compactFullBlockFallbackError(errors.New("compact block hash mismatch"))
 	}
 	have, err := p.service.hasBlock(blockHash)
 	if err != nil || have {
@@ -494,10 +499,28 @@ func (p *peer) processCompactRelayedBlock(expectedHash [32]byte, blockBytes []by
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
 	p.service.chainMu.Unlock()
 	if err != nil {
+		if compactApplyErrorNeedsFallback(err) {
+			return false, compactFullBlockFallbackError(err)
+		}
 		return false, err
 	}
 	p.acceptedRelayedBlock(blockHash, summary)
 	return true, nil
+}
+
+func compactFullBlockFallbackError(cause error) error {
+	if cause == nil {
+		return errCompactFullBlockFallbackRequired
+	}
+	return errors.Join(errCompactFullBlockFallbackRequired, cause)
+}
+
+func compactApplyErrorNeedsFallback(err error) bool {
+	if errors.Is(err, node.ErrParentNotFound) {
+		return true
+	}
+	var txErr *consensus.TxError
+	return errors.As(err, &txErr)
 }
 
 func (p *peer) requestCompactFullBlockFallbackForOutstanding(cause error) error {
@@ -633,6 +656,9 @@ func compactBlockTransactionCount(blockBytes []byte) (uint64, int, error) {
 func validateCompactRequestedIndexShape(indexes []uint64) error {
 	seen := make(map[uint64]struct{}, len(indexes))
 	for _, idx := range indexes {
+		if idx >= maxCompactRelayEntries {
+			return errors.New("compact relay index exceeds runtime cap")
+		}
 		if _, ok := seen[idx]; ok {
 			return errors.New("duplicate compact relay index")
 		}

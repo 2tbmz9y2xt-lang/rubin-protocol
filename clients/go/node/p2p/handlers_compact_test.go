@@ -253,6 +253,50 @@ func TestCompactReconstructedMissingParentRequestsFullBlockFallback(t *testing.T
 	}
 }
 
+func TestCompactRelayedBlockPropagatesLocalServiceErrors(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	block := compactTestPayloadFromBlock(t, blockBytes, 41, 42)
+	_, txs, err := compactBlockTransactions(blockBytes)
+	if err != nil {
+		t.Fatalf("compactBlockTransactions: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		setup func(*Service)
+		want  string
+	}{
+		{
+			name: "hasBlock error",
+			setup: func(s *Service) {
+				s.cfg.BlockStore = nil
+			},
+			want: "nil blockstore",
+		},
+		{
+			name: "sync engine error",
+			setup: func(s *Service) {
+				s.cfg.SyncEngine = nil
+			},
+			want: "sync engine is not initialized",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+			p, conn := compactTestPeerWithConn(sink)
+			tc.setup(p.service)
+			err := p.processCompactTransactions(blockHash, block.Header, txs)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("processCompactTransactions err=%v, want %q", err, tc.want)
+			}
+			if conn.Buffer.Len() != 0 {
+				t.Fatalf("local %s wrote %d fallback bytes, want none", tc.name, conn.Buffer.Len())
+			}
+		})
+	}
+}
+
 func TestCmpctBlockWithPendingRequestFallsBackNewBlockWithoutOverwrite(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -512,6 +556,20 @@ func TestGetBlockTxnRejectsDuplicateIndexesBeforeResponse(t *testing.T) {
 	}
 	if conn.Buffer.Len() != 0 {
 		t.Fatalf("duplicate getblocktxn wrote %d bytes, want no response", conn.Buffer.Len())
+	}
+}
+
+func TestGetBlockTxnRejectsRuntimeIndexCapBeforeResponse(t *testing.T) {
+	source := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	blockHash := [32]byte{0xef}
+	p, conn := compactTestPeerWithConn(source)
+
+	err := p.handleMessage(message{Command: messageGetBlockTxn, Payload: mustEncodeGetBlockTxnForHash(t, blockHash, []uint64{maxCompactRelayEntries})})
+	if err == nil || !strings.Contains(err.Error(), "compact relay index exceeds runtime cap") {
+		t.Fatalf("handleMessage(getblocktxn high index) err=%v, want runtime cap rejection", err)
+	}
+	if conn.Buffer.Len() != 0 {
+		t.Fatalf("high-index getblocktxn wrote %d bytes, want no response", conn.Buffer.Len())
 	}
 }
 

@@ -223,6 +223,18 @@ func TestCompactRequestedTransactionsRejectsDuplicateBeforeBlockScan(t *testing.
 	}
 }
 
+func TestCompactRequestedTransactionsRejectsRuntimeIndexCapBeforeScan(t *testing.T) {
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	blockBytes, err := compactBlockBytes(header, [][]byte{minimalBlockTxnTestTxBytes(73)})
+	if err != nil {
+		t.Fatalf("compactBlockBytes: %v", err)
+	}
+	_, err = compactRequestedTransactionsFromBlock(blockBytes, []uint64{maxCompactRelayEntries})
+	if err == nil || !strings.Contains(err.Error(), "compact relay index exceeds runtime cap") {
+		t.Fatalf("compactRequestedTransactionsFromBlock high index err=%v, want runtime cap rejection", err)
+	}
+}
+
 func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	nonce1, nonce2 := uint64(51), uint64(52)
 	validTx := minimalBlockTxnTestTxBytes(53)
