@@ -36,6 +36,10 @@ func TestReconstructCompactBlockCompletesExactPositionsFromWTxID(t *testing.T) {
 	if reflect.DeepEqual(result.Transactions[1], tx2) {
 		t.Fatal("result aliases local transaction bytes")
 	}
+	prefilledTx[0] ^= 0xff
+	if reflect.DeepEqual(result.Transactions[0], prefilledTx) {
+		t.Fatal("result aliases prefilled transaction bytes")
+	}
 }
 
 func TestReconstructCompactBlockReportsAbsoluteMissingIndexes(t *testing.T) {
@@ -310,7 +314,7 @@ func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 	}
 }
 
-func TestNewCompactOutstandingRequestCopiesPartialState(t *testing.T) {
+func TestNewCompactOutstandingRequestBuildsPartialState(t *testing.T) {
 	tx := minimalBlockTxnTestTxBytes(90)
 	shortID := compactShortIDForTx(t, tx, 91, 92)
 	blockHash := [32]byte{0x33}
@@ -323,9 +327,8 @@ func TestNewCompactOutstandingRequestCopiesPartialState(t *testing.T) {
 	if req.BlockHash != blockHash || req.Header != block.Header || req.Nonce1 != block.Nonce1 || req.Nonce2 != block.Nonce2 || req.BlockTxnPayloadCap != compactRelayPayloadCap(messageBlockTxn) {
 		t.Fatalf("request metadata mismatch: %+v", req)
 	}
-	result.MissingIndexes[0], result.MissingShortIDs[0], result.PartialTransactions[1][0] = 7, compactShortID{0x55}, 0xff
-	if !reflect.DeepEqual(req.MissingIndexes, []uint64{0}) || !reflect.DeepEqual(req.MissingShortIDs, []compactShortID{shortID}) || req.Transactions[1][0] == 0xff {
-		t.Fatalf("request aliases reconstruction result: %+v", req)
+	if !reflect.DeepEqual(req.MissingIndexes, []uint64{0}) || !reflect.DeepEqual(req.MissingShortIDs, []compactShortID{shortID}) || !reflect.DeepEqual(req.Transactions, [][]byte{nil, tx}) {
+		t.Fatalf("request state mismatch: %+v", req)
 	}
 	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{}); err == nil {
 		t.Fatal("empty missing request should fail")

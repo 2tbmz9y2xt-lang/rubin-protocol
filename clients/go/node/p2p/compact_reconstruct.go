@@ -37,7 +37,7 @@ func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactRec
 	}
 
 	txs := make([][]byte, totalEntries)
-	compactFillPrefilledTransactions(txs, p.Prefilled)
+	compactStagePrefilledTransactions(txs, p.Prefilled)
 	missing, missingShortIDs, overflow, err := compactFillOrCollectMissing(
 		txs,
 		totalEntries,
@@ -99,6 +99,12 @@ func compactPrefilledShortIDs(prefilled []prefilledTxn, totalEntries int, nonce1
 func compactFillPrefilledTransactions(txs [][]byte, prefilled []prefilledTxn) {
 	for _, entry := range prefilled {
 		txs[int(entry.Index)] = append([]byte(nil), entry.Tx...) // #nosec G115 -- compactPrefilledShortIDs bounds-checks prefilled indexes.
+	}
+}
+
+func compactStagePrefilledTransactions(txs [][]byte, prefilled []prefilledTxn) {
+	for _, entry := range prefilled {
+		txs[int(entry.Index)] = entry.Tx // #nosec G115 -- compactPrefilledShortIDs bounds-checks prefilled indexes.
 	}
 }
 
@@ -235,12 +241,13 @@ func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, r
 	if len(result.MissingIndexes) == 0 || len(result.MissingIndexes) != len(result.MissingShortIDs) {
 		return compactOutstandingRequest{}, errors.New("compact reconstruction missing request mismatch")
 	}
+	// Take ownership of reconstruction slices; peer state clones at the mutex boundary.
 	return compactOutstandingRequest{
 		BlockHash:          blockHash,
 		Header:             block.Header,
-		MissingIndexes:     append([]uint64(nil), result.MissingIndexes...),
-		MissingShortIDs:    append([]compactShortID(nil), result.MissingShortIDs...),
-		Transactions:       cloneCompactTransactions(result.PartialTransactions),
+		MissingIndexes:     result.MissingIndexes,
+		MissingShortIDs:    result.MissingShortIDs,
+		Transactions:       result.PartialTransactions,
 		Nonce1:             block.Nonce1,
 		Nonce2:             block.Nonce2,
 		BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn),
