@@ -258,22 +258,44 @@ func compactFillResponseTransactions(req compactOutstandingRequest, responseTxs 
 	if len(req.MissingIndexes) != len(req.MissingShortIDs) || len(responseTxs) != len(req.MissingIndexes) || len(responseWTxIDs) != len(responseTxs) {
 		return nil, errors.New("blocktxn transaction count mismatch")
 	}
-	txs := cloneCompactTransactions(req.Transactions)
+	txs := append([][]byte(nil), req.Transactions...)
 	for i, tx := range responseTxs {
-		shortID := compactShortID(consensus.CompactShortID(responseWTxIDs[i], req.Nonce1, req.Nonce2))
-		if shortID != req.MissingShortIDs[i] {
-			return nil, errors.New("blocktxn transaction short id mismatch")
-		}
 		idx := req.MissingIndexes[i]
 		if idx >= uint64(len(txs)) {
 			return nil, errors.New("compact relay index out of range")
 		}
-		txs[int(idx)] = append([]byte(nil), tx...) // #nosec G115 -- idx is bounded by len(txs) above.
+		txs[int(idx)] = tx // #nosec G115 -- idx is bounded by len(txs) above.
 	}
 	if err := compactValidatePresentTransactions(txs, true); err != nil {
 		return nil, err
 	}
+	for i, tx := range responseTxs {
+		wtxid, err := compactBlockTxnResponseWTxID(tx)
+		if err != nil {
+			return nil, err
+		}
+		if wtxid != responseWTxIDs[i] {
+			return nil, errors.New("blocktxn transaction wtxid mismatch")
+		}
+		shortID := compactShortID(consensus.CompactShortID(wtxid, req.Nonce1, req.Nonce2))
+		if shortID != req.MissingShortIDs[i] {
+			return nil, errors.New("blocktxn transaction short id mismatch")
+		}
+	}
+	cloneCompactTransactionsInPlace(txs)
 	return txs, nil
+}
+
+func compactBlockTxnResponseWTxID(tx []byte) ([32]byte, error) {
+	var zero [32]byte
+	if _, err := validateBlockTxnTransactionSize(uint64(len(tx)), 0); err != nil {
+		return zero, err
+	}
+	_, _, wtxid, consumed, err := consensus.ParseTx(tx)
+	if err != nil || consumed != len(tx) {
+		return zero, errors.New("blocktxn transaction is non-canonical")
+	}
+	return wtxid, nil
 }
 
 func compactValidatePresentTransactions(txs [][]byte, requireComplete bool) error {

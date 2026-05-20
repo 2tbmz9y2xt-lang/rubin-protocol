@@ -349,11 +349,19 @@ func TestCompactFillResponseTransactionsValidatesExpectedShortIDs(t *testing.T) 
 		Nonce1:          nonce1,
 		Nonce2:          nonce2,
 	}
-	if _, err := compactFillResponseTransactions(req, [][]byte{tx1}, [][32]byte{compactWTxIDForTx(t, tx1)}); err != nil {
+	filled, err := compactFillResponseTransactions(req, [][]byte{tx1}, [][32]byte{compactWTxIDForTx(t, tx1)})
+	if err != nil {
 		t.Fatalf("compactFillResponseTransactions: %v", err)
+	}
+	tx1[0] ^= 0xff
+	if filled[0][0] == tx1[0] {
+		t.Fatal("filled blocktxn response aliases source bytes")
 	}
 	if _, err := compactFillResponseTransactions(req, [][]byte{tx2}, [][32]byte{compactWTxIDForTx(t, tx2)}); err == nil || !strings.Contains(err.Error(), "short id mismatch") {
 		t.Fatalf("wrong short ID err=%v, want short id mismatch", err)
+	}
+	if _, err := compactFillResponseTransactions(req, [][]byte{tx2}, [][32]byte{compactWTxIDForTx(t, filled[0])}); err == nil || !strings.Contains(err.Error(), "wtxid mismatch") {
+		t.Fatalf("mismatched response wtxid err=%v, want wtxid mismatch", err)
 	}
 }
 
