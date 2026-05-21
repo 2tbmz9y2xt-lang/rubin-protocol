@@ -36,7 +36,7 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 	if !switchToBranch {
 		return s.storeSideBlockAndSummary(blockBytes, blockHash, pb, candidateHeight, prevTimestamps)
 	}
-	return s.applyHeavierBranch(branch, commonAncestorHeight)
+	return s.applyPreferredBranch(branch, commonAncestorHeight)
 }
 
 func parseReorgBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
@@ -144,7 +144,9 @@ func (s *SyncEngine) shouldSwitchToBranch(
 	}
 }
 
-func (s *SyncEngine) applyHeavierBranch(
+// applyPreferredBranch applies the candidate branch selected by fork choice:
+// greater ChainWork, or equal ChainWork with a lexicographically lower tip hash.
+func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 ) (*ChainStateConnectSummary, error) {
@@ -152,7 +154,7 @@ func (s *SyncEngine) applyHeavierBranch(
 	if err != nil {
 		return nil, err
 	}
-	disconnectedBlocks, reorgDepth, err := s.prepareHeavierBranch(branch, commonAncestorHeight, rollbackState)
+	disconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight, rollbackState)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +201,7 @@ func (s *SyncEngine) rollbackBranchBlockApply(
 	return rollbackErr
 }
 
-func (s *SyncEngine) prepareHeavierBranch(
+func (s *SyncEngine) preparePreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 	rollbackState syncRollbackState,
