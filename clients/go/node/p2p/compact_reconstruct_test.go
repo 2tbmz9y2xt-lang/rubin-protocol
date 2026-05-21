@@ -479,8 +479,10 @@ func TestHandleCmpctBlockRuntimeFlowAndEdges(t *testing.T) {
 		t.Fatal("send failure left outstanding or nil compact pool returned entries")
 	}
 	p = newCompactScriptedPeer(t)
-	requireNoCompactErr(t, p.processCompactTransactions(blockHash, header, nil, true), "empty compact fallback")
-	requireCompactFrame(t, p, messageGetData, "empty compact fallback")
+	err := p.processCompactTransactions(blockHash, header, [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES)}, true)
+	if err == nil || !strings.Contains(err.Error(), "compact block exceeds block size") || p.snapshotState().BanScore == 0 || p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatalf("oversize compact err=%v state=%+v writes=%d", err, p.snapshotState(), p.conn.(*scriptedConn).Buffer.Len())
+	}
 	if fallback, err := p.processCompactRelayedBlockWithFallback(blockHash, nil); err == nil || !fallback {
 		t.Fatalf("malformed compact fallback=%v err=%v", fallback, err)
 	}
@@ -559,6 +561,10 @@ func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
 	}
 	if got := compactRelayLocalTransactions(pool, 0); got != nil {
 		t.Fatalf("zero-limit snapshot=%v, want nil", got)
+	}
+	byteCap := len(minimalBlockTxnTestTxBytes(1))
+	if got := compactRelayLocalTransactionsWithBudget(pool, 4, byteCap); len(got) != 1 {
+		t.Fatalf("byte-bounded snapshot len=%d, want 1", len(got))
 	}
 	aliasPool := NewMemoryTxPoolWithLimit(1)
 	aliasRaw := minimalBlockTxnTestTxBytes(99)

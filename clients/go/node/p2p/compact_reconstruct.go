@@ -11,7 +11,8 @@ const (
 	compactDuplicateReportedIndex = ^uint64(0)
 	// Missing local candidates fall back to getblocktxn, so reconstruction
 	// must not scan an unbounded mempool snapshot before that fallback.
-	compactLocalTxCandidateLimit = defaultMaxTxPoolSize
+	compactLocalTxCandidateLimit      = defaultMaxTxPoolSize
+	compactLocalTxCandidateBytesLimit = consensus.MAX_BLOCK_BYTES
 )
 
 var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
@@ -347,7 +348,8 @@ func (p *peer) rejectBlockTxn(msg string) error { p.bumpBan(10, msg); return err
 func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte, fallbackOnApply bool) error {
 	blockBytes, err := compactBlockBytes(header, txs)
 	if err != nil {
-		return p.requestCompactFullBlockFallback(blockHash)
+		p.bumpBan(10, err.Error())
+		return err
 	}
 	if !fallbackOnApply {
 		return p.handleBlock(blockBytes)
@@ -388,10 +390,6 @@ func (p *peer) compactApplyErrorFallback(pb *consensus.ParsedBlock, blockHash [3
 		}
 		return true, err
 	}
-	if isConsensusApplyBlockError(err) {
-		p.recordRelayedBlockApplyError(err)
-		return false, err
-	}
 	p.recordRelayedBlockApplyError(err)
 	return false, err
 }
@@ -419,28 +417,32 @@ func compactBlockBytes(header [consensus.BLOCK_HEADER_BYTES]byte, txs [][]byte) 
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, tx...)
-		totalTxBytes = nextTotal
-		if len(out) > consensus.MAX_BLOCK_BYTES {
+		if len(out) > consensus.MAX_BLOCK_BYTES-len(tx) {
 			return nil, errors.New("compact block exceeds block size")
 		}
+		out = append(out, tx...)
+		totalTxBytes = nextTotal
 	}
 	return out, nil
 }
 
 func compactRelayLocalTransactions(pool TxPool, limit int) [][]byte {
+	return compactRelayLocalTransactionsWithBudget(pool, limit, compactLocalTxCandidateBytesLimit)
+}
+
+func compactRelayLocalTransactionsWithBudget(pool TxPool, limit int, byteLimit int) [][]byte {
 	switch pool := pool.(type) {
 	case *MemoryTxPool:
-		return compactMemoryPoolTransactions(pool, limit)
+		return compactMemoryPoolTransactions(pool, limit, byteLimit)
 	case *CanonicalMempoolTxPool:
-		return compactCanonicalPoolTransactions(pool, limit)
+		return compactCanonicalPoolTransactions(pool, limit, byteLimit)
 	default:
 		return nil
 	}
 }
 
-func compactMemoryPoolTransactions(pool *MemoryTxPool, limit int) [][]byte {
-	if pool == nil || limit <= 0 {
+func compactMemoryPoolTransactions(pool *MemoryTxPool, limit int, byteLimit int) [][]byte {
+	if pool == nil || limit <= 0 || byteLimit <= 0 {
 		return nil
 	}
 	pool.mu.RLock()
@@ -450,8 +452,13 @@ func compactMemoryPoolTransactions(pool *MemoryTxPool, limit int) [][]byte {
 		capHint = limit
 	}
 	out := make([][]byte, 0, capHint)
+	totalBytes := 0
 	for _, entry := range pool.txs {
+		if byteLimit-totalBytes < len(entry.raw) {
+			break
+		}
 		out = append(out, append([]byte(nil), entry.raw...))
+		totalBytes += len(entry.raw)
 		if len(out) >= limit {
 			break
 		}
@@ -459,15 +466,20 @@ func compactMemoryPoolTransactions(pool *MemoryTxPool, limit int) [][]byte {
 	return out
 }
 
-func compactCanonicalPoolTransactions(pool *CanonicalMempoolTxPool, limit int) [][]byte {
-	if pool == nil || pool.mempool == nil || limit <= 0 {
+func compactCanonicalPoolTransactions(pool *CanonicalMempoolTxPool, limit int, byteLimit int) [][]byte {
+	if pool == nil || pool.mempool == nil || limit <= 0 || byteLimit <= 0 {
 		return nil
 	}
 	ids := pool.mempool.TxIDsLimit(limit)
 	out := make([][]byte, 0, len(ids))
+	totalBytes := 0
 	for _, txid := range ids {
 		if tx, ok := pool.mempool.TxByID(txid); ok {
+			if byteLimit-totalBytes < len(tx) {
+				break
+			}
 			out = append(out, tx)
+			totalBytes += len(tx)
 		}
 	}
 	return out
