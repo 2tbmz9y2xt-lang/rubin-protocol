@@ -203,6 +203,30 @@ func TestRunBansUnexpectedBlockTxnCommandCap(t *testing.T) {
 	}
 }
 
+func TestRunBansUnexpectedBlockTxnMessageCap(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.PeerRuntimeConfig.MaxMessageSize = 1
+	header, err := buildEnvelopeHeader(
+		networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
+		messageBlockTxn,
+		[]byte{0x01, 0x02},
+	)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: header[:]}}}
+
+	err = p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds cap" {
+		t.Fatalf("run err=%v, want message cap error", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore == 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
+		t.Fatalf("state=%+v, want unexpected blocktxn ban", state)
+	}
+}
+
 func TestRunDisconnectsOnPartialHeaderTimeoutBeforeFakeFrame(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Millisecond
