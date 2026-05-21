@@ -85,12 +85,19 @@ func TestRecordAppliedBlock(t *testing.T) {
 	s.mu.RUnlock()
 }
 
-func TestStoreSideBlockAndSummaryInvalidBlock(t *testing.T) {
+func TestStoreSideBlockAndSummaryRejectsEmptyBranch(t *testing.T) {
 	bs := &BlockStore{}
 	s := &SyncEngine{blockStore: bs, cfg: SyncConfig{}}
-	_, err := s.storeSideBlockAndSummary([]byte{}, [32]byte{}, &consensus.ParsedBlock{}, 1, nil)
+	_, err := s.storeSideBlockAndSummary(nil, 0, 1)
 	if err == nil {
-		t.Fatal("expected validation error for empty block")
+		t.Fatal("expected validation error for empty branch")
+	}
+}
+
+func TestSideBranchPrevTimestampsRejectsNilStore(t *testing.T) {
+	_, err := sideBranchPrevTimestamps(nil, []reorgBranchBlock{{}}, 0)
+	if err == nil {
+		t.Fatal("expected timestamp context error for nil blockstore")
 	}
 }
 

@@ -2,9 +2,11 @@ package p2p
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -493,6 +495,44 @@ func TestAcceptedRelayedBlockBroadcastsResolvedOrphans(t *testing.T) {
 	})
 }
 
+func TestProcessRelayedBlockRejectsSideBranchTimestampBeforeAcceptedInventory(t *testing.T) {
+	sink := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	_, block1Bytes := testHarnessBlockAtHeight(t, sink, 1)
+	genesisParsed, err := consensus.ParseBlockBytes(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(genesis): %v", err)
+	}
+	sideBlock := blockWithHeaderTimestamp(t, block1Bytes, genesisParsed.Header.Timestamp)
+	_, sideHash, err := parseRelayedBlock(sideBlock)
+	if err != nil {
+		t.Fatalf("parseRelayedBlock(side): %v", err)
+	}
+
+	readFrames, closeProbe := registerRelayFrameProbe(t, sink.service, "relay-peer")
+	defer closeProbe()
+
+	peer := testPeerForService(sink.service, "remote", 3)
+	before := sink.syncEngine.BlockApplyCounts()
+	summary, err := peer.processRelayedBlock(sideBlock)
+	if err == nil {
+		t.Fatalf("expected timestamp-invalid side block rejection")
+	}
+	if summary != nil {
+		t.Fatalf("summary=%v, want nil", summary)
+	}
+	requireP2PConsensusTxErrCode(t, err, consensus.BLOCK_ERR_TIMESTAMP_OLD)
+	if after := sink.syncEngine.BlockApplyCounts(); after != before {
+		t.Fatalf("timestamp-invalid side block changed BlockApplyCounts from %+v to %+v", before, after)
+	}
+	if sink.service.blockSeen.Has(sideHash) {
+		t.Fatalf("timestamp-invalid side block must not be marked seen")
+	}
+	assertNoRelayFrame(t, readFrames, "timestamp-invalid side block")
+	if _, err := sink.blockStore.GetBlockByHash(sideHash); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("GetBlockByHash(timestamp-invalid side) err=%v, want not-exist", err)
+	}
+}
+
 func TestHandshakeSlotNilServiceAndChannel(t *testing.T) {
 	var nilSvc *Service
 	if !nilSvc.tryAcquireHandshakeSlot() {
@@ -659,6 +699,66 @@ func testHarnessBlockAtHeight(t *testing.T, h *testHarness, height uint64) ([32]
 		t.Fatalf("GetBlockByHash(height %d): %v", height, err)
 	}
 	return hash, blockBytes
+}
+
+func blockWithHeaderTimestamp(t *testing.T, block []byte, timestamp uint64) []byte {
+	t.Helper()
+	const timestampOffset = 4 + 32 + 32
+	if len(block) < consensus.BLOCK_HEADER_BYTES {
+		t.Fatalf("block length=%d, want at least header length %d", len(block), consensus.BLOCK_HEADER_BYTES)
+	}
+	out := append([]byte(nil), block...)
+	binary.LittleEndian.PutUint64(out[timestampOffset:timestampOffset+8], timestamp)
+	return out
+}
+
+func requireP2PConsensusTxErrCode(t *testing.T, err error, want consensus.ErrorCode) {
+	t.Helper()
+	var txErr *consensus.TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("err=%T %v, want consensus.TxError code %s", err, err, want)
+	}
+	if txErr.Code != want {
+		t.Fatalf("err code=%s, want %s", txErr.Code, want)
+	}
+}
+
+func registerRelayFrameProbe(t *testing.T, svc *Service, addr string) (<-chan message, func()) {
+	t.Helper()
+
+	remotePeer := newPeerRuntimeTestPeer(t)
+	remotePeer.service = svc
+	remotePeer.state.Addr = addr
+	local, remote := net.Pipe()
+	remotePeer.conn = local
+	closeBoth := func() {
+		_ = local.Close()
+		_ = remote.Close()
+	}
+	t.Cleanup(closeBoth)
+
+	svc.peersMu.Lock()
+	svc.peers[remotePeer.addr()] = remotePeer
+	svc.peersMu.Unlock()
+
+	frames := make(chan message, 1)
+	go func() {
+		frame, err := readFrame(remote, networkMagic(svc.cfg.PeerRuntimeConfig.Network), svc.cfg.PeerRuntimeConfig.MaxMessageSize)
+		if err == nil {
+			frames <- frame
+		}
+	}()
+	return frames, closeBoth
+}
+
+func assertNoRelayFrame(t *testing.T, frames <-chan message, label string) {
+	t.Helper()
+	select {
+	case frame := <-frames:
+		t.Fatalf("unexpected relay frame for %s: command=%q", label, frame.Command)
+	case <-time.After(100 * time.Millisecond):
+		return
+	}
 }
 
 func testPeerForService(svc *Service, userAgent string, bestHeight uint64) *peer {

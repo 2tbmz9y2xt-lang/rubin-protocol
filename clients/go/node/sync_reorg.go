@@ -34,7 +34,7 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 		return nil, err
 	}
 	if !switchToBranch {
-		return s.storeSideBlockAndSummary(blockBytes, blockHash, pb, candidateHeight, prevTimestamps)
+		return s.storeSideBlockAndSummary(branch, commonAncestorHeight, candidateHeight)
 	}
 	return s.applyPreferredBranch(branch, commonAncestorHeight)
 }
@@ -70,14 +70,39 @@ func (s *SyncEngine) evaluateSideBranch(
 	return branch, commonAncestorHeight, switchToBranch, candidateHeight, nil
 }
 
-func (s *SyncEngine) storeSideBlockAndSummary(blockBytes []byte, blockHash [32]byte, pb *consensus.ParsedBlock, candidateHeight uint64, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
-	if _, err := consensus.ValidateBlockBasicWithContextAtHeight(blockBytes, &pb.Header.PrevBlockHash, s.cfg.ExpectedTarget, candidateHeight, prevTimestamps); err != nil {
+func (s *SyncEngine) storeSideBlockAndSummary(branch []reorgBranchBlock, commonAncestorHeight uint64, candidateHeight uint64) (*ChainStateConnectSummary, error) {
+	if len(branch) == 0 {
+		return nil, errors.New("empty side branch")
+	}
+	candidate := branch[len(branch)-1]
+	prevTimestamps, err := sideBranchPrevTimestamps(s.blockStore, branch, commonAncestorHeight)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.blockStore.StoreBlock(blockHash, pb.HeaderBytes, blockBytes); err != nil {
+	if _, err := consensus.ValidateBlockBasicWithContextAtHeight(candidate.blockBytes, &candidate.header.PrevBlockHash, s.cfg.ExpectedTarget, candidateHeight, prevTimestamps); err != nil {
 		return nil, err
 	}
-	return s.syntheticSideChainSummary(candidateHeight, blockHash), nil
+	if err := s.blockStore.StoreBlock(candidate.hash, candidate.parsed.HeaderBytes, candidate.blockBytes); err != nil {
+		return nil, err
+	}
+	return s.syntheticSideChainSummary(candidateHeight, candidate.hash), nil
+}
+
+func sideBranchPrevTimestamps(store *BlockStore, branch []reorgBranchBlock, commonAncestorHeight uint64) ([]uint64, error) {
+	if len(branch) == 0 {
+		return nil, errors.New("empty side branch")
+	}
+	if store == nil {
+		return nil, errors.New("missing blockstore for side branch timestamp context")
+	}
+	prevTimestamps, err := prevTimestampsFromStore(store, commonAncestorHeight+1)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range branch[:len(branch)-1] {
+		prevTimestamps = advancePrevTimestamps(prevTimestamps, item.header.Timestamp)
+	}
+	return prevTimestamps, nil
 }
 
 func (s *SyncEngine) applyDirectBlockIfPossible(
