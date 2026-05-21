@@ -8,6 +8,8 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
+const compactOutstandingRequestTTL = 15 * time.Second
+
 type compactModeSnapshot struct {
 	Mode    uint8
 	Version uint64
@@ -74,7 +76,7 @@ func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
 }
 
 func (p *peer) activateCompactOutstandingRequest(req compactOutstandingRequest) {
-	req.ExpiresAt = p.service.cfg.Now().Add(p.service.cfg.PeerRuntimeConfig.ReadDeadline)
+	req.ExpiresAt = p.service.cfg.Now().Add(compactOutstandingRequestTTL)
 	p.setCompactOutstandingRequest(req)
 }
 

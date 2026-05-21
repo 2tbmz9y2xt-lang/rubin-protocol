@@ -138,7 +138,7 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 		if frame.Command == messageBlockTxn {
 			return p.rejectBlockTxn("unexpected blocktxn")
 		}
-		return errors.New("compact relay not negotiated")
+		return errors.New("compact relay receive disabled")
 	}
 	switch frame.Command {
 	case messageBlock:

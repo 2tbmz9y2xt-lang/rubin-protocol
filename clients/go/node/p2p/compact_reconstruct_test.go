@@ -548,9 +548,9 @@ func TestInternalCompactReceiveErrorBranches(t *testing.T) {
 		t.Fatalf("outstanding=%+v ok=%v", snap, ok)
 	}
 	p = newCompactScriptedPeer(t)
-	requireCompactErrContains(t, p.handleObjectRelayMessage(message{Command: messageCmpctBlock}), "compact relay not negotiated")
+	requireCompactErrContains(t, p.handleObjectRelayMessage(message{Command: messageCmpctBlock}), "compact relay receive disabled")
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-	requireCompactErrContains(t, p.handleObjectRelayMessage(message{Command: messageCmpctBlock, Payload: full}), "compact relay not negotiated")
+	requireCompactErrContains(t, p.handleObjectRelayMessage(message{Command: messageCmpctBlock, Payload: full}), "compact relay receive disabled")
 	requireNoCompactErr(t, p.handleCmpctBlock(full), "direct cmpctblock")
 	p = newCompactScriptedPeer(t)
 	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: [32]byte{0x01}})
@@ -607,6 +607,18 @@ func TestFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
 	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "full block")
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("full block did not clear matching compact outstanding request")
+	}
+}
+
+func TestInternalHandleCmpctBlockAlreadyHaveClearsMatchingOutstanding(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	full := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 501, 502), 501, 502)
+	requireNoCompactErr(t, p.handleCmpctBlock(full), "already-have cmpctblock")
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("already-have cmpctblock did not clear matching compact outstanding request")
 	}
 }
 

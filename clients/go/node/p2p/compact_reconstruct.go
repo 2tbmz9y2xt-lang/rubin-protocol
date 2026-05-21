@@ -266,8 +266,12 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	}
 	blockHash, _ := consensus.BlockHash(block.Header[:]) // fixed-size header slice cannot hit the length error path
 	have, err := p.service.hasBlock(blockHash)
-	if err != nil || have {
+	if err != nil {
 		return err
+	}
+	if have {
+		p.clearCompactOutstandingRequestForBlock(blockHash)
+		return nil
 	}
 	if err := p.validateCompactBlockHeader(block.Header); err != nil {
 		return err

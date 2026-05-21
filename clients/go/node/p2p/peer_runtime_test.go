@@ -154,17 +154,36 @@ func TestCompactOutstandingRequestExpires(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	now := time.Unix(1000, 0)
 	p.service.cfg.Now = func() time.Time { return now }
-	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = compactOutstandingRequestTTL + time.Second
 	p.activateCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: 64})
 	if got := p.blockTxnPayloadCap(); got != 64 {
 		t.Fatalf("fresh blocktxn cap=%d, want 64", got)
 	}
-	now = now.Add(time.Second)
+	now = now.Add(compactOutstandingRequestTTL)
 	if got := p.blockTxnPayloadCap(); got != 0 {
 		t.Fatalf("expired blocktxn cap=%d, want 0", got)
 	}
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("expired outstanding request was not cleared")
+	}
+}
+
+func TestCompactOutstandingRequestDoesNotExpireWhenReadDeadlineDisabled(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	now := time.Unix(1000, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = 0
+	p.activateCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: 64})
+	if got := p.blockTxnPayloadCap(); got != 64 {
+		t.Fatalf("disabled-deadline blocktxn cap=%d, want 64", got)
+	}
+	now = now.Add(compactOutstandingRequestTTL - time.Nanosecond)
+	if got := p.blockTxnPayloadCap(); got != 64 {
+		t.Fatalf("disabled-deadline early blocktxn cap=%d, want 64", got)
+	}
+	now = now.Add(time.Nanosecond)
+	if got := p.blockTxnPayloadCap(); got != 0 {
+		t.Fatalf("disabled-deadline expired blocktxn cap=%d, want 0", got)
 	}
 }
 
