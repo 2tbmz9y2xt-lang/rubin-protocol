@@ -28,7 +28,6 @@ fn advance_prev_timestamps(prev: Option<&[u64]>, new_ts: u64) -> Vec<u64> {
 /// A block on a candidate side-chain branch, collected while walking
 /// parent pointers back to a common ancestor on the canonical chain.
 struct ReorgBranchBlock {
-    #[allow(dead_code)]
     hash: [u8; 32],
     block_bytes: Vec<u8>,
     target: [u8; 32],
@@ -278,7 +277,7 @@ impl Deref for ApplyBlockWithReorgOutcome {
 
 impl SyncEngine {
     /// Apply a block that may extend the canonical chain directly or trigger
-    /// a reorg if it builds on a side chain with strictly more cumulative work.
+    /// a reorg if it builds on a better fork-choice branch.
     ///
     /// Returns the connect summary for the newly applied tip block.
     pub fn apply_block_with_reorg(
@@ -308,7 +307,8 @@ impl SyncEngine {
         let (branch, common_ancestor_hash, common_ancestor_height) =
             self.collect_branch_to_canonical(bh, block_bytes)?;
 
-        // Evaluate fork choice: switch only if candidate has strictly more work.
+        // Evaluate fork choice: switch if the candidate has greater work, or
+        // equal work with a lexicographically smaller tip hash.
         let (switch, candidate_height) =
             self.should_switch_to_branch(&branch, common_ancestor_hash)?;
 
@@ -343,7 +343,7 @@ impl SyncEngine {
         }
 
         // Execute the reorg.
-        self.apply_heavier_branch(branch, common_ancestor_height)
+        self.apply_preferred_branch(branch, common_ancestor_height)
     }
 
     /// Fast path: apply the block directly if it extends the current tip
@@ -373,8 +373,8 @@ impl SyncEngine {
         Ok(None)
     }
 
-    /// Evaluate the fork choice rule: candidate branch must have strictly
-    /// greater cumulative work than the current canonical chain.
+    /// Evaluate the fork choice rule: candidate branch must have greater
+    /// cumulative work, or equal work with a lexicographically smaller tip.
     fn should_switch_to_branch(
         &self,
         branch: &[ReorgBranchBlock],
@@ -400,12 +400,19 @@ impl SyncEngine {
             .ok_or("common ancestor not on canonical chain")?;
         let candidate_height = ancestor_height + branch.len() as u64;
 
-        Ok((candidate_work > current_work, candidate_height))
+        let candidate_tip_hash = branch.last().ok_or("empty side branch")?.hash;
+        let should_switch = match candidate_work.cmp(&current_work) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => candidate_tip_hash < current_tip_hash,
+            std::cmp::Ordering::Less => false,
+        };
+
+        Ok((should_switch, candidate_height))
     }
 
-    /// Execute the reorg: disconnect canonical blocks back to the common
-    /// ancestor, then connect the heavier branch.
-    fn apply_heavier_branch(
+    /// Execute the reorg for the branch selected by fork choice: greater
+    /// cumulative work, or equal work with a lexicographically smaller tip.
+    fn apply_preferred_branch(
         &mut self,
         branch: Vec<ReorgBranchBlock>,
         common_ancestor_height: u64,
@@ -413,7 +420,7 @@ impl SyncEngine {
         let rollback = self.capture_reorg_rollback_state(common_ancestor_height);
 
         // Dry-run: preview the disconnect + reconnect on a cloned state.
-        let disconnected_blocks = self.prepare_heavier_branch(&branch, common_ancestor_height)?;
+        let disconnected_blocks = self.prepare_preferred_branch(&branch, common_ancestor_height)?;
         let reorg_depth = u64::try_from(disconnected_blocks.len()).unwrap_or(u64::MAX);
 
         // Disconnect canonical chain back to the common ancestor.
@@ -424,7 +431,7 @@ impl SyncEngine {
             ));
         }
 
-        // Connect the heavier branch.  Pass None so apply_block derives
+        // Connect the preferred branch.  Pass None so apply_block derives
         // fresh timestamps from the (updated) canonical index for each block,
         // instead of reusing the stale caller value (B.9 fix, issue #1166).
         let mut last_summary = None;
@@ -465,7 +472,7 @@ impl SyncEngine {
 
     /// Dry-run validation: clone chain state, preview disconnect, then
     /// connect each branch block to verify the entire branch is valid.
-    fn prepare_heavier_branch(
+    fn prepare_preferred_branch(
         &self,
         branch: &[ReorgBranchBlock],
         common_ancestor_height: u64,
@@ -732,6 +739,32 @@ mod tests {
         (engine, dir)
     }
 
+    fn block_header_hash(block: &[u8]) -> [u8; 32] {
+        rubin_consensus::block_hash(&block[..rubin_consensus::BLOCK_HEADER_BYTES])
+            .expect("block header hash")
+    }
+
+    fn timestamp_ordered_equal_work_height_one_pair(
+        genesis_hash: [u8; 32],
+        gen_ts: u64,
+        later_tip_cmp: std::cmp::Ordering,
+    ) -> (Vec<u8>, [u8; 32], Vec<u8>, [u8; 32]) {
+        for earlier_delta in 1..128 {
+            let earlier_ts = gen_ts + earlier_delta;
+            let earlier_block = height_one_coinbase_only_block(genesis_hash, earlier_ts);
+            let earlier_hash = block_header_hash(&earlier_block);
+            for later_delta in (earlier_delta + 1)..128 {
+                let later_block =
+                    height_one_coinbase_only_block(genesis_hash, gen_ts + later_delta);
+                let later_hash = block_header_hash(&later_block);
+                if later_hash.cmp(&earlier_hash) == later_tip_cmp {
+                    return (earlier_block, earlier_hash, later_block, later_hash);
+                }
+            }
+        }
+        panic!("could not find deterministic equal-work test pair with requested tip ordering");
+    }
+
     struct CountingRotationProvider {
         suite_id: u8,
         spend_calls: AtomicUsize,
@@ -942,7 +975,42 @@ mod tests {
     }
 
     #[test]
-    fn apply_block_with_reorg_side_chain_stored() {
+    fn apply_block_with_reorg_switches_to_lower_tip_on_equal_work() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-equal-lower");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let (higher_block, higher_hash, lower_block, lower_hash) =
+            timestamp_ordered_equal_work_height_one_pair(
+                genesis_hash,
+                gen_ts,
+                std::cmp::Ordering::Less,
+            );
+
+        engine
+            .apply_block_with_reorg(&higher_block, None)
+            .expect("higher-tip block first");
+        assert_eq!(engine.chain_state.height, 1);
+        assert_eq!(engine.chain_state.tip_hash, higher_hash);
+
+        let summary = engine
+            .apply_block_with_reorg(&lower_block, None)
+            .expect("lower-tip equal-work branch");
+
+        assert_eq!(engine.chain_state.height, 1);
+        assert_eq!(summary.block_height, 1);
+        assert_eq!(engine.chain_state.tip_hash, lower_hash);
+        assert_eq!(engine.reorg_count(), 1);
+        assert_eq!(engine.last_reorg_depth(), 1);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_keeps_lower_tip_on_equal_work_higher_side_branch() {
         let (mut engine, dir) = engine_with_store("rubin-reorg-side");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
@@ -950,21 +1018,66 @@ mod tests {
             .apply_block_with_reorg(&genesis, None)
             .expect("genesis");
 
-        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let (lower_block, lower_hash, higher_block, _) =
+            timestamp_ordered_equal_work_height_one_pair(
+                genesis_hash,
+                gen_ts,
+                std::cmp::Ordering::Greater,
+            );
+
         engine
-            .apply_block_with_reorg(&block1, None)
-            .expect("block 1");
+            .apply_block_with_reorg(&lower_block, None)
+            .expect("lower-tip block first");
+        assert_eq!(engine.chain_state.height, 1);
+        assert_eq!(engine.chain_state.tip_hash, lower_hash);
 
-        // Alternate block at same height with parent = genesis.
-        // Same cumulative work → no reorg (not strictly greater).
-        let alt = height_one_coinbase_only_block(genesis_hash, gen_ts + 2);
         let summary = engine
-            .apply_block_with_reorg(&alt, None)
-            .expect("side chain stored");
+            .apply_block_with_reorg(&higher_block, None)
+            .expect("higher-tip equal-work side branch stored");
 
-        // Stored as side chain; canonical tip unchanged.
+        // Higher-tip equal-work branch is stored as side chain; canonical tip
+        // remains the lower hash.
         assert_eq!(engine.chain_state.height, 1);
         assert_eq!(summary.block_height, 1);
+        assert_eq!(engine.chain_state.tip_hash, lower_hash);
+        assert_eq!(engine.reorg_count(), 0);
+        assert_eq!(engine.last_reorg_depth(), 0);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_keeps_tip_when_candidate_has_less_work() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-less-work");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let block1_hash = block_header_hash(&block1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, gen_ts + 2);
+        let block2_hash = block_header_hash(&block2);
+        engine
+            .apply_block_with_reorg(&block2, None)
+            .expect("block2 canonical");
+        assert_eq!(engine.chain_state.height, 2);
+        assert_eq!(engine.chain_state.tip_hash, block2_hash);
+
+        let alt = height_one_coinbase_only_block(genesis_hash, gen_ts + 3);
+        let summary = engine
+            .apply_block_with_reorg(&alt, None)
+            .expect("lower-work side branch stored");
+
+        assert_eq!(summary.block_height, 1);
+        assert_eq!(engine.chain_state.height, 2);
+        assert_eq!(engine.chain_state.tip_hash, block2_hash);
         assert_eq!(engine.reorg_count(), 0);
         assert_eq!(engine.last_reorg_depth(), 0);
 
@@ -1220,7 +1333,7 @@ mod tests {
     /// The rollback's Phase 2 (chain_state.save) also fails → Some(err)
     /// flows through `err_with_rollback`.
     #[test]
-    fn apply_heavier_branch_disconnect_fail_rollback_cascade() {
+    fn apply_preferred_branch_disconnect_fail_rollback_cascade() {
         let (mut engine, dir) = engine_with_store("rubin-reorg-disc-fail");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
@@ -1286,7 +1399,7 @@ mod tests {
     /// (index and chain_state paths are writable), so err_with_rollback
     /// receives `None` — the original connect error is returned unchanged.
     #[test]
-    fn apply_heavier_branch_connect_fail_undo_readonly() {
+    fn apply_preferred_branch_connect_fail_undo_readonly() {
         let (mut engine, dir) = engine_with_store("rubin-reorg-conn-fail");
         let (genesis, genesis_hash, gen_ts) = genesis_info();
 
