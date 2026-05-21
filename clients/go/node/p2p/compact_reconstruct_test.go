@@ -432,17 +432,7 @@ func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing
 }
 
 func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
-	pool := NewMemoryTxPoolWithLimit(4)
-	for i := 0; i < 4; i++ {
-		raw := minimalBlockTxnTestTxBytes(uint64(i + 1))
-		_, txid, _, _, err := consensus.ParseTx(raw)
-		if err != nil {
-			t.Fatalf("ParseTx[%d]: %v", i, err)
-		}
-		if !pool.Put(txid, raw, uint64(i+1), len(raw)) {
-			t.Fatalf("Put[%d] rejected", i)
-		}
-	}
+	pool := compactRelayTestMemoryPool(t, 4)
 	if got := compactRelayLocalTransactions(pool, 2); len(got) != 2 {
 		t.Fatalf("bounded snapshot len=%d, want 2", len(got))
 	}
@@ -453,24 +443,32 @@ func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
 	if got := compactRelayLocalTransactionsWithBudget(pool, 4, byteCap); len(got) != 1 {
 		t.Fatalf("byte-bounded snapshot len=%d, want 1", len(got))
 	}
+}
+
+func TestCompactRelayLocalCandidateCollectorCountsSkippedEntries(t *testing.T) {
 	smallRaw := minimalBlockTxnTestTxBytes(90)
 	smallCap := len(smallRaw)
 	collector := newCompactLocalTxCandidateCollector(4, 4, smallCap)
-	for i := 0; i < 3; i++ {
-		collector.consider(make([]byte, smallCap+1))
-	}
+	collector.consider(make([]byte, smallCap+1))
+	collector.consider(make([]byte, smallCap+1))
+	collector.consider(make([]byte, smallCap+1))
 	collector.consider(smallRaw)
 	if len(collector.out) != 1 || !bytes.Equal(collector.out[0], smallRaw) {
 		t.Fatalf("oversized local candidates stopped bounded scan: len=%d", len(collector.out))
 	}
+
 	collector = newCompactLocalTxCandidateCollector(4, 4, smallCap)
-	for i := 0; i < 4; i++ {
-		collector.consider(make([]byte, smallCap+1))
-	}
+	collector.consider(make([]byte, smallCap+1))
+	collector.consider(make([]byte, smallCap+1))
+	collector.consider(make([]byte, smallCap+1))
+	collector.consider(make([]byte, smallCap+1))
 	continued := collector.consider(smallRaw)
 	if continued || len(collector.out) != 0 {
 		t.Fatalf("scan budget accepted late candidate: continue=%v len=%d", continued, len(collector.out))
 	}
+}
+
+func TestCompactRelayLocalTransactionsCopiesMemoryPoolBytes(t *testing.T) {
 	aliasPool := NewMemoryTxPoolWithLimit(1)
 	aliasRaw := minimalBlockTxnTestTxBytes(99)
 	_, aliasTxid, _, _, err := consensus.ParseTx(aliasRaw)
@@ -488,6 +486,36 @@ func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
 	if stored, ok := aliasPool.Get(aliasTxid); !ok || stored[0] == got[0][0] {
 		t.Fatal("bounded snapshot aliases memory pool transaction bytes")
 	}
+}
+
+func TestCompactRelayLocalTransactionsUsesPurposeSpecificByteCap(t *testing.T) {
+	if compactLocalTxCandidateBytesLimit >= consensus.MAX_BLOCK_BYTES {
+		t.Fatalf("local candidate byte limit=%d, want below MAX_BLOCK_BYTES=%d", compactLocalTxCandidateBytesLimit, consensus.MAX_BLOCK_BYTES)
+	}
+	pool := NewMemoryTxPoolWithLimit(1)
+	raw := make([]byte, compactLocalTxCandidateBytesLimit+1)
+	if !pool.Put([32]byte{0x44}, raw, 1, len(raw)) {
+		t.Fatal("Put oversized local candidate")
+	}
+	if got := compactRelayLocalTransactions(pool, 1); len(got) != 0 {
+		t.Fatalf("default local candidate cap accepted %d oversized txs", len(got))
+	}
+}
+
+func compactRelayTestMemoryPool(t *testing.T, count int) *MemoryTxPool {
+	t.Helper()
+	pool := NewMemoryTxPoolWithLimit(count)
+	for i := 0; i < count; i++ {
+		raw := minimalBlockTxnTestTxBytes(uint64(i + 1))
+		_, txid, _, _, err := consensus.ParseTx(raw)
+		if err != nil {
+			t.Fatalf("ParseTx[%d]: %v", i, err)
+		}
+		if !pool.Put(txid, raw, uint64(i+1), len(raw)) {
+			t.Fatalf("Put[%d] rejected", i)
+		}
+	}
+	return pool
 }
 
 func TestCompactRelayLocalTransactionsForBlockSkipsPrefilledOnly(t *testing.T) {

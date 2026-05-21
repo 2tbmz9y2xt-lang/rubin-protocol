@@ -98,6 +98,7 @@ func (m *Mempool) AllTxIDs() [][32]byte {
 }
 
 // TxIDsLimit returns at most limit txids from the current mempool snapshot.
+// It returns nil when limit <= 0; use AllTxIDs for an unbounded snapshot.
 // The slice ordering is not guaranteed to be stable between calls.
 func (m *Mempool) TxIDsLimit(limit int) [][32]byte {
 	if limit <= 0 {

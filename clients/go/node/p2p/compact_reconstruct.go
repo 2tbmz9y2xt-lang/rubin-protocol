@@ -8,10 +8,11 @@ import (
 
 const (
 	compactDuplicateReportedIndex = ^uint64(0)
-	// Missing local candidates fall back to getblocktxn, so reconstruction
-	// must not scan an unbounded mempool snapshot before that fallback.
+	// Local candidate snapshots are best-effort: missing candidates fall back
+	// to compact relay recovery, so keep the per-reconstruction copy budget
+	// well below the full block cap.
 	compactLocalTxCandidateLimit      = defaultMaxTxPoolSize
-	compactLocalTxCandidateBytesLimit = consensus.MAX_BLOCK_BYTES
+	compactLocalTxCandidateBytesLimit = 1 << 20
 )
 
 var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
@@ -324,25 +325,21 @@ func compactCanonicalPoolTransactions(pool *CanonicalMempoolTxPool, limit int, b
 		return nil
 	}
 	ids := pool.mempool.TxIDsLimit(limit)
-	capHint := len(ids)
-	if limit < capHint {
-		capHint = limit
-	}
-	out := make([][]byte, 0, capHint)
-	totalBytes := 0
+	return compactTxIDSnapshotTransactions(ids, pool.mempool.TxByID, limit, byteLimit)
+}
+
+func compactTxIDSnapshotTransactions(ids [][32]byte, getTx func([32]byte) ([]byte, bool), limit int, byteLimit int) [][]byte {
+	collector := newCompactLocalTxCandidateCollector(len(ids), limit, byteLimit)
 	for _, txid := range ids {
-		if tx, ok := pool.mempool.TxByID(txid); ok {
-			if byteLimit-totalBytes < len(tx) {
-				continue
-			}
-			out = append(out, tx)
-			totalBytes += len(tx)
-			if len(out) >= limit {
-				break
-			}
+		tx, ok := getTx(txid)
+		if !ok {
+			continue
+		}
+		if !collector.consider(tx) {
+			break
 		}
 	}
-	return out
+	return collector.out
 }
 
 func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) (compactOutstandingRequest, error) {
