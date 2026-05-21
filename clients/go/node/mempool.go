@@ -94,14 +94,35 @@ type Mempool struct {
 // AllTxIDs returns the txids of every transaction currently in the mempool.
 // The slice ordering is not guaranteed to be stable between calls.
 func (m *Mempool) AllTxIDs() [][32]byte {
+	return m.txIDsLimit(0)
+}
+
+// TxIDsLimit returns at most limit txids from the current mempool snapshot.
+// It returns nil when limit <= 0; use AllTxIDs for an unbounded snapshot.
+// The slice ordering is not guaranteed to be stable between calls.
+func (m *Mempool) TxIDsLimit(limit int) [][32]byte {
+	if limit <= 0 {
+		return nil
+	}
+	return m.txIDsLimit(limit)
+}
+
+func (m *Mempool) txIDsLimit(limit int) [][32]byte {
 	if m == nil {
 		return nil
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	ids := make([][32]byte, 0, len(m.txs))
+	capHint := len(m.txs)
+	if limit > 0 && limit < capHint {
+		capHint = limit
+	}
+	ids := make([][32]byte, 0, capHint)
 	for txid := range m.txs {
 		ids = append(ids, txid)
+		if limit > 0 && len(ids) >= limit {
+			break
+		}
 	}
 	return ids
 }

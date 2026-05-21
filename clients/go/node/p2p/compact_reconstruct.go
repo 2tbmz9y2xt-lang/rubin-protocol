@@ -6,7 +6,14 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-const compactDuplicateReportedIndex = ^uint64(0)
+const (
+	compactDuplicateReportedIndex = ^uint64(0)
+	// Local candidate snapshots are best-effort: missing candidates fall back
+	// to compact relay recovery, so keep the per-reconstruction copy budget
+	// well below the full block cap.
+	compactLocalTxCandidateLimit      = defaultMaxTxPoolSize
+	compactLocalTxCandidateBytesLimit = 1 << 20
+)
 
 var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
 
@@ -246,6 +253,93 @@ func compactLocalTxWTxID(tx []byte) ([32]byte, error) {
 		return zero, errors.New("compact local transaction is non-canonical")
 	}
 	return wtxid, nil
+}
+
+func compactRelayLocalTransactions(pool TxPool, limit int) [][]byte {
+	return compactRelayLocalTransactionsWithBudget(pool, limit, compactLocalTxCandidateBytesLimit)
+}
+
+func compactRelayLocalTransactionsForBlock(block cmpctBlockPayload, pool TxPool) [][]byte {
+	if len(block.ShortIDs) == 0 {
+		return nil
+	}
+	return compactRelayLocalTransactions(pool, compactLocalTxCandidateLimit)
+}
+
+func compactRelayLocalTransactionsWithBudget(pool TxPool, limit int, byteLimit int) [][]byte {
+	switch pool := pool.(type) {
+	case *MemoryTxPool:
+		return compactMemoryPoolTransactions(pool, limit, byteLimit)
+	case *CanonicalMempoolTxPool:
+		return compactCanonicalPoolTransactions(pool, limit, byteLimit)
+	default:
+		return nil
+	}
+}
+
+func compactMemoryPoolTransactions(pool *MemoryTxPool, limit int, byteLimit int) [][]byte {
+	if pool == nil || limit <= 0 || byteLimit <= 0 {
+		return nil
+	}
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	capHint := len(pool.txs)
+	if limit < capHint {
+		capHint = limit
+	}
+	collector := newCompactLocalTxCandidateCollector(capHint, limit, byteLimit)
+	for _, entry := range pool.txs {
+		if !collector.consider(entry.raw) {
+			break
+		}
+	}
+	return collector.out
+}
+
+type compactLocalTxCandidateCollector struct {
+	out        [][]byte
+	limit      int
+	byteLimit  int
+	scanned    int
+	totalBytes int
+}
+
+func newCompactLocalTxCandidateCollector(capHint int, limit int, byteLimit int) *compactLocalTxCandidateCollector {
+	return &compactLocalTxCandidateCollector{out: make([][]byte, 0, capHint), limit: limit, byteLimit: byteLimit}
+}
+
+func (c *compactLocalTxCandidateCollector) consider(raw []byte) bool {
+	if c.scanned >= c.limit || len(c.out) >= c.limit || c.totalBytes >= c.byteLimit {
+		return false
+	}
+	c.scanned++
+	if c.byteLimit-c.totalBytes >= len(raw) {
+		c.out = append(c.out, append([]byte(nil), raw...))
+		c.totalBytes += len(raw)
+	}
+	return c.scanned < c.limit && len(c.out) < c.limit && c.totalBytes < c.byteLimit
+}
+
+func compactCanonicalPoolTransactions(pool *CanonicalMempoolTxPool, limit int, byteLimit int) [][]byte {
+	if pool == nil || pool.mempool == nil || limit <= 0 || byteLimit <= 0 {
+		return nil
+	}
+	ids := pool.mempool.TxIDsLimit(limit)
+	return compactTxIDSnapshotTransactions(ids, pool.mempool.TxByID, limit, byteLimit)
+}
+
+func compactTxIDSnapshotTransactions(ids [][32]byte, getTx func([32]byte) ([]byte, bool), limit int, byteLimit int) [][]byte {
+	collector := newCompactLocalTxCandidateCollector(len(ids), limit, byteLimit)
+	for _, txid := range ids {
+		tx, ok := getTx(txid)
+		if !ok {
+			continue
+		}
+		if !collector.consider(tx) {
+			break
+		}
+	}
+	return collector.out
 }
 
 func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, result compactReconstructionResult) (compactOutstandingRequest, error) {
