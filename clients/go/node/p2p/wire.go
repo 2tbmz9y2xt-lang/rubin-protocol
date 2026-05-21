@@ -52,6 +52,14 @@ type message struct {
 
 type payloadLimitFn func(command string) uint32
 
+type commandPayloadCapError struct {
+	command string
+}
+
+func (e commandPayloadCapError) Error() string {
+	return "message exceeds command cap"
+}
+
 type frameHeader struct {
 	Command  string
 	Size     uint32
@@ -105,7 +113,7 @@ func readFrameWithPayloadLimit(r io.Reader, expectedMagic [4]byte, maxMessageSiz
 	}
 	if limit != nil {
 		if header.Size > limit(header.Command) {
-			return frame, errors.New("message exceeds command cap")
+			return frame, commandPayloadCapError{command: header.Command}
 		}
 	}
 	payload, err := readPayloadWithChecksum(r, header.Size, header.Checksum)

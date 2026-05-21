@@ -3,6 +3,7 @@ package p2p
 import (
 	"encoding/binary"
 	"errors"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -26,6 +27,8 @@ type compactOutstandingRequest struct {
 	Nonce1             uint64
 	Nonce2             uint64
 	BlockTxnPayloadCap uint32
+	RetainedBytes      uint64
+	ExpiresAt          time.Time
 }
 
 func (p *peer) handleSendCmpct(payload []byte) error {
@@ -70,9 +73,19 @@ func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
 	p.compactMu.Unlock()
 }
 
+func (p *peer) activateCompactOutstandingRequest(req compactOutstandingRequest) {
+	req.ExpiresAt = p.service.cfg.Now().Add(p.service.cfg.PeerRuntimeConfig.ReadDeadline)
+	p.setCompactOutstandingRequest(req)
+}
+
 func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, bool) {
 	p.compactMu.Lock()
 	if p.compact.outstanding == nil {
+		p.compactMu.Unlock()
+		return compactOutstandingRequest{}, false
+	}
+	if p.compactOutstandingRequestExpiredLocked() {
+		p.compact.outstanding = nil
 		p.compactMu.Unlock()
 		return compactOutstandingRequest{}, false
 	}
@@ -85,6 +98,10 @@ func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, b
 func (p *peer) hasCompactOutstandingRequest() bool {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
+	if p.compactOutstandingRequestExpiredLocked() {
+		p.compact.outstanding = nil
+		return false
+	}
 	return p.compact.outstanding != nil
 }
 
@@ -94,11 +111,31 @@ func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) 
 		p.compactMu.Unlock()
 		return compactOutstandingRequest{}, false
 	}
+	if p.compactOutstandingRequestExpiredLocked() {
+		p.compact.outstanding = nil
+		p.compactMu.Unlock()
+		return compactOutstandingRequest{}, false
+	}
 	// Stored outstanding requests are immutable; keep large tx-byte cloning outside compactMu.
 	req := *p.compact.outstanding
 	p.compact.outstanding = nil
 	p.compactMu.Unlock()
 	return cloneCompactOutstandingRequest(req), true
+}
+
+func (p *peer) clearCompactOutstandingRequestForBlock(blockHash [32]byte) {
+	p.compactMu.Lock()
+	if p.compact.outstanding != nil && p.compact.outstanding.BlockHash == blockHash {
+		p.compact.outstanding = nil
+	}
+	p.compactMu.Unlock()
+}
+
+func (p *peer) compactOutstandingRequestExpiredLocked() bool {
+	if p.compact.outstanding == nil || p.compact.outstanding.ExpiresAt.IsZero() {
+		return false
+	}
+	return !p.service.cfg.Now().Before(p.compact.outstanding.ExpiresAt)
 }
 
 func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutstandingRequest {
@@ -112,6 +149,10 @@ func (p *peer) blockTxnPayloadCap() uint32 {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil {
+		return 0
+	}
+	if p.compactOutstandingRequestExpiredLocked() {
+		p.compact.outstanding = nil
 		return 0
 	}
 	if maxCap := compactRelayPayloadCap(messageBlockTxn); p.compact.outstanding.BlockTxnPayloadCap > maxCap {

@@ -52,13 +52,7 @@ func (p *peer) run(ctx context.Context) error {
 func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 	base := postHandshakePayloadCap(p.service.cfg.LocatorLimit, p.service.cfg.SyncConfig.HeaderBatchLimit)
 	return func(command string) uint32 {
-		if command == messageGetBlockTxn {
-			return 0
-		}
-		if command == messageBlockTxn {
-			return p.blockTxnPayloadCap()
-		}
-		if isCompactRelayObjectCommand(command) && !p.compactRelayEnabled() {
+		if isCompactRelayObjectCommand(command) {
 			return 0
 		}
 		return base(command)
@@ -140,7 +134,7 @@ func (p *peer) handleInventoryRelayMessage(frame message) error {
 }
 
 func (p *peer) handleObjectRelayMessage(frame message) error {
-	if isCompactRelayObjectCommand(frame.Command) && !p.compactRelayObjectAllowed(frame.Command) {
+	if isCompactRelayObjectCommand(frame.Command) {
 		if frame.Command == messageBlockTxn {
 			return p.rejectBlockTxn("unexpected blocktxn")
 		}
@@ -153,10 +147,6 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 		return p.handleTx(frame.Payload)
 	case messageGetBlk:
 		return p.handleGetBlocks(frame.Payload)
-	case messageCmpctBlock:
-		return p.handleCmpctBlock(frame.Payload)
-	case messageBlockTxn:
-		return p.handleBlockTxn(frame.Payload)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
 	}
@@ -169,18 +159,6 @@ func isCompactRelayObjectCommand(command string) bool {
 	default:
 		return false
 	}
-}
-
-func (p *peer) compactRelayEnabled() bool {
-	mode := p.remoteCompactMode()
-	return mode.Version == compactRelayVersion && mode.Mode > 0
-}
-
-func (p *peer) compactRelayObjectAllowed(command string) bool {
-	if command == messageBlockTxn && p.blockTxnPayloadCap() > 0 {
-		return true
-	}
-	return p.compactRelayEnabled()
 }
 
 func (p *peer) handleAddressMessage(frame message) error {
@@ -237,11 +215,23 @@ func (p *peer) applyPostHandshakeDisconnectError(err error) {
 	if err == nil {
 		return
 	}
+	if reason, ok := compactBlockTxnCommandCapPolicyReason(err); ok {
+		p.bumpBan(10, reason)
+		return
+	}
 	if reason, ok := unknownCommandPolicyReason(err); ok {
 		p.setLastError(reason)
 		return
 	}
 	p.setLastError(err.Error())
+}
+
+func compactBlockTxnCommandCapPolicyReason(err error) (string, bool) {
+	var capErr commandPayloadCapError
+	if errors.As(err, &capErr) && capErr.command == messageBlockTxn {
+		return "unexpected blocktxn", true
+	}
+	return "", false
 }
 
 func (p *peer) bumpBan(delta int, reason string) bool {

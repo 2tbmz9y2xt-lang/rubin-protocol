@@ -12,11 +12,13 @@ const (
 	// Local candidate snapshots are best-effort: missing candidates fall back
 	// to compact relay recovery, so keep the per-reconstruction copy budget
 	// well below the full block cap.
-	compactLocalTxCandidateLimit      = defaultMaxTxPoolSize
-	compactLocalTxCandidateBytesLimit = 1 << 20
+	compactLocalTxCandidateLimit         = defaultMaxTxPoolSize
+	compactLocalTxCandidateBytesLimit    = 1 << 20
+	compactOutstandingRetainedBytesLimit = compactLocalTxCandidateBytesLimit
 )
 
 var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
+var errCompactOutstandingRetainedBytesTooLarge = errors.New("compact outstanding retained bytes too large")
 
 type compactReconstructionResult struct {
 	Transactions        [][]byte
@@ -303,6 +305,9 @@ func (p *peer) requestMissingCompactTransactions(block cmpctBlockPayload, blockH
 		return p.requestCompactFullBlockFallback(blockHash)
 	}
 	req, err := newCompactOutstandingRequest(block, blockHash, result)
+	if errors.Is(err, errCompactOutstandingRetainedBytesTooLarge) {
+		return p.requestCompactFullBlockFallback(blockHash)
+	}
 	if err != nil {
 		return err
 	}
@@ -310,11 +315,10 @@ func (p *peer) requestMissingCompactTransactions(block cmpctBlockPayload, blockH
 	if err != nil {
 		return err
 	}
-	p.setCompactOutstandingRequest(req)
 	if err := p.send(messageGetBlockTxn, body); err != nil {
-		p.popCompactOutstandingRequest()
 		return err
 	}
+	p.activateCompactOutstandingRequest(req)
 	return nil
 }
 
@@ -333,11 +337,11 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	}
 	response, err := decodeBlockTxnRuntimePayload(payload)
 	if err != nil {
-		p.popCompactOutstandingRequest()
+		p.clearCompactOutstandingRequestForBlock(req.BlockHash)
 		p.bumpBan(10, err.Error())
 		return err
 	}
-	req, _ = p.popCompactOutstandingRequest() // snapshot above guarantees presence in the single-reader peer loop.
+	p.clearCompactOutstandingRequestForBlock(req.BlockHash)
 	txs, err := compactFillResponseTransactions(req, response)
 	if err != nil {
 		return p.requestCompactFullBlockFallback(req.BlockHash)
@@ -533,6 +537,13 @@ func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, r
 	if err := compactValidateOutstandingShape(result.PartialTransactions, result.MissingIndexes); err != nil {
 		return compactOutstandingRequest{}, err
 	}
+	retainedBytes, err := compactPresentTransactionBytes(result.PartialTransactions)
+	if err != nil {
+		return compactOutstandingRequest{}, err
+	}
+	if retainedBytes > compactOutstandingRetainedBytesLimit {
+		return compactOutstandingRequest{}, errCompactOutstandingRetainedBytesTooLarge
+	}
 	payloadCap, err := compactBlockTxnResponsePayloadCap(result.PartialTransactions, len(result.MissingIndexes))
 	if err != nil {
 		return compactOutstandingRequest{}, err
@@ -547,6 +558,7 @@ func newCompactOutstandingRequest(block cmpctBlockPayload, blockHash [32]byte, r
 		Nonce1:             block.Nonce1,
 		Nonce2:             block.Nonce2,
 		BlockTxnPayloadCap: payloadCap,
+		RetainedBytes:      retainedBytes,
 	}, nil
 }
 

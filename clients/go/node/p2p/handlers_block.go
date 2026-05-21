@@ -62,8 +62,12 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 		return nil, errors.New("nil parsed block")
 	}
 	have, err := p.service.hasBlock(blockHash)
-	if err != nil || have {
+	if err != nil {
 		return nil, err
+	}
+	if have {
+		p.clearCompactOutstandingRequestForBlock(blockHash)
+		return nil, nil
 	}
 
 	p.service.chainMu.Lock()
@@ -72,6 +76,7 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 	if err != nil {
 		return p.handleRelayedBlockApplyError(pb, blockHash, blockBytes, err)
 	}
+	p.clearCompactOutstandingRequestForBlock(blockHash)
 	p.acceptedRelayedBlock(blockHash, summary)
 	return summary, nil
 }
@@ -99,6 +104,7 @@ func (p *peer) retainRelayedOrphanIfValid(
 		return nil, err
 	}
 	p.service.retainOrResolveOrphan(p, blockHash, pb.Header.PrevBlockHash, blockBytes)
+	p.clearCompactOutstandingRequestForBlock(blockHash)
 	return nil, nil
 }
 

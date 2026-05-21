@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -330,6 +331,9 @@ func TestNewCompactOutstandingRequestBuildsPartialState(t *testing.T) {
 	if req.BlockHash != blockHash || req.Header != block.Header || req.Nonce1 != block.Nonce1 || req.Nonce2 != block.Nonce2 || req.BlockTxnPayloadCap != wantPayloadCap {
 		t.Fatalf("request metadata mismatch: %+v", req)
 	}
+	if req.RetainedBytes != uint64(len(tx)) {
+		t.Fatalf("retained bytes=%d want %d", req.RetainedBytes, len(tx))
+	}
 	if !reflect.DeepEqual(req.MissingIndexes, []uint64{0}) || !reflect.DeepEqual(req.MissingShortIDs, []compactShortID{shortID}) || !reflect.DeepEqual(req.Transactions, [][]byte{nil, tx}) {
 		t.Fatalf("request state mismatch: %+v", req)
 	}
@@ -341,6 +345,13 @@ func TestNewCompactOutstandingRequestBuildsPartialState(t *testing.T) {
 	}
 	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{PartialTransactions: [][]byte{tx}, MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{shortID}}); err == nil {
 		t.Fatal("non-missing partial slot should fail")
+	}
+	if _, err := newCompactOutstandingRequest(block, blockHash, compactReconstructionResult{
+		PartialTransactions: [][]byte{make([]byte, compactOutstandingRetainedBytesLimit+1), nil},
+		MissingIndexes:      []uint64{1},
+		MissingShortIDs:     []compactShortID{shortID},
+	}); !errors.Is(err, errCompactOutstandingRetainedBytesTooLarge) {
+		t.Fatalf("oversized retained request err=%v, want retained byte cap", err)
 	}
 }
 
@@ -432,7 +443,7 @@ func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing
 	}
 }
 
-func TestHandleBlockTxnCompletesOutstandingBlock(t *testing.T) {
+func TestInternalHandleBlockTxnCompletesOutstandingBlock(t *testing.T) {
 	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	p := newPeerRuntimeTestPeer(t)
 	if err := p.handleBlockTxn(nil); err == nil || !strings.Contains(err.Error(), "missing block hash") || p.snapshotState().BanScore == 0 {
@@ -440,7 +451,6 @@ func TestHandleBlockTxnCompletesOutstandingBlock(t *testing.T) {
 	}
 	requireBlockTxnMessageBan(t, newPeerRuntimeTestPeer(t), make([]byte, 32), "unexpected")
 	p = newCompactScriptedPeer(t)
-	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
 	if err := p.handleBlockTxn(make([]byte, 32)); err == nil || !strings.Contains(err.Error(), "block hash mismatch") {
 		t.Fatalf("wrong hash blocktxn err=%v", err)
@@ -453,12 +463,42 @@ func TestHandleBlockTxnCompletesOutstandingBlock(t *testing.T) {
 	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
 	valid, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{txs[0]}})
 	requireNoCompactErr(t, err, "encode blocktxn")
-	requireNoCompactErr(t, p.handleMessage(message{Command: messageBlockTxn, Payload: valid}), "handle blocktxn")
+	requireNoCompactErr(t, p.handleBlockTxn(valid), "handle blocktxn")
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("outstanding request was not cleared")
 	}
 	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
 		t.Fatalf("hasBlock=%v err=%v", have, err)
+	}
+}
+
+func TestInternalHandleBlockTxnKeepsSnapshotAcrossExpiryRace(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	now := time.Unix(1000, 0)
+	p.service.cfg.Now = func() time.Time {
+		defer func() { now = now.Add(time.Second) }()
+		return now
+	}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:          blockHash,
+		Header:             header,
+		MissingIndexes:     []uint64{0},
+		MissingShortIDs:    []compactShortID{compactShortIDForTx(t, txs[0], 201, 202)},
+		Transactions:       [][]byte{nil},
+		Nonce1:             201,
+		Nonce2:             202,
+		BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn),
+		ExpiresAt:          time.Unix(1001, 0),
+	})
+	valid, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{txs[0]}})
+	requireNoCompactErr(t, err, "encode blocktxn")
+	requireNoCompactErr(t, p.handleBlockTxn(valid), "handle blocktxn")
+	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
+		t.Fatalf("hasBlock=%v err=%v, want accepted block from snapshot", have, err)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("expiry race sent full-block fallback")
 	}
 }
 
@@ -493,7 +533,7 @@ func TestHandleBlockTxnFallsBackWithoutBanOnShortIDMismatch(t *testing.T) {
 	}
 }
 
-func TestCompactReceiveErrorBranches(t *testing.T) {
+func TestInternalCompactReceiveErrorBranches(t *testing.T) {
 	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	full := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
 	missing := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, ShortIDs: []compactShortID{{0xaa}}})
@@ -510,8 +550,8 @@ func TestCompactReceiveErrorBranches(t *testing.T) {
 	p = newCompactScriptedPeer(t)
 	requireCompactErrContains(t, p.handleObjectRelayMessage(message{Command: messageCmpctBlock}), "compact relay not negotiated")
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-	requireNoCompactErr(t, p.handleObjectRelayMessage(message{Command: messageCmpctBlock, Payload: full}), "object cmpctblock")
-	requireNoCompactErr(t, p.handleCmpctBlock(full), "duplicate compact block")
+	requireCompactErrContains(t, p.handleObjectRelayMessage(message{Command: messageCmpctBlock, Payload: full}), "compact relay not negotiated")
+	requireNoCompactErr(t, p.handleCmpctBlock(full), "direct cmpctblock")
 	p = newCompactScriptedPeer(t)
 	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: [32]byte{0x01}})
 	requireNoCompactErr(t, p.handleCmpctBlock(missing), "concurrent outstanding")
@@ -521,6 +561,17 @@ func TestCompactReceiveErrorBranches(t *testing.T) {
 	requireCompactErrContains(t, p.handleCmpctBlock(missing), "message exceeds cap")
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("send failure left compact outstanding request")
+	}
+	p = newCompactScriptedPeer(t)
+	oversizedRetained := compactReconstructionResult{
+		PartialTransactions: [][]byte{make([]byte, compactOutstandingRetainedBytesLimit+1), nil},
+		MissingIndexes:      []uint64{1},
+		MissingShortIDs:     []compactShortID{{0xaa}},
+	}
+	requireNoCompactErr(t, p.requestMissingCompactTransactions(cmpctBlockPayload{Header: header}, blockHash, oversizedRetained), "oversized retained compact request")
+	requireCompactFrame(t, p, messageGetData)
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("oversized retained compact request left outstanding state")
 	}
 	p = newCompactScriptedPeer(t)
 	tooMany := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, ShortIDs: make([]compactShortID, maxCompactRelayEntries+1)})
@@ -547,6 +598,16 @@ func TestCompactReceiveErrorBranches(t *testing.T) {
 	p.service.cfg.TxPool = badPool
 	requireCompactErrContains(t, p.handleCmpctBlock(missing), "non-canonical")
 	requireCompactErrContains(t, p.requestMissingCompactTransactions(cmpctBlockPayload{Header: header}, blockHash, compactReconstructionResult{}), "")
+}
+
+func TestFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 401, 402), 401, 402)
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "full block")
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("full block did not clear matching compact outstanding request")
+	}
 }
 
 func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
@@ -702,7 +763,16 @@ func newCompactScriptedPeer(t *testing.T) *peer {
 }
 
 func setCompactTestOutstanding(p *peer, blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, shortID compactShortID, nonce1, nonce2 uint64) {
-	p.setCompactOutstandingRequest(compactOutstandingRequest{blockHash, header, []uint64{0}, []compactShortID{shortID}, [][]byte{nil}, nonce1, nonce2, compactRelayPayloadCap(messageBlockTxn)})
+	p.activateCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:          blockHash,
+		Header:             header,
+		MissingIndexes:     []uint64{0},
+		MissingShortIDs:    []compactShortID{shortID},
+		Transactions:       [][]byte{nil},
+		Nonce1:             nonce1,
+		Nonce2:             nonce2,
+		BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn),
+	})
 }
 
 func compactPartsFromBlockBytes(t *testing.T, block []byte) ([consensus.BLOCK_HEADER_BYTES]byte, [32]byte, [][]byte) {

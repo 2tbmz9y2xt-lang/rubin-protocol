@@ -88,7 +88,7 @@ func TestShouldIgnoreAndNormalizeReadError(t *testing.T) {
 	}
 }
 
-func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
+func TestCompactObjectCapsStayClosedUntilParityReceiveExists(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	limiter := p.postHandshakePayloadCap()
 	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
@@ -99,8 +99,8 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	limiter = p.postHandshakePayloadCap()
-	if got := limiter(messageCmpctBlock); got != compactRelayPayloadCap(messageCmpctBlock) {
-		t.Fatalf("negotiated cmpctblock cap=%d, want %d", got, compactRelayPayloadCap(messageCmpctBlock))
+	if got := limiter(messageCmpctBlock); got != 0 {
+		t.Fatalf("negotiated cmpctblock cap=%d, want 0 until Rust parity", got)
 	}
 	if got := limiter(messageGetBlockTxn); got != 0 {
 		t.Fatalf("getblocktxn serve-side cap=%d, want 0", got)
@@ -109,8 +109,8 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 		t.Fatalf("blocktxn cap without outstanding=%d, want 0", got)
 	}
 	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: 64})
-	if got := limiter(messageBlockTxn); got != 64 {
-		t.Fatalf("blocktxn outstanding cap=%d, want 64", got)
+	if got := limiter(messageBlockTxn); got != 0 {
+		t.Fatalf("live blocktxn outstanding cap=%d, want 0 until Rust parity", got)
 	}
 }
 
@@ -147,6 +147,40 @@ func TestBlockTxnPayloadCapIsOutstandingBounded(t *testing.T) {
 	}
 	if got := p.blockTxnPayloadCap(); got != 0 {
 		t.Fatalf("blocktxn cap after pop=%d, want 0", got)
+	}
+}
+
+func TestCompactOutstandingRequestExpires(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	now := time.Unix(1000, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Second
+	p.activateCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: 64})
+	if got := p.blockTxnPayloadCap(); got != 64 {
+		t.Fatalf("fresh blocktxn cap=%d, want 64", got)
+	}
+	now = now.Add(time.Second)
+	if got := p.blockTxnPayloadCap(); got != 0 {
+		t.Fatalf("expired blocktxn cap=%d, want 0", got)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("expired outstanding request was not cleared")
+	}
+}
+
+func TestRunBansUnexpectedBlockTxnCommandCap(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: make([]byte, 33)}),
+	}}}
+	err := p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("run err=%v, want command cap error", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore == 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
+		t.Fatalf("state=%+v, want unexpected blocktxn ban", state)
 	}
 }
 
