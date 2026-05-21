@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -1044,14 +1045,6 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 
 	subsidyA101 := consensus.BlockSubsidy(101, alreadyGenerated)
 	blockA101 := buildSingleTxBlock(t, prevHash, target, 202, reorgTestCoinbaseForAddress(t, 101, subsidyA101, sourceAddress))
-	summaryA101, err := engine.ApplyBlock(blockA101, nil)
-	if err != nil {
-		t.Fatalf("ApplyBlock(A101): %v", err)
-	}
-	if got := mempool.Len(); got != 1 {
-		t.Fatalf("mempool len after A101=%d, want 1", got)
-	}
-
 	subsidyB101 := consensus.BlockSubsidy(101, alreadyGenerated)
 	blockB101 := buildMultiTxBlock(
 		t,
@@ -1061,12 +1054,23 @@ func TestApplyBlockWithReorgRollbackRestoresMempoolAfterPersistFailure(t *testin
 		reorgTestCoinbaseForWtxids(t, 101, subsidyB101+100_000, destAddress, [][32]byte{{}, spendWtxid}),
 		spendTx,
 	)
+	blockA101, blockA101Hash, blockB101, blockB101Hash := orderedEqualWorkBlockVariants(t, blockA101, blockB101)
+	summaryA101, err := engine.ApplyBlock(blockA101, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A101): %v", err)
+	}
+	if summaryA101.BlockHash != blockA101Hash {
+		t.Fatalf("A101 hash=%x, want %x", summaryA101.BlockHash, blockA101Hash)
+	}
+	if got := mempool.Len(); got != 1 {
+		t.Fatalf("mempool len after A101=%d, want 1", got)
+	}
+
 	if _, err := engine.ApplyBlockWithReorg(blockB101, nil); err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B101): %v", err)
 	}
-	blockB101Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB101))
-	if err != nil {
-		t.Fatalf("BlockHash(B101): %v", err)
+	if engine.chainState.TipHash != blockA101Hash {
+		t.Fatalf("B101 equal-work side branch changed canonical tip to %x, want A101 %x", engine.chainState.TipHash, blockA101Hash)
 	}
 
 	subsidyB102 := consensus.BlockSubsidy(102, alreadyGenerated+subsidyB101)
@@ -1209,6 +1213,13 @@ func TestSyncReorgHelperCoveragePaths(t *testing.T) {
 	if height, _, err := engine.currentCanonicalTip(); err != nil || height != 1 {
 		t.Fatalf("currentCanonicalTip()=(%d,%v), want height=1", height, err)
 	}
+	switchBranch, height, err := engine.shouldSwitchToBranch(nil, devnetGenesisBlockHash, 0)
+	if err == nil {
+		t.Fatalf("shouldSwitchToBranch(empty branch) err=nil, want error")
+	}
+	if switchBranch || height != 0 {
+		t.Fatalf("shouldSwitchToBranch(empty branch)=(%v,%d), want (false,0)", switchBranch, height)
+	}
 }
 
 func TestApplyBlockWithReorgAdditionalErrorPaths(t *testing.T) {
@@ -1263,6 +1274,85 @@ func TestApplyBlockWithReorgKeepsLighterSideBranchOffCanonicalTip(t *testing.T) 
 	}
 	if _, err := store.GetBlockByHash(sideHash); err != nil {
 		t.Fatalf("GetBlockByHash(B1): %v", err)
+	}
+}
+
+func TestApplyBlockWithReorgSwitchesToLowerTipOnEqualWork(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	lowerBlock, lowerHash, higherBlock, higherHash := equalWorkCompetingHeightOneBlocks(t, target)
+
+	higherSummary, err := engine.ApplyBlock(higherBlock, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(higher): %v", err)
+	}
+	if higherSummary.BlockHash != higherHash {
+		t.Fatalf("higher block hash=%x, want %x", higherSummary.BlockHash, higherHash)
+	}
+
+	before := engine.BlockApplyCounts()
+	lowerSummary, err := engine.ApplyBlockWithReorg(lowerBlock, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(lower equal-work): %v", err)
+	}
+	if lowerSummary.BlockHash != lowerHash {
+		t.Fatalf("lower summary hash=%x, want %x", lowerSummary.BlockHash, lowerHash)
+	}
+	if engine.chainState.Height != 1 || engine.chainState.TipHash != lowerHash {
+		t.Fatalf("canonical tip=%d/%x, want 1/%x", engine.chainState.Height, engine.chainState.TipHash, lowerHash)
+	}
+	if depth := engine.LastReorgDepth(); depth != 1 {
+		t.Fatalf("LastReorgDepth()=%d, want 1", depth)
+	}
+	if count := engine.ReorgCount(); count != 1 {
+		t.Fatalf("ReorgCount()=%d, want 1", count)
+	}
+	if after := engine.BlockApplyCounts(); after.Accepted != before.Accepted+1 || after.Rejected != before.Rejected {
+		t.Fatalf("equal-work reorg counts=%+v, want accepted=%d rejected=%d", after, before.Accepted+1, before.Rejected)
+	}
+	canonicalHash, ok, err := store.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	if canonicalHash != lowerHash {
+		t.Fatalf("canonical height 1 hash=%x, want lower %x; higher was %x", canonicalHash, lowerHash, higherHash)
+	}
+}
+
+func TestApplyBlockWithReorgKeepsLowerTipOnEqualWorkHigherSideBranch(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	lowerBlock, lowerHash, higherBlock, higherHash := equalWorkCompetingHeightOneBlocks(t, target)
+
+	lowerSummary, err := engine.ApplyBlock(lowerBlock, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(lower): %v", err)
+	}
+	if lowerSummary.BlockHash != lowerHash {
+		t.Fatalf("lower block hash=%x, want %x", lowerSummary.BlockHash, lowerHash)
+	}
+
+	before := engine.BlockApplyCounts()
+	higherSummary, err := engine.ApplyBlockWithReorg(higherBlock, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(higher equal-work): %v", err)
+	}
+	if after := engine.BlockApplyCounts(); after != before {
+		t.Fatalf("higher equal-work side branch changed BlockApplyCounts from %+v to %+v", before, after)
+	}
+	if higherSummary.BlockHeight != 1 || higherSummary.BlockHash != higherHash {
+		t.Fatalf("higher side summary=%d/%x, want 1/%x", higherSummary.BlockHeight, higherSummary.BlockHash, higherHash)
+	}
+	if engine.chainState.Height != 1 || engine.chainState.TipHash != lowerHash {
+		t.Fatalf("canonical tip=%d/%x, want 1/%x", engine.chainState.Height, engine.chainState.TipHash, lowerHash)
+	}
+	canonicalHash, ok, err := store.CanonicalHash(1)
+	if err != nil || !ok {
+		t.Fatalf("CanonicalHash(1): ok=%v err=%v", ok, err)
+	}
+	if canonicalHash != lowerHash {
+		t.Fatalf("canonical height 1 hash=%x, want lower %x; higher was %x", canonicalHash, lowerHash, higherHash)
+	}
+	if _, err := store.GetBlockByHash(higherHash); err != nil {
+		t.Fatalf("GetBlockByHash(higher side): %v", err)
 	}
 }
 
@@ -1430,6 +1520,75 @@ func newReorgTestEngine(t *testing.T) (*SyncEngine, *BlockStore, [32]byte) {
 		t.Fatalf("ApplyBlock(genesis): %v", err)
 	}
 	return engine, store, target
+}
+
+func equalWorkCompetingHeightOneBlocks(t *testing.T, target [32]byte) ([]byte, [32]byte, []byte, [32]byte) {
+	t.Helper()
+	subsidy := consensus.BlockSubsidy(1, 0)
+	base := buildSingleTxBlock(
+		t,
+		devnetGenesisBlockHash,
+		target,
+		reorgTestTimestamp(1),
+		coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy),
+	)
+
+	var firstBlock []byte
+	var firstHash [32]byte
+	for nonce := uint64(1); nonce <= 64; nonce++ {
+		block := blockWithHeaderNonce(t, base, nonce)
+		hash, err := consensus.BlockHash(blockHeaderBytes(t, block))
+		if err != nil {
+			t.Fatalf("BlockHash(nonce=%d): %v", nonce, err)
+		}
+		if firstBlock == nil {
+			firstBlock = block
+			firstHash = hash
+			continue
+		}
+		if hash == firstHash {
+			continue
+		}
+		if bytes.Compare(hash[:], firstHash[:]) < 0 {
+			return block, hash, firstBlock, firstHash
+		}
+		return firstBlock, firstHash, block, hash
+	}
+	t.Fatalf("failed to build distinct equal-work competing blocks")
+	return nil, [32]byte{}, nil, [32]byte{}
+}
+
+func blockWithHeaderNonce(t *testing.T, block []byte, nonce uint64) []byte {
+	t.Helper()
+	if len(block) < consensus.BLOCK_HEADER_BYTES {
+		t.Fatalf("block length=%d, want at least header length %d", len(block), consensus.BLOCK_HEADER_BYTES)
+	}
+	out := append([]byte(nil), block...)
+	binary.LittleEndian.PutUint64(out[consensus.BLOCK_HEADER_BYTES-8:consensus.BLOCK_HEADER_BYTES], nonce)
+	return out
+}
+
+func orderedEqualWorkBlockVariants(t *testing.T, lowerBase []byte, higherBase []byte) ([]byte, [32]byte, []byte, [32]byte) {
+	t.Helper()
+	for lowerNonce := uint64(1); lowerNonce <= 64; lowerNonce++ {
+		lowerBlock := blockWithHeaderNonce(t, lowerBase, lowerNonce)
+		lowerHash, err := consensus.BlockHash(blockHeaderBytes(t, lowerBlock))
+		if err != nil {
+			t.Fatalf("BlockHash(lower nonce=%d): %v", lowerNonce, err)
+		}
+		for higherNonce := uint64(1); higherNonce <= 64; higherNonce++ {
+			higherBlock := blockWithHeaderNonce(t, higherBase, higherNonce)
+			higherHash, err := consensus.BlockHash(blockHeaderBytes(t, higherBlock))
+			if err != nil {
+				t.Fatalf("BlockHash(higher nonce=%d): %v", higherNonce, err)
+			}
+			if bytes.Compare(lowerHash[:], higherHash[:]) < 0 {
+				return lowerBlock, lowerHash, higherBlock, higherHash
+			}
+		}
+	}
+	t.Fatalf("failed to order equal-work block variants by tip hash")
+	return nil, [32]byte{}, nil, [32]byte{}
 }
 
 func testValidateIncomingChainID(blockHeight uint64, chainID [32]byte) error {
