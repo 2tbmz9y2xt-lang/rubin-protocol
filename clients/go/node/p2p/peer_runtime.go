@@ -209,7 +209,7 @@ func (p *peer) applyPostHandshakeDisconnectError(err error) {
 	if err == nil {
 		return
 	}
-	if reason, ok := compactBlockTxnCommandCapPolicyReason(err); ok {
+	if reason, ok := compactBlockTxnCapPolicyReason(err); ok {
 		p.bumpBan(10, reason)
 		return
 	}
@@ -217,21 +217,21 @@ func (p *peer) applyPostHandshakeDisconnectError(err error) {
 		p.setLastError(reason)
 		return
 	}
-	if reason, ok := commandPayloadCapDiagnosticReason(err); ok {
+	if reason, ok := payloadCapDiagnosticReason(err); ok {
 		p.setLastError(reason)
 		return
 	}
 	p.setLastError(err.Error())
 }
 
-func compactBlockTxnCommandCapPolicyReason(err error) (string, bool) {
+func compactBlockTxnCapPolicyReason(err error) (string, bool) {
 	if command, ok := capErrorCommand(err); ok && command == messageBlockTxn {
 		return "unexpected blocktxn", true
 	}
 	return "", false
 }
 
-func commandPayloadCapDiagnosticReason(err error) (string, bool) {
+func payloadCapDiagnosticReason(err error) (string, bool) {
 	command, ok := capErrorCommand(err)
 	if !ok || command == "" {
 		return "", false
