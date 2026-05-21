@@ -1047,6 +1047,44 @@ mod tests {
     }
 
     #[test]
+    fn apply_block_with_reorg_keeps_tip_when_candidate_has_less_work() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-less-work");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let block1_hash = block_header_hash(&block1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, gen_ts + 2);
+        let block2_hash = block_header_hash(&block2);
+        engine
+            .apply_block_with_reorg(&block2, None)
+            .expect("block2 canonical");
+        assert_eq!(engine.chain_state.height, 2);
+        assert_eq!(engine.chain_state.tip_hash, block2_hash);
+
+        let alt = height_one_coinbase_only_block(genesis_hash, gen_ts + 3);
+        let summary = engine
+            .apply_block_with_reorg(&alt, None)
+            .expect("lower-work side branch stored");
+
+        assert_eq!(summary.block_height, 1);
+        assert_eq!(engine.chain_state.height, 2);
+        assert_eq!(engine.chain_state.tip_hash, block2_hash);
+        assert_eq!(engine.reorg_count(), 0);
+        assert_eq!(engine.last_reorg_depth(), 0);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn evict_confirmed_from_pool_no_panic() {
         let (genesis, _, _) = genesis_info();
         let mut pool = TxPool::new();
