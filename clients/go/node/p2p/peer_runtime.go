@@ -52,11 +52,35 @@ func (p *peer) run(ctx context.Context) error {
 func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 	base := postHandshakePayloadCap(p.service.cfg.LocatorLimit, p.service.cfg.SyncConfig.HeaderBatchLimit)
 	return func(command string) uint32 {
-		if isCompactRelayObjectCommand(command) {
+		switch command {
+		case messageCmpctBlock:
+			if p.acceptsCompactBlocks() {
+				return compactRelayPayloadCap(command)
+			}
 			return 0
+		case messageBlockTxn:
+			if p.compactReceiveEnabled() {
+				return p.blockTxnPayloadCap()
+			}
+			return 0
+		case messageGetBlockTxn:
+			return 0
+		default:
+			return base(command)
 		}
-		return base(command)
 	}
+}
+
+func (p *peer) compactReceiveEnabled() bool {
+	return p != nil && p.service != nil && p.service.cfg.EnableCompactReceive
+}
+
+func (p *peer) acceptsCompactBlocks() bool {
+	if !p.compactReceiveEnabled() {
+		return false
+	}
+	mode := p.remoteCompactMode()
+	return mode.Version == compactRelayVersion && mode.Mode != 0
 }
 
 func peerRunContextDone(ctx context.Context) bool {
@@ -94,7 +118,7 @@ func normalizeReadError(err error) error {
 
 func (p *peer) handleMessage(frame message) error {
 	switch frame.Command {
-	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk:
+	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageBlockTxn:
 		return p.handleRelayMessage(frame)
 	case messageSendCmpct:
 		return p.handleSendCmpct(frame.Payload)
@@ -115,7 +139,7 @@ func (p *peer) handleRelayMessage(frame message) error {
 	switch frame.Command {
 	case messageInv, messageGetData:
 		return p.handleInventoryRelayMessage(frame)
-	case messageBlock, messageTx, messageGetBlk:
+	case messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageBlockTxn:
 		return p.handleObjectRelayMessage(frame)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
@@ -141,6 +165,16 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 		return p.handleTx(frame.Payload)
 	case messageGetBlk:
 		return p.handleGetBlocks(frame.Payload)
+	case messageCmpctBlock:
+		if !p.acceptsCompactBlocks() {
+			return postHandshakeUnknownCommandError{command: frame.Command}
+		}
+		return p.handleCmpctBlock(frame.Payload)
+	case messageBlockTxn:
+		if !p.compactReceiveEnabled() {
+			return postHandshakeUnknownCommandError{command: frame.Command}
+		}
+		return p.handleBlockTxn(frame.Payload)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
 	}

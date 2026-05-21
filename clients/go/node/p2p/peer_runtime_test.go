@@ -107,6 +107,32 @@ func TestCompactObjectCapsStayClosedUntilParityReceiveExists(t *testing.T) {
 	}
 }
 
+func TestCompactObjectCapsOpenOnlyForEnabledNegotiatedReceive(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	limiter := p.postHandshakePayloadCap()
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+		if got := limiter(command); got != 0 {
+			t.Fatalf("pre-negotiation %s cap=%d, want 0", command, got)
+		}
+	}
+
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	if got := limiter(messageCmpctBlock); got != compactRelayPayloadCap(messageCmpctBlock) {
+		t.Fatalf("negotiated cmpctblock cap=%d, want %d", got, compactRelayPayloadCap(messageCmpctBlock))
+	}
+	if got := limiter(messageGetBlockTxn); got != 0 {
+		t.Fatalf("inbound getblocktxn cap=%d, want closed until responder exists", got)
+	}
+	if got := limiter(messageBlockTxn); got != 0 {
+		t.Fatalf("blocktxn cap without outstanding=%d, want 0", got)
+	}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: 64})
+	if got := limiter(messageBlockTxn); got != 64 {
+		t.Fatalf("blocktxn cap with outstanding=%d, want 64", got)
+	}
+}
+
 func TestBlockTxnPayloadCapIsOutstandingBounded(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	if got := p.blockTxnPayloadCap(); got != 0 {
