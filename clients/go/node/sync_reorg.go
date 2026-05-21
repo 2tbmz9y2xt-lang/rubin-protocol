@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
@@ -35,7 +36,7 @@ func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uin
 	if !switchToBranch {
 		return s.storeSideBlockAndSummary(blockBytes, blockHash, pb, candidateHeight, prevTimestamps)
 	}
-	return s.applyHeavierBranch(branch, commonAncestorHeight)
+	return s.applyPreferredBranch(branch, commonAncestorHeight)
 }
 
 func parseReorgBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
@@ -106,6 +107,9 @@ func (s *SyncEngine) shouldSwitchToBranch(
 	commonAncestorHash [32]byte,
 	commonAncestorHeight uint64,
 ) (bool, uint64, error) {
+	if len(branch) == 0 {
+		return false, commonAncestorHeight, errors.New("empty side branch")
+	}
 	_, currentTipHash, err := s.currentCanonicalTip()
 	if err != nil {
 		return false, 0, err
@@ -129,10 +133,20 @@ func (s *SyncEngine) shouldSwitchToBranch(
 	}
 	candidateWork := new(big.Int).Add(new(big.Int).Set(ancestorWork), branchWork)
 	candidateHeight := commonAncestorHeight + uint64(len(branch))
-	return candidateWork.Cmp(currentWork) > 0, candidateHeight, nil
+	switch candidateWork.Cmp(currentWork) {
+	case 1:
+		return true, candidateHeight, nil
+	case -1:
+		return false, candidateHeight, nil
+	default:
+		candidateTipHash := branch[len(branch)-1].hash
+		return bytes.Compare(candidateTipHash[:], currentTipHash[:]) < 0, candidateHeight, nil
+	}
 }
 
-func (s *SyncEngine) applyHeavierBranch(
+// applyPreferredBranch applies the candidate branch selected by fork choice:
+// greater ChainWork, or equal ChainWork with a lexicographically lower tip hash.
+func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 ) (*ChainStateConnectSummary, error) {
@@ -140,7 +154,7 @@ func (s *SyncEngine) applyHeavierBranch(
 	if err != nil {
 		return nil, err
 	}
-	disconnectedBlocks, reorgDepth, err := s.prepareHeavierBranch(branch, commonAncestorHeight, rollbackState)
+	disconnectedBlocks, reorgDepth, err := s.preparePreferredBranch(branch, commonAncestorHeight, rollbackState)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +201,7 @@ func (s *SyncEngine) rollbackBranchBlockApply(
 	return rollbackErr
 }
 
-func (s *SyncEngine) prepareHeavierBranch(
+func (s *SyncEngine) preparePreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 	rollbackState syncRollbackState,
