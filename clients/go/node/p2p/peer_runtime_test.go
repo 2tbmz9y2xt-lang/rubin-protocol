@@ -99,11 +99,18 @@ func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
 
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	limiter = p.postHandshakePayloadCap()
-	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1})
-	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
-		if got := limiter(command); got != 0 {
-			t.Fatalf("negotiated %s cap=%d, want 0 until handler slice", command, got)
-		}
+	if got := limiter(messageCmpctBlock); got != compactRelayPayloadCap(messageCmpctBlock) {
+		t.Fatalf("negotiated cmpctblock cap=%d, want %d", got, compactRelayPayloadCap(messageCmpctBlock))
+	}
+	if got := limiter(messageGetBlockTxn); got != 0 {
+		t.Fatalf("getblocktxn serve-side cap=%d, want 0", got)
+	}
+	if got := limiter(messageBlockTxn); got != 0 {
+		t.Fatalf("blocktxn cap without outstanding=%d, want 0", got)
+	}
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: 64})
+	if got := limiter(messageBlockTxn); got != 64 {
+		t.Fatalf("blocktxn outstanding cap=%d, want 64", got)
 	}
 }
 

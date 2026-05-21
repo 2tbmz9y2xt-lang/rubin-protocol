@@ -82,6 +82,12 @@ func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, b
 	return cloneCompactOutstandingRequest(req), true
 }
 
+func (p *peer) hasCompactOutstandingRequest() bool {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	return p.compact.outstanding != nil
+}
+
 func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) {
 	p.compactMu.Lock()
 	if p.compact.outstanding == nil {
