@@ -302,6 +302,23 @@ func TestAlreadyHaveFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
 	}
 }
 
+func TestHasBlockErrorFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := testPeerForService(h.service, "remote", 0)
+	_, blockHash, err := parseRelayedBlock(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("parse genesis block: %v", err)
+	}
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	p.service.cfg.BlockStore = nil
+	if _, err := p.processRelayedBlock(node.DevnetGenesisBlockBytes()); err == nil {
+		t.Fatal("processRelayedBlock with nil blockstore unexpectedly succeeded")
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("has-block error full block did not clear matching compact outstanding request")
+	}
+}
+
 func TestOrphanFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
@@ -317,6 +334,28 @@ func TestOrphanFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
 	}
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("retained full-block orphan did not clear matching compact outstanding request")
+	}
+}
+
+func TestApplyErrorFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	corrupted := append([]byte(nil), blockBytes...)
+	for i := 36; i < 68; i++ {
+		corrupted[i] = 0xff
+	}
+	_, blockHash, err := parseRelayedBlock(corrupted)
+	if err != nil {
+		t.Fatalf("parse corrupted block: %v", err)
+	}
+	p := testPeerForService(sink.service, "remote", 1)
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	if _, err := p.processRelayedBlock(corrupted); err == nil {
+		t.Fatal("processRelayedBlock(corrupted) unexpectedly succeeded")
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("apply-error full block did not clear matching compact outstanding request")
 	}
 }
 
