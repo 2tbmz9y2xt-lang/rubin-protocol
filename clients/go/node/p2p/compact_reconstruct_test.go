@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"strings"
@@ -427,6 +428,78 @@ func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing
 	}
 	if !reflect.DeepEqual(result.Transactions, [][]byte{validTx}) || result.MissingIndexes != nil {
 		t.Fatalf("result=%+v, want prefilled-only reconstruction", result)
+	}
+}
+
+func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
+	pool := NewMemoryTxPoolWithLimit(4)
+	for i := 0; i < 4; i++ {
+		raw := minimalBlockTxnTestTxBytes(uint64(i + 1))
+		_, txid, _, _, err := consensus.ParseTx(raw)
+		if err != nil {
+			t.Fatalf("ParseTx[%d]: %v", i, err)
+		}
+		if !pool.Put(txid, raw, uint64(i+1), len(raw)) {
+			t.Fatalf("Put[%d] rejected", i)
+		}
+	}
+	if got := compactRelayLocalTransactions(pool, 2); len(got) != 2 {
+		t.Fatalf("bounded snapshot len=%d, want 2", len(got))
+	}
+	if got := compactRelayLocalTransactions(pool, 0); got != nil {
+		t.Fatalf("zero-limit snapshot=%v, want nil", got)
+	}
+	byteCap := len(minimalBlockTxnTestTxBytes(1))
+	if got := compactRelayLocalTransactionsWithBudget(pool, 4, byteCap); len(got) != 1 {
+		t.Fatalf("byte-bounded snapshot len=%d, want 1", len(got))
+	}
+	smallRaw := minimalBlockTxnTestTxBytes(90)
+	smallCap := len(smallRaw)
+	collector := newCompactLocalTxCandidateCollector(4, 4, smallCap)
+	for i := 0; i < 3; i++ {
+		collector.consider(make([]byte, smallCap+1))
+	}
+	collector.consider(smallRaw)
+	if len(collector.out) != 1 || !bytes.Equal(collector.out[0], smallRaw) {
+		t.Fatalf("oversized local candidates stopped bounded scan: len=%d", len(collector.out))
+	}
+	collector = newCompactLocalTxCandidateCollector(4, 4, smallCap)
+	for i := 0; i < 4; i++ {
+		collector.consider(make([]byte, smallCap+1))
+	}
+	continued := collector.consider(smallRaw)
+	if continued || len(collector.out) != 0 {
+		t.Fatalf("scan budget accepted late candidate: continue=%v len=%d", continued, len(collector.out))
+	}
+	aliasPool := NewMemoryTxPoolWithLimit(1)
+	aliasRaw := minimalBlockTxnTestTxBytes(99)
+	_, aliasTxid, _, _, err := consensus.ParseTx(aliasRaw)
+	if err != nil {
+		t.Fatalf("ParseTx alias: %v", err)
+	}
+	if !aliasPool.Put(aliasTxid, aliasRaw, 1, len(aliasRaw)) {
+		t.Fatal("Put alias tx rejected")
+	}
+	got := compactRelayLocalTransactions(aliasPool, 1)
+	if len(got) != 1 || len(got[0]) == 0 {
+		t.Fatalf("alias snapshot=%v", got)
+	}
+	got[0][0] ^= 0xff
+	if stored, ok := aliasPool.Get(aliasTxid); !ok || stored[0] == got[0][0] {
+		t.Fatal("bounded snapshot aliases memory pool transaction bytes")
+	}
+}
+
+func TestCompactRelayLocalTransactionsForBlockSkipsPrefilledOnly(t *testing.T) {
+	pool := NewMemoryTxPoolWithLimit(1)
+	if !pool.Put([32]byte{0x01}, []byte{0xaa}, 1, 1) {
+		t.Fatal("Put local candidate")
+	}
+	if got := compactRelayLocalTransactionsForBlock(cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: []byte{0xbb}}}}, pool); got != nil {
+		t.Fatalf("prefilled-only compact block candidates=%v, want nil", got)
+	}
+	if got := compactRelayLocalTransactionsForBlock(cmpctBlockPayload{ShortIDs: []compactShortID{{0x01}}}, pool); len(got) != 1 {
+		t.Fatalf("short-id compact block candidates len=%d, want 1", len(got))
 	}
 }
 
