@@ -168,7 +168,7 @@ func TestCompactOutstandingRequestExpires(t *testing.T) {
 	}
 }
 
-func TestCompactOutstandingRequestDoesNotExpireWhenReadDeadlineDisabled(t *testing.T) {
+func TestCompactOutstandingRequestUsesDedicatedTTLWhenReadDeadlineDisabled(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	now := time.Unix(1000, 0)
 	p.service.cfg.Now = func() time.Time { return now }
@@ -428,6 +428,23 @@ func TestApplyPostHandshakeDisconnectErrorNilAndGenericFallback(t *testing.T) {
 	}
 	if snap.BanScore != 0 {
 		t.Fatalf("ban_score=%d, want 0 for generic runtime error mapping", snap.BanScore)
+	}
+}
+
+func TestApplyPostHandshakeDisconnectErrorCommandCapRecordsCommand(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	err := commandPayloadCapError{command: messagePing}
+	if err.Error() != "message exceeds command cap" {
+		t.Fatalf("error=%q, want public command cap error unchanged", err.Error())
+	}
+
+	p.applyPostHandshakeDisconnectError(err)
+	snap := p.snapshotState()
+	if snap.LastError != "message exceeds command cap: ping" {
+		t.Fatalf("last_error=%q, want command diagnostic", snap.LastError)
+	}
+	if snap.BanScore != 0 {
+		t.Fatalf("ban_score=%d, want 0 for non-blocktxn command cap", snap.BanScore)
 	}
 }
 
