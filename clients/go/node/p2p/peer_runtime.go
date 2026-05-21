@@ -209,11 +209,46 @@ func (p *peer) applyPostHandshakeDisconnectError(err error) {
 	if err == nil {
 		return
 	}
+	if reason, ok := compactBlockTxnCapPolicyReason(err); ok {
+		p.bumpBan(10, reason)
+		return
+	}
 	if reason, ok := unknownCommandPolicyReason(err); ok {
 		p.setLastError(reason)
 		return
 	}
+	if reason, ok := payloadCapDiagnosticReason(err); ok {
+		p.setLastError(reason)
+		return
+	}
 	p.setLastError(err.Error())
+}
+
+func compactBlockTxnCapPolicyReason(err error) (string, bool) {
+	if command, ok := capErrorCommand(err); ok && command == messageBlockTxn {
+		return "unexpected blocktxn", true
+	}
+	return "", false
+}
+
+func payloadCapDiagnosticReason(err error) (string, bool) {
+	command, ok := capErrorCommand(err)
+	if !ok || command == "" {
+		return "", false
+	}
+	return fmt.Sprintf("%s: %s", err.Error(), command), true
+}
+
+func capErrorCommand(err error) (string, bool) {
+	var commandCapErr commandPayloadCapError
+	if errors.As(err, &commandCapErr) {
+		return commandCapErr.command, true
+	}
+	var messageCapErr inboundMessagePayloadCapError
+	if errors.As(err, &messageCapErr) {
+		return messageCapErr.command, true
+	}
+	return "", false
 }
 
 func (p *peer) bumpBan(delta int, reason string) bool {

@@ -88,7 +88,7 @@ func TestShouldIgnoreAndNormalizeReadError(t *testing.T) {
 	}
 }
 
-func TestCompactObjectCapsStayClosedUntilHandlersExist(t *testing.T) {
+func TestCompactObjectCapsStayClosedUntilParityReceiveExists(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	limiter := p.postHandshakePayloadCap()
 	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
@@ -140,6 +140,46 @@ func TestBlockTxnPayloadCapIsOutstandingBounded(t *testing.T) {
 	}
 	if got := p.blockTxnPayloadCap(); got != 0 {
 		t.Fatalf("blocktxn cap after pop=%d, want 0", got)
+	}
+}
+
+func TestRunBansUnexpectedBlockTxnCommandCap(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: make([]byte, 33)}),
+	}}}
+	err := p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("run err=%v, want command cap error", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore == 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
+		t.Fatalf("state=%+v, want unexpected blocktxn ban", state)
+	}
+}
+
+func TestRunBansUnexpectedBlockTxnMessageCap(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.PeerRuntimeConfig.MaxMessageSize = 1
+	header, err := buildEnvelopeHeader(
+		networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
+		messageBlockTxn,
+		[]byte{0x01, 0x02},
+	)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: header[:]}}}
+
+	err = p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds cap" {
+		t.Fatalf("run err=%v, want message cap error", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore == 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
+		t.Fatalf("state=%+v, want unexpected blocktxn ban", state)
 	}
 }
 
@@ -368,6 +408,23 @@ func TestApplyPostHandshakeDisconnectErrorNilAndGenericFallback(t *testing.T) {
 	}
 	if snap.BanScore != 0 {
 		t.Fatalf("ban_score=%d, want 0 for generic runtime error mapping", snap.BanScore)
+	}
+}
+
+func TestApplyPostHandshakeDisconnectErrorCommandCapRecordsCommand(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	err := commandPayloadCapError{command: messagePing}
+	if err.Error() != "message exceeds command cap" {
+		t.Fatalf("error=%q, want public command cap error unchanged", err.Error())
+	}
+
+	p.applyPostHandshakeDisconnectError(err)
+	snap := p.snapshotState()
+	if snap.LastError != "message exceeds command cap: ping" {
+		t.Fatalf("last_error=%q, want command diagnostic", snap.LastError)
+	}
+	if snap.BanScore != 0 {
+		t.Fatalf("ban_score=%d, want 0 for non-blocktxn command cap", snap.BanScore)
 	}
 }
 

@@ -75,6 +75,10 @@ func TestReadFrameMessageTooLarge(t *testing.T) {
 	if err == nil || err.Error() != "message exceeds cap" {
 		t.Fatalf("expected cap error, got %v", err)
 	}
+	var capErr inboundMessagePayloadCapError
+	if !errors.As(err, &capErr) || capErr.command != messageTx {
+		t.Fatalf("cap error=%T command=%q, want inbound message cap for %s", err, capErr.command, messageTx)
+	}
 }
 
 func TestReadFrameShortBody(t *testing.T) {
@@ -103,6 +107,10 @@ func TestReadFrameWithPayloadLimitRejectsOversizeVersionBeforePayloadRead(t *tes
 	if err == nil || err.Error() != "message exceeds command cap" {
 		t.Fatalf("expected command cap error, got %v", err)
 	}
+	var capErr commandPayloadCapError
+	if !errors.As(err, &capErr) || capErr.command != messageVersion {
+		t.Fatalf("cap error=%T command=%q, want command cap for %s", err, capErr.command, messageVersion)
+	}
 }
 
 func TestReadFrameWithPayloadLimitRejectsOversizeInvBeforePayloadRead(t *testing.T) {
@@ -117,6 +125,10 @@ func TestReadFrameWithPayloadLimitRejectsOversizeInvBeforePayloadRead(t *testing
 	_, err = readFrameWithPayloadLimit(reader, networkMagic("devnet"), 1024*1024, postHandshakePayloadCap(defaultLocatorLimit, 512))
 	if err == nil || err.Error() != "message exceeds command cap" {
 		t.Fatalf("expected command cap error, got %v", err)
+	}
+	var capErr commandPayloadCapError
+	if !errors.As(err, &capErr) || capErr.command != messageInv {
+		t.Fatalf("cap error=%T command=%q, want command cap for %s", err, capErr.command, messageInv)
 	}
 }
 
