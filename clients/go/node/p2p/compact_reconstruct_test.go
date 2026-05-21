@@ -2,12 +2,14 @@ package p2p
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 func TestReconstructCompactBlockCompletesExactPositionsFromWTxID(t *testing.T) {
@@ -431,6 +433,380 @@ func TestReconstructCompactBlockSkipsLocalLookupForPrefilledOnlyBlock(t *testing
 	}
 }
 
+func TestInternalHandleBlockTxnCompletesOutstandingBlock(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newPeerRuntimeTestPeer(t)
+	if err := p.handleBlockTxn(nil); err == nil || !strings.Contains(err.Error(), "missing block hash") || p.snapshotState().BanScore == 0 {
+		t.Fatalf("short blocktxn err=%v state=%+v", err, p.snapshotState())
+	}
+
+	p = newPeerRuntimeTestPeer(t)
+	if err := p.handleBlockTxn(make([]byte, 32)); err == nil || !strings.Contains(err.Error(), "unexpected blocktxn response") || p.snapshotState().BanScore == 0 {
+		t.Fatalf("unexpected blocktxn err=%v state=%+v", err, p.snapshotState())
+	}
+
+	p = newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
+	if err := p.handleBlockTxn(make([]byte, 32)); err == nil || !strings.Contains(err.Error(), "block hash mismatch") {
+		t.Fatalf("wrong hash blocktxn err=%v", err)
+	}
+
+	p = newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
+	malformed := append(blockHash[:], 0xff)
+	if err := p.handleBlockTxn(malformed); err == nil || p.snapshotState().BanScore == 0 {
+		t.Fatalf("malformed blocktxn err=%v state=%+v", err, p.snapshotState())
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("malformed blocktxn did not clear matching outstanding request")
+	}
+
+	p = newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
+	valid, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{txs[0]}})
+	requireNoCompactErr(t, err, "encode blocktxn")
+	requireNoCompactErr(t, p.handleBlockTxn(valid), "handle blocktxn")
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("outstanding request was not cleared")
+	}
+	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
+		t.Fatalf("hasBlock=%v err=%v", have, err)
+	}
+}
+
+func TestHandleCmpctBlockValidationAndFallbackEdges(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	full := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
+	missing := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, ShortIDs: []compactShortID{{0xaa}}})
+
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
+	requireNoCompactErr(t, p.handleCmpctBlock(full), "already-have compact block")
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("already-have compact block did not clear matching outstanding request")
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("already-have compact block sent fallback")
+	}
+
+	tinyTarget := [32]byte{}
+	tinyTarget[31] = 0x01
+	powInvalidHeader := compactHeaderWithTarget(header, tinyTarget)
+	p = newCompactScriptedPeer(t)
+	err := p.handleCmpctBlock(mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: powInvalidHeader, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}}))
+	if err == nil || !strings.Contains(err.Error(), "pow invalid") || p.snapshotState().BanScore == 0 {
+		t.Fatalf("pow-invalid compact header err=%v state=%+v", err, p.snapshotState())
+	}
+
+	wrongExpected := compactFilledTarget(0xee)
+	p = newCompactScriptedPeer(t)
+	p.service.cfg.SyncConfig.ExpectedTarget = &wrongExpected
+	err = p.handleCmpctBlock(full)
+	if err == nil || !strings.Contains(err.Error(), "target mismatch") || p.snapshotState().BanScore == 0 {
+		t.Fatalf("target-mismatch compact header err=%v state=%+v", err, p.snapshotState())
+	}
+
+	pool := NewMemoryTxPool()
+	pool.txs[[32]byte{0x42}] = &relayTxEntry{raw: []byte{0x01}, size: 1}
+	p = newCompactScriptedPeer(t)
+	p.service.cfg.TxPool = pool
+	requireNoCompactErr(t, p.handleCmpctBlock(missing), "malformed local candidate fallback")
+	requireCompactFrame(t, p, messageGetData)
+	if p.snapshotState().BanScore != 0 {
+		t.Fatalf("malformed local candidate ban_score=%d, want no ban", p.snapshotState().BanScore)
+	}
+
+	p = newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 301, 302), 301, 302)
+	requireNoCompactErr(t, p.handleCmpctBlock(missing), "missing compact block with existing outstanding")
+	requireCompactFrame(t, p, messageGetData)
+
+	p = newCompactScriptedPeer(t)
+	err = p.requestMissingCompactTransactions(cmpctBlockPayload{Header: header}, blockHash, compactReconstructionResult{
+		PartialTransactions: [][]byte{nil},
+		MissingIndexes:      []uint64{1},
+		MissingShortIDs:     []compactShortID{{0x01}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "compact relay index out of range") {
+		t.Fatalf("invalid missing request err=%v, want index out of range", err)
+	}
+}
+
+func TestCompactProcessErrorEdges(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.processCompactTransactions(blockHash, header, nil, true), "short-id assembly fallback")
+	requireCompactFrame(t, p, messageGetData)
+	if p.snapshotState().BanScore != 0 {
+		t.Fatalf("short-id assembly state=%+v, want no ban fallback", p.snapshotState())
+	}
+
+	p = newCompactScriptedPeer(t)
+	if err := p.processCompactTransactions(blockHash, header, nil, false); err == nil || !strings.Contains(err.Error(), "compact block has no transactions") || p.snapshotState().BanScore == 0 {
+		t.Fatalf("prefilled empty compact transactions err=%v state=%+v", err, p.snapshotState())
+	}
+
+	p = newCompactScriptedPeer(t)
+	if fallback, accepted, err := p.processCompactRelayedBlockWithFallback([32]byte{0x99}, node.DevnetGenesisBlockBytes(), true); !fallback || accepted || err != nil {
+		t.Fatalf("mismatched expected hash fallback=%v accepted=%v err=%v", fallback, accepted, err)
+	}
+
+	p = newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 401, 402), 401, 402)
+	p.service.cfg.BlockStore = nil
+	if fallback, accepted, err := p.processCompactRelayedBlockWithFallback(blockHash, node.DevnetGenesisBlockBytes(), true); fallback || accepted || err == nil {
+		t.Fatalf("hasBlock error fallback=%v accepted=%v err=%v", fallback, accepted, err)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("hasBlock error did not clear matching compact outstanding request")
+	}
+}
+
+func TestCompactApplyErrorFallbackEdges(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	pb, parsedHash, err := parseRelayedBlock(blockBytes)
+	requireNoCompactErr(t, err, "parse relayed block")
+	if parsedHash != blockHash {
+		t.Fatalf("parsed block hash=%x, want %x", parsedHash, blockHash)
+	}
+
+	p := newCompactScriptedPeer(t)
+	fallback, accepted, err := p.compactApplyErrorFallback(pb, blockHash, blockBytes, node.ErrParentNotFound, false)
+	requireNoCompactErr(t, err, "parent-not-found retain")
+	if fallback || accepted || p.service.orphans.Len() != 1 {
+		t.Fatalf("parent-not-found fallback=%v accepted=%v orphans=%d", fallback, accepted, p.service.orphans.Len())
+	}
+
+	p = newCompactScriptedPeer(t)
+	applyErr := &consensus.TxError{Code: consensus.BLOCK_ERR_MERKLE_INVALID, Msg: "merkle mismatch"}
+	fallback, accepted, err = p.compactApplyErrorFallback(pb, blockHash, blockBytes, applyErr, true)
+	requireNoCompactErr(t, err, "consensus apply fallback")
+	if !fallback || accepted || !strings.Contains(p.snapshotState().LastError, "merkle mismatch") {
+		t.Fatalf("consensus fallback=%v accepted=%v state=%+v", fallback, accepted, p.snapshotState())
+	}
+
+	p = newCompactScriptedPeer(t)
+	errBoom := errors.New("local apply failure")
+	fallback, accepted, err = p.compactApplyErrorFallback(pb, blockHash, blockBytes, errBoom, false)
+	if fallback || accepted || !errors.Is(err, errBoom) || !strings.Contains(p.snapshotState().LastError, "local apply failure") {
+		t.Fatalf("local apply fallback=%v accepted=%v err=%v state=%+v", fallback, accepted, err, p.snapshotState())
+	}
+}
+
+func TestCompactBlockBytesRejectsInvalidAssembly(t *testing.T) {
+	header, _, _ := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	cases := []struct {
+		name string
+		txs  [][]byte
+		want string
+	}{
+		{name: "empty", txs: nil, want: "compact block has no transactions"},
+		{name: "missing", txs: [][]byte{nil}, want: "compact block transaction missing"},
+		{name: "empty_tx", txs: [][]byte{{}}, want: "blocktxn transaction is empty"},
+		{name: "oversize_block", txs: [][]byte{make([]byte, consensus.MAX_BLOCK_BYTES)}, want: "compact block exceeds block size"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := compactBlockBytes(header, tc.txs)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("compactBlockBytes err=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompactPrefilledParentNotFoundRetainsOrphanWithoutFallback(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	header, gotHash, txs := compactPartsFromBlockBytes(t, blockBytes)
+	if gotHash != blockHash {
+		t.Fatalf("block hash=%x, want %x", gotHash, blockHash)
+	}
+
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.processCompactTransactions(blockHash, header, txs, false), "parent-not-found prefilled compact apply")
+	if got := p.service.orphans.Len(); got != 1 {
+		t.Fatalf("orphans.Len()=%d, want 1", got)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("parent-not-found compact apply sent full-block fallback")
+	}
+}
+
+func TestCompactShortIDParentNotFoundFallsBackWithoutBlockSeen(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	header, gotHash, txs := compactPartsFromBlockBytes(t, blockBytes)
+	if gotHash != blockHash {
+		t.Fatalf("block hash=%x, want %x", gotHash, blockHash)
+	}
+
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.processCompactTransactions(blockHash, header, txs, true), "parent-not-found short-id compact apply")
+	requireCompactFrame(t, p, messageGetData)
+	if got := p.service.orphans.Len(); got != 0 {
+		t.Fatalf("orphans.Len()=%d, want 0 for short-id reconstructed bytes", got)
+	}
+	if p.service.blockSeen.Has(blockHash) {
+		t.Fatal("short-id reconstructed orphan poisoned blockSeen")
+	}
+}
+
+func TestRunRoutesNegotiatedCmpctBlock(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	payload := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageCmpctBlock, Payload: payload})}}}
+
+	requireNoCompactErr(t, p.run(context.Background()), "run cmpctblock")
+	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
+		t.Fatalf("hasBlock=%v err=%v", have, err)
+	}
+}
+
+func TestRunRoutesOutstandingBlockTxn(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	payload, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{txs[0]}})
+	requireNoCompactErr(t, err, "encode blocktxn")
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload})}}}
+
+	requireNoCompactErr(t, p.run(context.Background()), "run blocktxn")
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("outstanding request was not cleared")
+	}
+	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
+		t.Fatalf("hasBlock=%v err=%v", have, err)
+	}
+}
+
+func TestHandleBlockTxnFallsBackWithoutBanOnShortIDMismatch(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortID{0xbb}, 301, 302)
+	valid, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{txs[0]}})
+	requireNoCompactErr(t, err, "encode blocktxn")
+	requireNoCompactErr(t, p.handleBlockTxn(valid), "mismatched blocktxn fallback")
+	requireCompactFrame(t, p, messageGetData)
+	if p.snapshotState().BanScore != 0 {
+		t.Fatalf("mismatched blocktxn state=%+v, want no ban", p.snapshotState())
+	}
+}
+
+func TestInternalCompactReceiveMissingAndFallbackBranches(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	missing := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, ShortIDs: []compactShortID{{0xaa}}})
+	full := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
+
+	p := newCompactScriptedPeer(t)
+	if err := p.handleCmpctBlock(nil); err == nil || p.snapshotState().BanScore == 0 {
+		t.Fatalf("malformed cmpctblock err=%v state=%+v", err, p.snapshotState())
+	}
+
+	p = newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 801, 802), 801, 802)
+	p.service.cfg.BlockStore = nil
+	if err := p.handleCmpctBlock(full); err == nil || !strings.Contains(err.Error(), "nil blockstore") {
+		t.Fatalf("hasBlock cmpctblock err=%v, want nil blockstore", err)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("hasBlock error did not clear matching compact outstanding request")
+	}
+
+	p = newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.handleCmpctBlock(missing), "missing compact block")
+	requireCompactFrame(t, p, messageGetBlockTxn)
+	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockHash != blockHash || snap.BlockTxnPayloadCap == 0 {
+		t.Fatalf("outstanding=%+v ok=%v", snap, ok)
+	}
+
+	p = newCompactScriptedPeer(t)
+	tooMany := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, ShortIDs: make([]compactShortID, maxCompactRelayEntries+1)})
+	requireNoCompactErr(t, p.handleCmpctBlock(tooMany), "missing overflow fallback")
+	requireCompactFrame(t, p, messageGetData)
+
+	p = newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.handleCmpctBlock(full), "prefilled compact block")
+	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
+		t.Fatalf("hasBlock=%v err=%v", have, err)
+	}
+}
+
+func TestInternalCompactApplySuccessClearsMatchingOutstanding(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 601, 602), 601, 602)
+	fallback, accepted, err := p.processCompactRelayedBlockWithFallback(blockHash, node.DevnetGenesisBlockBytes(), true)
+	requireNoCompactErr(t, err, "compact apply success")
+	if fallback || !accepted {
+		t.Fatalf("compact apply success fallback=%v accepted=%v, want accepted without fallback", fallback, accepted)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("compact apply success did not clear matching compact outstanding request")
+	}
+}
+
+func TestInternalCompactApplyEarlyHaveClearsMatchingOutstanding(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 701, 702), 701, 702)
+	fallback, accepted, err := p.processCompactRelayedBlockWithFallback(blockHash, node.DevnetGenesisBlockBytes(), true)
+	requireNoCompactErr(t, err, "compact apply early-have")
+	if fallback || !accepted {
+		t.Fatalf("compact apply early-have fallback=%v accepted=%v, want accepted without fallback", fallback, accepted)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("compact apply early-have did not clear matching compact outstanding request")
+	}
+}
+
+func TestProcessCompactTransactionsRejectsAcceptedBlockMissingAfterApply(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	otherStore, err := node.OpenBlockStore(node.BlockStorePath(t.TempDir()))
+	requireNoCompactErr(t, err, "open alternate blockstore")
+	p.service.cfg.BlockStore = otherStore
+
+	err = p.processCompactTransactions(blockHash, header, txs, true)
+	if err == nil || !strings.Contains(err.Error(), "compact block apply succeeded without accepting block") {
+		t.Fatalf("processCompactTransactions err=%v, want explicit missing accepted block error", err)
+	}
+	if p.service.blockSeen.Has(blockHash) {
+		t.Fatal("accepted-but-missing compact block marked blockSeen before storage verification")
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("accepted-but-missing compact block path sent fallback instead of returning an error")
+	}
+}
+
+func TestCompactPartsFromBlockBytesDecodesCompactSizeTxCountWidth(t *testing.T) {
+	const txCount = 253
+	genesis := node.DevnetGenesisBlockBytes()
+	block := append([]byte(nil), genesis[:consensus.BLOCK_HEADER_BYTES]...)
+	block = consensus.AppendCompactSize(block, txCount)
+	firstTx := minimalBlockTxnTestTxBytes(1000)
+	block = append(block, firstTx...)
+	for i := uint64(1); i < txCount; i++ {
+		block = append(block, minimalBlockTxnTestTxBytes(1000+i)...)
+	}
+
+	_, _, txs := compactPartsFromBlockBytes(t, block)
+	if len(txs) != txCount {
+		t.Fatalf("tx count=%d, want %d", len(txs), txCount)
+	}
+	if !bytes.Equal(txs[0], firstTx) {
+		t.Fatalf("first tx was sliced from the wrong offset")
+	}
+}
+
 func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
 	pool := compactRelayTestMemoryPool(t, 4)
 	if got := compactRelayLocalTransactions(pool, 2); len(got) != 2 {
@@ -568,4 +944,93 @@ func compactWTxIDForTx(t *testing.T, tx []byte) [32]byte {
 		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
 	}
 	return wtxid
+}
+
+func mustEncodeCmpctBlockPayload(t *testing.T, in cmpctBlockPayload) []byte {
+	t.Helper()
+	raw, err := encodeCmpctBlockPayload(in)
+	requireNoCompactErr(t, err, "encode cmpctblock")
+	return raw
+}
+
+func newCompactScriptedPeer(t *testing.T) *peer {
+	t.Helper()
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	return p
+}
+
+func setCompactTestOutstanding(p *peer, blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, shortID compactShortID, nonce1, nonce2 uint64) {
+	p.activateCompactOutstandingRequest(compactOutstandingRequest{
+		BlockHash:          blockHash,
+		Header:             header,
+		MissingIndexes:     []uint64{0},
+		MissingShortIDs:    []compactShortID{shortID},
+		Transactions:       [][]byte{nil},
+		Nonce1:             nonce1,
+		Nonce2:             nonce2,
+		BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn),
+	})
+}
+
+func compactPartsFromBlockBytes(t *testing.T, block []byte) ([consensus.BLOCK_HEADER_BYTES]byte, [32]byte, [][]byte) {
+	t.Helper()
+	if len(block) < consensus.BLOCK_HEADER_BYTES+1 {
+		t.Fatalf("block too short: %d", len(block))
+	}
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	copy(header[:], block[:consensus.BLOCK_HEADER_BYTES])
+	blockHash, _ := consensus.BlockHash(header[:])
+	txCount, countLen, err := consensus.DecodeCompactSize(block[consensus.BLOCK_HEADER_BYTES:])
+	if err != nil {
+		t.Fatalf("decode tx_count: %v", err)
+	}
+	offset := consensus.BLOCK_HEADER_BYTES + countLen
+	txs := make([][]byte, 0)
+	for i := uint64(0); i < txCount; i++ {
+		_, _, _, consumed, err := consensus.ParseTx(block[offset:])
+		if err != nil {
+			t.Fatalf("parse tx[%d]: %v", i, err)
+		}
+		if consumed <= 0 || offset+consumed > len(block) {
+			t.Fatalf("parse tx[%d] consumed invalid length %d at offset %d", i, consumed, offset)
+		}
+		txs = append(txs, append([]byte(nil), block[offset:offset+consumed]...))
+		offset += consumed
+	}
+	if offset != len(block) {
+		t.Fatalf("block has trailing bytes after tx list: %d", len(block)-offset)
+	}
+	return header, blockHash, txs
+}
+
+func requireCompactFrame(t *testing.T, p *peer, command string) {
+	t.Helper()
+	conn := p.conn.(*scriptedConn)
+	frame, err := readFrame(bytes.NewReader(conn.Buffer.Bytes()), networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	conn.Buffer.Reset()
+	if err != nil || frame.Command != command {
+		t.Fatalf("compact frame=%+v err=%v want %s", frame, err, command)
+	}
+}
+
+func requireNoCompactErr(t *testing.T, err error, label string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+}
+
+func compactHeaderWithTarget(header [consensus.BLOCK_HEADER_BYTES]byte, target [32]byte) [consensus.BLOCK_HEADER_BYTES]byte {
+	const targetOffset = 4 + 32 + 32 + 8
+	copy(header[targetOffset:targetOffset+32], target[:])
+	return header
+}
+
+func compactFilledTarget(fill byte) [32]byte {
+	var out [32]byte
+	for i := range out {
+		out[i] = fill
+	}
+	return out
 }
