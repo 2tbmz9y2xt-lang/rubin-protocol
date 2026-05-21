@@ -651,6 +651,26 @@ func TestInternalCompactApplyEarlyHaveClearsMatchingOutstanding(t *testing.T) {
 	}
 }
 
+func TestCompactPartsFromBlockBytesDecodesCompactSizeTxCountWidth(t *testing.T) {
+	const txCount = 253
+	genesis := node.DevnetGenesisBlockBytes()
+	block := append([]byte(nil), genesis[:consensus.BLOCK_HEADER_BYTES]...)
+	block = consensus.AppendCompactSize(block, txCount)
+	firstTx := minimalBlockTxnTestTxBytes(1000)
+	block = append(block, firstTx...)
+	for i := uint64(1); i < txCount; i++ {
+		block = append(block, minimalBlockTxnTestTxBytes(1000+i)...)
+	}
+
+	_, _, txs := compactPartsFromBlockBytes(t, block)
+	if len(txs) != txCount {
+		t.Fatalf("tx count=%d, want %d", len(txs), txCount)
+	}
+	if !bytes.Equal(txs[0], firstTx) {
+		t.Fatalf("first tx was sliced from the wrong offset")
+	}
+}
+
 func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
 	pool := compactRelayTestMemoryPool(t, 4)
 	if got := compactRelayLocalTransactions(pool, 2); len(got) != 2 {
@@ -817,10 +837,34 @@ func setCompactTestOutstanding(p *peer, blockHash [32]byte, header [consensus.BL
 }
 
 func compactPartsFromBlockBytes(t *testing.T, block []byte) ([consensus.BLOCK_HEADER_BYTES]byte, [32]byte, [][]byte) {
+	t.Helper()
+	if len(block) < consensus.BLOCK_HEADER_BYTES+1 {
+		t.Fatalf("block too short: %d", len(block))
+	}
 	var header [consensus.BLOCK_HEADER_BYTES]byte
 	copy(header[:], block[:consensus.BLOCK_HEADER_BYTES])
 	blockHash, _ := consensus.BlockHash(header[:])
-	return header, blockHash, [][]byte{append([]byte(nil), block[consensus.BLOCK_HEADER_BYTES+1:]...)}
+	txCount, countLen, err := consensus.DecodeCompactSize(block[consensus.BLOCK_HEADER_BYTES:])
+	if err != nil {
+		t.Fatalf("decode tx_count: %v", err)
+	}
+	offset := consensus.BLOCK_HEADER_BYTES + countLen
+	txs := make([][]byte, 0)
+	for i := uint64(0); i < txCount; i++ {
+		_, _, _, consumed, err := consensus.ParseTx(block[offset:])
+		if err != nil {
+			t.Fatalf("parse tx[%d]: %v", i, err)
+		}
+		if consumed <= 0 || offset+consumed > len(block) {
+			t.Fatalf("parse tx[%d] consumed invalid length %d at offset %d", i, consumed, offset)
+		}
+		txs = append(txs, append([]byte(nil), block[offset:offset+consumed]...))
+		offset += consumed
+	}
+	if offset != len(block) {
+		t.Fatalf("block has trailing bytes after tx list: %d", len(block)-offset)
+	}
+	return header, blockHash, txs
 }
 
 func requireCompactFrame(t *testing.T, p *peer, command string) {
