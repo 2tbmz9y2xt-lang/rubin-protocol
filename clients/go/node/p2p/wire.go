@@ -52,6 +52,22 @@ type message struct {
 
 type payloadLimitFn func(command string) uint32
 
+type commandPayloadCapError struct {
+	command string
+}
+
+func (e commandPayloadCapError) Error() string {
+	return "message exceeds command cap"
+}
+
+type inboundMessagePayloadCapError struct {
+	command string
+}
+
+func (e inboundMessagePayloadCapError) Error() string {
+	return "message exceeds cap"
+}
+
 type frameHeader struct {
 	Command  string
 	Size     uint32
@@ -105,7 +121,7 @@ func readFrameWithPayloadLimit(r io.Reader, expectedMagic [4]byte, maxMessageSiz
 	}
 	if limit != nil {
 		if header.Size > limit(header.Command) {
-			return frame, errors.New("message exceeds command cap")
+			return frame, commandPayloadCapError{command: header.Command}
 		}
 	}
 	payload, err := readPayloadWithChecksum(r, header.Size, header.Checksum)
@@ -198,7 +214,7 @@ func readFrameHeader(r io.Reader, expectedMagic [4]byte, maxMessageSize uint32) 
 	}
 	size := binary.LittleEndian.Uint32(raw[16:20])
 	if size > maxMessageSize {
-		return header, errors.New("message exceeds cap")
+		return header, inboundMessagePayloadCapError{command: command}
 	}
 	header.Command = command
 	header.Size = size
