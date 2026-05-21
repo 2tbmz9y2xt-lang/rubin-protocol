@@ -560,6 +560,21 @@ func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
 	if got := compactRelayLocalTransactions(pool, 0); got != nil {
 		t.Fatalf("zero-limit snapshot=%v, want nil", got)
 	}
+	aliasPool := NewMemoryTxPoolWithLimit(1)
+	aliasRaw := minimalBlockTxnTestTxBytes(99)
+	_, aliasTxid, _, _, err := consensus.ParseTx(aliasRaw)
+	requireNoCompactErr(t, err, "ParseTx alias")
+	if !aliasPool.Put(aliasTxid, aliasRaw, 1, len(aliasRaw)) {
+		t.Fatal("Put alias tx rejected")
+	}
+	got := compactRelayLocalTransactions(aliasPool, 1)
+	if len(got) != 1 || len(got[0]) == 0 {
+		t.Fatalf("alias snapshot=%v", got)
+	}
+	got[0][0] ^= 0xff
+	if stored, ok := aliasPool.Get(aliasTxid); !ok || stored[0] == got[0][0] {
+		t.Fatal("bounded snapshot aliases memory pool transaction bytes")
+	}
 }
 
 func compactShortIDForTx(t *testing.T, tx []byte, nonce1, nonce2 uint64) compactShortID {
@@ -603,7 +618,23 @@ func compactPartsFromBlockBytes(t *testing.T, block []byte) ([consensus.BLOCK_HE
 	var header [consensus.BLOCK_HEADER_BYTES]byte
 	copy(header[:], pb.HeaderBytes)
 	offset := consensus.BLOCK_HEADER_BYTES + len(consensus.EncodeCompactSize(pb.TxCount))
-	return header, blockHash, [][]byte{append([]byte(nil), block[offset:]...)}
+	if pb.TxCount > uint64(len(block)) {
+		t.Fatalf("tx count %d exceeds block length %d", pb.TxCount, len(block))
+	}
+	txs := make([][]byte, 0, int(pb.TxCount))
+	for i := uint64(0); i < pb.TxCount; i++ {
+		_, _, _, consumed, err := consensus.ParseTx(block[offset:])
+		requireNoCompactErr(t, err, "ParseTx")
+		if consumed <= 0 || offset+consumed > len(block) {
+			t.Fatalf("ParseTx consumed=%d offset=%d block_len=%d", consumed, offset, len(block))
+		}
+		txs = append(txs, append([]byte(nil), block[offset:offset+consumed]...))
+		offset += consumed
+	}
+	if offset != len(block) {
+		t.Fatalf("trailing block bytes after tx parse: offset=%d len=%d", offset, len(block))
+	}
+	return header, blockHash, txs
 }
 
 func requireCompactFrame(t *testing.T, p *peer, command string, label string) {

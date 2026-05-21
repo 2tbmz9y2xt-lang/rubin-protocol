@@ -451,7 +451,7 @@ func compactMemoryPoolTransactions(pool *MemoryTxPool, limit int) [][]byte {
 	}
 	out := make([][]byte, 0, capHint)
 	for _, entry := range pool.txs {
-		out = append(out, entry.raw)
+		out = append(out, append([]byte(nil), entry.raw...))
 		if len(out) >= limit {
 			break
 		}
