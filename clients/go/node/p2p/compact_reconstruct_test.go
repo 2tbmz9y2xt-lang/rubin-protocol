@@ -503,6 +503,30 @@ func TestCompactRelayLocalTransactionsForBlockSkipsPrefilledOnly(t *testing.T) {
 	}
 }
 
+func TestCompactRelayLocalTransactionsCoversCanonicalAndUnknownPools(t *testing.T) {
+	if got := compactRelayLocalTransactionsWithBudget(rejectingTxPool{}, 1, 1); got != nil {
+		t.Fatalf("unknown pool candidates=%v, want nil", got)
+	}
+	if got := compactRelayLocalTransactionsWithBudget(NewCanonicalMempoolTxPool(nil), 1, 1); got != nil {
+		t.Fatalf("nil canonical candidates=%v, want nil", got)
+	}
+
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	mempool := wireCanonicalMempoolForP2PTest(t, h)
+	tx1, _, _ := signedCanonicalP2PTxForHarness(t, h, 9001)
+	if err := mempool.AddTx(tx1); err != nil {
+		t.Fatalf("AddTx tx1: %v", err)
+	}
+
+	pool := NewCanonicalMempoolTxPool(mempool)
+	if got := compactRelayLocalTransactionsWithBudget(pool, 1, consensus.MAX_BLOCK_BYTES); len(got) != 1 {
+		t.Fatalf("limit-bounded canonical candidates len=%d, want 1", len(got))
+	}
+	if got := compactRelayLocalTransactionsWithBudget(pool, 2, len(tx1)-1); len(got) != 0 {
+		t.Fatalf("byte-bounded canonical candidates len=%d, want 0", len(got))
+	}
+}
+
 func compactShortIDForTx(t *testing.T, tx []byte, nonce1, nonce2 uint64) compactShortID {
 	t.Helper()
 	wtxid := compactWTxIDForTx(t, tx)
