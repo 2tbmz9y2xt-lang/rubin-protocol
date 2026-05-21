@@ -387,8 +387,12 @@ func (p *peer) processCompactRelayedBlockWithFallback(expectedHash [32]byte, blo
 		return true, err
 	}
 	have, err := p.service.hasBlock(blockHash)
-	if err != nil || have {
+	if err != nil {
 		return false, err
+	}
+	if have {
+		p.clearCompactOutstandingRequestForBlock(blockHash)
+		return false, nil
 	}
 	p.service.chainMu.Lock()
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
@@ -396,6 +400,7 @@ func (p *peer) processCompactRelayedBlockWithFallback(expectedHash [32]byte, blo
 	if err != nil {
 		return p.compactApplyErrorFallback(pb, blockHash, blockBytes, err, fallbackOnApply)
 	}
+	p.clearCompactOutstandingRequestForBlock(blockHash)
 	p.acceptedRelayedBlock(blockHash, summary)
 	return false, nil
 }

@@ -622,6 +622,35 @@ func TestInternalHandleCmpctBlockAlreadyHaveClearsMatchingOutstanding(t *testing
 	}
 }
 
+func TestInternalCompactApplySuccessClearsMatchingOutstanding(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 601, 602), 601, 602)
+	fallback, err := p.processCompactRelayedBlockWithFallback(blockHash, node.DevnetGenesisBlockBytes(), true)
+	requireNoCompactErr(t, err, "compact apply success")
+	if fallback {
+		t.Fatal("compact apply success requested fallback")
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("compact apply success did not clear matching compact outstanding request")
+	}
+}
+
+func TestInternalCompactApplyEarlyHaveClearsMatchingOutstanding(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 701, 702), 701, 702)
+	fallback, err := p.processCompactRelayedBlockWithFallback(blockHash, node.DevnetGenesisBlockBytes(), true)
+	requireNoCompactErr(t, err, "compact apply early-have")
+	if fallback {
+		t.Fatal("compact apply early-have requested fallback")
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("compact apply early-have did not clear matching compact outstanding request")
+	}
+}
+
 func TestCompactRelayLocalTransactionsBoundsMemoryPoolSnapshot(t *testing.T) {
 	pool := compactRelayTestMemoryPool(t, 4)
 	if got := compactRelayLocalTransactions(pool, 2); len(got) != 2 {
