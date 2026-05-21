@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
@@ -106,6 +107,9 @@ func (s *SyncEngine) shouldSwitchToBranch(
 	commonAncestorHash [32]byte,
 	commonAncestorHeight uint64,
 ) (bool, uint64, error) {
+	if len(branch) == 0 {
+		return false, commonAncestorHeight, errors.New("empty side branch")
+	}
 	_, currentTipHash, err := s.currentCanonicalTip()
 	if err != nil {
 		return false, 0, err
@@ -129,7 +133,15 @@ func (s *SyncEngine) shouldSwitchToBranch(
 	}
 	candidateWork := new(big.Int).Add(new(big.Int).Set(ancestorWork), branchWork)
 	candidateHeight := commonAncestorHeight + uint64(len(branch))
-	return candidateWork.Cmp(currentWork) > 0, candidateHeight, nil
+	switch candidateWork.Cmp(currentWork) {
+	case 1:
+		return true, candidateHeight, nil
+	case -1:
+		return false, candidateHeight, nil
+	default:
+		candidateTipHash := branch[len(branch)-1].hash
+		return bytes.Compare(candidateTipHash[:], currentTipHash[:]) < 0, candidateHeight, nil
+	}
 }
 
 func (s *SyncEngine) applyHeavierBranch(
