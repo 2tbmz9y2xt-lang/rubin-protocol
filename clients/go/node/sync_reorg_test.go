@@ -177,6 +177,17 @@ func blockHeaderBytes(t *testing.T, blockBytes []byte) []byte {
 	return pb.HeaderBytes
 }
 
+func requireConsensusTxErrCode(t *testing.T, err error, want consensus.ErrorCode) {
+	t.Helper()
+	var txErr *consensus.TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("err=%T %v, want consensus.TxError code %s", err, err, want)
+	}
+	if txErr.Code != want {
+		t.Fatalf("err code=%s, want %s", txErr.Code, want)
+	}
+}
+
 func TestApplyBlockWithReorgRejectsMissingParent(t *testing.T) {
 	engine, _, target := newReorgTestEngine(t)
 	before := engine.BlockApplyCounts()
@@ -195,7 +206,7 @@ func TestApplyBlockWithReorgRejectsInvalidNonHeavierSideBranch(t *testing.T) {
 	engine, store, target := newReorgTestEngine(t)
 
 	subsidy1 := consensus.BlockSubsidy(1, 0)
-	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	summaryA1, err := engine.ApplyBlock(blockA1, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlock(A1): %v", err)
@@ -224,6 +235,72 @@ func TestApplyBlockWithReorgRejectsInvalidNonHeavierSideBranch(t *testing.T) {
 	}
 }
 
+func TestApplyBlockWithReorgRejectsSideBranchTimestampContextBeforeStore(t *testing.T) {
+	engine, store, target := newReorgTestEngine(t)
+	genesisParsed, err := consensus.ParseBlockBytes(devnetGenesisBlockBytes)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(genesis): %v", err)
+	}
+
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	summaryA1, err := engine.ApplyBlock(blockA1, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	blockA2 := buildSingleTxBlock(t, summaryA1.BlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	summaryA2, err := engine.ApplyBlock(blockA2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock(A2): %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		timestamp uint64
+		wantCode  consensus.ErrorCode
+	}{
+		{
+			name:      "timestamp_old",
+			timestamp: genesisParsed.Header.Timestamp,
+			wantCode:  consensus.BLOCK_ERR_TIMESTAMP_OLD,
+		},
+		{
+			name:      "timestamp_future",
+			timestamp: genesisParsed.Header.Timestamp + consensus.MAX_FUTURE_DRIFT + 1,
+			wantCode:  consensus.BLOCK_ERR_TIMESTAMP_FUTURE,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sideBlock := buildSingleTxBlock(t, devnetGenesisBlockHash, target, tc.timestamp, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+			sideHash, err := consensus.BlockHash(blockHeaderBytes(t, sideBlock))
+			if err != nil {
+				t.Fatalf("BlockHash(side): %v", err)
+			}
+
+			before := engine.BlockApplyCounts()
+			summary, err := engine.ApplyBlockWithReorg(sideBlock, nil)
+			if err == nil {
+				t.Fatalf("expected timestamp-invalid side branch rejection")
+			}
+			if summary != nil {
+				t.Fatalf("summary=%v, want nil for rejected side branch", summary)
+			}
+			requireConsensusTxErrCode(t, err, tc.wantCode)
+			if after := engine.BlockApplyCounts(); after != before {
+				t.Fatalf("timestamp-invalid side branch changed BlockApplyCounts from %+v to %+v", before, after)
+			}
+			if engine.chainState.Height != 2 || engine.chainState.TipHash != summaryA2.BlockHash {
+				t.Fatalf("canonical tip changed after timestamp-invalid side branch")
+			}
+			if _, err := store.GetBlockByHash(sideHash); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("GetBlockByHash(timestamp-invalid side) err=%v, want not-exist", err)
+			}
+		})
+	}
+}
+
 func TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile(t *testing.T) {
 	dir := t.TempDir()
 	chainStatePath := ChainStatePath(dir)
@@ -241,7 +318,7 @@ func TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile(t *t
 	}
 
 	subsidy1 := consensus.BlockSubsidy(1, 0)
-	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	summaryA1, err := engine.ApplyBlock(blockA1, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlock(A1): %v", err)
@@ -251,7 +328,7 @@ func TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile(t *t
 		t.Fatalf("stateToDisk(before): %v", err)
 	}
 
-	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 3, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	sideB1Hash, err := consensus.BlockHash(blockHeaderBytes(t, sideB1))
 	if err != nil {
 		t.Fatalf("BlockHash(B1): %v", err)
@@ -261,7 +338,7 @@ func TestApplyBlockWithReorgRollbackRestoresCanonicalIndexAndChainstateFile(t *t
 	}
 
 	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
-	sideB2 := buildSingleTxBlock(t, sideB1Hash, target, 4, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	sideB2 := buildSingleTxBlock(t, sideB1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
 
 	prevWrite := writeFileAtomicFn
 	t.Cleanup(func() { writeFileAtomicFn = prevWrite })
@@ -314,19 +391,19 @@ func TestApplyBlockWithReorgRejectsInvalidHeavierBranchBeforeDisconnectingCanoni
 	engine, store, target := newReorgTestEngine(t)
 
 	subsidy1 := consensus.BlockSubsidy(1, 0)
-	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	summaryA1, err := engine.ApplyBlock(blockA1, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlock(A1): %v", err)
 	}
 	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
-	blockA2 := buildSingleTxBlock(t, summaryA1.BlockHash, target, 3, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	blockA2 := buildSingleTxBlock(t, summaryA1.BlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
 	summaryA2, err := engine.ApplyBlock(blockA2, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlock(A2): %v", err)
 	}
 
-	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 10, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(10), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	if _, err := engine.ApplyBlockWithReorg(blockB1, nil); err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B1): %v", err)
 	}
@@ -334,7 +411,7 @@ func TestApplyBlockWithReorgRejectsInvalidHeavierBranchBeforeDisconnectingCanoni
 	if err != nil {
 		t.Fatalf("BlockHash(B1): %v", err)
 	}
-	blockB2 := buildSingleTxBlock(t, blockB1Hash, target, 11, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	blockB2 := buildSingleTxBlock(t, blockB1Hash, target, reorgTestTimestamp(11), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
 	if _, err := engine.ApplyBlockWithReorg(blockB2, nil); err != nil {
 		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
 	}
@@ -344,7 +421,7 @@ func TestApplyBlockWithReorgRejectsInvalidHeavierBranchBeforeDisconnectingCanoni
 	}
 
 	subsidy3 := consensus.BlockSubsidy(3, subsidy1+subsidy2)
-	validB3 := buildSingleTxBlock(t, blockB2Hash, target, 12, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 3, subsidy3))
+	validB3 := buildSingleTxBlock(t, blockB2Hash, target, reorgTestTimestamp(12), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 3, subsidy3))
 	invalidB3 := append([]byte(nil), validB3...)
 	invalidB3[len(invalidB3)-1] ^= 0x01
 
@@ -1240,20 +1317,20 @@ func TestApplyBlockWithReorgKeepsLighterSideBranchOffCanonicalTip(t *testing.T) 
 	engine, store, target := newReorgTestEngine(t)
 
 	subsidy1 := consensus.BlockSubsidy(1, 0)
-	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 2, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	summaryA1, err := engine.ApplyBlock(blockA1, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlock(A1): %v", err)
 	}
 
 	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
-	blockA2 := buildSingleTxBlock(t, summaryA1.BlockHash, target, 3, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	blockA2 := buildSingleTxBlock(t, summaryA1.BlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
 	summaryA2, err := engine.ApplyBlock(blockA2, nil)
 	if err != nil {
 		t.Fatalf("ApplyBlock(A2): %v", err)
 	}
 
-	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, 4, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	sideB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
 	beforeSide := engine.BlockApplyCounts()
 	sideSummary, err := engine.ApplyBlockWithReorg(sideB1, nil)
 	if err != nil {
