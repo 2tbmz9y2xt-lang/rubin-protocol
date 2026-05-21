@@ -143,6 +143,232 @@ func TestBlockTxnPayloadCapIsOutstandingBounded(t *testing.T) {
 	}
 }
 
+func TestCompactOutstandingRequestUsesDedicatedTTL(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	now := time.Unix(1000, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = 0
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest([32]byte{0x11}))
+	if got := p.blockTxnPayloadCap(); got != 64 {
+		t.Fatalf("disabled-deadline blocktxn cap=%d, want 64", got)
+	}
+	now = now.Add(compactOutstandingRequestTTL - time.Nanosecond)
+	if got := p.blockTxnPayloadCap(); got != 64 {
+		t.Fatalf("pre-expiry blocktxn cap=%d, want 64", got)
+	}
+	now = now.Add(time.Nanosecond)
+	if got := p.blockTxnPayloadCap(); got != 0 {
+		t.Fatalf("expired blocktxn cap=%d, want 0", got)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("expired outstanding request was not cleared")
+	}
+}
+
+func TestCompactOutstandingRequestActivatesAfterSuccessfulSend(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	p.service.cfg.PeerRuntimeConfig.MaxMessageSize = 1
+	req := compactOutstandingTestRequest([32]byte{0x22})
+	if err := p.sendCompactOutstandingRequest(req); err == nil {
+		t.Fatal("oversized getblocktxn send should fail")
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("failed getblocktxn send left active outstanding request")
+	}
+
+	p = newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	if err := p.sendCompactOutstandingRequest(req); err != nil {
+		t.Fatalf("sendCompactOutstandingRequest: %v", err)
+	}
+	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockHash != req.BlockHash {
+		t.Fatalf("outstanding=%+v ok=%v, want sent request", snap, ok)
+	}
+	frame, err := readFrame(bytes.NewReader(p.conn.(*scriptedConn).Buffer.Bytes()), networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if err != nil {
+		t.Fatalf("read sent frame: %v", err)
+	}
+	if frame.Command != messageGetBlockTxn {
+		t.Fatalf("sent command=%q, want %q", frame.Command, messageGetBlockTxn)
+	}
+}
+
+func TestCompactOutstandingRequestDoesNotActivateOnEncodeError(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{}
+	req := compactOutstandingTestRequest([32]byte{0x44})
+	req.MissingIndexes = []uint64{maxCompactRelayIndexValue + 1}
+	if err := p.sendCompactOutstandingRequest(req); err == nil || !strings.Contains(err.Error(), "compact relay index out of range") {
+		t.Fatalf("sendCompactOutstandingRequest err=%v, want compact relay index out of range", err)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("encode failure left active outstanding request")
+	}
+	if got := p.conn.(*scriptedConn).Len(); got != 0 {
+		t.Fatalf("encode failure wrote %d bytes, want 0", got)
+	}
+}
+
+func TestExpiredCompactOutstandingSnapshotAndPopClearState(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	now := time.Unix(1000, 0)
+	p.service.cfg.Now = func() time.Time { return now }
+	req := compactOutstandingTestRequest([32]byte{0x55})
+
+	p.activateCompactOutstandingRequest(req)
+	now = now.Add(compactOutstandingRequestTTL)
+	if snap, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatalf("snapshot=%+v ok=%v, want expired request cleared", snap, ok)
+	}
+	p.compactMu.Lock()
+	snapshotCleared := p.compact.outstanding == nil
+	p.compactMu.Unlock()
+	if !snapshotCleared {
+		t.Fatal("expired snapshot left outstanding request active")
+	}
+
+	p.activateCompactOutstandingRequest(req)
+	now = now.Add(compactOutstandingRequestTTL)
+	if snap, ok := p.popCompactOutstandingRequest(); ok {
+		t.Fatalf("pop=%+v ok=%v, want expired request cleared", snap, ok)
+	}
+	p.compactMu.Lock()
+	popCleared := p.compact.outstanding == nil
+	p.compactMu.Unlock()
+	if !popCleared {
+		t.Fatal("expired pop left outstanding request active")
+	}
+}
+
+func TestPopCompactOutstandingRequestKeepsSnapshotAcrossExpiryRace(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	start := time.Unix(1000, 0)
+	current := start
+	p.service.cfg.Now = func() time.Time { return current }
+	blockHash := [32]byte{0x33}
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+
+	current = start.Add(compactOutstandingRequestTTL - time.Nanosecond)
+	calls := 0
+	p.service.cfg.Now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return current
+		}
+		return current.Add(time.Second)
+	}
+	snap, ok := p.popCompactOutstandingRequest()
+	if !ok || snap.BlockHash != blockHash {
+		t.Fatalf("pop snapshot=%+v ok=%v, want matching request", snap, ok)
+	}
+	if _, still := p.compactOutstandingRequestSnapshot(); still {
+		t.Fatal("popped outstanding request still active")
+	}
+}
+
+func TestFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	_, blockHash, err := parseRelayedBlock(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("parse genesis block: %v", err)
+	}
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	if err := p.handleBlock(node.DevnetGenesisBlockBytes()); err != nil {
+		t.Fatalf("handleBlock(genesis): %v", err)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("full-block accept did not clear matching compact outstanding request")
+	}
+}
+
+func TestAlreadyHaveFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := testPeerForService(h.service, "remote", 0)
+	_, blockHash, err := parseRelayedBlock(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("parse genesis block: %v", err)
+	}
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	summary, err := p.processRelayedBlock(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("processRelayedBlock(existing genesis): %v", err)
+	}
+	if summary != nil {
+		t.Fatalf("summary=%v, want nil for existing block", summary)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("already-have full block did not clear matching compact outstanding request")
+	}
+}
+
+func TestHasBlockErrorFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := testPeerForService(h.service, "remote", 0)
+	_, blockHash, err := parseRelayedBlock(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("parse genesis block: %v", err)
+	}
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	p.service.cfg.BlockStore = nil
+	if _, err := p.processRelayedBlock(node.DevnetGenesisBlockBytes()); err == nil {
+		t.Fatal("processRelayedBlock with nil blockstore unexpectedly succeeded")
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("has-block error full block did not clear matching compact outstanding request")
+	}
+}
+
+func TestOrphanFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 2)
+	p := testPeerForService(sink.service, "remote", 2)
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	summary, err := p.processRelayedBlock(blockBytes)
+	if err != nil {
+		t.Fatalf("processRelayedBlock(orphan): %v", err)
+	}
+	if summary != nil {
+		t.Fatalf("summary=%v, want nil for retained orphan", summary)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("retained full-block orphan did not clear matching compact outstanding request")
+	}
+}
+
+func TestApplyErrorFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
+	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	_, blockBytes := testHarnessBlockAtHeight(t, source, 1)
+	corrupted := append([]byte(nil), blockBytes...)
+	for i := 36; i < 68; i++ {
+		corrupted[i] = 0xff
+	}
+	_, blockHash, err := parseRelayedBlock(corrupted)
+	if err != nil {
+		t.Fatalf("parse corrupted block: %v", err)
+	}
+	p := testPeerForService(sink.service, "remote", 1)
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	if _, err := p.processRelayedBlock(corrupted); err == nil {
+		t.Fatal("processRelayedBlock(corrupted) unexpectedly succeeded")
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("apply-error full block did not clear matching compact outstanding request")
+	}
+}
+
+func compactOutstandingTestRequest(blockHash [32]byte) compactOutstandingRequest {
+	return compactOutstandingRequest{
+		BlockHash:          blockHash,
+		MissingIndexes:     []uint64{0},
+		MissingShortIDs:    []compactShortID{{0x01}},
+		Transactions:       [][]byte{nil},
+		BlockTxnPayloadCap: 64,
+	}
+}
+
 func TestRunBansUnexpectedBlockTxnCommandCap(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{reads: []scriptedRead{{
