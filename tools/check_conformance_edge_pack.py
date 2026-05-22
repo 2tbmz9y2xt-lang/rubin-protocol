@@ -133,8 +133,22 @@ def go_package_arg(raw_path: str) -> str:
     return f"./{package_dir.as_posix()}"
 
 
-def run_discovery_command(cmd: list[str], *, cwd: Path, command_runner, env: dict[str, str] | None = None) -> tuple[str, str | None]:
-    command_env = None if env is None else {**os.environ, **env}
+def run_discovery_command(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    command_runner,
+    env: dict[str, str | None] | None = None,
+    merge_stderr: bool = True,
+) -> tuple[str, str | None]:
+    command_env = None
+    if env is not None:
+        command_env = dict(os.environ)
+        for key, value in env.items():
+            if value is None:
+                command_env.pop(key, None)
+            else:
+                command_env[key] = value
     try:
         completed = command_runner(
             cmd,
@@ -154,7 +168,8 @@ def run_discovery_command(cmd: list[str], *, cwd: Path, command_runner, env: dic
         return "", f"runtime_evidence discovery command failed: {cmd[0]} exit {completed.returncode}"
     if not isinstance(completed.stdout, str) or not isinstance(completed.stderr, str):
         return "", "runtime_evidence discovery command produced malformed stdout"
-    return completed.stdout + completed.stderr, None
+    output = completed.stdout + completed.stderr if merge_stderr else completed.stdout
+    return output, None
 
 
 def go_discovery_env(temp_dir: str) -> dict[str, str]:
@@ -162,6 +177,18 @@ def go_discovery_env(temp_dir: str) -> dict[str, str]:
         "GOENV": "off",
         "GOFLAGS": "-buildvcs=false",
         "GOTMPDIR": temp_dir,
+    }
+
+
+def rust_discovery_env(temp_dir: str) -> dict[str, str | None]:
+    return {
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": str(Path(temp_dir) / "target"),
+        "CARGO_BUILD_TARGET": None,
+        "CARGO_ENCODED_RUSTFLAGS": None,
+        "RUSTC_WRAPPER": None,
+        "RUSTC_WORKSPACE_WRAPPER": None,
+        "RUSTFLAGS": None,
     }
 
 
@@ -252,11 +279,105 @@ def discovered_runtime_tests(
     *,
     repo_root: Path,
     expected_tests: list[str],
+    verify_rust_discovery: bool,
     command_runner,
 ) -> tuple[set[str], str | None]:
     if raw_path.startswith("clients/go/"):
         return go_file_discovered_tests(raw_path, repo_root=repo_root, expected_tests=expected_tests, command_runner=command_runner)
+    if verify_rust_discovery and raw_path.startswith("clients/rust/"):
+        return rust_file_discovered_tests(raw_path, repo_root=repo_root, expected_tests=expected_tests, command_runner=command_runner)
     return set(), None
+
+
+def rust_package_name(crate_root: Path) -> tuple[str, str | None]:
+    cargo_toml = crate_root / "Cargo.toml"
+    try:
+        lines = cargo_toml.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", f"runtime_evidence discovery command produced unreadable Cargo.toml: {exc}"
+    in_package = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "[package]":
+            in_package = True
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_package = False
+            continue
+        if in_package:
+            match = re.match(r'name\s*=\s*"([^"]+)"\s*$', stripped)
+            if match:
+                return match.group(1), None
+    return "", "runtime_evidence discovery command could not determine Rust package name"
+
+
+def rust_module_scope(raw_path: str) -> tuple[Path, str, str | None]:
+    parts = Path(raw_path).parts
+    if len(parts) < 6 or parts[:3] != ("clients", "rust", "crates"):
+        return Path(), "", "unsupported Rust runtime evidence source scope"
+    try:
+        src_index = parts.index("src", 4)
+    except ValueError:
+        return Path(), "", "unsupported Rust runtime evidence source scope"
+    crate_root = Path(*parts[:src_index])
+    source_parts = parts[src_index + 1 :]
+    if not source_parts or source_parts[0] == "bin" or source_parts[-1] in {"lib.rs", "main.rs", "mod.rs"}:
+        return Path(), "", "unsupported Rust runtime evidence source scope"
+    module_parts = list(source_parts)
+    module_parts[-1] = Path(module_parts[-1]).stem
+    return crate_root, "::".join(module_parts), None
+
+
+def rust_listed_tests(output: str, module_scope: str) -> set[str]:
+    tests: set[str] = set()
+    prefix = f"{module_scope}::"
+    for line in output.splitlines():
+        stripped = line.strip()
+        match = re.match(r"([^:][^ ]*(?:::[^ ]+)*)\: test$", stripped)
+        if match is None:
+            continue
+        test_path = match.group(1)
+        if test_path.startswith(prefix):
+            tests.add(test_path.rsplit("::", 1)[-1])
+    return tests
+
+
+def rust_file_discovered_tests(
+    raw_path: str,
+    *,
+    repo_root: Path,
+    expected_tests: list[str],
+    command_runner,
+) -> tuple[set[str], str | None]:
+    crate_rel, module_scope, scope_error = rust_module_scope(raw_path)
+    if scope_error is not None:
+        return set(), scope_error
+    package, package_error = rust_package_name(repo_root / crate_rel)
+    if package_error is not None:
+        return set(), package_error
+    rust_root = repo_root / "clients" / "rust"
+    with tempfile.TemporaryDirectory(prefix="rubin-rust-test-list-") as temp_dir:
+        env = rust_discovery_env(temp_dir)
+        output, error = run_discovery_command(
+            ["cargo", "test", "--locked", "-p", package, "--", "--list"],
+            cwd=rust_root,
+            env=env,
+            command_runner=command_runner,
+            merge_stderr=False,
+        )
+        if error is not None:
+            return set(), error
+        ignored_output, ignored_error = run_discovery_command(
+            ["cargo", "test", "--locked", "-p", package, "--", "--ignored", "--list"],
+            cwd=rust_root,
+            env=env,
+            command_runner=command_runner,
+            merge_stderr=False,
+        )
+        if ignored_error is not None:
+            return set(), ignored_error
+    active_tests = rust_listed_tests(output, module_scope) - rust_listed_tests(ignored_output, module_scope)
+    return {name for name in expected_tests if name in active_tests}, None
 
 
 def runtime_evidence_errors(
@@ -264,6 +385,7 @@ def runtime_evidence_errors(
     *,
     repo_root: Path,
     verify_go_discovery: bool,
+    verify_rust_discovery: bool,
     command_runner,
 ) -> list[str]:
     if not isinstance(value, dict):
@@ -289,11 +411,15 @@ def runtime_evidence_errors(
         if tests_error is not None:
             errors.append(tests_error)
         errors.extend(path_errors)
-        if verify_go_discovery and raw_path.startswith("clients/go/") and tests_error is None and not path_errors:
+        if (
+            (verify_go_discovery and raw_path.startswith("clients/go/"))
+            or (verify_rust_discovery and raw_path.startswith("clients/rust/"))
+        ) and tests_error is None and not path_errors:
             present, discovery_error = discovered_runtime_tests(
                 raw_path,
                 repo_root=repo_root,
                 expected_tests=tests,
+                verify_rust_discovery=verify_rust_discovery,
                 command_runner=command_runner,
             )
             if discovery_error is not None:
@@ -311,6 +437,11 @@ def main(argv: list[str] | None = None, *, command_runner=subprocess.run) -> int
         "--verify-runtime-evidence-go",
         action="store_true",
         help="run opt-in Go toolchain discovery for Go runtime_evidence test names",
+    )
+    parser.add_argument(
+        "--verify-runtime-evidence-rust",
+        action="store_true",
+        help="run opt-in Rust/Cargo discovery for Rust runtime_evidence test names",
     )
     args = parser.parse_args([] if argv is None else argv)
 
@@ -411,6 +542,7 @@ def main(argv: list[str] | None = None, *, command_runner=subprocess.run) -> int
                 domain.get("runtime_evidence"),
                 repo_root=repo_root,
                 verify_go_discovery=args.verify_runtime_evidence_go,
+                verify_rust_discovery=args.verify_runtime_evidence_rust,
                 command_runner=command_runner,
             ):
                 print(f"ERROR: domain {name}: {error}", file=sys.stderr)
