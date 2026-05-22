@@ -87,6 +87,20 @@ def make_repo(
     )
 
 
+def set_runtime_evidence(root: Path, runtime_evidence: object) -> None:
+    baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline["domains"][0]["runtime_evidence"] = runtime_evidence
+    write_json(baseline_path, baseline)
+
+
+def write_runtime_source(root: Path, rel_path: str, text: str = "// test source\n") -> Path:
+    path = root / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 class EdgePackCheckerTests(unittest.TestCase):
     def test_clean_accounting_passes_with_deferred_fuzz_formal(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -569,6 +583,147 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("unknown formal coverage status maybe", captured.getvalue())
+
+    def test_runtime_evidence_schema_path_success_without_test_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            write_runtime_source(root, "clients/go/node/sync_reorg_test.go")
+            write_runtime_source(root, "clients/rust/crates/rubin-node/src/sync_reorg.rs")
+            set_runtime_evidence(
+                root,
+                {
+                    "tests_by_file": {
+                        "clients/go/node/sync_reorg_test.go": ["TestDeclaredButNotScanned"],
+                        "clients/rust/crates/rubin-node/src/sync_reorg.rs": ["declared_but_not_scanned"],
+                    }
+                },
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stdout(captured):
+                rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
+    def test_runtime_evidence_rejects_schema_path_and_source_boundary_errors(self) -> None:
+        def base_runtime_evidence(path: str = "clients/go/node/sync_reorg_test.go") -> dict:
+            return {"tests_by_file": {path: ["TestRuntimeEvidence"]}}
+
+        cases = [
+            ("scalar runtime_evidence", "invalid", None, "runtime_evidence must be object"),
+            (
+                "missing tests_by_file",
+                {},
+                None,
+                "runtime_evidence.tests_by_file must be present",
+            ),
+            (
+                "empty tests_by_file",
+                {"tests_by_file": {}},
+                None,
+                "runtime_evidence.tests_by_file must be non-empty object",
+            ),
+            (
+                "blank path key",
+                {"tests_by_file": {"   ": ["TestRuntimeEvidence"]}},
+                None,
+                "runtime_evidence.tests_by_file keys must be non-empty repo-relative strings",
+            ),
+            (
+                "empty test list",
+                {"tests_by_file": {"clients/go/node/sync_reorg_test.go": []}},
+                None,
+                "runtime_evidence.tests_by_file[clients/go/node/sync_reorg_test.go] must be non-empty list",
+            ),
+            (
+                "duplicate test names",
+                {"tests_by_file": {"clients/go/node/sync_reorg_test.go": ["TestA", "TestA"]}},
+                None,
+                "runtime_evidence.tests_by_file[clients/go/node/sync_reorg_test.go] entries must be unique",
+            ),
+            (
+                "absolute path",
+                base_runtime_evidence("/clients/go/node/sync_reorg_test.go"),
+                None,
+                "runtime_evidence source path must be repo-relative",
+            ),
+            (
+                "traversal path",
+                base_runtime_evidence("clients/go/../node/sync_reorg_test.go"),
+                None,
+                "runtime_evidence source path must not contain '..'",
+            ),
+            (
+                "unsupported root",
+                base_runtime_evidence("scripts/sync_reorg_test.py"),
+                lambda root: write_runtime_source(root, "scripts/sync_reorg_test.py"),
+                "runtime_evidence source path must be under clients/go or clients/rust",
+            ),
+            (
+                "go wrong suffix",
+                base_runtime_evidence("clients/go/node/sync_reorg.go"),
+                lambda root: write_runtime_source(root, "clients/go/node/sync_reorg.go"),
+                "Go runtime evidence paths must end with _test.go",
+            ),
+            (
+                "rust wrong suffix",
+                base_runtime_evidence("clients/rust/crates/rubin-node/src/sync_reorg_test.go"),
+                lambda root: write_runtime_source(root, "clients/rust/crates/rubin-node/src/sync_reorg_test.go"),
+                "Rust runtime evidence paths must end with .rs",
+            ),
+            (
+                "missing source",
+                base_runtime_evidence(),
+                lambda root: None,
+                "runtime_evidence source path does not exist",
+            ),
+            (
+                "directory source",
+                base_runtime_evidence(),
+                lambda root: (root / "clients/go/node/sync_reorg_test.go").mkdir(parents=True),
+                "runtime_evidence source path must be a regular file",
+            ),
+            (
+                "oversize source",
+                base_runtime_evidence(),
+                lambda root: write_runtime_source(
+                    root,
+                    "clients/go/node/sync_reorg_test.go",
+                    "x" * (m.RUNTIME_EVIDENCE_MAX_SOURCE_BYTES + 1),
+                ),
+                "runtime_evidence source file exceeds max size",
+            ),
+        ]
+        for name, runtime_evidence, setup, expected in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                make_repo(root)
+                if setup is None:
+                    write_runtime_source(root, "clients/go/node/sync_reorg_test.go")
+                else:
+                    setup(root)
+                set_runtime_evidence(root, runtime_evidence)
+                captured = io.StringIO()
+                with chdir(root), contextlib.redirect_stderr(captured):
+                    rc = m.main()
+            self.assertEqual(rc, 1)
+            self.assertIn(expected, captured.getvalue())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink support unavailable")
+    def test_runtime_evidence_rejects_symlink_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            target = write_runtime_source(root, "external.go")
+            link = root / "clients/go/node/sync_reorg_test.go"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
+            set_runtime_evidence(root, {"tests_by_file": {"clients/go/node/sync_reorg_test.go": ["TestA"]}})
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("runtime_evidence source path must not contain symlinks", captured.getvalue())
 
 
 if __name__ == "__main__":

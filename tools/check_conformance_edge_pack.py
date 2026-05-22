@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import stat
 import sys
 from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
+RUNTIME_EVIDENCE_MAX_SOURCE_BYTES = 1_000_000
 
 
 def fail(msg: str) -> int:
@@ -70,6 +72,79 @@ def string_list(value: object, *, field_name: str, require_non_empty: bool = Fal
     if len(set(strings)) != len(strings):
         return [], f"{field_name} entries must be unique"
     return strings, None
+
+
+def path_contains_symlink(repo_root: Path, rel_path: Path) -> bool:
+    current = repo_root
+    for part in rel_path.parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def runtime_source_path_errors(raw_path: str, *, repo_root: Path) -> list[str]:
+    rel_path = Path(raw_path)
+    if rel_path.is_absolute():
+        return ["runtime_evidence source path must be repo-relative"]
+    if ".." in raw_path:
+        return ["runtime_evidence source path must not contain '..'"]
+
+    parts = rel_path.parts
+    if len(parts) < 2 or parts[0] != "clients" or parts[1] not in {"go", "rust"}:
+        return ["runtime_evidence source path must be under clients/go or clients/rust"]
+    if parts[1] == "go" and not raw_path.endswith("_test.go"):
+        return ["Go runtime evidence paths must end with _test.go"]
+    if parts[1] == "rust" and not raw_path.endswith(".rs"):
+        return ["Rust runtime evidence paths must end with .rs"]
+
+    source_path = repo_root / rel_path
+    if path_contains_symlink(repo_root, rel_path):
+        return ["runtime_evidence source path must not contain symlinks"]
+    try:
+        resolved = source_path.resolve(strict=True)
+    except FileNotFoundError:
+        return ["runtime_evidence source path does not exist"]
+    except OSError as exc:
+        return [f"runtime_evidence source path cannot be resolved: {exc}"]
+
+    if not resolved.is_relative_to(repo_root):
+        return ["runtime_evidence source path escapes repo root"]
+    try:
+        source_stat = source_path.stat()
+    except OSError as exc:
+        return [f"runtime_evidence source path cannot be statted: {exc}"]
+    if not stat.S_ISREG(source_stat.st_mode):
+        return ["runtime_evidence source path must be a regular file"]
+    if source_stat.st_size > RUNTIME_EVIDENCE_MAX_SOURCE_BYTES:
+        return ["runtime_evidence source file exceeds max size"]
+    return []
+
+
+def runtime_evidence_errors(value: object, *, repo_root: Path) -> list[str]:
+    if not isinstance(value, dict):
+        return ["runtime_evidence must be object"]
+    if "tests_by_file" not in value:
+        return ["runtime_evidence.tests_by_file must be present"]
+
+    tests_by_file = value.get("tests_by_file")
+    if not isinstance(tests_by_file, dict) or not tests_by_file:
+        return ["runtime_evidence.tests_by_file must be non-empty object"]
+
+    errors: list[str] = []
+    for raw_path, raw_tests in tests_by_file.items():
+        if not isinstance(raw_path, str) or not raw_path.strip() or raw_path != raw_path.strip():
+            errors.append("runtime_evidence.tests_by_file keys must be non-empty repo-relative strings")
+            continue
+        _, tests_error = string_list(
+            raw_tests,
+            field_name=f"runtime_evidence.tests_by_file[{raw_path}]",
+            require_non_empty=True,
+        )
+        if tests_error is not None:
+            errors.append(tests_error)
+        errors.extend(runtime_source_path_errors(raw_path, repo_root=repo_root))
+    return errors
 
 
 def main() -> int:
@@ -164,6 +239,11 @@ def main() -> int:
             print(f"ERROR: domain {name}: coverage_accounting must be object", file=sys.stderr)
             failures += 1
             continue
+
+        if "runtime_evidence" in domain:
+            for error in runtime_evidence_errors(domain.get("runtime_evidence"), repo_root=repo_root):
+                print(f"ERROR: domain {name}: {error}", file=sys.stderr)
+                failures += 1
 
         total = 0
         missing_gates: list[str] = []
