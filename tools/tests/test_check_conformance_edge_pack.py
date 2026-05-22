@@ -123,21 +123,14 @@ class EdgePackCheckerTests(unittest.TestCase):
             rust_path = "clients/rust/crates/rubin-node/src/sync_reorg.rs"
             (root / go_path).parent.mkdir(parents=True, exist_ok=True)
             (root / rust_path).parent.mkdir(parents=True, exist_ok=True)
-            (root / go_path).write_text(
-                "package node\n\nimport tb `testing`\n\nfunc TestRuntimeReorg(t *tb.T) {}\n",
-                encoding="utf-8",
-            )
-            (root / rust_path).write_text(
-                "#[cfg(test)]\nmod tests {\nfn helper<'a>() {}\n#[test] fn runtime_reorg_test() {}\n}\n",
-                encoding="utf-8",
-            )
+            go_source = "package node\n\nimport \"fmt\"\nimport tb `testing`\n\nvar _ = fmt.Sprintf\nfunc TestRuntimeReorg(t * tb.T) {}\n"
+            rust_source = "#[cfg(test)]\nmod tests {\nfn helper<'a>() {}\n#[test] #[should_panic] fn runtime_reorg_test() { panic!() }\n}\n"
+            (root / go_path).write_text(go_source, encoding="utf-8")
+            (root / rust_path).write_text(rust_source, encoding="utf-8")
             baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
             baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
             baseline["domains"][0]["runtime_evidence"] = {
-                "tests_by_file": {
-                    go_path: ["TestRuntimeReorg"],
-                    rust_path: ["runtime_reorg_test"],
-                }
+                "tests_by_file": {go_path: ["TestRuntimeReorg"], rust_path: ["runtime_reorg_test"]}
             }
             write_json(baseline_path, baseline)
             captured = io.StringIO()
@@ -165,40 +158,21 @@ class EdgePackCheckerTests(unittest.TestCase):
             cases = [
                 (
                     "clients/go/node/sync_reorg_test.go",
-                    "package node\n\nfunc Testlower() {}\nfunc Test1Bad(t *testing.T) {}\nfunc Test_Bad(t *testing.T) {}\nfunc TestWrong(t string) {}\nfunc TestExtra(t *testing.T, n int) {}\n",
+                    "package node\n\nimport \"testing\"\n\nfunc Testlower() {}\nfunc Test1Bad(t *testing.T) {}\nfunc Test_Bad(t *testing.T) {}\nfunc TestWrong(t string) {}\nfunc TestExtra(t *testing.T, n int) {}\n",
                     ["Testlower", "Test1Bad", "Test_Bad", "TestWrong", "TestExtra"],
                     "Testlower, Test1Bad, Test_Bad, TestWrong, TestExtra",
                 ),
-                (
-                    "clients/go/node/sync_reorg.go",
-                    "package node\n\nimport \"testing\"\n\nfunc TestWrongFile(t *testing.T) {}\n",
-                    ["TestWrongFile"],
-                    "must end with _test.go",
-                ),
-                (
-                    "clients/go/node/sync_reorg_test.go",
-                    "package node\n/*\nimport \"testing\"\n*/\nfunc TestCommentImport(t *testing.T) {}\n",
-                    ["TestCommentImport"],
-                    "TestCommentImport",
-                ),
+                ("clients/go/node/sync_reorg.go", "package node\n\nimport \"testing\"\n\nfunc TestWrongFile(t *testing.T) {}\n", ["TestWrongFile"], "must end with _test.go"),
+                ("clients/go/node/sync_reorg_test.go", "package node\n/*\nimport \"testing\"\n*/\nfunc TestCommentImport(t *testing.T) {}\n", ["TestCommentImport"], "TestCommentImport"),
                 (
                     "clients/go/node/sync_reorg_test.go",
                     "package node\nvar _ = `\nimport \"testing\"\n`\nvar _ = \"\\nimport \\\"testing\\\"\\n\"\nfunc TestRawImport(t *testing.T) {}\nfunc TestStringImport(t *testing.T) {}\n",
                     ["TestRawImport", "TestStringImport"],
                     "TestRawImport, TestStringImport",
                 ),
-                (
-                    "clients/go/node/sync_reorg_test.go",
-                    "/* lead */\n//go:build never\n\npackage node\n\nimport \"testing\"\n\nfunc TestTaggedOut(t *testing.T) {}\n",
-                    ["TestTaggedOut"],
-                    "TestTaggedOut",
-                ),
-                (
-                    "clients/go/node/sync_reorg_test.go",
-                    "package node\n\nfunc TestNoImport(t *testing.T) {}\n",
-                    ["TestNoImport"],
-                    "TestNoImport",
-                ),
+                ("clients/go/node/sync_reorg_test.go", "/* lead */\n//go:build never\n\npackage node\n\nimport \"testing\"\n\nfunc TestTaggedOut(t *testing.T) {}\n", ["TestTaggedOut"], "TestTaggedOut"),
+                ("clients/go/node/sync_reorg_windows_test.go", "package node\n\nimport \"testing\"\n\nfunc TestTaggedByFileName(t *testing.T) {}\n", ["TestTaggedByFileName"], "must not use GOOS/GOARCH file constraints"),
+                ("clients/go/node/sync_reorg_test.go", "package node\n\nfunc TestNoImport(t *testing.T) {}\n", ["TestNoImport"], "TestNoImport"),
             ]
             for rel_path, source, tests, want in cases:
                 with self.subTest(want=want):

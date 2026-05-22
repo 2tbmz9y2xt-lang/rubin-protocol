@@ -10,11 +10,13 @@ CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
 GO_TEST_FUNC_RE = re.compile(
     r"(?m)^func\s+(Test[A-Z][A-Za-z0-9_]*)\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?"
-    r"\*(?P<pkg>[A-Za-z_][A-Za-z0-9_]*)\.T\s*\)\s*\{"
+    r"\*\s*(?P<pkg>[A-Za-z_][A-Za-z0-9_]*)\.T\s*\)\s*\{"
 )
 GO_IMPORT_BLOCK_RE = re.compile(r"^import\s*\(\s*$")
+GO_ANY_SINGLE_IMPORT_RE = re.compile(r'^import\s+(?:(?:[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?(?:"[^"]+"|`[^`]+`)\s*$')
 GO_IMPORT_SPEC_RE = re.compile(r'^(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?(?:"testing"|`testing`)\s*$')
 GO_SINGLE_IMPORT_RE = re.compile(r'^import\s+(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?(?:"testing"|`testing`)\s*$')
+GO_PLATFORM_TAGS = set("386 aix amd64 android arm arm64 darwin dragonfly freebsd illumos ios js linux loong64 mips mips64 mips64le mipsle netbsd openbsd plan9 ppc64 ppc64le riscv64 s390x solaris wasm wasip1 windows zos".split())
 RUST_TEST_ATTR_RE = re.compile(r"^\s*#\s*\[\s*test\s*\]\s*$")
 RUST_CFG_TEST_ATTR_RE = re.compile(r"^\s*#\s*!?\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
 RUST_INACTIVE_ATTR_RE = re.compile(r"^\s*#\s*!?\s*\[\s*(?:ignore\b|cfg\s*\(|cfg_attr\s*\([^]]*\bignore\b)")
@@ -183,6 +185,8 @@ def go_testing_aliases(source: str) -> set[str]:
                 continue
             match = GO_SINGLE_IMPORT_RE.match(line)
             if not match:
+                if GO_ANY_SINGLE_IMPORT_RE.match(line):
+                    continue
                 break
         elif line == ")":
             in_import_block = False
@@ -226,21 +230,25 @@ def rust_test_names(source: str) -> set[str]:
                 inactive_depth = max(0, line.count("{") - line.count("}"))
                 pending_inactive_mod = False
             continue
-        if attr or line.startswith(("#[", "#![")):
+        while attr or line.startswith(("#[", "#![")):
             if "]" not in line:
                 attr = f"{attr} {line}".strip()
-                continue
+                line = ""
+                break
             head, line = line.split("]", 1)
             item_attr = f"{attr} {head}]".strip()
             attr = ""
             if item_attr.startswith("#!["):
                 if RUST_INACTIVE_ATTR_RE.match(item_attr) and not RUST_CFG_TEST_ATTR_RE.match(item_attr):
                     inactive_depth = 1
+                    line = ""
                 continue
             attrs.append(item_attr)
             line = line.strip()
             if not line:
-                continue
+                break
+        if not line:
+            continue
         if attrs:
             inactive = any(RUST_INACTIVE_ATTR_RE.match(attr) and not RUST_CFG_TEST_ATTR_RE.match(attr) for attr in attrs)
             if inactive and re.match(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\b", line):
@@ -289,6 +297,9 @@ def validate_runtime_evidence(repo_root: Path, domain_name: str, runtime_evidenc
         if source_path.suffix == ".go":
             if not source_path.name.endswith("_test.go"):
                 errors.append(f"domain {domain_name}: Go runtime_evidence source {raw_path} must end with _test.go")
+                continue
+            if source_path.stem.split("_")[-2] in GO_PLATFORM_TAGS:
+                errors.append(f"domain {domain_name}: Go runtime_evidence source {raw_path} must not use GOOS/GOARCH file constraints")
                 continue
             present = go_test_names(source)
         elif source_path.suffix == ".rs":
