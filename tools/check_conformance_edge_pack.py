@@ -13,6 +13,7 @@ GO_IMPORT_SPEC_RE = re.compile(r'^(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?
 GO_PLATFORM_TAGS = set("386 aix amd64 android arm arm64 darwin dragonfly freebsd illumos ios js linux loong64 mips mips64 mips64le mipsle netbsd openbsd plan9 ppc64 ppc64le riscv64 s390x solaris wasm wasip1 windows zos".split())
 RUST_TEST_ATTR_RE = re.compile(r"^\s*#\s*\[\s*test\s*\]\s*$")
 RUST_FN_RE = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+MAX_RUNTIME_EVIDENCE_SOURCE_BYTES = 1_000_000
 
 
 def fail(msg: str) -> int:
@@ -102,10 +103,9 @@ def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> s
         return n
     while i < n:
         if source.startswith("//", i):
-            preserve = language == "go" and (source.startswith("//go:build", i) or re.match(r"//\s*\+build\b", source[i:]))
             while i < n:
                 ch = source[i]
-                out.append(ch) if preserve else put_masked(ch)
+                put_masked(ch)
                 i += 1
                 if ch == "\n":
                     break
@@ -177,36 +177,33 @@ def go_testing_aliases(source: str) -> set[str]:
     return aliases
 def go_import_aliases(lines: list[str]) -> set[str]:
     return {(m.group("alias") or "testing") for line in lines if (m := GO_IMPORT_SPEC_RE.match(line.strip())) and (m.group("alias") or "testing") != "_"}
-def split_cfg_args(args: str) -> list[str]:
-    parts: list[str] = []
-    start = depth = 0
-    for idx, ch in enumerate(args):
-        depth += (ch == "(") - (ch == ")")
-        if ch == "," and depth == 0:
-            parts.append(args[start:idx])
-            start = idx + 1
-    return [part for part in [*parts, args[start:]] if part.strip()]
-def rust_cfg_active_under_test(expr: str) -> bool:
-    expr = re.sub(r"\s+", "", expr)
-    if expr == "test":
-        return True
-    if not (match := re.match(r"(not|any|all)\((.*)\)$", expr)):
+def go_has_build_constraint(source: str) -> bool:
+    for raw_line in source.splitlines():
+        line = raw_line.lstrip("\ufeff").strip()
+        if not line or line.startswith("/*") or line.startswith("*"):
+            continue
+        if line.startswith("//go:build") or re.match(r"//\s*\+build\b", line):
+            return True
+        if line.startswith("//"):
+            continue
         return False
-    op, body = match.groups()
-    values = [rust_cfg_active_under_test(part) for part in split_cfg_args(body)]
-    return (not values[0]) if op == "not" and values else (any(values) if op == "any" else all(values))
+    return False
 def rust_attr_inactive(attr: str) -> bool:
     body = re.sub(r"^\s*#\s*!?\s*\[\s*|\s*\]\s*$", "", attr)
     if re.match(r"ignore\b", body):
         return True
-    if body.startswith("cfg_attr"):
-        return "ignore" in body and rust_cfg_active_under_test(split_cfg_args(body.removeprefix("cfg_attr(").removesuffix(")"))[0])
-    return body.startswith("cfg") and not rust_cfg_active_under_test(body[body.find("(") + 1 : body.rfind(")")])
+    return body.startswith("cfg") and body[body.find("(") + 1 : body.rfind(")")].strip() != "test"
+def rust_has_unsupported_cfg_attr(source: str) -> bool:
+    masked_source = mask_non_code(source, language="rust")
+    for raw_line in masked_source.splitlines():
+        body = re.sub(r"^\s*#\s*!?\s*\[\s*|\s*\]\s*$", "", raw_line.strip()) if raw_line.strip().startswith(("#[", "#![")) else ""
+        if body.startswith("cfg_attr") or (body.startswith("cfg") and body[body.find("(") + 1 : body.rfind(")")].strip() != "test"):
+            return True
+    return False
 def rust_test_names(source: str) -> set[str]:
     names: set[str] = set()
     attrs: list[str] = []
     attr = ""
-    pending_inactive_mod = False
     inactive_depth = 0
     masked_source = mask_non_code(source, language="rust")
     masked_source = re.sub(r"'(?:\\(?:u\{[0-9A-Fa-f_]+\}|.)|[^\\'\n])'", lambda m: " " * len(m.group(0)), masked_source)
@@ -216,11 +213,6 @@ def rust_test_names(source: str) -> set[str]:
             continue
         if inactive_depth:
             inactive_depth = max(0, inactive_depth + line.count("{") - line.count("}"))
-            continue
-        if pending_inactive_mod:
-            if "{" in line or ";" in line:
-                inactive_depth = max(0, line.count("{") - line.count("}"))
-                pending_inactive_mod = False
             continue
         while attr or line.startswith(("#[", "#![")):
             if "]" not in line:
@@ -243,11 +235,9 @@ def rust_test_names(source: str) -> set[str]:
             continue
         if attrs:
             inactive = any(rust_attr_inactive(attr) for attr in attrs)
-            if inactive and re.match(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\b", line):
+            if inactive:
                 if "{" in line:
                     inactive_depth = max(0, line.count("{") - line.count("}"))
-                elif ";" not in line:
-                    pending_inactive_mod = True
                 attrs = []
                 continue
             match = RUST_FN_RE.match(line)
@@ -281,6 +271,21 @@ def validate_runtime_evidence(repo_root: Path, domain_name: str, runtime_evidenc
             continue
         source_path = repo_root / rel_path
         try:
+            resolved_source_path = source_path.resolve()
+            source_stat = source_path.stat()
+        except OSError as exc:
+            errors.append(f"domain {domain_name}: cannot resolve runtime_evidence source {raw_path}: {exc}")
+            continue
+        if not resolved_source_path.is_relative_to(repo_root.resolve()):
+            errors.append(f"domain {domain_name}: runtime_evidence source {raw_path} must stay under repo root")
+            continue
+        if source_path.is_symlink() or not source_path.is_file():
+            errors.append(f"domain {domain_name}: runtime_evidence source {raw_path} must be a regular file")
+            continue
+        if source_stat.st_size > MAX_RUNTIME_EVIDENCE_SOURCE_BYTES:
+            errors.append(f"domain {domain_name}: runtime_evidence source {raw_path} exceeds size limit")
+            continue
+        try:
             source = source_path.read_text(encoding="utf-8")
         except OSError as exc:
             errors.append(f"domain {domain_name}: cannot read runtime_evidence source {raw_path}: {exc}")
@@ -292,8 +297,14 @@ def validate_runtime_evidence(repo_root: Path, domain_name: str, runtime_evidenc
             if source_path.stem.split("_")[-2] in GO_PLATFORM_TAGS:
                 errors.append(f"domain {domain_name}: Go runtime_evidence source {raw_path} must not use GOOS/GOARCH file constraints")
                 continue
+            if go_has_build_constraint(source):
+                errors.append(f"domain {domain_name}: Go runtime_evidence source {raw_path} must not use build constraints")
+                continue
             present = go_test_names(source)
         elif source_path.suffix == ".rs":
+            if rust_has_unsupported_cfg_attr(source):
+                errors.append(f"domain {domain_name}: Rust runtime_evidence source {raw_path} must not use cfg/cfg_attr gates other than cfg(test)")
+                continue
             present = rust_test_names(source)
         else:
             errors.append(f"domain {domain_name}: unsupported runtime_evidence source type {raw_path}")
