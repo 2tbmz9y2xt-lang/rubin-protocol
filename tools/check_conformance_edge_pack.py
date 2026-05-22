@@ -13,6 +13,9 @@ GO_TEST_FUNC_RE = re.compile(
 )
 RUST_ATTR_RE = re.compile(r"^#\s*\[[^\]]+\]\s*$")
 RUST_TEST_ATTR_RE = re.compile(r"^#\s*\[\s*test\s*\]\s*$")
+RUST_CFG_ATTR_RE = re.compile(r"^#\s*\[\s*cfg\s*\(")
+RUST_CFG_TEST_ATTR_RE = re.compile(r"^#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
+RUST_IGNORE_ATTR_RE = re.compile(r"^#\s*\[\s*ignore(?:\s*(?:\([^]]*\)|=[^]]+))?\s*\]\s*$")
 RUST_FN_RE = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
@@ -217,21 +220,38 @@ def mask_non_code(source: str, *, language: str) -> str:
 
 def rust_test_names(source: str) -> set[str]:
     names: set[str] = set()
-    pending_test = False
+    attrs: list[str] = []
     for raw_line in source.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         if RUST_ATTR_RE.match(line):
-            if RUST_TEST_ATTR_RE.match(line):
-                pending_test = True
+            attrs.append(line)
             continue
-        if pending_test:
-            match = RUST_FN_RE.match(line)
-            if match:
-                names.add(match.group(1))
-            pending_test = False
+        match = RUST_FN_RE.match(line)
+        if match and any(RUST_TEST_ATTR_RE.match(attr) for attr in attrs) and not rust_attrs_disable_test(attrs):
+            names.add(match.group(1))
+        attrs = []
     return names
+
+
+def rust_attrs_disable_test(attrs: list[str]) -> bool:
+    for attr in attrs:
+        if RUST_IGNORE_ATTR_RE.match(attr):
+            return True
+        if RUST_CFG_ATTR_RE.match(attr) and not RUST_CFG_TEST_ATTR_RE.match(attr):
+            return True
+    return False
+
+
+def go_file_has_build_constraints(source: str) -> bool:
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if line.startswith("package "):
+            return False
+        if line.startswith("//go:build") or line.startswith("// +build"):
+            return True
+    return False
 
 
 def source_test_names(path: Path) -> tuple[set[str], str | None]:
@@ -241,6 +261,8 @@ def source_test_names(path: Path) -> tuple[set[str], str | None]:
         return set(), f"could not read {path}: {exc}"
     if path.suffix == ".go":
         if not path.name.endswith("_test.go"):
+            return set(), None
+        if go_file_has_build_constraints(source):
             return set(), None
         masked = mask_non_code(source, language="go")
         return {name for name in GO_TEST_FUNC_RE.findall(masked) if is_go_test_name(name)}, None
