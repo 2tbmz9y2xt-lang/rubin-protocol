@@ -123,16 +123,16 @@ class EdgePackCheckerTests(unittest.TestCase):
             rust_path = "clients/rust/crates/rubin-node/src/sync_reorg.rs"
             (root / go_path).parent.mkdir(parents=True, exist_ok=True)
             (root / rust_path).parent.mkdir(parents=True, exist_ok=True)
-            go_source = "\ufeffpackage node\n\nimport \"fmt\"\nimport . `testing`\n\nvar _ = fmt.Sprintf\nfunc TestRuntimeReorg(t * T) {}\nfunc Test1Bad(t *T) {}\nfunc Test_Bad(t *T) {}\n"
-            rust_source = "#[cfg(test)]\nmod tests {\nfn helper<'a>() {}\n#[cfg(any(test, feature = \"x\"))]\n#[test] #[should_panic] fn runtime_reorg_test() { panic!() }\n#[cfg_attr(not(test), ignore)]\n#[test] fn runtime_reorg_cfg_attr_test() {}\n}\n"
+            go_source = "\ufeffpackage node\n\nimport (\"fmt\"; . `testing`)\n\nvar _ = fmt.Sprintf\nfunc TestRuntimeReorg(t * T) {}\nfunc TestMultiline(\n    t *T,\n) {}\nfunc Test1Bad(t *T) {}\nfunc Test_Bad(t *T) {}\n"
+            rust_source = "#[cfg(test)]\nmod tests {\nfn helper<'a>() {}\n#[cfg(any(test, feature = \"x\"))]\n#[test] #[should_panic] fn runtime_reorg_test() { panic!() }\n#[cfg(all(test,))]\n#[test] fn runtime_reorg_cfg_trailing_test() {}\n#[cfg_attr(not(test), ignore)]\n#[test] fn runtime_reorg_cfg_attr_test() {}\n}\n"
             (root / go_path).write_text(go_source, encoding="utf-8")
             (root / rust_path).write_text(rust_source, encoding="utf-8")
             baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
             baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
             baseline["domains"][0]["runtime_evidence"] = {
                 "tests_by_file": {
-                    go_path: ["TestRuntimeReorg", "Test1Bad", "Test_Bad"],
-                    rust_path: ["runtime_reorg_test", "runtime_reorg_cfg_attr_test"],
+                    go_path: ["TestRuntimeReorg", "TestMultiline", "Test1Bad", "Test_Bad"],
+                    rust_path: ["runtime_reorg_test", "runtime_reorg_cfg_trailing_test", "runtime_reorg_cfg_attr_test"],
                 }
             }
             write_json(baseline_path, baseline)
@@ -173,7 +173,7 @@ class EdgePackCheckerTests(unittest.TestCase):
                     ["TestRawImport", "TestStringImport"],
                     "TestRawImport, TestStringImport",
                 ),
-                ("clients/go/node/sync_reorg_test.go", "/* lead */\n//go:build never\n\npackage node\n\nimport \"testing\"\n\nfunc TestTaggedOut(t *testing.T) {}\n", ["TestTaggedOut"], "TestTaggedOut"),
+                ("clients/go/node/sync_reorg_test.go", "/* lead */\n//\t+build never\n\npackage node\n\nimport \"testing\"\n\nfunc TestTaggedOut(t *testing.T) {}\n", ["TestTaggedOut"], "TestTaggedOut"),
                 ("clients/go/node/sync_reorg_windows_test.go", "package node\n\nimport \"testing\"\n\nfunc TestTaggedByFileName(t *testing.T) {}\n", ["TestTaggedByFileName"], "must not use GOOS/GOARCH file constraints"),
                 ("clients/go/node/sync_reorg_test.go", "package node\n\nfunc TestNoImport(t *testing.T) {}\n", ["TestNoImport"], "TestNoImport"),
             ]
@@ -198,7 +198,7 @@ class EdgePackCheckerTests(unittest.TestCase):
                 "#[cfg(\nFALSE\n)]\n#[test]\nfn cfg_multiline() {}\n#[cfg_attr(\ntest,\nignore\n)]\n#[test]\nfn cfg_attr_multiline() {}\n"
                 "#[cfg(FALSE)]\nmod disabled { #[test]\nfn disabled_module() {} }\n#[cfg(FALSE)]\n#[allow(dead_code)]\nmod disabled_stacked { #[test]\nfn disabled_mod_test() {} }\n"
                 "#[cfg(FALSE)]\nmod disabled_brace { const C: char = '}'; #[test]\nfn disabled_brace_module() {} }\n"
-                "#[cfg(FALSE)]\nmod disabled_next\n{\n#[test]\nfn disabled_next_line_brace() {}\n}\n#[test]\nconst fn const_test() {}\n#[test]\nunsafe fn unsafe_test() {}\n#[test]\nextern \"C\" fn extern_test() {}\n"
+                "#[cfg(FALSE)]\nmod disabled_next\n{\n#[test]\nfn disabled_next_line_brace() {}\n}\n#[test]\nconst fn const_test() {}\n#[test]\nunsafe fn unsafe_test() {}\n#[test]\nextern \"C\" fn extern_test() {}\n#[test]\nfn arg_test(x: i32) {}\n"
                 "mod inner_disabled {\n#![cfg(FALSE)]\n#[test]\nfn inner_cfg() {}\n}\n",
                 encoding="utf-8",
             )
@@ -208,7 +208,7 @@ class EdgePackCheckerTests(unittest.TestCase):
                 (
                     "ignored ignored_before cfg_disabled cfg_before cfg_nested_not_test cfg_multiline cfg_attr_multiline "
                     "disabled_module disabled_mod_test disabled_brace_module disabled_next_line_brace "
-                    "const_test unsafe_test extern_test inner_cfg"
+                    "const_test unsafe_test extern_test arg_test inner_cfg"
                 ).split(),
             )
             captured = io.StringIO()

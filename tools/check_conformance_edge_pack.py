@@ -8,17 +8,11 @@ from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
-GO_TEST_FUNC_RE = re.compile(
-    r"(?m)^func\s+(Test(?:[A-Z0-9_][A-Za-z0-9_]*)?)\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?"
-    r"\*\s*(?:(?P<pkg>[A-Za-z_][A-Za-z0-9_]*)\.)?T\s*\)\s*\{"
-)
-GO_IMPORT_BLOCK_RE = re.compile(r"^import\s*\(\s*$")
-GO_ANY_SINGLE_IMPORT_RE = re.compile(r'^import\s+(?:(?:[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?(?:"[^"]+"|`[^`]+`)\s*$')
+GO_TEST_FUNC_RE = re.compile(r"(?m)^func\s+(Test(?:[A-Z0-9_][A-Za-z0-9_]*)?)\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*\s*(?:(?P<pkg>[A-Za-z_][A-Za-z0-9_]*)\.)?T\s*,?\s*\)\s*\{")
 GO_IMPORT_SPEC_RE = re.compile(r'^(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?(?:"testing"|`testing`)\s*$')
-GO_SINGLE_IMPORT_RE = re.compile(r'^import\s+(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?(?:"testing"|`testing`)\s*$')
 GO_PLATFORM_TAGS = set("386 aix amd64 android arm arm64 darwin dragonfly freebsd illumos ios js linux loong64 mips mips64 mips64le mipsle netbsd openbsd plan9 ppc64 ppc64le riscv64 s390x solaris wasm wasip1 windows zos".split())
 RUST_TEST_ATTR_RE = re.compile(r"^\s*#\s*\[\s*test\s*\]\s*$")
-RUST_FN_RE = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+RUST_FN_RE = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*(?:->[^{]+)?\{")
 
 
 def fail(msg: str) -> int:
@@ -83,22 +77,16 @@ def string_list(value: object, *, field_name: str, require_non_empty: bool = Fal
         return [], f"{field_name} entries must be unique"
     return strings, None
 
-
 def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> str:
     out: list[str] = []
     i = 0
     n = len(source)
-
     def put_masked(ch: str) -> None:
         out.append("\n" if ch == "\n" else " ")
-
     def mask_until(end: str, start: int, *, skip_start: int = 1) -> int:
-        j = start
-        for _ in range(skip_start):
-            if j >= n:
-                return n
-            put_masked(source[j])
-            j += 1
+        j = min(n, start + skip_start)
+        for ch in source[start:j]:
+            put_masked(ch)
         while j < n:
             if source.startswith(end, j):
                 for extra in range(len(end)):
@@ -112,24 +100,9 @@ def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> s
                 continue
             j += 1
         return n
-
-    def rust_char_literal_end(start: int) -> int | None:
-        j = start + 1
-        if j >= n or source[j] == "\n":
-            return None
-        if source[j] == "\\":
-            j += 2
-            if j < n and source[j - 1] == "u" and source[j] == "{":
-                close = source.find("}", j + 1)
-                if close == -1:
-                    return None
-                j = close + 1
-            return j + 1 if j < n and source[j] == "'" else None
-        return j + 2 if j + 1 < n and source[j + 1] == "'" else None
-
     while i < n:
         if source.startswith("//", i):
-            preserve = language == "go" and (source.startswith("//go:build", i) or source.startswith("// +build", i))
+            preserve = language == "go" and (source.startswith("//go:build", i) or re.match(r"//\s*\+build\b", source[i:]))
             while i < n:
                 ch = source[i]
                 out.append(ch) if preserve else put_masked(ch)
@@ -171,125 +144,85 @@ def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> s
         if mask_strings and (source[i] == '"' or (language != "rust" and source[i] == "'")):
             i = mask_until(source[i], i)
             continue
-        if mask_strings and language == "rust" and source[i] == "'":
-            end = rust_char_literal_end(i)
-            if end is not None:
-                while i < end:
-                    put_masked(source[i])
-                    i += 1
-                continue
         out.append(source[i])
         i += 1
     return "".join(out)
-
-
 def go_test_names(source: str) -> set[str]:
     masked = mask_non_code(source, language="go")
     if go_has_build_constraint(masked):
         return set()
     aliases = go_testing_aliases(mask_non_code(source, language="go", mask_strings=False))
-    return {
-        match.group(1)
-        for match in GO_TEST_FUNC_RE.finditer(masked)
-        if (match.group("pkg") in aliases if match.group("pkg") else "." in aliases)
-    }
-
-
+    return {m.group(1) for m in GO_TEST_FUNC_RE.finditer(masked) if (m.group("pkg") in aliases if m.group("pkg") else "." in aliases)}
 def go_testing_aliases(source: str) -> set[str]:
     aliases: set[str] = set()
     in_import_block = False
     for raw_line in source.splitlines():
         line = raw_line.lstrip("\ufeff").strip()
-        if not in_import_block:
-            if not line or line.startswith("package "):
-                continue
-            if GO_IMPORT_BLOCK_RE.match(line):
-                in_import_block = True
-                continue
-            match = GO_SINGLE_IMPORT_RE.match(line)
-            if not match:
-                if GO_ANY_SINGLE_IMPORT_RE.match(line):
-                    continue
-                break
-        elif line == ")":
-            in_import_block = False
+        if in_import_block:
+            if line == ")":
+                in_import_block = False
+            else:
+                aliases.update(go_import_aliases([line]))
             continue
-        else:
-            match = GO_IMPORT_SPEC_RE.match(line)
-        if match:
-            alias = match.group("alias") or "testing"
-            if alias != "_":
-                aliases.add(alias)
+        if not line or line.startswith("package "):
+            continue
+        if line == "import (":
+            in_import_block = True
+            continue
+        if line.startswith("import (") and line.endswith(")"):
+            aliases.update(go_import_aliases(line.removeprefix("import (").removesuffix(")").split(";")))
+            continue
+        if line.startswith("import "):
+            aliases.update(go_import_aliases([line.removeprefix("import ")]))
+            continue
+        break
     return aliases
-
-
-def rust_cfg_active_under_test(expr: str) -> bool:
-    def split_args(args: str) -> list[str]:
-        parts: list[str] = []
-        start = depth = 0
-        for idx, ch in enumerate(args):
-            depth += ch == "("
-            depth -= ch == ")"
-            if ch == "," and depth == 0:
-                parts.append(args[start:idx])
-                start = idx + 1
-        parts.append(args[start:])
-        return parts
-
-    def eval_cfg(value: str) -> bool:
-        value = re.sub(r"\s+", "", value)
-        if value == "test":
-            return True
-        if value.startswith("not(") and value.endswith(")"):
-            return not eval_cfg(value[4:-1])
-        if value.startswith("any(") and value.endswith(")"):
-            return any(eval_cfg(part) for part in split_args(value[4:-1]))
-        if value.startswith("all(") and value.endswith(")"):
-            return all(eval_cfg(part) for part in split_args(value[4:-1]))
-        return False
-
-    return eval_cfg(expr)
-
-
-def rust_cfg_attr_condition(attr: str) -> str:
-    body = re.sub(r"^\s*#\s*!?\s*\[\s*cfg_attr\s*\(|\)\s*\]\s*$", "", attr)
-    depth = 0
-    for idx, ch in enumerate(body):
-        depth += ch == "("
-        depth -= ch == ")"
+def go_import_aliases(lines: list[str]) -> set[str]:
+    return {(m.group("alias") or "testing") for line in lines if (m := GO_IMPORT_SPEC_RE.match(line.strip())) and (m.group("alias") or "testing") != "_"}
+def split_cfg_args(args: str) -> list[str]:
+    parts: list[str] = []
+    start = depth = 0
+    for idx, ch in enumerate(args):
+        depth += (ch == "(") - (ch == ")")
         if ch == "," and depth == 0:
-            return body[:idx]
-    return body
-
-
+            parts.append(args[start:idx])
+            start = idx + 1
+    return [part for part in [*parts, args[start:]] if part.strip()]
+def rust_cfg_active_under_test(expr: str) -> bool:
+    expr = re.sub(r"\s+", "", expr)
+    if expr == "test":
+        return True
+    if not (match := re.match(r"(not|any|all)\((.*)\)$", expr)):
+        return False
+    op, body = match.groups()
+    values = [rust_cfg_active_under_test(part) for part in split_cfg_args(body)]
+    return (not values[0]) if op == "not" and values else (any(values) if op == "any" else all(values))
 def rust_attr_inactive(attr: str) -> bool:
     body = re.sub(r"^\s*#\s*!?\s*\[\s*|\s*\]\s*$", "", attr)
     if re.match(r"ignore\b", body):
         return True
     if body.startswith("cfg_attr"):
-        return "ignore" in body and rust_cfg_active_under_test(rust_cfg_attr_condition(attr))
+        return "ignore" in body and rust_cfg_active_under_test(split_cfg_args(body.removeprefix("cfg_attr(").removesuffix(")"))[0])
     return body.startswith("cfg") and not rust_cfg_active_under_test(body[body.find("(") + 1 : body.rfind(")")])
-
-
 def go_has_build_constraint(masked_source: str) -> bool:
     for raw_line in masked_source.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        if line.startswith("//go:build") or line.startswith("// +build"):
+        if line.startswith("//go:build") or re.match(r"//\s*\+build\b", line):
             return True
         if not line.startswith("//"):
             return False
     return False
-
-
 def rust_test_names(source: str) -> set[str]:
     names: set[str] = set()
     attrs: list[str] = []
     attr = ""
     pending_inactive_mod = False
     inactive_depth = 0
-    for raw_line in mask_non_code(source, language="rust").splitlines():
+    masked_source = mask_non_code(source, language="rust")
+    masked_source = re.sub(r"'(?:\\(?:u\{[0-9A-Fa-f_]+\}|.)|[^\\'\n])'", lambda m: " " * len(m.group(0)), masked_source)
+    for raw_line in masked_source.splitlines():
         line = raw_line.strip()
         if not line:
             continue
@@ -334,7 +267,6 @@ def rust_test_names(source: str) -> set[str]:
                 names.add(match.group(1))
             attrs = []
     return names
-
 
 def validate_runtime_evidence(repo_root: Path, domain_name: str, runtime_evidence: object) -> list[str]:
     if not isinstance(runtime_evidence, dict):
@@ -384,7 +316,6 @@ def validate_runtime_evidence(repo_root: Path, domain_name: str, runtime_evidenc
                 f"domain {domain_name}: {raw_path} missing declared runtime tests: {', '.join(missing)}"
             )
     return errors
-
 
 def main() -> int:
     repo_root = Path(".").resolve()
