@@ -31,12 +31,7 @@ func (p *peer) run(ctx context.Context) error {
 		if err := p.setReadDeadline(); err != nil {
 			return err
 		}
-		frame, err := readFrameWithPayloadLimit(
-			p.conn,
-			networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
-			p.service.cfg.PeerRuntimeConfig.MaxMessageSize,
-			p.postHandshakePayloadCap(),
-		)
+		frame, err := p.readPostHandshakeFrame()
 		if err != nil {
 			if shouldIgnoreReadError(err) {
 				continue
@@ -49,6 +44,77 @@ func (p *peer) run(ctx context.Context) error {
 	}
 }
 
+const blockTxnHashPayloadBytes = 32
+
+func (p *peer) readPostHandshakeFrame() (message, error) {
+	var frame message
+	header, err := readFrameHeader(
+		p.conn,
+		networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
+		p.service.cfg.PeerRuntimeConfig.MaxMessageSize,
+	)
+	if err != nil {
+		return frame, err
+	}
+	if header.Command == messageBlockTxn && p.acceptsBlockTxnResponses() {
+		return p.readBlockTxnFrame(header)
+	}
+	limit := p.postHandshakePayloadCap()
+	if header.Size > limit(header.Command) {
+		return frame, commandPayloadCapError{command: header.Command}
+	}
+	payload, err := readPayloadWithChecksum(p.conn, header.Size, header.Checksum)
+	if err != nil {
+		return frame, err
+	}
+	return message{Command: header.Command, Payload: payload}, nil
+}
+
+func (p *peer) readBlockTxnFrame(header frameHeader) (message, error) {
+	cap := p.blockTxnPayloadCap()
+	if cap == 0 {
+		return p.readUnexpectedBlockTxnFrame(header)
+	}
+	if header.Size > cap {
+		if stale, err := p.readOversizedBlockTxnStaleHash(header); err != nil || stale {
+			return message{}, err
+		}
+		return message{}, commandPayloadCapError{command: header.Command}
+	}
+	return p.readFullCommandFramePayload(header)
+}
+
+func (p *peer) readOversizedBlockTxnStaleHash(header frameHeader) (bool, error) {
+	if header.Size <= blockTxnHashPayloadBytes {
+		return false, nil
+	}
+	var responseHash [32]byte
+	n, err := io.ReadFull(p.conn, responseHash[:])
+	if err != nil {
+		return false, payloadReadError(header.Size, 0, n, err)
+	}
+	blockHash, ok := p.compactOutstandingBlockHash()
+	if !ok || responseHash != blockHash {
+		return true, errors.New("stale blocktxn response has body")
+	}
+	return false, nil
+}
+
+func (p *peer) readUnexpectedBlockTxnFrame(header frameHeader) (message, error) {
+	if header.Size > blockTxnHashPayloadBytes {
+		return message{}, commandPayloadCapError{command: header.Command}
+	}
+	return p.readFullCommandFramePayload(header)
+}
+
+func (p *peer) readFullCommandFramePayload(header frameHeader) (message, error) {
+	payload, err := readPayloadWithChecksum(p.conn, header.Size, header.Checksum)
+	if err != nil {
+		return message{}, err
+	}
+	return message{Command: header.Command, Payload: payload}, nil
+}
+
 func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 	base := postHandshakePayloadCap(p.service.cfg.LocatorLimit, p.service.cfg.SyncConfig.HeaderBatchLimit)
 	return func(command string) uint32 {
@@ -59,8 +125,14 @@ func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 			}
 			return 0
 		case messageBlockTxn:
-			if p.compactReceiveEnabled() {
-				return p.blockTxnPayloadCap()
+			if !p.compactReceiveEnabled() {
+				return 0
+			}
+			if cap := p.blockTxnPayloadCap(); cap != 0 {
+				return cap
+			}
+			if p.acceptsCompactBlocks() {
+				return blockTxnHashPayloadBytes
 			}
 			return 0
 		case messageGetBlockTxn:
@@ -81,6 +153,13 @@ func (p *peer) acceptsCompactBlocks() bool {
 	}
 	mode := p.remoteCompactMode()
 	return mode.Version == compactRelayVersion && mode.Mode != 0
+}
+
+func (p *peer) acceptsBlockTxnResponses() bool {
+	if !p.compactReceiveEnabled() {
+		return false
+	}
+	return p.acceptsCompactBlocks() || p.blockTxnPayloadCap() != 0
 }
 
 func peerRunContextDone(ctx context.Context) bool {
@@ -171,7 +250,7 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 		}
 		return p.handleCmpctBlock(frame.Payload)
 	case messageBlockTxn:
-		if !p.compactReceiveEnabled() {
+		if !p.acceptsBlockTxnResponses() {
 			return postHandshakeUnknownCommandError{command: frame.Command}
 		}
 		return p.handleBlockTxn(frame.Payload)
@@ -243,8 +322,7 @@ func (p *peer) applyPostHandshakeDisconnectError(err error) {
 	if err == nil {
 		return
 	}
-	if reason, ok := compactBlockTxnCapPolicyReason(err); ok {
-		p.bumpBan(10, reason)
+	if p.applyBlockTxnCapDisconnect(err) {
 		return
 	}
 	if reason, ok := unknownCommandPolicyReason(err); ok {
@@ -258,11 +336,27 @@ func (p *peer) applyPostHandshakeDisconnectError(err error) {
 	p.setLastError(err.Error())
 }
 
-func compactBlockTxnCapPolicyReason(err error) (string, bool) {
-	if command, ok := capErrorCommand(err); ok && command == messageBlockTxn {
-		return "unexpected blocktxn", true
+func (p *peer) applyBlockTxnCapDisconnect(err error) bool {
+	var commandCapErr commandPayloadCapError
+	if errors.As(err, &commandCapErr) && commandCapErr.command == messageBlockTxn {
+		if p.blockTxnPayloadCap() == 0 {
+			p.setLastError("unexpected blocktxn")
+			return true
+		}
+		p.clearCompactOutstandingRequest()
+		p.bumpBan(10, "blocktxn payload exceeds outstanding cap")
+		return true
 	}
-	return "", false
+	var messageCapErr inboundMessagePayloadCapError
+	if errors.As(err, &messageCapErr) && messageCapErr.command == messageBlockTxn {
+		if p.blockTxnPayloadCap() == 0 {
+			p.setLastError("unexpected blocktxn")
+			return true
+		}
+		p.setLastError("message exceeds cap: blocktxn")
+		return true
+	}
+	return false
 }
 
 func payloadCapDiagnosticReason(err error) (string, bool) {
