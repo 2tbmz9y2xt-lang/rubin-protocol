@@ -2,11 +2,23 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
+GO_TEST_FUNC_RE = re.compile(
+    r"(?m)^func\s+(Test[A-Z][A-Za-z0-9_]*)\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?"
+    r"\*(?P<pkg>[A-Za-z_][A-Za-z0-9_]*)\.T\s*\)\s*\{"
+)
+GO_IMPORT_BLOCK_RE = re.compile(r"^import\s*\(\s*$")
+GO_IMPORT_SPEC_RE = re.compile(r'^(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?"testing"\s*$')
+GO_SINGLE_IMPORT_RE = re.compile(r'^import\s+(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?"testing"\s*$')
+RUST_TEST_ATTR_RE = re.compile(r"^\s*#\s*\[\s*test\s*\]\s*$")
+RUST_CFG_TEST_ATTR_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
+RUST_INACTIVE_ATTR_RE = re.compile(r"^\s*#\s*\[\s*(?:ignore\b|cfg\s*\(|cfg_attr\s*\([^]]*\bignore\b)")
+RUST_FN_RE = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 def fail(msg: str) -> int:
@@ -70,6 +82,212 @@ def string_list(value: object, *, field_name: str, require_non_empty: bool = Fal
     if len(set(strings)) != len(strings):
         return [], f"{field_name} entries must be unique"
     return strings, None
+
+
+def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(source)
+
+    def put_masked(ch: str) -> None:
+        out.append("\n" if ch == "\n" else " ")
+
+    def mask_until(end: str, start: int, *, skip_start: int = 1) -> int:
+        j = start
+        for _ in range(skip_start):
+            if j >= n:
+                return n
+            put_masked(source[j])
+            j += 1
+        while j < n:
+            if source.startswith(end, j):
+                for extra in range(len(end)):
+                    put_masked(source[j + extra])
+                return j + len(end)
+            ch = source[j]
+            put_masked(ch)
+            if ch == "\\" and end in {'"', "'"} and j + 1 < n:
+                put_masked(source[j + 1])
+                j += 2
+                continue
+            j += 1
+        return n
+
+    while i < n:
+        if source.startswith("//", i):
+            while i < n:
+                ch = source[i]
+                put_masked(ch)
+                i += 1
+                if ch == "\n":
+                    break
+            continue
+        if source.startswith("/*", i):
+            depth = 1
+            put_masked(source[i])
+            put_masked(source[i + 1])
+            i += 2
+            while i < n and depth:
+                if language == "rust" and source.startswith("/*", i):
+                    depth += 1
+                    put_masked(source[i])
+                    put_masked(source[i + 1])
+                    i += 2
+                    continue
+                if source.startswith("*/", i):
+                    depth -= 1
+                    put_masked(source[i])
+                    put_masked(source[i + 1])
+                    i += 2
+                    continue
+                put_masked(source[i])
+                i += 1
+            continue
+        if language == "go" and source[i] == "`":
+            i = mask_until("`", i)
+            continue
+        if language == "rust" and source[i] == "r":
+            j = i + 1
+            while j < n and source[j] == "#":
+                j += 1
+            if j < n and source[j] == '"':
+                i = mask_until('"' + "#" * (j - i - 1), i, skip_start=j - i + 1)
+                continue
+        if mask_strings and source[i] in {'"', "'"}:
+            i = mask_until(source[i], i)
+            continue
+        out.append(source[i])
+        i += 1
+    return "".join(out)
+
+
+def go_test_names(source: str) -> set[str]:
+    masked = mask_non_code(source, language="go")
+    if go_has_build_constraint(source):
+        return set()
+    aliases = go_testing_aliases(mask_non_code(source, language="go", mask_strings=False))
+    return {match.group(1) for match in GO_TEST_FUNC_RE.finditer(masked) if match.group("pkg") in aliases}
+
+
+def go_testing_aliases(source: str) -> set[str]:
+    aliases: set[str] = set()
+    in_import_block = False
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if not in_import_block:
+            if GO_IMPORT_BLOCK_RE.match(line):
+                in_import_block = True
+                continue
+            match = GO_SINGLE_IMPORT_RE.match(line)
+        elif line == ")":
+            in_import_block = False
+            continue
+        else:
+            match = GO_IMPORT_SPEC_RE.match(line)
+        if match:
+            alias = match.group("alias") or "testing"
+            if alias not in {".", "_"}:
+                aliases.add(alias)
+    return aliases
+
+
+def go_has_build_constraint(masked_source: str) -> bool:
+    for raw_line in masked_source.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("//go:build") or line.startswith("// +build"):
+            return True
+        if not line.startswith("//"):
+            return False
+    return False
+
+
+def rust_test_names(source: str) -> set[str]:
+    names: set[str] = set()
+    attrs: list[str] = []
+    attr = ""
+    pending_inactive_mod = False
+    inactive_depth = 0
+    for raw_line in mask_non_code(source, language="rust").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if inactive_depth:
+            inactive_depth = max(0, inactive_depth + line.count("{") - line.count("}"))
+            continue
+        if pending_inactive_mod:
+            if "{" in line or ";" in line:
+                inactive_depth = max(0, line.count("{") - line.count("}"))
+                pending_inactive_mod = False
+            continue
+        if attr or line.startswith("#["):
+            attr = f"{attr} {line}".strip()
+            if "]" in line:
+                attrs.append(attr)
+                attr = ""
+            continue
+        if attrs:
+            inactive = any(RUST_INACTIVE_ATTR_RE.match(attr) and not RUST_CFG_TEST_ATTR_RE.match(attr) for attr in attrs)
+            if inactive and re.match(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\b", line):
+                if "{" in line:
+                    inactive_depth = max(0, line.count("{") - line.count("}"))
+                elif ";" not in line:
+                    pending_inactive_mod = True
+                attrs = []
+                continue
+            match = RUST_FN_RE.match(line)
+            if not inactive and any(RUST_TEST_ATTR_RE.match(attr) for attr in attrs) and match:
+                names.add(match.group(1))
+            attrs = []
+    return names
+
+
+def validate_runtime_evidence(repo_root: Path, domain_name: str, runtime_evidence: object) -> list[str]:
+    if not isinstance(runtime_evidence, dict):
+        return [f"domain {domain_name}: runtime_evidence must be object"]
+    tests_by_file = runtime_evidence.get("tests_by_file")
+    if not isinstance(tests_by_file, dict) or not tests_by_file:
+        return [f"domain {domain_name}: runtime_evidence.tests_by_file must be non-empty object"]
+    errors: list[str] = []
+    for raw_path, raw_names in tests_by_file.items():
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            errors.append(f"domain {domain_name}: runtime_evidence.tests_by_file keys must be non-empty strings")
+            continue
+        names, names_error = string_list(
+            raw_names,
+            field_name=f"runtime_evidence.tests_by_file[{raw_path}]",
+            require_non_empty=True,
+        )
+        if names_error is not None:
+            errors.append(f"domain {domain_name}: {names_error}")
+            continue
+        rel_path = Path(raw_path)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            errors.append(f"domain {domain_name}: runtime_evidence path {raw_path} must be repo-relative")
+            continue
+        source_path = repo_root / rel_path
+        try:
+            source = source_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"domain {domain_name}: cannot read runtime_evidence source {raw_path}: {exc}")
+            continue
+        if source_path.suffix == ".go":
+            if not source_path.name.endswith("_test.go"):
+                errors.append(f"domain {domain_name}: Go runtime_evidence source {raw_path} must end with _test.go")
+                continue
+            present = go_test_names(source)
+        elif source_path.suffix == ".rs":
+            present = rust_test_names(source)
+        else:
+            errors.append(f"domain {domain_name}: unsupported runtime_evidence source type {raw_path}")
+            continue
+        missing = [name for name in names if name not in present]
+        if missing:
+            errors.append(
+                f"domain {domain_name}: {raw_path} missing declared runtime tests: {', '.join(missing)}"
+            )
+    return errors
 
 
 def main() -> int:
@@ -137,6 +355,7 @@ def main() -> int:
         min_vectors_total = domain.get("min_vectors_total")
         required_vectors_by_gate = domain.get("required_vectors_by_gate", {})
         coverage_accounting = domain.get("coverage_accounting")
+        runtime_evidence = domain.get("runtime_evidence")
 
         if not isinstance(name, str) or not name.strip():
             print("ERROR: domain name missing/invalid", file=sys.stderr)
@@ -164,6 +383,10 @@ def main() -> int:
             print(f"ERROR: domain {name}: coverage_accounting must be object", file=sys.stderr)
             failures += 1
             continue
+        if runtime_evidence is not None:
+            for error in validate_runtime_evidence(repo_root, name, runtime_evidence):
+                print(f"ERROR: {error}", file=sys.stderr)
+                failures += 1
 
         total = 0
         missing_gates: list[str] = []

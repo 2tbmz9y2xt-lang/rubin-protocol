@@ -87,6 +87,23 @@ def make_repo(
     )
 
 
+def add_runtime_evidence(root: Path, rel_path: str, tests: list[str]) -> None:
+    baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline["domains"][0]["runtime_evidence"] = {"tests_by_file": {rel_path: tests}}
+    write_json(baseline_path, baseline)
+
+
+def run_runtime_evidence(root: Path, rel_path: str, source: str, tests: list[str]) -> tuple[int, str]:
+    (root / rel_path).parent.mkdir(parents=True, exist_ok=True)
+    (root / rel_path).write_text(source, encoding="utf-8")
+    add_runtime_evidence(root, rel_path, tests)
+    captured = io.StringIO()
+    with chdir(root), contextlib.redirect_stderr(captured):
+        rc = m.main()
+    return rc, captured.getvalue()
+
+
 class EdgePackCheckerTests(unittest.TestCase):
     def test_clean_accounting_passes_with_deferred_fuzz_formal(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -97,6 +114,144 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 0)
         self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
+    def test_runtime_evidence_accepts_go_and_rust_test_declarations(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            go_path = "clients/go/node/sync_reorg_test.go"
+            rust_path = "clients/rust/crates/rubin-node/src/sync_reorg.rs"
+            (root / go_path).parent.mkdir(parents=True, exist_ok=True)
+            (root / rust_path).parent.mkdir(parents=True, exist_ok=True)
+            (root / go_path).write_text(
+                "package node\n\nimport \"testing\"\n\nfunc TestRuntimeReorg(t *testing.T) {}\n",
+                encoding="utf-8",
+            )
+            (root / rust_path).write_text(
+                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn runtime_reorg_test() {}\n}\n",
+                encoding="utf-8",
+            )
+            baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+            baseline["domains"][0]["runtime_evidence"] = {
+                "tests_by_file": {
+                    go_path: ["TestRuntimeReorg"],
+                    rust_path: ["runtime_reorg_test"],
+                }
+            }
+            write_json(baseline_path, baseline)
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stdout(captured):
+                rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
+    def test_runtime_evidence_ignores_comments_and_raw_strings(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            rel_path = "clients/rust/crates/rubin-node/src/sync_reorg.rs"
+            rc, stderr = run_runtime_evidence(
+                root,
+                rel_path,
+                '/* #[test] fn fake_comment() {} */\nconst S: &str = r#"#[test]\nfn fake_raw() {}"#;\n',
+                ["fake_comment", "fake_raw"],
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("fake_comment, fake_raw", stderr)
+
+    def test_runtime_evidence_rejects_non_discoverable_go_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cases = [
+                (
+                    "clients/go/node/sync_reorg_test.go",
+                    "package node\n\nfunc Testlower() {}\nfunc Test1Bad(t *testing.T) {}\nfunc Test_Bad(t *testing.T) {}\nfunc TestWrong(t string) {}\nfunc TestExtra(t *testing.T, n int) {}\n",
+                    ["Testlower", "Test1Bad", "Test_Bad", "TestWrong", "TestExtra"],
+                    "Testlower, Test1Bad, Test_Bad, TestWrong, TestExtra",
+                ),
+                (
+                    "clients/go/node/sync_reorg.go",
+                    "package node\n\nimport \"testing\"\n\nfunc TestWrongFile(t *testing.T) {}\n",
+                    ["TestWrongFile"],
+                    "must end with _test.go",
+                ),
+                (
+                    "clients/go/node/sync_reorg_test.go",
+                    "package node\n/*\nimport \"testing\"\n*/\nfunc TestCommentImport(t *testing.T) {}\n",
+                    ["TestCommentImport"],
+                    "TestCommentImport",
+                ),
+                (
+                    "clients/go/node/sync_reorg_test.go",
+                    "package node\nvar _ = `\nimport \"testing\"\n`\nfunc TestRawImport(t *testing.T) {}\n",
+                    ["TestRawImport"],
+                    "TestRawImport",
+                ),
+                (
+                    "clients/go/node/sync_reorg_test.go",
+                    "//go:build never\n\npackage node\n\nimport \"testing\"\n\nfunc TestTaggedOut(t *testing.T) {}\n",
+                    ["TestTaggedOut"],
+                    "TestTaggedOut",
+                ),
+                (
+                    "clients/go/node/sync_reorg_test.go",
+                    "package node\n\nfunc TestNoImport(t *testing.T) {}\n",
+                    ["TestNoImport"],
+                    "TestNoImport",
+                ),
+            ]
+            for rel_path, source, tests, want in cases:
+                with self.subTest(want=want):
+                    root = Path(td) / want.split()[0].replace(",", "")
+                    make_repo(root)
+                    rc, stderr = run_runtime_evidence(root, rel_path, source, tests)
+                    self.assertEqual(rc, 1)
+                    self.assertIn(want, stderr)
+
+    def test_runtime_evidence_accepts_aliased_go_testing_import(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            rel_path = "clients/go/node/sync_reorg_test.go"
+            (root / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel_path).write_text(
+                'package node\n\nimport tb "testing"\n\nfunc TestAliased(t *tb.T) {}\n',
+                encoding="utf-8",
+            )
+            add_runtime_evidence(root, rel_path, ["TestAliased"])
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stdout(captured):
+                rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
+    def test_runtime_evidence_rejects_inactive_or_non_plain_rust_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            rel_path = "clients/rust/crates/rubin-node/src/sync_reorg.rs"
+            (root / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel_path).write_text(
+                "#[test]\n#[ignore]\nfn ignored() {}\n#[ignore]\n#[test]\nfn ignored_before() {}\n"
+                "#[test]\n#[cfg(FALSE)]\nfn cfg_disabled() {}\n#[cfg(FALSE)]\n#[test]\nfn cfg_before() {}\n"
+                "#[cfg(\nFALSE\n)]\n#[test]\nfn cfg_multiline() {}\n#[cfg_attr(\nfeature = \"never\",\nignore\n)]\n#[test]\nfn cfg_attr_multiline() {}\n"
+                "#[cfg(FALSE)]\nmod disabled { #[test]\nfn disabled_module() {} }\n#[cfg(FALSE)]\n#[allow(dead_code)]\nmod disabled_stacked { #[test]\nfn disabled_mod_test() {} }\n"
+                "#[cfg(FALSE)]\nmod disabled_next\n{\n#[test]\nfn disabled_next_line_brace() {}\n}\n#[test]\nconst fn const_test() {}\n#[test]\nunsafe fn unsafe_test() {}\n#[test]\nextern \"C\" fn extern_test() {}\n",
+                encoding="utf-8",
+            )
+            add_runtime_evidence(
+                root,
+                rel_path,
+                (
+                    "ignored ignored_before cfg_disabled cfg_before cfg_multiline cfg_attr_multiline "
+                    "disabled_module disabled_mod_test disabled_next_line_brace const_test unsafe_test extern_test"
+                ).split(),
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("disabled_next_line_brace, const_test, unsafe_test, extern_test", captured.getvalue())
 
     def test_missing_required_vector_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
