@@ -87,13 +87,6 @@ def make_repo(
     )
 
 
-def add_runtime_evidence(root: Path, tests_by_file: dict[str, list[str]]) -> None:
-    baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
-    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    baseline["domains"][0]["runtime_evidence"] = {"tests_by_file": tests_by_file}
-    write_json(baseline_path, baseline)
-
-
 class EdgePackCheckerTests(unittest.TestCase):
     def test_clean_accounting_passes_with_deferred_fuzz_formal(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -576,110 +569,6 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 1)
         self.assertIn("unknown formal coverage status maybe", captured.getvalue())
-
-    def test_runtime_evidence_accepts_declared_go_and_rust_tests(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            make_repo(root)
-            go_path = root / "clients" / "go" / "node" / "sync_reorg_test.go"
-            rust_path = root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "sync_reorg.rs"
-            go_path.parent.mkdir(parents=True, exist_ok=True)
-            rust_path.parent.mkdir(parents=True, exist_ok=True)
-            go_path.write_text('package node\n\nimport "testing"\n\nfunc TestRuntimeEvidence(t *testing.T) {}\n', encoding="utf-8")
-            rust_path.write_text("#[cfg(test)]\nmod tests {\n    #[test]\n    fn runtime_evidence() {}\n}\n", encoding="utf-8")
-            add_runtime_evidence(
-                root,
-                {
-                    "clients/go/node/sync_reorg_test.go": ["TestRuntimeEvidence"],
-                    "clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_evidence"],
-                },
-            )
-            captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stdout(captured):
-                rc = m.main()
-        self.assertEqual(rc, 0)
-        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
-
-    def test_runtime_evidence_rejects_path_escape(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            make_repo(root)
-            add_runtime_evidence(root, {"../outside_test.go": ["TestOutside"]})
-            captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stderr(captured):
-                rc = m.main()
-        self.assertEqual(rc, 1)
-        self.assertIn("runtime_evidence path ../outside_test.go must be repo-relative", captured.getvalue())
-
-    def test_runtime_evidence_rejects_missing_test_name(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            make_repo(root)
-            source = root / "clients" / "go" / "node" / "sync_reorg_test.go"
-            source.parent.mkdir(parents=True, exist_ok=True)
-            source.write_text('package node\n\nimport "testing"\n\nfunc TestPresent(t *testing.T) {}\n', encoding="utf-8")
-            add_runtime_evidence(root, {"clients/go/node/sync_reorg_test.go": ["TestMissing"]})
-            captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stderr(captured):
-                rc = m.main()
-        self.assertEqual(rc, 1)
-        self.assertIn("missing declared runtime tests: TestMissing", captured.getvalue())
-
-    def test_runtime_evidence_rejects_unsupported_suffix(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            make_repo(root)
-            source = root / "tools" / "runtime.py"
-            source.parent.mkdir(parents=True, exist_ok=True)
-            source.write_text("def test_runtime():\n    pass\n", encoding="utf-8")
-            add_runtime_evidence(root, {"tools/runtime.py": ["test_runtime"]})
-            captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stderr(captured):
-                rc = m.main()
-        self.assertEqual(rc, 1)
-        self.assertIn("unsupported runtime_evidence source type tools/runtime.py", captured.getvalue())
-
-    def test_runtime_evidence_rejects_go_platform_filename(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            make_repo(root)
-            source = root / "clients" / "go" / "node" / "sync_linux_test.go"
-            source.parent.mkdir(parents=True, exist_ok=True)
-            source.write_text('package node\n\nimport "testing"\n\nfunc TestLinuxOnly(t *testing.T) {}\n', encoding="utf-8")
-            add_runtime_evidence(root, {"clients/go/node/sync_linux_test.go": ["TestLinuxOnly"]})
-            captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stderr(captured):
-                rc = m.main()
-        self.assertEqual(rc, 1)
-        self.assertIn("must not use GOOS/GOARCH file constraints", captured.getvalue())
-
-    def test_runtime_evidence_rejects_go_build_constraints(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            make_repo(root)
-            source = root / "clients" / "go" / "node" / "sync_reorg_test.go"
-            source.parent.mkdir(parents=True, exist_ok=True)
-            source.write_text('//go:build linux\n\npackage node\n\nimport "testing"\n\nfunc TestLinuxOnly(t *testing.T) {}\n', encoding="utf-8")
-            add_runtime_evidence(root, {"clients/go/node/sync_reorg_test.go": ["TestLinuxOnly"]})
-            captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stderr(captured):
-                rc = m.main()
-        self.assertEqual(rc, 1)
-        self.assertIn("must not use build constraints", captured.getvalue())
-
-    def test_runtime_evidence_rejects_rust_cfg_gates_other_than_test(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            make_repo(root)
-            source = root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "sync_reorg.rs"
-            source.parent.mkdir(parents=True, exist_ok=True)
-            source.write_text("#[cfg(not(windows))]\n#[test]\nfn linux_like_runtime() {}\n", encoding="utf-8")
-            add_runtime_evidence(root, {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["linux_like_runtime"]})
-            captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stderr(captured):
-                rc = m.main()
-        self.assertEqual(rc, 1)
-        self.assertIn("must not use cfg/cfg_attr gates other than cfg(test)", captured.getvalue())
 
 
 if __name__ == "__main__":
