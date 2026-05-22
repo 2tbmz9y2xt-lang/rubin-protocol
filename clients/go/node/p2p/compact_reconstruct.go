@@ -16,7 +16,10 @@ const (
 	compactLocalTxCandidateBytesLimit = 1 << 20
 )
 
-var errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
+var (
+	errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
+	errBlockTxnTransactionShortIDMismatch = errors.New("blocktxn transaction short id mismatch")
+)
 
 type compactReconstructionResult struct {
 	Transactions        [][]byte
@@ -339,7 +342,11 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	p.clearCompactOutstandingRequestForBlock(req.BlockHash)
 	txs, err := compactFillResponseTransactions(req, response)
 	if err != nil {
-		return p.requestCompactFullBlockFallback(req.BlockHash)
+		if compactBlockTxnFillErrorAllowsFallback(err) {
+			return p.requestCompactFullBlockFallback(req.BlockHash)
+		}
+		p.bumpBan(10, err.Error())
+		return err
 	}
 	return p.processCompactTransactions(req.BlockHash, req.Header, txs, true)
 }
@@ -358,9 +365,6 @@ func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.
 		p.bumpBan(10, err.Error())
 		return err
 	}
-	if !fallbackOnApply {
-		return p.handleBlock(blockBytes)
-	}
 	fallback, accepted, err := p.processCompactRelayedBlockWithFallback(blockHash, blockBytes, fallbackOnApply)
 	if fallback {
 		return p.requestCompactFullBlockFallback(blockHash)
@@ -376,8 +380,17 @@ func (p *peer) processCompactTransactions(blockHash [32]byte, header [consensus.
 
 func (p *peer) processCompactRelayedBlockWithFallback(expectedHash [32]byte, blockBytes []byte, fallbackOnApply bool) (bool, bool, error) {
 	pb, blockHash, err := parseRelayedBlock(blockBytes)
-	if err != nil || pb == nil || blockHash != expectedHash {
-		return true, false, err
+	if err != nil {
+		return fallbackOnApply, false, err
+	}
+	if pb == nil {
+		return false, false, errors.New("nil parsed compact block")
+	}
+	if blockHash != expectedHash {
+		if fallbackOnApply {
+			return true, false, nil
+		}
+		return false, false, errors.New("compact block hash mismatch")
 	}
 	have, err := p.service.hasBlock(blockHash)
 	if err != nil {
@@ -386,7 +399,7 @@ func (p *peer) processCompactRelayedBlockWithFallback(expectedHash [32]byte, blo
 	}
 	if have {
 		p.clearCompactOutstandingRequestForBlock(blockHash)
-		return false, true, nil
+		return false, false, nil
 	}
 	p.service.chainMu.Lock()
 	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
@@ -629,11 +642,15 @@ func compactFillResponseTransactions(req compactOutstandingRequest, response blo
 		}
 		shortID := compactShortID(consensus.CompactShortID(wtxid, req.Nonce1, req.Nonce2))
 		if shortID != req.MissingShortIDs[i] {
-			return nil, errors.New("blocktxn transaction short id mismatch")
+			return nil, errBlockTxnTransactionShortIDMismatch
 		}
 	}
 	cloneCompactTransactionsInPlace(txs)
 	return txs, nil
+}
+
+func compactBlockTxnFillErrorAllowsFallback(err error) bool {
+	return errors.Is(err, errBlockTxnTransactionShortIDMismatch)
 }
 
 func compactBlockTxnResponseWTxID(tx []byte) ([32]byte, error) {

@@ -700,6 +700,29 @@ func TestHandleBlockTxnFallsBackWithoutBanOnShortIDMismatch(t *testing.T) {
 	}
 }
 
+func TestHandleBlockTxnBansMalformedFillWithoutFallback(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 301, 302), 301, 302)
+	payload, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: blockHash, Transactions: [][]byte{txs[0], txs[0]}})
+	requireNoCompactErr(t, err, "encode blocktxn")
+
+	err = p.handleBlockTxn(payload)
+	if err == nil || !strings.Contains(err.Error(), "transaction count mismatch") {
+		t.Fatalf("malformed blocktxn fill err=%v, want transaction count mismatch", err)
+	}
+	state := p.snapshotState()
+	if state.BanScore == 0 || !strings.Contains(state.LastError, "transaction count mismatch") {
+		t.Fatalf("malformed blocktxn fill state=%+v, want ban and last error", state)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("malformed blocktxn fill sent fallback instead of returning an error")
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("malformed blocktxn fill did not clear matching outstanding request")
+	}
+}
+
 func TestInternalCompactReceiveMissingAndFallbackBranches(t *testing.T) {
 	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	missing := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, ShortIDs: []compactShortID{{0xaa}}})
@@ -760,30 +783,52 @@ func TestInternalCompactApplyEarlyHaveClearsMatchingOutstanding(t *testing.T) {
 	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 701, 702), 701, 702)
 	fallback, accepted, err := p.processCompactRelayedBlockWithFallback(blockHash, node.DevnetGenesisBlockBytes(), true)
 	requireNoCompactErr(t, err, "compact apply early-have")
-	if fallback || !accepted {
-		t.Fatalf("compact apply early-have fallback=%v accepted=%v, want accepted without fallback", fallback, accepted)
+	if fallback || accepted {
+		t.Fatalf("compact apply early-have fallback=%v accepted=%v, want no accepted sync trigger", fallback, accepted)
 	}
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("compact apply early-have did not clear matching compact outstanding request")
 	}
 }
 
-func TestProcessCompactTransactionsRejectsAcceptedBlockMissingAfterApply(t *testing.T) {
+func TestProcessCompactTransactionsAlreadyHaveSkipsSyncRequest(t *testing.T) {
 	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	p := newCompactScriptedPeer(t)
-	otherStore, err := node.OpenBlockStore(node.BlockStorePath(t.TempDir()))
-	requireNoCompactErr(t, err, "open alternate blockstore")
-	p.service.cfg.BlockStore = otherStore
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	p.state.RemoteVersion.BestHeight = 1
 
-	err = p.processCompactTransactions(blockHash, header, txs, true)
-	if err == nil || !strings.Contains(err.Error(), "compact block apply succeeded without accepting block") {
-		t.Fatalf("processCompactTransactions err=%v, want explicit missing accepted block error", err)
-	}
-	if p.service.blockSeen.Has(blockHash) {
-		t.Fatal("accepted-but-missing compact block marked blockSeen before storage verification")
-	}
+	requireNoCompactErr(t, p.processCompactTransactions(blockHash, header, txs, true), "compact apply early-have")
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
-		t.Fatal("accepted-but-missing compact block path sent fallback instead of returning an error")
+		t.Fatal("already-have compact block requested more blocks")
+	}
+}
+
+func TestProcessCompactTransactionsRejectsAcceptedBlockMissingAfterApply(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	for _, tc := range []struct {
+		name            string
+		fallbackOnApply bool
+	}{
+		{name: "short_id", fallbackOnApply: true},
+		{name: "prefilled_only", fallbackOnApply: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newCompactScriptedPeer(t)
+			otherStore, err := node.OpenBlockStore(node.BlockStorePath(t.TempDir()))
+			requireNoCompactErr(t, err, "open alternate blockstore")
+			p.service.cfg.BlockStore = otherStore
+
+			err = p.processCompactTransactions(blockHash, header, txs, tc.fallbackOnApply)
+			if err == nil || !strings.Contains(err.Error(), "compact block apply succeeded without accepting block") {
+				t.Fatalf("processCompactTransactions err=%v, want explicit missing accepted block error", err)
+			}
+			if p.service.blockSeen.Has(blockHash) {
+				t.Fatal("accepted-but-missing compact block marked blockSeen before storage verification")
+			}
+			if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+				t.Fatal("accepted-but-missing compact block path sent fallback instead of returning an error")
+			}
+		})
 	}
 }
 
