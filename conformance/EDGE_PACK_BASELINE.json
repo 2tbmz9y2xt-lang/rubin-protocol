@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Machine-readable baseline for critical conformance edge coverage across parse/weight/sighash/covenants/difficulty/DA integrity/mempool policy/DA fee-floor policy domains.",
+  "description": "Machine-readable baseline for critical conformance edge coverage across parse/weight/sighash/covenants/difficulty/runtime reorg/DA integrity/mempool policy/DA fee-floor policy domains.",
   "domains": [
     {
       "name": "parse",
@@ -93,6 +93,26 @@
           "POW-03C",
           "POW-03D",
           "POW-08A"
+        ]
+      }
+    },
+    {
+      "name": "runtime_reorg",
+      "gates": [
+        "CV-FORK-CHOICE",
+        "CV-TIMESTAMP"
+      ],
+      "min_vectors_total": 21,
+      "required_vectors_by_gate": {
+        "CV-FORK-CHOICE": [
+          "CV-FC-EQUAL-WORK-TIE-BREAK",
+          "CV-FC-EQUAL-WORK-TIE-BREAK-REVERSED"
+        ],
+        "CV-TIMESTAMP": [
+          "CV-TS-01",
+          "CV-TS-03",
+          "CV-TS-05",
+          "CV-TS-06"
         ]
       }
     },
