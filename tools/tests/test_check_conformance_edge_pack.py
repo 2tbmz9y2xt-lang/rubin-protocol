@@ -183,9 +183,9 @@ class EdgePackCheckerTests(unittest.TestCase):
                 ),
                 (
                     "clients/go/node/sync_reorg_test.go",
-                    "package node\nvar _ = `\nimport \"testing\"\n`\nfunc TestRawImport(t *testing.T) {}\n",
-                    ["TestRawImport"],
-                    "TestRawImport",
+                    "package node\nvar _ = `\nimport \"testing\"\n`\nvar _ = \"\\nimport \\\"testing\\\"\\n\"\nfunc TestRawImport(t *testing.T) {}\nfunc TestStringImport(t *testing.T) {}\n",
+                    ["TestRawImport", "TestStringImport"],
+                    "TestRawImport, TestStringImport",
                 ),
                 (
                     "clients/go/node/sync_reorg_test.go",
