@@ -232,7 +232,7 @@ func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) 
 	return cloneCompactOutstandingRequest(req), true
 }
 
-func (p *peer) popExpiredCompactOutstandingBlockHash() ([32]byte, uint32, bool) {
+func (p *peer) popExpiredCompactOutstandingBlockHashAndPayloadCap() ([32]byte, uint32, bool) {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil || !p.compactOutstandingRequestExpiredLocked() {
