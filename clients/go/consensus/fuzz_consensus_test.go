@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -79,6 +80,36 @@ func FuzzParseTx(f *testing.F) {
 
 func FuzzParseBlockBytes(f *testing.F) {
 	f.Add(minimalBlockBytesForFuzz())
+	// tx_count boundary seeds from RUB-351 fuzz contract
+	{
+		base := minimalBlockBytesForFuzz()[:BLOCK_HEADER_BYTES]
+		// count = 0 (EOF after count)
+		f.Add(append(append([]byte(nil), base...), 0x00))
+		// count = 1 (EOF after count)
+		f.Add(append(append([]byte(nil), base...), 0x01))
+		// count = 252 (EOF after count)
+		f.Add(append(append([]byte(nil), base...), 0xfc))
+		// count = 253 (u16, EOF after count)
+		f.Add(append(append([]byte(nil), base...), 0xfd, 0xfd, 0x00))
+		// count = 65535 (u16 max, EOF after count)
+		f.Add(append(append([]byte(nil), base...), 0xfd, 0xff, 0xff))
+	}
+	// count = 2^32  (u64 CompactSize, EOF after count)
+	{
+		base := minimalBlockBytesForFuzz()[:BLOCK_HEADER_BYTES]
+		seed := append(append([]byte(nil), base...), 0xff)
+		u64 := make([]byte, 8)
+		binary.LittleEndian.PutUint64(u64, uint64(1)<<32)
+		f.Add(append(seed, u64...))
+	}
+	// count = u64_max (EOF after count)
+	{
+		base := minimalBlockBytesForFuzz()[:BLOCK_HEADER_BYTES]
+		seed := append(append([]byte(nil), base...), 0xff)
+		u64 := make([]byte, 8)
+		binary.LittleEndian.PutUint64(u64, ^uint64(0))
+		f.Add(append(seed, u64...))
+	}
 	f.Fuzz(func(t *testing.T, b []byte) {
 		pb, err := ParseBlockBytes(b)
 		if err != nil {
