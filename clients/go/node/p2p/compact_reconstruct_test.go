@@ -533,6 +533,9 @@ func TestHandleGetBlockTxnRejectsDuplicateBeforeBlockLookup(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "duplicate getblocktxn index") {
 		t.Fatalf("handleGetBlockTxn duplicate err=%v, want duplicate index", err)
 	}
+	if p.snapshotState().BanScore == 0 {
+		t.Fatal("duplicate getblocktxn did not bump ban before block lookup")
+	}
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
 		t.Fatal("duplicate getblocktxn sent a response")
 	}
@@ -543,6 +546,9 @@ func TestHandleGetBlockTxnMalformedAndMissingBlock(t *testing.T) {
 	if err := p.handleGetBlockTxn(make([]byte, 31)); err == nil || !strings.Contains(err.Error(), "getblocktxn payload missing block hash") {
 		t.Fatalf("short getblocktxn err=%v, want missing block hash", err)
 	}
+	if p.snapshotState().BanScore == 0 {
+		t.Fatal("malformed getblocktxn did not bump ban")
+	}
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
 		t.Fatal("malformed getblocktxn sent a response")
 	}
@@ -551,6 +557,9 @@ func TestHandleGetBlockTxnMalformedAndMissingBlock(t *testing.T) {
 	payload := mustEncodeGetBlockTxnRequest(t, [32]byte{0x99}, []uint64{0})
 	if err := p.handleGetBlockTxn(payload); err != nil {
 		t.Fatalf("missing block getblocktxn err=%v, want nil", err)
+	}
+	if p.snapshotState().BanScore != 0 {
+		t.Fatalf("missing block ban_score=%d, want 0", p.snapshotState().BanScore)
 	}
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
 		t.Fatal("missing block getblocktxn sent a response")
@@ -566,6 +575,9 @@ func TestHandleGetBlockTxnRejectsOutOfRangeAfterBlockCount(t *testing.T) {
 	err := p.handleGetBlockTxn(payload)
 	if err == nil || !strings.Contains(err.Error(), "getblocktxn index out of range") {
 		t.Fatalf("handleGetBlockTxn out-of-range err=%v, want range error", err)
+	}
+	if p.snapshotState().BanScore == 0 {
+		t.Fatal("out-of-range getblocktxn did not bump ban")
 	}
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
 		t.Fatal("out-of-range getblocktxn sent a response")
@@ -611,6 +623,17 @@ func TestCompactBlockTransactionsByIndexRejectsRangeBeforeScanningTx(t *testing.
 	_, err := compactBlockTransactionsByIndex(block, []uint64{1})
 	if err == nil || !strings.Contains(err.Error(), "getblocktxn index out of range") {
 		t.Fatalf("compactBlockTransactionsByIndex err=%v, want range before tx parse", err)
+	}
+}
+
+func TestCompactBlockTransactionsByIndexStopsAfterHighestRequested(t *testing.T) {
+	txs := [][]byte{minimalBlockTxnTestTxBytes(501), []byte{0xff}}
+	block := compactTestBlockBytesWithRawTxTail(t, txs, nil)
+
+	got, err := compactBlockTransactionsByIndex(block, []uint64{0})
+	requireNoCompactErr(t, err, "slice early requested tx")
+	if len(got) != 1 || !bytes.Equal(got[0], txs[0]) {
+		t.Fatalf("early requested tx=%x, want %x", got, txs[0])
 	}
 }
 

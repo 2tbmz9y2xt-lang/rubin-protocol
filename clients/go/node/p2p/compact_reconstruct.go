@@ -19,6 +19,7 @@ const (
 var (
 	errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
 	errBlockTxnTransactionShortIDMismatch = errors.New("blocktxn transaction short id mismatch")
+	errGetBlockTxnIndexOutOfRange         = errors.New("getblocktxn index out of range")
 )
 
 type compactReconstructionResult struct {
@@ -377,10 +378,10 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 func (p *peer) handleGetBlockTxn(payload []byte) error {
 	req, err := decodeGetBlockTxnPayload(payload)
 	if err != nil {
-		return err
+		return p.rejectGetBlockTxn(err.Error())
 	}
 	if err := compactValidateUniqueGetBlockTxnIndexes(req.Indexes); err != nil {
-		return err
+		return p.rejectGetBlockTxn(err.Error())
 	}
 	block, ok, err := p.blockBytes(req.BlockHash)
 	if err != nil || !ok {
@@ -388,6 +389,9 @@ func (p *peer) handleGetBlockTxn(payload []byte) error {
 	}
 	txs, err := compactBlockTransactionsByIndex(block, req.Indexes)
 	if err != nil {
+		if errors.Is(err, errGetBlockTxnIndexOutOfRange) {
+			return p.rejectGetBlockTxn(err.Error())
+		}
 		return err
 	}
 	response, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: req.BlockHash, Transactions: txs})
@@ -418,7 +422,7 @@ func compactBlockTransactionsByIndex(block []byte, indexes []uint64) ([][]byte, 
 	}
 	for _, idx := range indexes {
 		if idx >= txCount {
-			return nil, errors.New("getblocktxn index out of range")
+			return nil, errGetBlockTxnIndexOutOfRange
 		}
 	}
 	if len(indexes) == 0 {
@@ -426,11 +430,15 @@ func compactBlockTransactionsByIndex(block []byte, indexes []uint64) ([][]byte, 
 	}
 
 	positions := make(map[uint64]int, len(indexes))
+	var maxIndex uint64
 	for pos, idx := range indexes {
 		positions[idx] = pos
+		if idx > maxIndex {
+			maxIndex = idx
+		}
 	}
 	txs := make([][]byte, len(indexes))
-	for txIndex := uint64(0); txIndex < txCount; txIndex++ {
+	for txIndex := uint64(0); txIndex <= maxIndex; txIndex++ {
 		_, _, _, consumed, err := consensus.ParseTx(block[offset:])
 		if err != nil || consumed <= 0 || offset+consumed > len(block) {
 			return nil, errors.New("stored block transaction is non-canonical")
@@ -440,7 +448,7 @@ func compactBlockTransactionsByIndex(block []byte, indexes []uint64) ([][]byte, 
 		}
 		offset += consumed
 	}
-	if offset != len(block) {
+	if maxIndex == txCount-1 && offset != len(block) {
 		return nil, errors.New("stored block has trailing bytes after transactions")
 	}
 	return txs, nil
@@ -458,6 +466,11 @@ func compactBlockTransactionCount(block []byte) (uint64, int, error) {
 }
 
 func (p *peer) rejectBlockTxn(msg string) error {
+	p.bumpBan(10, msg)
+	return errors.New(msg)
+}
+
+func (p *peer) rejectGetBlockTxn(msg string) error {
 	p.bumpBan(10, msg)
 	return errors.New(msg)
 }
