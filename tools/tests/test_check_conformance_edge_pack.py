@@ -6,9 +6,11 @@ import contextlib
 import io
 import json
 import os
+import subprocess  # nosec B404
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -99,6 +101,58 @@ def write_runtime_source(root: Path, rel_path: str, text: str = "// test source\
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def make_runtime_evidence_repo(root: Path, tests_by_file: dict[str, list[str]]) -> None:
+    make_repo(root)
+    for rel_path in tests_by_file:
+        if rel_path.startswith("clients/go/"):
+            write_runtime_source(root, rel_path, "package node\n")
+        elif rel_path.startswith("clients/rust/"):
+            write_runtime_source(root, rel_path, "mod tests {}\n")
+    set_runtime_evidence(root, {"tests_by_file": tests_by_file})
+
+
+class FakeCommandRunner:
+    def __init__(self, outputs: dict[tuple[str, ...], tuple[int, str, str] | BaseException], registered_tests: list[str] | None = None) -> None:
+        self.outputs = outputs
+        self.registered_tests = ["TestRuntimeReorg"] if registered_tests is None else registered_tests
+        self.calls: list[tuple[tuple[str, ...], Path]] = []
+        self.envs: list[dict[str, str] | None] = []
+
+    def __call__(
+        self,
+        cmd: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        text: bool,
+        capture_output: bool,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        _ = (text, capture_output, timeout)
+        self.calls.append((tuple(cmd), cwd))
+        self.envs.append(env)
+        output = self.outputs.get(tuple(cmd))
+        if output is None:
+            output = next((candidate for pattern, candidate in self.outputs.items() if len(pattern) == len(cmd) and all(part == "*" or part == actual for part, actual in zip(pattern, cmd))), (127, "", "unexpected command"))
+        if isinstance(output, BaseException):
+            raise output
+        is_go_compile = len(GO_COMPILE) == len(cmd) and all(part == "*" or part == actual for part, actual in zip(GO_COMPILE, cmd))
+        if is_go_compile and env is not None and output[0] == 0:
+            work_dir = Path(env["GOTMPDIR"]) / "go-build-fake" / "b001"
+            work_dir.mkdir(parents=True)
+            entries = "\n".join(f'\t{{"{name}", _test.{name}}},' for name in self.registered_tests)
+            (work_dir / "_testmain.go").write_text(f"package main\nvar tests = []testing.InternalTest{{\n{entries}\n}}\n", encoding="utf-8")
+            output = (output[0], output[1], output[2] + f"WORK={work_dir.parent}\n")
+        rc, stdout, stderr = output
+        return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
+
+
+GO_COMPILE = ("go", "test", "-c", "-work", "-o", "*", "./node")
+
+
+def go_objdump_cmd(test_name: str) -> tuple[str, ...]: return ("go", "tool", "objdump", "-s", rf".*\.{test_name}$", "*")
 
 
 class EdgePackCheckerTests(unittest.TestCase):
@@ -604,6 +658,162 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 0)
         self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
+    def test_runtime_evidence_opt_in_verifies_declared_tests_with_toolchains(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rubin path ") as td:
+            root = Path(td)
+            make_runtime_evidence_repo(
+                root,
+                {
+                    "clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"],
+                    "clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"],
+                },
+            )
+            runner = FakeCommandRunner(
+                {
+                    GO_COMPILE: (0, "", ""),
+                    go_objdump_cmd("TestRuntimeReorg"): (
+                        0,
+                        f"TEXT pkg.TestRuntimeReorg(SB) {(root / 'clients/go/node/sync_reorg_test.go').resolve()}\n",
+                        "",
+                    ),
+                }
+            )
+            with chdir(root):
+                rc = m.main(["--verify-runtime-evidence-go"], command_runner=runner)
+        self.assertEqual(rc, 0)
+        self.assertFalse(any("-list" in call[0] for call in runner.calls))
+        self.assertTrue(all(call[0][0] != "cargo" for call in runner.calls))
+        go_envs = [env for call, env in zip(runner.calls, runner.envs) if call[0][0] == "go"]
+        self.assertTrue(go_envs)
+        self.assertTrue(all(env["GOENV"] == "off" for env in go_envs))
+        self.assertTrue(all(env["GOFLAGS"] == "-buildvcs=false" for env in go_envs))
+
+    def test_runtime_evidence_opt_in_accepts_external_package_go_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(root, {"clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"]})
+            runner = FakeCommandRunner({GO_COMPILE: (0, "", "")}, registered_tests=[])
+
+            def external_testmain(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                completed = runner(cmd, **kwargs)
+                if tuple(cmd[:4]) == ("go", "test", "-c", "-work"):
+                    work_root = Path(str(completed.stderr).split("WORK=", 1)[1].strip())
+                    (work_root / "b001" / "_testmain.go").write_text(
+                        'package main\nvar tests = []testing.InternalTest{\n\t{"TestRuntimeReorg", _xtest.TestRuntimeReorg},\n}\n',
+                        encoding="utf-8",
+                    )
+                return completed
+
+            runner.outputs[go_objdump_cmd("TestRuntimeReorg")] = (
+                0,
+                f"TEXT pkg.TestRuntimeReorg(SB) {(root / 'clients/go/node/sync_reorg_test.go').resolve()}\n",
+                "",
+            )
+            with chdir(root):
+                rc = m.main(["--verify-runtime-evidence-go"], command_runner=external_testmain)
+        self.assertEqual(rc, 0)
+
+    def test_runtime_evidence_opt_in_sanitizes_ambient_go_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(root, {"clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"]})
+            runner = FakeCommandRunner(
+                {
+                    GO_COMPILE: (0, "", ""),
+                    go_objdump_cmd("TestRuntimeReorg"): (
+                        0,
+                        f"TEXT pkg.TestRuntimeReorg(SB) {(root / 'clients/go/node/sync_reorg_test.go').resolve()}\n",
+                        "",
+                    ),
+                }
+            )
+            with unittest.mock.patch.dict(os.environ, {"GOFLAGS": "-tags=forged", "GOENV": str(root / "forged_goenv")}, clear=False):
+                with chdir(root):
+                    rc = m.main(["--verify-runtime-evidence-go"], command_runner=runner)
+        self.assertEqual(rc, 0)
+        go_envs = [env for call, env in zip(runner.calls, runner.envs) if call[0][0] == "go"]
+        self.assertTrue(go_envs)
+        self.assertTrue(all(env["GOENV"] == "off" for env in go_envs))
+        self.assertTrue(all(env["GOFLAGS"] == "-buildvcs=false" for env in go_envs))
+
+    def test_go_objdump_source_match_accepts_spaces_and_trimpath(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="rubin path ") as td:
+            repo_root = Path(td) / "clients/go/wrapper/repo"
+            source = repo_root / "clients/go/node/sync_reorg_test.go"
+            self.assertTrue(m.go_objdump_matches_source(f"TEXT pkg.TestA(SB) {source}\n", source_path=source, repo_root=repo_root))
+            self.assertTrue(
+                m.go_objdump_matches_source(
+                    "TEXT pkg.TestA(SB) github.com/rubin/clients/go/node/sync_reorg_test.go\n",
+                    source_path=source,
+                    repo_root=repo_root,
+                )
+            )
+
+    def test_runtime_evidence_opt_in_rejects_missing_exact_or_wrong_file_names(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(
+                root,
+                {
+                    "clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"],
+                    "clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"],
+                },
+            )
+            runner = FakeCommandRunner(
+                {
+                    GO_COMPILE: (0, "", ""),
+                    go_objdump_cmd("TestRuntimeReorg"): (
+                        0,
+                        f"TEXT pkg.TestRuntimeReorg(SB) {(root / 'clients/go/node/config_test.go').resolve()}\n",
+                        "",
+                    ),
+                }
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main(["--verify-runtime-evidence-go"], command_runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime evidence tests: TestRuntimeReorg", captured.getvalue())
+
+    def test_runtime_evidence_opt_in_rejects_compiled_non_test_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(root, {"clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"]})
+            runner = FakeCommandRunner(
+                {
+                    GO_COMPILE: (0, "", ""),
+                    go_objdump_cmd("TestRuntimeReorg"): (
+                        0,
+                        f"TEXT pkg.TestRuntimeReorg(SB) {(root / 'clients/go/node/sync_reorg_test.go').resolve()}\n",
+                        "",
+                    ),
+                },
+                registered_tests=[],
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main(["--verify-runtime-evidence-go"], command_runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime evidence tests: TestRuntimeReorg", captured.getvalue())
+
+    def test_runtime_evidence_opt_in_fails_closed_for_toolchain_error_and_timeout(self) -> None:
+        def timeout_runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(["go"], 30)
+
+        for runner, expected in [
+            (FakeCommandRunner({GO_COMPILE: (1, "", "go compile failed")}), "failed: go exit 1"),
+            (FakeCommandRunner({GO_COMPILE: PermissionError("not executable")}), "failed to start: go: not executable"),
+            (timeout_runner, "timed out"),
+        ]:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                make_runtime_evidence_repo(root, {"clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"]})
+                captured = io.StringIO()
+                with chdir(root), contextlib.redirect_stderr(captured):
+                    rc = m.main(["--verify-runtime-evidence-go"], command_runner=runner)
+            self.assertEqual(rc, 1)
+            self.assertIn(f"runtime_evidence discovery command {expected}", captured.getvalue())
 
     def test_runtime_evidence_rejects_schema_path_and_source_boundary_errors(self) -> None:
         def base_runtime_evidence(path: str = "clients/go/node/sync_reorg_test.go") -> dict:
