@@ -19,6 +19,7 @@ const (
 var (
 	errCompactRelayMissingRequestTooLarge = errors.New("too many compact relay missing transactions")
 	errBlockTxnTransactionShortIDMismatch = errors.New("blocktxn transaction short id mismatch")
+	errGetBlockTxnIndexOutOfRange         = errors.New("getblocktxn index out of range")
 )
 
 type compactReconstructionResult struct {
@@ -374,7 +375,107 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	return p.processCompactTransactions(req.BlockHash, req.Header, txs, true)
 }
 
+func (p *peer) handleGetBlockTxn(payload []byte) error {
+	req, err := decodeGetBlockTxnPayload(payload)
+	if err != nil {
+		return p.rejectGetBlockTxn(err.Error())
+	}
+	if err := compactValidateUniqueGetBlockTxnIndexes(req.Indexes); err != nil {
+		return p.rejectGetBlockTxn(err.Error())
+	}
+	p.compactSendBarrier()
+	if !p.consumeCompactBlockAnnouncement(req.BlockHash) {
+		p.setLastError("ignored unannounced getblocktxn request")
+		return nil
+	}
+	block, ok, err := p.blockBytes(req.BlockHash)
+	if err != nil || !ok {
+		return err
+	}
+	txs, err := compactBlockTransactionsByIndex(block, req.Indexes)
+	if err != nil {
+		if errors.Is(err, errGetBlockTxnIndexOutOfRange) {
+			return p.rejectGetBlockTxn(err.Error())
+		}
+		return err
+	}
+	response, err := encodeBlockTxnPayload(blockTxnPayload{BlockHash: req.BlockHash, Transactions: txs})
+	if err != nil {
+		return err
+	}
+	return p.send(messageBlockTxn, response)
+}
+
+func compactValidateUniqueGetBlockTxnIndexes(indexes []uint64) error {
+	if len(indexes) < 2 {
+		return nil
+	}
+	seen := make(map[uint64]struct{}, len(indexes))
+	for _, idx := range indexes {
+		if _, ok := seen[idx]; ok {
+			return errors.New("duplicate getblocktxn index")
+		}
+		seen[idx] = struct{}{}
+	}
+	return nil
+}
+
+func compactBlockTransactionsByIndex(block []byte, indexes []uint64) ([][]byte, error) {
+	txCount, offset, err := compactBlockTransactionCount(block)
+	if err != nil {
+		return nil, err
+	}
+	for _, idx := range indexes {
+		if idx >= txCount {
+			return nil, errGetBlockTxnIndexOutOfRange
+		}
+	}
+	if len(indexes) == 0 {
+		return [][]byte{}, nil
+	}
+
+	positions := make(map[uint64]int, len(indexes))
+	var maxIndex uint64
+	for pos, idx := range indexes {
+		positions[idx] = pos
+		if idx > maxIndex {
+			maxIndex = idx
+		}
+	}
+	txs := make([][]byte, len(indexes))
+	for txIndex := uint64(0); txIndex <= maxIndex; txIndex++ {
+		_, _, _, consumed, err := consensus.ParseTx(block[offset:])
+		if err != nil || consumed <= 0 || offset+consumed > len(block) {
+			return nil, errors.New("stored block transaction is non-canonical")
+		}
+		if pos, ok := positions[txIndex]; ok {
+			txs[pos] = append([]byte(nil), block[offset:offset+consumed]...)
+		}
+		offset += consumed
+	}
+	if maxIndex == txCount-1 && offset != len(block) {
+		return nil, errors.New("stored block has trailing bytes after transactions")
+	}
+	return txs, nil
+}
+
+func compactBlockTransactionCount(block []byte) (uint64, int, error) {
+	if len(block) < consensus.BLOCK_HEADER_BYTES {
+		return 0, 0, errors.New("stored block missing header")
+	}
+	txCount, countLen, err := consensus.DecodeCompactSize(block[consensus.BLOCK_HEADER_BYTES:])
+	if err != nil {
+		return 0, 0, err
+	}
+	return txCount, consensus.BLOCK_HEADER_BYTES + countLen, nil
+}
+
 func (p *peer) rejectBlockTxn(msg string) error {
+	p.bumpBan(10, msg)
+	return errors.New(msg)
+}
+
+func (p *peer) rejectGetBlockTxn(msg string) error {
 	p.bumpBan(10, msg)
 	return errors.New(msg)
 }

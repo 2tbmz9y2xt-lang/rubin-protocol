@@ -8,7 +8,10 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-const compactOutstandingRequestTTL = 15 * time.Second
+const (
+	compactOutstandingRequestTTL = 15 * time.Second
+	compactAnnouncedBlockLimit   = 16
+)
 
 type compactModeSnapshot struct {
 	Mode    uint8
@@ -18,6 +21,12 @@ type compactModeSnapshot struct {
 type peerCompactRelayState struct {
 	remoteMode  compactModeSnapshot
 	outstanding *compactOutstandingRequest
+	announced   []compactBlockAnnouncement
+}
+
+type compactBlockAnnouncement struct {
+	blockHash [32]byte
+	sent      bool
 }
 
 type compactOutstandingRequest struct {
@@ -65,6 +74,87 @@ func (p *peer) remoteCompactMode() compactModeSnapshot {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	return p.compact.remoteMode
+}
+
+func compactAnnouncementHashForSentMessage(command string, payload []byte) ([32]byte, bool) {
+	var zero [32]byte
+	if command != messageCmpctBlock {
+		return zero, false
+	}
+	header, ok := cmpctBlockHeaderValidationCandidate(payload)
+	if !ok {
+		return zero, false
+	}
+	blockHash, _ := consensus.BlockHash(header[:]) // fixed-size header slice cannot hit the length error path
+	return blockHash, true
+}
+
+func (p *peer) markCompactBlockAnnounced(blockHash [32]byte) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	p.appendCompactBlockAnnouncementLocked(blockHash, true)
+	p.trimCompactBlockAnnouncementsLocked()
+}
+
+func (p *peer) beginCompactBlockAnnouncementSend(blockHash [32]byte) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	p.appendCompactBlockAnnouncementLocked(blockHash, false)
+}
+
+func (p *peer) finishCompactBlockAnnouncementSend(blockHash [32]byte, sendErr error) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if sendErr != nil {
+		p.removeCompactBlockAnnouncementBySentLocked(blockHash, false)
+		return
+	}
+	p.publishCompactBlockAnnouncementLocked(blockHash)
+	p.trimCompactBlockAnnouncementsLocked()
+}
+
+func (p *peer) appendCompactBlockAnnouncementLocked(blockHash [32]byte, sent bool) {
+	p.compact.announced = append(p.compact.announced, compactBlockAnnouncement{blockHash: blockHash, sent: sent})
+}
+
+func (p *peer) publishCompactBlockAnnouncementLocked(blockHash [32]byte) {
+	for idx := len(p.compact.announced) - 1; idx >= 0; idx-- {
+		if p.compact.announced[idx].blockHash == blockHash {
+			p.compact.announced[idx].sent = true
+			return
+		}
+	}
+}
+
+func (p *peer) trimCompactBlockAnnouncementsLocked() {
+	for len(p.compact.announced) > compactAnnouncedBlockLimit {
+		copy(p.compact.announced, p.compact.announced[1:])
+		p.compact.announced[len(p.compact.announced)-1] = compactBlockAnnouncement{}
+		p.compact.announced = p.compact.announced[:len(p.compact.announced)-1]
+	}
+}
+
+func (p *peer) consumeCompactBlockAnnouncement(blockHash [32]byte) bool {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	return p.removeCompactBlockAnnouncementLocked(blockHash)
+}
+
+func (p *peer) removeCompactBlockAnnouncementLocked(blockHash [32]byte) bool {
+	return p.removeCompactBlockAnnouncementBySentLocked(blockHash, true)
+}
+
+func (p *peer) removeCompactBlockAnnouncementBySentLocked(blockHash [32]byte, sent bool) bool {
+	for idx := len(p.compact.announced) - 1; idx >= 0; idx-- {
+		if p.compact.announced[idx].blockHash != blockHash || p.compact.announced[idx].sent != sent {
+			continue
+		}
+		copy(p.compact.announced[idx:], p.compact.announced[idx+1:])
+		p.compact.announced[len(p.compact.announced)-1] = compactBlockAnnouncement{}
+		p.compact.announced = p.compact.announced[:len(p.compact.announced)-1]
+		return true
+	}
+	return false
 }
 
 func (p *peer) setCompactOutstandingRequest(req compactOutstandingRequest) {
