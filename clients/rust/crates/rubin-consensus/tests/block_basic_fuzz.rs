@@ -132,6 +132,45 @@ fn block_parse_deterministic() {
 // =============================================================
 
 #[test]
+fn block_parse_tx_count_u64max_eof_fuzz() {
+    // tx_count = u64_max with EOF immediately after count
+    let mut buf = vec![0u8; BLOCK_HEADER_BYTES];
+    buf.push(0xFF); // CompactSize u64 tag
+    buf.extend_from_slice(&u64::MAX.to_le_bytes());
+    let _ = parse_block_bytes(&buf);
+}
+
+#[test]
+fn block_parse_tx_count_2pow32_eof_fuzz() {
+    // tx_count = 2^32 with EOF immediately after count
+    let mut buf = vec![0u8; BLOCK_HEADER_BYTES];
+    buf.push(0xFF);
+    buf.extend_from_slice(&((1u64) << 32).to_le_bytes());
+    let _ = parse_block_bytes(&buf);
+}
+
+#[test]
+fn block_parse_tx_count_boundary_seeds() {
+    // Boundary seeds: 0, 1, 252, 253, 65535
+    // 0..=252: single-byte compact (tag = value)
+    // 253: 0xFD tag + u16 LE = 0xFD, 0xFD, 0x00
+    // 65535: 0xFD tag + u16 LE = 0xFD, 0xFF, 0xFF
+    let seeds: &[(u64, &[u8])] = &[
+        (0, &[0x00]),
+        (1, &[0x01]),
+        (252, &[0xFC]),
+        (253, &[0xFD, 0xFD, 0x00]),
+        (65535, &[0xFD, 0xFF, 0xFF]),
+    ];
+    for &(_seed, encoding) in seeds {
+        let mut buf = vec![0u8; BLOCK_HEADER_BYTES];
+        buf.extend_from_slice(encoding);
+        assert!(!encoding.is_empty());
+        let _ = parse_block_bytes(&buf);
+    }
+}
+
+#[test]
 fn block_parse_one_byte() {
     let _ = parse_block_bytes(&[0x01]);
 }

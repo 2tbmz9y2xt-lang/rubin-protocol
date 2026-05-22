@@ -567,6 +567,7 @@ func (p *peer) compactApplyErrorFallback(pb *consensus.ParsedBlock, blockHash [3
 }
 
 func (p *peer) requestCompactFullBlockFallback(blockHash [32]byte) error {
+	p.clearCompactOutstandingRequestForBlock(blockHash)
 	body, err := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
 	if err != nil {
 		return err
