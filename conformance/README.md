@@ -73,11 +73,11 @@ by domain:
 - mempool policy
 - DA fee-floor policy
 
-Runtime reorg coverage is not a new consensus fixture gate. It records the
-existing helper/direct-context `CV-FORK-CHOICE` and `CV-TIMESTAMP` edge domain
-without claiming checker-enforced node runtime source/test evidence. Follow-up
-checker hardening is tracked separately for declared runtime source/test
-validation.
+Runtime reorg coverage is not a new consensus fixture gate. The runtime reorg
+edge-pack domain is pinned using the existing helper/direct-context
+`CV-FORK-CHOICE` and `CV-TIMESTAMP` gates, without claiming checker-enforced
+node runtime source/test evidence. Follow-up checker hardening is tracked
+separately for declared runtime source/test validation.
 
 Mempool/DA fee-floor domains are accounting-only here: they cite committed
 executable CV vector IDs and replay evidence, but do not claim fuzz or formal
