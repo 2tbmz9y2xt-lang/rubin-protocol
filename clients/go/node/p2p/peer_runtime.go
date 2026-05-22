@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +22,12 @@ func (e postHandshakeUnknownCommandError) Error() string {
 
 func (e postHandshakeUnknownCommandError) peerReason() string {
 	return fmt.Sprintf("unknown command: %s", e.command)
+}
+
+type blockTxnStaleBodyError struct{}
+
+func (e blockTxnStaleBodyError) Error() string {
+	return "stale blocktxn response has body"
 }
 
 func (p *peer) run(ctx context.Context) error {
@@ -81,6 +88,9 @@ func (p *peer) readBlockTxnFrame(header frameHeader) (message, error) {
 		}
 		return message{}, commandPayloadCapError{command: header.Command}
 	}
+	if header.Size > blockTxnHashPayloadBytes {
+		return p.readMatchedBlockTxnFrame(header)
+	}
 	return p.readFullCommandFramePayload(header)
 }
 
@@ -113,6 +123,31 @@ func (p *peer) readFullCommandFramePayload(header frameHeader) (message, error) 
 		return message{}, err
 	}
 	return message{Command: header.Command, Payload: payload}, nil
+}
+
+func (p *peer) readMatchedBlockTxnFrame(header frameHeader) (message, error) {
+	prefix, err := readPayloadPrefix(p.conn, header.Size, blockTxnHashPayloadBytes)
+	if err != nil {
+		return message{}, err
+	}
+	if !p.blockTxnPrefixMatchesOutstanding(prefix) {
+		return message{}, blockTxnStaleBodyError{}
+	}
+	payload, err := readPayloadWithChecksum(io.MultiReader(bytes.NewReader(prefix), p.conn), header.Size, header.Checksum)
+	if err != nil {
+		return message{}, err
+	}
+	return message{Command: header.Command, Payload: payload}, nil
+}
+
+func (p *peer) blockTxnPrefixMatchesOutstanding(prefix []byte) bool {
+	if len(prefix) < blockTxnHashPayloadBytes {
+		return false
+	}
+	var responseHash [32]byte
+	copy(responseHash[:], prefix[:blockTxnHashPayloadBytes])
+	blockHash, ok := p.compactOutstandingBlockHash()
+	return ok && responseHash == blockHash
 }
 
 func (p *peer) postHandshakePayloadCap() payloadLimitFn {
@@ -322,6 +357,9 @@ func (p *peer) applyPostHandshakeDisconnectError(err error) {
 	if err == nil {
 		return
 	}
+	if p.applyBlockTxnStaleBodyDisconnect(err) {
+		return
+	}
 	if p.applyBlockTxnCapDisconnect(err) {
 		return
 	}
@@ -334,6 +372,15 @@ func (p *peer) applyPostHandshakeDisconnectError(err error) {
 		return
 	}
 	p.setLastError(err.Error())
+}
+
+func (p *peer) applyBlockTxnStaleBodyDisconnect(err error) bool {
+	var staleErr blockTxnStaleBodyError
+	if !errors.As(err, &staleErr) {
+		return false
+	}
+	p.setLastError(staleErr.Error())
+	return true
 }
 
 func (p *peer) applyBlockTxnCapDisconnect(err error) bool {

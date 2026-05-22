@@ -235,7 +235,7 @@ func compactLocalTxIndex(localTxs [][]byte, nonce1, nonce2 uint64) (map[compactS
 	for _, tx := range localTxs {
 		wtxid, err := compactLocalTxWTxID(tx)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		shortID := compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
 		if _, ok := out[shortID]; ok {
