@@ -111,6 +111,19 @@ func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, b
 	return cloneCompactOutstandingRequest(req), true
 }
 
+func (p *peer) compactOutstandingBlockHash() ([32]byte, bool) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding == nil {
+		return [32]byte{}, false
+	}
+	if p.compactOutstandingRequestExpiredLocked() {
+		p.compact.outstanding = nil
+		return [32]byte{}, false
+	}
+	return p.compact.outstanding.BlockHash, true
+}
+
 func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) {
 	p.compactMu.Lock()
 	if p.compact.outstanding == nil {
@@ -134,6 +147,12 @@ func (p *peer) clearCompactOutstandingRequestForBlock(blockHash [32]byte) {
 	if p.compact.outstanding != nil && p.compact.outstanding.BlockHash == blockHash {
 		p.compact.outstanding = nil
 	}
+	p.compactMu.Unlock()
+}
+
+func (p *peer) clearCompactOutstandingRequest() {
+	p.compactMu.Lock()
+	p.compact.outstanding = nil
 	p.compactMu.Unlock()
 }
 

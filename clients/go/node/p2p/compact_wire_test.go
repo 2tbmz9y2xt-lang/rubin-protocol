@@ -140,6 +140,25 @@ func TestCmpctBlockPayloadCodec(t *testing.T) {
 	}
 }
 
+func TestCmpctBlockPayloadCapAllowsManyPrefilledBlocks(t *testing.T) {
+	const txLen = 1024
+	txCount := (uint64(consensus.MAX_BLOCK_BYTES) - consensus.BLOCK_HEADER_BYTES - uint64(maxCompactSizeBytes)) / txLen
+	for compactFullBlockLenForTest(txCount+1, txLen) <= uint64(consensus.MAX_BLOCK_BYTES) {
+		txCount++
+	}
+	for compactFullBlockLenForTest(txCount, txLen) > uint64(consensus.MAX_BLOCK_BYTES) {
+		txCount--
+	}
+
+	compactLen := cmpctBlockAllPrefilledLenForTest(txCount, txLen)
+	if compactLen <= uint64(consensus.MAX_BLOCK_BYTES) {
+		t.Fatalf("all-prefilled cmpctblock len=%d, want above MAX_BLOCK_BYTES=%d", compactLen, consensus.MAX_BLOCK_BYTES)
+	}
+	if compactLen > uint64(compactRelayPayloadCap(messageCmpctBlock)) {
+		t.Fatalf("all-prefilled cmpctblock len=%d exceeds cmpctblock cap=%d", compactLen, compactRelayPayloadCap(messageCmpctBlock))
+	}
+}
+
 func TestCmpctBlockPayloadRejectsMalformed(t *testing.T) {
 	validTx := minimalBlockTxnTestTxBytes(12)
 	assertCmpctBlockEncodeFails(t, "empty", cmpctBlockPayload{}, "invalid compact relay entry count")
@@ -153,6 +172,8 @@ func TestCmpctBlockPayloadRejectsMalformed(t *testing.T) {
 	assertCmpctBlockDecodeFails(t, "short_header", make([]byte, consensus.BLOCK_HEADER_BYTES+15), "cmpctblock payload missing header or nonce")
 	assertCmpctBlockDecodeFails(t, "empty", cmpctBlockTestPayload([]byte{0, 0}), "invalid compact relay entry count")
 	assertCmpctBlockDecodeFails(t, "payload_above_wire_cap", make([]byte, consensus.MAX_RELAY_MSG_BYTES+1), "cmpctblock payload too large")
+	assertCmpctBlockDecodeFails(t, "short_id_count_too_large_truncated", oversizedCmpctBlockShortIDCountPayload([consensus.BLOCK_HEADER_BYTES]byte{}), "cmpctblock payload truncated short IDs")
+	assertCmpctBlockDecodeFails(t, "short_id_count_too_large_trailing_tail", append(oversizedCmpctBlockShortIDPayload([consensus.BLOCK_HEADER_BYTES]byte{}), 0x00), "cmpctblock payload has trailing bytes")
 	assertCmpctBlockDecodeFails(t, "nonminimal_short_count", cmpctBlockTestPayload([]byte{0xfd, 0x00, 0x00}), "non-minimal")
 	assertCmpctBlockDecodeFails(t, "truncated_short_ids", cmpctBlockTestPayload([]byte{1, 0x01, 0x02}), "cmpctblock payload truncated short IDs")
 	assertCmpctBlockDecodeFails(t, "nonminimal_prefilled_count", cmpctBlockTestPayload([]byte{0, 0xfd, 0x00, 0x00}), "non-minimal")
@@ -170,6 +191,16 @@ func TestCmpctBlockPayloadRejectsMalformed(t *testing.T) {
 	rangeBeforeTx := consensus.AppendU32le(consensus.AppendCompactSize(consensus.AppendCompactSize(nil, 0), 1), 1)
 	assertCmpctBlockDecodeFails(t, "prefilled_index_range_before_tx", cmpctBlockTestPayload(rangeBeforeTx), "compact relay index out of range")
 	assertCmpctBlockDecodeFails(t, "trailing", append(cmpctBlockTestPayload([]byte{1, 0, 0, 0, 0, 0, 0, 0}), 0x00), "cmpctblock payload has trailing bytes")
+}
+
+func compactFullBlockLenForTest(txCount, txLen uint64) uint64 {
+	return consensus.BLOCK_HEADER_BYTES + uint64(len(consensus.EncodeCompactSize(txCount))) + txCount*txLen
+}
+
+func cmpctBlockAllPrefilledLenForTest(txCount, txLen uint64) uint64 {
+	indexWidth := uint64(compactRelayIndexBytes)
+	entryLen := indexWidth + uint64(maxCompactSizeBytes) + txLen
+	return consensus.BLOCK_HEADER_BYTES + 16 + uint64(len(consensus.EncodeCompactSize(0))) + uint64(len(consensus.EncodeCompactSize(txCount))) + txCount*entryLen
 }
 
 func TestBlockTxnPayloadRejectsMalformed(t *testing.T) {
