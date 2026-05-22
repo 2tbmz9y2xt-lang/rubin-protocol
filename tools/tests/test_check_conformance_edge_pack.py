@@ -123,14 +123,17 @@ class EdgePackCheckerTests(unittest.TestCase):
             rust_path = "clients/rust/crates/rubin-node/src/sync_reorg.rs"
             (root / go_path).parent.mkdir(parents=True, exist_ok=True)
             (root / rust_path).parent.mkdir(parents=True, exist_ok=True)
-            go_source = "package node\n\nimport \"fmt\"\nimport tb `testing`\n\nvar _ = fmt.Sprintf\nfunc TestRuntimeReorg(t * tb.T) {}\n"
-            rust_source = "#[cfg(test)]\nmod tests {\nfn helper<'a>() {}\n#[test] #[should_panic] fn runtime_reorg_test() { panic!() }\n}\n"
+            go_source = "\ufeffpackage node\n\nimport \"fmt\"\nimport . `testing`\n\nvar _ = fmt.Sprintf\nfunc TestRuntimeReorg(t * T) {}\nfunc Test1Bad(t *T) {}\nfunc Test_Bad(t *T) {}\n"
+            rust_source = "#[cfg(test)]\nmod tests {\nfn helper<'a>() {}\n#[cfg(any(test, feature = \"x\"))]\n#[test] #[should_panic] fn runtime_reorg_test() { panic!() }\n#[cfg_attr(not(test), ignore)]\n#[test] fn runtime_reorg_cfg_attr_test() {}\n}\n"
             (root / go_path).write_text(go_source, encoding="utf-8")
             (root / rust_path).write_text(rust_source, encoding="utf-8")
             baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
             baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
             baseline["domains"][0]["runtime_evidence"] = {
-                "tests_by_file": {go_path: ["TestRuntimeReorg"], rust_path: ["runtime_reorg_test"]}
+                "tests_by_file": {
+                    go_path: ["TestRuntimeReorg", "Test1Bad", "Test_Bad"],
+                    rust_path: ["runtime_reorg_test", "runtime_reorg_cfg_attr_test"],
+                }
             }
             write_json(baseline_path, baseline)
             captured = io.StringIO()
@@ -158,9 +161,9 @@ class EdgePackCheckerTests(unittest.TestCase):
             cases = [
                 (
                     "clients/go/node/sync_reorg_test.go",
-                    "package node\n\nimport \"testing\"\n\nfunc Testlower() {}\nfunc Test1Bad(t *testing.T) {}\nfunc Test_Bad(t *testing.T) {}\nfunc TestWrong(t string) {}\nfunc TestExtra(t *testing.T, n int) {}\n",
-                    ["Testlower", "Test1Bad", "Test_Bad", "TestWrong", "TestExtra"],
-                    "Testlower, Test1Bad, Test_Bad, TestWrong, TestExtra",
+                    "package node\n\nimport \"testing\"\n\nfunc Testlower() {}\nfunc TestWrong(t string) {}\nfunc TestExtra(t *testing.T, n int) {}\n",
+                    ["Testlower", "TestWrong", "TestExtra"],
+                    "Testlower, TestWrong, TestExtra",
                 ),
                 ("clients/go/node/sync_reorg.go", "package node\n\nimport \"testing\"\n\nfunc TestWrongFile(t *testing.T) {}\n", ["TestWrongFile"], "must end with _test.go"),
                 ("clients/go/node/sync_reorg_test.go", "package node\n/*\nimport \"testing\"\n*/\nfunc TestCommentImport(t *testing.T) {}\n", ["TestCommentImport"], "TestCommentImport"),
@@ -191,8 +194,10 @@ class EdgePackCheckerTests(unittest.TestCase):
             (root / rel_path).write_text(
                 "#[test]\n#[ignore]\nfn ignored() {}\n#[ignore]\n#[test]\nfn ignored_before() {}\n"
                 "#[test]\n#[cfg(FALSE)]\nfn cfg_disabled() {}\n#[cfg(FALSE)]\n#[test]\nfn cfg_before() {}\n"
-                "#[cfg(\nFALSE\n)]\n#[test]\nfn cfg_multiline() {}\n#[cfg_attr(\nfeature = \"never\",\nignore\n)]\n#[test]\nfn cfg_attr_multiline() {}\n"
+                "#[cfg(any(not(test), feature = \"never\"))]\n#[test]\nfn cfg_nested_not_test() {}\n"
+                "#[cfg(\nFALSE\n)]\n#[test]\nfn cfg_multiline() {}\n#[cfg_attr(\ntest,\nignore\n)]\n#[test]\nfn cfg_attr_multiline() {}\n"
                 "#[cfg(FALSE)]\nmod disabled { #[test]\nfn disabled_module() {} }\n#[cfg(FALSE)]\n#[allow(dead_code)]\nmod disabled_stacked { #[test]\nfn disabled_mod_test() {} }\n"
+                "#[cfg(FALSE)]\nmod disabled_brace { const C: char = '}'; #[test]\nfn disabled_brace_module() {} }\n"
                 "#[cfg(FALSE)]\nmod disabled_next\n{\n#[test]\nfn disabled_next_line_brace() {}\n}\n#[test]\nconst fn const_test() {}\n#[test]\nunsafe fn unsafe_test() {}\n#[test]\nextern \"C\" fn extern_test() {}\n"
                 "mod inner_disabled {\n#![cfg(FALSE)]\n#[test]\nfn inner_cfg() {}\n}\n",
                 encoding="utf-8",
@@ -201,15 +206,16 @@ class EdgePackCheckerTests(unittest.TestCase):
                 root,
                 rel_path,
                 (
-                    "ignored ignored_before cfg_disabled cfg_before cfg_multiline cfg_attr_multiline "
-                    "disabled_module disabled_mod_test disabled_next_line_brace const_test unsafe_test extern_test inner_cfg"
+                    "ignored ignored_before cfg_disabled cfg_before cfg_nested_not_test cfg_multiline cfg_attr_multiline "
+                    "disabled_module disabled_mod_test disabled_brace_module disabled_next_line_brace "
+                    "const_test unsafe_test extern_test inner_cfg"
                 ).split(),
             )
             captured = io.StringIO()
             with chdir(root), contextlib.redirect_stderr(captured):
                 rc = m.main()
         self.assertEqual(rc, 1)
-        self.assertIn("disabled_next_line_brace, const_test, unsafe_test, extern_test", captured.getvalue())
+        self.assertIn("disabled_brace_module, disabled_next_line_brace, const_test", captured.getvalue())
 
     def test_missing_required_vector_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
