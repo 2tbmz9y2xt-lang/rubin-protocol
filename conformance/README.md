@@ -68,13 +68,13 @@ by domain:
 - sighash
 - covenants
 - difficulty
-- runtime reorg
+- runtime_reorg
 - DA
 - mempool policy
 - DA fee-floor policy
 
-Runtime reorg coverage is not a new consensus fixture gate. The runtime reorg
-edge-pack domain is pinned using the existing helper/direct-context
+`runtime_reorg` coverage is not a new consensus fixture gate. The
+`runtime_reorg` edge-pack domain is pinned using evidence from the existing
 `CV-FORK-CHOICE` and `CV-TIMESTAMP` gates, without claiming checker-enforced
 node runtime source/test evidence. Follow-up checker hardening is tracked
 separately for declared runtime source/test validation.
