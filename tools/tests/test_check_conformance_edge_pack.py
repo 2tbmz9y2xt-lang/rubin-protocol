@@ -671,6 +671,26 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
 
+    def test_runtime_evidence_keeps_line_after_rust_raw_string(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_coverage"]},
+            )
+            rust_test = root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "sync_reorg.rs"
+            rust_test.parent.mkdir(parents=True, exist_ok=True)
+            rust_test.write_text(
+                'const TEXT: &str = r#"not code"#;\n#[test]\nfn runtime_reorg_coverage() {}\n',
+                encoding="utf-8",
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stdout(captured):
+                rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
     def test_runtime_evidence_rejects_commented_rust_test_signature(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

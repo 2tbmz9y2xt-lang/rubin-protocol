@@ -163,8 +163,9 @@ def mask_non_code(source: str, *, language: str) -> str:
             if ch == '"' and source.startswith("#" * raw_hashes, i + 1):
                 for j in range(raw_hashes):
                     put_space(source[i + 1 + j])
-                i += raw_hashes + 1
+                i += raw_hashes + 2
                 state = "code"
+                continue
             i += 1
             continue
 
