@@ -626,6 +626,83 @@ func TestRunDisconnectsStaleBlockTxnBodyWithoutBan(t *testing.T) {
 	}
 }
 
+func TestRunRejectsStaleBlockTxnBodyBeforeChecksum(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	activeHash := [32]byte{0x66}
+	staleHash := [32]byte{0x77}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: activeHash, BlockTxnPayloadCap: 128})
+	payload := append(staleHash[:], make([]byte, 33)...)
+	header, err := buildEnvelopeHeader(networkMagic(p.service.cfg.PeerRuntimeConfig.Network), messageBlockTxn, payload)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	header[20] ^= 0xff
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: append(header[:], payload...)}}}
+	err = p.run(context.Background())
+	if err == nil || err.Error() != "stale blocktxn response has body" {
+		t.Fatalf("run err=%v, want stale body before checksum", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "stale blocktxn response has body") {
+		t.Fatalf("state=%+v, want stale body disconnect without ban", state)
+	}
+	if p.blockTxnPayloadCap() == 0 {
+		t.Fatal("stale body before checksum cleared active outstanding request")
+	}
+}
+
+func TestRunPropagatesBlockTxnPrefixReadFailure(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	blockHash := [32]byte{0x69}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: blockHash, BlockTxnPayloadCap: 128})
+	payload := append(blockHash[:], make([]byte, 33)...)
+	header, err := buildEnvelopeHeader(networkMagic(p.service.cfg.PeerRuntimeConfig.Network), messageBlockTxn, payload)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: header[:]}}}
+	err = p.run(context.Background())
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("run err=%v, want prefix short-read error", err)
+	}
+}
+
+func TestBlockTxnPrefixWithoutOutstandingDoesNotMatch(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	blockHash := [32]byte{0x6a}
+	prefix := append([]byte(nil), blockHash[:]...)
+	if p.blockTxnPrefixMatchesOutstanding(prefix) {
+		t.Fatal("blocktxn prefix matched without outstanding request")
+	}
+	if p.blockTxnPrefixMatchesOutstanding(prefix[:blockTxnHashPayloadBytes-1]) {
+		t.Fatal("short blocktxn prefix matched outstanding request")
+	}
+}
+
+func TestRunPropagatesMatchedBlockTxnChecksumFailure(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	blockHash := [32]byte{0x67}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: blockHash, BlockTxnPayloadCap: 128})
+	payload := append(blockHash[:], make([]byte, 33)...)
+	header, err := buildEnvelopeHeader(networkMagic(p.service.cfg.PeerRuntimeConfig.Network), messageBlockTxn, payload)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	header[20] ^= 0xff
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: append(header[:], payload...)}}}
+	err = p.run(context.Background())
+	if err == nil || err.Error() != "invalid envelope checksum" {
+		t.Fatalf("run err=%v, want invalid envelope checksum", err)
+	}
+}
+
 func TestApplyBlockTxnCapDisconnectBansActiveCommandCap(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.setCompactOutstandingRequest(compactOutstandingTestRequest([32]byte{0x63}))

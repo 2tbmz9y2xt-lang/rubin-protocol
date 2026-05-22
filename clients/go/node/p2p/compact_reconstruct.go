@@ -235,7 +235,7 @@ func compactLocalTxIndex(localTxs [][]byte, nonce1, nonce2 uint64) (map[compactS
 	for _, tx := range localTxs {
 		wtxid, err := compactLocalTxWTxID(tx)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		shortID := compactShortID(consensus.CompactShortID(wtxid, nonce1, nonce2))
 		if _, ok := out[shortID]; ok {
@@ -341,7 +341,7 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	}
 	if responseHash != blockHash {
 		if len(payload) > blockTxnHashPayloadBytes {
-			return errors.New("stale blocktxn response has body")
+			return blockTxnStaleBodyError{}
 		}
 		p.setLastError("ignored stale blocktxn response")
 		return nil
