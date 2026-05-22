@@ -13,11 +13,11 @@ GO_TEST_FUNC_RE = re.compile(
     r"\*(?P<pkg>[A-Za-z_][A-Za-z0-9_]*)\.T\s*\)\s*\{"
 )
 GO_IMPORT_BLOCK_RE = re.compile(r"^import\s*\(\s*$")
-GO_IMPORT_SPEC_RE = re.compile(r'^(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?"testing"\s*$')
-GO_SINGLE_IMPORT_RE = re.compile(r'^import\s+(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?"testing"\s*$')
+GO_IMPORT_SPEC_RE = re.compile(r'^(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?(?:"testing"|`testing`)\s*$')
+GO_SINGLE_IMPORT_RE = re.compile(r'^import\s+(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|[._])\s+)?(?:"testing"|`testing`)\s*$')
 RUST_TEST_ATTR_RE = re.compile(r"^\s*#\s*\[\s*test\s*\]\s*$")
-RUST_CFG_TEST_ATTR_RE = re.compile(r"^\s*#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
-RUST_INACTIVE_ATTR_RE = re.compile(r"^\s*#\s*\[\s*(?:ignore\b|cfg\s*\(|cfg_attr\s*\([^]]*\bignore\b)")
+RUST_CFG_TEST_ATTR_RE = re.compile(r"^\s*#\s*!?\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
+RUST_INACTIVE_ATTR_RE = re.compile(r"^\s*#\s*!?\s*\[\s*(?:ignore\b|cfg\s*\(|cfg_attr\s*\([^]]*\bignore\b)")
 RUST_FN_RE = re.compile(r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
@@ -115,9 +115,10 @@ def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> s
 
     while i < n:
         if source.startswith("//", i):
+            preserve = language == "go" and (source.startswith("//go:build", i) or source.startswith("// +build", i))
             while i < n:
                 ch = source[i]
-                put_masked(ch)
+                out.append(ch) if preserve else put_masked(ch)
                 i += 1
                 if ch == "\n":
                     break
@@ -143,7 +144,7 @@ def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> s
                 put_masked(source[i])
                 i += 1
             continue
-        if language == "go" and source[i] == "`":
+        if mask_strings and language == "go" and source[i] == "`":
             i = mask_until("`", i)
             continue
         if language == "rust" and source[i] == "r":
@@ -153,7 +154,7 @@ def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> s
             if j < n and source[j] == '"':
                 i = mask_until('"' + "#" * (j - i - 1), i, skip_start=j - i + 1)
                 continue
-        if mask_strings and source[i] in {'"', "'"}:
+        if mask_strings and (source[i] == '"' or (language != "rust" and source[i] == "'")):
             i = mask_until(source[i], i)
             continue
         out.append(source[i])
@@ -163,7 +164,7 @@ def mask_non_code(source: str, *, language: str, mask_strings: bool = True) -> s
 
 def go_test_names(source: str) -> set[str]:
     masked = mask_non_code(source, language="go")
-    if go_has_build_constraint(source):
+    if go_has_build_constraint(masked):
         return set()
     aliases = go_testing_aliases(mask_non_code(source, language="go", mask_strings=False))
     return {match.group(1) for match in GO_TEST_FUNC_RE.finditer(masked) if match.group("pkg") in aliases}
@@ -175,10 +176,14 @@ def go_testing_aliases(source: str) -> set[str]:
     for raw_line in source.splitlines():
         line = raw_line.strip()
         if not in_import_block:
+            if not line or line.startswith("package "):
+                continue
             if GO_IMPORT_BLOCK_RE.match(line):
                 in_import_block = True
                 continue
             match = GO_SINGLE_IMPORT_RE.match(line)
+            if not match:
+                break
         elif line == ")":
             in_import_block = False
             continue
@@ -221,12 +226,21 @@ def rust_test_names(source: str) -> set[str]:
                 inactive_depth = max(0, line.count("{") - line.count("}"))
                 pending_inactive_mod = False
             continue
-        if attr or line.startswith("#["):
-            attr = f"{attr} {line}".strip()
-            if "]" in line:
-                attrs.append(attr)
-                attr = ""
-            continue
+        if attr or line.startswith(("#[", "#![")):
+            if "]" not in line:
+                attr = f"{attr} {line}".strip()
+                continue
+            head, line = line.split("]", 1)
+            item_attr = f"{attr} {head}]".strip()
+            attr = ""
+            if item_attr.startswith("#!["):
+                if RUST_INACTIVE_ATTR_RE.match(item_attr) and not RUST_CFG_TEST_ATTR_RE.match(item_attr):
+                    inactive_depth = 1
+                continue
+            attrs.append(item_attr)
+            line = line.strip()
+            if not line:
+                continue
         if attrs:
             inactive = any(RUST_INACTIVE_ATTR_RE.match(attr) and not RUST_CFG_TEST_ATTR_RE.match(attr) for attr in attrs)
             if inactive and re.match(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\b", line):

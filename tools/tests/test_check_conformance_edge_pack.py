@@ -124,11 +124,11 @@ class EdgePackCheckerTests(unittest.TestCase):
             (root / go_path).parent.mkdir(parents=True, exist_ok=True)
             (root / rust_path).parent.mkdir(parents=True, exist_ok=True)
             (root / go_path).write_text(
-                "package node\n\nimport \"testing\"\n\nfunc TestRuntimeReorg(t *testing.T) {}\n",
+                "package node\n\nimport tb `testing`\n\nfunc TestRuntimeReorg(t *tb.T) {}\n",
                 encoding="utf-8",
             )
             (root / rust_path).write_text(
-                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn runtime_reorg_test() {}\n}\n",
+                "#[cfg(test)]\nmod tests {\nfn helper<'a>() {}\n#[test] fn runtime_reorg_test() {}\n}\n",
                 encoding="utf-8",
             )
             baseline_path = root / "conformance" / "EDGE_PACK_BASELINE.json"
@@ -189,7 +189,7 @@ class EdgePackCheckerTests(unittest.TestCase):
                 ),
                 (
                     "clients/go/node/sync_reorg_test.go",
-                    "//go:build never\n\npackage node\n\nimport \"testing\"\n\nfunc TestTaggedOut(t *testing.T) {}\n",
+                    "/* lead */\n//go:build never\n\npackage node\n\nimport \"testing\"\n\nfunc TestTaggedOut(t *testing.T) {}\n",
                     ["TestTaggedOut"],
                     "TestTaggedOut",
                 ),
@@ -208,23 +208,6 @@ class EdgePackCheckerTests(unittest.TestCase):
                     self.assertEqual(rc, 1)
                     self.assertIn(want, stderr)
 
-    def test_runtime_evidence_accepts_aliased_go_testing_import(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            make_repo(root)
-            rel_path = "clients/go/node/sync_reorg_test.go"
-            (root / rel_path).parent.mkdir(parents=True, exist_ok=True)
-            (root / rel_path).write_text(
-                'package node\n\nimport tb "testing"\n\nfunc TestAliased(t *tb.T) {}\n',
-                encoding="utf-8",
-            )
-            add_runtime_evidence(root, rel_path, ["TestAliased"])
-            captured = io.StringIO()
-            with chdir(root), contextlib.redirect_stdout(captured):
-                rc = m.main()
-        self.assertEqual(rc, 0)
-        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
-
     def test_runtime_evidence_rejects_inactive_or_non_plain_rust_tests(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -236,7 +219,8 @@ class EdgePackCheckerTests(unittest.TestCase):
                 "#[test]\n#[cfg(FALSE)]\nfn cfg_disabled() {}\n#[cfg(FALSE)]\n#[test]\nfn cfg_before() {}\n"
                 "#[cfg(\nFALSE\n)]\n#[test]\nfn cfg_multiline() {}\n#[cfg_attr(\nfeature = \"never\",\nignore\n)]\n#[test]\nfn cfg_attr_multiline() {}\n"
                 "#[cfg(FALSE)]\nmod disabled { #[test]\nfn disabled_module() {} }\n#[cfg(FALSE)]\n#[allow(dead_code)]\nmod disabled_stacked { #[test]\nfn disabled_mod_test() {} }\n"
-                "#[cfg(FALSE)]\nmod disabled_next\n{\n#[test]\nfn disabled_next_line_brace() {}\n}\n#[test]\nconst fn const_test() {}\n#[test]\nunsafe fn unsafe_test() {}\n#[test]\nextern \"C\" fn extern_test() {}\n",
+                "#[cfg(FALSE)]\nmod disabled_next\n{\n#[test]\nfn disabled_next_line_brace() {}\n}\n#[test]\nconst fn const_test() {}\n#[test]\nunsafe fn unsafe_test() {}\n#[test]\nextern \"C\" fn extern_test() {}\n"
+                "mod inner_disabled {\n#![cfg(FALSE)]\n#[test]\nfn inner_cfg() {}\n}\n",
                 encoding="utf-8",
             )
             add_runtime_evidence(
@@ -244,7 +228,7 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rel_path,
                 (
                     "ignored ignored_before cfg_disabled cfg_before cfg_multiline cfg_attr_multiline "
-                    "disabled_module disabled_mod_test disabled_next_line_brace const_test unsafe_test extern_test"
+                    "disabled_module disabled_mod_test disabled_next_line_brace const_test unsafe_test extern_test inner_cfg"
                 ).split(),
             )
             captured = io.StringIO()
