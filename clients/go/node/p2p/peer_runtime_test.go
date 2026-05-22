@@ -118,18 +118,25 @@ func TestCompactObjectCapsOpenOnlyForEnabledNegotiatedReceive(t *testing.T) {
 	}
 
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-	if got := limiter(messageCmpctBlock); got != compactRelayPayloadCap(messageCmpctBlock) {
-		t.Fatalf("negotiated cmpctblock cap=%d, want %d", got, compactRelayPayloadCap(messageCmpctBlock))
+	if got := limiter(messageCmpctBlock); got != uint32(consensus.MAX_RELAY_MSG_BYTES) {
+		t.Fatalf("negotiated cmpctblock cap=%d, want %d", got, consensus.MAX_RELAY_MSG_BYTES)
 	}
 	if got := limiter(messageGetBlockTxn); got != 0 {
 		t.Fatalf("inbound getblocktxn cap=%d, want closed until responder exists", got)
 	}
-	if got := limiter(messageBlockTxn); got != 0 {
-		t.Fatalf("blocktxn cap without outstanding=%d, want 0", got)
+	if got := limiter(messageBlockTxn); got != blockTxnHashPayloadBytes {
+		t.Fatalf("blocktxn cap without outstanding=%d, want hash-only cap %d", got, blockTxnHashPayloadBytes)
 	}
 	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: 64})
 	if got := limiter(messageBlockTxn); got != 64 {
 		t.Fatalf("blocktxn cap with outstanding=%d, want 64", got)
+	}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 0, Version: compactRelayVersion})
+	if got := limiter(messageCmpctBlock); got != 0 {
+		t.Fatalf("disabled cmpctblock cap=%d, want 0", got)
+	}
+	if got := limiter(messageBlockTxn); got != 64 {
+		t.Fatalf("disabled-mode blocktxn cap with outstanding=%d, want 64", got)
 	}
 }
 
@@ -188,6 +195,11 @@ func TestCompactOutstandingRequestUsesDedicatedTTL(t *testing.T) {
 	}
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("expired outstanding request was not cleared")
+	}
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest([32]byte{0x12}))
+	now = now.Add(compactOutstandingRequestTTL)
+	if _, ok := p.compactOutstandingBlockHash(); ok {
+		t.Fatal("expired outstanding block hash remained visible")
 	}
 }
 
@@ -395,7 +407,7 @@ func compactOutstandingTestRequest(blockHash [32]byte) compactOutstandingRequest
 	}
 }
 
-func TestRunBansUnexpectedBlockTxnCommandCap(t *testing.T) {
+func TestRunDoesNotBanUnexpectedBlockTxnCommandCap(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.conn = &scriptedConn{reads: []scriptedRead{{
 		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: make([]byte, 33)}),
@@ -406,12 +418,65 @@ func TestRunBansUnexpectedBlockTxnCommandCap(t *testing.T) {
 	}
 	p.applyPostHandshakeDisconnectError(err)
 	state := p.snapshotState()
-	if state.BanScore == 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
-		t.Fatalf("state=%+v, want unexpected blocktxn ban", state)
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
+		t.Fatalf("state=%+v, want unexpected blocktxn diagnostic without ban", state)
 	}
 }
 
-func TestRunBansUnexpectedBlockTxnMessageCap(t *testing.T) {
+func TestRunIgnoresUnexpectedBlockTxnAfterCompactNegotiation(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: make([]byte, blockTxnHashPayloadBytes)}),
+	}}}
+	if err := p.run(context.Background()); err != nil {
+		t.Fatalf("run unexpected blocktxn: %v", err)
+	}
+	state := p.snapshotState()
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "ignored unexpected blocktxn") {
+		t.Fatalf("state=%+v, want ignored unexpected blocktxn without ban", state)
+	}
+}
+
+func TestRunCapsUnexpectedBlockTxnBodyAfterCompactNegotiation(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: make([]byte, blockTxnHashPayloadBytes+1)}),
+	}}}
+	err := p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("run err=%v, want command cap error", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
+		t.Fatalf("state=%+v, want unexpected blocktxn diagnostic without ban", state)
+	}
+}
+
+func TestRunPropagatesUnexpectedBlockTxnChecksumFailure(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	payload := make([]byte, blockTxnHashPayloadBytes)
+	header, err := buildEnvelopeHeader(networkMagic(p.service.cfg.PeerRuntimeConfig.Network), messageBlockTxn, payload)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	header[20] ^= 0xff
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: append(header[:], payload...),
+	}}}
+	err = p.run(context.Background())
+	if err == nil || err.Error() != "invalid envelope checksum" {
+		t.Fatalf("run err=%v, want invalid envelope checksum", err)
+	}
+}
+
+func TestRunDoesNotBanUnexpectedBlockTxnMessageCap(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.service.cfg.PeerRuntimeConfig.MaxMessageSize = 1
 	header, err := buildEnvelopeHeader(
@@ -430,8 +495,171 @@ func TestRunBansUnexpectedBlockTxnMessageCap(t *testing.T) {
 	}
 	p.applyPostHandshakeDisconnectError(err)
 	state := p.snapshotState()
-	if state.BanScore == 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
-		t.Fatalf("state=%+v, want unexpected blocktxn ban", state)
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "unexpected blocktxn") {
+		t.Fatalf("state=%+v, want unexpected blocktxn diagnostic without ban", state)
+	}
+}
+
+func TestRunDoesNotClearActiveBlockTxnOnGlobalMessageCap(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	p.service.cfg.PeerRuntimeConfig.MaxMessageSize = 1
+	blockHash := [32]byte{0x62}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	header, err := buildEnvelopeHeader(
+		networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
+		messageBlockTxn,
+		append(blockHash[:], 0x01),
+	)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: header[:]}}}
+
+	err = p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds cap" {
+		t.Fatalf("run err=%v, want message cap error", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "message exceeds cap: blocktxn") {
+		t.Fatalf("state=%+v, want global cap disconnect without ban", state)
+	}
+	if p.blockTxnPayloadCap() == 0 {
+		t.Fatal("global cap disconnect cleared unclassified active outstanding request")
+	}
+}
+
+func TestRunBansShortOverCapBlockTxn(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	blockHash := [32]byte{0x65}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: blockHash, BlockTxnPayloadCap: 16})
+	payload := blockHash[:17]
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload}),
+	}}}
+	err := p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("run err=%v, want command cap error", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore == 0 || !strings.Contains(state.LastError, "blocktxn payload exceeds outstanding cap") {
+		t.Fatalf("state=%+v, want outstanding cap ban", state)
+	}
+	if p.blockTxnPayloadCap() != 0 {
+		t.Fatal("short over-cap blocktxn left outstanding request")
+	}
+}
+
+func TestRunRejectsOversizedBlockTxnBeforeChecksum(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	blockHash := [32]byte{0x64}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	payload := append(blockHash[:], make([]byte, 33)...)
+	header, err := buildEnvelopeHeader(networkMagic(p.service.cfg.PeerRuntimeConfig.Network), messageBlockTxn, payload)
+	if err != nil {
+		t.Fatalf("buildEnvelopeHeader: %v", err)
+	}
+	header[20] ^= 0xff
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: append(header[:], payload...),
+	}}}
+	err = p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("run err=%v, want command cap error", err)
+	}
+}
+
+func TestRunDisconnectsOversizedStaleBlockTxnWithoutBan(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	activeHash := [32]byte{0x66}
+	staleHash := [32]byte{0x77}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingTestRequest(activeHash))
+	payload := append(staleHash[:], make([]byte, 33)...)
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload}),
+	}}}
+	err := p.run(context.Background())
+	if err == nil || err.Error() != "stale blocktxn response has body" {
+		t.Fatalf("run err=%v, want stale blocktxn response has body", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "stale blocktxn response has body") {
+		t.Fatalf("state=%+v, want stale body disconnect without ban", state)
+	}
+	if p.blockTxnPayloadCap() == 0 {
+		t.Fatal("oversized stale blocktxn cleared active outstanding request")
+	}
+}
+
+func TestRunDisconnectsStaleBlockTxnBodyWithoutBan(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	activeHash := [32]byte{0x68}
+	staleHash := [32]byte{0x78}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingTestRequest(activeHash))
+	payload := append(staleHash[:], 0x01)
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload}),
+	}}}
+	err := p.run(context.Background())
+	if err == nil || err.Error() != "stale blocktxn response has body" {
+		t.Fatalf("run err=%v, want stale blocktxn response has body", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "stale blocktxn response has body") {
+		t.Fatalf("state=%+v, want stale body disconnect without ban", state)
+	}
+	if p.blockTxnPayloadCap() == 0 {
+		t.Fatal("stale body disconnect cleared active outstanding request")
+	}
+}
+
+func TestApplyBlockTxnCapDisconnectBansActiveCommandCap(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.setCompactOutstandingRequest(compactOutstandingTestRequest([32]byte{0x63}))
+	p.applyPostHandshakeDisconnectError(commandPayloadCapError{command: messageBlockTxn})
+	state := p.snapshotState()
+	if state.BanScore == 0 || !strings.Contains(state.LastError, "blocktxn payload exceeds outstanding cap") {
+		t.Fatalf("state=%+v, want active command cap ban", state)
+	}
+	if p.blockTxnPayloadCap() != 0 {
+		t.Fatal("active command cap error left outstanding request")
+	}
+}
+
+func TestRunBansActiveBlockTxnCapOverflow(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	blockHash := [32]byte{0x66}
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	p.setCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
+	payload := append(blockHash[:], make([]byte, 33)...)
+	p.conn = &scriptedConn{reads: []scriptedRead{{
+		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload}),
+	}}}
+	err := p.run(context.Background())
+	if err == nil || err.Error() != "message exceeds command cap" {
+		t.Fatalf("run err=%v, want command cap error", err)
+	}
+	p.applyPostHandshakeDisconnectError(err)
+	state := p.snapshotState()
+	if state.BanScore == 0 || !strings.Contains(state.LastError, "blocktxn payload exceeds outstanding cap") {
+		t.Fatalf("state=%+v, want active blocktxn cap overflow ban", state)
+	}
+	if p.blockTxnPayloadCap() != 0 {
+		t.Fatal("active blocktxn cap overflow left dynamic blocktxn cap open")
 	}
 }
 
@@ -522,6 +750,17 @@ func TestHandleMessageRejectsInvalidKinds(t *testing.T) {
 	}
 	if err := p.handleMessage(message{Command: "unknown"}); err == nil || !strings.Contains(err.Error(), "unknown message type") {
 		t.Fatalf("expected unknown-kind rejection, got %v", err)
+	}
+}
+
+func TestHandleObjectRelayMessageKeepsCompactObjectsClosed(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	for _, command := range []string{messageCmpctBlock, messageBlockTxn} {
+		err := p.handleObjectRelayMessage(message{Command: command})
+		var unknown postHandshakeUnknownCommandError
+		if !errors.As(err, &unknown) || unknown.command != command {
+			t.Fatalf("%s err=%v, want unknown command while compact receive is closed", command, err)
+		}
 	}
 }
 
