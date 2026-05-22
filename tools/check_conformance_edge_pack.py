@@ -3,17 +3,84 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
 GO_TEST_FUNC_RE = re.compile(
-    r"(?m)^func\s+(Test[A-Za-z0-9_]*)\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*testing\.T\s*\)"
+    r"(?m)^func\s+(Test[A-Za-z0-9_]*)\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?"
+    r"\*([A-Za-z_][A-Za-z0-9_]*)\.T\s*\)\s*\{"
 )
+GO_IMPORT_BLOCK_RE = re.compile(r"^import\s*\(\s*$")
+GO_IMPORT_SPEC_RE = re.compile(r'^(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|\.)\s+)?"testing"\s*$')
+GO_SINGLE_IMPORT_RE = re.compile(r'^import\s+(?:(?P<alias>[A-Za-z_][A-Za-z0-9_]*|\.)\s+)?"testing"\s*$')
 RUST_ATTR_RE = re.compile(r"^#\s*\[[^\]]+\]\s*$")
 RUST_TEST_ATTR_RE = re.compile(r"^#\s*\[\s*test\s*\]\s*$")
-RUST_FN_RE = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+RUST_CFG_ATTR_RE = re.compile(r"^#\s*\[\s*cfg\s*\(")
+RUST_CFG_TEST_ATTR_RE = re.compile(r"^#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
+RUST_IGNORE_ATTR_RE = re.compile(r"^#\s*\[\s*ignore(?:\s*(?:\([^]]*\)|=[^]]+))?\s*\]\s*$")
+RUST_CFG_ATTR_IGNORE_RE = re.compile(r"^#\s*\[\s*cfg_attr\s*\([^]]*\bignore\b")
+RUST_FN_RE = re.compile(
+    r"^(?:pub(?:\s*\([^)]*\))?\s+)?"
+    r"(?:const\s+)*"
+    r'(?:extern\s+(?:"[^"]+"\s+)?)?'
+    r"(?:const\s+)*"
+    r"fn\s+((?:r#)?[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^)]*)\)\s*(?P<tail>.*)$"
+)
+RUST_EXTERNAL_MOD_RE = re.compile(r"(?m)^\s*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+RUST_INLINE_MOD_RE = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\b")
+RUST_NON_MODULE_SCOPE_RE = re.compile(
+    r"^(?:pub(?:\s*\([^)]*\))?\s+)?"
+    r"(?:(?:const|async|unsafe)\s+)*"
+    r'(?:extern\s+(?:"[^"]+"\s+)?)?'
+    r"(?:(?:const|async|unsafe)\s+)*"
+    r"(?:fn|impl|trait|struct|enum|union)\b"
+)
+GO_KNOWN_GOOS = {
+    "aix",
+    "android",
+    "darwin",
+    "dragonfly",
+    "freebsd",
+    "hurd",
+    "illumos",
+    "ios",
+    "js",
+    "linux",
+    "netbsd",
+    "openbsd",
+    "plan9",
+    "solaris",
+    "wasip1",
+    "windows",
+}
+GO_KNOWN_GOARCH = {
+    "386",
+    "amd64",
+    "amd64p32",
+    "arm",
+    "arm64",
+    "arm64be",
+    "loong64",
+    "mips",
+    "mips64",
+    "mips64le",
+    "mips64p32",
+    "mips64p32le",
+    "mipsle",
+    "ppc",
+    "ppc64",
+    "ppc64le",
+    "riscv",
+    "riscv64",
+    "s390",
+    "s390x",
+    "sparc",
+    "sparc64",
+    "wasm",
+}
 
 
 def fail(msg: str) -> int:
@@ -88,6 +155,22 @@ def relative_source_path(value: object, *, field_name: str) -> tuple[Path, str |
     return path, None
 
 
+def safe_regular_file_error(repo_root: Path, path: Path) -> str | None:
+    try:
+        file_stat = path.lstat()
+    except OSError as exc:
+        return f"could not stat {path.relative_to(repo_root)}: {exc}"
+    if stat.S_ISLNK(file_stat.st_mode):
+        return f"{path.relative_to(repo_root)} must not be a symlink"
+    if not stat.S_ISREG(file_stat.st_mode):
+        return f"{path.relative_to(repo_root)} must be a regular file"
+    try:
+        path.resolve(strict=True).relative_to(repo_root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        return f"{path.relative_to(repo_root)} must resolve inside repo root: {exc}"
+    return None
+
+
 def mask_non_code(source: str, *, language: str) -> str:
     out: list[str] = []
     i = 0
@@ -98,6 +181,38 @@ def mask_non_code(source: str, *, language: str) -> str:
 
     def put_space(ch: str) -> None:
         out.append("\n" if ch == "\n" else " ")
+
+    def rust_char_literal_end(start: int) -> int | None:
+        if source.startswith("b'", start):
+            quote = start + 1
+        elif source[start] == "'":
+            quote = start
+        else:
+            return None
+
+        j = quote + 1
+        if j >= n:
+            return None
+        if source[j] == "\\":
+            j += 1
+            if j >= n:
+                return None
+            if source[j] == "u" and j + 1 < n and source[j + 1] == "{":
+                j += 2
+                while j < n and source[j] != "}":
+                    j += 1
+                if j >= n:
+                    return None
+                j += 1
+            elif source[j] == "x":
+                j += 3
+            else:
+                j += 1
+        else:
+            j += 1
+        if j < n and source[j] == "'":
+            return j + 1
+        return None
 
     while i < n:
         ch = source[i]
@@ -203,6 +318,13 @@ def mask_non_code(source: str, *, language: str) -> str:
             state = "double_string"
             i += 1
             continue
+        if language == "rust":
+            literal_end = rust_char_literal_end(i)
+            if literal_end is not None:
+                for k in range(i, literal_end):
+                    put_space(source[k])
+                i = literal_end
+                continue
         if language == "go" and ch == "'":
             put_space(ch)
             state = "single_string"
@@ -215,22 +337,346 @@ def mask_non_code(source: str, *, language: str) -> str:
     return "".join(out)
 
 
-def rust_test_names(source: str) -> set[str]:
-    names: set[str] = set()
-    pending_test = False
+def go_file_has_build_constraints(source: str) -> bool:
     for raw_line in source.splitlines():
         line = raw_line.strip()
+        if line.startswith("package "):
+            return False
+        if line.startswith("//go:build") or line.startswith("// +build"):
+            return True
+    return False
+
+
+def go_file_has_platform_suffix(path: Path) -> bool:
+    stem = path.name.removesuffix("_test.go").removesuffix(".go")
+    suffixes = stem.split("_")[1:]
+    if not suffixes:
+        return False
+    last = suffixes[-1]
+    if last in GO_KNOWN_GOARCH:
+        return True
+    if last in GO_KNOWN_GOOS:
+        return True
+    return len(suffixes) >= 2 and suffixes[-2] in GO_KNOWN_GOOS and suffixes[-1] in GO_KNOWN_GOARCH
+
+
+def go_test_source_reachability_error(rel_path: Path) -> str | None:
+    if rel_path.parts[:2] != ("clients", "go"):
+        return f"{rel_path} is not under clients/go"
+    if any(part == "testdata" or part.startswith(("_", ".")) for part in rel_path.parts):
+        return f"{rel_path} is in a Go-ignored directory or file"
+    if go_file_has_platform_suffix(rel_path):
+        return f"{rel_path} has a platform-specific Go suffix"
+    return None
+
+
+def go_testing_import_names(source: str) -> set[str]:
+    names: set[str] = set()
+    block_comment = False
+    in_import_block = False
+
+    def strip_comments(line: str) -> str:
+        nonlocal block_comment
+        out: list[str] = []
+        i = 0
+        while i < len(line):
+            if block_comment:
+                end = line.find("*/", i)
+                if end == -1:
+                    return "".join(out)
+                i = end + 2
+                block_comment = False
+                continue
+            if line.startswith("//", i):
+                break
+            if line.startswith("/*", i):
+                block_comment = True
+                i += 2
+                continue
+            if line[i] == '"':
+                out.append(line[i])
+                i += 1
+                while i < len(line):
+                    out.append(line[i])
+                    if line[i] == "\\" and i + 1 < len(line):
+                        i += 1
+                        out.append(line[i])
+                    elif line[i] == '"':
+                        i += 1
+                        break
+                    i += 1
+                continue
+            out.append(line[i])
+            i += 1
+        return "".join(out)
+
+    def add_import_match(match: re.Match[str]) -> None:
+        alias = match.group("alias")
+        if alias and alias not in {".", "_"}:
+            names.add(alias)
+        elif alias is None:
+            names.add("testing")
+
+    for raw_line in source.splitlines():
+        line = strip_comments(raw_line).strip()
+        if not line:
+            continue
+        if in_import_block:
+            if line == ")":
+                in_import_block = False
+                continue
+            match = GO_IMPORT_SPEC_RE.match(line)
+            if match:
+                add_import_match(match)
+            continue
+        match = GO_SINGLE_IMPORT_RE.match(line)
+        if match:
+            add_import_match(match)
+            continue
+        if GO_IMPORT_BLOCK_RE.match(line):
+            in_import_block = True
+            continue
+        if line.startswith("import "):
+            continue
+        if line.startswith("package "):
+            continue
+        break
+    return names
+
+
+def rust_logical_lines(source: str) -> list[str]:
+    logical: list[str] = []
+    pending_attr: list[str] = []
+    bracket_depth = 0
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if pending_attr:
+            pending_attr.append(line)
+            bracket_depth += line.count("[") - line.count("]")
+            if bracket_depth <= 0:
+                logical.append(" ".join(pending_attr))
+                pending_attr = []
+                bracket_depth = 0
+            continue
+        if line.startswith("#["):
+            pending_attr = [line]
+            bracket_depth = line.count("[") - line.count("]")
+            if bracket_depth <= 0:
+                logical.append(line)
+                pending_attr = []
+                bracket_depth = 0
+            continue
+        logical.append(line)
+    if pending_attr:
+        logical.append(" ".join(pending_attr))
+    return logical
+
+
+def rust_attrs_have_disabled_cfg(attrs: list[str]) -> bool:
+    return any(RUST_CFG_ATTR_RE.match(attr) and not RUST_CFG_TEST_ATTR_RE.match(attr) for attr in attrs)
+
+
+def rust_attrs_disable_runtime_test(attrs: list[str]) -> bool:
+    return rust_attrs_have_disabled_cfg(attrs) or any(
+        RUST_IGNORE_ATTR_RE.match(attr) or RUST_CFG_ATTR_IGNORE_RE.match(attr) for attr in attrs
+    )
+
+
+def rust_brace_delta(line: str) -> int:
+    return line.count("{") - line.count("}")
+
+
+def rust_line_opens_scope(line: str) -> bool:
+    return "{" in line and rust_brace_delta(line) > 0
+
+
+def rust_scope_kind(line: str) -> str | None:
+    if RUST_EXTERNAL_MOD_RE.match(line):
+        return None
+    if RUST_INLINE_MOD_RE.match(line):
+        return "module"
+    if RUST_NON_MODULE_SCOPE_RE.match(line):
+        return "non_module"
+    return None
+
+
+def rust_declared_external_modules(source: str) -> set[str]:
+    masked = mask_non_code(source, language="rust")
+    modules: set[str] = set()
+    attrs: list[str] = []
+    brace_depth = 0
+    for line in rust_logical_lines(masked):
+        if brace_depth < 0:
+            brace_depth = 0
         if not line:
             continue
         if RUST_ATTR_RE.match(line):
-            if RUST_TEST_ATTR_RE.match(line):
-                pending_test = True
+            attrs.append(line)
             continue
-        if pending_test:
-            match = RUST_FN_RE.match(line)
-            if match:
+        match = RUST_EXTERNAL_MOD_RE.match(line)
+        if match and brace_depth == 0 and not rust_attrs_have_disabled_cfg(attrs):
+            modules.add(match.group(1))
+        brace_depth += rust_brace_delta(line)
+        attrs = []
+    return modules
+
+
+def rust_module_file_for(parent: Path, module_name: str) -> Path | None:
+    flat = parent / f"{module_name}.rs"
+    nested = parent / module_name / "mod.rs"
+    if flat.exists():
+        return flat
+    if nested.exists():
+        return nested
+    return None
+
+
+def rust_source_reachability_error(repo_root: Path, rel_path: Path) -> str | None:
+    parts = rel_path.parts
+    if len(parts) < 6 or parts[:3] != ("clients", "rust", "crates"):
+        return f"{rel_path} is not under clients/rust/crates"
+    crate_root = repo_root.joinpath(*parts[:4])
+    src_root = crate_root / "src"
+    try:
+        source_rel = repo_root.joinpath(*parts).relative_to(src_root)
+    except ValueError:
+        return f"{rel_path} is not under a Rust crate src directory"
+    if source_rel.name in {"lib.rs", "main.rs"}:
+        return None
+    lib_rs = src_root / "lib.rs"
+    if not lib_rs.exists():
+        return f"{rel_path} has no crate lib.rs reachability root"
+    regular_error = safe_regular_file_error(repo_root, lib_rs)
+    if regular_error is not None:
+        return regular_error
+
+    if source_rel.name == "mod.rs":
+        module_parts = source_rel.parent.parts
+    else:
+        module_parts = (*source_rel.parent.parts, source_rel.stem)
+    if not module_parts:
+        return f"{rel_path} does not map to a Rust module path"
+
+    current_file = lib_rs
+    current_dir = src_root
+    for index, module_name in enumerate(module_parts):
+        regular_error = safe_regular_file_error(repo_root, current_file)
+        if regular_error is not None:
+            return regular_error
+        try:
+            current_source = current_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return f"could not read Rust module root {current_file}: {exc}"
+        if module_name not in rust_declared_external_modules(current_source):
+            return f"{rel_path} is not declared from {current_file.relative_to(repo_root)}"
+        next_file = rust_module_file_for(current_dir, module_name)
+        if next_file is None:
+            return f"{rel_path} module {module_name} has no reachable Rust source file"
+        regular_error = safe_regular_file_error(repo_root, next_file)
+        if regular_error is not None:
+            return regular_error
+        if index == len(module_parts) - 1:
+            if next_file.resolve() != repo_root.joinpath(*parts).resolve():
+                return f"{rel_path} maps to {next_file.relative_to(repo_root)} instead"
+            return None
+        current_file = next_file
+        current_dir = next_file.parent if next_file.name == "mod.rs" else next_file.with_suffix("")
+    return None
+
+
+def runtime_source_reachability_error(repo_root: Path, rel_path: Path) -> str | None:
+    if rel_path.suffix == ".go":
+        return go_test_source_reachability_error(rel_path)
+    if rel_path.suffix == ".rs":
+        return rust_source_reachability_error(repo_root, rel_path)
+    return None
+
+
+def rust_test_signature_is_executable(match: re.Match[str]) -> bool:
+    if match.group("params").strip():
+        return False
+    tail = match.group("tail").strip()
+    if tail.startswith("{"):
+        return True
+    if not tail.startswith("->"):
+        return False
+    return_type, _, after_return = tail[2:].partition("{")
+    if not after_return:
+        return False
+    return_type = return_type.strip()
+    if return_type == "()":
+        return True
+    result_match = re.fullmatch(r"(?:(?:std|core)::result::)?Result\s*<(?P<ok>[^,<>]+),\s*.+>", return_type)
+    return bool(result_match and result_match.group("ok").strip() == "()")
+
+
+def rust_test_names(source: str) -> set[str]:
+    names: set[str] = set()
+    attrs: list[str] = []
+    disabled_cfg_depths: list[int] = []
+    non_module_depths: list[int] = []
+    pending_scope_kind: str | None = None
+    pending_scope_disabled = False
+    brace_depth = 0
+    for line in rust_logical_lines(source):
+        if disabled_cfg_depths:
+            disabled_cfg_depths = [depth for depth in disabled_cfg_depths if brace_depth >= depth]
+        if non_module_depths:
+            non_module_depths = [depth for depth in non_module_depths if brace_depth >= depth]
+        if not line:
+            continue
+        if RUST_ATTR_RE.match(line):
+            attrs.append(line)
+            continue
+        if pending_scope_kind is not None and "{" in line:
+            scope_depth = brace_depth + 1
+            if pending_scope_disabled:
+                disabled_cfg_depths.append(scope_depth)
+            if pending_scope_kind == "non_module":
+                non_module_depths.append(scope_depth)
+            pending_scope_kind = None
+            pending_scope_disabled = False
+
+        current_disabled = bool(disabled_cfg_depths)
+        current_non_module = bool(non_module_depths)
+        attrs_have_disabled_cfg = rust_attrs_have_disabled_cfg(attrs)
+        match = RUST_FN_RE.match(line)
+        if match:
+            has_direct_test_attr = any(RUST_TEST_ATTR_RE.match(attr) for attr in attrs)
+            if (
+                has_direct_test_attr
+                and rust_test_signature_is_executable(match)
+                and not current_disabled
+                and not current_non_module
+                and not rust_attrs_disable_runtime_test(attrs)
+            ):
                 names.add(match.group(1))
-            pending_test = False
+            if rust_line_opens_scope(line):
+                scope_depth = brace_depth + 1
+                if attrs_have_disabled_cfg:
+                    disabled_cfg_depths.append(scope_depth)
+                non_module_depths.append(scope_depth)
+            elif "{" not in line and rust_scope_kind(line) == "non_module" and not line.rstrip().endswith(";"):
+                pending_scope_kind = "non_module"
+                pending_scope_disabled = attrs_have_disabled_cfg
+            brace_depth += rust_brace_delta(line)
+            attrs = []
+            continue
+
+        scope_kind = rust_scope_kind(line)
+        if scope_kind is not None:
+            if rust_line_opens_scope(line):
+                scope_depth = brace_depth + 1
+                if attrs_have_disabled_cfg:
+                    disabled_cfg_depths.append(scope_depth)
+                if scope_kind == "non_module":
+                    non_module_depths.append(scope_depth)
+            elif "{" not in line and not line.rstrip().endswith(";"):
+                pending_scope_kind = scope_kind
+                pending_scope_disabled = attrs_have_disabled_cfg
+
+        brace_depth += rust_brace_delta(line)
+        attrs = []
     return names
 
 
@@ -242,8 +688,15 @@ def source_test_names(path: Path) -> tuple[set[str], str | None]:
     if path.suffix == ".go":
         if not path.name.endswith("_test.go"):
             return set(), None
+        if go_file_has_build_constraints(source):
+            return set(), None
         masked = mask_non_code(source, language="go")
-        return {name for name in GO_TEST_FUNC_RE.findall(masked) if is_go_test_name(name)}, None
+        testing_import_names = go_testing_import_names(source)
+        return {
+            name
+            for name, import_name in GO_TEST_FUNC_RE.findall(masked)
+            if is_go_test_name(name) and import_name in testing_import_names
+        }, None
     if path.suffix == ".rs":
         return rust_test_names(mask_non_code(source, language="rust")), None
     return set(), f"unsupported runtime evidence source extension for {path}"
@@ -295,6 +748,22 @@ def validate_runtime_evidence(repo_root: Path, domain_name: str, value: object) 
         source_path = repo_root / rel_path
         if not source_path.exists():
             print(f"FAIL: domain {domain_name}: missing runtime evidence source: {raw_path}", file=sys.stderr)
+            failures += 1
+            continue
+        regular_error = safe_regular_file_error(repo_root, source_path)
+        if regular_error is not None:
+            print(
+                f"FAIL: domain {domain_name}: invalid runtime evidence source {raw_path}: {regular_error}",
+                file=sys.stderr,
+            )
+            failures += 1
+            continue
+        reachability_error = runtime_source_reachability_error(repo_root, rel_path)
+        if reachability_error is not None:
+            print(
+                f"FAIL: domain {domain_name}: unreachable runtime evidence source {raw_path}: {reachability_error}",
+                file=sys.stderr,
+            )
             failures += 1
             continue
 
