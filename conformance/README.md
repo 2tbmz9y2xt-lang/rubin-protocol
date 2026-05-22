@@ -75,7 +75,8 @@ by domain:
 
 Runtime reorg coverage is not a new consensus fixture gate. It ties the
 existing helper/direct-context `CV-FORK-CHOICE` and `CV-TIMESTAMP` vectors to
-committed Go/Rust node runtime tests for storage/switch behavior.
+committed Go/Rust node runtime tests for storage/switch behavior. Follow-up
+checker hardening is tracked separately for declared source/test validation.
 
 Mempool/DA fee-floor domains are accounting-only here: they cite committed
 executable CV vector IDs and replay evidence, but do not claim fuzz or formal
@@ -94,7 +95,6 @@ The gate fails when:
 - a required domain gate or fixture is missing;
 - a domain vector count is below the baseline;
 - required edge vector IDs from the baseline are missing;
-- a runtime evidence source or declared runtime test is missing;
 - `proof_coverage.json` claims fuzz/formal coverage for an edge/property domain
   before the checker supports concrete evidence validation.
 
