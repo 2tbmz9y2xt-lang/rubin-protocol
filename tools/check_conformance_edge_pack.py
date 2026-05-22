@@ -194,17 +194,15 @@ def go_discovery_env(temp_dir: str) -> dict[str, str]:
 def rust_discovery_env(temp_dir: str) -> dict[str, str | None]:
     return {
         "CARGO_INCREMENTAL": "0",
-        "CARGO_HOME": str(Path(temp_dir) / "cargo-home"), "HOME": temp_dir,
         "CARGO_TARGET_DIR": str(Path(temp_dir) / "target"),
         "CARGO_BUILD_TARGET": None,
         "CARGO_BUILD_RUSTC_WRAPPER": None,
         "CARGO_BUILD_RUSTFLAGS": None,
         "CARGO_ENCODED_RUSTFLAGS": None,
-        "CARGO_NET_OFFLINE": None,
         "RUSTC": None,
         "RUSTC_WRAPPER": None,
         "RUSTC_WORKSPACE_WRAPPER": None,
-        "RUSTUP_HOME": os.environ.get("RUSTUP_HOME", str(Path.home() / ".rustup")),
+        "RUSTUP_HOME": os.environ.get("RUSTUP_HOME"),
         "RUSTFLAGS": None,
     }
 
@@ -368,10 +366,21 @@ def rust_source_declared_tests(source_path: Path) -> tuple[set[str], str | None]
         return set(), f"runtime_evidence could not read Rust source: {exc}"
     if re.search(r"(?m)^\s*(?:#\[[^\n]*\]\s*)*mod\s+tests\s*;", source):
         return set(), "unsupported Rust runtime evidence source scope"
-    match = re.search(r"(?s)#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+tests\s*\{(?P<body>.*)\n\}", source)
+    match = re.search(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+tests\s*\{", source)
     if match is None:
         return set(), "unsupported Rust runtime evidence source scope"
-    body = match.group("body")
+    depth = 1
+    index = match.end()
+    while index < len(source) and depth > 0:
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    if depth != 0:
+        return set(), "unsupported Rust runtime evidence source scope"
+    body = source[match.end() : index - 1]
     if re.search(r"(?m)^\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:;|\{)", body):
         return set(), "unsupported Rust runtime evidence source scope"
     return set(re.findall(r"(?m)^\s*#\s*\[\s*test\s*\]\s*(?:#\[[^\n]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", body)), None
@@ -395,8 +404,6 @@ def rust_file_discovered_tests(
     for root in [rust_root, *rust_root.parents]:
         if (root / ".cargo" / "config").exists() or (root / ".cargo" / "config.toml").exists():
             return set(), "unsupported Rust runtime evidence Cargo config"
-        if root == repo_root:
-            break
     if package not in cargo_cache:
         with tempfile.TemporaryDirectory(prefix="rubin-rust-test-list-") as temp_dir:
             env = rust_discovery_env(temp_dir)

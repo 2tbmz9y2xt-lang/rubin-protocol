@@ -713,14 +713,18 @@ class EdgePackCheckerTests(unittest.TestCase):
                     "CARGO_BUILD_RUSTC_WRAPPER",
                     "CARGO_BUILD_RUSTFLAGS",
                     "CARGO_ENCODED_RUSTFLAGS",
-                    "CARGO_NET_OFFLINE",
                     "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
                     "RUSTC",
                     "RUSTC_WRAPPER",
                     "RUSTFLAGS",
                 ],
                 "forged",
-            ) | {"CARGO_TARGET_DIR": str(root / "forged-target-dir")}
+            ) | {
+                "CARGO_HOME": str(root / "cargo-home"),
+                "CARGO_NET_OFFLINE": "true",
+                "CARGO_TARGET_DIR": str(root / "forged-target-dir"),
+                "HOME": str(root / "real-home"),
+            }
             with unittest.mock.patch.dict(os.environ, forged_env, clear=False):
                 with chdir(root):
                     rc = m.main(["--verify-runtime-evidence-rust"], command_runner=runner)
@@ -728,16 +732,26 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertIn((CARGO_LIST, (root / "clients" / "rust").resolve()), runner.calls)
         self.assertEqual(1, [call[0] for call in runner.calls].count(CARGO_LIST))
         self.assertEqual(1, [call[0] for call in runner.calls].count(CARGO_IGNORED_LIST))
-        scrubbed = set(forged_env) - {"CARGO_TARGET_DIR"}
+        scrubbed = set(forged_env) - {"CARGO_HOME", "CARGO_NET_OFFLINE", "CARGO_TARGET_DIR", "HOME"}
         cargo_envs = [env for call, env in zip(runner.calls, runner.envs) if call[0][0] == "cargo"]
         self.assertTrue(cargo_envs)
         for env in cargo_envs:
             if env is None:
                 self.fail("cargo discovery env must be set")
             self.assertEqual(env["CARGO_INCREMENTAL"], "0")
-            self.assertTrue(all("rubin-rust-test-list-" in env[key] for key in ("CARGO_HOME", "HOME", "CARGO_TARGET_DIR")))
+            self.assertEqual(env["CARGO_HOME"], str(root / "cargo-home"))
+            self.assertEqual(env["CARGO_NET_OFFLINE"], "true")
+            self.assertEqual(env["HOME"], str(root / "real-home"))
+            self.assertIn("rubin-rust-test-list-", env["CARGO_TARGET_DIR"])
             self.assertNotEqual(env["CARGO_TARGET_DIR"], str(root / "forged-target-dir"))
             self.assertTrue(scrubbed.isdisjoint(env))
+
+    def test_runtime_evidence_rust_env_does_not_require_home_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with unittest.mock.patch.dict(os.environ, {}, clear=True):
+                with unittest.mock.patch.object(m.Path, "home", side_effect=RuntimeError("missing home")):
+                    env = m.rust_discovery_env(td)
+        self.assertIsNone(env["RUSTUP_HOME"])
 
     def test_runtime_evidence_rust_package_name_accepts_toml_quotes_and_comments(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -770,6 +784,23 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("missing runtime evidence tests: runtime_reorg_test, ignored_runtime_reorg_test", captured.getvalue())
 
+    def test_runtime_evidence_rust_opt_in_accepts_modules_after_tests_block(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(root, {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"]})
+            write_runtime_source(
+                root,
+                "clients/rust/crates/rubin-node/src/sync_reorg.rs",
+                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn runtime_reorg_test() {}\n}\n\nmod helper {}\n",
+            )
+            runner = FakeCommandRunner({
+                CARGO_LIST: (0, "sync_reorg::tests::runtime_reorg_test: test\n", ""),
+                CARGO_IGNORED_LIST: (0, "", ""),
+            })
+            with chdir(root):
+                rc = m.main(["--verify-runtime-evidence-rust"], command_runner=runner)
+        self.assertEqual(rc, 0)
+
     def test_runtime_evidence_rust_opt_in_rejects_unsupported_source_scopes(self) -> None:
         cases = [
             ("clients/rust/crates/rubin-node/src/lib.rs", None),
@@ -795,16 +826,20 @@ class EdgePackCheckerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             make_runtime_evidence_repo(root, {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"]})
-            config = root / "clients" / "rust" / ".cargo" / "config.toml"
-            config.parent.mkdir(parents=True)
-            config.write_text("[build]\nrustflags = [\"--cfg\", \"forged\"]\n", encoding="utf-8")
-            with chdir(root), contextlib.redirect_stderr(io.StringIO()) as captured:
-                rc = m.main(
-                    ["--verify-runtime-evidence-rust"],
-                    command_runner=FakeCommandRunner({CARGO_LIST: (0, "sync_reorg::tests::runtime_reorg_test: test\n", ""), CARGO_IGNORED_LIST: (0, "", "")}),
-                )
-        self.assertEqual(rc, 1)
-        self.assertIn("unsupported Rust runtime evidence Cargo config", captured.getvalue())
+            for config in (
+                root / "clients" / "rust" / ".cargo" / "config.toml",
+                root.parent / ".cargo" / "config.toml",
+            ):
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text("[build]\nrustflags = [\"--cfg\", \"forged\"]\n", encoding="utf-8")
+                with chdir(root), contextlib.redirect_stderr(io.StringIO()) as captured:
+                    rc = m.main(
+                        ["--verify-runtime-evidence-rust"],
+                        command_runner=FakeCommandRunner({CARGO_LIST: (0, "sync_reorg::tests::runtime_reorg_test: test\n", ""), CARGO_IGNORED_LIST: (0, "", "")}),
+                    )
+                config.unlink()
+                self.assertEqual(rc, 1)
+                self.assertIn("unsupported Rust runtime evidence Cargo config", captured.getvalue())
 
     def test_runtime_evidence_opt_in_accepts_external_package_go_tests(self) -> None:
         with tempfile.TemporaryDirectory() as td:
