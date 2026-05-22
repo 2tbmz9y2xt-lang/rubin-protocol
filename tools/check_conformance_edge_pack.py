@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
+import os
+import re
 import stat
+import subprocess  # nosec B404
 import sys
+import tempfile
 from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
 RUNTIME_EVIDENCE_MAX_SOURCE_BYTES = 1_000_000
+RUNTIME_EVIDENCE_DISCOVERY_TIMEOUT_SECS = 120
 
 
 def fail(msg: str) -> int:
@@ -97,7 +103,6 @@ def runtime_source_path_errors(raw_path: str, *, repo_root: Path) -> list[str]:
         return ["Go runtime evidence paths must end with _test.go"]
     if parts[1] == "rust" and not raw_path.endswith(".rs"):
         return ["Rust runtime evidence paths must end with .rs"]
-
     source_path = repo_root / rel_path
     if path_contains_symlink(repo_root, rel_path):
         return ["runtime_evidence source path must not contain symlinks"]
@@ -121,7 +126,146 @@ def runtime_source_path_errors(raw_path: str, *, repo_root: Path) -> list[str]:
     return []
 
 
-def runtime_evidence_errors(value: object, *, repo_root: Path) -> list[str]:
+def go_package_arg(raw_path: str) -> str:
+    package_dir = Path(raw_path).parent.relative_to("clients/go")
+    if str(package_dir) == ".":
+        return "."
+    return f"./{package_dir.as_posix()}"
+
+
+def run_discovery_command(cmd: list[str], *, cwd: Path, command_runner, env: dict[str, str] | None = None) -> tuple[str, str | None]:
+    command_env = None if env is None else {**os.environ, **env}
+    try:
+        completed = command_runner(
+            cmd,
+            cwd=cwd,
+            env=command_env,
+            text=True,
+            capture_output=True,
+            timeout=RUNTIME_EVIDENCE_DISCOVERY_TIMEOUT_SECS,
+        )
+    except FileNotFoundError:
+        return "", f"runtime_evidence discovery command missing: {cmd[0]}"
+    except OSError as exc:
+        return "", f"runtime_evidence discovery command failed to start: {cmd[0]}: {exc}"
+    except subprocess.TimeoutExpired:
+        return "", "runtime_evidence discovery command timed out"
+    if completed.returncode != 0:
+        return "", f"runtime_evidence discovery command failed: {cmd[0]} exit {completed.returncode}"
+    if not isinstance(completed.stdout, str) or not isinstance(completed.stderr, str):
+        return "", "runtime_evidence discovery command produced malformed stdout"
+    return completed.stdout + completed.stderr, None
+
+
+def go_discovery_env(temp_dir: str) -> dict[str, str]:
+    return {
+        "GOENV": "off",
+        "GOFLAGS": "-buildvcs=false",
+        "GOTMPDIR": temp_dir,
+    }
+
+
+def go_testmain_declared_tests(work_output: str, temp_dir: Path) -> tuple[set[str], str | None]:
+    work_root = None
+    for line in work_output.splitlines():
+        if line.startswith("WORK="):
+            work_root = Path(line.removeprefix("WORK=").strip()).resolve()
+            break
+    if work_root is None:
+        return set(), "runtime_evidence discovery command did not report Go work directory"
+    if not work_root.is_relative_to(temp_dir.resolve()):
+        return set(), "runtime_evidence discovery command reported unsafe Go work directory"
+    candidates = sorted(work_root.glob("**/_testmain.go"))
+    if not candidates:
+        return set(), "runtime_evidence discovery command did not produce Go testmain"
+    try:
+        testmain = candidates[0].read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return set(), f"runtime_evidence discovery command produced unreadable Go testmain: {exc}"
+    tests = set()
+    for match in re.finditer(r'\{"(Test[A-Za-z0-9_]*)",\s*_(x?test)\.(Test[A-Za-z0-9_]*)\}', testmain):
+        if match.group(1) == match.group(3):
+            tests.add(match.group(1))
+    return tests, None
+
+
+def go_objdump_matches_source(stdout: str, *, source_path: Path, repo_root: Path) -> bool:
+    absolute = source_path.resolve().as_posix()
+    try:
+        relative = source_path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        relative = source_path.name
+    for line in stdout.splitlines():
+        if not line.startswith("TEXT "):
+            continue
+        _, separator, emitted = line.rstrip().partition(") ")
+        if not separator:
+            continue
+        emitted = emitted.replace("\\", "/")
+        if emitted == absolute or emitted == relative or emitted.endswith(f"/{relative}"):
+            return True
+    return False
+
+
+def go_file_discovered_tests(
+    raw_path: str,
+    *,
+    repo_root: Path,
+    expected_tests: list[str],
+    command_runner,
+) -> tuple[set[str], str | None]:
+    package_arg = go_package_arg(raw_path)
+    go_root = repo_root / "clients" / "go"
+    with tempfile.TemporaryDirectory(prefix="rubin-go-testbin-") as temp_dir:
+        test_binary = Path(temp_dir) / "package.test"
+        compile_output, compile_error = run_discovery_command(
+            ["go", "test", "-c", "-work", "-o", str(test_binary), package_arg],
+            cwd=go_root,
+            env=go_discovery_env(temp_dir),
+            command_runner=command_runner,
+        )
+        if compile_error is not None:
+            return set(), compile_error
+        registered_tests, registry_error = go_testmain_declared_tests(compile_output, Path(temp_dir))
+        if registry_error is not None:
+            return set(), registry_error
+        file_tests: set[str] = set()
+        for test_name in sorted(expected_tests):
+            if test_name not in registered_tests:
+                continue
+            symbol_re = rf".*\.{re.escape(test_name)}$"
+            objdump_stdout, objdump_error = run_discovery_command(
+                ["go", "tool", "objdump", "-s", symbol_re, str(test_binary)],
+                cwd=go_root,
+                env=go_discovery_env(temp_dir),
+                command_runner=command_runner,
+            )
+            if objdump_error is not None:
+                return set(), objdump_error
+            if go_objdump_matches_source(objdump_stdout, source_path=repo_root / raw_path, repo_root=repo_root):
+                file_tests.add(test_name)
+    return file_tests, None
+
+
+def discovered_runtime_tests(
+    raw_path: str,
+    *,
+    repo_root: Path,
+    expected_tests: list[str],
+    command_runner,
+) -> tuple[set[str], str | None]:
+    if raw_path.startswith("clients/go/"):
+        return go_file_discovered_tests(raw_path, repo_root=repo_root, expected_tests=expected_tests, command_runner=command_runner)
+    return set(), None
+
+
+def runtime_evidence_errors(
+    value: object,
+    *,
+    repo_root: Path,
+    verify_go_discovery: bool,
+    command_runner,
+) -> list[str]:
     if not isinstance(value, dict):
         return ["runtime_evidence must be object"]
     if "tests_by_file" not in value:
@@ -136,18 +280,40 @@ def runtime_evidence_errors(value: object, *, repo_root: Path) -> list[str]:
         if not isinstance(raw_path, str) or not raw_path.strip() or raw_path != raw_path.strip():
             errors.append("runtime_evidence.tests_by_file keys must be non-empty repo-relative strings")
             continue
-        _, tests_error = string_list(
+        tests, tests_error = string_list(
             raw_tests,
             field_name=f"runtime_evidence.tests_by_file[{raw_path}]",
             require_non_empty=True,
         )
+        path_errors = runtime_source_path_errors(raw_path, repo_root=repo_root)
         if tests_error is not None:
             errors.append(tests_error)
-        errors.extend(runtime_source_path_errors(raw_path, repo_root=repo_root))
+        errors.extend(path_errors)
+        if verify_go_discovery and raw_path.startswith("clients/go/") and tests_error is None and not path_errors:
+            present, discovery_error = discovered_runtime_tests(
+                raw_path,
+                repo_root=repo_root,
+                expected_tests=tests,
+                command_runner=command_runner,
+            )
+            if discovery_error is not None:
+                errors.append(discovery_error)
+                continue
+            missing = [name for name in tests if name not in present]
+            if missing:
+                errors.append(f"missing runtime evidence tests: {', '.join(missing)}")
     return errors
 
 
-def main() -> int:
+def main(argv: list[str] | None = None, *, command_runner=subprocess.run) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--verify-runtime-evidence-go",
+        action="store_true",
+        help="run opt-in Go toolchain discovery for Go runtime_evidence test names",
+    )
+    args = parser.parse_args([] if argv is None else argv)
+
     repo_root = Path(".").resolve()
     baseline_path = repo_root / "conformance" / "EDGE_PACK_BASELINE.json"
     fixtures_dir = repo_root / "conformance" / "fixtures"
@@ -241,7 +407,12 @@ def main() -> int:
             continue
 
         if "runtime_evidence" in domain:
-            for error in runtime_evidence_errors(domain.get("runtime_evidence"), repo_root=repo_root):
+            for error in runtime_evidence_errors(
+                domain.get("runtime_evidence"),
+                repo_root=repo_root,
+                verify_go_discovery=args.verify_runtime_evidence_go,
+                command_runner=command_runner,
+            ):
                 print(f"ERROR: domain {name}: {error}", file=sys.stderr)
                 failures += 1
 
@@ -420,4 +591,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
