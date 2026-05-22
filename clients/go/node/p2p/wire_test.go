@@ -202,6 +202,24 @@ func TestReadPayloadWithChecksumZeroLengthReturnsEmptySlice(t *testing.T) {
 	}
 }
 
+func TestReadPayloadPrefixHandlesBoundariesAndShortRead(t *testing.T) {
+	const prefixLargerThanPayload = 32
+
+	if got, err := readPayloadPrefix(bytes.NewReader(nil), 5, 0); err != nil || got != nil {
+		t.Fatalf("zero prefix got=%v err=%v, want nil without read", got, err)
+	}
+
+	got, err := readPayloadPrefix(bytes.NewReader([]byte{0xaa, 0xbb}), 2, prefixLargerThanPayload)
+	if err != nil || !bytes.Equal(got, []byte{0xaa, 0xbb}) {
+		t.Fatalf("bounded prefix got=%x err=%v", got, err)
+	}
+
+	_, err = readPayloadPrefix(bytes.NewReader([]byte{0xaa}), 3, prefixLargerThanPayload)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("short prefix err=%v, want unexpected EOF", err)
+	}
+}
+
 func TestReadPayloadWithChecksumPropagatesNonEOFReadError(t *testing.T) {
 	payload := bytes.Repeat([]byte{0x11}, streamReadChunkBytes)
 	checksum := wireChecksum(payload)

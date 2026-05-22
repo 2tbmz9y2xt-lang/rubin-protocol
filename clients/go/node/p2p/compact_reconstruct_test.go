@@ -189,12 +189,6 @@ func TestReconstructCompactBlockRejectsMalformedInputs(t *testing.T) {
 			payload: cmpctBlockPayload{ShortIDs: []compactShortID{shortID}, Prefilled: []prefilledTxn{{Index: 0, Tx: append(validTx, 0x00)}}},
 			wantErr: "cmpctblock prefilled transaction is non-canonical",
 		},
-		{
-			name:    "noncanonical_local",
-			payload: cmpctBlockPayload{ShortIDs: []compactShortID{shortID}, Prefilled: []prefilledTxn{{Index: 0, Tx: validTx}}},
-			local:   [][]byte{append(validTx, 0x00)},
-			wantErr: "compact local transaction is non-canonical",
-		},
 	} {
 		_, err := reconstructCompactBlock(tc.payload, tc.local)
 		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -311,9 +305,12 @@ func TestCompactLocalTxIndexUsesBoundedPerCandidateValidation(t *testing.T) {
 		t.Fatalf("localIndex[%v]=%x want %x", shortID, localIndex[shortID], validTx)
 	}
 
-	_, err = compactLocalTxIndex([][]byte{append(minimalBlockTxnTestTxBytes(54), 0x00)}, nonce1, nonce2)
-	if err == nil || !strings.Contains(err.Error(), "compact local transaction is non-canonical") {
-		t.Fatalf("compactLocalTxIndex noncanonical err=%v", err)
+	localIndex, err = compactLocalTxIndex([][]byte{append(minimalBlockTxnTestTxBytes(54), 0x00), validTx}, nonce1, nonce2)
+	if err != nil {
+		t.Fatalf("compactLocalTxIndex with noncanonical candidate: %v", err)
+	}
+	if !reflect.DeepEqual(localIndex[shortID], validTx) || len(localIndex) != 1 {
+		t.Fatalf("localIndex after noncanonical candidate=%+v, want only valid candidate", localIndex)
 	}
 }
 
@@ -475,8 +472,10 @@ func TestHandleBlockTxnStaleBodyDisconnectsWithoutBan(t *testing.T) {
 	p.compact.outstanding.Transactions = [][]byte{txs[0]}
 	txAlias := p.compact.outstanding.Transactions[0]
 	stale := make([]byte, int(p.blockTxnPayloadCap()))
-	if err := p.handleBlockTxn(stale); err == nil || err.Error() != "stale blocktxn response has body" || p.snapshotState().BanScore != 0 {
-		t.Fatalf("near-cap stale blocktxn err=%v state=%+v, want no-ban disconnect", err, p.snapshotState())
+	err := p.handleBlockTxn(stale)
+	requireBlockTxnStaleBodyError(t, err)
+	if p.snapshotState().BanScore != 0 {
+		t.Fatalf("state=%+v, want no-ban disconnect", p.snapshotState())
 	}
 	if p.blockTxnPayloadCap() == 0 {
 		t.Fatal("near-cap stale blocktxn lost active blocktxn payload cap")
@@ -505,6 +504,27 @@ func TestHandleBlockTxnMatchingPayloadCapOverflowBans(t *testing.T) {
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("matching payload cap overflow left outstanding request")
 	}
+}
+
+func TestHandleCmpctBlockIgnoresMalformedLocalCandidates(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	shortID := compactShortIDForTx(t, txs[0], 201, 202)
+	pool := NewMemoryTxPoolWithLimit(1)
+	pool.txs[[32]byte{0x42}] = &relayTxEntry{raw: append(txs[0], 0x00), fee: 1, size: len(txs[0]) + 1}
+	p := newCompactScriptedPeer(t)
+	p.service.cfg.TxPool = pool
+	payload := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Nonce1: 201, Nonce2: 202, ShortIDs: []compactShortID{shortID}})
+
+	if err := p.handleCmpctBlock(payload); err != nil {
+		t.Fatalf("handleCmpctBlock with malformed local candidate: %v", err)
+	}
+	if p.snapshotState().BanScore != 0 {
+		t.Fatalf("ban_score=%d, want 0 for local candidate corruption", p.snapshotState().BanScore)
+	}
+	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockHash != blockHash || len(snap.MissingIndexes) != 1 {
+		t.Fatalf("outstanding=%+v ok=%v, want getblocktxn request for missing compact tx", snap, ok)
+	}
+	requireCompactFrame(t, p, messageGetBlockTxn)
 }
 
 func TestInternalHandleBlockTxnCompletesOutstandingBlock(t *testing.T) {
@@ -553,16 +573,6 @@ func TestHandleCmpctBlockValidationAndFallbackEdges(t *testing.T) {
 	err = p.handleCmpctBlock(full)
 	if err == nil || !strings.Contains(err.Error(), "target mismatch") || p.snapshotState().BanScore == 0 {
 		t.Fatalf("target-mismatch compact header err=%v state=%+v", err, p.snapshotState())
-	}
-
-	pool := NewMemoryTxPool()
-	pool.txs[[32]byte{0x42}] = &relayTxEntry{raw: []byte{0x01}, size: 1}
-	p = newCompactScriptedPeer(t)
-	p.service.cfg.TxPool = pool
-	requireNoCompactErr(t, p.handleCmpctBlock(missing), "malformed local candidate fallback")
-	requireCompactFrame(t, p, messageGetData)
-	if p.snapshotState().BanScore != 0 {
-		t.Fatalf("malformed local candidate ban_score=%d, want no ban", p.snapshotState().BanScore)
 	}
 
 	p = newCompactScriptedPeer(t)

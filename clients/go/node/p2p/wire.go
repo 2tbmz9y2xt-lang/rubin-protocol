@@ -155,6 +155,21 @@ func readZeroLengthPayload(wantChecksum [4]byte) ([]byte, error) {
 	return make([]byte, 0), nil
 }
 
+func readPayloadPrefix(r io.Reader, size uint32, prefixSize uint32) ([]byte, error) {
+	if prefixSize > size {
+		prefixSize = size
+	}
+	if prefixSize == 0 {
+		return nil, nil
+	}
+	prefix := make([]byte, int(prefixSize))
+	n, err := io.ReadFull(r, prefix)
+	if err != nil {
+		return nil, payloadReadError(size, 0, n, err)
+	}
+	return prefix, nil
+}
+
 func readPayloadChunks(r io.Reader, size uint32) ([]byte, [4]byte, error) {
 	hasher := sha3.New256()
 	initialCap := int(size)
