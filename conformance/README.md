@@ -75,9 +75,9 @@ by domain:
 
 `runtime_reorg` coverage is not a new consensus fixture gate. The
 `runtime_reorg` edge-pack domain is pinned using evidence from the existing
-`CV-FORK-CHOICE` and `CV-TIMESTAMP` gates, without claiming checker-enforced
-node runtime source/test evidence. Follow-up checker hardening is tracked
-separately for declared runtime source/test validation.
+`CV-FORK-CHOICE` and `CV-TIMESTAMP` gates. Declared runtime source/test names
+are metadata only in this slice; checker enforcement, source-boundary checks,
+and reachability hardening are tracked separately.
 
 Mempool/DA fee-floor domains are accounting-only here: they cite committed
 executable CV vector IDs and replay evidence, but do not claim fuzz or formal
