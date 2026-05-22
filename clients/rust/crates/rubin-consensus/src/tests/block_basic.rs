@@ -1182,3 +1182,59 @@ fn covenant_genesis_rotation_aware_rejects_non_native_suite() {
     let err = validate_tx_covenants_genesis(&tx, 0, Some(&rp)).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
 }
+
+// =============================================================
+// RUB-352 hostile tx_count parser hardening — regression tests
+// =============================================================
+
+#[test]
+fn parse_block_bytes_tx_count_u64max_eof() {
+    let tx = minimal_tx_bytes();
+    let mut prev = [0u8; 32];
+    prev[0] = 0xab;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, [0u8; 32], target, 1, std::slice::from_ref(&tx));
+    let mut buf = block[..BLOCK_HEADER_BYTES].to_vec();
+    buf.push(0xFF); // CompactSize tag for u64
+    buf.extend_from_slice(&u64::MAX.to_le_bytes());
+    let err = parse_block_bytes(&buf).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrParse);
+}
+
+#[test]
+fn parse_block_bytes_tx_count_2pow32_eof() {
+    let tx = minimal_tx_bytes();
+    let mut prev = [0u8; 32];
+    prev[0] = 0xac;
+    let target = [0xffu8; 32];
+    let block = build_block_bytes(prev, [0u8; 32], target, 1, std::slice::from_ref(&tx));
+    let mut buf = block[..BLOCK_HEADER_BYTES].to_vec();
+    buf.push(0xFF); // CompactSize tag for u64
+    buf.extend_from_slice(&((1u64) << 32).to_le_bytes()); // count = 2^32
+    buf.extend_from_slice(&tx); // 1 tx then EOF
+    let err = parse_block_bytes(&buf).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrParse);
+}
+
+#[test]
+fn parse_block_bytes_tx_count_too_small_trailing() {
+    let tx = minimal_tx_bytes();
+    let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");
+    let root = merkle_root_txids(&[txid]).expect("root");
+    let mut prev = [0u8; 32];
+    prev[0] = 0xad;
+    let target = [0xffu8; 32];
+    let mut block = build_block_bytes(prev, root, target, 10, &[tx.clone(), tx]);
+    block[BLOCK_HEADER_BYTES] = 0x01; // overwrite tx_count from 2 to 1
+    let err = parse_block_bytes(&block).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrParse);
+}
+
+#[test]
+fn parse_block_bytes_malformed_compactsize_eof() {
+    let mut buf = vec![0u8; BLOCK_HEADER_BYTES + 2];
+    buf[BLOCK_HEADER_BYTES] = 0xFD; // tag 0xFD needs 2 bytes
+    buf[BLOCK_HEADER_BYTES + 1] = 0x01; // only 1 byte given
+    let err = parse_block_bytes(&buf).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BlockErrParse);
+}
