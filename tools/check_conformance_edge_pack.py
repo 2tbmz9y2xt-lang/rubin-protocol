@@ -23,7 +23,6 @@ CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
 RUNTIME_EVIDENCE_MAX_SOURCE_BYTES = 1_000_000
 RUNTIME_EVIDENCE_DISCOVERY_TIMEOUT_SECS = 120
-CARGO_PACKAGE_NAME_RE = re.compile(r"""^name\s*=\s*(['"])([^'"]+)\1(?:\s*#.*)?$""")
 
 
 def fail(msg: str) -> int:
@@ -320,30 +319,17 @@ def rust_package_name(crate_root: Path) -> tuple[str, str | None]:
         cargo_text = cargo_toml.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return "", f"runtime_evidence could not read Cargo.toml: {exc}"
-    if toml_parser is not None:
-        try:
-            cargo_data = toml_parser.loads(cargo_text)
-        except toml_parser.TOMLDecodeError as exc:
-            return "", f"runtime_evidence could not parse Cargo.toml: {exc}"
-        package = cargo_data.get("package")
-        if isinstance(package, dict):
-            name = package.get("name")
-            if isinstance(name, str) and name.strip():
-                return name, None
-        return "", "runtime_evidence discovery command could not determine Rust package name"
-    in_package = False
-    for line in cargo_text.splitlines():
-        stripped = line.strip()
-        if stripped == "[package]":
-            in_package = True
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_package = False
-            continue
-        if in_package:
-            match = CARGO_PACKAGE_NAME_RE.match(stripped)
-            if match:
-                return match.group(2), None
+    if toml_parser is None:
+        return "", "runtime_evidence requires tomllib or tomli to parse Cargo.toml"
+    try:
+        cargo_data = toml_parser.loads(cargo_text)
+    except toml_parser.TOMLDecodeError as exc:
+        return "", f"runtime_evidence could not parse Cargo.toml: {exc}"
+    package = cargo_data.get("package")
+    if isinstance(package, dict):
+        name = package.get("name")
+        if isinstance(name, str) and name.strip():
+            return name, None
     return "", "runtime_evidence discovery command could not determine Rust package name"
 
 

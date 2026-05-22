@@ -746,7 +746,7 @@ class EdgePackCheckerTests(unittest.TestCase):
             write_runtime_source(root, "clients/rust/crates/rubin-node/Cargo.toml", "[package]\nname = 'rubin-node' # inline comment\n")
             self.assertEqual(("rubin-node", None), m.rust_package_name(crate_root))
             with unittest.mock.patch.object(m, "toml_parser", None):
-                self.assertEqual(("rubin-node", None), m.rust_package_name(crate_root))
+                self.assertEqual(("", "runtime_evidence requires tomllib or tomli to parse Cargo.toml"), m.rust_package_name(crate_root))
 
     def test_runtime_evidence_rust_opt_in_rejects_wrong_module_and_ignored_tests(self) -> None:
         with tempfile.TemporaryDirectory() as td:
