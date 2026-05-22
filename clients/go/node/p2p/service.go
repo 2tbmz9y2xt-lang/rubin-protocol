@@ -27,14 +27,17 @@ type ServiceConfig struct {
 	LocatorLimit       int
 	GetBlocksBatchSize uint64
 	TxRelayFanout      int
-	PeerRuntimeConfig  node.PeerRuntimeConfig
-	PeerManager        *node.PeerManager
-	SyncConfig         node.SyncConfig
-	SyncEngine         *node.SyncEngine
-	BlockStore         *node.BlockStore
-	TxPool             TxPool
-	TxMetadataFunc     func([]byte) (node.RelayTxMetadata, error)
-	Now                func() time.Time
+	// EnableCompactReceive opens Go compact object receive after negotiated sendcmpct.
+	// It defaults false until the controller/parity boundary explicitly enables it.
+	EnableCompactReceive bool
+	PeerRuntimeConfig    node.PeerRuntimeConfig
+	PeerManager          *node.PeerManager
+	SyncConfig           node.SyncConfig
+	SyncEngine           *node.SyncEngine
+	BlockStore           *node.BlockStore
+	TxPool               TxPool
+	TxMetadataFunc       func([]byte) (node.RelayTxMetadata, error)
+	Now                  func() time.Time
 }
 
 type Service struct {
