@@ -8,7 +8,9 @@ from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
-GO_TEST_FUNC_RE = re.compile(r"(?m)^func\s+(Test[A-Za-z0-9_]+)\s*\(\s*t\s+\*testing\.T\s*\)")
+GO_TEST_FUNC_RE = re.compile(
+    r"(?m)^func\s+(Test[A-Za-z0-9_]*)\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*testing\.T\s*\)"
+)
 RUST_TEST_FUNC_RE = re.compile(r"(?m)^\s*#\s*\[\s*test\s*\]\s*\n\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
@@ -90,10 +92,21 @@ def source_test_names(path: Path) -> tuple[set[str], str | None]:
     except (OSError, UnicodeDecodeError) as exc:
         return set(), f"could not read {path}: {exc}"
     if path.suffix == ".go":
-        return set(GO_TEST_FUNC_RE.findall(source)), None
+        if not path.name.endswith("_test.go"):
+            return set(), None
+        return {name for name in GO_TEST_FUNC_RE.findall(source) if is_go_test_name(name)}, None
     if path.suffix == ".rs":
         return set(RUST_TEST_FUNC_RE.findall(source)), None
     return set(), f"unsupported runtime evidence source extension for {path}"
+
+
+def is_go_test_name(name: str) -> bool:
+    if not name.startswith("Test"):
+        return False
+    suffix = name[len("Test") :]
+    if not suffix:
+        return True
+    return not suffix[0].islower()
 
 
 def validate_runtime_evidence(repo_root: Path, domain_name: str, value: object) -> int:
