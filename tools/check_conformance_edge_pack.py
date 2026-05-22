@@ -189,14 +189,12 @@ def go_testmain_declared_tests(work_output: str, temp_dir: Path) -> tuple[set[st
     return tests, None
 
 
-def go_objdump_matches_source(stdout: str, source_path: Path) -> bool:
+def go_objdump_matches_source(stdout: str, *, source_path: Path, repo_root: Path) -> bool:
     absolute = source_path.resolve().as_posix()
-    parts = source_path.parts
-    relative = source_path.name
-    for index, part in enumerate(parts[:-1]):
-        if part == "clients" and parts[index + 1] == "go":
-            relative = "/".join(parts[index:])
-            break
+    try:
+        relative = source_path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        relative = source_path.name
     for line in stdout.splitlines():
         if not line.startswith("TEXT "):
             continue
@@ -239,11 +237,12 @@ def go_file_discovered_tests(
             objdump_stdout, objdump_error = run_discovery_command(
                 ["go", "tool", "objdump", "-s", symbol_re, str(test_binary)],
                 cwd=go_root,
+                env=go_discovery_env(temp_dir),
                 command_runner=command_runner,
             )
             if objdump_error is not None:
                 return set(), objdump_error
-            if go_objdump_matches_source(objdump_stdout, repo_root / raw_path):
+            if go_objdump_matches_source(objdump_stdout, source_path=repo_root / raw_path, repo_root=repo_root):
                 file_tests.add(test_name)
     return file_tests, None
 

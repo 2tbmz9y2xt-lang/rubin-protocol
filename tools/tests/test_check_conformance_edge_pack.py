@@ -684,8 +684,10 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(any("-list" in call[0] for call in runner.calls))
         self.assertTrue(all(call[0][0] != "cargo" for call in runner.calls))
-        self.assertEqual(runner.envs[0]["GOENV"], "off")
-        self.assertEqual(runner.envs[0]["GOFLAGS"], "-buildvcs=false")
+        go_envs = [env for call, env in zip(runner.calls, runner.envs) if call[0][0] == "go"]
+        self.assertTrue(go_envs)
+        self.assertTrue(all(env["GOENV"] == "off" for env in go_envs))
+        self.assertTrue(all(env["GOFLAGS"] == "-buildvcs=false" for env in go_envs))
 
     def test_runtime_evidence_opt_in_accepts_external_package_go_tests(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -730,17 +732,21 @@ class EdgePackCheckerTests(unittest.TestCase):
                 with chdir(root):
                     rc = m.main(["--verify-runtime-evidence-go"], command_runner=runner)
         self.assertEqual(rc, 0)
-        self.assertEqual(runner.envs[0]["GOENV"], "off")
-        self.assertEqual(runner.envs[0]["GOFLAGS"], "-buildvcs=false")
+        go_envs = [env for call, env in zip(runner.calls, runner.envs) if call[0][0] == "go"]
+        self.assertTrue(go_envs)
+        self.assertTrue(all(env["GOENV"] == "off" for env in go_envs))
+        self.assertTrue(all(env["GOFLAGS"] == "-buildvcs=false" for env in go_envs))
 
     def test_go_objdump_source_match_accepts_spaces_and_trimpath(self) -> None:
         with tempfile.TemporaryDirectory(prefix="rubin path ") as td:
-            source = Path(td) / "clients/go/node/sync_reorg_test.go"
-            self.assertTrue(m.go_objdump_matches_source(f"TEXT pkg.TestA(SB) {source}\n", source))
+            repo_root = Path(td) / "clients/go/wrapper/repo"
+            source = repo_root / "clients/go/node/sync_reorg_test.go"
+            self.assertTrue(m.go_objdump_matches_source(f"TEXT pkg.TestA(SB) {source}\n", source_path=source, repo_root=repo_root))
             self.assertTrue(
                 m.go_objdump_matches_source(
                     "TEXT pkg.TestA(SB) github.com/rubin/clients/go/node/sync_reorg_test.go\n",
-                    source,
+                    source_path=source,
+                    repo_root=repo_root,
                 )
             )
 
