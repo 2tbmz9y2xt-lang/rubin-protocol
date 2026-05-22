@@ -265,9 +265,6 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	}
 	block, err := decodeCmpctBlockPayload(payload)
 	if err != nil {
-		if errors.Is(err, errCmpctBlockShortIDCountTooLarge) {
-			return p.requestOversizedCompactBlockFallback(payload)
-		}
 		p.bumpBan(10, err.Error())
 		return err
 	}
@@ -304,29 +301,6 @@ func (p *peer) validateCmpctBlockReceiveHeader(payload []byte) error {
 		return nil
 	}
 	return p.validateCompactBlockHeader(header)
-}
-
-func (p *peer) requestOversizedCompactBlockFallback(payload []byte) error {
-	if len(payload) < consensus.BLOCK_HEADER_BYTES {
-		p.bumpBan(10, errCmpctBlockShortIDCountTooLarge.Error())
-		return errCmpctBlockShortIDCountTooLarge
-	}
-	var header [consensus.BLOCK_HEADER_BYTES]byte
-	copy(header[:], payload[:consensus.BLOCK_HEADER_BYTES])
-	if err := p.validateCompactBlockHeader(header); err != nil {
-		return err
-	}
-	blockHash, _ := consensus.BlockHash(header[:]) // fixed-size header slice cannot hit the length error path
-	have, err := p.service.hasBlock(blockHash)
-	if err != nil {
-		p.clearCompactOutstandingRequestForBlock(blockHash)
-		return err
-	}
-	if have {
-		p.clearCompactOutstandingRequestForBlock(blockHash)
-		return nil
-	}
-	return p.requestCompactFullBlockFallback(blockHash)
 }
 
 func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]byte) error {

@@ -130,7 +130,14 @@ func TestCmpctBlockPayloadCodec(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cmpctblock roundtrip got=%+v want=%+v", got, want)
 	}
-	assertCmpctBlockEncodeFails(t, "short_id_count_too_large", cmpctBlockPayload{ShortIDs: make([]compactShortID, maxCompactRelayEntries+1)}, "too many cmpctblock short IDs")
+	shortIDs := make([]compactShortID, maxCompactRelayEntries+1)
+	raw, err = encodeCmpctBlockPayload(cmpctBlockPayload{ShortIDs: shortIDs})
+	if err != nil {
+		t.Fatalf("encodeCmpctBlockPayload above inventory vector limit: %v", err)
+	}
+	if got, err := decodeCmpctBlockPayload(raw); err != nil || len(got.ShortIDs) != len(shortIDs) {
+		t.Fatalf("decode above inventory vector limit got=%d err=%v", len(got.ShortIDs), err)
+	}
 }
 
 func TestCmpctBlockPayloadCapAllowsManyPrefilledBlocks(t *testing.T) {
@@ -165,15 +172,8 @@ func TestCmpctBlockPayloadRejectsMalformed(t *testing.T) {
 	assertCmpctBlockDecodeFails(t, "short_header", make([]byte, consensus.BLOCK_HEADER_BYTES+15), "cmpctblock payload missing header or nonce")
 	assertCmpctBlockDecodeFails(t, "empty", cmpctBlockTestPayload([]byte{0, 0}), "invalid compact relay entry count")
 	assertCmpctBlockDecodeFails(t, "payload_above_wire_cap", make([]byte, consensus.MAX_RELAY_MSG_BYTES+1), "cmpctblock payload too large")
-	assertCmpctBlockDecodeFails(t, "short_id_count_too_large_before_allocation", oversizedCmpctBlockShortIDPayload([consensus.BLOCK_HEADER_BYTES]byte{}), "too many cmpctblock short IDs")
 	assertCmpctBlockDecodeFails(t, "short_id_count_too_large_truncated", oversizedCmpctBlockShortIDCountPayload([consensus.BLOCK_HEADER_BYTES]byte{}), "cmpctblock payload truncated short IDs")
 	assertCmpctBlockDecodeFails(t, "short_id_count_too_large_trailing_tail", append(oversizedCmpctBlockShortIDPayload([consensus.BLOCK_HEADER_BYTES]byte{}), 0x00), "cmpctblock payload has trailing bytes")
-	oversizedWithValidPrefilled := oversizedCmpctBlockShortIDCountPayload([consensus.BLOCK_HEADER_BYTES]byte{})
-	oversizedWithValidPrefilled = append(oversizedWithValidPrefilled, make([]byte, (maxCompactRelayEntries+1)*compactShortIDBytes)...)
-	oversizedWithValidPrefilled = consensus.AppendCompactSize(oversizedWithValidPrefilled, 1)
-	oversizedWithValidPrefilled = consensus.AppendU32le(oversizedWithValidPrefilled, 0)
-	oversizedWithValidPrefilled = append(oversizedWithValidPrefilled, cmpctBlockTxEnvelope(validTx)...)
-	assertCmpctBlockDecodeFails(t, "short_id_count_too_large_valid_prefilled_tail", oversizedWithValidPrefilled, "too many cmpctblock short IDs")
 	assertCmpctBlockDecodeFails(t, "nonminimal_short_count", cmpctBlockTestPayload([]byte{0xfd, 0x00, 0x00}), "non-minimal")
 	assertCmpctBlockDecodeFails(t, "truncated_short_ids", cmpctBlockTestPayload([]byte{1, 0x01, 0x02}), "cmpctblock payload truncated short IDs")
 	assertCmpctBlockDecodeFails(t, "nonminimal_prefilled_count", cmpctBlockTestPayload([]byte{0, 0xfd, 0x00, 0x00}), "non-minimal")

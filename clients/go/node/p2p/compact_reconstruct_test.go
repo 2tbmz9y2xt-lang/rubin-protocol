@@ -866,16 +866,10 @@ func TestCompactOversizedFallbackSkipsAlreadyStoredBlock(t *testing.T) {
 
 func TestCompactOversizedFallbackValidatesHeaderAndShape(t *testing.T) {
 	header, _, _ := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
-
-	p := newCompactScriptedPeer(t)
-	if err := p.requestOversizedCompactBlockFallback(nil); !errors.Is(err, errCmpctBlockShortIDCountTooLarge) || p.snapshotState().BanScore == 0 {
-		t.Fatalf("short oversized fallback err=%v state=%+v", err, p.snapshotState())
-	}
-
-	p = newCompactScriptedPeer(t)
 	tinyTarget := [32]byte{}
 	tinyTarget[31] = 0x01
 	powInvalidHeader := compactHeaderWithTarget(header, tinyTarget)
+	p := newCompactScriptedPeer(t)
 	if err := p.handleCmpctBlock(oversizedCmpctBlockShortIDPayload(powInvalidHeader)); err == nil || !strings.Contains(err.Error(), "pow invalid") || p.snapshotState().BanScore == 0 {
 		t.Fatalf("invalid oversized fallback header err=%v state=%+v", err, p.snapshotState())
 	}
@@ -922,7 +916,7 @@ func TestHandleCmpctBlockRejectsMalformedTailBeforeHeaderValidation(t *testing.T
 	}
 }
 
-func TestHandleCmpctBlockRejectsNonCanonicalPrefilledBeforeHeaderValidation(t *testing.T) {
+func TestHandleCmpctBlockValidatesHeaderBeforeNonCanonicalPrefilledDecode(t *testing.T) {
 	header, _, _ := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	tinyTarget := [32]byte{}
 	tinyTarget[31] = 0x01
@@ -931,11 +925,11 @@ func TestHandleCmpctBlockRejectsNonCanonicalPrefilledBeforeHeaderValidation(t *t
 
 	p := newCompactScriptedPeer(t)
 	err := p.handleCmpctBlock(payload)
-	if err == nil || !strings.Contains(err.Error(), "cmpctblock prefilled transaction is non-canonical") || p.snapshotState().BanScore == 0 {
-		t.Fatalf("non-canonical compact tail err=%v state=%+v", err, p.snapshotState())
+	if err == nil || !strings.Contains(err.Error(), "pow invalid") || p.snapshotState().BanScore == 0 {
+		t.Fatalf("non-canonical compact tail err=%v state=%+v, want header validation first", err, p.snapshotState())
 	}
-	if strings.Contains(p.snapshotState().LastError, "pow invalid") {
-		t.Fatalf("state=%+v, want non-canonical tail rejected before PoW", p.snapshotState())
+	if strings.Contains(p.snapshotState().LastError, "cmpctblock prefilled transaction is non-canonical") {
+		t.Fatalf("state=%+v, want structural preflight without transaction parse", p.snapshotState())
 	}
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
 		t.Fatal("non-canonical compact tail sent fallback")
