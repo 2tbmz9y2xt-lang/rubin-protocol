@@ -831,6 +831,31 @@ func TestCompactProcessErrorEdges(t *testing.T) {
 	}
 }
 
+func TestRequestCompactFullBlockFallbackClearsOnlyMatchingOutstanding(t *testing.T) {
+	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 901, 902), 901, 902)
+
+	requireNoCompactErr(t, p.requestCompactFullBlockFallback(blockHash), "matching compact fallback")
+	frame := requireCompactFrame(t, p, messageGetData)
+	items, err := decodeInventoryVectors(frame.Payload)
+	requireNoCompactErr(t, err, "decode matching fallback getdata")
+	if len(items) != 1 || items[0].Type != MSG_BLOCK || items[0].Hash != blockHash {
+		t.Fatalf("matching fallback inventory=%+v, want MSG_BLOCK %x", items, blockHash)
+	}
+	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
+		t.Fatal("matching compact fallback left outstanding request active")
+	}
+
+	activeHash := [32]byte{0x81}
+	p = newCompactScriptedPeer(t)
+	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(activeHash))
+	requireNoCompactErr(t, p.requestCompactFullBlockFallback(blockHash), "stale compact fallback")
+	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockHash != activeHash {
+		t.Fatalf("stale compact fallback corrupted outstanding=%+v ok=%v", snap, ok)
+	}
+}
+
 func TestCompactApplyErrorFallbackEdges(t *testing.T) {
 	source := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 1)
