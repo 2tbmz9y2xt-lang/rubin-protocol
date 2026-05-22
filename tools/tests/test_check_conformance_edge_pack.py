@@ -103,18 +103,15 @@ def write_runtime_source(root: Path, rel_path: str, text: str = "// test source\
     return path
 
 
-def write_rust_package(root: Path, crate: str = "rubin-node", package: str = "rubin-node") -> None:
-    write_runtime_source(root, f"clients/rust/crates/{crate}/Cargo.toml", f'[package]\nname = "{package}"\n')
-
-
 def make_runtime_evidence_repo(root: Path, tests_by_file: dict[str, list[str]]) -> None:
     make_repo(root)
     for rel_path in tests_by_file:
         if rel_path.startswith("clients/go/"):
             write_runtime_source(root, rel_path, "package node\n")
         elif rel_path.startswith("clients/rust/"):
-            write_rust_package(root)
-            write_runtime_source(root, rel_path, "mod tests {}\n")
+            write_runtime_source(root, "clients/rust/crates/rubin-node/Cargo.toml", '[package]\nname = "rubin-node"\n')
+            tests = "".join(f"    #[test]\n    fn {name}() {{}}\n" for name in tests_by_file[rel_path])
+            write_runtime_source(root, rel_path, f"#[cfg(test)]\nmod tests {{\n{tests}}}\n")
     set_runtime_evidence(root, {"tests_by_file": tests_by_file})
 
 
@@ -155,8 +152,8 @@ class FakeCommandRunner:
 
 
 GO_COMPILE = ("go", "test", "-c", "-work", "-o", "*", "./node")
-CARGO_LIST = ("cargo", "test", "--locked", "-p", "rubin-node", "--", "--list")
-CARGO_IGNORED_LIST = ("cargo", "test", "--locked", "-p", "rubin-node", "--", "--ignored", "--list")
+CARGO_LIST = ("cargo", "test", "--locked", "-p", "rubin-node", "--lib", "--", "--list")
+CARGO_IGNORED_LIST = ("cargo", "test", "--locked", "-p", "rubin-node", "--lib", "--", "--ignored", "--list")
 
 
 def go_objdump_cmd(test_name: str) -> tuple[str, ...]: return ("go", "tool", "objdump", "-s", rf".*\.{test_name}$", "*")
@@ -701,45 +698,46 @@ class EdgePackCheckerTests(unittest.TestCase):
             root = Path(td)
             make_runtime_evidence_repo(
                 root,
-                {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"]},
-            )
-            runner = FakeCommandRunner(
                 {
-                    CARGO_LIST: (
-                        0,
-                        "sync_reorg::tests::runtime_reorg_test: test\n",
-                        "warning: wrapper noise is not evidence\n",
-                    ),
-                    CARGO_IGNORED_LIST: (0, "", ""),
-                }
-            )
-            with unittest.mock.patch.dict(
-                os.environ,
-                {
-                    "CARGO_BUILD_TARGET": "forged-target",
-                    "CARGO_ENCODED_RUSTFLAGS": "--cfg\u001fforged",
-                    "CARGO_TARGET_DIR": str(root / "forged-target-dir"),
-                    "RUSTC_WRAPPER": "forged-wrapper",
-                    "RUSTFLAGS": "--cfg forged",
+                    "clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"],
+                    "clients/rust/crates/rubin-node/src/txpool.rs": ["txpool_runtime_test"],
                 },
-                clear=False,
-            ):
+            )
+            runner = FakeCommandRunner({
+                CARGO_LIST: (0, "sync_reorg::tests::runtime_reorg_test: test\ntxpool::tests::txpool_runtime_test: test\n", "warning: wrapper noise is not evidence\n"),
+                CARGO_IGNORED_LIST: (0, "", ""),
+            })
+            forged_env = dict.fromkeys(
+                [
+                    "CARGO_BUILD_TARGET",
+                    "CARGO_BUILD_RUSTC_WRAPPER",
+                    "CARGO_BUILD_RUSTFLAGS",
+                    "CARGO_ENCODED_RUSTFLAGS",
+                    "CARGO_NET_OFFLINE",
+                    "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS",
+                    "RUSTC",
+                    "RUSTC_WRAPPER",
+                    "RUSTFLAGS",
+                ],
+                "forged",
+            ) | {"CARGO_TARGET_DIR": str(root / "forged-target-dir")}
+            with unittest.mock.patch.dict(os.environ, forged_env, clear=False):
                 with chdir(root):
                     rc = m.main(["--verify-runtime-evidence-rust"], command_runner=runner)
         self.assertEqual(rc, 0)
         self.assertIn((CARGO_LIST, (root / "clients" / "rust").resolve()), runner.calls)
+        self.assertEqual(1, [call[0] for call in runner.calls].count(CARGO_LIST))
+        self.assertEqual(1, [call[0] for call in runner.calls].count(CARGO_IGNORED_LIST))
+        scrubbed = set(forged_env) - {"CARGO_TARGET_DIR"}
         cargo_envs = [env for call, env in zip(runner.calls, runner.envs) if call[0][0] == "cargo"]
         self.assertTrue(cargo_envs)
         for env in cargo_envs:
             if env is None:
                 self.fail("cargo discovery env must be set")
             self.assertEqual(env["CARGO_INCREMENTAL"], "0")
-            self.assertIn("rubin-rust-test-list-", env["CARGO_TARGET_DIR"])
+            self.assertTrue(all("rubin-rust-test-list-" in env[key] for key in ("CARGO_HOME", "HOME", "CARGO_TARGET_DIR")))
             self.assertNotEqual(env["CARGO_TARGET_DIR"], str(root / "forged-target-dir"))
-            self.assertNotIn("CARGO_BUILD_TARGET", env)
-            self.assertNotIn("CARGO_ENCODED_RUSTFLAGS", env)
-            self.assertNotIn("RUSTC_WRAPPER", env)
-            self.assertNotIn("RUSTFLAGS", env)
+            self.assertTrue(scrubbed.isdisjoint(env))
 
     def test_runtime_evidence_rust_opt_in_rejects_wrong_module_and_ignored_tests(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -753,22 +751,10 @@ class EdgePackCheckerTests(unittest.TestCase):
                     ]
                 },
             )
-            runner = FakeCommandRunner(
-                {
-                    CARGO_LIST: (
-                        0,
-                        "\n".join(
-                            [
-                                "other_module::tests::runtime_reorg_test: test",
-                                "sync_reorg::tests::ignored_runtime_reorg_test: test",
-                            ]
-                        )
-                        + "\n",
-                        "",
-                    ),
-                    CARGO_IGNORED_LIST: (0, "sync_reorg::tests::ignored_runtime_reorg_test: test\n", ""),
-                }
-            )
+            runner = FakeCommandRunner({
+                CARGO_LIST: (0, "other_module::tests::runtime_reorg_test: test\nsync_reorg::child::tests::runtime_reorg_test: test\nsync_reorg::tests::child::runtime_reorg_test: test\nsync_reorg::tests::ignored_runtime_reorg_test: test\n", ""),
+                CARGO_IGNORED_LIST: (0, "sync_reorg::tests::ignored_runtime_reorg_test: test\n", ""),
+            })
             captured = io.StringIO()
             with chdir(root), contextlib.redirect_stderr(captured):
                 rc = m.main(["--verify-runtime-evidence-rust"], command_runner=runner)
@@ -776,14 +762,17 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertIn("missing runtime evidence tests: runtime_reorg_test, ignored_runtime_reorg_test", captured.getvalue())
 
     def test_runtime_evidence_rust_opt_in_rejects_unsupported_source_scopes(self) -> None:
-        for rel_path in [
-            "clients/rust/crates/rubin-node/src/lib.rs",
-            "clients/rust/crates/rubin-node/src/sync_reorg/mod.rs",
-            "clients/rust/crates/rubin-node/tests/runtime_reorg.rs",
-        ]:
+        cases = [
+            ("clients/rust/crates/rubin-node/src/lib.rs", None),
+            ("clients/rust/crates/rubin-node/src/sync_reorg/mod.rs", None),
+            ("clients/rust/crates/rubin-node/tests/runtime_reorg.rs", None),
+            ("clients/rust/crates/rubin-node/src/sync_reorg.rs", "#[cfg(test)]\nmod tests;\n"),
+        ]
+        for rel_path, source in cases:
             with self.subTest(rel_path=rel_path), tempfile.TemporaryDirectory() as td:
                 root = Path(td)
                 make_runtime_evidence_repo(root, {rel_path: ["runtime_reorg_test"]})
+                source is not None and write_runtime_source(root, rel_path, source)
                 captured = io.StringIO()
                 with chdir(root), contextlib.redirect_stderr(captured):
                     rc = m.main(
@@ -792,6 +781,21 @@ class EdgePackCheckerTests(unittest.TestCase):
                     )
             self.assertEqual(rc, 1)
             self.assertIn("unsupported Rust runtime evidence source scope", captured.getvalue())
+
+    def test_runtime_evidence_rust_opt_in_rejects_repo_cargo_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(root, {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"]})
+            config = root / "clients" / "rust" / ".cargo" / "config.toml"
+            config.parent.mkdir(parents=True)
+            config.write_text("[build]\nrustflags = [\"--cfg\", \"forged\"]\n", encoding="utf-8")
+            with chdir(root), contextlib.redirect_stderr(io.StringIO()) as captured:
+                rc = m.main(
+                    ["--verify-runtime-evidence-rust"],
+                    command_runner=FakeCommandRunner({CARGO_LIST: (0, "sync_reorg::tests::runtime_reorg_test: test\n", ""), CARGO_IGNORED_LIST: (0, "", "")}),
+                )
+        self.assertEqual(rc, 1)
+        self.assertIn("unsupported Rust runtime evidence Cargo config", captured.getvalue())
 
     def test_runtime_evidence_opt_in_accepts_external_package_go_tests(self) -> None:
         with tempfile.TemporaryDirectory() as td:
