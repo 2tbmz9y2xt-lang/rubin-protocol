@@ -257,8 +257,14 @@ func compactLocalTxWTxID(tx []byte) ([32]byte, error) {
 }
 
 func (p *peer) handleCmpctBlock(payload []byte) error {
+	if err := p.validateCmpctBlockReceiveHeader(payload); err != nil {
+		return err
+	}
 	block, err := decodeCmpctBlockPayload(payload)
 	if err != nil {
+		if errors.Is(err, errCmpctBlockShortIDCountTooLarge) {
+			return p.requestOversizedCompactBlockFallback(payload)
+		}
 		p.bumpBan(10, err.Error())
 		return err
 	}
@@ -271,9 +277,6 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 	if have {
 		p.clearCompactOutstandingRequestForBlock(blockHash)
 		return nil
-	}
-	if err := p.validateCompactBlockHeader(block.Header); err != nil {
-		return err
 	}
 	localTxs := compactRelayLocalTransactionsForBlock(block, p.service.cfg.TxPool)
 	result, err := reconstructCompactBlock(block, localTxs)
@@ -290,6 +293,46 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 		return p.processCompactTransactions(blockHash, block.Header, result.Transactions, len(block.ShortIDs) > 0)
 	}
 	return p.requestMissingCompactTransactions(block, blockHash, result)
+}
+
+func (p *peer) validateCmpctBlockReceiveHeader(payload []byte) error {
+	header, ok := cmpctBlockReceiveHeader(payload)
+	if !ok {
+		return nil
+	}
+	return p.validateCompactBlockHeader(header)
+}
+
+func cmpctBlockReceiveHeader(payload []byte) ([consensus.BLOCK_HEADER_BYTES]byte, bool) {
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	if len(payload) < consensus.BLOCK_HEADER_BYTES+16 {
+		return header, false
+	}
+	copy(header[:], payload[:consensus.BLOCK_HEADER_BYTES])
+	return header, true
+}
+
+func (p *peer) requestOversizedCompactBlockFallback(payload []byte) error {
+	if len(payload) < consensus.BLOCK_HEADER_BYTES {
+		p.bumpBan(10, errCmpctBlockShortIDCountTooLarge.Error())
+		return errCmpctBlockShortIDCountTooLarge
+	}
+	var header [consensus.BLOCK_HEADER_BYTES]byte
+	copy(header[:], payload[:consensus.BLOCK_HEADER_BYTES])
+	if err := p.validateCompactBlockHeader(header); err != nil {
+		return err
+	}
+	blockHash, _ := consensus.BlockHash(header[:]) // fixed-size header slice cannot hit the length error path
+	have, err := p.service.hasBlock(blockHash)
+	if err != nil {
+		p.clearCompactOutstandingRequestForBlock(blockHash)
+		return err
+	}
+	if have {
+		p.clearCompactOutstandingRequestForBlock(blockHash)
+		return nil
+	}
+	return p.requestCompactFullBlockFallback(blockHash)
 }
 
 func (p *peer) validateCompactBlockHeader(header [consensus.BLOCK_HEADER_BYTES]byte) error {
@@ -323,12 +366,27 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 	}
 	var responseHash [32]byte
 	copy(responseHash[:], payload[:32])
+	blockHash, ok := p.compactOutstandingBlockHash()
+	if !ok {
+		p.setLastError("ignored unexpected blocktxn response")
+		return nil
+	}
+	if responseHash != blockHash {
+		if len(payload) > blockTxnHashPayloadBytes {
+			return errors.New("stale blocktxn response has body")
+		}
+		p.setLastError("ignored stale blocktxn response")
+		return nil
+	}
 	req, ok := p.compactOutstandingRequestSnapshot()
 	if !ok {
-		return p.rejectBlockTxn("unexpected blocktxn response")
+		p.setLastError("ignored unexpected blocktxn response")
+		return nil
 	}
-	if responseHash != req.BlockHash {
-		return p.rejectBlockTxn("blocktxn block hash mismatch")
+	if uint64(len(payload)) > uint64(req.BlockTxnPayloadCap) {
+		p.clearCompactOutstandingRequestForBlock(req.BlockHash)
+		p.bumpBan(10, "blocktxn payload exceeds outstanding cap")
+		return errors.New("blocktxn payload exceeds outstanding cap")
 	}
 	response, err := decodeBlockTxnRuntimePayload(payload)
 	if err != nil {
