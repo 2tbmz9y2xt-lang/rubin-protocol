@@ -21,6 +21,14 @@ func (timeoutErr) Error() string   { return "timeout" }
 func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return true }
 
+func requireBlockTxnStaleBodyError(t *testing.T, err error) {
+	t.Helper()
+	var staleErr blockTxnStaleBodyError
+	if !errors.As(err, &staleErr) {
+		t.Fatalf("err=%T %v, want blockTxnStaleBodyError", err, err)
+	}
+}
+
 type scriptedRead struct {
 	data []byte
 	err  error
@@ -588,9 +596,7 @@ func TestRunDisconnectsOversizedStaleBlockTxnWithoutBan(t *testing.T) {
 		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload}),
 	}}}
 	err := p.run(context.Background())
-	if err == nil || err.Error() != "stale blocktxn response has body" {
-		t.Fatalf("run err=%v, want stale blocktxn response has body", err)
-	}
+	requireBlockTxnStaleBodyError(t, err)
 	p.applyPostHandshakeDisconnectError(err)
 	state := p.snapshotState()
 	if state.BanScore != 0 || !strings.Contains(state.LastError, "stale blocktxn response has body") {
@@ -613,9 +619,7 @@ func TestRunDisconnectsStaleBlockTxnBodyWithoutBan(t *testing.T) {
 		data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload}),
 	}}}
 	err := p.run(context.Background())
-	if err == nil || err.Error() != "stale blocktxn response has body" {
-		t.Fatalf("run err=%v, want stale blocktxn response has body", err)
-	}
+	requireBlockTxnStaleBodyError(t, err)
 	p.applyPostHandshakeDisconnectError(err)
 	state := p.snapshotState()
 	if state.BanScore != 0 || !strings.Contains(state.LastError, "stale blocktxn response has body") {
@@ -641,9 +645,7 @@ func TestRunRejectsStaleBlockTxnBodyBeforeChecksum(t *testing.T) {
 	header[20] ^= 0xff
 	p.conn = &scriptedConn{reads: []scriptedRead{{data: append(header[:], payload...)}}}
 	err = p.run(context.Background())
-	if err == nil || err.Error() != "stale blocktxn response has body" {
-		t.Fatalf("run err=%v, want stale body before checksum", err)
-	}
+	requireBlockTxnStaleBodyError(t, err)
 	p.applyPostHandshakeDisconnectError(err)
 	state := p.snapshotState()
 	if state.BanScore != 0 || !strings.Contains(state.LastError, "stale blocktxn response has body") {

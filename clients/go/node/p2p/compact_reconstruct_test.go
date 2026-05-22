@@ -472,8 +472,10 @@ func TestHandleBlockTxnStaleBodyDisconnectsWithoutBan(t *testing.T) {
 	p.compact.outstanding.Transactions = [][]byte{txs[0]}
 	txAlias := p.compact.outstanding.Transactions[0]
 	stale := make([]byte, int(p.blockTxnPayloadCap()))
-	if err := p.handleBlockTxn(stale); err == nil || err.Error() != "stale blocktxn response has body" || p.snapshotState().BanScore != 0 {
-		t.Fatalf("near-cap stale blocktxn err=%v state=%+v, want no-ban disconnect", err, p.snapshotState())
+	err := p.handleBlockTxn(stale)
+	requireBlockTxnStaleBodyError(t, err)
+	if p.snapshotState().BanScore != 0 {
+		t.Fatalf("state=%+v, want no-ban disconnect", p.snapshotState())
 	}
 	if p.blockTxnPayloadCap() == 0 {
 		t.Fatal("near-cap stale blocktxn lost active blocktxn payload cap")
