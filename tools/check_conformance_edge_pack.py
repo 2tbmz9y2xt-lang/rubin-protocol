@@ -16,7 +16,56 @@ RUST_TEST_ATTR_RE = re.compile(r"^#\s*\[\s*test\s*\]\s*$")
 RUST_CFG_ATTR_RE = re.compile(r"^#\s*\[\s*cfg\s*\(")
 RUST_CFG_TEST_ATTR_RE = re.compile(r"^#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*$")
 RUST_IGNORE_ATTR_RE = re.compile(r"^#\s*\[\s*ignore(?:\s*(?:\([^]]*\)|=[^]]+))?\s*\]\s*$")
+RUST_CFG_ATTR_IGNORE_RE = re.compile(r"^#\s*\[\s*cfg_attr\s*\([^]]*\bignore\b")
 RUST_FN_RE = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+RUST_INLINE_MOD_RE = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\b")
+RUST_NON_MODULE_SCOPE_RE = re.compile(
+    r"^(?:pub(?:\s*\([^)]*\))?\s+)?"
+    r"(?:fn|impl|trait|struct|enum|union|macro_rules!\s+[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*!)\b"
+)
+GO_KNOWN_GOOS = {
+    "aix",
+    "android",
+    "darwin",
+    "dragonfly",
+    "freebsd",
+    "hurd",
+    "illumos",
+    "ios",
+    "js",
+    "linux",
+    "netbsd",
+    "openbsd",
+    "plan9",
+    "solaris",
+    "wasip1",
+    "windows",
+}
+GO_KNOWN_GOARCH = {
+    "386",
+    "amd64",
+    "amd64p32",
+    "arm",
+    "arm64",
+    "arm64be",
+    "loong64",
+    "mips",
+    "mips64",
+    "mips64le",
+    "mips64p32",
+    "mips64p32le",
+    "mipsle",
+    "ppc",
+    "ppc64",
+    "ppc64le",
+    "riscv",
+    "riscv64",
+    "s390",
+    "s390x",
+    "sparc",
+    "sparc64",
+    "wasm",
+}
 
 
 def fail(msg: str) -> int:
@@ -221,27 +270,106 @@ def mask_non_code(source: str, *, language: str) -> str:
 def rust_test_names(source: str) -> set[str]:
     names: set[str] = set()
     attrs: list[str] = []
-    for raw_line in source.splitlines():
-        line = raw_line.strip()
+    disabled_depths: list[int] = []
+    non_module_depths: list[int] = []
+    pending_scope_kind: str | None = None
+    pending_scope_disabled = False
+    brace_depth = 0
+    for line in rust_logical_lines(source):
+        disabled_depths = [depth for depth in disabled_depths if brace_depth >= depth]
+        non_module_depths = [depth for depth in non_module_depths if brace_depth >= depth]
         if not line:
             continue
         if RUST_ATTR_RE.match(line):
             attrs.append(line)
             continue
+        attrs_disabled = rust_attrs_have_disabled_cfg(attrs)
+        if pending_scope_kind is not None and "{" in line:
+            scope_depth = brace_depth + 1
+            if pending_scope_disabled:
+                disabled_depths.append(scope_depth)
+            if pending_scope_kind == "non_module":
+                non_module_depths.append(scope_depth)
+            pending_scope_kind = None
+            pending_scope_disabled = False
         match = RUST_FN_RE.match(line)
-        if match and any(RUST_TEST_ATTR_RE.match(attr) for attr in attrs) and not rust_attrs_disable_test(attrs):
+        if (
+            match
+            and any(RUST_TEST_ATTR_RE.match(attr) for attr in attrs)
+            and not disabled_depths
+            and not non_module_depths
+            and not rust_attrs_disable_test(attrs)
+        ):
             names.add(match.group(1))
+        scope_kind = rust_scope_kind(line)
+        if scope_kind is not None:
+            if rust_line_opens_scope(line):
+                scope_depth = brace_depth + 1
+                if attrs_disabled:
+                    disabled_depths.append(scope_depth)
+                if scope_kind == "non_module":
+                    non_module_depths.append(scope_depth)
+            elif "{" not in line and not line.rstrip().endswith(";"):
+                pending_scope_kind = scope_kind
+                pending_scope_disabled = attrs_disabled
+        brace_depth += rust_brace_delta(line)
         attrs = []
     return names
 
 
+def rust_logical_lines(source: str) -> list[str]:
+    logical: list[str] = []
+    pending_attr: list[str] = []
+    bracket_depth = 0
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if pending_attr:
+            pending_attr.append(line)
+            bracket_depth += line.count("[") - line.count("]")
+            if bracket_depth <= 0:
+                logical.append(" ".join(pending_attr))
+                pending_attr = []
+                bracket_depth = 0
+            continue
+        if line.startswith("#["):
+            pending_attr = [line]
+            bracket_depth = line.count("[") - line.count("]")
+            if bracket_depth <= 0:
+                logical.append(line)
+                pending_attr = []
+                bracket_depth = 0
+            continue
+        logical.append(line)
+    if pending_attr:
+        logical.append(" ".join(pending_attr))
+    return logical
+
+
+def rust_attrs_have_disabled_cfg(attrs: list[str]) -> bool:
+    return any(RUST_CFG_ATTR_RE.match(attr) and not RUST_CFG_TEST_ATTR_RE.match(attr) for attr in attrs)
+
+
 def rust_attrs_disable_test(attrs: list[str]) -> bool:
     for attr in attrs:
-        if RUST_IGNORE_ATTR_RE.match(attr):
+        if RUST_IGNORE_ATTR_RE.match(attr) or RUST_CFG_ATTR_IGNORE_RE.match(attr):
             return True
-        if RUST_CFG_ATTR_RE.match(attr) and not RUST_CFG_TEST_ATTR_RE.match(attr):
-            return True
-    return False
+    return rust_attrs_have_disabled_cfg(attrs)
+
+
+def rust_brace_delta(line: str) -> int:
+    return line.count("{") - line.count("}")
+
+
+def rust_line_opens_scope(line: str) -> bool:
+    return "{" in line and rust_brace_delta(line) > 0
+
+
+def rust_scope_kind(line: str) -> str | None:
+    if RUST_INLINE_MOD_RE.match(line):
+        return "module"
+    if RUST_NON_MODULE_SCOPE_RE.match(line):
+        return "non_module"
+    return None
 
 
 def go_file_has_build_constraints(source: str) -> bool:
@@ -254,6 +382,16 @@ def go_file_has_build_constraints(source: str) -> bool:
     return False
 
 
+def go_file_has_platform_suffix(path: Path) -> bool:
+    stem = path.name.removesuffix("_test.go").removesuffix(".go")
+    suffixes = stem.split("_")[1:]
+    if not suffixes:
+        return False
+    if suffixes[-1] in GO_KNOWN_GOARCH or suffixes[-1] in GO_KNOWN_GOOS:
+        return True
+    return len(suffixes) >= 2 and suffixes[-2] in GO_KNOWN_GOOS and suffixes[-1] in GO_KNOWN_GOARCH
+
+
 def source_test_names(path: Path) -> tuple[set[str], str | None]:
     try:
         source = path.read_text(encoding="utf-8")
@@ -262,7 +400,7 @@ def source_test_names(path: Path) -> tuple[set[str], str | None]:
     if path.suffix == ".go":
         if not path.name.endswith("_test.go"):
             return set(), None
-        if go_file_has_build_constraints(source):
+        if go_file_has_build_constraints(source) or go_file_has_platform_suffix(path):
             return set(), None
         masked = mask_non_code(source, language="go")
         return {name for name in GO_TEST_FUNC_RE.findall(masked) if is_go_test_name(name)}, None
