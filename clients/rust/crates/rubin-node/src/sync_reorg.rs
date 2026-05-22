@@ -29,7 +29,9 @@ fn advance_prev_timestamps(prev: Option<&[u64]>, new_ts: u64) -> Vec<u64> {
 /// parent pointers back to a common ancestor on the canonical chain.
 struct ReorgBranchBlock {
     hash: [u8; 32],
+    header_bytes: [u8; BLOCK_HEADER_BYTES],
     block_bytes: Vec<u8>,
+    prev_hash: [u8; 32],
     target: [u8; 32],
     /// Header timestamp — used to advance the MTP sliding window during
     /// preview validation (B.9 fix).
@@ -316,34 +318,55 @@ impl SyncEngine {
             // Validate the block BEFORE storing — matching Go's ordering so
             // invalid side-chain blocks never reach the blockstore (B.2 fix,
             // issue #1168).
-            let derived_timestamps = if prev_timestamps.is_none() {
-                self.prev_timestamps_for_next_block().ok().flatten()
-            } else {
-                None
-            };
-            let ts = prev_timestamps.or(derived_timestamps.as_deref());
+            let candidate = branch.last().ok_or("empty side branch")?;
+            let ts = self.side_branch_prev_timestamps(&branch, common_ancestor_height)?;
             validate_block_basic_with_context_at_height(
-                block_bytes,
-                Some(parsed.header.prev_block_hash),
+                &candidate.block_bytes,
+                Some(candidate.prev_hash),
                 self.cfg.expected_target,
                 candidate_height,
-                ts,
+                ts.as_deref(),
             )
             .map_err(|e| e.to_string())?;
 
             // Validation passed — now persist the side-chain block.
-            if !block_store.has_block(bh) {
-                block_store.store_block(bh, &parsed.header_bytes, block_bytes)?;
+            if !block_store.has_block(candidate.hash) {
+                block_store.store_block(
+                    candidate.hash,
+                    &candidate.header_bytes,
+                    &candidate.block_bytes,
+                )?;
             }
 
             return Ok(ApplyBlockWithReorgOutcome {
-                summary: self.synthetic_side_chain_summary(candidate_height, bh),
+                summary: self.synthetic_side_chain_summary(candidate_height, candidate.hash),
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
             });
         }
 
         // Execute the reorg.
         self.apply_preferred_branch(branch, common_ancestor_height)
+    }
+
+    fn side_branch_prev_timestamps(
+        &self,
+        branch: &[ReorgBranchBlock],
+        common_ancestor_height: u64,
+    ) -> Result<Option<Vec<u64>>, String> {
+        if branch.is_empty() {
+            return Err("empty side branch".to_string());
+        }
+        let next_height = common_ancestor_height
+            .checked_add(1)
+            .ok_or_else(|| "height overflow".to_string())?;
+        let mut prev_timestamps = self.prev_timestamps_for_height(next_height)?;
+        for item in &branch[..branch.len() - 1] {
+            prev_timestamps = Some(advance_prev_timestamps(
+                prev_timestamps.as_deref(),
+                item.timestamp,
+            ));
+        }
+        Ok(prev_timestamps)
     }
 
     /// Fast path: apply the block directly if it extends the current tip
@@ -523,7 +546,9 @@ impl SyncEngine {
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let mut branch = vec![ReorgBranchBlock {
             hash: block_hash_bytes,
+            header_bytes: parsed.header_bytes,
             block_bytes: block_bytes.to_vec(),
+            prev_hash: parsed.header.prev_block_hash,
             target: parsed.header.target,
             timestamp: parsed.header.timestamp,
             txids: parsed.txids.clone(),
@@ -546,7 +571,9 @@ impl SyncEngine {
 
             branch.push(ReorgBranchBlock {
                 hash: parent_hash,
+                header_bytes: parent_parsed.header_bytes,
                 block_bytes: parent_bytes,
+                prev_hash: parent_parsed.header.prev_block_hash,
                 target: parent_parsed.header.target,
                 timestamp: parent_parsed.header.timestamp,
                 txids: parent_parsed.txids.clone(),
@@ -659,8 +686,8 @@ mod tests {
     use std::sync::Arc;
 
     use rubin_consensus::constants::{
-        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, POW_LIMIT, SUITE_ID_ML_DSA_87,
-        VERIFY_COST_ML_DSA_87,
+        MAX_FUTURE_DRIFT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, POW_LIMIT,
+        SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
     };
     use rubin_consensus::{
         marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction, Mldsa87Keypair,
@@ -1080,6 +1107,177 @@ mod tests {
         assert_eq!(engine.chain_state.tip_hash, block2_hash);
         assert_eq!(engine.reorg_count(), 0);
         assert_eq!(engine.last_reorg_depth(), 0);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_uses_side_branch_timestamp_context_before_store() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-side-mtp");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 100);
+        let block1_hash = block_header_hash(&block1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, gen_ts + 101);
+        let block2_hash = block_header_hash(&block2);
+        engine
+            .apply_block_with_reorg(&block2, None)
+            .expect("block2 canonical");
+
+        let side = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let side_hash = block_header_hash(&side);
+        let summary = engine
+            .apply_block_with_reorg(&side, None)
+            .expect("valid side branch must use candidate-parent MTP context");
+
+        assert_eq!(summary.block_height, 1);
+        assert_eq!(engine.chain_state.height, 2);
+        assert_eq!(engine.chain_state.tip_hash, block2_hash);
+        assert_eq!(engine.reorg_count(), 0);
+        assert_eq!(engine.last_reorg_depth(), 0);
+        assert!(
+            engine.has_block(side_hash).expect("side block lookup"),
+            "valid side branch must be stored after candidate-context validation"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_advances_side_branch_timestamp_context() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-side-mtp-parent");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 100);
+        let block1_hash = block_header_hash(&block1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, gen_ts + 101);
+        let block2_hash = block_header_hash(&block2);
+        engine
+            .apply_block_with_reorg(&block2, None)
+            .expect("block2 canonical");
+
+        let already_generated2 = engine.chain_state.already_generated;
+        let block3 = coinbase_only_block_with_gen(3, already_generated2, block2_hash, gen_ts + 102);
+        let block3_hash = block_header_hash(&block3);
+        engine
+            .apply_block_with_reorg(&block3, None)
+            .expect("block3 canonical");
+
+        let already_generated3 = engine.chain_state.already_generated;
+        let block4 = coinbase_only_block_with_gen(4, already_generated3, block3_hash, gen_ts + 103);
+        let block4_hash = block_header_hash(&block4);
+        engine
+            .apply_block_with_reorg(&block4, None)
+            .expect("block4 canonical");
+
+        let side1_ts = gen_ts + 200;
+        let side2_ts = gen_ts.saturating_add(MAX_FUTURE_DRIFT);
+        let side3_ts = gen_ts.saturating_add(MAX_FUTURE_DRIFT).saturating_add(100);
+        let side1 = height_one_coinbase_only_block(genesis_hash, side1_ts);
+        let side1_hash = block_header_hash(&side1);
+        engine
+            .apply_block_with_reorg(&side1, None)
+            .expect("valid side parent must be stored");
+
+        let side2 = coinbase_only_block_with_gen(2, subsidy1, side1_hash, side2_ts);
+        let side2_hash = block_header_hash(&side2);
+        engine
+            .apply_block_with_reorg(&side2, None)
+            .expect("valid side child must be stored");
+
+        let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1));
+        let side_generated2 = subsidy1.saturating_add(subsidy2);
+        let side3 = coinbase_only_block_with_gen(3, side_generated2, side2_hash, side3_ts);
+        let side3_hash = block_header_hash(&side3);
+        let summary = engine
+            .apply_block_with_reorg(&side3, None)
+            .expect("valid side grandchild must use advanced side-parent MTP context");
+
+        assert_eq!(summary.block_height, 3);
+        assert_eq!(engine.chain_state.height, 4);
+        assert_eq!(engine.chain_state.tip_hash, block4_hash);
+        assert_eq!(engine.reorg_count(), 0);
+        assert!(
+            engine
+                .has_block(side3_hash)
+                .expect("side grandchild lookup"),
+            "valid side grandchild must be stored after side-parent-context validation"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn side_branch_prev_timestamps_rejects_empty_branch() {
+        let (engine, dir) = engine_with_store("rubin-reorg-side-mtp-empty");
+
+        let err = engine.side_branch_prev_timestamps(&[], 0).unwrap_err();
+        assert!(err.contains("empty side branch"), "got: {err}");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_rejects_side_branch_timestamp_before_store() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-side-mtp-reject");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 100);
+        let block1_hash = block_header_hash(&block1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, gen_ts + 101);
+        let block2_hash = block_header_hash(&block2);
+        engine
+            .apply_block_with_reorg(&block2, None)
+            .expect("block2 canonical");
+
+        let cases = [
+            (gen_ts, "BLOCK_ERR_TIMESTAMP_OLD"),
+            (
+                gen_ts.saturating_add(MAX_FUTURE_DRIFT).saturating_add(1),
+                "BLOCK_ERR_TIMESTAMP_FUTURE",
+            ),
+        ];
+        for (timestamp, want_code) in cases {
+            let side = height_one_coinbase_only_block(genesis_hash, timestamp);
+            let side_hash = block_header_hash(&side);
+            let err = engine
+                .apply_block_with_reorg(&side, None)
+                .expect_err("timestamp-invalid side branch must reject");
+            assert!(err.contains(want_code), "err={err}, want code {want_code}");
+            assert_eq!(engine.chain_state.height, 2);
+            assert_eq!(engine.chain_state.tip_hash, block2_hash);
+            assert!(
+                !engine.has_block(side_hash).expect("side block lookup"),
+                "timestamp-invalid side branch must not be stored"
+            );
+        }
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
