@@ -546,7 +546,7 @@ impl SyncEngine {
         let parsed = parse_block_bytes(block_bytes).map_err(|e| e.to_string())?;
         let mut branch = vec![ReorgBranchBlock {
             hash: block_hash_bytes,
-            header_bytes: parsed.header_bytes.clone(),
+            header_bytes: parsed.header_bytes,
             block_bytes: block_bytes.to_vec(),
             prev_hash: parsed.header.prev_block_hash,
             target: parsed.header.target,
@@ -571,7 +571,7 @@ impl SyncEngine {
 
             branch.push(ReorgBranchBlock {
                 hash: parent_hash,
-                header_bytes: parent_parsed.header_bytes.clone(),
+                header_bytes: parent_parsed.header_bytes,
                 block_bytes: parent_bytes,
                 prev_hash: parent_parsed.header.prev_block_hash,
                 target: parent_parsed.header.target,
@@ -1181,25 +1181,45 @@ mod tests {
             .apply_block_with_reorg(&block3, None)
             .expect("block3 canonical");
 
-        let side1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let already_generated3 = engine.chain_state.already_generated;
+        let block4 = coinbase_only_block_with_gen(4, already_generated3, block3_hash, gen_ts + 103);
+        let block4_hash = block_header_hash(&block4);
+        engine
+            .apply_block_with_reorg(&block4, None)
+            .expect("block4 canonical");
+
+        let side1_ts = gen_ts + 200;
+        let side2_ts = gen_ts.saturating_add(MAX_FUTURE_DRIFT);
+        let side3_ts = gen_ts.saturating_add(MAX_FUTURE_DRIFT).saturating_add(100);
+        let side1 = height_one_coinbase_only_block(genesis_hash, side1_ts);
         let side1_hash = block_header_hash(&side1);
         engine
             .apply_block_with_reorg(&side1, None)
             .expect("valid side parent must be stored");
 
-        let side2 = coinbase_only_block_with_gen(2, subsidy1, side1_hash, gen_ts + 2);
+        let side2 = coinbase_only_block_with_gen(2, subsidy1, side1_hash, side2_ts);
         let side2_hash = block_header_hash(&side2);
-        let summary = engine
+        engine
             .apply_block_with_reorg(&side2, None)
-            .expect("valid side child must use side-parent MTP context");
+            .expect("valid side child must be stored");
 
-        assert_eq!(summary.block_height, 2);
-        assert_eq!(engine.chain_state.height, 3);
-        assert_eq!(engine.chain_state.tip_hash, block3_hash);
+        let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1));
+        let side_generated2 = subsidy1.saturating_add(subsidy2);
+        let side3 = coinbase_only_block_with_gen(3, side_generated2, side2_hash, side3_ts);
+        let side3_hash = block_header_hash(&side3);
+        let summary = engine
+            .apply_block_with_reorg(&side3, None)
+            .expect("valid side grandchild must use advanced side-parent MTP context");
+
+        assert_eq!(summary.block_height, 3);
+        assert_eq!(engine.chain_state.height, 4);
+        assert_eq!(engine.chain_state.tip_hash, block4_hash);
         assert_eq!(engine.reorg_count(), 0);
         assert!(
-            engine.has_block(side2_hash).expect("side child lookup"),
-            "valid side child must be stored after side-parent-context validation"
+            engine
+                .has_block(side3_hash)
+                .expect("side grandchild lookup"),
+            "valid side grandchild must be stored after side-parent-context validation"
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
