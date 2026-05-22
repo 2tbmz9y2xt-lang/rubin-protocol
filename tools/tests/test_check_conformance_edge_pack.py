@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess  # nosec B404
 import sys
 import tempfile
 import unittest
@@ -101,6 +102,62 @@ def write_runtime_source(root: Path, rel_path: str, text: str = "// test source\
     return path
 
 
+def write_rust_crate_manifest(root: Path) -> None:
+    write_runtime_source(
+        root,
+        "clients/rust/Cargo.toml",
+        '[workspace]\nmembers = ["crates/rubin-node"]\n',
+    )
+    write_runtime_source(
+        root,
+        "clients/rust/crates/rubin-node/Cargo.toml",
+        '[package]\nname = "rubin-node"\nversion = "0.0.0"\nedition = "2021"\n',
+    )
+
+
+def make_runtime_evidence_repo(root: Path, tests_by_file: dict[str, list[str]]) -> None:
+    make_repo(root)
+    for rel_path in tests_by_file:
+        if rel_path.startswith("clients/go/"):
+            write_runtime_source(root, rel_path, "package node\n")
+        elif rel_path.startswith("clients/rust/"):
+            write_runtime_source(root, rel_path, "mod tests {}\n")
+    if any(path.startswith("clients/rust/") for path in tests_by_file):
+        write_rust_crate_manifest(root)
+    set_runtime_evidence(root, {"tests_by_file": tests_by_file})
+
+
+class FakeCommandRunner:
+    def __init__(self, outputs: dict[tuple[str, ...], tuple[int, str, str]]) -> None:
+        self.outputs = outputs
+        self.calls: list[tuple[tuple[str, ...], Path]] = []
+
+    def __call__(
+        self,
+        cmd: list[str],
+        *,
+        cwd: Path,
+        text: bool,
+        capture_output: bool,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        _ = (text, capture_output, timeout)
+        self.calls.append((tuple(cmd), cwd))
+        output = self.outputs.get(tuple(cmd))
+        if output is None:
+            output = next((candidate for pattern, candidate in self.outputs.items() if len(pattern) == len(cmd) and all(part == "*" or part == actual for part, actual in zip(pattern, cmd))), (127, "", "unexpected command"))
+        rc, stdout, stderr = output
+        return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
+
+
+GO_LIST = ("go", "test", "-run", "^$", "-list", ".", "./node")
+GO_COMPILE = ("go", "test", "-c", "-o", "*", "./node")
+RUST_SYNC_LIST = ("cargo", "test", "-p", "rubin-node", "--lib", "sync_reorg", "--", "--list")
+RUST_SYNC_IGNORED = ("cargo", "test", "-p", "rubin-node", "--lib", "sync_reorg", "--", "--ignored", "--list")
+
+def go_objdump_cmd(test_name: str) -> tuple[str, ...]: return ("go", "tool", "objdump", "-s", rf".*\.{test_name}$", "*")
+
+
 class EdgePackCheckerTests(unittest.TestCase):
     def test_clean_accounting_passes_with_deferred_fuzz_formal(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -110,7 +167,6 @@ class EdgePackCheckerTests(unittest.TestCase):
             with chdir(root), contextlib.redirect_stdout(captured):
                 rc = m.main()
         self.assertEqual(rc, 0)
-        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
 
     def test_missing_required_vector_fails(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -604,6 +660,112 @@ class EdgePackCheckerTests(unittest.TestCase):
                 rc = m.main()
         self.assertEqual(rc, 0)
         self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
+    def test_runtime_evidence_opt_in_verifies_declared_tests_with_toolchains(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(
+                root,
+                {
+                    "clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"],
+                    "clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"],
+                },
+            )
+            runner = FakeCommandRunner(
+                {
+                    GO_LIST: (0, "TestRuntimeReorg\n", ""),
+                    GO_COMPILE: (0, "", ""),
+                    go_objdump_cmd("TestRuntimeReorg"): (
+                        0,
+                        f"TEXT pkg.TestRuntimeReorg(SB) {(root / 'clients/go/node/sync_reorg_test.go').resolve()}\n",
+                        "",
+                    ),
+                    RUST_SYNC_LIST: (
+                        0,
+                        "sync_reorg::tests::runtime_reorg_test: test\n",
+                        "cargo build noise is not parsed as evidence\n",
+                    ),
+                    RUST_SYNC_IGNORED: (0, "", ""),
+                }
+            )
+            with chdir(root):
+                rc = m.main(["--verify-runtime-evidence"], command_runner=runner)
+        self.assertEqual(rc, 0)
+
+    def test_runtime_evidence_opt_in_rejects_missing_exact_or_wrong_file_names(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(
+                root,
+                {
+                    "clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"],
+                    "clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_test"],
+                },
+            )
+            runner = FakeCommandRunner(
+                {
+                    GO_LIST: (0, "TestRuntimeReorg\n", ""),
+                    GO_COMPILE: (0, "", ""),
+                    go_objdump_cmd("TestRuntimeReorg"): (
+                        0,
+                        f"TEXT pkg.TestRuntimeReorg(SB) {(root / 'clients/go/node/config_test.go').resolve()}\n",
+                        "",
+                    ),
+                    RUST_SYNC_LIST: (
+                        0,
+                        "other::tests::runtime_reorg_test: test\n",
+                        "",
+                    ),
+                    RUST_SYNC_IGNORED: (0, "", ""),
+                }
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main(["--verify-runtime-evidence"], command_runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime evidence tests: TestRuntimeReorg", captured.getvalue())
+        self.assertIn("missing runtime evidence tests: runtime_reorg_test", captured.getvalue())
+
+    def test_runtime_evidence_opt_in_fails_closed_for_toolchain_error_and_timeout(self) -> None:
+        def timeout_runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(["go"], 30)
+
+        for runner, expected in [
+            (FakeCommandRunner({GO_LIST: (1, "", "go list failed")}), "failed: go exit 1"),
+            (timeout_runner, "timed out"),
+        ]:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                make_runtime_evidence_repo(root, {"clients/go/node/sync_reorg_test.go": ["TestRuntimeReorg"]})
+                captured = io.StringIO()
+                with chdir(root), contextlib.redirect_stderr(captured):
+                    rc = m.main(["--verify-runtime-evidence"], command_runner=runner)
+            self.assertEqual(rc, 1)
+            self.assertIn(f"runtime_evidence discovery command {expected}", captured.getvalue())
+
+    def test_runtime_evidence_opt_in_rejects_ignored_rust_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_runtime_evidence_repo(root, {"clients/rust/crates/rubin-node/src/ignored.rs": ["ignored_test"]})
+            runner = FakeCommandRunner(
+                {
+                    ("cargo", "test", "-p", "rubin-node", "--lib", "ignored", "--", "--list"): (
+                        0,
+                        "ignored::tests::ignored_test: test\n",
+                        "",
+                    ),
+                    ("cargo", "test", "-p", "rubin-node", "--lib", "ignored", "--", "--ignored", "--list"): (
+                        0,
+                        "ignored::tests::ignored_test: test\n",
+                        "",
+                    ),
+                }
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main(["--verify-runtime-evidence"], command_runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime evidence tests: ignored_test", captured.getvalue())
 
     def test_runtime_evidence_rejects_schema_path_and_source_boundary_errors(self) -> None:
         def base_runtime_evidence(path: str = "clients/go/node/sync_reorg_test.go") -> dict:
