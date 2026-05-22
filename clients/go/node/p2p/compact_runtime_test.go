@@ -169,14 +169,14 @@ func TestFailedCmpctBlockSendDoesNotAuthorizeRacingGetBlockTxn(t *testing.T) {
 	}
 }
 
-func TestPopExpiredCompactOutstandingBlockHashClearsOnlyExpired(t *testing.T) {
+func TestPopExpiredCompactOutstandingBlockHashAndPayloadCapClearsOnlyExpired(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	now := time.Unix(1000, 0)
 	p.service.cfg.Now = func() time.Time { return now }
 	blockHash := [32]byte{0x41}
 	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
 
-	if gotHash, gotCap, ok := p.popExpiredCompactOutstandingBlockHash(); ok {
+	if gotHash, gotCap, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap(); ok {
 		t.Fatalf("pre-expiry pop hash=%x cap=%d ok=%v, want no pop", gotHash, gotCap, ok)
 	}
 	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockHash != blockHash {
@@ -184,7 +184,7 @@ func TestPopExpiredCompactOutstandingBlockHashClearsOnlyExpired(t *testing.T) {
 	}
 
 	now = now.Add(compactOutstandingRequestTTL)
-	gotHash, gotCap, ok := p.popExpiredCompactOutstandingBlockHash()
+	gotHash, gotCap, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap()
 	if !ok || gotHash != blockHash || gotCap != 64 {
 		t.Fatalf("expired pop hash=%x cap=%d ok=%v, want hash %x cap 64", gotHash, gotCap, ok, blockHash)
 	}
