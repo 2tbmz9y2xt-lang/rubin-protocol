@@ -109,7 +109,7 @@ def make_runtime_evidence_repo(root: Path, tests_by_file: dict[str, list[str]]) 
         if rel_path.startswith("clients/go/"):
             write_runtime_source(root, rel_path, "package node\n")
         elif rel_path.startswith("clients/rust/"):
-            write_runtime_source(root, "clients/rust/crates/rubin-node/Cargo.toml", '[package]\nname = "rubin-node"\n')
+            write_runtime_source(root, "clients/rust/crates/rubin-node/Cargo.toml", "[package]\nname = 'rubin-node' # inline comment\n")
             tests = "".join(f"    #[test]\n    fn {name}() {{}}\n" for name in tests_by_file[rel_path])
             write_runtime_source(root, rel_path, f"#[cfg(test)]\nmod tests {{\n{tests}}}\n")
     set_runtime_evidence(root, {"tests_by_file": tests_by_file})
@@ -738,6 +738,15 @@ class EdgePackCheckerTests(unittest.TestCase):
             self.assertTrue(all("rubin-rust-test-list-" in env[key] for key in ("CARGO_HOME", "HOME", "CARGO_TARGET_DIR")))
             self.assertNotEqual(env["CARGO_TARGET_DIR"], str(root / "forged-target-dir"))
             self.assertTrue(scrubbed.isdisjoint(env))
+
+    def test_runtime_evidence_rust_package_name_accepts_toml_quotes_and_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            crate_root = root / "clients" / "rust" / "crates" / "rubin-node"
+            write_runtime_source(root, "clients/rust/crates/rubin-node/Cargo.toml", "[package]\nname = 'rubin-node' # inline comment\n")
+            self.assertEqual(("rubin-node", None), m.rust_package_name(crate_root))
+            with unittest.mock.patch.object(m, "toml_parser", None):
+                self.assertEqual(("rubin-node", None), m.rust_package_name(crate_root))
 
     def test_runtime_evidence_rust_opt_in_rejects_wrong_module_and_ignored_tests(self) -> None:
         with tempfile.TemporaryDirectory() as td:
