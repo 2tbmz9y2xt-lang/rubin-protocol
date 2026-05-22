@@ -68,9 +68,16 @@ by domain:
 - sighash
 - covenants
 - difficulty
+- runtime_reorg
 - DA
 - mempool policy
 - DA fee-floor policy
+
+`runtime_reorg` coverage is not a new consensus fixture gate. The
+`runtime_reorg` edge-pack domain is pinned using evidence from the existing
+`CV-FORK-CHOICE` and `CV-TIMESTAMP` gates, without claiming checker-enforced
+node runtime source/test evidence. Follow-up checker hardening is tracked
+separately for declared runtime source/test validation.
 
 Mempool/DA fee-floor domains are accounting-only here: they cite committed
 executable CV vector IDs and replay evidence, but do not claim fuzz or formal
