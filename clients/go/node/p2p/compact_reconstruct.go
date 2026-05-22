@@ -383,6 +383,11 @@ func (p *peer) handleGetBlockTxn(payload []byte) error {
 	if err := compactValidateUniqueGetBlockTxnIndexes(req.Indexes); err != nil {
 		return p.rejectGetBlockTxn(err.Error())
 	}
+	p.compactSendBarrier()
+	if !p.consumeCompactBlockAnnouncement(req.BlockHash) {
+		p.setLastError("ignored unannounced getblocktxn request")
+		return nil
+	}
 	block, ok, err := p.blockBytes(req.BlockHash)
 	if err != nil || !ok {
 		return err

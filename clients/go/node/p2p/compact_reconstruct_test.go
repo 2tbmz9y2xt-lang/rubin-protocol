@@ -512,6 +512,7 @@ func TestRunRoutesNegotiatedGetBlockTxn(t *testing.T) {
 	p.service.cfg.EnableCompactReceive = true
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	p.markCompactBlockAnnounced(blockHash)
 	payload := mustEncodeGetBlockTxnRequest(t, blockHash, []uint64{0})
 	p.conn = &scriptedConn{reads: []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageGetBlockTxn, Payload: payload})}}}
 
@@ -555,6 +556,7 @@ func TestHandleGetBlockTxnMalformedAndMissingBlock(t *testing.T) {
 
 	p = newCompactScriptedPeer(t)
 	payload := mustEncodeGetBlockTxnRequest(t, [32]byte{0x99}, []uint64{0})
+	p.markCompactBlockAnnounced([32]byte{0x99})
 	if err := p.handleGetBlockTxn(payload); err != nil {
 		t.Fatalf("missing block getblocktxn err=%v, want nil", err)
 	}
@@ -570,6 +572,7 @@ func TestHandleGetBlockTxnRejectsOutOfRangeAfterBlockCount(t *testing.T) {
 	_, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	p := newCompactScriptedPeer(t)
 	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	p.markCompactBlockAnnounced(blockHash)
 	payload := mustEncodeGetBlockTxnRequest(t, blockHash, []uint64{uint64(len(txs))})
 
 	err := p.handleGetBlockTxn(payload)
@@ -581,6 +584,55 @@ func TestHandleGetBlockTxnRejectsOutOfRangeAfterBlockCount(t *testing.T) {
 	}
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
 		t.Fatal("out-of-range getblocktxn sent a response")
+	}
+}
+
+func TestHandleGetBlockTxnRequiresCompactAnnouncement(t *testing.T) {
+	_, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	payload := mustEncodeGetBlockTxnRequest(t, blockHash, []uint64{0})
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+
+	if err := p.handleGetBlockTxn(payload); err != nil {
+		t.Fatalf("unannounced getblocktxn err=%v, want nil", err)
+	}
+	state := p.snapshotState()
+	if state.BanScore != 0 || !strings.Contains(state.LastError, "ignored unannounced getblocktxn request") {
+		t.Fatalf("unannounced getblocktxn state=%+v, want no-ban diagnostic", state)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("unannounced getblocktxn sent a response")
+	}
+
+	p.markCompactBlockAnnounced(blockHash)
+	requireNoCompactErr(t, p.handleGetBlockTxn(payload), "announced getblocktxn")
+	frame := requireCompactFrame(t, p, messageBlockTxn)
+	got, err := decodeBlockTxnPayload(frame.Payload)
+	requireNoCompactErr(t, err, "decode announced blocktxn")
+	if got.BlockHash != blockHash || len(got.Transactions) != 1 || !bytes.Equal(got.Transactions[0], txs[0]) {
+		t.Fatalf("announced blocktxn=%+v, want hash %x and requested tx", got, blockHash)
+	}
+
+	p.conn.(*scriptedConn).Buffer.Reset()
+	requireNoCompactErr(t, p.handleGetBlockTxn(payload), "consumed getblocktxn announcement")
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("consumed getblocktxn announcement allowed a repeated response")
+	}
+}
+
+func TestHandleGetBlockTxnIgnoresUnannouncedBeforeBlockLookup(t *testing.T) {
+	p := newCompactScriptedPeer(t)
+	p.service.cfg.BlockStore = nil
+	payload := mustEncodeGetBlockTxnRequest(t, [32]byte{0x42}, []uint64{0})
+
+	if err := p.handleGetBlockTxn(payload); err != nil {
+		t.Fatalf("unannounced getblocktxn with nil blockstore err=%v, want nil before lookup", err)
+	}
+	if p.snapshotState().BanScore != 0 {
+		t.Fatalf("unannounced getblocktxn ban_score=%d, want 0", p.snapshotState().BanScore)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("unannounced getblocktxn with nil blockstore sent a response")
 	}
 }
 

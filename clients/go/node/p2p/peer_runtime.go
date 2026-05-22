@@ -331,14 +331,31 @@ func unknownCommandPolicyReason(err error) (string, bool) {
 }
 
 func (p *peer) send(command string, payload []byte) error {
+	announcementHash, hasAnnouncement := compactAnnouncementHashForSentMessage(command, payload)
 	p.writeMu.Lock()
-	defer p.writeMu.Unlock()
 	if deadline := p.service.cfg.PeerRuntimeConfig.WriteDeadline; deadline > 0 {
 		if err := p.conn.SetWriteDeadline(time.Now().Add(deadline)); err != nil {
+			p.writeMu.Unlock()
 			return err
 		}
 	}
-	return writeFrame(p.conn, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), message{Command: command, Payload: payload}, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if hasAnnouncement {
+		p.beginCompactBlockAnnouncementSend(announcementHash)
+	}
+	err := writeFrame(p.conn, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), message{Command: command, Payload: payload}, p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if hasAnnouncement {
+		p.finishCompactBlockAnnouncementSend(announcementHash, err)
+	}
+	p.writeMu.Unlock()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *peer) compactSendBarrier() {
+	p.writeMu.Lock()
+	p.writeMu.Unlock()
 }
 
 func (p *peer) addr() string {

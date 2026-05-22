@@ -37,6 +37,10 @@ type scriptedRead struct {
 type scriptedConn struct {
 	reads []scriptedRead
 	bytes.Buffer
+	writeCount int
+	writeHook  func(int)
+	writeErr   error
+	writeErrAt int
 }
 
 func (c *scriptedConn) Read(p []byte) (int, error) {
@@ -59,7 +63,17 @@ func (c *scriptedConn) Read(p []byte) (int, error) {
 	return 0, err
 }
 
-func (c *scriptedConn) Write(p []byte) (int, error) { return c.Buffer.Write(p) }
+func (c *scriptedConn) Write(p []byte) (int, error) {
+	n, err := c.Buffer.Write(p)
+	c.writeCount++
+	if c.writeHook != nil {
+		c.writeHook(c.writeCount)
+	}
+	if c.writeErr != nil && (c.writeErrAt == 0 || c.writeCount == c.writeErrAt) {
+		return n, c.writeErr
+	}
+	return n, err
+}
 func (c *scriptedConn) Close() error                { return nil }
 func (c *scriptedConn) LocalAddr() net.Addr         { return stubAddr("local") }
 func (c *scriptedConn) RemoteAddr() net.Addr        { return stubAddr("remote") }
