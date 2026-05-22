@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
+GO_TEST_FUNC_RE = re.compile(r"(?m)^func\s+(Test[A-Za-z0-9_]+)\s*\(\s*t\s+\*testing\.T\s*\)")
+RUST_TEST_FUNC_RE = re.compile(r"(?m)^\s*#\s*\[\s*test\s*\]\s*\n\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 def fail(msg: str) -> int:
@@ -70,6 +73,84 @@ def string_list(value: object, *, field_name: str, require_non_empty: bool = Fal
     if len(set(strings)) != len(strings):
         return [], f"{field_name} entries must be unique"
     return strings, None
+
+
+def relative_source_path(value: object, *, field_name: str) -> tuple[Path, str | None]:
+    if not isinstance(value, str) or not value.strip():
+        return Path(), f"{field_name} must be non-empty string"
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        return Path(), f"{field_name} must be relative and must not contain '..'"
+    return path, None
+
+
+def source_test_names(path: Path) -> tuple[set[str], str | None]:
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return set(), f"could not read {path}: {exc}"
+    if path.suffix == ".go":
+        return set(GO_TEST_FUNC_RE.findall(source)), None
+    if path.suffix == ".rs":
+        return set(RUST_TEST_FUNC_RE.findall(source)), None
+    return set(), f"unsupported runtime evidence source extension for {path}"
+
+
+def validate_runtime_evidence(repo_root: Path, domain_name: str, value: object) -> int:
+    failures = 0
+    if not isinstance(value, dict):
+        print(f"ERROR: domain {domain_name}: runtime_evidence must be object", file=sys.stderr)
+        return 1
+
+    tests_by_file = value.get("tests_by_file")
+    if not isinstance(tests_by_file, dict) or not tests_by_file:
+        print(
+            f"ERROR: domain {domain_name}: runtime_evidence.tests_by_file must be non-empty object",
+            file=sys.stderr,
+        )
+        return 1
+
+    for raw_path, raw_test_names in tests_by_file.items():
+        rel_path, path_error = relative_source_path(
+            raw_path,
+            field_name=f"domain {domain_name} runtime_evidence.tests_by_file key",
+        )
+        if path_error is not None:
+            print(f"ERROR: {path_error}", file=sys.stderr)
+            failures += 1
+            continue
+
+        required_tests, tests_error = string_list(
+            raw_test_names,
+            field_name=f"domain {domain_name} runtime_evidence.tests_by_file[{raw_path}]",
+            require_non_empty=True,
+        )
+        if tests_error is not None:
+            print(f"ERROR: {tests_error}", file=sys.stderr)
+            failures += 1
+            continue
+
+        source_path = repo_root / rel_path
+        if not source_path.exists():
+            print(f"FAIL: domain {domain_name}: missing runtime evidence source: {raw_path}", file=sys.stderr)
+            failures += 1
+            continue
+
+        present_tests, source_error = source_test_names(source_path)
+        if source_error is not None:
+            print(f"ERROR: domain {domain_name}: {source_error}", file=sys.stderr)
+            failures += 1
+            continue
+
+        missing_tests = [test_name for test_name in required_tests if test_name not in present_tests]
+        if missing_tests:
+            print(
+                f"FAIL: domain {domain_name}: {raw_path} missing runtime tests: {', '.join(missing_tests)}",
+                file=sys.stderr,
+            )
+            failures += 1
+
+    return failures
 
 
 def main() -> int:
@@ -137,6 +218,7 @@ def main() -> int:
         min_vectors_total = domain.get("min_vectors_total")
         required_vectors_by_gate = domain.get("required_vectors_by_gate", {})
         coverage_accounting = domain.get("coverage_accounting")
+        runtime_evidence = domain.get("runtime_evidence")
 
         if not isinstance(name, str) or not name.strip():
             print("ERROR: domain name missing/invalid", file=sys.stderr)
@@ -164,6 +246,8 @@ def main() -> int:
             print(f"ERROR: domain {name}: coverage_accounting must be object", file=sys.stderr)
             failures += 1
             continue
+        if runtime_evidence is not None:
+            failures += validate_runtime_evidence(repo_root, name, runtime_evidence)
 
         total = 0
         missing_gates: list[str] = []
