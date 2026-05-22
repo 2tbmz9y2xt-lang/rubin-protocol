@@ -8,8 +8,12 @@ from pathlib import Path
 
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
-GO_TEST_FUNC_RE = re.compile(r"(?m)^func\s+(Test[A-Za-z0-9_]+)\s*\(\s*t\s+\*testing\.T\s*\)")
-RUST_TEST_FUNC_RE = re.compile(r"(?m)^\s*#\s*\[\s*test\s*\]\s*\n\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+GO_TEST_FUNC_RE = re.compile(
+    r"(?m)^func\s+(Test[A-Za-z0-9_]*)\s*\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*testing\.T\s*\)"
+)
+RUST_ATTR_RE = re.compile(r"^#\s*\[[^\]]+\]\s*$")
+RUST_TEST_ATTR_RE = re.compile(r"^#\s*\[\s*test\s*\]\s*$")
+RUST_FN_RE = re.compile(r"^(?:pub(?:\s*\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 def fail(msg: str) -> int:
@@ -84,16 +88,174 @@ def relative_source_path(value: object, *, field_name: str) -> tuple[Path, str |
     return path, None
 
 
+def mask_non_code(source: str, *, language: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(source)
+    block_depth = 0
+    state = "code"
+    raw_hashes = 0
+
+    def put_space(ch: str) -> None:
+        out.append("\n" if ch == "\n" else " ")
+
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+
+        if state == "line_comment":
+            put_space(ch)
+            if ch == "\n":
+                state = "code"
+            i += 1
+            continue
+
+        if state == "block_comment":
+            if language == "rust" and ch == "/" and nxt == "*":
+                put_space(ch)
+                put_space(nxt)
+                block_depth += 1
+                i += 2
+                continue
+            if ch == "*" and nxt == "/":
+                put_space(ch)
+                put_space(nxt)
+                block_depth -= 1
+                i += 2
+                if block_depth == 0:
+                    state = "code"
+                continue
+            put_space(ch)
+            i += 1
+            continue
+
+        if state == "double_string":
+            put_space(ch)
+            if ch == "\\" and i + 1 < n:
+                put_space(source[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                state = "code"
+            i += 1
+            continue
+
+        if state == "single_string":
+            put_space(ch)
+            if ch == "\\" and i + 1 < n:
+                put_space(source[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                state = "code"
+            i += 1
+            continue
+
+        if state == "go_raw_string":
+            put_space(ch)
+            if ch == "`":
+                state = "code"
+            i += 1
+            continue
+
+        if state == "rust_raw_string":
+            put_space(ch)
+            if ch == '"' and source.startswith("#" * raw_hashes, i + 1):
+                for j in range(raw_hashes):
+                    put_space(source[i + 1 + j])
+                i += raw_hashes + 2
+                state = "code"
+                continue
+            i += 1
+            continue
+
+        if ch == "/" and nxt == "/":
+            put_space(ch)
+            put_space(nxt)
+            state = "line_comment"
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            put_space(ch)
+            put_space(nxt)
+            state = "block_comment"
+            block_depth = 1
+            i += 2
+            continue
+        if language == "go" and ch == "`":
+            put_space(ch)
+            state = "go_raw_string"
+            i += 1
+            continue
+        if language == "rust" and ch == "r":
+            j = i + 1
+            while j < n and source[j] == "#":
+                j += 1
+            if j < n and source[j] == '"':
+                for k in range(i, j + 1):
+                    put_space(source[k])
+                raw_hashes = j - i - 1
+                state = "rust_raw_string"
+                i = j + 1
+                continue
+        if ch == '"':
+            put_space(ch)
+            state = "double_string"
+            i += 1
+            continue
+        if language == "go" and ch == "'":
+            put_space(ch)
+            state = "single_string"
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
+def rust_test_names(source: str) -> set[str]:
+    names: set[str] = set()
+    pending_test = False
+    for raw_line in source.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if RUST_ATTR_RE.match(line):
+            if RUST_TEST_ATTR_RE.match(line):
+                pending_test = True
+            continue
+        if pending_test:
+            match = RUST_FN_RE.match(line)
+            if match:
+                names.add(match.group(1))
+            pending_test = False
+    return names
+
+
 def source_test_names(path: Path) -> tuple[set[str], str | None]:
     try:
         source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return set(), f"could not read {path}: {exc}"
     if path.suffix == ".go":
-        return set(GO_TEST_FUNC_RE.findall(source)), None
+        if not path.name.endswith("_test.go"):
+            return set(), None
+        masked = mask_non_code(source, language="go")
+        return {name for name in GO_TEST_FUNC_RE.findall(masked) if is_go_test_name(name)}, None
     if path.suffix == ".rs":
-        return set(RUST_TEST_FUNC_RE.findall(source)), None
+        return rust_test_names(mask_non_code(source, language="rust")), None
     return set(), f"unsupported runtime evidence source extension for {path}"
+
+
+def is_go_test_name(name: str) -> bool:
+    if not name.startswith("Test"):
+        return False
+    suffix = name[len("Test") :]
+    if not suffix:
+        return True
+    return not suffix[0].islower()
 
 
 def validate_runtime_evidence(repo_root: Path, domain_name: str, value: object) -> int:

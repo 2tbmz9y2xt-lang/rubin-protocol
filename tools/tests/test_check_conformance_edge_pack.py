@@ -560,6 +560,100 @@ class EdgePackCheckerTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("missing runtime tests: TestRuntimeReorgCoverage", captured.getvalue())
 
+    def test_runtime_evidence_rejects_go_lowercase_test_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/go/node/sync_reorg_test.go": ["Testfoo"]},
+            )
+            go_test = root / "clients" / "go" / "node" / "sync_reorg_test.go"
+            go_test.parent.mkdir(parents=True, exist_ok=True)
+            go_test.write_text("package node\n\nfunc Testfoo(t *testing.T) {}\n", encoding="utf-8")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime tests: Testfoo", captured.getvalue())
+
+    def test_runtime_evidence_rejects_go_test_in_non_test_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/go/node/sync_reorg.go": ["TestRuntimeReorgCoverage"]},
+            )
+            go_file = root / "clients" / "go" / "node" / "sync_reorg.go"
+            go_file.parent.mkdir(parents=True, exist_ok=True)
+            go_file.write_text(
+                "package node\n\nfunc TestRuntimeReorgCoverage(t *testing.T) {}\n",
+                encoding="utf-8",
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime tests: TestRuntimeReorgCoverage", captured.getvalue())
+
+    def test_runtime_evidence_rejects_commented_go_test_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/go/node/sync_reorg_test.go": ["TestRuntimeReorgCoverage"]},
+            )
+            go_test = root / "clients" / "go" / "node" / "sync_reorg_test.go"
+            go_test.parent.mkdir(parents=True, exist_ok=True)
+            go_test.write_text(
+                "package node\n\n/*\nfunc TestRuntimeReorgCoverage(t *testing.T) {}\n*/\n",
+                encoding="utf-8",
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime tests: TestRuntimeReorgCoverage", captured.getvalue())
+
+    def test_runtime_evidence_rejects_go_raw_string_test_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/go/node/sync_reorg_test.go": ["TestRuntimeReorgCoverage"]},
+            )
+            go_test = root / "clients" / "go" / "node" / "sync_reorg_test.go"
+            go_test.parent.mkdir(parents=True, exist_ok=True)
+            go_test.write_text(
+                "package node\n\nconst fixture = `func TestRuntimeReorgCoverage(t *testing.T) {}`\n",
+                encoding="utf-8",
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime tests: TestRuntimeReorgCoverage", captured.getvalue())
+
+    def test_runtime_evidence_allows_go_unnamed_test_parameter(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/go/node/sync_reorg_test.go": ["TestRuntimeReorgCoverage"]},
+            )
+            go_test = root / "clients" / "go" / "node" / "sync_reorg_test.go"
+            go_test.parent.mkdir(parents=True, exist_ok=True)
+            go_test.write_text("package node\n\nfunc TestRuntimeReorgCoverage(*testing.T) {}\n", encoding="utf-8")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stdout(captured):
+                rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
     def test_runtime_evidence_rejects_rust_helper_without_test_attribute(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -571,6 +665,86 @@ class EdgePackCheckerTests(unittest.TestCase):
             rust_test = root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "sync_reorg.rs"
             rust_test.parent.mkdir(parents=True, exist_ok=True)
             rust_test.write_text("fn runtime_reorg_coverage() {}\n", encoding="utf-8")
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime tests: runtime_reorg_coverage", captured.getvalue())
+
+    def test_runtime_evidence_allows_rust_test_with_additional_attributes_and_visibility(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_coverage"]},
+            )
+            rust_test = root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "sync_reorg.rs"
+            rust_test.parent.mkdir(parents=True, exist_ok=True)
+            rust_test.write_text(
+                "#[test]\n#[should_panic]\npub(crate) fn runtime_reorg_coverage() {}\n",
+                encoding="utf-8",
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stdout(captured):
+                rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
+    def test_runtime_evidence_keeps_line_after_rust_raw_string(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_coverage"]},
+            )
+            rust_test = root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "sync_reorg.rs"
+            rust_test.parent.mkdir(parents=True, exist_ok=True)
+            rust_test.write_text(
+                'const TEXT: &str = r#"not code"#;\n#[test]\nfn runtime_reorg_coverage() {}\n',
+                encoding="utf-8",
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stdout(captured):
+                rc = m.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("OK: conformance edge-pack baseline satisfied.", captured.getvalue())
+
+    def test_runtime_evidence_rejects_commented_rust_test_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_coverage"]},
+            )
+            rust_test = root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "sync_reorg.rs"
+            rust_test.parent.mkdir(parents=True, exist_ok=True)
+            rust_test.write_text(
+                "/*\n#[test]\nfn runtime_reorg_coverage() {}\n*/\n",
+                encoding="utf-8",
+            )
+            captured = io.StringIO()
+            with chdir(root), contextlib.redirect_stderr(captured):
+                rc = m.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("missing runtime tests: runtime_reorg_coverage", captured.getvalue())
+
+    def test_runtime_evidence_rejects_rust_raw_string_test_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_repo(root)
+            add_runtime_evidence(
+                root,
+                {"clients/rust/crates/rubin-node/src/sync_reorg.rs": ["runtime_reorg_coverage"]},
+            )
+            rust_test = root / "clients" / "rust" / "crates" / "rubin-node" / "src" / "sync_reorg.rs"
+            rust_test.parent.mkdir(parents=True, exist_ok=True)
+            rust_test.write_text(
+                'const TEXT: &str = r#"#[test]\nfn runtime_reorg_coverage() {}"#;\n',
+                encoding="utf-8",
+            )
             captured = io.StringIO()
             with chdir(root), contextlib.redirect_stderr(captured):
                 rc = m.main()
