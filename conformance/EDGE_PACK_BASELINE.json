@@ -114,6 +114,22 @@
           "CV-TS-05",
           "CV-TS-06"
         ]
+      },
+      "runtime_evidence": {
+        "tests_by_file": {
+          "clients/go/node/sync_reorg_test.go": [
+            "TestApplyBlockWithReorgRejectsSideBranchTimestampContextBeforeStore",
+            "TestApplyBlockWithReorgSwitchesToLowerTipOnEqualWork",
+            "TestApplyBlockWithReorgKeepsLowerTipOnEqualWorkHigherSideBranch"
+          ],
+          "clients/rust/crates/rubin-node/src/sync_reorg.rs": [
+            "apply_block_with_reorg_switches_to_lower_tip_on_equal_work",
+            "apply_block_with_reorg_keeps_lower_tip_on_equal_work_higher_side_branch",
+            "apply_block_with_reorg_uses_side_branch_timestamp_context_before_store",
+            "apply_block_with_reorg_advances_side_branch_timestamp_context",
+            "apply_block_with_reorg_rejects_side_branch_timestamp_before_store"
+          ]
+        }
       }
     },
     {
