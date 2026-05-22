@@ -129,8 +129,8 @@ func TestCompactObjectCapsOpenOnlyForEnabledNegotiatedReceive(t *testing.T) {
 	if got := limiter(messageCmpctBlock); got != uint32(consensus.MAX_RELAY_MSG_BYTES) {
 		t.Fatalf("negotiated cmpctblock cap=%d, want %d", got, consensus.MAX_RELAY_MSG_BYTES)
 	}
-	if got := limiter(messageGetBlockTxn); got != 0 {
-		t.Fatalf("inbound getblocktxn cap=%d, want closed until responder exists", got)
+	if got, want := limiter(messageGetBlockTxn), compactRelayPayloadCap(messageGetBlockTxn); got != want {
+		t.Fatalf("inbound getblocktxn cap=%d, want %d", got, want)
 	}
 	if got := limiter(messageBlockTxn); got != blockTxnHashPayloadBytes {
 		t.Fatalf("blocktxn cap without outstanding=%d, want hash-only cap %d", got, blockTxnHashPayloadBytes)
@@ -142,6 +142,9 @@ func TestCompactObjectCapsOpenOnlyForEnabledNegotiatedReceive(t *testing.T) {
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 0, Version: compactRelayVersion})
 	if got := limiter(messageCmpctBlock); got != 0 {
 		t.Fatalf("disabled cmpctblock cap=%d, want 0", got)
+	}
+	if got := limiter(messageGetBlockTxn); got != 0 {
+		t.Fatalf("disabled getblocktxn cap=%d, want 0", got)
 	}
 	if got := limiter(messageBlockTxn); got != 64 {
 		t.Fatalf("disabled-mode blocktxn cap with outstanding=%d, want 64", got)
@@ -834,7 +837,7 @@ func TestHandleMessageRejectsInvalidKinds(t *testing.T) {
 
 func TestHandleObjectRelayMessageKeepsCompactObjectsClosed(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
-	for _, command := range []string{messageCmpctBlock, messageBlockTxn} {
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
 		err := p.handleObjectRelayMessage(message{Command: command})
 		var unknown postHandshakeUnknownCommandError
 		if !errors.As(err, &unknown) || unknown.command != command {

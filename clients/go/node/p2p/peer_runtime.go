@@ -171,6 +171,9 @@ func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 			}
 			return 0
 		case messageGetBlockTxn:
+			if p.acceptsCompactBlocks() {
+				return compactRelayPayloadCap(command)
+			}
 			return 0
 		default:
 			return base(command)
@@ -232,7 +235,7 @@ func normalizeReadError(err error) error {
 
 func (p *peer) handleMessage(frame message) error {
 	switch frame.Command {
-	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageBlockTxn:
+	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
 		return p.handleRelayMessage(frame)
 	case messageSendCmpct:
 		return p.handleSendCmpct(frame.Payload)
@@ -253,7 +256,7 @@ func (p *peer) handleRelayMessage(frame message) error {
 	switch frame.Command {
 	case messageInv, messageGetData:
 		return p.handleInventoryRelayMessage(frame)
-	case messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageBlockTxn:
+	case messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
 		return p.handleObjectRelayMessage(frame)
 	default:
 		return postHandshakeUnknownCommandError{command: frame.Command}
@@ -284,6 +287,11 @@ func (p *peer) handleObjectRelayMessage(frame message) error {
 			return postHandshakeUnknownCommandError{command: frame.Command}
 		}
 		return p.handleCmpctBlock(frame.Payload)
+	case messageGetBlockTxn:
+		if !p.acceptsCompactBlocks() {
+			return postHandshakeUnknownCommandError{command: frame.Command}
+		}
+		return p.handleGetBlockTxn(frame.Payload)
 	case messageBlockTxn:
 		if !p.acceptsBlockTxnResponses() {
 			return postHandshakeUnknownCommandError{command: frame.Command}

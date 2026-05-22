@@ -506,6 +506,133 @@ func TestHandleBlockTxnMatchingPayloadCapOverflowBans(t *testing.T) {
 	}
 }
 
+func TestRunRoutesNegotiatedGetBlockTxn(t *testing.T) {
+	_, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	payload := mustEncodeGetBlockTxnRequest(t, blockHash, []uint64{0})
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageGetBlockTxn, Payload: payload})}}}
+
+	requireNoCompactErr(t, p.run(context.Background()), "run getblocktxn")
+	frame := requireCompactFrame(t, p, messageBlockTxn)
+	got, err := decodeBlockTxnPayload(frame.Payload)
+	requireNoCompactErr(t, err, "decode served blocktxn")
+	if got.BlockHash != blockHash || len(got.Transactions) != 1 || !bytes.Equal(got.Transactions[0], txs[0]) {
+		t.Fatalf("served blocktxn=%+v, want hash %x and requested tx", got, blockHash)
+	}
+}
+
+func TestHandleGetBlockTxnRejectsDuplicateBeforeBlockLookup(t *testing.T) {
+	p := newCompactScriptedPeer(t)
+	p.service.cfg.BlockStore = nil
+	payload := mustEncodeGetBlockTxnRequest(t, [32]byte{0x42}, []uint64{0, 0})
+
+	err := p.handleGetBlockTxn(payload)
+	if err == nil || !strings.Contains(err.Error(), "duplicate getblocktxn index") {
+		t.Fatalf("handleGetBlockTxn duplicate err=%v, want duplicate index", err)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("duplicate getblocktxn sent a response")
+	}
+}
+
+func TestHandleGetBlockTxnMalformedAndMissingBlock(t *testing.T) {
+	p := newCompactScriptedPeer(t)
+	if err := p.handleGetBlockTxn(make([]byte, 31)); err == nil || !strings.Contains(err.Error(), "getblocktxn payload missing block hash") {
+		t.Fatalf("short getblocktxn err=%v, want missing block hash", err)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("malformed getblocktxn sent a response")
+	}
+
+	p = newCompactScriptedPeer(t)
+	payload := mustEncodeGetBlockTxnRequest(t, [32]byte{0x99}, []uint64{0})
+	if err := p.handleGetBlockTxn(payload); err != nil {
+		t.Fatalf("missing block getblocktxn err=%v, want nil", err)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("missing block getblocktxn sent a response")
+	}
+}
+
+func TestHandleGetBlockTxnRejectsOutOfRangeAfterBlockCount(t *testing.T) {
+	_, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
+	p := newCompactScriptedPeer(t)
+	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
+	payload := mustEncodeGetBlockTxnRequest(t, blockHash, []uint64{uint64(len(txs))})
+
+	err := p.handleGetBlockTxn(payload)
+	if err == nil || !strings.Contains(err.Error(), "getblocktxn index out of range") {
+		t.Fatalf("handleGetBlockTxn out-of-range err=%v, want range error", err)
+	}
+	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
+		t.Fatal("out-of-range getblocktxn sent a response")
+	}
+}
+
+func TestCompactValidateUniqueGetBlockTxnIndexesAcceptsDistinct(t *testing.T) {
+	if err := compactValidateUniqueGetBlockTxnIndexes([]uint64{2, 0, 1}); err != nil {
+		t.Fatalf("compactValidateUniqueGetBlockTxnIndexes: %v", err)
+	}
+}
+
+func TestCompactBlockTransactionsByIndexPreservesRequestOrder(t *testing.T) {
+	txs := [][]byte{
+		minimalBlockTxnTestTxBytes(301),
+		minimalBlockTxnTestTxBytes(302),
+		minimalBlockTxnTestTxBytes(303),
+	}
+	block := compactTestBlockBytesWithTxs(t, txs)
+
+	got, err := compactBlockTransactionsByIndex(block, []uint64{2, 0, 1})
+	requireNoCompactErr(t, err, "slice compact block transactions")
+	want := [][]byte{txs[2], txs[0], txs[1]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ordered txs=%x, want %x", got, want)
+	}
+}
+
+func TestCompactBlockTransactionsByIndexHandlesEmptyRequest(t *testing.T) {
+	got, err := compactBlockTransactionsByIndex(node.DevnetGenesisBlockBytes(), nil)
+	requireNoCompactErr(t, err, "empty getblocktxn request")
+	if len(got) != 0 {
+		t.Fatalf("empty request returned %d txs, want 0", len(got))
+	}
+}
+
+func TestCompactBlockTransactionsByIndexRejectsRangeBeforeScanningTx(t *testing.T) {
+	genesis := node.DevnetGenesisBlockBytes()
+	block := append([]byte(nil), genesis[:consensus.BLOCK_HEADER_BYTES]...)
+	block = consensus.AppendCompactSize(block, 1)
+	block = append(block, 0xff)
+
+	_, err := compactBlockTransactionsByIndex(block, []uint64{1})
+	if err == nil || !strings.Contains(err.Error(), "getblocktxn index out of range") {
+		t.Fatalf("compactBlockTransactionsByIndex err=%v, want range before tx parse", err)
+	}
+}
+
+func TestCompactBlockTransactionsByIndexRejectsMalformedStoredBlocks(t *testing.T) {
+	txs := [][]byte{minimalBlockTxnTestTxBytes(401)}
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{name: "short_header", raw: make([]byte, consensus.BLOCK_HEADER_BYTES-1), want: "stored block missing header"},
+		{name: "bad_count", raw: append(make([]byte, consensus.BLOCK_HEADER_BYTES), 0xfd), want: "TX_ERR_PARSE"},
+		{name: "bad_tx", raw: compactTestBlockBytesWithRawTxTail(t, [][]byte{{0xff}}, nil), want: "stored block transaction is non-canonical"},
+		{name: "trailing", raw: compactTestBlockBytesWithRawTxTail(t, txs, []byte{0x00}), want: "stored block has trailing bytes after transactions"},
+	} {
+		_, err := compactBlockTransactionsByIndex(tc.raw, []uint64{0})
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s err=%v, want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
 func TestHandleCmpctBlockIgnoresMalformedLocalCandidates(t *testing.T) {
 	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	shortID := compactShortIDForTx(t, txs[0], 201, 202)
@@ -1215,6 +1342,31 @@ func cmpctBlockNonCanonicalPrefilledPayload(header [consensus.BLOCK_HEADER_BYTES
 	return append(raw, tx...)
 }
 
+func mustEncodeGetBlockTxnRequest(t *testing.T, blockHash [32]byte, indexes []uint64) []byte {
+	t.Helper()
+	raw, err := encodeGetBlockTxnPayload(getBlockTxnPayload{BlockHash: blockHash, Indexes: indexes})
+	if err != nil {
+		t.Fatalf("encodeGetBlockTxnPayload: %v", err)
+	}
+	return raw
+}
+
+func compactTestBlockBytesWithTxs(t *testing.T, txs [][]byte) []byte {
+	t.Helper()
+	return compactTestBlockBytesWithRawTxTail(t, txs, nil)
+}
+
+func compactTestBlockBytesWithRawTxTail(t *testing.T, txs [][]byte, tail []byte) []byte {
+	t.Helper()
+	genesis := node.DevnetGenesisBlockBytes()
+	raw := append([]byte(nil), genesis[:consensus.BLOCK_HEADER_BYTES]...)
+	raw = consensus.AppendCompactSize(raw, uint64(len(txs)))
+	for _, tx := range txs {
+		raw = append(raw, tx...)
+	}
+	return append(raw, tail...)
+}
+
 func newCompactScriptedPeer(t *testing.T) *peer {
 	t.Helper()
 	p := newPeerRuntimeTestPeer(t)
@@ -1266,7 +1418,7 @@ func compactPartsFromBlockBytes(t *testing.T, block []byte) ([consensus.BLOCK_HE
 	return header, blockHash, txs
 }
 
-func requireCompactFrame(t *testing.T, p *peer, command string) {
+func requireCompactFrame(t *testing.T, p *peer, command string) message {
 	t.Helper()
 	conn := p.conn.(*scriptedConn)
 	frame, err := readFrame(bytes.NewReader(conn.Buffer.Bytes()), networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
@@ -1274,6 +1426,7 @@ func requireCompactFrame(t *testing.T, p *peer, command string) {
 	if err != nil || frame.Command != command {
 		t.Fatalf("compact frame=%+v err=%v want %s", frame, err, command)
 	}
+	return frame
 }
 
 func requireNoCompactErr(t *testing.T, err error, label string) {
