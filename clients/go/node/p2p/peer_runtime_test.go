@@ -218,13 +218,8 @@ func TestCompactOutstandingRequestUsesDedicatedTTL(t *testing.T) {
 	if got := p.blockTxnPayloadCap(); got != 0 {
 		t.Fatalf("expired blocktxn cap=%d, want 0", got)
 	}
-	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
-		t.Fatal("expired outstanding request was not cleared")
-	}
-	p.activateCompactOutstandingRequest(compactOutstandingTestRequest([32]byte{0x12}))
-	now = now.Add(compactOutstandingRequestTTL)
-	if _, ok := p.compactOutstandingBlockHash(); ok {
-		t.Fatal("expired outstanding block hash remained visible")
+	if gotHash, gotCap, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap(); !ok || gotHash != ([32]byte{0x11}) || gotCap != 64 {
+		t.Fatalf("expired pop hash=%x cap=%d ok=%v, want hash 0x11 cap 64", gotHash, gotCap, ok)
 	}
 }
 
@@ -273,7 +268,7 @@ func TestCompactOutstandingRequestDoesNotActivateOnEncodeError(t *testing.T) {
 	}
 }
 
-func TestExpiredCompactOutstandingSnapshotAndPopClearState(t *testing.T) {
+func TestExpiredCompactOutstandingAccessorsPreserveStateForFallbackPop(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	now := time.Unix(1000, 0)
 	p.service.cfg.Now = func() time.Time { return now }
@@ -282,25 +277,14 @@ func TestExpiredCompactOutstandingSnapshotAndPopClearState(t *testing.T) {
 	p.activateCompactOutstandingRequest(req)
 	now = now.Add(compactOutstandingRequestTTL)
 	if snap, ok := p.compactOutstandingRequestSnapshot(); ok {
-		t.Fatalf("snapshot=%+v ok=%v, want expired request cleared", snap, ok)
+		t.Fatalf("snapshot=%+v ok=%v, want expired request hidden", snap, ok)
 	}
-	p.compactMu.Lock()
-	snapshotCleared := p.compact.outstanding == nil
-	p.compactMu.Unlock()
-	if !snapshotCleared {
-		t.Fatal("expired snapshot left outstanding request active")
-	}
-
-	p.activateCompactOutstandingRequest(req)
-	now = now.Add(compactOutstandingRequestTTL)
 	if snap, ok := p.popCompactOutstandingRequest(); ok {
-		t.Fatalf("pop=%+v ok=%v, want expired request cleared", snap, ok)
+		t.Fatalf("pop=%+v ok=%v, want expired request hidden", snap, ok)
 	}
-	p.compactMu.Lock()
-	popCleared := p.compact.outstanding == nil
-	p.compactMu.Unlock()
-	if !popCleared {
-		t.Fatal("expired pop left outstanding request active")
+	gotHash, gotCap, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap()
+	if !ok || gotHash != req.BlockHash || gotCap != req.BlockTxnPayloadCap {
+		t.Fatalf("fallback pop hash=%x cap=%d ok=%v, want hash %x cap %d", gotHash, gotCap, ok, req.BlockHash, req.BlockTxnPayloadCap)
 	}
 }
 
@@ -352,16 +336,22 @@ func TestAlreadyHaveFullBlockClearsMatchingCompactOutstanding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse genesis block: %v", err)
 	}
+	ck := &clock{now: time.Now()}
+	p.service.cfg.Now = ck.Now
 	p.activateCompactOutstandingRequest(compactOutstandingTestRequest(blockHash))
-	summary, err := p.processRelayedBlock(node.DevnetGenesisBlockBytes())
-	if err != nil {
-		t.Fatalf("processRelayedBlock(existing genesis): %v", err)
-	}
-	if summary != nil {
-		t.Fatalf("summary=%v, want nil for existing block", summary)
-	}
+	conn := &expiryWakeConn{scriptedConn: scriptedConn{reads: []scriptedRead{
+		{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlock, Payload: node.DevnetGenesisBlockBytes()})},
+		{err: io.EOF},
+	}}}
+	conn.expireOnRead(ck, 1)
+	p.conn = conn
+
+	requireNoCompactErr(t, p.run(context.Background()), "run existing full block")
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("already-have full block did not clear matching compact outstanding request")
+	}
+	if written := conn.Bytes(); len(written) != 0 {
+		t.Fatalf("existing full block wrote duplicate fallback bytes: %d", len(written))
 	}
 }
 

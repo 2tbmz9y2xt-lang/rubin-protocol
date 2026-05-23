@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"time"
@@ -191,7 +192,6 @@ func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, b
 		return compactOutstandingRequest{}, false
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
 		p.compactMu.Unlock()
 		return compactOutstandingRequest{}, false
 	}
@@ -208,7 +208,6 @@ func (p *peer) compactOutstandingBlockHash() ([32]byte, bool) {
 		return [32]byte{}, false
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
 		return [32]byte{}, false
 	}
 	return p.compact.outstanding.BlockHash, true
@@ -221,7 +220,6 @@ func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) 
 		return compactOutstandingRequest{}, false
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
 		p.compactMu.Unlock()
 		return compactOutstandingRequest{}, false
 	}
@@ -273,68 +271,48 @@ func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutsta
 }
 
 func (p *peer) blockTxnPayloadCap() uint32 {
+	_, cap, ok := p.blockTxnFrameOutstanding()
+	if !ok {
+		return 0
+	}
+	return cap
+}
+
+func (p *peer) blockTxnFrameOutstanding() ([32]byte, uint32, bool) {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil {
-		return 0
+		return [32]byte{}, 0, false
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
-		return 0
+		return [32]byte{}, 0, false
 	}
-	if maxCap := compactRelayPayloadCap(messageBlockTxn); p.compact.outstanding.BlockTxnPayloadCap > maxCap {
-		return maxCap
+	cap := p.compact.outstanding.BlockTxnPayloadCap
+	if maxCap := compactRelayPayloadCap(messageBlockTxn); cap > maxCap {
+		cap = maxCap
 	}
-	return p.compact.outstanding.BlockTxnPayloadCap
+	return p.compact.outstanding.BlockHash, cap, true
 }
 
-// handleExpiredCompactOutstanding checks whether the peer's compact
-// outstanding request has expired.  If it has, the function pops the
-// request, emits a getdata(MSG_BLOCK) fallback for the block, and
-// returns nil.
-func (p *peer) handleExpiredCompactOutstanding() error {
-	req, ok := p.popExpiredCompactOutstandingRequest()
+func (p *peer) handleExpiredCompactOutstanding(ctx context.Context) (bool, error) {
+	if peerRunContextDone(ctx) {
+		return false, nil
+	}
+	blockHash, _, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap()
 	if !ok {
-		return nil
+		return false, nil
 	}
-	body, err := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: req.BlockHash}})
-	if err != nil {
-		return err
+	if peerRunContextDone(ctx) {
+		return false, nil
 	}
-	return p.send(messageGetData, body)
+	body, _ := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
+	return true, p.send(messageGetData, body)
 }
 
-// popExpiredCompactOutstandingRequest is like
-// popCompactOutstandingRequest but only pops the request when it has
-// already expired (the active-request path continues to use
-// popCompactOutstandingRequest for non-expired retrieval).
-func (p *peer) popExpiredCompactOutstandingRequest() (compactOutstandingRequest, bool) {
-	p.compactMu.Lock()
-	if p.compact.outstanding == nil || p.compact.outstanding.ExpiresAt.IsZero() {
-		p.compactMu.Unlock()
-		return compactOutstandingRequest{}, false
-	}
-	if !p.compactOutstandingRequestExpiredLocked() {
-		p.compactMu.Unlock()
-		return compactOutstandingRequest{}, false
-	}
-	req := *p.compact.outstanding
-	p.compact.outstanding = nil
-	p.compactMu.Unlock()
-	return cloneCompactOutstandingRequest(req), true
-}
-
-// compactOutstandingExpiry returns a zero time and false when there
-// is no active (non-expired) compact outstanding request.  Otherwise
-// it returns the expiry timestamp and true.
 func (p *peer) compactOutstandingExpiry() (time.Time, bool) {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil || p.compact.outstanding.ExpiresAt.IsZero() {
-		return time.Time{}, false
-	}
-	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
 		return time.Time{}, false
 	}
 	return p.compact.outstanding.ExpiresAt, true
