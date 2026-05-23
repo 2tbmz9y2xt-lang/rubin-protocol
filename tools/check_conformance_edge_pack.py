@@ -11,6 +11,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+try:
+    import tomllib as toml_parser
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python < 3.11 without tomli.
+    try:
+        import tomli as toml_parser  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        toml_parser = None  # type: ignore[assignment]
+
 CLAIMED_PRESENT_STATUSES = {"present", "covered", "complete"}
 KNOWN_ABSENT_STATUSES = {"absent", "deferred", "not_claimed", "not-applicable", "not_applicable"}
 RUNTIME_EVIDENCE_MAX_SOURCE_BYTES = 1_000_000
@@ -133,8 +141,25 @@ def go_package_arg(raw_path: str) -> str:
     return f"./{package_dir.as_posix()}"
 
 
-def run_discovery_command(cmd: list[str], *, cwd: Path, command_runner, env: dict[str, str] | None = None) -> tuple[str, str | None]:
-    command_env = None if env is None else {**os.environ, **env}
+def run_discovery_command(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    command_runner,
+    env: dict[str, str | None] | None = None,
+    merge_stderr: bool = True,
+) -> tuple[str, str | None]:
+    command_env = None
+    if env is not None:
+        command_env = dict(os.environ)
+        for key, value in env.items():
+            if value is None:
+                command_env.pop(key, None)
+            else:
+                command_env[key] = value
+        for key in list(command_env):
+            if key.startswith("CARGO_TARGET_") and key != "CARGO_TARGET_DIR":
+                command_env.pop(key, None)
     try:
         completed = command_runner(
             cmd,
@@ -153,8 +178,9 @@ def run_discovery_command(cmd: list[str], *, cwd: Path, command_runner, env: dic
     if completed.returncode != 0:
         return "", f"runtime_evidence discovery command failed: {cmd[0]} exit {completed.returncode}"
     if not isinstance(completed.stdout, str) or not isinstance(completed.stderr, str):
-        return "", "runtime_evidence discovery command produced malformed stdout"
-    return completed.stdout + completed.stderr, None
+        return "", "runtime_evidence discovery command produced malformed stdout/stderr"
+    output = completed.stdout + completed.stderr if merge_stderr else completed.stdout
+    return output, None
 
 
 def go_discovery_env(temp_dir: str) -> dict[str, str]:
@@ -162,6 +188,22 @@ def go_discovery_env(temp_dir: str) -> dict[str, str]:
         "GOENV": "off",
         "GOFLAGS": "-buildvcs=false",
         "GOTMPDIR": temp_dir,
+    }
+
+
+def rust_discovery_env(temp_dir: str) -> dict[str, str | None]:
+    return {
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": str(Path(temp_dir) / "target"),
+        "CARGO_BUILD_TARGET": None,
+        "CARGO_BUILD_RUSTC_WRAPPER": None,
+        "CARGO_BUILD_RUSTFLAGS": None,
+        "CARGO_ENCODED_RUSTFLAGS": None,
+        "RUSTC": None,
+        "RUSTC_WRAPPER": None,
+        "RUSTC_WORKSPACE_WRAPPER": None,
+        "RUSTUP_HOME": os.environ.get("RUSTUP_HOME"),
+        "RUSTFLAGS": None,
     }
 
 
@@ -252,11 +294,149 @@ def discovered_runtime_tests(
     *,
     repo_root: Path,
     expected_tests: list[str],
+    verify_rust_discovery: bool,
+    cargo_cache: dict[str, tuple[set[str], str | None]],
     command_runner,
 ) -> tuple[set[str], str | None]:
     if raw_path.startswith("clients/go/"):
         return go_file_discovered_tests(raw_path, repo_root=repo_root, expected_tests=expected_tests, command_runner=command_runner)
+    if verify_rust_discovery and raw_path.startswith("clients/rust/"):
+        return rust_file_discovered_tests(
+            raw_path,
+            repo_root=repo_root,
+            expected_tests=expected_tests,
+            cargo_cache=cargo_cache,
+            command_runner=command_runner,
+        )
     return set(), None
+
+
+def rust_package_name(crate_root: Path) -> tuple[str, str | None]:
+    cargo_toml = crate_root / "Cargo.toml"
+    try:
+        cargo_text = cargo_toml.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return "", f"runtime_evidence could not read Cargo.toml: {exc}"
+    if toml_parser is None:
+        return "", "runtime_evidence requires tomllib or tomli to parse Cargo.toml"
+    try:
+        cargo_data = toml_parser.loads(cargo_text)
+    except toml_parser.TOMLDecodeError as exc:
+        return "", f"runtime_evidence could not parse Cargo.toml: {exc}"
+    package = cargo_data.get("package")
+    if isinstance(package, dict):
+        name = package.get("name")
+        if isinstance(name, str) and name.strip():
+            return name, None
+    return "", "runtime_evidence discovery command could not determine Rust package name"
+
+
+def rust_module_scope(raw_path: str) -> tuple[Path, str, str | None]:
+    parts = Path(raw_path).parts
+    if len(parts) < 6 or parts[:3] != ("clients", "rust", "crates"):
+        return Path(), "", "unsupported Rust runtime evidence source scope"
+    try:
+        src_index = parts.index("src", 4)
+    except ValueError:
+        return Path(), "", "unsupported Rust runtime evidence source scope"
+    crate_root = Path(*parts[:src_index])
+    source_parts = parts[src_index + 1 :]
+    if not source_parts or source_parts[0] == "bin" or source_parts[-1] in {"lib.rs", "main.rs", "mod.rs"}:
+        return Path(), "", "unsupported Rust runtime evidence source scope"
+    module_parts = list(source_parts)
+    module_parts[-1] = Path(module_parts[-1]).stem
+    return crate_root, "::".join(module_parts), None
+
+
+def rust_listed_test_paths(output: str) -> set[str]:
+    tests: set[str] = set()
+    for line in output.splitlines():
+        stripped = line.strip()
+        match = re.match(r"([^:][^ ]*(?:::[^ ]+)*)\: test$", stripped)
+        if match is None:
+            continue
+        tests.add(match.group(1))
+    return tests
+
+
+def rust_source_declared_tests(source_path: Path) -> tuple[set[str], str | None]:
+    try:
+        source = source_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return set(), f"runtime_evidence could not read Rust source: {exc}"
+    if re.search(r"(?m)^\s*(?:#\[[^\n]*\]\s*)*mod\s+tests\s*;", source):
+        return set(), "unsupported Rust runtime evidence source scope"
+    match = re.search(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+tests\s*\{", source)
+    if match is None:
+        return set(), "unsupported Rust runtime evidence source scope"
+    depth = 1
+    index = match.end()
+    while index < len(source) and depth > 0:
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    if depth != 0:
+        return set(), "unsupported Rust runtime evidence source scope"
+    body = source[match.end() : index - 1]
+    if re.search(r"(?m)^\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:;|\{)", body):
+        return set(), "unsupported Rust runtime evidence source scope"
+    return set(re.findall(r"(?m)^\s*#\s*\[\s*test\s*\]\s*(?:#\[[^\n]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", body)), None
+
+
+def rust_file_discovered_tests(
+    raw_path: str,
+    *,
+    repo_root: Path,
+    expected_tests: list[str],
+    cargo_cache: dict[str, tuple[set[str], str | None]],
+    command_runner,
+) -> tuple[set[str], str | None]:
+    crate_rel, module_scope, scope_error = rust_module_scope(raw_path)
+    if scope_error is not None:
+        return set(), scope_error
+    package, package_error = rust_package_name(repo_root / crate_rel)
+    if package_error is not None:
+        return set(), package_error
+    rust_root = repo_root / "clients" / "rust"
+    for root in [rust_root, *rust_root.parents]:
+        if (root / ".cargo" / "config").exists() or (root / ".cargo" / "config.toml").exists():
+            return set(), "unsupported Rust runtime evidence Cargo config"
+    if package not in cargo_cache:
+        with tempfile.TemporaryDirectory(prefix="rubin-rust-test-list-") as temp_dir:
+            env = rust_discovery_env(temp_dir)
+            output, error = run_discovery_command(
+                ["cargo", "test", "--locked", "-p", package, "--lib", "--", "--list"],
+                cwd=rust_root,
+                env=env,
+                command_runner=command_runner,
+                merge_stderr=False,
+            )
+            if error is not None:
+                cargo_cache[package] = (set(), error)
+            else:
+                ignored_output, ignored_error = run_discovery_command(
+                    ["cargo", "test", "--locked", "-p", package, "--lib", "--", "--ignored", "--list"],
+                    cwd=rust_root,
+                    env=env,
+                    command_runner=command_runner,
+                    merge_stderr=False,
+                )
+                cargo_cache[package] = (
+                    rust_listed_test_paths(output) - rust_listed_test_paths(ignored_output),
+                    ignored_error,
+                )
+    active_test_paths, cargo_error = cargo_cache[package]
+    if cargo_error is not None:
+        return set(), cargo_error
+    source_tests, source_error = rust_source_declared_tests(repo_root / raw_path)
+    if source_error is not None:
+        return set(), source_error
+    prefix = f"{module_scope}::tests::"
+    active_tests = {suffix for path in active_test_paths if path.startswith(prefix) for suffix in [path.removeprefix(prefix)] if "::" not in suffix and suffix in source_tests}
+    return {name for name in expected_tests if name in active_tests}, None
 
 
 def runtime_evidence_errors(
@@ -264,6 +444,7 @@ def runtime_evidence_errors(
     *,
     repo_root: Path,
     verify_go_discovery: bool,
+    verify_rust_discovery: bool,
     command_runner,
 ) -> list[str]:
     if not isinstance(value, dict):
@@ -276,6 +457,7 @@ def runtime_evidence_errors(
         return ["runtime_evidence.tests_by_file must be non-empty object"]
 
     errors: list[str] = []
+    cargo_cache: dict[str, tuple[set[str], str | None]] = {}
     for raw_path, raw_tests in tests_by_file.items():
         if not isinstance(raw_path, str) or not raw_path.strip() or raw_path != raw_path.strip():
             errors.append("runtime_evidence.tests_by_file keys must be non-empty repo-relative strings")
@@ -289,11 +471,16 @@ def runtime_evidence_errors(
         if tests_error is not None:
             errors.append(tests_error)
         errors.extend(path_errors)
-        if verify_go_discovery and raw_path.startswith("clients/go/") and tests_error is None and not path_errors:
+        if (
+            (verify_go_discovery and raw_path.startswith("clients/go/"))
+            or (verify_rust_discovery and raw_path.startswith("clients/rust/"))
+        ) and tests_error is None and not path_errors:
             present, discovery_error = discovered_runtime_tests(
                 raw_path,
                 repo_root=repo_root,
                 expected_tests=tests,
+                verify_rust_discovery=verify_rust_discovery,
+                cargo_cache=cargo_cache,
                 command_runner=command_runner,
             )
             if discovery_error is not None:
@@ -311,6 +498,11 @@ def main(argv: list[str] | None = None, *, command_runner=subprocess.run) -> int
         "--verify-runtime-evidence-go",
         action="store_true",
         help="run opt-in Go toolchain discovery for Go runtime_evidence test names",
+    )
+    parser.add_argument(
+        "--verify-runtime-evidence-rust",
+        action="store_true",
+        help="run opt-in Rust/Cargo discovery for Rust runtime_evidence test names",
     )
     args = parser.parse_args([] if argv is None else argv)
 
@@ -411,6 +603,7 @@ def main(argv: list[str] | None = None, *, command_runner=subprocess.run) -> int
                 domain.get("runtime_evidence"),
                 repo_root=repo_root,
                 verify_go_discovery=args.verify_runtime_evidence_go,
+                verify_rust_discovery=args.verify_runtime_evidence_rust,
                 command_runner=command_runner,
             ):
                 print(f"ERROR: domain {name}: {error}", file=sys.stderr)
