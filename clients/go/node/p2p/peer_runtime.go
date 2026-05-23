@@ -35,6 +35,9 @@ func (p *peer) run(ctx context.Context) error {
 		if peerRunContextDone(ctx) {
 			return nil
 		}
+		if err := p.handleExpiredCompactOutstanding(); err != nil {
+			return err
+		}
 		if err := p.setReadDeadline(); err != nil {
 			return err
 		}
@@ -214,8 +217,14 @@ func peerRunContextDone(ctx context.Context) bool {
 
 func (p *peer) setReadDeadline() error {
 	deadline := p.service.cfg.PeerRuntimeConfig.ReadDeadline
+	if expiry, ok := p.compactOutstandingExpiry(); ok {
+		remaining := time.Until(expiry)
+		if deadline <= 0 || remaining < deadline {
+			deadline = remaining
+		}
+	}
 	if deadline <= 0 {
-		return nil
+		return p.conn.SetReadDeadline(time.Time{})
 	}
 	return p.conn.SetReadDeadline(time.Now().Add(deadline))
 }

@@ -287,3 +287,55 @@ func (p *peer) blockTxnPayloadCap() uint32 {
 	}
 	return p.compact.outstanding.BlockTxnPayloadCap
 }
+
+// handleExpiredCompactOutstanding checks whether the peer's compact
+// outstanding request has expired.  If it has, the function pops the
+// request, emits a getdata(MSG_BLOCK) fallback for the block, and
+// returns nil.
+func (p *peer) handleExpiredCompactOutstanding() error {
+	req, ok := p.popExpiredCompactOutstandingRequest()
+	if !ok {
+		return nil
+	}
+	body, err := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: req.BlockHash}})
+	if err != nil {
+		return err
+	}
+	return p.send(messageGetData, body)
+}
+
+// popExpiredCompactOutstandingRequest is like
+// popCompactOutstandingRequest but only pops the request when it has
+// already expired (the active-request path continues to use
+// popCompactOutstandingRequest for non-expired retrieval).
+func (p *peer) popExpiredCompactOutstandingRequest() (compactOutstandingRequest, bool) {
+	p.compactMu.Lock()
+	if p.compact.outstanding == nil || p.compact.outstanding.ExpiresAt.IsZero() {
+		p.compactMu.Unlock()
+		return compactOutstandingRequest{}, false
+	}
+	if !p.compactOutstandingRequestExpiredLocked() {
+		p.compactMu.Unlock()
+		return compactOutstandingRequest{}, false
+	}
+	req := *p.compact.outstanding
+	p.compact.outstanding = nil
+	p.compactMu.Unlock()
+	return cloneCompactOutstandingRequest(req), true
+}
+
+// compactOutstandingExpiry returns a zero time and false when there
+// is no active (non-expired) compact outstanding request.  Otherwise
+// it returns the expiry timestamp and true.
+func (p *peer) compactOutstandingExpiry() (time.Time, bool) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding == nil || p.compact.outstanding.ExpiresAt.IsZero() {
+		return time.Time{}, false
+	}
+	if p.compactOutstandingRequestExpiredLocked() {
+		p.compact.outstanding = nil
+		return time.Time{}, false
+	}
+	return p.compact.outstanding.ExpiresAt, true
+}
