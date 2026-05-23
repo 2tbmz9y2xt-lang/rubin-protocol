@@ -271,27 +271,19 @@ func cloneCompactOutstandingRequest(req compactOutstandingRequest) compactOutsta
 }
 
 func (p *peer) blockTxnPayloadCap() uint32 {
-	_, cap, ok := p.blockTxnFrameOutstanding()
-	if !ok {
-		return 0
-	}
-	return cap
-}
-
-func (p *peer) blockTxnFrameOutstanding() ([32]byte, uint32, bool) {
 	p.compactMu.Lock()
 	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil {
-		return [32]byte{}, 0, false
+		return 0
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		return [32]byte{}, 0, false
+		return 0
 	}
 	cap := p.compact.outstanding.BlockTxnPayloadCap
 	if maxCap := compactRelayPayloadCap(messageBlockTxn); cap > maxCap {
 		cap = maxCap
 	}
-	return p.compact.outstanding.BlockHash, cap, true
+	return cap
 }
 
 func (p *peer) handleExpiredCompactOutstanding(ctx context.Context) (bool, error) {
@@ -305,7 +297,7 @@ func (p *peer) handleExpiredCompactOutstanding(ctx context.Context) (bool, error
 	if peerRunContextDone(ctx) {
 		return false, nil
 	}
-	body, _ := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
+	body := append([]byte{MSG_BLOCK}, blockHash[:]...)
 	return true, p.send(messageGetData, body)
 }
 

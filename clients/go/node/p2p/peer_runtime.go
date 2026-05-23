@@ -38,10 +38,11 @@ func (p *peer) run(ctx context.Context) error {
 		if _, err := p.handleExpiredCompactOutstanding(ctx); err != nil {
 			return err
 		}
-		if err := p.setReadDeadline(); err != nil {
+		frameStart := time.Now()
+		if err := p.setReadDeadlineAt(frameStart, true); err != nil {
 			return err
 		}
-		frame, err := p.readPostHandshakeFrame()
+		frame, err := p.readPostHandshakeFrame(ctx, frameStart)
 		if err != nil {
 			if shouldIgnoreReadError(err) {
 				continue
@@ -67,63 +68,86 @@ func (p *peer) run(ctx context.Context) error {
 
 const blockTxnHashPayloadBytes = 32
 
-func (p *peer) readPostHandshakeFrame() (message, error) {
+func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time) (message, error) {
 	var frame message
-	blockTxnHash, blockTxnCap, hasBlockTxnOutstanding := p.blockTxnFrameOutstanding()
-	header, err := p.readPostHandshakeFrameHeader()
+	header, err := p.readPostHandshakeFrameHeader(ctx, frameStart)
 	if err != nil {
 		return frame, err
 	}
-	if err := p.setReadDeadlineAt(time.Now(), false); err != nil {
-		return frame, err
+	if header.Command == messageBlockTxn && p.acceptsBlockTxnResponses() {
+		return p.readBlockTxnFrame(header)
 	}
-	if header.Command == messageBlockTxn && (hasBlockTxnOutstanding || p.acceptsBlockTxnResponses()) {
-		return p.readBlockTxnFrame(header, blockTxnHash, blockTxnCap, hasBlockTxnOutstanding)
+	if err := p.setReadDeadlineAt(frameStart, true); err != nil {
+		return frame, err
 	}
 	limit := p.postHandshakePayloadCap()
 	if header.Size > limit(header.Command) {
 		return frame, commandPayloadCapError{command: header.Command}
 	}
-	payload, err := readPayloadWithChecksum(p.conn, header.Size, header.Checksum)
+	payload, err := readPayloadWithChecksum(&compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart}, header.Size, header.Checksum)
 	if err != nil {
 		return frame, err
 	}
 	return message{Command: header.Command, Payload: payload}, nil
 }
 
-func (p *peer) readPostHandshakeFrameHeader() (frameHeader, error) {
+func (p *peer) readPostHandshakeFrameHeader(ctx context.Context, frameStart time.Time) (frameHeader, error) {
 	magic := networkMagic(p.service.cfg.PeerRuntimeConfig.Network)
 	maxSize := p.service.cfg.PeerRuntimeConfig.MaxMessageSize
 	if _, ok := p.compactOutstandingExpiry(); !ok {
 		return readFrameHeader(p.conn, magic, maxSize)
 	}
-	var first [1]byte
-	if _, err := io.ReadFull(p.conn, first[:]); err != nil {
-		return frameHeader{}, err
-	}
-	if err := p.setReadDeadlineAt(time.Now(), false); err != nil {
-		return frameHeader{}, err
-	}
-	return readFrameHeader(io.MultiReader(bytes.NewReader(first[:]), p.conn), magic, maxSize)
+	return readFrameHeader(&compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart}, magic, maxSize)
 }
 
-func (p *peer) readBlockTxnFrame(header frameHeader, blockHash [32]byte, cap uint32, hasOutstanding bool) (message, error) {
-	if !hasOutstanding {
+type compactFallbackReader struct {
+	peer       *peer
+	ctx        context.Context
+	frameStart time.Time
+	sent       bool
+}
+
+func (r *compactFallbackReader) Read(p []byte) (int, error) {
+	for {
+		n, err := r.peer.conn.Read(p)
+		if n > 0 {
+			return n, nil
+		}
+		if !isReadTimeout(err) || r.sent {
+			return n, err
+		}
+		sent, sendErr := r.peer.handleExpiredCompactOutstanding(r.ctx)
+		if sendErr != nil {
+			return 0, sendErr
+		}
+		if !sent {
+			return n, err
+		}
+		r.sent = true
+		if err := r.peer.setReadDeadlineAt(r.frameStart, false); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func (p *peer) readBlockTxnFrame(header frameHeader) (message, error) {
+	cap := p.blockTxnPayloadCap()
+	if cap == 0 {
 		return p.readUnexpectedBlockTxnFrame(header)
 	}
 	if header.Size > cap {
-		if stale, err := p.readOversizedBlockTxnStaleHash(header, blockHash); err != nil || stale {
+		if stale, err := p.readOversizedBlockTxnStaleHash(header); err != nil || stale {
 			return message{}, err
 		}
 		return message{}, commandPayloadCapError{command: header.Command}
 	}
 	if header.Size > blockTxnHashPayloadBytes {
-		return p.readMatchedBlockTxnFrame(header, blockHash)
+		return p.readMatchedBlockTxnFrame(header)
 	}
 	return p.readFullCommandFramePayload(header)
 }
 
-func (p *peer) readOversizedBlockTxnStaleHash(header frameHeader, blockHash [32]byte) (bool, error) {
+func (p *peer) readOversizedBlockTxnStaleHash(header frameHeader) (bool, error) {
 	if header.Size <= blockTxnHashPayloadBytes {
 		return false, nil
 	}
@@ -132,7 +156,8 @@ func (p *peer) readOversizedBlockTxnStaleHash(header frameHeader, blockHash [32]
 	if err != nil {
 		return false, payloadReadError(header.Size, 0, n, err)
 	}
-	if responseHash != blockHash {
+	blockHash, ok := p.compactOutstandingBlockHash()
+	if !ok || responseHash != blockHash {
 		return true, blockTxnStaleBodyError{}
 	}
 	return false, nil
@@ -153,16 +178,13 @@ func (p *peer) readFullCommandFramePayload(header frameHeader) (message, error) 
 	return message{Command: header.Command, Payload: payload}, nil
 }
 
-func (p *peer) readMatchedBlockTxnFrame(header frameHeader, blockHash [32]byte) (message, error) {
+func (p *peer) readMatchedBlockTxnFrame(header frameHeader) (message, error) {
 	prefix, err := readPayloadPrefix(p.conn, header.Size, blockTxnHashPayloadBytes)
 	if err != nil {
 		return message{}, err
 	}
-	if !blockTxnPrefixMatchesHash(prefix, blockHash) {
+	if !p.blockTxnPrefixMatchesOutstanding(prefix) {
 		return message{}, blockTxnStaleBodyError{}
-	}
-	if currentHash, currentCap, ok := p.blockTxnFrameOutstanding(); !ok || currentHash != blockHash || header.Size > currentCap {
-		return message{}, commandPayloadCapError{command: header.Command}
 	}
 	payload, err := readPayloadWithChecksum(io.MultiReader(bytes.NewReader(prefix), p.conn), header.Size, header.Checksum)
 	if err != nil {
@@ -172,17 +194,13 @@ func (p *peer) readMatchedBlockTxnFrame(header frameHeader, blockHash [32]byte) 
 }
 
 func (p *peer) blockTxnPrefixMatchesOutstanding(prefix []byte) bool {
-	blockHash, _, ok := p.blockTxnFrameOutstanding()
-	return ok && blockTxnPrefixMatchesHash(prefix, blockHash)
-}
-
-func blockTxnPrefixMatchesHash(prefix []byte, blockHash [32]byte) bool {
 	if len(prefix) < blockTxnHashPayloadBytes {
 		return false
 	}
 	var responseHash [32]byte
 	copy(responseHash[:], prefix[:blockTxnHashPayloadBytes])
-	return responseHash == blockHash
+	blockHash, ok := p.compactOutstandingBlockHash()
+	return ok && responseHash == blockHash
 }
 
 func (p *peer) postHandshakePayloadCap() payloadLimitFn {
