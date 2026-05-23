@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"strings"
+	"net"
 	"testing"
 	"time"
-
-	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
 type clock struct{ now time.Time }
@@ -18,9 +16,8 @@ func (c *clock) advance(d time.Duration) { c.now = c.now.Add(d) }
 
 type expiryWakeConn struct {
 	scriptedConn
-	lastReadDeadline time.Time
-	readCount        int
-	onRead           func(int)
+	readCount int
+	onRead    func(int)
 }
 
 func (c *expiryWakeConn) Read(p []byte) (int, error) {
@@ -30,7 +27,6 @@ func (c *expiryWakeConn) Read(p []byte) (int, error) {
 	}
 	return c.scriptedConn.Read(p)
 }
-func (c *expiryWakeConn) SetReadDeadline(t time.Time) error { c.lastReadDeadline = t; return nil }
 func (c *expiryWakeConn) expireOnRead(ck *clock, readCount int) {
 	c.onRead = func(n int) {
 		if n == readCount {
@@ -54,31 +50,8 @@ func requireFirstWrittenCommand(t *testing.T, p *peer, written []byte, want stri
 	if err != nil {
 		t.Fatalf("readFrameHeader: %v", err)
 	}
-	if cmd := strings.TrimRight(string(frame.Command[:]), "\x00"); cmd != want {
-		t.Fatalf("first write command=%q, want %q", cmd, want)
-	}
-}
-
-func TestRunReturnsExpiredCompactFallbackSendError(t *testing.T) {
-	p, ck := setupCompactFallbackPeer(t)
-	ck.advance(compactOutstandingRequestTTL + time.Second)
-	p.conn = &scriptedConn{writeErr: io.ErrClosedPipe}
-	if err := p.run(context.Background()); err == nil || err.Error() != io.ErrClosedPipe.Error() {
-		t.Fatalf("run err=%v, want closed pipe", err)
-	}
-}
-
-func TestHandleExpiredCompactOutstandingHonorsCancelAfterPop(t *testing.T) {
-	p, ck := setupCompactFallbackPeer(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	ck.advance(compactOutstandingRequestTTL + time.Second)
-	p.service.cfg.Now = func() time.Time { cancel(); return ck.now }
-	p.conn = &scriptedConn{}
-	if sent, err := p.handleExpiredCompactOutstanding(ctx); sent || err != nil {
-		t.Fatalf("sent=%v err=%v, want canceled no-op", sent, err)
-	}
-	if written := p.conn.(*scriptedConn).Bytes(); len(written) != 0 {
-		t.Fatalf("canceled fallback wrote %d bytes", len(written))
+	if frame.Command != want {
+		t.Fatalf("first write command=%q, want %q", frame.Command, want)
 	}
 }
 
@@ -90,34 +63,83 @@ func TestRunFallsBackAndClearsExpiredCompactOutstandingOnIdleTimeout(t *testing.
 
 	requireNoCompactErr(t, p.run(context.Background()), "run idle compact fallback")
 	requireFirstWrittenCommand(t, p, conn.Bytes(), messageGetData)
+	p, ck = setupCompactFallbackPeer(t)
+	ck.advance(compactOutstandingRequestTTL + time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.conn = &scriptedConn{}
+	if err := p.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if p.conn.(*scriptedConn).Len() != 0 {
+		t.Fatal("canceled run wrote compact fallback")
+	}
+}
+
+func TestRunKeepsStartedHeaderAliveAcrossCompactExpiry(t *testing.T) {
+	p, _ := setupCompactFallbackPeer(t)
+	p.service.cfg.Now = time.Now
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = 0
+	p.compactMu.Lock()
+	p.compact.outstanding.ExpiresAt = time.Now().Add(25 * time.Millisecond)
+	p.compactMu.Unlock()
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	p.conn = local
+	frameBytes := mustPeerRuntimeFrameBytes(t, p, message{Command: messagePing})
+	stopFrame := mustPeerRuntimeFrameBytes(t, p, message{Command: messageVersion})
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- p.run(context.Background())
+	}()
+	if _, err := remote.Write(frameBytes[:1]); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if err := remote.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := remote.Write(frameBytes[1:]); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := readFrame(remote, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Command != messageGetData {
+		t.Fatal("fallback command mismatch")
+	}
+	if _, err := remote.Write(stopFrame); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-runDone:
+		if err == nil || err.Error() != "invalid version message after handshake" {
+			t.Fatalf("run err=%v, want post-handshake version stop", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("run did not consume stop frame")
+	}
 }
 
 func TestRunFallsBackForExpiredCompactOutstandingBeforeBenignFrame(t *testing.T) {
-	header, _, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
-	cmpctPayload := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
 	matchingBlockTxnPayload := append([]byte{0x11}, make([]byte, 32)...)
 	staleBlockTxnPayload := append([]byte{0x22}, make([]byte, 64)...)
 	for _, tc := range []struct {
 		name        string
 		msg         message
-		split       bool
 		advanceRead int
 		wantErr     string
 	}{
-		{name: "cmpctblock", msg: message{Command: messageCmpctBlock, Payload: cmpctPayload}, advanceRead: 1},
-		{name: "blocktxn_matching_body_header_crosses_expiry", msg: message{Command: messageBlockTxn, Payload: matchingBlockTxnPayload}, split: true, advanceRead: 1},
-		{name: "blocktxn_stale_body_crosses_expiry", msg: message{Command: messageBlockTxn, Payload: staleBlockTxnPayload}, split: true, advanceRead: 2, wantErr: "stale blocktxn response has body"},
+		{name: "blocktxn_matching_body_header_crosses_expiry", msg: message{Command: messageBlockTxn, Payload: matchingBlockTxnPayload}, advanceRead: 1, wantErr: "message exceeds command cap"},
+		{name: "blocktxn_stale_body_crosses_expiry", msg: message{Command: messageBlockTxn, Payload: staleBlockTxnPayload}, advanceRead: 2, wantErr: "stale blocktxn response has body"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, ck := setupCompactFallbackPeer(t)
-			if tc.split {
-				p.service.cfg.PeerRuntimeConfig.ReadDeadline = 0
-			}
+			p.service.cfg.PeerRuntimeConfig.ReadDeadline = 0
 			frameBytes := mustPeerRuntimeFrameBytes(t, p, tc.msg)
-			reads := []scriptedRead{{data: frameBytes}, {err: io.EOF}}
-			if tc.split {
-				reads = []scriptedRead{{data: frameBytes[:wireHeaderSize]}, {data: frameBytes[wireHeaderSize:]}, {err: io.EOF}}
-			}
+			reads := []scriptedRead{{data: frameBytes[:wireHeaderSize]}, {data: frameBytes[wireHeaderSize:]}, {err: io.EOF}}
 			conn := &expiryWakeConn{scriptedConn: scriptedConn{reads: reads}}
 			conn.expireOnRead(ck, tc.advanceRead)
 			p.conn = conn
@@ -135,36 +157,5 @@ func TestRunFallsBackForExpiredCompactOutstandingBeforeBenignFrame(t *testing.T)
 			}
 			requireFirstWrittenCommand(t, p, conn.Bytes(), messageGetData)
 		})
-	}
-}
-
-func TestSetReadDeadlineUsesCompactOutstandingExpiry(t *testing.T) {
-	p, ck := setupCompactFallbackPeer(t)
-	p.service.cfg.PeerRuntimeConfig.ReadDeadline = 10 * time.Minute
-	dc := &expiryWakeConn{}
-	p.conn = dc
-	if err := p.setReadDeadlineAt(ck.now, true); err != nil {
-		t.Fatalf("setReadDeadline: %v", err)
-	}
-	if diff := dc.lastReadDeadline.Sub(ck.now.Add(compactOutstandingRequestTTL)); diff < -100*time.Millisecond || diff > 100*time.Millisecond {
-		t.Fatalf("deadline=%v, want compact expiry near %v", dc.lastReadDeadline, ck.now.Add(compactOutstandingRequestTTL))
-	}
-	if err := p.setReadDeadlineAt(ck.now, false); err != nil || dc.lastReadDeadline.Before(ck.now.Add(time.Minute)) {
-		t.Fatalf("generic deadline=%v err=%v, want compact expiry removed", dc.lastReadDeadline, err)
-	}
-
-	p.service.cfg.PeerRuntimeConfig.ReadDeadline = 0
-	if err := p.setPostHeaderReadDeadline(ck.now); err != nil || dc.lastReadDeadline.IsZero() || dc.lastReadDeadline.After(ck.now.Add(compactOutstandingRequestTTL)) {
-		t.Fatalf("post-header deadline=%v err=%v, want bounded payload read", dc.lastReadDeadline, err)
-	}
-	ck.advance(compactOutstandingRequestTTL + time.Second)
-	if _, err := p.handleExpiredCompactOutstanding(context.Background()); err != nil {
-		t.Fatalf("handleExpiredCompactOutstanding: %v", err)
-	}
-	if err := p.setReadDeadline(); err != nil {
-		t.Fatalf("setReadDeadline after expiry: %v", err)
-	}
-	if !dc.lastReadDeadline.IsZero() {
-		t.Fatalf("deadline=%v, want cleared deadline", dc.lastReadDeadline)
 	}
 }

@@ -70,15 +70,11 @@ const blockTxnHashPayloadBytes = 32
 func (p *peer) readPostHandshakeFrame() (message, error) {
 	var frame message
 	blockTxnHash, blockTxnCap, hasBlockTxnOutstanding := p.blockTxnFrameOutstanding()
-	header, err := readFrameHeader(
-		p.conn,
-		networkMagic(p.service.cfg.PeerRuntimeConfig.Network),
-		p.service.cfg.PeerRuntimeConfig.MaxMessageSize,
-	)
+	header, err := p.readPostHandshakeFrameHeader()
 	if err != nil {
 		return frame, err
 	}
-	if err := p.setPostHeaderReadDeadline(time.Now()); err != nil {
+	if err := p.setReadDeadlineAt(time.Now(), false); err != nil {
 		return frame, err
 	}
 	if header.Command == messageBlockTxn && (hasBlockTxnOutstanding || p.acceptsBlockTxnResponses()) {
@@ -93,6 +89,22 @@ func (p *peer) readPostHandshakeFrame() (message, error) {
 		return frame, err
 	}
 	return message{Command: header.Command, Payload: payload}, nil
+}
+
+func (p *peer) readPostHandshakeFrameHeader() (frameHeader, error) {
+	magic := networkMagic(p.service.cfg.PeerRuntimeConfig.Network)
+	maxSize := p.service.cfg.PeerRuntimeConfig.MaxMessageSize
+	if _, ok := p.compactOutstandingExpiry(); !ok {
+		return readFrameHeader(p.conn, magic, maxSize)
+	}
+	var first [1]byte
+	if _, err := io.ReadFull(p.conn, first[:]); err != nil {
+		return frameHeader{}, err
+	}
+	if err := p.setReadDeadlineAt(time.Now(), false); err != nil {
+		return frameHeader{}, err
+	}
+	return readFrameHeader(io.MultiReader(bytes.NewReader(first[:]), p.conn), magic, maxSize)
 }
 
 func (p *peer) readBlockTxnFrame(header frameHeader, blockHash [32]byte, cap uint32, hasOutstanding bool) (message, error) {
@@ -148,6 +160,9 @@ func (p *peer) readMatchedBlockTxnFrame(header frameHeader, blockHash [32]byte) 
 	}
 	if !blockTxnPrefixMatchesHash(prefix, blockHash) {
 		return message{}, blockTxnStaleBodyError{}
+	}
+	if currentHash, currentCap, ok := p.blockTxnFrameOutstanding(); !ok || currentHash != blockHash || header.Size > currentCap {
+		return message{}, commandPayloadCapError{command: header.Command}
 	}
 	payload, err := readPayloadWithChecksum(io.MultiReader(bytes.NewReader(prefix), p.conn), header.Size, header.Checksum)
 	if err != nil {
@@ -251,20 +266,6 @@ func (p *peer) setReadDeadlineAt(wallNow time.Time, includeCompact bool) error {
 			if deadlineTime.IsZero() || compactDeadline.Before(deadlineTime) {
 				deadlineTime = compactDeadline
 			}
-		}
-	}
-	return p.conn.SetReadDeadline(deadlineTime)
-}
-
-func (p *peer) setPostHeaderReadDeadline(wallNow time.Time) error {
-	var deadlineTime time.Time
-	if deadline := p.service.cfg.PeerRuntimeConfig.ReadDeadline; deadline > 0 {
-		deadlineTime = wallNow.Add(deadline)
-	}
-	if _, ok := p.compactOutstandingExpiry(); ok {
-		compactDeadline := wallNow.Add(compactOutstandingRequestTTL)
-		if deadlineTime.IsZero() || compactDeadline.Before(deadlineTime) {
-			deadlineTime = compactDeadline
 		}
 	}
 	return p.conn.SetReadDeadline(deadlineTime)
