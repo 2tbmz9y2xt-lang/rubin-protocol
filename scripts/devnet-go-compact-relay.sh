@@ -114,6 +114,7 @@ with socket.create_server(("127.0.0.1", 0)) as listener:
     print(f"proxy: listening={addr[0]}:{addr[1]}", flush=True)
     client, _ = listener.accept()
     with client, socket.create_connection((target_host, int(target_port)), timeout=int(io_timeout)) as server:
+        server.settimeout(None)
         threads = [
             threading.Thread(target=pump, args=("a_to_b", client, server), daemon=True),
             threading.Thread(target=pump, args=("b_to_a", server, client), daemon=True),
