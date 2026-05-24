@@ -58,6 +58,22 @@ for tool in python3 perl lsof; do
   }
 done
 
+validate_rpc_timeout_config() {
+  python3 - "${RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS}" <<'PY'
+import math
+import sys
+
+timeout_raw = sys.argv[1]
+try:
+    request_timeout = float(timeout_raw)
+except ValueError:
+    raise SystemExit(f"invalid RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS={timeout_raw!r}")
+if not math.isfinite(request_timeout) or request_timeout <= 0 or request_timeout > 300:
+    raise SystemExit(f"RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS out of range: {timeout_raw!r}")
+PY
+}
+validate_rpc_timeout_config
+
 # shellcheck source=scripts/devnet-process-common.sh disable=SC1091
 source "${HELPER}"
 rubin_process_init go-two-node-full-block
@@ -93,6 +109,7 @@ trap go_two_node_exit_trap EXIT
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
   python3 - "${method}" "${addr}" "${path}" "${body}" "${RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS}" <<'PY'
+import math
 import socket
 import sys
 import urllib.error
@@ -103,7 +120,7 @@ try:
     request_timeout = float(timeout_raw)
 except ValueError:
     raise SystemExit(f"invalid RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS={timeout_raw!r}")
-if request_timeout <= 0 or request_timeout > 300:
+if not math.isfinite(request_timeout) or request_timeout <= 0 or request_timeout > 300:
     raise SystemExit(f"RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS out of range: {timeout_raw!r}")
 data = body.encode() if body else None
 req = urllib.request.Request(f"http://{addr}{path}", data=data, method=method)
