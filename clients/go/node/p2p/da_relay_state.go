@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"crypto/sha3"
 	"errors"
 	"sync"
 
@@ -102,29 +103,37 @@ type daRelaySetRecord struct {
 }
 
 type daRelayCommit struct {
-	daID         [32]byte
-	peerQuotaKey string
-	chunkCount   uint16
-	wireBytes    uint64
+	daID              [32]byte
+	payloadCommitment [32]byte
+	peerQuotaKey      string
+	chunkCount        uint16
+	wireBytes         uint64
 }
 
 type daRelayChunk struct {
 	daID         [32]byte
+	chunkHash    [32]byte
 	peerQuotaKey string
 	chunkIndex   uint16
+	payload      []byte
 	wireBytes    uint64
 }
 
 var (
-	errDARelayDuplicateCommit         = errors.New("duplicate da commit")
-	errDARelayDuplicateChunk          = errors.New("duplicate da chunk")
-	errDARelayChunkCountInvalid       = errors.New("da commit chunk count invalid")
-	errDARelayChunkIndexOutOfRange    = errors.New("da chunk index out of range")
-	errDARelayChunkIndexOutsideCommit = errors.New("da chunk index outside commit")
-	errDARelayOrphanPoolCapExceeded   = errors.New("da orphan pool cap exceeded")
-	errDARelayOrphanPeerCapExceeded   = errors.New("da orphan pool per-peer cap exceeded")
-	errDARelayOrphanDAIDCapExceeded   = errors.New("da orphan pool per-da_id cap exceeded")
-	errDARelayOrphanCommitCapExceeded = errors.New("da orphan commit overhead cap exceeded")
+	errDARelayDuplicateCommit           = errors.New("duplicate da commit")
+	errDARelayDuplicateChunk            = errors.New("duplicate da chunk")
+	errDARelayChunkCountInvalid         = errors.New("da commit chunk count invalid")
+	errDARelayChunkIndexOutOfRange      = errors.New("da chunk index out of range")
+	errDARelayChunkIndexOutsideCommit   = errors.New("da chunk index outside commit")
+	errDARelayOrphanPoolCapExceeded     = errors.New("da orphan pool cap exceeded")
+	errDARelayOrphanPeerCapExceeded     = errors.New("da orphan pool per-peer cap exceeded")
+	errDARelayOrphanDAIDCapExceeded     = errors.New("da orphan pool per-da_id cap exceeded")
+	errDARelayOrphanCommitCapExceeded   = errors.New("da orphan commit overhead cap exceeded")
+	errDARelayChunkHashMismatch         = errors.New("da chunk hash mismatch")
+	errDARelayChunkPayloadSizeInvalid   = errors.New("da chunk payload size invalid")
+	errDARelayPayloadCommitmentMismatch = errors.New("da payload commitment mismatch")
+	errDARelayWireBytesInvalid          = errors.New("da relay wire bytes invalid")
+	errDARelayPinnedPayloadCapExceeded  = errors.New("da pinned payload cap exceeded")
 )
 
 type daRelayState struct {
@@ -200,6 +209,9 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	if commit.chunkCount == 0 || uint64(commit.chunkCount) > consensus.MAX_DA_CHUNK_COUNT {
 		return daRelaySetRecord{}, errDARelayChunkCountInvalid
 	}
+	if commit.wireBytes == 0 {
+		return daRelaySetRecord{}, errDARelayWireBytesInvalid
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,6 +229,9 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	record.state = daRelayStateStagedCommit
 	record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
 	record.receivedTime = s.nextReceivedTime + 1
+	if err := record.tryComplete(true); err != nil {
+		return daRelaySetRecord{}, err
+	}
 	if err := record.recomputeOrphanTotals(); err != nil {
 		return daRelaySetRecord{}, err
 	}
@@ -229,6 +244,17 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelaySetRecord, error) {
 	if uint64(chunk.chunkIndex) >= consensus.MAX_DA_CHUNK_COUNT {
 		return daRelaySetRecord{}, errDARelayChunkIndexOutOfRange
+	}
+	payloadLen := len(chunk.payload)
+	if payloadLen == 0 || uint64(payloadLen) > consensus.CHUNK_BYTES {
+		return daRelaySetRecord{}, errDARelayChunkPayloadSizeInvalid
+	}
+	if chunk.wireBytes < uint64(payloadLen) {
+		return daRelaySetRecord{}, errDARelayWireBytesInvalid
+	}
+	payload := cloneBytes(chunk.payload)
+	if sha3.Sum256(payload) != chunk.chunkHash {
+		return daRelaySetRecord{}, errDARelayChunkHashMismatch
 	}
 
 	s.mu.Lock()
@@ -248,8 +274,12 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 		record.state = daRelayStateOrphanChunks
 		record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
 	}
+	chunk.payload = payload
 	record.chunks[chunk.chunkIndex] = chunk
 	record.receivedTime = s.nextReceivedTime + 1
+	if err := record.tryComplete(false); err != nil {
+		return daRelaySetRecord{}, err
+	}
 	if err := record.recomputeOrphanTotals(); err != nil {
 		return daRelaySetRecord{}, err
 	}
@@ -270,11 +300,16 @@ func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	if err != nil {
 		return err
 	}
+	pinnedBytes, err := s.projectPinnedPayloadLocked(records)
+	if err != nil {
+		return err
+	}
 	s.sets = records
 	s.orphanBytes = orphanBytes
 	s.orphanBytesByPeerQuotaKey = peerBytes
 	s.orphanBytesByDAID = daBytes
 	s.orphanCommitOverheadBytes = commitBytes
+	s.pinnedPayloadBytes = pinnedBytes
 	s.nextReceivedTime = record.receivedTime
 	return nil
 }
@@ -313,6 +348,21 @@ func (s *daRelayState) projectOrphanAccountingLocked(records map[[32]byte]daRela
 	return orphanBytes, peerBytes, daBytes, commitBytes, nil
 }
 
+func (s *daRelayState) projectPinnedPayloadLocked(records map[[32]byte]daRelaySetRecord) (uint64, error) {
+	var pinnedBytes uint64
+	for _, record := range records {
+		if record.state != daRelayStateCompleteSet || record.payloadBytes == 0 {
+			continue
+		}
+		var err error
+		pinnedBytes, err = checkedAddUint64(pinnedBytes, record.payloadBytes)
+		if err != nil || pinnedBytes > s.caps.pinnedPayloadBytes {
+			return 0, errDARelayPinnedPayloadCapExceeded
+		}
+	}
+	return pinnedBytes, nil
+}
+
 func (s *daRelayState) addProjectedPeerBytes(peerBytes map[string]uint64, key string, bytes uint64) error {
 	if key == "" || bytes == 0 {
 		return nil
@@ -343,6 +393,7 @@ func (r daRelaySetRecord) clone() daRelaySetRecord {
 	out := r
 	out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))
 	for index, chunk := range r.chunks {
+		chunk.payload = cloneBytes(chunk.payload)
 		out.chunks[index] = chunk
 	}
 	return out
@@ -362,6 +413,50 @@ func (r *daRelaySetRecord) pruneChunksOutsideCommit() {
 	}
 }
 
+func (r *daRelaySetRecord) tryComplete(dropChunksOnCommitMismatch bool) error {
+	if r.commit.chunkCount == 0 || len(r.missingChunkIndexes()) != 0 {
+		r.payloadBytes = 0
+		return nil
+	}
+
+	hasher := sha3.New256()
+	var payloadBytes uint64
+	for i := uint16(0); i < r.commit.chunkCount; i++ {
+		chunk := r.chunks[i]
+		if sha3.Sum256(chunk.payload) != chunk.chunkHash {
+			delete(r.chunks, i)
+			r.payloadBytes = 0
+			r.state = daRelayStateStagedCommit
+			return errDARelayChunkHashMismatch
+		}
+		var err error
+		payloadBytes, err = checkedAddUint64(payloadBytes, uint64(len(chunk.payload)))
+		if err != nil {
+			return errDARelayPinnedPayloadCapExceeded
+		}
+		_, _ = hasher.Write(chunk.payload)
+	}
+	var payloadCommitment [32]byte
+	copy(payloadCommitment[:], hasher.Sum(nil))
+	if payloadCommitment != r.commit.payloadCommitment {
+		if !dropChunksOnCommitMismatch {
+			r.payloadBytes = 0
+			r.state = daRelayStateStagedCommit
+			return errDARelayPayloadCommitmentMismatch
+		}
+		for i := uint16(0); i < r.commit.chunkCount; i++ {
+			delete(r.chunks, i)
+		}
+		r.payloadBytes = 0
+		r.state = daRelayStateStagedCommit
+		return nil
+	}
+	r.payloadBytes = payloadBytes
+	r.state = daRelayStateCompleteSet
+	r.ttlBlocksRemaining = 0
+	return nil
+}
+
 func (r *daRelaySetRecord) recomputeOrphanTotals() error {
 	r.wireBytes = r.commit.wireBytes
 	for _, chunk := range r.chunks {
@@ -379,4 +474,11 @@ func checkedAddUint64(a uint64, b uint64) (uint64, error) {
 		return 0, errDARelayOrphanPoolCapExceeded
 	}
 	return a + b, nil
+}
+
+func cloneBytes(in []byte) []byte {
+	if len(in) == 0 {
+		return nil
+	}
+	return append([]byte(nil), in...)
 }
