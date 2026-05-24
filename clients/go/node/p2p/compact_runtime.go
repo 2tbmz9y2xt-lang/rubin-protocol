@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"time"
@@ -191,7 +192,6 @@ func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, b
 		return compactOutstandingRequest{}, false
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
 		p.compactMu.Unlock()
 		return compactOutstandingRequest{}, false
 	}
@@ -208,7 +208,6 @@ func (p *peer) compactOutstandingBlockHash() ([32]byte, bool) {
 		return [32]byte{}, false
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
 		return [32]byte{}, false
 	}
 	return p.compact.outstanding.BlockHash, true
@@ -221,7 +220,6 @@ func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) 
 		return compactOutstandingRequest{}, false
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
 		p.compactMu.Unlock()
 		return compactOutstandingRequest{}, false
 	}
@@ -279,11 +277,35 @@ func (p *peer) blockTxnPayloadCap() uint32 {
 		return 0
 	}
 	if p.compactOutstandingRequestExpiredLocked() {
-		p.compact.outstanding = nil
 		return 0
 	}
-	if maxCap := compactRelayPayloadCap(messageBlockTxn); p.compact.outstanding.BlockTxnPayloadCap > maxCap {
-		return maxCap
+	cap := p.compact.outstanding.BlockTxnPayloadCap
+	if maxCap := compactRelayPayloadCap(messageBlockTxn); cap > maxCap {
+		cap = maxCap
 	}
-	return p.compact.outstanding.BlockTxnPayloadCap
+	return cap
+}
+
+func (p *peer) handleExpiredCompactOutstanding(ctx context.Context) (bool, error) {
+	if peerRunContextDone(ctx) {
+		return false, nil
+	}
+	blockHash, _, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap()
+	if !ok {
+		return false, nil
+	}
+	if peerRunContextDone(ctx) {
+		return false, nil
+	}
+	body := append([]byte{MSG_BLOCK}, blockHash[:]...)
+	return true, p.send(messageGetData, body)
+}
+
+func (p *peer) compactOutstandingExpiry() (time.Time, bool) {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding == nil || p.compact.outstanding.ExpiresAt.IsZero() {
+		return time.Time{}, false
+	}
+	return p.compact.outstanding.ExpiresAt, true
 }
