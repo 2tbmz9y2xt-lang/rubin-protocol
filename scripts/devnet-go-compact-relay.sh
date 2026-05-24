@@ -19,6 +19,8 @@ NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
 PROXY_PY="${RUBIN_PROCESS_ARTIFACT_ROOT}/capture_proxy.py"
 PROXY_READY="${RUBIN_PROCESS_ARTIFACT_ROOT}/proxy.ready"
 PROXY_EVENTS="${RUBIN_PROCESS_ARTIFACT_ROOT}/sendcmpct-events.jsonl"
+COMPACT_TEST_JSONL="${RUBIN_PROCESS_ARTIFACT_ROOT}/compact-path-go-test.jsonl"
+COMPACT_EVIDENCE_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/compact-path-evidence.json"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-compact-relay-report.json"
 A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
 B_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-b"
@@ -166,22 +168,118 @@ PY
   echo "timeout waiting for bidirectional sendcmpct events in ${PROXY_EVENTS}" >&2
   return 1
 }
+run_fips_preflight_before_captured_dev_env() {
+  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" != "only" || "${RUBIN_OPENSSL_SKIP_FIPS_GUARD:-0}" == "1" ]]; then
+    return 0
+  fi
+  echo "Running FIPS-only preflight before captured dev-env command streams" >&2
+  "${DEV_ENV}" -- "${REPO_ROOT}/scripts/crypto/openssl/fips-preflight.sh" >&2
+}
+run_compact_path_evidence() {
+  local test_name="TestCompactProcessEvidenceSummaryMarkers"
+  local -a compact_test_cmd=(/usr/bin/env RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" test ./node/p2p -run "^${test_name}$" -count=1 -json)
+  run_fips_preflight_before_captured_dev_env
+  "${compact_test_cmd[@]}" >"${COMPACT_TEST_JSONL}" || {
+    echo "compact path evidence test failed; jsonl=${COMPACT_TEST_JSONL}" >&2
+    return 1
+  }
+  export COMPACT_EVIDENCE_JSON COMPACT_TEST_JSONL DEV_ENV GO_MODULE_ROOT
+  python3 - "${test_name}" <<'PY'
+import json, os, sys
+test_name = sys.argv[1]
+jsonl_path = os.environ["COMPACT_TEST_JSONL"]
+test_passed = False
+package_passed = False
+with open(jsonl_path, encoding="utf-8") as fh:
+    for line_no, line in enumerate(fh, 1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"malformed compact evidence JSONL at line {line_no}: {exc}") from None
+        if event.get("Test") == test_name and event.get("Action") == "pass":
+            test_passed = True
+        if event.get("Package", "").endswith("/clients/go/node/p2p") and event.get("Action") == "pass" and "Test" not in event:
+            package_passed = True
+if not test_passed or not package_passed:
+    raise SystemExit(f"missing compact evidence PASS test_passed={test_passed} package_passed={package_passed}")
+evidence = {
+    "compact_attempted": True,
+    "compact_reconstructed": True,
+    "fallback_used": False,
+    "disabled_receive_rejected": True,
+    "evidence_scope": "go_test_wrapper_not_live_devnet",
+    "source": {
+        "kind": "go_test_wrapper",
+        "package": "./node/p2p",
+        "test": test_name,
+        "jsonl": jsonl_path,
+        "argv": [
+            "/usr/bin/env",
+            "RUBIN_OPENSSL_SKIP_FIPS_GUARD=1",
+            os.environ["DEV_ENV"],
+            "--",
+            "go",
+            "-C",
+            os.environ["GO_MODULE_ROOT"],
+            "test",
+            "./node/p2p",
+            "-run",
+            f"^{test_name}$",
+            "-count=1",
+            "-json",
+        ],
+    },
+}
+with open(os.environ["COMPACT_EVIDENCE_JSON"], "w", encoding="utf-8") as out:
+    json.dump(evidence, out, indent=2, sort_keys=True)
+    out.write("\n")
+PY
+}
 write_report() {
-  export REPORT_JSON RUBIN_PROCESS_ARTIFACT_ROOT NODE_BIN A_PID B_PID A_RPC_ADDR B_RPC_ADDR A_P2P_ADDR B_P2P_ADDR PROXY_ADDR PROXY_EVENTS A_PEERS B_PEERS A_LOG B_LOG
+  export REPORT_JSON RUBIN_PROCESS_ARTIFACT_ROOT NODE_BIN A_PID B_PID A_RPC_ADDR B_RPC_ADDR A_P2P_ADDR B_P2P_ADDR PROXY_ADDR PROXY_EVENTS COMPACT_EVIDENCE_JSON A_PEERS B_PEERS A_LOG B_LOG
   python3 - <<'PY'
 import json, os
-events = [json.loads(line) for line in open(os.environ["PROXY_EVENTS"], encoding="utf-8")]
+def load_json(path, label):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except OSError as exc:
+        raise SystemExit(f"read {label}: {exc}") from None
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"malformed {label}: {exc}") from None
+def load_jsonl(path, label):
+    events = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise SystemExit(f"malformed {label} at line {line_no}: {exc}") from None
+    except OSError as exc:
+        raise SystemExit(f"read {label}: {exc}") from None
+    return events
+events = load_jsonl(os.environ["PROXY_EVENTS"], "sendcmpct JSONL")
+compact_evidence = load_json(os.environ["COMPACT_EVIDENCE_JSON"], "compact evidence JSON")
+for key, want in (("compact_attempted", True), ("compact_reconstructed", True), ("fallback_used", False)):
+    if compact_evidence.get(key) is not want:
+        raise SystemExit(f"compact evidence {key}={compact_evidence.get(key)!r}, want {want!r}")
 root, node_bin = os.environ["RUBIN_PROCESS_ARTIFACT_ROOT"], os.environ["NODE_BIN"]
 report = {
     "scenario": "go_two_node_compact_sendcmpct_process",
     "verdict": "PASS",
+    "go_test_compact_evidence": compact_evidence,
     "participants": [
         {k: v for k, v in (("name", "node-a"), ("implementation", "go"), ("pid", int(os.environ["A_PID"])), ("binary", node_bin), ("rpc", os.environ["A_RPC_ADDR"]), ("p2p", os.environ["A_P2P_ADDR"]), ("log", os.path.join(root, os.environ["A_LOG"])), ("handshake_peers", int(os.environ["A_PEERS"])))},
         {k: v for k, v in (("name", "node-b"), ("implementation", "go"), ("pid", int(os.environ["B_PID"])), ("binary", node_bin), ("rpc", os.environ["B_RPC_ADDR"]), ("p2p", os.environ["B_P2P_ADDR"]), ("log", os.path.join(root, os.environ["B_LOG"])), ("handshake_peers", int(os.environ["B_PEERS"])))},
     ],
     "proxy": {"addr": os.environ["PROXY_ADDR"], "target": os.environ["B_P2P_ADDR"]},
     "sendcmpct": [{"direction": e["direction"], "mode": e["mode"], "version": e["version"], "size": e["size"]} for e in events],
-    "out_of_scope": ["cmpctblock_reconstruction", "full_block_regression_closeout", "da_relay", "rust", "final_devnet_readiness"],
+    "out_of_scope": ["live_devnet_cmpctblock_reconstruction", "production_compact_receive_enablement", "full_block_regression_closeout", "da_relay", "rust", "final_devnet_readiness"],
 }
 dirs = {e["direction"] for e in events if e.get("command") == "sendcmpct" and e.get("mode") == 0 and e.get("version") == 1}
 if dirs != {"a_to_b", "b_to_a"}:
@@ -210,5 +308,6 @@ A_P2P_ADDR="${STARTED_P2P}"
 A_PEERS="$(wait_peers_ready node-a "${A_RPC_ADDR}")"
 B_PEERS="$(wait_peers_ready node-b "${B_RPC_ADDR}")"
 wait_sendcmpct_exchange
+run_compact_path_evidence
 write_report
-echo "PASS: Go compact relay sendcmpct exchange observed; report=${REPORT_JSON}"
+echo "PASS: Go compact relay sendcmpct observed; cmpctblock path verified by Go test wrapper; report=${REPORT_JSON}"
