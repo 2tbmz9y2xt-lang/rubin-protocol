@@ -9,7 +9,47 @@ BASE_HEIGHT=101
 TARGET_A_HEIGHT=$((BASE_HEIGHT + 1))
 TARGET_B_HEIGHT=$((BASE_HEIGHT + 2))
 : "${KEEP_TMP:=1}"
+: "${RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS:=5}"
 export KEEP_TMP
+
+prepend_path_if_exists_once() {
+  local dir="$1"
+  [[ -d "${dir}" ]] || return 0
+  case ":${PATH}:" in
+    *":${dir}:"*) ;;
+    *) PATH="${dir}:${PATH}" ;;
+  esac
+}
+
+configure_openssl_runtime_env() {
+  if [[ -n "${RUBIN_OPENSSL_PREFIX:-}" ]]; then
+    [[ -x "${RUBIN_OPENSSL_PREFIX}/bin/openssl" ]] || {
+      echo "RUBIN_OPENSSL_PREFIX is set but missing bin/openssl: ${RUBIN_OPENSSL_PREFIX}" >&2
+      return 1
+    }
+    prepend_path_if_exists_once "${RUBIN_OPENSSL_PREFIX}/bin"
+    export OPENSSL_DIR="${RUBIN_OPENSSL_PREFIX}"
+    if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules" ]]; then
+      export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules"
+    elif [[ -d "${RUBIN_OPENSSL_PREFIX}/lib64/ossl-modules" ]]; then
+      export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib64/ossl-modules"
+    fi
+  fi
+  [[ -z "${RUBIN_OPENSSL_MODULES:-}" ]] || export OPENSSL_MODULES="${RUBIN_OPENSSL_MODULES}"
+  [[ -z "${RUBIN_OPENSSL_CONF:-}" ]] || export OPENSSL_CONF="${RUBIN_OPENSSL_CONF}"
+  if [[ "${RUBIN_OPENSSL_FIPS_MODE:-off}" == "only" && -n "${OPENSSL_DIR:-}" ]]; then
+    if [[ -z "${OPENSSL_CONF:-}" && -f "${OPENSSL_DIR}/ssl/openssl-fips.cnf" ]]; then
+      export OPENSSL_CONF="${OPENSSL_DIR}/ssl/openssl-fips.cnf"
+    fi
+    if [[ -z "${OPENSSL_MODULES:-}" && -d "${OPENSSL_DIR}/lib/ossl-modules" ]]; then
+      export OPENSSL_MODULES="${OPENSSL_DIR}/lib/ossl-modules"
+    elif [[ -z "${OPENSSL_MODULES:-}" && -d "${OPENSSL_DIR}/lib64/ossl-modules" ]]; then
+      export OPENSSL_MODULES="${OPENSSL_DIR}/lib64/ossl-modules"
+    fi
+  fi
+  export PATH
+}
+configure_openssl_runtime_env
 
 for tool in python3 perl lsof; do
   command -v "${tool}" >/dev/null 2>&1 || {
@@ -24,8 +64,10 @@ rubin_process_init go-two-node-full-block
 
 NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-go"
 TXGEN_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-txgen"
+CONSENSUS_CLI_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-consensus-cli-go"
 KEYGEN_GO="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.go"
 KEYGEN_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/keygen.json"
+FROM_KEY_FILE="${RUBIN_PROCESS_ARTIFACT_ROOT}/from-key.hex"
 REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/go-two-node-full-block-report.json"
 MINE_LOG="${RUBIN_PROCESS_ARTIFACT_ROOT}/mine-base.log"
 A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
@@ -34,27 +76,47 @@ A_LOG="node-a.log"
 B_LOG="node-b.log"
 RUBIN_PROCESS_LOGS+=("${MINE_LOG}")
 
+cleanup_from_key_file() {
+  [[ -n "${FROM_KEY_FILE:-}" ]] || return 0
+  rm -f -- "${FROM_KEY_FILE}"
+}
+
+go_two_node_exit_trap() {
+  local status=$? cleanup_status=0
+  cleanup_from_key_file || cleanup_status=$?
+  rubin_process_cleanup "${status}" || cleanup_status=$?
+  [[ "${status}" != "0" ]] && exit "${status}"
+  exit "${cleanup_status}"
+}
+trap go_two_node_exit_trap EXIT
+
 rpc_json() {
   local method="$1" addr="$2" path="$3" body="${4:-}"
-  python3 - "${method}" "${addr}" "${path}" "${body}" <<'PY'
+  python3 - "${method}" "${addr}" "${path}" "${body}" "${RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS}" <<'PY'
 import socket
 import sys
 import urllib.error
 import urllib.request
 
-method, addr, path, body = sys.argv[1:5]
+method, addr, path, body, timeout_raw = sys.argv[1:6]
+try:
+    request_timeout = float(timeout_raw)
+except ValueError:
+    raise SystemExit(f"invalid RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS={timeout_raw!r}")
+if request_timeout <= 0 or request_timeout > 300:
+    raise SystemExit(f"RUBIN_GO_TWO_NODE_RPC_TIMEOUT_SECONDS out of range: {timeout_raw!r}")
 data = body.encode() if body else None
 req = urllib.request.Request(f"http://{addr}{path}", data=data, method=method)
 if body:
     req.add_header("Content-Type", "application/json")
 try:
-    with urllib.request.urlopen(req, timeout=5) as resp:
+    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
         print(resp.read().decode("utf-8"), end="")
 except urllib.error.HTTPError as exc:
     print(exc.read().decode("utf-8"), end="")
     sys.exit(22)
 except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-    print(f"request failed: {getattr(exc, 'reason', exc)}", end="")
+    print(f"request failed timeout={request_timeout}: {getattr(exc, 'reason', exc)}", end="")
     sys.exit(1)
 PY
 }
@@ -194,6 +256,161 @@ chain_identity_tsv() {
   rpc_json GET "$1" /chain_identity | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["network"], d["chain_id_hex"], d["genesis_hash_hex"], sep="\t")'
 }
 
+mempool_min_fee_rate() {
+  local addr="$1" body
+  body="$(rpc_json GET "${addr}" /metrics)" || return 1
+  printf '%s' "${body}" | python3 -c '
+import re
+import sys
+
+metric = "rubin_node_mempool_min_fee_rate"
+found = None
+for raw in sys.stdin.read().splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    fields = line.split()
+    if fields[0] != metric:
+        continue
+    if found is not None:
+        raise SystemExit(f"duplicate {metric} metric")
+    if len(fields) != 2 or not re.fullmatch(r"[0-9]+", fields[1]):
+        raise SystemExit(f"malformed {metric} metric line: {raw!r}")
+    found = int(fields[1])
+if found is None:
+    raise SystemExit(f"missing {metric} metric")
+if found < 1:
+    found = 1
+if found > 2**64 - 1:
+    raise SystemExit(f"{metric} overflows uint64: {found}")
+print(found)
+'
+}
+
+generate_tx_hex() {
+  local fee="$1" tx_hex
+  tx_hex="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key-file "${FROM_KEY_FILE}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee "${fee}")" || return 1
+  [[ "${tx_hex}" =~ ^[0-9a-f]+$ && ${#tx_hex} -le 20000 && $(( ${#tx_hex} % 2 )) -eq 0 ]] || {
+    echo "txgen emitted malformed or unbounded tx_hex length=${#tx_hex}" >&2
+    return 1
+  }
+  printf '%s\n' "${tx_hex}"
+}
+
+tx_weight_stats_tsv() {
+  local tx_hex="$1"
+  python3 - "${CONSENSUS_CLI_BIN}" "${tx_hex}" <<'PY'
+import json
+import re
+import subprocess
+import sys
+
+cli, tx_hex = sys.argv[1:3]
+if not re.fullmatch(r"[0-9a-f]+", tx_hex) or len(tx_hex) % 2 != 0 or len(tx_hex) > 20_000:
+    raise SystemExit("tx_hex is malformed or unbounded")
+req = json.dumps({"op": "tx_weight_and_stats", "tx_hex": tx_hex}) + "\n"
+try:
+    proc = subprocess.run(
+        [cli],
+        input=req,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit("tx weight helper timed out")
+except OSError as exc:
+    raise SystemExit(f"tx weight helper unavailable: {exc}")
+if len(proc.stdout or "") > 100_000 or len(proc.stderr or "") > 100_000:
+    raise SystemExit("tx weight helper output too large")
+if proc.returncode != 0:
+    raise SystemExit(f"tx weight helper failed rc={proc.returncode}: {(proc.stderr or '').strip()}")
+try:
+    data = json.loads(proc.stdout)
+except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
+    raise SystemExit(f"tx weight helper emitted malformed JSON: {exc}")
+if not isinstance(data, dict) or data.get("ok") is not True:
+    raise SystemExit(f"tx weight helper rejected tx: {data!r}")
+vals = []
+for name in ("weight", "da_bytes", "anchor_bytes"):
+    value = data.get(name)
+    if not isinstance(value, int) or value < 0 or value > 2**64 - 1:
+        raise SystemExit(f"tx weight helper returned invalid {name}: {value!r}")
+    vals.append(value)
+if vals[0] == 0:
+    raise SystemExit("tx weight helper returned zero weight")
+print(*vals, sep="\t")
+PY
+}
+
+required_fee_for_weight() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+weight = int(sys.argv[1])
+fee_rate = int(sys.argv[2])
+if weight <= 0 or fee_rate <= 0:
+    raise SystemExit(f"invalid weight/fee_rate: weight={weight} fee_rate={fee_rate}")
+max_u64 = 2**64 - 1
+if weight > max_u64 or fee_rate > max_u64 or weight > max_u64 // fee_rate:
+    raise SystemExit(f"required fee overflow: weight={weight} fee_rate={fee_rate}")
+print(weight * fee_rate)
+PY
+}
+
+derive_policy_valid_tx() {
+  local attempt current_fee tx_hex stats required_fee
+  TX_MIN_FEE_RATE="$(mempool_min_fee_rate "${A_RPC_ADDR}")" || return 1
+  current_fee="${TX_MIN_FEE_RATE}"
+  for attempt in 1 2 3 4 5; do
+    tx_hex="$(generate_tx_hex "${current_fee}")" || return 1
+    stats="$(tx_weight_stats_tsv "${tx_hex}")" || return 1
+    IFS=$'\t' read -r TX_WEIGHT TX_DA_BYTES TX_ANCHOR_BYTES <<<"${stats}"
+    required_fee="$(required_fee_for_weight "${TX_WEIGHT}" "${TX_MIN_FEE_RATE}")" || return 1
+    if [[ "${current_fee}" == "${required_fee}" ]]; then
+      TX_HEX="${tx_hex}"
+      TX_FEE="${current_fee}"
+      TX_REQUIRED_FEE="${required_fee}"
+      return 0
+    fi
+    current_fee="${required_fee}"
+  done
+  echo "fee calculation did not converge after ${attempt} attempts min_fee_rate=${TX_MIN_FEE_RATE} last_fee=${current_fee} last_weight=${TX_WEIGHT:-<none>}" >&2
+  return 1
+}
+
+submit_tx_hex() {
+  local tx_hex="$1" body response
+  body="$(python3 - "${tx_hex}" <<'PY'
+import json
+import re
+import sys
+
+tx_hex = sys.argv[1]
+if not re.fullmatch(r"[0-9a-f]+", tx_hex) or len(tx_hex) % 2 != 0 or len(tx_hex) > 20_000:
+    raise SystemExit("tx_hex is malformed or unbounded")
+print(json.dumps({"tx_hex": tx_hex}, separators=(",", ":")))
+PY
+)" || return 1
+  response="$(rpc_json POST "${A_RPC_ADDR}" /submit_tx "${body}")" || {
+    echo "submit failed: ${response}" >&2
+    return 1
+  }
+  printf '%s' "${response}" | python3 -c '
+import json
+import re
+import sys
+
+d = json.load(sys.stdin)
+txid = d.get("txid")
+if d.get("accepted") is not True or not isinstance(txid, str) or not re.fullmatch(r"[0-9a-f]{64}", txid):
+    raise SystemExit("submit_tx did not return accepted txid: " + json.dumps(d, sort_keys=True))
+print(txid)
+'
+}
+
 assert_same_identity() {
   local a="$1" b="$2" a_id b_id
   a_id="$(chain_identity_tsv "${a}")"
@@ -299,12 +516,16 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func main() {
+	if len(os.Args) != 2 {
+		panic("usage: keygen <from-key-file>")
+	}
 	from, err := consensus.NewMLDSA87Keypair()
 	if err != nil {
 		panic(err)
@@ -319,8 +540,10 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	if err := os.WriteFile(os.Args[1], []byte(hex.EncodeToString(der)), 0o600); err != nil {
+		panic(fmt.Errorf("write from key file: %w", err))
+	}
 	out := map[string]string{
-		"from_der_hex":    hex.EncodeToString(der),
 		"mine_address_hex": hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(from.PubkeyBytes())),
 		"to_address_hex":   hex.EncodeToString(consensus.P2PKCovenantDataForPubkey(to.PubkeyBytes())),
 	}
@@ -333,6 +556,7 @@ GO
 
 write_report() {
   export REPORT_JSON A_DIR B_DIR A_PID B_PID A_RPC_ADDR B_RPC_ADDR A_P2P_ADDR B_P2P_ADDR A_PEERS B_PEERS TX_ID TX_HEX \
+    TX_FEE TX_WEIGHT TX_MIN_FEE_RATE TX_REQUIRED_FEE TX_DA_BYTES TX_ANCHOR_BYTES \
     BASE_HEIGHT BASE_HASH A_MINE_HEIGHT A_MINE_HASH A_MINE_TX_COUNT B_AFTER_A_HEIGHT B_AFTER_A_HASH \
     B_MINE_HEIGHT B_MINE_HASH B_MINE_TX_COUNT A_FINAL_HEIGHT A_FINAL_HASH B_FINAL_HEIGHT B_FINAL_HASH
   python3 - <<'PY'
@@ -374,6 +598,12 @@ report = {
     "participants": participants,
     "tx": {
         "id": e["TX_ID"],
+        "fee": i("TX_FEE"),
+        "weight": i("TX_WEIGHT"),
+        "min_fee_rate": i("TX_MIN_FEE_RATE"),
+        "required_fee": i("TX_REQUIRED_FEE"),
+        "da_bytes": i("TX_DA_BYTES"),
+        "anchor_bytes": i("TX_ANCHOR_BYTES"),
         "submission": "node-a rpc:/submit_tx",
         "observed_in_node_b_mempool_before_mine": True,
         "included_by": "node-a",
@@ -436,9 +666,9 @@ PY
 echo "Building Go rubin-node and rubin-txgen"
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${NODE_BIN}" ./cmd/rubin-node
 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${TXGEN_BIN}" ./cmd/rubin-txgen
+"${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" build -o "${CONSENSUS_CLI_BIN}" ./cmd/rubin-consensus-cli
 write_keygen
-"${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" >"${KEYGEN_JSON}"
-FROM_DER_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["from_der_hex"])' "${KEYGEN_JSON}")"
+RUBIN_OPENSSL_SKIP_FIPS_GUARD=1 "${DEV_ENV}" -- go -C "${GO_MODULE_ROOT}" run "${KEYGEN_GO}" "${FROM_KEY_FILE}" >"${KEYGEN_JSON}"
 MINE_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mine_address_hex"])' "${KEYGEN_JSON}")"
 TO_ADDRESS_HEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["to_address_hex"])' "${KEYGEN_JSON}")"
 
@@ -463,18 +693,20 @@ B_PEERS="$(wait_peers_ready node-b "${B_RPC_ADDR}" 1 30)"
 IFS=$'\t' read -r _ BASE_HASH < <(wait_height_any_hash "node-a base" "${A_RPC_ADDR}" "${BASE_HEIGHT}" 30)
 wait_tip_exact node-b "${B_RPC_ADDR}" "${BASE_HEIGHT}" "${BASE_HASH}" 30
 
-TX_HEX="$("${TXGEN_BIN}" --datadir "${A_DIR}" --from-key "${FROM_DER_HEX}" --to-key "${TO_ADDRESS_HEX}" --amount 1 --fee 1 --submit-to "${A_RPC_ADDR}")"
+derive_policy_valid_tx
+cleanup_from_key_file
+TX_ID="$(submit_tx_hex "${TX_HEX}")"
 A_MEMPOOL_JSON="$(rpc_json GET "${A_RPC_ADDR}" /get_mempool)"
-TX_ID="$(printf '%s' "${A_MEMPOOL_JSON}" | python3 -c '
+printf '%s' "${A_MEMPOOL_JSON}" | python3 -c '
 import json
 import sys
 
+want = sys.argv[1]
 d = json.load(sys.stdin)
 txids = d.get("txids") or []
-if d.get("count") != 1 or len(txids) != 1:
+if d.get("count") != 1 or len(txids) != 1 or txids[0] != want:
     raise SystemExit("expected node-a mempool count=1 after submit, got " + json.dumps(d, sort_keys=True))
-print(txids[0])
-')"
+' "${TX_ID}"
 wait_mempool_contains node-b "${B_RPC_ADDR}" "${TX_ID}" 30
 
 A_MINE_JSON="$(rpc_json POST "${A_RPC_ADDR}" /mine_next '{}')"
