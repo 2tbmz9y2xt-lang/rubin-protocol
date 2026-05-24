@@ -925,6 +925,26 @@ func TestRunResetsReadDeadlineBeforeLateBlockTxnDrainAfterExpiryFallback(t *test
 	}
 }
 
+func TestRunKeepsActiveCompactDeadlineWithStaleLateBlockTxnContext(t *testing.T) {
+	p, ck := setupCompactFallbackPeer(t)
+	ck.advance(compactOutstandingRequestTTL + time.Second)
+	p.service.cfg.PeerRuntimeConfig.ReadDeadline = time.Hour
+	conn := &scriptedConn{
+		reads: []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageVersion})}},
+		writeHook: func(int) {
+			p.activateCompactOutstandingRequest(compactOutstandingTestRequest([32]byte{0x23}))
+		},
+	}
+	p.conn = conn
+
+	if err := p.run(context.Background()); err == nil {
+		t.Fatal("run succeeded, want post-handshake version stop")
+	}
+	if len(conn.readDeadlines) == 0 || conn.readDeadlines[0].After(time.Now().Add(time.Minute)) {
+		t.Fatalf("read deadlines=%v, want active compact expiry before normal read deadline", conn.readDeadlines)
+	}
+}
+
 func TestRunRejectsShortLateBlockTxnAfterExpiryFallback(t *testing.T) {
 	blockHash := [32]byte{0x14}
 	req := compactOutstandingTestRequest(blockHash)
@@ -963,7 +983,7 @@ func TestReadLateBlockTxnKeepsNewActiveOutstandingResponse(t *testing.T) {
 	}
 	p.conn = &scriptedConn{reads: []scriptedRead{{data: payload}}}
 
-	frame, err := p.readLateBlockTxnFrame(header, expiredCompactBlockTxnContext{blockHash: oldHash, payloadCap: 64})
+	frame, err := p.readLateBlockTxnFrame(header, compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: blockTxnHashPayloadBytes})
 	if err != nil {
 		t.Fatalf("read late blocktxn with active response: %v", err)
 	}
