@@ -193,24 +193,25 @@ func (p *peer) readBlockTxnFrame(header frameHeader) (message, error) {
 }
 
 func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, error) {
-	if header.Size > lateBlockTxn.BlockTxnPayloadCap || header.Size > compactRelayPayloadCap(messageBlockTxn) {
-		prefix, err := readPayloadPrefix(p.conn, header.Size, blockTxnHashPayloadBytes)
+	prefix, err := readPayloadPrefix(p.conn, header.Size, blockTxnHashPayloadBytes)
+	if err != nil {
+		return message{}, nil, err
+	}
+	payloadReader := io.MultiReader(bytes.NewReader(prefix), p.conn)
+	if p.blockTxnPrefixMatchesOutstanding(prefix) {
+		if activeCap := p.blockTxnPayloadCap(); activeCap == 0 || header.Size > activeCap {
+			return message{}, lateBlockTxn, commandPayloadCapError{command: header.Command}
+		}
+		payload, err := readPayloadWithChecksum(payloadReader, header.Size, header.Checksum)
 		if err != nil {
-			return message{}, nil, err
+			return message{}, lateBlockTxn, err
 		}
-		if p.blockTxnPrefixMatchesOutstanding(prefix) {
-			if activeCap := p.blockTxnPayloadCap(); activeCap == 0 || header.Size > activeCap {
-				return message{}, lateBlockTxn, commandPayloadCapError{command: header.Command}
-			}
-			payload, err := readPayloadWithChecksum(io.MultiReader(bytes.NewReader(prefix), p.conn), header.Size, header.Checksum)
-			if err != nil {
-				return message{}, lateBlockTxn, err
-			}
-			return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
-		}
+		return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
+	}
+	if header.Size > lateBlockTxn.BlockTxnPayloadCap || header.Size > compactRelayPayloadCap(messageBlockTxn) {
 		return message{}, nil, commandPayloadCapError{command: header.Command}
 	}
-	payload, err := readPayloadWithChecksum(p.conn, header.Size, header.Checksum)
+	payload, err := readPayloadWithChecksum(payloadReader, header.Size, header.Checksum)
 	if err != nil {
 		return message{}, nil, err
 	}
