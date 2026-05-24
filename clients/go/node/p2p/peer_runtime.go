@@ -209,7 +209,10 @@ func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn *compactOu
 		return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
 	}
 	if header.Size > lateBlockTxn.BlockTxnPayloadCap || header.Size > compactRelayPayloadCap(messageBlockTxn) {
-		return message{}, nil, commandPayloadCapError{command: header.Command}
+		if p.blockTxnPayloadCap() == 0 && bytes.Equal(prefix, lateBlockTxn.BlockHash[:]) {
+			return message{}, nil, commandPayloadCapError{command: header.Command}
+		}
+		return message{}, nil, blockTxnStaleBodyError{}
 	}
 	payload, err := readPayloadWithChecksum(payloadReader, header.Size, header.Checksum)
 	if err != nil {
@@ -220,9 +223,6 @@ func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn *compactOu
 	}
 	if bytes.Equal(payload[:blockTxnHashPayloadBytes], lateBlockTxn.BlockHash[:]) {
 		return message{}, nil, errLateBlockTxnIgnored
-	}
-	if p.blockTxnPrefixMatchesOutstanding(payload) {
-		return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
 	}
 	if len(payload) > blockTxnHashPayloadBytes {
 		return message{}, nil, blockTxnStaleBodyError{}
