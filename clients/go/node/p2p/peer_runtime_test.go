@@ -888,7 +888,6 @@ func TestRunResetsReadDeadlineBeforeLateBlockTxnDrainAfterExpiryFallback(t *test
 	req := compactOutstandingTestRequest(blockHash)
 	beforeRun := time.Now()
 	p, conn, err := runExpiredLateBlockTxnFrame(t, req, append(blockHash[:], 0x01), message{Command: messageVersion})
-
 	if err == nil || !strings.Contains(err.Error(), "invalid version message after handshake") {
 		t.Fatalf("run err=%v, want next frame after late blocktxn drain", err)
 	}
@@ -931,7 +930,6 @@ func TestRunRejectsWrongHashLateBlockTxnBodyAfterExpiryFallback(t *testing.T) {
 	staleHash := [32]byte{0x25}
 	req := compactOutstandingTestRequest(blockHash)
 	p, conn, err := runExpiredLateBlockTxnFrame(t, req, append(staleHash[:], 0x01))
-
 	requireBlockTxnStaleBodyError(t, err)
 	requireFirstGetDataBlock(t, p, conn.Bytes(), blockHash)
 }
@@ -960,7 +958,7 @@ func TestReadLateBlockTxnKeepsNewActiveOutstandingResponse(t *testing.T) {
 		t.Fatalf("frame=%+v, want active blocktxn payload", frame)
 	}
 	_, lateCtx, err = p.readPostHandshakeFrame(context.Background(), time.Now(), lateCtx)
-	if err == nil || err.Error() != "ignored late blocktxn response" || lateCtx != nil {
+	if !errors.Is(err, errLateBlockTxnIgnored) || lateCtx != nil {
 		t.Fatalf("stale late read err=%v lateCtx=%+v, want ignored late blocktxn and cleared context", err, lateCtx)
 	}
 	p = newPeerRuntimeTestPeer(t)
@@ -1006,7 +1004,6 @@ func TestRunIgnoresHashOnlyStaleLateBlockTxnAfterExpiryFallback(t *testing.T) {
 	staleHash := [32]byte{0x26}
 	req := compactOutstandingTestRequest(blockHash)
 	p, conn, err := runExpiredLateBlockTxnFrame(t, req, staleHash[:])
-
 	if err != nil {
 		t.Fatalf("run hash-only stale late blocktxn: %v", err)
 	}

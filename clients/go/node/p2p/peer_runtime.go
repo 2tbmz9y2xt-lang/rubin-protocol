@@ -30,6 +30,8 @@ func (e blockTxnStaleBodyError) Error() string {
 	return "stale blocktxn response has body"
 }
 
+var errLateBlockTxnIgnored = errors.New("ignored late blocktxn response")
+
 func (p *peer) run(ctx context.Context) error {
 	var lateBlockTxn *compactOutstandingRequest
 	recordExpiredFallback := func() error {
@@ -57,7 +59,7 @@ func (p *peer) run(ctx context.Context) error {
 		frame, nextLateBlockTxn, err := p.readPostHandshakeFrame(ctx, frameStart, lateBlockTxn)
 		lateBlockTxn = nextLateBlockTxn
 		if err != nil {
-			if err.Error() == "ignored late blocktxn response" || shouldIgnoreReadError(err) {
+			if errors.Is(err, errLateBlockTxnIgnored) || shouldIgnoreReadError(err) {
 				continue
 			}
 			return normalizeReadError(err)
@@ -83,11 +85,9 @@ const blockTxnHashPayloadBytes = 32
 
 func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, error) {
 	var frame message
-	reader := &compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart}
+	reader := &compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart, lateBlockTxn: lateBlockTxn}
 	header, err := readFrameHeader(reader, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
-	if reader.lateBlockTxn != nil {
-		lateBlockTxn = reader.lateBlockTxn
-	}
+	lateBlockTxn = reader.lateBlockTxn
 	if err != nil {
 		return frame, lateBlockTxn, err
 	}
@@ -108,9 +108,7 @@ func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time,
 		return frame, lateBlockTxn, commandPayloadCapError{command: header.Command}
 	}
 	payload, err := readPayloadWithChecksum(reader, header.Size, header.Checksum)
-	if reader.lateBlockTxn != nil {
-		lateBlockTxn = reader.lateBlockTxn
-	}
+	lateBlockTxn = reader.lateBlockTxn
 	if err != nil {
 		return frame, lateBlockTxn, err
 	}
@@ -188,14 +186,7 @@ func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn *compactOu
 	}
 	payloadReader := io.MultiReader(bytes.NewReader(prefix), p.conn)
 	if p.blockTxnPrefixMatchesOutstanding(prefix) {
-		if activeCap := p.blockTxnPayloadCap(); activeCap == 0 || header.Size > activeCap {
-			return message{}, lateBlockTxn, commandPayloadCapError{command: header.Command}
-		}
-		payload, err := readPayloadWithChecksum(payloadReader, header.Size, header.Checksum)
-		if err != nil {
-			return message{}, lateBlockTxn, err
-		}
-		return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
+		return p.readActiveBlockTxnFrame(header, payloadReader, lateBlockTxn)
 	}
 	if header.Size > lateBlockTxn.BlockTxnPayloadCap || header.Size > compactRelayPayloadCap(messageBlockTxn) {
 		if p.blockTxnPayloadCap() == 0 && bytes.Equal(prefix, lateBlockTxn.BlockHash[:]) {
@@ -207,21 +198,36 @@ func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn *compactOu
 	if err != nil {
 		return message{}, nil, err
 	}
+	return p.classifyLateBlockTxnPayload(payload, lateBlockTxn, header.Command)
+}
+
+func (p *peer) readActiveBlockTxnFrame(header frameHeader, payloadReader io.Reader, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, error) {
+	if activeCap := p.blockTxnPayloadCap(); activeCap == 0 || header.Size > activeCap {
+		return message{}, lateBlockTxn, commandPayloadCapError{command: header.Command}
+	}
+	payload, err := readPayloadWithChecksum(payloadReader, header.Size, header.Checksum)
+	if err != nil {
+		return message{}, lateBlockTxn, err
+	}
+	return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
+}
+
+func (p *peer) classifyLateBlockTxnPayload(payload []byte, lateBlockTxn *compactOutstandingRequest, command string) (message, *compactOutstandingRequest, error) {
 	if len(payload) < blockTxnHashPayloadBytes {
 		if p.blockTxnPayloadCap() != 0 {
-			return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
+			return message{Command: command, Payload: payload}, lateBlockTxn, nil
 		}
 		return message{}, nil, errors.New("blocktxn payload missing block hash")
 	}
 	if bytes.Equal(payload[:blockTxnHashPayloadBytes], lateBlockTxn.BlockHash[:]) {
-		p.setLastError("ignored late blocktxn response")
-		return message{}, nil, errors.New("ignored late blocktxn response")
+		p.setLastError(errLateBlockTxnIgnored.Error())
+		return message{}, nil, errLateBlockTxnIgnored
 	}
 	if len(payload) > blockTxnHashPayloadBytes {
 		return message{}, nil, blockTxnStaleBodyError{}
 	}
 	p.setLastError("ignored stale blocktxn response")
-	return message{}, nil, errors.New("ignored late blocktxn response")
+	return message{}, nil, errLateBlockTxnIgnored
 }
 
 func (p *peer) readOversizedBlockTxnStaleHash(header frameHeader) (bool, error) {
