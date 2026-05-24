@@ -1,6 +1,10 @@
 package p2p
 
-import "testing"
+import (
+	"crypto/sha3"
+	"errors"
+	"testing"
+)
 
 func TestDefaultDARelayCapsMatchSpec(t *testing.T) {
 	caps := defaultDARelayCaps()
@@ -157,6 +161,105 @@ func TestDARelayReceivedTimeIsMonotonicLocalSequence(t *testing.T) {
 	}
 }
 
+func TestDARelayTransitionsRetainOrphansAndComplete(t *testing.T) {
+	state, err := newDARelayState(defaultDARelayCaps())
+	if err != nil {
+		t.Fatalf("new DA relay state: %v", err)
+	}
+
+	daID := daRelayTestID(1)
+	chunk0 := daRelayTestChunk(daID, 0, []byte("chunk-0"), 7)
+	chunk1 := daRelayTestChunk(daID, 1, []byte("chunk-1"), 13)
+	staleChunk := daRelayTestChunk(daID, 2, []byte("stale"), 29)
+	commit := daRelayTestCommit(daID, 2, daRelayPayloadCommitment(chunk0.payload, chunk1.payload), 19)
+
+	record, err := state.addDAChunk("127.0.0.1:1000", chunk0)
+	if err != nil {
+		t.Fatalf("add orphan chunk: %v", err)
+	}
+	if record.state != daRelayStateOrphanChunks || record.payloadBytes != uint64(len(chunk0.payload)) {
+		t.Fatalf("orphan record=%+v, want ORPHAN_CHUNKS with first payload", record)
+	}
+	if state.pinnedPayloadBytes != 0 {
+		t.Fatalf("orphan chunk pinned bytes = %d, want 0", state.pinnedPayloadBytes)
+	}
+	if _, err := state.addDAChunk("127.0.0.1:1000", staleChunk); err != nil {
+		t.Fatalf("add stale orphan chunk: %v", err)
+	}
+
+	record, err = state.addDACommit("127.0.0.1:2000", commit)
+	if err != nil {
+		t.Fatalf("add commit: %v", err)
+	}
+	if record.state != daRelayStateStagedCommit {
+		t.Fatalf("state=%v, want STAGED_COMMIT", record.state)
+	}
+	if record.ttlBlocksRemaining != daOrphanTTLBlocks {
+		t.Fatalf("ttl=%d, want %d", record.ttlBlocksRemaining, daOrphanTTLBlocks)
+	}
+	if missing := record.missingChunkIndexes(); len(missing) != 1 || missing[0] != 1 {
+		t.Fatalf("missing=%v, want [1]", missing)
+	}
+	if _, ok := record.chunks[2]; ok || record.payloadBytes != uint64(len(chunk0.payload)) {
+		t.Fatalf("stale orphan retained in staged record=%+v", record)
+	}
+	if _, err := state.addDACommit("127.0.0.1:2000", commit); !errors.Is(err, errDARelayDuplicateCommit) {
+		t.Fatalf("duplicate commit err=%v, want %v", err, errDARelayDuplicateCommit)
+	}
+	if state.pinnedPayloadBytes != 0 {
+		t.Fatalf("staged commit pinned bytes = %d, want 0", state.pinnedPayloadBytes)
+	}
+
+	record, err = state.addDAChunk("127.0.0.1:3000", chunk1)
+	if err != nil {
+		t.Fatalf("add completing chunk: %v", err)
+	}
+	if record.state != daRelayStateCompleteSet {
+		t.Fatalf("record=%+v, want COMPLETE_SET mineable", record)
+	}
+	wantPayloadBytes := uint64(len(chunk0.payload) + len(chunk1.payload))
+	if record.payloadBytes != wantPayloadBytes || state.pinnedPayloadBytes != wantPayloadBytes {
+		t.Fatalf("payload accounting record=%d pinned=%d, want %d", record.payloadBytes, state.pinnedPayloadBytes, wantPayloadBytes)
+	}
+	if state.orphanBytes != 0 || len(state.orphanBytesByDAID) != 0 || len(state.orphanBytesByPeerQuotaKey) != 0 {
+		t.Fatalf("orphan accounting after complete: global=%d da=%d peer=%d, want all zero", state.orphanBytes, len(state.orphanBytesByDAID), len(state.orphanBytesByPeerQuotaKey))
+	}
+	beforePinned := state.pinnedPayloadBytes
+	if _, err := state.addDAChunk("127.0.0.1:3000", chunk1); !errors.Is(err, errDARelayDuplicateChunk) || state.pinnedPayloadBytes != beforePinned {
+		t.Fatalf("duplicate chunk err=%v pinned=%d before=%d", err, state.pinnedPayloadBytes, beforePinned)
+	}
+}
+
+func TestDARelayRejectsIntegrityFailuresBeforeComplete(t *testing.T) {
+	state, err := newDARelayState(defaultDARelayCaps())
+	if err != nil {
+		t.Fatalf("new DA relay state: %v", err)
+	}
+
+	daID := daRelayTestID(3)
+	badHash := daRelayTestChunk(daID, 0, []byte("bad-hash"), 5)
+	badHash.chunkHash[0] ^= 0x01
+	if _, err := state.addDAChunk("peer-a", badHash); !errors.Is(err, errDARelayChunkHashMismatch) {
+		t.Fatalf("bad chunk hash err=%v, want %v", err, errDARelayChunkHashMismatch)
+	}
+	if _, ok := state.sets[daID]; ok {
+		t.Fatalf("bad chunk hash created da set")
+	}
+
+	chunk := daRelayTestChunk(daID, 0, []byte("payload"), 5)
+	commit := daRelayTestCommit(daID, 1, daRelayPayloadCommitment([]byte("different")), 11)
+	if _, err := state.addDACommit("peer-a", commit); err != nil {
+		t.Fatalf("add commit: %v", err)
+	}
+	if _, err := state.addDAChunk("peer-a", chunk); !errors.Is(err, errDARelayPayloadCommitmentMismatch) {
+		t.Fatalf("payload commitment err=%v, want %v", err, errDARelayPayloadCommitmentMismatch)
+	}
+	record, ok := state.sets[daID]
+	if !ok || record.state != daRelayStateStagedCommit || state.pinnedPayloadBytes != 0 {
+		t.Fatalf("after bad commitment record=%+v ok=%v pinned=%d, want staged and unpinned", record, ok, state.pinnedPayloadBytes)
+	}
+}
+
 func TestDARelayCapsRejectInvalidLimits(t *testing.T) {
 	tests := []struct {
 		name string
@@ -241,4 +344,40 @@ func TestDARelayCapsRejectInvalidLimits(t *testing.T) {
 			t.Fatalf("%s caps should fail validation", tt.name)
 		}
 	}
+}
+
+func daRelayTestID(seed byte) (out [32]byte) {
+	for i := range out {
+		out[i] = seed
+	}
+	return out
+}
+
+func daRelayTestChunk(daID [32]byte, index uint16, payload []byte, wireBytes uint64) daRelayChunk {
+	return daRelayChunk{
+		daID:       daID,
+		chunkIndex: index,
+		chunkHash:  sha3.Sum256(payload),
+		payload:    append([]byte(nil), payload...),
+		wireBytes:  wireBytes,
+	}
+}
+
+func daRelayTestCommit(daID [32]byte, chunkCount uint16, payloadCommitment [32]byte, wireBytes uint64) daRelayCommit {
+	return daRelayCommit{
+		daID:              daID,
+		chunkCount:        chunkCount,
+		payloadCommitment: payloadCommitment,
+		wireBytes:         wireBytes,
+	}
+}
+
+func daRelayPayloadCommitment(payloads ...[]byte) [32]byte {
+	hasher := sha3.New256()
+	for _, payload := range payloads {
+		_, _ = hasher.Write(payload)
+	}
+	var out [32]byte
+	copy(out[:], hasher.Sum(nil))
+	return out
 }
