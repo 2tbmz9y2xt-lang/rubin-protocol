@@ -1,6 +1,11 @@
 package p2p
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
 
 func TestDefaultDARelayCapsMatchSpec(t *testing.T) {
 	caps := defaultDARelayCaps()
@@ -157,6 +162,110 @@ func TestDARelayReceivedTimeIsMonotonicLocalSequence(t *testing.T) {
 	}
 }
 
+func TestDARelayStagesCommitAndRetainsBoundedOrphans(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(1)
+
+	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 7))
+	mustAddDAChunk(t, state, "peer-b", daRelayTestChunk(daID, 2, 11))
+
+	record := mustAddDACommit(t, state, "peer-c", daRelayTestCommit(daID, 2, 13))
+	if record.state != daRelayStateStagedCommit {
+		t.Fatalf("state=%v, want STAGED_COMMIT", record.state)
+	}
+	if record.ttlBlocksRemaining != daOrphanTTLBlocks {
+		t.Fatalf("ttl=%d, want %d", record.ttlBlocksRemaining, daOrphanTTLBlocks)
+	}
+	if missing := record.missingChunkIndexes(); len(missing) != 1 || missing[0] != 1 {
+		t.Fatalf("missing=%v, want [1]", missing)
+	}
+	if _, ok := record.chunks[2]; ok {
+		t.Fatalf("orphan chunk outside commit count was retained")
+	}
+	if state.orphanBytes != record.wireBytes || state.orphanBytesByDAID[daID] != record.wireBytes {
+		t.Fatalf("orphan accounting global=%d da=%d record=%d", state.orphanBytes, state.orphanBytesByDAID[daID], record.wireBytes)
+	}
+	record.chunks[7] = daRelayTestChunk(daID, 7, 1)
+	if _, ok := state.sets[daID].chunks[7]; ok {
+		t.Fatalf("returned record aliases stored chunks")
+	}
+}
+
+func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
+	daID := daRelayTestID(2)
+	for _, tt := range []struct {
+		patch func(*daRelayCaps)
+		want  error
+	}{
+		{
+			patch: func(caps *daRelayCaps) {
+				caps.orphanPoolBytes, caps.orphanPoolPerPeerBytes = 4, 4
+				caps.orphanPoolPerDAIDBytes, caps.orphanCommitOverheadBytes = 4, 4
+			},
+			want: errDARelayOrphanPoolCapExceeded,
+		},
+		{
+			patch: func(caps *daRelayCaps) { caps.orphanPoolPerPeerBytes = 4 },
+			want:  errDARelayOrphanPeerCapExceeded,
+		},
+		{
+			patch: func(caps *daRelayCaps) { caps.orphanPoolPerDAIDBytes = 4 },
+			want:  errDARelayOrphanDAIDCapExceeded,
+		},
+	} {
+		caps := defaultDARelayCaps()
+		tt.patch(&caps)
+		state := newDARelayStateForTest(t, caps)
+		_, err := state.addDAChunk("peer-a", daRelayTestChunk(daID, 0, 5))
+		requireDAErr(t, err, tt.want)
+		if len(state.sets) != 0 || state.orphanBytes != 0 {
+			t.Fatalf("rejection mutated state: sets=%d orphan=%d", len(state.sets), state.orphanBytes)
+		}
+	}
+
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 1, 1))
+	_, err := state.addDAChunk("peer-a", daRelayTestChunk(daID, 1, 1))
+	requireDAErr(t, err, errDARelayChunkIndexOutsideCommit)
+	_, err = state.addDACommit("peer-a", daRelayTestCommit(daID, 0, 1))
+	requireDAErr(t, err, errDARelayChunkCountInvalid)
+	_, err = state.addDAChunk("peer-a", daRelayTestChunk(daID, uint16(consensus.MAX_DA_CHUNK_COUNT), 1))
+	requireDAErr(t, err, errDARelayChunkIndexOutOfRange)
+
+	caps := defaultDARelayCaps()
+	caps.orphanPoolBytes, caps.orphanPoolPerPeerBytes = ^uint64(0), ^uint64(0)
+	caps.orphanPoolPerDAIDBytes = ^uint64(0)
+	overflowState := newDARelayStateForTest(t, caps)
+	mustAddDAChunk(t, overflowState, "peer-a", daRelayTestChunk(daID, 0, ^uint64(0)))
+	_, err = overflowState.addDACommit("peer-a", daRelayTestCommit(daID, 2, 1))
+	requireDAErr(t, err, errDARelayOrphanPoolCapExceeded)
+}
+
+func TestDARelayRejectedCandidatesDoNotMutateStoredChunks(t *testing.T) {
+	daID := daRelayTestID(4)
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 1))
+	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 2, 1))
+	state.caps.orphanCommitOverheadBytes = 1
+	_, err := state.addDACommit("peer-b", daRelayTestCommit(daID, 1, 2))
+	requireDAErr(t, err, errDARelayOrphanCommitCapExceeded)
+	if _, ok := state.sets[daID].chunks[2]; !ok {
+		t.Fatalf("failed commit pruned stored orphan chunk")
+	}
+	if state.orphanCommitOverheadBytes != 0 {
+		t.Fatalf("commit overhead after rejected commit = %d, want 0", state.orphanCommitOverheadBytes)
+	}
+
+	state = newDARelayStateForTest(t, defaultDARelayCaps())
+	mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 2, 1))
+	state.caps.orphanPoolPerDAIDBytes = state.orphanBytes
+	_, err = state.addDAChunk("peer-b", daRelayTestChunk(daID, 1, 1))
+	requireDAErr(t, err, errDARelayOrphanDAIDCapExceeded)
+	if _, ok := state.sets[daID].chunks[1]; ok {
+		t.Fatalf("failed chunk insert mutated stored staged record")
+	}
+}
+
 func TestDARelayCapsRejectInvalidLimits(t *testing.T) {
 	tests := []struct {
 		name string
@@ -240,5 +349,52 @@ func TestDARelayCapsRejectInvalidLimits(t *testing.T) {
 		if err := tt.caps.validate(); err == nil {
 			t.Fatalf("%s caps should fail validation", tt.name)
 		}
+	}
+}
+
+func daRelayTestID(seed byte) (out [32]byte) {
+	out[0] = seed
+	return out
+}
+
+func daRelayTestChunk(daID [32]byte, index uint16, wireBytes uint64) daRelayChunk {
+	return daRelayChunk{daID: daID, chunkIndex: index, wireBytes: wireBytes}
+}
+
+func daRelayTestCommit(daID [32]byte, chunkCount uint16, wireBytes uint64) daRelayCommit {
+	return daRelayCommit{daID: daID, chunkCount: chunkCount, wireBytes: wireBytes}
+}
+
+func newDARelayStateForTest(t *testing.T, caps daRelayCaps) *daRelayState {
+	t.Helper()
+	state, err := newDARelayState(caps)
+	if err != nil {
+		t.Fatalf("new DA relay state: %v", err)
+	}
+	return state
+}
+
+func mustAddDAChunk(t *testing.T, state *daRelayState, peer string, chunk daRelayChunk) daRelaySetRecord {
+	t.Helper()
+	record, err := state.addDAChunk(peer, chunk)
+	if err != nil {
+		t.Fatalf("add DA chunk: %v", err)
+	}
+	return record
+}
+
+func mustAddDACommit(t *testing.T, state *daRelayState, peer string, commit daRelayCommit) daRelaySetRecord {
+	t.Helper()
+	record, err := state.addDACommit(peer, commit)
+	if err != nil {
+		t.Fatalf("add DA commit: %v", err)
+	}
+	return record
+}
+
+func requireDAErr(t *testing.T, got error, want error) {
+	t.Helper()
+	if !errors.Is(got, want) {
+		t.Fatalf("err=%v, want %v", got, want)
 	}
 }

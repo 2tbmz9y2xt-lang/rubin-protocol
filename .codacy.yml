@@ -99,6 +99,7 @@ engines:
       - "clients/go/node/p2p/addr_manager.go"
       - "clients/go/node/p2p/compact_reconstruct.go"
       - "clients/go/node/p2p/compact_wire.go"
+      - "clients/go/node/p2p/da_relay_state.go"
       - "clients/go/node/p2p/handlers_block.go"
       - "clients/go/node/p2p/handshake.go"
       - "clients/go/node/p2p/mempool.go"
