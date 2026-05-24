@@ -287,18 +287,11 @@ func (p *peer) blockTxnPayloadCap() uint32 {
 }
 
 func (p *peer) handleExpiredCompactOutstanding(ctx context.Context) (bool, error) {
-	if peerRunContextDone(ctx) {
-		return false, nil
+	expired, err := p.sendExpiredCompactOutstandingFallback(ctx)
+	if err != nil {
+		return false, err
 	}
-	blockHash, _, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap()
-	if !ok {
-		return false, nil
-	}
-	if peerRunContextDone(ctx) {
-		return false, nil
-	}
-	body := append([]byte{MSG_BLOCK}, blockHash[:]...)
-	return true, p.send(messageGetData, body)
+	return expired != nil, nil
 }
 
 func (p *peer) compactOutstandingExpiry() (time.Time, bool) {

@@ -216,6 +216,7 @@ func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn *compactOu
 		return message{}, nil, errors.New("blocktxn payload missing block hash")
 	}
 	if bytes.Equal(payload[:blockTxnHashPayloadBytes], lateBlockTxn.BlockHash[:]) {
+		p.setLastError(errLateBlockTxnIgnored.Error())
 		return message{}, nil, errLateBlockTxnIgnored
 	}
 	if len(payload) > blockTxnHashPayloadBytes {

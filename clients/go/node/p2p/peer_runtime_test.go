@@ -859,6 +859,9 @@ func TestRunDrainsLateBlockTxnBodyAfterExpiryFallback(t *testing.T) {
 		t.Fatalf("run err=%v, want next frame after drained late blocktxn", err)
 	}
 	requireFirstGetDataBlock(t, p, conn.Bytes(), blockHash)
+	if state := p.snapshotState(); state.BanScore != 0 || !strings.Contains(state.LastError, "ignored late blocktxn response") {
+		t.Fatalf("state=%+v, want ignored late blocktxn diagnostic without ban", state)
+	}
 	p, ck := setupCompactFallbackPeer(t)
 	frameBytes := mustPeerRuntimeFrameBytes(t, p, message{Command: messageHeaders, Payload: []byte{0x01}})
 	lateFrame := mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload})
