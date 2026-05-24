@@ -98,7 +98,7 @@ type daRelayState struct {
 	caps                      daRelayCaps
 	nextReceivedTime          uint64
 	orphanBytes               uint64
-	orphanBytesByPeer         map[string]uint64
+	orphanBytesByPeerQuotaKey map[string]uint64
 	orphanBytesByDAID         map[[32]byte]uint64
 	orphanCommitOverheadBytes uint64
 	pinnedPayloadBytes        uint64
@@ -110,10 +110,10 @@ func newDARelayState(caps daRelayCaps) (*daRelayState, error) {
 		return nil, err
 	}
 	return &daRelayState{
-		caps:              caps,
-		orphanBytesByPeer: map[string]uint64{},
-		orphanBytesByDAID: map[[32]byte]uint64{},
-		sets:              make(map[[32]byte]daRelaySetRecord),
+		caps:                      caps,
+		orphanBytesByPeerQuotaKey: map[string]uint64{},
+		orphanBytesByDAID:         map[[32]byte]uint64{},
+		sets:                      make(map[[32]byte]daRelaySetRecord),
 	}, nil
 }
 
@@ -123,4 +123,18 @@ func (s *daRelayState) nextMonotonicReceivedTime() uint64 {
 
 	s.nextReceivedTime++
 	return s.nextReceivedTime
+}
+
+func (s *daRelayState) setOrphanBytesForPeer(peerAddr string, bytes uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.orphanBytesByPeerQuotaKey[peerQuotaKey(peerAddr)] = bytes
+}
+
+func (s *daRelayState) orphanBytesForPeer(peerAddr string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.orphanBytesByPeerQuotaKey[peerQuotaKey(peerAddr)]
 }

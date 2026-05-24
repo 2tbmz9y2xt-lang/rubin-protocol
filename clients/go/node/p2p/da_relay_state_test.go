@@ -69,8 +69,8 @@ func TestNewDARelayStateInitializesEmptyAccounting(t *testing.T) {
 	if state.orphanBytes != 0 {
 		t.Fatalf("orphan bytes = %d, want 0", state.orphanBytes)
 	}
-	if len(state.orphanBytesByPeer) != 0 {
-		t.Fatalf("orphan bytes by peer = %d entries, want 0", len(state.orphanBytesByPeer))
+	if len(state.orphanBytesByPeerQuotaKey) != 0 {
+		t.Fatalf("orphan bytes by peer quota key = %d entries, want 0", len(state.orphanBytesByPeerQuotaKey))
 	}
 	if len(state.orphanBytesByDAID) != 0 {
 		t.Fatalf("orphan bytes by da_id = %d entries, want 0", len(state.orphanBytesByDAID))
@@ -91,14 +91,31 @@ func TestNewDARelayStateInitializesWritableAccountingMaps(t *testing.T) {
 
 	var daID [32]byte
 	daID[0] = 1
-	state.orphanBytesByPeer["peer"] = 1
+	state.setOrphanBytesForPeer("peer", 1)
 	state.orphanBytesByDAID[daID] = 2
 
-	if state.orphanBytesByPeer["peer"] != 1 {
+	if state.orphanBytesForPeer("peer") != 1 {
 		t.Fatalf("orphan peer accounting map is not writable")
 	}
 	if state.orphanBytesByDAID[daID] != 2 {
 		t.Fatalf("orphan da_id accounting map is not writable")
+	}
+}
+
+func TestDARelayPeerAccountingUsesQuotaKey(t *testing.T) {
+	state, err := newDARelayState(defaultDARelayCaps())
+	if err != nil {
+		t.Fatalf("new DA relay state: %v", err)
+	}
+
+	state.setOrphanBytesForPeer("127.0.0.1:1000", 1)
+	state.setOrphanBytesForPeer("127.0.0.1:2000", 2)
+
+	if len(state.orphanBytesByPeerQuotaKey) != 1 {
+		t.Fatalf("peer accounting entries = %d, want 1", len(state.orphanBytesByPeerQuotaKey))
+	}
+	if got := state.orphanBytesForPeer("127.0.0.1:3000"); got != 2 {
+		t.Fatalf("peer accounting bytes = %d, want 2", got)
 	}
 }
 
