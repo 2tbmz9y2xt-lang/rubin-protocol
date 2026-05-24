@@ -30,28 +30,51 @@ func (e blockTxnStaleBodyError) Error() string {
 	return "stale blocktxn response has body"
 }
 
+var errLateBlockTxnIgnored = errors.New("ignored late blocktxn response")
+
+type expiredCompactBlockTxnContext struct {
+	blockHash  [32]byte
+	payloadCap uint32
+}
+
 func (p *peer) run(ctx context.Context) error {
+	var lateBlockTxn *expiredCompactBlockTxnContext
+	recordExpiredFallback := func() error {
+		expired, sent, err := p.sendExpiredCompactOutstandingFallback(ctx)
+		if err != nil {
+			return err
+		}
+		if sent {
+			lateBlockTxn = expired
+		}
+		return nil
+	}
 	for {
 		if peerRunContextDone(ctx) {
 			return nil
 		}
-		if _, err := p.handleExpiredCompactOutstanding(ctx); err != nil {
+		if err := recordExpiredFallback(); err != nil {
 			return err
 		}
 		frameStart := time.Now()
-		if err := p.setReadDeadlineAt(frameStart, true); err != nil {
+		if err := p.setReadDeadlineAt(frameStart, lateBlockTxn == nil); err != nil {
 			return err
 		}
-		frame, err := p.readPostHandshakeFrame(ctx, frameStart)
+		frame, expired, consumedLateBlockTxn, err := p.readPostHandshakeFrame(ctx, frameStart, lateBlockTxn)
+		if expired != nil {
+			lateBlockTxn = expired
+		} else if consumedLateBlockTxn {
+			lateBlockTxn = nil
+		}
 		if err != nil {
-			if shouldIgnoreReadError(err) {
+			if errors.Is(err, errLateBlockTxnIgnored) || shouldIgnoreReadError(err) {
 				continue
 			}
 			return normalizeReadError(err)
 		}
 		fallbackBeforeMessage := frame.Command == messagePing || frame.Command == messagePong || frame.Command == messageHeaders || frame.Command == messageCmpctBlock
 		if fallbackBeforeMessage {
-			if _, err := p.handleExpiredCompactOutstanding(ctx); err != nil {
+			if err := recordExpiredFallback(); err != nil {
 				return err
 			}
 		}
@@ -59,7 +82,7 @@ func (p *peer) run(ctx context.Context) error {
 			return err
 		}
 		if !fallbackBeforeMessage {
-			if _, err := p.handleExpiredCompactOutstanding(ctx); err != nil {
+			if err := recordExpiredFallback(); err != nil {
 				return err
 			}
 		}
@@ -68,43 +91,53 @@ func (p *peer) run(ctx context.Context) error {
 
 const blockTxnHashPayloadBytes = 32
 
-func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time) (message, error) {
+func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time, lateBlockTxn *expiredCompactBlockTxnContext) (message, *expiredCompactBlockTxnContext, bool, error) {
 	var frame message
-	header, err := p.readPostHandshakeFrameHeader(ctx, frameStart)
+	reader := &compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart}
+	header, err := p.readPostHandshakeFrameHeader(reader)
 	if err != nil {
-		return frame, err
+		return frame, reader.lateBlockTxn, false, err
 	}
-	if header.Command == messageBlockTxn && p.acceptsBlockTxnResponses() {
-		return p.readBlockTxnFrame(header)
+	if reader.lateBlockTxn != nil {
+		lateBlockTxn = reader.lateBlockTxn
+	}
+	if header.Command == messageBlockTxn && (lateBlockTxn != nil || p.acceptsBlockTxnResponses()) {
+		frame, err := p.readBlockTxnFrame(header, lateBlockTxn)
+		return frame, nil, lateBlockTxn != nil, err
 	}
 	if err := p.setReadDeadlineAt(frameStart, true); err != nil {
-		return frame, err
+		return frame, reader.lateBlockTxn, false, err
 	}
 	limit := p.postHandshakePayloadCap()
 	if header.Size > limit(header.Command) {
-		return frame, commandPayloadCapError{command: header.Command}
+		return frame, reader.lateBlockTxn, false, commandPayloadCapError{command: header.Command}
 	}
-	payload, err := readPayloadWithChecksum(&compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart}, header.Size, header.Checksum)
+	payloadReader := io.Reader(p.conn)
+	if _, ok := p.compactOutstandingExpiry(); ok {
+		payloadReader = reader
+	}
+	payload, err := readPayloadWithChecksum(payloadReader, header.Size, header.Checksum)
 	if err != nil {
-		return frame, err
+		return frame, reader.lateBlockTxn, false, err
 	}
-	return message{Command: header.Command, Payload: payload}, nil
+	return message{Command: header.Command, Payload: payload}, reader.lateBlockTxn, false, nil
 }
 
-func (p *peer) readPostHandshakeFrameHeader(ctx context.Context, frameStart time.Time) (frameHeader, error) {
+func (p *peer) readPostHandshakeFrameHeader(reader *compactFallbackReader) (frameHeader, error) {
 	magic := networkMagic(p.service.cfg.PeerRuntimeConfig.Network)
 	maxSize := p.service.cfg.PeerRuntimeConfig.MaxMessageSize
 	if _, ok := p.compactOutstandingExpiry(); !ok {
 		return readFrameHeader(p.conn, magic, maxSize)
 	}
-	return readFrameHeader(&compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart}, magic, maxSize)
+	return readFrameHeader(reader, magic, maxSize)
 }
 
 type compactFallbackReader struct {
-	peer       *peer
-	ctx        context.Context
-	frameStart time.Time
-	sent       bool
+	peer         *peer
+	ctx          context.Context
+	frameStart   time.Time
+	sent         bool
+	lateBlockTxn *expiredCompactBlockTxnContext
 }
 
 func (r *compactFallbackReader) Read(p []byte) (int, error) {
@@ -116,7 +149,7 @@ func (r *compactFallbackReader) Read(p []byte) (int, error) {
 		if !isReadTimeout(err) || r.sent {
 			return n, err
 		}
-		sent, sendErr := r.peer.handleExpiredCompactOutstanding(r.ctx)
+		lateBlockTxn, sent, sendErr := r.peer.sendExpiredCompactOutstandingFallback(r.ctx)
 		if sendErr != nil {
 			return 0, sendErr
 		}
@@ -124,13 +157,35 @@ func (r *compactFallbackReader) Read(p []byte) (int, error) {
 			return n, err
 		}
 		r.sent = true
+		r.lateBlockTxn = lateBlockTxn
 		if err := r.peer.setReadDeadlineAt(r.frameStart, false); err != nil {
 			return 0, err
 		}
 	}
 }
 
-func (p *peer) readBlockTxnFrame(header frameHeader) (message, error) {
+func (p *peer) sendExpiredCompactOutstandingFallback(ctx context.Context) (*expiredCompactBlockTxnContext, bool, error) {
+	if peerRunContextDone(ctx) {
+		return nil, false, nil
+	}
+	blockHash, payloadCap, ok := p.popExpiredCompactOutstandingBlockHashAndPayloadCap()
+	if !ok {
+		return nil, false, nil
+	}
+	if peerRunContextDone(ctx) {
+		return nil, false, nil
+	}
+	body := append([]byte{MSG_BLOCK}, blockHash[:]...)
+	if err := p.send(messageGetData, body); err != nil {
+		return nil, true, err
+	}
+	return &expiredCompactBlockTxnContext{blockHash: blockHash, payloadCap: payloadCap}, true, nil
+}
+
+func (p *peer) readBlockTxnFrame(header frameHeader, lateBlockTxn *expiredCompactBlockTxnContext) (message, error) {
+	if lateBlockTxn != nil {
+		return p.readLateBlockTxnFrame(header, *lateBlockTxn)
+	}
 	cap := p.blockTxnPayloadCap()
 	if cap == 0 {
 		return p.readUnexpectedBlockTxnFrame(header)
@@ -145,6 +200,36 @@ func (p *peer) readBlockTxnFrame(header frameHeader) (message, error) {
 		return p.readMatchedBlockTxnFrame(header)
 	}
 	return p.readFullCommandFramePayload(header)
+}
+
+func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn expiredCompactBlockTxnContext) (message, error) {
+	cap := lateBlockTxn.payloadCap
+	if maxCap := compactRelayPayloadCap(messageBlockTxn); cap > maxCap {
+		cap = maxCap
+	}
+	if header.Size > cap {
+		return message{}, commandPayloadCapError{command: header.Command}
+	}
+	payload, err := readPayloadWithChecksum(p.conn, header.Size, header.Checksum)
+	if err != nil {
+		return message{}, err
+	}
+	if len(payload) < blockTxnHashPayloadBytes {
+		return message{}, errors.New("blocktxn payload missing block hash")
+	}
+	var responseHash [32]byte
+	copy(responseHash[:], payload[:blockTxnHashPayloadBytes])
+	if responseHash == lateBlockTxn.blockHash {
+		return message{}, errLateBlockTxnIgnored
+	}
+	if p.blockTxnPrefixMatchesOutstanding(payload) {
+		return message{Command: header.Command, Payload: payload}, nil
+	}
+	if len(payload) > blockTxnHashPayloadBytes {
+		return message{}, blockTxnStaleBodyError{}
+	}
+	p.setLastError("ignored stale blocktxn response")
+	return message{}, errLateBlockTxnIgnored
 }
 
 func (p *peer) readOversizedBlockTxnStaleHash(header frameHeader) (bool, error) {
