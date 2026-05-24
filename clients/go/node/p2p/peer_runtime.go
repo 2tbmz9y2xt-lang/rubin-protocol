@@ -30,8 +30,6 @@ func (e blockTxnStaleBodyError) Error() string {
 	return "stale blocktxn response has body"
 }
 
-var errLateBlockTxnIgnored = errors.New("ignored late blocktxn response")
-
 func (p *peer) run(ctx context.Context) error {
 	var lateBlockTxn *compactOutstandingRequest
 	recordExpiredFallback := func() error {
@@ -59,7 +57,7 @@ func (p *peer) run(ctx context.Context) error {
 		frame, nextLateBlockTxn, err := p.readPostHandshakeFrame(ctx, frameStart, lateBlockTxn)
 		lateBlockTxn = nextLateBlockTxn
 		if err != nil {
-			if errors.Is(err, errLateBlockTxnIgnored) || shouldIgnoreReadError(err) {
+			if err.Error() == "ignored late blocktxn response" || shouldIgnoreReadError(err) {
 				continue
 			}
 			return normalizeReadError(err)
@@ -216,14 +214,14 @@ func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn *compactOu
 		return message{}, nil, errors.New("blocktxn payload missing block hash")
 	}
 	if bytes.Equal(payload[:blockTxnHashPayloadBytes], lateBlockTxn.BlockHash[:]) {
-		p.setLastError(errLateBlockTxnIgnored.Error())
-		return message{}, nil, errLateBlockTxnIgnored
+		p.setLastError("ignored late blocktxn response")
+		return message{}, nil, errors.New("ignored late blocktxn response")
 	}
 	if len(payload) > blockTxnHashPayloadBytes {
 		return message{}, nil, blockTxnStaleBodyError{}
 	}
 	p.setLastError("ignored stale blocktxn response")
-	return message{}, nil, errLateBlockTxnIgnored
+	return message{}, nil, errors.New("ignored late blocktxn response")
 }
 
 func (p *peer) readOversizedBlockTxnStaleHash(header frameHeader) (bool, error) {
