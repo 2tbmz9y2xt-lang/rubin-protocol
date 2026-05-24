@@ -128,15 +128,20 @@ PY
 start_node() {
   local label="$1" log_file="$2" datadir="$3" peers="${4:-}"
   if [[ -z "${peers}" ]]; then
-    rubin_process_start "${log_file}" "${NODE_BIN}" --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 || return 1
+    rubin_process_start "${log_file}" "${NODE_BIN}" --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 \
+      || { printf 'failed to start %s log_file=%s\n' "${label}" "${log_file}" >&2; return 1; }
   else
-    rubin_process_start "${log_file}" "${NODE_BIN}" --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${peers}" || return 1
+    rubin_process_start "${log_file}" "${NODE_BIN}" --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0 --peers "${peers}" \
+      || { printf 'failed to start %s log_file=%s\n' "${label}" "${log_file}" >&2; return 1; }
   fi
   STARTED_PID="${RUBIN_PROCESS_LAST_PID}"
-  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 30 "${STARTED_PID}"
+  rubin_process_wait_for_log "${log_file}" "rpc: listening=" 30 "${STARTED_PID}" \
+    || { printf 'failed waiting for %s rpc listen log_file=%s pid=%s\n' "${label}" "${log_file}" "${STARTED_PID}" >&2; return 1; }
   STARTED_RPC="$(rubin_process_extract_rpc_addr "${log_file}")"
-  STARTED_P2P="$(p2p_addr_for_pid "${STARTED_PID}" "${STARTED_RPC}")"
-  rubin_process_wait_for_rpc_ready "${STARTED_RPC}" 30
+  STARTED_P2P="$(p2p_addr_for_pid "${STARTED_PID}" "${STARTED_RPC}")" \
+    || { printf 'failed resolving %s p2p address pid=%s rpc=%s\n' "${label}" "${STARTED_PID}" "${STARTED_RPC}" >&2; return 1; }
+  rubin_process_wait_for_rpc_ready "${STARTED_RPC}" 30 \
+    || { printf 'failed waiting for %s rpc ready addr=%s\n' "${label}" "${STARTED_RPC}" >&2; return 1; }
 }
 wait_sendcmpct_exchange() {
   local deadline=$((SECONDS + 30))
