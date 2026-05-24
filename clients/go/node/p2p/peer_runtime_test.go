@@ -89,7 +89,6 @@ func runExpiredLateBlockTxnFrame(t *testing.T, req compactOutstandingRequest, pa
 	p, ck := setupCompactFallbackPeer(t)
 	p.activateCompactOutstandingRequest(req)
 	ck.advance(compactOutstandingRequestTTL + time.Second)
-
 	reads := []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload})}}
 	for _, frame := range tail {
 		reads = append(reads, scriptedRead{data: mustPeerRuntimeFrameBytes(t, p, frame)})
@@ -854,18 +853,12 @@ func TestRunDrainsLateBlockTxnBodyAfterExpiryFallback(t *testing.T) {
 	blockHash := [32]byte{0x11}
 	req := compactOutstandingTestRequest(blockHash)
 	payload := append(blockHash[:], 0x01)
-	p, conn, err := runExpiredLateBlockTxnFrame(
-		t,
-		req,
-		payload,
-		message{Command: messageVersion},
-	)
+	p, conn, err := runExpiredLateBlockTxnFrame(t, req, payload, message{Command: messageVersion})
 
 	if err == nil || !strings.Contains(err.Error(), "invalid version message after handshake") {
 		t.Fatalf("run err=%v, want next frame after drained late blocktxn", err)
 	}
 	requireFirstGetDataBlock(t, p, conn.Bytes(), blockHash)
-
 	p, ck := setupCompactFallbackPeer(t)
 	frameBytes := mustPeerRuntimeFrameBytes(t, p, message{Command: messageHeaders, Payload: []byte{0x01}})
 	lateFrame := mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload})
@@ -883,8 +876,7 @@ func TestRunCapsLateBlockTxnBodyAfterExpiryFallbackByOutstandingRequest(t *testi
 	blockHash := [32]byte{0x12}
 	req := compactOutstandingTestRequest(blockHash)
 	req.BlockTxnPayloadCap = blockTxnHashPayloadBytes
-	payload := append(blockHash[:], 0x01)
-	p, conn, err := runExpiredLateBlockTxnFrame(t, req, payload)
+	p, conn, err := runExpiredLateBlockTxnFrame(t, req, append(blockHash[:], 0x01))
 
 	if err == nil || err.Error() != "message exceeds command cap" {
 		t.Fatalf("run err=%v, want expired outstanding cap error", err)
@@ -895,9 +887,8 @@ func TestRunCapsLateBlockTxnBodyAfterExpiryFallbackByOutstandingRequest(t *testi
 func TestRunResetsReadDeadlineBeforeLateBlockTxnDrainAfterExpiryFallback(t *testing.T) {
 	blockHash := [32]byte{0x13}
 	req := compactOutstandingTestRequest(blockHash)
-	payload := append(blockHash[:], 0x01)
 	beforeRun := time.Now()
-	p, conn, err := runExpiredLateBlockTxnFrame(t, req, payload, message{Command: messageVersion})
+	p, conn, err := runExpiredLateBlockTxnFrame(t, req, append(blockHash[:], 0x01), message{Command: messageVersion})
 
 	if err == nil || !strings.Contains(err.Error(), "invalid version message after handshake") {
 		t.Fatalf("run err=%v, want next frame after late blocktxn drain", err)
@@ -941,8 +932,7 @@ func TestRunRejectsWrongHashLateBlockTxnBodyAfterExpiryFallback(t *testing.T) {
 	blockHash := [32]byte{0x15}
 	staleHash := [32]byte{0x25}
 	req := compactOutstandingTestRequest(blockHash)
-	payload := append(staleHash[:], 0x01)
-	p, conn, err := runExpiredLateBlockTxnFrame(t, req, payload)
+	p, conn, err := runExpiredLateBlockTxnFrame(t, req, append(staleHash[:], 0x01))
 
 	requireBlockTxnStaleBodyError(t, err)
 	requireFirstGetDataBlock(t, p, conn.Bytes(), blockHash)
@@ -975,7 +965,6 @@ func TestReadLateBlockTxnKeepsNewActiveOutstandingResponse(t *testing.T) {
 	if !errors.Is(err, errLateBlockTxnIgnored) || lateCtx != nil {
 		t.Fatalf("stale late read err=%v lateCtx=%+v, want ignored late blocktxn and cleared context", err, lateCtx)
 	}
-
 	p = newPeerRuntimeTestPeer(t)
 	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockHash: activeHash, BlockTxnPayloadCap: 64})
 	p.conn = &scriptedConn{reads: []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: activePayload})}}}
@@ -1000,6 +989,18 @@ func TestReadLateBlockTxnKeepsNewActiveOutstandingResponse(t *testing.T) {
 	if state := p.snapshotState(); state.BanScore != 0 || p.blockTxnPayloadCap() == 0 {
 		t.Fatalf("state=%+v activeCap=%d, want stale late cap not active ban/clear", state, p.blockTxnPayloadCap())
 	}
+
+	p = newPeerRuntimeTestPeer(t)
+	p.service.cfg.EnableCompactReceive = true
+	p.setCompactOutstandingRequest(compactOutstandingTestRequest(activeHash))
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: activeHash[:blockTxnHashPayloadBytes-1]})}}}
+	frame, lateCtx, err = p.readPostHandshakeFrame(context.Background(), time.Now(), &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: 64})
+	if err != nil || lateCtx == nil {
+		t.Fatalf("short active err=%v lateCtx=%+v, want active validation frame", err, lateCtx)
+	}
+	if err := p.handleMessage(frame); err == nil || p.snapshotState().BanScore == 0 {
+		t.Fatalf("short active handle err=%v state=%+v, want active blocktxn reject/ban", err, p.snapshotState())
+	}
 }
 
 func TestRunIgnoresHashOnlyStaleLateBlockTxnAfterExpiryFallback(t *testing.T) {
@@ -1012,8 +1013,7 @@ func TestRunIgnoresHashOnlyStaleLateBlockTxnAfterExpiryFallback(t *testing.T) {
 		t.Fatalf("run hash-only stale late blocktxn: %v", err)
 	}
 	requireFirstGetDataBlock(t, p, conn.Bytes(), blockHash)
-	state := p.snapshotState()
-	if state.BanScore != 0 || !strings.Contains(state.LastError, "ignored stale blocktxn response") {
+	if state := p.snapshotState(); state.BanScore != 0 || !strings.Contains(state.LastError, "ignored stale blocktxn response") {
 		t.Fatalf("state=%+v, want ignored stale late blocktxn without ban", state)
 	}
 }
@@ -1042,8 +1042,7 @@ func requireBadChecksumLateBlockTxn(t *testing.T, blockHash [32]byte, payload []
 	ck.advance(compactOutstandingRequestTTL + time.Second)
 	raw := mustPeerRuntimeFrameBytes(t, p, message{Command: messageBlockTxn, Payload: payload})
 	raw[20] ^= 0xff
-	conn := &scriptedConn{reads: []scriptedRead{{data: raw}}}
-	p.conn = conn
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: raw}}}
 	err := p.run(context.Background())
 	if err == nil || err.Error() != "invalid envelope checksum" {
 		t.Fatalf("payload len=%d err=%v, want checksum failure before semantic classification", len(payload), err)

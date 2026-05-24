@@ -86,7 +86,7 @@ const blockTxnHashPayloadBytes = 32
 func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, error) {
 	var frame message
 	reader := &compactFallbackReader{peer: p, ctx: ctx, frameStart: frameStart}
-	header, err := p.readPostHandshakeFrameHeader(reader)
+	header, err := readFrameHeader(reader, networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
 	if reader.lateBlockTxn != nil {
 		lateBlockTxn = reader.lateBlockTxn
 	}
@@ -117,15 +117,6 @@ func (p *peer) readPostHandshakeFrame(ctx context.Context, frameStart time.Time,
 		return frame, lateBlockTxn, err
 	}
 	return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
-}
-
-func (p *peer) readPostHandshakeFrameHeader(reader *compactFallbackReader) (frameHeader, error) {
-	magic := networkMagic(p.service.cfg.PeerRuntimeConfig.Network)
-	maxSize := p.service.cfg.PeerRuntimeConfig.MaxMessageSize
-	if _, ok := p.compactOutstandingExpiry(); !ok {
-		return readFrameHeader(p.conn, magic, maxSize)
-	}
-	return readFrameHeader(reader, magic, maxSize)
 }
 
 type compactFallbackReader struct {
@@ -219,6 +210,9 @@ func (p *peer) readLateBlockTxnFrame(header frameHeader, lateBlockTxn *compactOu
 		return message{}, nil, err
 	}
 	if len(payload) < blockTxnHashPayloadBytes {
+		if p.blockTxnPayloadCap() != 0 {
+			return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
+		}
 		return message{}, nil, errors.New("blocktxn payload missing block hash")
 	}
 	if bytes.Equal(payload[:blockTxnHashPayloadBytes], lateBlockTxn.BlockHash[:]) {
