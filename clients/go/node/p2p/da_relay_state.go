@@ -50,36 +50,39 @@ func (c daRelayCaps) validate() error {
 }
 
 func (c daRelayCaps) validatePositiveCaps() error {
-	if c.orphanPoolBytes == 0 {
-		return errors.New("da orphan pool cap is zero")
+	checks := []struct {
+		value   uint64
+		message string
+	}{
+		{value: c.orphanPoolBytes, message: "da orphan pool cap is zero"},
+		{value: c.orphanPoolPerPeerBytes, message: "da orphan pool per-peer cap is zero"},
+		{value: c.orphanPoolPerDAIDBytes, message: "da orphan pool per-da_id cap is zero"},
+		{value: c.orphanCommitOverheadBytes, message: "da orphan commit overhead cap is zero"},
+		{value: c.orphanTTLBlocks, message: "da orphan ttl is zero"},
+		{value: c.pinnedPayloadBytes, message: "da pinned payload cap is zero"},
 	}
-	if c.orphanPoolPerPeerBytes == 0 {
-		return errors.New("da orphan pool per-peer cap is zero")
-	}
-	if c.orphanPoolPerDAIDBytes == 0 {
-		return errors.New("da orphan pool per-da_id cap is zero")
-	}
-	if c.orphanCommitOverheadBytes == 0 {
-		return errors.New("da orphan commit overhead cap is zero")
-	}
-	if c.orphanTTLBlocks == 0 {
-		return errors.New("da orphan ttl is zero")
-	}
-	if c.pinnedPayloadBytes == 0 {
-		return errors.New("da pinned payload cap is zero")
+	for _, check := range checks {
+		if check.value == 0 {
+			return errors.New(check.message)
+		}
 	}
 	return nil
 }
 
 func (c daRelayCaps) validateRelativeCaps() error {
-	if c.orphanPoolPerPeerBytes > c.orphanPoolBytes {
-		return errors.New("da orphan pool per-peer cap exceeds global cap")
+	checks := []struct {
+		value   uint64
+		limit   uint64
+		message string
+	}{
+		{value: c.orphanPoolPerPeerBytes, limit: c.orphanPoolBytes, message: "da orphan pool per-peer cap exceeds global cap"},
+		{value: c.orphanPoolPerDAIDBytes, limit: c.orphanPoolBytes, message: "da orphan pool per-da_id cap exceeds global cap"},
+		{value: c.orphanCommitOverheadBytes, limit: c.orphanPoolBytes, message: "da orphan commit overhead cap exceeds global cap"},
 	}
-	if c.orphanPoolPerDAIDBytes > c.orphanPoolBytes {
-		return errors.New("da orphan pool per-da_id cap exceeds global cap")
-	}
-	if c.orphanCommitOverheadBytes > c.orphanPoolBytes {
-		return errors.New("da orphan commit overhead cap exceeds global cap")
+	for _, check := range checks {
+		if check.value > check.limit {
+			return errors.New(check.message)
+		}
 	}
 	return nil
 }
@@ -137,4 +140,18 @@ func (s *daRelayState) orphanBytesForPeer(peerAddr string) uint64 {
 	defer s.mu.Unlock()
 
 	return s.orphanBytesByPeerQuotaKey[peerQuotaKey(peerAddr)]
+}
+
+func (s *daRelayState) setOrphanBytesForDAID(daID [32]byte, bytes uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.orphanBytesByDAID[daID] = bytes
+}
+
+func (s *daRelayState) orphanBytesForDAID(daID [32]byte) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.orphanBytesByDAID[daID]
 }

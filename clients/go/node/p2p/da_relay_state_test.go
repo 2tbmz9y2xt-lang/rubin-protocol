@@ -92,12 +92,12 @@ func TestNewDARelayStateInitializesWritableAccountingMaps(t *testing.T) {
 	var daID [32]byte
 	daID[0] = 1
 	state.setOrphanBytesForPeer("peer", 1)
-	state.orphanBytesByDAID[daID] = 2
+	state.setOrphanBytesForDAID(daID, 2)
 
 	if state.orphanBytesForPeer("peer") != 1 {
 		t.Fatalf("orphan peer accounting map is not writable")
 	}
-	if state.orphanBytesByDAID[daID] != 2 {
+	if state.orphanBytesForDAID(daID) != 2 {
 		t.Fatalf("orphan da_id accounting map is not writable")
 	}
 }
@@ -152,6 +152,22 @@ func TestDARelayCapsRejectInvalidLimits(t *testing.T) {
 			caps: func() daRelayCaps {
 				caps := defaultDARelayCaps()
 				caps.orphanPoolPerPeerBytes = 0
+				return caps
+			}(),
+		},
+		{
+			name: "zero per da id orphan pool",
+			caps: func() daRelayCaps {
+				caps := defaultDARelayCaps()
+				caps.orphanPoolPerDAIDBytes = 0
+				return caps
+			}(),
+		},
+		{
+			name: "zero commit overhead",
+			caps: func() daRelayCaps {
+				caps := defaultDARelayCaps()
+				caps.orphanCommitOverheadBytes = 0
 				return caps
 			}(),
 		},
