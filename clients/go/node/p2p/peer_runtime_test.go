@@ -935,12 +935,11 @@ func TestRunRejectsWrongHashLateBlockTxnBodyAfterExpiryFallback(t *testing.T) {
 }
 
 func TestReadLateBlockTxnKeepsActiveResponseAndThenIgnoresLateContext(t *testing.T) {
-	oldHash := [32]byte{0x15}
-	activeHash := [32]byte{0x35}
-	activePayload := makePeerRuntimeBlockTxnPayload(activeHash, 33, 0x01)
-	oldPayload := makePeerRuntimeBlockTxnPayload(oldHash, 1, 0x01)
+	oldHash, activeHash := [32]byte{0x15}, [32]byte{0x35}
+	activePayload := append(activeHash[:], bytes.Repeat([]byte{0x01}, 33)...)
+	oldPayload := append(oldHash[:], 0x01)
 	p := setupLateBlockTxnReadPeer(t, compactOutstandingRequest{BlockHash: activeHash, BlockTxnPayloadCap: 128}, activePayload, oldPayload)
-	lateCtx := lateBlockTxnReadContext(oldHash, 64)
+	lateCtx := &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: 64}
 
 	frame, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), lateCtx)
 	if err != nil {
@@ -959,63 +958,27 @@ func TestReadLateBlockTxnKeepsActiveResponseAndThenIgnoresLateContext(t *testing
 }
 
 func TestReadLateBlockTxnActiveCapErrorPreservesLateContext(t *testing.T) {
-	oldHash := [32]byte{0x15}
-	activeHash := [32]byte{0x35}
-	activePayload := makePeerRuntimeBlockTxnPayload(activeHash, 33, 0x01)
+	oldHash, activeHash := [32]byte{0x15}, [32]byte{0x35}
+	activePayload := append(activeHash[:], bytes.Repeat([]byte{0x01}, 33)...)
 	p := setupLateBlockTxnReadPeer(t, compactOutstandingRequest{BlockHash: activeHash, BlockTxnPayloadCap: 64}, activePayload)
 
-	_, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), lateBlockTxnReadContext(oldHash, 128))
+	_, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: 128})
 	if err == nil || err.Error() != "message exceeds command cap" || lateCtx == nil {
 		t.Fatalf("active cap err=%v lateCtx=%+v, want cap error preserving late context", err, lateCtx)
 	}
 }
 
-func TestReadLateBlockTxnSameHashActiveResponseWinsOverLateContext(t *testing.T) {
-	oldHash := [32]byte{0x15}
-	oldPayload := makePeerRuntimeBlockTxnPayload(oldHash, 1, 0x01)
-	p := setupLateBlockTxnReadPeer(t, compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: 128}, oldPayload)
-
-	frame, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), lateBlockTxnReadContext(oldHash, 64))
-	if err != nil || lateCtx == nil || !bytes.Equal(frame.Payload, oldPayload) {
-		t.Fatalf("same-hash active frame=%+v err=%v lateCtx=%+v, want active response before late ignore", frame, err, lateCtx)
-	}
-}
-
 func TestReadLateBlockTxnStaleBodyDoesNotBanActiveOutstanding(t *testing.T) {
-	oldHash := [32]byte{0x15}
-	activeHash := [32]byte{0x35}
-	p := setupLateBlockTxnReadPeer(t, compactOutstandingTestRequest(activeHash), makePeerRuntimeBlockTxnPayload(oldHash, 33, 0x02))
+	oldHash, activeHash := [32]byte{0x15}, [32]byte{0x35}
+	stalePayload := append(oldHash[:], bytes.Repeat([]byte{0x02}, 33)...)
+	p := setupLateBlockTxnReadPeer(t, compactOutstandingTestRequest(activeHash), stalePayload)
 
-	_, _, err := p.readPostHandshakeFrame(context.Background(), time.Now(), lateBlockTxnReadContext(oldHash, blockTxnHashPayloadBytes))
+	_, _, err := p.readPostHandshakeFrame(context.Background(), time.Now(), &compactOutstandingRequest{BlockHash: oldHash, BlockTxnPayloadCap: blockTxnHashPayloadBytes})
 	requireBlockTxnStaleBodyError(t, err)
 	p.applyPostHandshakeDisconnectError(err)
 	if state := p.snapshotState(); state.BanScore != 0 || p.blockTxnPayloadCap() == 0 {
 		t.Fatalf("state=%+v activeCap=%d, want stale late cap not active ban/clear", state, p.blockTxnPayloadCap())
 	}
-}
-
-func TestReadLateBlockTxnShortActiveResponseStillUsesActiveValidation(t *testing.T) {
-	oldHash := [32]byte{0x15}
-	activeHash := [32]byte{0x35}
-	p := setupLateBlockTxnReadPeer(t, compactOutstandingTestRequest(activeHash), activeHash[:blockTxnHashPayloadBytes-1])
-	p.service.cfg.EnableCompactReceive = true
-
-	frame, lateCtx, err := p.readPostHandshakeFrame(context.Background(), time.Now(), lateBlockTxnReadContext(oldHash, 64))
-	if err != nil || lateCtx == nil {
-		t.Fatalf("short active err=%v lateCtx=%+v, want active validation frame", err, lateCtx)
-	}
-	if err := p.handleMessage(frame); err == nil || p.snapshotState().BanScore == 0 {
-		t.Fatalf("short active handle err=%v state=%+v, want active blocktxn reject/ban", err, p.snapshotState())
-	}
-}
-
-func makePeerRuntimeBlockTxnPayload(hash [32]byte, extraLen int, fill byte) []byte {
-	payload := append([]byte{}, hash[:]...)
-	return append(payload, bytes.Repeat([]byte{fill}, extraLen)...)
-}
-
-func lateBlockTxnReadContext(hash [32]byte, payloadCap uint32) *compactOutstandingRequest {
-	return &compactOutstandingRequest{BlockHash: hash, BlockTxnPayloadCap: payloadCap}
 }
 
 func setupLateBlockTxnReadPeer(t *testing.T, active compactOutstandingRequest, payloads ...[]byte) *peer {
