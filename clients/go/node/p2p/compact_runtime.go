@@ -51,6 +51,11 @@ func (p *peer) handleSendCmpct(payload []byte) error {
 	return nil
 }
 
+func (p *peer) advertiseLocalCompactMode() error {
+	payload := consensus.AppendU64le([]byte{0}, compactRelayVersion)
+	return p.send(messageSendCmpct, payload)
+}
+
 func parseSendCmpctRuntimePayload(payload []byte) (sendCmpctPayload, error) {
 	if len(payload) != sendCmpctPayloadBytes {
 		return sendCmpctPayload{}, errors.New("sendcmpct payload width mismatch")

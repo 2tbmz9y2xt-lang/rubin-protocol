@@ -238,7 +238,8 @@ rubin_process_start() {
   _rubin_process_require_artifact_parent "${log_file}" || return 1
   command -v perl >/dev/null 2>&1 || { _rubin_process_error "perl is required to launch managed process groups"; return 1; }
   launch_exec_realpath="$(_rubin_process_executable_realpath "$1")" || { _rubin_process_error "failed to resolve executable identity for $1"; return 1; }
-  set -- "${launch_exec_realpath}" "${@:2}"
+  shift
+  set -- "${launch_exec_realpath}" "$@"
 
   perl -e 'setpgrp(0, 0) or die "setpgrp failed: $!"; exec { $ARGV[0] } @ARGV or die "exec failed: $!"' -- "$@" >"${log_file}" 2>&1 &
   launch_status=$?

@@ -51,16 +51,27 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 	defer s.unregisterPeer(current)
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
+	if err := s.sendPostHandshakeAnnouncements(current); err != nil {
+		return err
+	}
+	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
+		current.applyPostHandshakeDisconnectError(err)
+		return err
+	}
+	return nil
+}
+
+func (s *Service) sendPostHandshakeAnnouncements(current *peer) error {
+	if err := current.advertiseLocalCompactMode(); err != nil {
+		current.setLastError(err.Error())
+		return err
+	}
 	if err := s.requestBlocksIfBehind(current); err != nil {
 		current.setLastError(err.Error())
 		return err
 	}
 	if err := current.send(messageGetAddr, nil); err != nil {
 		current.setLastError(err.Error())
-	}
-	if err := current.run(s.ctx); err != nil && s.ctx.Err() == nil {
-		current.applyPostHandshakeDisconnectError(err)
-		return err
 	}
 	return nil
 }
