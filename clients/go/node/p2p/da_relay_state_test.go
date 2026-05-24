@@ -117,6 +117,29 @@ func TestDARelayPeerAccountingUsesQuotaKey(t *testing.T) {
 	if got := state.orphanBytesForPeer("127.0.0.1:3000"); got != 2 {
 		t.Fatalf("peer accounting bytes = %d, want 2", got)
 	}
+	state.setOrphanBytesForPeer("127.0.0.1:4000", 0)
+	if len(state.orphanBytesByPeerQuotaKey) != 0 {
+		t.Fatalf("peer accounting entries after zero update = %d, want 0", len(state.orphanBytesByPeerQuotaKey))
+	}
+}
+
+func TestDARelayDAIDAccountingDeletesZeroBytes(t *testing.T) {
+	state, err := newDARelayState(defaultDARelayCaps())
+	if err != nil {
+		t.Fatalf("new DA relay state: %v", err)
+	}
+
+	var daID [32]byte
+	daID[0] = 1
+	state.setOrphanBytesForDAID(daID, 2)
+	state.setOrphanBytesForDAID(daID, 0)
+
+	if len(state.orphanBytesByDAID) != 0 {
+		t.Fatalf("da_id accounting entries after zero update = %d, want 0", len(state.orphanBytesByDAID))
+	}
+	if got := state.orphanBytesForDAID(daID); got != 0 {
+		t.Fatalf("da_id accounting bytes = %d, want 0", got)
+	}
 }
 
 func TestDARelayReceivedTimeIsMonotonicLocalSequence(t *testing.T) {

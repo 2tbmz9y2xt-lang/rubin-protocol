@@ -132,7 +132,12 @@ func (s *daRelayState) setOrphanBytesForPeer(peerAddr string, bytes uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.orphanBytesByPeerQuotaKey[peerQuotaKey(peerAddr)] = bytes
+	key := peerQuotaKey(peerAddr)
+	if bytes == 0 {
+		delete(s.orphanBytesByPeerQuotaKey, key)
+		return
+	}
+	s.orphanBytesByPeerQuotaKey[key] = bytes
 }
 
 func (s *daRelayState) orphanBytesForPeer(peerAddr string) uint64 {
@@ -146,6 +151,10 @@ func (s *daRelayState) setOrphanBytesForDAID(daID [32]byte, bytes uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if bytes == 0 {
+		delete(s.orphanBytesByDAID, daID)
+		return
+	}
 	s.orphanBytesByDAID[daID] = bytes
 }
 
