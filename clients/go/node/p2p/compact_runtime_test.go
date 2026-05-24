@@ -37,6 +37,23 @@ func TestSendCmpctPostHandshakeCommandPathRecordsPeerMode(t *testing.T) {
 	}
 }
 
+func TestAdvertiseLocalCompactModeSendsDisabledSendCmpct(t *testing.T) {
+	p := newCompactScriptedPeer(t)
+	if err := p.advertiseLocalCompactMode(); err != nil {
+		t.Fatalf("advertiseLocalCompactMode: %v", err)
+	}
+	frame, err := readFrame(bytes.NewReader(p.conn.(*scriptedConn).Buffer.Bytes()), networkMagic(p.service.cfg.PeerRuntimeConfig.Network), p.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+	requireNoCompactErr(t, err, "read advertised sendcmpct")
+	if frame.Command != messageSendCmpct {
+		t.Fatalf("command=%q, want %q", frame.Command, messageSendCmpct)
+	}
+	got, err := decodeSendCmpctPayload(frame.Payload)
+	requireNoCompactErr(t, err, "decode advertised sendcmpct")
+	if got.Mode != 0 || got.Version != compactRelayVersion {
+		t.Fatalf("sendcmpct=%+v, want mode=0 version=%d", got, compactRelayVersion)
+	}
+}
+
 func TestSentCmpctBlockRecordsOneShotAnnouncement(t *testing.T) {
 	header, blockHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
 	payload := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{

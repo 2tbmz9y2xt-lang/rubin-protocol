@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -371,6 +372,15 @@ func TestCoverage_HandleConnRunErrorPath(t *testing.T) {
 			remoteDone <- err
 			return
 		}
+		if frame.Command != messageSendCmpct {
+			remoteDone <- fmt.Errorf("unexpected first outbound command: %s", frame.Command)
+			return
+		}
+		frame, err = readFrame(remote, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		if err != nil {
+			remoteDone <- err
+			return
+		}
 		if frame.Command != messageGetAddr {
 			remoteDone <- fmt.Errorf("unexpected outbound command: %s", frame.Command)
 			return
@@ -394,6 +404,17 @@ func TestCoverage_HandleConnRunErrorPath(t *testing.T) {
 	}
 	if err := <-remoteDone; err != nil {
 		t.Fatalf("remote sequence: %v", err)
+	}
+}
+
+func TestCoverage_SendPostHandshakeAnnouncementsAdvertiseError(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	want := errors.New("write failed")
+	p := testPeerForService(h.service, "remote", 0)
+	p.conn = &scriptedConn{writeErr: want, writeErrAt: 1}
+
+	if err := h.service.sendPostHandshakeAnnouncements(p); !errors.Is(err, want) {
+		t.Fatalf("sendPostHandshakeAnnouncements error=%v, want %v", err, want)
 	}
 }
 
