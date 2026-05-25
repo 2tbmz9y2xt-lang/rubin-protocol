@@ -642,6 +642,51 @@ func TestDARelayAdvanceOrphanTTLDecrementsAndPreservesCompleteSets(t *testing.T)
 	}
 }
 
+func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	decrementID := daRelayTestID(97)
+	expireID := daRelayTestID(98)
+
+	decrementRecord := daRelayOverflowOrphanAccountingRecord(decrementID)
+	decrementRecord.ttlBlocksRemaining = 2
+	state.sets[decrementID] = decrementRecord
+	_, err := state.advanceOrphanTTL()
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if got := state.sets[decrementID].ttlBlocksRemaining; got != 2 {
+		t.Fatalf("failed ttl decrement mutated ttl=%d, want 2", got)
+	}
+
+	delete(state.sets, decrementID)
+	expireRecord := daRelayOverflowOrphanAccountingRecord(expireID)
+	expireRecord.ttlBlocksRemaining = 1
+	state.sets[expireID] = expireRecord
+	_, err = state.advanceOrphanTTL()
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if _, ok := state.sets[expireID]; !ok {
+		t.Fatal("failed ttl expiry deleted corrupt record")
+	}
+}
+
+func TestDARelayRemoveSetRecordReturnsPinnedProjectionErrorWithoutMutation(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(99)
+	record := daRelaySetRecord{
+		daID:         daID,
+		state:        daRelayStateCompleteSet,
+		payloadBytes: 1,
+		wireBytes:    ^uint64(0),
+	}
+	state.sets[daID] = record
+
+	state.mu.Lock()
+	err := state.removeDASetRecordLocked(record)
+	state.mu.Unlock()
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if _, ok := state.sets[daID]; !ok {
+		t.Fatal("failed remove deleted corrupt complete record")
+	}
+}
+
 func TestDARelayRejectedCandidatesDoNotMutateStoredChunks(t *testing.T) {
 	daID := daRelayTestID(5)
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
@@ -1292,6 +1337,30 @@ func daRelayTestChunkPayload(daID [32]byte, index uint16, wireBytes uint64, payl
 
 func daRelayTestCommitForPayloads(daID [32]byte, wireBytes uint64, payloads ...[]byte) daRelayCommit {
 	return daRelayCommit{daID: daID, payloadCommitment: daRelayPayloadCommitment(payloads...), chunkCount: uint16(len(payloads)), wireBytes: wireBytes}
+}
+
+func daRelayOverflowOrphanAccountingRecord(daID [32]byte) daRelaySetRecord {
+	return daRelaySetRecord{
+		daID:               daID,
+		state:              daRelayStateStagedCommit,
+		wireBytes:          ^uint64(0),
+		ttlBlocksRemaining: 1,
+		commit: daRelayCommit{
+			daID:         daID,
+			peerQuotaKey: "peer-overflow",
+			chunkCount:   2,
+			wireBytes:    ^uint64(0),
+		},
+		chunks: map[uint16]daRelayChunk{
+			0: {
+				daID:         daID,
+				peerQuotaKey: "peer-overflow",
+				chunkIndex:   0,
+				payload:      []byte{1},
+				wireBytes:    1,
+			},
+		},
+	}
 }
 
 func daRelayPayloadCommitment(payloads ...[]byte) [32]byte {
