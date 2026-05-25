@@ -129,6 +129,39 @@ func TestDARelayPeerAccountingUsesQuotaKey(t *testing.T) {
 	}
 }
 
+func TestDARelayPeerQuotaKeyPreventsPortHopping(t *testing.T) {
+	t.Run("chunk only", func(t *testing.T) {
+		caps := defaultDARelayCaps()
+		caps.orphanPoolPerPeerBytes = 10
+		state := newDARelayStateForTest(t, caps)
+		firstID := daRelayTestID(41)
+		secondID := daRelayTestID(42)
+
+		record := mustAddDAChunk(t, state, "127.0.0.1:1000", daRelayTestChunk(firstID, 0, 6))
+		_, err := state.addDAChunk("127.0.0.1:2000", daRelayTestChunk(secondID, 0, 5))
+		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
+
+		requirePortHopRejectedWithoutMutation(t, state, secondID, record.wireBytes)
+	})
+
+	t.Run("staged commit", func(t *testing.T) {
+		caps := defaultDARelayCaps()
+		caps.orphanPoolPerPeerBytes = 10
+		state := newDARelayStateForTest(t, caps)
+		firstID := daRelayTestID(43)
+		secondID := daRelayTestID(44)
+
+		record := mustAddDACommit(t, state, "127.0.0.1:1000", daRelayTestCommit(firstID, 2, 6))
+		_, err := state.addDACommit("127.0.0.1:2000", daRelayTestCommit(secondID, 2, 5))
+		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
+
+		requirePortHopRejectedWithoutMutation(t, state, secondID, record.wireBytes)
+		if state.orphanCommitOverheadBytes != record.commit.wireBytes {
+			t.Fatalf("commit overhead = %d, want %d", state.orphanCommitOverheadBytes, record.commit.wireBytes)
+		}
+	})
+}
+
 func TestDARelayDAIDAccountingDeletesZeroBytes(t *testing.T) {
 	state, err := newDARelayState(defaultDARelayCaps())
 	if err != nil {
@@ -372,6 +405,7 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 		chunks: map[uint16]daRelayChunk{
 			0: daRelayTestChunkPayload(daID, 0, 17, []byte("immutable-payload")),
 		},
+		replaceableChunks: map[uint16]bool{0: true},
 	}
 
 	stateClone := record.cloneForStateMutation()
@@ -384,6 +418,10 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	if _, ok := record.chunks[1]; ok {
 		t.Fatalf("state mutation clone aliases chunk map")
 	}
+	stateClone.replaceableChunks[1] = true
+	if record.replaceableChunks[1] {
+		t.Fatalf("state mutation clone aliases replaceable chunk map")
+	}
 
 	callerClone := record.clone()
 	callerChunk := callerClone.chunks[0]
@@ -394,6 +432,10 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	callerClone.chunks[0] = callerChunk
 	if record.chunks[0].payload[0] == callerClone.chunks[0].payload[0] {
 		t.Fatalf("caller clone aliases stored payload")
+	}
+	callerClone.replaceableChunks[1] = true
+	if record.replaceableChunks[1] {
+		t.Fatalf("caller clone aliases replaceable chunk map")
 	}
 }
 
@@ -438,6 +480,28 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	}
 	if record.commit.payloadCommitment != daRelayPayloadCommitment(payload1, payload0) {
 		t.Fatalf("complete set did not retain first commit")
+	}
+
+	state = newDARelayStateForTest(t, defaultDARelayCaps())
+	mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), []byte("payload-x")))
+	mustAddDACommit(t, state, "peer-b", daRelayTestCommitForPayloads(daID, 1, payload0, payload1))
+	beforeMismatchTime := state.nextReceivedTime
+	_, err = state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
+	requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
+	record = state.sets[daID]
+	if !record.replaceableChunks[0] || len(record.chunks) != 1 || state.pinnedPayloadBytes != 0 {
+		t.Fatalf("chunk mismatch did not mark stale chunk replaceable: replaceable=%v chunks=%d pinned=%d", record.replaceableChunks, len(record.chunks), state.pinnedPayloadBytes)
+	}
+	if state.nextReceivedTime <= beforeMismatchTime || record.receivedTime != state.nextReceivedTime {
+		t.Fatalf("replaceable mark time record=%d state=%d before=%d", record.receivedTime, state.nextReceivedTime, beforeMismatchTime)
+	}
+	record = mustAddDAChunk(t, state, "peer-d", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
+	if record.replaceableChunks[0] || len(record.chunks) != 1 {
+		t.Fatalf("replacement chunk did not clear replaceable marker: replaceable=%v chunks=%d", record.replaceableChunks, len(record.chunks))
+	}
+	record = mustAddDAChunk(t, state, "peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
+	if record.state != daRelayStateCompleteSet {
+		t.Fatalf("state after stale orphan replacement=%v, want COMPLETE_SET", record.state)
 	}
 
 	state = newDARelayStateForTest(t, defaultDARelayCaps())
@@ -655,4 +719,20 @@ func mustPinnedPayloadAccounting(t *testing.T, record daRelaySetRecord) uint64 {
 		t.Fatalf("pinned payload accounting: %v", err)
 	}
 	return bytes
+}
+
+func requirePortHopRejectedWithoutMutation(t *testing.T, state *daRelayState, rejectedID [32]byte, wantPeerBytes uint64) {
+	t.Helper()
+	if got := state.orphanBytesForPeer("127.0.0.1:3000"); got != wantPeerBytes {
+		t.Fatalf("peer quota bytes = %d, want %d", got, wantPeerBytes)
+	}
+	if got := state.orphanBytes; got != wantPeerBytes {
+		t.Fatalf("global orphan bytes = %d, want %d", got, wantPeerBytes)
+	}
+	if _, ok := state.sets[rejectedID]; ok {
+		t.Fatalf("rejected port-hop candidate mutated state")
+	}
+	if got := state.orphanBytesForDAID(rejectedID); got != 0 {
+		t.Fatalf("rejected da_id accounting = %d, want 0", got)
+	}
 }
