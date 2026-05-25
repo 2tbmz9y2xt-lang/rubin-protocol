@@ -522,6 +522,126 @@ func TestDARelayDuplicateCommitAfterOrphanChunksKeepsFirstSeenState(t *testing.T
 	}
 }
 
+func TestDARelayAdvanceOrphanTTLExpiresOrphanChunksAtomically(t *testing.T) {
+	caps := defaultDARelayCaps()
+	caps.orphanTTLBlocks = 1
+	state := newDARelayStateForTest(t, caps)
+	daID := daRelayTestID(93)
+
+	first := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 7))
+	second := mustAddDAChunk(t, state, "peer-b", daRelayTestChunk(daID, 1, 11))
+	wantBytes := first.wireBytes + second.chunks[1].wireBytes
+	if state.orphanBytes != wantBytes || state.orphanBytesForDAID(daID) != wantBytes {
+		t.Fatalf("setup accounting global=%d da=%d want %d", state.orphanBytes, state.orphanBytesForDAID(daID), wantBytes)
+	}
+
+	expired, err := state.advanceOrphanTTL()
+	if err != nil {
+		t.Fatalf("advance ttl: %v", err)
+	}
+	if len(expired) != 1 || expired[0].daID != daID || expired[0].state != daRelayStateOrphanChunks || expired[0].commitPeerQuotaKey != "" {
+		t.Fatalf("expired=%+v, want orphan da_id without commit attribution", expired)
+	}
+	if _, ok := state.sets[daID]; ok {
+		t.Fatalf("expired orphan da_id record was retained")
+	}
+	if state.orphanBytes != 0 || state.orphanBytesForDAID(daID) != 0 || state.orphanCommitOverheadBytes != 0 {
+		t.Fatalf("expiry left accounting global=%d da=%d commit=%d", state.orphanBytes, state.orphanBytesForDAID(daID), state.orphanCommitOverheadBytes)
+	}
+	if got := state.orphanBytesForPeer("peer-a"); got != 0 {
+		t.Fatalf("expiry left peer-a bytes=%d", got)
+	}
+	if got := state.orphanBytesForPeer("peer-b"); got != 0 {
+		t.Fatalf("expiry left peer-b bytes=%d", got)
+	}
+	if expired, err = state.advanceOrphanTTL(); err != nil || len(expired) != 0 {
+		t.Fatalf("second ttl advance expired=%+v err=%v, want no-op", expired, err)
+	}
+}
+
+func TestDARelayAdvanceOrphanTTLExpiresStagedCommitAccounting(t *testing.T) {
+	caps := defaultDARelayCaps()
+	caps.orphanTTLBlocks = 1
+	state := newDARelayStateForTest(t, caps)
+	daID := daRelayTestID(94)
+
+	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 7))
+	record := mustAddDACommit(t, state, "peer-b", daRelayTestCommit(daID, 3, 13))
+	if record.state != daRelayStateStagedCommit {
+		t.Fatalf("setup state=%v, want staged commit", record.state)
+	}
+	record.ttlBlocksRemaining = 0
+	state.sets[daID] = record
+	if state.orphanCommitOverheadBytes != record.commit.wireBytes {
+		t.Fatalf("setup commit overhead=%d, want %d", state.orphanCommitOverheadBytes, record.commit.wireBytes)
+	}
+
+	expired, err := state.advanceOrphanTTL()
+	if err != nil {
+		t.Fatalf("advance ttl: %v", err)
+	}
+	if len(expired) != 1 || expired[0].daID != daID || expired[0].state != daRelayStateStagedCommit || expired[0].commitPeerQuotaKey != peerQuotaKey("peer-b") {
+		t.Fatalf("expired=%+v, want staged commit attribution to peer-b", expired)
+	}
+	if _, ok := state.sets[daID]; ok {
+		t.Fatalf("expired staged commit da_id record was retained")
+	}
+	if state.orphanBytes != 0 || state.orphanBytesForDAID(daID) != 0 || state.orphanCommitOverheadBytes != 0 {
+		t.Fatalf("expiry left accounting global=%d da=%d commit=%d", state.orphanBytes, state.orphanBytesForDAID(daID), state.orphanCommitOverheadBytes)
+	}
+	if got := state.orphanBytesForPeer("peer-a"); got != 0 {
+		t.Fatalf("expiry left chunk peer bytes=%d", got)
+	}
+	if got := state.orphanBytesForPeer("peer-b"); got != 0 {
+		t.Fatalf("expiry left commit peer bytes=%d", got)
+	}
+}
+
+func TestDARelayAdvanceOrphanTTLDecrementsAndPreservesCompleteSets(t *testing.T) {
+	caps := defaultDARelayCaps()
+	caps.orphanTTLBlocks = 2
+	state := newDARelayStateForTest(t, caps)
+	stagedID := daRelayTestID(95)
+	completeID := daRelayTestID(96)
+	payload := []byte("complete-payload")
+
+	staged := mustAddDACommit(t, state, "peer-a", daRelayTestCommit(stagedID, 2, 5))
+	mustAddDACommit(t, state, "peer-b", daRelayTestCommitForPayloads(completeID, 3, payload))
+	complete := mustAddDAChunk(t, state, "peer-c", daRelayTestChunkPayload(completeID, 0, uint64(len(payload)), payload))
+	wantPinned := state.pinnedPayloadBytes
+	if complete.state != daRelayStateCompleteSet || wantPinned == 0 {
+		t.Fatalf("setup complete state=%v pinned=%d", complete.state, wantPinned)
+	}
+
+	expired, err := state.advanceOrphanTTL()
+	if err != nil {
+		t.Fatalf("first advance ttl: %v", err)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("first ttl advance expired=%+v, want none", expired)
+	}
+	if got := state.sets[stagedID].ttlBlocksRemaining; got != staged.ttlBlocksRemaining-1 {
+		t.Fatalf("staged ttl after first tick=%d, want %d", got, staged.ttlBlocksRemaining-1)
+	}
+	if _, ok := state.sets[completeID]; !ok || state.pinnedPayloadBytes != wantPinned {
+		t.Fatalf("first tick mutated complete set ok=%v pinned=%d want %d", ok, state.pinnedPayloadBytes, wantPinned)
+	}
+
+	expired, err = state.advanceOrphanTTL()
+	if err != nil {
+		t.Fatalf("second advance ttl: %v", err)
+	}
+	if len(expired) != 1 || expired[0].daID != stagedID {
+		t.Fatalf("second ttl advance expired=%+v, want staged da_id", expired)
+	}
+	if _, ok := state.sets[stagedID]; ok {
+		t.Fatalf("expired staged record was retained")
+	}
+	if got := state.sets[completeID]; got.state != daRelayStateCompleteSet || state.pinnedPayloadBytes != wantPinned {
+		t.Fatalf("second tick mutated complete set state=%v pinned=%d want %d", got.state, state.pinnedPayloadBytes, wantPinned)
+	}
+}
+
 func TestDARelayRejectedCandidatesDoNotMutateStoredChunks(t *testing.T) {
 	daID := daRelayTestID(5)
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
