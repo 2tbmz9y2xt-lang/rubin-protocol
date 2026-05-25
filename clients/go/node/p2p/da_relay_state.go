@@ -158,12 +158,16 @@ func newDARelayState(caps daRelayCaps) (*daRelayState, error) {
 	}, nil
 }
 
-func (s *daRelayState) nextMonotonicReceivedTime() uint64 {
+func (s *daRelayState) nextMonotonicReceivedTime() (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.nextReceivedTime++
-	return s.nextReceivedTime
+	receivedTime, err := s.nextReceivedTimeLocked()
+	if err != nil {
+		return 0, err
+	}
+	s.nextReceivedTime = receivedTime
+	return receivedTime, nil
 }
 
 func (s *daRelayState) nextReceivedTimeLocked() (uint64, error) {
@@ -383,7 +387,7 @@ func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
 	if r.commit.chunkCount == 0 {
 		return nil
 	}
-	missing := make([]uint16, 0)
+	var missing []uint16
 	for i := uint16(0); i < r.commit.chunkCount; i++ {
 		if _, ok := r.chunks[i]; !ok {
 			missing = append(missing, i)
@@ -431,10 +435,10 @@ func (r *daRelaySetRecord) recomputeOrphanTotals() error {
 }
 
 func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
-	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
 	if r.wireBytes == 0 {
-		return accounting, nil
+		return daRelayRecordAccounting{}, nil
 	}
+	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
 	accounting.orphanBytes = r.wireBytes
 	accounting.commitBytes = r.commit.wireBytes
 	if err := addPeerAccounting(accounting.peerBytes, r.commit.peerQuotaKey, r.commit.wireBytes); err != nil {

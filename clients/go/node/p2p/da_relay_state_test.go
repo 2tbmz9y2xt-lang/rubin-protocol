@@ -225,12 +225,43 @@ func TestDARelayReceivedTimeIsMonotonicLocalSequence(t *testing.T) {
 		t.Fatalf("new DA relay state: %v", err)
 	}
 
-	first := state.nextMonotonicReceivedTime()
-	second := state.nextMonotonicReceivedTime()
-	third := state.nextMonotonicReceivedTime()
+	first, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
+	second, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
+	third, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
 
 	if first != 1 || second != 2 || third != 3 {
 		t.Fatalf("received_time sequence = %d, %d, %d; want 1, 2, 3", first, second, third)
+	}
+}
+
+func TestDARelayReceivedTimeMonotonicAcrossMutationPaths(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+
+	first, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
+	chunkRecord := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daRelayTestID(51), 0, 1))
+	second, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
+	commitRecord := mustAddDACommit(t, state, "peer-b", daRelayTestCommit(daRelayTestID(52), 2, 1))
+
+	if !(first < chunkRecord.receivedTime && chunkRecord.receivedTime < second && second < commitRecord.receivedTime) {
+		t.Fatalf("received_time order first=%d chunk=%d second=%d commit=%d", first, chunkRecord.receivedTime, second, commitRecord.receivedTime)
+	}
+	if state.nextReceivedTime != commitRecord.receivedTime {
+		t.Fatalf("state received_time=%d, want %d", state.nextReceivedTime, commitRecord.receivedTime)
 	}
 }
 
@@ -260,6 +291,21 @@ func TestDARelayStagesCommitAndRetainsBoundedOrphans(t *testing.T) {
 	record.chunks[7] = daRelayTestChunk(daID, 7, 1)
 	if _, ok := state.sets[daID].chunks[7]; ok {
 		t.Fatalf("returned record aliases stored chunks")
+	}
+}
+
+func TestDARelayMissingChunkIndexesReturnsNilWhenComplete(t *testing.T) {
+	daID := daRelayTestID(53)
+	record := daRelaySetRecord{
+		commit: daRelayTestCommit(daID, 2, 1),
+		chunks: map[uint16]daRelayChunk{
+			0: daRelayTestChunk(daID, 0, 1),
+			1: daRelayTestChunk(daID, 1, 1),
+		},
+	}
+
+	if missing := record.missingChunkIndexes(); missing != nil {
+		t.Fatalf("missing chunk indexes = %v, want nil", missing)
 	}
 }
 
@@ -301,6 +347,8 @@ func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
 	requireDAErr(t, err, errDARelayChunkIndexOutsideCommit)
 	_, err = state.addDACommit("peer-a", daRelayTestCommit(daID, 0, 1))
 	requireDAErr(t, err, errDARelayChunkCountInvalid)
+	_, err = state.addDACommit("peer-a", daRelayTestCommit(daID, uint16(consensus.MAX_DA_CHUNK_COUNT+1), 1))
+	requireDAErr(t, err, errDARelayChunkCountInvalid)
 	_, err = state.addDAChunk("peer-a", daRelayTestChunk(daID, uint16(consensus.MAX_DA_CHUNK_COUNT), 1))
 	requireDAErr(t, err, errDARelayChunkIndexOutOfRange)
 
@@ -311,6 +359,27 @@ func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
 	mustAddDAChunk(t, overflowState, "peer-a", daRelayTestChunk(daID, 0, ^uint64(0)))
 	_, err = overflowState.addDACommit("peer-a", daRelayTestCommit(daID, 2, 1))
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
+
+	chunkOnlyOverflowState := newDARelayStateForTest(t, caps)
+	mustAddDAChunk(t, chunkOnlyOverflowState, "peer-a", daRelayTestChunk(daID, 0, ^uint64(0)))
+	_, err = chunkOnlyOverflowState.addDAChunk("peer-a", daRelayTestChunk(daID, 1, 1))
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if len(chunkOnlyOverflowState.sets[daID].chunks) != 1 {
+		t.Fatalf("chunk overflow mutated chunk set: got %d chunks", len(chunkOnlyOverflowState.sets[daID].chunks))
+	}
+}
+
+func TestDARelayZeroRecordAccountingDoesNotAllocatePeerBytes(t *testing.T) {
+	accounting, err := (daRelaySetRecord{}).orphanAccounting()
+	if err != nil {
+		t.Fatalf("zero record accounting: %v", err)
+	}
+	if accounting.orphanBytes != 0 || accounting.commitBytes != 0 {
+		t.Fatalf("zero accounting totals orphan=%d commit=%d, want 0", accounting.orphanBytes, accounting.commitBytes)
+	}
+	if accounting.peerBytes != nil {
+		t.Fatalf("zero accounting peer map = %#v, want nil", accounting.peerBytes)
+	}
 }
 
 func TestDARelayRejectsZeroWireBytesBeforeMutation(t *testing.T) {
