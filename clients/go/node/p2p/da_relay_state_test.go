@@ -478,6 +478,15 @@ func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
 	if state.sets[daID].commit.wireBytes != record.commit.wireBytes || state.orphanBytes != record.wireBytes {
 		t.Fatalf("duplicate commit mutated state: commit=%d orphan=%d want commit=%d orphan=%d", state.sets[daID].commit.wireBytes, state.orphanBytes, record.commit.wireBytes, record.wireBytes)
 	}
+	if got := state.sets[daID].commit.peerQuotaKey; got != peerQuotaKey("peer-a") {
+		t.Fatalf("duplicate commit peer=%q, want first peer", got)
+	}
+	if got := state.orphanBytesForPeer("peer-b"); got != 0 {
+		t.Fatalf("duplicate commit credited duplicate peer bytes=%d", got)
+	}
+	if got := state.sets[daID].receivedTime; got != record.receivedTime {
+		t.Fatalf("duplicate commit received_time=%d, want first-seen %d", got, record.receivedTime)
+	}
 
 	chunk := daRelayTestChunk(daID, 0, 7)
 	record = mustAddDAChunk(t, state, "peer-c", chunk)
@@ -486,6 +495,30 @@ func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
 	requireDAErr(t, err, errDARelayDuplicateChunk)
 	if len(state.sets[daID].chunks) != 1 || state.orphanBytes != record.wireBytes {
 		t.Fatalf("duplicate chunk mutated state: chunks=%d orphan=%d want orphan=%d", len(state.sets[daID].chunks), state.orphanBytes, record.wireBytes)
+	}
+}
+
+func TestDARelayDuplicateCommitAfterOrphanChunksKeepsFirstSeenState(t *testing.T) {
+	daID := daRelayTestID(92)
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+
+	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 7))
+	record := mustAddDACommit(t, state, "peer-b", daRelayTestCommit(daID, 2, 3))
+
+	_, err := state.addDACommit("peer-c", daRelayTestCommit(daID, 2, 11))
+	requireDAErr(t, err, errDARelayDuplicateCommit)
+	stored := state.sets[daID]
+	if stored.commit.wireBytes != record.commit.wireBytes || stored.commit.peerQuotaKey != peerQuotaKey("peer-b") {
+		t.Fatalf("duplicate commit replaced first commit: wire=%d peer=%q", stored.commit.wireBytes, stored.commit.peerQuotaKey)
+	}
+	if stored.receivedTime != record.receivedTime || state.nextReceivedTime != record.receivedTime {
+		t.Fatalf("duplicate commit time record=%d state=%d want %d", stored.receivedTime, state.nextReceivedTime, record.receivedTime)
+	}
+	if _, ok := stored.chunks[0]; !ok {
+		t.Fatal("duplicate commit dropped first-seen orphan chunk")
+	}
+	if got := state.orphanBytesForPeer("peer-c"); got != 0 {
+		t.Fatalf("duplicate commit credited duplicate peer bytes=%d", got)
 	}
 }
 
