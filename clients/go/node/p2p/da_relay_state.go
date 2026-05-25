@@ -140,7 +140,14 @@ var (
 	errDARelayPayloadCommitmentMismatch = errors.New("da payload commitment mismatch")
 	errDARelayWireBytesInvalid          = errors.New("da relay wire bytes invalid")
 	errDARelayPinnedPayloadCapExceeded  = errors.New("da pinned payload cap exceeded")
+	errDARelayArithmeticOverflow        = errors.New("da relay arithmetic overflow")
 )
+
+type daRelayRecordAccounting struct {
+	orphanBytes uint64
+	commitBytes uint64
+	peerBytes   map[string]uint64
+}
 
 type daRelayState struct {
 	mu                        sync.Mutex
@@ -222,7 +229,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record := s.sets[commit.daID].clone()
+	record := s.sets[commit.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if record.commit.chunkCount != 0 {
 		return daRelaySetRecord{}, errDARelayDuplicateCommit
@@ -255,7 +262,7 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	if payloadLen == 0 || uint64(payloadLen) > consensus.CHUNK_BYTES {
 		return daRelaySetRecord{}, errDARelayChunkPayloadSizeInvalid
 	}
-	if chunk.wireBytes < uint64(payloadLen) {
+	if chunk.wireBytes == 0 || chunk.wireBytes < uint64(payloadLen) {
 		return daRelaySetRecord{}, errDARelayWireBytesInvalid
 	}
 	payload := cloneBytes(chunk.payload)
@@ -266,7 +273,7 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record := s.sets[chunk.daID].clone()
+	record := s.sets[chunk.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if _, exists := record.chunks[chunk.chunkIndex]; exists {
 		return daRelaySetRecord{}, errDARelayDuplicateChunk
@@ -296,89 +303,114 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 }
 
 func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
-	records := make(map[[32]byte]daRelaySetRecord, len(s.sets)+1)
-	for daID, existing := range s.sets {
-		records[daID] = existing
-	}
-	records[record.daID] = record.clone()
-
-	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingLocked(records)
+	oldRecord := s.sets[record.daID]
+	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record)
 	if err != nil {
 		return err
 	}
-	pinnedBytes, err := s.projectPinnedPayloadLocked(records)
+	pinnedBytes, err := s.projectPinnedPayloadDeltaLocked(oldRecord, record)
 	if err != nil {
 		return err
 	}
-	s.sets = records
+	s.sets[record.daID] = record.cloneForStateMutation()
 	s.orphanBytes = orphanBytes
-	s.orphanBytesByPeerQuotaKey = peerBytes
-	s.orphanBytesByDAID = daBytes
+	s.applyProjectedPeerBytes(peerBytes)
+	s.applyProjectedDAIDBytes(record.daID, daBytes)
 	s.orphanCommitOverheadBytes = commitBytes
 	s.pinnedPayloadBytes = pinnedBytes
 	s.nextReceivedTime = record.receivedTime
 	return nil
 }
 
-func (s *daRelayState) projectOrphanAccountingLocked(records map[[32]byte]daRelaySetRecord) (uint64, map[string]uint64, map[[32]byte]uint64, uint64, error) {
-	peerBytes := map[string]uint64{}
-	daBytes := map[[32]byte]uint64{}
-	var orphanBytes uint64
-	var commitBytes uint64
-	for daID, record := range records {
-		if record.state == daRelayStateCompleteSet || record.wireBytes == 0 {
-			continue
-		}
-		var err error
-		orphanBytes, err = checkedAddUint64(orphanBytes, record.wireBytes)
-		if err != nil || orphanBytes > s.caps.orphanPoolBytes {
-			return 0, nil, nil, 0, errDARelayOrphanPoolCapExceeded
-		}
-		daBytes[daID], err = checkedAddUint64(daBytes[daID], record.wireBytes)
-		if err != nil || daBytes[daID] > s.caps.orphanPoolPerDAIDBytes {
-			return 0, nil, nil, 0, errDARelayOrphanDAIDCapExceeded
-		}
-		commitBytes, err = checkedAddUint64(commitBytes, record.commit.wireBytes)
-		if err != nil || commitBytes > s.caps.orphanCommitOverheadBytes {
-			return 0, nil, nil, 0, errDARelayOrphanCommitCapExceeded
-		}
-		if err := s.addProjectedPeerBytes(peerBytes, record.commit.peerQuotaKey, record.commit.wireBytes); err != nil {
-			return 0, nil, nil, 0, err
-		}
-		for _, chunk := range record.chunks {
-			if err := s.addProjectedPeerBytes(peerBytes, chunk.peerQuotaKey, chunk.wireBytes); err != nil {
-				return 0, nil, nil, 0, err
-			}
-		}
+func (s *daRelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, map[string]uint64, uint64, uint64, error) {
+	oldAccounting, err := oldRecord.orphanAccounting()
+	if err != nil {
+		return 0, nil, 0, 0, err
+	}
+	newAccounting, err := newRecord.orphanAccounting()
+	if err != nil {
+		return 0, nil, 0, 0, err
+	}
+	orphanBytes, err := checkedApplyUint64Delta(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes)
+	if err != nil {
+		return 0, nil, 0, 0, err
+	}
+	if orphanBytes > s.caps.orphanPoolBytes {
+		return 0, nil, 0, 0, errDARelayOrphanPoolCapExceeded
+	}
+	daBytes, err := checkedApplyUint64Delta(s.orphanBytesByDAID[newRecord.daID], oldAccounting.orphanBytes, newAccounting.orphanBytes)
+	if err != nil {
+		return 0, nil, 0, 0, err
+	}
+	if daBytes > s.caps.orphanPoolPerDAIDBytes {
+		return 0, nil, 0, 0, errDARelayOrphanDAIDCapExceeded
+	}
+	commitBytes, err := checkedApplyUint64Delta(s.orphanCommitOverheadBytes, oldAccounting.commitBytes, newAccounting.commitBytes)
+	if err != nil {
+		return 0, nil, 0, 0, err
+	}
+	if commitBytes > s.caps.orphanCommitOverheadBytes {
+		return 0, nil, 0, 0, errDARelayOrphanCommitCapExceeded
+	}
+	peerBytes, err := s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes)
+	if err != nil {
+		return 0, nil, 0, 0, err
 	}
 	return orphanBytes, peerBytes, daBytes, commitBytes, nil
 }
 
-func (s *daRelayState) projectPinnedPayloadLocked(records map[[32]byte]daRelaySetRecord) (uint64, error) {
-	var pinnedBytes uint64
-	for _, record := range records {
-		if record.state != daRelayStateCompleteSet || record.payloadBytes == 0 {
-			continue
-		}
-		var err error
-		pinnedBytes, err = checkedAddUint64(pinnedBytes, record.payloadBytes)
-		if err != nil || pinnedBytes > s.caps.pinnedPayloadBytes {
-			return 0, errDARelayPinnedPayloadCapExceeded
-		}
+func (s *daRelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, error) {
+	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, oldRecord.pinnedPayloadAccountingBytes(), newRecord.pinnedPayloadAccountingBytes())
+	if err != nil || pinnedBytes > s.caps.pinnedPayloadBytes {
+		return 0, errDARelayPinnedPayloadCapExceeded
 	}
 	return pinnedBytes, nil
 }
 
-func (s *daRelayState) addProjectedPeerBytes(peerBytes map[string]uint64, key string, bytes uint64) error {
-	if key == "" || bytes == 0 {
-		return nil
+func (s *daRelayState) projectPeerAccountingDeltaLocked(oldPeerBytes, newPeerBytes map[string]uint64) (map[string]uint64, error) {
+	projected := map[string]uint64{}
+	for key, oldBytes := range oldPeerBytes {
+		value, err := checkedApplyUint64Delta(s.orphanBytesByPeerQuotaKey[key], oldBytes, newPeerBytes[key])
+		if err != nil {
+			return nil, err
+		}
+		if value > s.caps.orphanPoolPerPeerBytes {
+			return nil, errDARelayOrphanPeerCapExceeded
+		}
+		projected[key] = value
 	}
-	var err error
-	peerBytes[key], err = checkedAddUint64(peerBytes[key], bytes)
-	if err != nil || peerBytes[key] > s.caps.orphanPoolPerPeerBytes {
-		return errDARelayOrphanPeerCapExceeded
+	for key, newBytes := range newPeerBytes {
+		if _, seen := oldPeerBytes[key]; seen {
+			continue
+		}
+		value, err := checkedApplyUint64Delta(s.orphanBytesByPeerQuotaKey[key], 0, newBytes)
+		if err != nil {
+			return nil, err
+		}
+		if value > s.caps.orphanPoolPerPeerBytes {
+			return nil, errDARelayOrphanPeerCapExceeded
+		}
+		projected[key] = value
 	}
-	return nil
+	return projected, nil
+}
+
+func (s *daRelayState) applyProjectedPeerBytes(projected map[string]uint64) {
+	for key, bytes := range projected {
+		if bytes == 0 {
+			delete(s.orphanBytesByPeerQuotaKey, key)
+			continue
+		}
+		s.orphanBytesByPeerQuotaKey[key] = bytes
+	}
+}
+
+func (s *daRelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
+	if bytes == 0 {
+		delete(s.orphanBytesByDAID, daID)
+		return
+	}
+	s.orphanBytesByDAID[daID] = bytes
 }
 
 func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
@@ -407,11 +439,21 @@ func (r daRelaySetRecord) evictionAccounting() (daRelayEvictionAccounting, bool)
 }
 
 func (r daRelaySetRecord) clone() daRelaySetRecord {
+	return r.cloneWithPayloads(true)
+}
+
+func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
+	return r.cloneWithPayloads(false)
+}
+
+func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	r.ensureMaps()
 	out := r
 	out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))
 	for index, chunk := range r.chunks {
-		chunk.payload = cloneBytes(chunk.payload)
+		if copyPayloads {
+			chunk.payload = cloneBytes(chunk.payload)
+		}
 		out.chunks[index] = chunk
 	}
 	return out
@@ -441,12 +483,6 @@ func (r *daRelaySetRecord) tryComplete(dropChunksOnCommitMismatch bool) error {
 	var payloadBytes uint64
 	for i := uint16(0); i < r.commit.chunkCount; i++ {
 		chunk := r.chunks[i]
-		if sha3.Sum256(chunk.payload) != chunk.chunkHash {
-			delete(r.chunks, i)
-			r.payloadBytes = 0
-			r.state = daRelayStateStagedCommit
-			return errDARelayChunkHashMismatch
-		}
 		var err error
 		payloadBytes, err = checkedAddUint64(payloadBytes, uint64(len(chunk.payload)))
 		if err != nil {
@@ -487,9 +523,50 @@ func (r *daRelaySetRecord) recomputeOrphanTotals() error {
 	return nil
 }
 
+func (r daRelaySetRecord) pinnedPayloadAccountingBytes() uint64 {
+	if r.state != daRelayStateCompleteSet || r.payloadBytes == 0 {
+		return 0
+	}
+	return r.payloadBytes
+}
+
+func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
+	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
+	if r.state == daRelayStateCompleteSet || r.wireBytes == 0 {
+		return accounting, nil
+	}
+	accounting.orphanBytes = r.wireBytes
+	accounting.commitBytes = r.commit.wireBytes
+	if err := addPeerAccounting(accounting.peerBytes, r.commit.peerQuotaKey, r.commit.wireBytes); err != nil {
+		return daRelayRecordAccounting{}, err
+	}
+	for _, chunk := range r.chunks {
+		if err := addPeerAccounting(accounting.peerBytes, chunk.peerQuotaKey, chunk.wireBytes); err != nil {
+			return daRelayRecordAccounting{}, err
+		}
+	}
+	return accounting, nil
+}
+
+func addPeerAccounting(peerBytes map[string]uint64, key string, bytes uint64) error {
+	if key == "" || bytes == 0 {
+		return nil
+	}
+	var err error
+	peerBytes[key], err = checkedAddUint64(peerBytes[key], bytes)
+	return err
+}
+
+func checkedApplyUint64Delta(current uint64, remove uint64, add uint64) (uint64, error) {
+	if current < remove {
+		return 0, errDARelayArithmeticOverflow
+	}
+	return checkedAddUint64(current-remove, add)
+}
+
 func checkedAddUint64(a uint64, b uint64) (uint64, error) {
 	if ^uint64(0)-a < b {
-		return 0, errDARelayOrphanPoolCapExceeded
+		return 0, errDARelayArithmeticOverflow
 	}
 	return a + b, nil
 }
