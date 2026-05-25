@@ -221,11 +221,11 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	record := s.sets[commit.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if record.commit.chunkCount != 0 {
+		s.mu.Unlock()
 		return daRelaySetRecord{}, errDARelayDuplicateCommit
 	}
 	c := commit
@@ -236,15 +236,19 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	record.state = daRelayStateStagedCommit
 	record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
 	record.receivedTime = s.nextReceivedTime + 1
-	if err := record.tryComplete(true); err != nil {
+	if err := record.tryComplete(false); err != nil {
+		s.mu.Unlock()
 		return daRelaySetRecord{}, err
 	}
 	if err := record.recomputeOrphanTotals(); err != nil {
+		s.mu.Unlock()
 		return daRelaySetRecord{}, err
 	}
 	if err := s.applyDASetRecordLocked(record); err != nil {
+		s.mu.Unlock()
 		return daRelaySetRecord{}, err
 	}
+	s.mu.Unlock()
 	return record.clone(), nil
 }
 
@@ -274,11 +278,11 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	payload := cloneBytes(chunk.payload)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	record = s.sets[chunk.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
+		s.mu.Unlock()
 		return daRelaySetRecord{}, err
 	}
 	chunk.peerQuotaKey = peerQuotaKey(peerAddr)
@@ -291,14 +295,18 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	record.chunks[chunk.chunkIndex] = chunk
 	record.receivedTime = s.nextReceivedTime + 1
 	if err := record.tryComplete(false); err != nil {
+		s.mu.Unlock()
 		return daRelaySetRecord{}, err
 	}
 	if err := record.recomputeOrphanTotals(); err != nil {
+		s.mu.Unlock()
 		return daRelaySetRecord{}, err
 	}
 	if err := s.applyDASetRecordLocked(record); err != nil {
+		s.mu.Unlock()
 		return daRelaySetRecord{}, err
 	}
+	s.mu.Unlock()
 	return record.clone(), nil
 }
 
