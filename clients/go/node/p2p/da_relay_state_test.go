@@ -269,6 +269,7 @@ func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
 
 	chunk := daRelayTestChunk(daID, 0, 7)
 	record = mustAddDAChunk(t, state, "peer-c", chunk)
+	chunk.chunkHash[0] ^= 0xff
 	_, err = state.addDAChunk("peer-d", chunk)
 	requireDAErr(t, err, errDARelayDuplicateChunk)
 	if len(state.sets[daID].chunks) != 1 || state.orphanBytes != record.wireBytes {
@@ -294,11 +295,16 @@ func TestDARelayRejectedCandidatesDoNotMutateStoredChunks(t *testing.T) {
 	state = newDARelayStateForTest(t, defaultDARelayCaps())
 	mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 2, 1))
 	state.caps.orphanPoolPerDAIDBytes = state.orphanBytes
-	_, err = state.addDAChunk("peer-b", daRelayTestChunk(daID, 1, 1))
+	chunk := daRelayTestChunk(daID, 1, 1)
+	_, err = state.addDAChunk("peer-b", chunk)
 	requireDAErr(t, err, errDARelayOrphanDAIDCapExceeded)
 	if _, ok := state.sets[daID].chunks[1]; ok {
 		t.Fatalf("failed chunk insert mutated stored staged record")
 	}
+	chunk.chunkIndex = 2
+	chunk.chunkHash[0] ^= 0xff
+	_, err = state.addDAChunk("peer-b", chunk)
+	requireDAErr(t, err, errDARelayChunkIndexOutsideCommit)
 }
 
 func TestDARelayCompletesSetAndPinsPayload(t *testing.T) {

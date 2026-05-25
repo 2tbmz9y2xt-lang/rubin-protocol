@@ -259,21 +259,27 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	if chunk.wireBytes == 0 || chunk.wireBytes < uint64(payloadLen) {
 		return daRelaySetRecord{}, errDARelayWireBytesInvalid
 	}
-	payload := cloneBytes(chunk.payload)
-	if sha3.Sum256(payload) != chunk.chunkHash {
+
+	s.mu.Lock()
+	record := s.sets[chunk.daID]
+	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
+		s.mu.Unlock()
+		return daRelaySetRecord{}, err
+	}
+	s.mu.Unlock()
+
+	if sha3.Sum256(chunk.payload) != chunk.chunkHash {
 		return daRelaySetRecord{}, errDARelayChunkHashMismatch
 	}
+	payload := cloneBytes(chunk.payload)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record := s.sets[chunk.daID].cloneForStateMutation()
+	record = s.sets[chunk.daID].cloneForStateMutation()
 	record.ensureMaps()
-	if _, exists := record.chunks[chunk.chunkIndex]; exists {
-		return daRelaySetRecord{}, errDARelayDuplicateChunk
-	}
-	if record.commit.chunkCount != 0 && chunk.chunkIndex >= record.commit.chunkCount {
-		return daRelaySetRecord{}, errDARelayChunkIndexOutsideCommit
+	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
+		return daRelaySetRecord{}, err
 	}
 	chunk.peerQuotaKey = peerQuotaKey(peerAddr)
 	record.daID = chunk.daID
@@ -453,6 +459,16 @@ func (r *daRelaySetRecord) pruneChunksOutsideCommit() {
 			delete(r.chunks, index)
 		}
 	}
+}
+
+func (r daRelaySetRecord) validateChunkInsert(chunkIndex uint16) error {
+	if _, exists := r.chunks[chunkIndex]; exists {
+		return errDARelayDuplicateChunk
+	}
+	if r.commit.chunkCount != 0 && chunkIndex >= r.commit.chunkCount {
+		return errDARelayChunkIndexOutsideCommit
+	}
+	return nil
 }
 
 func (r *daRelaySetRecord) tryComplete(dropChunksOnCommitMismatch bool) error {
