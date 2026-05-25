@@ -711,22 +711,36 @@ func TestDARelayRejectsSingleCandidateMismatchWithoutRetry(t *testing.T) {
 	payload := []byte("payload")
 	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, []byte("different")))
 
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := state.addDAChunk("peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload)), payload))
-		errCh <- err
-	}()
-
-	select {
-	case err := <-errCh:
-		requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
-	case <-time.After(2 * time.Second):
-		t.Fatal("single-candidate commitment mismatch did not return")
-	}
+	requireAddDAChunkErrWithin(t, state, "peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload)), payload), errDARelayPayloadCommitmentMismatch)
 
 	record := state.sets[daID]
 	if record.state != daRelayStateStagedCommit || len(record.chunks) != 0 || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("single-candidate mismatch mutated state: state=%v chunks=%d pinned=%d", record.state, len(record.chunks), state.pinnedPayloadBytes)
+	}
+}
+
+func TestDARelayRejectsBadReplaceableReplacementWithoutRetry(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(64)
+	payload0 := []byte("payload-a")
+	payload1 := []byte("payload-b")
+	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload0, payload1))
+	mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), []byte("stale")))
+	_, err := state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
+	requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
+	if !state.sets[daID].replaceableChunks[0] {
+		t.Fatalf("setup did not mark stale chunk replaceable")
+	}
+	record := mustAddDAChunk(t, state, "peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
+	if record.state != daRelayStateStagedCommit || !record.replaceableChunks[0] || len(record.chunks) != 2 {
+		t.Fatalf("setup did not retain replaceable stale chunk with other chunk present: state=%v replaceable=%v chunks=%d", record.state, record.replaceableChunks, len(record.chunks))
+	}
+
+	requireAddDAChunkErrWithin(t, state, "peer-d", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), []byte("also-bad")), errDARelayPayloadCommitmentMismatch)
+
+	record = state.sets[daID]
+	if !record.replaceableChunks[0] || len(record.chunks) != 2 || state.pinnedPayloadBytes != 0 {
+		t.Fatalf("bad replacement mismatch mutated state: replaceable=%v chunks=%d pinned=%d", record.replaceableChunks, len(record.chunks), state.pinnedPayloadBytes)
 	}
 }
 
@@ -908,6 +922,13 @@ func TestDARelayMarkMatchingChunksRejectsNoopSnapshots(t *testing.T) {
 	retry, err = state.markMatchingCompletionChunksReplaceable(snapshot)
 	if err != nil || retry {
 		t.Fatalf("empty matching mark retry=%v err=%v, want false nil", retry, err)
+	}
+
+	stagedRecord.chunks[0] = daRelayTestChunkPayload(daID, 0, uint64(len(payload)), []byte("wrong"))
+	state.sets[daID] = stagedRecord
+	retry, err = state.markMatchingCompletionChunksReplaceable(snapshot)
+	if err != nil || retry {
+		t.Fatalf("mismatched matching mark retry=%v err=%v, want false nil", retry, err)
 	}
 }
 
@@ -1106,6 +1127,21 @@ func requireDAErr(t *testing.T, got error, want error) {
 	t.Helper()
 	if !errors.Is(got, want) {
 		t.Fatalf("err=%v, want %v", got, want)
+	}
+}
+
+func requireAddDAChunkErrWithin(t *testing.T, state *daRelayState, peer string, chunk daRelayChunk, want error) {
+	t.Helper()
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := state.addDAChunk(peer, chunk)
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		requireDAErr(t, err, want)
+	case <-time.After(2 * time.Second):
+		t.Fatal("add DA chunk did not return")
 	}
 }
 

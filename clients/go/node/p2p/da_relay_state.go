@@ -694,7 +694,7 @@ func (s *daRelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayC
 	}
 	indexes, ok := record.matchingCompletionChunkIndexes(snapshot)
 	if !ok {
-		return true, nil
+		return false, nil
 	}
 	if len(indexes) == 0 {
 		return false, nil
