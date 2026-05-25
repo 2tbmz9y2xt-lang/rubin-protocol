@@ -326,6 +326,38 @@ func TestDARelayCompletesSetAndPinsPayload(t *testing.T) {
 	}
 }
 
+func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T) {
+	daID := daRelayTestID(6)
+	record := daRelaySetRecord{
+		daID: daID,
+		chunks: map[uint16]daRelayChunk{
+			0: daRelayTestChunkPayload(daID, 0, 17, []byte("immutable-payload")),
+		},
+	}
+
+	stateClone := record.cloneForStateMutation()
+	originalChunk := record.chunks[0]
+	stateChunk := stateClone.chunks[0]
+	if &stateChunk.payload[0] != &originalChunk.payload[0] {
+		t.Fatalf("state mutation clone deep-copied payload")
+	}
+	stateClone.chunks[1] = daRelayTestChunkPayload(daID, 1, 1, []byte("second"))
+	if _, ok := record.chunks[1]; ok {
+		t.Fatalf("state mutation clone aliases chunk map")
+	}
+
+	callerClone := record.clone()
+	callerChunk := callerClone.chunks[0]
+	if &callerChunk.payload[0] == &originalChunk.payload[0] {
+		t.Fatalf("caller clone reused payload")
+	}
+	callerChunk.payload[0] ^= 0xff
+	callerClone.chunks[0] = callerChunk
+	if record.chunks[0].payload[0] == callerClone.chunks[0].payload[0] {
+		t.Fatalf("caller clone aliases stored payload")
+	}
+}
+
 func TestDARelayRejectsIntegrityAndPinnedCapBeforeMutation(t *testing.T) {
 	daID := daRelayTestID(6)
 	state := newDARelayStateForTest(t, defaultDARelayCaps())

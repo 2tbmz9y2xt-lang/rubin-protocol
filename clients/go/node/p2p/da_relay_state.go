@@ -223,7 +223,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record := s.sets[commit.daID].clone()
+	record := s.sets[commit.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if record.commit.chunkCount != 0 {
 		return daRelaySetRecord{}, errDARelayDuplicateCommit
@@ -267,7 +267,7 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record := s.sets[chunk.daID].clone()
+	record := s.sets[chunk.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if _, exists := record.chunks[chunk.chunkIndex]; exists {
 		return daRelaySetRecord{}, errDARelayDuplicateChunk
@@ -306,7 +306,7 @@ func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	if err != nil {
 		return err
 	}
-	s.sets[record.daID] = record.clone()
+	s.sets[record.daID] = record.cloneForStateMutation()
 	s.orphanBytes = orphanBytes
 	s.applyProjectedPeerBytes(peerBytes)
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
@@ -421,11 +421,21 @@ func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
 }
 
 func (r daRelaySetRecord) clone() daRelaySetRecord {
+	return r.cloneWithPayloads(true)
+}
+
+func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
+	return r.cloneWithPayloads(false)
+}
+
+func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	r.ensureMaps()
 	out := r
 	out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))
 	for index, chunk := range r.chunks {
-		chunk.payload = cloneBytes(chunk.payload)
+		if copyPayloads {
+			chunk.payload = cloneBytes(chunk.payload)
+		}
 		out.chunks[index] = chunk
 	}
 	return out
@@ -455,12 +465,6 @@ func (r *daRelaySetRecord) tryComplete(dropChunksOnCommitMismatch bool) error {
 	var payloadBytes uint64
 	for i := uint16(0); i < r.commit.chunkCount; i++ {
 		chunk := r.chunks[i]
-		if sha3.Sum256(chunk.payload) != chunk.chunkHash {
-			delete(r.chunks, i)
-			r.payloadBytes = 0
-			r.state = daRelayStateStagedCommit
-			return errDARelayChunkHashMismatch
-		}
 		var err error
 		payloadBytes, err = checkedAddUint64(payloadBytes, uint64(len(chunk.payload)))
 		if err != nil {
