@@ -3,6 +3,8 @@ package p2p
 import (
 	"crypto/sha3"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -613,6 +615,46 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	callerClone.replaceableChunks[1] = true
 	if record.replaceableChunks[1] {
 		t.Fatalf("caller clone aliases replaceable chunk map")
+	}
+}
+
+func TestDARelayEvictionAccountingHidesUnavailableFee(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(90)
+	payload0 := []byte("chunk-zero")
+	payload1 := []byte("chunk-one")
+
+	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 3, payload0, payload1))
+	mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
+	record := mustAddDAChunk(t, state, "peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
+
+	accounting, ok := record.evictionAccounting()
+	if !ok {
+		t.Fatal("complete DA set did not expose eviction accounting")
+	}
+	if accounting.daID != daID {
+		t.Fatalf("eviction da_id=%x, want %x", accounting.daID, daID)
+	}
+	if accounting.payloadBytes != record.payloadBytes || accounting.wireBytes != record.wireBytes || accounting.receivedTime != record.receivedTime {
+		t.Fatalf("eviction accounting = %+v, want payload=%d wire=%d received=%d", accounting, record.payloadBytes, record.wireBytes, record.receivedTime)
+	}
+
+	accountingType := reflect.TypeOf(accounting)
+	for i := 0; i < accountingType.NumField(); i++ {
+		if strings.Contains(strings.ToLower(accountingType.Field(i).Name), "fee") {
+			t.Fatalf("eviction accounting exposes unavailable fee field %q", accountingType.Field(i).Name)
+		}
+	}
+}
+
+func TestDARelayEvictionAccountingRejectsIncompleteSet(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(91)
+	payload := []byte("chunk-zero")
+
+	record := mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 3, payload))
+	if _, ok := record.evictionAccounting(); ok {
+		t.Fatal("incomplete DA set exposed eviction accounting")
 	}
 }
 
