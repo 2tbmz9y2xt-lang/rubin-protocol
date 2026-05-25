@@ -162,6 +162,46 @@ func TestDARelayPeerQuotaKeyPreventsPortHopping(t *testing.T) {
 	})
 }
 
+func TestDARelayEmptyPeerQuotaKeyIsCapped(t *testing.T) {
+	t.Run("chunk only", func(t *testing.T) {
+		caps := defaultDARelayCaps()
+		caps.orphanPoolPerPeerBytes = 10
+		state := newDARelayStateForTest(t, caps)
+		firstID := daRelayTestID(45)
+		secondID := daRelayTestID(46)
+
+		record := mustAddDAChunk(t, state, "", daRelayTestChunk(firstID, 0, 6))
+		_, err := state.addDAChunk("", daRelayTestChunk(secondID, 0, 5))
+		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
+
+		if got := state.orphanBytesForPeer(""); got != record.wireBytes {
+			t.Fatalf("empty peer quota bytes = %d, want %d", got, record.wireBytes)
+		}
+		if _, ok := state.sets[secondID]; ok {
+			t.Fatalf("empty-peer cap rejection mutated state")
+		}
+	})
+
+	t.Run("staged commit", func(t *testing.T) {
+		caps := defaultDARelayCaps()
+		caps.orphanPoolPerPeerBytes = 10
+		state := newDARelayStateForTest(t, caps)
+		firstID := daRelayTestID(47)
+		secondID := daRelayTestID(48)
+
+		record := mustAddDACommit(t, state, "", daRelayTestCommit(firstID, 2, 6))
+		_, err := state.addDACommit("", daRelayTestCommit(secondID, 2, 5))
+		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
+
+		if got := state.orphanBytesForPeer(""); got != record.wireBytes {
+			t.Fatalf("empty peer quota bytes = %d, want %d", got, record.wireBytes)
+		}
+		if _, ok := state.sets[secondID]; ok {
+			t.Fatalf("empty-peer commit cap rejection mutated state")
+		}
+	})
+}
+
 func TestDARelayDAIDAccountingDeletesZeroBytes(t *testing.T) {
 	state, err := newDARelayState(defaultDARelayCaps())
 	if err != nil {
@@ -187,12 +227,43 @@ func TestDARelayReceivedTimeIsMonotonicLocalSequence(t *testing.T) {
 		t.Fatalf("new DA relay state: %v", err)
 	}
 
-	first := state.nextMonotonicReceivedTime()
-	second := state.nextMonotonicReceivedTime()
-	third := state.nextMonotonicReceivedTime()
+	first, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
+	second, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
+	third, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
 
 	if first != 1 || second != 2 || third != 3 {
 		t.Fatalf("received_time sequence = %d, %d, %d; want 1, 2, 3", first, second, third)
+	}
+}
+
+func TestDARelayReceivedTimeMonotonicAcrossMutationPaths(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+
+	first, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
+	chunkRecord := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daRelayTestID(51), 0, 1))
+	second, err := state.nextMonotonicReceivedTime()
+	if err != nil {
+		t.Fatalf("next received time: %v", err)
+	}
+	commitRecord := mustAddDACommit(t, state, "peer-b", daRelayTestCommit(daRelayTestID(52), 2, 1))
+
+	if !(first < chunkRecord.receivedTime && chunkRecord.receivedTime < second && second < commitRecord.receivedTime) {
+		t.Fatalf("received_time order first=%d chunk=%d second=%d commit=%d", first, chunkRecord.receivedTime, second, commitRecord.receivedTime)
+	}
+	if state.nextReceivedTime != commitRecord.receivedTime {
+		t.Fatalf("state received_time=%d, want %d", state.nextReceivedTime, commitRecord.receivedTime)
 	}
 }
 
@@ -222,6 +293,21 @@ func TestDARelayStagesCommitAndRetainsBoundedOrphans(t *testing.T) {
 	record.chunks[7] = daRelayTestChunk(daID, 7, 1)
 	if _, ok := state.sets[daID].chunks[7]; ok {
 		t.Fatalf("returned record aliases stored chunks")
+	}
+}
+
+func TestDARelayMissingChunkIndexesReturnsNilWhenComplete(t *testing.T) {
+	daID := daRelayTestID(53)
+	record := daRelaySetRecord{
+		commit: daRelayTestCommit(daID, 2, 1),
+		chunks: map[uint16]daRelayChunk{
+			0: daRelayTestChunk(daID, 0, 1),
+			1: daRelayTestChunk(daID, 1, 1),
+		},
+	}
+
+	if missing := record.missingChunkIndexes(); missing != nil {
+		t.Fatalf("missing chunk indexes = %v, want nil", missing)
 	}
 }
 
@@ -263,6 +349,8 @@ func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
 	requireDAErr(t, err, errDARelayChunkIndexOutsideCommit)
 	_, err = state.addDACommit("peer-a", daRelayTestCommit(daID, 0, 1))
 	requireDAErr(t, err, errDARelayChunkCountInvalid)
+	_, err = state.addDACommit("peer-a", daRelayTestCommit(daID, uint16(consensus.MAX_DA_CHUNK_COUNT+1), 1))
+	requireDAErr(t, err, errDARelayChunkCountInvalid)
 	_, err = state.addDAChunk("peer-a", daRelayTestChunk(daID, uint16(consensus.MAX_DA_CHUNK_COUNT), 1))
 	requireDAErr(t, err, errDARelayChunkIndexOutOfRange)
 
@@ -273,6 +361,27 @@ func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
 	mustAddDAChunk(t, overflowState, "peer-a", daRelayTestChunk(daID, 0, ^uint64(0)))
 	_, err = overflowState.addDACommit("peer-a", daRelayTestCommit(daID, 2, 1))
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
+
+	chunkOnlyOverflowState := newDARelayStateForTest(t, caps)
+	mustAddDAChunk(t, chunkOnlyOverflowState, "peer-a", daRelayTestChunk(daID, 0, ^uint64(0)))
+	_, err = chunkOnlyOverflowState.addDAChunk("peer-a", daRelayTestChunk(daID, 1, 1))
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if len(chunkOnlyOverflowState.sets[daID].chunks) != 1 {
+		t.Fatalf("chunk overflow mutated chunk set: got %d chunks", len(chunkOnlyOverflowState.sets[daID].chunks))
+	}
+}
+
+func TestDARelayZeroRecordAccountingDoesNotAllocatePeerBytes(t *testing.T) {
+	accounting, err := (daRelaySetRecord{}).orphanAccounting()
+	if err != nil {
+		t.Fatalf("zero record accounting: %v", err)
+	}
+	if accounting.orphanBytes != 0 || accounting.commitBytes != 0 {
+		t.Fatalf("zero accounting totals orphan=%d commit=%d, want 0", accounting.orphanBytes, accounting.commitBytes)
+	}
+	if accounting.peerBytes != nil {
+		t.Fatalf("zero accounting peer map = %#v, want nil", accounting.peerBytes)
+	}
 }
 
 func TestDARelayRejectsZeroWireBytesBeforeMutation(t *testing.T) {
@@ -286,6 +395,26 @@ func TestDARelayRejectsZeroWireBytesBeforeMutation(t *testing.T) {
 
 	if len(state.sets) != 0 || state.orphanBytes != 0 || state.orphanCommitOverheadBytes != 0 {
 		t.Fatalf("zero wire rejection mutated state: sets=%d orphan=%d commit=%d", len(state.sets), state.orphanBytes, state.orphanCommitOverheadBytes)
+	}
+}
+
+func TestDARelayRejectsReceivedTimeOverflowBeforeMutation(t *testing.T) {
+	chunkState := newDARelayStateForTest(t, defaultDARelayCaps())
+	chunkState.nextReceivedTime = ^uint64(0)
+	chunkID := daRelayTestID(49)
+	_, err := chunkState.addDAChunk("peer-a", daRelayTestChunk(chunkID, 0, 1))
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if len(chunkState.sets) != 0 || chunkState.nextReceivedTime != ^uint64(0) {
+		t.Fatalf("chunk time overflow mutated state: sets=%d time=%d", len(chunkState.sets), chunkState.nextReceivedTime)
+	}
+
+	commitState := newDARelayStateForTest(t, defaultDARelayCaps())
+	commitState.nextReceivedTime = ^uint64(0)
+	commitID := daRelayTestID(50)
+	_, err = commitState.addDACommit("peer-a", daRelayTestCommit(commitID, 2, 1))
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if len(commitState.sets) != 0 || commitState.nextReceivedTime != ^uint64(0) {
+		t.Fatalf("commit time overflow mutated state: sets=%d time=%d", len(commitState.sets), commitState.nextReceivedTime)
 	}
 }
 
