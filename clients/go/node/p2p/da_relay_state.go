@@ -21,7 +21,6 @@ type daRelaySetState uint8
 const (
 	daRelayStateOrphanChunks daRelaySetState = iota
 	daRelayStateStagedCommit
-	daRelayStateCompleteSet
 )
 
 type daRelayCaps struct {
@@ -372,7 +371,7 @@ func (s *daRelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
 }
 
 func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
-	if r.commit.chunkCount == 0 || r.state == daRelayStateCompleteSet {
+	if r.commit.chunkCount == 0 {
 		return nil
 	}
 	missing := make([]uint16, 0)
@@ -424,7 +423,7 @@ func (r *daRelaySetRecord) recomputeOrphanTotals() error {
 
 func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
-	if r.state == daRelayStateCompleteSet || r.wireBytes == 0 {
+	if r.wireBytes == 0 {
 		return accounting, nil
 	}
 	accounting.orphanBytes = r.wireBytes

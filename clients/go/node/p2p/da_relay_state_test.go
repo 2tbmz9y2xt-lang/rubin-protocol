@@ -38,10 +38,9 @@ func TestDARelayStatesAreDistinct(t *testing.T) {
 	states := map[daRelaySetState]bool{
 		daRelayStateOrphanChunks: true,
 		daRelayStateStagedCommit: true,
-		daRelayStateCompleteSet:  true,
 	}
 
-	if len(states) != 3 {
+	if len(states) != 2 {
 		t.Fatalf("DA relay states are not distinct: got %d unique states", len(states))
 	}
 }
