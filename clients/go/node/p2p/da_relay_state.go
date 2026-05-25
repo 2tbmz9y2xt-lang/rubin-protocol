@@ -286,11 +286,13 @@ func validateDAChunk(chunk daRelayChunk) error {
 }
 
 func (s *daRelayState) prepareDASetRecordLocked(record *daRelaySetRecord) error {
-	receivedTime, err := s.nextReceivedTimeLocked()
-	if err != nil {
-		return err
+	if record.receivedTime == 0 {
+		receivedTime, err := s.nextReceivedTimeLocked()
+		if err != nil {
+			return err
+		}
+		record.receivedTime = receivedTime
 	}
-	record.receivedTime = receivedTime
 	return record.recomputeOrphanTotals()
 }
 
@@ -305,7 +307,9 @@ func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	s.applyProjectedPeerBytes(peerBytes)
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
 	s.orphanCommitOverheadBytes = commitBytes
-	s.nextReceivedTime = record.receivedTime
+	if record.receivedTime > s.nextReceivedTime {
+		s.nextReceivedTime = record.receivedTime
+	}
 	return nil
 }
 

@@ -265,6 +265,48 @@ func TestDARelayReceivedTimeMonotonicAcrossMutationPaths(t *testing.T) {
 	}
 }
 
+func TestDARelayReceivedTimeStaysFirstSeenForExistingRecord(t *testing.T) {
+	t.Run("chunk then commit", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		daID := daRelayTestID(54)
+
+		firstRecord := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 1))
+		otherRecord := mustAddDAChunk(t, state, "peer-b", daRelayTestChunk(daRelayTestID(55), 0, 1))
+		updatedRecord := mustAddDACommit(t, state, "peer-c", daRelayTestCommit(daID, 2, 1))
+
+		if updatedRecord.receivedTime != firstRecord.receivedTime {
+			t.Fatalf("updated received_time=%d, want first-seen %d", updatedRecord.receivedTime, firstRecord.receivedTime)
+		}
+		if state.nextReceivedTime != otherRecord.receivedTime {
+			t.Fatalf("state received_time=%d, want latest new-record time %d", state.nextReceivedTime, otherRecord.receivedTime)
+		}
+		nextRecord := mustAddDAChunk(t, state, "peer-d", daRelayTestChunk(daRelayTestID(56), 0, 1))
+		if nextRecord.receivedTime != otherRecord.receivedTime+1 {
+			t.Fatalf("next received_time=%d, want %d", nextRecord.receivedTime, otherRecord.receivedTime+1)
+		}
+	})
+
+	t.Run("commit then chunk", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		daID := daRelayTestID(57)
+
+		firstRecord := mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 2, 1))
+		otherRecord := mustAddDAChunk(t, state, "peer-b", daRelayTestChunk(daRelayTestID(58), 0, 1))
+		updatedRecord := mustAddDAChunk(t, state, "peer-c", daRelayTestChunk(daID, 0, 1))
+
+		if updatedRecord.receivedTime != firstRecord.receivedTime {
+			t.Fatalf("updated received_time=%d, want first-seen %d", updatedRecord.receivedTime, firstRecord.receivedTime)
+		}
+		if state.nextReceivedTime != otherRecord.receivedTime {
+			t.Fatalf("state received_time=%d, want latest new-record time %d", state.nextReceivedTime, otherRecord.receivedTime)
+		}
+		nextRecord := mustAddDACommit(t, state, "peer-d", daRelayTestCommit(daRelayTestID(59), 2, 1))
+		if nextRecord.receivedTime != otherRecord.receivedTime+1 {
+			t.Fatalf("next received_time=%d, want %d", nextRecord.receivedTime, otherRecord.receivedTime+1)
+		}
+	})
+}
+
 func TestDARelayStagesCommitAndRetainsBoundedOrphans(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	daID := daRelayTestID(1)
