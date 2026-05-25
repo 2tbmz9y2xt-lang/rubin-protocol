@@ -4,6 +4,7 @@ import (
 	"crypto/sha3"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -441,10 +442,10 @@ func TestDARelayRejectsReceivedTimeOverflowBeforeMutation(t *testing.T) {
 	}
 	replaceableState.sets[replaceableID] = replaceableRecord
 	replaceableState.nextReceivedTime = ^uint64(0)
-	applied, err := replaceableState.markMatchingCompletionChunksReplaceable(snapshot)
+	retry, err := replaceableState.markMatchingCompletionChunksReplaceable(snapshot)
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
-	if applied || replaceableState.sets[replaceableID].replaceableChunks[0] || replaceableState.nextReceivedTime != ^uint64(0) {
-		t.Fatalf("replaceable time overflow mutated state: applied=%v replaceable=%v time=%d", applied, replaceableState.sets[replaceableID].replaceableChunks, replaceableState.nextReceivedTime)
+	if retry || replaceableState.sets[replaceableID].replaceableChunks[0] || replaceableState.nextReceivedTime != ^uint64(0) {
+		t.Fatalf("replaceable time overflow mutated state: retry=%v replaceable=%v time=%d", retry, replaceableState.sets[replaceableID].replaceableChunks, replaceableState.nextReceivedTime)
 	}
 }
 
@@ -704,6 +705,31 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	}
 }
 
+func TestDARelayRejectsSingleCandidateMismatchWithoutRetry(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(63)
+	payload := []byte("payload")
+	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, []byte("different")))
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := state.addDAChunk("peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload)), payload))
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
+	case <-time.After(2 * time.Second):
+		t.Fatal("single-candidate commitment mismatch did not return")
+	}
+
+	record := state.sets[daID]
+	if record.state != daRelayStateStagedCommit || len(record.chunks) != 0 || state.pinnedPayloadBytes != 0 {
+		t.Fatalf("single-candidate mismatch mutated state: state=%v chunks=%d pinned=%d", record.state, len(record.chunks), state.pinnedPayloadBytes)
+	}
+}
+
 func TestDARelayRejectsCompletionOverflowBeforeMutation(t *testing.T) {
 	caps := defaultDARelayCaps()
 	caps.orphanPoolBytes = ^uint64(0)
@@ -870,18 +896,18 @@ func TestDARelayMarkMatchingChunksRejectsNoopSnapshots(t *testing.T) {
 	completeRecord := sourceRecord
 	completeRecord.state = daRelayStateCompleteSet
 	state.sets[daID] = completeRecord
-	applied, err := state.markMatchingCompletionChunksReplaceable(snapshot)
-	if err != nil || applied {
-		t.Fatalf("complete record mark applied=%v err=%v, want false nil", applied, err)
+	retry, err := state.markMatchingCompletionChunksReplaceable(snapshot)
+	if err != nil || !retry {
+		t.Fatalf("complete record mark retry=%v err=%v, want true nil", retry, err)
 	}
 
 	stagedRecord := completeRecord
 	stagedRecord.state = daRelayStateStagedCommit
 	stagedRecord.chunks = map[uint16]daRelayChunk{}
 	state.sets[daID] = stagedRecord
-	applied, err = state.markMatchingCompletionChunksReplaceable(snapshot)
-	if err != nil || applied {
-		t.Fatalf("empty matching mark applied=%v err=%v, want false nil", applied, err)
+	retry, err = state.markMatchingCompletionChunksReplaceable(snapshot)
+	if err != nil || retry {
+		t.Fatalf("empty matching mark retry=%v err=%v, want false nil", retry, err)
 	}
 }
 

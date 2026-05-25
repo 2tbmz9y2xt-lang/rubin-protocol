@@ -346,11 +346,11 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 
 		payloadBytes, payloadCommitment := snapshot.payloadCommitment()
 		if payloadCommitment != snapshot.payloadCommitmentExpected {
-			applied, err := s.markMatchingCompletionChunksReplaceable(snapshot)
+			retry, err := s.markMatchingCompletionChunksReplaceable(snapshot)
 			if err != nil {
 				return daRelaySetRecord{}, err
 			}
-			if !applied {
+			if retry {
 				continue
 			}
 			return daRelaySetRecord{}, errDARelayPayloadCommitmentMismatch
@@ -684,16 +684,19 @@ func (s *daRelayState) stageCommitDroppingMatchingCompletionChunks(peerAddr stri
 	return true, nil
 }
 
-func (s *daRelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayCompletionSnapshot) (bool, error) {
+func (s *daRelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayCompletionSnapshot) (retry bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record := s.sets[snapshot.daID].cloneForStateMutation()
 	if record.state == daRelayStateCompleteSet || record.commit.chunkCount != snapshot.chunkCount || record.commit.payloadCommitment != snapshot.payloadCommitmentExpected {
-		return false, nil
+		return true, nil
 	}
 	indexes, ok := record.matchingCompletionChunkIndexes(snapshot)
-	if !ok || len(indexes) == 0 {
+	if !ok {
+		return true, nil
+	}
+	if len(indexes) == 0 {
 		return false, nil
 	}
 	record.markChunksReplaceable(indexes)
@@ -705,7 +708,7 @@ func (s *daRelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayC
 	if err := s.applyDASetRecordLocked(record); err != nil {
 		return false, err
 	}
-	return true, nil
+	return false, nil
 }
 
 func (r daRelaySetRecord) matchingCompletionChunkIndexes(snapshot daRelayCompletionSnapshot) ([]uint16, bool) {
