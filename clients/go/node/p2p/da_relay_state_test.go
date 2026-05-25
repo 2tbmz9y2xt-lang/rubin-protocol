@@ -457,6 +457,29 @@ func TestDARelayRejectsIntegrityAndPinnedCapBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestDARelayPinnedPayloadDeltaKeepsOverflowAndCapErrorsDistinct(t *testing.T) {
+	caps := defaultDARelayCaps()
+	caps.pinnedPayloadBytes = 1
+	state := newDARelayStateForTest(t, caps)
+
+	state.pinnedPayloadBytes = 1
+	state.mu.Lock()
+	_, err := state.projectPinnedPayloadDeltaLocked(
+		daRelaySetRecord{state: daRelayStateCompleteSet, payloadBytes: 2},
+		daRelaySetRecord{},
+	)
+	state.mu.Unlock()
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+
+	state.mu.Lock()
+	_, err = state.projectPinnedPayloadDeltaLocked(
+		daRelaySetRecord{},
+		daRelaySetRecord{state: daRelayStateCompleteSet, payloadBytes: 2},
+	)
+	state.mu.Unlock()
+	requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
+}
+
 func TestDARelayCapsRejectInvalidLimits(t *testing.T) {
 	tests := []struct {
 		name string

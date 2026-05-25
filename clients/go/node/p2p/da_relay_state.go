@@ -367,7 +367,10 @@ func (s *daRelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord d
 
 func (s *daRelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, error) {
 	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, oldRecord.pinnedPayloadAccountingBytes(), newRecord.pinnedPayloadAccountingBytes())
-	if err != nil || pinnedBytes > s.caps.pinnedPayloadBytes {
+	if err != nil {
+		return 0, err
+	}
+	if pinnedBytes > s.caps.pinnedPayloadBytes {
 		return 0, errDARelayPinnedPayloadCapExceeded
 	}
 	return pinnedBytes, nil
@@ -502,7 +505,7 @@ func (r *daRelaySetRecord) tryComplete(dropChunksOnCommitMismatch bool) error {
 		var err error
 		payloadBytes, err = checkedAddUint64(payloadBytes, uint64(len(chunk.payload)))
 		if err != nil {
-			return errDARelayPinnedPayloadCapExceeded
+			return err
 		}
 		_, _ = hasher.Write(chunk.payload)
 	}
