@@ -166,6 +166,10 @@ func (s *daRelayState) nextMonotonicReceivedTime() uint64 {
 	return s.nextReceivedTime
 }
 
+func (s *daRelayState) nextReceivedTimeLocked() (uint64, error) {
+	return checkedAddUint64(s.nextReceivedTime, 1)
+}
+
 func (s *daRelayState) setOrphanBytesForPeer(peerAddr string, bytes uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -226,8 +230,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	record.pruneChunksOutsideCommit()
 	record.state = daRelayStateStagedCommit
 	record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
-	record.receivedTime = s.nextReceivedTime + 1
-	if err := record.recomputeOrphanTotals(); err != nil {
+	if err := s.prepareDASetRecordLocked(&record); err != nil {
 		return daRelaySetRecord{}, err
 	}
 	if err := s.applyDASetRecordLocked(record); err != nil {
@@ -259,8 +262,7 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 		record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
 	}
 	record.chunks[chunk.chunkIndex] = chunk
-	record.receivedTime = s.nextReceivedTime + 1
-	if err := record.recomputeOrphanTotals(); err != nil {
+	if err := s.prepareDASetRecordLocked(&record); err != nil {
 		return daRelaySetRecord{}, err
 	}
 	if err := s.applyDASetRecordLocked(record); err != nil {
@@ -277,6 +279,15 @@ func validateDAChunk(chunk daRelayChunk) error {
 		return errDARelayWireBytesInvalid
 	}
 	return nil
+}
+
+func (s *daRelayState) prepareDASetRecordLocked(record *daRelaySetRecord) error {
+	receivedTime, err := s.nextReceivedTimeLocked()
+	if err != nil {
+		return err
+	}
+	record.receivedTime = receivedTime
+	return record.recomputeOrphanTotals()
 }
 
 func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
@@ -438,7 +449,7 @@ func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
 }
 
 func addPeerAccounting(peerBytes map[string]uint64, key string, bytes uint64) error {
-	if key == "" || bytes == 0 {
+	if bytes == 0 {
 		return nil
 	}
 	var err error
