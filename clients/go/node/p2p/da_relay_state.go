@@ -199,6 +199,18 @@ func (s *daRelayState) nextReceivedTimeLocked() (uint64, error) {
 	return checkedAddUint64(s.nextReceivedTime, 1)
 }
 
+func (s *daRelayState) assignFirstSeenReceivedTimeLocked(record *daRelaySetRecord) error {
+	if record.receivedTime != 0 {
+		return nil
+	}
+	receivedTime, err := s.nextReceivedTimeLocked()
+	if err != nil {
+		return err
+	}
+	record.receivedTime = receivedTime
+	return nil
+}
+
 func (s *daRelayState) setOrphanBytesForPeer(peerAddr string, bytes uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -393,11 +405,9 @@ func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelay
 	record.pruneChunksOutsideCommit()
 	record.state = daRelayStateStagedCommit
 	record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
-	receivedTime, err := s.nextReceivedTimeLocked()
-	if err != nil {
+	if err := s.assignFirstSeenReceivedTimeLocked(&record); err != nil {
 		return daRelaySetRecord{}, err
 	}
-	record.receivedTime = receivedTime
 	return record, nil
 }
 
@@ -416,11 +426,9 @@ func (s *daRelayState) stageDAChunkRecordLocked(peerAddr string, chunk daRelayCh
 	chunk.payload = payload
 	record.chunks[chunk.chunkIndex] = chunk
 	delete(record.replaceableChunks, chunk.chunkIndex)
-	receivedTime, err := s.nextReceivedTimeLocked()
-	if err != nil {
+	if err := s.assignFirstSeenReceivedTimeLocked(&record); err != nil {
 		return daRelaySetRecord{}, err
 	}
-	record.receivedTime = receivedTime
 	return record, nil
 }
 
@@ -454,7 +462,9 @@ func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
 	s.orphanCommitOverheadBytes = commitBytes
 	s.pinnedPayloadBytes = pinnedBytes
-	s.nextReceivedTime = record.receivedTime
+	if record.receivedTime > s.nextReceivedTime {
+		s.nextReceivedTime = record.receivedTime
+	}
 	return nil
 }
 
@@ -696,15 +706,10 @@ func (s *daRelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayC
 	if !ok {
 		return false, nil
 	}
-	if len(indexes) == 0 {
+	if len(indexes) != len(snapshot.chunks) {
 		return false, nil
 	}
 	record.markChunksReplaceable(indexes)
-	receivedTime, err := s.nextReceivedTimeLocked()
-	if err != nil {
-		return false, err
-	}
-	record.receivedTime = receivedTime
 	if err := s.applyDASetRecordLocked(record); err != nil {
 		return false, err
 	}
