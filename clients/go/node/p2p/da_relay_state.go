@@ -96,10 +96,16 @@ type daRelaySetRecord struct {
 	receivedTime       uint64
 	payloadBytes       uint64
 	wireBytes          uint64
-	totalFee           uint64
 	ttlBlocksRemaining uint64
 	commit             daRelayCommit
 	chunks             map[uint16]daRelayChunk
+}
+
+type daRelayEvictionAccounting struct {
+	daID         [32]byte
+	payloadBytes uint64
+	wireBytes    uint64
+	receivedTime uint64
 }
 
 type daRelayCommit struct {
@@ -386,6 +392,18 @@ func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
 		}
 	}
 	return missing
+}
+
+func (r daRelaySetRecord) evictionAccounting() (daRelayEvictionAccounting, bool) {
+	if r.state != daRelayStateCompleteSet || r.payloadBytes == 0 || r.wireBytes == 0 || r.receivedTime == 0 {
+		return daRelayEvictionAccounting{}, false
+	}
+	return daRelayEvictionAccounting{
+		daID:         r.daID,
+		payloadBytes: r.payloadBytes,
+		wireBytes:    r.wireBytes,
+		receivedTime: r.receivedTime,
+	}, true
 }
 
 func (r daRelaySetRecord) clone() daRelaySetRecord {
