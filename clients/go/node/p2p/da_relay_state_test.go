@@ -416,6 +416,31 @@ func TestDARelayRejectsReceivedTimeOverflowBeforeMutation(t *testing.T) {
 	if len(commitState.sets) != 0 || commitState.nextReceivedTime != ^uint64(0) {
 		t.Fatalf("commit time overflow mutated state: sets=%d time=%d", len(commitState.sets), commitState.nextReceivedTime)
 	}
+
+	replaceableState := newDARelayStateForTest(t, defaultDARelayCaps())
+	replaceableID := daRelayTestID(54)
+	replaceableRecord := daRelaySetRecord{
+		daID:   replaceableID,
+		state:  daRelayStateStagedCommit,
+		commit: daRelayTestCommitForPayloads(replaceableID, 1, []byte("good")),
+		chunks: map[uint16]daRelayChunk{
+			0: daRelayTestChunkPayload(replaceableID, 0, 3, []byte("bad")),
+		},
+	}
+	if err := replaceableRecord.recomputeOrphanTotals(); err != nil {
+		t.Fatalf("recompute replaceable record: %v", err)
+	}
+	snapshot, complete := replaceableRecord.completionSnapshot()
+	if !complete {
+		t.Fatalf("replaceable overflow setup did not produce a complete snapshot")
+	}
+	replaceableState.sets[replaceableID] = replaceableRecord
+	replaceableState.nextReceivedTime = ^uint64(0)
+	applied, err := replaceableState.markMatchingCompletionChunksReplaceable(snapshot)
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if applied || replaceableState.sets[replaceableID].replaceableChunks[0] || replaceableState.nextReceivedTime != ^uint64(0) {
+		t.Fatalf("replaceable time overflow mutated state: applied=%v replaceable=%v time=%d", applied, replaceableState.sets[replaceableID].replaceableChunks, replaceableState.nextReceivedTime)
+	}
 }
 
 func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
@@ -621,6 +646,9 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	if !record.replaceableChunks[0] || len(record.chunks) != 1 || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("chunk mismatch did not mark stale chunk replaceable: replaceable=%v chunks=%d pinned=%d", record.replaceableChunks, len(record.chunks), state.pinnedPayloadBytes)
 	}
+	if missing := record.missingChunkIndexes(); len(missing) != 2 || missing[0] != 0 || missing[1] != 1 {
+		t.Fatalf("replaceable chunk missing indexes=%v, want [0 1]", missing)
+	}
 	if state.nextReceivedTime <= beforeMismatchTime || record.receivedTime != state.nextReceivedTime {
 		t.Fatalf("replaceable mark time record=%d state=%d before=%d", record.receivedTime, state.nextReceivedTime, beforeMismatchTime)
 	}
@@ -642,6 +670,10 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 		t.Fatalf("chunk mismatch mutated staged chunks: state=%v chunks=%d pinned=%d", state.sets[daID].state, len(state.sets[daID].chunks), state.pinnedPayloadBytes)
 	}
 	record = mustAddDAChunk(t, state, "peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
+	if record.state != daRelayStateStagedCommit || !record.replaceableChunks[0] {
+		t.Fatalf("staged recovery should still require replacing marked chunk: state=%v replaceable=%v", record.state, record.replaceableChunks)
+	}
+	record = mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
 	if record.state != daRelayStateCompleteSet {
 		t.Fatalf("state after staged recovery=%v, want COMPLETE_SET", record.state)
 	}

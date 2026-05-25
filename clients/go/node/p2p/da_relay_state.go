@@ -557,7 +557,8 @@ func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
 	}
 	var missing []uint16
 	for i := uint16(0); i < r.commit.chunkCount; i++ {
-		if _, ok := r.chunks[i]; !ok {
+		_, ok := r.chunks[i]
+		if !ok || r.replaceableChunks[i] {
 			missing = append(missing, i)
 		}
 	}
@@ -696,7 +697,11 @@ func (s *daRelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayC
 		return false, nil
 	}
 	record.markChunksReplaceable(indexes)
-	record.receivedTime = s.nextReceivedTime + 1
+	receivedTime, err := s.nextReceivedTimeLocked()
+	if err != nil {
+		return false, err
+	}
+	record.receivedTime = receivedTime
 	if err := s.applyDASetRecordLocked(record); err != nil {
 		return false, err
 	}
