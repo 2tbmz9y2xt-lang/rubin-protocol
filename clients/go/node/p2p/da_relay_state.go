@@ -237,11 +237,8 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 }
 
 func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelaySetRecord, error) {
-	if uint64(chunk.chunkIndex) >= consensus.MAX_DA_CHUNK_COUNT {
-		return daRelaySetRecord{}, errDARelayChunkIndexOutOfRange
-	}
-	if chunk.wireBytes == 0 {
-		return daRelaySetRecord{}, errDARelayWireBytesInvalid
+	if err := validateDAChunk(chunk); err != nil {
+		return daRelaySetRecord{}, err
 	}
 
 	s.mu.Lock()
@@ -272,6 +269,16 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	return record.clone(), nil
 }
 
+func validateDAChunk(chunk daRelayChunk) error {
+	if uint64(chunk.chunkIndex) >= consensus.MAX_DA_CHUNK_COUNT {
+		return errDARelayChunkIndexOutOfRange
+	}
+	if chunk.wireBytes == 0 {
+		return errDARelayWireBytesInvalid
+	}
+	return nil
+}
+
 func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	oldRecord := s.sets[record.daID]
 	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record)
@@ -296,26 +303,17 @@ func (s *daRelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord d
 	if err != nil {
 		return 0, nil, 0, 0, err
 	}
-	orphanBytes, err := checkedApplyUint64Delta(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes)
+	orphanBytes, err := checkedApplyUint64DeltaCap(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolBytes, errDARelayOrphanPoolCapExceeded)
 	if err != nil {
 		return 0, nil, 0, 0, err
 	}
-	if orphanBytes > s.caps.orphanPoolBytes {
-		return 0, nil, 0, 0, errDARelayOrphanPoolCapExceeded
-	}
-	daBytes, err := checkedApplyUint64Delta(s.orphanBytesByDAID[newRecord.daID], oldAccounting.orphanBytes, newAccounting.orphanBytes)
+	daBytes, err := checkedApplyUint64DeltaCap(s.orphanBytesByDAID[newRecord.daID], oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolPerDAIDBytes, errDARelayOrphanDAIDCapExceeded)
 	if err != nil {
 		return 0, nil, 0, 0, err
 	}
-	if daBytes > s.caps.orphanPoolPerDAIDBytes {
-		return 0, nil, 0, 0, errDARelayOrphanDAIDCapExceeded
-	}
-	commitBytes, err := checkedApplyUint64Delta(s.orphanCommitOverheadBytes, oldAccounting.commitBytes, newAccounting.commitBytes)
+	commitBytes, err := checkedApplyUint64DeltaCap(s.orphanCommitOverheadBytes, oldAccounting.commitBytes, newAccounting.commitBytes, s.caps.orphanCommitOverheadBytes, errDARelayOrphanCommitCapExceeded)
 	if err != nil {
 		return 0, nil, 0, 0, err
-	}
-	if commitBytes > s.caps.orphanCommitOverheadBytes {
-		return 0, nil, 0, 0, errDARelayOrphanCommitCapExceeded
 	}
 	peerBytes, err := s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes)
 	if err != nil {
@@ -446,6 +444,17 @@ func addPeerAccounting(peerBytes map[string]uint64, key string, bytes uint64) er
 	var err error
 	peerBytes[key], err = checkedAddUint64(peerBytes[key], bytes)
 	return err
+}
+
+func checkedApplyUint64DeltaCap(current, remove, add, limit uint64, capErr error) (uint64, error) {
+	value, err := checkedApplyUint64Delta(current, remove, add)
+	if err != nil {
+		return 0, err
+	}
+	if value > limit {
+		return 0, capErr
+	}
+	return value, nil
 }
 
 func checkedApplyUint64Delta(current uint64, remove uint64, add uint64) (uint64, error) {

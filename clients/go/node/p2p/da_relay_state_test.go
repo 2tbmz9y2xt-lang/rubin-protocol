@@ -127,6 +127,39 @@ func TestDARelayPeerAccountingUsesQuotaKey(t *testing.T) {
 	}
 }
 
+func TestDARelayPeerQuotaKeyPreventsPortHopping(t *testing.T) {
+	t.Run("chunk only", func(t *testing.T) {
+		caps := defaultDARelayCaps()
+		caps.orphanPoolPerPeerBytes = 10
+		state := newDARelayStateForTest(t, caps)
+		firstID := daRelayTestID(41)
+		secondID := daRelayTestID(42)
+
+		record := mustAddDAChunk(t, state, "127.0.0.1:1000", daRelayTestChunk(firstID, 0, 6))
+		_, err := state.addDAChunk("127.0.0.1:2000", daRelayTestChunk(secondID, 0, 5))
+		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
+
+		requirePortHopRejectedWithoutMutation(t, state, secondID, record.wireBytes)
+	})
+
+	t.Run("staged commit", func(t *testing.T) {
+		caps := defaultDARelayCaps()
+		caps.orphanPoolPerPeerBytes = 10
+		state := newDARelayStateForTest(t, caps)
+		firstID := daRelayTestID(43)
+		secondID := daRelayTestID(44)
+
+		record := mustAddDACommit(t, state, "127.0.0.1:1000", daRelayTestCommit(firstID, 2, 6))
+		_, err := state.addDACommit("127.0.0.1:2000", daRelayTestCommit(secondID, 2, 5))
+		requireDAErr(t, err, errDARelayOrphanPeerCapExceeded)
+
+		requirePortHopRejectedWithoutMutation(t, state, secondID, record.wireBytes)
+		if state.orphanCommitOverheadBytes != record.commit.wireBytes {
+			t.Fatalf("commit overhead = %d, want %d", state.orphanCommitOverheadBytes, record.commit.wireBytes)
+		}
+	})
+}
+
 func TestDARelayDAIDAccountingDeletesZeroBytes(t *testing.T) {
 	state, err := newDARelayState(defaultDARelayCaps())
 	if err != nil {
@@ -429,5 +462,21 @@ func requireDAErr(t *testing.T, got error, want error) {
 	t.Helper()
 	if !errors.Is(got, want) {
 		t.Fatalf("err=%v, want %v", got, want)
+	}
+}
+
+func requirePortHopRejectedWithoutMutation(t *testing.T, state *daRelayState, rejectedID [32]byte, wantPeerBytes uint64) {
+	t.Helper()
+	if got := state.orphanBytesForPeer("127.0.0.1:3000"); got != wantPeerBytes {
+		t.Fatalf("peer quota bytes = %d, want %d", got, wantPeerBytes)
+	}
+	if got := state.orphanBytes; got != wantPeerBytes {
+		t.Fatalf("global orphan bytes = %d, want %d", got, wantPeerBytes)
+	}
+	if _, ok := state.sets[rejectedID]; ok {
+		t.Fatalf("rejected port-hop candidate mutated state")
+	}
+	if got := state.orphanBytesForDAID(rejectedID); got != 0 {
+		t.Fatalf("rejected da_id accounting = %d, want 0", got)
 	}
 }
