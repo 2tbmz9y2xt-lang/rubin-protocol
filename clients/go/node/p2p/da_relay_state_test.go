@@ -239,11 +239,45 @@ func TestDARelayRejectsStagedIndexAndCapFailuresBeforeMutation(t *testing.T) {
 	overflowState := newDARelayStateForTest(t, caps)
 	mustAddDAChunk(t, overflowState, "peer-a", daRelayTestChunk(daID, 0, ^uint64(0)))
 	_, err = overflowState.addDACommit("peer-a", daRelayTestCommit(daID, 2, 1))
-	requireDAErr(t, err, errDARelayOrphanPoolCapExceeded)
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+}
+
+func TestDARelayRejectsZeroWireBytesBeforeMutation(t *testing.T) {
+	daID := daRelayTestID(3)
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+
+	_, err := state.addDACommit("peer-a", daRelayTestCommit(daID, 1, 0))
+	requireDAErr(t, err, errDARelayWireBytesInvalid)
+	_, err = state.addDAChunk("peer-a", daRelayTestChunk(daID, 0, 0))
+	requireDAErr(t, err, errDARelayWireBytesInvalid)
+
+	if len(state.sets) != 0 || state.orphanBytes != 0 || state.orphanCommitOverheadBytes != 0 {
+		t.Fatalf("zero wire rejection mutated state: sets=%d orphan=%d commit=%d", len(state.sets), state.orphanBytes, state.orphanCommitOverheadBytes)
+	}
+}
+
+func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
+	daID := daRelayTestID(4)
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+
+	record := mustAddDACommit(t, state, "peer-a", daRelayTestCommit(daID, 2, 3))
+	_, err := state.addDACommit("peer-b", daRelayTestCommit(daID, 2, 5))
+	requireDAErr(t, err, errDARelayDuplicateCommit)
+	if state.sets[daID].commit.wireBytes != record.commit.wireBytes || state.orphanBytes != record.wireBytes {
+		t.Fatalf("duplicate commit mutated state: commit=%d orphan=%d want commit=%d orphan=%d", state.sets[daID].commit.wireBytes, state.orphanBytes, record.commit.wireBytes, record.wireBytes)
+	}
+
+	chunk := daRelayTestChunk(daID, 0, 7)
+	record = mustAddDAChunk(t, state, "peer-c", chunk)
+	_, err = state.addDAChunk("peer-d", chunk)
+	requireDAErr(t, err, errDARelayDuplicateChunk)
+	if len(state.sets[daID].chunks) != 1 || state.orphanBytes != record.wireBytes {
+		t.Fatalf("duplicate chunk mutated state: chunks=%d orphan=%d want orphan=%d", len(state.sets[daID].chunks), state.orphanBytes, record.wireBytes)
+	}
 }
 
 func TestDARelayRejectedCandidatesDoNotMutateStoredChunks(t *testing.T) {
-	daID := daRelayTestID(4)
+	daID := daRelayTestID(5)
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 1))
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 2, 1))
