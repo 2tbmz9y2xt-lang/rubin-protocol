@@ -747,24 +747,31 @@ func (s daRelayCompletionSnapshot) matchesRecord(r daRelaySetRecord) bool {
 	if !ok {
 		return false
 	}
-	if current.daID != s.daID || current.payloadCommitmentExpected != s.payloadCommitmentExpected || current.chunkCount != s.chunkCount {
+	return s.matchesHeader(current) && completionChunksMatch(s.chunks, current.chunks)
+}
+
+func (s daRelayCompletionSnapshot) matchesHeader(current daRelayCompletionSnapshot) bool {
+	return current.daID == s.daID &&
+		current.payloadCommitmentExpected == s.payloadCommitmentExpected &&
+		current.chunkCount == s.chunkCount
+}
+
+func completionChunksMatch(expected, current []daRelayCompletionChunkSnapshot) bool {
+	if len(current) != len(expected) {
 		return false
 	}
-	if len(current.chunks) != len(s.chunks) {
-		return false
-	}
-	for i := range s.chunks {
-		if current.chunks[i].chunkIndex != s.chunks[i].chunkIndex {
-			return false
-		}
-		if current.chunks[i].chunkHash != s.chunks[i].chunkHash {
-			return false
-		}
-		if len(current.chunks[i].payload) != len(s.chunks[i].payload) {
+	for i := range expected {
+		if !completionChunkMatches(expected[i], current[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+func completionChunkMatches(expected, current daRelayCompletionChunkSnapshot) bool {
+	return current.chunkIndex == expected.chunkIndex &&
+		current.chunkHash == expected.chunkHash &&
+		len(current.payload) == len(expected.payload)
 }
 
 func (r *daRelaySetRecord) markComplete(payloadBytes uint64) {
