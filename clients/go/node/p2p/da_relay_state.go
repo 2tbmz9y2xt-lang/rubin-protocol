@@ -279,7 +279,7 @@ func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	if err != nil {
 		return err
 	}
-	s.sets[record.daID] = record.clone()
+	s.sets[record.daID] = record
 	s.orphanBytes = orphanBytes
 	s.applyProjectedPeerBytes(peerBytes)
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
@@ -385,8 +385,10 @@ func (r daRelaySetRecord) missingChunkIndexes() []uint16 {
 }
 
 func (r daRelaySetRecord) clone() daRelaySetRecord {
-	r.ensureMaps()
 	out := r
+	if r.chunks == nil {
+		return out
+	}
 	out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))
 	for index, chunk := range r.chunks {
 		out.chunks[index] = chunk
