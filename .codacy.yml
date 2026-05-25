@@ -99,6 +99,9 @@ engines:
       - "clients/go/node/p2p/addr_manager.go"
       - "clients/go/node/p2p/compact_reconstruct.go"
       - "clients/go/node/p2p/compact_wire.go"
+      # DA relay staged/orphan accounting is branch-dense P2P state-machine code;
+      # keep this metric-only exclusion narrow while targeted DA tests and review
+      # cover validation-before-mutation, accounting, and quota invariants.
       - "clients/go/node/p2p/da_relay_state.go"
       - "clients/go/node/p2p/handlers_block.go"
       - "clients/go/node/p2p/handshake.go"
