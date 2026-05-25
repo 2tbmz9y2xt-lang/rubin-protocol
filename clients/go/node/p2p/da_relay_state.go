@@ -15,6 +15,8 @@ const (
 	daOrphanCommitOverheadMaxBytes uint64 = 8 << 20
 	daOrphanTTLBlocks              uint64 = 3
 	daMempoolPinnedPayloadMaxBytes uint64 = 96_000_000
+	daCompleteSetRecordFootprint   uint64 = 256
+	daCompleteSetChunkFootprint    uint64 = 128
 )
 
 type daRelaySetState uint8
@@ -368,7 +370,15 @@ func (s *daRelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord d
 }
 
 func (s *daRelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, error) {
-	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, oldRecord.pinnedPayloadAccountingBytes(), newRecord.pinnedPayloadAccountingBytes())
+	oldPinnedBytes, err := oldRecord.pinnedPayloadAccountingBytes()
+	if err != nil {
+		return 0, err
+	}
+	newPinnedBytes, err := newRecord.pinnedPayloadAccountingBytes()
+	if err != nil {
+		return 0, err
+	}
+	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, oldPinnedBytes, newPinnedBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -534,11 +544,25 @@ func (r *daRelaySetRecord) recomputeOrphanTotals() error {
 	return nil
 }
 
-func (r daRelaySetRecord) pinnedPayloadAccountingBytes() uint64 {
+func (r daRelaySetRecord) pinnedPayloadAccountingBytes() (uint64, error) {
 	if r.state != daRelayStateCompleteSet || r.payloadBytes == 0 {
-		return 0
+		return 0, nil
 	}
-	return r.payloadBytes
+	footprint := r.wireBytes
+	if footprint == 0 {
+		footprint = r.payloadBytes
+	}
+	var err error
+	footprint, err = checkedAddUint64(footprint, daCompleteSetRecordFootprint)
+	if err != nil {
+		return 0, err
+	}
+	chunkFootprint := uint64(r.commit.chunkCount) * daCompleteSetChunkFootprint
+	footprint, err = checkedAddUint64(footprint, chunkFootprint)
+	if err != nil {
+		return 0, err
+	}
+	return footprint, nil
 }
 
 func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {

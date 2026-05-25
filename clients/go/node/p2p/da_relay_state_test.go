@@ -320,8 +320,9 @@ func TestDARelayCompletesSetAndPinsPayload(t *testing.T) {
 	if record.state != daRelayStateCompleteSet {
 		t.Fatalf("state=%v, want COMPLETE_SET", record.state)
 	}
-	if record.payloadBytes != uint64(len(payload0)+len(payload1)) || state.pinnedPayloadBytes != record.payloadBytes {
-		t.Fatalf("payload bytes record=%d pinned=%d", record.payloadBytes, state.pinnedPayloadBytes)
+	wantPinned := mustPinnedPayloadAccounting(t, record)
+	if record.payloadBytes != uint64(len(payload0)+len(payload1)) || state.pinnedPayloadBytes != wantPinned {
+		t.Fatalf("payload bytes record=%d pinned=%d want pinned=%d", record.payloadBytes, state.pinnedPayloadBytes, wantPinned)
 	}
 	if state.orphanBytes != 0 || len(state.orphanBytesByDAID) != 0 {
 		t.Fatalf("complete set left orphan accounting: global=%d da=%d", state.orphanBytes, len(state.orphanBytesByDAID))
@@ -415,6 +416,16 @@ func TestDARelayRejectsIntegrityAndPinnedCapBeforeMutation(t *testing.T) {
 	requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
 	if state.sets[daID].state != daRelayStateStagedCommit || len(state.sets[daID].chunks) != 0 || state.pinnedPayloadBytes != 0 {
 		t.Fatalf("pinned cap rejection mutated state: state=%v chunks=%d pinned=%d", state.sets[daID].state, len(state.sets[daID].chunks), state.pinnedPayloadBytes)
+	}
+
+	caps = defaultDARelayCaps()
+	caps.pinnedPayloadBytes = uint64(len(payload0))
+	state = newDARelayStateForTest(t, caps)
+	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload0))
+	_, err = state.addDAChunk("peer-b", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
+	requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
+	if state.sets[daID].state != daRelayStateStagedCommit || state.pinnedPayloadBytes != 0 {
+		t.Fatalf("footprint cap rejection mutated state: state=%v pinned=%d", state.sets[daID].state, state.pinnedPayloadBytes)
 	}
 }
 
@@ -590,4 +601,13 @@ func requireDAErr(t *testing.T, got error, want error) {
 	if !errors.Is(got, want) {
 		t.Fatalf("err=%v, want %v", got, want)
 	}
+}
+
+func mustPinnedPayloadAccounting(t *testing.T, record daRelaySetRecord) uint64 {
+	t.Helper()
+	bytes, err := record.pinnedPayloadAccountingBytes()
+	if err != nil {
+		t.Fatalf("pinned payload accounting: %v", err)
+	}
+	return bytes
 }
