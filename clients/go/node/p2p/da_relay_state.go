@@ -1,8 +1,10 @@
 package p2p
 
 import (
+	"bytes"
 	"crypto/sha3"
 	"errors"
+	"sort"
 	"sync"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -109,6 +111,13 @@ type daRelayEvictionAccounting struct {
 	payloadBytes uint64
 	wireBytes    uint64
 	receivedTime uint64
+}
+
+type daRelayExpiredSet struct {
+	daID               [32]byte
+	state              daRelaySetState
+	commitPeerQuotaKey string
+	receivedTime       uint64
 }
 
 type daRelayCommit struct {
@@ -252,6 +261,46 @@ func (s *daRelayState) orphanBytesForDAID(daID [32]byte) uint64 {
 	defer s.mu.Unlock()
 
 	return s.orphanBytesByDAID[daID]
+}
+
+func (s *daRelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var expired []daRelayExpiredSet
+	for _, daID := range s.sortedIncompleteDAIDsLocked() {
+		record := s.sets[daID]
+		if record.ttlBlocksRemaining > 1 {
+			record.ttlBlocksRemaining--
+			s.sets[daID] = record
+			continue
+		}
+		if err := s.removeDASetRecordLocked(record); err != nil {
+			return nil, err
+		}
+		expired = append(expired, daRelayExpiredSet{
+			daID:               record.daID,
+			state:              record.state,
+			commitPeerQuotaKey: record.commit.peerQuotaKey,
+			receivedTime:       record.receivedTime,
+		})
+	}
+	return expired, nil
+}
+
+func (s *daRelayState) sortedIncompleteDAIDsLocked() [][32]byte {
+	var daIDs [][32]byte
+	for daID := range s.orphanBytesByDAID {
+		record, ok := s.sets[daID]
+		if !ok || record.state == daRelayStateCompleteSet {
+			continue
+		}
+		daIDs = append(daIDs, daID)
+	}
+	sort.Slice(daIDs, func(i, j int) bool {
+		return bytes.Compare(daIDs[i][:], daIDs[j][:]) < 0
+	})
+	return daIDs
 }
 
 func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRelaySetRecord, error) {
@@ -471,6 +520,25 @@ func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	if record.receivedTime > s.nextReceivedTime {
 		s.nextReceivedTime = record.receivedTime
 	}
+	return nil
+}
+
+func (s *daRelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
+	emptyRecord := daRelaySetRecord{daID: record.daID}
+	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(record, emptyRecord)
+	if err != nil {
+		return err
+	}
+	pinnedBytes, err := s.projectPinnedPayloadDeltaLocked(record, emptyRecord)
+	if err != nil {
+		return err
+	}
+	delete(s.sets, record.daID)
+	s.orphanBytes = orphanBytes
+	s.applyProjectedPeerBytes(peerBytes)
+	s.applyProjectedDAIDBytes(record.daID, daBytes)
+	s.orphanCommitOverheadBytes = commitBytes
+	s.pinnedPayloadBytes = pinnedBytes
 	return nil
 }
 

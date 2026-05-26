@@ -280,6 +280,97 @@ func TestOrphanResolution(t *testing.T) {
 	assertHarnessTip(t, sink, 2, height2Hash)
 }
 
+func TestAcceptedBlockKeepsResolvingOrphansWhenDATTLExpiryFails(t *testing.T) {
+	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	sink.service.daRelay = newDARelayStateForTest(t, defaultDARelayCaps())
+	overflowID := daRelayTestID(102)
+	overflowRecord := daRelayOverflowOrphanAccountingRecord(overflowID)
+	overflowRecord.ttlBlocksRemaining = 2
+	sink.service.daRelay.sets[overflowID] = overflowRecord
+	sink.service.daRelay.orphanBytesByDAID[overflowID] = overflowRecord.wireBytes
+
+	genesisBytes := node.DevnetGenesisBlockBytes()
+	_, block1Bytes := testHarnessBlockAtHeight(t, source, 1)
+	height2Hash, block2Bytes := testHarnessBlockAtHeight(t, source, 2)
+	peer := testPeerForService(sink.service, "remote", 2)
+
+	assertRelayedBlockIsOrphan(t, peer, block2Bytes, "block2")
+	assertRelayedBlockIsOrphan(t, peer, block1Bytes, "block1")
+	summary, err := peer.processRelayedBlock(genesisBytes)
+	if err != nil {
+		t.Fatalf("processRelayedBlock(genesis): %v", err)
+	}
+	if summary == nil || summary.BlockHeight != 0 {
+		t.Fatalf("genesis summary=%v, want height 0", summary)
+	}
+	if peer.snapshotState().LastError == "" {
+		t.Fatalf("expected DA TTL cleanup error to be recorded")
+	}
+	assertOrphanPoolLen(t, sink.service, 0)
+	assertHarnessTip(t, sink, 2, height2Hash)
+}
+
+func TestProcessRelayedBlockAdvancesDARelayTTL(t *testing.T) {
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	caps := defaultDARelayCaps()
+	caps.orphanTTLBlocks = 1
+	sink.service.daRelay = newDARelayStateForTest(t, caps)
+
+	daID := daRelayTestID(100)
+	mustAddDAChunk(t, sink.service.daRelay, "peer-a", daRelayTestChunk(daID, 0, 7))
+	if got := sink.service.daRelay.orphanBytes; got == 0 {
+		t.Fatalf("orphanBytes=%d, want staged orphan bytes before block accept", got)
+	}
+
+	peer := testPeerForService(sink.service, "remote", 1)
+	summary, err := peer.processRelayedBlock(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("processRelayedBlock(genesis): %v", err)
+	}
+	if summary == nil || summary.BlockHeight != 0 {
+		t.Fatalf("summary=%v, want height 0", summary)
+	}
+	if _, ok := sink.service.daRelay.sets[daID]; ok {
+		t.Fatalf("DA set %x still present after accepted block TTL expiry", daID)
+	}
+	if got := sink.service.daRelay.orphanBytes; got != 0 {
+		t.Fatalf("orphanBytes=%d, want 0 after accepted block TTL expiry", got)
+	}
+	if got := sink.service.daRelay.orphanBytesForPeer("peer-a"); got != 0 {
+		t.Fatalf("orphanBytesForPeer(peer-a)=%d, want 0", got)
+	}
+	if got := sink.service.daRelay.orphanBytesForDAID(daID); got != 0 {
+		t.Fatalf("orphanBytesForDAID=%d, want 0", got)
+	}
+}
+
+func TestAnnounceBlockAdvancesDARelayTTL(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	caps := defaultDARelayCaps()
+	caps.orphanTTLBlocks = 1
+	h.service.daRelay = newDARelayStateForTest(t, caps)
+
+	daID := daRelayTestID(101)
+	mustAddDAChunk(t, h.service.daRelay, "peer-a", daRelayTestChunk(daID, 0, 7))
+	blockBytes := h.mineNextBlockBytes(t)
+	if err := h.service.AnnounceBlock(blockBytes); err != nil {
+		t.Fatalf("AnnounceBlock: %v", err)
+	}
+	if _, ok := h.service.daRelay.sets[daID]; ok {
+		t.Fatalf("DA set %x still present after local block announce TTL expiry", daID)
+	}
+	if got := h.service.daRelay.orphanBytes; got != 0 {
+		t.Fatalf("orphanBytes=%d, want 0 after local block announce TTL expiry", got)
+	}
+	if got := h.service.daRelay.orphanBytesForPeer("peer-a"); got != 0 {
+		t.Fatalf("orphanBytesForPeer(peer-a)=%d, want 0", got)
+	}
+	if got := h.service.daRelay.orphanBytesForDAID(daID); got != 0 {
+		t.Fatalf("orphanBytesForDAID=%d, want 0", got)
+	}
+}
+
 func TestHandleBlockRequestsMoreBlocksAfterAccept(t *testing.T) {
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	peer := &peer{

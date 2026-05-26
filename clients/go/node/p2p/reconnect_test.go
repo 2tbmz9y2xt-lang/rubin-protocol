@@ -202,6 +202,7 @@ func TestReconnectDuePeersDialsDuePeer(t *testing.T) {
 
 	h.service.reconnectDuePeers()
 	<-acceptedDone
+	h.service.loopWG.Wait()
 	if got := accepted.Load(); got != 1 {
 		t.Fatalf("accepted=%d, want 1", got)
 	}
