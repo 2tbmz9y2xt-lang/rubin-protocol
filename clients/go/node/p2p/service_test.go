@@ -280,6 +280,40 @@ func TestOrphanResolution(t *testing.T) {
 	assertHarnessTip(t, sink, 2, height2Hash)
 }
 
+func TestProcessRelayedBlockAdvancesDARelayTTL(t *testing.T) {
+	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	caps := defaultDARelayCaps()
+	caps.orphanTTLBlocks = 1
+	sink.service.daRelay = newDARelayStateForTest(t, caps)
+
+	daID := daRelayTestID(100)
+	mustAddDAChunk(t, sink.service.daRelay, "peer-a", daRelayTestChunk(daID, 0, 7))
+	if got := sink.service.daRelay.orphanBytes; got == 0 {
+		t.Fatalf("orphanBytes=%d, want staged orphan bytes before block accept", got)
+	}
+
+	peer := testPeerForService(sink.service, "remote", 1)
+	summary, err := peer.processRelayedBlock(node.DevnetGenesisBlockBytes())
+	if err != nil {
+		t.Fatalf("processRelayedBlock(genesis): %v", err)
+	}
+	if summary == nil || summary.BlockHeight != 0 {
+		t.Fatalf("summary=%v, want height 0", summary)
+	}
+	if _, ok := sink.service.daRelay.sets[daID]; ok {
+		t.Fatalf("DA set %x still present after accepted block TTL expiry", daID)
+	}
+	if got := sink.service.daRelay.orphanBytes; got != 0 {
+		t.Fatalf("orphanBytes=%d, want 0 after accepted block TTL expiry", got)
+	}
+	if got := sink.service.daRelay.orphanBytesForPeer("peer-a"); got != 0 {
+		t.Fatalf("orphanBytesForPeer(peer-a)=%d, want 0", got)
+	}
+	if got := sink.service.daRelay.orphanBytesForDAID(daID); got != 0 {
+		t.Fatalf("orphanBytesForDAID=%d, want 0", got)
+	}
+}
+
 func TestHandleBlockRequestsMoreBlocksAfterAccept(t *testing.T) {
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	peer := &peer{

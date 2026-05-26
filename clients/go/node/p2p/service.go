@@ -82,6 +82,7 @@ type Service struct {
 	blockSeen *boundedHashSet
 	txSeen    *boundedHashSet
 	orphans   *orphanPool
+	daRelay   *daRelayState
 
 	// peerLifecycleExits counts peer lifecycle exits at the single
 	// canonical removal boundary inside unregisterPeer. The counter is
@@ -119,6 +120,10 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
 	addrMgr := newAddrManager(cfg.Now)
 	seedAddrManagerFromBootstrap(addrMgr, outboundAddrs)
+	daRelay, err := newDARelayState(defaultDARelayCaps())
+	if err != nil {
+		return nil, err
+	}
 	return &Service{
 		cfg:            cfg,
 		peers:          make(map[string]*peer),
@@ -130,6 +135,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
 		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
 		orphans:        newOrphanPool(500),
+		daRelay:        daRelay,
 	}, nil
 }
 
