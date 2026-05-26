@@ -103,7 +103,6 @@ engines:
       # keep this metric-only exclusion narrow while targeted DA tests and review
       # cover validation-before-mutation, accounting, and quota invariants.
       - "clients/go/node/p2p/da_relay_state.go"
-      - "clients/go/node/p2p/da_relay_prefetch.go"
       - "clients/go/node/p2p/handlers_block.go"
       - "clients/go/node/p2p/handshake.go"
       - "clients/go/node/p2p/mempool.go"
