@@ -165,6 +165,17 @@ func TestDARelayPeerQuotaKeyPreventsPortHopping(t *testing.T) {
 	})
 }
 
+func TestDARelayReleasePeerQuotaKeySkipsUnchargedPeer(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	record := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daRelayTestID(112), 0, 7))
+	if err := state.releasePeerQuotaKey("peer-b"); err != nil {
+		t.Fatalf("release uncharged peer: %v", err)
+	}
+	if got := state.orphanBytesForPeer("peer-a"); got != record.wireBytes {
+		t.Fatalf("charged peer bytes after unrelated release = %d, want %d", got, record.wireBytes)
+	}
+}
+
 func TestDARelayEmptyPeerQuotaKeyIsCapped(t *testing.T) {
 	t.Run("chunk only", func(t *testing.T) {
 		caps := defaultDARelayCaps()
