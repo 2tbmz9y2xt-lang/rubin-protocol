@@ -240,28 +240,18 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
 	}
-	txid, err := parseCanonicalTxID(txBytes)
+	tx, txid, err := parseCanonicalTx(txBytes)
 	if err != nil {
 		return err
 	}
 	if err := s.ensureRelayTxAdmitted(txid, txBytes); err != nil {
 		return err
 	}
+	_ = s.stageRelayDATx("", txBytes, tx)
 	if !s.txSeen.Add(txid) {
 		return nil
 	}
 	return s.broadcastInventory(nil, []InventoryVector{{Type: MSG_TX, Hash: txid}})
-}
-
-func parseCanonicalTxID(txBytes []byte) ([32]byte, error) {
-	_, txid, _, consumed, err := consensus.ParseTx(txBytes)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	if consumed != len(txBytes) {
-		return [32]byte{}, errors.New("non-canonical tx bytes")
-	}
-	return txid, nil
 }
 
 func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) error {
