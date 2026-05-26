@@ -77,6 +77,8 @@ func (s *Service) sendPostHandshakeAnnouncements(current *peer) error {
 }
 
 func (s *Service) registerPeer(p *peer) error {
+	unlockQuota := s.lockPeerQuotaKey(peerQuotaKey(p.addr()))
+	defer unlockQuota()
 	if err := s.cfg.PeerManager.AddPeer(&p.state); err != nil {
 		return err
 	}
@@ -97,16 +99,16 @@ func (s *Service) unregisterPeer(p *peer) {
 		return
 	}
 	addr := p.addr()
-	remove := false
-	s.peersMu.Lock()
-	for key, current := range s.peers {
-		if current != p {
-			continue
+	quotaKey := peerQuotaKey(addr)
+	unlockQuota := s.lockPeerQuotaKey(quotaKey)
+	defer unlockQuota()
+	remove := s.removePeerEntries(p)
+	if remove {
+		s.cfg.PeerManager.RemovePeer(addr)
+		if err := s.releaseDAQuotaIfInactiveLocked(quotaKey); err != nil {
+			p.setLastError(err.Error())
 		}
-		delete(s.peers, key)
-		remove = true
 	}
-	s.peersMu.Unlock()
 	if remove {
 		// Lifecycle-exit counter increments here, exactly once per
 		// unregisterPeer call that actually deleted peer entries from
@@ -116,11 +118,76 @@ func (s *Service) unregisterPeer(p *peer) {
 		// safe to call without peersMu (the lock has been released
 		// above) because the counter is independent of peer-map state.
 		s.peerLifecycleExits.Add(1)
-		s.cfg.PeerManager.RemovePeer(addr)
 	}
 	if remove && s.isOutboundAddr(addr) {
 		s.scheduleReconnect(addr)
 	}
+}
+
+func (s *Service) removePeerEntries(p *peer) bool {
+	s.peersMu.Lock()
+	defer s.peersMu.Unlock()
+	remove := false
+	for key, current := range s.peers {
+		if current == p {
+			delete(s.peers, key)
+			remove = true
+		}
+	}
+	return remove
+}
+
+func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
+	unlockQuota := s.lockPeerQuotaKey(quotaKey)
+	defer unlockQuota()
+	return s.releaseDAQuotaIfInactiveLocked(quotaKey)
+}
+
+func (s *Service) releaseDAQuotaIfInactiveLocked(quotaKey string) error {
+	if s.daRelay == nil {
+		return nil
+	}
+	s.peersMu.RLock()
+	active := s.hasActivePeerQuotaKeyLocked(quotaKey)
+	s.peersMu.RUnlock()
+	if active {
+		return nil
+	}
+	return s.daRelay.releasePeerQuotaKey(quotaKey)
+}
+
+func (s *Service) lockPeerQuotaKey(quotaKey string) func() {
+	s.peerQuotaLocksMu.Lock()
+	if s.peerQuotaLocks == nil {
+		s.peerQuotaLocks = make(map[string]*peerQuotaLock)
+	}
+	quotaLock := s.peerQuotaLocks[quotaKey]
+	if quotaLock == nil {
+		quotaLock = &peerQuotaLock{}
+		s.peerQuotaLocks[quotaKey] = quotaLock
+	}
+	quotaLock.refs++
+	s.peerQuotaLocksMu.Unlock()
+
+	quotaLock.mu.Lock()
+	return func() {
+		quotaLock.mu.Unlock()
+		s.peerQuotaLocksMu.Lock()
+		quotaLock.refs--
+		if quotaLock.refs == 0 {
+			delete(s.peerQuotaLocks, quotaKey)
+		}
+		s.peerQuotaLocksMu.Unlock()
+	}
+}
+
+func (s *Service) hasActivePeerQuotaKeyLocked(quotaKey string) bool {
+	for _, current := range s.peers {
+		if current != nil && peerQuotaKey(current.addr()) == quotaKey {
+			return true
+		}
+	}
+	return false
 }
 
 // PeerLifecycleExits returns the monotonic count of peer lifecycle

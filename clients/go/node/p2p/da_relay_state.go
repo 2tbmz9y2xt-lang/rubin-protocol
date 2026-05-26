@@ -288,6 +288,40 @@ func (s *daRelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 	return expired, nil
 }
 
+func (s *daRelayState) releasePeerQuotaKey(key string) error {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.orphanBytesByPeerQuotaKey[key] == 0 {
+		return nil
+	}
+
+	for _, daID := range s.sortedIncompleteDAIDsLocked() {
+		record := s.sets[daID]
+		updated, changed, err := record.withoutPeerQuotaKey(key)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			continue
+		}
+		if updated.emptyIncomplete() {
+			if err := s.removeDASetRecordLocked(record); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := s.applyDASetRecordLocked(updated); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *daRelayState) sortedIncompleteDAIDsLocked() [][32]byte {
 	var daIDs [][32]byte
 	for daID := range s.orphanBytesByDAID {
@@ -702,6 +736,60 @@ func (r *daRelaySetRecord) pruneChunksOutsideCommit() {
 			delete(r.replaceableChunks, index)
 		}
 	}
+}
+
+func (r daRelaySetRecord) withoutPeerQuotaKey(key string) (daRelaySetRecord, bool, error) {
+	if r.state == daRelayStateCompleteSet || r.wireBytes == 0 {
+		return r, false, nil
+	}
+
+	out := r.cloneForStateMutation()
+	changed := out.dropCommitForPeerQuotaKey(key)
+	if out.dropChunksForPeerQuotaKey(key) {
+		changed = true
+	}
+	if !changed {
+		return r, false, nil
+	}
+	out.payloadBytes = 0
+	if out.commit.chunkCount == 0 {
+		out.state = daRelayStateOrphanChunks
+		out.replaceableChunks = nil
+	}
+	if out.emptyIncomplete() {
+		out.wireBytes = 0
+		return out, true, nil
+	}
+	if err := out.recomputeOrphanTotals(); err != nil {
+		return daRelaySetRecord{}, false, err
+	}
+	return out, true, nil
+}
+
+func (r *daRelaySetRecord) dropCommitForPeerQuotaKey(key string) bool {
+	if r.commit.wireBytes == 0 || r.commit.peerQuotaKey != key {
+		return false
+	}
+	r.commit = daRelayCommit{}
+	r.replaceableChunks = nil
+	return true
+}
+
+func (r *daRelaySetRecord) dropChunksForPeerQuotaKey(key string) bool {
+	changed := false
+	for index, chunk := range r.chunks {
+		if chunk.wireBytes == 0 || chunk.peerQuotaKey != key {
+			continue
+		}
+		delete(r.chunks, index)
+		delete(r.replaceableChunks, index)
+		changed = true
+	}
+	return changed
+}
+
+func (r daRelaySetRecord) emptyIncomplete() bool {
+	return r.state != daRelayStateCompleteSet && r.commit.chunkCount == 0 && len(r.chunks) == 0
 }
 
 func (r daRelaySetRecord) validateChunkInsert(chunkIndex uint16) error {

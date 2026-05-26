@@ -46,8 +46,10 @@ type Service struct {
 	cancel   context.CancelFunc
 	listener net.Listener
 
-	peersMu sync.RWMutex
-	peers   map[string]*peer
+	peersMu          sync.RWMutex
+	peers            map[string]*peer
+	peerQuotaLocksMu sync.Mutex
+	peerQuotaLocks   map[string]*peerQuotaLock
 	// closed is set to true by Close. A Service instance is single-use: once
 	// Close has returned, Start refuses to restart the same Service and the
 	// accept/reconnect loops must not be revived. Guarded by peersMu.
@@ -99,6 +101,11 @@ type Service struct {
 	peerLifecycleExits atomic.Uint64
 }
 
+type peerQuotaLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 type peer struct {
 	conn    net.Conn
 	service *Service
@@ -127,6 +134,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	return &Service{
 		cfg:            cfg,
 		peers:          make(map[string]*peer),
+		peerQuotaLocks: make(map[string]*peerQuotaLock),
 		inFlightDial:   make(map[string]struct{}),
 		reconnectState: make(map[string]*reconnectEntry),
 		outboundAddrs:  outboundAddrs,
