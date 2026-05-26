@@ -64,10 +64,7 @@ func (s *Service) finishDAPrefetch(peerAddr string, daID [32]byte, record daRela
 }
 
 func (s *Service) scheduleDAPrefetchSnapshot(peerAddr string, daID [32]byte) {
-	s.daRelay.mu.Lock()
-	record := s.daRelay.sets[daID].clone()
-	s.daRelay.mu.Unlock()
-	s.scheduleDAPrefetch(peerAddr, record)
+	s.scheduleDAPrefetch(peerAddr, daRelaySetRecord{daID: daID})
 }
 
 func daRelayCommitPayloadCommitment(tx *consensus.Tx) ([32]byte, bool) {
