@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"crypto/sha3"
 	"errors"
 	"io/fs"
 	"os"
@@ -45,6 +46,69 @@ func distinctTxBytes(t *testing.T, nonce uint64) []byte {
 		t.Fatalf("MarshalTx nonce=%d: %v", nonce, err)
 	}
 	return raw
+}
+
+func daCommitRelayTxBytes(t *testing.T, daID [32]byte, nonce uint64, payloads ...[]byte) []byte {
+	t.Helper()
+	if len(payloads) == 0 {
+		t.Fatal("DA commit test tx requires at least one payload")
+	}
+	commitment := daRelayPayloadCommitment(payloads...)
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x01,
+		TxNonce: nonce,
+		Outputs: []consensus.TxOutput{{
+			Value:        0,
+			CovenantType: consensus.COV_TYPE_DA_COMMIT,
+			CovenantData: append([]byte(nil), commitment[:]...),
+		}},
+		DaCommitCore: &consensus.DaCommitCore{
+			DaID:       daID,
+			ChunkCount: uint16(len(payloads)),
+		},
+	}
+	raw, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx DA commit: %v", err)
+	}
+	return raw
+}
+
+func daChunkRelayTxBytes(t *testing.T, daID [32]byte, index uint16, nonce uint64, payload []byte) []byte {
+	t.Helper()
+	chunkHash := sha3.Sum256(payload)
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x02,
+		TxNonce: nonce,
+		DaChunkCore: &consensus.DaChunkCore{
+			DaID:       daID,
+			ChunkIndex: index,
+			ChunkHash:  chunkHash,
+		},
+		DaPayload: cloneBytes(payload),
+	}
+	raw, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx DA chunk: %v", err)
+	}
+	return raw
+}
+
+func daRelayRecordSnapshot(t *testing.T, state *daRelayState, daID [32]byte) (daRelaySetRecord, bool) {
+	t.Helper()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	record, ok := state.sets[daID]
+	return record.clone(), ok
+}
+
+func daRelayTestPeer(h *testHarness, addr string) *peer {
+	return &peer{
+		service: h.service,
+		state:   node.PeerState{Addr: addr, HandshakeComplete: true},
+	}
 }
 
 func putRelayTx(pool *MemoryTxPool, txid [32]byte, raw []byte) bool {
@@ -202,6 +266,89 @@ func TestHandleTxValid(t *testing.T) {
 	}
 }
 
+func TestHandleTxStagesDATxsIntoRelayState(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := daRelayTestPeer(h, "127.0.0.1:19111")
+	daID := daRelayTestID(120)
+	payload := []byte("relay-da-payload")
+	commitTx := daCommitRelayTxBytes(t, daID, 9101, payload)
+	chunkTx := daChunkRelayTxBytes(t, daID, 0, 9102, payload)
+
+	if err := p.handleTx(commitTx); err != nil {
+		t.Fatalf("handleTx DA commit: %v", err)
+	}
+	record, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID)
+	if !ok {
+		t.Fatal("DA commit tx did not create a relay state record")
+	}
+	if record.state != daRelayStateStagedCommit || record.commit.chunkCount != 1 {
+		t.Fatalf("DA commit relay state=%v chunk_count=%d, want staged/1", record.state, record.commit.chunkCount)
+	}
+	if record.commit.payloadCommitment != daRelayPayloadCommitment(payload) {
+		t.Fatal("DA commit relay state stored wrong payload commitment")
+	}
+
+	if err := p.handleTx(chunkTx); err != nil {
+		t.Fatalf("handleTx DA chunk: %v", err)
+	}
+	record, ok = daRelayRecordSnapshot(t, h.service.daRelay, daID)
+	if !ok {
+		t.Fatal("DA chunk tx removed relay state record")
+	}
+	if record.state != daRelayStateCompleteSet {
+		t.Fatalf("DA relay state=%v, want complete set", record.state)
+	}
+	if record.payloadBytes != uint64(len(payload)) || h.service.daRelay.pinnedPayloadBytes == 0 {
+		t.Fatalf("DA complete accounting payload=%d pinned=%d", record.payloadBytes, h.service.daRelay.pinnedPayloadBytes)
+	}
+}
+
+func TestStageRelayDATxIgnoresIncompleteMetadata(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	daID := daRelayTestID(123)
+	peerAddr := "127.0.0.1:19114"
+
+	var nilService *Service
+	if err := nilService.stageRelayDATx(peerAddr, nil, &consensus.Tx{}); err != nil {
+		t.Fatalf("nil service stageRelayDATx: %v", err)
+	}
+	if err := h.service.stageRelayDATx(peerAddr, nil, nil); err != nil {
+		t.Fatalf("nil tx stageRelayDATx: %v", err)
+	}
+	if err := h.service.stageRelayDATx(peerAddr, []byte{0x01}, &consensus.Tx{TxKind: 0x01}); err != nil {
+		t.Fatalf("DA commit without core: %v", err)
+	}
+	if err := h.service.stageRelayDATx(peerAddr, []byte{0x02}, &consensus.Tx{TxKind: 0x02}); err != nil {
+		t.Fatalf("DA chunk without core: %v", err)
+	}
+
+	wrongCovenant := &consensus.Tx{
+		TxKind: 0x01,
+		Outputs: []consensus.TxOutput{{
+			CovenantType: consensus.COV_TYPE_P2PK,
+		}},
+		DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: 1},
+	}
+	if err := h.service.stageRelayDATx(peerAddr, []byte{0x03}, wrongCovenant); err != nil {
+		t.Fatalf("DA commit without DA covenant output: %v", err)
+	}
+
+	badCommitment := &consensus.Tx{
+		TxKind: 0x01,
+		Outputs: []consensus.TxOutput{{
+			CovenantType: consensus.COV_TYPE_DA_COMMIT,
+			CovenantData: []byte{0x01},
+		}},
+		DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: 1},
+	}
+	if err := h.service.stageRelayDATx(peerAddr, []byte{0x04}, badCommitment); err != nil {
+		t.Fatalf("DA commit with short commitment: %v", err)
+	}
+	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok {
+		t.Fatal("incomplete DA metadata mutated relay state")
+	}
+}
+
 func TestHandleTxNonCanonical(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -229,6 +376,32 @@ func TestHandleTxNonCanonical(t *testing.T) {
 	}
 	if p.state.BanScore == 0 {
 		t.Fatal("ban score should be > 0 after non-canonical tx")
+	}
+}
+
+func TestHandleTxDAAdmissionRejectsDoNotMutateRelayState(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := daRelayTestPeer(h, "127.0.0.1:19112")
+	daID := daRelayTestID(121)
+	payload := []byte("relay-da-bad-payload")
+	nonCanonical := append(daCommitRelayTxBytes(t, daID, 9201, payload), 0x00)
+	if err := p.handleTx(nonCanonical); err != nil {
+		t.Fatalf("handleTx non-canonical DA commit: %v", err)
+	}
+	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok {
+		t.Fatal("non-canonical DA commit mutated relay state")
+	}
+
+	badChunk := daChunkRelayTxBytes(t, daID, 0, 9202, payload)
+	badChunk[len(badChunk)-1] ^= 0xff
+	if err := p.handleTx(badChunk); err != nil {
+		t.Fatalf("handleTx DA chunk hash mismatch: %v", err)
+	}
+	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok {
+		t.Fatal("DA chunk hash mismatch mutated relay state")
+	}
+	if p.snapshotState().BanScore != 10 {
+		t.Fatalf("ban score=%d, want only the non-canonical parse penalty", p.snapshotState().BanScore)
 	}
 }
 
@@ -277,6 +450,43 @@ func TestAnnounceTx(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool {
 		return sink.service.cfg.TxPool.Has(txid)
 	})
+}
+
+func TestAnnounceTxStagesDAOnceAcrossLocalAndInbound(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := daRelayTestPeer(h, "127.0.0.1:19113")
+	daID := daRelayTestID(122)
+	payload := []byte("relay-da-local-payload")
+	commitTx := daCommitRelayTxBytes(t, daID, 9301, payload)
+	chunkTx := daChunkRelayTxBytes(t, daID, 0, 9302, payload)
+
+	if err := h.service.AnnounceTx(commitTx); err != nil {
+		t.Fatalf("AnnounceTx DA commit: %v", err)
+	}
+	if err := p.handleTx(commitTx); err != nil {
+		t.Fatalf("handleTx duplicate DA commit: %v", err)
+	}
+	record, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID)
+	if !ok {
+		t.Fatal("local DA commit did not create relay state")
+	}
+	if record.state != daRelayStateStagedCommit || record.receivedTime != 1 {
+		t.Fatalf("after duplicate DA commit state=%v received_time=%d, want staged/1", record.state, record.receivedTime)
+	}
+
+	if err := h.service.AnnounceTx(chunkTx); err != nil {
+		t.Fatalf("AnnounceTx DA chunk: %v", err)
+	}
+	if err := p.handleTx(chunkTx); err != nil {
+		t.Fatalf("handleTx duplicate DA chunk: %v", err)
+	}
+	record, ok = daRelayRecordSnapshot(t, h.service.daRelay, daID)
+	if !ok {
+		t.Fatal("local DA chunk removed relay state")
+	}
+	if record.state != daRelayStateCompleteSet || record.receivedTime != 1 || h.service.daRelay.nextReceivedTime != 1 {
+		t.Fatalf("duplicate local/inbound DA relay state=%v received=%d next=%d, want complete/1/1", record.state, record.receivedTime, h.service.daRelay.nextReceivedTime)
+	}
 }
 
 func TestAnnounceTxRelaysIntoCanonicalMempoolAndMiner(t *testing.T) {
@@ -841,7 +1051,7 @@ func TestBlockBytesIOError(t *testing.T) {
 	if err := os.RemoveAll(blocksDir); err != nil {
 		t.Fatalf("RemoveAll: %v", err)
 	}
-	if err := os.WriteFile(blocksDir, []byte("not-a-dir"), 0644); err != nil {
+	if err := os.WriteFile(blocksDir, []byte("not-a-dir"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
