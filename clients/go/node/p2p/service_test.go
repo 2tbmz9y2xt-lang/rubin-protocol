@@ -484,6 +484,74 @@ func TestUnregisterPeerKeepsDAAccountingForActiveQuotaKey(t *testing.T) {
 	}
 }
 
+func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	runtimeCfg := node.DefaultPeerRuntimeConfig("devnet", 1)
+	h.peerManager = node.NewPeerManager(runtimeCfg)
+	h.service.cfg.PeerManager = h.peerManager
+	h.service.cfg.PeerRuntimeConfig = runtimeCfg
+	h.service.daRelay = newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(112)
+	oldPeer := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
+	newPeer := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19112"}}
+	if err := h.service.registerPeer(oldPeer); err != nil {
+		t.Fatalf("register old peer: %v", err)
+	}
+	mustAddDAChunk(t, h.service.daRelay, oldPeer.addr(), daRelayTestChunk(daID, 0, 9))
+
+	h.service.daRelay.mu.Lock()
+	unregistered := make(chan struct{})
+	go func() {
+		h.service.unregisterPeer(oldPeer)
+		close(unregistered)
+	}()
+	waitFor(t, time.Second, func() bool {
+		return h.service.cfg.PeerManager.Count() == 0
+	})
+
+	registered := make(chan error, 1)
+	go func() { registered <- h.service.registerPeer(newPeer) }()
+	select {
+	case err := <-registered:
+		h.service.daRelay.mu.Unlock()
+		t.Fatalf("register new peer completed while unregister held DA relay lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	h.service.daRelay.mu.Unlock()
+	<-unregistered
+	if err := <-registered; err != nil {
+		t.Fatalf("register new peer: %v", err)
+	}
+	if got := h.service.cfg.PeerManager.Count(); got != 1 {
+		t.Fatalf("peer manager count after replacement register = %d, want 1", got)
+	}
+}
+
+func TestLockPeerQuotaKeyInitializesNilMap(t *testing.T) {
+	s := &Service{}
+	unlock := s.lockPeerQuotaKey("127.0.0.1")
+	unlock()
+	if s.peerQuotaLocks == nil {
+		t.Fatalf("peer quota locks map was not initialized")
+	}
+	if got := len(s.peerQuotaLocks); got != 0 {
+		t.Fatalf("peer quota locks after unlock = %d, want 0", got)
+	}
+}
+
+func TestReleaseDAQuotaIfInactiveHandlesNilRelay(t *testing.T) {
+	s := &Service{}
+	if err := s.releaseDAQuotaIfInactive("127.0.0.1"); err != nil {
+		t.Fatalf("release DA quota with nil relay: %v", err)
+	}
+	if s.peerQuotaLocks == nil {
+		t.Fatalf("peer quota locks map was not initialized")
+	}
+	if got := len(s.peerQuotaLocks); got != 0 {
+		t.Fatalf("peer quota locks after release = %d, want 0", got)
+	}
+}
+
 func TestHandleBlockRequestsMoreBlocksAfterAccept(t *testing.T) {
 	sink := newTestHarness(t, 0, "127.0.0.1:0", nil)
 	peer := &peer{
