@@ -26,44 +26,52 @@ type daRelayPrefetchPlan struct {
 }
 
 func (s *Service) scheduleDAPrefetch(peerAddr string, record daRelaySetRecord) {
-	if s == nil || s.daRelay == nil {
+	if !s.canScheduleDAPrefetch() {
 		return
 	}
 	peersByKey, keys := s.daPrefetchPeers(peerAddr)
 	plans, diagnostic := s.daRelay.planDAPrefetch(record, keys, s.cfg.Now())
-	if diagnostic != "" && len(keys) != 0 {
-		peersByKey[keys[0]].setLastError(diagnostic)
-	}
+	reportDAPrefetchDiagnostic(peersByKey, keys, diagnostic)
 	for _, plan := range plans {
-		current := peersByKey[plan.peerKey]
-		if current == nil {
-			s.daRelay.releaseDAPrefetchPlan(plan)
-			continue
-		}
-		payload, err := encodeGetDAChunkPayload(getDAChunkPayload{Version: daChunkRequestVersion, DAID: plan.daID, Indexes: plan.indexes})
-		if err == nil {
-			err = current.send(messageGetDAChunk, payload)
-		}
-		if err != nil {
-			current.setLastError(fmt.Sprintf("da prefetch send failed: %v", err))
-			s.daRelay.releaseDAPrefetchPlan(plan)
-		}
+		s.sendDAPrefetchPlan(peersByKey, plan)
 	}
+}
+
+func (s *Service) canScheduleDAPrefetch() bool {
+	if s == nil {
+		return false
+	}
+	return s.daRelay != nil
 }
 
 func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) {
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
-	peers := map[string]*peer{}
 	if peerAddr != "" {
-		if current := s.peers[peerAddr]; current != nil && current.acceptsCompactBlocks() {
-			if key := peerQuotaKey(current.addr()); key != "" {
-				return map[string]*peer{key: current}, []string{key}
-			}
+		peers, keys, ok := s.preferredDAPrefetchPeerLocked(peerAddr)
+		if ok {
+			return peers, keys
 		}
 	}
+	return s.allDAPrefetchPeersLocked()
+}
+
+func (s *Service) preferredDAPrefetchPeerLocked(peerAddr string) (map[string]*peer, []string, bool) {
+	current := s.peers[peerAddr]
+	if !acceptsDAPrefetch(current) {
+		return nil, nil, false
+	}
+	key := peerQuotaKey(current.addr())
+	if key == "" {
+		return nil, nil, false
+	}
+	return map[string]*peer{key: current}, []string{key}, true
+}
+
+func (s *Service) allDAPrefetchPeersLocked() (map[string]*peer, []string) {
+	peers := map[string]*peer{}
 	for _, current := range s.peers {
-		if current == nil || !current.acceptsCompactBlocks() {
+		if !acceptsDAPrefetch(current) {
 			continue
 		}
 		if key := peerQuotaKey(current.addr()); key != "" {
@@ -78,18 +86,45 @@ func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) 
 	return peers, keys
 }
 
+func acceptsDAPrefetch(current *peer) bool {
+	if current == nil {
+		return false
+	}
+	return current.acceptsCompactBlocks()
+}
+
+func reportDAPrefetchDiagnostic(peersByKey map[string]*peer, keys []string, diagnostic string) {
+	if diagnostic == "" || len(keys) == 0 {
+		return
+	}
+	peersByKey[keys[0]].setLastError(diagnostic)
+}
+
+func (s *Service) sendDAPrefetchPlan(peersByKey map[string]*peer, plan daRelayPrefetchPlan) {
+	current := peersByKey[plan.peerKey]
+	if current == nil {
+		s.daRelay.releaseDAPrefetchPlan(plan)
+		return
+	}
+	payload, err := encodeDAPrefetchPlanPayload(plan)
+	if err == nil {
+		err = current.send(messageGetDAChunk, payload)
+	}
+	if err != nil {
+		current.setLastError(fmt.Sprintf("da prefetch send failed: %v", err))
+		s.daRelay.releaseDAPrefetchPlan(plan)
+	}
+}
+
+func encodeDAPrefetchPlanPayload(plan daRelayPrefetchPlan) ([]byte, error) {
+	return encodeGetDAChunkPayload(getDAChunkPayload{Version: daChunkRequestVersion, DAID: plan.daID, Indexes: plan.indexes})
+}
+
 func (s *daRelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string, now time.Time) ([]daRelayPrefetchPlan, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.prefetch.indexes == nil {
-		s.prefetch.indexes = map[[32]byte]map[uint16]string{}
-		s.prefetch.expires = map[[32]byte]time.Time{}
-	}
-	for daID, expiresAt := range s.prefetch.expires {
-		if !expiresAt.IsZero() && !now.Before(expiresAt) {
-			s.prefetch.releaseSet(daID)
-		}
-	}
+	s.prefetch.ensureMaps()
+	s.prefetch.releaseExpired(now)
 	missing := record.missingChunkIndexes()
 	if len(missing) == 0 {
 		s.prefetch.releaseSet(record.daID)
@@ -98,14 +133,42 @@ func (s *daRelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string
 	if len(peerKeys) == 0 {
 		return nil, ""
 	}
-	set := s.prefetch.indexes[record.daID]
-	if set == nil {
-		if len(s.prefetch.indexes) >= daPrefetchMaxConcurrentSets {
-			return nil, "da prefetch global set cap exceeded"
-		}
-		set = map[uint16]string{}
+	set, diagnostic := s.prefetch.planSet(record.daID)
+	if diagnostic != "" {
+		return nil, diagnostic
 	}
-	globalBytes, peerBytes := s.prefetch.bytesInFlight()
+	plansByPeer, diagnostic := s.prefetch.reserveMissing(record.daID, missing, peerKeys, set, now)
+	return buildDAPrefetchPlans(record.daID, peerKeys, plansByPeer), diagnostic
+}
+
+func (p *daRelayPrefetchState) ensureMaps() {
+	if p.indexes == nil {
+		p.indexes = map[[32]byte]map[uint16]string{}
+		p.expires = map[[32]byte]time.Time{}
+	}
+}
+
+func (p *daRelayPrefetchState) releaseExpired(now time.Time) {
+	for daID, expiresAt := range p.expires {
+		if !expiresAt.IsZero() && !now.Before(expiresAt) {
+			p.releaseSet(daID)
+		}
+	}
+}
+
+func (p *daRelayPrefetchState) planSet(daID [32]byte) (map[uint16]string, string) {
+	set := p.indexes[daID]
+	if set != nil {
+		return set, ""
+	}
+	if len(p.indexes) >= daPrefetchMaxConcurrentSets {
+		return nil, "da prefetch global set cap exceeded"
+	}
+	return map[uint16]string{}, ""
+}
+
+func (p *daRelayPrefetchState) reserveMissing(daID [32]byte, missing []uint16, peerKeys []string, set map[uint16]string, now time.Time) (map[string][]uint16, string) {
+	globalBytes, peerBytes := p.bytesInFlight()
 	plansByPeer := map[string][]uint16{}
 	peerIndex := 0
 	for _, chunkIndex := range missing {
@@ -114,23 +177,23 @@ func (s *daRelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string
 		}
 		peerKey, ok, reason := nextDAPrefetchPeer(peerKeys, peerBytes, globalBytes, &peerIndex)
 		if !ok {
-			if len(plansByPeer) != 0 {
-				s.prefetch.expires[record.daID] = now.Add(daPrefetchRequestTTL)
-			}
-			return buildDAPrefetchPlans(record.daID, peerKeys, plansByPeer), reason
+			p.expirePlanned(daID, plansByPeer, now)
+			return plansByPeer, reason
 		}
-		if s.prefetch.indexes[record.daID] == nil {
-			s.prefetch.indexes[record.daID] = set
-		}
+		p.indexes[daID] = set
 		set[chunkIndex] = peerKey
 		globalBytes += consensus.CHUNK_BYTES
 		peerBytes[peerKey] += consensus.CHUNK_BYTES
 		plansByPeer[peerKey] = append(plansByPeer[peerKey], chunkIndex)
 	}
+	p.expirePlanned(daID, plansByPeer, now)
+	return plansByPeer, ""
+}
+
+func (p *daRelayPrefetchState) expirePlanned(daID [32]byte, plansByPeer map[string][]uint16, now time.Time) {
 	if len(plansByPeer) != 0 {
-		s.prefetch.expires[record.daID] = now.Add(daPrefetchRequestTTL)
+		p.expires[daID] = now.Add(daPrefetchRequestTTL)
 	}
-	return buildDAPrefetchPlans(record.daID, peerKeys, plansByPeer), ""
 }
 
 func nextDAPrefetchPeer(peerKeys []string, peerBytes map[string]uint64, globalBytes uint64, peerIndex *int) (string, bool, string) {

@@ -14,32 +14,11 @@ func TestDAPrefetchPlansBoundedDedupTimeoutAndComplete(t *testing.T) {
 	record := mustAddDACommit(t, state, "", daRelayTestCommit(daID, uint16(consensus.MAX_DA_CHUNK_COUNT), 1))
 	keys := []string{"peer-a", "peer-b", "peer-c", "peer-d", "peer-e", "peer-f", "peer-g", "peer-h", "peer-i"}
 	now := time.Unix(1000, 0)
-	plans, diagnostic := state.planDAPrefetch(record, keys, now)
-	total, unique, maxPeerBytes := summarizeDAPrefetchPlans(plans)
-	if diagnostic != "" || total != int(consensus.MAX_DA_CHUNK_COUNT) || unique != total || maxPeerBytes > daPrefetchPerPeerBytesPerSecond {
-		t.Fatalf("diagnostic=%q total=%d unique=%d maxPeerBytes=%d", diagnostic, total, unique, maxPeerBytes)
-	}
-	if duplicatePlans, diagnostic := state.planDAPrefetch(record, keys, now); len(duplicatePlans) != 0 || diagnostic != "" {
-		t.Fatalf("duplicate trigger plans=%d diagnostic=%q, want no duplicate", len(duplicatePlans), diagnostic)
-	}
-	for i := 0; i < daPrefetchMaxConcurrentSets-1; i++ {
-		blocked := mustAddDACommit(t, state, "", daRelayTestCommit(daRelayTestID(byte(131+i)), 1, 1))
-		if plans, diagnostic := state.planDAPrefetch(blocked, keys, now); len(plans) != 0 || diagnostic != "da prefetch global byte cap exceeded" {
-			t.Fatalf("blocked plans=%d diagnostic=%q, want byte-cap diagnostic", len(plans), diagnostic)
-		}
-	}
-	if got := len(state.prefetch.indexes); got != 1 {
-		t.Fatalf("prefetch reservations=%d, want only active set", got)
-	}
-	plans, diagnostic = state.planDAPrefetch(record, keys, now.Add(daPrefetchRequestTTL+time.Nanosecond))
-	if retryTotal, _, _ := summarizeDAPrefetchPlans(plans); diagnostic != "" || retryTotal != total {
-		t.Fatalf("retry total=%d diagnostic=%q, want %d", retryTotal, diagnostic, total)
-	}
-	record.state = daRelayStateCompleteSet
-	plans, diagnostic = state.planDAPrefetch(record, keys, now)
-	if len(plans) != 0 || diagnostic != "" || len(state.prefetch.indexes) != 0 {
-		t.Fatalf("complete cleanup plans=%d diagnostic=%q inflight=%d", len(plans), diagnostic, len(state.prefetch.indexes))
-	}
+	total := requireBoundedDAPrefetchPlan(t, state, record, keys, now)
+	requireNoDuplicateDAPrefetch(t, state, record, keys, now)
+	requireNoEmptyDAPrefetchReservations(t, state, keys, now)
+	requireDAPrefetchRetryAfterTTL(t, state, record, keys, now, total)
+	requireDAPrefetchCompleteCleanup(t, state, record, keys, now)
 }
 
 func TestDAPrefetchSendFailureReleasesSlotWithoutBan(t *testing.T) {
@@ -68,6 +47,55 @@ func summarizeDAPrefetchPlans(plans []daRelayPrefetchPlan) (int, int, uint64) {
 		}
 	}
 	return total, len(seen), maxPeerBytes
+}
+
+func requireBoundedDAPrefetchPlan(t *testing.T, state *daRelayState, record daRelaySetRecord, keys []string, now time.Time) int {
+	t.Helper()
+	plans, diagnostic := state.planDAPrefetch(record, keys, now)
+	total, unique, maxPeerBytes := summarizeDAPrefetchPlans(plans)
+	if diagnostic != "" || total != int(consensus.MAX_DA_CHUNK_COUNT) || unique != total || maxPeerBytes > daPrefetchPerPeerBytesPerSecond {
+		t.Fatalf("diagnostic=%q total=%d unique=%d maxPeerBytes=%d", diagnostic, total, unique, maxPeerBytes)
+	}
+	return total
+}
+
+func requireNoDuplicateDAPrefetch(t *testing.T, state *daRelayState, record daRelaySetRecord, keys []string, now time.Time) {
+	t.Helper()
+	plans, diagnostic := state.planDAPrefetch(record, keys, now)
+	if len(plans) != 0 || diagnostic != "" {
+		t.Fatalf("duplicate trigger plans=%d diagnostic=%q, want no duplicate", len(plans), diagnostic)
+	}
+}
+
+func requireNoEmptyDAPrefetchReservations(t *testing.T, state *daRelayState, keys []string, now time.Time) {
+	t.Helper()
+	for i := 0; i < daPrefetchMaxConcurrentSets-1; i++ {
+		blocked := mustAddDACommit(t, state, "", daRelayTestCommit(daRelayTestID(byte(131+i)), 1, 1))
+		plans, diagnostic := state.planDAPrefetch(blocked, keys, now)
+		if len(plans) != 0 || diagnostic != "da prefetch global byte cap exceeded" {
+			t.Fatalf("blocked plans=%d diagnostic=%q, want byte-cap diagnostic", len(plans), diagnostic)
+		}
+	}
+	if got := len(state.prefetch.indexes); got != 1 {
+		t.Fatalf("prefetch reservations=%d, want only active set", got)
+	}
+}
+
+func requireDAPrefetchRetryAfterTTL(t *testing.T, state *daRelayState, record daRelaySetRecord, keys []string, now time.Time, wantTotal int) {
+	t.Helper()
+	plans, diagnostic := state.planDAPrefetch(record, keys, now.Add(daPrefetchRequestTTL+time.Nanosecond))
+	if retryTotal, _, _ := summarizeDAPrefetchPlans(plans); diagnostic != "" || retryTotal != wantTotal {
+		t.Fatalf("retry total=%d diagnostic=%q, want %d", retryTotal, diagnostic, wantTotal)
+	}
+}
+
+func requireDAPrefetchCompleteCleanup(t *testing.T, state *daRelayState, record daRelaySetRecord, keys []string, now time.Time) {
+	t.Helper()
+	record.state = daRelayStateCompleteSet
+	plans, diagnostic := state.planDAPrefetch(record, keys, now)
+	if len(plans) != 0 || diagnostic != "" || len(state.prefetch.indexes) != 0 {
+		t.Fatalf("complete cleanup plans=%d diagnostic=%q inflight=%d", len(plans), diagnostic, len(state.prefetch.indexes))
+	}
 }
 
 func addDAPrefetchTestPeer(svc *Service, addr string, writeErr error) *peer {
