@@ -220,7 +220,12 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 	if !s.blockSeen.Add(blockHash) {
 		return nil
 	}
-	return s.broadcastInventory(nil, []InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
+	broadcastErr := s.broadcastAcceptedBlock(nil, blockHash)
+	ttlErr := s.advanceDAOrphanTTL()
+	if broadcastErr != nil {
+		return broadcastErr
+	}
+	return ttlErr
 }
 
 func (s *Service) AnnounceTx(txBytes []byte) error {

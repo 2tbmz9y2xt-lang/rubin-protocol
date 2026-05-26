@@ -268,11 +268,8 @@ func (s *daRelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 	defer s.mu.Unlock()
 
 	var expired []daRelayExpiredSet
-	for _, daID := range s.sortedDAIDsLocked() {
+	for _, daID := range s.sortedIncompleteDAIDsLocked() {
 		record := s.sets[daID]
-		if record.state == daRelayStateCompleteSet {
-			continue
-		}
 		if record.ttlBlocksRemaining > 1 {
 			record.ttlBlocksRemaining--
 			s.sets[daID] = record
@@ -291,9 +288,13 @@ func (s *daRelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 	return expired, nil
 }
 
-func (s *daRelayState) sortedDAIDsLocked() [][32]byte {
-	daIDs := make([][32]byte, 0, len(s.sets))
-	for daID := range s.sets {
+func (s *daRelayState) sortedIncompleteDAIDsLocked() [][32]byte {
+	var daIDs [][32]byte
+	for daID := range s.orphanBytesByDAID {
+		record, ok := s.sets[daID]
+		if !ok || record.state == daRelayStateCompleteSet {
+			continue
+		}
 		daIDs = append(daIDs, daID)
 	}
 	sort.Slice(daIDs, func(i, j int) bool {

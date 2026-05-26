@@ -650,6 +650,7 @@ func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testin
 	decrementRecord := daRelayOverflowOrphanAccountingRecord(decrementID)
 	decrementRecord.ttlBlocksRemaining = 2
 	state.sets[decrementID] = decrementRecord
+	state.orphanBytesByDAID[decrementID] = decrementRecord.wireBytes
 	expired, err := state.advanceOrphanTTL()
 	if err != nil {
 		t.Fatalf("ttl-only decrement should skip accounting projection: %v", err)
@@ -662,9 +663,11 @@ func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testin
 	}
 
 	delete(state.sets, decrementID)
+	delete(state.orphanBytesByDAID, decrementID)
 	expireRecord := daRelayOverflowOrphanAccountingRecord(expireID)
 	expireRecord.ttlBlocksRemaining = 1
 	state.sets[expireID] = expireRecord
+	state.orphanBytesByDAID[expireID] = expireRecord.wireBytes
 	_, err = state.advanceOrphanTTL()
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
 	if _, ok := state.sets[expireID]; !ok {

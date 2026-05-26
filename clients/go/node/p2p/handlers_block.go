@@ -140,19 +140,21 @@ func parseRelayedBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, err
 func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainStateConnectSummary) {
 	if err := p.service.noteAcceptedBlock(p, blockHash, summary); err != nil {
 		p.setLastError(err.Error())
-		return
 	}
 	p.service.resolveOrphans(p, blockHash)
 }
 
 func (s *Service) noteAcceptedBlock(skip *peer, blockHash [32]byte, summary *node.ChainStateConnectSummary) error {
-	if err := s.advanceDAOrphanTTL(); err != nil {
-		return err
+	if summary != nil {
+		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
 	}
-	s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
 	s.blockSeen.Add(blockHash)
-	_ = s.broadcastInventory(skip, []InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
-	return nil
+	_ = s.broadcastAcceptedBlock(skip, blockHash)
+	return s.advanceDAOrphanTTL()
+}
+
+func (s *Service) broadcastAcceptedBlock(skip *peer, blockHash [32]byte) error {
+	return s.broadcastInventory(skip, []InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
 }
 
 func (s *Service) advanceDAOrphanTTL() error {
@@ -226,7 +228,9 @@ func (s *Service) resolveOrphans(skip *peer, blockHash [32]byte) {
 				continue
 			}
 			if err := s.noteAcceptedBlock(skip, childHash, summary); err != nil {
-				return
+				if skip != nil {
+					skip.setLastError(err.Error())
+				}
 			}
 			queue = append(queue, childHash)
 		}
