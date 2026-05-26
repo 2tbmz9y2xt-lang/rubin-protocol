@@ -275,9 +275,7 @@ func (s *daRelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 		}
 		if record.ttlBlocksRemaining > 1 {
 			record.ttlBlocksRemaining--
-			if err := s.applyDASetRecordLocked(record); err != nil {
-				return nil, err
-			}
+			s.sets[daID] = record
 			continue
 		}
 		if err := s.removeDASetRecordLocked(record); err != nil {

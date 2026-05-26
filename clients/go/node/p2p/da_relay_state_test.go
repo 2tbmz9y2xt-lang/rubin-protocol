@@ -650,10 +650,15 @@ func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testin
 	decrementRecord := daRelayOverflowOrphanAccountingRecord(decrementID)
 	decrementRecord.ttlBlocksRemaining = 2
 	state.sets[decrementID] = decrementRecord
-	_, err := state.advanceOrphanTTL()
-	requireDAErr(t, err, errDARelayArithmeticOverflow)
-	if got := state.sets[decrementID].ttlBlocksRemaining; got != 2 {
-		t.Fatalf("failed ttl decrement mutated ttl=%d, want 2", got)
+	expired, err := state.advanceOrphanTTL()
+	if err != nil {
+		t.Fatalf("ttl-only decrement should skip accounting projection: %v", err)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("ttl-only decrement expired=%+v, want none", expired)
+	}
+	if got := state.sets[decrementID].ttlBlocksRemaining; got != 1 {
+		t.Fatalf("ttl-only decrement ttl=%d, want 1", got)
 	}
 
 	delete(state.sets, decrementID)
