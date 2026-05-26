@@ -290,31 +290,30 @@ func (p *peer) postHandshakePayloadCap() payloadLimitFn {
 	base := postHandshakePayloadCap(p.service.cfg.LocatorLimit, p.service.cfg.SyncConfig.HeaderBatchLimit)
 	return func(command string) uint32 {
 		switch command {
-		case messageCmpctBlock:
+		case messageCmpctBlock, messageGetBlockTxn, messageGetDAChunk:
 			if p.acceptsCompactBlocks() {
 				return compactRelayPayloadCap(command)
 			}
 			return 0
 		case messageBlockTxn:
-			if !p.compactReceiveEnabled() {
-				return 0
-			}
-			if cap := p.blockTxnPayloadCap(); cap != 0 {
-				return cap
-			}
-			if p.acceptsCompactBlocks() {
-				return blockTxnHashPayloadBytes
-			}
-			return 0
-		case messageGetBlockTxn:
-			if p.acceptsCompactBlocks() {
-				return compactRelayPayloadCap(command)
-			}
-			return 0
+			return p.blockTxnPostHandshakePayloadCap()
 		default:
 			return base(command)
 		}
 	}
+}
+
+func (p *peer) blockTxnPostHandshakePayloadCap() uint32 {
+	if !p.compactReceiveEnabled() {
+		return 0
+	}
+	if cap := p.blockTxnPayloadCap(); cap != 0 {
+		return cap
+	}
+	if p.acceptsCompactBlocks() {
+		return blockTxnHashPayloadBytes
+	}
+	return 0
 }
 
 func (p *peer) compactReceiveEnabled() bool {
@@ -387,7 +386,7 @@ func normalizeReadError(err error) error {
 
 func (p *peer) handleMessage(frame message) error {
 	switch frame.Command {
-	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
+	case messageInv, messageGetData, messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageGetBlockTxn, messageBlockTxn, messageGetDAChunk:
 		return p.handleRelayMessage(frame)
 	case messageSendCmpct:
 		return p.handleSendCmpct(frame.Payload)
@@ -408,6 +407,11 @@ func (p *peer) handleRelayMessage(frame message) error {
 	switch frame.Command {
 	case messageInv, messageGetData:
 		return p.handleInventoryRelayMessage(frame)
+	case messageGetDAChunk:
+		if !p.acceptsCompactBlocks() {
+			return postHandshakeUnknownCommandError{command: frame.Command}
+		}
+		return p.handleGetDAChunk(frame.Payload)
 	case messageBlock, messageTx, messageGetBlk, messageCmpctBlock, messageGetBlockTxn, messageBlockTxn:
 		return p.handleObjectRelayMessage(frame)
 	default:

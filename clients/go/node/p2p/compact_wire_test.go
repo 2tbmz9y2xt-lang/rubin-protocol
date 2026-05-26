@@ -10,12 +10,13 @@ import (
 
 func TestCompactWireCommandConstantsAndPayloadCaps(t *testing.T) {
 	liveCaps := postHandshakePayloadCap(defaultLocatorLimit, 512)
-	commands := []string{messageSendCmpct, messageGetBlockTxn, messageCmpctBlock, messageBlockTxn}
+	commands := []string{messageSendCmpct, messageGetBlockTxn, messageCmpctBlock, messageBlockTxn, messageGetDAChunk}
 	caps := []uint32{
 		sendCmpctPayloadBytes,
 		uint32(32 + maxCompactSizeBytes + maxCompactRelayEntries*compactRelayIndexBytes),
 		uint32(consensus.MAX_RELAY_MSG_BYTES),
 		uint32(consensus.MAX_BLOCK_BYTES + 32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes),
+		getDAChunkPayloadCap(),
 	}
 	for i, command := range commands {
 		if _, err := encodeWireCommand(command); err != nil {
@@ -52,6 +53,34 @@ func TestGetBlockTxnPayloadCodec(t *testing.T) {
 	}
 	if got.BlockHash != want.BlockHash || !reflect.DeepEqual(got.Indexes, want.Indexes) {
 		t.Fatalf("getblocktxn roundtrip got=%+v want=%+v", got, want)
+	}
+}
+
+func TestGetDAChunkPayloadCodec(t *testing.T) {
+	want := getDAChunkPayload{
+		Version: daChunkRequestVersion,
+		DAID:    [32]byte{0xaa, 0xbb, 0xcc},
+		Indexes: []uint16{0, 2, uint16(consensus.MAX_DA_CHUNK_COUNT - 1)},
+	}
+	raw, err := encodeGetDAChunkPayload(want)
+	if err != nil {
+		t.Fatalf("encodeGetDAChunkPayload: %v", err)
+	}
+	wantWire := consensus.AppendU64le(nil, daChunkRequestVersion)
+	wantWire = append(wantWire, want.DAID[:]...)
+	wantWire = consensus.AppendCompactSize(wantWire, uint64(len(want.Indexes)))
+	for _, idx := range want.Indexes {
+		wantWire = consensus.AppendU16le(wantWire, idx)
+	}
+	if !reflect.DeepEqual(raw, wantWire) {
+		t.Fatalf("getdachunk wire=%x, want %x", raw, wantWire)
+	}
+	got, err := decodeGetDAChunkPayload(raw)
+	if err != nil {
+		t.Fatalf("decodeGetDAChunkPayload: %v", err)
+	}
+	if got.Version != want.Version || got.DAID != want.DAID || !reflect.DeepEqual(got.Indexes, want.Indexes) {
+		t.Fatalf("getdachunk roundtrip got=%+v want=%+v", got, want)
 	}
 }
 
@@ -359,6 +388,58 @@ func TestGetBlockTxnPayloadRejectsMalformed(t *testing.T) {
 	}
 }
 
+func TestGetDAChunkPayloadRejectsMalformed(t *testing.T) {
+	tooMany := make([]uint16, consensus.MAX_DA_CHUNK_COUNT+1)
+	for i := range tooMany {
+		tooMany[i] = uint16(i)
+	}
+	for _, tc := range []struct {
+		name    string
+		in      getDAChunkPayload
+		wantErr string
+	}{
+		{name: "version", in: getDAChunkPayload{Version: daChunkRequestVersion + 1, Indexes: []uint16{0}}, wantErr: "unsupported DA chunk request version"},
+		{name: "empty", in: getDAChunkPayload{Version: daChunkRequestVersion}, wantErr: "invalid DA chunk request index count"},
+		{name: "too_many", in: getDAChunkPayload{Version: daChunkRequestVersion, Indexes: tooMany}, wantErr: "invalid DA chunk request index count"},
+		{name: "unsorted", in: getDAChunkPayload{Version: daChunkRequestVersion, Indexes: []uint16{2, 1}}, wantErr: "DA chunk request indexes not strictly increasing"},
+		{name: "duplicate", in: getDAChunkPayload{Version: daChunkRequestVersion, Indexes: []uint16{1, 1}}, wantErr: "DA chunk request indexes not strictly increasing"},
+		{name: "range", in: getDAChunkPayload{Version: daChunkRequestVersion, Indexes: []uint16{uint16(consensus.MAX_DA_CHUNK_COUNT)}}, wantErr: "DA chunk request index out of range"},
+	} {
+		_, err := encodeGetDAChunkPayload(tc.in)
+		if err == nil {
+			t.Fatalf("%s: expected encode failure", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s: encode error=%q, want %q", tc.name, err, tc.wantErr)
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		raw     []byte
+		wantErr string
+	}{
+		{name: "short_prefix", raw: make([]byte, 39), wantErr: "getdachunk payload missing version or da_id"},
+		{name: "version", raw: getDAChunkTestPayload(daChunkRequestVersion+1, []byte{1, 0, 0}), wantErr: "unsupported DA chunk request version"},
+		{name: "nonminimal_count", raw: getDAChunkTestPayload(daChunkRequestVersion, []byte{0xfd, 0x00, 0x00}), wantErr: "non-minimal"},
+		{name: "empty", raw: getDAChunkTestPayload(daChunkRequestVersion, []byte{0}), wantErr: "invalid DA chunk request index count"},
+		{name: "count_too_large", raw: getDAChunkTestPayload(daChunkRequestVersion, consensus.AppendCompactSize(nil, consensus.MAX_DA_CHUNK_COUNT+1)), wantErr: "invalid DA chunk request index count"},
+		{name: "truncated_index", raw: getDAChunkTestPayload(daChunkRequestVersion, []byte{1, 0x01}), wantErr: "getdachunk payload truncated index"},
+		{name: "unsorted", raw: getDAChunkIndexedPayload(2, 1), wantErr: "DA chunk request indexes not strictly increasing"},
+		{name: "duplicate", raw: getDAChunkIndexedPayload(1, 1), wantErr: "DA chunk request indexes not strictly increasing"},
+		{name: "range", raw: getDAChunkIndexedPayload(uint16(consensus.MAX_DA_CHUNK_COUNT)), wantErr: "DA chunk request index out of range"},
+		{name: "trailing", raw: append(getDAChunkIndexedPayload(0), 0x00), wantErr: "getdachunk payload has trailing bytes"},
+	} {
+		_, err := decodeGetDAChunkPayload(tc.raw)
+		if err == nil {
+			t.Fatalf("%s: expected decode failure", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s: decode error=%q, want %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
 func getBlockTxnTestPayload(tail []byte) []byte {
 	return append(make([]byte, 32), tail...)
 }
@@ -378,6 +459,20 @@ func mustEncodeGetBlockTxnPayload(t *testing.T, indexes []uint64) []byte {
 		t.Fatalf("encodeGetBlockTxnPayload: %v", err)
 	}
 	return raw
+}
+
+func getDAChunkTestPayload(version uint64, tail []byte) []byte {
+	out := consensus.AppendU64le(nil, version)
+	out = append(out, make([]byte, 32)...)
+	return append(out, tail...)
+}
+
+func getDAChunkIndexedPayload(indexes ...uint16) []byte {
+	tail := consensus.AppendCompactSize(nil, uint64(len(indexes)))
+	for _, idx := range indexes {
+		tail = consensus.AppendU16le(tail, idx)
+	}
+	return getDAChunkTestPayload(daChunkRequestVersion, tail)
 }
 
 func TestSendCmpctPayloadCodec(t *testing.T) {

@@ -8,17 +8,21 @@ import (
 )
 
 const (
-	messageSendCmpct                 = "sendcmpct"
-	messageCmpctBlock                = "cmpctblock"
-	messageGetBlockTxn               = "getblocktxn"
-	messageBlockTxn                  = "blocktxn"
-	compactRelayVersion       uint64 = 1
-	sendCmpctPayloadBytes            = 9
-	compactShortIDBytes              = 6
-	compactRelayIndexBytes           = 4
-	maxCompactRelayEntries           = maxInventoryVectors
-	maxCmpctBlockEntries             = consensus.MAX_BLOCK_BYTES
-	maxCompactRelayIndexValue        = consensus.MAX_BLOCK_BYTES - 1
+	messageSendCmpct                    = "sendcmpct"
+	messageCmpctBlock                   = "cmpctblock"
+	messageGetBlockTxn                  = "getblocktxn"
+	messageBlockTxn                     = "blocktxn"
+	messageGetDAChunk                   = "getdachunk"
+	compactRelayVersion          uint64 = 1
+	daChunkRequestVersion        uint64 = 1
+	sendCmpctPayloadBytes               = 9
+	compactShortIDBytes                 = 6
+	compactRelayIndexBytes              = 4
+	daChunkIndexBytes                   = 2
+	getDAChunkPayloadPrefixBytes        = 8 + 32
+	maxCompactRelayEntries              = maxInventoryVectors
+	maxCmpctBlockEntries                = consensus.MAX_BLOCK_BYTES
+	maxCompactRelayIndexValue           = consensus.MAX_BLOCK_BYTES - 1
 )
 
 type sendCmpctPayload struct {
@@ -29,6 +33,12 @@ type sendCmpctPayload struct {
 type getBlockTxnPayload struct {
 	BlockHash [32]byte
 	Indexes   []uint64
+}
+
+type getDAChunkPayload struct {
+	Version uint64
+	DAID    [32]byte
+	Indexes []uint16
 }
 
 type blockTxnPayload struct {
@@ -123,6 +133,96 @@ func decodeGetBlockTxnPayload(payload []byte) (getBlockTxnPayload, error) {
 	}
 	out.Indexes = indexes
 	return out, nil
+}
+
+func getDAChunkPayloadCap() uint32 {
+	return uint32(getDAChunkPayloadPrefixBytes + maxCompactSizeBytes + int(consensus.MAX_DA_CHUNK_COUNT)*daChunkIndexBytes)
+}
+
+func encodeGetDAChunkPayload(p getDAChunkPayload) ([]byte, error) {
+	if p.Version != daChunkRequestVersion {
+		return nil, errors.New("unsupported DA chunk request version")
+	}
+	if err := validateDAChunkRequestIndexCount(uint64(len(p.Indexes))); err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, getDAChunkPayloadCap())
+	out = consensus.AppendU64le(out, p.Version)
+	out = append(out, p.DAID[:]...)
+	out = consensus.AppendCompactSize(out, uint64(len(p.Indexes)))
+	var prev uint16
+	for i, idx := range p.Indexes {
+		if err := validateDAChunkRequestIndex(uint64(i), idx, prev); err != nil {
+			return nil, err
+		}
+		out = consensus.AppendU16le(out, idx)
+		prev = idx
+	}
+	return out, nil
+}
+
+func decodeGetDAChunkPayload(payload []byte) (getDAChunkPayload, error) {
+	var out getDAChunkPayload
+	if len(payload) < getDAChunkPayloadPrefixBytes {
+		return out, errors.New("getdachunk payload missing version or da_id")
+	}
+	out.Version = binary.LittleEndian.Uint64(payload[:8])
+	if out.Version != daChunkRequestVersion {
+		return getDAChunkPayload{}, errors.New("unsupported DA chunk request version")
+	}
+	copy(out.DAID[:], payload[8:getDAChunkPayloadPrefixBytes])
+	count, consumed, err := consensus.DecodeCompactSize(payload[getDAChunkPayloadPrefixBytes:])
+	if err != nil {
+		return getDAChunkPayload{}, err
+	}
+	if err := validateDAChunkRequestIndexCount(count); err != nil {
+		return getDAChunkPayload{}, err
+	}
+	offset := getDAChunkPayloadPrefixBytes + consumed
+	indexes, offset, err := decodeGetDAChunkIndexes(payload, offset, count)
+	if err != nil {
+		return getDAChunkPayload{}, err
+	}
+	if offset != len(payload) {
+		return getDAChunkPayload{}, errors.New("getdachunk payload has trailing bytes")
+	}
+	out.Indexes = indexes
+	return out, nil
+}
+
+func decodeGetDAChunkIndexes(payload []byte, offset int, count uint64) ([]uint16, int, error) {
+	indexes := make([]uint16, 0, int(count)) // #nosec G115 -- count is capped at MAX_DA_CHUNK_COUNT before this helper.
+	var prev uint16
+	for i := uint64(0); i < count; i++ {
+		if len(payload[offset:]) < daChunkIndexBytes {
+			return nil, 0, errors.New("getdachunk payload truncated index")
+		}
+		idx := binary.LittleEndian.Uint16(payload[offset:])
+		offset += daChunkIndexBytes
+		if err := validateDAChunkRequestIndex(i, idx, prev); err != nil {
+			return nil, 0, err
+		}
+		indexes = append(indexes, idx)
+		prev = idx
+	}
+	return indexes, offset, nil
+}
+
+func validateDAChunkRequestIndexCount(count uint64) error {
+	if count == 0 || count > consensus.MAX_DA_CHUNK_COUNT {
+		return errors.New("invalid DA chunk request index count")
+	}
+	return nil
+}
+
+func validateDAChunkRequestIndex(pos uint64, idx uint16, prev uint16) error {
+	if uint64(idx) >= consensus.MAX_DA_CHUNK_COUNT {
+		return errors.New("DA chunk request index out of range")
+	}
+	if pos > 0 && idx <= prev {
+		return errors.New("DA chunk request indexes not strictly increasing")
+	}
+	return nil
 }
 
 func encodeBlockTxnPayload(p blockTxnPayload) ([]byte, error) {

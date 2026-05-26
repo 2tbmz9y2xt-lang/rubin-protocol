@@ -39,6 +39,7 @@ func (c *expiryWakeConn) Read(p []byte) (int, error) {
 	}
 	return c.scriptedConn.Read(p)
 }
+
 func (c *expiryWakeConn) expireOnRead(ck *clock, readCount int) {
 	c.onRead = func(n int) {
 		if n == readCount {
@@ -182,10 +183,10 @@ func TestShouldIgnoreAndNormalizeReadError(t *testing.T) {
 	}
 }
 
-func TestCompactObjectCapsStayClosedUntilParityReceiveExists(t *testing.T) {
+func TestCompactObjectCapsStayClosedUntilReceiveEnabled(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	limiter := p.postHandshakePayloadCap()
-	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn, messageGetDAChunk} {
 		if got := limiter(command); got != 0 {
 			t.Fatalf("pre-negotiation %s cap=%d, want 0", command, got)
 		}
@@ -194,9 +195,9 @@ func TestCompactObjectCapsStayClosedUntilParityReceiveExists(t *testing.T) {
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	limiter = p.postHandshakePayloadCap()
 	p.setCompactOutstandingRequest(compactOutstandingRequest{BlockTxnPayloadCap: compactRelayPayloadCap(messageBlockTxn) + 1})
-	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn, messageGetDAChunk} {
 		if got := limiter(command); got != 0 {
-			t.Fatalf("negotiated %s cap=%d, want 0 until handler slice", command, got)
+			t.Fatalf("negotiated %s cap=%d, want 0 while compact receive is disabled", command, got)
 		}
 	}
 }
@@ -205,7 +206,7 @@ func TestCompactObjectCapsOpenOnlyForEnabledNegotiatedReceive(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
 	p.service.cfg.EnableCompactReceive = true
 	limiter := p.postHandshakePayloadCap()
-	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn} {
+	for _, command := range []string{messageCmpctBlock, messageGetBlockTxn, messageBlockTxn, messageGetDAChunk} {
 		if got := limiter(command); got != 0 {
 			t.Fatalf("pre-negotiation %s cap=%d, want 0", command, got)
 		}
@@ -217,6 +218,9 @@ func TestCompactObjectCapsOpenOnlyForEnabledNegotiatedReceive(t *testing.T) {
 	}
 	if got, want := limiter(messageGetBlockTxn), compactRelayPayloadCap(messageGetBlockTxn); got != want {
 		t.Fatalf("inbound getblocktxn cap=%d, want %d", got, want)
+	}
+	if got, want := limiter(messageGetDAChunk), getDAChunkPayloadCap(); got != want {
+		t.Fatalf("inbound getdachunk cap=%d, want %d", got, want)
 	}
 	if got := limiter(messageBlockTxn); got != blockTxnHashPayloadBytes {
 		t.Fatalf("blocktxn cap without outstanding=%d, want hash-only cap %d", got, blockTxnHashPayloadBytes)
@@ -231,6 +235,9 @@ func TestCompactObjectCapsOpenOnlyForEnabledNegotiatedReceive(t *testing.T) {
 	}
 	if got := limiter(messageGetBlockTxn); got != 0 {
 		t.Fatalf("disabled getblocktxn cap=%d, want 0", got)
+	}
+	if got := limiter(messageGetDAChunk); got != 0 {
+		t.Fatalf("disabled getdachunk cap=%d, want 0", got)
 	}
 	if got := limiter(messageBlockTxn); got != 64 {
 		t.Fatalf("disabled-mode blocktxn cap with outstanding=%d, want 64", got)
@@ -1145,7 +1152,8 @@ func TestRunDisconnectsOnPayloadTimeoutBeforeFakeFrame(t *testing.T) {
 			if tc.prefixBytes > 0 {
 				reads = append(reads, scriptedRead{data: payload[:tc.prefixBytes]})
 			}
-			reads = append(reads,
+			reads = append(
+				reads,
 				scriptedRead{err: timeoutErr{}},
 				scriptedRead{data: fakeValidFrame},
 			)
@@ -1188,6 +1196,35 @@ func TestHandleMessageRejectsInvalidKinds(t *testing.T) {
 	}
 	if err := p.handleMessage(message{Command: "unknown"}); err == nil || !strings.Contains(err.Error(), "unknown message type") {
 		t.Fatalf("expected unknown-kind rejection, got %v", err)
+	}
+}
+
+func TestHandleGetDAChunkRequiresCompactReceiveAndDecodesPayload(t *testing.T) {
+	var daID [32]byte
+	daID[0] = 0x37
+	payload, err := encodeGetDAChunkPayload(getDAChunkPayload{
+		Version: daChunkRequestVersion,
+		DAID:    daID,
+		Indexes: []uint16{0, 2},
+	})
+	if err != nil {
+		t.Fatalf("encodeGetDAChunkPayload: %v", err)
+	}
+
+	p := newPeerRuntimeTestPeer(t)
+	err = p.handleMessage(message{Command: messageGetDAChunk, Payload: payload})
+	var unknown postHandshakeUnknownCommandError
+	if !errors.As(err, &unknown) || unknown.command != messageGetDAChunk {
+		t.Fatalf("closed getdachunk err=%v, want unknown command", err)
+	}
+
+	p.service.cfg.EnableCompactReceive = true
+	p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
+	if err := p.handleMessage(message{Command: messageGetDAChunk, Payload: payload}); err != nil {
+		t.Fatalf("valid getdachunk: %v", err)
+	}
+	if err := p.handleMessage(message{Command: messageGetDAChunk, Payload: payload[:1]}); err == nil || !strings.Contains(err.Error(), "getdachunk payload missing") {
+		t.Fatalf("malformed getdachunk err=%v, want decode rejection", err)
 	}
 }
 

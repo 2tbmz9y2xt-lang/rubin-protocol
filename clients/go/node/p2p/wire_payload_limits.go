@@ -37,6 +37,9 @@ func compactRelayPayloadCap(command string) uint32 {
 	if command == messageBlockTxn {
 		return uint32(consensus.MAX_BLOCK_BYTES + 32 + maxCompactSizeBytes + maxCompactRelayEntries*maxCompactSizeBytes)
 	}
+	if command == messageGetDAChunk {
+		return getDAChunkPayloadCap()
+	}
 	return 0
 }
 
