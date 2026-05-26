@@ -70,6 +70,11 @@ func parseSendCmpctRuntimePayload(payload []byte) (sendCmpctPayload, error) {
 	return out, nil
 }
 
+func (*peer) handleGetDAChunk(payload []byte) error {
+	_, err := decodeGetDAChunkPayload(payload)
+	return err
+}
+
 func (p *peer) setRemoteCompactMode(mode compactModeSnapshot) {
 	p.compactMu.Lock()
 	p.compact.remoteMode = mode
