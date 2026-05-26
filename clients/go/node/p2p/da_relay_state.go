@@ -177,6 +177,7 @@ type daRelayRecordAccounting struct {
 type daRelayState struct {
 	mu                        sync.Mutex
 	caps                      daRelayCaps
+	prefetch                  daRelayPrefetchState
 	nextReceivedTime          uint64
 	orphanBytes               uint64
 	orphanBytesByPeerQuotaKey map[string]uint64

@@ -1,6 +1,10 @@
 package p2p
 
-import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+import (
+	"errors"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
 
 func (s *Service) stageRelayDATx(peerAddr string, txBytes []byte, tx *consensus.Tx) error {
 	if s == nil || s.daRelay == nil || tx == nil {
@@ -25,27 +29,45 @@ func (s *Service) stageRelayDACommitTx(peerAddr string, wireBytes uint64, tx *co
 	if !ok {
 		return nil
 	}
-	_, err := s.daRelay.addDACommit(peerAddr, daRelayCommit{
+	record, err := s.daRelay.addDACommit(peerAddr, daRelayCommit{
 		daID:              tx.DaCommitCore.DaID,
 		payloadCommitment: commitment,
 		chunkCount:        tx.DaCommitCore.ChunkCount,
 		wireBytes:         wireBytes,
 	})
-	return err
+	return s.finishDAPrefetch(peerAddr, tx.DaCommitCore.DaID, record, err)
 }
 
 func (s *Service) stageRelayDAChunkTx(peerAddr string, wireBytes uint64, tx *consensus.Tx) error {
 	if tx.DaChunkCore == nil {
 		return nil
 	}
-	_, err := s.daRelay.addDAChunk(peerAddr, daRelayChunk{
+	record, err := s.daRelay.addDAChunk(peerAddr, daRelayChunk{
 		daID:       tx.DaChunkCore.DaID,
 		chunkHash:  tx.DaChunkCore.ChunkHash,
 		chunkIndex: tx.DaChunkCore.ChunkIndex,
 		payload:    tx.DaPayload,
 		wireBytes:  wireBytes,
 	})
+	return s.finishDAPrefetch(peerAddr, tx.DaChunkCore.DaID, record, err)
+}
+
+func (s *Service) finishDAPrefetch(peerAddr string, daID [32]byte, record daRelaySetRecord, err error) error {
+	if err == nil {
+		s.scheduleDAPrefetch(peerAddr, record)
+		return nil
+	}
+	if errors.Is(err, errDARelayPayloadCommitmentMismatch) {
+		s.scheduleDAPrefetchSnapshot(peerAddr, daID)
+	}
 	return err
+}
+
+func (s *Service) scheduleDAPrefetchSnapshot(peerAddr string, daID [32]byte) {
+	s.daRelay.mu.Lock()
+	record := s.daRelay.sets[daID].clone()
+	s.daRelay.mu.Unlock()
+	s.scheduleDAPrefetch(peerAddr, record)
 }
 
 func daRelayCommitPayloadCommitment(tx *consensus.Tx) ([32]byte, bool) {
