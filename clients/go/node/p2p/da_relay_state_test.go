@@ -499,13 +499,19 @@ func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
 		t.Fatalf("duplicate commit received_time=%d, want first-seen %d", got, record.receivedTime)
 	}
 
-	chunk := daRelayTestChunk(daID, 0, 7)
+	chunk := daRelayTestChunkWithTxBytes(daID, 0, 7, []byte{'a', 1, 'b'}, []byte{1})
 	record = mustAddDAChunk(t, state, "peer-c", chunk)
-	chunk.chunkHash[0] ^= 0xff
-	_, err = state.addDAChunk("peer-d", chunk)
+	duplicateChunk := daRelayTestChunkWithTxBytes(daID, 0, 11, []byte{'d', 1, 'e'}, []byte{1})
+	duplicateChunk.chunkHash[0] ^= 0xff
+	_, err = state.addDAChunk("peer-d", duplicateChunk)
 	requireDAErr(t, err, errDARelayDuplicateChunk)
-	if len(state.sets[daID].chunks) != 1 || state.orphanBytes != record.wireBytes {
-		t.Fatalf("duplicate chunk mutated state: chunks=%d orphan=%d want orphan=%d", len(state.sets[daID].chunks), state.orphanBytes, record.wireBytes)
+	duplicateChunk.txBytes[0] = 'X'
+	wantOrphanBytes := record.wireBytes + uint64(len(chunk.payload))
+	if len(state.sets[daID].chunks) != 1 || state.orphanBytes != wantOrphanBytes {
+		t.Fatalf("duplicate chunk mutated state: chunks=%d orphan=%d want orphan=%d", len(state.sets[daID].chunks), state.orphanBytes, wantOrphanBytes)
+	}
+	if !reflect.DeepEqual(state.sets[daID].chunks[0].txBytes, []byte{'a', 1, 'b'}) {
+		t.Fatalf("duplicate chunk mutated stored tx bytes: %q", state.sets[daID].chunks[0].txBytes)
 	}
 }
 
@@ -514,13 +520,20 @@ func TestDARelayDuplicateCommitAfterOrphanChunksKeepsFirstSeenState(t *testing.T
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 7))
-	record := mustAddDACommit(t, state, "peer-b", daRelayTestCommit(daID, 2, 3))
+	payload0 := []byte{1}
+	payload1 := []byte{2}
+	record := mustAddDACommit(t, state, "peer-b", daRelayTestCommitWithTxBytes(daID, 3, []byte("first-commit"), payload0, payload1))
 
-	_, err := state.addDACommit("peer-c", daRelayTestCommit(daID, 2, 11))
+	duplicate := daRelayTestCommitWithTxBytes(daID, 11, []byte("duplicate-commit"), payload0, payload1)
+	_, err := state.addDACommit("peer-c", duplicate)
 	requireDAErr(t, err, errDARelayDuplicateCommit)
+	duplicate.txBytes[0] = 'X'
 	stored := state.sets[daID]
 	if stored.commit.wireBytes != record.commit.wireBytes || stored.commit.peerQuotaKey != peerQuotaKey("peer-b") {
 		t.Fatalf("duplicate commit replaced first commit: wire=%d peer=%q", stored.commit.wireBytes, stored.commit.peerQuotaKey)
+	}
+	if !reflect.DeepEqual(stored.commit.txBytes, []byte("first-commit")) {
+		t.Fatalf("duplicate commit mutated stored tx bytes: %q", stored.commit.txBytes)
 	}
 	if stored.receivedTime != record.receivedTime || state.nextReceivedTime != record.receivedTime {
 		t.Fatalf("duplicate commit time record=%d state=%d want %d", stored.receivedTime, state.nextReceivedTime, record.receivedTime)
@@ -756,9 +769,8 @@ func TestDARelayCompletesSetAndPinsPayload(t *testing.T) {
 	if state.orphanBytes != 0 || len(state.orphanBytesByDAID) != 0 {
 		t.Fatalf("complete set left orphan accounting: global=%d da=%d", state.orphanBytes, len(state.orphanBytesByDAID))
 	}
-	record.chunks[0].payload[0] ^= 0xff
-	if state.sets[daID].chunks[0].payload[0] == record.chunks[0].payload[0] {
-		t.Fatalf("returned complete record aliases stored payload")
+	if len(record.chunks[0].payload) != 0 || len(state.sets[daID].chunks[0].payload) != 0 {
+		t.Fatalf("complete set retained chunk payload copy")
 	}
 }
 
@@ -797,9 +809,10 @@ func TestDARelayCommitCompletesOrphanChunks(t *testing.T) {
 func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T) {
 	daID := daRelayTestID(7)
 	record := daRelaySetRecord{
-		daID: daID,
+		daID:   daID,
+		commit: daRelayCommit{txBytes: []byte("commit-tx")},
 		chunks: map[uint16]daRelayChunk{
-			0: daRelayTestChunkPayload(daID, 0, 17, []byte("immutable-payload")),
+			0: daRelayTestChunkWithTxBytes(daID, 0, 17, []byte("chunk-tx"), []byte("immutable-payload")),
 		},
 		replaceableChunks: map[uint16]bool{0: true},
 	}
@@ -809,6 +822,9 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	stateChunk := stateClone.chunks[0]
 	if &stateChunk.payload[0] != &originalChunk.payload[0] {
 		t.Fatalf("state mutation clone deep-copied payload")
+	}
+	if &stateChunk.txBytes[0] != &originalChunk.txBytes[0] {
+		t.Fatalf("state mutation clone deep-copied tx bytes")
 	}
 	stateClone.chunks[1] = daRelayTestChunkPayload(daID, 1, 1, []byte("second"))
 	if _, ok := record.chunks[1]; ok {
@@ -823,6 +839,9 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	callerChunk := callerClone.chunks[0]
 	if &callerChunk.payload[0] == &originalChunk.payload[0] {
 		t.Fatalf("caller clone reused payload")
+	}
+	if callerClone.commit.txBytes != nil || callerChunk.txBytes != nil {
+		t.Fatalf("caller clone exposed internal tx bytes")
 	}
 	callerChunk.payload[0] ^= 0xff
 	callerClone.chunks[0] = callerChunk
@@ -1100,7 +1119,7 @@ func TestDARelayStageChunkRejectsDuplicateWithoutMutation(t *testing.T) {
 	record := mustAddDAChunk(t, state, "peer-a", chunk)
 
 	state.mu.Lock()
-	staged, err := state.stageDAChunkRecordLocked("peer-b", chunk, chunk.payload)
+	staged, err := state.stageDAChunkRecordLocked("peer-b", chunk, chunk.payload, false)
 	state.mu.Unlock()
 	requireDAErr(t, err, errDARelayDuplicateChunk)
 
@@ -1356,6 +1375,18 @@ func daRelayTestChunkPayload(daID [32]byte, index uint16, wireBytes uint64, payl
 
 func daRelayTestCommitForPayloads(daID [32]byte, wireBytes uint64, payloads ...[]byte) daRelayCommit {
 	return daRelayCommit{daID: daID, payloadCommitment: daRelayPayloadCommitment(payloads...), chunkCount: uint16(len(payloads)), wireBytes: wireBytes}
+}
+
+func daRelayTestCommitWithTxBytes(daID [32]byte, wireBytes uint64, txBytes []byte, payloads ...[]byte) daRelayCommit {
+	commit := daRelayTestCommitForPayloads(daID, wireBytes, payloads...)
+	commit.txBytes = cloneBytes(txBytes)
+	return commit
+}
+
+func daRelayTestChunkWithTxBytes(daID [32]byte, index uint16, wireBytes uint64, txBytes []byte, payload []byte) daRelayChunk {
+	chunk := daRelayTestChunkPayload(daID, index, wireBytes, payload)
+	chunk.txBytes = cloneBytes(txBytes)
+	return chunk
 }
 
 func daRelayOverflowOrphanAccountingRecord(daID [32]byte) daRelaySetRecord {

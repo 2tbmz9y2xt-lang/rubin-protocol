@@ -13,15 +13,15 @@ func (s *Service) stageRelayDATx(peerAddr string, txBytes []byte, tx *consensus.
 	wireBytes := uint64(len(txBytes))
 	switch tx.TxKind {
 	case 0x01:
-		return s.stageRelayDACommitTx(peerAddr, wireBytes, tx)
+		return s.stageRelayDACommitTx(peerAddr, txBytes, wireBytes, tx)
 	case 0x02:
-		return s.stageRelayDAChunkTx(peerAddr, wireBytes, tx)
+		return s.stageRelayDAChunkTx(peerAddr, txBytes, wireBytes, tx)
 	default:
 		return nil
 	}
 }
 
-func (s *Service) stageRelayDACommitTx(peerAddr string, wireBytes uint64, tx *consensus.Tx) error {
+func (s *Service) stageRelayDACommitTx(peerAddr string, txBytes []byte, wireBytes uint64, tx *consensus.Tx) error {
 	if tx.DaCommitCore == nil {
 		return nil
 	}
@@ -34,11 +34,12 @@ func (s *Service) stageRelayDACommitTx(peerAddr string, wireBytes uint64, tx *co
 		payloadCommitment: commitment,
 		chunkCount:        tx.DaCommitCore.ChunkCount,
 		wireBytes:         wireBytes,
+		txBytes:           txBytes,
 	})
 	return s.finishDAPrefetch(peerAddr, tx.DaCommitCore.DaID, record, err)
 }
 
-func (s *Service) stageRelayDAChunkTx(peerAddr string, wireBytes uint64, tx *consensus.Tx) error {
+func (s *Service) stageRelayDAChunkTx(peerAddr string, txBytes []byte, wireBytes uint64, tx *consensus.Tx) error {
 	if tx.DaChunkCore == nil {
 		return nil
 	}
@@ -48,6 +49,7 @@ func (s *Service) stageRelayDAChunkTx(peerAddr string, wireBytes uint64, tx *con
 		chunkIndex: tx.DaChunkCore.ChunkIndex,
 		payload:    tx.DaPayload,
 		wireBytes:  wireBytes,
+		txBytes:    txBytes,
 	})
 	return s.finishDAPrefetch(peerAddr, tx.DaChunkCore.DaID, record, err)
 }

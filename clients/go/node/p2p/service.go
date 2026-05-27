@@ -3,6 +3,7 @@ package p2p
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -240,32 +241,43 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
 	}
-	tx, txid, err := parseCanonicalTx(txBytes)
+	_, txid, err := parseCanonicalTx(txBytes)
 	if err != nil {
 		return err
 	}
-	if err := s.ensureRelayTxAdmitted(txid, txBytes); err != nil {
+	admittedTxBytes, admittedTx, err := s.ensureRelayTxAdmitted(txid, txBytes)
+	if err != nil {
 		return err
 	}
-	_ = s.stageRelayDATx("", txBytes, tx)
+	_ = s.stageRelayDATx("", admittedTxBytes, admittedTx)
 	if !s.txSeen.Add(txid) {
 		return nil
 	}
 	return s.broadcastInventory(nil, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 }
 
-func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) error {
-	if s.cfg.TxPool.Has(txid) {
-		return nil
+func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) ([]byte, *consensus.Tx, error) {
+	if !s.cfg.TxPool.Has(txid) {
+		meta, err := s.relayTxMetadata(txBytes)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) && !s.cfg.TxPool.Has(txid) {
+			return nil, nil, errors.New("tx not admitted to relay pool")
+		}
 	}
-	meta, err := s.relayTxMetadata(txBytes)
+	admittedTxBytes, ok := s.cfg.TxPool.Get(txid)
+	if !ok {
+		return nil, nil, errors.New("admitted tx missing from relay pool")
+	}
+	admittedTx, admittedTxid, err := parseCanonicalTx(admittedTxBytes)
 	if err != nil {
-		return err
+		return nil, nil, fmt.Errorf("admitted tx is non-canonical: %w", err)
 	}
-	if s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) || s.cfg.TxPool.Has(txid) {
-		return nil
+	if admittedTxid != txid {
+		return nil, nil, errors.New("admitted txid mismatch")
 	}
-	return errors.New("tx not admitted to relay pool")
+	return admittedTxBytes, admittedTx, nil
 }
 
 func normalizePeerAddrs(addrs []string) []string {

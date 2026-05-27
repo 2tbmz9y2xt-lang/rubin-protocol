@@ -22,7 +22,7 @@ func (p *peer) handleTx(txBytes []byte) error {
 		}
 		return nil
 	}
-	tx, txid, err := parseCanonicalTx(txBytes)
+	_, txid, err := parseCanonicalTx(txBytes)
 	if err != nil {
 		if p.bumpBan(10, err.Error()) {
 			return err
@@ -35,17 +35,14 @@ func (p *peer) handleTx(txBytes []byte) error {
 	if !isNew {
 		return nil
 	}
-	meta, err := p.service.relayTxMetadata(txBytes)
+	admittedTxBytes, admittedTx, err := p.service.ensureRelayTxAdmitted(txid, txBytes)
 	if err != nil {
-		// Keep metadata rejections peer-neutral for Go/Rust relay parity:
-		// local policy/runtime state can reject a structurally valid tx, and
-		// Rust surfaces the same branch as non-banworthy MetadataRejected.
+		// Keep admission and metadata rejections peer-neutral for Go/Rust relay
+		// parity: local policy/runtime state can reject a structurally valid tx,
+		// and Rust surfaces the same branch as non-banworthy MetadataRejected.
 		return nil //nolint:nilerr
 	}
-	if !p.service.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
-		return nil
-	}
-	_ = p.service.stageRelayDATx(p.addr(), txBytes, tx)
+	_ = p.service.stageRelayDATx(p.addr(), admittedTxBytes, admittedTx)
 	_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 	return nil
 }

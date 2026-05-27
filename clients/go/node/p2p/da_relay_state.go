@@ -143,6 +143,7 @@ type daRelayCommit struct {
 	peerQuotaKey      string
 	chunkCount        uint16
 	wireBytes         uint64
+	txBytes           []byte
 }
 
 type daRelayChunk struct {
@@ -152,6 +153,7 @@ type daRelayChunk struct {
 	chunkIndex   uint16
 	payload      []byte
 	wireBytes    uint64
+	txBytes      []byte
 }
 
 type daRelayCompletionSnapshot struct {
@@ -363,12 +365,17 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 		return daRelaySetRecord{}, errDARelayWireBytesInvalid
 	}
 
+	commitTxBytesOwned := false
 	for {
 		s.mu.Lock()
-		record, err := s.stageDACommitRecordLocked(peerAddr, commit)
+		record, err := s.stageDACommitRecordLocked(peerAddr, commit, commitTxBytesOwned)
 		if err != nil {
 			s.mu.Unlock()
 			return daRelaySetRecord{}, err
+		}
+		if !commitTxBytesOwned {
+			commit.txBytes = record.commit.txBytes
+			commitTxBytesOwned = true
 		}
 		snapshot, complete := record.completionSnapshot()
 		if !complete {
@@ -389,7 +396,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 		if payloadCommitment != snapshot.payloadCommitmentExpected {
 			// Commit metadata is the first-seen authority for duplicate handling;
 			// orphan chunks are provisional until they match that commit.
-			applied, err := s.stageCommitDroppingMatchingCompletionChunks(peerAddr, commit, snapshot)
+			applied, err := s.stageCommitDroppingMatchingCompletionChunks(peerAddr, commit, commitTxBytesOwned, snapshot)
 			if err != nil {
 				return daRelaySetRecord{}, err
 			}
@@ -400,7 +407,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 		}
 
 		s.mu.Lock()
-		record, err = s.stageDACommitRecordLocked(peerAddr, commit)
+		record, err = s.stageDACommitRecordLocked(peerAddr, commit, commitTxBytesOwned)
 		if err != nil {
 			s.mu.Unlock()
 			return daRelaySetRecord{}, err
@@ -441,12 +448,18 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	}
 	payload := cloneBytes(chunk.payload)
 
+	chunkTxBytesOwned := false
 	for {
 		s.mu.Lock()
-		record, err := s.stageDAChunkRecordLocked(peerAddr, chunk, payload)
+		record, err := s.stageDAChunkRecordLocked(peerAddr, chunk, payload, chunkTxBytesOwned)
 		if err != nil {
 			s.mu.Unlock()
 			return daRelaySetRecord{}, err
+		}
+		if !chunkTxBytesOwned {
+			stagedChunk := record.chunks[chunk.chunkIndex]
+			chunk.txBytes = stagedChunk.txBytes
+			chunkTxBytesOwned = true
 		}
 		snapshot, complete := record.completionSnapshot()
 		if !complete {
@@ -476,7 +489,7 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 		}
 
 		s.mu.Lock()
-		record, err = s.stageDAChunkRecordLocked(peerAddr, chunk, payload)
+		record, err = s.stageDAChunkRecordLocked(peerAddr, chunk, payload, chunkTxBytesOwned)
 		if err != nil {
 			s.mu.Unlock()
 			return daRelaySetRecord{}, err
@@ -499,7 +512,9 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	}
 }
 
-func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelayCommit) (daRelaySetRecord, error) {
+// txBytesOwned is only true for retrying a txBytes slice cloned by an earlier
+// successful staging call; first admission still clones after duplicate checks.
+func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelayCommit, txBytesOwned bool) (daRelaySetRecord, error) {
 	record := s.sets[commit.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if record.commit.chunkCount != 0 {
@@ -507,6 +522,9 @@ func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelay
 	}
 	c := commit
 	c.peerQuotaKey = peerQuotaKey(peerAddr)
+	if !txBytesOwned {
+		c.txBytes = cloneBytes(c.txBytes)
+	}
 	record.daID = c.daID
 	record.commit = c
 	record.pruneChunksOutsideCommit()
@@ -518,13 +536,17 @@ func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelay
 	return record, nil
 }
 
-func (s *daRelayState) stageDAChunkRecordLocked(peerAddr string, chunk daRelayChunk, payload []byte) (daRelaySetRecord, error) {
+// txBytesOwned follows the same ownership contract as stageDACommitRecordLocked.
+func (s *daRelayState) stageDAChunkRecordLocked(peerAddr string, chunk daRelayChunk, payload []byte, txBytesOwned bool) (daRelaySetRecord, error) {
 	record := s.sets[chunk.daID].cloneForStateMutation()
 	record.ensureMaps()
 	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
 		return daRelaySetRecord{}, err
 	}
 	chunk.peerQuotaKey = peerQuotaKey(peerAddr)
+	if !txBytesOwned {
+		chunk.txBytes = cloneBytes(chunk.txBytes)
+	}
 	record.daID = chunk.daID
 	if record.commit.chunkCount == 0 {
 		record.state = daRelayStateOrphanChunks
@@ -723,11 +745,15 @@ func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
 
 func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	out := r
+	if copyPayloads {
+		out.commit.txBytes = nil
+	}
 	if r.chunks != nil {
 		out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))
 		for index, chunk := range r.chunks {
 			if copyPayloads {
 				chunk.payload = cloneBytes(chunk.payload)
+				chunk.txBytes = nil
 			}
 			out.chunks[index] = chunk
 		}
@@ -859,11 +885,11 @@ func (s daRelayCompletionSnapshot) payloadCommitment() (uint64, [32]byte) {
 	return payloadBytes, payloadCommitment
 }
 
-func (s *daRelayState) stageCommitDroppingMatchingCompletionChunks(peerAddr string, commit daRelayCommit, snapshot daRelayCompletionSnapshot) (bool, error) {
+func (s *daRelayState) stageCommitDroppingMatchingCompletionChunks(peerAddr string, commit daRelayCommit, txBytesOwned bool, snapshot daRelayCompletionSnapshot) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record, err := s.stageDACommitRecordLocked(peerAddr, commit)
+	record, err := s.stageDACommitRecordLocked(peerAddr, commit, txBytesOwned)
 	if err != nil {
 		return false, err
 	}
@@ -976,6 +1002,10 @@ func (r *daRelaySetRecord) markComplete(payloadBytes uint64) {
 	r.state = daRelayStateCompleteSet
 	r.ttlBlocksRemaining = 0
 	r.replaceableChunks = nil
+	for index, chunk := range r.chunks {
+		chunk.payload = nil
+		r.chunks[index] = chunk
+	}
 }
 
 func (r *daRelaySetRecord) recomputeOrphanTotals() error {
@@ -1016,13 +1046,26 @@ func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
 		return daRelayRecordAccounting{}, nil
 	}
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
-	accounting.orphanBytes = r.wireBytes
+	accounting.orphanBytes = r.commit.wireBytes
 	accounting.commitBytes = r.commit.wireBytes
 	if err := addPeerAccounting(accounting.peerBytes, r.commit.peerQuotaKey, r.commit.wireBytes); err != nil {
 		return daRelayRecordAccounting{}, err
 	}
 	for _, chunk := range r.chunks {
-		if err := addPeerAccounting(accounting.peerBytes, chunk.peerQuotaKey, chunk.wireBytes); err != nil {
+		chunkBytes := chunk.wireBytes
+		if len(chunk.txBytes) != 0 && len(chunk.payload) != 0 {
+			var addErr error
+			chunkBytes, addErr = checkedAddUint64(chunkBytes, uint64(len(chunk.payload)))
+			if addErr != nil {
+				return daRelayRecordAccounting{}, addErr
+			}
+		}
+		orphanBytes, err := checkedAddUint64(accounting.orphanBytes, chunkBytes)
+		if err != nil {
+			return daRelayRecordAccounting{}, err
+		}
+		accounting.orphanBytes = orphanBytes
+		if err := addPeerAccounting(accounting.peerBytes, chunk.peerQuotaKey, chunkBytes); err != nil {
 			return daRelayRecordAccounting{}, err
 		}
 	}
