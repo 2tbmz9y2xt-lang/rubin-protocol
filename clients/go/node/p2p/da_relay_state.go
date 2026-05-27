@@ -838,7 +838,7 @@ func (r daRelaySetRecord) emptyIncomplete() bool {
 
 func (r daRelaySetRecord) validateChunkInsert(chunkIndex uint16) error {
 	if _, exists := r.chunks[chunkIndex]; exists {
-		if r.replaceableChunks[chunkIndex] {
+		if _, replaceable := r.replaceableChunks[chunkIndex]; replaceable {
 			return nil
 		}
 		return errDARelayDuplicateChunk
@@ -927,7 +927,7 @@ func (s *daRelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayC
 	if len(indexes) == 0 {
 		return false, nil
 	}
-	record.markChunksReplaceable(indexes)
+	record.markChunksReplaceable(indexes, len(indexes) == len(snapshot.chunks))
 	if err := s.applyDASetRecordLocked(record); err != nil {
 		return false, err
 	}
@@ -956,12 +956,12 @@ func (r *daRelaySetRecord) dropChunks(indexes []uint16) {
 	}
 }
 
-func (r *daRelaySetRecord) markChunksReplaceable(indexes []uint16) {
+func (r *daRelaySetRecord) markChunksReplaceable(indexes []uint16, missing bool) {
 	if r.replaceableChunks == nil {
 		r.replaceableChunks = map[uint16]bool{}
 	}
 	for _, index := range indexes {
-		r.replaceableChunks[index] = true
+		r.replaceableChunks[index] = missing
 	}
 }
 

@@ -34,8 +34,8 @@ func (p *peer) handleTx(txBytes []byte) error {
 	}
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
-	if !p.validateAndMarkRelayTxSeen(txid, txBytes, tx) {
-		return nil
+	if stop, err := p.validateAndMarkRelayTxSeen(txid, txBytes, tx); stop {
+		return err
 	}
 	admittedTxBytes, admittedTx, err := p.service.ensureRelayTxAdmitted(txid, txBytes, tx, true)
 	if err != nil {
@@ -49,11 +49,14 @@ func (p *peer) handleTx(txBytes []byte) error {
 	return nil
 }
 
-func (p *peer) validateAndMarkRelayTxSeen(txid [32]byte, txBytes []byte, tx *consensus.Tx) bool {
+func (p *peer) validateAndMarkRelayTxSeen(txid [32]byte, txBytes []byte, tx *consensus.Tx) (bool, error) {
 	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
-		return false
+		if p.bumpBan(10, err.Error()) {
+			return true, err
+		}
+		return true, nil
 	}
-	return p.service.txSeen.Add(txid)
+	return !p.service.txSeen.Add(txid), nil
 }
 
 func canonicalTxID(txBytes []byte) ([32]byte, error) {

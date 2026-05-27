@@ -422,8 +422,8 @@ func TestHandleTxDAAdmissionRejectsDoNotMutateRelayState(t *testing.T) {
 	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok {
 		t.Fatal("DA chunk hash mismatch mutated relay state")
 	}
-	if p.snapshotState().BanScore != 10 {
-		t.Fatalf("ban score=%d, want only the non-canonical parse penalty", p.snapshotState().BanScore)
+	if p.snapshotState().BanScore != 20 {
+		t.Fatalf("ban score=%d, want parse and DA admission penalties", p.snapshotState().BanScore)
 	}
 }
 
@@ -887,6 +887,7 @@ func TestAnnounceTxAdmissionRejectDoesNotMarkSeen(t *testing.T) {
 
 func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.PeerRuntimeConfig.BanThreshold = 10
 	daID := daRelayTestID(121)
 	payload := []byte("admitted-da-payload")
 	txBytes := daChunkRelayTxBytes(t, daID, 0, 9151, payload)
@@ -895,8 +896,8 @@ func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
 		t.Fatalf("canonicalTxID: %v", err)
 	}
 	badPayloadTx := sameTxIDWithDAPayload(t, txBytes, []byte("bad-da-payload"))
-	if err := daRelayTestPeer(h, "127.0.0.1:19115").handleTx(badPayloadTx); err != nil {
-		t.Fatalf("handle bad DA chunk: %v", err)
+	if err := daRelayTestPeer(h, "127.0.0.1:19115").handleTx(badPayloadTx); !errors.Is(err, errDARelayChunkHashMismatch) {
+		t.Fatalf("handle bad DA chunk err=%v, want hash mismatch at ban threshold", err)
 	}
 	if h.service.cfg.TxPool.Has(txid) || h.service.txSeen.Has(txid) {
 		t.Fatal("bad same-txid DA payload poisoned relay admission")
