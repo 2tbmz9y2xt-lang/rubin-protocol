@@ -34,13 +34,10 @@ func (p *peer) handleTx(txBytes []byte) error {
 	}
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
-	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
+	if !p.validateAndMarkRelayTxSeen(txid, txBytes, tx) {
 		return nil
 	}
-	if !p.service.txSeen.Add(txid) {
-		return nil
-	}
-	admittedTxBytes, admittedTx, err := p.service.ensureRelayTxAdmitted(txid, txBytes, tx)
+	admittedTxBytes, admittedTx, err := p.service.ensureRelayTxAdmitted(txid, txBytes, tx, true)
 	if err != nil {
 		// Keep admission and metadata rejections peer-neutral for Go/Rust relay
 		// parity: local policy/runtime state can reject a structurally valid tx,
@@ -50,6 +47,13 @@ func (p *peer) handleTx(txBytes []byte) error {
 	_ = p.service.stageRelayDATx(p.addr(), admittedTxBytes, admittedTx)
 	_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 	return nil
+}
+
+func (p *peer) validateAndMarkRelayTxSeen(txid [32]byte, txBytes []byte, tx *consensus.Tx) bool {
+	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
+		return false
+	}
+	return p.service.txSeen.Add(txid)
 }
 
 func canonicalTxID(txBytes []byte) ([32]byte, error) {

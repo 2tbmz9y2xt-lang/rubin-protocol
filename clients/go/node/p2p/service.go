@@ -245,7 +245,7 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	admittedTxBytes, admittedTx, err := s.ensureRelayTxAdmitted(txid, txBytes, tx)
+	admittedTxBytes, admittedTx, err := s.ensureRelayTxAdmitted(txid, txBytes, tx, false)
 	if err != nil {
 		return err
 	}
@@ -256,10 +256,12 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	return s.broadcastInventory(nil, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 }
 
-func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte, submittedTx *consensus.Tx) ([]byte, *consensus.Tx, error) {
+func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte, submittedTx *consensus.Tx, submittedTxValidated bool) ([]byte, *consensus.Tx, error) {
 	if !s.cfg.TxPool.Has(txid) {
-		if err := validateRelayDATxForAdmission(txBytes, submittedTx); err != nil {
-			return nil, nil, err
+		if !submittedTxValidated {
+			if err := validateRelayDATxForAdmission(txBytes, submittedTx); err != nil {
+				return nil, nil, err
+			}
 		}
 		meta, err := s.relayTxMetadata(txBytes)
 		if err != nil {

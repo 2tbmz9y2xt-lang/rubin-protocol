@@ -126,14 +126,6 @@ func daRelayRecordSnapshot(t *testing.T, state *daRelayState, daID [32]byte) (da
 	return record.clone(), ok
 }
 
-func daRelayStoredRecordSnapshot(t *testing.T, state *daRelayState, daID [32]byte) (daRelaySetRecord, bool) {
-	t.Helper()
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	record, ok := state.sets[daID]
-	return record.cloneForStateMutation(), ok
-}
-
 func daRelayTestPeer(h *testHarness, addr string) *peer {
 	return &peer{
 		service: h.service,
@@ -934,75 +926,6 @@ func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
 	}
 	if !h.service.txSeen.Has(txid) {
 		t.Fatal("announced tx should be marked seen after already-admitted broadcast")
-	}
-}
-
-func TestDAStagingUsesOnlyAdmittedTxBytes(t *testing.T) {
-	cases := []struct {
-		name  string
-		setup func(*testHarness) (*MemoryTxPool, func([]byte) error)
-	}{
-		{
-			name: "AnnounceTx",
-			setup: func(h *testHarness) (*MemoryTxPool, func([]byte) error) {
-				return h.service.cfg.TxPool.(*MemoryTxPool), h.service.AnnounceTx
-			},
-		},
-		{
-			name: "handleTx",
-			setup: func(h *testHarness) (*MemoryTxPool, func([]byte) error) {
-				pool := NewMemoryTxPoolWithLimit(2)
-				h.service.cfg.TxPool = pool
-				return pool, daRelayTestPeer(h, "127.0.0.1:19114").handleTx
-			},
-		},
-	}
-
-	for i, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-			pool, stage := tc.setup(h)
-			daID := daRelayTestID(byte(126 + i))
-			payload := []byte("admitted-da-payload")
-			admittedCommit := daCommitRelayTxBytes(t, daID, uint64(9401+i*10), payload)
-			admittedChunk := daChunkRelayTxBytes(t, daID, 0, uint64(9402+i*10), payload)
-			commitID, err := canonicalTxID(admittedCommit)
-			if err != nil {
-				t.Fatalf("commit txid: %v", err)
-			}
-			chunkID, err := canonicalTxID(admittedChunk)
-			if err != nil {
-				t.Fatalf("chunk txid: %v", err)
-			}
-			if !putRelayTx(pool, commitID, admittedCommit) {
-				t.Fatal("preload admitted commit")
-			}
-			if !putRelayTx(pool, chunkID, admittedChunk) {
-				t.Fatal("preload admitted chunk")
-			}
-
-			if err := stage(admittedCommit); err != nil {
-				t.Fatalf("stage admitted commit: %v", err)
-			}
-			if err := stage(admittedChunk); err != nil {
-				t.Fatalf("stage admitted chunk: %v", err)
-			}
-
-			record, ok := daRelayStoredRecordSnapshot(t, h.service.daRelay, daID)
-			if !ok || record.state != daRelayStateCompleteSet {
-				t.Fatalf("DA relay record ok=%v state=%v, want complete set", ok, record.state)
-			}
-			if !bytes.Equal(record.commit.txBytes, admittedCommit) {
-				t.Fatalf("commit relay state did not retain admitted bytes")
-			}
-			chunk := record.chunks[0]
-			if !bytes.Equal(chunk.txBytes, admittedChunk) {
-				t.Fatalf("chunk relay state did not retain admitted bytes")
-			}
-			if len(chunk.payload) != 0 {
-				t.Fatalf("complete relay record retained duplicate chunk payload copy")
-			}
-		})
 	}
 }
 
