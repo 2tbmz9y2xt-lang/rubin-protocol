@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/sha3"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -173,6 +175,19 @@ func (rejectingTxPool) Get([32]byte) ([]byte, bool) { return nil, false }
 func (rejectingTxPool) Has([32]byte) bool { return false }
 
 func (rejectingTxPool) Put([32]byte, []byte, uint64, int) bool { return false }
+
+type inconsistentTxPool struct {
+	raw []byte
+	ok  bool
+}
+
+func (p inconsistentTxPool) Get([32]byte) ([]byte, bool) {
+	return cloneBytes(p.raw), p.ok
+}
+
+func (p inconsistentTxPool) Has([32]byte) bool { return true }
+
+func (p inconsistentTxPool) Put([32]byte, []byte, uint64, int) bool { return false }
 
 func wireCanonicalMempoolForP2PTest(t *testing.T, h *testHarness) *node.Mempool {
 	t.Helper()
@@ -911,6 +926,35 @@ func TestAnnounceTxAdmissionRejectDoesNotMarkSeen(t *testing.T) {
 	}
 	if h.service.txSeen.Has(txid) {
 		t.Fatal("admission-rejected AnnounceTx must not mark tx as seen")
+	}
+}
+
+func TestEnsureRelayTxAdmittedInvariantErrorsNameTxID(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	txBytes := distinctTxBytes(t, 8841)
+	txid, err := canonicalTxID(txBytes)
+	if err != nil {
+		t.Fatalf("canonicalTxID: %v", err)
+	}
+	otherTxBytes := distinctTxBytes(t, 8842)
+	otherTxid, err := canonicalTxID(otherTxBytes)
+	if err != nil {
+		t.Fatalf("other canonicalTxID: %v", err)
+	}
+
+	h.service.cfg.TxPool = inconsistentTxPool{raw: otherTxBytes, ok: true}
+	_, _, err = h.service.ensureRelayTxAdmitted(txid, txBytes)
+	if err == nil {
+		t.Fatal("ensureRelayTxAdmitted should reject mismatched admitted txid")
+	}
+	for _, want := range []string{
+		"admitted txid mismatch",
+		fmt.Sprintf("expected=%x", txid),
+		fmt.Sprintf("got=%x", otherTxid),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err.Error(), want)
+		}
 	}
 }
 

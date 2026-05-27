@@ -263,19 +263,19 @@ func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) ([]byte, 
 			return nil, nil, err
 		}
 		if !s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) && !s.cfg.TxPool.Has(txid) {
-			return nil, nil, errors.New("tx not admitted to relay pool")
+			return nil, nil, fmt.Errorf("tx not admitted to relay pool: txid=%x", txid)
 		}
 	}
 	admittedTxBytes, ok := s.cfg.TxPool.Get(txid)
 	if !ok {
-		return nil, nil, errors.New("admitted tx missing from relay pool")
+		return nil, nil, fmt.Errorf("admitted tx missing from relay pool: txid=%x", txid)
 	}
 	admittedTx, admittedTxid, err := parseCanonicalTx(admittedTxBytes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("admitted tx is non-canonical: %w", err)
+		return nil, nil, fmt.Errorf("admitted tx is non-canonical: txid=%x: %w", txid, err)
 	}
 	if admittedTxid != txid {
-		return nil, nil, errors.New("admitted txid mismatch")
+		return nil, nil, fmt.Errorf("admitted txid mismatch: expected=%x got=%x", txid, admittedTxid)
 	}
 	return admittedTxBytes, admittedTx, nil
 }
