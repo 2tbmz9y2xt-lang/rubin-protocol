@@ -523,9 +523,8 @@ func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelay
 	}
 	c := commit
 	c.peerQuotaKey = peerQuotaKey(peerAddr)
-	if !txBytesOwned {
-		c.txBytes = cloneBytes(c.txBytes)
-	}
+	cloneTxBytes := !txBytesOwned && len(c.txBytes) != 0
+	txBytes := c.txBytes
 	record.daID = c.daID
 	record.commit = c
 	record.pruneChunksOutsideCommit()
@@ -533,6 +532,16 @@ func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelay
 	record.ttlBlocksRemaining = s.caps.orphanTTLBlocks
 	if err := s.assignFirstSeenReceivedTimeLocked(&record); err != nil {
 		return daRelaySetRecord{}, err
+	}
+	if cloneTxBytes {
+		if err := record.recomputeOrphanTotals(); err != nil {
+			return daRelaySetRecord{}, err
+		}
+		if err := s.checkDASetRecordCapsLocked(record); err != nil {
+			return daRelaySetRecord{}, err
+		}
+		c.txBytes = cloneBytes(txBytes)
+		record.commit = c
 	}
 	return record, nil
 }
