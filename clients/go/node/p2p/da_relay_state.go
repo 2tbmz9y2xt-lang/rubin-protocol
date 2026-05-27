@@ -364,7 +364,6 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	if commit.wireBytes == 0 {
 		return daRelaySetRecord{}, errDARelayWireBytesInvalid
 	}
-	commit.txBytes = cloneBytes(commit.txBytes)
 
 	for {
 		s.mu.Lock()
@@ -512,6 +511,7 @@ func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelay
 	}
 	c := commit
 	c.peerQuotaKey = peerQuotaKey(peerAddr)
+	c.txBytes = cloneBytes(c.txBytes)
 	record.daID = c.daID
 	record.commit = c
 	record.pruneChunksOutsideCommit()
@@ -985,6 +985,10 @@ func (r *daRelaySetRecord) markComplete(payloadBytes uint64) {
 	r.state = daRelayStateCompleteSet
 	r.ttlBlocksRemaining = 0
 	r.replaceableChunks = nil
+	for index, chunk := range r.chunks {
+		chunk.payload = nil
+		r.chunks[index] = chunk
+	}
 }
 
 func (r *daRelaySetRecord) recomputeOrphanTotals() error {

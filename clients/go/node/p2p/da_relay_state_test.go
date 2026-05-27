@@ -514,13 +514,20 @@ func TestDARelayDuplicateCommitAfterOrphanChunksKeepsFirstSeenState(t *testing.T
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 
 	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daID, 0, 7))
-	record := mustAddDACommit(t, state, "peer-b", daRelayTestCommit(daID, 2, 3))
+	payload0 := []byte{1}
+	payload1 := []byte{2}
+	record := mustAddDACommit(t, state, "peer-b", daRelayTestCommitWithTxBytes(daID, 3, []byte("first-commit"), payload0, payload1))
 
-	_, err := state.addDACommit("peer-c", daRelayTestCommit(daID, 2, 11))
+	duplicate := daRelayTestCommitWithTxBytes(daID, 11, []byte("duplicate-commit"), payload0, payload1)
+	_, err := state.addDACommit("peer-c", duplicate)
 	requireDAErr(t, err, errDARelayDuplicateCommit)
+	duplicate.txBytes[0] = 'X'
 	stored := state.sets[daID]
 	if stored.commit.wireBytes != record.commit.wireBytes || stored.commit.peerQuotaKey != peerQuotaKey("peer-b") {
 		t.Fatalf("duplicate commit replaced first commit: wire=%d peer=%q", stored.commit.wireBytes, stored.commit.peerQuotaKey)
+	}
+	if !reflect.DeepEqual(stored.commit.txBytes, []byte("first-commit")) {
+		t.Fatalf("duplicate commit mutated stored tx bytes: %q", stored.commit.txBytes)
 	}
 	if stored.receivedTime != record.receivedTime || state.nextReceivedTime != record.receivedTime {
 		t.Fatalf("duplicate commit time record=%d state=%d want %d", stored.receivedTime, state.nextReceivedTime, record.receivedTime)
@@ -756,9 +763,8 @@ func TestDARelayCompletesSetAndPinsPayload(t *testing.T) {
 	if state.orphanBytes != 0 || len(state.orphanBytesByDAID) != 0 {
 		t.Fatalf("complete set left orphan accounting: global=%d da=%d", state.orphanBytes, len(state.orphanBytesByDAID))
 	}
-	record.chunks[0].payload[0] ^= 0xff
-	if state.sets[daID].chunks[0].payload[0] == record.chunks[0].payload[0] {
-		t.Fatalf("returned complete record aliases stored payload")
+	if len(record.chunks[0].payload) != 0 || len(state.sets[daID].chunks[0].payload) != 0 {
+		t.Fatalf("complete set retained chunk payload copy")
 	}
 }
 
@@ -807,6 +813,16 @@ func TestDARelayCompleteSetCandidatesExposeOnlyCompleteImmutableOrdered(t *testi
 	mustAddDAChunk(t, state, "peer-e", daRelayTestChunkWithTxBytes(lateID, 0, 14, []byte("chunk-late-0"), latePayload))
 	mustAddDAChunk(t, state, "peer-f", daRelayTestChunkWithTxBytes(earlyID, 1, 15, []byte("chunk-early-1"), earlyPayload1))
 	mustAddDAChunk(t, state, "peer-g", daRelayTestChunkWithTxBytes(earlyID, 0, 16, []byte("chunk-early-0"), earlyPayload0))
+	for _, daID := range [][32]byte{earlyID, lateID} {
+		for index, chunk := range state.sets[daID].chunks {
+			if len(chunk.payload) != 0 {
+				t.Fatalf("complete set %x chunk %d retained payload copy", daID, index)
+			}
+			if len(chunk.txBytes) == 0 {
+				t.Fatalf("complete set %x chunk %d lost tx bytes", daID, index)
+			}
+		}
+	}
 
 	candidates := state.completeSetCandidates()
 	if len(candidates) != 2 {
