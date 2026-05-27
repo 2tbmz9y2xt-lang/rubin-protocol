@@ -944,8 +944,8 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	_, err = state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1))
 	requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 	record = state.sets[daID]
-	if _, ok := record.replaceableChunks[0]; !ok || record.replaceableChunks[0] || len(record.chunks) != 1 || state.pinnedPayloadBytes != 0 {
-		t.Fatalf("partial chunk mismatch did not allow stale replacement without prefetch taint: replaceable=%v chunks=%d pinned=%d", record.replaceableChunks, len(record.chunks), state.pinnedPayloadBytes)
+	if _, ok := record.replaceableChunks[0]; ok || len(record.chunks) != 1 || state.pinnedPayloadBytes != 0 {
+		t.Fatalf("partial chunk mismatch tainted stale chunk replacement: replaceable=%v chunks=%d pinned=%d", record.replaceableChunks, len(record.chunks), state.pinnedPayloadBytes)
 	}
 	if state.nextReceivedTime != beforeMismatchTime || record.receivedTime != beforeMismatchTime {
 		t.Fatalf("partial chunk mismatch time record=%d state=%d want first-seen %d", record.receivedTime, state.nextReceivedTime, beforeMismatchTime)
@@ -965,7 +965,7 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	if record.state != daRelayStateCompleteSet {
 		t.Fatalf("state after partial mismatch recovery=%v, want COMPLETE_SET", record.state)
 	}
-	if record.replaceableChunks[0] {
+	if _, ok := record.replaceableChunks[0]; ok {
 		t.Fatalf("partial mismatch marked valid chunk replaceable: replaceable=%v", record.replaceableChunks)
 	}
 
@@ -1092,7 +1092,7 @@ func TestDARelayRejectsMismatchApplyFailureBeforeMutation(t *testing.T) {
 		}
 	})
 
-	t.Run("chunk mismatch replaceable path", func(t *testing.T) {
+	t.Run("chunk partial mismatch skips replaceable apply", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		daID := daRelayTestID(58)
 		payload0 := []byte("payload-a")
@@ -1102,10 +1102,10 @@ func TestDARelayRejectsMismatchApplyFailureBeforeMutation(t *testing.T) {
 		state.orphanBytesByPeerQuotaKey[peerQuotaKey("peer-b")] = 0
 
 		_, err := state.addDAChunk("peer-c", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), []byte("wrong")))
-		requireDAErr(t, err, errDARelayArithmeticOverflow)
+		requireDAErr(t, err, errDARelayPayloadCommitmentMismatch)
 
 		record := state.sets[daID]
-		if record.replaceableChunks[0] || len(record.chunks) != 1 || record.state != daRelayStateStagedCommit {
+		if _, ok := record.replaceableChunks[0]; ok || len(record.chunks) != 1 || record.state != daRelayStateStagedCommit {
 			t.Fatalf("chunk mismatch apply failure mutated record: replaceable=%v chunks=%d state=%v", record.replaceableChunks, len(record.chunks), record.state)
 		}
 	})
