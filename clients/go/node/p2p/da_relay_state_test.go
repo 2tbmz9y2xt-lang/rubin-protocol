@@ -445,6 +445,92 @@ func TestDARelayZeroRecordAccountingDoesNotAllocatePeerBytes(t *testing.T) {
 	}
 }
 
+func TestDARelayAccountingUsesRetainedTxByteLengths(t *testing.T) {
+	daID := daRelayTestID(93)
+	payload := []byte("retained-payload")
+	commitTx := []byte("canonical-commit-tx")
+	chunkTx := []byte("canonical-chunk-tx")
+	record := daRelaySetRecord{
+		daID:  daID,
+		state: daRelayStateStagedCommit,
+		commit: daRelayCommit{
+			daID:         daID,
+			chunkCount:   1,
+			wireBytes:    1,
+			txBytes:      cloneBytes(commitTx),
+			peerQuotaKey: "commit-peer",
+		},
+		chunks: map[uint16]daRelayChunk{
+			0: {
+				daID:         daID,
+				chunkIndex:   0,
+				chunkHash:    sha3.Sum256(payload),
+				payload:      cloneBytes(payload),
+				wireBytes:    1,
+				txBytes:      cloneBytes(chunkTx),
+				peerQuotaKey: "chunk-peer",
+			},
+		},
+	}
+
+	if err := record.recomputeOrphanTotals(); err != nil {
+		t.Fatalf("recompute retained accounting: %v", err)
+	}
+	wantWire := uint64(len(commitTx) + len(chunkTx))
+	if record.wireBytes != wantWire {
+		t.Fatalf("record wire bytes=%d, want retained tx bytes %d", record.wireBytes, wantWire)
+	}
+
+	accounting, err := record.orphanAccounting()
+	if err != nil {
+		t.Fatalf("orphan retained accounting: %v", err)
+	}
+	wantOrphan := wantWire + uint64(len(payload))
+	if accounting.orphanBytes != wantOrphan || accounting.commitBytes != uint64(len(commitTx)) {
+		t.Fatalf("accounting orphan=%d commit=%d, want orphan=%d commit=%d", accounting.orphanBytes, accounting.commitBytes, wantOrphan, len(commitTx))
+	}
+	if accounting.peerBytes["commit-peer"] != uint64(len(commitTx)) {
+		t.Fatalf("commit peer bytes=%d, want %d", accounting.peerBytes["commit-peer"], len(commitTx))
+	}
+	wantChunkBytes := uint64(len(chunkTx) + len(payload))
+	if accounting.peerBytes["chunk-peer"] != wantChunkBytes {
+		t.Fatalf("chunk peer bytes=%d, want %d", accounting.peerBytes["chunk-peer"], wantChunkBytes)
+	}
+}
+
+func TestDARelayCompletionIgnoresTransientOrphanCapsForRetainedTxBytes(t *testing.T) {
+	caps := defaultDARelayCaps()
+	caps.orphanPoolBytes = 4
+	caps.orphanPoolPerPeerBytes = 4
+	caps.orphanPoolPerDAIDBytes = 4
+	caps.orphanCommitOverheadBytes = 4
+	caps.pinnedPayloadBytes = 1 << 20
+
+	t.Run("commit completes orphan chunk", func(t *testing.T) {
+		state := newDARelayStateForTest(t, caps)
+		daID := daRelayTestID(94)
+		payload := []byte{1}
+		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, 1, payload))
+
+		record := mustAddDACommit(t, state, "peer-b", daRelayTestCommitWithTxBytes(daID, 1, []byte("retained-commit-tx"), payload))
+		if record.state != daRelayStateCompleteSet || state.orphanBytes != 0 || state.orphanCommitOverheadBytes != 0 {
+			t.Fatalf("commit completion state=%v orphan=%d commit=%d", record.state, state.orphanBytes, state.orphanCommitOverheadBytes)
+		}
+	})
+
+	t.Run("chunk completes staged commit", func(t *testing.T) {
+		state := newDARelayStateForTest(t, caps)
+		daID := daRelayTestID(95)
+		payload := []byte{1}
+		mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload))
+
+		record := mustAddDAChunk(t, state, "peer-b", daRelayTestChunkWithTxBytes(daID, 0, 1, []byte("retained-chunk-tx"), payload))
+		if record.state != daRelayStateCompleteSet || state.orphanBytes != 0 || state.orphanCommitOverheadBytes != 0 {
+			t.Fatalf("chunk completion state=%v orphan=%d commit=%d", record.state, state.orphanBytes, state.orphanCommitOverheadBytes)
+		}
+	})
+}
+
 func TestDARelayRejectsZeroWireBytesBeforeMutation(t *testing.T) {
 	daID := daRelayTestID(3)
 	state := newDARelayStateForTest(t, defaultDARelayCaps())

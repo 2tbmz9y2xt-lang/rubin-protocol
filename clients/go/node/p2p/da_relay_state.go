@@ -534,11 +534,13 @@ func (s *daRelayState) stageDACommitRecordLocked(peerAddr string, commit daRelay
 		return daRelaySetRecord{}, err
 	}
 	if cloneTxBytes {
-		if err := record.recomputeOrphanTotals(); err != nil {
-			return daRelaySetRecord{}, err
-		}
-		if err := s.checkDASetRecordCapsLocked(record); err != nil {
-			return daRelaySetRecord{}, err
+		if !record.completeByShape() {
+			if err := record.recomputeOrphanTotals(); err != nil {
+				return daRelaySetRecord{}, err
+			}
+			if err := s.checkDASetRecordCapsLocked(record); err != nil {
+				return daRelaySetRecord{}, err
+			}
 		}
 		c.txBytes = cloneBytes(txBytes)
 		record.commit = c
@@ -568,11 +570,13 @@ func (s *daRelayState) stageDAChunkRecordLocked(peerAddr string, chunk daRelayCh
 		return daRelaySetRecord{}, err
 	}
 	if cloneTxBytes {
-		if err := record.recomputeOrphanTotals(); err != nil {
-			return daRelaySetRecord{}, err
-		}
-		if err := s.checkDASetRecordCapsLocked(record); err != nil {
-			return daRelaySetRecord{}, err
+		if !record.completeByShape() {
+			if err := record.recomputeOrphanTotals(); err != nil {
+				return daRelaySetRecord{}, err
+			}
+			if err := s.checkDASetRecordCapsLocked(record); err != nil {
+				return daRelaySetRecord{}, err
+			}
 		}
 		chunk.txBytes = cloneBytes(txBytes)
 		record.chunks[chunk.chunkIndex] = chunk
@@ -901,6 +905,11 @@ func (r daRelaySetRecord) completionSnapshot() (daRelayCompletionSnapshot, bool)
 	return snapshot, true
 }
 
+func (r daRelaySetRecord) completeByShape() bool {
+	_, complete := r.completionSnapshot()
+	return complete
+}
+
 func (s daRelayCompletionSnapshot) payloadCommitment() (uint64, [32]byte) {
 	hasher := sha3.New256()
 	var payloadBytes uint64
@@ -1037,10 +1046,10 @@ func (r *daRelaySetRecord) markComplete(payloadBytes uint64) {
 }
 
 func (r *daRelaySetRecord) recomputeOrphanTotals() error {
-	r.wireBytes = r.commit.wireBytes
+	r.wireBytes = retainedTxAccountingBytes(r.commit.wireBytes, r.commit.txBytes)
 	for _, chunk := range r.chunks {
 		var err error
-		r.wireBytes, err = checkedAddUint64(r.wireBytes, chunk.wireBytes)
+		r.wireBytes, err = checkedAddUint64(r.wireBytes, retainedTxAccountingBytes(chunk.wireBytes, chunk.txBytes))
 		if err != nil {
 			return err
 		}
@@ -1070,17 +1079,18 @@ func (r daRelaySetRecord) pinnedPayloadAccountingBytes() (uint64, error) {
 }
 
 func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
-	if r.state == daRelayStateCompleteSet || r.wireBytes == 0 {
+	if r.state == daRelayStateCompleteSet || (r.wireBytes == 0 && r.commit.wireBytes == 0 && len(r.commit.txBytes) == 0 && len(r.chunks) == 0) {
 		return daRelayRecordAccounting{}, nil
 	}
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
-	accounting.orphanBytes = r.commit.wireBytes
-	accounting.commitBytes = r.commit.wireBytes
-	if err := addPeerAccounting(accounting.peerBytes, r.commit.peerQuotaKey, r.commit.wireBytes); err != nil {
+	commitBytes := retainedTxAccountingBytes(r.commit.wireBytes, r.commit.txBytes)
+	accounting.orphanBytes = commitBytes
+	accounting.commitBytes = commitBytes
+	if err := addPeerAccounting(accounting.peerBytes, r.commit.peerQuotaKey, commitBytes); err != nil {
 		return daRelayRecordAccounting{}, err
 	}
 	for _, chunk := range r.chunks {
-		chunkBytes := chunk.wireBytes
+		chunkBytes := retainedTxAccountingBytes(chunk.wireBytes, chunk.txBytes)
 		if len(chunk.txBytes) != 0 && len(chunk.payload) != 0 {
 			var addErr error
 			chunkBytes, addErr = checkedAddUint64(chunkBytes, uint64(len(chunk.payload)))
@@ -1098,6 +1108,13 @@ func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
 		}
 	}
 	return accounting, nil
+}
+
+func retainedTxAccountingBytes(wireBytes uint64, txBytes []byte) uint64 {
+	if len(txBytes) != 0 {
+		return uint64(len(txBytes))
+	}
+	return wireBytes
 }
 
 func addPeerAccounting(peerBytes map[string]uint64, key string, bytes uint64) error {
