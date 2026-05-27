@@ -545,9 +545,8 @@ func (s *daRelayState) stageDAChunkRecordLocked(peerAddr string, chunk daRelayCh
 		return daRelaySetRecord{}, err
 	}
 	chunk.peerQuotaKey = peerQuotaKey(peerAddr)
-	if !txBytesOwned {
-		chunk.txBytes = cloneBytes(chunk.txBytes)
-	}
+	cloneTxBytes := !txBytesOwned && len(chunk.txBytes) != 0
+	txBytes := chunk.txBytes
 	record.daID = chunk.daID
 	if record.commit.chunkCount == 0 {
 		record.state = daRelayStateOrphanChunks
@@ -558,6 +557,16 @@ func (s *daRelayState) stageDAChunkRecordLocked(peerAddr string, chunk daRelayCh
 	delete(record.replaceableChunks, chunk.chunkIndex)
 	if err := s.assignFirstSeenReceivedTimeLocked(&record); err != nil {
 		return daRelaySetRecord{}, err
+	}
+	if cloneTxBytes {
+		if err := record.recomputeOrphanTotals(); err != nil {
+			return daRelaySetRecord{}, err
+		}
+		if err := s.checkDASetRecordCapsLocked(record); err != nil {
+			return daRelaySetRecord{}, err
+		}
+		chunk.txBytes = cloneBytes(txBytes)
+		record.chunks[chunk.chunkIndex] = chunk
 	}
 	return record, nil
 }
@@ -596,6 +605,15 @@ func (s *daRelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 		s.nextReceivedTime = record.receivedTime
 	}
 	return nil
+}
+
+func (s *daRelayState) checkDASetRecordCapsLocked(record daRelaySetRecord) error {
+	oldRecord := s.sets[record.daID]
+	if _, _, _, _, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record); err != nil {
+		return err
+	}
+	_, err := s.projectPinnedPayloadDeltaLocked(oldRecord, record)
+	return err
 }
 
 func (s *daRelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
@@ -839,7 +857,7 @@ func (r daRelaySetRecord) emptyIncomplete() bool {
 
 func (r daRelaySetRecord) validateChunkInsert(chunkIndex uint16) error {
 	if _, exists := r.chunks[chunkIndex]; exists {
-		if _, replaceable := r.replaceableChunks[chunkIndex]; replaceable {
+		if r.replaceableChunks[chunkIndex] {
 			return nil
 		}
 		return errDARelayDuplicateChunk

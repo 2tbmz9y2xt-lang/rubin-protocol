@@ -950,10 +950,8 @@ func TestDARelayRejectsIntegrityAndPinnedCapSafely(t *testing.T) {
 	if state.nextReceivedTime != beforeMismatchTime || record.receivedTime != beforeMismatchTime {
 		t.Fatalf("partial chunk mismatch time record=%d state=%d want first-seen %d", record.receivedTime, state.nextReceivedTime, beforeMismatchTime)
 	}
-	record = mustAddDAChunk(t, state, "peer-d", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
-	if record = mustAddDAChunk(t, state, "peer-e", daRelayTestChunkPayload(daID, 1, uint64(len(payload1)), payload1)); record.state != daRelayStateCompleteSet {
-		t.Fatalf("state after stale chunk recovery=%v, want COMPLETE_SET", record.state)
-	}
+	_, err = state.addDAChunk("peer-d", daRelayTestChunkPayload(daID, 0, uint64(len(payload0)), payload0))
+	requireDAErr(t, err, errDARelayDuplicateChunk)
 
 	state = newDARelayStateForTest(t, defaultDARelayCaps())
 	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload0, payload1))
