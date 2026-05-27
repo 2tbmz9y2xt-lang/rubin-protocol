@@ -8,32 +8,28 @@ import (
 )
 
 // CompleteDASetCandidates returns immutable snapshots of relay-complete DA sets.
-func (s *Service) CompleteDASetCandidates() []node.CompleteDASetCandidate {
+func (s *Service) CompleteDASetCandidates(maxPayloadBytes uint64) []node.CompleteDASetCandidate {
 	if s == nil || s.daRelay == nil {
 		return nil
 	}
-	return s.daRelay.completeSetCandidates()
+	return s.daRelay.completeSetCandidates(maxPayloadBytes)
 }
 
-func (s *daRelayState) completeSetCandidates() []node.CompleteDASetCandidate {
-	records := s.completeSetCandidateRecords()
-	candidates := make([]node.CompleteDASetCandidate, 0, len(records))
-	for _, record := range records {
+func (s *daRelayState) completeSetCandidates(maxPayloadBytes uint64) []node.CompleteDASetCandidate {
+	if s == nil || maxPayloadBytes == 0 {
+		return nil
+	}
+	var candidates []node.CompleteDASetCandidate
+	for _, record := range s.completeSetCandidateRecords(maxPayloadBytes) {
 		candidate, ok := record.completeSetCandidate()
 		if ok {
 			candidates = append(candidates, candidate)
 		}
 	}
-	if len(candidates) == 0 {
-		return nil
-	}
 	return candidates
 }
 
-func (s *daRelayState) completeSetCandidateRecords() []daRelaySetRecord {
-	if s == nil {
-		return nil
-	}
+func (s *daRelayState) completeSetCandidateRecords(maxPayloadBytes uint64) []daRelaySetRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -48,14 +44,20 @@ func (s *daRelayState) completeSetCandidateRecords() []daRelaySetRecord {
 	})
 
 	records := make([]daRelaySetRecord, 0, len(daIDs))
+	var payloadBytes uint64
 	for _, daID := range daIDs {
-		records = append(records, s.sets[daID].cloneForStateMutation())
+		record := s.sets[daID]
+		if record.payloadBytes > maxPayloadBytes-payloadBytes {
+			break
+		}
+		records = append(records, record.cloneForStateMutation())
+		payloadBytes += record.payloadBytes
 	}
 	return records
 }
 
 func (r daRelaySetRecord) completeSetCandidate() (node.CompleteDASetCandidate, bool) {
-	if r.state != daRelayStateCompleteSet || len(r.commit.txBytes) == 0 {
+	if len(r.commit.txBytes) == 0 {
 		return node.CompleteDASetCandidate{}, false
 	}
 	chunks := make([]node.CompleteDASetChunkCandidate, 0, r.commit.chunkCount)

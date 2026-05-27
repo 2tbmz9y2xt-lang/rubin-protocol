@@ -1028,13 +1028,26 @@ func (r daRelaySetRecord) orphanAccounting() (daRelayRecordAccounting, error) {
 		return daRelayRecordAccounting{}, nil
 	}
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
-	accounting.orphanBytes = r.wireBytes
+	accounting.orphanBytes = r.commit.wireBytes
 	accounting.commitBytes = r.commit.wireBytes
 	if err := addPeerAccounting(accounting.peerBytes, r.commit.peerQuotaKey, r.commit.wireBytes); err != nil {
 		return daRelayRecordAccounting{}, err
 	}
 	for _, chunk := range r.chunks {
-		if err := addPeerAccounting(accounting.peerBytes, chunk.peerQuotaKey, chunk.wireBytes); err != nil {
+		chunkBytes := chunk.wireBytes
+		if len(chunk.txBytes) != 0 && len(chunk.payload) != 0 {
+			var addErr error
+			chunkBytes, addErr = checkedAddUint64(chunkBytes, uint64(len(chunk.payload)))
+			if addErr != nil {
+				return daRelayRecordAccounting{}, addErr
+			}
+		}
+		orphanBytes, err := checkedAddUint64(accounting.orphanBytes, chunkBytes)
+		if err != nil {
+			return daRelayRecordAccounting{}, err
+		}
+		accounting.orphanBytes = orphanBytes
+		if err := addPeerAccounting(accounting.peerBytes, chunk.peerQuotaKey, chunkBytes); err != nil {
 			return daRelayRecordAccounting{}, err
 		}
 	}

@@ -2,7 +2,7 @@ package node
 
 // CompleteDASetProvider exposes relay-complete DA set candidates to miner code.
 type CompleteDASetProvider interface {
-	CompleteDASetCandidates() []CompleteDASetCandidate
+	CompleteDASetCandidates(maxPayloadBytes uint64) []CompleteDASetCandidate
 }
 
 // CompleteDASetCandidate is an immutable miner-facing COMPLETE_SET snapshot.
