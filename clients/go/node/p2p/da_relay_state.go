@@ -143,6 +143,7 @@ type daRelayCommit struct {
 	peerQuotaKey      string
 	chunkCount        uint16
 	wireBytes         uint64
+	txBytes           []byte
 }
 
 type daRelayChunk struct {
@@ -152,6 +153,7 @@ type daRelayChunk struct {
 	chunkIndex   uint16
 	payload      []byte
 	wireBytes    uint64
+	txBytes      []byte
 }
 
 type daRelayCompletionSnapshot struct {
@@ -362,6 +364,7 @@ func (s *daRelayState) addDACommit(peerAddr string, commit daRelayCommit) (daRel
 	if commit.wireBytes == 0 {
 		return daRelaySetRecord{}, errDARelayWireBytesInvalid
 	}
+	commit.txBytes = cloneBytes(commit.txBytes)
 
 	for {
 		s.mu.Lock()
@@ -440,6 +443,8 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 		return daRelaySetRecord{}, errDARelayChunkHashMismatch
 	}
 	payload := cloneBytes(chunk.payload)
+	txBytes := cloneBytes(chunk.txBytes)
+	chunk.txBytes = txBytes
 
 	for {
 		s.mu.Lock()
@@ -723,11 +728,15 @@ func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
 
 func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	out := r
+	if copyPayloads {
+		out.commit.txBytes = cloneBytes(out.commit.txBytes)
+	}
 	if r.chunks != nil {
 		out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))
 		for index, chunk := range r.chunks {
 			if copyPayloads {
 				chunk.payload = cloneBytes(chunk.payload)
+				chunk.txBytes = cloneBytes(chunk.txBytes)
 			}
 			out.chunks[index] = chunk
 		}
