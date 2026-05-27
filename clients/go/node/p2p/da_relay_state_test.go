@@ -868,9 +868,10 @@ func TestServiceCompleteDASetCandidatesNilSafe(t *testing.T) {
 func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T) {
 	daID := daRelayTestID(7)
 	record := daRelaySetRecord{
-		daID: daID,
+		daID:   daID,
+		commit: daRelayCommit{txBytes: []byte("commit-tx")},
 		chunks: map[uint16]daRelayChunk{
-			0: daRelayTestChunkPayload(daID, 0, 17, []byte("immutable-payload")),
+			0: daRelayTestChunkWithTxBytes(daID, 0, 17, []byte("chunk-tx"), []byte("immutable-payload")),
 		},
 		replaceableChunks: map[uint16]bool{0: true},
 	}
@@ -880,6 +881,9 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	stateChunk := stateClone.chunks[0]
 	if &stateChunk.payload[0] != &originalChunk.payload[0] {
 		t.Fatalf("state mutation clone deep-copied payload")
+	}
+	if &stateChunk.txBytes[0] != &originalChunk.txBytes[0] {
+		t.Fatalf("state mutation clone deep-copied tx bytes")
 	}
 	stateClone.chunks[1] = daRelayTestChunkPayload(daID, 1, 1, []byte("second"))
 	if _, ok := record.chunks[1]; ok {
@@ -894,6 +898,9 @@ func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T
 	callerChunk := callerClone.chunks[0]
 	if &callerChunk.payload[0] == &originalChunk.payload[0] {
 		t.Fatalf("caller clone reused payload")
+	}
+	if callerClone.commit.txBytes != nil || callerChunk.txBytes != nil {
+		t.Fatalf("caller clone exposed internal tx bytes")
 	}
 	callerChunk.payload[0] ^= 0xff
 	callerClone.chunks[0] = callerChunk

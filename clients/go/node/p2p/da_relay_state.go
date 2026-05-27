@@ -728,14 +728,14 @@ func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
 func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	out := r
 	if copyPayloads {
-		out.commit.txBytes = cloneBytes(out.commit.txBytes)
+		out.commit.txBytes = nil
 	}
 	if r.chunks != nil {
 		out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))
 		for index, chunk := range r.chunks {
 			if copyPayloads {
 				chunk.payload = cloneBytes(chunk.payload)
-				chunk.txBytes = cloneBytes(chunk.txBytes)
+				chunk.txBytes = nil
 			}
 			out.chunks[index] = chunk
 		}
