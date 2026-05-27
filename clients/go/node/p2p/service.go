@@ -258,6 +258,16 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 
 func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) ([]byte, *consensus.Tx, error) {
 	if !s.cfg.TxPool.Has(txid) {
+		submittedTx, submittedTxid, err := parseCanonicalTx(txBytes)
+		if err != nil {
+			return nil, nil, err
+		}
+		if submittedTxid != txid {
+			return nil, nil, fmt.Errorf("submitted txid mismatch: expected=%x got=%x", txid, submittedTxid)
+		}
+		if err := validateRelayDATxForAdmission(txBytes, submittedTx); err != nil {
+			return nil, nil, err
+		}
 		meta, err := s.relayTxMetadata(txBytes)
 		if err != nil {
 			return nil, nil, err
@@ -276,6 +286,9 @@ func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) ([]byte, 
 	}
 	if admittedTxid != txid {
 		return nil, nil, fmt.Errorf("admitted txid mismatch: expected=%x got=%x", txid, admittedTxid)
+	}
+	if err := validateRelayDATxForAdmission(admittedTxBytes, admittedTx); err != nil {
+		return nil, nil, fmt.Errorf("admitted tx failed DA relay validation: txid=%x: %w", txid, err)
 	}
 	return admittedTxBytes, admittedTx, nil
 }

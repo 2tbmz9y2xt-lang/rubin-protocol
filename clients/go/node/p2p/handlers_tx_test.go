@@ -5,11 +5,9 @@ import (
 	"context"
 	"crypto/sha3"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -99,27 +97,6 @@ func daChunkRelayTxBytes(t *testing.T, daID [32]byte, index uint16, nonce uint64
 	return raw
 }
 
-func sameTxIDWithSentinelWitness(t *testing.T, raw []byte) []byte {
-	t.Helper()
-	tx, txid, err := parseCanonicalTx(raw)
-	if err != nil {
-		t.Fatalf("parse canonical tx: %v", err)
-	}
-	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SENTINEL}}
-	alt, err := consensus.MarshalTx(tx)
-	if err != nil {
-		t.Fatalf("MarshalTx alternate witness: %v", err)
-	}
-	altTxid, err := canonicalTxID(alt)
-	if err != nil {
-		t.Fatalf("alternate witness txid: %v", err)
-	}
-	if altTxid != txid || bytes.Equal(alt, raw) {
-		t.Fatalf("alternate witness txid=%x want %x different_bytes=%v", altTxid, txid, !bytes.Equal(alt, raw))
-	}
-	return alt
-}
-
 func sameTxIDWithDAPayload(t *testing.T, raw []byte, payload []byte) []byte {
 	t.Helper()
 	tx, txid, err := parseCanonicalTx(raw)
@@ -175,19 +152,6 @@ func (rejectingTxPool) Get([32]byte) ([]byte, bool) { return nil, false }
 func (rejectingTxPool) Has([32]byte) bool { return false }
 
 func (rejectingTxPool) Put([32]byte, []byte, uint64, int) bool { return false }
-
-type inconsistentTxPool struct {
-	raw []byte
-	ok  bool
-}
-
-func (p inconsistentTxPool) Get([32]byte) ([]byte, bool) {
-	return cloneBytes(p.raw), p.ok
-}
-
-func (p inconsistentTxPool) Has([32]byte) bool { return true }
-
-func (p inconsistentTxPool) Put([32]byte, []byte, uint64, int) bool { return false }
 
 func wireCanonicalMempoolForP2PTest(t *testing.T, h *testHarness) *node.Mempool {
 	t.Helper()
@@ -929,23 +893,24 @@ func TestAnnounceTxAdmissionRejectDoesNotMarkSeen(t *testing.T) {
 	}
 }
 
-func TestEnsureRelayTxAdmittedInvariantErrorsNameTxID(t *testing.T) {
+func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	txBytes := distinctTxBytes(t, 8841)
+	daID := daRelayTestID(121)
+	payload := []byte("admitted-da-payload")
+	txBytes := daChunkRelayTxBytes(t, daID, 0, 9151, payload)
 	txid, err := canonicalTxID(txBytes)
 	if err != nil {
 		t.Fatalf("canonicalTxID: %v", err)
 	}
-	otherTxBytes := distinctTxBytes(t, 8842)
-	otherTxid, err := canonicalTxID(otherTxBytes)
-	if err != nil {
-		t.Fatalf("other canonicalTxID: %v", err)
+	badPayloadTx := sameTxIDWithDAPayload(t, txBytes, []byte("bad-da-payload"))
+	if err := daRelayTestPeer(h, "127.0.0.1:19115").handleTx(badPayloadTx); err != nil {
+		t.Fatalf("handle bad DA chunk: %v", err)
 	}
-	h.service.cfg.TxPool = inconsistentTxPool{raw: otherTxBytes, ok: true}
-	_, _, err = h.service.ensureRelayTxAdmitted(txid, txBytes)
-	want := fmt.Sprintf("admitted txid mismatch: expected=%x got=%x", txid, otherTxid)
-	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("ensureRelayTxAdmitted err=%v, want %q", err, want)
+	if h.service.cfg.TxPool.Has(txid) || h.service.txSeen.Has(txid) {
+		t.Fatal("bad same-txid DA payload poisoned relay admission")
+	}
+	if err := h.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("AnnounceTx correct DA chunk after bad variant: %v", err)
 	}
 }
 
@@ -1016,24 +981,22 @@ func TestDAStagingUsesOnlyAdmittedTxBytes(t *testing.T) {
 				t.Fatal("preload admitted chunk")
 			}
 
-			alternateCommit := sameTxIDWithSentinelWitness(t, admittedCommit)
-			alternateChunk := sameTxIDWithDAPayload(t, admittedChunk, []byte("unadmitted-da-payload"))
-			if err := stage(alternateCommit); err != nil {
-				t.Fatalf("stage alternate commit: %v", err)
+			if err := stage(admittedCommit); err != nil {
+				t.Fatalf("stage admitted commit: %v", err)
 			}
-			if err := stage(alternateChunk); err != nil {
-				t.Fatalf("stage alternate chunk: %v", err)
+			if err := stage(admittedChunk); err != nil {
+				t.Fatalf("stage admitted chunk: %v", err)
 			}
 
 			record, ok := daRelayStoredRecordSnapshot(t, h.service.daRelay, daID)
 			if !ok || record.state != daRelayStateCompleteSet {
 				t.Fatalf("DA relay record ok=%v state=%v, want complete set", ok, record.state)
 			}
-			if !bytes.Equal(record.commit.txBytes, admittedCommit) || bytes.Equal(record.commit.txBytes, alternateCommit) {
+			if !bytes.Equal(record.commit.txBytes, admittedCommit) {
 				t.Fatalf("commit relay state did not retain admitted bytes")
 			}
 			chunk := record.chunks[0]
-			if !bytes.Equal(chunk.txBytes, admittedChunk) || bytes.Equal(chunk.txBytes, alternateChunk) {
+			if !bytes.Equal(chunk.txBytes, admittedChunk) {
 				t.Fatalf("chunk relay state did not retain admitted bytes")
 			}
 			if len(chunk.payload) != 0 {

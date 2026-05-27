@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"crypto/sha3"
 	"errors"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -63,6 +64,26 @@ func (s *Service) finishDAPrefetch(peerAddr string, daID [32]byte, record daRela
 		s.scheduleDAPrefetchSnapshot(peerAddr, daID)
 	}
 	return err
+}
+
+func validateRelayDATxForAdmission(txBytes []byte, tx *consensus.Tx) error {
+	if tx == nil || tx.TxKind != 0x02 || tx.DaChunkCore == nil {
+		return nil
+	}
+	chunk := daRelayChunk{
+		daID:       tx.DaChunkCore.DaID,
+		chunkHash:  tx.DaChunkCore.ChunkHash,
+		chunkIndex: tx.DaChunkCore.ChunkIndex,
+		payload:    tx.DaPayload,
+		wireBytes:  uint64(len(txBytes)),
+	}
+	if err := validateDAChunk(chunk); err != nil {
+		return err
+	}
+	if sha3.Sum256(tx.DaPayload) != tx.DaChunkCore.ChunkHash {
+		return errDARelayChunkHashMismatch
+	}
+	return nil
 }
 
 func (s *Service) scheduleDAPrefetchSnapshot(peerAddr string, daID [32]byte) {

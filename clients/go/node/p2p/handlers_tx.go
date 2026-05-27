@@ -22,11 +22,14 @@ func (p *peer) handleTx(txBytes []byte) error {
 		}
 		return nil
 	}
-	_, txid, err := parseCanonicalTx(txBytes)
+	tx, txid, err := parseCanonicalTx(txBytes)
 	if err != nil {
 		if p.bumpBan(10, err.Error()) {
 			return err
 		}
+		return nil
+	}
+	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
 		return nil
 	}
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
