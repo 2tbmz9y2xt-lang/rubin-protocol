@@ -44,7 +44,7 @@ func (p *peer) handleTx(txBytes []byte) error {
 		// and Rust surfaces the same branch as non-banworthy MetadataRejected.
 		return nil //nolint:nilerr
 	}
-	_ = p.service.stageRelayDATx(p.addr(), admittedTxBytes, admittedTx)
+	_ = p.service.stageRelayDATx(p.addr(), admittedTxBytes, admittedTx, true)
 	_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 	return nil
 }

@@ -7,16 +7,17 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-func (s *Service) stageRelayDATx(peerAddr string, txBytes []byte, tx *consensus.Tx) error {
+func (s *Service) stageRelayDATx(peerAddr string, txBytes []byte, tx *consensus.Tx, hashChecked ...bool) error {
 	if s == nil || s.daRelay == nil || tx == nil {
 		return nil
 	}
 	wireBytes := uint64(len(txBytes))
+	checked := len(hashChecked) != 0 && hashChecked[0]
 	switch tx.TxKind {
 	case 0x01:
 		return s.stageRelayDACommitTx(peerAddr, txBytes, wireBytes, tx)
 	case 0x02:
-		return s.stageRelayDAChunkTx(peerAddr, txBytes, wireBytes, tx)
+		return s.stageRelayDAChunkTx(peerAddr, txBytes, wireBytes, tx, checked)
 	default:
 		return nil
 	}
@@ -40,17 +41,18 @@ func (s *Service) stageRelayDACommitTx(peerAddr string, txBytes []byte, wireByte
 	return s.finishDAPrefetch(peerAddr, tx.DaCommitCore.DaID, record, err)
 }
 
-func (s *Service) stageRelayDAChunkTx(peerAddr string, txBytes []byte, wireBytes uint64, tx *consensus.Tx) error {
+func (s *Service) stageRelayDAChunkTx(peerAddr string, txBytes []byte, wireBytes uint64, tx *consensus.Tx, hashChecked bool) error {
 	if tx.DaChunkCore == nil {
 		return nil
 	}
 	record, err := s.daRelay.addDAChunk(peerAddr, daRelayChunk{
-		daID:       tx.DaChunkCore.DaID,
-		chunkHash:  tx.DaChunkCore.ChunkHash,
-		chunkIndex: tx.DaChunkCore.ChunkIndex,
-		payload:    tx.DaPayload,
-		wireBytes:  wireBytes,
-		txBytes:    txBytes,
+		daID:        tx.DaChunkCore.DaID,
+		chunkHash:   tx.DaChunkCore.ChunkHash,
+		chunkIndex:  tx.DaChunkCore.ChunkIndex,
+		payload:     tx.DaPayload,
+		wireBytes:   wireBytes,
+		txBytes:     txBytes,
+		hashChecked: hashChecked,
 	})
 	return s.finishDAPrefetch(peerAddr, tx.DaChunkCore.DaID, record, err)
 }

@@ -1,7 +1,6 @@
 package p2p
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha3"
 	"errors"
@@ -95,27 +94,6 @@ func daChunkRelayTxBytes(t *testing.T, daID [32]byte, index uint16, nonce uint64
 		t.Fatalf("MarshalTx DA chunk: %v", err)
 	}
 	return raw
-}
-
-func sameTxIDWithDAPayload(t *testing.T, raw []byte, payload []byte) []byte {
-	t.Helper()
-	tx, txid, err := parseCanonicalTx(raw)
-	if err != nil {
-		t.Fatalf("parse canonical tx: %v", err)
-	}
-	tx.DaPayload = cloneBytes(payload)
-	alt, err := consensus.MarshalTx(tx)
-	if err != nil {
-		t.Fatalf("MarshalTx alternate DA payload: %v", err)
-	}
-	altTxid, err := canonicalTxID(alt)
-	if err != nil {
-		t.Fatalf("alternate DA payload txid: %v", err)
-	}
-	if altTxid != txid || bytes.Equal(alt, raw) {
-		t.Fatalf("alternate DA payload txid=%x want %x different_bytes=%v", altTxid, txid, !bytes.Equal(alt, raw))
-	}
-	return alt
 }
 
 func daRelayRecordSnapshot(t *testing.T, state *daRelayState, daID [32]byte) (daRelaySetRecord, bool) {
@@ -891,11 +869,18 @@ func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
 	daID := daRelayTestID(121)
 	payload := []byte("admitted-da-payload")
 	txBytes := daChunkRelayTxBytes(t, daID, 0, 9151, payload)
-	txid, err := canonicalTxID(txBytes)
+	badTx, txid, err := parseCanonicalTx(txBytes)
 	if err != nil {
-		t.Fatalf("canonicalTxID: %v", err)
+		t.Fatalf("parse canonical tx: %v", err)
 	}
-	badPayloadTx := sameTxIDWithDAPayload(t, txBytes, []byte("bad-da-payload"))
+	badTx.DaPayload = []byte("bad-da-payload")
+	badPayloadTx, err := consensus.MarshalTx(badTx)
+	if err != nil {
+		t.Fatalf("MarshalTx bad DA payload: %v", err)
+	}
+	if badTxid, err := canonicalTxID(badPayloadTx); err != nil || badTxid != txid {
+		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
+	}
 	if err := daRelayTestPeer(h, "127.0.0.1:19115").handleTx(badPayloadTx); !errors.Is(err, errDARelayChunkHashMismatch) {
 		t.Fatalf("handle bad DA chunk err=%v, want hash mismatch at ban threshold", err)
 	}

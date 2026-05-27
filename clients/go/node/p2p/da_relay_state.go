@@ -154,6 +154,7 @@ type daRelayChunk struct {
 	payload      []byte
 	wireBytes    uint64
 	txBytes      []byte
+	hashChecked  bool
 }
 
 type daRelayCompletionSnapshot struct {
@@ -443,7 +444,7 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 	}
 	s.mu.Unlock()
 
-	if sha3.Sum256(chunk.payload) != chunk.chunkHash {
+	if !chunk.hashChecked && sha3.Sum256(chunk.payload) != chunk.chunkHash {
 		return daRelaySetRecord{}, errDARelayChunkHashMismatch
 	}
 	payload := cloneBytes(chunk.payload)

@@ -249,7 +249,7 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	_ = s.stageRelayDATx("", admittedTxBytes, admittedTx)
+	_ = s.stageRelayDATx("", admittedTxBytes, admittedTx, true)
 	if !s.txSeen.Add(txid) {
 		return nil
 	}
@@ -267,9 +267,7 @@ func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte, submitted
 		if err != nil {
 			return nil, nil, err
 		}
-		if s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
-			return txBytes, submittedTx, nil
-		}
+		s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size)
 		if !s.cfg.TxPool.Has(txid) {
 			return nil, nil, fmt.Errorf("tx not admitted to relay pool: txid=%x", txid)
 		}
