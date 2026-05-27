@@ -941,20 +941,11 @@ func TestEnsureRelayTxAdmittedInvariantErrorsNameTxID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("other canonicalTxID: %v", err)
 	}
-
 	h.service.cfg.TxPool = inconsistentTxPool{raw: otherTxBytes, ok: true}
 	_, _, err = h.service.ensureRelayTxAdmitted(txid, txBytes)
-	if err == nil {
-		t.Fatal("ensureRelayTxAdmitted should reject mismatched admitted txid")
-	}
-	for _, want := range []string{
-		"admitted txid mismatch",
-		fmt.Sprintf("expected=%x", txid),
-		fmt.Sprintf("got=%x", otherTxid),
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err.Error(), want)
-		}
+	want := fmt.Sprintf("admitted txid mismatch: expected=%x got=%x", txid, otherTxid)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("ensureRelayTxAdmitted err=%v, want %q", err, want)
 	}
 }
 
