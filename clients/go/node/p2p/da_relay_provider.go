@@ -48,7 +48,7 @@ func (s *daRelayState) completeSetCandidateRecords(maxPayloadBytes uint64) []daR
 	for _, daID := range daIDs {
 		record := s.sets[daID]
 		if record.payloadBytes > maxPayloadBytes-payloadBytes {
-			break
+			continue
 		}
 		records = append(records, record.cloneForStateMutation())
 		payloadBytes += record.payloadBytes

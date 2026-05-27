@@ -856,6 +856,10 @@ func TestDARelayCompleteSetCandidatesExposeOnlyCompleteImmutableOrdered(t *testi
 	if got := state.completeSetCandidates(earlyPayloadBytes); len(got) != 1 || got[0].DAID != earlyID {
 		t.Fatalf("bounded candidates=%+v, want only early da_id", got)
 	}
+	latePayloadBytes := uint64(len(latePayload))
+	if got := state.completeSetCandidates(latePayloadBytes); len(got) != 1 || got[0].DAID != lateID {
+		t.Fatalf("oversized early candidate blocked later fit=%+v, want only late da_id", got)
+	}
 }
 
 func TestServiceCompleteDASetCandidatesNilSafe(t *testing.T) {
