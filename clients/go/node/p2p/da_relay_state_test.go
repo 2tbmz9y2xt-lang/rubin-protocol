@@ -1187,7 +1187,7 @@ func TestDARelayStageChunkRejectsDuplicateWithoutMutation(t *testing.T) {
 	record := mustAddDAChunk(t, state, "peer-a", chunk)
 
 	state.mu.Lock()
-	staged, err := state.stageDAChunkRecordLocked("peer-b", chunk, chunk.payload)
+	staged, err := state.stageDAChunkRecordLocked("peer-b", chunk, chunk.payload, false)
 	state.mu.Unlock()
 	requireDAErr(t, err, errDARelayDuplicateChunk)
 

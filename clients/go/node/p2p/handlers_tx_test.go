@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha3"
 	"errors"
@@ -94,6 +95,48 @@ func daChunkRelayTxBytes(t *testing.T, daID [32]byte, index uint16, nonce uint64
 		t.Fatalf("MarshalTx DA chunk: %v", err)
 	}
 	return raw
+}
+
+func sameTxIDWithSentinelWitness(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	tx, txid, err := parseCanonicalTx(raw)
+	if err != nil {
+		t.Fatalf("parse canonical tx: %v", err)
+	}
+	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_SENTINEL}}
+	alt, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx alternate witness: %v", err)
+	}
+	altTxid, err := canonicalTxID(alt)
+	if err != nil {
+		t.Fatalf("alternate witness txid: %v", err)
+	}
+	if altTxid != txid || bytes.Equal(alt, raw) {
+		t.Fatalf("alternate witness txid=%x want %x different_bytes=%v", altTxid, txid, !bytes.Equal(alt, raw))
+	}
+	return alt
+}
+
+func sameTxIDWithDAPayload(t *testing.T, raw []byte, payload []byte) []byte {
+	t.Helper()
+	tx, txid, err := parseCanonicalTx(raw)
+	if err != nil {
+		t.Fatalf("parse canonical tx: %v", err)
+	}
+	tx.DaPayload = cloneBytes(payload)
+	alt, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx alternate DA payload: %v", err)
+	}
+	altTxid, err := canonicalTxID(alt)
+	if err != nil {
+		t.Fatalf("alternate DA payload txid: %v", err)
+	}
+	if altTxid != txid || bytes.Equal(alt, raw) {
+		t.Fatalf("alternate DA payload txid=%x want %x different_bytes=%v", altTxid, txid, !bytes.Equal(alt, raw))
+	}
+	return alt
 }
 
 func daRelayRecordSnapshot(t *testing.T, state *daRelayState, daID [32]byte) (daRelaySetRecord, bool) {
@@ -883,6 +926,192 @@ func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
 	}
 	if !h.service.txSeen.Has(txid) {
 		t.Fatal("announced tx should be marked seen after already-admitted broadcast")
+	}
+}
+
+func TestAnnounceTxStagesOnlyAdmittedDABytes(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	pool := h.service.cfg.TxPool.(*MemoryTxPool)
+	daID := daRelayTestID(126)
+	payload := []byte("admitted-da-payload")
+	admittedCommit := daCommitRelayTxBytes(t, daID, 9401, payload)
+	admittedChunk := daChunkRelayTxBytes(t, daID, 0, 9402, payload)
+	commitID, err := canonicalTxID(admittedCommit)
+	if err != nil {
+		t.Fatalf("commit txid: %v", err)
+	}
+	chunkID, err := canonicalTxID(admittedChunk)
+	if err != nil {
+		t.Fatalf("chunk txid: %v", err)
+	}
+	if !putRelayTx(pool, commitID, admittedCommit) {
+		t.Fatal("preload admitted commit")
+	}
+	if !putRelayTx(pool, chunkID, admittedChunk) {
+		t.Fatal("preload admitted chunk")
+	}
+
+	alternateCommit := sameTxIDWithSentinelWitness(t, admittedCommit)
+	alternateChunk := sameTxIDWithDAPayload(t, admittedChunk, []byte("unadmitted-da-payload"))
+	if err := h.service.AnnounceTx(alternateCommit); err != nil {
+		t.Fatalf("AnnounceTx alternate commit: %v", err)
+	}
+	if err := h.service.AnnounceTx(alternateChunk); err != nil {
+		t.Fatalf("AnnounceTx alternate chunk: %v", err)
+	}
+
+	candidates := h.service.CompleteDASetCandidates(uint64(len(payload)))
+	if len(candidates) != 1 {
+		t.Fatalf("complete DA candidates=%d, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if !bytes.Equal(candidate.CommitTx, admittedCommit) || bytes.Equal(candidate.CommitTx, alternateCommit) {
+		t.Fatalf("commit candidate is not admitted bytes")
+	}
+	if len(candidate.Chunks) != 1 || !bytes.Equal(candidate.Chunks[0].Tx, admittedChunk) || bytes.Equal(candidate.Chunks[0].Tx, alternateChunk) {
+		t.Fatalf("chunk candidate is not admitted bytes: chunks=%d", len(candidate.Chunks))
+	}
+
+	firstPinned := h.service.daRelay.pinnedPayloadBytes
+	if firstPinned == 0 {
+		t.Fatal("complete DA set did not pin provider accounting")
+	}
+	h.service.daRelay.caps.pinnedPayloadBytes = firstPinned
+	pool.Remove(chunkID)
+	if got := h.service.CompleteDASetCandidates(uint64(len(payload))); len(got) != 0 {
+		t.Fatalf("evicted DA chunk candidate still exposed: %d", len(got))
+	}
+	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok || h.service.daRelay.pinnedPayloadBytes != 0 {
+		t.Fatalf("stale complete DA record not pruned ok=%v pinned=%d", ok, h.service.daRelay.pinnedPayloadBytes)
+	}
+
+	replacementID := daRelayTestID(127)
+	replacementCommit := daCommitRelayTxBytes(t, replacementID, 9403, payload)
+	replacementChunk := daChunkRelayTxBytes(t, replacementID, 0, 9404, payload)
+	if err := h.service.AnnounceTx(replacementCommit); err != nil {
+		t.Fatalf("AnnounceTx replacement commit: %v", err)
+	}
+	if err := h.service.AnnounceTx(replacementChunk); err != nil {
+		t.Fatalf("AnnounceTx replacement chunk: %v", err)
+	}
+	replacementCandidates := h.service.CompleteDASetCandidates(uint64(len(payload)))
+	if len(replacementCandidates) != 1 || replacementCandidates[0].DAID != replacementID {
+		t.Fatalf("replacement candidates=%+v, want replacement DAID", replacementCandidates)
+	}
+}
+
+func TestCompleteDASetPruneDoesNotRemoveRegeneratedDAID(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	pool := h.service.cfg.TxPool.(*MemoryTxPool)
+	daID := daRelayTestID(129)
+	payload := []byte("regenerated-da-payload")
+	firstCommit := daCommitRelayTxBytes(t, daID, 9601, payload)
+	firstChunk := daChunkRelayTxBytes(t, daID, 0, 9602, payload)
+	if err := h.service.AnnounceTx(firstCommit); err != nil {
+		t.Fatalf("AnnounceTx first commit: %v", err)
+	}
+	if err := h.service.AnnounceTx(firstChunk); err != nil {
+		t.Fatalf("AnnounceTx first chunk: %v", err)
+	}
+	staleRecords := h.service.daRelay.completeSetCandidateRecordsSnapshot()
+	if len(staleRecords) != 1 {
+		t.Fatalf("stale snapshot records=%d, want 1", len(staleRecords))
+	}
+	firstCommitID, err := canonicalTxID(firstCommit)
+	if err != nil {
+		t.Fatalf("first commit txid: %v", err)
+	}
+	firstChunkID, err := canonicalTxID(firstChunk)
+	if err != nil {
+		t.Fatalf("first chunk txid: %v", err)
+	}
+	pool.Remove(firstCommitID)
+	pool.Remove(firstChunkID)
+
+	h.service.daRelay.mu.Lock()
+	firstRecord := h.service.daRelay.sets[daID]
+	if err := h.service.daRelay.removeDASetRecordLocked(firstRecord); err != nil {
+		h.service.daRelay.mu.Unlock()
+		t.Fatalf("remove first record: %v", err)
+	}
+	h.service.daRelay.mu.Unlock()
+
+	nextCommit := daCommitRelayTxBytes(t, daID, 9603, payload)
+	nextChunk := daChunkRelayTxBytes(t, daID, 0, 9604, payload)
+	if err := h.service.AnnounceTx(nextCommit); err != nil {
+		t.Fatalf("AnnounceTx next commit: %v", err)
+	}
+	if err := h.service.AnnounceTx(nextChunk); err != nil {
+		t.Fatalf("AnnounceTx next chunk: %v", err)
+	}
+	if err := h.service.pruneStaleCompleteSetRecords(staleRecords); err != nil {
+		t.Fatalf("delayed stale prune: %v", err)
+	}
+
+	candidates := h.service.CompleteDASetCandidates(uint64(len(payload)))
+	if len(candidates) != 1 || candidates[0].DAID != daID || !bytes.Equal(candidates[0].CommitTx, nextCommit) {
+		t.Fatalf("delayed stale prune removed regenerated candidate: %+v", candidates)
+	}
+}
+
+func TestHandleTxStagesOnlyAdmittedDABytes(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	pool := NewMemoryTxPoolWithLimit(2)
+	h.service.cfg.TxPool = pool
+	p := daRelayTestPeer(h, "127.0.0.1:19114")
+	daID := daRelayTestID(128)
+	payload := []byte("handle-admitted-da-payload")
+	admittedCommit := daCommitRelayTxBytes(t, daID, 9501, payload)
+	admittedChunk := daChunkRelayTxBytes(t, daID, 0, 9502, payload)
+	commitID, err := canonicalTxID(admittedCommit)
+	if err != nil {
+		t.Fatalf("commit txid: %v", err)
+	}
+	chunkID, err := canonicalTxID(admittedChunk)
+	if err != nil {
+		t.Fatalf("chunk txid: %v", err)
+	}
+	if !putRelayTx(pool, commitID, admittedCommit) {
+		t.Fatal("preload admitted commit")
+	}
+	if !putRelayTx(pool, chunkID, admittedChunk) {
+		t.Fatal("preload admitted chunk")
+	}
+
+	alternateCommit := sameTxIDWithSentinelWitness(t, admittedCommit)
+	alternateChunk := sameTxIDWithDAPayload(t, admittedChunk, []byte("handle-unadmitted-da-payload"))
+	if err := p.handleTx(alternateCommit); err != nil {
+		t.Fatalf("handleTx alternate commit: %v", err)
+	}
+	if err := p.handleTx(alternateChunk); err != nil {
+		t.Fatalf("handleTx alternate chunk: %v", err)
+	}
+
+	candidates := h.service.CompleteDASetCandidates(uint64(len(payload)))
+	if len(candidates) != 1 {
+		t.Fatalf("complete DA candidates=%d, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if !bytes.Equal(candidate.CommitTx, admittedCommit) || bytes.Equal(candidate.CommitTx, alternateCommit) {
+		t.Fatalf("commit candidate is not admitted bytes")
+	}
+	if len(candidate.Chunks) != 1 || !bytes.Equal(candidate.Chunks[0].Tx, admittedChunk) || bytes.Equal(candidate.Chunks[0].Tx, alternateChunk) {
+		t.Fatalf("chunk candidate is not admitted bytes: chunks=%d", len(candidate.Chunks))
+	}
+
+	evictor := distinctTxBytes(t, 9503)
+	evictorID, err := canonicalTxID(evictor)
+	if err != nil {
+		t.Fatalf("evictor txid: %v", err)
+	}
+	if !pool.Put(evictorID, evictor, uint64(len(evictor))*2, len(evictor)) {
+		t.Fatal("high-priority tx should evict one admitted DA tx")
+	}
+	if got := h.service.CompleteDASetCandidates(uint64(len(payload))); len(got) != 0 {
+		t.Fatalf("capacity-evicted DA candidate still exposed: %d", len(got))
+	}
+	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok || h.service.daRelay.pinnedPayloadBytes != 0 {
+		t.Fatalf("capacity-evicted complete DA record not pruned ok=%v pinned=%d", ok, h.service.daRelay.pinnedPayloadBytes)
 	}
 }
 
