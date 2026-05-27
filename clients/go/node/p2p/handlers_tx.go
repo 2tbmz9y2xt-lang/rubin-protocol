@@ -29,16 +29,18 @@ func (p *peer) handleTx(txBytes []byte) error {
 		}
 		return nil
 	}
-	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
+	if p.service.txSeen.Has(txid) {
 		return nil
 	}
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
-	isNew := p.service.txSeen.Add(txid)
-	if !isNew {
+	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
 		return nil
 	}
-	admittedTxBytes, admittedTx, err := p.service.ensureRelayTxAdmitted(txid, txBytes)
+	if !p.service.txSeen.Add(txid) {
+		return nil
+	}
+	admittedTxBytes, admittedTx, err := p.service.ensureRelayTxAdmitted(txid, txBytes, tx)
 	if err != nil {
 		// Keep admission and metadata rejections peer-neutral for Go/Rust relay
 		// parity: local policy/runtime state can reject a structurally valid tx,

@@ -241,11 +241,11 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
 	}
-	_, txid, err := parseCanonicalTx(txBytes)
+	tx, txid, err := parseCanonicalTx(txBytes)
 	if err != nil {
 		return err
 	}
-	admittedTxBytes, admittedTx, err := s.ensureRelayTxAdmitted(txid, txBytes)
+	admittedTxBytes, admittedTx, err := s.ensureRelayTxAdmitted(txid, txBytes, tx)
 	if err != nil {
 		return err
 	}
@@ -256,15 +256,8 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	return s.broadcastInventory(nil, []InventoryVector{{Type: MSG_TX, Hash: txid}})
 }
 
-func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) ([]byte, *consensus.Tx, error) {
+func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte, submittedTx *consensus.Tx) ([]byte, *consensus.Tx, error) {
 	if !s.cfg.TxPool.Has(txid) {
-		submittedTx, submittedTxid, err := parseCanonicalTx(txBytes)
-		if err != nil {
-			return nil, nil, err
-		}
-		if submittedTxid != txid {
-			return nil, nil, fmt.Errorf("submitted txid mismatch: expected=%x got=%x", txid, submittedTxid)
-		}
 		if err := validateRelayDATxForAdmission(txBytes, submittedTx); err != nil {
 			return nil, nil, err
 		}
@@ -272,7 +265,10 @@ func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte) ([]byte, 
 		if err != nil {
 			return nil, nil, err
 		}
-		if !s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) && !s.cfg.TxPool.Has(txid) {
+		if s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
+			return txBytes, submittedTx, nil
+		}
+		if !s.cfg.TxPool.Has(txid) {
 			return nil, nil, fmt.Errorf("tx not admitted to relay pool: txid=%x", txid)
 		}
 	}
