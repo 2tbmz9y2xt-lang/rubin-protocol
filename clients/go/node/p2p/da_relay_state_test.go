@@ -499,13 +499,18 @@ func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
 		t.Fatalf("duplicate commit received_time=%d, want first-seen %d", got, record.receivedTime)
 	}
 
-	chunk := daRelayTestChunk(daID, 0, 7)
+	chunk := daRelayTestChunkWithTxBytes(daID, 0, 7, []byte("first-chunk"), []byte{1})
 	record = mustAddDAChunk(t, state, "peer-c", chunk)
-	chunk.chunkHash[0] ^= 0xff
-	_, err = state.addDAChunk("peer-d", chunk)
+	duplicateChunk := daRelayTestChunkWithTxBytes(daID, 0, 11, []byte("duplicate-chunk"), []byte{1})
+	duplicateChunk.chunkHash[0] ^= 0xff
+	_, err = state.addDAChunk("peer-d", duplicateChunk)
 	requireDAErr(t, err, errDARelayDuplicateChunk)
+	duplicateChunk.txBytes[0] = 'X'
 	if len(state.sets[daID].chunks) != 1 || state.orphanBytes != record.wireBytes {
 		t.Fatalf("duplicate chunk mutated state: chunks=%d orphan=%d want orphan=%d", len(state.sets[daID].chunks), state.orphanBytes, record.wireBytes)
+	}
+	if !reflect.DeepEqual(state.sets[daID].chunks[0].txBytes, []byte("first-chunk")) {
+		t.Fatalf("duplicate chunk mutated stored tx bytes: %q", state.sets[daID].chunks[0].txBytes)
 	}
 }
 

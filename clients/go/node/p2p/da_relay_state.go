@@ -442,8 +442,6 @@ func (s *daRelayState) addDAChunk(peerAddr string, chunk daRelayChunk) (daRelayS
 		return daRelaySetRecord{}, errDARelayChunkHashMismatch
 	}
 	payload := cloneBytes(chunk.payload)
-	txBytes := cloneBytes(chunk.txBytes)
-	chunk.txBytes = txBytes
 
 	for {
 		s.mu.Lock()
@@ -530,6 +528,7 @@ func (s *daRelayState) stageDAChunkRecordLocked(peerAddr string, chunk daRelayCh
 		return daRelaySetRecord{}, err
 	}
 	chunk.peerQuotaKey = peerQuotaKey(peerAddr)
+	chunk.txBytes = cloneBytes(chunk.txBytes)
 	record.daID = chunk.daID
 	if record.commit.chunkCount == 0 {
 		record.state = daRelayStateOrphanChunks
