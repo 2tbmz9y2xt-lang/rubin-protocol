@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,6 +124,50 @@ func (rejectingTxPool) Get([32]byte) ([]byte, bool) { return nil, false }
 func (rejectingTxPool) Has([32]byte) bool { return false }
 
 func (rejectingTxPool) Put([32]byte, []byte, uint64, int) bool { return false }
+
+type staticTxPool struct {
+	raw []byte
+}
+
+func (p staticTxPool) Get([32]byte) ([]byte, bool) {
+	if len(p.raw) == 0 {
+		return nil, false
+	}
+	return append([]byte(nil), p.raw...), true
+}
+
+func (p staticTxPool) Has([32]byte) bool {
+	return len(p.raw) != 0
+}
+
+func (p staticTxPool) Put([32]byte, []byte, uint64, int) bool {
+	return false
+}
+
+type transientGetMissTxPool struct {
+	raw       []byte
+	getMisses int
+	getCalls  int
+	putCalls  int
+}
+
+func (p *transientGetMissTxPool) Get([32]byte) ([]byte, bool) {
+	p.getCalls++
+	if p.getCalls <= p.getMisses || len(p.raw) == 0 {
+		return nil, false
+	}
+	return append([]byte(nil), p.raw...), true
+}
+
+func (p *transientGetMissTxPool) Has([32]byte) bool {
+	return len(p.raw) != 0
+}
+
+func (p *transientGetMissTxPool) Put(_ [32]byte, raw []byte, _ uint64, _ int) bool {
+	p.putCalls++
+	p.raw = append(p.raw[:0], raw...)
+	return true
+}
 
 func wireCanonicalMempoolForP2PTest(t *testing.T, h *testHarness) *node.Mempool {
 	t.Helper()
@@ -400,8 +446,8 @@ func TestHandleTxDAAdmissionRejectsDoNotMutateRelayState(t *testing.T) {
 	if _, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID); ok {
 		t.Fatal("DA chunk hash mismatch mutated relay state")
 	}
-	if p.snapshotState().BanScore != 10 {
-		t.Fatalf("ban score=%d, want only the non-canonical parse penalty", p.snapshotState().BanScore)
+	if p.snapshotState().BanScore != 20 {
+		t.Fatalf("ban score=%d, want parse and DA admission penalties", p.snapshotState().BanScore)
 	}
 }
 
@@ -863,6 +909,133 @@ func TestAnnounceTxAdmissionRejectDoesNotMarkSeen(t *testing.T) {
 	}
 }
 
+func TestAnnounceTxRetriesTransientRelayPoolGetMiss(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	pool := &transientGetMissTxPool{getMisses: 2}
+	h.service.cfg.TxPool = pool
+	txBytes := distinctTxBytes(t, 9154)
+	txid, err := canonicalTxID(txBytes)
+	if err != nil {
+		t.Fatalf("canonicalTxID: %v", err)
+	}
+	if err := h.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("AnnounceTx after transient pool misses: %v", err)
+	}
+	if !h.service.txSeen.Has(txid) {
+		t.Fatal("AnnounceTx should mark tx seen after retry admission")
+	}
+	if pool.getCalls < 3 || pool.putCalls != 1 {
+		t.Fatalf("pool getCalls=%d putCalls=%d, want retry after transient Get miss", pool.getCalls, pool.putCalls)
+	}
+}
+
+func TestHandleTxRetriesTransientRelayPoolGetMissAfterSeen(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	pool := &transientGetMissTxPool{getMisses: 2}
+	h.service.cfg.TxPool = pool
+	daID := daRelayTestID(124)
+	payload := []byte("admitted-da-payload")
+	txBytes := daChunkRelayTxBytes(t, daID, 0, 9155, payload)
+	txid, err := canonicalTxID(txBytes)
+	if err != nil {
+		t.Fatalf("canonicalTxID: %v", err)
+	}
+	if err := daRelayTestPeer(h, "127.0.0.1:19117").handleTx(txBytes); err != nil {
+		t.Fatalf("handleTx after transient pool misses: %v", err)
+	}
+	if !h.service.txSeen.Has(txid) {
+		t.Fatal("handleTx should keep tx seen after retry admission")
+	}
+	record, ok := daRelayRecordSnapshot(t, h.service.daRelay, daID)
+	if !ok || len(record.chunks) != 1 {
+		t.Fatalf("DA chunk was not staged after retry admission: ok=%v chunks=%d", ok, len(record.chunks))
+	}
+	if pool.getCalls < 3 || pool.putCalls != 1 {
+		t.Fatalf("pool getCalls=%d putCalls=%d, want retry after transient Get miss", pool.getCalls, pool.putCalls)
+	}
+}
+
+func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.PeerRuntimeConfig.BanThreshold = 10
+	daID := daRelayTestID(121)
+	payload := []byte("admitted-da-payload")
+	txBytes := daChunkRelayTxBytes(t, daID, 0, 9151, payload)
+	badTx, txid, err := parseCanonicalTx(txBytes)
+	if err != nil {
+		t.Fatalf("parse canonical tx: %v", err)
+	}
+	badTx.DaPayload = []byte("bad-da-payload")
+	badPayloadTx, err := consensus.MarshalTx(badTx)
+	if err != nil {
+		t.Fatalf("MarshalTx bad DA payload: %v", err)
+	}
+	if badTxid, err := canonicalTxID(badPayloadTx); err != nil || badTxid != txid {
+		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
+	}
+	if err := daRelayTestPeer(h, "127.0.0.1:19115").handleTx(badPayloadTx); !errors.Is(err, errDARelayChunkHashMismatch) {
+		t.Fatalf("handle bad DA chunk err=%v, want hash mismatch at ban threshold", err)
+	}
+	if h.service.cfg.TxPool.Has(txid) || h.service.txSeen.Has(txid) {
+		t.Fatal("bad same-txid DA payload poisoned relay admission")
+	}
+	if err := h.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("AnnounceTx correct DA chunk after bad variant: %v", err)
+	}
+}
+
+func TestValidateRelayDATxForAdmissionRejectsInvalidChunkShape(t *testing.T) {
+	payload := []byte("admitted-da-payload")
+	tx := &consensus.Tx{
+		Version: 1,
+		TxKind:  0x02,
+		TxNonce: 9156,
+		DaChunkCore: &consensus.DaChunkCore{
+			DaID:       daRelayTestID(125),
+			ChunkIndex: 0,
+			ChunkHash:  sha3.Sum256(payload),
+		},
+		DaPayload: payload,
+	}
+	if err := validateRelayDATxForAdmission(nil, tx); !errors.Is(err, errDARelayWireBytesInvalid) {
+		t.Fatalf("validateRelayDATxForAdmission err=%v, want wire bytes invalid", err)
+	}
+}
+
+func TestHandleTxAlreadySeenRejectsBadDAChunkVariant(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.PeerRuntimeConfig.BanThreshold = 10
+	daID := daRelayTestID(123)
+	payload := []byte("admitted-da-payload")
+	txBytes := daChunkRelayTxBytes(t, daID, 0, 9153, payload)
+	goodTx, txid, err := parseCanonicalTx(txBytes)
+	if err != nil {
+		t.Fatalf("parse canonical tx: %v", err)
+	}
+	if err := h.service.AnnounceTx(txBytes); err != nil {
+		t.Fatalf("AnnounceTx setup DA chunk: %v", err)
+	}
+	if !h.service.txSeen.Has(txid) {
+		t.Fatal("setup DA chunk was not marked seen")
+	}
+	badTx := *goodTx
+	badTx.DaPayload = []byte("bad-da-payload")
+	badPayloadTx, err := consensus.MarshalTx(&badTx)
+	if err != nil {
+		t.Fatalf("MarshalTx bad DA payload: %v", err)
+	}
+	if badTxid, err := canonicalTxID(badPayloadTx); err != nil || badTxid != txid {
+		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
+	}
+
+	if err := daRelayTestPeer(h, "127.0.0.1:19116").handleTx(badPayloadTx); !errors.Is(err, errDARelayChunkHashMismatch) {
+		t.Fatalf("handle seen bad DA chunk err=%v, want hash mismatch at ban threshold", err)
+	}
+	if got, ok := h.service.cfg.TxPool.Get(txid); !ok || !reflect.DeepEqual(got, txBytes) {
+		t.Fatal("bad already-seen DA variant mutated admitted pool bytes")
+	}
+}
+
 func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	canonicalMempool := wireCanonicalMempoolForP2PTest(t, h)
@@ -883,6 +1056,103 @@ func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
 	}
 	if !h.service.txSeen.Has(txid) {
 		t.Fatal("announced tx should be marked seen after already-admitted broadcast")
+	}
+}
+
+func TestAnnounceTxAlreadyAdmittedRejectsBadDAChunkVariant(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	daID := daRelayTestID(122)
+	payload := []byte("admitted-da-payload")
+	txBytes := daChunkRelayTxBytes(t, daID, 0, 9152, payload)
+	goodTx, txid, err := parseCanonicalTx(txBytes)
+	if err != nil {
+		t.Fatalf("parse canonical tx: %v", err)
+	}
+	meta := node.RelayTxMetadata{Fee: 1, Size: len(txBytes)}
+	if !h.service.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
+		t.Fatal("setup admitted DA chunk")
+	}
+	badTx := *goodTx
+	badTx.DaPayload = []byte("bad-da-payload")
+	badPayloadTx, err := consensus.MarshalTx(&badTx)
+	if err != nil {
+		t.Fatalf("MarshalTx bad DA payload: %v", err)
+	}
+	if badTxid, err := canonicalTxID(badPayloadTx); err != nil || badTxid != txid {
+		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
+	}
+
+	if err := h.service.AnnounceTx(badPayloadTx); !errors.Is(err, errDARelayChunkHashMismatch) {
+		t.Fatalf("AnnounceTx bad same-txid DA payload err=%v, want hash mismatch", err)
+	}
+	if h.service.txSeen.Has(txid) {
+		t.Fatal("bad already-admitted DA variant marked tx seen")
+	}
+	if got, ok := h.service.cfg.TxPool.Get(txid); !ok || !reflect.DeepEqual(got, txBytes) {
+		t.Fatal("bad already-admitted DA variant mutated admitted pool bytes")
+	}
+}
+
+func TestAnnounceTxRejectsInvalidAdmittedPoolBytes(t *testing.T) {
+	goodDAID := daRelayTestID(126)
+	goodPayload := []byte("admitted-da-payload")
+	goodDATxBytes := daChunkRelayTxBytes(t, goodDAID, 0, 9157, goodPayload)
+	goodDATx, goodDATxid, err := parseCanonicalTx(goodDATxBytes)
+	if err != nil {
+		t.Fatalf("parse good DA tx: %v", err)
+	}
+	badDATx := *goodDATx
+	badDATx.DaPayload = []byte("bad-da-payload")
+	badDATxBytes, err := consensus.MarshalTx(&badDATx)
+	if err != nil {
+		t.Fatalf("MarshalTx bad DA payload: %v", err)
+	}
+	if badTxid, err := canonicalTxID(badDATxBytes); err != nil || badTxid != goodDATxid {
+		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, goodDATxid)
+	}
+
+	mismatchTxBytes := distinctTxBytes(t, 9158)
+	cases := []struct {
+		name    string
+		poolRaw []byte
+		txBytes []byte
+		want    string
+	}{
+		{
+			name:    "noncanonical admitted bytes",
+			poolRaw: []byte{0xff},
+			txBytes: distinctTxBytes(t, 9159),
+			want:    "admitted tx is non-canonical",
+		},
+		{
+			name:    "admitted txid mismatch",
+			poolRaw: mismatchTxBytes,
+			txBytes: distinctTxBytes(t, 9160),
+			want:    "admitted txid mismatch",
+		},
+		{
+			name:    "admitted DA validation failure",
+			poolRaw: badDATxBytes,
+			txBytes: goodDATxBytes,
+			want:    "admitted tx failed DA relay validation",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+			h.service.cfg.TxPool = staticTxPool{raw: tc.poolRaw}
+			txid, err := canonicalTxID(tc.txBytes)
+			if err != nil {
+				t.Fatalf("canonicalTxID: %v", err)
+			}
+			err = h.service.AnnounceTx(tc.txBytes)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("AnnounceTx err=%v, want containing %q", err, tc.want)
+			}
+			if h.service.txSeen.Has(txid) {
+				t.Fatal("AnnounceTx should not mark invalid admitted pool bytes seen")
+			}
+		})
 	}
 }
 
