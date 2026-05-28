@@ -450,7 +450,8 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 			parsed = append(parsed, candidate.minedCandidate)
 		}
 	}
-	if m.cfg.CompleteDASetProvider == nil || maxSelected == 0 {
+	if m.cfg.CompleteDASetProvider == nil || maxSelected == 0 ||
+		len(parsed) >= maxSelected || selectedWeight >= remainingWeight {
 		return parsed, nil
 	}
 	validationCtx, err := m.providerConsensusContext(nextHeight)
@@ -466,6 +467,10 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 	for _, set := range m.cfg.CompleteDASetProvider.CompleteDASetCandidates(providerBudget) {
 		if len(parsed) >= maxSelected || len(selectedDAIDs) >= consensus.MAX_DA_BATCHES_PER_BLOCK {
 			break
+		}
+		remainingSlots := maxSelected - len(parsed)
+		if len(set.Chunks) >= remainingSlots {
+			continue
 		}
 		group, ok, err := m.parseCompleteDASetCandidate(set)
 		if err != nil {
