@@ -18,6 +18,7 @@ const (
 	defaultGetBlocksBatchLimit uint64 = 128
 	defaultLocatorLimit               = 32
 	defaultTxRelayFanout              = 8
+	relayTxAdmissionAttempts          = 2
 )
 
 type ServiceConfig struct {
@@ -257,36 +258,49 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 }
 
 func (s *Service) ensureRelayTxAdmitted(txid [32]byte, txBytes []byte, submittedTx *consensus.Tx, submittedTxValidated bool) ([]byte, *consensus.Tx, error) {
-	if !s.cfg.TxPool.Has(txid) {
-		if !submittedTxValidated {
-			if err := validateRelayDATxForAdmission(txBytes, submittedTx); err != nil {
-				return nil, nil, err
-			}
-		}
-		meta, err := s.relayTxMetadata(txBytes)
-		if err != nil {
+	if !submittedTxValidated {
+		if err := validateRelayDATxForAdmission(txBytes, submittedTx); err != nil {
 			return nil, nil, err
 		}
+	}
+	var meta node.RelayTxMetadata
+	metaReady := false
+	for attempt := 0; attempt < relayTxAdmissionAttempts; attempt++ {
+		if admittedTxBytes, admittedTx, ok, err := s.relayTxFromPool(txid); ok || err != nil {
+			return admittedTxBytes, admittedTx, err
+		}
+		if !metaReady {
+			var err error
+			meta, err = s.relayTxMetadata(txBytes)
+			if err != nil {
+				return nil, nil, err
+			}
+			metaReady = true
+		}
 		s.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size)
-		if !s.cfg.TxPool.Has(txid) {
-			return nil, nil, fmt.Errorf("tx not admitted to relay pool: txid=%x", txid)
+		if admittedTxBytes, admittedTx, ok, err := s.relayTxFromPool(txid); ok || err != nil {
+			return admittedTxBytes, admittedTx, err
 		}
 	}
+	return nil, nil, fmt.Errorf("tx not admitted to relay pool: txid=%x", txid)
+}
+
+func (s *Service) relayTxFromPool(txid [32]byte) ([]byte, *consensus.Tx, bool, error) {
 	admittedTxBytes, ok := s.cfg.TxPool.Get(txid)
 	if !ok {
-		return nil, nil, fmt.Errorf("admitted tx missing from relay pool: txid=%x", txid)
+		return nil, nil, false, nil
 	}
 	admittedTx, admittedTxid, err := parseCanonicalTx(admittedTxBytes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("admitted tx is non-canonical: txid=%x: %w", txid, err)
+		return nil, nil, true, fmt.Errorf("admitted tx is non-canonical: txid=%x: %w", txid, err)
 	}
 	if admittedTxid != txid {
-		return nil, nil, fmt.Errorf("admitted txid mismatch: expected=%x got=%x", txid, admittedTxid)
+		return nil, nil, true, fmt.Errorf("admitted txid mismatch: expected=%x got=%x", txid, admittedTxid)
 	}
 	if err := validateRelayDATxForAdmission(admittedTxBytes, admittedTx); err != nil {
-		return nil, nil, fmt.Errorf("admitted tx failed DA relay validation: txid=%x: %w", txid, err)
+		return nil, nil, true, fmt.Errorf("admitted tx failed DA relay validation: txid=%x: %w", txid, err)
 	}
-	return admittedTxBytes, admittedTx, nil
+	return admittedTxBytes, admittedTx, true, nil
 }
 
 func normalizePeerAddrs(addrs []string) []string {

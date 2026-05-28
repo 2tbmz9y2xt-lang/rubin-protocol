@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -30,7 +31,7 @@ func (p *peer) handleTx(txBytes []byte) error {
 		return nil
 	}
 	if p.service.txSeen.Has(txid) {
-		return nil
+		return p.handleSeenRelayTxVariant(txid, txBytes, tx)
 	}
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
@@ -57,6 +58,21 @@ func (p *peer) validateAndMarkRelayTxSeen(txid [32]byte, txBytes []byte, tx *con
 		return true, nil
 	}
 	return !p.service.txSeen.Add(txid), nil
+}
+
+func (p *peer) handleSeenRelayTxVariant(txid [32]byte, txBytes []byte, tx *consensus.Tx) error {
+	if tx == nil || tx.TxKind != 0x02 || tx.DaChunkCore == nil {
+		return nil
+	}
+	if admittedTxBytes, ok := p.service.cfg.TxPool.Get(txid); ok && bytes.Equal(admittedTxBytes, txBytes) {
+		return nil
+	}
+	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
+		if p.bumpBan(10, err.Error()) {
+			return err
+		}
+	}
+	return nil
 }
 
 func canonicalTxID(txBytes []byte) ([32]byte, error) {

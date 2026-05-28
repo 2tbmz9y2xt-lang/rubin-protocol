@@ -510,11 +510,16 @@ func TestDARelayCompletionIgnoresTransientOrphanCapsForRetainedTxBytes(t *testin
 		state := newDARelayStateForTest(t, caps)
 		daID := daRelayTestID(94)
 		payload := []byte{1}
+		commitTx := []byte("retained-commit-tx")
 		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, 1, payload))
 
-		record := mustAddDACommit(t, state, "peer-b", daRelayTestCommitWithTxBytes(daID, 1, []byte("retained-commit-tx"), payload))
+		record := mustAddDACommit(t, state, "peer-b", daRelayTestCommitWithTxBytes(daID, 1, commitTx, payload))
 		if record.state != daRelayStateCompleteSet || state.orphanBytes != 0 || state.orphanCommitOverheadBytes != 0 {
 			t.Fatalf("commit completion state=%v orphan=%d commit=%d", record.state, state.orphanBytes, state.orphanCommitOverheadBytes)
+		}
+		commitTx[0] = 'X'
+		if !reflect.DeepEqual(state.sets[daID].commit.txBytes, []byte("retained-commit-tx")) {
+			t.Fatalf("complete commit retained caller txBytes alias: %q", state.sets[daID].commit.txBytes)
 		}
 	})
 
@@ -522,11 +527,52 @@ func TestDARelayCompletionIgnoresTransientOrphanCapsForRetainedTxBytes(t *testin
 		state := newDARelayStateForTest(t, caps)
 		daID := daRelayTestID(95)
 		payload := []byte{1}
+		chunkTx := []byte("retained-chunk-tx")
 		mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload))
 
-		record := mustAddDAChunk(t, state, "peer-b", daRelayTestChunkWithTxBytes(daID, 0, 1, []byte("retained-chunk-tx"), payload))
+		record := mustAddDAChunk(t, state, "peer-b", daRelayTestChunkWithTxBytes(daID, 0, 1, chunkTx, payload))
 		if record.state != daRelayStateCompleteSet || state.orphanBytes != 0 || state.orphanCommitOverheadBytes != 0 {
 			t.Fatalf("chunk completion state=%v orphan=%d commit=%d", record.state, state.orphanBytes, state.orphanCommitOverheadBytes)
+		}
+		chunkTx[0] = 'X'
+		if !reflect.DeepEqual(state.sets[daID].chunks[0].txBytes, []byte("retained-chunk-tx")) {
+			t.Fatalf("complete chunk retained caller txBytes alias: %q", state.sets[daID].chunks[0].txBytes)
+		}
+	})
+
+	t.Run("commit completion checks pinned cap before retaining tx bytes", func(t *testing.T) {
+		rejectCaps := defaultDARelayCaps()
+		rejectCaps.pinnedPayloadBytes = 1
+		state := newDARelayStateForTest(t, rejectCaps)
+		daID := daRelayTestID(96)
+		payload := []byte{1}
+		commitTx := []byte("retained-commit-tx")
+		mustAddDAChunk(t, state, "peer-a", daRelayTestChunkPayload(daID, 0, 1, payload))
+
+		_, err := state.addDACommit("peer-b", daRelayTestCommitWithTxBytes(daID, 1, commitTx, payload))
+		requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
+		commitTx[0] = 'X'
+		stored := state.sets[daID]
+		if stored.commit.chunkCount != 0 || len(stored.commit.txBytes) != 0 || state.pinnedPayloadBytes != 0 {
+			t.Fatalf("rejected complete commit retained state: commit=%d tx=%q pinned=%d", stored.commit.chunkCount, stored.commit.txBytes, state.pinnedPayloadBytes)
+		}
+	})
+
+	t.Run("chunk completion checks pinned cap before retaining tx bytes", func(t *testing.T) {
+		rejectCaps := defaultDARelayCaps()
+		rejectCaps.pinnedPayloadBytes = 1
+		state := newDARelayStateForTest(t, rejectCaps)
+		daID := daRelayTestID(97)
+		payload := []byte{1}
+		chunkTx := []byte("retained-chunk-tx")
+		mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(daID, 1, payload))
+
+		_, err := state.addDAChunk("peer-b", daRelayTestChunkWithTxBytes(daID, 0, 1, chunkTx, payload))
+		requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
+		chunkTx[0] = 'X'
+		stored := state.sets[daID]
+		if len(stored.chunks) != 0 || state.pinnedPayloadBytes != 0 {
+			t.Fatalf("rejected complete chunk retained state: chunks=%d pinned=%d", len(stored.chunks), state.pinnedPayloadBytes)
 		}
 	})
 }
@@ -1204,7 +1250,7 @@ func TestDARelayStageChunkRejectsDuplicateWithoutMutation(t *testing.T) {
 	record := mustAddDAChunk(t, state, "peer-a", chunk)
 
 	state.mu.Lock()
-	staged, err := state.stageDAChunkRecordLocked("peer-b", chunk, chunk.payload, false)
+	staged, _, err := state.stageDAChunkRecordLocked("peer-b", chunk, chunk.payload, false)
 	state.mu.Unlock()
 	requireDAErr(t, err, errDARelayDuplicateChunk)
 
