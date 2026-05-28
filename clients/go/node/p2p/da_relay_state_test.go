@@ -938,6 +938,69 @@ func TestDARelayCommitCompletesOrphanChunks(t *testing.T) {
 	}
 }
 
+func TestDARelayCompleteSetCandidatesExposeOnlyCompleteImmutableOrdered(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	orphanID, stagedID := daRelayTestID(31), daRelayTestID(32)
+	lateID, earlyID := daRelayTestID(33), daRelayTestID(30)
+	earlyPayload0, earlyPayload1 := []byte("early-0"), []byte("early-1")
+	latePayload := []byte("late")
+
+	mustAddDAChunk(t, state, "peer-o", daRelayTestChunkWithTxBytes(orphanID, 0, 6, []byte("chunk-orphan"), []byte("orphan")))
+	mustAddDACommit(t, state, "peer-s", daRelayTestCommitWithTxBytes(stagedID, 6, []byte("commit-staged"), []byte("staged")))
+	mustAddDACommit(t, state, "peer-l", daRelayTestCommitWithTxBytes(lateID, 7, []byte("commit-late"), latePayload))
+	mustAddDAChunk(t, state, "peer-l", daRelayTestChunkWithTxBytes(lateID, 0, uint64(len(latePayload)), []byte("chunk-late"), latePayload))
+	mustAddDACommit(t, state, "peer-e", daRelayTestCommitWithTxBytes(earlyID, 8, []byte("commit-early"), earlyPayload0, earlyPayload1))
+	for _, chunk := range []daRelayChunk{
+		daRelayTestChunkWithTxBytes(earlyID, 1, uint64(len(earlyPayload1)), []byte("chunk-early-1"), earlyPayload1),
+		daRelayTestChunkWithTxBytes(earlyID, 0, uint64(len(earlyPayload0)), []byte("chunk-early-0"), earlyPayload0),
+	} {
+		mustAddDAChunk(t, state, "peer-e", chunk)
+	}
+
+	candidates := (&Service{daRelay: state}).CompleteDASetCandidates(^uint64(0))
+	if len(candidates) != 2 {
+		t.Fatalf("complete candidates=%d, want 2", len(candidates))
+	}
+	if candidates[0].DAID != earlyID || candidates[1].DAID != lateID {
+		t.Fatalf("candidate order=%x,%x want %x,%x", candidates[0].DAID, candidates[1].DAID, earlyID, lateID)
+	}
+	if got := candidates[0].PayloadBytes; got != uint64(len(earlyPayload0)+len(earlyPayload1)) {
+		t.Fatalf("early payload bytes=%d, want %d", got, len(earlyPayload0)+len(earlyPayload1))
+	}
+	if !reflect.DeepEqual(candidates[0].CommitTx, []byte("commit-early")) {
+		t.Fatalf("early commit tx=%q", candidates[0].CommitTx)
+	}
+	if len(candidates[0].Chunks) != 2 || candidates[0].Chunks[0].Index != 0 || candidates[0].Chunks[1].Index != 1 {
+		t.Fatalf("early chunks=%+v, want indexes 0,1", candidates[0].Chunks)
+	}
+	candidates[0].CommitTx[0] = 'X'
+	candidates[0].Chunks[0].Tx[0] = 'Y'
+	again := state.completeSetCandidates(^uint64(0))
+	if !reflect.DeepEqual(again[0].CommitTx, []byte("commit-early")) || !reflect.DeepEqual(again[0].Chunks[0].Tx, []byte("chunk-early-0")) {
+		t.Fatalf("candidate snapshot aliases state: commit=%q chunk=%q", again[0].CommitTx, again[0].Chunks[0].Tx)
+	}
+	earlyPayloadBytes := uint64(len(earlyPayload0) + len(earlyPayload1))
+	if got := state.completeSetCandidates(earlyPayloadBytes); len(got) != 1 || got[0].DAID != earlyID {
+		t.Fatalf("bounded candidates=%+v, want only early da_id", got)
+	}
+	latePayloadBytes := uint64(len(latePayload))
+	if got := state.completeSetCandidates(latePayloadBytes); len(got) != 1 || got[0].DAID != lateID {
+		t.Fatalf("oversized early candidate blocked later fit=%+v, want only late da_id", got)
+	}
+}
+
+func TestServiceCompleteDASetCandidatesNilSafe(t *testing.T) {
+	if got := (*Service)(nil).CompleteDASetCandidates(1); got != nil {
+		t.Fatalf("nil service candidates=%v, want nil", got)
+	}
+	if got := (&Service{}).CompleteDASetCandidates(1); got != nil {
+		t.Fatalf("service without relay candidates=%v, want nil", got)
+	}
+	if got := (*daRelayState)(nil).completeSetCandidates(1); got != nil {
+		t.Fatalf("nil state candidates=%v, want nil", got)
+	}
+}
+
 func TestDARelayCloneModesKeepStateCopiesShallowAndCallerCopiesDeep(t *testing.T) {
 	daID := daRelayTestID(7)
 	record := daRelaySetRecord{
