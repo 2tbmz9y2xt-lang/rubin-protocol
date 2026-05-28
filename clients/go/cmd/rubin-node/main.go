@@ -514,6 +514,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if mineAddrErr == nil {
 			minerCfg.CoreExtProfiles = genesisCfg.CoreExtProfiles
 			minerCfg.CurrentMempoolMinFeeRateFn = mempool.CurrentMinFeeRateSnapshot
+			minerCfg.CompleteDASetProvider = p2pService
 			var err error
 			liveMiner, err = newMinerFn(chainState, blockStore, syncEngine, minerCfg)
 			if err != nil {

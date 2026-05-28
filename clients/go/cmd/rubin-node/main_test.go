@@ -2089,6 +2089,9 @@ func TestRunMineBlocksPassesMineAddressToMiner(t *testing.T) {
 	if got := captured.CurrentMempoolMinFeeRateFn(); got != offlineMinerSentinelFloor {
 		t.Fatalf("offline-mining provider returned %d, want sentinel %d; closure is not bound to the live mempool snapshot", got, offlineMinerSentinelFloor)
 	}
+	if captured.CompleteDASetProvider != nil {
+		t.Fatal("offline-mining miner cfg should not receive a DA complete-set provider without a p2p service")
+	}
 }
 
 func TestRunMainnetFailsWithoutGenesisFileBeforeExplicitTargetCheck(t *testing.T) {
@@ -2639,6 +2642,10 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 				_, _ = fmt.Fprintf(os.Stderr, "T-D regression: provider returned %d, want sentinel %d (closure not bound to live mempool snapshot)\n", got, liveMinerSentinelFloor)
 				os.Exit(35)
 			}
+			if cfg.CompleteDASetProvider == nil {
+				_, _ = fmt.Fprintln(os.Stderr, "DA provider regression: live miner cfg.CompleteDASetProvider=nil")
+				os.Exit(36)
+			}
 			return nil, errors.New("test deliberate miner init abort to unblock SIGINT")
 		}
 		dir := t.TempDir()
@@ -2675,6 +2682,9 @@ func TestRunDevnetWithRPCBindLiveMinerHasCurrentMempoolMinFeeRateFn(t *testing.T
 		}
 		if errors.As(err, &ee) && ee.ExitCode() == 35 {
 			t.Fatalf("T-D regression: live miner CurrentMempoolMinFeeRateFn does not observe the live mempool snapshot (sentinel mismatch); the closure may be a static fallback that bypasses the rolling rolling-floor source (stderr=%s)", stderr.String())
+		}
+		if errors.As(err, &ee) && ee.ExitCode() == 36 {
+			t.Fatalf("DA provider regression: live miner cfg.CompleteDASetProvider is nil; production wiring missing in main.go around `liveMiner, err = newMinerFn(...)` (stderr=%s)", stderr.String())
 		}
 		t.Fatalf("unexpected child error: %v (stderr=%s)", err, stderr.String())
 	}
