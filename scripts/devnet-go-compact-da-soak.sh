@@ -350,6 +350,7 @@ report = {
         "evidence": fallback,
     },
     "cleanup": {
+        "scope": "participant_pids_from_child_reports",
         "compact": compact_cleanup,
         "da": da_cleanup,
     },
@@ -362,7 +363,7 @@ report = {
         "da_path_exercised": True,
         "full_block_fallback_available": True,
         "timeout_paths_bounded_by_child_scripts": True,
-        "child_process_cleanup_verified": True,
+        "participant_pid_cleanup_verified": True,
     },
     "out_of_scope": [
         "production_runtime_change",
@@ -380,4 +381,8 @@ with open(os.environ["REPORT_JSON"], "w", encoding="utf-8") as out:
     out.write("\n")
 PY
 
-echo "PASS: Go compact+DA combined soak evidence completed; report=${REPORT_JSON}"
+if [[ "${KEEP_TMP}" == "1" ]]; then
+  echo "PASS: Go compact+DA combined soak evidence completed; report=${REPORT_JSON}"
+else
+  echo "PASS: Go compact+DA combined soak evidence completed; report_removed_on_exit=true"
+fi
