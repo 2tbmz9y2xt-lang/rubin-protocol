@@ -275,18 +275,25 @@ func (m *Miner) snapshotBuildContextState() (miningChainStateSnapshot, error) {
 }
 
 func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
-	candidateTxs := txs
+	maxSelected := m.maxSelectedTransactions()
+	if maxSelected == 0 {
+		return nil
+	}
+	if len(txs) != 0 {
+		return pickFlatCandidateRaw(txs, maxSelected)
+	}
+	if m.sync == nil || m.sync.mempool == nil {
+		return nil
+	}
+	return m.mempoolCandidateTransactions(maxSelected)
+}
+
+func (m *Miner) maxSelectedTransactions() int {
 	maxSelected := m.cfg.MaxTxPerBlock - 1
 	if maxSelected < 0 {
-		maxSelected = 0
+		return 0
 	}
-	if len(candidateTxs) == 0 && m.sync != nil && m.sync.mempool != nil && maxSelected > 0 {
-		candidateTxs = m.sync.mempool.SelectTransactions(maxSelected, int(consensus.MAX_BLOCK_WEIGHT))
-	}
-	if maxSelected >= 0 && len(candidateTxs) > maxSelected {
-		candidateTxs = candidateTxs[:maxSelected]
-	}
-	return candidateTxs
+	return maxSelected
 }
 
 func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
@@ -397,31 +404,47 @@ func compactSizeLenForMiner(n uint64) uint64 {
 }
 
 func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, remainingWeight uint64) ([]minedCandidate, error) {
-	parsed := make([]minedCandidate, 0, len(candidateTxs))
+	maxSelected := m.maxSelectedTransactions()
+	parsed := make([]minedCandidate, 0, min(len(candidateTxs), maxSelected))
 	var selectedWeight uint64
 	var policyDaIncluded uint64
 	for _, raw := range candidateTxs {
-		candidate, err := m.parseMiningCandidate(raw)
+		if len(parsed) >= maxSelected {
+			break
+		}
+		candidate, nextDaIncluded, ok, err := m.trySelectFlatCandidate(raw, utxos, nextHeight, selectedWeight, remainingWeight, policyDaIncluded)
 		if err != nil {
 			return nil, err
 		}
-		reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, policyDaIncluded)
-		if err != nil {
-			// Policy checks should never abort block construction.
-			// Treat policy evaluation errors as a rejected candidate and continue.
-			continue
+		if ok {
+			selectedWeight += candidate.weight
+			policyDaIncluded = nextDaIncluded
+			parsed = append(parsed, candidate)
 		}
-		if reject {
-			continue
-		}
-		if candidate.minedCandidate.weight > remainingWeight-selectedWeight {
-			continue
-		}
-		selectedWeight += candidate.minedCandidate.weight
-		policyDaIncluded = nextDaIncluded
-		parsed = append(parsed, candidate.minedCandidate)
 	}
 	return parsed, nil
+}
+
+func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (minedCandidate, uint64, bool, error) {
+	candidate, err := m.parseMiningCandidate(raw)
+	if err != nil {
+		return minedCandidate{}, policyDaIncluded, false, err
+	}
+	if isMiningDATx(candidate.tx) {
+		return minedCandidate{}, policyDaIncluded, false, nil
+	}
+	reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, policyDaIncluded)
+	if err != nil || reject {
+		return minedCandidate{}, policyDaIncluded, false, nil
+	}
+	if selectedWeight >= remainingWeight {
+		return minedCandidate{}, policyDaIncluded, false, nil
+	}
+	availableWeight := remainingWeight - selectedWeight
+	if candidate.minedCandidate.weight > availableWeight {
+		return minedCandidate{}, policyDaIncluded, false, nil
+	}
+	return candidate.minedCandidate, nextDaIncluded, true, nil
 }
 
 type miningCandidate struct {
