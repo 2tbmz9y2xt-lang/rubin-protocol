@@ -83,7 +83,7 @@ type MinerConfig struct {
 	CoreExtProfiles consensus.CoreExtProfileProvider
 
 	// CompleteDASetProvider exposes relay COMPLETE_SET snapshots to miner selection.
-	// Runtime wiring is owned by a later child; nil preserves existing selection.
+	// Runtime wiring is owned by a later child; nil disables provider-backed DA selection.
 	CompleteDASetProvider CompleteDASetProvider
 }
 
@@ -284,12 +284,28 @@ func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
 	candidateTxs := txs
 	maxSelected := m.maxSelectedTransactions()
 	if len(candidateTxs) == 0 && m.sync != nil && m.sync.mempool != nil && maxSelected > 0 {
-		return m.sync.mempool.SelectTransactions(m.sync.mempool.Len(), int(consensus.MAX_BLOCK_WEIGHT))
+		available := m.sync.mempool.Len()
+		return m.sync.mempool.SelectTransactions(mempoolCandidateFetchLimit(maxSelected, available), int(consensus.MAX_BLOCK_WEIGHT))
 	}
 	if maxSelected >= 0 && len(candidateTxs) > maxSelected {
 		candidateTxs = candidateTxs[:maxSelected]
 	}
 	return candidateTxs
+}
+
+func mempoolCandidateFetchLimit(maxSelected int, available int) int {
+	if maxSelected <= 0 || available <= 0 {
+		return 0
+	}
+	overfetch := int(consensus.MAX_DA_BATCHES_PER_BLOCK)
+	if overfetch > maxSelected {
+		overfetch = maxSelected
+	}
+	limit := maxSelected + overfetch
+	if limit < maxSelected || limit > available {
+		return available
+	}
+	return limit
 }
 
 func (m *Miner) maxSelectedTransactions() int {
@@ -423,7 +439,13 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 		}
 		selection.tryAddCandidate(m, candidate, utxos, nextHeight)
 	}
+	if !selection.canAddCompleteDASet() {
+		return selection.parsed, nil
+	}
 	for _, set := range m.completeDASetCandidatesForMining() {
+		if !selection.canAddCompleteDASet() {
+			break
+		}
 		if err := selection.tryAddCompleteDASet(m, set, utxos, nextHeight); err != nil {
 			return nil, err
 		}
@@ -437,11 +459,12 @@ type miningCandidate struct {
 }
 
 type miningCandidateSelection struct {
-	parsed           []minedCandidate
-	selectedWeight   uint64
-	policyDaIncluded uint64
-	maxCandidates    int
-	remainingWeight  uint64
+	parsed            []minedCandidate
+	selectedWeight    uint64
+	policyDaIncluded  uint64
+	maxCandidates     int
+	remainingWeight   uint64
+	selectedDABatches int
 }
 
 func (s *miningCandidateSelection) tryAddCandidate(m *Miner, candidate miningCandidate, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) bool {
@@ -460,11 +483,14 @@ func (s *miningCandidateSelection) tryAddCandidate(m *Miner, candidate miningCan
 }
 
 func (s *miningCandidateSelection) tryAddCompleteDASet(m *Miner, set CompleteDASetCandidate, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) error {
+	if !s.canAddCompleteDASet() {
+		return nil
+	}
 	group, ok, err := m.parseCompleteDASetCandidate(set)
 	if err != nil || !ok {
 		return err
 	}
-	if len(group) == 0 || len(s.parsed)+len(group) > s.maxCandidates || s.selectedWeight > s.remainingWeight {
+	if !s.hasRoomForCompleteDAGroup(group) {
 		return nil
 	}
 	groupWeight, nextDaIncluded, ok := s.projectCompleteDAGroup(m, group, utxos, nextHeight)
@@ -473,10 +499,22 @@ func (s *miningCandidateSelection) tryAddCompleteDASet(m *Miner, set CompleteDAS
 	}
 	s.selectedWeight += groupWeight
 	s.policyDaIncluded = nextDaIncluded
+	s.selectedDABatches++
 	for _, candidate := range group {
 		s.parsed = append(s.parsed, candidate.minedCandidate)
 	}
 	return nil
+}
+
+func (s *miningCandidateSelection) canAddCompleteDASet() bool {
+	return len(s.parsed) < s.maxCandidates &&
+		s.selectedDABatches < int(consensus.MAX_DA_BATCHES_PER_BLOCK)
+}
+
+func (s *miningCandidateSelection) hasRoomForCompleteDAGroup(group []miningCandidate) bool {
+	return len(group) != 0 &&
+		len(s.parsed)+len(group) <= s.maxCandidates &&
+		s.selectedWeight <= s.remainingWeight
 }
 
 func (s *miningCandidateSelection) projectCompleteDAGroup(m *Miner, group []miningCandidate, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) (uint64, uint64, bool) {

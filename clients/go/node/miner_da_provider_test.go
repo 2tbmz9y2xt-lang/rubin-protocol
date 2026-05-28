@@ -20,6 +20,16 @@ func (p *budgetProbeProvider) CompleteDASetCandidates(max uint64) []CompleteDASe
 	return nil
 }
 
+type countingCompleteDASetProvider struct {
+	calls int
+	sets  []CompleteDASetCandidate
+}
+
+func (p *countingCompleteDASetProvider) CompleteDASetCandidates(uint64) []CompleteDASetCandidate {
+	p.calls++
+	return p.sets
+}
+
 func TestMinerSelectsCompleteDASetAndDropsFlatDA(t *testing.T) {
 	daID := [32]byte{0x71}
 	candidate, commit, chunk0, chunk1 := minerTestDASet(t, daID)
@@ -34,6 +44,50 @@ func TestMinerSelectsCompleteDASetAndDropsFlatDA(t *testing.T) {
 	if len(selected) != 4 || string(selected[0].raw) != string(flatNonDA) || string(selected[1].raw) != string(commit) ||
 		string(selected[2].raw) != string(chunk0) || string(selected[3].raw) != string(chunk1) {
 		t.Fatalf("selected sequence mismatch")
+	}
+}
+
+func TestMinerCompleteDASetSelectionCapsRuntimeWork(t *testing.T) {
+	if got := mempoolCandidateFetchLimit(4, 1000); got != 8 {
+		t.Fatalf("fetch limit=%d, want bounded overfetch 8", got)
+	}
+	if got := mempoolCandidateFetchLimit(200, 1000); got != 200+int(consensus.MAX_DA_BATCHES_PER_BLOCK) {
+		t.Fatalf("fetch limit=%d, want max plus DA batch cap", got)
+	}
+	if got := mempoolCandidateFetchLimit(200, 250); got != 250 {
+		t.Fatalf("fetch limit=%d, want available cap", got)
+	}
+
+	provider := &countingCompleteDASetProvider{}
+	miner := minerTestWithDAProvider(provider)
+	miner.cfg.MaxTxPerBlock = 2
+	flatNonDA := txWithOneInputOneOutput([32]byte{0x15}, 0, 1, consensus.COV_TYPE_P2PK, testP2PKCovenantData(0x15), nil)
+	selected, err := miner.selectCandidateTransactions([][]byte{flatNonDA}, nil, 1, ^uint64(0))
+	if err != nil {
+		t.Fatalf("selectCandidateTransactions: %v", err)
+	}
+	if len(selected) != 1 || provider.calls != 0 {
+		t.Fatalf("selected=%d provider_calls=%d, want full template without provider call", len(selected), provider.calls)
+	}
+}
+
+func TestMinerCompleteDASetSelectionCapsDABatches(t *testing.T) {
+	const groupSize = 3
+	sets := make([]CompleteDASetCandidate, 0, consensus.MAX_DA_BATCHES_PER_BLOCK+1)
+	for i := 0; i < consensus.MAX_DA_BATCHES_PER_BLOCK+1; i++ {
+		daID := [32]byte{0x75, byte(i), byte(i >> 8)}
+		candidate, _, _, _ := minerTestDASet(t, daID)
+		sets = append(sets, candidate)
+	}
+	miner := minerTestWithDAProvider(staticCompleteDASetProvider(sets))
+	miner.cfg.MaxTxPerBlock = 1 + len(sets)*groupSize
+	selected, err := miner.selectCandidateTransactions(nil, nil, 1, ^uint64(0))
+	if err != nil {
+		t.Fatalf("selectCandidateTransactions: %v", err)
+	}
+	want := int(consensus.MAX_DA_BATCHES_PER_BLOCK) * groupSize
+	if len(selected) != want {
+		t.Fatalf("selected=%d, want %d capped DA batch transactions", len(selected), want)
 	}
 }
 
