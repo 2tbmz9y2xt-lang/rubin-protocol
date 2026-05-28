@@ -1,7 +1,9 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha3"
 	"errors"
 	"math"
 	"time"
@@ -79,6 +81,8 @@ type MinerConfig struct {
 	// CoreExtProfiles is the chain-config profile mapping used by policy checks.
 	// Consensus uses a canonical source for profile(ext_id, height); this is policy-only.
 	CoreExtProfiles consensus.CoreExtProfileProvider
+
+	CompleteDASetProvider CompleteDASetProvider
 }
 
 type MinedBlock struct {
@@ -101,6 +105,7 @@ type minedCandidate struct {
 	txid   [32]byte
 	wtxid  [32]byte
 	weight uint64
+	nonce  uint64
 }
 
 type miningBuildContext struct {
@@ -110,6 +115,14 @@ type miningBuildContext struct {
 	alreadyGenerated uint64
 	utxos            map[consensus.Outpoint]consensus.UtxoEntry
 	candidateTxs     [][]byte
+}
+
+type miningConsensusContext struct {
+	blockMTP        uint64
+	chainID         [32]byte
+	coreExtProfiles consensus.CoreExtProfileProvider
+	rotation        consensus.RotationProvider
+	registry        *consensus.SuiteRegistry
 }
 
 type miningChainStateSnapshot struct {
@@ -303,6 +316,9 @@ func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
 	if m.cfg.PolicyRejectCoreExtPreActivation {
 		return true
 	}
+	if m.cfg.CompleteDASetProvider != nil {
+		return true
+	}
 	// DA anti-abuse policy always runs RejectDaAnchorTxPolicy to account for
 	// per-template DA bytes, even when the surcharge floor is disabled. Keep
 	// a readonly snapshot available for that path so custom configs cannot
@@ -408,6 +424,8 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 	parsed := make([]minedCandidate, 0, min(len(candidateTxs), maxSelected))
 	var selectedWeight uint64
 	var policyDaIncluded uint64
+	selectedNonces := make(map[uint64]struct{}, maxSelected)
+	selectedInputs := make(map[consensus.Outpoint]struct{}, maxSelected)
 	for _, raw := range candidateTxs {
 		if len(parsed) >= maxSelected {
 			break
@@ -417,34 +435,256 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 			return nil, err
 		}
 		if ok {
-			selectedWeight += candidate.weight
+			if candidate.minedCandidate.nonce == 0 {
+				continue
+			}
+			if _, exists := selectedNonces[candidate.minedCandidate.nonce]; exists {
+				continue
+			}
+			selectedWeight += candidate.minedCandidate.weight
 			policyDaIncluded = nextDaIncluded
-			parsed = append(parsed, candidate)
+			selectedNonces[candidate.minedCandidate.nonce] = struct{}{}
+			for _, input := range candidate.tx.Inputs {
+				selectedInputs[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}] = struct{}{}
+			}
+			parsed = append(parsed, candidate.minedCandidate)
+		}
+	}
+	if m.cfg.CompleteDASetProvider == nil || maxSelected == 0 {
+		return parsed, nil
+	}
+	validationCtx, err := m.providerConsensusContext(nextHeight)
+	if err != nil {
+		return nil, err
+	}
+	providerDaIncluded := uint64(0)
+	selectedDAIDs := make(map[[32]byte]struct{})
+	providerBudget := uint64(consensus.MAX_DA_BYTES_PER_BLOCK)
+	if m.cfg.PolicyDaAnchorAntiAbuse && m.cfg.PolicyMaxDaBytesPerBlock > 0 && m.cfg.PolicyMaxDaBytesPerBlock < providerBudget {
+		providerBudget = m.cfg.PolicyMaxDaBytesPerBlock
+	}
+	for _, set := range m.cfg.CompleteDASetProvider.CompleteDASetCandidates(providerBudget) {
+		if len(parsed) >= maxSelected || len(selectedDAIDs) >= consensus.MAX_DA_BATCHES_PER_BLOCK {
+			break
+		}
+		group, ok, err := m.parseCompleteDASetCandidate(set)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if _, exists := selectedDAIDs[group.daID]; exists || len(parsed)+len(group.txs) > maxSelected {
+			continue
+		}
+		nextProviderDaIncluded, ok := updatedPolicyDaBytes(providerDaIncluded, group.daBytes, providerBudget)
+		if !ok {
+			continue
+		}
+		groupWeight, nextDaIncluded, ok := m.projectCompleteDASetGroup(group.txs, selectedNonces, selectedInputs, utxos, nextHeight, validationCtx, selectedWeight, remainingWeight, policyDaIncluded)
+		if !ok {
+			continue
+		}
+		selectedWeight += groupWeight
+		policyDaIncluded = nextDaIncluded
+		providerDaIncluded = nextProviderDaIncluded
+		selectedDAIDs[group.daID] = struct{}{}
+		for _, candidate := range group.txs {
+			selectedNonces[candidate.minedCandidate.nonce] = struct{}{}
+			for _, input := range candidate.tx.Inputs {
+				selectedInputs[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}] = struct{}{}
+			}
+			parsed = append(parsed, candidate.minedCandidate)
 		}
 	}
 	return parsed, nil
 }
 
-func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (minedCandidate, uint64, bool, error) {
+func (m *Miner) providerConsensusContext(nextHeight uint64) (miningConsensusContext, error) {
+	var ctx miningConsensusContext
+	if m == nil {
+		return ctx, nil
+	}
+	if m.blockStore != nil && nextHeight != 0 {
+		prevTimestamps, err := m.prevTimestamps(nextHeight)
+		if err != nil {
+			return miningConsensusContext{}, err
+		}
+		if len(prevTimestamps) != 0 {
+			ctx.blockMTP = mtpMedian(nextHeight, prevTimestamps)
+		}
+	}
+	if m.sync != nil {
+		ctx.chainID = m.sync.cfg.ChainID
+		ctx.coreExtProfiles = m.sync.cfg.CoreExtProfiles
+		ctx.rotation = m.sync.cfg.RotationProvider
+		ctx.registry = m.sync.cfg.SuiteRegistry
+	}
+	return ctx, nil
+}
+
+type completeDASetMiningCandidate struct {
+	daID    [32]byte
+	txs     []miningCandidate
+	daBytes uint64
+}
+
+func (m *Miner) parseCompleteDASetCandidate(set CompleteDASetCandidate) (completeDASetMiningCandidate, bool, error) {
+	commit, err := m.parseMiningCandidate(set.CommitTx)
+	if err != nil {
+		return completeDASetMiningCandidate{}, false, err
+	}
+	core := commit.tx.DaCommitCore
+	if core == nil || core.DaID != set.DAID || core.ChunkCount == 0 || uint64(core.ChunkCount) > consensus.MAX_DA_CHUNK_COUNT ||
+		len(set.Chunks) != int(core.ChunkCount) || len(commit.tx.Inputs) == 0 {
+		return completeDASetMiningCandidate{}, false, nil
+	}
+
+	group := completeDASetMiningCandidate{daID: set.DAID, txs: []miningCandidate{commit}}
+	group.daBytes = uint64(len(commit.tx.DaPayload))
+	hasher := sha3.New256()
+	for i, chunk := range set.Chunks {
+		wantIndex := uint16(i)
+		if chunk.Index != wantIndex {
+			return completeDASetMiningCandidate{}, false, nil
+		}
+		candidate, err := m.parseMiningCandidate(chunk.Tx)
+		if err != nil {
+			return completeDASetMiningCandidate{}, false, err
+		}
+		tx := candidate.tx
+		chunkCore := tx.DaChunkCore
+		if chunkCore == nil || chunkCore.DaID != set.DAID || chunkCore.ChunkIndex != wantIndex ||
+			len(tx.Inputs) == 0 || sha3.Sum256(tx.DaPayload) != chunkCore.ChunkHash {
+			return completeDASetMiningCandidate{}, false, nil
+		}
+		nextDaBytes, err := addU64NoOverflowValue(group.daBytes, uint64(len(candidate.tx.DaPayload)))
+		if err != nil {
+			return completeDASetMiningCandidate{}, false, nil
+		}
+		group.daBytes = nextDaBytes
+		_, _ = hasher.Write(candidate.tx.DaPayload)
+		group.txs = append(group.txs, candidate)
+	}
+	if !completeDACommitmentMatches(commit.tx, hasher.Sum(nil)) {
+		return completeDASetMiningCandidate{}, false, nil
+	}
+	return group, true, nil
+}
+
+func completeDACommitmentMatches(tx *consensus.Tx, commitment []byte) bool {
+	count := 0
+	for _, output := range tx.Outputs {
+		if output.CovenantType != consensus.COV_TYPE_DA_COMMIT {
+			continue
+		}
+		if count != 0 || len(output.CovenantData) != 32 || !bytes.Equal(output.CovenantData, commitment) {
+			return false
+		}
+		count++
+	}
+	return count == 1
+}
+
+func (m *Miner) projectCompleteDASetGroup(group []miningCandidate, selectedNonces map[uint64]struct{}, selectedInputs map[consensus.Outpoint]struct{}, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, validationCtx miningConsensusContext, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (uint64, uint64, bool) {
+	if len(group) == 0 || selectedWeight > remainingWeight {
+		return 0, policyDaIncluded, false
+	}
+	availableWeight := remainingWeight - selectedWeight
+	var groupWeight uint64
+	nextDaIncluded := policyDaIncluded
+
+	groupInputOutpoints, ok := collectCompleteDASetGroupInputs(group, selectedNonces, selectedInputs)
+	if !ok {
+		return 0, policyDaIncluded, false
+	}
+	if !validateCompleteDASetGroupConsensus(group, utxos, groupInputOutpoints, nextHeight, validationCtx) {
+		return 0, policyDaIncluded, false
+	}
+	for _, candidate := range group {
+		reject, daIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, nextDaIncluded)
+		if err != nil || reject || groupWeight > availableWeight || candidate.minedCandidate.weight > availableWeight-groupWeight {
+			return 0, policyDaIncluded, false
+		}
+		groupWeight += candidate.minedCandidate.weight
+		nextDaIncluded = daIncluded
+	}
+	return groupWeight, nextDaIncluded, true
+}
+
+func collectCompleteDASetGroupInputs(group []miningCandidate, selectedNonces map[uint64]struct{}, selectedInputs map[consensus.Outpoint]struct{}) ([]consensus.Outpoint, bool) {
+	groupNonces := make(map[uint64]struct{}, len(group))
+	groupInputs := make(map[consensus.Outpoint]struct{}, len(group))
+	groupInputOutpoints := make([]consensus.Outpoint, 0, len(group))
+	for _, candidate := range group {
+		nonce := candidate.minedCandidate.nonce
+		if nonce == 0 {
+			return nil, false
+		}
+		if _, exists := selectedNonces[nonce]; exists {
+			return nil, false
+		}
+		if _, exists := groupNonces[nonce]; exists {
+			return nil, false
+		}
+		for _, input := range candidate.tx.Inputs {
+			op := consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}
+			if _, exists := selectedInputs[op]; exists {
+				return nil, false
+			}
+			if _, exists := groupInputs[op]; exists {
+				return nil, false
+			}
+			groupInputs[op] = struct{}{}
+			groupInputOutpoints = append(groupInputOutpoints, op)
+		}
+		groupNonces[nonce] = struct{}{}
+	}
+	return groupInputOutpoints, true
+}
+
+func validateCompleteDASetGroupConsensus(group []miningCandidate, utxos map[consensus.Outpoint]consensus.UtxoEntry, groupInputOutpoints []consensus.Outpoint, nextHeight uint64, validationCtx miningConsensusContext) bool {
+	workUtxos := copySelectedUtxoSet(utxos, groupInputOutpoints)
+	for _, candidate := range group {
+		if _, err := consensus.CheckParsedTransactionWithOwnedUtxoSetAndCoreExtProfilesAndSuiteContext(
+			candidate.minedCandidate.raw,
+			candidate.tx,
+			candidate.minedCandidate.txid,
+			candidate.minedCandidate.wtxid,
+			workUtxos,
+			nextHeight,
+			validationCtx.blockMTP,
+			validationCtx.chainID,
+			validationCtx.coreExtProfiles,
+			validationCtx.rotation,
+			validationCtx.registry,
+		); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (miningCandidate, uint64, bool, error) {
 	candidate, err := m.parseMiningCandidate(raw)
 	if err != nil {
-		return minedCandidate{}, policyDaIncluded, false, err
+		return miningCandidate{}, policyDaIncluded, false, err
 	}
 	if isMiningDATx(candidate.tx) {
-		return minedCandidate{}, policyDaIncluded, false, nil
+		return miningCandidate{}, policyDaIncluded, false, nil
 	}
 	reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, policyDaIncluded)
 	if err != nil || reject {
-		return minedCandidate{}, policyDaIncluded, false, nil
+		return miningCandidate{}, policyDaIncluded, false, nil
 	}
 	if selectedWeight >= remainingWeight {
-		return minedCandidate{}, policyDaIncluded, false, nil
+		return miningCandidate{}, policyDaIncluded, false, nil
 	}
 	availableWeight := remainingWeight - selectedWeight
 	if candidate.minedCandidate.weight > availableWeight {
-		return minedCandidate{}, policyDaIncluded, false, nil
+		return miningCandidate{}, policyDaIncluded, false, nil
 	}
-	return candidate.minedCandidate, nextDaIncluded, true, nil
+	return candidate, nextDaIncluded, true, nil
 }
 
 type miningCandidate struct {
@@ -468,6 +708,7 @@ func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
 			txid:   txid,
 			wtxid:  wtxid,
 			weight: txWeight,
+			nonce:  tx.TxNonce,
 		},
 	}, nil
 }
