@@ -104,6 +104,12 @@ func TestMinerCompleteDASetProviderValidity(t *testing.T) {
 	if len(selected) != 1 || string(selected[0].raw) != string(nonDA) {
 		t.Fatalf("provider nonce collision selected=%d, want only flat tx", len(selected))
 	}
+	collidingInput := minerProviderCloneSet(set)
+	collidingInput.CommitTx = minerProviderMutateTx(t, collidingInput.CommitTx, func(tx *consensus.Tx) { tx.Inputs[0].PrevTxid = [32]byte{0x82} })
+	selected = minerProviderSelected(t, []CompleteDASetCandidate{collidingInput}, [][]byte{nonDA}, 0, 0)
+	if len(selected) != 1 || string(selected[0].raw) != string(nonDA) {
+		t.Fatalf("provider input collision selected=%d, want only flat tx", len(selected))
+	}
 	sets := make([]CompleteDASetCandidate, 0, consensus.MAX_DA_BATCHES_PER_BLOCK+1)
 	for i := 0; i < consensus.MAX_DA_BATCHES_PER_BLOCK+1; i++ {
 		sets = append(sets, minerProviderTestSet(t, [32]byte{byte(i + 1), 0x85}, []byte{byte(i), 0}, []byte{byte(i), 1}))
@@ -127,12 +133,14 @@ func TestMinerCompleteDASetProviderRejectsInvalidGroups(t *testing.T) {
 	badCommitment.CommitTx = minerProviderMutateTx(t, badCommitment.CommitTx, func(tx *consensus.Tx) { tx.Outputs[0].CovenantData[0] ^= 0xff })
 	duplicateNonce := minerProviderCloneSet(base)
 	duplicateNonce.Chunks[1].Tx = minerProviderMutateTx(t, duplicateNonce.Chunks[1].Tx, func(tx *consensus.Tx) { tx.TxNonce = mustParseTx(t, duplicateNonce.Chunks[0].Tx).TxNonce })
+	duplicateInput := minerProviderCloneSet(base)
+	duplicateInput.Chunks[1].Tx = minerProviderMutateTx(t, duplicateInput.Chunks[1].Tx, func(tx *consensus.Tx) { tx.Inputs[0] = mustParseTx(t, duplicateInput.Chunks[0].Tx).Inputs[0] })
 	zeroNonce := minerProviderCloneSet(base)
 	zeroNonce.CommitTx = minerProviderMutateTx(t, zeroNonce.CommitTx, func(tx *consensus.Tx) { tx.TxNonce = 0 })
 	overBudget := minerProviderCloneSet(base)
-	for i, set := range []CompleteDASetCandidate{missing, duplicate, wrongDAID, badHash, badCommitment, duplicateNonce, zeroNonce, overBudget} {
+	for i, set := range []CompleteDASetCandidate{missing, duplicate, wrongDAID, badHash, badCommitment, duplicateNonce, duplicateInput, zeroNonce, overBudget} {
 		maxBytes := uint64(0)
-		if i == 7 {
+		if i == 8 {
 			maxBytes = 3
 		}
 		if selected := minerProviderSelected(t, []CompleteDASetCandidate{set}, nil, 0, maxBytes); len(selected) != 0 {
@@ -177,8 +185,10 @@ func minerProviderTestSet(t *testing.T, daID [32]byte, payloads ...[]byte) Compl
 		raw := minerProviderChunkTx(t, daID, base, uint16(i), payload)
 		chunks = append(chunks, CompleteDASetChunkCandidate{Index: uint16(i), Tx: raw})
 	}
+	commitInput := daID
+	commitInput[31] = 0xc1
 	tx := &consensus.Tx{Version: 1, TxKind: 0x01, TxNonce: base, DaPayload: []byte{0xa1}}
-	tx.Inputs = []consensus.TxInput{{PrevTxid: [32]byte{0xc1}}}
+	tx.Inputs = []consensus.TxInput{{PrevTxid: commitInput}}
 	tx.Outputs = []consensus.TxOutput{{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: hasher.Sum(nil)}}
 	tx.DaCommitCore = &consensus.DaCommitCore{DaID: daID, ChunkCount: uint16(len(payloads)), BatchNumber: 1}
 	commit := mustMarshalTxForNodeTest(t, tx)
@@ -187,8 +197,10 @@ func minerProviderTestSet(t *testing.T, daID [32]byte, payloads ...[]byte) Compl
 
 func minerProviderChunkTx(t *testing.T, daID [32]byte, base uint64, index uint16, payload []byte) []byte {
 	chunkHash := sha3.Sum256(payload)
+	chunkInput := daID
+	chunkInput[31] = byte(index)
 	tx := &consensus.Tx{Version: 1, TxKind: 0x02, TxNonce: base + uint64(index) + 1, DaPayload: append([]byte(nil), payload...)}
-	tx.Inputs = []consensus.TxInput{{PrevTxid: [32]byte{0xc2}, PrevVout: uint32(index)}}
+	tx.Inputs = []consensus.TxInput{{PrevTxid: chunkInput, PrevVout: uint32(index)}}
 	tx.DaChunkCore = &consensus.DaChunkCore{DaID: daID, ChunkIndex: index, ChunkHash: chunkHash}
 	return mustMarshalTxForNodeTest(t, tx)
 }

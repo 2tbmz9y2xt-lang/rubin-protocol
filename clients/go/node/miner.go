@@ -414,6 +414,7 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 	var selectedWeight uint64
 	var policyDaIncluded uint64
 	selectedNonces := make(map[uint64]struct{}, maxSelected)
+	selectedInputs := make(map[consensus.Outpoint]struct{}, maxSelected)
 	providerDaIncluded, selectedDAIDs := uint64(0), make(map[[32]byte]struct{})
 	for _, raw := range candidateTxs {
 		if len(parsed) >= maxSelected {
@@ -424,16 +425,19 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 			return nil, err
 		}
 		if ok {
-			if candidate.nonce == 0 {
+			if candidate.minedCandidate.nonce == 0 {
 				continue
 			}
-			if _, exists := selectedNonces[candidate.nonce]; exists {
+			if _, exists := selectedNonces[candidate.minedCandidate.nonce]; exists {
 				continue
 			}
-			selectedWeight += candidate.weight
+			selectedWeight += candidate.minedCandidate.weight
 			policyDaIncluded = nextDaIncluded
-			selectedNonces[candidate.nonce] = struct{}{}
-			parsed = append(parsed, candidate)
+			selectedNonces[candidate.minedCandidate.nonce] = struct{}{}
+			for _, input := range candidate.tx.Inputs {
+				selectedInputs[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}] = struct{}{}
+			}
+			parsed = append(parsed, candidate.minedCandidate)
 		}
 	}
 	if m.cfg.CompleteDASetProvider == nil || maxSelected == 0 {
@@ -461,7 +465,7 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 		if !ok {
 			continue
 		}
-		groupWeight, nextDaIncluded, ok := m.projectCompleteDASetGroup(group.txs, selectedNonces, utxos, nextHeight, selectedWeight, remainingWeight, policyDaIncluded)
+		groupWeight, nextDaIncluded, ok := m.projectCompleteDASetGroup(group.txs, selectedNonces, selectedInputs, utxos, nextHeight, selectedWeight, remainingWeight, policyDaIncluded)
 		if !ok {
 			continue
 		}
@@ -471,6 +475,9 @@ func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[con
 		selectedDAIDs[group.daID] = struct{}{}
 		for _, candidate := range group.txs {
 			selectedNonces[candidate.minedCandidate.nonce] = struct{}{}
+			for _, input := range candidate.tx.Inputs {
+				selectedInputs[consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}] = struct{}{}
+			}
 			parsed = append(parsed, candidate.minedCandidate)
 		}
 	}
@@ -540,12 +547,13 @@ func completeDACommitmentMatches(tx *consensus.Tx, commitment []byte) bool {
 	return count == 1
 }
 
-func (m *Miner) projectCompleteDASetGroup(group []miningCandidate, selectedNonces map[uint64]struct{}, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (uint64, uint64, bool) {
+func (m *Miner) projectCompleteDASetGroup(group []miningCandidate, selectedNonces map[uint64]struct{}, selectedInputs map[consensus.Outpoint]struct{}, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (uint64, uint64, bool) {
 	if len(group) == 0 || selectedWeight > remainingWeight {
 		return 0, policyDaIncluded, false
 	}
 	availableWeight := remainingWeight - selectedWeight
 	groupNonces := make(map[uint64]struct{}, len(group))
+	groupInputs := make(map[consensus.Outpoint]struct{}, len(group))
 	var groupWeight uint64
 	nextDaIncluded := policyDaIncluded
 	for _, candidate := range group {
@@ -559,6 +567,16 @@ func (m *Miner) projectCompleteDASetGroup(group []miningCandidate, selectedNonce
 		if _, exists := groupNonces[nonce]; exists {
 			return 0, policyDaIncluded, false
 		}
+		for _, input := range candidate.tx.Inputs {
+			op := consensus.Outpoint{Txid: input.PrevTxid, Vout: input.PrevVout}
+			if _, exists := selectedInputs[op]; exists {
+				return 0, policyDaIncluded, false
+			}
+			if _, exists := groupInputs[op]; exists {
+				return 0, policyDaIncluded, false
+			}
+			groupInputs[op] = struct{}{}
+		}
 		reject, daIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, nextDaIncluded)
 		if err != nil || reject || groupWeight > availableWeight || candidate.minedCandidate.weight > availableWeight-groupWeight {
 			return 0, policyDaIncluded, false
@@ -570,26 +588,26 @@ func (m *Miner) projectCompleteDASetGroup(group []miningCandidate, selectedNonce
 	return groupWeight, nextDaIncluded, true
 }
 
-func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (minedCandidate, uint64, bool, error) {
+func (m *Miner) trySelectFlatCandidate(raw []byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, selectedWeight uint64, remainingWeight uint64, policyDaIncluded uint64) (miningCandidate, uint64, bool, error) {
 	candidate, err := m.parseMiningCandidate(raw)
 	if err != nil {
-		return minedCandidate{}, policyDaIncluded, false, err
+		return miningCandidate{}, policyDaIncluded, false, err
 	}
 	if isMiningDATx(candidate.tx) {
-		return minedCandidate{}, policyDaIncluded, false, nil
+		return miningCandidate{}, policyDaIncluded, false, nil
 	}
 	reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, policyDaIncluded)
 	if err != nil || reject {
-		return minedCandidate{}, policyDaIncluded, false, nil
+		return miningCandidate{}, policyDaIncluded, false, nil
 	}
 	if selectedWeight >= remainingWeight {
-		return minedCandidate{}, policyDaIncluded, false, nil
+		return miningCandidate{}, policyDaIncluded, false, nil
 	}
 	availableWeight := remainingWeight - selectedWeight
 	if candidate.minedCandidate.weight > availableWeight {
-		return minedCandidate{}, policyDaIncluded, false, nil
+		return miningCandidate{}, policyDaIncluded, false, nil
 	}
-	return candidate.minedCandidate, nextDaIncluded, true, nil
+	return candidate, nextDaIncluded, true, nil
 }
 
 type miningCandidate struct {
