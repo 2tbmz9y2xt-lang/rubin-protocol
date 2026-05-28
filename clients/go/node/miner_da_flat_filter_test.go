@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"encoding/binary"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -91,36 +92,54 @@ func (p minerTestCompleteDASetProvider) CompleteDASetCandidates(uint64) []Comple
 	return p
 }
 func TestMinerCompleteDASetProviderValidity(t *testing.T) {
+	fixture := newMinerProviderTestFixture(t)
 	daID := [32]byte{0x81}
-	set := minerProviderTestSet(t, daID, []byte("chunk-0"), []byte("chunk-1"))
+	set := fixture.completeDASet(t, daID, []byte("chunk-0"), []byte("chunk-1"))
 	nonDA := minerFlatTestNonDA(0x82)
-	selected := minerProviderSelected(t, []CompleteDASetCandidate{set, set}, nil, 0, 0)
+	selected := minerProviderSelected(t, []CompleteDASetCandidate{set, set}, nil, fixture.utxos, 0, 0)
 	if len(selected) != 3 {
 		t.Fatalf("duplicate da_id selected=%d, want one complete DA set", len(selected))
 	}
+	policyOffMiner := &Miner{
+		cfg: MinerConfig{
+			CompleteDASetProvider:    minerTestCompleteDASetProvider{set},
+			MaxTxPerBlock:            16,
+			PolicyDaAnchorAntiAbuse:  false,
+			PolicyMaxDaBytesPerBlock: 3,
+		},
+		sync: &SyncEngine{cfg: SyncConfig{ChainID: devnetGenesisChainID}},
+	}
+	selected, err := policyOffMiner.selectCandidateTransactions(nil, fixture.utxos, 1, ^uint64(0))
+	if err != nil {
+		t.Fatalf("select with DA policy disabled: %v", err)
+	}
+	if len(selected) != 3 {
+		t.Fatalf("policy-disabled provider selected=%d, want complete DA set", len(selected))
+	}
 	collidingNonce := minerProviderCloneSet(set)
 	collidingNonce.CommitTx = minerProviderMutateTx(t, collidingNonce.CommitTx, func(tx *consensus.Tx) { tx.TxNonce = 1 })
-	selected = minerProviderSelected(t, []CompleteDASetCandidate{collidingNonce}, [][]byte{nonDA}, 0, 0)
+	selected = minerProviderSelected(t, []CompleteDASetCandidate{collidingNonce}, [][]byte{nonDA}, fixture.utxos, 0, 0)
 	if len(selected) != 1 || string(selected[0].raw) != string(nonDA) {
 		t.Fatalf("provider nonce collision selected=%d, want only flat tx", len(selected))
 	}
 	collidingInput := minerProviderCloneSet(set)
 	collidingInput.CommitTx = minerProviderMutateTx(t, collidingInput.CommitTx, func(tx *consensus.Tx) { tx.Inputs[0].PrevTxid = [32]byte{0x82} })
-	selected = minerProviderSelected(t, []CompleteDASetCandidate{collidingInput}, [][]byte{nonDA}, 0, 0)
+	selected = minerProviderSelected(t, []CompleteDASetCandidate{collidingInput}, [][]byte{nonDA}, fixture.utxos, 0, 0)
 	if len(selected) != 1 || string(selected[0].raw) != string(nonDA) {
 		t.Fatalf("provider input collision selected=%d, want only flat tx", len(selected))
 	}
 	sets := make([]CompleteDASetCandidate, 0, consensus.MAX_DA_BATCHES_PER_BLOCK+1)
 	for i := 0; i < consensus.MAX_DA_BATCHES_PER_BLOCK+1; i++ {
-		sets = append(sets, minerProviderTestSet(t, [32]byte{byte(i + 1), 0x85}, []byte{byte(i), 0}, []byte{byte(i), 1}))
+		sets = append(sets, fixture.completeDASet(t, [32]byte{byte(i + 1), 0x85}, []byte{byte(i), 0}, []byte{byte(i), 1}))
 	}
-	selected = minerProviderSelected(t, sets, nil, len(sets)*3+1, 0)
+	selected = minerProviderSelected(t, sets, nil, fixture.utxos, len(sets)*3+1, 0)
 	if len(selected) != int(consensus.MAX_DA_BATCHES_PER_BLOCK)*3 {
 		t.Fatalf("selected batches=%d, want capped provider DA batches", len(selected)/3)
 	}
 }
 func TestMinerCompleteDASetProviderRejectsInvalidGroups(t *testing.T) {
-	base := minerProviderTestSet(t, [32]byte{0x83}, []byte("chunk-0"), []byte("chunk-1"))
+	fixture := newMinerProviderTestFixture(t)
+	base := fixture.completeDASet(t, [32]byte{0x83}, []byte("chunk-0"), []byte("chunk-1"))
 	missing := minerProviderCloneSet(base)
 	missing.Chunks = missing.Chunks[:1]
 	duplicate := minerProviderCloneSet(base)
@@ -138,12 +157,13 @@ func TestMinerCompleteDASetProviderRejectsInvalidGroups(t *testing.T) {
 	zeroNonce := minerProviderCloneSet(base)
 	zeroNonce.CommitTx = minerProviderMutateTx(t, zeroNonce.CommitTx, func(tx *consensus.Tx) { tx.TxNonce = 0 })
 	overBudget := minerProviderCloneSet(base)
-	for i, set := range []CompleteDASetCandidate{missing, duplicate, wrongDAID, badHash, badCommitment, duplicateNonce, duplicateInput, zeroNonce, overBudget} {
+	wrongChainSig := fixture.completeDASetWithChainID(t, [32]byte{0x88}, [32]byte{0x87}, []byte("chunk-0"), []byte("chunk-1"))
+	for i, set := range []CompleteDASetCandidate{missing, duplicate, wrongDAID, badHash, badCommitment, duplicateNonce, duplicateInput, zeroNonce, overBudget, wrongChainSig} {
 		maxBytes := uint64(0)
 		if i == 8 {
 			maxBytes = 3
 		}
-		if selected := minerProviderSelected(t, []CompleteDASetCandidate{set}, nil, 0, maxBytes); len(selected) != 0 {
+		if selected := minerProviderSelected(t, []CompleteDASetCandidate{set}, nil, fixture.utxos, 0, maxBytes); len(selected) != 0 {
 			t.Fatalf("invalid provider selected=%d", len(selected))
 		}
 	}
@@ -152,56 +172,106 @@ func TestMinerCompleteDASetProviderRejectsInvalidGroups(t *testing.T) {
 	if _, err := (&Miner{cfg: MinerConfig{CompleteDASetProvider: minerTestCompleteDASetProvider{badRaw}, MaxTxPerBlock: 16}}).selectCandidateTransactions(nil, nil, 1, ^uint64(0)); err == nil {
 		t.Fatalf("expected malformed provider raw error")
 	}
-	set2 := minerProviderTestSet(t, [32]byte{0x86}, []byte("chunk-0"), []byte("chunk-1"))
+	set2 := fixture.completeDASet(t, [32]byte{0x86}, []byte("chunk-0"), []byte("chunk-1"))
 	set2.CommitTx = minerProviderMutateTx(t, set2.CommitTx, func(tx *consensus.Tx) { tx.TxNonce = mustParseTx(t, base.CommitTx).TxNonce })
-	if selected := minerProviderSelected(t, []CompleteDASetCandidate{base, set2}, nil, 0, 0); len(selected) != 3 {
+	if selected := minerProviderSelected(t, []CompleteDASetCandidate{base, set2}, nil, fixture.utxos, 0, 0); len(selected) != 3 {
 		t.Fatalf("cross-provider nonce collision selected=%d, want first complete DA set only", len(selected))
 	}
 }
 
 func minerProviderCloneSet(s CompleteDASetCandidate) CompleteDASetCandidate {
+	s.CommitTx = append([]byte(nil), s.CommitTx...)
 	s.Chunks = append([]CompleteDASetChunkCandidate(nil), s.Chunks...)
+	for i := range s.Chunks {
+		s.Chunks[i].Tx = append([]byte(nil), s.Chunks[i].Tx...)
+	}
 	return s
 }
 
-func minerProviderSelected(t *testing.T, sets []CompleteDASetCandidate, flat [][]byte, maxTx int, maxBytes uint64) []minedCandidate {
+func minerProviderSelected(t *testing.T, sets []CompleteDASetCandidate, flat [][]byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, maxTx int, maxBytes uint64) []minedCandidate {
 	if maxTx == 0 {
 		maxTx = 16
 	}
-	cfg := MinerConfig{CompleteDASetProvider: minerTestCompleteDASetProvider(sets), MaxTxPerBlock: maxTx, PolicyMaxDaBytesPerBlock: maxBytes}
-	selected, err := (&Miner{cfg: cfg}).selectCandidateTransactions(flat, nil, 1, ^uint64(0))
+	cfg := MinerConfig{
+		CompleteDASetProvider:    minerTestCompleteDASetProvider(sets),
+		MaxTxPerBlock:            maxTx,
+		PolicyDaAnchorAntiAbuse:  true,
+		PolicyMaxDaBytesPerBlock: maxBytes,
+	}
+	miner := &Miner{cfg: cfg, sync: &SyncEngine{cfg: SyncConfig{ChainID: devnetGenesisChainID}}}
+	selected, err := miner.selectCandidateTransactions(flat, utxos, 1, ^uint64(0))
 	if err != nil {
 		t.Fatalf("select provider candidates: %v", err)
 	}
 	return selected
 }
 
-func minerProviderTestSet(t *testing.T, daID [32]byte, payloads ...[]byte) CompleteDASetCandidate {
+type minerProviderTestFixture struct {
+	signer    *consensus.MLDSA87Keypair
+	address   []byte
+	utxos     map[consensus.Outpoint]consensus.UtxoEntry
+	nextInput uint64
+}
+
+func newMinerProviderTestFixture(t *testing.T) *minerProviderTestFixture {
+	signer := mustNodeMLDSA87Keypair(t)
+	return &minerProviderTestFixture{
+		signer:  signer,
+		address: consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes()),
+		utxos:   make(map[consensus.Outpoint]consensus.UtxoEntry),
+	}
+}
+
+func (f *minerProviderTestFixture) completeDASet(t *testing.T, daID [32]byte, payloads ...[]byte) CompleteDASetCandidate {
+	return f.completeDASetWithChainID(t, devnetGenesisChainID, daID, payloads...)
+}
+
+func (f *minerProviderTestFixture) completeDASetWithChainID(t *testing.T, chainID [32]byte, daID [32]byte, payloads ...[]byte) CompleteDASetCandidate {
 	base := 2 + uint64(daID[0])*(consensus.MAX_DA_CHUNK_COUNT+2)
 	hasher := sha3.New256()
 	chunks := make([]CompleteDASetChunkCandidate, 0, len(payloads))
 	for i, payload := range payloads {
 		_, _ = hasher.Write(payload)
-		raw := minerProviderChunkTx(t, daID, base, uint16(i), payload)
+		raw := f.chunkTx(t, chainID, daID, base, uint16(i), payload)
 		chunks = append(chunks, CompleteDASetChunkCandidate{Index: uint16(i), Tx: raw})
 	}
-	commitInput := daID
-	commitInput[31] = 0xc1
 	tx := &consensus.Tx{Version: 1, TxKind: 0x01, TxNonce: base, DaPayload: []byte{0xa1}}
-	tx.Inputs = []consensus.TxInput{{PrevTxid: commitInput}}
+	tx.Inputs = []consensus.TxInput{f.nextSignedInput()}
 	tx.Outputs = []consensus.TxOutput{{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: hasher.Sum(nil)}}
 	tx.DaCommitCore = &consensus.DaCommitCore{DaID: daID, ChunkCount: uint16(len(payloads)), BatchNumber: 1}
-	commit := mustMarshalTxForNodeTest(t, tx)
+	commit := f.signAndMarshal(t, chainID, tx)
 	return CompleteDASetCandidate{DAID: daID, CommitTx: commit, Chunks: chunks}
 }
 
-func minerProviderChunkTx(t *testing.T, daID [32]byte, base uint64, index uint16, payload []byte) []byte {
+func (f *minerProviderTestFixture) chunkTx(t *testing.T, chainID [32]byte, daID [32]byte, base uint64, index uint16, payload []byte) []byte {
 	chunkHash := sha3.Sum256(payload)
-	chunkInput := daID
-	chunkInput[31] = byte(index)
 	tx := &consensus.Tx{Version: 1, TxKind: 0x02, TxNonce: base + uint64(index) + 1, DaPayload: append([]byte(nil), payload...)}
-	tx.Inputs = []consensus.TxInput{{PrevTxid: chunkInput, PrevVout: uint32(index)}}
+	tx.Inputs = []consensus.TxInput{f.nextSignedInput()}
 	tx.DaChunkCore = &consensus.DaChunkCore{DaID: daID, ChunkIndex: index, ChunkHash: chunkHash}
+	return f.signAndMarshal(t, chainID, tx)
+}
+
+func (f *minerProviderTestFixture) nextSignedInput() consensus.TxInput {
+	f.nextInput++
+	var txid [32]byte
+	txid[0] = 0xd7
+	binary.BigEndian.PutUint64(txid[24:], f.nextInput)
+	op := consensus.Outpoint{Txid: txid}
+	f.utxos[op] = consensus.UtxoEntry{
+		Value:             1_000_000,
+		CovenantType:      consensus.COV_TYPE_P2PK,
+		CovenantData:      append([]byte(nil), f.address...),
+		CreationHeight:    1,
+		CreatedByCoinbase: false,
+	}
+	return consensus.TxInput{PrevTxid: op.Txid, PrevVout: op.Vout}
+}
+
+func (f *minerProviderTestFixture) signAndMarshal(t *testing.T, chainID [32]byte, tx *consensus.Tx) []byte {
+	t.Helper()
+	if err := consensus.SignTransaction(tx, f.utxos, chainID, f.signer); err != nil {
+		t.Fatalf("SignTransaction(provider): %v", err)
+	}
 	return mustMarshalTxForNodeTest(t, tx)
 }
 

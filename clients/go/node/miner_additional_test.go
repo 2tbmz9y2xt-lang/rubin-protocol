@@ -466,6 +466,10 @@ func TestPolicyNeedsReadonlyUtxoSnapshotMatrix(t *testing.T) {
 	if disabled.policyNeedsReadonlyUtxoSnapshot() {
 		t.Fatal("fully disabled policy matrix should not require snapshot")
 	}
+	disabled.cfg.CompleteDASetProvider = minerTestCompleteDASetProvider{}
+	if !disabled.policyNeedsReadonlyUtxoSnapshot() {
+		t.Fatal("provider validation should require snapshot")
+	}
 
 	coreExt := &Miner{cfg: DefaultMinerConfig()}
 	coreExt.cfg.PolicyRejectCoreExtPreActivation = true
