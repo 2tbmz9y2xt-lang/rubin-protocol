@@ -464,22 +464,12 @@ func (s *miningCandidateSelection) tryAddCompleteDASet(m *Miner, set CompleteDAS
 	if err != nil || !ok {
 		return err
 	}
-	if len(group) == 0 || len(s.parsed)+len(group) > s.maxCandidates || s.selectedWeight > s.remainingWeight {
+	if !s.hasRoomForCompleteDAGroup(group) {
 		return nil
 	}
-	nextDaIncluded := s.policyDaIncluded
-	var groupWeight uint64
-	remainingWeight := s.remainingWeight - s.selectedWeight
-	for _, candidate := range group {
-		reject, daIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, nextDaIncluded)
-		if err != nil || reject {
-			return nil
-		}
-		if groupWeight > remainingWeight || candidate.minedCandidate.weight > remainingWeight-groupWeight {
-			return nil
-		}
-		groupWeight += candidate.minedCandidate.weight
-		nextDaIncluded = daIncluded
+	groupWeight, nextDaIncluded, ok := s.projectCompleteDAGroup(m, group, utxos, nextHeight)
+	if !ok {
+		return nil
 	}
 	s.selectedWeight += groupWeight
 	s.policyDaIncluded = nextDaIncluded
@@ -487,6 +477,30 @@ func (s *miningCandidateSelection) tryAddCompleteDASet(m *Miner, set CompleteDAS
 		s.parsed = append(s.parsed, candidate.minedCandidate)
 	}
 	return nil
+}
+
+func (s *miningCandidateSelection) hasRoomForCompleteDAGroup(group []miningCandidate) bool {
+	return len(group) != 0 &&
+		len(s.parsed)+len(group) <= s.maxCandidates &&
+		s.selectedWeight <= s.remainingWeight
+}
+
+func (s *miningCandidateSelection) projectCompleteDAGroup(m *Miner, group []miningCandidate, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) (uint64, uint64, bool) {
+	nextDaIncluded := s.policyDaIncluded
+	remainingWeight := s.remainingWeight - s.selectedWeight
+	var groupWeight uint64
+	for _, candidate := range group {
+		reject, daIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, nextDaIncluded)
+		if err != nil || reject {
+			return 0, 0, false
+		}
+		if candidate.minedCandidate.weight > remainingWeight-groupWeight {
+			return 0, 0, false
+		}
+		groupWeight += candidate.minedCandidate.weight
+		nextDaIncluded = daIncluded
+	}
+	return groupWeight, nextDaIncluded, true
 }
 
 func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
@@ -525,64 +539,106 @@ func (m *Miner) completeDASetPayloadBudget() uint64 {
 }
 
 func (m *Miner) parseCompleteDASetCandidate(set CompleteDASetCandidate) ([]miningCandidate, bool, error) {
-	commit, err := m.parseMiningCandidate(set.CommitTx)
+	commit, chunkCount, ok, err := m.parseCompleteDASetCommit(set)
 	if err != nil {
 		return nil, false, err
 	}
-	if commit.tx.DaCommitCore == nil || commit.tx.DaCommitCore.DaID != set.DAID {
+	if !ok {
 		return nil, false, nil
 	}
-	chunkCount := int(commit.tx.DaCommitCore.ChunkCount)
-	if chunkCount == 0 || len(set.Chunks) != chunkCount {
-		return nil, false, nil
-	}
-
-	chunks := append([]CompleteDASetChunkCandidate(nil), set.Chunks...)
-	sort.Slice(chunks, func(i, j int) bool {
-		return chunks[i].Index < chunks[j].Index
-	})
-
 	group := make([]miningCandidate, 0, 1+chunkCount)
 	group = append(group, commit)
+
+	chunks := sortedCompleteDASetChunks(set.Chunks)
+	chunkCandidates, payload, ok, err := m.parseCompleteDASetChunks(set.DAID, chunks)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok || !completeDACommitmentMatches(commit.tx, payload) {
+		return nil, false, nil
+	}
+	group = append(group, chunkCandidates...)
+	return group, true, nil
+}
+
+func (m *Miner) parseCompleteDASetCommit(set CompleteDASetCandidate) (miningCandidate, int, bool, error) {
+	commit, err := m.parseMiningCandidate(set.CommitTx)
+	if err != nil {
+		return miningCandidate{}, 0, false, err
+	}
+	core := commit.tx.DaCommitCore
+	if core == nil || core.DaID != set.DAID {
+		return miningCandidate{}, 0, false, nil
+	}
+	chunkCount := int(core.ChunkCount)
+	if chunkCount == 0 || len(set.Chunks) != chunkCount {
+		return miningCandidate{}, 0, false, nil
+	}
+	return commit, chunkCount, true, nil
+}
+
+func sortedCompleteDASetChunks(chunks []CompleteDASetChunkCandidate) []CompleteDASetChunkCandidate {
+	sorted := append([]CompleteDASetChunkCandidate(nil), chunks...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Index < sorted[j].Index
+	})
+	return sorted
+}
+
+func (m *Miner) parseCompleteDASetChunks(daID [32]byte, chunks []CompleteDASetChunkCandidate) ([]miningCandidate, []byte, bool, error) {
+	group := make([]miningCandidate, 0, len(chunks))
 	var payload []byte
 	for i, chunk := range chunks {
 		if int(chunk.Index) != i {
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
 		candidate, err := m.parseMiningCandidate(chunk.Tx)
 		if err != nil {
-			return nil, false, err
+			return nil, nil, false, err
 		}
-		core := candidate.tx.DaChunkCore
-		if core == nil || core.DaID != set.DAID || core.ChunkIndex != chunk.Index {
-			return nil, false, nil
-		}
-		if len(candidate.tx.Inputs) == 0 || sha3.Sum256(candidate.tx.DaPayload) != core.ChunkHash {
-			return nil, false, nil
+		if !completeDAChunkMatches(candidate.tx, daID, chunk.Index) {
+			return nil, nil, false, nil
 		}
 		payload = append(payload, candidate.tx.DaPayload...)
 		group = append(group, candidate)
 	}
-	if len(commit.tx.Inputs) == 0 {
-		return nil, false, nil
+	return group, payload, true, nil
+}
+
+func completeDAChunkMatches(tx *consensus.Tx, daID [32]byte, index uint16) bool {
+	core := tx.DaChunkCore
+	return core != nil &&
+		core.DaID == daID &&
+		core.ChunkIndex == index &&
+		len(tx.Inputs) != 0 &&
+		sha3.Sum256(tx.DaPayload) == core.ChunkHash
+}
+
+func completeDACommitmentMatches(tx *consensus.Tx, payload []byte) bool {
+	if len(tx.Inputs) == 0 {
+		return false
 	}
-	payloadCommitment := sha3.Sum256(payload)
-	daCommitOutputs := 0
+	gotCommitment, ok := singleDACommitmentOutput(tx.Outputs)
+	return ok && gotCommitment == sha3.Sum256(payload)
+}
+
+func singleDACommitmentOutput(outputs []consensus.TxOutput) ([32]byte, bool) {
 	var gotCommitment [32]byte
-	for _, out := range commit.tx.Outputs {
+	found := false
+	for _, out := range outputs {
 		if out.CovenantType != consensus.COV_TYPE_DA_COMMIT {
 			continue
 		}
-		daCommitOutputs++
+		if found {
+			return [32]byte{}, false
+		}
 		if len(out.CovenantData) != len(gotCommitment) {
-			return nil, false, nil
+			return [32]byte{}, false
 		}
 		copy(gotCommitment[:], out.CovenantData)
+		found = true
 	}
-	if daCommitOutputs != 1 || gotCommitment != payloadCommitment {
-		return nil, false, nil
-	}
-	return group, true, nil
+	return gotCommitment, found
 }
 
 func isMiningDATx(tx *consensus.Tx) bool {
