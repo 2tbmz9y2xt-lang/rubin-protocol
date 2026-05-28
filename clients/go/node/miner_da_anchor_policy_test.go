@@ -241,7 +241,11 @@ func TestMinerPolicyCapsDaTemplateBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new miner2: %v", err)
 	}
-	if _, err := miner2.MineOne(context.Background(), [][]byte{daTx}); err == nil {
-		t.Fatalf("expected mining failure when DA tx is not filtered")
+	mb, err = miner2.MineOne(context.Background(), [][]byte{daTx})
+	if err != nil {
+		t.Fatalf("mine one with DA policy disabled: %v", err)
+	}
+	if mb.TxCount != 1 {
+		t.Fatalf("tx_count=%d, want 1 (coinbase only; standalone DA tx must be filtered)", mb.TxCount)
 	}
 }
