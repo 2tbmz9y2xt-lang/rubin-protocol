@@ -599,8 +599,11 @@ func completeDASetChunkCount(tx *consensus.Tx, set CompleteDASetCandidate) (int,
 	if core == nil || core.DaID != set.DAID {
 		return 0, false
 	}
+	if core.ChunkCount == 0 || uint64(core.ChunkCount) > consensus.MAX_DA_CHUNK_COUNT {
+		return 0, false
+	}
 	chunkCount := int(core.ChunkCount)
-	return chunkCount, chunkCount != 0 && len(set.Chunks) == chunkCount
+	return chunkCount, len(set.Chunks) == chunkCount
 }
 
 func sortedCompleteDASetChunks(chunks []CompleteDASetChunkCandidate) []CompleteDASetChunkCandidate {

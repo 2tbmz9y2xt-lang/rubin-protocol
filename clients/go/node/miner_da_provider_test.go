@@ -114,6 +114,21 @@ func TestMinerCompleteDASetSelectionRejectsCoverageEdges(t *testing.T) {
 	assertNoCompleteDASelection(t, badIndex, 16)
 }
 
+func TestCompleteDASetChunkCountRejectsConsensusCap(t *testing.T) {
+	daID := [32]byte{0x76}
+	tx := &consensus.Tx{DaCommitCore: &consensus.DaCommitCore{
+		DaID:       daID,
+		ChunkCount: uint16(consensus.MAX_DA_CHUNK_COUNT + 1),
+	}}
+	set := CompleteDASetCandidate{
+		DAID:   daID,
+		Chunks: make([]CompleteDASetChunkCandidate, int(consensus.MAX_DA_CHUNK_COUNT)+1),
+	}
+	if chunkCount, ok := completeDASetChunkCount(tx, set); ok || chunkCount != 0 {
+		t.Fatalf("completeDASetChunkCount=%d,%v, want cap rejection", chunkCount, ok)
+	}
+}
+
 func TestMinerCompleteDASetRejectsMalformedProviderRawAndBudgetFallback(t *testing.T) {
 	daID := [32]byte{0x74}
 	candidate, _, _, _ := minerTestDASet(t, daID)
