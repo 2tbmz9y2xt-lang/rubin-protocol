@@ -91,6 +91,74 @@ type minerTestCompleteDASetProvider []CompleteDASetCandidate
 func (p minerTestCompleteDASetProvider) CompleteDASetCandidates(uint64) []CompleteDASetCandidate {
 	return p
 }
+
+type countingMinerTestCompleteDASetProvider struct {
+	calls int
+	sets  []CompleteDASetCandidate
+}
+
+func (p *countingMinerTestCompleteDASetProvider) CompleteDASetCandidates(uint64) []CompleteDASetCandidate {
+	p.calls++
+	return p.sets
+}
+
+func TestMinerCompleteDASetProviderRuntimeBounds(t *testing.T) {
+	nonDA := minerFlatTestNonDA(0x90)
+	for _, tc := range []struct {
+		name            string
+		flat            [][]byte
+		remainingWeight uint64
+		wantSelected    int
+	}{
+		{
+			name:            "slots full",
+			flat:            [][]byte{nonDA},
+			remainingWeight: ^uint64(0),
+			wantSelected:    1,
+		},
+		{
+			name:            "no remaining weight",
+			remainingWeight: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &countingMinerTestCompleteDASetProvider{}
+			miner := &Miner{cfg: MinerConfig{CompleteDASetProvider: provider, MaxTxPerBlock: 2}}
+			selected, err := miner.selectCandidateTransactions(tc.flat, nil, 1, tc.remainingWeight)
+			if err != nil {
+				t.Fatalf("selectCandidateTransactions: %v", err)
+			}
+			if len(selected) != tc.wantSelected {
+				t.Fatalf("selected=%d, want %d", len(selected), tc.wantSelected)
+			}
+			if provider.calls != 0 {
+				t.Fatalf("provider calls=%d, want 0", provider.calls)
+			}
+		})
+	}
+}
+
+func TestMinerCompleteDASetProviderSkipsUnfittableSetBeforeParsing(t *testing.T) {
+	badRaw := append(daCommitTxBytesForMinerPolicyTest(1, []byte("manifest")), 0)
+	provider := &countingMinerTestCompleteDASetProvider{
+		sets: []CompleteDASetCandidate{{
+			CommitTx: badRaw,
+			Chunks:   []CompleteDASetChunkCandidate{{Index: 0, Tx: badRaw}},
+		}},
+	}
+	miner := &Miner{cfg: MinerConfig{CompleteDASetProvider: provider, MaxTxPerBlock: 2}}
+	selected, err := miner.selectCandidateTransactions(nil, nil, 1, ^uint64(0))
+	if err != nil {
+		t.Fatalf("selectCandidateTransactions: %v", err)
+	}
+	if len(selected) != 0 {
+		t.Fatalf("selected=%d, want 0", len(selected))
+	}
+	if provider.calls != 1 {
+		t.Fatalf("provider calls=%d, want 1", provider.calls)
+	}
+}
+
 func TestMinerCompleteDASetProviderValidity(t *testing.T) {
 	fixture := newMinerProviderTestFixture(t)
 	daID := [32]byte{0x81}
