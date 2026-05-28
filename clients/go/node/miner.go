@@ -2,8 +2,10 @@ package node
 
 import (
 	"context"
+	"crypto/sha3"
 	"errors"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -79,6 +81,10 @@ type MinerConfig struct {
 	// CoreExtProfiles is the chain-config profile mapping used by policy checks.
 	// Consensus uses a canonical source for profile(ext_id, height); this is policy-only.
 	CoreExtProfiles consensus.CoreExtProfileProvider
+
+	// CompleteDASetProvider exposes relay COMPLETE_SET snapshots to miner selection.
+	// Runtime wiring is owned by a later child; nil preserves existing selection.
+	CompleteDASetProvider CompleteDASetProvider
 }
 
 type MinedBlock struct {
@@ -276,17 +282,22 @@ func (m *Miner) snapshotBuildContextState() (miningChainStateSnapshot, error) {
 
 func (m *Miner) candidateTransactions(txs [][]byte) [][]byte {
 	candidateTxs := txs
-	maxSelected := m.cfg.MaxTxPerBlock - 1
-	if maxSelected < 0 {
-		maxSelected = 0
-	}
+	maxSelected := m.maxSelectedTransactions()
 	if len(candidateTxs) == 0 && m.sync != nil && m.sync.mempool != nil && maxSelected > 0 {
-		candidateTxs = m.sync.mempool.SelectTransactions(maxSelected, int(consensus.MAX_BLOCK_WEIGHT))
+		return m.sync.mempool.SelectTransactions(m.sync.mempool.Len(), int(consensus.MAX_BLOCK_WEIGHT))
 	}
 	if maxSelected >= 0 && len(candidateTxs) > maxSelected {
 		candidateTxs = candidateTxs[:maxSelected]
 	}
 	return candidateTxs
+}
+
+func (m *Miner) maxSelectedTransactions() int {
+	maxSelected := m.cfg.MaxTxPerBlock - 1
+	if maxSelected < 0 {
+		return 0
+	}
+	return maxSelected
 }
 
 func (m *Miner) policyNeedsReadonlyUtxoSnapshot() bool {
@@ -397,36 +408,85 @@ func compactSizeLenForMiner(n uint64) uint64 {
 }
 
 func (m *Miner) selectCandidateTransactions(candidateTxs [][]byte, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, remainingWeight uint64) ([]minedCandidate, error) {
-	parsed := make([]minedCandidate, 0, len(candidateTxs))
-	var selectedWeight uint64
-	var policyDaIncluded uint64
+	selection := miningCandidateSelection{
+		maxCandidates:   m.maxSelectedTransactions(),
+		remainingWeight: remainingWeight,
+		parsed:          make([]minedCandidate, 0, len(candidateTxs)),
+	}
 	for _, raw := range candidateTxs {
 		candidate, err := m.parseMiningCandidate(raw)
 		if err != nil {
 			return nil, err
 		}
-		reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, policyDaIncluded)
-		if err != nil {
-			// Policy checks should never abort block construction.
-			// Treat policy evaluation errors as a rejected candidate and continue.
+		if isMiningDATx(candidate.tx) {
 			continue
 		}
-		if reject {
-			continue
-		}
-		if candidate.minedCandidate.weight > remainingWeight-selectedWeight {
-			continue
-		}
-		selectedWeight += candidate.minedCandidate.weight
-		policyDaIncluded = nextDaIncluded
-		parsed = append(parsed, candidate.minedCandidate)
+		selection.tryAddCandidate(m, candidate, utxos, nextHeight)
 	}
-	return parsed, nil
+	for _, set := range m.completeDASetCandidatesForMining() {
+		if err := selection.tryAddCompleteDASet(m, set, utxos, nextHeight); err != nil {
+			return nil, err
+		}
+	}
+	return selection.parsed, nil
 }
 
 type miningCandidate struct {
 	tx             *consensus.Tx
 	minedCandidate minedCandidate
+}
+
+type miningCandidateSelection struct {
+	parsed           []minedCandidate
+	selectedWeight   uint64
+	policyDaIncluded uint64
+	maxCandidates    int
+	remainingWeight  uint64
+}
+
+func (s *miningCandidateSelection) tryAddCandidate(m *Miner, candidate miningCandidate, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) bool {
+	reject, nextDaIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, s.policyDaIncluded)
+	if err != nil || reject || len(s.parsed) >= s.maxCandidates || s.selectedWeight > s.remainingWeight {
+		return false
+	}
+	remainingWeight := s.remainingWeight - s.selectedWeight
+	if candidate.minedCandidate.weight > remainingWeight {
+		return false
+	}
+	s.selectedWeight += candidate.minedCandidate.weight
+	s.policyDaIncluded = nextDaIncluded
+	s.parsed = append(s.parsed, candidate.minedCandidate)
+	return true
+}
+
+func (s *miningCandidateSelection) tryAddCompleteDASet(m *Miner, set CompleteDASetCandidate, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64) error {
+	group, ok, err := m.parseCompleteDASetCandidate(set)
+	if err != nil || !ok {
+		return err
+	}
+	if len(group) == 0 || len(s.parsed)+len(group) > s.maxCandidates || s.selectedWeight > s.remainingWeight {
+		return nil
+	}
+	nextDaIncluded := s.policyDaIncluded
+	var groupWeight uint64
+	remainingWeight := s.remainingWeight - s.selectedWeight
+	for _, candidate := range group {
+		reject, daIncluded, err := m.rejectCandidate(candidate.tx, utxos, nextHeight, nextDaIncluded)
+		if err != nil || reject {
+			return nil
+		}
+		if groupWeight > remainingWeight || candidate.minedCandidate.weight > remainingWeight-groupWeight {
+			return nil
+		}
+		groupWeight += candidate.minedCandidate.weight
+		nextDaIncluded = daIncluded
+	}
+	s.selectedWeight += groupWeight
+	s.policyDaIncluded = nextDaIncluded
+	for _, candidate := range group {
+		s.parsed = append(s.parsed, candidate.minedCandidate)
+	}
+	return nil
 }
 
 func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
@@ -447,6 +507,91 @@ func (m *Miner) parseMiningCandidate(raw []byte) (miningCandidate, error) {
 			weight: txWeight,
 		},
 	}, nil
+}
+
+func (m *Miner) completeDASetCandidatesForMining() []CompleteDASetCandidate {
+	if m == nil || m.cfg.CompleteDASetProvider == nil || m.maxSelectedTransactions() == 0 {
+		return nil
+	}
+	return m.cfg.CompleteDASetProvider.CompleteDASetCandidates(m.completeDASetPayloadBudget())
+}
+
+func (m *Miner) completeDASetPayloadBudget() uint64 {
+	max := m.cfg.PolicyMaxDaBytesPerBlock
+	if max == 0 || max > consensus.MAX_DA_BYTES_PER_BLOCK {
+		return consensus.MAX_DA_BYTES_PER_BLOCK
+	}
+	return max
+}
+
+func (m *Miner) parseCompleteDASetCandidate(set CompleteDASetCandidate) ([]miningCandidate, bool, error) {
+	commit, err := m.parseMiningCandidate(set.CommitTx)
+	if err != nil {
+		return nil, false, err
+	}
+	if commit.tx.DaCommitCore == nil || commit.tx.DaCommitCore.DaID != set.DAID {
+		return nil, false, nil
+	}
+	chunkCount := int(commit.tx.DaCommitCore.ChunkCount)
+	if chunkCount == 0 || len(set.Chunks) != chunkCount {
+		return nil, false, nil
+	}
+
+	chunks := append([]CompleteDASetChunkCandidate(nil), set.Chunks...)
+	sort.Slice(chunks, func(i, j int) bool {
+		return chunks[i].Index < chunks[j].Index
+	})
+
+	group := make([]miningCandidate, 0, 1+chunkCount)
+	group = append(group, commit)
+	var payload []byte
+	for i, chunk := range chunks {
+		if int(chunk.Index) != i {
+			return nil, false, nil
+		}
+		candidate, err := m.parseMiningCandidate(chunk.Tx)
+		if err != nil {
+			return nil, false, err
+		}
+		core := candidate.tx.DaChunkCore
+		if core == nil || core.DaID != set.DAID || core.ChunkIndex != chunk.Index {
+			return nil, false, nil
+		}
+		if len(candidate.tx.Inputs) == 0 || sha3.Sum256(candidate.tx.DaPayload) != core.ChunkHash {
+			return nil, false, nil
+		}
+		payload = append(payload, candidate.tx.DaPayload...)
+		group = append(group, candidate)
+	}
+	if len(commit.tx.Inputs) == 0 {
+		return nil, false, nil
+	}
+	payloadCommitment := sha3.Sum256(payload)
+	daCommitOutputs := 0
+	var gotCommitment [32]byte
+	for _, out := range commit.tx.Outputs {
+		if out.CovenantType != consensus.COV_TYPE_DA_COMMIT {
+			continue
+		}
+		daCommitOutputs++
+		if len(out.CovenantData) != len(gotCommitment) {
+			return nil, false, nil
+		}
+		copy(gotCommitment[:], out.CovenantData)
+	}
+	if daCommitOutputs != 1 || gotCommitment != payloadCommitment {
+		return nil, false, nil
+	}
+	return group, true, nil
+}
+
+func isMiningDATx(tx *consensus.Tx) bool {
+	return tx != nil &&
+		(tx.TxKind == 0x01 ||
+			tx.TxKind == 0x02 ||
+			tx.DaCommitCore != nil ||
+			tx.DaChunkCore != nil ||
+			len(tx.DaPayload) != 0)
 }
 
 func (m *Miner) rejectCandidate(tx *consensus.Tx, utxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policyDaIncluded uint64) (bool, uint64, error) {
