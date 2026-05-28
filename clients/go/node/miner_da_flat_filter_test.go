@@ -112,8 +112,9 @@ func TestMinerCompleteDASetProviderValidity(t *testing.T) {
 	if len(selected) != int(consensus.MAX_DA_BATCHES_PER_BLOCK)*3 {
 		t.Fatalf("selected batches=%d, want capped provider DA batches", len(selected)/3)
 	}
-	daID = [32]byte{0x83}
-	base := minerProviderTestSet(t, daID, []byte("chunk-0"), []byte("chunk-1"))
+}
+func TestMinerCompleteDASetProviderRejectsInvalidGroups(t *testing.T) {
+	base := minerProviderTestSet(t, [32]byte{0x83}, []byte("chunk-0"), []byte("chunk-1"))
 	missing := minerProviderCloneSet(base)
 	missing.Chunks = missing.Chunks[:1]
 	duplicate := minerProviderCloneSet(base)
