@@ -2712,14 +2712,74 @@ mod tests {
                 .short_ids,
             short_ids
         );
+
+        let tx_len = 1024usize;
+        let mut tx_count =
+            ((MAX_BLOCK_BYTES as usize) - BLOCK_HEADER_BYTES - MAX_COMPACT_SIZE_BYTES) / tx_len;
+        while compact_full_block_len_for_test(tx_count + 1, tx_len) <= MAX_BLOCK_BYTES {
+            tx_count += 1;
+        }
+        while compact_full_block_len_for_test(tx_count, tx_len) > MAX_BLOCK_BYTES {
+            tx_count -= 1;
+        }
+        let prefilled: Vec<PrefilledTxn> = (0..tx_count)
+            .map(|index| PrefilledTxn {
+                index: index as u64,
+                tx: vec![0u8; tx_len],
+            })
+            .collect();
+        let compact_len =
+            cmpctblock_payload_byte_len(0, &prefilled).expect("all-prefilled cmpctblock length");
+        assert!(
+            compact_len > MAX_BLOCK_BYTES,
+            "all-prefilled cmpctblock len={compact_len}, want above MAX_BLOCK_BYTES={MAX_BLOCK_BYTES}"
+        );
+        assert!(
+            compact_len <= MAX_RELAY_MSG_BYTES,
+            "all-prefilled cmpctblock len={compact_len}, want below MAX_RELAY_MSG_BYTES={MAX_RELAY_MSG_BYTES}"
+        );
     }
 
     #[test]
     fn cmpctblock_payload_rejects_malformed_and_capped_inputs() {
         let valid_tx = minimal_blocktxn_test_tx_bytes(12);
         assert_cmpctblock_err(
+            decode_cmpctblock_payload(&[0u8; BLOCK_HEADER_BYTES + 15]),
+            "cmpctblock payload missing header or nonce",
+        );
+        assert_cmpctblock_err(
             cmpctblock_payload_byte_len(0, &[]),
             "invalid compact relay entry count",
+        );
+        assert_cmpctblock_err(
+            encode_cmpctblock_payload(cmpctblock_test_value(
+                Vec::new(),
+                vec![PrefilledTxn {
+                    index: 0,
+                    tx: Vec::new(),
+                }],
+            )),
+            "blocktxn transaction is empty",
+        );
+        assert_cmpctblock_err(
+            encode_cmpctblock_payload(cmpctblock_test_value(
+                Vec::new(),
+                vec![PrefilledTxn {
+                    index: 1,
+                    tx: valid_tx.clone(),
+                }],
+            )),
+            "compact relay index out of range",
+        );
+        assert_cmpctblock_err(
+            encode_cmpctblock_payload(cmpctblock_test_value(
+                Vec::new(),
+                vec![PrefilledTxn {
+                    index: MAX_COMPACT_RELAY_INDEX_VALUE + 1,
+                    tx: valid_tx.clone(),
+                }],
+            )),
+            "compact relay index out of range",
         );
         assert_cmpctblock_decode_err(
             &vec![0u8; (MAX_RELAY_MSG_BYTES as usize) + 1],
@@ -2753,6 +2813,12 @@ mod tests {
             &cmpctblock_prefilled_tail(0, &truncated_tx),
             "compact relay transaction truncated",
         );
+        let mut non_canonical_tx = valid_tx.clone();
+        non_canonical_tx.push(0);
+        assert_cmpctblock_decode_err(
+            &cmpctblock_prefilled_tail(0, &cmpctblock_tx_envelope(&non_canonical_tx)),
+            "cmpctblock prefilled transaction is non-canonical",
+        );
 
         let tx_envelope = cmpctblock_tx_envelope(&valid_tx);
         let mut duplicate = Vec::new();
@@ -2784,15 +2850,31 @@ mod tests {
             )),
             "compact relay index",
         );
-        let mut non_canonical_tx = valid_tx;
+        let mut non_canonical_tx = valid_tx.clone();
         non_canonical_tx.push(0);
         assert_cmpctblock_err(
             encode_cmpctblock_payload(cmpctblock_test_value(
                 Vec::new(),
                 vec![PrefilledTxn {
                     index: 0,
-                    tx: non_canonical_tx,
+                    tx: non_canonical_tx.clone(),
                 }],
+            )),
+            "cmpctblock prefilled transaction is non-canonical",
+        );
+        assert_cmpctblock_err(
+            encode_cmpctblock_payload(cmpctblock_test_value(
+                Vec::new(),
+                vec![
+                    PrefilledTxn {
+                        index: 0,
+                        tx: non_canonical_tx,
+                    },
+                    PrefilledTxn {
+                        index: 1,
+                        tx: valid_tx,
+                    },
+                ],
             )),
             "cmpctblock prefilled transaction is non-canonical",
         );
@@ -2850,6 +2932,11 @@ mod tests {
         out.extend(test_tag.to_le_bytes());
         out.extend([0; 8]);
         out
+    }
+
+    fn compact_full_block_len_for_test(tx_count: usize, tx_len: usize) -> u64 {
+        (BLOCK_HEADER_BYTES + compact_size_wire_len(tx_count as u64) as usize + tx_count * tx_len)
+            as u64
     }
 
     fn build_block_bytes(
