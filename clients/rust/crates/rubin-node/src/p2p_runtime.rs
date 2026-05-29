@@ -2702,10 +2702,21 @@ mod tests {
             decode_cmpctblock_payload(&encoded).expect("decode cmpctblock"),
             payload
         );
+
+        let short_ids = vec![[0u8; COMPACT_SHORT_ID_BYTES]; MAX_COMPACT_RELAY_ENTRIES + 1];
+        let raw = encode_cmpctblock_payload(cmpctblock_test_value(short_ids.clone(), Vec::new()))
+            .expect("encode cmpctblock above inventory vector limit");
+        assert_eq!(
+            decode_cmpctblock_payload(&raw)
+                .expect("decode cmpctblock above inventory vector limit")
+                .short_ids,
+            short_ids
+        );
     }
 
     #[test]
     fn cmpctblock_payload_rejects_malformed_and_capped_inputs() {
+        let valid_tx = minimal_blocktxn_test_tx_bytes(12);
         assert_cmpctblock_err(
             cmpctblock_payload_byte_len(0, &[]),
             "invalid compact relay entry count",
@@ -2720,6 +2731,70 @@ mod tests {
         assert_cmpctblock_decode_err(
             &[1, 0, 0, 0, 0, 0, 0, 0, 0],
             "cmpctblock payload has trailing bytes",
+        );
+        assert_cmpctblock_decode_err(&[0, 0], "invalid compact relay entry count");
+        assert_cmpctblock_decode_err(&[0, 0xfd, 0, 0], "non-minimal CompactSize");
+
+        let mut huge_prefilled = vec![0];
+        encode_compact_size(MAX_BLOCK_BYTES, &mut huge_prefilled);
+        assert_cmpctblock_decode_err(
+            &huge_prefilled,
+            "cmpctblock payload truncated prefilled index",
+        );
+        assert_cmpctblock_decode_err(
+            &[0, 1, 1, 2],
+            "cmpctblock payload truncated prefilled index",
+        );
+
+        let mut truncated_tx = Vec::new();
+        encode_compact_size((valid_tx.len() + 1) as u64, &mut truncated_tx);
+        truncated_tx.extend_from_slice(&valid_tx);
+        assert_cmpctblock_decode_err(
+            &cmpctblock_prefilled_tail(0, &truncated_tx),
+            "compact relay transaction truncated",
+        );
+
+        let tx_envelope = cmpctblock_tx_envelope(&valid_tx);
+        let mut duplicate = Vec::new();
+        encode_compact_size(0, &mut duplicate);
+        encode_compact_size(2, &mut duplicate);
+        duplicate.extend_from_slice(&0u32.to_le_bytes());
+        duplicate.extend_from_slice(&tx_envelope);
+        duplicate.extend_from_slice(&0u32.to_le_bytes());
+        duplicate.extend_from_slice(&tx_envelope);
+        assert_cmpctblock_decode_err(&duplicate, "compact relay index out of range");
+        assert_cmpctblock_decode_err(
+            &cmpctblock_prefilled_tail(1, &[]),
+            "compact relay index out of range",
+        );
+
+        assert_cmpctblock_err(
+            encode_cmpctblock_payload(cmpctblock_test_value(
+                Vec::new(),
+                vec![
+                    PrefilledTxn {
+                        index: 1,
+                        tx: valid_tx.clone(),
+                    },
+                    PrefilledTxn {
+                        index: 1,
+                        tx: valid_tx.clone(),
+                    },
+                ],
+            )),
+            "compact relay index",
+        );
+        let mut non_canonical_tx = valid_tx;
+        non_canonical_tx.push(0);
+        assert_cmpctblock_err(
+            encode_cmpctblock_payload(cmpctblock_test_value(
+                Vec::new(),
+                vec![PrefilledTxn {
+                    index: 0,
+                    tx: non_canonical_tx,
+                }],
+            )),
+            "cmpctblock prefilled transaction is non-canonical",
         );
     }
 
@@ -2739,6 +2814,35 @@ mod tests {
         let mut payload = vec![0u8; BLOCK_HEADER_BYTES + 16];
         payload.extend_from_slice(tail);
         payload
+    }
+
+    fn cmpctblock_test_value(
+        short_ids: Vec<[u8; COMPACT_SHORT_ID_BYTES]>,
+        prefilled: Vec<PrefilledTxn>,
+    ) -> CmpctBlockPayload {
+        CmpctBlockPayload {
+            header: [0u8; BLOCK_HEADER_BYTES],
+            nonce1: 0,
+            nonce2: 0,
+            short_ids,
+            prefilled,
+        }
+    }
+
+    fn cmpctblock_prefilled_tail(index: u32, tx_envelope: &[u8]) -> Vec<u8> {
+        let mut tail = Vec::new();
+        encode_compact_size(0, &mut tail);
+        encode_compact_size(1, &mut tail);
+        tail.extend_from_slice(&index.to_le_bytes());
+        tail.extend_from_slice(tx_envelope);
+        tail
+    }
+
+    fn cmpctblock_tx_envelope(tx: &[u8]) -> Vec<u8> {
+        let mut envelope = Vec::new();
+        encode_compact_size(tx.len() as u64, &mut envelope);
+        envelope.extend_from_slice(tx);
+        envelope
     }
 
     fn minimal_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
