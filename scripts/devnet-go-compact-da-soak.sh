@@ -19,6 +19,12 @@ require_file() {
   [[ -f "${path}" ]] || { echo "missing ${label}: ${path}" >&2; exit 1; }
 }
 
+require_executable() {
+  local label="$1" path="$2"
+  require_file "${label}" "${path}"
+  [[ -x "${path}" ]] || { echo "${label} is not executable: ${path}" >&2; exit 1; }
+}
+
 resolve_spec_root() {
   local candidate
   if [[ -n "${RUBIN_SPEC_ROOT:-}" ]]; then
@@ -35,9 +41,9 @@ resolve_spec_root() {
   return 1
 }
 
-require_file compact-script "${COMPACT_SCRIPT}"
-require_file da-script "${DA_SCRIPT}"
-require_file dev-env "${DEV_ENV}"
+require_executable compact-script "${COMPACT_SCRIPT}"
+require_executable da-script "${DA_SCRIPT}"
+require_executable dev-env "${DEV_ENV}"
 SPEC_ROOT="$(resolve_spec_root)"
 [[ -d "${SPEC_ROOT}" ]] || { echo "missing spec root: ${SPEC_ROOT}" >&2; exit 1; }
 SPEC_ROOT="$(cd "${SPEC_ROOT}" && pwd -P)"
