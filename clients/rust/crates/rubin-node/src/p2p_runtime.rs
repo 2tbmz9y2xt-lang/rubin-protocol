@@ -2227,14 +2227,18 @@ mod tests {
     fn getblocktxn_payload_codec_matches_go_wire() {
         let mut block_hash = [0u8; 32];
         block_hash[..3].copy_from_slice(&[1, 2, 3]);
+        let high_index = (MAX_COMPACT_RELAY_ENTRIES as u64) + 2;
         let payload = GetBlockTxnPayload {
             block_hash,
-            indexes: vec![0, 2, 5],
+            indexes: vec![0, high_index, MAX_COMPACT_RELAY_ENTRIES as u64],
         };
 
         let encoded = encode_getblocktxn_payload(payload.clone()).expect("encode getblocktxn");
         let mut want = block_hash.to_vec();
-        want.extend_from_slice(&[3, 0, 0, 0, 0, 2, 0, 0, 0, 5, 0, 0, 0]);
+        encode_compact_size(3, &mut want);
+        for idx in [0_u32, high_index as u32, MAX_COMPACT_RELAY_ENTRIES as u32] {
+            want.extend_from_slice(&idx.to_le_bytes());
+        }
         assert_eq!(encoded, want);
         assert_eq!(
             decode_getblocktxn_payload(&encoded).expect("decode getblocktxn"),
