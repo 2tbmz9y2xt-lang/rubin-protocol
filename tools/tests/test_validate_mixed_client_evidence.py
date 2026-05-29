@@ -48,6 +48,33 @@ def _assert_one(testcase: unittest.TestCase, errors: list[str], *needles: str) -
     )
 
 
+def _schema_node_for_path(path: tuple[str, ...]) -> dict:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    node = schema
+    for key in path:
+        node = node["properties"][key]
+    return node
+
+
+def _assert_min_length_field_error(
+    testcase: unittest.TestCase,
+    errors: list[str],
+    path: tuple[str, ...],
+    min_length: int = 1,
+) -> None:
+    field = ".".join(path)
+    testcase.assertEqual(
+        _schema_node_for_path(path).get("minLength"),
+        min_length,
+        f"{field} schema minLength drifted",
+    )
+    testcase.assertTrue(errors, "expected validation errors but got none")
+    testcase.assertTrue(
+        any(e.startswith(f"{field}: ") for e in errors),
+        f"expected schema-owned {field} error; got {errors}",
+    )
+
+
 class CommittedFixtureTests(unittest.TestCase):
     def test_committed_valid_minimal_mixed_passes(self):
         errors = validator.validate(
@@ -471,7 +498,7 @@ class SchemaOwnedTests(unittest.TestCase):
             data["verdict"] = "FAIL"
             data["failure_reason"] = ""
             errors = _validate_dict(Path(td), data)
-            _assert_one(self, errors, "failure_reason", "too short")
+            _assert_min_length_field_error(self, errors, ("failure_reason",))
             self.assertFalse(
                 any(
                     "required when verdict=FAIL" in e
@@ -487,7 +514,7 @@ class SchemaOwnedTests(unittest.TestCase):
             data = _load_committed_valid()
             data["scenario"] = ""
             errors = _validate_dict(Path(td), data)
-            _assert_one(self, errors, "scenario", "too short")
+            _assert_min_length_field_error(self, errors, ("scenario",))
 
     def test_scenario_too_long_schema_owned_only(self):
         """`scenario` longer than `maxLength: 200` is rejected by the
@@ -1094,11 +1121,7 @@ class RestartReorgSchemaOwnedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             data = _valid_with_restart(stopped="")
             errors = _validate_dict(Path(td), data)
-            self.assertTrue(errors)
-            self.assertTrue(
-                any("stopped_node" in e and "too short" in e for e in errors),
-                f"expected schema minLength violation; got {errors}",
-            )
+            _assert_min_length_field_error(self, errors, ("restart", "stopped_node"))
 
     def test_reorg_final_state_missing_tip_schema_owned_only(self):
         """reorg.final_state without `tip` is schema-rejected (RUB-207
