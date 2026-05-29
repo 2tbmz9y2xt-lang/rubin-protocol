@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import io
 import json
 import shutil
@@ -45,6 +46,63 @@ def _assert_one(testcase: unittest.TestCase, errors: list[str], *needles: str) -
     testcase.assertTrue(
         any(all(n in e for n in needles) for e in errors),
         f"no error matched all needles {needles!r}; got {errors}",
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _committed_schema() -> dict:
+    try:
+        raw_schema = SCHEMA_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AssertionError(f"could not read committed schema: {SCHEMA_PATH}") from exc
+    try:
+        schema = json.loads(raw_schema)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"committed schema is invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+        ) from exc
+    if not isinstance(schema, dict):
+        raise AssertionError("committed schema root is not an object")
+    return schema
+
+
+def _schema_node_for_path(path: tuple[str, ...]) -> dict:
+    node = _committed_schema()
+    walked: list[str] = []
+    for key in path:
+        walked.append(key)
+        props = node.get("properties")
+        if not isinstance(props, dict) or key not in props:
+            raise AssertionError(
+                f"{'.'.join(walked)} schema path missing under {'.'.join(walked[:-1]) or '<root>'}"
+            )
+        child = props[key]
+        if not isinstance(child, dict):
+            raise AssertionError(f"{'.'.join(walked)} schema node is not an object")
+        node = child
+    return node
+
+
+def _assert_min_length_field_error(
+    testcase: unittest.TestCase,
+    errors: list[str],
+    path: tuple[str, ...],
+    min_length: int = 1,
+) -> None:
+    field = ".".join(path)
+    testcase.assertEqual(
+        _schema_node_for_path(path).get("minLength"),
+        min_length,
+        f"{field} schema minLength drifted",
+    )
+    testcase.assertTrue(errors, "expected validation errors but got none")
+    testcase.assertTrue(
+        any(e.startswith(f"{field}: ") for e in errors),
+        f"expected schema-owned {field} error; got {errors}",
+    )
+    testcase.assertFalse(
+        any("not in participants" in e for e in errors),
+        f"cross-field membership must not mask schema minLength for {field}; got {errors}",
     )
 
 
@@ -471,7 +529,7 @@ class SchemaOwnedTests(unittest.TestCase):
             data["verdict"] = "FAIL"
             data["failure_reason"] = ""
             errors = _validate_dict(Path(td), data)
-            _assert_one(self, errors, "failure_reason", "too short")
+            _assert_min_length_field_error(self, errors, ("failure_reason",))
             self.assertFalse(
                 any(
                     "required when verdict=FAIL" in e
@@ -487,7 +545,7 @@ class SchemaOwnedTests(unittest.TestCase):
             data = _load_committed_valid()
             data["scenario"] = ""
             errors = _validate_dict(Path(td), data)
-            _assert_one(self, errors, "scenario", "too short")
+            _assert_min_length_field_error(self, errors, ("scenario",))
 
     def test_scenario_too_long_schema_owned_only(self):
         """`scenario` longer than `maxLength: 200` is rejected by the
@@ -1094,11 +1152,7 @@ class RestartReorgSchemaOwnedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             data = _valid_with_restart(stopped="")
             errors = _validate_dict(Path(td), data)
-            self.assertTrue(errors)
-            self.assertTrue(
-                any("stopped_node" in e and "too short" in e for e in errors),
-                f"expected schema minLength violation; got {errors}",
-            )
+            _assert_min_length_field_error(self, errors, ("restart", "stopped_node"))
 
     def test_reorg_final_state_missing_tip_schema_owned_only(self):
         """reorg.final_state without `tip` is schema-rejected (RUB-207
