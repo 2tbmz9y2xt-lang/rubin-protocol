@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use rubin_consensus::{
     block_hash,
     constants::{MAX_BLOCK_BYTES, MAX_RELAY_MSG_BYTES},
-    parse_block_bytes,
+    encode_compact_size, parse_block_bytes, read_compact_size_bytes,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -40,6 +40,10 @@ const MESSAGE_ADDR: &str = "addr";
 const MESSAGE_SENDCMPCT: &str = "sendcmpct";
 const COMPACT_RELAY_VERSION: u64 = 1;
 const SENDCMPCT_PAYLOAD_BYTES: u64 = 9;
+const COMPACT_RELAY_INDEX_BYTES: usize = 4;
+const MAX_COMPACT_SIZE_BYTES: usize = 9;
+const MAX_COMPACT_RELAY_ENTRIES: usize = MAX_INVENTORY_VECTORS;
+const MAX_COMPACT_RELAY_INDEX_VALUE: u64 = MAX_BLOCK_BYTES - 1;
 pub const MSG_BLOCK: u8 = 0x01;
 pub const MSG_TX: u8 = 0x02;
 const INVENTORY_VECTOR_SIZE: usize = 33;
@@ -98,6 +102,12 @@ pub struct InventoryVector {
 pub struct GetBlocksPayload {
     pub locator_hashes: Vec<[u8; 32]>,
     pub stop_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct GetBlockTxnPayload {
+    pub block_hash: [u8; 32],
+    pub indexes: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1430,6 +1440,70 @@ pub fn decode_getblocks_payload(payload: &[u8]) -> io::Result<GetBlocksPayload> 
     })
 }
 
+pub fn encode_getblocktxn_payload(req: GetBlockTxnPayload) -> io::Result<Vec<u8>> {
+    if req.indexes.len() > MAX_COMPACT_RELAY_ENTRIES {
+        return Err(invalid_data("too many compact relay indexes"));
+    }
+    let mut out = Vec::with_capacity(
+        32 + MAX_COMPACT_SIZE_BYTES + req.indexes.len() * COMPACT_RELAY_INDEX_BYTES,
+    );
+    out.extend_from_slice(&req.block_hash);
+    encode_compact_size(req.indexes.len() as u64, &mut out);
+    for idx in req.indexes {
+        if idx > MAX_COMPACT_RELAY_INDEX_VALUE {
+            return Err(invalid_data("compact relay index out of range"));
+        }
+        let idx =
+            u32::try_from(idx).map_err(|_| invalid_data("compact relay index out of range"))?;
+        out.extend_from_slice(&idx.to_le_bytes());
+    }
+    Ok(out)
+}
+
+pub fn decode_getblocktxn_payload(payload: &[u8]) -> io::Result<GetBlockTxnPayload> {
+    if payload.len() < 32 {
+        return Err(invalid_data("getblocktxn payload missing block hash"));
+    }
+    let mut block_hash = [0u8; 32];
+    block_hash.copy_from_slice(&payload[..32]);
+    let (count, consumed) = read_compact_size_bytes(&payload[32..])
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let count = usize::try_from(count).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "too many compact relay indexes")
+    })?;
+    if count > MAX_COMPACT_RELAY_ENTRIES {
+        return Err(invalid_data("too many compact relay indexes"));
+    }
+    let mut offset = 32 + consumed;
+    let mut indexes = Vec::with_capacity(count);
+    for _ in 0..count {
+        if payload.len() - offset < COMPACT_RELAY_INDEX_BYTES {
+            return Err(invalid_data("getblocktxn payload truncated index"));
+        }
+        let end = offset + COMPACT_RELAY_INDEX_BYTES;
+        let idx_bytes: [u8; COMPACT_RELAY_INDEX_BYTES] = payload[offset..end]
+            .try_into()
+            .map_err(|_| invalid_data("getblocktxn payload truncated index"))?;
+        let idx = u64::from(u32::from_le_bytes(idx_bytes));
+        if idx > MAX_COMPACT_RELAY_INDEX_VALUE {
+            return Err(invalid_data("compact relay index out of range"));
+        }
+        indexes.push(idx);
+        offset = end;
+    }
+    if offset != payload.len() {
+        return Err(invalid_data("getblocktxn payload has trailing bytes"));
+    }
+    Ok(GetBlockTxnPayload {
+        block_hash,
+        indexes,
+    })
+}
+
+fn invalid_data(msg: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
 fn marshal_empty_addr_payload() -> Vec<u8> {
     vec![0u8]
 }
@@ -2147,6 +2221,96 @@ mod tests {
         payload[0] = mode;
         payload[1..].copy_from_slice(&version.to_le_bytes());
         payload
+    }
+
+    #[test]
+    fn getblocktxn_payload_codec_matches_go_wire() {
+        let mut block_hash = [0u8; 32];
+        block_hash[..3].copy_from_slice(&[1, 2, 3]);
+        let payload = GetBlockTxnPayload {
+            block_hash,
+            indexes: vec![0, 2, 5],
+        };
+
+        let encoded = encode_getblocktxn_payload(payload.clone()).expect("encode getblocktxn");
+        let mut want = block_hash.to_vec();
+        want.extend_from_slice(&[3, 0, 0, 0, 0, 2, 0, 0, 0, 5, 0, 0, 0]);
+        assert_eq!(encoded, want);
+        assert_eq!(
+            decode_getblocktxn_payload(&encoded).expect("decode getblocktxn"),
+            payload
+        );
+    }
+
+    fn assert_getblocktxn_decode_err(raw: Vec<u8>, want_err: &str) {
+        let err = decode_getblocktxn_payload(&raw)
+            .err()
+            .unwrap_or_else(|| panic!("decode unexpectedly succeeded"));
+        assert!(
+            err.to_string().contains(want_err),
+            "got {err}, want substring {want_err}"
+        );
+    }
+
+    fn assert_getblocktxn_encode_err(payload: GetBlockTxnPayload, want_err: &str) {
+        let err = encode_getblocktxn_payload(payload)
+            .err()
+            .unwrap_or_else(|| panic!("encode unexpectedly succeeded"));
+        assert!(
+            err.to_string().contains(want_err),
+            "got {err}, want substring {want_err}"
+        );
+    }
+
+    #[test]
+    fn getblocktxn_decode_rejects_invalid_wire() {
+        let block_hash = [7u8; 32];
+
+        assert_getblocktxn_decode_err(vec![0u8; 31], "getblocktxn payload missing block hash");
+        assert_getblocktxn_decode_err(block_hash.to_vec(), "unexpected EOF (u8)");
+
+        let mut too_many = block_hash.to_vec();
+        encode_compact_size((MAX_COMPACT_RELAY_ENTRIES as u64) + 1, &mut too_many);
+        assert_getblocktxn_decode_err(too_many, "too many compact relay indexes");
+
+        let mut non_minimal_count = block_hash.to_vec();
+        non_minimal_count.extend_from_slice(&[0xfd, 1, 0, 0, 0, 0, 0]);
+        assert_getblocktxn_decode_err(non_minimal_count, "non-minimal CompactSize");
+
+        let mut truncated_index = block_hash.to_vec();
+        truncated_index.push(1);
+        truncated_index.extend_from_slice(&[0, 0, 0]);
+        assert_getblocktxn_decode_err(truncated_index, "getblocktxn payload truncated index");
+
+        let mut trailing_bytes = block_hash.to_vec();
+        trailing_bytes.push(0);
+        trailing_bytes.push(1);
+        assert_getblocktxn_decode_err(trailing_bytes, "getblocktxn payload has trailing bytes");
+
+        let mut index_out_of_range = block_hash.to_vec();
+        index_out_of_range.push(1);
+        index_out_of_range
+            .extend_from_slice(&((MAX_COMPACT_RELAY_INDEX_VALUE + 1) as u32).to_le_bytes());
+        assert_getblocktxn_decode_err(index_out_of_range, "compact relay index out of range");
+    }
+
+    #[test]
+    fn getblocktxn_encode_rejects_bounds() {
+        let block_hash = [9u8; 32];
+        assert_getblocktxn_encode_err(
+            GetBlockTxnPayload {
+                block_hash,
+                indexes: vec![0; MAX_COMPACT_RELAY_ENTRIES + 1],
+            },
+            "too many compact relay indexes",
+        );
+        assert_getblocktxn_encode_err(
+            GetBlockTxnPayload {
+                block_hash,
+                indexes: vec![MAX_COMPACT_RELAY_INDEX_VALUE + 1],
+            },
+            "compact relay index out of range",
+        );
     }
 
     fn build_block_bytes(
