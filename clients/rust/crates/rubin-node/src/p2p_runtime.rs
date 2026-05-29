@@ -1860,9 +1860,15 @@ fn compact_push_missing(missing: &mut Vec<u64>, index: u64) -> io::Result<()> {
 fn compact_validate_present_transactions<'a>(
     txs: impl IntoIterator<Item = &'a [u8]>,
 ) -> io::Result<()> {
+    compact_validate_present_transaction_lengths(txs.into_iter().map(|tx| tx.len() as u64))
+}
+
+fn compact_validate_present_transaction_lengths(
+    tx_lens: impl IntoIterator<Item = u64>,
+) -> io::Result<()> {
     let mut total_tx_bytes = 0u64;
-    for tx in txs {
-        total_tx_bytes = validate_blocktxn_transaction_size(tx.len() as u64, total_tx_bytes)?;
+    for tx_len in tx_lens {
+        total_tx_bytes = validate_blocktxn_transaction_size(tx_len, total_tx_bytes)?;
     }
     Ok(())
 }
@@ -3135,18 +3141,11 @@ mod tests {
         let result = reconstruct_compact_block(&one_missing, &[malformed, valid_tx.clone()])
             .expect("malformed local candidate ignored");
         assert_eq!(result.transactions, vec![valid_tx.clone()]);
-        let large_tx = large_blocktxn_test_tx_bytes(201);
-        let oversized_count = (MAX_BLOCK_BYTES as usize / large_tx.len()) + 1;
-        assert_reconstruct_err(
-            &cmpctblock_test_value(
-                Vec::new(),
-                (0..oversized_count)
-                    .map(|index| compact_reconstruct_prefilled(index as u64, large_tx.clone()))
-                    .collect(),
-            ),
-            &[],
+        assert_blocktxn_err(
+            compact_validate_present_transaction_lengths([MAX_BLOCK_BYTES, 1]),
             "blocktxn transactions exceed block size",
         );
+        let large_tx = large_blocktxn_test_tx_bytes(201);
         let capped_candidates = vec![large_tx.clone(), valid_tx.clone()];
         assert_reconstruct_missing(&one_missing, &capped_candidates, &[0]);
     }
