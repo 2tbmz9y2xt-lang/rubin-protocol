@@ -10,7 +10,7 @@ DA_SCRIPT="${REPO_ROOT}/scripts/devnet-go-da-relay.sh"
 : "${KEEP_TMP:=1}"
 export KEEP_TMP
 
-for tool in python3 git; do
+for tool in python3 git perl lsof ps; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is required for Go compact+DA soak evidence" >&2; exit 1; }
 done
 
