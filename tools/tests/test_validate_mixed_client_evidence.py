@@ -51,8 +51,18 @@ def _assert_one(testcase: unittest.TestCase, errors: list[str], *needles: str) -
 def _schema_node_for_path(path: tuple[str, ...]) -> dict:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     node = schema
+    walked: list[str] = []
     for key in path:
-        node = node["properties"][key]
+        walked.append(key)
+        props = node.get("properties")
+        if not isinstance(props, dict) or key not in props:
+            raise AssertionError(
+                f"{'.'.join(walked)} schema path missing under {'.'.join(walked[:-1]) or '<root>'}"
+            )
+        child = props[key]
+        if not isinstance(child, dict):
+            raise AssertionError(f"{'.'.join(walked)} schema node is not an object")
+        node = child
     return node
 
 
@@ -72,6 +82,10 @@ def _assert_min_length_field_error(
     testcase.assertTrue(
         any(e.startswith(f"{field}: ") for e in errors),
         f"expected schema-owned {field} error; got {errors}",
+    )
+    testcase.assertFalse(
+        any("not in participants" in e for e in errors),
+        f"cross-field membership must not mask schema minLength for {field}; got {errors}",
     )
 
 
