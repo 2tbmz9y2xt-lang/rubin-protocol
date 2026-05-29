@@ -6,7 +6,7 @@ use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use rubin_consensus::{
-    block_hash,
+    block_hash, compact_shortid,
     constants::{MAX_BLOCK_BYTES, MAX_RELAY_MSG_BYTES},
     encode_compact_size, parse_block_bytes, parse_tx, read_compact_size_bytes, BLOCK_HEADER_BYTES,
 };
@@ -45,6 +45,10 @@ const COMPACT_SHORT_ID_BYTES: usize = 6;
 const MAX_COMPACT_SIZE_BYTES: usize = 9;
 const MAX_COMPACT_RELAY_ENTRIES: usize = MAX_INVENTORY_VECTORS;
 const MAX_COMPACT_RELAY_INDEX_VALUE: u64 = MAX_BLOCK_BYTES - 1;
+const COMPACT_LOCAL_TX_CANDIDATE_LIMIT: usize = 1000;
+const COMPACT_LOCAL_TX_CANDIDATE_BYTES_LIMIT: usize = 1 << 20;
+type CompactShortId = [u8; COMPACT_SHORT_ID_BYTES];
+type CompactLocalIndex = HashMap<CompactShortId, Option<Vec<u8>>>;
 pub const MSG_BLOCK: u8 = 0x01;
 pub const MSG_TX: u8 = 0x02;
 const INVENTORY_VECTOR_SIZE: usize = 33;
@@ -127,8 +131,15 @@ pub struct CmpctBlockPayload {
     pub header: [u8; BLOCK_HEADER_BYTES],
     pub nonce1: u64,
     pub nonce2: u64,
-    pub short_ids: Vec<[u8; COMPACT_SHORT_ID_BYTES]>,
+    pub short_ids: Vec<CompactShortId>,
     pub prefilled: Vec<PrefilledTxn>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompactReconstructionResult {
+    pub transactions: Vec<Vec<u8>>,
+    pub partial_transactions: Vec<Option<Vec<u8>>>,
+    pub missing_indexes: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1688,6 +1699,174 @@ pub fn decode_cmpctblock_payload(payload: &[u8]) -> io::Result<CmpctBlockPayload
     Ok(out)
 }
 
+pub fn reconstruct_compact_block(
+    payload: &CmpctBlockPayload,
+    local_txs: &[Vec<u8>],
+) -> io::Result<CompactReconstructionResult> {
+    let total_entries = validate_cmpctblock_entry_count(
+        payload.short_ids.len() as u64,
+        payload.prefilled.len() as u64,
+    )?;
+    cmpctblock_payload_byte_len(payload.short_ids.len() as u64, &payload.prefilled)?;
+    let total_entries = usize::try_from(total_entries)
+        .map_err(|_| invalid_data("invalid compact relay entry count"))?;
+    let prefilled_short_ids =
+        compact_prefilled_short_ids(&payload.prefilled, payload.nonce1, payload.nonce2)?;
+    if payload.short_ids.is_empty() {
+        let transactions: Vec<_> = payload.prefilled.iter().map(|e| e.tx.clone()).collect();
+        compact_validate_present_transactions(transactions.iter().map(Vec::as_slice))?;
+        return Ok(CompactReconstructionResult {
+            transactions,
+            ..Default::default()
+        });
+    }
+
+    let mut local_index = compact_local_tx_index(local_txs, payload.nonce1, payload.nonce2)?;
+    for short_id in prefilled_short_ids {
+        local_index.insert(short_id, None);
+    }
+    compact_missing(None, total_entries, payload, &local_index)?;
+    let mut partial = vec![None; total_entries];
+    for entry in &payload.prefilled {
+        partial[entry.index as usize] = Some(entry.tx.clone());
+    }
+    let missing_indexes =
+        compact_missing(Some(&mut partial), total_entries, payload, &local_index)?;
+    if missing_indexes.is_empty() {
+        compact_validate_present_transactions(partial.iter().filter_map(Option::as_deref))?;
+        return Ok(CompactReconstructionResult {
+            transactions: partial
+                .into_iter()
+                .map(|tx| tx.ok_or_else(|| invalid_data("compact block transaction missing")))
+                .collect::<io::Result<Vec<_>>>()?,
+            ..Default::default()
+        });
+    }
+    Ok(CompactReconstructionResult {
+        partial_transactions: partial,
+        missing_indexes,
+        ..Default::default()
+    })
+}
+
+fn compact_prefilled_short_ids(
+    prefilled: &[PrefilledTxn],
+    nonce1: u64,
+    nonce2: u64,
+) -> io::Result<Vec<CompactShortId>> {
+    let err = "cmpctblock prefilled transaction is non-canonical";
+    let mut out = Vec::with_capacity(prefilled.len());
+    for entry in prefilled {
+        let (_, _, wtxid, consumed) = parse_tx(&entry.tx).map_err(|_| invalid_data(err))?;
+        if consumed != entry.tx.len() {
+            return Err(invalid_data(err));
+        }
+        out.push(compact_shortid(wtxid, nonce1, nonce2));
+    }
+    Ok(out)
+}
+
+fn compact_local_tx_index(
+    local_txs: &[Vec<u8>],
+    nonce1: u64,
+    nonce2: u64,
+) -> io::Result<CompactLocalIndex> {
+    if local_txs.len() > COMPACT_LOCAL_TX_CANDIDATE_LIMIT {
+        return Err(invalid_data("too many compact relay local candidates"));
+    }
+    let mut total_tx_bytes = 0usize;
+    let mut out = HashMap::with_capacity(local_txs.len());
+    for tx in local_txs {
+        if validate_blocktxn_transaction_size(tx.len() as u64, 0).is_err() {
+            continue;
+        }
+        if tx.len() > COMPACT_LOCAL_TX_CANDIDATE_BYTES_LIMIT.saturating_sub(total_tx_bytes) {
+            continue;
+        }
+        let Ok((_, _, wtxid, consumed)) = parse_tx(tx) else {
+            continue;
+        };
+        if consumed != tx.len() {
+            continue;
+        }
+        let short_id = compact_shortid(wtxid, nonce1, nonce2);
+        if let Some(slot) = out.get_mut(&short_id) {
+            *slot = None;
+            continue;
+        }
+        total_tx_bytes += tx.len();
+        out.insert(short_id, Some(tx.clone()));
+    }
+    Ok(out)
+}
+
+fn compact_missing(
+    mut txs: Option<&mut [Option<Vec<u8>>]>,
+    total_entries: usize,
+    payload: &CmpctBlockPayload,
+    local_index: &CompactLocalIndex,
+) -> io::Result<Vec<u64>> {
+    let mut missing_indexes = Vec::new();
+    let mut first_hit = HashMap::new();
+    let mut short_pos = 0usize;
+    let mut prefilled_pos = 0usize;
+    for absolute_index in 0..total_entries {
+        if short_pos >= payload.short_ids.len() {
+            break;
+        }
+        if prefilled_pos < payload.prefilled.len()
+            && payload.prefilled[prefilled_pos].index == absolute_index as u64
+        {
+            prefilled_pos += 1;
+            continue;
+        }
+        let short_id = payload.short_ids[short_pos];
+        let tx = local_index.get(&short_id).and_then(Option::as_ref);
+        match tx {
+            Some(tx) => {
+                if let Some(first_index) = first_hit.get(&short_id).copied() {
+                    if first_index != u64::MAX {
+                        if let Some(txs) = txs.as_deref_mut() {
+                            txs[first_index as usize] = None;
+                        }
+                        first_hit.insert(short_id, u64::MAX);
+                        compact_push_missing(&mut missing_indexes, first_index)?;
+                    }
+                    compact_push_missing(&mut missing_indexes, absolute_index as u64)?;
+                } else {
+                    first_hit.insert(short_id, absolute_index as u64);
+                    if let Some(txs) = txs.as_deref_mut() {
+                        txs[absolute_index] = Some(tx.clone());
+                    }
+                }
+            }
+            None => compact_push_missing(&mut missing_indexes, absolute_index as u64)?,
+        }
+        short_pos += 1;
+    }
+    if let Some(txs) = txs {
+        compact_validate_present_transactions(txs.iter().filter_map(Option::as_deref))?;
+    }
+    Ok(missing_indexes)
+}
+
+fn compact_push_missing(missing: &mut Vec<u64>, index: u64) -> io::Result<()> {
+    missing.push(index);
+    (missing.len() <= MAX_COMPACT_RELAY_ENTRIES)
+        .then_some(())
+        .ok_or_else(|| invalid_data("too many compact relay missing transactions"))
+}
+
+fn compact_validate_present_transactions<'a>(
+    txs: impl IntoIterator<Item = &'a [u8]>,
+) -> io::Result<()> {
+    let mut total_tx_bytes = 0u64;
+    for tx in txs {
+        total_tx_bytes = validate_blocktxn_transaction_size(tx.len() as u64, total_tx_bytes)?;
+    }
+    Ok(())
+}
+
 fn validate_blocktxn_transaction_size(tx_len: u64, total_tx_bytes: u64) -> io::Result<u64> {
     if tx_len == 0 {
         return Err(invalid_data("blocktxn transaction is empty"));
@@ -2880,6 +3059,124 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compact_reconstruct_go_parity_matrix() {
+        let prefilled = minimal_blocktxn_test_tx_bytes(101);
+        let tx2 = minimal_blocktxn_test_tx_bytes(102);
+        let tx3 = minimal_blocktxn_test_tx_bytes(103);
+        let full = cmpctblock_test_value(
+            vec![
+                compact_reconstruct_short_id_for_tx(&tx2),
+                compact_reconstruct_short_id_for_tx(&tx3),
+            ],
+            vec![compact_reconstruct_prefilled(0, prefilled.clone())],
+        );
+        assert_eq!(
+            reconstruct_compact_block(&full, &[tx3.clone(), tx2.clone()])
+                .expect("complete")
+                .transactions,
+            vec![prefilled.clone(), tx2, tx3]
+        );
+
+        let missing_payload =
+            cmpctblock_test_value(vec![[0x99; COMPACT_SHORT_ID_BYTES]], Vec::new());
+        assert_reconstruct_missing(&missing_payload, &[], &[0]);
+        let local = minimal_blocktxn_test_tx_bytes(122);
+        let short_id = compact_reconstruct_short_id_for_tx(&local);
+        let base = cmpctblock_test_value(
+            vec![short_id],
+            vec![compact_reconstruct_prefilled(0, prefilled.clone())],
+        );
+        let mut duplicate_payload = base.clone();
+        duplicate_payload.short_ids.push(short_id);
+        assert_reconstruct_missing(&duplicate_payload, std::slice::from_ref(&local), &[1, 2]);
+        assert_reconstruct_missing(&base, &[local.clone(), local], &[1]);
+        let prefilled_collision = cmpctblock_test_value(
+            vec![compact_reconstruct_short_id_for_tx(&prefilled)],
+            base.prefilled,
+        );
+        assert_reconstruct_missing(&prefilled_collision, &[prefilled], &[1]);
+        let valid_tx = minimal_blocktxn_test_tx_bytes(131);
+        let short_id = compact_reconstruct_short_id_for_tx(&valid_tx);
+        let cases = [
+            (
+                vec![short_id],
+                vec![compact_reconstruct_prefilled(2, valid_tx.clone())],
+                "compact relay index out of range",
+            ),
+            (
+                Vec::new(),
+                vec![
+                    compact_reconstruct_prefilled(0, valid_tx.clone()),
+                    compact_reconstruct_prefilled(0, valid_tx.clone()),
+                ],
+                "compact relay index out of range",
+            ),
+        ];
+        for (short_ids, prefilled, want_err) in cases {
+            assert_reconstruct_err(&cmpctblock_test_value(short_ids, prefilled), &[], want_err);
+        }
+        assert_reconstruct_err(
+            &cmpctblock_test_value(
+                vec![[0u8; COMPACT_SHORT_ID_BYTES]; MAX_COMPACT_RELAY_ENTRIES + 1],
+                Vec::new(),
+            ),
+            &[],
+            "too many compact relay missing transactions",
+        );
+        let one_missing = cmpctblock_test_value(vec![short_id], Vec::new());
+        assert_reconstruct_err(
+            &one_missing,
+            &vec![valid_tx.clone(); COMPACT_LOCAL_TX_CANDIDATE_LIMIT + 1],
+            "too many compact relay local candidates",
+        );
+        let mut malformed = valid_tx.clone();
+        malformed.push(0);
+        let result = reconstruct_compact_block(&one_missing, &[malformed, valid_tx.clone()])
+            .expect("malformed local candidate ignored");
+        assert_eq!(result.transactions, vec![valid_tx.clone()]);
+        let large_tx = large_blocktxn_test_tx_bytes(201);
+        let oversized_count = (MAX_BLOCK_BYTES as usize / large_tx.len()) + 1;
+        assert_reconstruct_err(
+            &cmpctblock_test_value(
+                Vec::new(),
+                (0..oversized_count)
+                    .map(|index| compact_reconstruct_prefilled(index as u64, large_tx.clone()))
+                    .collect(),
+            ),
+            &[],
+            "blocktxn transactions exceed block size",
+        );
+        let capped_candidates = vec![large_tx.clone(), valid_tx.clone()];
+        assert_reconstruct_missing(&one_missing, &capped_candidates, &[0]);
+    }
+    fn assert_reconstruct_missing(
+        payload: &CmpctBlockPayload,
+        local_txs: &[Vec<u8>],
+        want: &[u64],
+    ) {
+        assert_eq!(
+            reconstruct_compact_block(payload, local_txs)
+                .expect("reconstruct")
+                .missing_indexes,
+            want
+        );
+    }
+    fn compact_reconstruct_prefilled(index: u64, tx: Vec<u8>) -> PrefilledTxn {
+        PrefilledTxn { index, tx }
+    }
+
+    fn compact_reconstruct_short_id_for_tx(tx: &[u8]) -> CompactShortId {
+        let (_, _, wtxid, _) = parse_tx(tx).expect("parse compact tx");
+        compact_shortid(wtxid, 0, 0)
+    }
+
+    fn assert_reconstruct_err(payload: &CmpctBlockPayload, local_txs: &[Vec<u8>], want_err: &str) {
+        let err = reconstruct_compact_block(payload, local_txs)
+            .expect_err("compact reconstruction succeeded")
+            .to_string();
+        assert!(err.contains(want_err), "got {err}, want {want_err}");
+    }
     fn assert_cmpctblock_decode_err(tail: &[u8], want_err: &str) {
         assert_cmpctblock_err(
             decode_cmpctblock_payload(&cmpctblock_test_payload(tail)),
@@ -2899,7 +3196,7 @@ mod tests {
     }
 
     fn cmpctblock_test_value(
-        short_ids: Vec<[u8; COMPACT_SHORT_ID_BYTES]>,
+        short_ids: Vec<CompactShortId>,
         prefilled: Vec<PrefilledTxn>,
     ) -> CmpctBlockPayload {
         CmpctBlockPayload {
@@ -2931,6 +3228,20 @@ mod tests {
         let mut out = vec![1, 0, 0, 0, 0];
         out.extend(test_tag.to_le_bytes());
         out.extend([0; 8]);
+        out
+    }
+
+    fn large_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
+        let mut out = vec![1, 0, 0, 0, 0];
+        out.extend(test_tag.to_le_bytes());
+        out.push(0);
+        encode_compact_size(16, &mut out);
+        for _ in 0..16 {
+            out.extend([0; 10]);
+            encode_compact_size(65_521, &mut out);
+            out.extend([0; 65_521]);
+        }
+        out.extend([0; 6]);
         out
     }
 
