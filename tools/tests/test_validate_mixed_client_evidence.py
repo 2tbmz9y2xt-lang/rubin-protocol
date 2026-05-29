@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import functools
 import io
 import json
 import shutil
@@ -48,9 +49,25 @@ def _assert_one(testcase: unittest.TestCase, errors: list[str], *needles: str) -
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _committed_schema() -> dict:
+    try:
+        raw_schema = SCHEMA_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AssertionError(f"could not read committed schema: {SCHEMA_PATH}") from exc
+    try:
+        schema = json.loads(raw_schema)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"committed schema is invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+        ) from exc
+    if not isinstance(schema, dict):
+        raise AssertionError("committed schema root is not an object")
+    return schema
+
+
 def _schema_node_for_path(path: tuple[str, ...]) -> dict:
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    node = schema
+    node = _committed_schema()
     walked: list[str] = []
     for key in path:
         walked.append(key)
