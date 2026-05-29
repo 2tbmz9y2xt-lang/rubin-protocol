@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use rubin_consensus::{
     block_hash,
     constants::{MAX_BLOCK_BYTES, MAX_RELAY_MSG_BYTES},
-    encode_compact_size, parse_block_bytes, read_compact_size_bytes,
+    encode_compact_size, parse_block_bytes, parse_tx, read_compact_size_bytes,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -108,6 +108,12 @@ pub struct GetBlocksPayload {
 pub struct GetBlockTxnPayload {
     pub block_hash: [u8; 32],
     pub indexes: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct BlockTxnPayload {
+    pub block_hash: [u8; 32],
+    pub transactions: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1500,6 +1506,114 @@ pub fn decode_getblocktxn_payload(payload: &[u8]) -> io::Result<GetBlockTxnPaylo
     })
 }
 
+pub fn encode_blocktxn_payload(payload: BlockTxnPayload) -> io::Result<Vec<u8>> {
+    if payload.transactions.len() > MAX_COMPACT_RELAY_ENTRIES {
+        return Err(invalid_data("too many compact relay transactions"));
+    }
+    let cap_hint = validate_compact_relay_transactions(
+        &payload.transactions,
+        "blocktxn transaction is non-canonical",
+    )?;
+    let mut out = Vec::with_capacity(cap_hint as usize);
+    out.extend_from_slice(&payload.block_hash);
+    encode_compact_size(payload.transactions.len() as u64, &mut out);
+    for tx in payload.transactions {
+        encode_compact_size(tx.len() as u64, &mut out);
+        out.extend_from_slice(&tx);
+    }
+    Ok(out)
+}
+
+pub fn decode_blocktxn_payload(payload: &[u8]) -> io::Result<BlockTxnPayload> {
+    if payload.len() < 32 {
+        return Err(invalid_data("blocktxn payload missing block hash"));
+    }
+    let mut block_hash = [0u8; 32];
+    block_hash.copy_from_slice(&payload[..32]);
+    let (count, consumed) = read_compact_size_bytes(&payload[32..])
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    if count > MAX_COMPACT_RELAY_ENTRIES as u64 {
+        return Err(invalid_data("too many compact relay transactions"));
+    }
+    let count = count as usize;
+    let mut offset = 32 + consumed;
+    let mut transactions = Vec::with_capacity(count);
+    let mut total_tx_bytes = 0u64;
+    for _ in 0..count {
+        let (tx_len, len_consumed) = read_compact_size_bytes(&payload[offset..])
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        offset += len_consumed;
+        if tx_len > payload[offset..].len() as u64 {
+            return Err(invalid_data("compact relay transaction truncated"));
+        }
+        let next_total = validate_blocktxn_transaction_size(tx_len, total_tx_bytes)?;
+        let tx_len = tx_len as usize;
+        let tx = &payload[offset..offset + tx_len];
+        let consumed = parse_tx(tx)
+            .map_err(|_| invalid_data("blocktxn transaction is non-canonical"))?
+            .3;
+        if consumed != tx_len {
+            return Err(invalid_data("blocktxn transaction is non-canonical"));
+        }
+        transactions.push(tx.to_vec());
+        offset += tx_len;
+        total_tx_bytes = next_total;
+    }
+    if offset != payload.len() {
+        return Err(invalid_data("blocktxn payload has trailing bytes"));
+    }
+    Ok(BlockTxnPayload {
+        block_hash,
+        transactions,
+    })
+}
+
+fn validate_blocktxn_transaction_size(tx_len: u64, total_tx_bytes: u64) -> io::Result<u64> {
+    if tx_len == 0 {
+        return Err(invalid_data("blocktxn transaction is empty"));
+    }
+    if tx_len > MAX_BLOCK_BYTES {
+        return Err(invalid_data("blocktxn transaction too large"));
+    }
+    if total_tx_bytes > MAX_BLOCK_BYTES - tx_len {
+        return Err(invalid_data("blocktxn transactions exceed block size"));
+    }
+    Ok(total_tx_bytes + tx_len)
+}
+
+fn validate_compact_relay_transactions(
+    transactions: &[Vec<u8>],
+    err_msg: &'static str,
+) -> io::Result<u64> {
+    let mut total_tx_bytes = 0u64;
+    let mut total_payload_bytes = 32u64 + compact_size_wire_len(transactions.len() as u64);
+    for tx in transactions {
+        let next_total = validate_blocktxn_transaction_size(tx.len() as u64, total_tx_bytes)?;
+        let payload_add = compact_size_wire_len(tx.len() as u64)
+            .checked_add(tx.len() as u64)
+            .ok_or_else(|| invalid_data("blocktxn payload too large"))?;
+        if payload_add > MAX_RELAY_MSG_BYTES - total_payload_bytes {
+            return Err(invalid_data("blocktxn payload too large"));
+        }
+        let consumed = parse_tx(tx).map_err(|_| invalid_data(err_msg))?.3;
+        if consumed != tx.len() {
+            return Err(invalid_data(err_msg));
+        }
+        total_tx_bytes = next_total;
+        total_payload_bytes += payload_add;
+    }
+    Ok(total_payload_bytes)
+}
+
+fn compact_size_wire_len(n: u64) -> u64 {
+    match n {
+        0x00..=0xfc => 1,
+        0xfd..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
+}
+
 fn invalid_data(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
@@ -2315,6 +2429,85 @@ mod tests {
             },
             "compact relay index out of range",
         );
+    }
+
+    #[test]
+    fn blocktxn_payload_codec_matches_go_wire() {
+        let tx1 = minimal_blocktxn_test_tx_bytes(1);
+        let block_hash = [4u8; 32];
+        let payload = BlockTxnPayload {
+            block_hash,
+            transactions: vec![tx1.clone()],
+        };
+
+        let encoded = encode_blocktxn_payload(payload.clone()).expect("encode blocktxn");
+        let mut want = block_hash.to_vec();
+        encode_compact_size(1, &mut want);
+        encode_compact_size(tx1.len() as u64, &mut want);
+        want.extend_from_slice(&tx1);
+        assert_eq!(encoded, want);
+        assert_eq!(
+            decode_blocktxn_payload(&encoded).expect("decode blocktxn"),
+            payload
+        );
+    }
+
+    fn assert_blocktxn_err<T: std::fmt::Debug>(got: io::Result<T>, want_err: &str) {
+        let err = got
+            .expect_err("operation unexpectedly succeeded")
+            .to_string();
+        assert!(err.contains(want_err), "got {err}, want {want_err}");
+    }
+
+    #[test]
+    fn blocktxn_rejects_malformed_and_capped_inputs() {
+        let block_hash = [7u8; 32];
+        let valid_tx = minimal_blocktxn_test_tx_bytes(5);
+        let mut non_minimal_count = block_hash.to_vec();
+        non_minimal_count.extend_from_slice(&[0xfd, 0, 0]);
+        let mut too_many = block_hash.to_vec();
+        encode_compact_size((MAX_COMPACT_RELAY_ENTRIES as u64) + 1, &mut too_many);
+        let mut empty_tx = block_hash.to_vec();
+        empty_tx.extend_from_slice(&[1, 0]);
+        let mut raw_concatenated = block_hash.to_vec();
+        encode_compact_size(2, &mut raw_concatenated);
+        raw_concatenated.extend_from_slice(&valid_tx);
+        let mut trailing = block_hash.to_vec();
+        trailing.extend_from_slice(&[0, 0]);
+        for (raw, want) in [
+            (non_minimal_count, "non-minimal CompactSize"),
+            (too_many, "too many compact relay transactions"),
+            (empty_tx, "blocktxn transaction is empty"),
+            (raw_concatenated, "blocktxn transaction is non-canonical"),
+            (trailing, "blocktxn payload has trailing bytes"),
+        ] {
+            assert_blocktxn_err(decode_blocktxn_payload(&raw), want);
+        }
+
+        let mut valid_with_trailing = minimal_blocktxn_test_tx_bytes(3);
+        valid_with_trailing.push(0);
+        assert_blocktxn_err(
+            encode_blocktxn_payload(BlockTxnPayload {
+                block_hash,
+                transactions: vec![valid_with_trailing],
+            }),
+            "blocktxn transaction is non-canonical",
+        );
+        assert_blocktxn_err(
+            validate_blocktxn_transaction_size(MAX_BLOCK_BYTES + 1, 0),
+            "blocktxn transaction too large",
+        );
+        assert_blocktxn_err(
+            validate_blocktxn_transaction_size(1, MAX_BLOCK_BYTES),
+            "blocktxn transactions exceed block size",
+        );
+    }
+
+    fn minimal_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
+        let mut out = vec![1, 0, 0, 0, 0];
+        out.extend(test_tag.to_le_bytes());
+        out.extend([0; 8]);
+        out
     }
 
     fn build_block_bytes(
