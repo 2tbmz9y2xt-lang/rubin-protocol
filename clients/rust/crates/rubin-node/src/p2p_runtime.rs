@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use rubin_consensus::{
     block_hash,
     constants::{MAX_BLOCK_BYTES, MAX_RELAY_MSG_BYTES},
-    encode_compact_size, parse_block_bytes, parse_tx, read_compact_size_bytes,
+    encode_compact_size, parse_block_bytes, parse_tx, read_compact_size_bytes, BLOCK_HEADER_BYTES,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -41,6 +41,7 @@ const MESSAGE_SENDCMPCT: &str = "sendcmpct";
 const COMPACT_RELAY_VERSION: u64 = 1;
 const SENDCMPCT_PAYLOAD_BYTES: u64 = 9;
 const COMPACT_RELAY_INDEX_BYTES: usize = 4;
+const COMPACT_SHORT_ID_BYTES: usize = 6;
 const MAX_COMPACT_SIZE_BYTES: usize = 9;
 const MAX_COMPACT_RELAY_ENTRIES: usize = MAX_INVENTORY_VECTORS;
 const MAX_COMPACT_RELAY_INDEX_VALUE: u64 = MAX_BLOCK_BYTES - 1;
@@ -114,6 +115,20 @@ pub struct GetBlockTxnPayload {
 pub struct BlockTxnPayload {
     pub block_hash: [u8; 32],
     pub transactions: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PrefilledTxn {
+    pub index: u64,
+    pub tx: Vec<u8>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CmpctBlockPayload {
+    pub header: [u8; BLOCK_HEADER_BYTES],
+    pub nonce1: u64,
+    pub nonce2: u64,
+    pub short_ids: Vec<[u8; COMPACT_SHORT_ID_BYTES]>,
+    pub prefilled: Vec<PrefilledTxn>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1568,6 +1583,111 @@ pub fn decode_blocktxn_payload(payload: &[u8]) -> io::Result<BlockTxnPayload> {
     })
 }
 
+pub fn encode_cmpctblock_payload(payload: CmpctBlockPayload) -> io::Result<Vec<u8>> {
+    let cap_hint = cmpctblock_payload_byte_len(payload.short_ids.len() as u64, &payload.prefilled)?;
+    let cap_hint =
+        usize::try_from(cap_hint).map_err(|_| invalid_data("cmpctblock payload too large"))?;
+    let mut total_tx_bytes = 0u64;
+    for entry in &payload.prefilled {
+        total_tx_bytes = validate_blocktxn_transaction_size(entry.tx.len() as u64, total_tx_bytes)?;
+        validate_compact_relay_tx(
+            &entry.tx,
+            "cmpctblock prefilled transaction is non-canonical",
+        )?;
+    }
+    let mut out = Vec::with_capacity(cap_hint);
+    out.extend_from_slice(&payload.header);
+    out.extend_from_slice(&payload.nonce1.to_le_bytes());
+    out.extend_from_slice(&payload.nonce2.to_le_bytes());
+    encode_compact_size(payload.short_ids.len() as u64, &mut out);
+    for short_id in payload.short_ids {
+        out.extend_from_slice(&short_id);
+    }
+    encode_compact_size(payload.prefilled.len() as u64, &mut out);
+    for entry in payload.prefilled {
+        let index = u32::try_from(entry.index)
+            .map_err(|_| invalid_data("compact relay index out of range"))?;
+        out.extend_from_slice(&index.to_le_bytes());
+        encode_compact_size(entry.tx.len() as u64, &mut out);
+        out.extend_from_slice(&entry.tx);
+    }
+    Ok(out)
+}
+
+pub fn decode_cmpctblock_payload(payload: &[u8]) -> io::Result<CmpctBlockPayload> {
+    if payload.len() as u64 > MAX_RELAY_MSG_BYTES {
+        return Err(invalid_data("cmpctblock payload too large"));
+    }
+    if payload.len() < BLOCK_HEADER_BYTES + 16 {
+        return Err(invalid_data("cmpctblock payload missing header or nonce"));
+    }
+    let mut header = [0u8; BLOCK_HEADER_BYTES];
+    header.copy_from_slice(&payload[..BLOCK_HEADER_BYTES]);
+    let mut nonce1 = [0u8; 8];
+    nonce1.copy_from_slice(&payload[BLOCK_HEADER_BYTES..BLOCK_HEADER_BYTES + 8]);
+    let mut nonce2 = [0u8; 8];
+    nonce2.copy_from_slice(&payload[BLOCK_HEADER_BYTES + 8..BLOCK_HEADER_BYTES + 16]);
+    let mut offset = BLOCK_HEADER_BYTES + 16;
+    let short_count = read_compact_size_at(payload, &mut offset)?;
+    if short_count > (payload.len() - offset) as u64 / COMPACT_SHORT_ID_BYTES as u64 {
+        return Err(invalid_data("cmpctblock payload truncated short IDs"));
+    }
+    let short_id_end = offset + (short_count as usize) * COMPACT_SHORT_ID_BYTES;
+    let mut next_offset = short_id_end;
+    let prefilled_count = read_compact_size_at(payload, &mut next_offset)?;
+    let total_entries = validate_cmpctblock_entry_count(short_count, prefilled_count)?;
+    let mut short_ids = Vec::new();
+    for chunk in payload[offset..short_id_end].chunks_exact(COMPACT_SHORT_ID_BYTES) {
+        let mut short_id = [0u8; COMPACT_SHORT_ID_BYTES];
+        short_id.copy_from_slice(chunk);
+        short_ids.push(short_id);
+    }
+    offset = next_offset;
+    let mut out = CmpctBlockPayload {
+        header,
+        nonce1: u64::from_le_bytes(nonce1),
+        nonce2: u64::from_le_bytes(nonce2),
+        short_ids,
+        prefilled: Vec::new(),
+    };
+    let mut prev = 0u64;
+    let mut total_tx_bytes = 0u64;
+    for entry_pos in 0..prefilled_count {
+        if payload.len().saturating_sub(offset) < COMPACT_RELAY_INDEX_BYTES {
+            return Err(invalid_data("cmpctblock payload truncated prefilled index"));
+        }
+        let index_end = offset + COMPACT_RELAY_INDEX_BYTES;
+        let index = u64::from(u32::from_le_bytes(
+            payload[offset..index_end]
+                .try_into()
+                .map_err(|_| invalid_data("cmpctblock payload truncated prefilled index"))?,
+        ));
+        offset = index_end;
+        if (entry_pos > 0 && index <= prev) || index >= total_entries {
+            return Err(invalid_data("compact relay index out of range"));
+        }
+        let tx_len = read_compact_size_at(payload, &mut offset)?;
+        if tx_len > payload[offset..].len() as u64 {
+            return Err(invalid_data("compact relay transaction truncated"));
+        }
+        total_tx_bytes = validate_blocktxn_transaction_size(tx_len, total_tx_bytes)?;
+        let tx_len = usize::try_from(tx_len)
+            .map_err(|_| invalid_data("compact relay transaction truncated"))?;
+        let tx = &payload[offset..offset + tx_len];
+        validate_compact_relay_tx(tx, "cmpctblock prefilled transaction is non-canonical")?;
+        out.prefilled.push(PrefilledTxn {
+            index,
+            tx: tx.to_vec(),
+        });
+        prev = index;
+        offset += tx_len;
+    }
+    if offset != payload.len() {
+        return Err(invalid_data("cmpctblock payload has trailing bytes"));
+    }
+    Ok(out)
+}
+
 fn validate_blocktxn_transaction_size(tx_len: u64, total_tx_bytes: u64) -> io::Result<u64> {
     if tx_len == 0 {
         return Err(invalid_data("blocktxn transaction is empty"));
@@ -1579,6 +1699,60 @@ fn validate_blocktxn_transaction_size(tx_len: u64, total_tx_bytes: u64) -> io::R
         return Err(invalid_data("blocktxn transactions exceed block size"));
     }
     Ok(total_tx_bytes + tx_len)
+}
+
+fn validate_compact_relay_tx(tx: &[u8], err_msg: &'static str) -> io::Result<()> {
+    let consumed = parse_tx(tx).map_err(|_| invalid_data(err_msg))?.3;
+    if consumed != tx.len() {
+        return Err(invalid_data(err_msg));
+    }
+    Ok(())
+}
+
+fn validate_cmpctblock_entry_count(short_count: u64, prefilled_count: u64) -> io::Result<u64> {
+    let total_entries = short_count
+        .checked_add(prefilled_count)
+        .ok_or_else(|| invalid_data("invalid compact relay entry count"))?;
+    if total_entries == 0 || total_entries > MAX_BLOCK_BYTES {
+        return Err(invalid_data("invalid compact relay entry count"));
+    }
+    Ok(total_entries)
+}
+
+fn read_compact_size_at(payload: &[u8], offset: &mut usize) -> io::Result<u64> {
+    let (value, consumed) = read_compact_size_bytes(&payload[*offset..])
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    *offset += consumed;
+    Ok(value)
+}
+
+fn cmpctblock_payload_byte_len(short_count: u64, prefilled: &[PrefilledTxn]) -> io::Result<u64> {
+    let limit = MAX_RELAY_MSG_BYTES;
+    let mut total = BLOCK_HEADER_BYTES as u64
+        + 16
+        + compact_size_wire_len(short_count)
+        + compact_size_wire_len(prefilled.len() as u64);
+    if short_count > (limit - total) / COMPACT_SHORT_ID_BYTES as u64 {
+        return Err(invalid_data("cmpctblock payload too large"));
+    }
+    total += short_count * COMPACT_SHORT_ID_BYTES as u64;
+    let total_entries = validate_cmpctblock_entry_count(short_count, prefilled.len() as u64)?;
+    let mut prev_plus_one = 0u64;
+    for entry in prefilled {
+        if entry.index < prev_plus_one || entry.index >= total_entries {
+            return Err(invalid_data("compact relay index out of range"));
+        }
+        let add = (COMPACT_RELAY_INDEX_BYTES as u64)
+            .checked_add(compact_size_wire_len(entry.tx.len() as u64))
+            .and_then(|v| v.checked_add(entry.tx.len() as u64))
+            .ok_or_else(|| invalid_data("cmpctblock payload too large"))?;
+        if add > limit - total {
+            return Err(invalid_data("cmpctblock payload too large"));
+        }
+        total += add;
+        prev_plus_one = entry.index + 1;
+    }
+    Ok(total)
 }
 
 fn validate_compact_relay_transactions(
@@ -2501,6 +2675,70 @@ mod tests {
             validate_blocktxn_transaction_size(1, MAX_BLOCK_BYTES),
             "blocktxn transactions exceed block size",
         );
+    }
+
+    #[test]
+    fn cmpctblock_payload_codec_matches_go_wire() {
+        let tx = minimal_blocktxn_test_tx_bytes(10);
+        let mut header = [0u8; BLOCK_HEADER_BYTES];
+        header[..3].copy_from_slice(&[1, 2, 3]);
+        let payload = CmpctBlockPayload {
+            header,
+            nonce1: 0x1122_3344_5566_7788,
+            nonce2: 0x8877_6655_4433_2211,
+            short_ids: vec![[1, 2, 3, 4, 5, 6]],
+            prefilled: vec![PrefilledTxn {
+                index: 1,
+                tx: tx.clone(),
+            }],
+        };
+        let encoded = encode_cmpctblock_payload(payload.clone()).expect("encode cmpctblock");
+        let nonce1 = payload.nonce1.to_le_bytes();
+        let nonce2 = payload.nonce2.to_le_bytes();
+        let fixed = [1, 1, 2, 3, 4, 5, 6, 1, 1, 0, 0, 0, tx.len() as u8];
+        let want = [header.as_slice(), &nonce1, &nonce2, &fixed, tx.as_slice()].concat();
+        assert_eq!(encoded, want);
+        assert_eq!(
+            decode_cmpctblock_payload(&encoded).expect("decode cmpctblock"),
+            payload
+        );
+    }
+
+    #[test]
+    fn cmpctblock_payload_rejects_malformed_and_capped_inputs() {
+        assert_cmpctblock_err(
+            cmpctblock_payload_byte_len(0, &[]),
+            "invalid compact relay entry count",
+        );
+        assert_cmpctblock_decode_err(
+            &vec![0u8; (MAX_RELAY_MSG_BYTES as usize) + 1],
+            "cmpctblock payload too large",
+        );
+        assert_cmpctblock_decode_err(&[0xfd, 0, 0], "non-minimal CompactSize");
+        assert_cmpctblock_decode_err(&[1, 1, 2], "cmpctblock payload truncated short IDs");
+        assert_cmpctblock_decode_err(&[0, 1, 1, 0, 0, 0], "compact relay index out of range");
+        assert_cmpctblock_decode_err(
+            &[1, 0, 0, 0, 0, 0, 0, 0, 0],
+            "cmpctblock payload has trailing bytes",
+        );
+    }
+
+    fn assert_cmpctblock_decode_err(tail: &[u8], want_err: &str) {
+        assert_cmpctblock_err(
+            decode_cmpctblock_payload(&cmpctblock_test_payload(tail)),
+            want_err,
+        );
+    }
+
+    fn assert_cmpctblock_err<T: std::fmt::Debug>(got: io::Result<T>, want_err: &str) {
+        let err = got.expect_err("cmpctblock operation succeeded").to_string();
+        assert!(err.contains(want_err), "got {err}, want {want_err}");
+    }
+
+    fn cmpctblock_test_payload(tail: &[u8]) -> Vec<u8> {
+        let mut payload = vec![0u8; BLOCK_HEADER_BYTES + 16];
+        payload.extend_from_slice(tail);
+        payload
     }
 
     fn minimal_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
