@@ -2503,9 +2503,9 @@ mod tests {
         );
     }
 
-    fn minimal_blocktxn_test_tx_bytes(nonce: u64) -> Vec<u8> {
+    fn minimal_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
         let mut out = vec![1, 0, 0, 0, 0];
-        out.extend(nonce.to_le_bytes());
+        out.extend(test_tag.to_le_bytes());
         out.extend([0; 8]);
         out
     }
