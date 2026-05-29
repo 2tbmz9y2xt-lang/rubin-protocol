@@ -2710,8 +2710,8 @@ mod tests {
             cmpctblock_payload_byte_len(0, &[]),
             "invalid compact relay entry count",
         );
-        assert_cmpctblock_err(
-            cmpctblock_payload_byte_len(MAX_RELAY_MSG_BYTES, &[]),
+        assert_cmpctblock_decode_err(
+            &vec![0u8; (MAX_RELAY_MSG_BYTES as usize) + 1],
             "cmpctblock payload too large",
         );
         assert_cmpctblock_decode_err(&[0xfd, 0, 0], "non-minimal CompactSize");
