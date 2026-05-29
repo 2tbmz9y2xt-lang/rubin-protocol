@@ -3879,6 +3879,38 @@ mod tests {
             }
         );
 
+        let second_listener = TcpListener::bind("127.0.0.1:0").expect("bind second");
+        let second_client = TcpStream::connect(second_listener.local_addr().expect("second addr"))
+            .expect("connect second");
+        let (second_stream, _) = second_listener.accept().expect("accept second");
+        let mut second_session =
+            PeerSession::new(second_stream, default_peer_runtime_config("devnet", 8))
+                .expect("second session");
+        second_session
+            .collect_live_responses(
+                WireMessage {
+                    command: MESSAGE_SENDCMPCT.to_string(),
+                    payload: sendcmpct_runtime_payload(1, COMPACT_RELAY_VERSION),
+                },
+                &mut engine,
+                None,
+            )
+            .expect("second peer sendcmpct");
+        assert_eq!(
+            session.remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 2,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
+        assert_eq!(
+            second_session.remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 1,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
+
         let err = session
             .collect_live_responses(
                 WireMessage {
@@ -3901,7 +3933,7 @@ mod tests {
             }
         );
 
-        let err = session
+        let err = second_session
             .collect_live_responses(
                 WireMessage {
                     command: MESSAGE_SENDCMPCT.to_string(),
@@ -3913,7 +3945,14 @@ mod tests {
             .err()
             .expect("short sendcmpct payload must fail");
         assert!(err.to_string().contains("sendcmpct payload width mismatch"));
-        let err = session
+        assert_eq!(
+            second_session.remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 1,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
+        let err = second_session
             .collect_live_responses(
                 WireMessage {
                     command: MESSAGE_SENDCMPCT.to_string(),
@@ -3925,6 +3964,39 @@ mod tests {
             .err()
             .expect("current-version unknown mode must fail");
         assert!(err.to_string().contains("unsupported compact relay mode"));
+        assert_eq!(
+            second_session.remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 1,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
+
+        session
+            .collect_live_responses(
+                WireMessage {
+                    command: MESSAGE_SENDCMPCT.to_string(),
+                    payload: sendcmpct_runtime_payload(0, COMPACT_RELAY_VERSION),
+                },
+                &mut engine,
+                None,
+            )
+            .expect("sendcmpct mode downgrade to disabled");
+        assert_eq!(
+            session.remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 0,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
+        assert_eq!(
+            second_session.remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 1,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
+        drop(second_client);
         drop(client);
     }
 
