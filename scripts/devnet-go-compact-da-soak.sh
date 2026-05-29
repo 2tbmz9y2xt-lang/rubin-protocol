@@ -129,18 +129,22 @@ import sys
 label, report_path = sys.argv[1:3]
 with open(report_path, encoding="utf-8") as fh:
     report = json.load(fh)
-pids = []
-for participant in report.get("participants", []):
+participants = report.get("participants")
+if not isinstance(participants, list) or not participants:
+    raise SystemExit(f"{label}: missing participant pid evidence")
+checks = []
+for participant in participants:
+    if not isinstance(participant, dict):
+        raise SystemExit(f"{label}: invalid participant entry: {participant!r}")
     pid = participant.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         raise SystemExit(f"{label}: invalid participant pid: {pid!r}")
-    pids.append(pid)
-for pid in pids:
-    expected = None
-    for participant in report.get("participants", []):
-        if participant.get("pid") == pid and isinstance(participant.get("binary"), str):
-            expected = os.path.basename(os.path.realpath(participant["binary"]))
-            break
+    binary = participant.get("binary")
+    if not isinstance(binary, str) or not binary.strip():
+        raise SystemExit(f"{label}: invalid participant binary for pid {pid}: {binary!r}")
+    expected = os.path.basename(os.path.realpath(binary))
+    checks.append((pid, expected))
+for pid, expected in checks:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -152,7 +156,7 @@ for pid in pids:
     if expected and actual and actual != expected:
         continue
     raise SystemExit(f"{label}: participant pid still alive after child cleanup: {pid}")
-print(json.dumps({"label": label, "participant_pids": pids, "cleanup_verified": True}, sort_keys=True))
+print(json.dumps({"label": label, "participant_pids": [pid for pid, _ in checks], "cleanup_verified": True}, sort_keys=True))
 PY
 }
 
