@@ -7,6 +7,7 @@ DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 GO_MODULE_ROOT="${REPO_ROOT}/clients/go"
 COMPACT_SCRIPT="${REPO_ROOT}/scripts/devnet-go-compact-relay.sh"
 DA_SCRIPT="${REPO_ROOT}/scripts/devnet-go-da-relay.sh"
+ENV_BIN="/usr/bin/env"
 : "${KEEP_TMP:=1}"
 export KEEP_TMP
 
@@ -44,6 +45,7 @@ resolve_spec_root() {
 require_executable compact-script "${COMPACT_SCRIPT}"
 require_executable da-script "${DA_SCRIPT}"
 require_executable dev-env "${DEV_ENV}"
+require_executable env "${ENV_BIN}"
 SPEC_ROOT="$(resolve_spec_root)"
 [[ -d "${SPEC_ROOT}" ]] || { echo "missing spec root: ${SPEC_ROOT}" >&2; exit 1; }
 SPEC_ROOT="$(cd "${SPEC_ROOT}" && pwd -P)"
@@ -116,8 +118,9 @@ PY
 
 run_child_soak() {
   local label="$1" script="$2" log="$3"
+  local -a child_cmd=("${ENV_BIN}" KEEP_TMP=1 RUBIN_PROCESS_KEEP_ARTIFACTS=1 RUBIN_PROCESS_ARTIFACT_PARENT="${ARTIFACT_ROOT}" "${script}")
   echo "Running ${label} soak" >&2
-  if ! env KEEP_TMP=1 RUBIN_PROCESS_KEEP_ARTIFACTS=1 RUBIN_PROCESS_ARTIFACT_PARENT="${ARTIFACT_ROOT}" "${script}" >"${log}" 2>&1; then
+  if ! "${child_cmd[@]}" >"${log}" 2>&1; then
     echo "${label} soak failed; log=${log}" >&2
     tail -n 80 "${log}" >&2 || true
     return 1
