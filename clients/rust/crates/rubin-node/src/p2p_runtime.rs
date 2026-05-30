@@ -140,6 +140,7 @@ pub struct CompactReconstructionResult {
     pub transactions: Vec<Vec<u8>>,
     pub partial_transactions: Vec<Option<Vec<u8>>>,
     pub missing_indexes: Vec<u64>,
+    pub missing_short_ids: Vec<CompactShortId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -209,6 +210,7 @@ pub struct PeerRelayContext<'a> {
     pub tx_pool: &'a std::sync::Mutex<crate::txpool::TxPool>,
 }
 
+#[derive(Debug, Default)]
 pub struct LiveMessageOutcome {
     pub responses: Vec<WireMessage>,
     pub tx_pool_cleanup: TxPoolCleanupPlan,
@@ -220,6 +222,16 @@ struct CompactModeSnapshot {
     version: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompactOutstandingRequest {
+    block_hash: [u8; 32],
+    header: [u8; BLOCK_HEADER_BYTES],
+    missing_short_ids: Vec<CompactShortId>,
+    partial_transactions: Vec<Option<Vec<u8>>>,
+    nonces: [u64; 2],
+    blocktxn_payload_cap: u64,
+    expires_at: Instant,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OrphanBlockEntry {
     block_hash: [u8; 32],
@@ -251,6 +263,7 @@ pub struct PeerSession {
     pending_tx_pool_cleanup: TxPoolCleanupPlan,
     prefetched_read_byte: Option<u8>,
     remote_compact_mode: CompactModeSnapshot,
+    compact_outstanding: Option<CompactOutstandingRequest>,
 }
 
 pub struct PeerManager {
@@ -369,6 +382,7 @@ impl PeerSession {
             pending_tx_pool_cleanup: TxPoolCleanupPlan::default(),
             prefetched_read_byte: None,
             remote_compact_mode: CompactModeSnapshot::default(),
+            compact_outstanding: None,
         })
     }
 
@@ -419,6 +433,15 @@ impl PeerSession {
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
+                if let Some(block_hash) = self
+                    .compact_outstanding
+                    .as_ref()
+                    .filter(|req| Instant::now() >= req.expires_at)
+                    .map(|req| req.block_hash)
+                {
+                    self.compact_outstanding = None;
+                    self.write_message(&compact_full_block_fallback_message(block_hash)?)?;
+                }
                 Ok(false)
             }
             Err(err) => Err(err),
@@ -432,6 +455,15 @@ impl PeerSession {
         let mut reader = PrefetchedReader {
             stream: &mut self.stream,
             prefetched_read_byte: self.prefetched_read_byte.take(),
+        };
+        let compact_mode = self.remote_compact_mode;
+        let blocktxn_payload_cap = self
+            .compact_outstanding
+            .as_ref()
+            .filter(|req| Instant::now() < req.expires_at)
+            .map(|req| req.blocktxn_payload_cap.min(MAX_RELAY_MSG_BYTES));
+        let payload_cap = move |command: &str| {
+            runtime_payload_cap_for_compact_session(command, compact_mode, blocktxn_payload_cap)
         };
         // NOTE on tx-oversize ban policy (parity gap with Go's
         // `peer.handleTx`):
@@ -452,10 +484,11 @@ impl PeerSession {
         // ban-score policy at the higher layer; that is intentionally
         // out of scope for this Q-* task (which only aligns the
         // malformed/parse-fail surface).
-        read_message_from(
+        read_message_from_with_payload_limit(
             &mut reader,
             network_magic(&self.cfg.network),
             MAX_RELAY_MSG_BYTES,
+            &payload_cap,
         )
     }
 
@@ -630,6 +663,8 @@ impl PeerSession {
                     tx_pool_cleanup,
                 })
             }
+            "cmpctblock" => self.handle_cmpctblock(&msg.payload, sync_engine, relay_ctx),
+            "blocktxn" => self.handle_blocktxn(&msg.payload, sync_engine),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
                     let outcome = crate::tx_relay::handle_received_tx(
@@ -826,6 +861,211 @@ impl PeerSession {
         Ok(())
     }
 
+    fn handle_cmpctblock(
+        &mut self,
+        payload: &[u8],
+        sync_engine: &mut SyncEngine,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
+    ) -> io::Result<LiveMessageOutcome> {
+        if self.remote_compact_mode.version != COMPACT_RELAY_VERSION
+            || self.remote_compact_mode.mode == 0
+        {
+            return Err(invalid_data("compact receive disabled"));
+        }
+        self.clear_expired_compact_outstanding_request();
+        let block = match decode_cmpctblock_payload(payload) {
+            Ok(block) => block,
+            Err(err) => {
+                self.bump_ban(10, &err.to_string());
+                return Err(err);
+            }
+        };
+        let parsed_header =
+            rubin_consensus::parse_block_header_bytes(&block.header).map_err(io::Error::other)?;
+        if let Err(err) = rubin_consensus::pow_check(&block.header, parsed_header.target) {
+            self.bump_ban(100, &err.to_string());
+            return Err(io::Error::new(io::ErrorKind::InvalidData, err.to_string()));
+        }
+        if matches!(sync_engine.cfg.expected_target, Some(expected) if parsed_header.target != expected)
+        {
+            self.bump_ban(100, "target mismatch");
+            return Err(invalid_data("target mismatch"));
+        }
+        let block_hash = block_hash(&block.header).map_err(io::Error::other)?;
+        if sync_engine
+            .has_block(block_hash)
+            .map_err(io::Error::other)?
+        {
+            self.clear_compact_outstanding_request_for_block(block_hash);
+            return Ok(LiveMessageOutcome::default());
+        }
+        let local_txs = match relay_ctx.and_then(|ctx| ctx.tx_pool.lock().ok()) {
+            Some(pool) => pool.select_transactions(
+                COMPACT_LOCAL_TX_CANDIDATE_LIMIT,
+                COMPACT_LOCAL_TX_CANDIDATE_BYTES_LIMIT,
+            ),
+            None => Vec::new(),
+        };
+        let result = match reconstruct_compact_block(&block, &local_txs) {
+            Ok(result) => result,
+            Err(_err) if !block.short_ids.is_empty() => {
+                return self.request_compact_full_block_fallback(block_hash);
+            }
+            Err(err) => return Err(err),
+        };
+        if !result.transactions.is_empty() {
+            return self.process_compact_transactions(
+                block_hash,
+                block.header,
+                &result.transactions,
+                sync_engine,
+            );
+        }
+        self.request_missing_compact_transactions(block, block_hash, result)
+    }
+    fn request_missing_compact_transactions(
+        &mut self,
+        block: CmpctBlockPayload,
+        block_hash: [u8; 32],
+        result: CompactReconstructionResult,
+    ) -> io::Result<LiveMessageOutcome> {
+        if self.compact_outstanding.is_some() {
+            return self.request_compact_full_block_fallback(block_hash);
+        }
+        let present_bytes = result
+            .partial_transactions
+            .iter()
+            .filter_map(Option::as_ref)
+            .try_fold(0u64, |total, tx| {
+                validate_blocktxn_transaction_size(tx.len() as u64, total)
+            })?;
+        let blocktxn_payload_cap =
+            32 + compact_size_wire_len(result.missing_indexes.len() as u64) + MAX_BLOCK_BYTES
+                - present_bytes
+                + result.missing_indexes.len() as u64 * MAX_COMPACT_SIZE_BYTES as u64;
+        let payload = encode_getblocktxn_payload(GetBlockTxnPayload {
+            block_hash,
+            indexes: result.missing_indexes.clone(),
+        })?;
+        self.compact_outstanding = Some(CompactOutstandingRequest {
+            block_hash,
+            header: block.header,
+            missing_short_ids: result.missing_short_ids,
+            partial_transactions: result.partial_transactions,
+            nonces: [block.nonce1, block.nonce2],
+            blocktxn_payload_cap,
+            expires_at: Instant::now() + DEFAULT_READ_DEADLINE,
+        });
+        Ok(LiveMessageOutcome {
+            responses: vec![WireMessage {
+                command: "getblocktxn".to_string(),
+                payload,
+            }],
+            ..Default::default()
+        })
+    }
+    fn handle_blocktxn(
+        &mut self,
+        payload: &[u8],
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<LiveMessageOutcome> {
+        if payload.len() < 32 {
+            self.bump_ban(10, "blocktxn payload missing block hash");
+            return Err(invalid_data("blocktxn payload missing block hash"));
+        }
+        self.clear_expired_compact_outstanding_request();
+        let mut response_hash = [0u8; 32];
+        response_hash.copy_from_slice(&payload[..32]);
+        let Some(req) = self.compact_outstanding.clone() else {
+            return Ok(LiveMessageOutcome::default());
+        };
+        if response_hash != req.block_hash {
+            return if payload.len() > 32 {
+                Err(invalid_data("stale blocktxn response"))
+            } else {
+                Ok(LiveMessageOutcome::default())
+            };
+        }
+        if payload.len() as u64 > req.blocktxn_payload_cap {
+            self.clear_compact_outstanding_request_for_block(req.block_hash);
+            self.bump_ban(10, "blocktxn payload exceeds outstanding cap");
+            return Err(invalid_data("blocktxn payload exceeds outstanding cap"));
+        }
+        let response = match decode_blocktxn_payload(payload) {
+            Ok(response) => response,
+            Err(err) => {
+                self.clear_compact_outstanding_request_for_block(req.block_hash);
+                self.bump_ban(10, &err.to_string());
+                return Err(err);
+            }
+        };
+        self.clear_compact_outstanding_request_for_block(req.block_hash);
+        let txs = match compact_fill_response_transactions(&req, response) {
+            Ok(txs) => txs,
+            Err(err)
+                if err
+                    .to_string()
+                    .contains("blocktxn transaction short id mismatch") =>
+            {
+                return self.request_compact_full_block_fallback(req.block_hash);
+            }
+            Err(err) => {
+                self.bump_ban(10, &err.to_string());
+                return Err(err);
+            }
+        };
+        self.process_compact_transactions(req.block_hash, req.header, &txs, sync_engine)
+    }
+    fn process_compact_transactions(
+        &mut self,
+        expected_hash: [u8; 32],
+        header: [u8; BLOCK_HEADER_BYTES],
+        txs: &[Vec<u8>],
+        sync_engine: &mut SyncEngine,
+    ) -> io::Result<LiveMessageOutcome> {
+        let block_bytes = match compact_block_bytes(header, txs) {
+            Ok(block_bytes) => block_bytes,
+            Err(_err) => {
+                return self.request_compact_full_block_fallback(expected_hash);
+            }
+        };
+        match self.handle_block(&block_bytes, sync_engine) {
+            Ok(tx_pool_cleanup) => {
+                self.clear_compact_outstanding_request_for_block(expected_hash);
+                Ok(LiveMessageOutcome {
+                    responses: self
+                        .prepare_block_request_if_behind(sync_engine)?
+                        .into_iter()
+                        .collect(),
+                    tx_pool_cleanup,
+                })
+            }
+            Err(err) => {
+                self.peer.last_error = err.to_string();
+                self.request_compact_full_block_fallback(expected_hash)
+            }
+        }
+    }
+    fn request_compact_full_block_fallback(
+        &mut self,
+        block_hash: [u8; 32],
+    ) -> io::Result<LiveMessageOutcome> {
+        self.clear_compact_outstanding_request_for_block(block_hash);
+        Ok(LiveMessageOutcome {
+            responses: vec![compact_full_block_fallback_message(block_hash)?],
+            ..Default::default()
+        })
+    }
+    fn clear_compact_outstanding_request_for_block(&mut self, block_hash: [u8; 32]) {
+        if self.compact_outstanding.as_ref().map(|req| req.block_hash) == Some(block_hash) {
+            self.compact_outstanding = None;
+        }
+    }
+    fn clear_expired_compact_outstanding_request(&mut self) {
+        if matches!(&self.compact_outstanding, Some(req) if Instant::now() >= req.expires_at) {
+            self.compact_outstanding = None;
+        }
+    }
     // Historically used by the inline run_block_sync_loop match; preserved under
     // #[cfg(test)] so the original behavioral test keeps documenting the
     // follow-up getblocks path. Production dispatch routes through
@@ -1174,7 +1414,7 @@ pub fn perform_version_handshake(
             &mut deadline_reader,
             network_magic(&session.cfg.network),
             MAX_RELAY_MSG_BYTES,
-            pre_handshake_payload_cap,
+            &pre_handshake_payload_cap,
         )?;
         match msg.command.as_str() {
             "version" => {
@@ -1287,7 +1527,7 @@ fn read_message_from<R: Read>(
         reader,
         expected_magic,
         max_payload_bytes,
-        runtime_payload_cap,
+        &runtime_payload_cap,
     )
 }
 
@@ -1295,7 +1535,7 @@ fn read_message_from_with_payload_limit<R: Read>(
     reader: &mut R,
     expected_magic: [u8; 4],
     max_payload_bytes: u64,
-    payload_cap: fn(&str) -> u64,
+    payload_cap: &dyn Fn(&str) -> u64,
 ) -> io::Result<WireMessage> {
     let mut header = [0u8; WIRE_HEADER_SIZE];
     reader.read_exact(&mut header)?;
@@ -1730,9 +1970,8 @@ pub fn reconstruct_compact_block(
     for entry in &payload.prefilled {
         partial[entry.index as usize] = Some(entry.tx.clone());
     }
-    let missing_indexes =
-        compact_missing(Some(&mut partial), total_entries, payload, &local_index)?;
-    if missing_indexes.is_empty() {
+    let missing = compact_missing(Some(&mut partial), total_entries, payload, &local_index)?;
+    if missing.0.is_empty() {
         compact_validate_present_transactions(partial.iter().filter_map(Option::as_deref))?;
         return Ok(CompactReconstructionResult {
             transactions: partial
@@ -1744,7 +1983,8 @@ pub fn reconstruct_compact_block(
     }
     Ok(CompactReconstructionResult {
         partial_transactions: partial,
-        missing_indexes,
+        missing_indexes: missing.0,
+        missing_short_ids: missing.1,
         ..Default::default()
     })
 }
@@ -1805,8 +2045,8 @@ fn compact_missing(
     total_entries: usize,
     payload: &CmpctBlockPayload,
     local_index: &CompactLocalIndex,
-) -> io::Result<Vec<u64>> {
-    let mut missing_indexes = Vec::new();
+) -> io::Result<(Vec<u64>, Vec<CompactShortId>)> {
+    let mut missing = (Vec::new(), Vec::new());
     let mut first_hit = HashMap::new();
     let mut short_pos = 0usize;
     let mut prefilled_pos = 0usize;
@@ -1830,9 +2070,9 @@ fn compact_missing(
                             txs[first_index as usize] = None;
                         }
                         first_hit.insert(short_id, u64::MAX);
-                        compact_push_missing(&mut missing_indexes, first_index)?;
+                        compact_push_missing(&mut missing, first_index, short_id)?;
                     }
-                    compact_push_missing(&mut missing_indexes, absolute_index as u64)?;
+                    compact_push_missing(&mut missing, absolute_index as u64, short_id)?;
                 } else {
                     first_hit.insert(short_id, absolute_index as u64);
                     if let Some(txs) = txs.as_deref_mut() {
@@ -1840,19 +2080,24 @@ fn compact_missing(
                     }
                 }
             }
-            None => compact_push_missing(&mut missing_indexes, absolute_index as u64)?,
+            None => compact_push_missing(&mut missing, absolute_index as u64, short_id)?,
         }
         short_pos += 1;
     }
     if let Some(txs) = txs {
         compact_validate_present_transactions(txs.iter().filter_map(Option::as_deref))?;
     }
-    Ok(missing_indexes)
+    Ok(missing)
 }
 
-fn compact_push_missing(missing: &mut Vec<u64>, index: u64) -> io::Result<()> {
-    missing.push(index);
-    (missing.len() <= MAX_COMPACT_RELAY_ENTRIES)
+fn compact_push_missing(
+    missing: &mut (Vec<u64>, Vec<CompactShortId>),
+    index: u64,
+    short_id: CompactShortId,
+) -> io::Result<()> {
+    missing.0.push(index);
+    missing.1.push(short_id);
+    (missing.0.len() <= MAX_COMPACT_RELAY_ENTRIES)
         .then_some(())
         .ok_or_else(|| invalid_data("too many compact relay missing transactions"))
 }
@@ -1962,6 +2207,60 @@ fn validate_compact_relay_transactions(
         total_payload_bytes += payload_add;
     }
     Ok(total_payload_bytes)
+}
+
+fn compact_full_block_fallback_message(block_hash: [u8; 32]) -> io::Result<WireMessage> {
+    Ok(WireMessage {
+        command: MESSAGE_GETDATA.to_string(),
+        payload: encode_inventory_vectors(&[InventoryVector {
+            kind: MSG_BLOCK,
+            hash: block_hash,
+        }])?,
+    })
+}
+fn compact_fill_response_transactions(
+    req: &CompactOutstandingRequest,
+    response: BlockTxnPayload,
+) -> io::Result<Vec<Vec<u8>>> {
+    if response.transactions.len() != req.missing_short_ids.len() {
+        return Err(invalid_data("blocktxn transaction count mismatch"));
+    }
+    let mut txs = req.partial_transactions.clone();
+    for ((slot, want_short_id), tx) in txs
+        .iter_mut()
+        .filter(|slot| slot.is_none())
+        .zip(&req.missing_short_ids)
+        .zip(&response.transactions)
+    {
+        let (_, _, wtxid, consumed) =
+            parse_tx(tx).map_err(|_| invalid_data("blocktxn transaction is non-canonical"))?;
+        if consumed != tx.len() {
+            return Err(invalid_data("blocktxn transaction is non-canonical"));
+        }
+        if compact_shortid(wtxid, req.nonces[0], req.nonces[1]) != *want_short_id {
+            return Err(invalid_data("blocktxn transaction short id mismatch"));
+        }
+        *slot = Some(tx.clone());
+    }
+    let txs = txs
+        .into_iter()
+        .map(|tx| tx.ok_or_else(|| invalid_data("compact block transaction missing")))
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(txs)
+}
+fn compact_block_bytes(header: [u8; BLOCK_HEADER_BYTES], txs: &[Vec<u8>]) -> io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(BLOCK_HEADER_BYTES + MAX_COMPACT_SIZE_BYTES);
+    out.extend_from_slice(&header);
+    encode_compact_size(txs.len() as u64, &mut out);
+    let mut total_tx_bytes = 0u64;
+    for tx in txs {
+        total_tx_bytes = validate_blocktxn_transaction_size(tx.len() as u64, total_tx_bytes)?;
+        if tx.len() > (MAX_BLOCK_BYTES as usize).saturating_sub(out.len()) {
+            return Err(invalid_data("compact block exceeds block size"));
+        }
+        out.extend_from_slice(tx);
+    }
+    Ok(out)
 }
 
 fn compact_size_wire_len(n: u64) -> u64 {
@@ -2174,7 +2473,7 @@ fn unmarshal_wire_message(
         &header,
         expected_magic,
         max_message_size,
-        runtime_payload_cap,
+        &runtime_payload_cap,
     )?;
     let total_len = WIRE_HEADER_SIZE + envelope.payload_len;
     if raw.len() < total_len {
@@ -2207,7 +2506,7 @@ fn parse_envelope_header(
     header: &[u8; WIRE_HEADER_SIZE],
     expected_magic: [u8; 4],
     max_message_size: u64,
-    payload_cap: fn(&str) -> u64,
+    payload_cap: &dyn Fn(&str) -> u64,
 ) -> io::Result<ParsedEnvelopeHeader> {
     if header[0..4] != expected_magic {
         return Err(io::Error::new(
@@ -2334,6 +2633,19 @@ fn runtime_payload_cap(command: &str) -> u64 {
         MESSAGE_BLOCK | MESSAGE_TX => MAX_BLOCK_BYTES,
         "headers" => MAX_HEADERS_PAYLOAD_BYTES,
         _ => 0,
+    }
+}
+
+fn runtime_payload_cap_for_compact_session(
+    command: &str,
+    compact_mode: CompactModeSnapshot,
+    blocktxn_payload_cap: Option<u64>,
+) -> u64 {
+    let compact_receive = compact_mode.version == COMPACT_RELAY_VERSION && compact_mode.mode != 0;
+    match command {
+        "cmpctblock" if compact_receive => MAX_RELAY_MSG_BYTES,
+        "blocktxn" => blocktxn_payload_cap.unwrap_or((compact_receive as u64) * 32),
+        _ => runtime_payload_cap(command),
     }
 }
 
@@ -3187,7 +3499,6 @@ mod tests {
         let err = got.expect_err("cmpctblock operation succeeded").to_string();
         assert!(err.contains(want_err), "got {err}, want {want_err}");
     }
-
     fn cmpctblock_test_payload(tail: &[u8]) -> Vec<u8> {
         let mut payload = vec![0u8; BLOCK_HEADER_BYTES + 16];
         payload.extend_from_slice(tail);
@@ -3284,6 +3595,52 @@ mod tests {
         build_block_bytes(prev_hash, merkle_root, POW_LIMIT, timestamp, &[coinbase])
     }
 
+    #[test]
+    fn compact_receive_flow_smoke() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        let mut session =
+            PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
+        let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+        let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+        let block1 = height_one_coinbase_only_block(genesis_hash, genesis.header.timestamp + 1);
+        let header: [u8; BLOCK_HEADER_BYTES] = block1[..BLOCK_HEADER_BYTES].try_into().unwrap();
+        let tx = block1[BLOCK_HEADER_BYTES + 1..].to_vec();
+        let block_hash = block_hash(&header).expect("block hash");
+        let short_id = compact_reconstruct_short_id_for_tx(&tx);
+        let missing = encode_cmpctblock_payload(CmpctBlockPayload {
+            header,
+            nonce1: 0,
+            nonce2: 0,
+            short_ids: vec![short_id],
+            prefilled: Vec::new(),
+        })
+        .expect("cmpctblock");
+        session.remote_compact_mode = CompactModeSnapshot {
+            mode: 1,
+            version: COMPACT_RELAY_VERSION,
+        };
+
+        let mut engine = test_sync_engine_with_genesis();
+        session
+            .handle_cmpctblock(&missing, &mut engine, None)
+            .unwrap();
+        session.compact_outstanding.as_mut().unwrap().expires_at = Instant::now();
+        assert!(!session.poll_read_ready(Duration::from_millis(1)).unwrap());
+        let _ = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read compact fallback");
+        session
+            .handle_cmpctblock(&missing, &mut engine, None)
+            .unwrap();
+        let response = encode_blocktxn_payload(BlockTxnPayload {
+            block_hash,
+            transactions: vec![tx.clone()],
+        })
+        .unwrap();
+        session.handle_blocktxn(&response, &mut engine).unwrap();
+        assert!(engine.has_block(block_hash).unwrap());
+    }
     #[test]
     fn p2p_version_handshake_bidirectional_ok() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -4230,8 +4587,7 @@ mod tests {
                 &mut engine,
                 None,
             )
-            .err()
-            .expect("future version must fail before future-mode validation");
+            .unwrap_err();
         assert!(err
             .to_string()
             .contains("unsupported compact relay version"));
@@ -4252,8 +4608,7 @@ mod tests {
                 &mut engine,
                 None,
             )
-            .err()
-            .expect("short sendcmpct payload must fail");
+            .unwrap_err();
         assert!(err.to_string().contains("sendcmpct payload width mismatch"));
         assert_eq!(
             second_session.remote_compact_mode,
@@ -4271,8 +4626,7 @@ mod tests {
                 &mut engine,
                 None,
             )
-            .err()
-            .expect("current-version unknown mode must fail");
+            .unwrap_err();
         assert!(err.to_string().contains("unsupported compact relay mode"));
         assert_eq!(
             second_session.remote_compact_mode,
