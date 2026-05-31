@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 use crate::p2p_runtime::{
-    perform_version_handshake, LiveMessageOutcome, PeerManager, PeerRelayContext,
-    PeerRuntimeConfig, VersionPayloadV1, WireMessage,
+    perform_version_handshake, snapshot_compact_local_tx_candidates, LiveMessageOutcome,
+    PeerManager, PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1, WireMessage,
 };
 use crate::sync_reorg::TxPoolCleanupPlan;
 use crate::tx_relay::{PeerOutbox, TxRelayState};
@@ -812,24 +812,6 @@ fn handle_peer(
         addr: peer_addr.clone(),
     };
 
-    // Build relay context for message loop. RUB-178 / GitHub #1438
-    // introduced the lifecycle plumbing; `tx_pool` threads the existing
-    // `shared.tx_pool` handle (already used by the block-apply cleanup
-    // path in `apply_tx_pool_cleanup`) into the peer-tx dispatch so
-    // peer transactions reach canonical admission via the seam in
-    // `collect_live_responses`. RUB-173 / GitHub #1420 then swapped that
-    // seam to `add_tx_with_source(..., TxSource::Remote, ...)` for
-    // source-aware classification. No new lifecycle ownership: this is
-    // the same `Arc<Mutex<TxPool>>` introduced for cleanup in PR #876.
-    let relay_ctx = PeerRelayContext {
-        relay_state: &shared.relay_state,
-        peer_manager: &shared.peer_manager,
-        local_addr: &shared.local_addr,
-        peer_registered_addr: &peer_addr,
-        peer_writers: &shared.peer_outboxes,
-        tx_pool: &shared.tx_pool,
-    };
-
     {
         let mut engine = shared
             .sync_engine
@@ -869,7 +851,7 @@ fn handle_peer(
         let msg = session
             .read_message()
             .map_err(|err| format!("read message: {err}"))?;
-        let outbound_messages = {
+        let (outbound_messages, disconnect_after_responses) = {
             // Validate payload size before acquiring engine lock.
             if msg.payload.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
                 return Err(format!(
@@ -878,10 +860,38 @@ fn handle_peer(
                     rubin_consensus::constants::MAX_RELAY_MSG_BYTES,
                 ));
             }
+            let compact_local_txs = if msg.command == "cmpctblock" {
+                let needs_snapshot = {
+                    let engine = shared
+                        .sync_engine
+                        .lock()
+                        .map_err(|_| "sync engine unavailable".to_string())?;
+                    session
+                        .cmpctblock_needs_local_tx_snapshot(&msg.payload, &engine)
+                        .map_err(|err| format!("precheck cmpctblock: {err}"))?
+                };
+                if needs_snapshot {
+                    Some(snapshot_compact_local_tx_candidates(&shared.tx_pool))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let relay_ctx = PeerRelayContext {
+                relay_state: &shared.relay_state,
+                peer_manager: &shared.peer_manager,
+                local_addr: &shared.local_addr,
+                peer_registered_addr: &peer_addr,
+                peer_writers: &shared.peer_outboxes,
+                tx_pool: &shared.tx_pool,
+                compact_local_txs: compact_local_txs.as_deref(),
+            };
             // Lock scope minimized: engine lock held only during
             // collect_live_responses.  Payload size check above ensures
-            // no unbounded deserialization under lock.
-            let (responses, tx_pool_cleanup) = {
+            // no unbounded deserialization under lock; compact mempool
+            // candidate snapshots are prevalidated above and taken before this lock.
+            let (responses, tx_pool_cleanup, disconnect_after_responses) = {
                 let mut engine = shared
                     .sync_engine
                     .lock()
@@ -895,7 +905,7 @@ fn handle_peer(
                 &shared,
                 tx_pool_cleanup,
             )?);
-            responses
+            (responses, disconnect_after_responses)
         };
         for outbound in outbound_messages {
             session
@@ -903,6 +913,9 @@ fn handle_peer(
                 .map_err(|err| format!("handle live message: {err}"))?;
         }
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
+        if let Some(reason) = disconnect_after_responses {
+            return Err(format!("handle live message: {reason}"));
+        }
     }
     Ok(())
 }
@@ -991,11 +1004,12 @@ fn finalize_live_message_outcome(
     shared: &SharedServiceState,
     outcome: io::Result<LiveMessageOutcome>,
     pending_cleanup: TxPoolCleanupPlan,
-) -> Result<(Vec<WireMessage>, TxPoolCleanupPlan), String> {
+) -> Result<(Vec<WireMessage>, TxPoolCleanupPlan, Option<String>), String> {
     match outcome {
         Ok(outcome) => Ok((
             outcome.responses,
             outcome.tx_pool_cleanup.merge(pending_cleanup),
+            outcome.disconnect_after_responses,
         )),
         Err(err) => {
             log_tx_pool_cleanup_requeue_failure(&maybe_apply_tx_pool_cleanup(
@@ -1602,14 +1616,16 @@ mod tests {
                 payload: Vec::new(),
             }],
             tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            ..Default::default()
         };
         let pending =
             TxPoolCleanupPlan::from_parts_for_test(vec![[0x22; 32]], Vec::new(), Vec::new());
 
-        let (responses, merged_cleanup) =
+        let (responses, merged_cleanup, disconnect_after_responses) =
             finalize_live_message_outcome(&shared, Ok(outcome), pending).expect("success path");
 
         assert_eq!(responses.len(), 1);
+        assert_eq!(disconnect_after_responses, None);
         assert!(
             !merged_cleanup.is_empty(),
             "pending cleanup must survive the success path"

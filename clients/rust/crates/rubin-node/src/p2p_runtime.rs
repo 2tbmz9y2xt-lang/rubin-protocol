@@ -47,6 +47,8 @@ const MAX_COMPACT_RELAY_ENTRIES: usize = MAX_INVENTORY_VECTORS;
 const MAX_COMPACT_RELAY_INDEX_VALUE: u64 = MAX_BLOCK_BYTES - 1;
 const COMPACT_LOCAL_TX_CANDIDATE_LIMIT: usize = 1000;
 const COMPACT_LOCAL_TX_CANDIDATE_BYTES_LIMIT: usize = 1 << 20;
+const COMPACT_PREFETCHED_FRAME_DRAIN_GRACE: Duration = Duration::from_millis(50);
+const STALE_BLOCKTXN_RESPONSE_ERR: &str = "stale blocktxn response";
 type CompactShortId = [u8; COMPACT_SHORT_ID_BYTES];
 type CompactLocalIndex = HashMap<CompactShortId, Option<Vec<u8>>>;
 pub const MSG_BLOCK: u8 = 0x01;
@@ -209,12 +211,32 @@ pub struct PeerRelayContext<'a> {
     /// (`clients/go/node/p2p/mempool.go:45-54`); that method's last
     /// statement (line 53) is `p.mempool.AddRemoteTx(raw)`.
     pub tx_pool: &'a std::sync::Mutex<crate::txpool::TxPool>,
+    pub compact_local_txs: Option<&'a [Vec<u8>]>,
 }
 
 #[derive(Debug, Default)]
 pub struct LiveMessageOutcome {
     pub responses: Vec<WireMessage>,
     pub tx_pool_cleanup: TxPoolCleanupPlan,
+    pub disconnect_after_responses: Option<String>,
+}
+
+pub(crate) fn snapshot_compact_local_tx_candidates(
+    tx_pool: &std::sync::Mutex<crate::txpool::TxPool>,
+) -> Vec<Vec<u8>> {
+    match tx_pool.lock() {
+        Ok(pool) => pool.select_transactions(
+            COMPACT_LOCAL_TX_CANDIDATE_LIMIT,
+            COMPACT_LOCAL_TX_CANDIDATE_BYTES_LIMIT,
+        ),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn prepend_compact_fallback(outcome: &mut LiveMessageOutcome, fallback: Option<WireMessage>) {
+    if let Some(fallback) = fallback {
+        outcome.responses.insert(0, fallback);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -421,14 +443,42 @@ impl PeerSession {
         self.cfg.read_deadline
     }
 
+    pub fn compact_receive_ready(&self) -> bool {
+        self.cfg.enable_compact_receive
+            && self.remote_compact_mode.version == COMPACT_RELAY_VERSION
+            && self.remote_compact_mode.mode != 0
+    }
+
+    pub fn cmpctblock_needs_local_tx_snapshot(
+        &self,
+        payload: &[u8],
+        sync_engine: &SyncEngine,
+    ) -> io::Result<bool> {
+        if !self.compact_receive_ready()
+            || !cmpctblock_receive_header_precheck_passes(payload, sync_engine.cfg.expected_target)
+        {
+            return Ok(false);
+        }
+        let Ok(block) = decode_cmpctblock_payload(payload) else {
+            return Ok(false);
+        };
+        if block.short_ids.is_empty() {
+            return Ok(false);
+        }
+        let block_hash = block_hash(&block.header).map_err(io::Error::other)?;
+        Ok(!sync_engine
+            .has_block(block_hash)
+            .map_err(io::Error::other)?)
+    }
+
     pub fn poll_read_ready(&mut self, timeout: Duration) -> io::Result<bool> {
+        if self.prefetched_read_byte.is_some() {
+            return Ok(true);
+        }
         if self.send_expired_compact_fallback()? {
             return Ok(false);
         }
         self.clear_expired_compact_late_blocktxn();
-        if self.prefetched_read_byte.is_some() {
-            return Ok(true);
-        }
         let timeout = self.compact_read_timeout(timeout);
         if timeout.is_zero() {
             self.send_expired_compact_fallback()?;
@@ -462,14 +512,22 @@ impl PeerSession {
     }
 
     pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
-        self.send_expired_compact_fallback()?;
+        let prefetched_frame_in_progress = self.prefetched_read_byte.is_some();
+        if !prefetched_frame_in_progress {
+            self.send_expired_compact_fallback()?;
+        }
         self.clear_expired_compact_late_blocktxn();
-        let read_deadline = self.compact_read_deadline(timeout);
+        let read_deadline = if prefetched_frame_in_progress {
+            Instant::now() + self.compact_prefetched_read_timeout(timeout)
+        } else {
+            self.compact_read_deadline(timeout)
+        };
         let compact_mode = self.remote_compact_mode;
+        let now = Instant::now();
         let active_blocktxn_payload_cap = self
             .compact_outstanding
             .as_ref()
-            .filter(|req| Instant::now() < req.expires_at)
+            .filter(|req| prefetched_frame_in_progress || now < req.expires_at)
             .map(|req| req.blocktxn_payload_cap.min(MAX_RELAY_MSG_BYTES));
         let late_blocktxn_payload_cap = self
             .compact_late_blocktxn
@@ -536,6 +594,14 @@ impl PeerSession {
             .checked_duration_since(Instant::now())
             .unwrap_or(Duration::ZERO)
             .min(timeout)
+    }
+
+    fn compact_prefetched_read_timeout(&self, timeout: Duration) -> Duration {
+        let compact_timeout = self.compact_read_timeout(timeout);
+        if !compact_timeout.is_zero() {
+            return compact_timeout;
+        }
+        timeout.min(COMPACT_PREFETCHED_FRAME_DRAIN_GRACE)
     }
 
     fn compact_read_deadline(&self, timeout: Duration) -> Instant {
@@ -685,6 +751,7 @@ impl PeerSession {
                     Ok(LiveMessageOutcome {
                         responses: Vec::new(),
                         tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                        ..Default::default()
                     })
                 } else {
                     Ok(LiveMessageOutcome {
@@ -693,6 +760,7 @@ impl PeerSession {
                             payload: encode_inventory_vectors(&requests)?,
                         }],
                         tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                        ..Default::default()
                     })
                 }
             }
@@ -703,6 +771,7 @@ impl PeerSession {
                     relay_ctx.map(|c| c.relay_state),
                 )?,
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                ..Default::default()
             }),
             MESSAGE_GETBLOCKS => {
                 let items = self.handle_getblocks(&msg.payload, sync_engine)?;
@@ -710,6 +779,7 @@ impl PeerSession {
                     Ok(LiveMessageOutcome {
                         responses: Vec::new(),
                         tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                        ..Default::default()
                     })
                 } else {
                     Ok(LiveMessageOutcome {
@@ -718,6 +788,7 @@ impl PeerSession {
                             payload: encode_inventory_vectors(&items)?,
                         }],
                         tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                        ..Default::default()
                     })
                 }
             }
@@ -729,6 +800,7 @@ impl PeerSession {
                         .into_iter()
                         .collect(),
                     tx_pool_cleanup,
+                    ..Default::default()
                 })
             }
             "cmpctblock" => self.handle_cmpctblock(&msg.payload, sync_engine, relay_ctx),
@@ -866,17 +938,20 @@ impl PeerSession {
                 Ok(LiveMessageOutcome {
                     responses: Vec::new(),
                     tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    ..Default::default()
                 })
             }
             "headers" | "pong" => Ok(LiveMessageOutcome {
                 responses: Vec::new(),
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                ..Default::default()
             }),
             MESSAGE_SENDCMPCT => {
                 self.handle_sendcmpct(&msg.payload)?;
                 Ok(LiveMessageOutcome {
                     responses: Vec::new(),
                     tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    ..Default::default()
                 })
             }
             "ping" => Ok(LiveMessageOutcome {
@@ -885,6 +960,7 @@ impl PeerSession {
                     payload: Vec::new(),
                 }],
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                ..Default::default()
             }),
             MESSAGE_GETADDR => Ok(LiveMessageOutcome {
                 responses: vec![WireMessage {
@@ -892,12 +968,14 @@ impl PeerSession {
                     payload: marshal_empty_addr_payload(),
                 }],
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                ..Default::default()
             }),
             MESSAGE_ADDR => {
                 let _ = unmarshal_addr_payload(&msg.payload)?;
                 Ok(LiveMessageOutcome {
                     responses: Vec::new(),
                     tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                    ..Default::default()
                 })
             }
             other => {
@@ -916,6 +994,9 @@ impl PeerSession {
         let outcome = self.collect_live_responses(msg, sync_engine, relay_ctx)?;
         for response in outcome.responses {
             self.write_message(&response)?;
+        }
+        if let Some(reason) = outcome.disconnect_after_responses {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
         }
         Ok(outcome.tx_pool_cleanup)
     }
@@ -941,7 +1022,6 @@ impl PeerSession {
         {
             return Err(invalid_data("compact receive disabled"));
         }
-        self.send_expired_compact_fallback()?;
         self.validate_cmpctblock_receive_header(payload, sync_engine)?;
         let block = match decode_cmpctblock_payload(payload) {
             Ok(block) => block,
@@ -958,30 +1038,33 @@ impl PeerSession {
             self.clear_compact_outstanding_request_for_block(block_hash);
             return Ok(LiveMessageOutcome::default());
         }
-        let local_txs = match relay_ctx.and_then(|ctx| ctx.tx_pool.lock().ok()) {
-            Some(pool) => pool.select_transactions(
-                COMPACT_LOCAL_TX_CANDIDATE_LIMIT,
-                COMPACT_LOCAL_TX_CANDIDATE_BYTES_LIMIT,
-            ),
-            None => Vec::new(),
-        };
-        let result = match reconstruct_compact_block(&block, &local_txs) {
+        let expired_fallback = self.take_expired_compact_fallback_message()?;
+        let local_txs = relay_ctx
+            .and_then(|ctx| ctx.compact_local_txs)
+            .unwrap_or(&[]);
+        let result = match reconstruct_compact_block(&block, local_txs) {
             Ok(result) => result,
             Err(_err) if !block.short_ids.is_empty() => {
-                return self.request_compact_full_block_fallback(block_hash);
+                let mut outcome = self.request_compact_full_block_fallback(block_hash)?;
+                prepend_compact_fallback(&mut outcome, expired_fallback);
+                return Ok(outcome);
             }
             Err(err) => return Err(err),
         };
         if !result.transactions.is_empty() {
-            return self.process_compact_transactions(
+            let mut outcome = self.process_compact_transactions(
                 block_hash,
                 block.header,
                 &result.transactions,
                 sync_engine,
                 !block.short_ids.is_empty(),
-            );
+            )?;
+            prepend_compact_fallback(&mut outcome, expired_fallback);
+            return Ok(outcome);
         }
-        self.request_missing_compact_transactions(block, block_hash, result)
+        let mut outcome = self.request_missing_compact_transactions(block, block_hash, result)?;
+        prepend_compact_fallback(&mut outcome, expired_fallback);
+        Ok(outcome)
     }
     fn validate_cmpctblock_receive_header(
         &mut self,
@@ -1064,20 +1147,29 @@ impl PeerSession {
             self.compact_outstanding.as_ref(),
             Some(req) if Instant::now() >= req.expires_at && response_hash != req.block_hash
         ) {
-            self.send_expired_compact_fallback()?;
+            let mut outcome = LiveMessageOutcome::default();
+            prepend_compact_fallback(&mut outcome, self.take_expired_compact_fallback_message()?);
+            if payload.len() > 32 {
+                outcome.disconnect_after_responses = Some(STALE_BLOCKTXN_RESPONSE_ERR.to_string());
+            }
+            return Ok(outcome);
         }
         let Some(req) = self.compact_outstanding.clone() else {
+            let mut outcome = LiveMessageOutcome::default();
             if self.clear_matching_late_blocktxn(response_hash, payload.len() as u64)? {
-                return Ok(LiveMessageOutcome::default());
+                return Ok(outcome);
             }
-            return Ok(LiveMessageOutcome::default());
+            if payload.len() > 32 {
+                outcome.disconnect_after_responses = Some(STALE_BLOCKTXN_RESPONSE_ERR.to_string());
+            }
+            return Ok(outcome);
         };
         if response_hash != req.block_hash {
             if self.clear_matching_late_blocktxn(response_hash, payload.len() as u64)? {
                 return Ok(LiveMessageOutcome::default());
             }
             return if payload.len() > 32 {
-                Err(invalid_data("stale blocktxn response"))
+                Err(invalid_data(STALE_BLOCKTXN_RESPONSE_ERR))
             } else {
                 Ok(LiveMessageOutcome::default())
             };
@@ -1159,6 +1251,7 @@ impl PeerSession {
                         .into_iter()
                         .collect(),
                     tx_pool_cleanup,
+                    ..Default::default()
                 })
             }
             Err(err) => {
@@ -1194,15 +1287,21 @@ impl PeerSession {
         }
     }
     fn send_expired_compact_fallback(&mut self) -> io::Result<bool> {
+        let Some(fallback) = self.take_expired_compact_fallback_message()? else {
+            return Ok(false);
+        };
+        self.write_message(&fallback)?;
+        Ok(true)
+    }
+    fn take_expired_compact_fallback_message(&mut self) -> io::Result<Option<WireMessage>> {
         self.clear_expired_compact_late_blocktxn();
         if !matches!(&self.compact_outstanding, Some(req) if Instant::now() >= req.expires_at) {
-            return Ok(false);
+            return Ok(None);
         }
         let req = self.compact_outstanding.take().expect("checked above");
         let block_hash = req.block_hash;
         self.preserve_compact_request_for_late_blocktxn(req);
-        self.write_message(&compact_full_block_fallback_message(block_hash)?)?;
-        Ok(true)
+        Ok(Some(compact_full_block_fallback_message(block_hash)?))
     }
     fn preserve_compact_request_for_late_blocktxn(&mut self, req: CompactOutstandingRequest) {
         self.compact_late_blocktxn = Some(CompactLateBlockTxnDrain {
@@ -2139,6 +2238,22 @@ fn cmpctblock_header_validation_candidate(payload: &[u8]) -> Option<[u8; BLOCK_H
     let mut header = [0u8; BLOCK_HEADER_BYTES];
     header.copy_from_slice(&payload[..BLOCK_HEADER_BYTES]);
     Some(header)
+}
+
+fn cmpctblock_receive_header_precheck_passes(
+    payload: &[u8],
+    expected_target: Option<[u8; 32]>,
+) -> bool {
+    let Some(header) = cmpctblock_header_validation_candidate(payload) else {
+        return true;
+    };
+    let Ok(parsed_header) = rubin_consensus::parse_block_header_bytes(&header) else {
+        return false;
+    };
+    if rubin_consensus::pow_check(&header, parsed_header.target).is_err() {
+        return false;
+    }
+    !matches!(expected_target, Some(expected) if parsed_header.target != expected)
 }
 
 fn has_cmpctblock_header_validation_shape(payload: &[u8]) -> bool {
@@ -4074,6 +4189,49 @@ mod tests {
         assert_eq!(late.command, "blocktxn");
         session.handle_blocktxn(&late.payload, &mut engine).unwrap();
         assert!(session.compact_late_blocktxn.is_none());
+        let stale_hash = [0x55; 32];
+        session.compact_late_blocktxn = Some(CompactLateBlockTxnDrain {
+            block_hash,
+            blocktxn_payload_cap: MAX_RELAY_MSG_BYTES,
+            expires_at: Instant::now() + DEFAULT_READ_DEADLINE,
+        });
+        let outcome = session
+            .handle_blocktxn(&stale_hash, &mut engine)
+            .expect("hash-only stale blocktxn ignored");
+        assert_eq!(outcome.disconnect_after_responses, None);
+        assert!(session.compact_late_blocktxn.is_some());
+        let stale_body = encode_blocktxn_payload(BlockTxnPayload {
+            block_hash: stale_hash,
+            transactions: vec![tx.clone()],
+        })
+        .unwrap();
+        let outcome = session
+            .handle_blocktxn(&stale_body, &mut engine)
+            .expect("stale body queued for disconnect");
+        assert_eq!(
+            outcome.disconnect_after_responses.as_deref(),
+            Some(STALE_BLOCKTXN_RESPONSE_ERR)
+        );
+        session.compact_late_blocktxn = None;
+        session
+            .handle_cmpctblock(&missing, &mut engine, None)
+            .unwrap();
+        session.compact_outstanding.as_mut().unwrap().expires_at = Instant::now();
+        let err = session
+            .handle_live_message(
+                WireMessage {
+                    command: "blocktxn".to_string(),
+                    payload: stale_body.clone(),
+                },
+                &mut engine,
+                None,
+            )
+            .expect_err("expired mismatched body disconnects after fallback");
+        assert!(err.to_string().contains(STALE_BLOCKTXN_RESPONSE_ERR));
+        let fallback = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read fallback before stale body disconnect");
+        assert_eq!(fallback.command, MESSAGE_GETDATA);
+        session.compact_late_blocktxn = None;
         session
             .handle_cmpctblock(&missing, &mut engine, None)
             .unwrap();
@@ -4081,10 +4239,8 @@ mod tests {
         let outcome = session
             .handle_cmpctblock(&missing, &mut engine, None)
             .expect("expired outstanding cmpctblock sends fallback before replacement");
-        assert_eq!(outcome.responses[0].command, "getblocktxn");
-        let fallback = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
-            .expect("read handler fallback");
-        assert_eq!(fallback.command, MESSAGE_GETDATA);
+        assert_eq!(outcome.responses[0].command, MESSAGE_GETDATA);
+        assert_eq!(outcome.responses[1].command, "getblocktxn");
         let response = encode_blocktxn_payload(BlockTxnPayload {
             block_hash,
             transactions: vec![tx.clone()],
@@ -4152,6 +4308,72 @@ mod tests {
     }
 
     #[test]
+    fn compact_snapshot_precheck_requires_valid_unknown_short_ids() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let _client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        let mut session =
+            PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
+        let engine = test_sync_engine_with_genesis();
+        let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+        let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+        let block1 = height_one_coinbase_only_block(genesis_hash, genesis.header.timestamp + 1);
+        let header: [u8; BLOCK_HEADER_BYTES] = block1[..BLOCK_HEADER_BYTES].try_into().unwrap();
+        let tx = block1[BLOCK_HEADER_BYTES + 1..].to_vec();
+        let short_id = compact_reconstruct_short_id_for_tx(&tx);
+        let missing = encode_cmpctblock_payload(CmpctBlockPayload {
+            header,
+            nonce1: 0,
+            nonce2: 0,
+            short_ids: vec![short_id],
+            prefilled: Vec::new(),
+        })
+        .expect("cmpctblock");
+
+        assert!(!session
+            .cmpctblock_needs_local_tx_snapshot(&missing, &engine)
+            .expect("disabled precheck"));
+        session.cfg.enable_compact_receive = true;
+        session.remote_compact_mode = CompactModeSnapshot {
+            mode: 1,
+            version: COMPACT_RELAY_VERSION,
+        };
+        assert!(session
+            .cmpctblock_needs_local_tx_snapshot(&missing, &engine)
+            .expect("valid unknown short-id precheck"));
+
+        let mut malformed = missing.clone();
+        malformed.push(0);
+        assert!(!session
+            .cmpctblock_needs_local_tx_snapshot(&malformed, &engine)
+            .expect("malformed precheck"));
+
+        let all_prefilled = encode_cmpctblock_payload(CmpctBlockPayload {
+            header,
+            nonce1: 0,
+            nonce2: 0,
+            short_ids: Vec::new(),
+            prefilled: vec![PrefilledTxn { index: 0, tx }],
+        })
+        .expect("all-prefilled cmpctblock");
+        assert!(!session
+            .cmpctblock_needs_local_tx_snapshot(&all_prefilled, &engine)
+            .expect("all-prefilled precheck"));
+
+        let known = encode_cmpctblock_payload(CmpctBlockPayload {
+            header: genesis.header_bytes,
+            nonce1: 0,
+            nonce2: 0,
+            short_ids: vec![[1u8; COMPACT_SHORT_ID_BYTES]],
+            prefilled: Vec::new(),
+        })
+        .expect("known cmpctblock");
+        assert!(!session
+            .cmpctblock_needs_local_tx_snapshot(&known, &engine)
+            .expect("known block precheck"));
+    }
+
+    #[test]
     fn compact_receive_expiry_clamps_poll_and_prefetched_reads() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let mut client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
@@ -4183,6 +4405,46 @@ mod tests {
         assert!(session.compact_late_blocktxn.is_some());
 
         session.compact_late_blocktxn = None;
+        session.compact_outstanding = Some(CompactOutstandingRequest {
+            block_hash,
+            header: [0u8; BLOCK_HEADER_BYTES],
+            missing_indexes: vec![0],
+            missing_short_ids: vec![[0u8; COMPACT_SHORT_ID_BYTES]],
+            partial_transactions: vec![None],
+            nonces: [0, 0],
+            blocktxn_payload_cap: MAX_RELAY_MSG_BYTES,
+            expires_at: Instant::now() + Duration::from_millis(150),
+        });
+        let matching_blocktxn = encode_blocktxn_payload(BlockTxnPayload {
+            block_hash,
+            transactions: Vec::new(),
+        })
+        .expect("matching blocktxn");
+        client
+            .write_all(
+                &marshal_wire_message(
+                    &WireMessage {
+                        command: "blocktxn".to_string(),
+                        payload: matching_blocktxn.clone(),
+                    },
+                    network_magic("devnet"),
+                    MAX_RELAY_MSG_BYTES,
+                )
+                .unwrap(),
+            )
+            .expect("write matching blocktxn");
+        client.flush().expect("flush matching blocktxn");
+        assert!(session.poll_read_ready(Duration::from_secs(1)).unwrap());
+        session.compact_outstanding.as_mut().unwrap().expires_at =
+            Instant::now() - Duration::from_millis(1);
+        let msg = session
+            .read_message_with_timeout(Duration::from_secs(1))
+            .expect("prefetched matching blocktxn should read before expiry fallback");
+        assert_eq!(msg.command, "blocktxn");
+        assert_eq!(msg.payload, matching_blocktxn);
+        assert!(session.compact_outstanding.is_some());
+        assert!(session.compact_late_blocktxn.is_none());
+
         session.compact_outstanding = Some(CompactOutstandingRequest {
             block_hash,
             header: [0u8; BLOCK_HEADER_BYTES],
@@ -5523,6 +5785,7 @@ mod tests {
                 peer_registered_addr: "sender:8333",
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
+                compact_local_txs: None,
             };
 
             let msg = WireMessage {
@@ -5725,6 +5988,7 @@ mod tests {
                 peer_registered_addr: "sender:8333",
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
+                compact_local_txs: None,
             };
 
             let msg = WireMessage {
