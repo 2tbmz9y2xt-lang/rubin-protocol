@@ -1512,15 +1512,17 @@ impl CompactFallbackFrameReader<'_> {
 
 impl Read for CompactFallbackFrameReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         if let Some(first_byte) = self.prefetched_read_byte.take() {
-            if buf.is_empty() {
-                self.prefetched_read_byte = Some(first_byte);
-                return Ok(0);
-            }
             buf[0] = first_byte;
             return Ok(1);
         }
         loop {
+            if self.send_expired_compact_outstanding_fallback()? {
+                continue;
+            }
             let expiry = self.compact_outstanding.as_ref().map(|req| req.expires_at);
             let timeout = compact_expiry_bounded_read_timeout(expiry, self.read_timeout);
             self.stream
@@ -4235,6 +4237,39 @@ mod tests {
             .write_all(&header[1..])
             .expect("write ping after fallback");
         reader.join().expect("read_message thread");
+    }
+
+    #[test]
+    fn compact_fallback_frame_reader_sends_expired_fallback_before_ready_read() {
+        let (mut session, mut client) = test_peer_session();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("client read timeout");
+        let block_hash = [0xdd; 32];
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(req);
+        client.write_all(b"x").expect("write ready byte");
+
+        let mut reader = CompactFallbackFrameReader {
+            stream: &mut session.stream,
+            prefetched_read_byte: None,
+            compact_outstanding: &mut session.compact_outstanding,
+            read_timeout: Duration::from_secs(1),
+            write_timeout: session.cfg.write_deadline,
+            network_magic: network_magic(&session.cfg.network),
+        };
+        let mut empty = [];
+        assert_eq!(reader.read(&mut empty).expect("zero-length read"), 0);
+        assert!(reader.compact_outstanding.is_some());
+
+        let mut buf = [0u8; 1];
+        assert_eq!(reader.read(&mut buf).expect("read ready byte"), 1);
+        assert_eq!(buf[0], b'x');
+        drop(reader);
+
+        assert!(session.compact_outstanding.is_none());
+        assert_fallback_getdata(&mut client, block_hash);
     }
 
     fn large_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
