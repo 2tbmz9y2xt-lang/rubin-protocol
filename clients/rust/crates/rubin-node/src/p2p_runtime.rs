@@ -2331,8 +2331,49 @@ fn compact_full_block_fallback_message(block_hash: [u8; 32]) -> io::Result<WireM
     })
 }
 fn compact_block_hash_from_payload(payload: &[u8]) -> io::Result<[u8; 32]> {
-    let payload = decode_cmpctblock_payload(payload)?;
-    block_hash(&payload.header).map_err(io::Error::other)
+    if payload.len() as u64 > MAX_RELAY_MSG_BYTES {
+        return Err(invalid_data("cmpctblock payload too large"));
+    }
+    if payload.len() < BLOCK_HEADER_BYTES + 16 {
+        return Err(invalid_data("cmpctblock payload missing header or nonce"));
+    }
+    let mut offset = BLOCK_HEADER_BYTES + 16;
+    let short_count = read_compact_size_at(payload, &mut offset)?;
+    if short_count > (payload.len() - offset) as u64 / COMPACT_SHORT_ID_BYTES as u64 {
+        return Err(invalid_data("cmpctblock payload truncated short IDs"));
+    }
+    offset += (short_count as usize) * COMPACT_SHORT_ID_BYTES;
+    let prefilled_count = read_compact_size_at(payload, &mut offset)?;
+    let total_entries = validate_cmpctblock_entry_count(short_count, prefilled_count)?;
+    let mut prev = 0u64;
+    let mut total_tx_bytes = 0u64;
+    for entry_pos in 0..prefilled_count {
+        if payload.len().saturating_sub(offset) < COMPACT_RELAY_INDEX_BYTES {
+            return Err(invalid_data("cmpctblock payload truncated prefilled index"));
+        }
+        let index_end = offset + COMPACT_RELAY_INDEX_BYTES;
+        let index = u64::from(u32::from_le_bytes(
+            payload[offset..index_end]
+                .try_into()
+                .map_err(|_| invalid_data("cmpctblock payload truncated prefilled index"))?,
+        ));
+        offset = index_end;
+        if (entry_pos > 0 && index <= prev) || index >= total_entries {
+            return Err(invalid_data("compact relay index out of range"));
+        }
+        let tx_len = read_compact_size_at(payload, &mut offset)?;
+        if tx_len > payload[offset..].len() as u64 {
+            return Err(invalid_data("compact relay transaction truncated"));
+        }
+        total_tx_bytes = validate_blocktxn_transaction_size(tx_len, total_tx_bytes)?;
+        offset += usize::try_from(tx_len)
+            .map_err(|_| invalid_data("compact relay transaction truncated"))?;
+        prev = index;
+    }
+    if offset != payload.len() {
+        return Err(invalid_data("cmpctblock payload has trailing bytes"));
+    }
+    block_hash(&payload[..BLOCK_HEADER_BYTES]).map_err(io::Error::other)
 }
 fn compact_validate_unique_getblocktxn_indexes(indexes: &[u64]) -> io::Result<()> {
     if indexes.len() < 2 {
@@ -3377,6 +3418,7 @@ mod tests {
             }),
             "cmpctblock payload missing header or nonce",
         );
+        assert!(session.compact_announced.is_empty());
         let outcome = session
             .handle_getblocktxn(&request(bad_hash, vec![0]), &engine)
             .expect("unannounced getblocktxn");
@@ -3412,6 +3454,65 @@ mod tests {
         assert_blocktxn_err(
             validate_blocktxn_transaction_size(MAX_BLOCK_BYTES + 1, 0),
             "blocktxn transaction too large",
+        );
+    }
+
+    #[test]
+    fn getblocktxn_cmpctblock_hash_fastpath_avoids_tx_parse() {
+        let mut header = [0u8; BLOCK_HEADER_BYTES];
+        header[..3].copy_from_slice(&[7, 8, 9]);
+        let mut payload = header.to_vec();
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.extend_from_slice(&2u64.to_le_bytes());
+        encode_compact_size(0, &mut payload);
+        encode_compact_size(1, &mut payload);
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        encode_compact_size(1, &mut payload);
+        payload.push(0xff);
+
+        assert_cmpctblock_err(
+            decode_cmpctblock_payload(&payload),
+            "cmpctblock prefilled transaction is non-canonical",
+        );
+        assert_eq!(
+            compact_block_hash_from_payload(&payload).expect("structural hash"),
+            block_hash(&header).expect("expected hash")
+        );
+
+        for (tail, want_err) in [
+            (&[0xfd, 0, 0][..], "non-minimal CompactSize"),
+            (&[1, 1, 2][..], "cmpctblock payload truncated short IDs"),
+            (&[0, 0][..], "invalid compact relay entry count"),
+            (&[0, 0xfd, 0, 0][..], "non-minimal CompactSize"),
+            (&[0, 1, 1, 0, 0, 0][..], "compact relay index out of range"),
+            (
+                &[1, 0, 0, 0, 0, 0, 0, 0, 0][..],
+                "cmpctblock payload has trailing bytes",
+            ),
+        ] {
+            assert_cmpctblock_err(
+                compact_block_hash_from_payload(&cmpctblock_test_payload(tail)),
+                want_err,
+            );
+        }
+
+        let valid_tx = minimal_blocktxn_test_tx_bytes(12);
+        let mut truncated_tx = Vec::new();
+        encode_compact_size((valid_tx.len() + 1) as u64, &mut truncated_tx);
+        truncated_tx.extend_from_slice(&valid_tx);
+        assert_cmpctblock_err(
+            compact_block_hash_from_payload(&cmpctblock_test_payload(&cmpctblock_prefilled_tail(
+                0,
+                &truncated_tx,
+            ))),
+            "compact relay transaction truncated",
+        );
+        assert_cmpctblock_err(
+            compact_block_hash_from_payload(&cmpctblock_test_payload(&cmpctblock_prefilled_tail(
+                0,
+                &[0],
+            ))),
+            "blocktxn transaction is empty",
         );
     }
 
