@@ -444,15 +444,7 @@ impl PeerSession {
                     io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                 ) =>
             {
-                if let Some(block_hash) = self
-                    .compact_outstanding
-                    .as_ref()
-                    .filter(|req| Instant::now() >= req.expires_at)
-                    .map(|req| req.block_hash)
-                {
-                    self.compact_outstanding = None;
-                    self.write_message(&compact_full_block_fallback_message(block_hash)?)?;
-                }
+                self.send_expired_compact_outstanding_fallback()?;
                 Ok(false)
             }
             Err(err) => Err(err),
@@ -1151,10 +1143,33 @@ impl PeerSession {
             self.compact_outstanding = None;
         }
     }
-    fn clear_expired_compact_outstanding_request(&mut self) {
-        if matches!(&self.compact_outstanding, Some(req) if Instant::now() >= req.expires_at) {
-            self.compact_outstanding = None;
+    fn pop_expired_compact_outstanding_block_hash_and_payload_cap(
+        &mut self,
+    ) -> Option<([u8; 32], u64)> {
+        if self
+            .compact_outstanding_expiry()
+            .is_none_or(|expiry| Instant::now() < expiry)
+        {
+            return None;
         }
+        self.compact_outstanding
+            .take()
+            .map(|req| (req.block_hash, req.blocktxn_payload_cap))
+    }
+    fn send_expired_compact_outstanding_fallback(&mut self) -> io::Result<bool> {
+        let Some((block_hash, _payload_cap)) =
+            self.pop_expired_compact_outstanding_block_hash_and_payload_cap()
+        else {
+            return Ok(false);
+        };
+        self.write_message(&compact_full_block_fallback_message(block_hash)?)?;
+        Ok(true)
+    }
+    fn clear_expired_compact_outstanding_request(&mut self) {
+        let _ = self.pop_expired_compact_outstanding_block_hash_and_payload_cap();
+    }
+    fn compact_outstanding_expiry(&self) -> Option<Instant> {
+        self.compact_outstanding.as_ref().map(|req| req.expires_at)
     }
     fn compact_receive_active(&self) -> bool {
         self.cfg.enable_compact_receive
@@ -4057,6 +4072,89 @@ mod tests {
                 .map(|req| req.block_hash),
             Some(active_hash),
             "stale fallback cleared unrelated outstanding compact request"
+        );
+    }
+
+    #[test]
+    fn compact_fallback_expiry_go_parity_matrix() {
+        let (mut session, mut client) = test_peer_session();
+        let active_hash = [0x77; 32];
+        session.compact_outstanding = Some(compact_outstanding_test_request(active_hash));
+        assert!(session.compact_outstanding_expiry().is_some());
+        assert!(!session
+            .send_expired_compact_outstanding_fallback()
+            .expect("nonexpired fallback"));
+        assert_eq!(
+            session
+                .compact_outstanding
+                .as_ref()
+                .map(|req| req.block_hash),
+            Some(active_hash)
+        );
+
+        let expired_hash = [0x88; 32];
+        let mut expired_req = compact_outstanding_test_request(expired_hash);
+        expired_req.blocktxn_payload_cap = 123;
+        expired_req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(expired_req);
+        let (got_hash, got_cap) = session
+            .pop_expired_compact_outstanding_block_hash_and_payload_cap()
+            .expect("expired pop");
+        assert_eq!(got_hash, expired_hash);
+        assert_eq!(got_cap, 123);
+        assert!(session.compact_outstanding.is_none());
+        assert!(session
+            .pop_expired_compact_outstanding_block_hash_and_payload_cap()
+            .is_none());
+
+        session.compact_outstanding = Some(compact_outstanding_test_request(expired_hash));
+        session.compact_outstanding.as_mut().unwrap().expires_at =
+            Instant::now() - Duration::from_secs(1);
+        assert!(session
+            .send_expired_compact_outstanding_fallback()
+            .expect("expired fallback"));
+        assert!(session.compact_outstanding.is_none());
+        let _ = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read direct fallback getdata");
+        assert!(!session
+            .send_expired_compact_outstanding_fallback()
+            .expect("duplicate fallback"));
+
+        let (mut failed_session, _failed_client) = test_peer_session();
+        let mut failed_req = compact_outstanding_test_request([0x99; 32]);
+        failed_req.expires_at = Instant::now() - Duration::from_secs(1);
+        failed_session.compact_outstanding = Some(failed_req);
+        failed_session
+            .stream
+            .shutdown(std::net::Shutdown::Both)
+            .expect("shutdown stream");
+        assert!(failed_session
+            .send_expired_compact_outstanding_fallback()
+            .is_err());
+        assert!(failed_session.compact_outstanding.is_none());
+    }
+
+    #[test]
+    fn compact_fallback_poll_read_ready_emits_expired_fallback() {
+        let (mut session, mut client) = test_peer_session();
+        let block_hash = [0xaa; 32];
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(req);
+
+        assert!(!session
+            .poll_read_ready(Duration::from_millis(10))
+            .expect("poll read ready"));
+        assert!(session.compact_outstanding.is_none());
+        let msg = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read idle fallback getdata");
+        assert_eq!(msg.command, MESSAGE_GETDATA);
+        assert_eq!(
+            decode_inventory_vectors(&msg.payload).expect("decode idle fallback inventory"),
+            vec![InventoryVector {
+                kind: MSG_BLOCK,
+                hash: block_hash
+            }]
         );
     }
 
