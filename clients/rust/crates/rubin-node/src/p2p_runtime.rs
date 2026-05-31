@@ -449,8 +449,16 @@ impl PeerSession {
     }
 
     pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
-        self.send_expired_compact_outstanding_fallback()?;
-        let timeout = self.compact_expiry_bounded_read_timeout(timeout);
+        while self.prefetched_read_byte.is_none() {
+            let had_outstanding = self.compact_outstanding.is_some();
+            if self.poll_read_ready(timeout)? {
+                break;
+            }
+            if had_outstanding && self.compact_outstanding.is_none() {
+                continue;
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "peer read timeout"));
+        }
         self.stream
             .set_read_timeout(Some(timeout))
             .map_err(io::Error::other)?;
@@ -491,19 +499,12 @@ impl PeerSession {
         // ban-score policy at the higher layer; that is intentionally
         // out of scope for this Q-* task (which only aligns the
         // malformed/parse-fail surface).
-        match read_message_from_with_payload_limit(
+        read_message_from_with_payload_limit(
             &mut reader,
             network_magic(&self.cfg.network),
             MAX_RELAY_MSG_BYTES,
             &payload_cap,
-        ) {
-            Ok(message) => Ok(message),
-            Err(err) if is_socket_read_timeout(&err) => {
-                self.send_expired_compact_outstanding_fallback()?;
-                Err(err)
-            }
-            Err(err) => Err(err),
-        }
+        )
     }
 
     pub fn write_message(&mut self, msg: &WireMessage) -> io::Result<()> {
@@ -4213,7 +4214,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_fallback_read_message_timeout_is_bounded_by_expiry() {
+    fn compact_fallback_read_message_continues_after_expiry_fallback() {
         let (mut session, mut client) = test_peer_session();
         client
             .set_read_timeout(Some(Duration::from_secs(1)))
@@ -4223,17 +4224,14 @@ mod tests {
         req.expires_at = Instant::now() + Duration::from_millis(30);
         session.compact_outstanding = Some(req);
 
-        let started = Instant::now();
-        let err = match session.read_message_with_timeout(Duration::from_secs(2)) {
-            Ok(_) => panic!("read unexpectedly succeeded before compact expiry fallback"),
-            Err(err) => err,
-        };
-        assert!(is_socket_read_timeout(&err));
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "read used the full peer read timeout instead of compact expiry"
-        );
-        assert!(session.compact_outstanding.is_none());
+        let reader = thread::spawn(move || {
+            let msg = session
+                .read_message_with_timeout(Duration::from_secs(2))
+                .expect("continue reading after compact expiry fallback");
+            assert_eq!(msg.command, "ping");
+            assert!(session.compact_outstanding.is_none());
+        });
+
         let fallback = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
             .expect("read expiry-bounded fallback getdata");
         assert_eq!(fallback.command, MESSAGE_GETDATA);
@@ -4245,6 +4243,12 @@ mod tests {
                 hash: block_hash
             }]
         );
+        let header =
+            build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
+        client
+            .write_all(&header)
+            .expect("write ping after fallback");
+        reader.join().expect("read_message thread");
     }
 
     fn large_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
