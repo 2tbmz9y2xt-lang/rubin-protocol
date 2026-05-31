@@ -425,7 +425,9 @@ impl PeerSession {
         if self.prefetched_read_byte.is_some() {
             return Ok(true);
         }
-        self.send_expired_compact_outstanding_fallback()?;
+        if self.send_expired_compact_outstanding_fallback()? {
+            return Ok(false);
+        }
         let timeout =
             compact_expiry_bounded_read_timeout(self.compact_outstanding_expiry(), timeout);
         self.stream
