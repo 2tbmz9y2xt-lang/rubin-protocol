@@ -1260,6 +1260,7 @@ impl PeerSession {
     ) -> io::Result<TxPoolCleanupPlan> {
         let parsed = parse_block_bytes(block_bytes).map_err(io::Error::other)?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(io::Error::other)?;
+        self.clear_compact_outstanding_request_for_block(block_hash_bytes);
         if sync_engine
             .has_block(block_hash_bytes)
             .map_err(io::Error::other)?
@@ -3975,6 +3976,88 @@ mod tests {
         out.extend(test_tag.to_le_bytes());
         out.extend([0; 8]);
         out
+    }
+
+    fn compact_outstanding_test_request(block_hash: [u8; 32]) -> CompactOutstandingRequest {
+        CompactOutstandingRequest {
+            block_hash,
+            header: [0u8; BLOCK_HEADER_BYTES],
+            missing_indexes: vec![0],
+            missing_short_ids: vec![[0x01; COMPACT_SHORT_ID_BYTES]],
+            partial_transactions: vec![None],
+            nonces: [0, 0],
+            blocktxn_payload_cap: 64,
+            expires_at: Instant::now() + DEFAULT_READ_DEADLINE,
+        }
+    }
+
+    #[test]
+    fn compact_outstanding_clear_go_parity_matrix() {
+        let (mut session, _client) = test_peer_session();
+        let mut engine = test_sync_engine_with_genesis();
+        let block = devnet_genesis_block_bytes();
+        let block_hash = block_hash(&block[..BLOCK_HEADER_BYTES]).expect("genesis hash");
+
+        session.compact_outstanding = Some(compact_outstanding_test_request(block_hash));
+        session
+            .handle_block(&block, &mut engine)
+            .expect("already-have full block");
+        assert!(
+            session.compact_outstanding.is_none(),
+            "matching full block did not clear outstanding compact request"
+        );
+
+        let active_hash = [0x55; 32];
+        session.compact_outstanding = Some(compact_outstanding_test_request(active_hash));
+        session
+            .handle_block(&block, &mut engine)
+            .expect("nonmatching full block");
+        assert_eq!(
+            session
+                .compact_outstanding
+                .as_ref()
+                .map(|req| req.block_hash),
+            Some(active_hash),
+            "nonmatching full block cleared unrelated outstanding compact request"
+        );
+
+        session.clear_compact_outstanding_request_for_block([0x66; 32]);
+        assert_eq!(
+            session
+                .compact_outstanding
+                .as_ref()
+                .map(|req| req.block_hash),
+            Some(active_hash),
+            "nonmatching explicit clear corrupted outstanding compact request"
+        );
+        session.clear_compact_outstanding_request_for_block(active_hash);
+        session.clear_compact_outstanding_request_for_block(active_hash);
+        assert!(
+            session.compact_outstanding.is_none(),
+            "matching explicit clear was not idempotent"
+        );
+
+        session.compact_outstanding = Some(compact_outstanding_test_request(block_hash));
+        session
+            .request_compact_full_block_fallback(block_hash)
+            .expect("matching fallback");
+        assert!(
+            session.compact_outstanding.is_none(),
+            "matching fallback left outstanding compact request active"
+        );
+
+        session.compact_outstanding = Some(compact_outstanding_test_request(active_hash));
+        session
+            .request_compact_full_block_fallback(block_hash)
+            .expect("stale fallback");
+        assert_eq!(
+            session
+                .compact_outstanding
+                .as_ref()
+                .map(|req| req.block_hash),
+            Some(active_hash),
+            "stale fallback cleared unrelated outstanding compact request"
+        );
     }
 
     fn large_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
