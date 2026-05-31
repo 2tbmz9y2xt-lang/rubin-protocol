@@ -425,6 +425,11 @@ impl PeerSession {
         if self.prefetched_read_byte.is_some() {
             return Ok(true);
         }
+        if self.send_expired_compact_outstanding_fallback()? {
+            return Ok(false);
+        }
+        let timeout =
+            compact_expiry_bounded_read_timeout(self.compact_outstanding_expiry(), timeout);
         self.stream
             .set_read_timeout(Some(timeout))
             .map_err(io::Error::other)?;
@@ -438,21 +443,8 @@ impl PeerSession {
                 self.prefetched_read_byte = Some(probe[0]);
                 Ok(true)
             }
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                if let Some(block_hash) = self
-                    .compact_outstanding
-                    .as_ref()
-                    .filter(|req| Instant::now() >= req.expires_at)
-                    .map(|req| req.block_hash)
-                {
-                    self.compact_outstanding = None;
-                    self.write_message(&compact_full_block_fallback_message(block_hash)?)?;
-                }
+            Err(err) if is_socket_read_timeout(&err) => {
+                self.send_expired_compact_outstanding_fallback()?;
                 Ok(false)
             }
             Err(err) => Err(err),
@@ -460,19 +452,33 @@ impl PeerSession {
     }
 
     pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
-        self.stream
-            .set_read_timeout(Some(timeout))
-            .map_err(io::Error::other)?;
+        if self.prefetched_read_byte.is_some() {
+            self.send_expired_compact_outstanding_fallback()?;
+        }
+        while self.prefetched_read_byte.is_none() {
+            let had_outstanding = self.compact_outstanding.is_some();
+            if self.poll_read_ready(timeout)? {
+                break;
+            }
+            if had_outstanding && self.compact_outstanding.is_none() {
+                continue;
+            }
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "peer read timeout"));
+        }
         let compact_receive = self.compact_receive_active();
-        let mut reader = PrefetchedReader {
-            stream: &mut self.stream,
-            prefetched_read_byte: self.prefetched_read_byte.take(),
-        };
         let blocktxn_payload_cap = self
             .compact_outstanding
             .as_ref()
             .filter(|req| Instant::now() < req.expires_at)
             .map(|req| req.blocktxn_payload_cap.min(MAX_RELAY_MSG_BYTES));
+        let mut reader = CompactFallbackFrameReader {
+            stream: &mut self.stream,
+            prefetched_read_byte: self.prefetched_read_byte.take(),
+            compact_outstanding: &mut self.compact_outstanding,
+            read_timeout: timeout,
+            write_timeout: self.cfg.write_deadline,
+            network_magic: network_magic(&self.cfg.network),
+        };
         let payload_cap = move |command: &str| match command {
             "cmpctblock" if compact_receive => MAX_RELAY_MSG_BYTES,
             MESSAGE_GETBLOCKTXN if compact_receive => MAX_GETBLOCKTXN_PAYLOAD_BYTES,
@@ -525,11 +531,7 @@ impl PeerSession {
         };
         let header =
             build_envelope_header(network_magic(&self.cfg.network), &msg.command, &msg.payload)?;
-        self.stream.write_all(&header)?;
-        if !msg.payload.is_empty() {
-            self.stream.write_all(&msg.payload)?;
-        }
-        self.stream.flush()?;
+        write_wire_message_to_stream(&mut self.stream, self.cfg.write_deadline, &header, msg)?;
         if let Some(block_hash) = compact_announcement {
             self.mark_compact_block_announced(block_hash);
         }
@@ -1151,10 +1153,25 @@ impl PeerSession {
             self.compact_outstanding = None;
         }
     }
+    fn pop_expired_compact_outstanding_block_hash_and_payload_cap(
+        &mut self,
+    ) -> Option<([u8; 32], u64)> {
+        pop_expired_compact_outstanding(&mut self.compact_outstanding)
+    }
+    fn send_expired_compact_outstanding_fallback(&mut self) -> io::Result<bool> {
+        let Some((block_hash, _payload_cap)) =
+            self.pop_expired_compact_outstanding_block_hash_and_payload_cap()
+        else {
+            return Ok(false);
+        };
+        self.write_message(&compact_full_block_fallback_message(block_hash)?)?;
+        Ok(true)
+    }
     fn clear_expired_compact_outstanding_request(&mut self) {
-        if matches!(&self.compact_outstanding, Some(req) if Instant::now() >= req.expires_at) {
-            self.compact_outstanding = None;
-        }
+        let _ = self.pop_expired_compact_outstanding_block_hash_and_payload_cap();
+    }
+    fn compact_outstanding_expiry(&self) -> Option<Instant> {
+        self.compact_outstanding.as_ref().map(|req| req.expires_at)
     }
     fn compact_receive_active(&self) -> bool {
         self.cfg.enable_compact_receive
@@ -1470,26 +1487,57 @@ impl Read for DeadlineReader {
     }
 }
 
-struct PrefetchedReader<'a> {
+struct CompactFallbackFrameReader<'a> {
     stream: &'a mut TcpStream,
     prefetched_read_byte: Option<u8>,
+    compact_outstanding: &'a mut Option<CompactOutstandingRequest>,
+    read_timeout: Duration,
+    write_timeout: Duration,
+    network_magic: [u8; 4],
 }
 
-impl Read for PrefetchedReader<'_> {
+impl CompactFallbackFrameReader<'_> {
+    fn send_expired_compact_outstanding_fallback(&mut self) -> io::Result<bool> {
+        let Some((block_hash, _payload_cap)) =
+            pop_expired_compact_outstanding(self.compact_outstanding)
+        else {
+            return Ok(false);
+        };
+        let msg = compact_full_block_fallback_message(block_hash)?;
+        let header = build_envelope_header(self.network_magic, &msg.command, &msg.payload)?;
+        write_wire_message_to_stream(self.stream, self.write_timeout, &header, &msg)?;
+        Ok(true)
+    }
+}
+
+impl Read for CompactFallbackFrameReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(first_byte) = self.prefetched_read_byte.take() {
-            if buf.is_empty() {
-                self.prefetched_read_byte = Some(first_byte);
-                return Ok(0);
-            }
-            buf[0] = first_byte;
-            if buf.len() == 1 {
-                return Ok(1);
-            }
-            let read = self.stream.read(&mut buf[1..])?;
-            return Ok(read + 1);
+        if buf.is_empty() {
+            return Ok(0);
         }
-        self.stream.read(buf)
+        if let Some(first_byte) = self.prefetched_read_byte.take() {
+            buf[0] = first_byte;
+            return Ok(1);
+        }
+        loop {
+            if self.send_expired_compact_outstanding_fallback()? {
+                continue;
+            }
+            let expiry = self.compact_outstanding.as_ref().map(|req| req.expires_at);
+            let timeout = compact_expiry_bounded_read_timeout(expiry, self.read_timeout);
+            self.stream
+                .set_read_timeout(Some(timeout))
+                .map_err(io::Error::other)?;
+            match self.stream.read(buf) {
+                Err(err) if is_socket_read_timeout(&err) => {
+                    if self.send_expired_compact_outstanding_fallback()? {
+                        continue;
+                    }
+                    return Err(err);
+                }
+                result => return result,
+            }
+        }
     }
 }
 
@@ -1642,6 +1690,56 @@ fn read_message_from<R: Read>(
         max_payload_bytes,
         &runtime_payload_cap,
     )
+}
+
+fn is_socket_read_timeout(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
+}
+
+fn compact_expiry_bounded_read_timeout(expiry: Option<Instant>, timeout: Duration) -> Duration {
+    expiry
+        .map(|expiry| {
+            let remaining = expiry.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                Duration::from_millis(1).min(timeout)
+            } else {
+                remaining.min(timeout)
+            }
+        })
+        .unwrap_or(timeout)
+}
+
+fn pop_expired_compact_outstanding(
+    compact_outstanding: &mut Option<CompactOutstandingRequest>,
+) -> Option<([u8; 32], u64)> {
+    if compact_outstanding
+        .as_ref()
+        .is_none_or(|req| Instant::now() < req.expires_at)
+    {
+        return None;
+    }
+    compact_outstanding
+        .take()
+        .map(|req| (req.block_hash, req.blocktxn_payload_cap))
+}
+
+fn write_wire_message_to_stream(
+    stream: &mut TcpStream,
+    write_timeout: Duration,
+    header: &[u8; WIRE_HEADER_SIZE],
+    msg: &WireMessage,
+) -> io::Result<()> {
+    stream
+        .set_write_timeout(Some(write_timeout))
+        .map_err(io::Error::other)?;
+    stream.write_all(header)?;
+    if !msg.payload.is_empty() {
+        stream.write_all(&msg.payload)?;
+    }
+    stream.flush()
 }
 
 fn read_message_from_with_payload_limit<R: Read>(
@@ -3991,6 +4089,19 @@ mod tests {
         }
     }
 
+    fn assert_fallback_getdata(client: &mut TcpStream, block_hash: [u8; 32]) {
+        let msg = read_message_from(client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read fallback getdata");
+        assert_eq!(msg.command, MESSAGE_GETDATA);
+        assert_eq!(
+            decode_inventory_vectors(&msg.payload).expect("decode fallback inventory"),
+            vec![InventoryVector {
+                kind: MSG_BLOCK,
+                hash: block_hash
+            }]
+        );
+    }
+
     #[test]
     fn compact_outstanding_clear_go_parity_matrix() {
         let (mut session, _client) = test_peer_session();
@@ -4058,6 +4169,108 @@ mod tests {
             Some(active_hash),
             "stale fallback cleared unrelated outstanding compact request"
         );
+    }
+
+    #[test]
+    fn compact_fallback_poll_read_ready_emits_expired_fallback() {
+        let (mut session, mut client) = test_peer_session();
+        let block_hash = [0xaa; 32];
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(req);
+
+        assert!(!session
+            .poll_read_ready(Duration::from_millis(10))
+            .expect("poll read ready"));
+        assert!(session.compact_outstanding.is_none());
+        assert_fallback_getdata(&mut client, block_hash);
+    }
+
+    #[test]
+    fn compact_fallback_read_message_with_ready_frame_emits_expired_fallback() {
+        let (mut session, mut client) = test_peer_session();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("client read timeout");
+        let block_hash = [0xbb; 32];
+        let req = compact_outstanding_test_request(block_hash);
+        session.compact_outstanding = Some(req);
+        let header =
+            build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
+        client.write_all(&header).expect("write ready ping");
+        assert!(session
+            .poll_read_ready(Duration::from_secs(1))
+            .expect("prefetch first byte"));
+        session.compact_outstanding.as_mut().unwrap().expires_at =
+            Instant::now() - Duration::from_secs(1);
+
+        let msg = session.read_message().expect("read ready ping");
+        assert_eq!(msg.command, "ping");
+        assert!(session.compact_outstanding.is_none());
+        assert_fallback_getdata(&mut client, block_hash);
+    }
+
+    #[test]
+    fn compact_fallback_read_message_continues_after_expiry_fallback() {
+        let (mut session, mut client) = test_peer_session();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("client read timeout");
+        let block_hash = [0xcc; 32];
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.expires_at = Instant::now() + Duration::from_millis(30);
+        session.compact_outstanding = Some(req);
+        let header =
+            build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
+        client.write_all(&header[..1]).expect("write partial ping");
+
+        let reader = thread::spawn(move || {
+            let msg = session
+                .read_message_with_timeout(Duration::from_secs(2))
+                .expect("continue reading after compact expiry fallback");
+            assert_eq!(msg.command, "ping");
+            assert!(session.compact_outstanding.is_none());
+        });
+
+        assert_fallback_getdata(&mut client, block_hash);
+        client
+            .write_all(&header[1..])
+            .expect("write ping after fallback");
+        reader.join().expect("read_message thread");
+    }
+
+    #[test]
+    fn compact_fallback_frame_reader_sends_expired_fallback_before_ready_read() {
+        let (mut session, mut client) = test_peer_session();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("client read timeout");
+        let block_hash = [0xdd; 32];
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(req);
+        client.write_all(b"x").expect("write ready byte");
+
+        {
+            let mut reader = CompactFallbackFrameReader {
+                stream: &mut session.stream,
+                prefetched_read_byte: None,
+                compact_outstanding: &mut session.compact_outstanding,
+                read_timeout: Duration::from_secs(1),
+                write_timeout: session.cfg.write_deadline,
+                network_magic: network_magic(&session.cfg.network),
+            };
+            let mut empty = [];
+            assert_eq!(reader.read(&mut empty).expect("zero-length read"), 0);
+            assert!(reader.compact_outstanding.is_some());
+
+            let mut buf = [0u8; 1];
+            assert_eq!(reader.read(&mut buf).expect("read ready byte"), 1);
+            assert_eq!(buf[0], b'x');
+        }
+
+        assert!(session.compact_outstanding.is_none());
+        assert_fallback_getdata(&mut client, block_hash);
     }
 
     fn large_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
