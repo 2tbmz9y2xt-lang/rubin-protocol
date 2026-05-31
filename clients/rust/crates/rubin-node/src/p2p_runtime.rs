@@ -452,6 +452,9 @@ impl PeerSession {
     }
 
     pub fn read_message_with_timeout(&mut self, timeout: Duration) -> io::Result<WireMessage> {
+        if self.prefetched_read_byte.is_some() {
+            self.send_expired_compact_outstanding_fallback()?;
+        }
         while self.prefetched_read_byte.is_none() {
             let had_outstanding = self.compact_outstanding.is_some();
             if self.poll_read_ready(timeout)? {
@@ -4188,12 +4191,16 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(1)))
             .expect("client read timeout");
         let block_hash = [0xbb; 32];
-        let mut req = compact_outstanding_test_request(block_hash);
-        req.expires_at = Instant::now() - Duration::from_secs(1);
+        let req = compact_outstanding_test_request(block_hash);
         session.compact_outstanding = Some(req);
         let header =
             build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
         client.write_all(&header).expect("write ready ping");
+        assert!(session
+            .poll_read_ready(Duration::from_secs(1))
+            .expect("prefetch first byte"));
+        session.compact_outstanding.as_mut().unwrap().expires_at =
+            Instant::now() - Duration::from_secs(1);
 
         let msg = session.read_message().expect("read ready ping");
         assert_eq!(msg.command, "ping");
