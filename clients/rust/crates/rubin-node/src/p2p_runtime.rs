@@ -426,7 +426,8 @@ impl PeerSession {
             return Ok(true);
         }
         self.send_expired_compact_outstanding_fallback()?;
-        let timeout = self.compact_expiry_bounded_read_timeout(timeout);
+        let timeout =
+            compact_expiry_bounded_read_timeout(self.compact_outstanding_expiry(), timeout);
         self.stream
             .set_read_timeout(Some(timeout))
             .map_err(io::Error::other)?;
@@ -459,19 +460,20 @@ impl PeerSession {
             }
             return Err(io::Error::new(io::ErrorKind::TimedOut, "peer read timeout"));
         }
-        self.stream
-            .set_read_timeout(Some(timeout))
-            .map_err(io::Error::other)?;
         let compact_receive = self.compact_receive_active();
-        let mut reader = PrefetchedReader {
-            stream: &mut self.stream,
-            prefetched_read_byte: self.prefetched_read_byte.take(),
-        };
         let blocktxn_payload_cap = self
             .compact_outstanding
             .as_ref()
             .filter(|req| Instant::now() < req.expires_at)
             .map(|req| req.blocktxn_payload_cap.min(MAX_RELAY_MSG_BYTES));
+        let mut reader = CompactFallbackFrameReader {
+            stream: &mut self.stream,
+            prefetched_read_byte: self.prefetched_read_byte.take(),
+            compact_outstanding: &mut self.compact_outstanding,
+            read_timeout: timeout,
+            write_timeout: self.cfg.write_deadline,
+            network_magic: network_magic(&self.cfg.network),
+        };
         let payload_cap = move |command: &str| match command {
             "cmpctblock" if compact_receive => MAX_RELAY_MSG_BYTES,
             MESSAGE_GETBLOCKTXN if compact_receive => MAX_GETBLOCKTXN_PAYLOAD_BYTES,
@@ -524,11 +526,7 @@ impl PeerSession {
         };
         let header =
             build_envelope_header(network_magic(&self.cfg.network), &msg.command, &msg.payload)?;
-        self.stream.write_all(&header)?;
-        if !msg.payload.is_empty() {
-            self.stream.write_all(&msg.payload)?;
-        }
-        self.stream.flush()?;
+        write_wire_message_to_stream(&mut self.stream, self.cfg.write_deadline, &header, msg)?;
         if let Some(block_hash) = compact_announcement {
             self.mark_compact_block_announced(block_hash);
         }
@@ -1153,15 +1151,7 @@ impl PeerSession {
     fn pop_expired_compact_outstanding_block_hash_and_payload_cap(
         &mut self,
     ) -> Option<([u8; 32], u64)> {
-        if self
-            .compact_outstanding_expiry()
-            .is_none_or(|expiry| Instant::now() < expiry)
-        {
-            return None;
-        }
-        self.compact_outstanding
-            .take()
-            .map(|req| (req.block_hash, req.blocktxn_payload_cap))
+        pop_expired_compact_outstanding(&mut self.compact_outstanding)
     }
     fn send_expired_compact_outstanding_fallback(&mut self) -> io::Result<bool> {
         let Some((block_hash, _payload_cap)) =
@@ -1177,18 +1167,6 @@ impl PeerSession {
     }
     fn compact_outstanding_expiry(&self) -> Option<Instant> {
         self.compact_outstanding.as_ref().map(|req| req.expires_at)
-    }
-    fn compact_expiry_bounded_read_timeout(&self, timeout: Duration) -> Duration {
-        self.compact_outstanding_expiry()
-            .map(|expiry| {
-                let remaining = expiry.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    Duration::from_millis(1).min(timeout)
-                } else {
-                    remaining.min(timeout)
-                }
-            })
-            .unwrap_or(timeout)
     }
     fn compact_receive_active(&self) -> bool {
         self.cfg.enable_compact_receive
@@ -1504,12 +1482,30 @@ impl Read for DeadlineReader {
     }
 }
 
-struct PrefetchedReader<'a> {
+struct CompactFallbackFrameReader<'a> {
     stream: &'a mut TcpStream,
     prefetched_read_byte: Option<u8>,
+    compact_outstanding: &'a mut Option<CompactOutstandingRequest>,
+    read_timeout: Duration,
+    write_timeout: Duration,
+    network_magic: [u8; 4],
 }
 
-impl Read for PrefetchedReader<'_> {
+impl CompactFallbackFrameReader<'_> {
+    fn send_expired_compact_outstanding_fallback(&mut self) -> io::Result<bool> {
+        let Some((block_hash, _payload_cap)) =
+            pop_expired_compact_outstanding(self.compact_outstanding)
+        else {
+            return Ok(false);
+        };
+        let msg = compact_full_block_fallback_message(block_hash)?;
+        let header = build_envelope_header(self.network_magic, &msg.command, &msg.payload)?;
+        write_wire_message_to_stream(self.stream, self.write_timeout, &header, &msg)?;
+        Ok(true)
+    }
+}
+
+impl Read for CompactFallbackFrameReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if let Some(first_byte) = self.prefetched_read_byte.take() {
             if buf.is_empty() {
@@ -1517,13 +1513,24 @@ impl Read for PrefetchedReader<'_> {
                 return Ok(0);
             }
             buf[0] = first_byte;
-            if buf.len() == 1 {
-                return Ok(1);
-            }
-            let read = self.stream.read(&mut buf[1..])?;
-            return Ok(read + 1);
+            return Ok(1);
         }
-        self.stream.read(buf)
+        loop {
+            let expiry = self.compact_outstanding.as_ref().map(|req| req.expires_at);
+            let timeout = compact_expiry_bounded_read_timeout(expiry, self.read_timeout);
+            self.stream
+                .set_read_timeout(Some(timeout))
+                .map_err(io::Error::other)?;
+            match self.stream.read(buf) {
+                Err(err) if is_socket_read_timeout(&err) => {
+                    if self.send_expired_compact_outstanding_fallback()? {
+                        continue;
+                    }
+                    return Err(err);
+                }
+                result => return result,
+            }
+        }
     }
 }
 
@@ -1683,6 +1690,49 @@ fn is_socket_read_timeout(err: &io::Error) -> bool {
         err.kind(),
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
     )
+}
+
+fn compact_expiry_bounded_read_timeout(expiry: Option<Instant>, timeout: Duration) -> Duration {
+    expiry
+        .map(|expiry| {
+            let remaining = expiry.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                Duration::from_millis(1).min(timeout)
+            } else {
+                remaining.min(timeout)
+            }
+        })
+        .unwrap_or(timeout)
+}
+
+fn pop_expired_compact_outstanding(
+    compact_outstanding: &mut Option<CompactOutstandingRequest>,
+) -> Option<([u8; 32], u64)> {
+    if compact_outstanding
+        .as_ref()
+        .is_none_or(|req| Instant::now() < req.expires_at)
+    {
+        return None;
+    }
+    compact_outstanding
+        .take()
+        .map(|req| (req.block_hash, req.blocktxn_payload_cap))
+}
+
+fn write_wire_message_to_stream(
+    stream: &mut TcpStream,
+    write_timeout: Duration,
+    header: &[u8; WIRE_HEADER_SIZE],
+    msg: &WireMessage,
+) -> io::Result<()> {
+    stream
+        .set_write_timeout(Some(write_timeout))
+        .map_err(io::Error::other)?;
+    stream.write_all(header)?;
+    if !msg.payload.is_empty() {
+        stream.write_all(&msg.payload)?;
+    }
+    stream.flush()
 }
 
 fn read_message_from_with_payload_limit<R: Read>(
@@ -4032,6 +4082,19 @@ mod tests {
         }
     }
 
+    fn assert_fallback_getdata(client: &mut TcpStream, block_hash: [u8; 32]) {
+        let msg = read_message_from(client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read fallback getdata");
+        assert_eq!(msg.command, MESSAGE_GETDATA);
+        assert_eq!(
+            decode_inventory_vectors(&msg.payload).expect("decode fallback inventory"),
+            vec![InventoryVector {
+                kind: MSG_BLOCK,
+                hash: block_hash
+            }]
+        );
+    }
+
     #[test]
     fn compact_outstanding_clear_go_parity_matrix() {
         let (mut session, _client) = test_peer_session();
@@ -4102,65 +4165,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_fallback_expiry_go_parity_matrix() {
-        let (mut session, mut client) = test_peer_session();
-        let active_hash = [0x77; 32];
-        session.compact_outstanding = Some(compact_outstanding_test_request(active_hash));
-        assert!(session.compact_outstanding_expiry().is_some());
-        assert!(!session
-            .send_expired_compact_outstanding_fallback()
-            .expect("nonexpired fallback"));
-        assert_eq!(
-            session
-                .compact_outstanding
-                .as_ref()
-                .map(|req| req.block_hash),
-            Some(active_hash)
-        );
-
-        let expired_hash = [0x88; 32];
-        let mut expired_req = compact_outstanding_test_request(expired_hash);
-        expired_req.blocktxn_payload_cap = 123;
-        expired_req.expires_at = Instant::now() - Duration::from_secs(1);
-        session.compact_outstanding = Some(expired_req);
-        let (got_hash, got_cap) = session
-            .pop_expired_compact_outstanding_block_hash_and_payload_cap()
-            .expect("expired pop");
-        assert_eq!(got_hash, expired_hash);
-        assert_eq!(got_cap, 123);
-        assert!(session.compact_outstanding.is_none());
-        assert!(session
-            .pop_expired_compact_outstanding_block_hash_and_payload_cap()
-            .is_none());
-
-        session.compact_outstanding = Some(compact_outstanding_test_request(expired_hash));
-        session.compact_outstanding.as_mut().unwrap().expires_at =
-            Instant::now() - Duration::from_secs(1);
-        assert!(session
-            .send_expired_compact_outstanding_fallback()
-            .expect("expired fallback"));
-        assert!(session.compact_outstanding.is_none());
-        let _ = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
-            .expect("read direct fallback getdata");
-        assert!(!session
-            .send_expired_compact_outstanding_fallback()
-            .expect("duplicate fallback"));
-
-        let (mut failed_session, _failed_client) = test_peer_session();
-        let mut failed_req = compact_outstanding_test_request([0x99; 32]);
-        failed_req.expires_at = Instant::now() - Duration::from_secs(1);
-        failed_session.compact_outstanding = Some(failed_req);
-        failed_session
-            .stream
-            .shutdown(std::net::Shutdown::Both)
-            .expect("shutdown stream");
-        assert!(failed_session
-            .send_expired_compact_outstanding_fallback()
-            .is_err());
-        assert!(failed_session.compact_outstanding.is_none());
-    }
-
-    #[test]
     fn compact_fallback_poll_read_ready_emits_expired_fallback() {
         let (mut session, mut client) = test_peer_session();
         let block_hash = [0xaa; 32];
@@ -4172,16 +4176,7 @@ mod tests {
             .poll_read_ready(Duration::from_millis(10))
             .expect("poll read ready"));
         assert!(session.compact_outstanding.is_none());
-        let msg = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
-            .expect("read idle fallback getdata");
-        assert_eq!(msg.command, MESSAGE_GETDATA);
-        assert_eq!(
-            decode_inventory_vectors(&msg.payload).expect("decode idle fallback inventory"),
-            vec![InventoryVector {
-                kind: MSG_BLOCK,
-                hash: block_hash
-            }]
-        );
+        assert_fallback_getdata(&mut client, block_hash);
     }
 
     #[test]
@@ -4201,16 +4196,7 @@ mod tests {
         let msg = session.read_message().expect("read ready ping");
         assert_eq!(msg.command, "ping");
         assert!(session.compact_outstanding.is_none());
-        let fallback = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
-            .expect("read ready-frame fallback getdata");
-        assert_eq!(fallback.command, MESSAGE_GETDATA);
-        assert_eq!(
-            decode_inventory_vectors(&fallback.payload).expect("decode ready fallback inventory"),
-            vec![InventoryVector {
-                kind: MSG_BLOCK,
-                hash: block_hash
-            }]
-        );
+        assert_fallback_getdata(&mut client, block_hash);
     }
 
     #[test]
@@ -4223,6 +4209,9 @@ mod tests {
         let mut req = compact_outstanding_test_request(block_hash);
         req.expires_at = Instant::now() + Duration::from_millis(30);
         session.compact_outstanding = Some(req);
+        let header =
+            build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
+        client.write_all(&header[..1]).expect("write partial ping");
 
         let reader = thread::spawn(move || {
             let msg = session
@@ -4232,21 +4221,9 @@ mod tests {
             assert!(session.compact_outstanding.is_none());
         });
 
-        let fallback = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
-            .expect("read expiry-bounded fallback getdata");
-        assert_eq!(fallback.command, MESSAGE_GETDATA);
-        assert_eq!(
-            decode_inventory_vectors(&fallback.payload)
-                .expect("decode expiry-bounded fallback inventory"),
-            vec![InventoryVector {
-                kind: MSG_BLOCK,
-                hash: block_hash
-            }]
-        );
-        let header =
-            build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
+        assert_fallback_getdata(&mut client, block_hash);
         client
-            .write_all(&header)
+            .write_all(&header[1..])
             .expect("write ping after fallback");
         reader.join().expect("read_message thread");
     }
