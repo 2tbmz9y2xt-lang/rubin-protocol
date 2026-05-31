@@ -38,6 +38,8 @@ const MESSAGE_GETBLOCKS: &str = "getblocks";
 const MESSAGE_GETADDR: &str = "getaddr";
 const MESSAGE_ADDR: &str = "addr";
 const MESSAGE_SENDCMPCT: &str = "sendcmpct";
+const MESSAGE_GETBLOCKTXN: &str = "getblocktxn";
+const MESSAGE_BLOCKTXN: &str = "blocktxn";
 const COMPACT_RELAY_VERSION: u64 = 1;
 const SENDCMPCT_PAYLOAD_BYTES: u64 = 9;
 const COMPACT_RELAY_INDEX_BYTES: usize = 4;
@@ -47,6 +49,10 @@ const MAX_COMPACT_RELAY_ENTRIES: usize = MAX_INVENTORY_VECTORS;
 const MAX_COMPACT_RELAY_INDEX_VALUE: u64 = MAX_BLOCK_BYTES - 1;
 const COMPACT_LOCAL_TX_CANDIDATE_LIMIT: usize = 1000;
 const COMPACT_LOCAL_TX_CANDIDATE_BYTES_LIMIT: usize = 1 << 20;
+const COMPACT_ANNOUNCED_BLOCK_LIMIT: usize = 16;
+const MAX_GETBLOCKTXN_PAYLOAD_BYTES: u64 = 32
+    + MAX_COMPACT_SIZE_BYTES as u64
+    + MAX_COMPACT_RELAY_ENTRIES as u64 * COMPACT_RELAY_INDEX_BYTES as u64;
 type CompactShortId = [u8; COMPACT_SHORT_ID_BYTES];
 type CompactLocalIndex = HashMap<CompactShortId, Option<Vec<u8>>>;
 pub const MSG_BLOCK: u8 = 0x01;
@@ -266,6 +272,7 @@ pub struct PeerSession {
     prefetched_read_byte: Option<u8>,
     remote_compact_mode: CompactModeSnapshot,
     compact_outstanding: Option<CompactOutstandingRequest>,
+    compact_announced: Vec<[u8; 32]>,
 }
 
 pub struct PeerManager {
@@ -386,6 +393,7 @@ impl PeerSession {
             prefetched_read_byte: None,
             remote_compact_mode: CompactModeSnapshot::default(),
             compact_outstanding: None,
+            compact_announced: Vec::new(),
         })
     }
 
@@ -455,24 +463,22 @@ impl PeerSession {
         self.stream
             .set_read_timeout(Some(timeout))
             .map_err(io::Error::other)?;
-        let compact_receive_enabled = self.cfg.enable_compact_receive;
+        let compact_receive = self.compact_receive_active();
         let mut reader = PrefetchedReader {
             stream: &mut self.stream,
             prefetched_read_byte: self.prefetched_read_byte.take(),
         };
-        let compact_mode = self.remote_compact_mode;
         let blocktxn_payload_cap = self
             .compact_outstanding
             .as_ref()
             .filter(|req| Instant::now() < req.expires_at)
             .map(|req| req.blocktxn_payload_cap.min(MAX_RELAY_MSG_BYTES));
-        let compact_receive = compact_receive_enabled
-            && compact_mode.version == COMPACT_RELAY_VERSION
-            && compact_mode.mode != 0;
         let payload_cap = move |command: &str| match command {
             "cmpctblock" if compact_receive => MAX_RELAY_MSG_BYTES,
-            "blocktxn" if compact_receive => blocktxn_payload_cap.unwrap_or(32),
-            "blocktxn" => 0,
+            MESSAGE_GETBLOCKTXN if compact_receive => MAX_GETBLOCKTXN_PAYLOAD_BYTES,
+            MESSAGE_GETBLOCKTXN => 0,
+            MESSAGE_BLOCKTXN if compact_receive => blocktxn_payload_cap.unwrap_or(32),
+            MESSAGE_BLOCKTXN => 0,
             _ => runtime_payload_cap(command),
         };
         // NOTE on tx-oversize ban policy (parity gap with Go's
@@ -512,6 +518,11 @@ impl PeerSession {
                 format!("message exceeds cap: {}", msg.payload.len()),
             ));
         }
+        let compact_announcement = if msg.command == "cmpctblock" {
+            Some(compact_block_hash_from_payload(&msg.payload)?)
+        } else {
+            None
+        };
         let header =
             build_envelope_header(network_magic(&self.cfg.network), &msg.command, &msg.payload)?;
         self.stream.write_all(&header)?;
@@ -519,6 +530,9 @@ impl PeerSession {
             self.stream.write_all(&msg.payload)?;
         }
         self.stream.flush()?;
+        if let Some(block_hash) = compact_announcement {
+            self.mark_compact_block_announced(block_hash);
+        }
         Ok(())
     }
 
@@ -674,7 +688,8 @@ impl PeerSession {
                 })
             }
             "cmpctblock" => self.handle_cmpctblock(&msg.payload, sync_engine, relay_ctx),
-            "blocktxn" => self.handle_blocktxn(&msg.payload, sync_engine),
+            MESSAGE_GETBLOCKTXN => self.handle_getblocktxn(&msg.payload, sync_engine),
+            MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
                     let outcome = crate::tx_relay::handle_received_tx(
@@ -971,7 +986,59 @@ impl PeerSession {
         });
         Ok(LiveMessageOutcome {
             responses: vec![WireMessage {
-                command: "getblocktxn".to_string(),
+                command: MESSAGE_GETBLOCKTXN.to_string(),
+                payload,
+            }],
+            ..Default::default()
+        })
+    }
+    fn handle_getblocktxn(
+        &mut self,
+        payload: &[u8],
+        sync_engine: &SyncEngine,
+    ) -> io::Result<LiveMessageOutcome> {
+        if !self.compact_receive_active() {
+            return Err(invalid_data("compact receive disabled"));
+        }
+        let req = match decode_getblocktxn_payload(payload) {
+            Ok(req) => req,
+            Err(err) => {
+                self.bump_ban(10, &err.to_string());
+                return Err(err);
+            }
+        };
+        if let Err(err) = compact_validate_unique_getblocktxn_indexes(&req.indexes) {
+            self.bump_ban(10, &err.to_string());
+            return Err(err);
+        }
+        if !self.consume_compact_block_announcement(req.block_hash) {
+            self.peer.last_error = "ignored unannounced getblocktxn request".to_string();
+            return Ok(LiveMessageOutcome::default());
+        }
+        if !sync_engine
+            .has_block(req.block_hash)
+            .map_err(io::Error::other)?
+        {
+            return Ok(LiveMessageOutcome::default());
+        }
+        let block = sync_engine
+            .get_block_by_hash(req.block_hash)
+            .map_err(io::Error::other)?;
+        let txs = match compact_block_transactions_by_index(&block, &req.indexes) {
+            Ok(txs) => txs,
+            Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                self.bump_ban(10, &err.to_string());
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+        let payload = encode_blocktxn_payload(BlockTxnPayload {
+            block_hash: req.block_hash,
+            transactions: txs,
+        })?;
+        Ok(LiveMessageOutcome {
+            responses: vec![WireMessage {
+                command: MESSAGE_BLOCKTXN.to_string(),
                 payload,
             }],
             ..Default::default()
@@ -1088,6 +1155,28 @@ impl PeerSession {
         if matches!(&self.compact_outstanding, Some(req) if Instant::now() >= req.expires_at) {
             self.compact_outstanding = None;
         }
+    }
+    fn compact_receive_active(&self) -> bool {
+        self.cfg.enable_compact_receive
+            && self.remote_compact_mode.version == COMPACT_RELAY_VERSION
+            && self.remote_compact_mode.mode != 0
+    }
+    fn mark_compact_block_announced(&mut self, block_hash: [u8; 32]) {
+        self.compact_announced.push(block_hash);
+        while self.compact_announced.len() > COMPACT_ANNOUNCED_BLOCK_LIMIT {
+            self.compact_announced.remove(0);
+        }
+    }
+    fn consume_compact_block_announcement(&mut self, block_hash: [u8; 32]) -> bool {
+        let Some(pos) = self
+            .compact_announced
+            .iter()
+            .rposition(|announced| *announced == block_hash)
+        else {
+            return false;
+        };
+        self.compact_announced.remove(pos);
+        true
     }
     // Historically used by the inline run_block_sync_loop match; preserved under
     // #[cfg(test)] so the original behavioral test keeps documenting the
@@ -2241,6 +2330,76 @@ fn compact_full_block_fallback_message(block_hash: [u8; 32]) -> io::Result<WireM
         }])?,
     })
 }
+fn compact_block_hash_from_payload(payload: &[u8]) -> io::Result<[u8; 32]> {
+    let payload = decode_cmpctblock_payload(payload)?;
+    block_hash(&payload.header).map_err(io::Error::other)
+}
+fn compact_validate_unique_getblocktxn_indexes(indexes: &[u64]) -> io::Result<()> {
+    if indexes.len() < 2 {
+        return Ok(());
+    }
+    let mut seen = indexes.to_vec();
+    seen.sort_unstable();
+    if seen.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(invalid_data("duplicate getblocktxn index"));
+    }
+    Ok(())
+}
+
+fn compact_block_transactions_by_index(block: &[u8], indexes: &[u64]) -> io::Result<Vec<Vec<u8>>> {
+    let (tx_count, mut offset) = compact_block_transaction_count(block)?;
+    for &idx in indexes {
+        if idx >= tx_count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "getblocktxn index out of range",
+            ));
+        }
+    }
+    if indexes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut positions = HashMap::with_capacity(indexes.len());
+    let mut max_index = 0u64;
+    for (pos, &idx) in indexes.iter().enumerate() {
+        positions.insert(idx, pos);
+        max_index = max_index.max(idx);
+    }
+    let mut txs = vec![Vec::new(); indexes.len()];
+    for tx_index in 0..=max_index {
+        let consumed = parse_tx(&block[offset..])
+            .map_err(|_| invalid_data("stored block transaction is non-canonical"))?
+            .3;
+        if consumed == 0 {
+            return Err(invalid_data("stored block transaction is non-canonical"));
+        }
+        let end = offset
+            .checked_add(consumed)
+            .filter(|&end| end <= block.len())
+            .ok_or_else(|| invalid_data("stored block transaction is non-canonical"))?;
+        if let Some(&pos) = positions.get(&tx_index) {
+            txs[pos] = block[offset..end].to_vec();
+        }
+        offset = end;
+    }
+    if max_index == tx_count - 1 && offset != block.len() {
+        return Err(invalid_data(
+            "stored block has trailing bytes after transactions",
+        ));
+    }
+    Ok(txs)
+}
+
+fn compact_block_transaction_count(block: &[u8]) -> io::Result<(u64, usize)> {
+    if block.len() < BLOCK_HEADER_BYTES {
+        return Err(invalid_data("stored block missing header"));
+    }
+    let (tx_count, count_len) = read_compact_size_bytes(&block[BLOCK_HEADER_BYTES..])
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    Ok((tx_count, BLOCK_HEADER_BYTES + count_len))
+}
+
 fn compact_fill_response_transactions(
     req: &CompactOutstandingRequest,
     response: BlockTxnPayload,
@@ -3026,6 +3185,20 @@ mod tests {
         payload
     }
 
+    fn test_peer_session() -> (PeerSession, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        let mut cfg = default_peer_runtime_config("devnet", 8);
+        cfg.enable_compact_receive = true;
+        let mut session = PeerSession::new(stream, cfg).expect("session");
+        session.remote_compact_mode = CompactModeSnapshot {
+            mode: 1,
+            version: COMPACT_RELAY_VERSION,
+        };
+        (session, client)
+    }
+
     #[test]
     fn getblocktxn_payload_codec_matches_go_wire() {
         let mut block_hash = [0u8; 32];
@@ -3117,6 +3290,128 @@ mod tests {
                 indexes: vec![MAX_COMPACT_RELAY_INDEX_VALUE + 1],
             },
             "compact relay index out of range",
+        );
+    }
+
+    #[test]
+    fn getblocktxn_serves_announced_block_in_request_order() {
+        let (mut session, _client) = test_peer_session();
+        let mut engine = test_sync_engine_with_genesis();
+        let block = devnet_genesis_block_bytes();
+        let block_hash = block_hash(&block[..BLOCK_HEADER_BYTES]).expect("genesis hash");
+        let want_txs = compact_block_transactions_by_index(&block, &[0]).expect("expected tx");
+        let mut header = [0u8; BLOCK_HEADER_BYTES];
+        header.copy_from_slice(&block[..BLOCK_HEADER_BYTES]);
+        session
+            .write_message(&WireMessage {
+                command: "cmpctblock".to_string(),
+                payload: encode_cmpctblock_payload(CmpctBlockPayload {
+                    header,
+                    nonce1: 0,
+                    nonce2: 0,
+                    short_ids: Vec::new(),
+                    prefilled: vec![PrefilledTxn {
+                        index: 0,
+                        tx: want_txs[0].clone(),
+                    }],
+                })
+                .expect("encode cmpctblock"),
+            })
+            .expect("write cmpctblock announcement");
+        let request = encode_getblocktxn_payload(GetBlockTxnPayload {
+            block_hash,
+            indexes: vec![0],
+        })
+        .expect("encode getblocktxn");
+
+        let outcome = session
+            .collect_live_responses(
+                WireMessage {
+                    command: MESSAGE_GETBLOCKTXN.to_string(),
+                    payload: request,
+                },
+                &mut engine,
+                None,
+            )
+            .expect("serve getblocktxn");
+
+        assert_eq!(outcome.responses.len(), 1);
+        assert_eq!(outcome.responses[0].command, MESSAGE_BLOCKTXN);
+        let got = decode_blocktxn_payload(&outcome.responses[0].payload).expect("blocktxn");
+        assert_eq!(got.block_hash, block_hash);
+        assert_eq!(got.transactions, want_txs);
+    }
+
+    #[test]
+    fn getblocktxn_rejects_disabled_duplicate_and_unannounced() {
+        let (mut session, _client) = test_peer_session();
+        let engine = test_sync_engine_with_genesis();
+        let request = |block_hash, indexes| {
+            encode_getblocktxn_payload(GetBlockTxnPayload {
+                block_hash,
+                indexes,
+            })
+            .expect("encode getblocktxn")
+        };
+
+        session.cfg.enable_compact_receive = false;
+        let err = session
+            .handle_getblocktxn(&request([0x33; 32], vec![0]), &engine)
+            .expect_err("disabled compact receive must reject getblocktxn");
+        assert!(err.to_string().contains("compact receive disabled"));
+        assert_eq!(session.peer.ban_score, 0);
+
+        session.cfg.enable_compact_receive = true;
+        let err = session
+            .handle_getblocktxn(&request([0x42; 32], vec![0, 0]), &engine)
+            .expect_err("duplicate getblocktxn must fail");
+        assert!(err.to_string().contains("duplicate getblocktxn index"));
+        assert!(session.peer.ban_score > 0);
+
+        session.peer.ban_score = 0;
+        let bad_hash = block_hash(&[0u8; BLOCK_HEADER_BYTES]).expect("bad cmpctblock hash");
+        assert_cmpctblock_err(
+            session.write_message(&WireMessage {
+                command: "cmpctblock".to_string(),
+                payload: vec![0u8; BLOCK_HEADER_BYTES],
+            }),
+            "cmpctblock payload missing header or nonce",
+        );
+        let outcome = session
+            .handle_getblocktxn(&request(bad_hash, vec![0]), &engine)
+            .expect("unannounced getblocktxn");
+        assert!(outcome.responses.is_empty());
+        assert_eq!(session.peer.ban_score, 0);
+        assert_eq!(
+            session.peer.last_error,
+            "ignored unannounced getblocktxn request"
+        );
+    }
+
+    #[test]
+    fn getblocktxn_block_slice_preserves_request_order() {
+        let genesis = devnet_genesis_block_bytes();
+        let mut block = genesis[..BLOCK_HEADER_BYTES].to_vec();
+        encode_compact_size(1, &mut block);
+        block.push(0xff);
+        let err = compact_block_transactions_by_index(&block, &[1])
+            .expect_err("out-of-range getblocktxn must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("getblocktxn index out of range"));
+
+        let txs = vec![
+            minimal_blocktxn_test_tx_bytes(301),
+            minimal_blocktxn_test_tx_bytes(302),
+            minimal_blocktxn_test_tx_bytes(303),
+        ];
+        let block = build_block_bytes([0u8; 32], [1u8; 32], POW_LIMIT, 0, &txs);
+
+        let got = compact_block_transactions_by_index(&block, &[2, 0, 1]).expect("slice block txs");
+
+        assert_eq!(got, vec![txs[2].clone(), txs[0].clone(), txs[1].clone()]);
+        assert_blocktxn_err(
+            validate_blocktxn_transaction_size(MAX_BLOCK_BYTES + 1, 0),
+            "blocktxn transaction too large",
         );
     }
 
