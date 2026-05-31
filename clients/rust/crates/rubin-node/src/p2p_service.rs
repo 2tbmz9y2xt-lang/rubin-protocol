@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::p2p_runtime::{
     perform_version_handshake, snapshot_compact_local_tx_candidates, LiveMessageOutcome,
-    PeerManager, PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1, WireMessage,
+    PeerManager, PeerRelayContext, PeerRuntimeConfig, PeerSession, VersionPayloadV1, WireMessage,
 };
 use crate::sync_reorg::TxPoolCleanupPlan;
 use crate::tx_relay::{PeerOutbox, TxRelayState};
@@ -860,24 +860,8 @@ fn handle_peer(
                     rubin_consensus::constants::MAX_RELAY_MSG_BYTES,
                 ));
             }
-            let compact_local_txs = if msg.command == "cmpctblock" {
-                let needs_snapshot = {
-                    let engine = shared
-                        .sync_engine
-                        .lock()
-                        .map_err(|_| "sync engine unavailable".to_string())?;
-                    session
-                        .cmpctblock_needs_local_tx_snapshot(&msg.payload, &engine)
-                        .map_err(|err| format!("precheck cmpctblock: {err}"))?
-                };
-                if needs_snapshot {
-                    Some(snapshot_compact_local_tx_candidates(&shared.tx_pool))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let compact_local_txs =
+                maybe_snapshot_compact_local_txs(&msg.command, &msg.payload, &session, &shared)?;
             let relay_ctx = PeerRelayContext {
                 relay_state: &shared.relay_state,
                 peer_manager: &shared.peer_manager,
@@ -913,9 +897,7 @@ fn handle_peer(
                 .map_err(|err| format!("handle live message: {err}"))?;
         }
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
-        if let Some(reason) = disconnect_after_responses {
-            return Err(format!("handle live message: {reason}"));
-        }
+        disconnect_after_live_responses(disconnect_after_responses)?;
     }
     Ok(())
 }
@@ -1018,6 +1000,37 @@ fn finalize_live_message_outcome(
             )?);
             Err(format!("handle live message: {err}"))
         }
+    }
+}
+
+fn maybe_snapshot_compact_local_txs(
+    command: &str,
+    payload: &[u8],
+    session: &PeerSession,
+    shared: &SharedServiceState,
+) -> Result<Option<Vec<Vec<u8>>>, String> {
+    if command != "cmpctblock" {
+        return Ok(None);
+    }
+    let needs_snapshot = {
+        let engine = shared
+            .sync_engine
+            .lock()
+            .map_err(|_| "sync engine unavailable".to_string())?;
+        session
+            .cmpctblock_needs_local_tx_snapshot(payload, &engine)
+            .map_err(|err| format!("precheck cmpctblock: {err}"))?
+    };
+    if !needs_snapshot {
+        return Ok(None);
+    }
+    Ok(Some(snapshot_compact_local_tx_candidates(&shared.tx_pool)))
+}
+
+fn disconnect_after_live_responses(reason: Option<String>) -> Result<(), String> {
+    match reason {
+        Some(reason) => Err(format!("handle live message: {reason}")),
+        None => Ok(()),
     }
 }
 
@@ -1131,22 +1144,27 @@ mod tests {
     use rubin_consensus::{block_hash, constants::POW_LIMIT, parse_tx, BLOCK_HEADER_BYTES};
 
     use super::{
-        apply_tx_pool_cleanup, connect_with_timeout, finalize_live_message_outcome,
-        flush_peer_outbox, is_connected_with_alias, join_all_service_workers, lock_in_flight_dials,
-        maybe_apply_tx_pool_cleanup, outbound_connect_timeout, reconnect_missing_bootstrap_peers,
-        register_peer_alias, register_peer_outbox, should_skip_outbound_dial,
-        start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig, PeerAliasGuard,
-        PeerGuard, SharedServiceState,
+        apply_tx_pool_cleanup, connect_with_timeout, disconnect_after_live_responses,
+        finalize_live_message_outcome, flush_peer_outbox, is_connected_with_alias,
+        join_all_service_workers, lock_in_flight_dials, maybe_apply_tx_pool_cleanup,
+        maybe_snapshot_compact_local_txs, outbound_connect_timeout,
+        reconnect_missing_bootstrap_peers, register_peer_alias, register_peer_outbox,
+        should_skip_outbound_dial, start_node_p2p_service, wait_for_service_shutdown,
+        NodeP2PServiceConfig, PeerAliasGuard, PeerGuard, SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
     use crate::p2p_runtime::{
         build_envelope_header, decode_inventory_vectors, default_peer_runtime_config,
-        encode_inventory_vectors, network_magic, perform_version_handshake, InventoryVector,
-        LiveMessageOutcome, PeerManager, PeerRuntimeConfig, VersionPayloadV1, WireMessage, MSG_TX,
+        encode_cmpctblock_payload, encode_inventory_vectors, network_magic,
+        perform_version_handshake, CmpctBlockPayload, InventoryVector, LiveMessageOutcome,
+        PeerManager, PeerRuntimeConfig, PeerSession, VersionPayloadV1, WireMessage, MSG_TX,
     };
     use crate::sync_reorg::TxPoolCleanupPlan;
-    use crate::test_helpers::{block_with_txs, signed_conflicting_p2pk_state_and_txs};
+    use crate::test_helpers::{
+        block_with_txs, genesis_info, height_one_coinbase_only_block,
+        signed_conflicting_p2pk_state_and_txs,
+    };
     use crate::tx_relay::PeerOutbox;
     use crate::tx_relay::TxRelayState;
     use crate::txpool::TxSource;
@@ -1654,6 +1672,93 @@ mod tests {
         );
 
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn compact_local_snapshot_precheck_covers_known_and_unknown_cmpctblock() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-compact-snapshot-precheck");
+        {
+            let mut engine = sync_engine.lock().expect("sync engine");
+            let genesis = devnet_genesis_block_bytes();
+            engine
+                .apply_block_with_reorg(&genesis, None)
+                .expect("apply genesis");
+        }
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.enable_compact_receive = true;
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let _client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        let mut session = PeerSession::new(stream, runtime_cfg).expect("session");
+        {
+            let mut engine = shared.sync_engine.lock().expect("sync engine");
+            session
+                .handle_live_message(
+                    WireMessage {
+                        command: "sendcmpct".to_string(),
+                        payload: sendcmpct_payload(1),
+                    },
+                    &mut engine,
+                    None,
+                )
+                .expect("enable compact receive");
+        }
+
+        let (genesis_bytes, genesis_hash, genesis_ts) = genesis_info();
+        let known_header: [u8; BLOCK_HEADER_BYTES] =
+            genesis_bytes[..BLOCK_HEADER_BYTES].try_into().unwrap();
+        let known = encode_cmpctblock_payload(CmpctBlockPayload {
+            header: known_header,
+            nonce1: 0,
+            nonce2: 0,
+            short_ids: vec![[1u8; 6]],
+            prefilled: Vec::new(),
+        })
+        .expect("known cmpctblock");
+        assert!(
+            maybe_snapshot_compact_local_txs("cmpctblock", &known, &session, &shared)
+                .expect("known precheck")
+                .is_none()
+        );
+
+        let block1 = height_one_coinbase_only_block(genesis_hash, genesis_ts + 1);
+        let unknown_header: [u8; BLOCK_HEADER_BYTES] =
+            block1[..BLOCK_HEADER_BYTES].try_into().unwrap();
+        let unknown = encode_cmpctblock_payload(CmpctBlockPayload {
+            header: unknown_header,
+            nonce1: 0,
+            nonce2: 0,
+            short_ids: vec![[2u8; 6]],
+            prefilled: Vec::new(),
+        })
+        .expect("unknown cmpctblock");
+        let snapshot = maybe_snapshot_compact_local_txs("cmpctblock", &unknown, &session, &shared)
+            .expect("unknown precheck")
+            .expect("unknown short-id cmpctblock snapshots the tx pool");
+        assert!(snapshot.is_empty());
+        assert!(
+            maybe_snapshot_compact_local_txs("ping", &[], &session, &shared)
+                .expect("non compact command")
+                .is_none()
+        );
+
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn disconnect_after_live_responses_formats_reason() {
+        disconnect_after_live_responses(None).expect("no disconnect reason");
+        let err = disconnect_after_live_responses(Some("stale blocktxn response".to_string()))
+            .expect_err("disconnect reason should surface");
+        assert_eq!(err, "handle live message: stale blocktxn response");
+    }
+
+    fn sendcmpct_payload(mode: u8) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(9);
+        payload.push(mode);
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload
     }
 
     fn test_wire_frame(runtime_cfg: &PeerRuntimeConfig, command: &str, payload: &[u8]) -> Vec<u8> {

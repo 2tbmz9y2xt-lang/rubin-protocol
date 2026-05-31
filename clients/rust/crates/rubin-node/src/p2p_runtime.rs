@@ -398,7 +398,7 @@ impl PeerSession {
         self.stream.write_all(data)
     }
 
-    fn new(stream: TcpStream, cfg: PeerRuntimeConfig) -> Result<Self, String> {
+    pub(crate) fn new(stream: TcpStream, cfg: PeerRuntimeConfig) -> Result<Self, String> {
         let addr = stream
             .peer_addr()
             .map(|a| a.to_string())
