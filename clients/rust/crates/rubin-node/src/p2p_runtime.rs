@@ -1026,7 +1026,7 @@ impl PeerSession {
             .map_err(io::Error::other)?;
         let txs = match compact_block_transactions_by_index(&block, &req.indexes) {
             Ok(txs) => txs,
-            Err(err) if err.to_string().contains("getblocktxn index out of range") => {
+            Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
                 self.bump_ban(10, &err.to_string());
                 return Err(err);
             }
@@ -2335,6 +2335,9 @@ fn compact_block_hash_from_payload(payload: &[u8]) -> io::Result<[u8; 32]> {
     block_hash(&payload.header).map_err(io::Error::other)
 }
 fn compact_validate_unique_getblocktxn_indexes(indexes: &[u64]) -> io::Result<()> {
+    if indexes.len() < 2 {
+        return Ok(());
+    }
     let mut seen = indexes.to_vec();
     seen.sort_unstable();
     if seen.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -2347,7 +2350,10 @@ fn compact_block_transactions_by_index(block: &[u8], indexes: &[u64]) -> io::Res
     let (tx_count, mut offset) = compact_block_transaction_count(block)?;
     for &idx in indexes {
         if idx >= tx_count {
-            return Err(invalid_data("getblocktxn index out of range"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "getblocktxn index out of range",
+            ));
         }
     }
     if indexes.is_empty() {
@@ -3193,19 +3199,6 @@ mod tests {
         (session, client)
     }
 
-    fn test_sync_engine_without_blockstore() -> SyncEngine {
-        SyncEngine::new(
-            ChainState::new(),
-            None,
-            crate::sync::default_sync_config(
-                Some(rubin_consensus::constants::POW_LIMIT),
-                devnet_genesis_chain_id(),
-                None,
-            ),
-        )
-        .expect("new sync engine without blockstore")
-    }
-
     #[test]
     fn getblocktxn_payload_codec_matches_go_wire() {
         let mut block_hash = [0u8; 32];
@@ -3352,7 +3345,7 @@ mod tests {
     #[test]
     fn getblocktxn_rejects_disabled_duplicate_and_unannounced() {
         let (mut session, _client) = test_peer_session();
-        let engine = test_sync_engine_without_blockstore();
+        let engine = test_sync_engine_with_genesis();
         let request = |block_hash, indexes| {
             encode_getblocktxn_payload(GetBlockTxnPayload {
                 block_hash,
@@ -3401,10 +3394,10 @@ mod tests {
         let mut block = genesis[..BLOCK_HEADER_BYTES].to_vec();
         encode_compact_size(1, &mut block);
         block.push(0xff);
-        assert_blocktxn_err(
-            compact_block_transactions_by_index(&block, &[1]),
-            "getblocktxn index out of range",
-        );
+        let err = compact_block_transactions_by_index(&block, &[1])
+            .expect_err("out-of-range getblocktxn must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("getblocktxn index out of range"));
 
         let txs = vec![
             minimal_blocktxn_test_tx_bytes(301),
