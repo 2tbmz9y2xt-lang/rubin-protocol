@@ -4251,22 +4251,23 @@ mod tests {
         session.compact_outstanding = Some(req);
         client.write_all(b"x").expect("write ready byte");
 
-        let mut reader = CompactFallbackFrameReader {
-            stream: &mut session.stream,
-            prefetched_read_byte: None,
-            compact_outstanding: &mut session.compact_outstanding,
-            read_timeout: Duration::from_secs(1),
-            write_timeout: session.cfg.write_deadline,
-            network_magic: network_magic(&session.cfg.network),
-        };
-        let mut empty = [];
-        assert_eq!(reader.read(&mut empty).expect("zero-length read"), 0);
-        assert!(reader.compact_outstanding.is_some());
+        {
+            let mut reader = CompactFallbackFrameReader {
+                stream: &mut session.stream,
+                prefetched_read_byte: None,
+                compact_outstanding: &mut session.compact_outstanding,
+                read_timeout: Duration::from_secs(1),
+                write_timeout: session.cfg.write_deadline,
+                network_magic: network_magic(&session.cfg.network),
+            };
+            let mut empty = [];
+            assert_eq!(reader.read(&mut empty).expect("zero-length read"), 0);
+            assert!(reader.compact_outstanding.is_some());
 
-        let mut buf = [0u8; 1];
-        assert_eq!(reader.read(&mut buf).expect("read ready byte"), 1);
-        assert_eq!(buf[0], b'x');
-        drop(reader);
+            let mut buf = [0u8; 1];
+            assert_eq!(reader.read(&mut buf).expect("read ready byte"), 1);
+            assert_eq!(buf[0], b'x');
+        }
 
         assert!(session.compact_outstanding.is_none());
         assert_fallback_getdata(&mut client, block_hash);
