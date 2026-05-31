@@ -455,6 +455,7 @@ impl PeerSession {
         self.stream
             .set_read_timeout(Some(timeout))
             .map_err(io::Error::other)?;
+        self.send_expired_compact_outstanding_fallback()?;
         let compact_receive = self.compact_receive_active();
         let mut reader = PrefetchedReader {
             stream: &mut self.stream,
@@ -4151,6 +4152,35 @@ mod tests {
         assert_eq!(msg.command, MESSAGE_GETDATA);
         assert_eq!(
             decode_inventory_vectors(&msg.payload).expect("decode idle fallback inventory"),
+            vec![InventoryVector {
+                kind: MSG_BLOCK,
+                hash: block_hash
+            }]
+        );
+    }
+
+    #[test]
+    fn compact_fallback_read_message_with_ready_frame_emits_expired_fallback() {
+        let (mut session, mut client) = test_peer_session();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("client read timeout");
+        let block_hash = [0xbb; 32];
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(req);
+        let header =
+            build_envelope_header(network_magic("devnet"), "ping", &[]).expect("ping header");
+        client.write_all(&header).expect("write ready ping");
+
+        let msg = session.read_message().expect("read ready ping");
+        assert_eq!(msg.command, "ping");
+        assert!(session.compact_outstanding.is_none());
+        let fallback = read_message_from(&mut client, network_magic("devnet"), MAX_RELAY_MSG_BYTES)
+            .expect("read ready-frame fallback getdata");
+        assert_eq!(fallback.command, MESSAGE_GETDATA);
+        assert_eq!(
+            decode_inventory_vectors(&fallback.payload).expect("decode ready fallback inventory"),
             vec![InventoryVector {
                 kind: MSG_BLOCK,
                 hash: block_hash
