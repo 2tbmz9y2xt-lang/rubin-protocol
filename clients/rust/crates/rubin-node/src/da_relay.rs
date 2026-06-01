@@ -88,7 +88,7 @@ impl PeerQuotaKey {
 fn split_peer_host(addr: &str) -> &str {
     if let Some(rest) = addr.strip_prefix('[') {
         if let Some((host, port)) = rest.rsplit_once("]:") {
-            if !host.contains(']') && !port.contains(':') && !port.contains(['[', ']']) {
+            if !host.contains(['[', ']']) && !port.contains(':') && !port.contains(['[', ']']) {
                 return host;
             }
         }
@@ -216,6 +216,7 @@ mod tests {
             ("[fe80::1%en0]:", "fe80::1"),
             ("[fe80::1%]:8333", "fe80::1%"),
             ("[example.com%zone]:8333", "example.com%zone"),
+            ("[a[b]:8333", "[a[b]:8333"),
             ("example[.com]:8333", "example[.com]:8333"),
             ("example.com%zone:8333", "example.com%zone"),
         ] {
