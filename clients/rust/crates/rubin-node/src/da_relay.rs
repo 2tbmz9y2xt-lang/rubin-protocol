@@ -37,12 +37,15 @@ pub enum DaRelayError {
     AccountingCapExceeded,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PeerQuotaKey(String);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaRelayState {
     caps: DaRelayCaps,
     next_received_time: u64,
     orphan_bytes: u64,
-    orphan_bytes_by_peer_quota_key: BTreeMap<String, u64>,
+    orphan_bytes_by_peer_quota_key: BTreeMap<PeerQuotaKey, u64>,
     orphan_bytes_by_da_id: BTreeMap<[u8; 32], u64>,
     orphan_commit_overhead_bytes: u64,
     pinned_payload_bytes: u64,
@@ -99,6 +102,41 @@ impl DaRelayCaps {
         }
         Ok(())
     }
+}
+
+impl PeerQuotaKey {
+    #[allow(dead_code)]
+    fn from_peer_addr(addr: &str) -> Self {
+        if addr.is_empty() {
+            return Self(String::new());
+        }
+        let host = addr
+            .parse::<std::net::SocketAddr>()
+            .map(|socket_addr| socket_addr.ip().to_string())
+            .unwrap_or_else(|_| split_peer_host(addr).to_owned());
+        let host = strip_ipv6_zone(&host);
+        host.parse::<std::net::IpAddr>()
+            .map(|ip| Self(ip.to_string()))
+            .unwrap_or_else(|_| Self(host.to_owned()))
+    }
+}
+
+#[allow(dead_code)]
+fn split_peer_host(addr: &str) -> &str {
+    if let Some(rest) = addr.strip_prefix('[') {
+        if let Some((host, _port)) = rest.split_once("]:") {
+            return host;
+        }
+    }
+    if addr.matches(':').count() == 1 {
+        return addr.rsplit_once(':').map_or(addr, |(host, _port)| host);
+    }
+    addr
+}
+
+#[allow(dead_code)]
+fn strip_ipv6_zone(host: &str) -> &str {
+    host.split_once('%').map_or(host, |(addr, _zone)| addr)
 }
 
 impl DaRelayState {
@@ -210,6 +248,26 @@ mod tests {
 
         assert_eq!(state.caps(), caps);
         assert!(state.is_empty());
+    }
+
+    #[test]
+    fn peer_quota_key_normalizes_port_variants() {
+        assert_eq!(
+            PeerQuotaKey::from_peer_addr("127.0.0.1:8333"),
+            PeerQuotaKey::from_peer_addr("127.0.0.1:9444")
+        );
+        assert_eq!(
+            PeerQuotaKey::from_peer_addr("[::1]:8333"),
+            PeerQuotaKey("::1".to_owned())
+        );
+        assert_eq!(
+            PeerQuotaKey::from_peer_addr("example.com:8333"),
+            PeerQuotaKey("example.com".to_owned())
+        );
+        assert_eq!(
+            PeerQuotaKey::from_peer_addr(""),
+            PeerQuotaKey(String::new())
+        );
     }
 
     #[test]
