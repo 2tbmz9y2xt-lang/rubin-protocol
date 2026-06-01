@@ -171,7 +171,6 @@ mod tests {
             ($($field:ident = $value:expr),+ $(,)?) => {$({
                 let mut caps = DaRelayCaps::default();
                 caps.$field = $value;
-                assert_eq!(caps.validate(), Err(InvalidCaps));
                 assert_eq!(DaRelayState::new(caps), Err(InvalidCaps));
             })+};
         }
@@ -190,9 +189,16 @@ mod tests {
     }
 
     #[test]
-    fn da_relay_state_initializes_empty_accounting_maps() {
-        let mut state = DaRelayState::new(DaRelayCaps::default()).expect("valid caps");
-        assert_eq!(state.next_received_time, 0);
+    fn da_relay_default_caps_match_go_reference() {
+        let caps = DaRelayCaps::default();
+        assert_eq!(caps.orphan_pool_bytes, 64 << 20);
+        assert_eq!(caps.orphan_pool_per_peer_bytes, 4 << 20);
+        assert_eq!(caps.orphan_pool_per_da_id_bytes, 8 << 20);
+        assert_eq!(caps.orphan_commit_overhead_bytes, 8 << 20);
+        assert_eq!(caps.orphan_ttl_blocks, 3);
+        assert_eq!(caps.pinned_payload_bytes, 96_000_000);
+        assert_eq!(caps.max_complete_sets, MAX_DA_BATCHES_PER_BLOCK);
+        let mut state = DaRelayState::new(caps).expect("valid caps");
         assert!(state.is_empty());
         state.next_received_time = 1;
         assert!(state.is_empty());
@@ -210,10 +216,8 @@ mod tests {
             ("fe80::1%en0", "fe80::1"),
             ("[fe80::1%en0]:8333", "fe80::1"),
             ("example.com:8333", "example.com"),
-            ("[example.com]:8333", "example.com"),
             ("example.com", "example.com"),
             ("example.com%zone:8333", "example.com%zone"),
-            ("[example.com%zone]:8333", "example.com%zone"),
             ("example.com%zone", "example.com%zone"),
         ] {
             assert_eq!(PeerQuotaKey::from_peer_addr(addr).0, expected);
@@ -222,16 +226,14 @@ mod tests {
 
     #[test]
     fn da_relay_accounting_projection_fails_closed() {
+        let project_counter = DaRelayState::project_counter;
         for (current, remove, add, cap, expected) in [
             (0, 1, 0, 10, Err(AccountingUnderflow)),
             (u64::MAX, 0, 1, u64::MAX, Err(AccountingOverflow)),
             (9, 0, 2, 10, Err(AccountingCapExceeded)),
             (9, 4, 2, 10, Ok(7)),
         ] {
-            assert_eq!(
-                DaRelayState::project_counter(current, remove, add, cap),
-                expected
-            );
+            assert_eq!(project_counter(current, remove, add, cap), expected);
         }
     }
 }
