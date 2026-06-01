@@ -40,6 +40,7 @@ const MESSAGE_ADDR: &str = "addr";
 const MESSAGE_SENDCMPCT: &str = "sendcmpct";
 const MESSAGE_GETBLOCKTXN: &str = "getblocktxn";
 const MESSAGE_BLOCKTXN: &str = "blocktxn";
+const BLOCKTXN_HASH_PAYLOAD_BYTES: usize = 32;
 const COMPACT_RELAY_VERSION: u64 = 1;
 const SENDCMPCT_PAYLOAD_BYTES: u64 = 9;
 const COMPACT_RELAY_INDEX_BYTES: usize = 4;
@@ -240,6 +241,13 @@ struct CompactOutstandingRequest {
     blocktxn_payload_cap: u64,
     expires_at: Instant,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LateBlockTxnContext {
+    block_hash: [u8; 32],
+    blocktxn_payload_cap: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OrphanBlockEntry {
     block_hash: [u8; 32],
@@ -272,6 +280,7 @@ pub struct PeerSession {
     prefetched_read_byte: Option<u8>,
     remote_compact_mode: CompactModeSnapshot,
     compact_outstanding: Option<CompactOutstandingRequest>,
+    late_blocktxn: Option<LateBlockTxnContext>,
     compact_announced: Vec<[u8; 32]>,
 }
 
@@ -393,6 +402,7 @@ impl PeerSession {
             prefetched_read_byte: None,
             remote_compact_mode: CompactModeSnapshot::default(),
             compact_outstanding: None,
+            late_blocktxn: None,
             compact_announced: Vec::new(),
         })
     }
@@ -466,15 +476,11 @@ impl PeerSession {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "peer read timeout"));
         }
         let compact_receive = self.compact_receive_active();
-        let blocktxn_payload_cap = self
-            .compact_outstanding
-            .as_ref()
-            .filter(|req| Instant::now() < req.expires_at)
-            .map(|req| req.blocktxn_payload_cap.min(MAX_RELAY_MSG_BYTES));
         let mut reader = CompactFallbackFrameReader {
             stream: &mut self.stream,
             prefetched_read_byte: self.prefetched_read_byte.take(),
             compact_outstanding: &mut self.compact_outstanding,
+            late_blocktxn: &mut self.late_blocktxn,
             read_timeout: timeout,
             write_timeout: self.cfg.write_deadline,
             network_magic: network_magic(&self.cfg.network),
@@ -483,7 +489,7 @@ impl PeerSession {
             "cmpctblock" if compact_receive => MAX_RELAY_MSG_BYTES,
             MESSAGE_GETBLOCKTXN if compact_receive => MAX_GETBLOCKTXN_PAYLOAD_BYTES,
             MESSAGE_GETBLOCKTXN => 0,
-            MESSAGE_BLOCKTXN if compact_receive => blocktxn_payload_cap.unwrap_or(32),
+            MESSAGE_BLOCKTXN if compact_receive => MAX_RELAY_MSG_BYTES,
             MESSAGE_BLOCKTXN => 0,
             _ => runtime_payload_cap(command),
         };
@@ -506,11 +512,12 @@ impl PeerSession {
         // ban-score policy at the higher layer; that is intentionally
         // out of scope for this Q-* task (which only aligns the
         // malformed/parse-fail surface).
-        read_message_from_with_payload_limit(
+        read_message_from_compact_reader(
             &mut reader,
             network_magic(&self.cfg.network),
             MAX_RELAY_MSG_BYTES,
             &payload_cap,
+            compact_receive,
         )
     }
 
@@ -1055,12 +1062,32 @@ impl PeerSession {
             return Ok(LiveMessageOutcome::default());
         }
         if payload.len() < 32 {
+            if self.compact_outstanding.is_none() && self.late_blocktxn.take().is_some() {
+                return Err(invalid_data("blocktxn payload missing block hash"));
+            }
             self.bump_ban(10, "blocktxn payload missing block hash");
             return Err(invalid_data("blocktxn payload missing block hash"));
         }
         self.clear_expired_compact_outstanding_request();
         let mut response_hash = [0u8; 32];
         response_hash.copy_from_slice(&payload[..32]);
+        let active_hash = self.compact_outstanding.as_ref().map(|req| req.block_hash);
+        if active_hash != Some(response_hash) {
+            if let Some(late) = self.late_blocktxn.take() {
+                if response_hash == late.block_hash {
+                    if payload.len() as u64 > late.blocktxn_payload_cap {
+                        return Err(invalid_data("message exceeds command cap"));
+                    }
+                    self.peer.last_error = "ignored late blocktxn response".to_string();
+                    return Ok(LiveMessageOutcome::default());
+                }
+                if payload.len() > 32 {
+                    return Err(invalid_data("stale blocktxn response has body"));
+                }
+                self.peer.last_error = "ignored stale blocktxn response".to_string();
+                return Ok(LiveMessageOutcome::default());
+            }
+        }
         let Some(req) = self.compact_outstanding.as_ref() else {
             return Ok(LiveMessageOutcome::default());
         };
@@ -1159,12 +1186,16 @@ impl PeerSession {
         pop_expired_compact_outstanding(&mut self.compact_outstanding)
     }
     fn send_expired_compact_outstanding_fallback(&mut self) -> io::Result<bool> {
-        let Some((block_hash, _payload_cap)) =
+        let Some((block_hash, payload_cap)) =
             self.pop_expired_compact_outstanding_block_hash_and_payload_cap()
         else {
             return Ok(false);
         };
         self.write_message(&compact_full_block_fallback_message(block_hash)?)?;
+        self.late_blocktxn = Some(LateBlockTxnContext {
+            block_hash,
+            blocktxn_payload_cap: payload_cap,
+        });
         Ok(true)
     }
     fn clear_expired_compact_outstanding_request(&mut self) {
@@ -1491,6 +1522,7 @@ struct CompactFallbackFrameReader<'a> {
     stream: &'a mut TcpStream,
     prefetched_read_byte: Option<u8>,
     compact_outstanding: &'a mut Option<CompactOutstandingRequest>,
+    late_blocktxn: &'a mut Option<LateBlockTxnContext>,
     read_timeout: Duration,
     write_timeout: Duration,
     network_magic: [u8; 4],
@@ -1498,7 +1530,7 @@ struct CompactFallbackFrameReader<'a> {
 
 impl CompactFallbackFrameReader<'_> {
     fn send_expired_compact_outstanding_fallback(&mut self) -> io::Result<bool> {
-        let Some((block_hash, _payload_cap)) =
+        let Some((block_hash, payload_cap)) =
             pop_expired_compact_outstanding(self.compact_outstanding)
         else {
             return Ok(false);
@@ -1506,6 +1538,10 @@ impl CompactFallbackFrameReader<'_> {
         let msg = compact_full_block_fallback_message(block_hash)?;
         let header = build_envelope_header(self.network_magic, &msg.command, &msg.payload)?;
         write_wire_message_to_stream(self.stream, self.write_timeout, &header, &msg)?;
+        *self.late_blocktxn = Some(LateBlockTxnContext {
+            block_hash,
+            blocktxn_payload_cap: payload_cap,
+        });
         Ok(true)
     }
 }
@@ -1753,6 +1789,79 @@ fn read_message_from_with_payload_limit<R: Read>(
     let envelope = parse_envelope_header(&header, expected_magic, max_payload_bytes, payload_cap)?;
     let payload = read_payload_with_checksum(reader, envelope.payload_len, envelope.checksum)?;
 
+    Ok(WireMessage {
+        command: envelope.command,
+        payload,
+    })
+}
+
+fn read_message_from_compact_reader(
+    reader: &mut CompactFallbackFrameReader<'_>,
+    expected_magic: [u8; 4],
+    max_payload_bytes: u64,
+    payload_cap: &dyn Fn(&str) -> u64,
+    compact_receive: bool,
+) -> io::Result<WireMessage> {
+    let mut header = [0u8; WIRE_HEADER_SIZE];
+    reader.read_exact(&mut header)?;
+    let envelope = parse_envelope_header(&header, expected_magic, max_payload_bytes, payload_cap)?;
+    if compact_receive && envelope.command == MESSAGE_BLOCKTXN {
+        return read_blocktxn_from_compact_reader(reader, envelope);
+    }
+    let payload = read_payload_with_checksum(reader, envelope.payload_len, envelope.checksum)?;
+
+    Ok(WireMessage {
+        command: envelope.command,
+        payload,
+    })
+}
+
+fn read_blocktxn_from_compact_reader(
+    reader: &mut CompactFallbackFrameReader<'_>,
+    envelope: ParsedEnvelopeHeader,
+) -> io::Result<WireMessage> {
+    if envelope.payload_len < BLOCKTXN_HASH_PAYLOAD_BYTES {
+        let payload = read_payload_with_checksum(reader, envelope.payload_len, envelope.checksum)?;
+        return Ok(WireMessage {
+            command: envelope.command,
+            payload,
+        });
+    }
+
+    let mut prefix = [0u8; BLOCKTXN_HASH_PAYLOAD_BYTES];
+    reader.read_exact(&mut prefix)?;
+    let active_cap = reader
+        .compact_outstanding
+        .as_ref()
+        .filter(|req| req.block_hash == prefix)
+        .map(|req| req.blocktxn_payload_cap.min(MAX_RELAY_MSG_BYTES));
+    let late_cap = reader
+        .late_blocktxn
+        .as_ref()
+        .filter(|req| req.block_hash == prefix)
+        .map(|req| req.blocktxn_payload_cap.min(MAX_RELAY_MSG_BYTES));
+    let matched_late_only = active_cap.is_none() && late_cap.is_some();
+
+    if let Some(cap) = active_cap.or(late_cap) {
+        if envelope.payload_len as u64 > cap {
+            if matched_late_only {
+                *reader.late_blocktxn = None;
+            }
+            return Err(invalid_data("message exceeds command cap"));
+        }
+    } else if envelope.payload_len > BLOCKTXN_HASH_PAYLOAD_BYTES {
+        *reader.late_blocktxn = None;
+        return Err(invalid_data("stale blocktxn response has body"));
+    }
+
+    let mut payload = prefix.to_vec();
+    payload.resize(envelope.payload_len, 0);
+    if envelope.payload_len > BLOCKTXN_HASH_PAYLOAD_BYTES {
+        reader.read_exact(&mut payload[BLOCKTXN_HASH_PAYLOAD_BYTES..])?;
+    }
+    if envelope.checksum != wire_checksum(&payload) {
+        return Err(invalid_data("invalid envelope checksum"));
+    }
     Ok(WireMessage {
         command: envelope.command,
         payload,
@@ -4102,6 +4211,30 @@ mod tests {
         );
     }
 
+    fn write_test_wire_message(client: &mut TcpStream, command: &str, payload: &[u8]) {
+        let header =
+            build_envelope_header(network_magic("devnet"), command, payload).expect("build header");
+        client.write_all(&header).expect("write header");
+        client.write_all(payload).expect("write payload");
+        client.flush().expect("flush payload");
+    }
+
+    fn run_late_blocktxn_after_expiry(
+        block_hash: [u8; 32],
+        payload: Vec<u8>,
+    ) -> (PeerSession, TcpStream, io::Result<TxPoolCleanupPlan>) {
+        let (mut session, mut client) = test_peer_session();
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(req);
+        write_test_wire_message(&mut client, MESSAGE_BLOCKTXN, &payload);
+        let mut engine = test_sync_engine_with_genesis();
+        let result = session
+            .read_message_with_timeout(Duration::from_secs(1))
+            .and_then(|msg| session.handle_live_message(msg, &mut engine, None));
+        (session, client, result)
+    }
+
     #[test]
     fn compact_outstanding_clear_go_parity_matrix() {
         let (mut session, _client) = test_peer_session();
@@ -4256,6 +4389,7 @@ mod tests {
                 stream: &mut session.stream,
                 prefetched_read_byte: None,
                 compact_outstanding: &mut session.compact_outstanding,
+                late_blocktxn: &mut session.late_blocktxn,
                 read_timeout: Duration::from_secs(1),
                 write_timeout: session.cfg.write_deadline,
                 network_magic: network_magic(&session.cfg.network),
@@ -4271,6 +4405,91 @@ mod tests {
 
         assert!(session.compact_outstanding.is_none());
         assert_fallback_getdata(&mut client, block_hash);
+    }
+
+    #[test]
+    fn late_blocktxn_after_expiry_fallback_matrix() {
+        let block_hash = [0xe1; 32];
+        let matching = {
+            let mut payload = block_hash.to_vec();
+            payload.push(0x01);
+            payload
+        };
+        let (mut session, mut client, result) =
+            run_late_blocktxn_after_expiry(block_hash, matching);
+        result.expect("matching late blocktxn ignored");
+        assert_fallback_getdata(&mut client, block_hash);
+        assert!(session.compact_outstanding.is_none());
+        assert!(session.late_blocktxn.is_none());
+        assert_eq!(session.peer.ban_score, 0);
+        assert_eq!(session.peer.last_error, "ignored late blocktxn response");
+        session
+            .handle_blocktxn(&block_hash, &mut test_sync_engine_with_genesis())
+            .expect("duplicate hash-only blocktxn");
+
+        let stale_hash = [0xe2; 32];
+        let (session, mut client, result) =
+            run_late_blocktxn_after_expiry(block_hash, stale_hash.to_vec());
+        result.expect("hash-only stale late blocktxn ignored");
+        assert_fallback_getdata(&mut client, block_hash);
+        assert!(session.compact_outstanding.is_none());
+        assert!(session.late_blocktxn.is_none());
+        assert_eq!(session.peer.ban_score, 0);
+        assert_eq!(session.peer.last_error, "ignored stale blocktxn response");
+
+        let (mut session, mut client) = test_peer_session();
+        session.late_blocktxn = Some(LateBlockTxnContext {
+            block_hash,
+            blocktxn_payload_cap: 64,
+        });
+        let mut stale_body = stale_hash.to_vec();
+        stale_body.push(0x01);
+        let header = build_envelope_header(network_magic("devnet"), MESSAGE_BLOCKTXN, &stale_body)
+            .expect("build stale blocktxn header");
+        client.write_all(&header).expect("write header");
+        client.write_all(&stale_hash).expect("write hash prefix");
+        let err = session
+            .read_message_with_timeout(Duration::from_secs(1))
+            .expect_err("stale body must reject before reading body");
+        assert_eq!(err.to_string(), "stale blocktxn response has body");
+        assert!(session.late_blocktxn.is_none());
+    }
+
+    #[test]
+    fn late_blocktxn_fragmented_after_expiry_fallback() {
+        let (mut session, mut client) = test_peer_session();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("client read timeout");
+        let block_hash = [0xe3; 32];
+        let mut payload = block_hash.to_vec();
+        payload.push(0x01);
+        let header = build_envelope_header(network_magic("devnet"), MESSAGE_BLOCKTXN, &payload)
+            .expect("build blocktxn header");
+        let mut req = compact_outstanding_test_request(block_hash);
+        req.expires_at = Instant::now() - Duration::from_secs(1);
+        session.compact_outstanding = Some(req);
+
+        let reader = thread::spawn(move || {
+            let mut engine = test_sync_engine_with_genesis();
+            let msg = session
+                .read_message_with_timeout(Duration::from_secs(2))
+                .expect("read fragmented late blocktxn");
+            session
+                .handle_live_message(msg, &mut engine, None)
+                .expect("handle fragmented late blocktxn");
+            assert!(session.compact_outstanding.is_none());
+            assert!(session.late_blocktxn.is_none());
+            assert_eq!(session.peer.last_error, "ignored late blocktxn response");
+        });
+
+        assert_fallback_getdata(&mut client, block_hash);
+        client.write_all(&header).expect("write blocktxn header");
+        client
+            .write_all(&payload[..1])
+            .expect("write first payload byte");
+        client.write_all(&payload[1..]).expect("write rest payload");
+        reader.join().expect("late blocktxn reader");
     }
 
     fn large_blocktxn_test_tx_bytes(test_tag: u64) -> Vec<u8> {
