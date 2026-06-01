@@ -36,7 +36,6 @@ pub enum DaRelayError {
     ChunkIndexOutsideCommit,
     ChunkPayloadSizeInvalid,
     ChunkHashMismatch,
-    CompleteSetRequiresOwner,
 }
 
 type DaRelayResult<T = ()> = Result<T, DaRelayError>;
@@ -240,11 +239,6 @@ impl DaRelayState {
             .unwrap_or_else(|| DaRelaySetRecord::new(commit.da_id));
         record.commit = Some(commit);
         record.prune_chunks_outside_commit();
-        if record.commit.as_ref().is_some_and(|commit| {
-            (0..commit.chunk_count).all(|index| record.chunks.contains_key(&index))
-        }) {
-            record.chunks.clear();
-        }
         self.prepare_and_apply_incomplete_record(record)
     }
     pub(crate) fn stage_incomplete_da_chunk(&mut self, chunk: DaRelayChunk) -> DaRelayResult {
@@ -278,11 +272,6 @@ impl DaRelayState {
         &mut self,
         mut record: DaRelaySetRecord,
     ) -> DaRelayResult {
-        if record.commit.as_ref().is_some_and(|commit| {
-            (0..commit.chunk_count).all(|index| record.chunks.contains_key(&index))
-        }) {
-            return Err(DaRelayError::CompleteSetRequiresOwner);
-        }
         record.recompute_wire_bytes()?;
         let old = self.sets_by_da_id.get(&record.da_id);
         let old_bytes = old.map_or(0, |old| old.wire_bytes);
@@ -475,8 +464,8 @@ mod tests {
     #[rustfmt::skip]
     fn da_relay_staged_mutation_matrix() {
         let pk = || PeerQuotaKey::from_peer_addr("peer-a"); let commit = |da_id, chunk_count, wire_bytes| DaRelayCommit { da_id, peer_quota_key: pk(), chunk_count, wire_bytes }; let chunk = |da_id, chunk_index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk(), chunk_index, payload: Arc::from(payload), wire_bytes }; let reject = |got: Result<(), DaRelayError>, want| assert_eq!(got, Err(want));
-        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(commit([1; 32], 2, 2)).unwrap(); assert!(state.sets_by_da_id[&[1; 32]].commit.is_some()); state.stage_incomplete_da_chunk(chunk([1; 32], 0, b"payload-a", 9)).unwrap(); assert_eq!(state.sets_by_da_id[&[1; 32]].chunks.len(), 1); let before = state.clone(); reject(state.stage_incomplete_da_chunk(chunk([1; 32], 1, b"payload-b", 9)), CompleteSetRequiresOwner); assert_eq!(state, before);
-        state.stage_incomplete_da_chunk(chunk([2; 32], 0, b"payload-a", 9)).unwrap(); state.stage_incomplete_da_chunk(chunk([2; 32], 1, b"payload-b", 9)).unwrap(); state.stage_incomplete_da_commit(commit([2; 32], 2, 1)).unwrap(); let record = &state.sets_by_da_id[&[2; 32]]; assert!(record.commit.is_some() && record.chunks.is_empty()); assert_eq!(state.orphan_bytes_by_da_id[&[2; 32]], record.wire_bytes);
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(commit([1; 32], 2, 2)).unwrap(); assert!(state.sets_by_da_id[&[1; 32]].commit.is_some()); state.stage_incomplete_da_chunk(chunk([1; 32], 0, b"payload-a", 9)).unwrap(); state.stage_incomplete_da_chunk(chunk([1; 32], 1, b"payload-b", 9)).unwrap(); assert_eq!(state.sets_by_da_id[&[1; 32]].chunks.len(), 2);
+        state.stage_incomplete_da_chunk(chunk([2; 32], 0, b"payload-a", 9)).unwrap(); state.stage_incomplete_da_chunk(chunk([2; 32], 1, b"payload-b", 9)).unwrap(); state.stage_incomplete_da_commit(commit([2; 32], 2, 1)).unwrap(); let record = &state.sets_by_da_id[&[2; 32]]; assert!(record.commit.is_some() && record.chunks.len() == 2); assert_eq!(state.orphan_bytes_by_da_id[&[2; 32]], record.wire_bytes);
         state.stage_incomplete_da_chunk(chunk([12; 32], 0, b"keep", 4)).unwrap(); state.stage_incomplete_da_chunk(chunk([12; 32], 2, b"prune", 5)).unwrap(); state.stage_incomplete_da_commit(commit([12; 32], 2, 1)).unwrap(); let record = &state.sets_by_da_id[&[12; 32]]; assert!(record.chunks.contains_key(&0) && !record.chunks.contains_key(&2)); assert_eq!(state.orphan_bytes_by_da_id[&[12; 32]], record.wire_bytes);
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); reject(state.stage_incomplete_da_commit(commit([3; 32], 0, 1)), InvalidCommitChunkCount); reject(state.stage_incomplete_da_commit(commit([3; 32], 1, 0)), InvalidWireBytes); assert!(state.sets_by_da_id.is_empty());
         state.stage_incomplete_da_commit(commit([3; 32], 2, 1)).unwrap(); let before = state.clone(); let mut bad_hash = chunk([3; 32], 0, b"payload", 7); bad_hash.chunk_hash[0] ^= 0xff;
