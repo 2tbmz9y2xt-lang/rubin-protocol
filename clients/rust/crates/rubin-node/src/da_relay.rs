@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
@@ -270,12 +271,8 @@ impl DaRelaySetRecord {
             self.commit.as_ref().map_or(0, |commit| commit.wire_bytes)
         }
     }
-    fn orphan_peer_bytes(&self) -> BTreeMap<PeerQuotaKey, u64> {
-        if self.state == DaRelaySetState::CompleteSet {
-            BTreeMap::new()
-        } else {
-            self.peer_bytes.clone()
-        }
+    fn orphan_peer_bytes(&self) -> Option<&BTreeMap<PeerQuotaKey, u64>> {
+        (self.state != DaRelaySetState::CompleteSet).then_some(&self.peer_bytes)
     }
     fn pinned_payload_accounting_bytes(&self) -> DaRelayResult<u64> {
         if self.state != DaRelaySetState::CompleteSet || self.payload_bytes == 0 {
@@ -565,21 +562,22 @@ impl DaRelayState {
     ) -> DaRelayResult<Vec<(PeerQuotaKey, u64)>> {
         let mut projected = Vec::new();
         let new_peer_bytes = new.orphan_peer_bytes();
-        let old_peer_bytes = old.map(DaRelaySetRecord::orphan_peer_bytes);
-        if let Some(old_peer_bytes) = &old_peer_bytes {
+        let old_peer_bytes = old.and_then(DaRelaySetRecord::orphan_peer_bytes);
+        if let Some(old_peer_bytes) = old_peer_bytes {
             for (key, old_bytes) in old_peer_bytes {
-                let new_bytes = new_peer_bytes.get(key).copied().unwrap_or(0);
+                let new_bytes = new_peer_bytes
+                    .and_then(|m| m.get(key))
+                    .copied()
+                    .unwrap_or(0);
                 projected.push(self.project_peer_counter(key, *old_bytes, new_bytes)?);
             }
         }
-        for (key, new_bytes) in &new_peer_bytes {
-            if old_peer_bytes
-                .as_ref()
-                .is_some_and(|old_peer_bytes| old_peer_bytes.contains_key(key))
-            {
-                continue;
+        if let Some(new_peer_bytes) = new_peer_bytes {
+            for (key, new_bytes) in new_peer_bytes {
+                if !old_peer_bytes.is_some_and(|old_bytes| old_bytes.contains_key(key)) {
+                    projected.push(self.project_peer_counter(key, 0, *new_bytes)?);
+                }
             }
-            projected.push(self.project_peer_counter(key, 0, *new_bytes)?);
         }
         Ok(projected)
     }
