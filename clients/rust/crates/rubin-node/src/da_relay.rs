@@ -38,7 +38,7 @@ pub enum DaRelayError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PeerQuotaKey(String);
+pub struct PeerQuotaKey(String);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaRelayState {
@@ -105,8 +105,7 @@ impl DaRelayCaps {
 }
 
 impl PeerQuotaKey {
-    #[allow(dead_code)]
-    fn from_peer_addr(addr: &str) -> Self {
+    pub fn from_peer_addr(addr: &str) -> Self {
         if addr.is_empty() {
             return Self(String::new());
         }
@@ -121,7 +120,6 @@ impl PeerQuotaKey {
     }
 }
 
-#[allow(dead_code)]
 fn split_peer_host(addr: &str) -> &str {
     if let Some(rest) = addr.strip_prefix('[') {
         if let Some((host, _port)) = rest.split_once("]:") {
@@ -134,7 +132,6 @@ fn split_peer_host(addr: &str) -> &str {
     addr
 }
 
-#[allow(dead_code)]
 fn strip_ipv6_zone(host: &str) -> &str {
     host.split_once('%').map_or(host, |(addr, _zone)| addr)
 }
