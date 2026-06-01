@@ -39,7 +39,7 @@ pub enum DaRelayError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaRelayState {
-    pub caps: DaRelayCaps,
+    caps: DaRelayCaps,
     next_received_time: u64,
     orphan_bytes: u64,
     orphan_bytes_by_peer: BTreeMap<Vec<u8>, u64>,
@@ -116,6 +116,10 @@ impl DaRelayState {
         })
     }
 
+    pub fn caps(&self) -> DaRelayCaps {
+        self.caps
+    }
+
     pub fn is_empty(&self) -> bool {
         self.next_received_time == 0
             && self.orphan_bytes == 0
@@ -148,6 +152,7 @@ impl DaRelayState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use DaRelayError::*;
 
     #[test]
     fn da_relay_default_caps_match_go_reference() {
@@ -174,36 +179,27 @@ mod tests {
             }};
         }
 
-        invalid!(orphan_pool_bytes = 0, DaRelayError::OrphanPoolBytesZero);
-        invalid!(
-            orphan_pool_per_peer_bytes = 0,
-            DaRelayError::OrphanPoolPerPeerBytesZero
-        );
-        invalid!(
-            orphan_pool_per_da_id_bytes = 0,
-            DaRelayError::OrphanPoolPerDaIdBytesZero
-        );
+        invalid!(orphan_pool_bytes = 0, OrphanPoolBytesZero);
+        invalid!(orphan_pool_per_peer_bytes = 0, OrphanPoolPerPeerBytesZero);
+        invalid!(orphan_pool_per_da_id_bytes = 0, OrphanPoolPerDaIdBytesZero);
         invalid!(
             orphan_commit_overhead_bytes = 0,
-            DaRelayError::OrphanCommitOverheadBytesZero
+            OrphanCommitOverheadBytesZero
         );
-        invalid!(orphan_ttl_blocks = 0, DaRelayError::OrphanTtlBlocksZero);
-        invalid!(
-            pinned_payload_bytes = 0,
-            DaRelayError::PinnedPayloadBytesZero
-        );
-        invalid!(max_complete_sets = 0, DaRelayError::MaxCompleteSetsZero);
+        invalid!(orphan_ttl_blocks = 0, OrphanTtlBlocksZero);
+        invalid!(pinned_payload_bytes = 0, PinnedPayloadBytesZero);
+        invalid!(max_complete_sets = 0, MaxCompleteSetsZero);
         invalid!(
             orphan_pool_per_peer_bytes = DA_ORPHAN_POOL_BYTES + 1,
-            DaRelayError::OrphanPoolPerPeerExceedsGlobal
+            OrphanPoolPerPeerExceedsGlobal
         );
         invalid!(
             orphan_pool_per_da_id_bytes = DA_ORPHAN_POOL_BYTES + 1,
-            DaRelayError::OrphanPoolPerDaIdExceedsGlobal
+            OrphanPoolPerDaIdExceedsGlobal
         );
         invalid!(
             orphan_commit_overhead_bytes = DA_ORPHAN_POOL_BYTES + 1,
-            DaRelayError::OrphanCommitOverheadExceedsGlobal
+            OrphanCommitOverheadExceedsGlobal
         );
     }
 
@@ -212,22 +208,16 @@ mod tests {
         let caps = DaRelayCaps::default();
         let state = DaRelayState::new(caps).expect("valid caps");
 
-        assert_eq!(state.caps, caps);
+        assert_eq!(state.caps(), caps);
         assert!(state.is_empty());
     }
 
     #[test]
     fn da_relay_accounting_projection_fails_closed() {
         for (current, remove, add, cap, expected) in [
-            (0, 1, 0, 10, Err(DaRelayError::AccountingUnderflow)),
-            (
-                u64::MAX,
-                0,
-                1,
-                u64::MAX,
-                Err(DaRelayError::AccountingOverflow),
-            ),
-            (9, 0, 2, 10, Err(DaRelayError::AccountingCapExceeded)),
+            (0, 1, 0, 10, Err(AccountingUnderflow)),
+            (u64::MAX, 0, 1, u64::MAX, Err(AccountingOverflow)),
+            (9, 0, 2, 10, Err(AccountingCapExceeded)),
             (9, 4, 2, 10, Ok(7)),
         ] {
             assert_eq!(
