@@ -42,7 +42,7 @@ pub struct DaRelayState {
     caps: DaRelayCaps,
     next_received_time: u64,
     orphan_bytes: u64,
-    orphan_bytes_by_peer: BTreeMap<Vec<u8>, u64>,
+    orphan_bytes_by_peer: BTreeMap<String, u64>,
     orphan_bytes_by_da_id: BTreeMap<[u8; 32], u64>,
     orphan_commit_overhead_bytes: u64,
     pinned_payload_bytes: u64,
