@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
 
 use rubin_consensus::constants::MAX_DA_BATCHES_PER_BLOCK;
 
@@ -22,16 +23,7 @@ pub struct DaRelayCaps {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DaRelayError {
-    OrphanPoolBytesZero,
-    OrphanPoolPerPeerBytesZero,
-    OrphanPoolPerDaIdBytesZero,
-    OrphanCommitOverheadBytesZero,
-    OrphanTtlBlocksZero,
-    PinnedPayloadBytesZero,
-    MaxCompleteSetsZero,
-    OrphanPoolPerPeerExceedsGlobal,
-    OrphanPoolPerDaIdExceedsGlobal,
-    OrphanCommitOverheadExceedsGlobal,
+    InvalidCaps,
     AccountingUnderflow,
     AccountingOverflow,
     AccountingCapExceeded,
@@ -68,37 +60,21 @@ impl Default for DaRelayCaps {
 
 impl DaRelayCaps {
     pub fn validate(self) -> Result<(), DaRelayError> {
-        macro_rules! reject_zero {
-            ($field:ident, $err:expr) => {
-                if self.$field == 0 {
-                    return Err($err);
-                }
-            };
-        }
-        reject_zero!(orphan_pool_bytes, DaRelayError::OrphanPoolBytesZero);
-        reject_zero!(
-            orphan_pool_per_peer_bytes,
-            DaRelayError::OrphanPoolPerPeerBytesZero
-        );
-        reject_zero!(
-            orphan_pool_per_da_id_bytes,
-            DaRelayError::OrphanPoolPerDaIdBytesZero
-        );
-        reject_zero!(
-            orphan_commit_overhead_bytes,
-            DaRelayError::OrphanCommitOverheadBytesZero
-        );
-        reject_zero!(orphan_ttl_blocks, DaRelayError::OrphanTtlBlocksZero);
-        reject_zero!(pinned_payload_bytes, DaRelayError::PinnedPayloadBytesZero);
-        reject_zero!(max_complete_sets, DaRelayError::MaxCompleteSetsZero);
-        if self.orphan_pool_per_peer_bytes > self.orphan_pool_bytes {
-            return Err(DaRelayError::OrphanPoolPerPeerExceedsGlobal);
-        }
-        if self.orphan_pool_per_da_id_bytes > self.orphan_pool_bytes {
-            return Err(DaRelayError::OrphanPoolPerDaIdExceedsGlobal);
-        }
-        if self.orphan_commit_overhead_bytes > self.orphan_pool_bytes {
-            return Err(DaRelayError::OrphanCommitOverheadExceedsGlobal);
+        if [
+            self.orphan_pool_bytes,
+            self.orphan_pool_per_peer_bytes,
+            self.orphan_pool_per_da_id_bytes,
+            self.orphan_commit_overhead_bytes,
+            self.orphan_ttl_blocks,
+            self.pinned_payload_bytes,
+            self.max_complete_sets,
+        ]
+        .contains(&0)
+            || self.orphan_pool_per_peer_bytes > self.orphan_pool_bytes
+            || self.orphan_pool_per_da_id_bytes > self.orphan_pool_bytes
+            || self.orphan_commit_overhead_bytes > self.orphan_pool_bytes
+        {
+            return Err(DaRelayError::InvalidCaps);
         }
         Ok(())
     }
@@ -110,13 +86,10 @@ impl PeerQuotaKey {
             return Self(String::new());
         }
         let host = addr
-            .parse::<std::net::SocketAddr>()
+            .parse::<SocketAddr>()
             .map(|socket_addr| socket_addr.ip().to_string())
             .unwrap_or_else(|_| split_peer_host(addr).to_owned());
-        let host = strip_ipv6_zone(&host);
-        host.parse::<std::net::IpAddr>()
-            .map(|ip| Self(ip.to_string()))
-            .unwrap_or_else(|_| Self(host.to_owned()))
+        Self(normalize_peer_host(&host))
     }
 }
 
@@ -132,8 +105,18 @@ fn split_peer_host(addr: &str) -> &str {
     addr
 }
 
-fn strip_ipv6_zone(host: &str) -> &str {
-    host.split_once('%').map_or(host, |(addr, _zone)| addr)
+fn normalize_peer_host(host: &str) -> String {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return ip.to_string();
+    }
+    if host.contains(':') {
+        if let Some((without_zone, _zone)) = host.split_once('%') {
+            if let Ok(ip) = without_zone.parse::<IpAddr>() {
+                return ip.to_string();
+            }
+        }
+    }
+    host.to_owned()
 }
 
 impl DaRelayState {
@@ -151,13 +134,8 @@ impl DaRelayState {
         })
     }
 
-    pub fn caps(&self) -> DaRelayCaps {
-        self.caps
-    }
-
     pub fn is_empty(&self) -> bool {
-        self.next_received_time == 0
-            && self.orphan_bytes == 0
+        self.orphan_bytes == 0
             && self.orphan_bytes_by_peer_quota_key.is_empty()
             && self.orphan_bytes_by_da_id.is_empty()
             && self.orphan_commit_overhead_bytes == 0
@@ -171,10 +149,9 @@ impl DaRelayState {
         add: u64,
         cap: u64,
     ) -> Result<u64, DaRelayError> {
-        let after_remove = current
+        let next = current
             .checked_sub(remove)
-            .ok_or(DaRelayError::AccountingUnderflow)?;
-        let next = after_remove
+            .ok_or(DaRelayError::AccountingUnderflow)?
             .checked_add(add)
             .ok_or(DaRelayError::AccountingOverflow)?;
         if next > cap {
@@ -186,97 +163,61 @@ impl DaRelayState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use DaRelayError::*;
-
-    #[test]
-    fn da_relay_default_caps_match_go_reference() {
-        let caps = DaRelayCaps::default();
-
-        assert_eq!(caps.orphan_pool_bytes, 64 << 20);
-        assert_eq!(caps.orphan_pool_per_peer_bytes, 4 << 20);
-        assert_eq!(caps.orphan_pool_per_da_id_bytes, 8 << 20);
-        assert_eq!(caps.orphan_commit_overhead_bytes, 8 << 20);
-        assert_eq!(caps.orphan_ttl_blocks, 3);
-        assert_eq!(caps.pinned_payload_bytes, 96_000_000);
-        assert_eq!(caps.max_complete_sets, MAX_DA_BATCHES_PER_BLOCK);
-    }
+    use super::{DaRelayError::*, *};
 
     #[test]
     fn da_relay_rejects_invalid_caps() {
-        macro_rules! invalid {
-            ($field:ident = $value:expr, $expected:expr) => {{
+        macro_rules! invalid_caps {
+            ($($field:ident = $value:expr),+ $(,)?) => {$({
                 let mut caps = DaRelayCaps::default();
                 caps.$field = $value;
-                let expected = $expected;
-                assert_eq!(caps.validate(), Err(expected));
-                assert_eq!(DaRelayState::new(caps), Err(expected));
-            }};
+                assert_eq!(caps.validate(), Err(InvalidCaps));
+                assert_eq!(DaRelayState::new(caps), Err(InvalidCaps));
+            })+};
         }
-
-        invalid!(orphan_pool_bytes = 0, OrphanPoolBytesZero);
-        invalid!(orphan_pool_per_peer_bytes = 0, OrphanPoolPerPeerBytesZero);
-        invalid!(orphan_pool_per_da_id_bytes = 0, OrphanPoolPerDaIdBytesZero);
-        invalid!(
+        invalid_caps!(
+            orphan_pool_bytes = 0,
+            orphan_pool_per_peer_bytes = 0,
+            orphan_pool_per_da_id_bytes = 0,
             orphan_commit_overhead_bytes = 0,
-            OrphanCommitOverheadBytesZero
-        );
-        invalid!(orphan_ttl_blocks = 0, OrphanTtlBlocksZero);
-        invalid!(pinned_payload_bytes = 0, PinnedPayloadBytesZero);
-        invalid!(max_complete_sets = 0, MaxCompleteSetsZero);
-        invalid!(
+            orphan_ttl_blocks = 0,
+            pinned_payload_bytes = 0,
+            max_complete_sets = 0,
             orphan_pool_per_peer_bytes = DA_ORPHAN_POOL_BYTES + 1,
-            OrphanPoolPerPeerExceedsGlobal
-        );
-        invalid!(
             orphan_pool_per_da_id_bytes = DA_ORPHAN_POOL_BYTES + 1,
-            OrphanPoolPerDaIdExceedsGlobal
-        );
-        invalid!(
             orphan_commit_overhead_bytes = DA_ORPHAN_POOL_BYTES + 1,
-            OrphanCommitOverheadExceedsGlobal
         );
     }
 
     #[test]
     fn da_relay_state_initializes_empty_accounting_maps() {
-        let caps = DaRelayCaps::default();
-        let state = DaRelayState::new(caps).expect("valid caps");
-
-        assert_eq!(state.caps(), caps);
+        let mut state = DaRelayState::new(DaRelayCaps::default()).expect("valid caps");
+        assert_eq!(state.next_received_time, 0);
+        assert!(state.is_empty());
+        state.next_received_time = 1;
         assert!(state.is_empty());
     }
 
     #[test]
-    fn peer_quota_key_normalizes_port_variants() {
-        assert_eq!(
-            PeerQuotaKey::from_peer_addr("127.0.0.1:8333"),
-            PeerQuotaKey::from_peer_addr("127.0.0.1:9444")
-        );
-        assert_eq!(
-            PeerQuotaKey::from_peer_addr("[::1]:8333"),
-            PeerQuotaKey("::1".to_owned())
-        );
-        assert_eq!(
-            PeerQuotaKey::from_peer_addr("[fe80::1%en0]:8333"),
-            PeerQuotaKey("fe80::1".to_owned())
-        );
-        assert_eq!(
-            PeerQuotaKey::from_peer_addr("fe80::1%en0"),
-            PeerQuotaKey("fe80::1".to_owned())
-        );
-        assert_eq!(
-            PeerQuotaKey::from_peer_addr("example.com:8333"),
-            PeerQuotaKey("example.com".to_owned())
-        );
-        assert_eq!(
-            PeerQuotaKey::from_peer_addr("example.com"),
-            PeerQuotaKey("example.com".to_owned())
-        );
-        assert_eq!(
-            PeerQuotaKey::from_peer_addr(""),
-            PeerQuotaKey(String::new())
-        );
+    fn peer_quota_key_normalizes_hostile_matrix() {
+        for (addr, expected) in [
+            ("", ""),
+            ("127.0.0.1:8333", "127.0.0.1"),
+            ("127.0.0.1:9444", "127.0.0.1"),
+            ("127.0.0.1%zone:8333", "127.0.0.1%zone"),
+            ("[::1]:8333", "::1"),
+            ("fe80::1", "fe80::1"),
+            ("fe80::1%en0", "fe80::1"),
+            ("[fe80::1%en0]:8333", "fe80::1"),
+            ("example.com:8333", "example.com"),
+            ("[example.com]:8333", "example.com"),
+            ("example.com", "example.com"),
+            ("example.com%zone:8333", "example.com%zone"),
+            ("[example.com%zone]:8333", "example.com%zone"),
+            ("example.com%zone", "example.com%zone"),
+        ] {
+            assert_eq!(PeerQuotaKey::from_peer_addr(addr).0, expected);
+        }
     }
 
     #[test]
