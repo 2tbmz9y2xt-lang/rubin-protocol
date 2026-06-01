@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use std::net::{IpAddr, SocketAddr};
-
-use rubin_consensus::constants::MAX_DA_BATCHES_PER_BLOCK;
+use std::net::{IpAddr, Ipv6Addr};
 
 pub const DA_ORPHAN_POOL_BYTES: u64 = 64 << 20;
 pub const DA_ORPHAN_POOL_PER_PEER_BYTES: u64 = 4 << 20;
@@ -12,13 +10,12 @@ pub const DA_PINNED_PAYLOAD_BYTES: u64 = 96_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DaRelayCaps {
-    pub orphan_pool_bytes: u64,
-    pub orphan_pool_per_peer_bytes: u64,
-    pub orphan_pool_per_da_id_bytes: u64,
-    pub orphan_commit_overhead_bytes: u64,
-    pub orphan_ttl_blocks: u64,
-    pub pinned_payload_bytes: u64,
-    pub max_complete_sets: u64,
+    orphan_pool_bytes: u64,
+    orphan_pool_per_peer_bytes: u64,
+    orphan_pool_per_da_id_bytes: u64,
+    orphan_commit_overhead_bytes: u64,
+    orphan_ttl_blocks: u64,
+    pinned_payload_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +29,7 @@ pub enum DaRelayError {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerQuotaKey(String);
 
+/// Foundation container; future mutation paths need exclusive access or owner-side synchronization.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaRelayState {
     caps: DaRelayCaps,
@@ -53,7 +51,6 @@ impl Default for DaRelayCaps {
             orphan_commit_overhead_bytes: DA_ORPHAN_COMMIT_OVERHEAD_BYTES,
             orphan_ttl_blocks: DA_ORPHAN_TTL_BLOCKS,
             pinned_payload_bytes: DA_PINNED_PAYLOAD_BYTES,
-            max_complete_sets: MAX_DA_BATCHES_PER_BLOCK,
         }
     }
 }
@@ -67,7 +64,6 @@ impl DaRelayCaps {
             self.orphan_commit_overhead_bytes,
             self.orphan_ttl_blocks,
             self.pinned_payload_bytes,
-            self.max_complete_sets,
         ]
         .contains(&0)
             || self.orphan_pool_per_peer_bytes > self.orphan_pool_bytes
@@ -85,22 +81,23 @@ impl PeerQuotaKey {
         if addr.is_empty() {
             return Self(String::new());
         }
-        let host = addr
-            .parse::<SocketAddr>()
-            .map(|socket_addr| socket_addr.ip().to_string())
-            .unwrap_or_else(|_| split_peer_host(addr).to_owned());
-        Self(normalize_peer_host(&host))
+        Self(normalize_peer_host(split_peer_host(addr)))
     }
 }
 
 fn split_peer_host(addr: &str) -> &str {
     if let Some(rest) = addr.strip_prefix('[') {
-        if let Some((host, _port)) = rest.split_once("]:") {
-            return host;
+        if let Some((host, port)) = rest.rsplit_once("]:") {
+            if !host.contains(']') && !port.contains(':') && !port.contains(['[', ']']) {
+                return host;
+            }
         }
+        return addr;
     }
-    if addr.matches(':').count() == 1 {
-        return addr.rsplit_once(':').map_or(addr, |(host, _port)| host);
+    if let Some((host, _port)) = addr.rsplit_once(':').filter(|(host, port)| {
+        !host.contains(':') && !host.contains(['[', ']']) && !port.contains(['[', ']'])
+    }) {
+        return host;
     }
     addr
 }
@@ -109,11 +106,9 @@ fn normalize_peer_host(host: &str) -> String {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return ip.to_string();
     }
-    if host.contains(':') {
-        if let Some((without_zone, _zone)) = host.split_once('%') {
-            if let Ok(ip) = without_zone.parse::<IpAddr>() {
-                return ip.to_string();
-            }
+    if let Some((without_zone, _zone)) = host.split_once('%').filter(|(_, zone)| !zone.is_empty()) {
+        if let Ok(ip) = without_zone.parse::<Ipv6Addr>() {
+            return ip.to_string();
         }
     }
     host.to_owned()
@@ -143,12 +138,8 @@ impl DaRelayState {
             && self.sets_by_da_id.is_empty()
     }
 
-    pub fn project_counter(
-        current: u64,
-        remove: u64,
-        add: u64,
-        cap: u64,
-    ) -> Result<u64, DaRelayError> {
+    #[allow(dead_code)]
+    fn project_counter(current: u64, remove: u64, add: u64, cap: u64) -> Result<u64, DaRelayError> {
         let next = current
             .checked_sub(remove)
             .ok_or(DaRelayError::AccountingUnderflow)?
@@ -181,7 +172,6 @@ mod tests {
             orphan_commit_overhead_bytes = 0,
             orphan_ttl_blocks = 0,
             pinned_payload_bytes = 0,
-            max_complete_sets = 0,
             orphan_pool_per_peer_bytes = DA_ORPHAN_POOL_BYTES + 1,
             orphan_pool_per_da_id_bytes = DA_ORPHAN_POOL_BYTES + 1,
             orphan_commit_overhead_bytes = DA_ORPHAN_POOL_BYTES + 1,
@@ -197,7 +187,6 @@ mod tests {
         assert_eq!(caps.orphan_commit_overhead_bytes, 8 << 20);
         assert_eq!(caps.orphan_ttl_blocks, 3);
         assert_eq!(caps.pinned_payload_bytes, 96_000_000);
-        assert_eq!(caps.max_complete_sets, MAX_DA_BATCHES_PER_BLOCK);
         let mut state = DaRelayState::new(caps).expect("valid caps");
         assert!(state.is_empty());
         state.next_received_time = 1;
@@ -209,16 +198,26 @@ mod tests {
         for (addr, expected) in [
             ("", ""),
             ("127.0.0.1:8333", "127.0.0.1"),
-            ("127.0.0.1:9444", "127.0.0.1"),
+            ("127.0.0.1:65536", "127.0.0.1"),
             ("127.0.0.1%zone:8333", "127.0.0.1%zone"),
-            ("[::1]:8333", "::1"),
-            ("fe80::1", "fe80::1"),
-            ("fe80::1%en0", "fe80::1"),
-            ("[fe80::1%en0]:8333", "fe80::1"),
+            (":8333", ""),
             ("example.com:8333", "example.com"),
-            ("example.com", "example.com"),
+            ("example.com:", "example.com"),
+            ("[::1]:8333", "::1"),
+            ("[::1]:", "::1"),
+            ("[::1]:https", "::1"),
+            ("[::1]:65536", "::1"),
+            ("[::1]:8333:extra", "[::1]:8333:extra"),
+            ("[::1]:8333]", "[::1]:8333]"),
+            ("fe80::1%en0", "fe80::1"),
+            ("fe80::1%", "fe80::1%"),
+            ("fe80::1%en0:8333", "fe80::1"),
+            ("[fe80::1%en0]:8333", "fe80::1"),
+            ("[fe80::1%en0]:", "fe80::1"),
+            ("[fe80::1%]:8333", "fe80::1%"),
+            ("[example.com%zone]:8333", "example.com%zone"),
+            ("example[.com]:8333", "example[.com]:8333"),
             ("example.com%zone:8333", "example.com%zone"),
-            ("example.com%zone", "example.com%zone"),
         ] {
             assert_eq!(PeerQuotaKey::from_peer_addr(addr).0, expected);
         }
