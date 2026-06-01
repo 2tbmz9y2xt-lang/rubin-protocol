@@ -42,7 +42,7 @@ pub struct DaRelayState {
     caps: DaRelayCaps,
     next_received_time: u64,
     orphan_bytes: u64,
-    orphan_bytes_by_peer: BTreeMap<String, u64>,
+    orphan_bytes_by_peer_quota_key: BTreeMap<String, u64>,
     orphan_bytes_by_da_id: BTreeMap<[u8; 32], u64>,
     orphan_commit_overhead_bytes: u64,
     pinned_payload_bytes: u64,
@@ -108,7 +108,7 @@ impl DaRelayState {
             caps,
             next_received_time: 0,
             orphan_bytes: 0,
-            orphan_bytes_by_peer: BTreeMap::new(),
+            orphan_bytes_by_peer_quota_key: BTreeMap::new(),
             orphan_bytes_by_da_id: BTreeMap::new(),
             orphan_commit_overhead_bytes: 0,
             pinned_payload_bytes: 0,
@@ -123,7 +123,7 @@ impl DaRelayState {
     pub fn is_empty(&self) -> bool {
         self.next_received_time == 0
             && self.orphan_bytes == 0
-            && self.orphan_bytes_by_peer.is_empty()
+            && self.orphan_bytes_by_peer_quota_key.is_empty()
             && self.orphan_bytes_by_da_id.is_empty()
             && self.orphan_commit_overhead_bytes == 0
             && self.pinned_payload_bytes == 0
