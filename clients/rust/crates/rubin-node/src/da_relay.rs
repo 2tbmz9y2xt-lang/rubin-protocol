@@ -258,7 +258,19 @@ mod tests {
             PeerQuotaKey("::1".to_owned())
         );
         assert_eq!(
+            PeerQuotaKey::from_peer_addr("[fe80::1%en0]:8333"),
+            PeerQuotaKey("fe80::1".to_owned())
+        );
+        assert_eq!(
+            PeerQuotaKey::from_peer_addr("fe80::1%en0"),
+            PeerQuotaKey("fe80::1".to_owned())
+        );
+        assert_eq!(
             PeerQuotaKey::from_peer_addr("example.com:8333"),
+            PeerQuotaKey("example.com".to_owned())
+        );
+        assert_eq!(
+            PeerQuotaKey::from_peer_addr("example.com"),
             PeerQuotaKey("example.com".to_owned())
         );
         assert_eq!(
