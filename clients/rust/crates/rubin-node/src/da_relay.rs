@@ -80,6 +80,14 @@ pub(crate) struct DaRelaySetRecord {
     replaceable_chunks: BTreeSet<u16>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DaRelayEvictionAccounting {
+    pub(crate) da_id: [u8; 32],
+    pub(crate) payload_bytes: u64,
+    pub(crate) wire_bytes: u64,
+    pub(crate) received_time: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerQuotaKey(String);
 
@@ -290,6 +298,22 @@ impl DaRelaySetRecord {
             u64::from(chunk_count) * DA_COMPLETE_SET_CHUNK_FOOTPRINT,
         )
     }
+
+    pub(crate) fn eviction_accounting(&self) -> Option<DaRelayEvictionAccounting> {
+        if self.state != DaRelaySetState::CompleteSet
+            || self.payload_bytes == 0
+            || self.wire_bytes == 0
+            || self.received_time == 0
+        {
+            return None;
+        }
+        Some(DaRelayEvictionAccounting {
+            da_id: self.da_id,
+            payload_bytes: self.payload_bytes,
+            wire_bytes: self.wire_bytes,
+            received_time: self.received_time,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -359,6 +383,25 @@ impl DaRelayState {
             && self.orphan_commit_overhead_bytes == 0
             && self.pinned_payload_bytes == 0
             && self.sets_by_da_id.is_empty()
+    }
+
+    pub(crate) fn complete_set_eviction_candidates(
+        &self,
+        max_payload_bytes: u64,
+    ) -> impl Iterator<Item = DaRelayEvictionAccounting> + '_ {
+        let mut payload_bytes = 0u64;
+        let allow_candidates = max_payload_bytes != 0;
+        self.sets_by_da_id.values().filter_map(move |record| {
+            if !allow_candidates {
+                return None;
+            }
+            let candidate = record.eviction_accounting()?;
+            if candidate.payload_bytes > max_payload_bytes.saturating_sub(payload_bytes) {
+                return None;
+            }
+            payload_bytes += candidate.payload_bytes;
+            Some(candidate)
+        })
     }
 
     pub(crate) fn stage_incomplete_da_commit(
@@ -723,5 +766,78 @@ mod tests {
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([22; 32], 0, b"bad", 3)).unwrap(); assert_eq!(state.stage_incomplete_da_commit(peer, commit([22; 32], &[b"good"], 1)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[22; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert!(record.chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([22; 32], 0, b"good", 4)).unwrap(); assert_eq!(state.sets_by_da_id[&[22; 32]].state, DaRelaySetState::CompleteSet);
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(peer, commit([23; 32], &[b"aa", b"bb"], 1)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([23; 32], 0, b"aa", 2)).unwrap(); assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([23; 32], 1, b"xx", 2)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[23; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert!(record.chunks.contains_key(&0) && !record.chunks.contains_key(&1)); assert!(record.replaceable_chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([23; 32], 1, b"bb", 2)).unwrap(); assert_eq!(state.sets_by_da_id[&[23; 32]].state, DaRelaySetState::CompleteSet);
         let caps = DaRelayCaps { pinned_payload_bytes: 1, ..DaRelayCaps::default() }; let mut state = DaRelayState::new(caps).unwrap(); state.stage_incomplete_da_commit(peer, commit([24; 32], &[b"aa"], 1)).unwrap(); let before = state.clone(); assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([24; 32], 0, b"aa", 2)), Err(AccountingCapExceeded)); assert_eq!(state, before);
+    }
+
+    #[test]
+    fn da_relay_eviction_accounting_matrix() {
+        let peer = "peer-a:8333";
+        let pk = || PeerQuotaKey::from_peer_addr(peer);
+        let commit = |da_id, payloads: &[&[u8]], wire_bytes| DaRelayCommit {
+            da_id,
+            payload_commitment: payload_commitment(payloads),
+            peer_quota_key: pk(),
+            chunk_count: payloads.len() as u16,
+            wire_bytes,
+        };
+        let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk {
+            da_id,
+            chunk_hash: sha3_256(payload),
+            peer_quota_key: pk(),
+            chunk_index: index,
+            payload: Arc::from(payload),
+            wire_bytes,
+        };
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state
+            .stage_incomplete_da_commit(peer, commit([42; 32], &[b"aa", b"bb"], 3))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer, chunk([42; 32], 0, b"aa", 4))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer, chunk([42; 32], 1, b"bb", 5))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(peer, commit([41; 32], &[b"staged"], 6))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(peer, commit([40; 32], &[b"cccccc"], 7))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer, chunk([40; 32], 0, b"cccccc", 8))
+            .unwrap();
+
+        let record = &state.sets_by_da_id[&[42; 32]];
+        let accounting = record
+            .eviction_accounting()
+            .expect("complete set accounting");
+        assert_eq!(
+            accounting,
+            DaRelayEvictionAccounting {
+                da_id: [42; 32],
+                payload_bytes: 4,
+                wire_bytes: record.wire_bytes,
+                received_time: record.received_time
+            }
+        );
+        assert!(state.sets_by_da_id[&[41; 32]]
+            .eviction_accounting()
+            .is_none());
+        let candidate_ids: Vec<_> = state
+            .complete_set_eviction_candidates(u64::MAX)
+            .map(|candidate| candidate.da_id)
+            .collect();
+        assert_eq!(candidate_ids, vec![[40; 32], [42; 32]]);
+        let bounded_ids: Vec<_> = state
+            .complete_set_eviction_candidates(6)
+            .map(|candidate| candidate.da_id)
+            .collect();
+        assert_eq!(bounded_ids, vec![[40; 32]]);
+        let later_fit_ids: Vec<_> = state
+            .complete_set_eviction_candidates(4)
+            .map(|candidate| candidate.da_id)
+            .collect();
+        assert_eq!(later_fit_ids, vec![[42; 32]]);
+        assert!(state.complete_set_eviction_candidates(0).next().is_none());
     }
 }
