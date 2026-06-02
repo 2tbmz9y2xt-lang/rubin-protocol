@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use rubin_consensus::{
     block_hash, compact_shortid,
-    constants::{MAX_BLOCK_BYTES, MAX_RELAY_MSG_BYTES},
+    constants::{MAX_BLOCK_BYTES, MAX_DA_CHUNK_COUNT, MAX_RELAY_MSG_BYTES},
     encode_compact_size, parse_block_bytes, parse_tx, read_compact_size_bytes, BLOCK_HEADER_BYTES,
 };
 use sha3::{Digest, Sha3_256};
@@ -42,8 +42,10 @@ const MESSAGE_GETBLOCKTXN: &str = "getblocktxn";
 const MESSAGE_BLOCKTXN: &str = "blocktxn";
 const BLOCKTXN_HASH_PAYLOAD_BYTES: usize = 32;
 const COMPACT_RELAY_VERSION: u64 = 1;
+const DA_CHUNK_REQUEST_VERSION: u64 = 1;
 const SENDCMPCT_PAYLOAD_BYTES: u64 = 9;
 const COMPACT_RELAY_INDEX_BYTES: usize = 4;
+const GETDACHUNK_PAYLOAD_PREFIX_BYTES: usize = 40;
 const COMPACT_SHORT_ID_BYTES: usize = 6;
 const MAX_COMPACT_SIZE_BYTES: usize = 9;
 const MAX_COMPACT_RELAY_ENTRIES: usize = MAX_INVENTORY_VECTORS;
@@ -120,6 +122,13 @@ pub struct GetBlocksPayload {
 pub struct GetBlockTxnPayload {
     pub block_hash: [u8; 32],
     pub indexes: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct GetDAChunkPayload {
+    pub version: u64,
+    pub da_id: [u8; 32],
+    pub indexes: Vec<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -2092,6 +2101,64 @@ pub fn decode_getblocktxn_payload(payload: &[u8]) -> io::Result<GetBlockTxnPaylo
     })
 }
 
+pub fn encode_getdachunk_payload(payload: GetDAChunkPayload) -> io::Result<Vec<u8>> {
+    if payload.version != DA_CHUNK_REQUEST_VERSION {
+        return Err(invalid_data("unsupported DA chunk request version"));
+    }
+    let count = u64::try_from(payload.indexes.len())
+        .map_err(|_| invalid_data("invalid DA chunk request index count"))?;
+    validate_da_chunk_request_index_count(count)?;
+    let mut out = Vec::new();
+    out.extend_from_slice(&payload.version.to_le_bytes());
+    out.extend_from_slice(&payload.da_id);
+    encode_compact_size(count, &mut out);
+    let mut prev = 0u16;
+    for (pos, idx) in payload.indexes.into_iter().enumerate() {
+        validate_da_chunk_request_index(pos as u64, idx, prev)?;
+        out.extend_from_slice(&idx.to_le_bytes());
+        prev = idx;
+    }
+    Ok(out)
+}
+
+pub fn decode_getdachunk_payload(payload: &[u8]) -> io::Result<GetDAChunkPayload> {
+    if payload.len() < GETDACHUNK_PAYLOAD_PREFIX_BYTES {
+        return Err(invalid_data("getdachunk payload missing version or da_id"));
+    }
+    let mut version_bytes = [0u8; 8];
+    version_bytes.copy_from_slice(&payload[..8]);
+    let version = u64::from_le_bytes(version_bytes);
+    if version != DA_CHUNK_REQUEST_VERSION {
+        return Err(invalid_data("unsupported DA chunk request version"));
+    }
+    let mut da_id = [0u8; 32];
+    da_id.copy_from_slice(&payload[8..GETDACHUNK_PAYLOAD_PREFIX_BYTES]);
+
+    let mut offset = GETDACHUNK_PAYLOAD_PREFIX_BYTES;
+    let count = read_compact_size_at(payload, &mut offset)?;
+    validate_da_chunk_request_index_count(count)?;
+    let mut indexes = Vec::with_capacity(count as usize);
+    let mut prev = 0u16;
+    for pos in 0..count {
+        if payload.len().saturating_sub(offset) < 2 {
+            return Err(invalid_data("getdachunk payload truncated index"));
+        }
+        let idx = u16::from_le_bytes([payload[offset], payload[offset + 1]]);
+        validate_da_chunk_request_index(pos, idx, prev)?;
+        indexes.push(idx);
+        prev = idx;
+        offset += 2;
+    }
+    if offset != payload.len() {
+        return Err(invalid_data("getdachunk payload has trailing bytes"));
+    }
+    Ok(GetDAChunkPayload {
+        version,
+        da_id,
+        indexes,
+    })
+}
+
 pub fn encode_blocktxn_payload(payload: BlockTxnPayload) -> io::Result<Vec<u8>> {
     if payload.transactions.len() > MAX_COMPACT_RELAY_ENTRIES {
         return Err(invalid_data("too many compact relay transactions"));
@@ -2455,6 +2522,25 @@ fn validate_compact_relay_tx(tx: &[u8], err_msg: &'static str) -> io::Result<()>
     let consumed = parse_tx(tx).map_err(|_| invalid_data(err_msg))?.3;
     if consumed != tx.len() {
         return Err(invalid_data(err_msg));
+    }
+    Ok(())
+}
+
+fn validate_da_chunk_request_index_count(count: u64) -> io::Result<()> {
+    if count == 0 || count > MAX_DA_CHUNK_COUNT {
+        return Err(invalid_data("invalid DA chunk request index count"));
+    }
+    Ok(())
+}
+
+fn validate_da_chunk_request_index(pos: u64, idx: u16, prev: u16) -> io::Result<()> {
+    if u64::from(idx) >= MAX_DA_CHUNK_COUNT {
+        return Err(invalid_data("DA chunk request index out of range"));
+    }
+    if pos > 0 && idx <= prev {
+        return Err(invalid_data(
+            "DA chunk request indexes not strictly increasing",
+        ));
     }
     Ok(())
 }
@@ -3540,6 +3626,96 @@ mod tests {
             },
             "compact relay index out of range",
         );
+    }
+
+    fn getdachunk_payload_with_tail(version: u64, tail: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&[0xaau8; 32]);
+        out.extend_from_slice(tail);
+        out
+    }
+
+    fn getdachunk_indexed_payload(indexes: &[u16]) -> Vec<u8> {
+        let mut tail = Vec::new();
+        encode_compact_size(indexes.len() as u64, &mut tail);
+        for idx in indexes {
+            tail.extend_from_slice(&idx.to_le_bytes());
+        }
+        getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &tail)
+    }
+
+    fn assert_getdachunk_decode_err(raw: Vec<u8>, want_err: &str) {
+        let err = decode_getdachunk_payload(&raw)
+            .err()
+            .unwrap_or_else(|| panic!("decode unexpectedly succeeded"));
+        assert!(
+            err.to_string().contains(want_err),
+            "got {err}, want substring {want_err}"
+        );
+    }
+
+    #[test]
+    fn getdachunk_payload_codec_matches_go_wire() {
+        let indexes = vec![0, 2, (MAX_DA_CHUNK_COUNT - 1) as u16];
+        let payload = GetDAChunkPayload {
+            version: DA_CHUNK_REQUEST_VERSION,
+            da_id: [0xaau8; 32],
+            indexes: indexes.clone(),
+        };
+
+        let encoded = encode_getdachunk_payload(payload.clone()).expect("encode getdachunk");
+        assert_eq!(encoded, getdachunk_indexed_payload(&indexes));
+        assert_eq!(
+            decode_getdachunk_payload(&encoded).expect("decode getdachunk"),
+            payload
+        );
+    }
+
+    #[test]
+    fn getdachunk_decode_rejects_invalid_wire() {
+        let mut too_many = Vec::new();
+        encode_compact_size(MAX_DA_CHUNK_COUNT + 1, &mut too_many);
+        let mut trailing = getdachunk_indexed_payload(&[0]);
+        trailing.push(0);
+
+        for (raw, want) in [
+            (
+                vec![0u8; GETDACHUNK_PAYLOAD_PREFIX_BYTES - 1],
+                "getdachunk payload missing version or da_id",
+            ),
+            (
+                getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION + 1, &[1, 0, 0]),
+                "unsupported DA chunk request version",
+            ),
+            (
+                getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &[0xfd, 0, 0]),
+                "non-minimal CompactSize",
+            ),
+            (
+                getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &[0]),
+                "invalid DA chunk request index count",
+            ),
+            (
+                getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &too_many),
+                "invalid DA chunk request index count",
+            ),
+            (
+                getdachunk_indexed_payload(&[2, 1]),
+                "DA chunk request indexes not strictly increasing",
+            ),
+            (
+                getdachunk_indexed_payload(&[1, 1]),
+                "DA chunk request indexes not strictly increasing",
+            ),
+            (
+                getdachunk_indexed_payload(&[MAX_DA_CHUNK_COUNT as u16]),
+                "DA chunk request index out of range",
+            ),
+            (trailing, "getdachunk payload has trailing bytes"),
+        ] {
+            assert_getdachunk_decode_err(raw, want);
+        }
     }
 
     #[test]
