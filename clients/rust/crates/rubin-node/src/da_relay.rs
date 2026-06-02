@@ -762,6 +762,74 @@ mod tests {
     }
 
     #[test]
+    fn da_relay_duplicate_first_seen_matrix() {
+        let peer_a = "peer-a:8333";
+        let peer_b = "peer-b:8333";
+        let peer_c = "peer-c:8333";
+        let commit = |da_id, payloads: &[&[u8]], wire_bytes| DaRelayCommit {
+            da_id,
+            payload_commitment: payload_commitment(payloads),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_count: payloads.len() as u16,
+            wire_bytes,
+        };
+        let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk {
+            da_id,
+            chunk_hash: sha3_256(payload),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_index: index,
+            payload: Arc::from(payload),
+            wire_bytes,
+        };
+
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_a, chunk([60; 32], 0, b"first-chunk", 12))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(peer_b, commit([60; 32], &[b"first-chunk", b"tail"], 7))
+            .unwrap();
+        let before = state.clone();
+        assert_eq!(
+            state.stage_incomplete_da_commit(peer_c, commit([60; 32], &[b"other"], 99)),
+            Err(DuplicateCommit)
+        );
+        assert_eq!(state, before);
+        let record = &state.sets_by_da_id[&[60; 32]];
+        assert_eq!(
+            record.commit.as_ref().map(|commit| &commit.peer_quota_key),
+            Some(&PeerQuotaKey::from_peer_addr(peer_b))
+        );
+        assert_eq!(record.chunks[&0].payload.as_ref(), b"first-chunk");
+        assert!(!state
+            .orphan_bytes_by_peer_quota_key
+            .contains_key(&PeerQuotaKey::from_peer_addr(peer_c)));
+
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_a, chunk([61; 32], 0, b"first", 5))
+            .unwrap();
+        let before = state.clone();
+        let mut duplicate = chunk([61; 32], 0, b"conflict", 8);
+        duplicate.chunk_hash[0] ^= 0xff;
+        assert_eq!(
+            state.stage_incomplete_da_chunk(peer_b, duplicate),
+            Err(DuplicateChunk)
+        );
+        assert_eq!(state, before);
+        let record = &state.sets_by_da_id[&[61; 32]];
+        assert_eq!(record.chunks[&0].payload.as_ref(), b"first");
+        assert_eq!(
+            record.chunks[&0].peer_quota_key,
+            PeerQuotaKey::from_peer_addr(peer_a)
+        );
+        assert!(!record.replaceable_chunks.contains(&0));
+        assert!(!state
+            .orphan_bytes_by_peer_quota_key
+            .contains_key(&PeerQuotaKey::from_peer_addr(peer_b)));
+    }
+
+    #[test]
     #[rustfmt::skip]
     fn da_relay_complete_integrity_matrix() {
         let peer = "peer-a:8333"; let pk = || PeerQuotaKey::from_peer_addr(peer); let commit = |da_id, payloads: &[&[u8]], wire_bytes| DaRelayCommit { da_id, payload_commitment: payload_commitment(payloads), peer_quota_key: pk(), chunk_count: payloads.len() as u16, wire_bytes }; let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk(), chunk_index: index, payload: Arc::from(payload), wire_bytes };
