@@ -3630,9 +3630,21 @@ mod tests {
         );
     }
 
+    const DA_ERR_VERSION: &str = "unsupported DA chunk request version";
+    const DA_ERR_COUNT: &str = "invalid DA chunk request index count";
+    const DA_ERR_ORDER: &str = "DA chunk request indexes not strictly increasing";
+    const DA_ERR_RANGE: &str = "DA chunk request index out of range";
+
+    fn getdachunk_request(version: u64, indexes: Vec<u16>) -> GetDAChunkPayload {
+        GetDAChunkPayload {
+            version,
+            da_id: [0xaau8; 32],
+            indexes,
+        }
+    }
+
     fn getdachunk_payload_with_tail(version: u64, tail: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&version.to_le_bytes());
+        let mut out = version.to_le_bytes().to_vec();
         out.extend_from_slice(&[0xaau8; 32]);
         out.extend_from_slice(tail);
         out
@@ -3641,30 +3653,16 @@ mod tests {
     fn getdachunk_indexed_payload(indexes: &[u16]) -> Vec<u8> {
         let mut tail = Vec::new();
         encode_compact_size(indexes.len() as u64, &mut tail);
-        for idx in indexes {
-            tail.extend_from_slice(&idx.to_le_bytes());
-        }
+        indexes
+            .iter()
+            .for_each(|idx| tail.extend_from_slice(&idx.to_le_bytes()));
         getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &tail)
-    }
-
-    fn assert_getdachunk_decode_err(raw: Vec<u8>, want_err: &str) {
-        let err = decode_getdachunk_payload(&raw)
-            .err()
-            .unwrap_or_else(|| panic!("decode unexpectedly succeeded"));
-        assert!(
-            err.to_string().contains(want_err),
-            "got {err}, want substring {want_err}"
-        );
     }
 
     #[test]
     fn getdachunk_payload_codec_matches_go_wire() {
         let indexes = vec![0, 2, (MAX_DA_CHUNK_COUNT - 1) as u16];
-        let payload = GetDAChunkPayload {
-            version: DA_CHUNK_REQUEST_VERSION,
-            da_id: [0xaau8; 32],
-            indexes: indexes.clone(),
-        };
+        let payload = getdachunk_request(DA_CHUNK_REQUEST_VERSION, indexes.clone());
 
         let encoded = encode_getdachunk_payload(payload.clone()).expect("encode getdachunk");
         assert_eq!(encoded, getdachunk_indexed_payload(&indexes));
@@ -3675,48 +3673,48 @@ mod tests {
     }
 
     #[test]
+    fn getdachunk_encode_rejects_invalid_requests() {
+        let range_index = MAX_DA_CHUNK_COUNT as u16;
+        let too_many = vec![0; (MAX_DA_CHUNK_COUNT + 1) as usize];
+        for (version, indexes, want) in [
+            (DA_CHUNK_REQUEST_VERSION + 1, vec![0], DA_ERR_VERSION),
+            (DA_CHUNK_REQUEST_VERSION, Vec::new(), DA_ERR_COUNT),
+            (DA_CHUNK_REQUEST_VERSION, too_many, DA_ERR_COUNT),
+            (DA_CHUNK_REQUEST_VERSION, vec![2, 1], DA_ERR_ORDER),
+            (DA_CHUNK_REQUEST_VERSION, vec![1, 1], DA_ERR_ORDER),
+            (DA_CHUNK_REQUEST_VERSION, vec![range_index], DA_ERR_RANGE),
+        ] {
+            let payload = getdachunk_request(version, indexes);
+            let err = encode_getdachunk_payload(payload).expect_err("encode must reject");
+            assert!(err.to_string().contains(want), "{err}");
+        }
+    }
+
+    #[test]
     fn getdachunk_decode_rejects_invalid_wire() {
+        let range_index = MAX_DA_CHUNK_COUNT as u16;
         let mut too_many = Vec::new();
         encode_compact_size(MAX_DA_CHUNK_COUNT + 1, &mut too_many);
+        let payload = |tail: &[u8]| getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, tail);
+        let bad_version = getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION + 1, &[1, 0, 0]);
+        let short_prefix = vec![0u8; GETDACHUNK_PAYLOAD_PREFIX_BYTES - 1];
         let mut trailing = getdachunk_indexed_payload(&[0]);
         trailing.push(0);
 
         for (raw, want) in [
-            (
-                vec![0u8; GETDACHUNK_PAYLOAD_PREFIX_BYTES - 1],
-                "getdachunk payload missing version or da_id",
-            ),
-            (
-                getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION + 1, &[1, 0, 0]),
-                "unsupported DA chunk request version",
-            ),
-            (
-                getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &[0xfd, 0, 0]),
-                "non-minimal CompactSize",
-            ),
-            (
-                getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &[0]),
-                "invalid DA chunk request index count",
-            ),
-            (
-                getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &too_many),
-                "invalid DA chunk request index count",
-            ),
-            (
-                getdachunk_indexed_payload(&[2, 1]),
-                "DA chunk request indexes not strictly increasing",
-            ),
-            (
-                getdachunk_indexed_payload(&[1, 1]),
-                "DA chunk request indexes not strictly increasing",
-            ),
-            (
-                getdachunk_indexed_payload(&[MAX_DA_CHUNK_COUNT as u16]),
-                "DA chunk request index out of range",
-            ),
+            (short_prefix, "getdachunk payload missing version or da_id"),
+            (bad_version, DA_ERR_VERSION),
+            (payload(&[0xfd, 0, 0]), "non-minimal CompactSize"),
+            (payload(&[0]), DA_ERR_COUNT),
+            (payload(&too_many), DA_ERR_COUNT),
+            (payload(&[1, 0x01]), "getdachunk payload truncated index"),
+            (getdachunk_indexed_payload(&[2, 1]), DA_ERR_ORDER),
+            (getdachunk_indexed_payload(&[1, 1]), DA_ERR_ORDER),
+            (getdachunk_indexed_payload(&[range_index]), DA_ERR_RANGE),
             (trailing, "getdachunk payload has trailing bytes"),
         ] {
-            assert_getdachunk_decode_err(raw, want);
+            let err = decode_getdachunk_payload(&raw).expect_err("decode must reject");
+            assert!(err.to_string().contains(want), "{err}");
         }
     }
 
