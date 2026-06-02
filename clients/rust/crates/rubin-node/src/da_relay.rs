@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
-use rubin_consensus::constants::{CHUNK_BYTES, COV_TYPE_DA_COMMIT, MAX_DA_CHUNK_COUNT};
+use rubin_consensus::constants::{
+    CHUNK_BYTES, COV_TYPE_DA_COMMIT, MAX_DA_CHUNK_COUNT, TX_WIRE_VERSION,
+};
 use rubin_consensus::{parse_tx, Tx};
 use sha3::{Digest, Sha3_256};
 
@@ -397,6 +399,7 @@ impl DaRelayState {
 
     #[rustfmt::skip]
     pub(crate) fn validate_relay_da_tx_for_admission(tx_bytes: &[u8]) -> DaRelayResult {
+        if relay_da_tx_kind_prefix(tx_bytes) != Some(0x02) { return Ok(()); }
         let Ok((tx, _txid, _wtxid, consumed)) = parse_tx(tx_bytes) else { return Ok(()); };
         if consumed != tx_bytes.len() { return Ok(()); }
         let wire_bytes = u64::try_from(tx_bytes.len()).map_err(|_| DaRelayError::AccountingOverflow)?;
@@ -722,6 +725,14 @@ impl DaRelayState {
     }
 }
 
+fn relay_da_tx_kind_prefix(tx_bytes: &[u8]) -> Option<u8> {
+    let version = u32::from_le_bytes(tx_bytes.get(..4)?.try_into().ok()?);
+    if version != TX_WIRE_VERSION {
+        return None;
+    }
+    tx_bytes.get(4).copied()
+}
+
 #[rustfmt::skip]
 fn validate_relay_da_chunk_for_admission(tx: &Tx, wire_bytes: u64) -> DaRelayResult {
     if tx.tx_kind != 0x02 { return Ok(()); }
@@ -851,6 +862,26 @@ mod tests {
 
         let mut reject_state = DaRelayState::new(DaRelayCaps::default()).unwrap(); let payload = b"relay chunk"; let mut bad_core = relay_chunk_core([6u8; 32], 0, payload); bad_core.chunk_hash = [7u8; 32];
         let bad = relay_test_tx(0x02, Vec::new(), None, Some(bad_core), payload); assert_eq!(reject_state.stage_relay_da_tx_bytes(peer, &bad), Err(ChunkHashMismatch)); assert!(reject_state.is_empty());
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn validate_relay_da_tx_for_admission_fast_paths_non_chunk_prefixes() {
+        let non_da = relay_test_tx(0x00, Vec::new(), None, None, &[]);
+        assert_eq!(relay_da_tx_kind_prefix(&non_da), Some(0x00));
+        DaRelayState::validate_relay_da_tx_for_admission(&non_da).unwrap();
+
+        let commit = relay_test_tx(0x01, vec![da_commit_output([2u8; 32])], Some(relay_commit_core([3u8; 32], 1)), None, &[]);
+        assert_eq!(relay_da_tx_kind_prefix(&commit), Some(0x01));
+        DaRelayState::validate_relay_da_tx_for_admission(&commit).unwrap();
+
+        assert_eq!(relay_da_tx_kind_prefix(&[0u8; 4]), None);
+        assert_eq!(relay_da_tx_kind_prefix(&[0xff, 0, 0, 0, 0x02]), None);
+
+        let payload = b"relay chunk"; let mut bad_core = relay_chunk_core([4u8; 32], 0, payload); bad_core.chunk_hash = [5u8; 32];
+        let bad_chunk = relay_test_tx(0x02, Vec::new(), None, Some(bad_core), payload);
+        assert_eq!(relay_da_tx_kind_prefix(&bad_chunk), Some(0x02));
+        assert_eq!(DaRelayState::validate_relay_da_tx_for_admission(&bad_chunk), Err(ChunkHashMismatch));
     }
 
     #[test]
