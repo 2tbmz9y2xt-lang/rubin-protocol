@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
+RUST_ROOT="${REPO_ROOT}/clients/rust"
+HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
+MODE="run"
+unset REPORT_JSON RUBIN_PROCESS_ARTIFACT_ROOT
+: "${KEEP_TMP:=1}"
+: "${COMPACT_RELAY_IO_TIMEOUT_SECONDS:=5}"
+usage() { echo "usage: $0 [--dependency-preflight-only]" >&2; }
+while (($#)); do
+  case "$1" in
+    --dependency-preflight-only) MODE="dependency"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+emit_no_data() {
+  local reason="$1"
+  if [[ -n "${REPORT_JSON:-}" ]]; then
+    python3 - "${REPORT_JSON}" "${reason}" "${RUBIN_PROCESS_ARTIFACT_ROOT:-}" "${NODE_BIN:-}" "${A_PID:-}" "${A_RPC:-}" "${A_P2P:-}" "${A_PEERS:-}" "${B_PID:-}" "${B_RPC:-}" "${B_P2P:-}" "${B_PEERS:-}" <<'PY'
+import json, sys
+path, reason, root, binary, a_pid, a_rpc, a_p2p, a_peers, b_pid, b_rpc, b_p2p, b_peers = sys.argv[1:13]
+data = {"scenario": "rust_two_node_compact_sendcmpct_process", "verdict": "NO_DATA", "reason": reason}
+if root: data["artifact_root"] = root
+participants = []
+for name, pid, rpc, p2p, peers in (("node-a", a_pid, a_rpc, a_p2p, a_peers), ("node-b", b_pid, b_rpc, b_p2p, b_peers)):
+    if pid:
+        item = {"name": name, "implementation": "rust", "pid": int(pid), "binary": binary, "rpc": rpc or None, "p2p": p2p or None, "log": f"{root}/{name}.log" if root else None}
+        if peers: item["handshake_peers"] = int(peers)
+        participants.append(item)
+if participants: data["participants"] = participants
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, sort_keys=True); f.write("\n")
+PY
+    echo "NO_DATA: reason=${reason}; report=${REPORT_JSON}" >&2
+  else
+    echo "NO_DATA: reason=${reason}" >&2
+  fi
+  return 1
+}
+
+dependency_preflight() {
+  local issue data closed label_done
+  command -v gh >/dev/null 2>&1 || emit_no_data dependency_preflight_gh_unavailable
+  for issue in 1855 1873 1874 1875 1856 1857 1858 1889; do
+    data="$(gh issue view "${issue}" --repo 2tbmz9y2xt-lang/rubin-protocol --json state,labels --jq '[.state == "CLOSED", any(.labels[].name; . == "status:DONE")] | @tsv')" \
+      || emit_no_data "dependency_${issue}_gh_query_failed"
+    [[ "${data}" =~ ^(true|false)$'\t'(true|false)$ ]] || emit_no_data "dependency_${issue}_gh_output_malformed"
+    closed="${data%%$'\t'*}"; label_done="${data#*$'\t'}"
+    [[ "${closed}" == "true" && "${label_done}" == "true" ]] || emit_no_data "dependency_${issue}_not_done"
+  done
+  echo "PASS: Rust compact relay dependency preflight closed with status:DONE"
+}
+if [[ "${MODE}" == "dependency" ]]; then
+  dependency_preflight
+  exit 0
+fi
+
+for tool in python3 perl gh; do
+  command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is required for Rust compact relay devnet evidence" >&2; exit 1; }
+done
+[[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
+# shellcheck source=scripts/devnet-process-common.sh disable=SC1091
+source "${HELPER}"
+COMPACT_RELAY_IO_TIMEOUT_SECONDS="$(_rubin_process_uint_decimal COMPACT_RELAY_IO_TIMEOUT_SECONDS "${COMPACT_RELAY_IO_TIMEOUT_SECONDS}")"
+export KEEP_TMP
+rubin_process_init rust-compact-relay
+NODE_BIN="${RUBIN_PROCESS_ARTIFACT_ROOT}/rubin-node-rust"
+REPORT_JSON="${RUBIN_PROCESS_ARTIFACT_ROOT}/rust-compact-relay-report.json"
+A_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-a"
+B_DIR="${RUBIN_PROCESS_ARTIFACT_ROOT}/node-b"
+build_node() {
+  local host bin
+  host="$("${DEV_ENV}" -- rustc -vV | awk '/^host:/ {print $2}')"
+  [[ -n "${host}" ]] || { echo "could not derive host target triple" >&2; return 1; }
+  "${DEV_ENV}" -- cargo build --manifest-path "${RUST_ROOT}/Cargo.toml" \
+    --release --locked -p rubin-node --target "${host}" --target-dir "${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target" \
+    >/dev/null
+  bin="${RUBIN_PROCESS_ARTIFACT_ROOT}/cargo-target/${host}/release/rubin-node"
+  cp -- "${bin}" "${NODE_BIN}"
+  [[ -x "${NODE_BIN}" ]] || { echo "built Rust node is not executable: ${NODE_BIN}" >&2; return 1; }
+}
+start_node() {
+  local label="$1" log="$2" datadir="$3" peers="${4:-}"
+  local cmd=("${NODE_BIN}" --network devnet --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
+  [[ -z "${peers}" ]] || cmd+=(--peers "${peers}")
+  rubin_process_start "${log}" "${cmd[@]}" || { echo "failed to start ${label}" >&2; return 1; }
+  STARTED_PID="${RUBIN_PROCESS_LAST_PID}"
+  rubin_process_wait_for_log "${log}" "rpc: listening=" 60 "${STARTED_PID}" || return 1
+  STARTED_RPC="$(rubin_process_extract_rpc_addr "${log}")"
+  STARTED_P2P="$(sed -n 's/.*p2p: listening=//p' "$(_rubin_process_resolve_log "${log}")" | tail -n 1 | tr -d '[:space:]')"
+  [[ "${STARTED_P2P}" == 127.0.0.1:* ]] || { echo "failed resolving ${label} p2p address" >&2; return 1; }
+  rubin_process_wait_for_rpc_ready "${STARTED_RPC}" 30
+}
+wait_peers_ready() {
+  local label="$1" addr="$2" deadline=$((SECONDS + 30)) count="0"
+  while (( SECONDS < deadline )); do
+    if count="$(python3 - "${addr}" "${COMPACT_RELAY_IO_TIMEOUT_SECONDS}" <<'PY' 2>/dev/null
+import json, sys, urllib.request
+with urllib.request.urlopen(f"http://{sys.argv[1]}/peers", timeout=int(sys.argv[2])) as resp:
+    data = json.load(resp)
+print(sum(1 for p in (data.get("peers") or []) if p.get("handshake_complete") is True))
+PY
+    )" && [[ "${count}" =~ ^[0-9]+$ && "${count}" -ge 1 ]]; then
+      printf '%s\n' "${count}"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "timeout waiting for ${label} handshake peers addr=${addr} actual=${count}" >&2
+  return 1
+}
+dependency_preflight
+echo "Building Rust rubin-node"
+build_node
+mkdir -p "${A_DIR}" "${B_DIR}"
+start_node node-b node-b.log "${B_DIR}" || emit_no_data node_b_start_failed; B_PID="${STARTED_PID}"; B_RPC="${STARTED_RPC}"; B_P2P="${STARTED_P2P}"
+start_node node-a node-a.log "${A_DIR}" "${B_P2P}" || emit_no_data node_a_start_failed; A_PID="${STARTED_PID}"; A_RPC="${STARTED_RPC}"; A_P2P="${STARTED_P2P}"
+A_PEERS="$(wait_peers_ready node-a "${A_RPC}")" || emit_no_data node_a_handshake_missing
+B_PEERS="$(wait_peers_ready node-b "${B_RPC}")" || emit_no_data node_b_handshake_missing
+emit_no_data compact_advertisement_runtime_fix_required
