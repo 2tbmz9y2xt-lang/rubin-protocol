@@ -56,6 +56,7 @@ pub(crate) struct DaRelayCommit {
     peer_quota_key: PeerQuotaKey,
     chunk_count: u16,
     wire_bytes: u64,
+    tx_bytes: Arc<[u8]>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DaRelayChunk {
@@ -65,6 +66,7 @@ pub(crate) struct DaRelayChunk {
     chunk_index: u16,
     payload: Arc<[u8]>,
     wire_bytes: u64,
+    tx_bytes: Arc<[u8]>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DaRelaySetRecord {
@@ -218,15 +220,18 @@ impl DaRelaySetRecord {
         self.peer_bytes.clear();
         let mut total = 0;
         if let Some(commit) = &self.commit {
-            total = commit.wire_bytes;
-            self.peer_bytes
-                .insert(commit.peer_quota_key.clone(), commit.wire_bytes);
+            total = retained_tx_accounting_bytes(commit.wire_bytes, &commit.tx_bytes);
+            self.peer_bytes.insert(commit.peer_quota_key.clone(), total);
         }
         let peer_bytes = &mut self.peer_bytes;
         for chunk in self.chunks.values() {
-            total = checked_add(total, chunk.wire_bytes)?;
+            total = checked_add(
+                total,
+                retained_tx_accounting_bytes(chunk.wire_bytes, &chunk.tx_bytes),
+            )?;
+            let chunk_bytes = orphan_chunk_accounting_bytes(chunk)?;
             let entry = peer_bytes.entry(chunk.peer_quota_key.clone()).or_default();
-            *entry = checked_add(*entry, chunk.wire_bytes)?;
+            *entry = checked_add(*entry, chunk_bytes)?;
         }
         self.wire_bytes = total;
         Ok(())
@@ -265,18 +270,22 @@ impl DaRelaySetRecord {
     fn mark_chunks_replaceable(&mut self, indexes: impl IntoIterator<Item = u16>) {
         self.replaceable_chunks.extend(indexes);
     }
-    fn orphan_wire_bytes(&self) -> u64 {
+    fn orphan_wire_bytes(&self) -> DaRelayResult<u64> {
         if self.state == DaRelaySetState::CompleteSet {
-            0
+            Ok(0)
         } else {
-            self.wire_bytes
+            self.peer_bytes
+                .values()
+                .try_fold(0u64, |total, bytes| checked_add(total, *bytes))
         }
     }
     fn orphan_commit_bytes(&self) -> u64 {
         if self.state == DaRelaySetState::CompleteSet {
             0
         } else {
-            self.commit.as_ref().map_or(0, |commit| commit.wire_bytes)
+            self.commit.as_ref().map_or(0, |commit| {
+                retained_tx_accounting_bytes(commit.wire_bytes, &commit.tx_bytes)
+            })
         }
     }
     fn orphan_peer_bytes(&self) -> Option<&BTreeMap<PeerQuotaKey, u64>> {
@@ -293,10 +302,10 @@ impl DaRelaySetRecord {
         };
         let footprint = checked_add(footprint, DA_COMPLETE_SET_RECORD_FOOTPRINT)?;
         let chunk_count = self.commit.as_ref().map_or(0, |commit| commit.chunk_count);
-        checked_add(
-            footprint,
-            u64::from(chunk_count) * DA_COMPLETE_SET_CHUNK_FOOTPRINT,
-        )
+        let chunk_footprint = u64::from(chunk_count)
+            .checked_mul(DA_COMPLETE_SET_CHUNK_FOOTPRINT)
+            .ok_or(DaRelayError::AccountingOverflow)?;
+        checked_add(footprint, chunk_footprint)
     }
 
     pub(crate) fn eviction_accounting(&self) -> Option<DaRelayEvictionAccounting> {
@@ -526,11 +535,11 @@ impl DaRelayState {
 
     fn apply_record(&mut self, record: DaRelaySetRecord) -> DaRelayResult {
         let old = self.sets_by_da_id.get(&record.da_id);
-        let old_bytes = old.map_or(0, DaRelaySetRecord::orphan_wire_bytes);
+        let old_bytes = old.map_or(Ok(0), DaRelaySetRecord::orphan_wire_bytes)?;
         let old_commit_bytes = old.map_or(0, DaRelaySetRecord::orphan_commit_bytes);
         let old_pinned_bytes =
             old.map_or(Ok(0), DaRelaySetRecord::pinned_payload_accounting_bytes)?;
-        let new_bytes = record.orphan_wire_bytes();
+        let new_bytes = record.orphan_wire_bytes()?;
         let new_commit_bytes = record.orphan_commit_bytes();
         let new_pinned_bytes = record.pinned_payload_accounting_bytes()?;
         let peer_bytes = self.project_peer_bytes(old, &record)?;
@@ -648,6 +657,22 @@ fn checked_add(left: u64, right: u64) -> DaRelayResult<u64> {
         .ok_or(DaRelayError::AccountingOverflow)
 }
 
+fn retained_tx_accounting_bytes(wire_bytes: u64, tx_bytes: &[u8]) -> u64 {
+    if tx_bytes.is_empty() {
+        wire_bytes
+    } else {
+        tx_bytes.len() as u64
+    }
+}
+
+fn orphan_chunk_accounting_bytes(chunk: &DaRelayChunk) -> DaRelayResult<u64> {
+    let mut bytes = retained_tx_accounting_bytes(chunk.wire_bytes, &chunk.tx_bytes);
+    if !chunk.tx_bytes.is_empty() && !chunk.payload.is_empty() {
+        bytes = checked_add(bytes, chunk.payload.len() as u64)?;
+    }
+    Ok(bytes)
+}
+
 fn sha3_256(input: &[u8]) -> [u8; 32] {
     Sha3_256::digest(input).into()
 }
@@ -747,7 +772,7 @@ mod tests {
     #[test]
     #[rustfmt::skip]
     fn da_relay_staged_mutation_matrix() {
-        let peer = "peer-a:8333"; let pk = || PeerQuotaKey::from_peer_addr(peer); let stage_commit = |state: &mut DaRelayState, commit| state.stage_incomplete_da_commit(peer, commit); let stage_chunk = |state: &mut DaRelayState, chunk| state.stage_incomplete_da_chunk(peer, chunk); let commit = |da_id, chunk_count, wire_bytes| DaRelayCommit { da_id, payload_commitment: [0; 32], peer_quota_key: pk(), chunk_count, wire_bytes }; let chunk = |da_id, chunk_index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk(), chunk_index, payload: Arc::from(payload), wire_bytes }; let reject = |got: Result<(), DaRelayError>, want| assert_eq!(got, Err(want));
+        let peer = "peer-a:8333"; let pk = || PeerQuotaKey::from_peer_addr(peer); let stage_commit = |state: &mut DaRelayState, commit| state.stage_incomplete_da_commit(peer, commit); let stage_chunk = |state: &mut DaRelayState, chunk| state.stage_incomplete_da_chunk(peer, chunk); let commit = |da_id, chunk_count, wire_bytes| DaRelayCommit { da_id, payload_commitment: [0; 32], peer_quota_key: pk(), chunk_count, wire_bytes, tx_bytes: Arc::from([]) }; let chunk = |da_id, chunk_index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk(), chunk_index, payload: Arc::from(payload), wire_bytes, tx_bytes: Arc::from([]) }; let reject = |got: Result<(), DaRelayError>, want| assert_eq!(got, Err(want));
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); let mut forged_commit = commit([13; 32], 1, 2); forged_commit.peer_quota_key = PeerQuotaKey::from_peer_addr("peer-b:8333"); stage_commit(&mut state, forged_commit).unwrap(); let mut forged_chunk = chunk([14; 32], 0, b"owned", 6); forged_chunk.peer_quota_key = PeerQuotaKey::from_peer_addr("peer-b:8333"); stage_chunk(&mut state, forged_chunk).unwrap(); assert!(state.orphan_bytes_by_peer_quota_key.contains_key(&pk()) && !state.orphan_bytes_by_peer_quota_key.contains_key(&PeerQuotaKey::from_peer_addr("peer-b:8333")));
         stage_commit(&mut state, commit([1; 32], 3, 2)).unwrap(); assert!(state.sets_by_da_id[&[1; 32]].commit.is_some()); stage_chunk(&mut state, chunk([1; 32], 0, b"payload-a", 9)).unwrap(); stage_chunk(&mut state, chunk([1; 32], 1, b"payload-b", 9)).unwrap(); assert_eq!(state.sets_by_da_id[&[1; 32]].chunks.len(), 2);
         stage_chunk(&mut state, chunk([2; 32], 0, b"payload-a", 9)).unwrap(); stage_chunk(&mut state, chunk([2; 32], 1, b"payload-b", 9)).unwrap(); stage_commit(&mut state, commit([2; 32], 3, 1)).unwrap(); let record = &state.sets_by_da_id[&[2; 32]]; assert!(record.commit.is_some() && record.chunks.len() == 2); assert_eq!(state.orphan_bytes_by_da_id[&[2; 32]], record.wire_bytes);
@@ -772,6 +797,7 @@ mod tests {
             peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
             chunk_count: payloads.len() as u16,
             wire_bytes,
+            tx_bytes: Arc::from([]),
         };
         let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk {
             da_id,
@@ -780,6 +806,7 @@ mod tests {
             chunk_index: index,
             payload: Arc::from(payload),
             wire_bytes,
+            tx_bytes: Arc::from([]),
         };
 
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
@@ -830,9 +857,166 @@ mod tests {
     }
 
     #[test]
+    fn da_relay_retained_tx_byte_accounting_matrix() {
+        let peer_commit = "commit-peer:8333";
+        let peer_chunk = "chunk-peer:8333";
+        let peer_dup = "duplicate-peer:8333";
+        let payload = b"retained-payload";
+        let payload_wire = payload.len() as u64;
+        let commit_tx = b"canonical-commit-tx";
+        let chunk_tx = b"canonical-chunk-tx";
+        let commit = |da_id, payloads: &[&[u8]], wire_bytes, tx_bytes: &[u8]| DaRelayCommit {
+            da_id,
+            payload_commitment: payload_commitment(payloads),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_count: payloads.len() as u16,
+            wire_bytes,
+            tx_bytes: Arc::from(tx_bytes),
+        };
+        let chunk = |da_id, index, payload: &[u8], wire_bytes, tx_bytes: &[u8]| DaRelayChunk {
+            da_id,
+            chunk_hash: sha3_256(payload),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_index: index,
+            payload: Arc::from(payload),
+            wire_bytes,
+            tx_bytes: Arc::from(tx_bytes),
+        };
+
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        let invalid_commit = commit([68; 32], &[payload], 0, b"invalid-commit-tx");
+        assert_eq!(
+            state.stage_incomplete_da_commit(peer_commit, invalid_commit),
+            Err(InvalidWireBytes)
+        );
+
+        let mut invalid_hash = chunk([69; 32], 0, payload, payload_wire, b"invalid-chunk-tx");
+        invalid_hash.chunk_hash[0] ^= 0xff;
+        assert_eq!(
+            state.stage_incomplete_da_chunk(peer_chunk, invalid_hash),
+            Err(ChunkHashMismatch)
+        );
+        assert!(state.sets_by_da_id.is_empty());
+
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state
+            .stage_incomplete_da_commit(
+                peer_commit,
+                commit([70; 32], &[payload, b"tail"], 1, commit_tx),
+            )
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(
+                peer_chunk,
+                chunk([70; 32], 0, payload, payload_wire, chunk_tx),
+            )
+            .unwrap();
+        let record = &state.sets_by_da_id[&[70; 32]];
+        let retained_wire = (commit_tx.len() + chunk_tx.len()) as u64;
+        assert_eq!(record.wire_bytes, retained_wire);
+        assert_eq!(state.orphan_commit_overhead_bytes, commit_tx.len() as u64);
+        assert_eq!(state.orphan_bytes, retained_wire + payload.len() as u64);
+        assert_eq!(state.orphan_bytes_by_da_id[&[70; 32]], state.orphan_bytes);
+        assert_eq!(
+            record.peer_bytes[&PeerQuotaKey::from_peer_addr(peer_commit)],
+            commit_tx.len() as u64
+        );
+        assert_eq!(
+            record.peer_bytes[&PeerQuotaKey::from_peer_addr(peer_chunk)],
+            (chunk_tx.len() + payload.len()) as u64
+        );
+
+        let before = state.clone();
+        assert_eq!(
+            state.stage_incomplete_da_commit(
+                peer_dup,
+                commit([70; 32], &[b"other"], 99, b"duplicate-commit-tx"),
+            ),
+            Err(DuplicateCommit)
+        );
+        assert_eq!(state, before);
+
+        let mut duplicate_chunk = chunk([70; 32], 0, b"conflict", 99, b"duplicate-chunk-tx");
+        duplicate_chunk.chunk_hash[0] ^= 0xff;
+        assert_eq!(
+            state.stage_incomplete_da_chunk(peer_dup, duplicate_chunk),
+            Err(DuplicateChunk)
+        );
+        assert_eq!(state, before);
+
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state
+            .stage_incomplete_da_commit(peer_commit, commit([71; 32], &[payload], 1, commit_tx))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(
+                peer_chunk,
+                chunk([71; 32], 0, payload, payload_wire, chunk_tx),
+            )
+            .unwrap();
+        let record = &state.sets_by_da_id[&[71; 32]];
+        assert_eq!(record.state, DaRelaySetState::CompleteSet);
+        let chunk_count = u64::from(record.commit.as_ref().unwrap().chunk_count);
+        assert!(record.chunks.values().all(|chunk| chunk.payload.is_empty()));
+        let pinned = retained_wire
+            + DA_COMPLETE_SET_RECORD_FOOTPRINT
+            + chunk_count * DA_COMPLETE_SET_CHUNK_FOOTPRINT;
+        assert_eq!(state.pinned_payload_bytes, pinned);
+        assert_eq!(state.orphan_bytes, 0);
+
+        let tight_caps = DaRelayCaps {
+            orphan_commit_overhead_bytes: 1,
+            ..DaRelayCaps::default()
+        };
+        let mut state = DaRelayState::new(tight_caps).unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_chunk, chunk([74; 32], 0, b"x", 1, &[]))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(peer_commit, commit([74; 32], &[b"x"], 1, commit_tx))
+            .unwrap();
+        assert_eq!(
+            state.sets_by_da_id[&[74; 32]].state,
+            DaRelaySetState::CompleteSet
+        );
+
+        let caps = DaRelayCaps {
+            pinned_payload_bytes: 1,
+            ..DaRelayCaps::default()
+        };
+        let mut state = DaRelayState::new(caps).unwrap();
+        state
+            .stage_incomplete_da_commit(peer_commit, commit([72; 32], &[payload], 1, commit_tx))
+            .unwrap();
+        let before = state.clone();
+        assert_eq!(
+            state.stage_incomplete_da_chunk(
+                peer_chunk,
+                chunk([72; 32], 0, payload, payload_wire, chunk_tx)
+            ),
+            Err(AccountingCapExceeded)
+        );
+        assert_eq!(state, before);
+
+        let mut state = DaRelayState::new(caps).unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_chunk, chunk([73; 32], 0, payload, payload_wire, &[]))
+            .unwrap();
+        let before = state.clone();
+        assert_eq!(
+            state.stage_incomplete_da_commit(
+                peer_commit,
+                commit([73; 32], &[payload], 1, commit_tx),
+            ),
+            Err(AccountingCapExceeded)
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
     #[rustfmt::skip]
     fn da_relay_complete_integrity_matrix() {
-        let peer = "peer-a:8333"; let pk = || PeerQuotaKey::from_peer_addr(peer); let commit = |da_id, payloads: &[&[u8]], wire_bytes| DaRelayCommit { da_id, payload_commitment: payload_commitment(payloads), peer_quota_key: pk(), chunk_count: payloads.len() as u16, wire_bytes }; let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk(), chunk_index: index, payload: Arc::from(payload), wire_bytes };
+        let peer = "peer-a:8333"; let pk = || PeerQuotaKey::from_peer_addr(peer); let commit = |da_id, payloads: &[&[u8]], wire_bytes| DaRelayCommit { da_id, payload_commitment: payload_commitment(payloads), peer_quota_key: pk(), chunk_count: payloads.len() as u16, wire_bytes, tx_bytes: Arc::from([]) }; let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk(), chunk_index: index, payload: Arc::from(payload), wire_bytes, tx_bytes: Arc::from([]) };
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(peer, commit([20; 32], &[b"aa", b"bb"], 2)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([20; 32], 0, b"aa", 2)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([20; 32], 1, b"bb", 2)).unwrap(); let record = &state.sets_by_da_id[&[20; 32]]; let chunk_count = u64::from(record.commit.as_ref().unwrap().chunk_count); assert_eq!(record.state, DaRelaySetState::CompleteSet); assert_eq!(record.payload_bytes, 4); assert_eq!(record.ttl_blocks_remaining, 0); assert!(record.chunks.values().all(|chunk| chunk.payload.is_empty())); assert_eq!(state.orphan_bytes, 0); assert!(!state.orphan_bytes_by_da_id.contains_key(&[20; 32])); assert_eq!(state.pinned_payload_bytes, record.wire_bytes + DA_COMPLETE_SET_RECORD_FOOTPRINT + chunk_count * DA_COMPLETE_SET_CHUNK_FOOTPRINT);
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(peer, commit([21; 32], &[b"good"], 1)).unwrap(); assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([21; 32], 0, b"bad", 3)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[21; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert_eq!(record.payload_bytes, 0); assert!(record.chunks.is_empty() && record.replaceable_chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([21; 32], 0, b"good", 4)).unwrap(); let record = &state.sets_by_da_id[&[21; 32]]; assert_eq!(record.state, DaRelaySetState::CompleteSet); assert!(record.replaceable_chunks.is_empty());
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([22; 32], 0, b"bad", 3)).unwrap(); assert_eq!(state.stage_incomplete_da_commit(peer, commit([22; 32], &[b"good"], 1)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[22; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert!(record.chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([22; 32], 0, b"good", 4)).unwrap(); assert_eq!(state.sets_by_da_id[&[22; 32]].state, DaRelaySetState::CompleteSet);
@@ -850,6 +1034,7 @@ mod tests {
             peer_quota_key: pk(),
             chunk_count: payloads.len() as u16,
             wire_bytes,
+            tx_bytes: Arc::from([]),
         };
         let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk {
             da_id,
@@ -858,6 +1043,7 @@ mod tests {
             chunk_index: index,
             payload: Arc::from(payload),
             wire_bytes,
+            tx_bytes: Arc::from([]),
         };
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
         state
