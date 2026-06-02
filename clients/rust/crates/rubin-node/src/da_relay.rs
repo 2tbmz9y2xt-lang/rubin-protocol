@@ -390,18 +390,22 @@ impl DaRelayState {
         max_payload_bytes: u64,
     ) -> impl Iterator<Item = DaRelayEvictionAccounting> + '_ {
         let mut payload_bytes = 0u64;
-        let allow_candidates = max_payload_bytes != 0;
-        self.sets_by_da_id.values().filter_map(move |record| {
-            if !allow_candidates {
-                return None;
-            }
-            let candidate = record.eviction_accounting()?;
-            if candidate.payload_bytes > max_payload_bytes.saturating_sub(payload_bytes) {
-                return None;
-            }
-            payload_bytes += candidate.payload_bytes;
-            Some(candidate)
-        })
+        let limit = if max_payload_bytes == 0 {
+            0
+        } else {
+            usize::MAX
+        };
+        self.sets_by_da_id
+            .values()
+            .take(limit)
+            .filter_map(move |record| {
+                let candidate = record.eviction_accounting()?;
+                if candidate.payload_bytes > max_payload_bytes.saturating_sub(payload_bytes) {
+                    return None;
+                }
+                payload_bytes += candidate.payload_bytes;
+                Some(candidate)
+            })
     }
 
     pub(crate) fn stage_incomplete_da_commit(
@@ -838,6 +842,8 @@ mod tests {
             .map(|candidate| candidate.da_id)
             .collect();
         assert_eq!(later_fit_ids, vec![[42; 32]]);
-        assert!(state.complete_set_eviction_candidates(0).next().is_none());
+        let mut zero_budget = state.complete_set_eviction_candidates(0);
+        assert_eq!(zero_budget.size_hint(), (0, Some(0)));
+        assert!(zero_budget.next().is_none());
     }
 }
