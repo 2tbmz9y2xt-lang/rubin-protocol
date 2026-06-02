@@ -37,7 +37,7 @@ PY
   else
     echo "NO_DATA: reason=${reason}" >&2
   fi
-  return 1
+  exit 1
 }
 
 for tool in python3 perl; do
@@ -75,7 +75,7 @@ start_node() {
   STARTED_RPC="$(rubin_process_extract_rpc_addr "${log}")" || return 1
   _rubin_process_loopback_endpoint "${STARTED_RPC}" || { echo "failed resolving ${label} rpc address" >&2; return 1; }
   rubin_process_wait_for_log "${log}" "p2p: listening=" 60 "${STARTED_PID}" || return 1
-  STARTED_P2P="$(sed -n 's/.*p2p: listening=//p' "$(_rubin_process_resolve_log "${log}")" | tail -n 1 | tr -d '[:space:]')"
+  STARTED_P2P="$(sed -n 's/.*p2p: listening=//p' "$(_rubin_process_resolve_log "${log}")" | tail -n 1 | tr -d '[:space:]')" || return 1
   _rubin_process_loopback_endpoint "${STARTED_P2P}" || { echo "failed resolving ${label} p2p address" >&2; return 1; }
   rubin_process_wait_for_rpc_ready "${STARTED_RPC}" 30 || return 1
 }
