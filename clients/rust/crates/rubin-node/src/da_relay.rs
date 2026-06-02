@@ -810,6 +810,9 @@ mod tests {
         state
             .stage_incomplete_da_chunk(peer, chunk([40; 32], 0, b"cccccc", 8))
             .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer, chunk([39; 32], 0, b"orphan", 6))
+            .unwrap();
 
         let record = &state.sets_by_da_id[&[42; 32]];
         let accounting = record
@@ -827,6 +830,18 @@ mod tests {
         assert!(state.sets_by_da_id[&[41; 32]]
             .eviction_accounting()
             .is_none());
+        assert!(state.sets_by_da_id[&[39; 32]]
+            .eviction_accounting()
+            .is_none());
+        let mut suppressed = record.clone();
+        suppressed.payload_bytes = 0;
+        assert!(suppressed.eviction_accounting().is_none());
+        let mut suppressed = record.clone();
+        suppressed.wire_bytes = 0;
+        assert!(suppressed.eviction_accounting().is_none());
+        let mut suppressed = record.clone();
+        suppressed.received_time = 0;
+        assert!(suppressed.eviction_accounting().is_none());
         let candidate_ids: Vec<_> = state
             .complete_set_eviction_candidates(u64::MAX)
             .map(|candidate| candidate.da_id)
