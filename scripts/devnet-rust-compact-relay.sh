@@ -91,6 +91,7 @@ start_node() {
   STARTED_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${log}" "rpc: listening=" 60 "${STARTED_PID}" || return 1
   STARTED_RPC="$(rubin_process_extract_rpc_addr "${log}")"
+  rubin_process_wait_for_log "${log}" "p2p: listening=" 60 "${STARTED_PID}" || return 1
   STARTED_P2P="$(sed -n 's/.*p2p: listening=//p' "$(_rubin_process_resolve_log "${log}")" | tail -n 1 | tr -d '[:space:]')"
   [[ "${STARTED_P2P}" == 127.0.0.1:* ]] || { echo "failed resolving ${label} p2p address" >&2; return 1; }
   rubin_process_wait_for_rpc_ready "${STARTED_RPC}" 30
