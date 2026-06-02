@@ -28,4 +28,10 @@ fi
 [[ "${output}" == *"NO_DATA: reason=dependency_1855_gh_output_malformed"* ]] || {
   echo "FAIL: malformed gh output produced unexpected output" >&2; echo "${output}" >&2; exit 1
 }
+if output="$(PATH="/usr/bin:/bin" "${HARNESS}" --dependency-preflight-only 2>&1)"; then
+  echo "FAIL: missing gh should fail closed" >&2; echo "${output}" >&2; exit 1
+fi
+[[ "${output}" == *"NO_DATA: reason=dependency_preflight_gh_unavailable"* ]] || {
+  echo "FAIL: missing gh produced unexpected output" >&2; echo "${output}" >&2; exit 1
+}
 echo "PASS: Rust compact relay dependency preflight fails closed with NO_DATA"

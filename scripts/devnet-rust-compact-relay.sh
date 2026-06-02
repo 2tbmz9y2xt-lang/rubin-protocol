@@ -6,7 +6,7 @@ DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 RUST_ROOT="${REPO_ROOT}/clients/rust"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
 MODE="run"
-unset REPORT_JSON RUBIN_PROCESS_ARTIFACT_ROOT
+unset REPORT_JSON
 : "${KEEP_TMP:=1}"
 : "${COMPACT_RELAY_IO_TIMEOUT_SECONDS:=5}"
 usage() { echo "usage: $0 [--dependency-preflight-only]" >&2; }
@@ -23,7 +23,7 @@ emit_no_data() {
     python3 - "${REPORT_JSON}" "${reason}" "${RUBIN_PROCESS_ARTIFACT_ROOT:-}" "${NODE_BIN:-}" "${A_PID:-}" "${A_RPC:-}" "${A_P2P:-}" "${A_PEERS:-}" "${B_PID:-}" "${B_RPC:-}" "${B_P2P:-}" "${B_PEERS:-}" <<'PY'
 import json, sys
 path, reason, root, binary, a_pid, a_rpc, a_p2p, a_peers, b_pid, b_rpc, b_p2p, b_peers = sys.argv[1:13]
-data = {"scenario": "rust_two_node_compact_sendcmpct_process", "verdict": "NO_DATA", "reason": reason}
+data = {"scenario": "rust_two_node_compact_sendcmpct_process", "verdict": "NO_DATA", "failure_reason": reason}
 if root: data["artifact_root"] = root
 participants = []
 for name, pid, rpc, p2p, peers in (("node-a", a_pid, a_rpc, a_p2p, a_peers), ("node-b", b_pid, b_rpc, b_p2p, b_peers)):
@@ -59,7 +59,7 @@ if [[ "${MODE}" == "dependency" ]]; then
   exit 0
 fi
 
-for tool in python3 perl gh; do
+for tool in python3 perl; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is required for Rust compact relay devnet evidence" >&2; exit 1; }
 done
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
