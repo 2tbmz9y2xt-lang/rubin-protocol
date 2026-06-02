@@ -5,14 +5,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 RUST_ROOT="${REPO_ROOT}/clients/rust"
 HELPER="${REPO_ROOT}/scripts/devnet-process-common.sh"
-MODE="run"
 unset REPORT_JSON
 : "${KEEP_TMP:=1}"
 : "${COMPACT_RELAY_IO_TIMEOUT_SECONDS:=5}"
-usage() { echo "usage: $0 [--dependency-preflight-only]" >&2; }
+usage() { echo "usage: $0" >&2; }
 while (($#)); do
   case "$1" in
-    --dependency-preflight-only) MODE="dependency"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -42,23 +40,6 @@ PY
   return 1
 }
 
-dependency_preflight() {
-  local issue data closed label_done
-  command -v gh >/dev/null 2>&1 || emit_no_data dependency_preflight_gh_unavailable
-  for issue in 1855 1873 1874 1875 1856 1857 1858 1889; do
-    data="$(gh issue view "${issue}" --repo 2tbmz9y2xt-lang/rubin-protocol --json state,labels --jq '[.state == "CLOSED", any(.labels[].name; . == "status:DONE")] | @tsv')" \
-      || emit_no_data "dependency_${issue}_gh_query_failed"
-    [[ "${data}" =~ ^(true|false)$'\t'(true|false)$ ]] || emit_no_data "dependency_${issue}_gh_output_malformed"
-    closed="${data%%$'\t'*}"; label_done="${data#*$'\t'}"
-    [[ "${closed}" == "true" && "${label_done}" == "true" ]] || emit_no_data "dependency_${issue}_not_done"
-  done
-  echo "PASS: Rust compact relay dependency preflight closed with status:DONE"
-}
-if [[ "${MODE}" == "dependency" ]]; then
-  dependency_preflight
-  exit 0
-fi
-
 for tool in python3 perl; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is required for Rust compact relay devnet evidence" >&2; exit 1; }
 done
@@ -86,15 +67,17 @@ build_node() {
 start_node() {
   local label="$1" log="$2" datadir="$3" peers="${4:-}"
   local cmd=("${NODE_BIN}" --network devnet --datadir "${datadir}" --bind 127.0.0.1:0 --rpc-bind 127.0.0.1:0)
+  STARTED_PID=""; STARTED_RPC=""; STARTED_P2P=""
   [[ -z "${peers}" ]] || cmd+=(--peers "${peers}")
   rubin_process_start "${log}" "${cmd[@]}" || { echo "failed to start ${label}" >&2; return 1; }
   STARTED_PID="${RUBIN_PROCESS_LAST_PID}"
   rubin_process_wait_for_log "${log}" "rpc: listening=" 60 "${STARTED_PID}" || return 1
-  STARTED_RPC="$(rubin_process_extract_rpc_addr "${log}")"
+  STARTED_RPC="$(rubin_process_extract_rpc_addr "${log}")" || return 1
+  _rubin_process_loopback_endpoint "${STARTED_RPC}" || { echo "failed resolving ${label} rpc address" >&2; return 1; }
   rubin_process_wait_for_log "${log}" "p2p: listening=" 60 "${STARTED_PID}" || return 1
   STARTED_P2P="$(sed -n 's/.*p2p: listening=//p' "$(_rubin_process_resolve_log "${log}")" | tail -n 1 | tr -d '[:space:]')"
-  [[ "${STARTED_P2P}" == 127.0.0.1:* ]] || { echo "failed resolving ${label} p2p address" >&2; return 1; }
-  rubin_process_wait_for_rpc_ready "${STARTED_RPC}" 30
+  _rubin_process_loopback_endpoint "${STARTED_P2P}" || { echo "failed resolving ${label} p2p address" >&2; return 1; }
+  rubin_process_wait_for_rpc_ready "${STARTED_RPC}" 30 || return 1
 }
 wait_peers_ready() {
   local label="$1" addr="$2" deadline=$((SECONDS + 30)) count="0"
@@ -114,12 +97,19 @@ PY
   echo "timeout waiting for ${label} handshake peers addr=${addr} actual=${count}" >&2
   return 1
 }
-dependency_preflight
 echo "Building Rust rubin-node"
 build_node
 mkdir -p "${A_DIR}" "${B_DIR}"
-start_node node-b node-b.log "${B_DIR}" || emit_no_data node_b_start_failed; B_PID="${STARTED_PID}"; B_RPC="${STARTED_RPC}"; B_P2P="${STARTED_P2P}"
-start_node node-a node-a.log "${A_DIR}" "${B_P2P}" || emit_no_data node_a_start_failed; A_PID="${STARTED_PID}"; A_RPC="${STARTED_RPC}"; A_P2P="${STARTED_P2P}"
+if ! start_node node-b node-b.log "${B_DIR}"; then
+  B_PID="${STARTED_PID:-}"; B_RPC="${STARTED_RPC:-}"; B_P2P="${STARTED_P2P:-}"
+  emit_no_data node_b_start_failed
+fi
+B_PID="${STARTED_PID}"; B_RPC="${STARTED_RPC}"; B_P2P="${STARTED_P2P}"
+if ! start_node node-a node-a.log "${A_DIR}" "${B_P2P}"; then
+  A_PID="${STARTED_PID:-}"; A_RPC="${STARTED_RPC:-}"; A_P2P="${STARTED_P2P:-}"
+  emit_no_data node_a_start_failed
+fi
+A_PID="${STARTED_PID}"; A_RPC="${STARTED_RPC}"; A_P2P="${STARTED_P2P}"
 A_PEERS="$(wait_peers_ready node-a "${A_RPC}")" || emit_no_data node_a_handshake_missing
 B_PEERS="$(wait_peers_ready node-b "${B_RPC}")" || emit_no_data node_b_handshake_missing
 emit_no_data compact_advertisement_runtime_fix_required
