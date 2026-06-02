@@ -14,6 +14,10 @@ case "${RUBIN_FAKE_GH_MODE:-not_done}" in
 esac
 SH
 chmod +x "${FAKE_BIN}/gh"
+NO_GH_BIN="${TMP_ROOT}/no-gh-bin"
+mkdir -p "${NO_GH_BIN}"
+ln -s "$(command -v bash)" "${NO_GH_BIN}/bash"
+ln -s "$(command -v dirname)" "${NO_GH_BIN}/dirname"
 LEAK_PATH="${TMP_ROOT}/must-not-exist.json"
 if output="$(REPORT_JSON="${LEAK_PATH}" RUBIN_PROCESS_ARTIFACT_ROOT="${TMP_ROOT}/bad" PATH="${FAKE_BIN}:${PATH}" "${HARNESS}" --dependency-preflight-only 2>&1)"; then
   echo "FAIL: dependency preflight should fail closed" >&2; echo "${output}" >&2; exit 1
@@ -28,7 +32,7 @@ fi
 [[ "${output}" == *"NO_DATA: reason=dependency_1855_gh_output_malformed"* ]] || {
   echo "FAIL: malformed gh output produced unexpected output" >&2; echo "${output}" >&2; exit 1
 }
-if output="$(PATH="/usr/bin:/bin" "${HARNESS}" --dependency-preflight-only 2>&1)"; then
+if output="$(PATH="${NO_GH_BIN}" "${HARNESS}" --dependency-preflight-only 2>&1)"; then
   echo "FAIL: missing gh should fail closed" >&2; echo "${output}" >&2; exit 1
 fi
 [[ "${output}" == *"NO_DATA: reason=dependency_preflight_gh_unavailable"* ]] || {
