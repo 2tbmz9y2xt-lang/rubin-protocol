@@ -2108,7 +2108,9 @@ pub fn encode_getdachunk_payload(payload: GetDAChunkPayload) -> io::Result<Vec<u
     let count = u64::try_from(payload.indexes.len())
         .map_err(|_| invalid_data("invalid DA chunk request index count"))?;
     validate_da_chunk_request_index_count(count)?;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(
+        GETDACHUNK_PAYLOAD_PREFIX_BYTES + MAX_COMPACT_SIZE_BYTES + payload.indexes.len() * 2,
+    );
     out.extend_from_slice(&payload.version.to_le_bytes());
     out.extend_from_slice(&payload.da_id);
     encode_compact_size(count, &mut out);
