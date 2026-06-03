@@ -729,6 +729,10 @@ impl DaRelayState {
     }
 }
 
+pub(crate) fn stages_relay_da_tx_bytes(tx_bytes: &[u8]) -> bool {
+    matches!(relay_da_tx_kind_prefix(tx_bytes), Some(0x01 | 0x02))
+}
+
 fn relay_da_tx_kind_prefix(tx_bytes: &[u8]) -> Option<u8> {
     let version = u32::from_le_bytes(tx_bytes.get(..4)?.try_into().ok()?);
     if version != TX_WIRE_VERSION {

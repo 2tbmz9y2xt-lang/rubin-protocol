@@ -758,6 +758,8 @@ impl PeerSession {
                             | crate::tx_relay::RelayTxOutcome::DuplicateSeen
                     ) {
                         if let Some(txid) = relay_txid {
+                            let stages_relay_da_tx =
+                                crate::da_relay::stages_relay_da_tx_bytes(&msg.payload);
                             let mut stage_fresh_payload = false;
                             let mut duplicate_da_bytes = None;
                             match ctx.tx_pool.lock() {
@@ -773,9 +775,9 @@ impl PeerSession {
                                             )
                                             .is_ok()
                                     {
-                                        stage_fresh_payload = true;
+                                        stage_fresh_payload = stages_relay_da_tx;
                                     }
-                                    if !stage_fresh_payload {
+                                    if !stage_fresh_payload && stages_relay_da_tx {
                                         duplicate_da_bytes = pool.tx_by_id(&txid);
                                     }
                                 }
@@ -6122,6 +6124,29 @@ mod tests {
 
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn collect_live_responses_duplicate_non_da_skips_da_relay_stage() {
+        use std::collections::HashMap; use std::sync::{Arc, Mutex};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind"); let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept"); let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
+            let (chain_state, tx_bytes, _unused) = signed_conflicting_p2pk_state_and_txs(20_000, 10, 9); let mut sync_cfg = crate::sync::default_sync_config(None, crate::genesis::devnet_genesis_chain_id(), None); sync_cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
+            let mut engine = crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine");
+            let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64)); let _ = peer_manager.add_peer(PeerState { addr: "other:8333".to_string(), ..Default::default() });
+            let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); peer_outboxes.lock().unwrap().insert("sender:8333".to_string(), crate::tx_relay::PeerOutbox::default()); peer_outboxes.lock().unwrap().insert("other:8333".to_string(), crate::tx_relay::PeerOutbox::default());
+            let canonical_tx_pool: Mutex<TxPool> = Mutex::new(TxPool::new()); let da_relay_state = test_da_relay_state();
+            let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay_state };
+            session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes.clone() }, &mut engine, Some(&relay_ctx)).expect("first non-DA relay tx must admit");
+            let (_, txid, _, _consumed) = parse_tx(&tx_bytes).expect("parse tx for txid"); assert!(relay_state.tx_seen.has(&txid)); assert!(canonical_tx_pool.lock().unwrap().contains(&txid));
+            let poisoned_da_relay = Arc::new(test_da_relay_state()); let poison_target = Arc::clone(&poisoned_da_relay); let _ = thread::spawn(move || { let _guard = poison_target.lock().unwrap(); panic!("intentional poison for duplicate non-DA DA-stage skip test"); }).join(); assert!(poisoned_da_relay.is_poisoned());
+            session.peer.last_error.clear(); let duplicate_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: poisoned_da_relay.as_ref() };
+            session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes }, &mut engine, Some(&duplicate_ctx)).expect("duplicate non-DA relay tx must stay peer-neutral");
+            assert!(session.state().last_error.is_empty(), "duplicate non-DA tx must not touch DA relay staging: {:?}", session.state().last_error);
+        });
+        let _client = TcpStream::connect(addr).expect("connect"); server.join().expect("server join");
     }
 
     /// RUB-178 smoke test for the `relay_ctx = None` branch of
