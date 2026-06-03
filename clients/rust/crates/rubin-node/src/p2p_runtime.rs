@@ -853,18 +853,18 @@ impl PeerSession {
                         crate::da_relay::relay_da_tx_kind_prefix(&msg.payload),
                         Some(0x01 | 0x02)
                     );
-                    if matches!(outcome, Relayed { .. })
-                        || (relay_da_tx && matches!(outcome, DuplicateSeen { .. }))
+                    if matches!(&outcome, Relayed { .. })
+                        || (relay_da_tx && matches!(&outcome, DuplicateSeen { .. }))
                     {
                         let mut admitted_tx = None;
                         match ctx.tx_pool.lock() {
                             Ok(mut pool) => {
                                 if relay_da_tx {
-                                    if let Relayed { txid } | DuplicateSeen { txid } = outcome {
-                                        admitted_tx = pool.tx_by_id(&txid);
+                                    if let Relayed { txid } | DuplicateSeen { txid } = &outcome {
+                                        admitted_tx = pool.tx_by_id(txid);
                                     }
                                 }
-                                if admitted_tx.is_none() && matches!(outcome, Relayed { .. }) {
+                                if admitted_tx.is_none() && matches!(&outcome, Relayed { .. }) {
                                     #[rustfmt::skip]
                                     let add_remote = pool.add_tx_with_source(&msg.payload, &sync_engine.chain_state, sync_engine.block_store.as_ref(), sync_engine.cfg.chain_id, crate::txpool::TxSource::Remote).ok().and_then(|(txid, _meta)| pool.tx_by_id(&txid));
                                     if relay_da_tx {
