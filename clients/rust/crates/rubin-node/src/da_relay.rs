@@ -4,6 +4,8 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
 use rubin_consensus::constants::{CHUNK_BYTES, MAX_DA_CHUNK_COUNT};
+use rubin_consensus::constants::{COV_TYPE_DA_COMMIT, TX_WIRE_VERSION};
+use rubin_consensus::{parse_tx, Tx};
 use sha3::{Digest, Sha3_256};
 
 pub const DA_ORPHAN_POOL_BYTES: u64 = 64 << 20;
@@ -394,6 +396,76 @@ impl DaRelayState {
             && self.sets_by_da_id.is_empty()
     }
 
+    pub(crate) fn validate_relay_da_tx_for_admission(tx_bytes: &[u8]) -> DaRelayResult {
+        if relay_da_tx_kind_prefix(tx_bytes) != Some(0x02) {
+            return Ok(());
+        }
+        let (tx, _txid, _wtxid, consumed) =
+            parse_tx(tx_bytes).map_err(|_| DaRelayError::InvalidWireBytes)?;
+        if consumed != tx_bytes.len() {
+            return Err(DaRelayError::InvalidWireBytes);
+        }
+        let wire_bytes =
+            u64::try_from(tx_bytes.len()).map_err(|_| DaRelayError::AccountingOverflow)?;
+        validate_relay_da_chunk_for_admission(&tx, wire_bytes)
+    }
+
+    #[rustfmt::skip]
+    pub(crate) fn stage_relay_da_tx_bytes(&mut self, peer_addr: &str, tx_bytes: Vec<u8>) -> DaRelayResult { self.stage_relay_da_tx_bytes_checked(peer_addr, tx_bytes, false) }
+
+    #[rustfmt::skip]
+    pub(crate) fn stage_relay_da_tx_bytes_checked(&mut self, peer_addr: &str, tx_bytes: Vec<u8>, chunk_hash_prevalidated: bool) -> DaRelayResult {
+        let wire_bytes = u64::try_from(tx_bytes.len()).map_err(|_| DaRelayError::AccountingOverflow)?;
+        let (tx, _txid, _wtxid, consumed) = parse_tx(&tx_bytes).map_err(|_| DaRelayError::InvalidWireBytes)?;
+        if consumed != tx_bytes.len() {
+            return Err(DaRelayError::InvalidWireBytes);
+        }
+        match tx.tx_kind {
+            0x01 => {
+                let Some(core) = tx.da_commit_core.as_ref() else {
+                    return Ok(());
+                };
+                let Some(payload_commitment) = relay_da_commit_payload_commitment(&tx) else {
+                    return Ok(());
+                };
+                self.stage_incomplete_da_commit(
+                    peer_addr,
+                    DaRelayCommit {
+                        da_id: core.da_id,
+                        payload_commitment,
+                        peer_quota_key: PeerQuotaKey::from_peer_addr(peer_addr),
+                        chunk_count: core.chunk_count,
+                        wire_bytes,
+                        tx_bytes: Arc::from(tx_bytes.into_boxed_slice()),
+                    },
+                )
+            }
+            0x02 => {
+                let Some(core) = tx.da_chunk_core.as_ref() else {
+                    return Ok(());
+                };
+                self.stage_incomplete_da_chunk_inner(
+                    peer_addr,
+                    DaRelayChunk {
+                        da_id: core.da_id,
+                        chunk_hash: core.chunk_hash,
+                        peer_quota_key: PeerQuotaKey::from_peer_addr(peer_addr),
+                        chunk_index: core.chunk_index,
+                        payload: Arc::from(tx.da_payload.into_boxed_slice()),
+                        wire_bytes,
+                        tx_bytes: Arc::from(tx_bytes.into_boxed_slice()),
+                    },
+                    chunk_hash_prevalidated,
+                )
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    #[rustfmt::skip]
+    pub(crate) fn test_record_summary(&self, da_id: [u8; 32]) -> Option<(bool, usize, u64)> { let record = self.sets_by_da_id.get(&da_id)?; Some((record.commit.is_some(), record.chunks.len(), record.wire_bytes)) }
+
     pub(crate) fn complete_set_eviction_candidates(
         &self,
         max_payload_bytes: u64,
@@ -442,17 +514,17 @@ impl DaRelayState {
         record.prune_chunks_outside_commit();
         self.prepare_and_apply_record(record, CompletionMismatchAction::DropMatchingChunks)
     }
-    pub(crate) fn stage_incomplete_da_chunk(
-        &mut self,
-        peer_addr: &str,
-        mut chunk: DaRelayChunk,
-    ) -> DaRelayResult {
+    #[rustfmt::skip]
+    pub(crate) fn stage_incomplete_da_chunk(&mut self, peer_addr: &str, chunk: DaRelayChunk) -> DaRelayResult { self.stage_incomplete_da_chunk_inner(peer_addr, chunk, false) }
+    #[rustfmt::skip]
+    fn stage_incomplete_da_chunk_inner(&mut self, peer_addr: &str, chunk: DaRelayChunk, chunk_hash_prevalidated: bool) -> DaRelayResult {
+        let mut chunk = chunk;
         validate_da_chunk(&chunk)?;
         let current = self.sets_by_da_id.get(&chunk.da_id);
         if let Some(record) = current {
             record.validate_chunk_insert(chunk.chunk_index)?;
         }
-        if sha3_256(chunk.payload.as_ref()) != chunk.chunk_hash {
+        if !chunk_hash_prevalidated && sha3_256(chunk.payload.as_ref()) != chunk.chunk_hash {
             return Err(DaRelayError::ChunkHashMismatch);
         }
         let chunk_index = chunk.chunk_index;
@@ -652,6 +724,50 @@ fn validate_da_chunk(chunk: &DaRelayChunk) -> DaRelayResult {
     Ok(())
 }
 
+pub(crate) fn relay_da_tx_kind_prefix(tx_bytes: &[u8]) -> Option<u8> {
+    let version = u32::from_le_bytes(tx_bytes.get(..4)?.try_into().ok()?);
+    let kind = tx_bytes.get(4).copied()?;
+    (version == TX_WIRE_VERSION).then_some(kind)
+}
+
+fn validate_relay_da_chunk_for_admission(tx: &Tx, wire_bytes: u64) -> DaRelayResult {
+    if tx.tx_kind != 0x02 {
+        return Ok(());
+    }
+    let Some(core) = tx.da_chunk_core.as_ref() else {
+        return Ok(());
+    };
+    let payload_len =
+        u64::try_from(tx.da_payload.len()).map_err(|_| DaRelayError::AccountingOverflow)?;
+    if u64::from(core.chunk_index) >= MAX_DA_CHUNK_COUNT {
+        return Err(DaRelayError::ChunkIndexOutOfRange);
+    }
+    if payload_len == 0 || payload_len > CHUNK_BYTES {
+        return Err(DaRelayError::ChunkPayloadSizeInvalid);
+    }
+    if wire_bytes < payload_len {
+        return Err(DaRelayError::InvalidWireBytes);
+    }
+    if sha3_256(&tx.da_payload) != core.chunk_hash {
+        return Err(DaRelayError::ChunkHashMismatch);
+    }
+    Ok(())
+}
+
+fn relay_da_commit_payload_commitment(tx: &Tx) -> Option<[u8; 32]> {
+    let mut outputs = tx
+        .outputs
+        .iter()
+        .filter(|output| output.covenant_type == COV_TYPE_DA_COMMIT);
+    let output = outputs.next()?;
+    if output.covenant_data.len() != 32 || outputs.next().is_some() {
+        return None;
+    }
+    let mut commitment = [0u8; 32];
+    commitment.copy_from_slice(&output.covenant_data);
+    Some(commitment)
+}
+
 fn checked_add(left: u64, right: u64) -> DaRelayResult<u64> {
     left.checked_add(right)
         .ok_or(DaRelayError::AccountingOverflow)
@@ -716,6 +832,31 @@ mod tests {
         assert!(state.is_empty());
         state.next_received_time = 1;
         assert!(state.is_empty());
+    }
+
+    #[rustfmt::skip]
+    fn relay_test_tx(tx_kind: u8, outputs: Vec<rubin_consensus::TxOutput>, da_commit_core: Option<rubin_consensus::DaCommitCore>, da_chunk_core: Option<rubin_consensus::DaChunkCore>, da_payload: Vec<u8>) -> Vec<u8> { rubin_consensus::marshal_tx(&rubin_consensus::Tx { version: rubin_consensus::constants::TX_WIRE_VERSION, tx_kind, tx_nonce: 7, inputs: Vec::new(), outputs, locktime: 0, da_commit_core, da_chunk_core, witness: Vec::new(), da_payload }).expect("marshal relay test tx") }
+
+    #[rustfmt::skip]
+    fn relay_commit_core(da_id: [u8; 32], chunk_count: u16) -> rubin_consensus::DaCommitCore { rubin_consensus::DaCommitCore { da_id, chunk_count, retl_domain_id: [0x10; 32], batch_number: 1, tx_data_root: [0x11; 32], state_root: [0x12; 32], withdrawals_root: [0x13; 32], batch_sig_suite: 0, batch_sig: Vec::new() } }
+
+    #[rustfmt::skip]
+    fn relay_chunk_core(da_id: [u8; 32], chunk_index: u16, payload: &[u8]) -> rubin_consensus::DaChunkCore { rubin_consensus::DaChunkCore { da_id, chunk_index, chunk_hash: sha3_256(payload) } }
+
+    #[rustfmt::skip]
+    fn da_commit_output(commitment: [u8; 32]) -> rubin_consensus::TxOutput { rubin_consensus::TxOutput { value: 0, covenant_type: rubin_consensus::constants::COV_TYPE_DA_COMMIT, covenant_data: commitment.to_vec() } }
+
+    #[test]
+    #[rustfmt::skip]
+    fn stage_relay_da_tx_bytes_contract_matrix() {
+        let peer = "peer-a:8333"; let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); let non_da = relay_test_tx(0x00, Vec::new(), None, None, Vec::new()); state.stage_relay_da_tx_bytes(peer, non_da.clone()).unwrap(); let (non_da_tx, _, _, _) = parse_tx(&non_da).unwrap(); assert_eq!(validate_relay_da_chunk_for_admission(&non_da_tx, non_da.len() as u64), Ok(())); assert!(state.is_empty());
+        let bad_commit_output = rubin_consensus::TxOutput { value: 0, covenant_type: rubin_consensus::constants::COV_TYPE_DA_COMMIT, covenant_data: vec![4u8; 31] }; let bad_commit = relay_test_tx(0x01, vec![bad_commit_output], Some(relay_commit_core([4u8; 32], 1)), None, Vec::new()); state.stage_relay_da_tx_bytes(peer, bad_commit).unwrap(); assert!(state.is_empty());
+        let da_id = [1u8; 32]; let commitment = [2u8; 32]; let commit_tx = relay_test_tx(0x01, vec![da_commit_output(commitment)], Some(relay_commit_core(da_id, 1)), None, Vec::new()); state.stage_relay_da_tx_bytes(peer, commit_tx.clone()).unwrap(); let commit = state.sets_by_da_id[&da_id].commit.as_ref().unwrap(); assert_eq!(commit.payload_commitment, commitment); assert_eq!(commit.tx_bytes.as_ref(), commit_tx.as_slice());
+        let payload = b"relay chunk".to_vec(); let mut bad_core = relay_chunk_core([6u8; 32], 0, &payload); bad_core.chunk_hash = [7u8; 32]; let bad_chunk = relay_test_tx(0x02, Vec::new(), None, Some(bad_core), payload.clone()); let mut reject_state = DaRelayState::new(DaRelayCaps::default()).unwrap(); assert_eq!(DaRelayState::validate_relay_da_tx_for_admission(&bad_chunk), Err(ChunkHashMismatch)); assert_eq!(reject_state.stage_relay_da_tx_bytes(peer, bad_chunk), Err(ChunkHashMismatch)); assert!(reject_state.is_empty());
+        let mut trailing_chunk = relay_test_tx(0x02, Vec::new(), None, Some(relay_chunk_core([8u8; 32], 0, &payload)), payload.clone()); trailing_chunk.push(0); assert_eq!(DaRelayState::validate_relay_da_tx_for_admission(&trailing_chunk), Err(InvalidWireBytes)); assert_eq!(reject_state.stage_relay_da_tx_bytes(peer, trailing_chunk), Err(InvalidWireBytes)); assert!(reject_state.is_empty());
+        let good_tx = relay_test_tx(0x02, Vec::new(), None, Some(relay_chunk_core([7u8; 32], 0, &payload)), payload.clone()); reject_state.stage_relay_da_tx_bytes(peer, good_tx.clone()).unwrap(); assert_eq!(reject_state.test_record_summary([7u8; 32]), Some((false, 1, good_tx.len() as u64))); assert_eq!(reject_state.sets_by_da_id[&[7u8; 32]].chunks[&0].tx_bytes.as_ref(), good_tx.as_slice());
+        let (good_chunk_tx, _, _, _) = parse_tx(&good_tx).unwrap(); let mut edge_tx = good_chunk_tx.clone(); edge_tx.da_chunk_core.as_mut().unwrap().chunk_index = MAX_DA_CHUNK_COUNT as u16; assert_eq!(validate_relay_da_chunk_for_admission(&edge_tx, good_tx.len() as u64), Err(ChunkIndexOutOfRange)); edge_tx.da_chunk_core.as_mut().unwrap().chunk_index = 0; edge_tx.da_payload.clear(); assert_eq!(validate_relay_da_chunk_for_admission(&edge_tx, good_tx.len() as u64), Err(ChunkPayloadSizeInvalid)); edge_tx.da_payload = payload.clone(); assert_eq!(validate_relay_da_chunk_for_admission(&edge_tx, 0), Err(InvalidWireBytes));
+        let caps = DaRelayCaps { orphan_pool_per_peer_bytes: good_tx.len() as u64 + payload.len() as u64 - 1, ..DaRelayCaps::default() }; let mut cap_state = DaRelayState::new(caps).unwrap(); assert_eq!(cap_state.stage_relay_da_tx_bytes(peer, good_tx), Err(AccountingCapExceeded)); assert!(cap_state.is_empty());
     }
 
     #[test]
