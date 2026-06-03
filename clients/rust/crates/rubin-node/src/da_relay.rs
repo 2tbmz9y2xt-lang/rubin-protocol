@@ -92,6 +92,13 @@ pub(crate) struct DaRelayEvictionAccounting {
     pub(crate) received_time: u64,
 }
 
+struct DaRelayTtlExpiryProjection {
+    orphan_bytes: u64,
+    orphan_commit_overhead_bytes: u64,
+    peer_bytes: Vec<(PeerQuotaKey, u64)>,
+    da_id_bytes: Vec<([u8; 32], u64)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerQuotaKey(String);
 
@@ -490,34 +497,44 @@ impl DaRelayState {
     }
 
     pub(crate) fn advance_orphan_ttl(&mut self) -> DaRelayResult<Vec<[u8; 32]>> {
-        let da_ids: Vec<_> = self
-            .orphan_bytes_by_da_id
-            .keys()
-            .copied()
-            .filter(|da_id| {
-                self.sets_by_da_id
-                    .get(da_id)
-                    .is_some_and(|record| record.state != DaRelaySetState::CompleteSet)
-            })
-            .collect();
-        let mut staged = self.clone();
-        let mut expired = Vec::new();
-        for da_id in da_ids {
-            let Some(record) = staged.sets_by_da_id.get(&da_id).cloned() else {
+        let mut decrementing_da_ids = Vec::new();
+        let mut expiring_records = Vec::new();
+        for da_id in self.orphan_bytes_by_da_id.keys().copied() {
+            let Some(record) = self.sets_by_da_id.get(&da_id) else {
                 continue;
             };
+            if record.state == DaRelaySetState::CompleteSet {
+                continue;
+            }
             if record.ttl_blocks_remaining > 1 {
-                staged
-                    .sets_by_da_id
+                decrementing_da_ids.push(da_id);
+            } else {
+                expiring_records.push(record.clone());
+            }
+        }
+
+        if expiring_records.is_empty() {
+            for da_id in decrementing_da_ids {
+                self.sets_by_da_id
                     .get_mut(&da_id)
                     .ok_or(DaRelayError::AccountingUnderflow)?
                     .ttl_blocks_remaining -= 1;
-                continue;
             }
-            expired.push(record.da_id);
-            staged.remove_record(&record)?;
+            return Ok(Vec::new());
         }
-        *self = staged;
+
+        let projection = self.project_ttl_expiry(&expiring_records)?;
+        let expired = expiring_records
+            .iter()
+            .map(|record| record.da_id)
+            .collect::<Vec<_>>();
+        for da_id in decrementing_da_ids {
+            self.sets_by_da_id
+                .get_mut(&da_id)
+                .ok_or(DaRelayError::AccountingUnderflow)?
+                .ttl_blocks_remaining -= 1;
+        }
+        self.apply_ttl_expiry_projection(projection, expiring_records);
         Ok(expired)
     }
 
@@ -742,54 +759,87 @@ impl DaRelayState {
         Ok(projected)
     }
 
-    fn remove_record(&mut self, record: &DaRelaySetRecord) -> DaRelayResult {
-        let empty = DaRelaySetRecord::new(record.da_id);
-        let orphan_wire_bytes = record.orphan_wire_bytes()?;
-        let orphan_bytes = Self::project_counter(
-            self.orphan_bytes,
-            orphan_wire_bytes,
-            0,
-            self.caps.orphan_pool_bytes,
-        )?;
-        let da_id_bytes = Self::project_counter(
-            self.orphan_bytes_by_da_id
-                .get(&record.da_id)
-                .copied()
-                .unwrap_or(0),
-            orphan_wire_bytes,
-            0,
-            self.caps.orphan_pool_per_da_id_bytes,
-        )?;
-        let commit_overhead = Self::project_counter(
-            self.orphan_commit_overhead_bytes,
-            record.orphan_commit_bytes(),
-            0,
-            self.caps.orphan_commit_overhead_bytes,
-        )?;
-        let pinned_payload_bytes = Self::project_counter(
-            self.pinned_payload_bytes,
-            record.pinned_payload_accounting_bytes()?,
-            0,
-            self.caps.pinned_payload_bytes,
-        )?;
-        let peer_bytes = self.project_peer_bytes(Some(record), &empty)?;
-        self.orphan_bytes = orphan_bytes;
-        self.orphan_commit_overhead_bytes = commit_overhead;
-        self.pinned_payload_bytes = pinned_payload_bytes;
-        for (key, bytes) in peer_bytes {
+    fn project_ttl_expiry(
+        &self,
+        records: &[DaRelaySetRecord],
+    ) -> DaRelayResult<DaRelayTtlExpiryProjection> {
+        let mut remove_orphan_bytes = 0u64;
+        let mut remove_commit_overhead_bytes = 0u64;
+        let mut remove_peer_bytes = BTreeMap::new();
+        let mut da_id_bytes = Vec::with_capacity(records.len());
+        for record in records {
+            let orphan_wire_bytes = record.orphan_wire_bytes()?;
+            remove_orphan_bytes = checked_add(remove_orphan_bytes, orphan_wire_bytes)?;
+            remove_commit_overhead_bytes =
+                checked_add(remove_commit_overhead_bytes, record.orphan_commit_bytes())?;
+            da_id_bytes.push((
+                record.da_id,
+                Self::project_counter(
+                    self.orphan_bytes_by_da_id
+                        .get(&record.da_id)
+                        .copied()
+                        .unwrap_or(0),
+                    orphan_wire_bytes,
+                    0,
+                    self.caps.orphan_pool_per_da_id_bytes,
+                )?,
+            ));
+            if let Some(peer_bytes) = record.orphan_peer_bytes() {
+                for (key, bytes) in peer_bytes {
+                    let entry = remove_peer_bytes.entry(key.clone()).or_default();
+                    *entry = checked_add(*entry, *bytes)?;
+                }
+            }
+        }
+        let peer_bytes = remove_peer_bytes
+            .into_iter()
+            .map(|(key, bytes)| {
+                let projected = self.project_peer_counter(&key, bytes, 0)?.1;
+                Ok((key, projected))
+            })
+            .collect::<DaRelayResult<_>>()?;
+        Ok(DaRelayTtlExpiryProjection {
+            orphan_bytes: Self::project_counter(
+                self.orphan_bytes,
+                remove_orphan_bytes,
+                0,
+                self.caps.orphan_pool_bytes,
+            )?,
+            orphan_commit_overhead_bytes: Self::project_counter(
+                self.orphan_commit_overhead_bytes,
+                remove_commit_overhead_bytes,
+                0,
+                self.caps.orphan_commit_overhead_bytes,
+            )?,
+            peer_bytes,
+            da_id_bytes,
+        })
+    }
+
+    fn apply_ttl_expiry_projection(
+        &mut self,
+        projection: DaRelayTtlExpiryProjection,
+        records: Vec<DaRelaySetRecord>,
+    ) {
+        self.orphan_bytes = projection.orphan_bytes;
+        self.orphan_commit_overhead_bytes = projection.orphan_commit_overhead_bytes;
+        for (key, bytes) in projection.peer_bytes {
             if bytes == 0 {
                 self.orphan_bytes_by_peer_quota_key.remove(&key);
             } else {
                 self.orphan_bytes_by_peer_quota_key.insert(key, bytes);
             }
         }
-        if da_id_bytes == 0 {
-            self.orphan_bytes_by_da_id.remove(&record.da_id);
-        } else {
-            self.orphan_bytes_by_da_id.insert(record.da_id, da_id_bytes);
+        for (da_id, bytes) in projection.da_id_bytes {
+            if bytes == 0 {
+                self.orphan_bytes_by_da_id.remove(&da_id);
+            } else {
+                self.orphan_bytes_by_da_id.insert(da_id, bytes);
+            }
         }
-        self.sets_by_da_id.remove(&record.da_id);
-        Ok(())
+        for record in records {
+            self.sets_by_da_id.remove(&record.da_id);
+        }
     }
 }
 fn validate_da_chunk(chunk: &DaRelayChunk) -> DaRelayResult {
