@@ -496,8 +496,8 @@ fn broadcast_inv_to_addrs(
 
 /// Announce a transaction after successful mempool admission.
 ///
-/// Full flow: parse tx → compute txid → store in relay pool → mark seen →
-/// broadcast INV to peers. Matches Go `AnnounceTx`.
+/// Full flow: parse tx → compute txid → validate DA relay admission → store in
+/// relay pool → mark seen → broadcast INV to peers. Matches Go `AnnounceTx`.
 pub fn announce_tx(
     tx_bytes: &[u8],
     meta: crate::txpool::RelayTxMetadata,
@@ -507,6 +507,8 @@ pub fn announce_tx(
     peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
 ) -> Result<(), String> {
     let txid = canonical_txid(tx_bytes)?;
+    crate::da_relay::DaRelayState::validate_relay_da_tx_for_admission(tx_bytes)
+        .map_err(|err| format!("DA relay tx admission validation failed: {err:?}"))?;
 
     // RPC path already passed mempool admission, so preserve the validated
     // relay metadata for relay-pool priority instead of degrading to zero fee.
@@ -683,7 +685,7 @@ pub fn handle_received_tx(
 }
 
 /// Extract the canonical txid from raw tx bytes using consensus parsing.
-fn canonical_txid(tx_bytes: &[u8]) -> Result<[u8; 32], String> {
+pub(crate) fn canonical_txid(tx_bytes: &[u8]) -> Result<[u8; 32], String> {
     let (_tx, txid, _wtxid, consumed) =
         rubin_consensus::parse_tx(tx_bytes).map_err(|e| e.to_string())?;
     if consumed != tx_bytes.len() {
