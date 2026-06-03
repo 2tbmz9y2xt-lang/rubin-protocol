@@ -711,54 +711,46 @@ impl PeerSession {
             MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
-                    let (outcome, relay_txid) = if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize
-                    {
-                        (crate::tx_relay::RelayTxOutcome::Oversized, None)
-                    } else {
-                        let validated_da_txid =
-                            match crate::da_relay::DaRelayState::validate_relay_da_tx_for_admission(
-                                &msg.payload,
-                            ) {
-                                Ok(txid) => txid,
-                                Err(err) => {
-                                    let reason =
-                                        format!("DA relay tx admission validation failed: {err:?}");
-                                    self.bump_ban(10, &reason);
-                                    if self.peer.ban_score >= self.cfg.ban_threshold {
-                                        return Err(io::Error::new(
-                                            io::ErrorKind::InvalidData,
-                                            reason,
-                                        ));
-                                    }
-                                    return Ok(LiveMessageOutcome {
-                                        responses: Vec::new(),
-                                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
-                                    });
+                    let validated_da_txid =
+                        match crate::da_relay::DaRelayState::validate_relay_da_tx_for_admission(
+                            &msg.payload,
+                        ) {
+                            Ok(txid) => txid,
+                            Err(err) => {
+                                let reason =
+                                    format!("DA relay tx admission validation failed: {err:?}");
+                                self.bump_ban(10, &reason);
+                                if self.peer.ban_score >= self.cfg.ban_threshold {
+                                    return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
                                 }
-                            };
-                        let txid = match validated_da_txid {
-                            Some(txid) => Ok(txid),
-                            None => crate::tx_relay::canonical_txid(&msg.payload),
+                                return Ok(LiveMessageOutcome {
+                                    responses: Vec::new(),
+                                    tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                                });
+                            }
                         };
-                        match txid {
-                            Ok(txid) => (
-                                crate::tx_relay::handle_received_tx_with_canonical_txid(
-                                    &msg.payload,
-                                    txid,
-                                    sync_engine,
-                                    ctx.relay_state,
-                                    ctx.peer_manager,
-                                    ctx.peer_registered_addr,
-                                    ctx.local_addr,
-                                    ctx.peer_writers,
-                                )?,
-                                Some(txid),
-                            ),
-                            Err(reason) => (
-                                crate::tx_relay::RelayTxOutcome::MalformedParse(reason),
-                                None,
-                            ),
-                        }
+                    let txid = match validated_da_txid {
+                        Some(txid) => Ok(txid),
+                        None => crate::tx_relay::canonical_txid(&msg.payload),
+                    };
+                    let (outcome, relay_txid) = match txid {
+                        Ok(txid) => (
+                            crate::tx_relay::handle_received_tx_with_canonical_txid(
+                                &msg.payload,
+                                txid,
+                                sync_engine,
+                                ctx.relay_state,
+                                ctx.peer_manager,
+                                ctx.peer_registered_addr,
+                                ctx.local_addr,
+                                ctx.peer_writers,
+                            )?,
+                            Some(txid),
+                        ),
+                        Err(reason) => (
+                            crate::tx_relay::RelayTxOutcome::MalformedParse(reason),
+                            None,
+                        ),
                     };
                     if matches!(
                         outcome,
