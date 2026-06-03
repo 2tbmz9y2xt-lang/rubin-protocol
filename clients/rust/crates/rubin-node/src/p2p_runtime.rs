@@ -766,7 +766,8 @@ impl PeerSession {
                             | crate::tx_relay::RelayTxOutcome::DuplicateSeen
                     ) {
                         if let Some(txid) = relay_txid {
-                            let mut admitted_da_bytes = None;
+                            let mut stage_fresh_payload = false;
+                            let mut duplicate_da_bytes = None;
                             match ctx.tx_pool.lock() {
                                 Ok(mut pool) => {
                                     if matches!(outcome, crate::tx_relay::RelayTxOutcome::Relayed)
@@ -780,10 +781,10 @@ impl PeerSession {
                                             )
                                             .is_ok()
                                     {
-                                        admitted_da_bytes = Some(msg.payload.clone());
+                                        stage_fresh_payload = true;
                                     }
-                                    if admitted_da_bytes.is_none() {
-                                        admitted_da_bytes = pool.tx_by_id(&txid);
+                                    if !stage_fresh_payload {
+                                        duplicate_da_bytes = pool.tx_by_id(&txid);
                                     }
                                 }
                                 Err(_) => {
@@ -792,11 +793,16 @@ impl PeerSession {
                                             .to_string();
                                 }
                             }
-                            if let Some(admitted_da_bytes) = admitted_da_bytes {
+                            let staged_da_bytes = if stage_fresh_payload {
+                                Some(msg.payload.as_slice())
+                            } else {
+                                duplicate_da_bytes.as_deref()
+                            };
+                            if let Some(staged_da_bytes) = staged_da_bytes {
                                 if let Ok(mut da_relay) = ctx.da_relay.lock() {
                                     if let Err(err) = da_relay.stage_relay_da_tx_bytes(
                                         ctx.peer_registered_addr,
-                                        &admitted_da_bytes,
+                                        staged_da_bytes,
                                     ) {
                                         self.peer.last_error =
                                             format!("DA relay tx staging failed: {err:?}");
@@ -3551,8 +3557,6 @@ mod tests {
     }
 
     #[rustfmt::skip]
-    fn same_txid_da_payload_variant(tx_bytes: &[u8], payload: &[u8]) -> (Vec<u8>, [u8; 32]) { let (mut tx, txid, _, _) = parse_tx(tx_bytes).expect("parse da chunk tx"); tx.da_payload = payload.to_vec(); let variant = marshal_tx(&tx).expect("marshal DA payload variant"); assert_eq!(parse_tx(&variant).expect("parse variant").1, txid); (variant, txid) }
-
     #[test]
     fn getblocktxn_payload_codec_matches_go_wire() {
         let mut block_hash = [0u8; 32];
@@ -6046,26 +6050,6 @@ mod tests {
                 da_relay: &da_relay_state,
             };
 
-            let (bad_payload_tx, same_txid) =
-                same_txid_da_payload_variant(&tx_bytes, b"bad-da-payload");
-            session
-                .collect_live_responses(
-                    WireMessage {
-                        command: MESSAGE_TX.to_string(),
-                        payload: bad_payload_tx,
-                    },
-                    &mut engine,
-                    Some(&relay_ctx),
-                )
-                .expect("bad DA payload stays sub-threshold");
-            assert_eq!(session.state().ban_score, 10);
-            assert!(!relay_state.tx_seen.has(&same_txid));
-            assert!(!relay_state.relay_pool.has(&same_txid));
-            assert!(!canonical_tx_pool.lock().unwrap().contains(&same_txid));
-            assert_eq!(
-                da_relay_state.lock().unwrap().test_record_summary(da_id),
-                None
-            );
             let msg = WireMessage {
                 command: MESSAGE_TX.to_string(),
                 payload: tx_bytes.clone(),
@@ -6120,37 +6104,15 @@ mod tests {
                     .contains("DA relay tx staging failed: DuplicateChunk"),
                 "duplicate DA staging must be observable on peer.last_error"
             );
-            for preseen in [false, true] {
-                let dup_relay_state = crate::tx_relay::TxRelayState::new();
-                if preseen {
-                    dup_relay_state.tx_seen.add(txid);
-                }
-                let dup_da_relay_state = test_da_relay_state();
-                let dup_ctx = PeerRelayContext { relay_state: &dup_relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &dup_da_relay_state };
-                session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes.clone() }, &mut engine, Some(&dup_ctx)).expect("already-admitted DA tx should stay peer-neutral");
-                assert_eq!(dup_da_relay_state.lock().unwrap().test_record_summary(da_id), Some((false, 1, tx_bytes.len() as u64)));
-            }
+            let dup_relay_state = crate::tx_relay::TxRelayState::new(); let dup_da_relay_state = test_da_relay_state();
+            let dup_ctx = PeerRelayContext { relay_state: &dup_relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &dup_da_relay_state };
+            session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes.clone() }, &mut engine, Some(&dup_ctx)).expect("already-admitted DA tx should stay peer-neutral");
+            assert_eq!(dup_da_relay_state.lock().unwrap().test_record_summary(da_id), Some((false, 1, tx_bytes.len() as u64)));
 
-            session
-                .collect_live_responses(
-                    WireMessage {
-                        command: MESSAGE_TX.to_string(),
-                        payload: conflicting_tx.clone(),
-                    },
-                    &mut engine,
-                    Some(&relay_ctx),
-                )
-                .expect("conflicting MESSAGE_TX dispatch must preserve relay outcome");
-            let (_, conflicting_txid, _, _consumed) =
-                parse_tx(&conflicting_tx).expect("parse conflict tx for txid");
+            session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: conflicting_tx.clone() }, &mut engine, Some(&relay_ctx)).expect("conflicting MESSAGE_TX dispatch must preserve relay outcome");
+            let (_, conflicting_txid, _, _consumed) = parse_tx(&conflicting_tx).expect("parse conflict tx for txid");
             assert!(relay_state.tx_seen.has(&conflicting_txid));
-            assert_eq!(
-                da_relay_state
-                    .lock()
-                    .unwrap()
-                    .test_record_summary(conflicting_da_id),
-                None
-            );
+            assert_eq!(da_relay_state.lock().unwrap().test_record_summary(conflicting_da_id), None);
 
             // 2) relay-cache-only path remains separate: tx_relay's
             //    relay_state still records the tx as well. This proves

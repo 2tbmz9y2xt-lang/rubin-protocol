@@ -457,17 +457,20 @@ impl DaRelayState {
                     return Ok(());
                 };
                 validate_relay_da_chunk_for_admission(&tx, wire_bytes)?;
+                let (da_id, chunk_index, chunk_hash) =
+                    (core.da_id, core.chunk_index, core.chunk_hash);
                 if let Some(record) = self.sets_by_da_id.get(&core.da_id) {
                     record.validate_chunk_insert(core.chunk_index)?;
                 }
+                let payload = Arc::from(tx.da_payload);
                 self.stage_incomplete_da_chunk(
                     peer_addr,
                     DaRelayChunk {
-                        da_id: core.da_id,
-                        chunk_hash: core.chunk_hash,
+                        da_id,
+                        chunk_hash,
                         peer_quota_key: PeerQuotaKey::from_peer_addr(peer_addr),
-                        chunk_index: core.chunk_index,
-                        payload: Arc::from(tx.da_payload.as_slice()),
+                        chunk_index,
+                        payload,
                         wire_bytes,
                         tx_bytes: Arc::from(tx_bytes),
                     },
