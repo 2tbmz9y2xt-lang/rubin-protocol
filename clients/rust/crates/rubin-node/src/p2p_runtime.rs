@@ -849,21 +849,27 @@ impl PeerSession {
                     // DA relay staging is only stashed here; the service
                     // loop applies it after releasing the engine lock.
                     use crate::tx_relay::RelayTxOutcome::{DuplicateSeen, Relayed};
-                    let relayed = matches!(outcome, Relayed { .. });
-                    let relay_txid = match &outcome {
-                        Relayed { txid } | DuplicateSeen { txid } => Some(*txid),
-                        _ => None,
-                    };
-                    if let Some(relay_txid) = relay_txid {
+                    let relay_da_tx = matches!(
+                        crate::da_relay::relay_da_tx_kind_prefix(&msg.payload),
+                        Some(0x01 | 0x02)
+                    );
+                    if matches!(outcome, Relayed { .. })
+                        || (relay_da_tx && matches!(outcome, DuplicateSeen { .. }))
+                    {
                         let mut admitted_tx = None;
                         match ctx.tx_pool.lock() {
                             Ok(mut pool) => {
-                                let existing_tx = pool.tx_by_id(&relay_txid);
-                                admitted_tx = existing_tx;
-                                if admitted_tx.is_none() && relayed {
+                                if relay_da_tx {
+                                    if let Relayed { txid } | DuplicateSeen { txid } = outcome {
+                                        admitted_tx = pool.tx_by_id(&txid);
+                                    }
+                                }
+                                if admitted_tx.is_none() && matches!(outcome, Relayed { .. }) {
                                     #[rustfmt::skip]
                                     let add_remote = pool.add_tx_with_source(&msg.payload, &sync_engine.chain_state, sync_engine.block_store.as_ref(), sync_engine.cfg.chain_id, crate::txpool::TxSource::Remote).ok().and_then(|(txid, _meta)| pool.tx_by_id(&txid));
-                                    admitted_tx = add_remote;
+                                    if relay_da_tx {
+                                        admitted_tx = add_remote;
+                                    }
                                 }
                             }
                             Err(_) => {
@@ -872,13 +878,15 @@ impl PeerSession {
                                         .to_string();
                             }
                         }
-                        if let Some(tx_bytes) = admitted_tx {
-                            let hash_checked = tx_bytes == msg.payload;
-                            self.stash_pending_da_relay_staging(
-                                ctx.peer_registered_addr,
-                                tx_bytes,
-                                hash_checked,
-                            );
+                        if relay_da_tx {
+                            if let Some(tx_bytes) = admitted_tx {
+                                let hash_checked = tx_bytes == msg.payload;
+                                self.stash_pending_da_relay_staging(
+                                    ctx.peer_registered_addr,
+                                    tx_bytes,
+                                    hash_checked,
+                                );
+                            }
                         }
                     }
                     // Mirror Go's `peer.handleTx` parse-fail policy: parse
@@ -6125,6 +6133,10 @@ mod tests {
             let _ = session
                 .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
                 .expect("collect_live_responses MESSAGE_TX must succeed for floor-compliant tx");
+            assert!(
+                session.take_pending_da_relay_staging().is_none(),
+                "non-DA MESSAGE_TX must not queue DA relay staging work"
+            );
 
             let (_, txid, _, _consumed) = parse_tx(&tx_bytes).expect("parse tx for txid");
 

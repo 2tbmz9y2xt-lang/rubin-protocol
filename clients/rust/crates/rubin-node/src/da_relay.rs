@@ -741,7 +741,7 @@ fn validate_da_chunk(chunk: &DaRelayChunk) -> DaRelayResult {
     Ok(())
 }
 
-fn relay_da_tx_kind_prefix(tx_bytes: &[u8]) -> Option<u8> {
+pub(crate) fn relay_da_tx_kind_prefix(tx_bytes: &[u8]) -> Option<u8> {
     let version = u32::from_le_bytes(tx_bytes.get(..4)?.try_into().ok()?);
     let kind = tx_bytes.get(4).copied()?;
     (version == TX_WIRE_VERSION).then_some(kind)
