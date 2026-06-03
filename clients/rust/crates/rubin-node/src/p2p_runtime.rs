@@ -225,6 +225,7 @@ pub struct PeerRelayContext<'a> {
     /// (`clients/go/node/p2p/mempool.go:45-54`); that method's last
     /// statement (line 53) is `p.mempool.AddRemoteTx(raw)`.
     pub tx_pool: &'a std::sync::Mutex<crate::txpool::TxPool>,
+    pub da_relay: &'a std::sync::Mutex<crate::da_relay::DaRelayState>,
 }
 
 #[derive(Debug, Default)]
@@ -710,6 +711,21 @@ impl PeerSession {
             MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
+                    if let Err(err) =
+                        crate::da_relay::DaRelayState::validate_relay_da_tx_for_admission(
+                            &msg.payload,
+                        )
+                    {
+                        let reason = format!("DA relay tx admission validation failed: {err:?}");
+                        self.bump_ban(10, &reason);
+                        if self.peer.ban_score >= self.cfg.ban_threshold {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
+                        }
+                        return Ok(LiveMessageOutcome {
+                            responses: Vec::new(),
+                            tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                        });
+                    }
                     let outcome = crate::tx_relay::handle_received_tx(
                         &msg.payload,
                         sync_engine,
@@ -795,21 +811,43 @@ impl PeerSession {
                     // `handle_mine_next`, NOT the engine-snapshot-then-drop
                     // pattern in `apply_tx_pool_cleanup`. The seam does
                     // not re-acquire the engine, so no deadlock from self.
-                    if matches!(outcome, crate::tx_relay::RelayTxOutcome::Relayed) {
+                    use crate::tx_relay::RelayTxOutcome::{DuplicateSeen, Relayed};
+                    let relayed = matches!(outcome, Relayed);
+                    if relayed || matches!(outcome, DuplicateSeen) {
+                        #[rustfmt::skip]
+                        let relay_txid = parse_tx(&msg.payload).ok().and_then(|(_, txid, _, consumed)| (consumed == msg.payload.len()).then_some(txid));
+                        let mut admitted_tx = None;
                         match ctx.tx_pool.lock() {
                             Ok(mut pool) => {
-                                let _ = pool.add_tx_with_source(
-                                    &msg.payload,
-                                    &sync_engine.chain_state,
-                                    sync_engine.block_store.as_ref(),
-                                    sync_engine.cfg.chain_id,
-                                    crate::txpool::TxSource::Remote,
-                                );
+                                let existing_tx = relay_txid.and_then(|txid| pool.tx_by_id(&txid));
+                                admitted_tx = existing_tx;
+                                if admitted_tx.is_none() && relayed {
+                                    #[rustfmt::skip]
+                                    let add_remote = pool.add_tx_with_source(&msg.payload, &sync_engine.chain_state, sync_engine.block_store.as_ref(), sync_engine.cfg.chain_id, crate::txpool::TxSource::Remote).ok().and_then(|(txid, _meta)| pool.tx_by_id(&txid));
+                                    admitted_tx = add_remote;
+                                }
                             }
                             Err(_) => {
                                 self.peer.last_error =
                                     "canonical tx_pool poisoned; peer-tx admission skipped"
                                         .to_string();
+                            }
+                        }
+                        if let Some(tx_bytes) = admitted_tx {
+                            match ctx.da_relay.lock() {
+                                Ok(mut da_relay) => {
+                                    if let Err(err) = da_relay
+                                        .stage_relay_da_tx_bytes(ctx.peer_registered_addr, tx_bytes)
+                                    {
+                                        self.peer.last_error =
+                                            format!("DA relay tx staging failed: {err:?}");
+                                    }
+                                }
+                                Err(_) => {
+                                    self.peer.last_error =
+                                        "da relay state poisoned; peer-tx staging skipped"
+                                            .to_string();
+                                }
                             }
                         }
                     }
@@ -3402,6 +3440,15 @@ mod tests {
     use serde::Deserialize;
 
     static NEXT_TEST_ROOT_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[expect(clippy::type_complexity)]
+    #[rustfmt::skip]
+    fn signed_conflicting_da_chunk_state_and_txs() -> (ChainState, Vec<u8>, Vec<u8>, Vec<u8>, [u8; 32], [u8; 32], [u8; 32]) {
+        let keypair = rubin_consensus::Mldsa87Keypair::generate().expect("OpenSSL signer"); let pubkey = keypair.pubkey_bytes(); let outpoint = rubin_consensus::Outpoint { txid: [0xA1; 32], vout: 0 }; let mut state = ChainState::new();
+        state.utxos.insert(outpoint.clone(), rubin_consensus::UtxoEntry { value: 20_000, covenant_type: rubin_consensus::constants::COV_TYPE_P2PK, covenant_data: rubin_consensus::p2pk_covenant_data_for_pubkey(&pubkey), creation_height: 0, created_by_coinbase: false }); let utxos = state.utxos.clone();
+        let build = |nonce: u64, da_id: [u8; 32], payload: &[u8], valid_hash: bool| { let mut tx = rubin_consensus::Tx { version: rubin_consensus::constants::TX_WIRE_VERSION, tx_kind: 0x02, tx_nonce: nonce, inputs: vec![rubin_consensus::TxInput { prev_txid: outpoint.txid, prev_vout: outpoint.vout, script_sig: Vec::new(), sequence: 0 }], outputs: vec![rubin_consensus::TxOutput { value: 10, covenant_type: rubin_consensus::constants::COV_TYPE_P2PK, covenant_data: rubin_consensus::p2pk_covenant_data_for_pubkey(&vec![nonce as u8; 2592]) }], locktime: 0, da_commit_core: None, da_chunk_core: Some(rubin_consensus::DaChunkCore { da_id, chunk_index: 0, chunk_hash: if valid_hash { Sha3_256::digest(payload).into() } else { [0xE1; 32] } }), witness: Vec::new(), da_payload: payload.to_vec() }; rubin_consensus::sign_transaction(&mut tx, &utxos, devnet_genesis_chain_id(), &keypair).expect("sign DA chunk tx"); rubin_consensus::marshal_tx(&tx).expect("marshal DA chunk tx") };
+        let admitted_da_id = [0xD1; 32]; let conflicting_da_id = [0xD2; 32]; let bad_da_id = [0xD3; 32]; let admitted = build(7, admitted_da_id, b"admitted da chunk", true); let conflicting = build(8, conflicting_da_id, b"conflicting da chunk", true); let bad = build(9, bad_da_id, b"bad da chunk", false); (state, admitted, conflicting, bad, admitted_da_id, conflicting_da_id, bad_da_id)
+    }
 
     #[derive(Deserialize)]
     struct SharedRuntimeVectors {
@@ -6021,6 +6068,10 @@ mod tests {
                 crate::tx_relay::PeerOutbox::default(),
             );
             let canonical_tx_pool: Mutex<TxPool> = Mutex::new(TxPool::new());
+            let da_relay_state = Mutex::new(
+                crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
+                    .expect("valid DA relay caps"),
+            );
 
             let relay_ctx = PeerRelayContext {
                 relay_state: &relay_state,
@@ -6029,6 +6080,7 @@ mod tests {
                 peer_registered_addr: "sender:8333",
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
+                da_relay: &da_relay_state,
             };
 
             let msg = WireMessage {
@@ -6090,6 +6142,28 @@ mod tests {
 
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn collect_live_responses_message_tx_stages_da_after_remote_admission() {
+        use std::collections::HashMap; use std::sync::Mutex;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind"); let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept"); let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
+            let (chain_state, admitted_tx, conflicting_tx, bad_tx, da_id, conflict_da_id, bad_da_id) = signed_conflicting_da_chunk_state_and_txs();
+            let mut sync_cfg = crate::sync::default_sync_config(None, crate::genesis::devnet_genesis_chain_id(), None);
+            sync_cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
+            let mut engine = crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine"); let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64)); let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); let canonical_tx_pool = Mutex::new(TxPool::new()); let da_relay = Mutex::new(crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default()).expect("valid DA relay caps"));
+            let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay };
+            let (_, bad_txid, _, _) = parse_tx(&bad_tx).expect("parse bad DA tx");
+            session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: bad_tx }, &mut engine, Some(&relay_ctx)).expect("sub-threshold malformed DA tx is peer-neutral"); assert_eq!(session.state().ban_score, 10); assert!(!relay_state.tx_seen.has(&bad_txid)); assert_eq!(da_relay.lock().unwrap().test_record_summary(bad_da_id), None);
+            let (_, txid, _, _) = parse_tx(&admitted_tx).expect("parse admitted DA tx");
+            canonical_tx_pool.lock().unwrap().add_tx_with_source(&admitted_tx, &engine.chain_state, engine.block_store.as_ref(), engine.cfg.chain_id, crate::txpool::TxSource::Local).expect("pre-admit DA tx"); assert!(relay_state.tx_seen.add(txid)); session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: admitted_tx.clone() }, &mut engine, Some(&relay_ctx)).expect("already-seen DA tx dispatch"); assert_eq!(canonical_tx_pool.lock().unwrap().entry_source(&txid), Some(crate::txpool::TxSource::Local)); assert_eq!(da_relay.lock().unwrap().test_record_summary(da_id), Some((false, 1, admitted_tx.len() as u64)));
+            let (_, conflicting_txid, _, _) = parse_tx(&conflicting_tx).expect("parse conflicting DA tx");
+            session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: conflicting_tx }, &mut engine, Some(&relay_ctx)).expect("txpool-rejected DA tx preserves relay outcome"); assert!(relay_state.tx_seen.has(&conflicting_txid)); assert_eq!(da_relay.lock().unwrap().test_record_summary(conflict_da_id), None);
+        });
+        let _client = TcpStream::connect(addr).expect("connect"); server.join().expect("server join");
     }
 
     /// RUB-178 smoke test for the `relay_ctx = None` branch of
@@ -6223,6 +6297,10 @@ mod tests {
                 canonical_tx_pool.is_poisoned(),
                 "Mutex must be poisoned before exercising the seam"
             );
+            let da_relay_state = Mutex::new(
+                crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
+                    .expect("valid DA relay caps"),
+            );
 
             let relay_ctx = PeerRelayContext {
                 relay_state: &relay_state,
@@ -6231,6 +6309,7 @@ mod tests {
                 peer_registered_addr: "sender:8333",
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
+                da_relay: &da_relay_state,
             };
 
             let msg = WireMessage {
