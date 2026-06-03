@@ -7,8 +7,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rubin_consensus::{
-    canonical_rotation_network_name_normalized, normalized_rotation_network_name,
-    SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
+    block_hash, canonical_rotation_network_name_normalized, normalized_rotation_network_name,
+    parse_block_bytes, SUPPORTED_ROTATION_NETWORK_NAMES_CSV,
 };
 use rubin_node::devnet_rpc::{
     attach_shutdown_signal_to_devnet_rpc_state, RPC_READINESS_TRANSITION_FAILED,
@@ -498,11 +498,19 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     };
     let announce_block: Option<rubin_node::devnet_rpc::AnnounceBlockFn> = {
         let relay_state = p2p_service.relay_state();
+        let da_relay = p2p_service.da_relay_state();
         let pm = Arc::clone(&peer_manager);
         let pw = p2p_service.peer_outboxes();
         let local = p2p_service.addr().to_string();
         Some(Arc::new(move |block_bytes: &[u8]| {
-            rubin_node::tx_relay::announce_block(block_bytes, &relay_state, &pm, &local, &pw)
+            announce_block_and_advance_da_ttl(
+                block_bytes,
+                &relay_state,
+                &pm,
+                &local,
+                &pw,
+                &da_relay,
+            )
         }))
     };
     let state = attach_shutdown_signal_to_devnet_rpc_state(
@@ -1254,24 +1262,59 @@ fn validate_peer_addr(addr: &str) -> Result<(), String> {
     validate_addr("peer", addr)
 }
 
+#[rustfmt::skip]
+fn announce_block_and_advance_da_ttl(
+    block_bytes: &[u8],
+    relay_state: &rubin_node::tx_relay::TxRelayState,
+    peer_manager: &rubin_node::p2p_runtime::PeerManager,
+    local_addr: &str,
+    peer_writers: &Mutex<std::collections::HashMap<String, rubin_node::tx_relay::PeerOutbox>>,
+    da_relay: &Arc<Mutex<rubin_node::da_relay::DaRelayState>>,
+) -> Result<(), String> {
+    let parsed = parse_block_bytes(block_bytes).map_err(|err| err.to_string())?; let hash = block_hash(&parsed.header_bytes).map_err(|err| err.to_string())?; let advance_da_ttl = !relay_state.block_seen.has(&hash);
+    rubin_node::tx_relay::announce_block(block_bytes, relay_state, peer_manager, local_addr, peer_writers)?;
+    if !advance_da_ttl {
+        return Ok(());
+    }
+    let _ = relay_state.block_seen.add(hash);
+    da_relay
+        .lock()
+        .map_err(|_| "da relay state lock poisoned".to_string())
+        .and_then(|mut da_relay| {
+            da_relay
+                .advance_orphan_ttl_for_accepted_block()
+                .map(|_| ())
+                .map_err(|err| format!("da relay orphan ttl: {err:?}"))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::{cell::RefCell, rc::Rc};
 
     use super::{
-        format_peer_slots_banner, handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
+        announce_block_and_advance_da_ttl, format_peer_slots_banner,
+        handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
         maybe_shutdown_if_requested, parse_args, run, runtime_genesis_hash, stop_signal_pair,
         validate_config, wait_for_stop_and_shutdown, LegacyExposureReport,
         PRODUCTION_STOP_SIGNAL_SET, RPC_READINESS_TRANSITION_FAILED,
     };
     use rubin_consensus::constants::{
-        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
+        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, TX_WIRE_VERSION,
+        VERIFY_COST_ML_DSA_87,
     };
+    use rubin_consensus::{block_hash, marshal_tx, parse_block_bytes, DaChunkCore, Tx};
+    use rubin_node::da_relay::{DaRelayCaps, DaRelayState};
+    use rubin_node::genesis::devnet_genesis_block_bytes;
+    use rubin_node::p2p_runtime::{default_peer_runtime_config, PeerManager, PeerState};
+    use rubin_node::tx_relay::{PeerOutbox, TxRelayState};
     use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
     use serde_json::Value;
+    use sha3::{Digest, Sha3_256};
 
     #[derive(serde::Deserialize)]
     struct LegacyExposureHookVectorsDoc {
@@ -1354,6 +1397,36 @@ mod tests {
             .next()
             .expect("first JSON value")
             .expect("json parse")
+    }
+
+    #[rustfmt::skip]
+    fn local_da_chunk_tx(da_id: [u8; 32], payload: &[u8]) -> Vec<u8> {
+        marshal_tx(&Tx { version: TX_WIRE_VERSION, tx_kind: 0x02, tx_nonce: 1, inputs: Vec::new(), outputs: Vec::new(), locktime: 0, da_commit_core: None, da_chunk_core: Some(DaChunkCore { da_id, chunk_index: 0, chunk_hash: Sha3_256::digest(payload).into() }), witness: Vec::new(), da_payload: payload.to_vec() }).expect("marshal local DA chunk tx")
+    }
+
+    fn test_block_hash(block: &[u8]) -> [u8; 32] {
+        let parsed = parse_block_bytes(block).expect("parse test block");
+        block_hash(&parsed.header_bytes).expect("hash test block")
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn local_block_announce_advances_da_orphan_ttl_once() {
+        let relay_state = TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 8)); let peer_writers = Mutex::new(std::collections::HashMap::<String, PeerOutbox>::new()); let da_relay = Arc::new(Mutex::new(DaRelayState::new(DaRelayCaps::default()).expect("da relay state")));
+        let mut blocks = vec![devnet_genesis_block_bytes(); 3]; blocks[1][0] ^= 0x01; blocks[2][0] ^= 0x02;
+        let first_tx = local_da_chunk_tx([0x91; 32], b"local-da-one"); da_relay.lock().unwrap().stage_relay_da_tx_bytes("peer-a:8333", &first_tx).expect("stage first DA chunk");
+        for block in &blocks { announce_block_and_advance_da_ttl(block, &relay_state, &peer_manager, "local:8333", &peer_writers, &da_relay).expect("advance local block"); }
+        assert!(da_relay.lock().unwrap().is_empty());
+        let second_tx = local_da_chunk_tx([0x92; 32], b"local-da-two"); da_relay.lock().unwrap().stage_relay_da_tx_bytes("peer-a:8333", &second_tx).expect("stage second DA chunk");
+        announce_block_and_advance_da_ttl(&blocks[2], &relay_state, &peer_manager, "local:8333", &peer_writers, &da_relay).expect("duplicate local block should not advance TTL");
+        assert!(!da_relay.lock().unwrap().is_empty());
+        let relay_state = TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 8)); let peer_writers = Mutex::new(std::collections::HashMap::<String, PeerOutbox>::new()); let da_relay = Arc::new(Mutex::new(DaRelayState::new(DaRelayCaps::default()).expect("da relay state")));
+        peer_manager.add_peer(PeerState { addr: "missing:8333".to_string(), ..Default::default() }).expect("register peer without outbox");
+        let block = devnet_genesis_block_bytes(); let hash = test_block_hash(&block); let tx = local_da_chunk_tx([0x93; 32], b"local-da-failed-announce"); da_relay.lock().unwrap().stage_relay_da_tx_bytes("peer-a:8333", &tx).expect("stage DA chunk");
+        let err = announce_block_and_advance_da_ttl(&block, &relay_state, &peer_manager, "local:8333", &peer_writers, &da_relay).expect_err("missing outbox should keep announce retryable");
+        assert!(err.contains("peer outbox missing for missing:8333"));
+        assert!(!relay_state.block_seen.has(&hash));
+        assert!(!da_relay.lock().unwrap().is_empty());
     }
 
     struct FailingWriter;

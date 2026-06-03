@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
 
-use crate::da_relay::{DaRelayCaps, DaRelayState};
+use crate::da_relay::{DaRelayCaps, DaRelayState, PeerQuotaKey};
 use crate::p2p_runtime::{
     perform_version_handshake, LiveMessageOutcome, PeerManager, PeerRelayContext,
     PeerRuntimeConfig, VersionPayloadV1, WireMessage,
@@ -820,6 +820,7 @@ fn handle_peer(
 
     let _peer_guard = PeerGuard {
         peer_manager: Arc::clone(&shared.peer_manager),
+        da_relay: Arc::clone(&shared.da_relay),
         addr: peer_addr.clone(),
     };
 
@@ -1030,12 +1031,24 @@ fn service_local_version(
 
 struct PeerGuard {
     peer_manager: Arc<PeerManager>,
+    da_relay: Arc<Mutex<DaRelayState>>,
     addr: String,
 }
 
 impl Drop for PeerGuard {
     fn drop(&mut self) {
+        let quota_key = PeerQuotaKey::from_peer_addr(&self.addr);
         self.peer_manager.remove_peer(&self.addr);
+        let quota_key_still_active = self
+            .peer_manager
+            .snapshot()
+            .iter()
+            .any(|peer| PeerQuotaKey::from_peer_addr(&peer.addr) == quota_key);
+        if !quota_key_still_active {
+            if let Ok(mut da_relay) = self.da_relay.lock() {
+                let _ = da_relay.release_peer_quota_key(&quota_key);
+            }
+        }
     }
 }
 
@@ -1119,7 +1132,12 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use rubin_consensus::{block_hash, constants::POW_LIMIT, parse_tx, BLOCK_HEADER_BYTES};
+    use rubin_consensus::{
+        block_hash,
+        constants::{POW_LIMIT, TX_WIRE_VERSION},
+        marshal_tx, parse_tx, DaChunkCore, Tx, BLOCK_HEADER_BYTES,
+    };
+    use sha3::{Digest, Sha3_256};
 
     use super::{
         apply_tx_pool_cleanup, connect_with_timeout, finalize_live_message_outcome,
@@ -2413,6 +2431,7 @@ mod tests {
         let alias_guard = register_peer_alias(&shared, alias, &primary).expect("register alias");
         let peer_guard = PeerGuard {
             peer_manager: Arc::clone(&shared.peer_manager),
+            da_relay: Arc::clone(&shared.da_relay),
             addr: primary.clone(),
         };
 
@@ -2437,6 +2456,23 @@ mod tests {
 
         drop(outbox_guard);
         assert!(!shared.peer_outboxes.lock().unwrap().contains_key(&primary));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn peer_guard_drop_releases_inactive_da_quota_key() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-quota-release"); let shared = test_shared_state(default_peer_runtime_config("devnet", 8), vec![], sync_engine);
+        let peer = "127.0.0.1:19111"; let da_id = [0x87; 32]; let payload = b"owned";
+        shared.peer_manager.add_peer(crate::p2p_runtime::PeerState { addr: peer.to_string(), ..Default::default() }).expect("register peer");
+        let tx = marshal_tx(&Tx { version: TX_WIRE_VERSION, tx_kind: 0x02, tx_nonce: 1, inputs: Vec::new(), outputs: Vec::new(), locktime: 0, da_commit_core: None, da_chunk_core: Some(DaChunkCore { da_id, chunk_index: 0, chunk_hash: Sha3_256::digest(payload).into() }), witness: Vec::new(), da_payload: payload.to_vec() }).expect("marshal da chunk tx");
+        shared.da_relay.lock().unwrap().stage_relay_da_tx_bytes(peer, &tx).expect("stage da chunk");
+        let guard = PeerGuard { peer_manager: Arc::clone(&shared.peer_manager), da_relay: Arc::clone(&shared.da_relay), addr: peer.to_string() };
+        drop(guard);
+        let da_relay = shared.da_relay.lock().unwrap();
+        assert_eq!(da_relay.test_orphan_bytes_for_peer(peer), 0);
+        assert_eq!(da_relay.test_orphan_bytes_for_da_id(da_id), 0);
+        assert_eq!(da_relay.test_record_summary(da_id), None);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
