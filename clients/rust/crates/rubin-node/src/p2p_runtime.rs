@@ -228,9 +228,10 @@ pub struct PeerRelayContext<'a> {
     pub da_relay: &'a std::sync::Mutex<crate::da_relay::DaRelayState>,
 }
 
-pub(crate) type PendingDaRelayStaging = (String, Vec<u8>);
+pub(crate) type PendingDaRelayStaging = (String, Vec<u8>, bool);
 
-fn should_skip_relay_da_admission_precheck(
+#[rustfmt::skip]
+fn skip_da(
     tx_bytes: &[u8],
     relay_state: &crate::tx_relay::TxRelayState,
     tx_pool: &Mutex<crate::txpool::TxPool>,
@@ -241,14 +242,7 @@ fn should_skip_relay_da_admission_precheck(
     let Ok(txid) = crate::tx_relay::canonical_txid(tx_bytes) else {
         return false;
     };
-    if !relay_state.tx_seen.has(&txid) {
-        return false;
-    }
-    let Ok(pool) = tx_pool.lock() else {
-        return false;
-    };
-    pool.tx_by_id(&txid)
-        .is_some_and(|admitted_tx| admitted_tx == tx_bytes)
+    relay_state.tx_seen.has(&txid) && tx_pool.lock().ok().and_then(|pool| pool.tx_by_id(&txid)).is_some_and(|admitted_tx| admitted_tx == tx_bytes)
 }
 
 #[derive(Debug, Default)]
@@ -463,23 +457,24 @@ impl PeerSession {
     }
 
     #[rustfmt::skip]
-    fn stash_pending_da_relay_staging(&mut self, peer_addr: &str, tx_bytes: Vec<u8>) {
-        self.pending_da_relay_staging = Some((peer_addr.to_string(), tx_bytes));
+    fn stash_da_staging(&mut self, peer_addr: &str, tx_bytes: Vec<u8>, chunk_hash_prevalidated: bool) {
+        self.pending_da_relay_staging = Some((peer_addr.to_string(), tx_bytes, chunk_hash_prevalidated));
     }
 
+    #[rustfmt::skip]
     pub(crate) fn apply_pending_da_relay_staging(
         &mut self,
         da_relay: &std::sync::Mutex<crate::da_relay::DaRelayState>,
         pending: Option<PendingDaRelayStaging>,
     ) {
-        let Some((peer_addr, tx_bytes)) = pending else {
+        let Some((peer_addr, tx_bytes, chunk_hash_prevalidated)) = pending else {
             return;
         };
         let Ok(mut da_relay) = da_relay.lock() else {
             self.peer.last_error = "da relay state poisoned; peer-tx staging skipped".to_string();
             return;
         };
-        if let Err(err) = da_relay.stage_relay_da_tx_bytes(&peer_addr, tx_bytes) {
+        if let Err(err) = da_relay.stage_relay_da_tx_bytes_checked(&peer_addr, tx_bytes, chunk_hash_prevalidated) {
             self.peer.last_error = format!("DA relay tx staging failed: {err:?}");
         }
     }
@@ -762,11 +757,8 @@ impl PeerSession {
             MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
-                    if !should_skip_relay_da_admission_precheck(
-                        &msg.payload,
-                        ctx.relay_state,
-                        ctx.tx_pool,
-                    ) {
+                    let hash_checked = !skip_da(&msg.payload, ctx.relay_state, ctx.tx_pool);
+                    if hash_checked {
                         if let Err(err) =
                             crate::da_relay::DaRelayState::validate_relay_da_tx_for_admission(
                                 &msg.payload,
@@ -793,12 +785,10 @@ impl PeerSession {
                         ctx.local_addr,
                         ctx.peer_writers,
                     )?;
-                    // Stash DA relay staging here; the service loop applies it
-                    // after releasing the sync engine lock.
                     use crate::tx_relay::RelayTxOutcome::{DuplicateSeen, Relayed};
                     let relay_da_tx = matches!(
                         crate::da_relay::relay_da_tx_kind_prefix(&msg.payload),
-                        Some(0x01 | 0x02)
+                        Some(0x01) | Some(0x02)
                     );
                     if matches!(&outcome, Relayed { .. })
                         || (relay_da_tx && matches!(&outcome, DuplicateSeen { .. }))
@@ -827,8 +817,9 @@ impl PeerSession {
                         }
                         if relay_da_tx {
                             if let Some(tx_bytes) = admitted_tx {
-                                #[rustfmt::skip]
-                                self.stash_pending_da_relay_staging(ctx.peer_registered_addr, tx_bytes);
+                                let prevalid = hash_checked && tx_bytes == msg.payload;
+                                let peer_addr = ctx.peer_registered_addr;
+                                self.stash_da_staging(peer_addr, tx_bytes, prevalid);
                             }
                         }
                     }

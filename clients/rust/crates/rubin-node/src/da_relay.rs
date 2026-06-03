@@ -411,7 +411,10 @@ impl DaRelayState {
     }
 
     #[rustfmt::skip]
-    pub(crate) fn stage_relay_da_tx_bytes(&mut self, peer_addr: &str, tx_bytes: Vec<u8>) -> DaRelayResult {
+    pub(crate) fn stage_relay_da_tx_bytes(&mut self, peer_addr: &str, tx_bytes: Vec<u8>) -> DaRelayResult { self.stage_relay_da_tx_bytes_checked(peer_addr, tx_bytes, false) }
+
+    #[rustfmt::skip]
+    pub(crate) fn stage_relay_da_tx_bytes_checked(&mut self, peer_addr: &str, tx_bytes: Vec<u8>, chunk_hash_prevalidated: bool) -> DaRelayResult {
         let wire_bytes = u64::try_from(tx_bytes.len()).map_err(|_| DaRelayError::AccountingOverflow)?;
         let (tx, _txid, _wtxid, consumed) = parse_tx(&tx_bytes).map_err(|_| DaRelayError::InvalidWireBytes)?;
         if consumed != tx_bytes.len() {
@@ -441,7 +444,7 @@ impl DaRelayState {
                 let Some(core) = tx.da_chunk_core.as_ref() else {
                     return Ok(());
                 };
-                self.stage_incomplete_da_chunk(
+                self.stage_incomplete_da_chunk_inner(
                     peer_addr,
                     DaRelayChunk {
                         da_id: core.da_id,
@@ -452,6 +455,7 @@ impl DaRelayState {
                         wire_bytes,
                         tx_bytes: Arc::from(tx_bytes.into_boxed_slice()),
                     },
+                    chunk_hash_prevalidated,
                 )
             }
             _ => Ok(()),
@@ -510,18 +514,17 @@ impl DaRelayState {
         record.prune_chunks_outside_commit();
         self.prepare_and_apply_record(record, CompletionMismatchAction::DropMatchingChunks)
     }
-    pub(crate) fn stage_incomplete_da_chunk(
-        &mut self,
-        peer_addr: &str,
-        chunk: DaRelayChunk,
-    ) -> DaRelayResult {
+    #[rustfmt::skip]
+    pub(crate) fn stage_incomplete_da_chunk(&mut self, peer_addr: &str, chunk: DaRelayChunk) -> DaRelayResult { self.stage_incomplete_da_chunk_inner(peer_addr, chunk, false) }
+    #[rustfmt::skip]
+    fn stage_incomplete_da_chunk_inner(&mut self, peer_addr: &str, chunk: DaRelayChunk, chunk_hash_prevalidated: bool) -> DaRelayResult {
         let mut chunk = chunk;
         validate_da_chunk(&chunk)?;
         let current = self.sets_by_da_id.get(&chunk.da_id);
         if let Some(record) = current {
             record.validate_chunk_insert(chunk.chunk_index)?;
         }
-        if sha3_256(chunk.payload.as_ref()) != chunk.chunk_hash {
+        if !chunk_hash_prevalidated && sha3_256(chunk.payload.as_ref()) != chunk.chunk_hash {
             return Err(DaRelayError::ChunkHashMismatch);
         }
         let chunk_index = chunk.chunk_index;
