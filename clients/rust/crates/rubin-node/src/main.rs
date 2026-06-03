@@ -483,11 +483,20 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
 
     let announce_tx: Option<rubin_node::devnet_rpc::AnnounceTxFn> = {
         let relay_state = p2p_service.relay_state();
+        let da_relay = p2p_service.da_relay_state();
         let pm = Arc::clone(&peer_manager);
         let pw = p2p_service.peer_outboxes();
         let local = p2p_service.addr().to_string();
         Some(Arc::new(move |tx_bytes: &[u8], meta| {
-            rubin_node::tx_relay::announce_tx(tx_bytes, meta, &relay_state, &pm, &local, &pw)
+            announce_tx_after_local_admission(
+                tx_bytes,
+                meta,
+                &relay_state,
+                &pm,
+                &local,
+                &pw,
+                &da_relay,
+            )
         }))
     };
     let announce_block: Option<rubin_node::devnet_rpc::AnnounceBlockFn> = {
@@ -1248,24 +1257,53 @@ fn validate_peer_addr(addr: &str) -> Result<(), String> {
     validate_addr("peer", addr)
 }
 
+fn announce_tx_after_local_admission(
+    tx_bytes: &[u8],
+    meta: rubin_node::txpool::RelayTxMetadata,
+    relay_state: &rubin_node::tx_relay::TxRelayState,
+    peer_manager: &rubin_node::p2p_runtime::PeerManager,
+    local_addr: &str,
+    peer_writers: &Mutex<std::collections::HashMap<String, rubin_node::tx_relay::PeerOutbox>>,
+    da_relay: &Arc<Mutex<rubin_node::da_relay::DaRelayState>>,
+) -> Result<(), String> {
+    rubin_node::p2p_service::stage_local_da_relay_tx_bytes(da_relay, tx_bytes);
+    rubin_node::tx_relay::announce_tx(
+        tx_bytes,
+        meta,
+        relay_state,
+        peer_manager,
+        local_addr,
+        peer_writers,
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::{cell::RefCell, rc::Rc};
 
     use super::{
-        format_peer_slots_banner, handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
+        announce_tx_after_local_admission, format_peer_slots_banner,
+        handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
         maybe_shutdown_if_requested, parse_args, run, runtime_genesis_hash, stop_signal_pair,
         validate_config, wait_for_stop_and_shutdown, LegacyExposureReport,
         PRODUCTION_STOP_SIGNAL_SET, RPC_READINESS_TRANSITION_FAILED,
     };
     use rubin_consensus::constants::{
-        ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87, VERIFY_COST_ML_DSA_87,
+        COV_TYPE_DA_COMMIT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
+        TX_WIRE_VERSION, VERIFY_COST_ML_DSA_87,
     };
+    use rubin_consensus::{marshal_tx, parse_tx, DaChunkCore, DaCommitCore, Tx, TxOutput};
+    use rubin_node::da_relay::{DaRelayCaps, DaRelayState};
+    use rubin_node::tx_relay::{PeerOutbox, TxRelayState};
+    use rubin_node::txpool::RelayTxMetadata;
     use rubin_node::{load_genesis_config, PRODUCTION_LOCAL_ROTATION_DESCRIPTOR_ERR};
     use serde_json::Value;
+    use sha3::{Digest, Sha3_256};
 
     #[derive(serde::Deserialize)]
     struct LegacyExposureHookVectorsDoc {
@@ -1319,6 +1357,91 @@ mod tests {
                 grace_hook: "not_applicable_legacy_exposure_present".to_string(),
             },
         ]
+    }
+
+    #[rustfmt::skip]
+    fn local_da_commit_tx(da_id: [u8; 32], commitment: [u8; 32]) -> Vec<u8> {
+        marshal_tx(&Tx { version: TX_WIRE_VERSION, tx_kind: 0x01, tx_nonce: 1, inputs: Vec::new(), outputs: vec![TxOutput { value: 0, covenant_type: COV_TYPE_DA_COMMIT, covenant_data: commitment.to_vec() }], locktime: 0, da_commit_core: Some(DaCommitCore { da_id, chunk_count: 1, retl_domain_id: [0x10; 32], batch_number: 1, tx_data_root: [0x11; 32], state_root: [0x12; 32], withdrawals_root: [0x13; 32], batch_sig_suite: 0, batch_sig: Vec::new() }), da_chunk_core: None, witness: Vec::new(), da_payload: Vec::new() }).expect("marshal local DA commit tx")
+    }
+
+    #[rustfmt::skip]
+    fn local_da_chunk_tx(da_id: [u8; 32], payload: &[u8]) -> Vec<u8> {
+        marshal_tx(&Tx { version: TX_WIRE_VERSION, tx_kind: 0x02, tx_nonce: 2, inputs: Vec::new(), outputs: Vec::new(), locktime: 0, da_commit_core: None, da_chunk_core: Some(DaChunkCore { da_id, chunk_index: 0, chunk_hash: Sha3_256::digest(payload).into() }), witness: Vec::new(), da_payload: payload.to_vec() }).expect("marshal local DA chunk tx")
+    }
+
+    #[rustfmt::skip]
+    fn local_non_da_tx() -> Vec<u8> {
+        marshal_tx(&Tx { version: TX_WIRE_VERSION, tx_kind: 0x00, tx_nonce: 3, inputs: Vec::new(), outputs: Vec::new(), locktime: 0, da_commit_core: None, da_chunk_core: None, witness: Vec::new(), da_payload: Vec::new() }).expect("marshal local non-DA tx")
+    }
+
+    struct LocalDaTestContext {
+        relay: TxRelayState,
+        peers: rubin_node::PeerManager,
+        outboxes: Mutex<HashMap<String, PeerOutbox>>,
+        da_relay: Arc<Mutex<DaRelayState>>,
+    }
+
+    impl LocalDaTestContext {
+        fn announce(&self, tx_bytes: &[u8]) -> Result<(), String> {
+            announce_tx_after_local_admission(
+                tx_bytes,
+                RelayTxMetadata {
+                    fee: 1,
+                    size: tx_bytes.len(),
+                },
+                &self.relay,
+                &self.peers,
+                "local:8333",
+                &self.outboxes,
+                &self.da_relay,
+            )
+        }
+    }
+
+    fn local_da_test_context() -> LocalDaTestContext {
+        LocalDaTestContext {
+            relay: TxRelayState::new(),
+            peers: rubin_node::PeerManager::new(rubin_node::default_peer_runtime_config(
+                "devnet", 8,
+            )),
+            outboxes: Mutex::new(HashMap::new()),
+            da_relay: Arc::new(Mutex::new(
+                DaRelayState::new(DaRelayCaps::default()).expect("valid DA relay caps"),
+            )),
+        }
+    }
+
+    #[test]
+    fn local_da_announce_stages_after_admission_callback() {
+        let ctx = local_da_test_context();
+        let commit_tx = local_da_commit_tx([0x41; 32], [0x42; 32]);
+        ctx.announce(&commit_tx).expect("local DA commit announce");
+        assert!(!ctx.da_relay.lock().unwrap().is_empty());
+
+        let ctx = local_da_test_context();
+        let chunk_tx = local_da_chunk_tx([0x43; 32], b"local-da-chunk");
+        ctx.announce(&chunk_tx).expect("local DA chunk announce");
+        assert!(!ctx.da_relay.lock().unwrap().is_empty());
+
+        let ctx = local_da_test_context();
+        let non_da_tx = local_non_da_tx();
+        let (_tx, txid, _wtxid, consumed) = parse_tx(&non_da_tx).expect("parse non-DA tx");
+        assert_eq!(consumed, non_da_tx.len());
+        ctx.announce(&non_da_tx).expect("local non-DA announce");
+        assert!(ctx.da_relay.lock().unwrap().is_empty());
+        assert!(ctx.relay.tx_seen.has(&txid));
+
+        let ctx = local_da_test_context();
+        let mut bad_chunk_tx = local_da_chunk_tx([0x44; 32], b"local-da-good");
+        let (mut bad_tx, _txid, _wtxid, _consumed) =
+            parse_tx(&bad_chunk_tx).expect("parse DA chunk tx");
+        bad_tx.da_payload = b"local-da-bad".to_vec();
+        bad_chunk_tx = marshal_tx(&bad_tx).expect("marshal bad DA chunk tx");
+        let err = ctx
+            .announce(&bad_chunk_tx)
+            .expect_err("bad local DA chunk must not relay");
+        assert!(err.contains("ChunkHashMismatch"), "{err}");
+        assert!(ctx.da_relay.lock().unwrap().is_empty());
     }
 
     /// RUB-13 / GitHub #1157: stdout helper for tests that parse the

@@ -209,6 +209,10 @@ impl RunningNodeP2PService {
         Arc::clone(&self.shared.peer_outboxes)
     }
 
+    pub fn da_relay_state(&self) -> Arc<Mutex<DaRelayState>> {
+        Arc::clone(&self.shared.da_relay)
+    }
+
     pub fn close(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.addr);
@@ -230,6 +234,19 @@ impl Drop for RunningNodeP2PService {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+pub fn stage_local_da_relay_tx_bytes(da_relay: &Arc<Mutex<DaRelayState>>, tx_bytes: &[u8]) {
+    if !matches!(
+        crate::da_relay::relay_da_tx_kind_prefix(tx_bytes),
+        Some(0x01) | Some(0x02)
+    ) {
+        return;
+    }
+    let Ok(mut da_relay) = da_relay.lock() else {
+        return;
+    };
+    let _ = da_relay.stage_relay_da_tx_bytes("", tx_bytes.to_vec());
 }
 
 fn run_accept_loop(listener: TcpListener, shared: SharedServiceState) {
@@ -1235,6 +1252,37 @@ mod tests {
             sync_engine,
         );
         (shared, dir)
+    }
+
+    #[test]
+    fn local_da_relay_accessor_ignores_poisoned_stage_lock() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-relay-accessor");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            Vec::new(),
+            sync_engine,
+        );
+        let mut service = super::RunningNodeP2PService {
+            addr: "127.0.0.1:0".to_string(),
+            stop: Arc::clone(&shared.stop),
+            shared: shared.clone(),
+            accept_join: None,
+            reconnect_join: None,
+        };
+        let da_relay = service.da_relay_state();
+        assert!(Arc::ptr_eq(&da_relay, &shared.da_relay));
+        let poison_target = Arc::clone(&da_relay);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_target.lock().expect("lock DA relay");
+            panic!("poison DA relay lock for staging no-op");
+        });
+        let mut tx_bytes = rubin_consensus::constants::TX_WIRE_VERSION
+            .to_le_bytes()
+            .to_vec();
+        tx_bytes.push(0x01);
+        super::stage_local_da_relay_tx_bytes(&da_relay, &tx_bytes);
+        service.close();
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     fn store_requeue_block(shared: &SharedServiceState, txs: &[Vec<u8>]) -> [u8; 32] {
