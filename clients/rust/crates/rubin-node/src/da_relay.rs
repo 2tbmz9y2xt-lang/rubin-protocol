@@ -489,6 +489,38 @@ impl DaRelayState {
             })
     }
 
+    pub(crate) fn advance_orphan_ttl(&mut self) -> DaRelayResult<Vec<[u8; 32]>> {
+        let da_ids: Vec<_> = self
+            .orphan_bytes_by_da_id
+            .keys()
+            .copied()
+            .filter(|da_id| {
+                self.sets_by_da_id
+                    .get(da_id)
+                    .is_some_and(|record| record.state != DaRelaySetState::CompleteSet)
+            })
+            .collect();
+        let mut staged = self.clone();
+        let mut expired = Vec::new();
+        for da_id in da_ids {
+            let Some(record) = staged.sets_by_da_id.get(&da_id).cloned() else {
+                continue;
+            };
+            if record.ttl_blocks_remaining > 1 {
+                staged
+                    .sets_by_da_id
+                    .get_mut(&da_id)
+                    .ok_or(DaRelayError::AccountingUnderflow)?
+                    .ttl_blocks_remaining -= 1;
+                continue;
+            }
+            expired.push(record.da_id);
+            staged.remove_record(&record)?;
+        }
+        *self = staged;
+        Ok(expired)
+    }
+
     pub(crate) fn stage_incomplete_da_commit(
         &mut self,
         peer_addr: &str,
@@ -708,6 +740,56 @@ impl DaRelayState {
             }
         }
         Ok(projected)
+    }
+
+    fn remove_record(&mut self, record: &DaRelaySetRecord) -> DaRelayResult {
+        let empty = DaRelaySetRecord::new(record.da_id);
+        let orphan_wire_bytes = record.orphan_wire_bytes()?;
+        let orphan_bytes = Self::project_counter(
+            self.orphan_bytes,
+            orphan_wire_bytes,
+            0,
+            self.caps.orphan_pool_bytes,
+        )?;
+        let da_id_bytes = Self::project_counter(
+            self.orphan_bytes_by_da_id
+                .get(&record.da_id)
+                .copied()
+                .unwrap_or(0),
+            orphan_wire_bytes,
+            0,
+            self.caps.orphan_pool_per_da_id_bytes,
+        )?;
+        let commit_overhead = Self::project_counter(
+            self.orphan_commit_overhead_bytes,
+            record.orphan_commit_bytes(),
+            0,
+            self.caps.orphan_commit_overhead_bytes,
+        )?;
+        let pinned_payload_bytes = Self::project_counter(
+            self.pinned_payload_bytes,
+            record.pinned_payload_accounting_bytes()?,
+            0,
+            self.caps.pinned_payload_bytes,
+        )?;
+        let peer_bytes = self.project_peer_bytes(Some(record), &empty)?;
+        self.orphan_bytes = orphan_bytes;
+        self.orphan_commit_overhead_bytes = commit_overhead;
+        self.pinned_payload_bytes = pinned_payload_bytes;
+        for (key, bytes) in peer_bytes {
+            if bytes == 0 {
+                self.orphan_bytes_by_peer_quota_key.remove(&key);
+            } else {
+                self.orphan_bytes_by_peer_quota_key.insert(key, bytes);
+            }
+        }
+        if da_id_bytes == 0 {
+            self.orphan_bytes_by_da_id.remove(&record.da_id);
+        } else {
+            self.orphan_bytes_by_da_id.insert(record.da_id, da_id_bytes);
+        }
+        self.sets_by_da_id.remove(&record.da_id);
+        Ok(())
     }
 }
 fn validate_da_chunk(chunk: &DaRelayChunk) -> DaRelayResult {
@@ -1152,6 +1234,23 @@ mod tests {
             Err(AccountingCapExceeded)
         );
         assert_eq!(state, before);
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn da_relay_ttl_expiry_matrix() {
+        let peer = "peer-a:8333"; let pk = PeerQuotaKey::from_peer_addr(peer);
+        let commit = |da_id, payloads: &[&[u8]], wire_bytes| DaRelayCommit { da_id, payload_commitment: payload_commitment(payloads), peer_quota_key: pk.clone(), chunk_count: payloads.len() as u16, wire_bytes, tx_bytes: Arc::from([]) };
+        let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk.clone(), chunk_index: index, payload: Arc::from(payload), wire_bytes, tx_bytes: Arc::from([]) };
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([3; 32], 0, b"orphan", 6)).unwrap(); state.stage_incomplete_da_commit(peer, commit([2; 32], &[b"staged"], 7)).unwrap(); state.stage_incomplete_da_commit(peer, commit([1; 32], &[b"complete"], 8)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([1; 32], 0, b"complete", 8)).unwrap();
+        let complete_before = state.sets_by_da_id[&[1; 32]].clone(); let orphan_before = state.orphan_bytes; assert!(state.advance_orphan_ttl().unwrap().is_empty()); assert_eq!(state.sets_by_da_id[&[3; 32]].ttl_blocks_remaining, 2); assert_eq!(state.sets_by_da_id[&[2; 32]].ttl_blocks_remaining, 2); assert_eq!(state.sets_by_da_id[&[1; 32]], complete_before); assert_eq!(state.orphan_bytes, orphan_before);
+        state.sets_by_da_id.get_mut(&[3; 32]).unwrap().ttl_blocks_remaining = 1; state.sets_by_da_id.get_mut(&[2; 32]).unwrap().ttl_blocks_remaining = 0; let expired = state.advance_orphan_ttl().unwrap();
+        assert_eq!(expired, vec![[2; 32], [3; 32]]);
+        assert_eq!(state.sets_by_da_id.get(&[1; 32]), Some(&complete_before)); assert!(!state.sets_by_da_id.contains_key(&[2; 32])); assert!(!state.sets_by_da_id.contains_key(&[3; 32])); assert_eq!(state.orphan_bytes, 0); assert!(state.orphan_bytes_by_da_id.is_empty()); assert!(state.orphan_bytes_by_peer_quota_key.is_empty()); assert_eq!(state.orphan_commit_overhead_bytes, 0); assert_eq!(state.pinned_payload_bytes, complete_before.pinned_payload_accounting_bytes().unwrap()); let before_noop = state.clone(); assert!(state.advance_orphan_ttl().unwrap().is_empty()); assert_eq!(state, before_noop);
+        state.stage_incomplete_da_chunk(peer, chunk([4; 32], 0, b"corrupt", 7)).unwrap(); state.sets_by_da_id.get_mut(&[4; 32]).unwrap().ttl_blocks_remaining = 1; state.orphan_bytes = 0; let before = state.clone();
+        assert_eq!(state.advance_orphan_ttl(), Err(AccountingUnderflow)); assert_eq!(state, before);
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([4; 32], 0, b"early", 5)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([5; 32], 0, b"late", 7)).unwrap(); state.sets_by_da_id.get_mut(&[4; 32]).unwrap().ttl_blocks_remaining = 1; state.sets_by_da_id.get_mut(&[5; 32]).unwrap().ttl_blocks_remaining = 1; state.orphan_bytes_by_da_id.insert([5; 32], 0); let before = state.clone();
+        assert_eq!(state.advance_orphan_ttl(), Err(AccountingUnderflow)); assert_eq!(state, before);
     }
 
     #[test]
