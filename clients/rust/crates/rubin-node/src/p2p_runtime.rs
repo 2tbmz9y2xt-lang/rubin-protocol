@@ -203,29 +203,9 @@ pub struct PeerRelayContext<'a> {
     /// Outbound relay queues: serialized wire frames enqueued by broadcast,
     /// drained by the peer thread to avoid concurrent TcpStream writes.
     pub peer_writers: &'a std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
-    /// Canonical TxPool admission seam with source-aware classification
-    /// (RUB-178 / GitHub #1438 introduced the lifecycle plumbing using
-    /// legacy `pool.admit`; RUB-173 / GitHub #1420 swapped the call to
-    /// `add_tx_with_source(..., TxSource::Remote, ...)`).
-    ///
-    /// Threads the existing `shared.tx_pool: Arc<Mutex<TxPool>>` handle
-    /// (introduced in PR #876, commit `ce270e3`, already used by the
-    /// production block-apply cleanup path in `p2p_service.rs`) into the
-    /// peer-tx live message dispatch so peer transactions admit through
-    /// the canonical source-aware entry after relay-cache success. The
-    /// `Remote` provenance matches Go's `Mempool.AddRemoteTx`
-    /// (`clients/go/node/mempool.go:416`). Go's p2p production path
-    /// reaches `AddRemoteTx` through three indirections:
-    /// `clients/go/node/p2p/handlers_tx.go::handleTx` (line 45) calls
-    /// `cfg.TxPool.Put` against the `TxPool` interface, which
-    /// production wiring at
-    /// `clients/go/cmd/rubin-node/main.go:489`
-    /// (`p2p.NewCanonicalMempoolTxPool(mempool)`) routes through
-    /// `CanonicalMempoolTxPool.Put`
-    /// (`clients/go/node/p2p/mempool.go:45-54`); that method's last
-    /// statement (line 53) is `p.mempool.AddRemoteTx(raw)`.
+    /// Canonical TxPool admission seam for peer-relayed txs; the source
+    /// is recorded as `Remote` to match Go's production p2p mempool path.
     pub tx_pool: &'a std::sync::Mutex<crate::txpool::TxPool>,
-    pub da_relay: &'a std::sync::Mutex<crate::da_relay::DaRelayState>,
 }
 
 #[derive(Debug, Default)]
@@ -287,6 +267,8 @@ pub struct PeerSession {
     peer: PeerState,
     orphans: OrphanBlockPool,
     pending_tx_pool_cleanup: TxPoolCleanupPlan,
+    pending_da_relay_stages: Vec<(String, Vec<u8>)>,
+    pending_da_orphan_ttl_advances: u64,
     prefetched_read_byte: Option<u8>,
     remote_compact_mode: CompactModeSnapshot,
     compact_outstanding: Option<CompactOutstandingRequest>,
@@ -409,6 +391,8 @@ impl PeerSession {
             },
             orphans: OrphanBlockPool::new(DEFAULT_ORPHAN_LIMIT, DEFAULT_ORPHAN_BYTE_LIMIT),
             pending_tx_pool_cleanup: TxPoolCleanupPlan::default(),
+            pending_da_relay_stages: Vec::new(),
+            pending_da_orphan_ttl_advances: 0,
             prefetched_read_byte: None,
             remote_compact_mode: CompactModeSnapshot::default(),
             compact_outstanding: None,
@@ -431,6 +415,59 @@ impl PeerSession {
         }
         let pending = self.take_pending_tx_pool_cleanup();
         self.pending_tx_pool_cleanup = pending.merge(cleanup);
+    }
+
+    pub(crate) fn drain_pending_da_relay_stages(
+        &mut self,
+        da_relay: &std::sync::Mutex<crate::da_relay::DaRelayState>,
+    ) {
+        let stages = std::mem::take(&mut self.pending_da_relay_stages);
+        if stages.is_empty() {
+            return;
+        }
+        let Ok(mut da_relay) = da_relay.lock() else {
+            self.peer.last_error = "da relay state poisoned; peer-tx staging skipped".to_string();
+            return;
+        };
+        for (peer_addr, tx_bytes) in stages {
+            if let Err(err) = da_relay.stage_relay_da_tx_bytes(&peer_addr, &tx_bytes) {
+                self.peer.last_error = format!("DA relay tx staging failed: {err:?}");
+            }
+        }
+    }
+
+    pub(crate) fn advance_da_orphan_ttl_for_accepted_blocks(
+        &mut self,
+        da_relay: &std::sync::Mutex<crate::da_relay::DaRelayState>,
+    ) {
+        let advances = std::mem::take(&mut self.pending_da_orphan_ttl_advances);
+        if advances == 0 {
+            return;
+        }
+        let Ok(mut da_relay) = da_relay.lock() else {
+            self.peer.last_error =
+                "da relay state poisoned; DA orphan TTL advance skipped".to_string();
+            return;
+        };
+        for _ in 0..advances {
+            if let Err(err) = da_relay.advance_orphan_ttl() {
+                self.peer.last_error = format!("DA orphan TTL advance failed: {err:?}");
+                return;
+            }
+        }
+    }
+
+    fn queue_da_relay_stage(&mut self, peer_addr: &str, tx_bytes: Vec<u8>) {
+        self.pending_da_relay_stages
+            .push((peer_addr.to_string(), tx_bytes));
+    }
+
+    fn note_accepted_block_for_da_ttl(&mut self) -> io::Result<()> {
+        self.pending_da_orphan_ttl_advances = self
+            .pending_da_orphan_ttl_advances
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("DA orphan TTL advance counter overflow"))?;
+        Ok(())
     }
 
     pub fn read_message(&mut self) -> io::Result<WireMessage> {
@@ -642,20 +679,21 @@ impl PeerSession {
         sync_engine: &mut SyncEngine,
         relay_ctx: Option<&PeerRelayContext<'_>>,
     ) -> io::Result<LiveMessageOutcome> {
-        if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize {
+        let WireMessage { command, payload } = msg;
+        if payload.len() > MAX_RELAY_MSG_BYTES as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "message payload too large: {} > {}",
-                    msg.payload.len(),
+                    payload.len(),
                     MAX_RELAY_MSG_BYTES
                 ),
             ));
         }
-        match msg.command.as_str() {
+        match command.as_str() {
             MESSAGE_INV => {
                 let requests =
-                    self.handle_inv(&msg.payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
+                    self.handle_inv(&payload, sync_engine, relay_ctx.map(|c| c.relay_state))?;
                 if requests.is_empty() {
                     Ok(LiveMessageOutcome {
                         responses: Vec::new(),
@@ -673,14 +711,14 @@ impl PeerSession {
             }
             MESSAGE_GETDATA => Ok(LiveMessageOutcome {
                 responses: self.collect_getdata_responses(
-                    &msg.payload,
+                    &payload,
                     sync_engine,
                     relay_ctx.map(|c| c.relay_state),
                 )?,
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
             }),
             MESSAGE_GETBLOCKS => {
-                let items = self.handle_getblocks(&msg.payload, sync_engine)?;
+                let items = self.handle_getblocks(&payload, sync_engine)?;
                 if items.is_empty() {
                     Ok(LiveMessageOutcome {
                         responses: Vec::new(),
@@ -697,7 +735,7 @@ impl PeerSession {
                 }
             }
             MESSAGE_BLOCK => {
-                let tx_pool_cleanup = self.handle_block(&msg.payload, sync_engine)?;
+                let tx_pool_cleanup = self.handle_block(&payload, sync_engine)?;
                 Ok(LiveMessageOutcome {
                     responses: self
                         .prepare_block_request_if_behind(sync_engine)?
@@ -706,14 +744,14 @@ impl PeerSession {
                     tx_pool_cleanup,
                 })
             }
-            "cmpctblock" => self.handle_cmpctblock(&msg.payload, sync_engine, relay_ctx),
-            MESSAGE_GETBLOCKTXN => self.handle_getblocktxn(&msg.payload, sync_engine),
-            MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine),
+            "cmpctblock" => self.handle_cmpctblock(&payload, sync_engine, relay_ctx),
+            MESSAGE_GETBLOCKTXN => self.handle_getblocktxn(&payload, sync_engine),
+            MESSAGE_BLOCKTXN => self.handle_blocktxn(&payload, sync_engine),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
                     let validated_da_txid =
                         match crate::da_relay::DaRelayState::validate_relay_da_tx_for_admission(
-                            &msg.payload,
+                            &payload,
                         ) {
                             Ok(txid) => txid,
                             Err(err) => {
@@ -731,12 +769,12 @@ impl PeerSession {
                         };
                     let txid = match validated_da_txid {
                         Some(txid) => Ok(txid),
-                        None => crate::tx_relay::canonical_txid(&msg.payload),
+                        None => crate::tx_relay::canonical_txid(&payload),
                     };
                     let (outcome, relay_txid) = match txid {
                         Ok(txid) => (
                             crate::tx_relay::handle_received_tx_with_canonical_txid(
-                                &msg.payload,
+                                &payload,
                                 txid,
                                 sync_engine,
                                 ctx.relay_state,
@@ -752,6 +790,27 @@ impl PeerSession {
                             None,
                         ),
                     };
+                    // Mirror Go's `peer.handleTx` parse-fail policy: parse
+                    // failures bump the peer ban score by 10 and fail the
+                    // session only when the cumulative score crosses the
+                    // ban threshold. Pool/metadata rejections of a valid
+                    // tx stay silent. Wire-level oversize is rejected
+                    // earlier in `parse_envelope_header`; this branch only
+                    // fires for parse failures that reach
+                    // `handle_received_tx` (RPC path or sub-cap garbage).
+                    if outcome.is_banworthy() {
+                        let reason = match &outcome {
+                            crate::tx_relay::RelayTxOutcome::MalformedParse(r) => r.clone(),
+                            crate::tx_relay::RelayTxOutcome::Oversized => {
+                                format!("tx payload exceeds MAX_RELAY_MSG_BYTES: {}", payload.len())
+                            }
+                            _ => String::new(),
+                        };
+                        self.bump_ban(10, &reason);
+                        if self.peer.ban_score >= self.cfg.ban_threshold {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
+                        }
+                    }
                     if matches!(
                         outcome,
                         crate::tx_relay::RelayTxOutcome::Relayed
@@ -759,7 +818,7 @@ impl PeerSession {
                     ) {
                         if let Some(txid) = relay_txid {
                             let stages_relay_da_tx =
-                                crate::da_relay::stages_relay_da_tx_bytes(&msg.payload);
+                                crate::da_relay::stages_relay_da_tx_bytes(&payload);
                             let mut stage_fresh_payload = false;
                             let mut duplicate_da_bytes = None;
                             match ctx.tx_pool.lock() {
@@ -767,7 +826,7 @@ impl PeerSession {
                                     if matches!(outcome, crate::tx_relay::RelayTxOutcome::Relayed)
                                         && pool
                                             .add_tx_with_source(
-                                                &msg.payload,
+                                                &payload,
                                                 &sync_engine.chain_state,
                                                 sync_engine.block_store.as_ref(),
                                                 sync_engine.cfg.chain_id,
@@ -787,50 +846,14 @@ impl PeerSession {
                                             .to_string();
                                 }
                             }
-                            let staged_da_bytes = if stage_fresh_payload {
-                                Some(msg.payload.as_slice())
-                            } else {
-                                duplicate_da_bytes.as_deref()
-                            };
-                            if let Some(staged_da_bytes) = staged_da_bytes {
-                                if let Ok(mut da_relay) = ctx.da_relay.lock() {
-                                    if let Err(err) = da_relay.stage_relay_da_tx_bytes(
-                                        ctx.peer_registered_addr,
-                                        staged_da_bytes,
-                                    ) {
-                                        self.peer.last_error =
-                                            format!("DA relay tx staging failed: {err:?}");
-                                    }
-                                } else {
-                                    self.peer.last_error =
-                                        "da relay state poisoned; peer-tx staging skipped"
-                                            .to_string();
-                                }
+                            if stage_fresh_payload {
+                                self.queue_da_relay_stage(ctx.peer_registered_addr, payload);
+                            } else if let Some(staged_da_bytes) = duplicate_da_bytes {
+                                self.queue_da_relay_stage(
+                                    ctx.peer_registered_addr,
+                                    staged_da_bytes,
+                                );
                             }
-                        }
-                    }
-                    // Mirror Go's `peer.handleTx` parse-fail policy: parse
-                    // failures bump the peer ban score by 10 and fail the
-                    // session only when the cumulative score crosses the
-                    // ban threshold. Pool/metadata rejections of a valid
-                    // tx stay silent. Wire-level oversize is rejected
-                    // earlier in `parse_envelope_header`; this branch only
-                    // fires for parse failures that reach
-                    // `handle_received_tx` (RPC path or sub-cap garbage).
-                    if outcome.is_banworthy() {
-                        let reason = match &outcome {
-                            crate::tx_relay::RelayTxOutcome::MalformedParse(r) => r.clone(),
-                            crate::tx_relay::RelayTxOutcome::Oversized => {
-                                format!(
-                                    "tx payload exceeds MAX_RELAY_MSG_BYTES: {}",
-                                    msg.payload.len()
-                                )
-                            }
-                            _ => String::new(),
-                        };
-                        self.bump_ban(10, &reason);
-                        if self.peer.ban_score >= self.cfg.ban_threshold {
-                            return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
                         }
                     }
                 }
@@ -844,7 +867,7 @@ impl PeerSession {
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
             }),
             MESSAGE_SENDCMPCT => {
-                self.handle_sendcmpct(&msg.payload)?;
+                self.handle_sendcmpct(&payload)?;
                 Ok(LiveMessageOutcome {
                     responses: Vec::new(),
                     tx_pool_cleanup: TxPoolCleanupPlan::default(),
@@ -865,7 +888,7 @@ impl PeerSession {
                 tx_pool_cleanup: TxPoolCleanupPlan::default(),
             }),
             MESSAGE_ADDR => {
-                let _ = unmarshal_addr_payload(&msg.payload)?;
+                let _ = unmarshal_addr_payload(&payload)?;
                 Ok(LiveMessageOutcome {
                     responses: Vec::new(),
                     tx_pool_cleanup: TxPoolCleanupPlan::default(),
@@ -1335,6 +1358,7 @@ impl PeerSession {
         match sync_engine.apply_block_with_reorg(block_bytes, None) {
             Ok(outcome) => {
                 sync_engine.record_best_known_height(outcome.summary.block_height);
+                self.note_accepted_block_for_da_ttl()?;
                 let mut tx_pool_cleanup = outcome.tx_pool_cleanup;
                 if let Err(err) =
                     self.resolve_orphans(block_hash_bytes, sync_engine, &mut tx_pool_cleanup)
@@ -1389,6 +1413,7 @@ impl PeerSession {
             match sync_engine.apply_block_with_reorg(&child.block_bytes, None) {
                 Ok(outcome) => {
                     sync_engine.record_best_known_height(outcome.summary.block_height);
+                    self.note_accepted_block_for_da_ttl()?;
                     *tx_pool_cleanup =
                         std::mem::take(tx_pool_cleanup).merge(outcome.tx_pool_cleanup);
                     ready.extend(self.orphans.take_children(child.block_hash));
@@ -5949,42 +5974,8 @@ mod tests {
         assert!(err.contains("unknown message type: weird"), "got: {err}");
     }
 
-    /// RUB-178 / GitHub #1438 introduced this production-path
-    /// reachability proof for the canonical TxPool admission seam in
-    /// `PeerRelayContext`; RUB-173 / GitHub #1420 paired the seam swap
-    /// to `add_tx_with_source(_, _, _, _, TxSource::Remote)` with an
-    /// `entry_source` parity update from `Local` to `Remote`.
-    ///
-    /// Proof assertion: the `assert_eq!(pool_guard.entry_source(&txid),
-    /// Some(crate::txpool::TxSource::Remote), ...)` near the end of
-    /// this test is the regression anchor that breaks if the seam
-    /// regresses to legacy `pool.admit` (Local) or any other source
-    /// variant.
-    ///
-    /// Why this is not helper-only:
-    ///
-    ///   - The test does NOT call `add_tx_with_source(...)` or
-    ///     `pool.admit(...)` directly. Admission happens through
-    ///     `PeerSession::collect_live_responses`, the exact public
-    ///     method used by the production message loop in
-    ///     `clients/rust/crates/rubin-node/src/p2p_service.rs::handle_peer`
-    ///     (see the `session.collect_live_responses(msg, &mut engine,
-    ///     Some(&relay_ctx))` call in `handle_peer`'s message-loop body).
-    ///   - The test constructs a real `PeerRelayContext` whose `tx_pool`
-    ///     field uses the same `Mutex<TxPool>` shape that
-    ///     `p2p_service.rs::handle_peer` constructs from
-    ///     `&shared.tx_pool` (the canonical pool that already drives the
-    ///     production block-apply cleanup path).
-    ///   - The canonical pool side effect is asserted from outside the
-    ///     dispatch: after `collect_live_responses` returns,
-    ///     `tx_pool.lock()` is taken and `pool.contains(&txid)` plus
-    ///     `pool.entry_source(&txid)` are checked. The seam is the
-    ///     only code path that could put the txid there in this scenario.
-    ///   - Source classification: `entry_source(&txid)` is asserted to
-    ///     equal `Some(TxSource::Remote)` per RUB-173 / GitHub #1420.
-    ///     This matches Go's `Mempool.AddRemoteTx` provenance and breaks
-    ///     if the seam regresses to legacy `pool.admit` (Local) or any
-    ///     other source variant.
+    /// Production-path regression for peer tx admission, Remote provenance,
+    /// and deferred DA staging after `collect_live_responses`.
     #[test]
     #[rustfmt::skip]
     fn collect_live_responses_message_tx_admits_through_canonical_pool_seam() {
@@ -6010,11 +6001,6 @@ mod tests {
             let mut engine =
                 crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine");
 
-            // Production analogue of `shared.relay_state` /
-            // `shared.peer_manager` / `shared.peer_outboxes` /
-            // `shared.tx_pool` — same handles
-            // `clients/rust/crates/rubin-node/src/p2p_service.rs` threads
-            // into `PeerRelayContext`.
             let relay_state = crate::tx_relay::TxRelayState::new();
             let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64));
             let _ = peer_manager.add_peer(PeerState {
@@ -6041,7 +6027,6 @@ mod tests {
                 peer_registered_addr: "sender:8333",
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
-                da_relay: &da_relay_state,
             };
 
             let msg = WireMessage {
@@ -6052,31 +6037,16 @@ mod tests {
             let _ = session
                 .collect_live_responses(msg, &mut engine, Some(&relay_ctx))
                 .expect("collect_live_responses MESSAGE_TX must succeed for floor-compliant tx");
+            session.drain_pending_da_relay_stages(&da_relay_state);
 
             let (_, txid, _, _consumed) = parse_tx(&tx_bytes).expect("parse tx for txid");
 
-            // 1) production-path reachability: the canonical pool side
-            //    effect is observable AFTER `collect_live_responses`
-            //    returns. No direct `pool.admit(...)` call from the
-            //    test reached this state; the only path is through
-            //    `collect_live_responses::MESSAGE_TX` -> tx_relay::Relayed
-            //    -> ctx.tx_pool seam.
             let pool_guard = canonical_tx_pool.lock().expect("pool lock");
             assert!(
                 pool_guard.contains(&txid),
                 "canonical TxPool must contain the txid after MESSAGE_TX dispatch — \
                  the seam is the only code path that could place it there in this test"
             );
-            // RUB-173 / GitHub #1420 source-provenance pin: the seam
-            // uses `add_tx_with_source(_, _, _, _, TxSource::Remote)`
-            // which records `Remote` on `TxPoolEntry.source` to match
-            // Go's `Mempool.AddRemoteTx` provenance. Proof assertion:
-            // the `assert_eq!` below comparing
-            // `pool_guard.entry_source(&txid)` against
-            // `Some(crate::txpool::TxSource::Remote)` is the parity
-            // anchor; any regression that drops back to legacy
-            // `pool.admit` (Local) or any other source variant
-            // produces a test failure here.
             assert_eq!(
                 pool_guard.entry_source(&txid),
                 Some(crate::txpool::TxSource::Remote),
@@ -6091,6 +6061,7 @@ mod tests {
                 Some((false, 1, tx_bytes.len() as u64))
             );
             session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes.clone() }, &mut engine, Some(&relay_ctx)).expect("duplicate DA staging diagnostics should stay peer-neutral");
+            session.drain_pending_da_relay_stages(&da_relay_state);
             assert!(
                 session
                     .state()
@@ -6099,8 +6070,9 @@ mod tests {
                 "duplicate DA staging must be observable on peer.last_error"
             );
             let dup_relay_state = crate::tx_relay::TxRelayState::new(); let dup_da_relay_state = test_da_relay_state();
-            let dup_ctx = PeerRelayContext { relay_state: &dup_relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &dup_da_relay_state };
+            let dup_ctx = PeerRelayContext { relay_state: &dup_relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool };
             session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes.clone() }, &mut engine, Some(&dup_ctx)).expect("already-admitted DA tx should stay peer-neutral");
+            session.drain_pending_da_relay_stages(&dup_da_relay_state);
             assert_eq!(dup_da_relay_state.lock().unwrap().test_record_summary(da_id), Some((false, 1, tx_bytes.len() as u64)));
 
             session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: conflicting_tx.clone() }, &mut engine, Some(&relay_ctx)).expect("conflicting MESSAGE_TX dispatch must preserve relay outcome");
@@ -6108,10 +6080,6 @@ mod tests {
             assert!(relay_state.tx_seen.has(&conflicting_txid));
             assert_eq!(da_relay_state.lock().unwrap().test_record_summary(conflicting_da_id), None);
 
-            // 2) relay-cache-only path remains separate: tx_relay's
-            //    relay_state still records the tx as well. This proves
-            //    the seam is additive on top of the relay-only path,
-            //    not a replacement of it.
             assert!(
                 relay_state.tx_seen.has(&txid),
                 "tx_relay relay-cache `tx_seen` must still record the tx"
@@ -6129,7 +6097,7 @@ mod tests {
     #[test]
     #[rustfmt::skip]
     fn collect_live_responses_duplicate_non_da_skips_da_relay_stage() {
-        use std::collections::HashMap; use std::sync::{Arc, Mutex};
+        use std::collections::HashMap; use std::sync::Mutex;
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind"); let addr = listener.local_addr().expect("addr");
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept"); let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
@@ -6137,12 +6105,11 @@ mod tests {
             let mut engine = crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine");
             let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64)); let _ = peer_manager.add_peer(PeerState { addr: "other:8333".to_string(), ..Default::default() });
             let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); peer_outboxes.lock().unwrap().insert("sender:8333".to_string(), crate::tx_relay::PeerOutbox::default()); peer_outboxes.lock().unwrap().insert("other:8333".to_string(), crate::tx_relay::PeerOutbox::default());
-            let canonical_tx_pool: Mutex<TxPool> = Mutex::new(TxPool::new()); let da_relay_state = test_da_relay_state();
-            let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay_state };
+            let canonical_tx_pool: Mutex<TxPool> = Mutex::new(TxPool::new());
+            let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool };
             session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes.clone() }, &mut engine, Some(&relay_ctx)).expect("first non-DA relay tx must admit");
             let (_, txid, _, _consumed) = parse_tx(&tx_bytes).expect("parse tx for txid"); assert!(relay_state.tx_seen.has(&txid)); assert!(canonical_tx_pool.lock().unwrap().contains(&txid));
-            let poisoned_da_relay = Arc::new(test_da_relay_state()); let poison_target = Arc::clone(&poisoned_da_relay); let _ = thread::spawn(move || { let _guard = poison_target.lock().unwrap(); panic!("intentional poison for duplicate non-DA DA-stage skip test"); }).join(); assert!(poisoned_da_relay.is_poisoned());
-            session.peer.last_error.clear(); let duplicate_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: poisoned_da_relay.as_ref() };
+            session.peer.last_error.clear(); let duplicate_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool };
             session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes }, &mut engine, Some(&duplicate_ctx)).expect("duplicate non-DA relay tx must stay peer-neutral");
             assert!(session.state().last_error.is_empty(), "duplicate non-DA tx must not touch DA relay staging: {:?}", session.state().last_error);
         });
@@ -6270,7 +6237,6 @@ mod tests {
             // mirrors the production failure mode where a panic during
             // pool mutation leaves a poisoned shared handle.
             let canonical_tx_pool: Arc<Mutex<TxPool>> = Arc::new(Mutex::new(TxPool::new()));
-            let da_relay_state = test_da_relay_state();
             let poison_pool = Arc::clone(&canonical_tx_pool);
             let _ = thread::spawn(move || {
                 let _guard = poison_pool.lock().unwrap();
@@ -6289,7 +6255,6 @@ mod tests {
                 peer_registered_addr: "sender:8333",
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
-                da_relay: &da_relay_state,
             };
 
             let msg = WireMessage {

@@ -483,10 +483,16 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
 
     let announce_tx: Option<rubin_node::devnet_rpc::AnnounceTxFn> = {
         let relay_state = p2p_service.relay_state();
+        let da_relay = p2p_service.da_relay_state();
         let pm = Arc::clone(&peer_manager);
         let pw = p2p_service.peer_outboxes();
         let local = p2p_service.addr().to_string();
         Some(Arc::new(move |tx_bytes: &[u8], meta| {
+            if rubin_node::da_relay::stages_relay_da_tx_bytes(tx_bytes) {
+                if let Ok(mut da_relay) = da_relay.lock() {
+                    let _ = da_relay.stage_relay_da_tx_bytes("", tx_bytes);
+                }
+            }
             rubin_node::tx_relay::announce_tx(tx_bytes, meta, &relay_state, &pm, &local, &pw)
         }))
     };

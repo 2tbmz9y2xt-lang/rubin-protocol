@@ -400,18 +400,14 @@ impl DaRelayState {
     #[rustfmt::skip]
     pub(crate) fn validate_relay_da_tx_for_admission(tx_bytes: &[u8]) -> DaRelayResult<Option<[u8; 32]>> {
         if relay_da_tx_kind_prefix(tx_bytes) != Some(0x02) { return Ok(None); }
-        let Ok((tx, txid, _wtxid, consumed)) = parse_tx(tx_bytes) else { return Ok(None); };
-        if consumed != tx_bytes.len() { return Ok(None); }
+        let (tx, txid, _wtxid, consumed) = parse_tx(tx_bytes).map_err(|_| DaRelayError::InvalidWireBytes)?;
+        if consumed != tx_bytes.len() { return Err(DaRelayError::InvalidWireBytes); }
         let wire_bytes = u64::try_from(tx_bytes.len()).map_err(|_| DaRelayError::AccountingOverflow)?;
         validate_relay_da_chunk_for_admission(&tx, wire_bytes)?;
         Ok(Some(txid))
     }
 
-    pub(crate) fn stage_relay_da_tx_bytes(
-        &mut self,
-        peer_addr: &str,
-        tx_bytes: &[u8],
-    ) -> DaRelayResult {
+    pub fn stage_relay_da_tx_bytes(&mut self, peer_addr: &str, tx_bytes: &[u8]) -> DaRelayResult {
         let wire_bytes =
             u64::try_from(tx_bytes.len()).map_err(|_| DaRelayError::AccountingOverflow)?;
         if wire_bytes == 0 {
@@ -478,6 +474,34 @@ impl DaRelayState {
             }
             _ => Ok(()),
         }
+    }
+
+    pub(crate) fn advance_orphan_ttl(&mut self) -> DaRelayResult<usize> {
+        let mut expired = 0usize;
+        for da_id in self
+            .orphan_bytes_by_da_id
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let Some(record) = self.sets_by_da_id.get_mut(&da_id) else {
+                continue;
+            };
+            if record.state == DaRelaySetState::CompleteSet {
+                continue;
+            }
+            if record.ttl_blocks_remaining > 1 {
+                record.ttl_blocks_remaining -= 1;
+                continue;
+            }
+            if let Some(record) = self.sets_by_da_id.remove(&da_id) {
+                self.remove_record(record)?;
+                expired = expired
+                    .checked_add(1)
+                    .ok_or(DaRelayError::AccountingOverflow)?;
+            }
+        }
+        Ok(expired)
     }
 
     #[cfg(test)]
@@ -684,6 +708,37 @@ impl DaRelayState {
         Ok(())
     }
 
+    fn remove_record(&mut self, record: DaRelaySetRecord) -> DaRelayResult {
+        let old_bytes = record.orphan_wire_bytes()?;
+        let old_commit_bytes = record.orphan_commit_bytes();
+        let old_pinned_bytes = record.pinned_payload_accounting_bytes()?;
+        let empty = DaRelaySetRecord::new(record.da_id);
+        let peer_bytes = self.project_peer_bytes(Some(&record), &empty)?;
+        self.orphan_bytes =
+            Self::project_counter(self.orphan_bytes, old_bytes, 0, self.caps.orphan_pool_bytes)?;
+        self.orphan_commit_overhead_bytes = Self::project_counter(
+            self.orphan_commit_overhead_bytes,
+            old_commit_bytes,
+            0,
+            self.caps.orphan_commit_overhead_bytes,
+        )?;
+        self.pinned_payload_bytes = Self::project_counter(
+            self.pinned_payload_bytes,
+            old_pinned_bytes,
+            0,
+            self.caps.pinned_payload_bytes,
+        )?;
+        for (key, bytes) in peer_bytes {
+            if bytes == 0 {
+                self.orphan_bytes_by_peer_quota_key.remove(&key);
+            } else {
+                self.orphan_bytes_by_peer_quota_key.insert(key, bytes);
+            }
+        }
+        self.orphan_bytes_by_da_id.remove(&record.da_id);
+        Ok(())
+    }
+
     fn project_peer_counter(
         &self,
         key: &PeerQuotaKey,
@@ -729,7 +784,7 @@ impl DaRelayState {
     }
 }
 
-pub(crate) fn stages_relay_da_tx_bytes(tx_bytes: &[u8]) -> bool {
+pub fn stages_relay_da_tx_bytes(tx_bytes: &[u8]) -> bool {
     matches!(relay_da_tx_kind_prefix(tx_bytes), Some(0x01 | 0x02))
 }
 
@@ -885,11 +940,26 @@ mod tests {
 
         assert_eq!(relay_da_tx_kind_prefix(&[0u8; 4]), None);
         assert_eq!(relay_da_tx_kind_prefix(&[0xff, 0, 0, 0, 0x02]), None);
+        let malformed_chunk_prefix = [TX_WIRE_VERSION.to_le_bytes().as_slice(), &[0x02]].concat();
+        assert_eq!(relay_da_tx_kind_prefix(&malformed_chunk_prefix), Some(0x02));
+        assert_eq!(DaRelayState::validate_relay_da_tx_for_admission(&malformed_chunk_prefix), Err(InvalidWireBytes));
 
         let payload = b"relay chunk"; let mut bad_core = relay_chunk_core([4u8; 32], 0, payload); bad_core.chunk_hash = [5u8; 32];
         let bad_chunk = relay_test_tx(0x02, Vec::new(), None, Some(bad_core), payload);
         assert_eq!(relay_da_tx_kind_prefix(&bad_chunk), Some(0x02));
         assert_eq!(DaRelayState::validate_relay_da_tx_for_admission(&bad_chunk), Err(ChunkHashMismatch));
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn da_relay_orphan_ttl_advances_and_expires_incomplete_sets() {
+        let caps = DaRelayCaps { orphan_ttl_blocks: 2, ..DaRelayCaps::default() }; let mut state = DaRelayState::new(caps).unwrap();
+        state.stage_incomplete_da_chunk("peer-a:8333", DaRelayChunk { da_id: [9; 32], chunk_hash: sha3_256(b"chunk"), peer_quota_key: PeerQuotaKey::from_peer_addr("peer-a:8333"), chunk_index: 0, payload: Arc::from(&b"chunk"[..]), wire_bytes: 5, tx_bytes: Arc::from([]) }).unwrap();
+        assert_eq!(state.sets_by_da_id[&[9; 32]].ttl_blocks_remaining, 2);
+        assert_eq!(state.advance_orphan_ttl().unwrap(), 0);
+        assert_eq!(state.sets_by_da_id[&[9; 32]].ttl_blocks_remaining, 1);
+        assert_eq!(state.advance_orphan_ttl().unwrap(), 1);
+        assert!(state.is_empty());
     }
 
     #[test]

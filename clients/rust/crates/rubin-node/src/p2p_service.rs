@@ -210,6 +210,10 @@ impl RunningNodeP2PService {
         Arc::clone(&self.shared.peer_outboxes)
     }
 
+    pub fn da_relay_state(&self) -> Arc<Mutex<DaRelayState>> {
+        Arc::clone(&self.shared.da_relay)
+    }
+
     pub fn close(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(&self.addr);
@@ -819,15 +823,7 @@ fn handle_peer(
         addr: peer_addr.clone(),
     };
 
-    // Build relay context for message loop. RUB-178 / GitHub #1438
-    // introduced the lifecycle plumbing; `tx_pool` threads the existing
-    // `shared.tx_pool` handle (already used by the block-apply cleanup
-    // path in `apply_tx_pool_cleanup`) into the peer-tx dispatch so
-    // peer transactions reach canonical admission via the seam in
-    // `collect_live_responses`. RUB-173 / GitHub #1420 then swapped that
-    // seam to `add_tx_with_source(..., TxSource::Remote, ...)` for
-    // source-aware classification. No new lifecycle ownership: this is
-    // the same `Arc<Mutex<TxPool>>` introduced for cleanup in PR #876.
+    // Build relay context for message-loop tx admission and broadcast.
     let relay_ctx = PeerRelayContext {
         relay_state: &shared.relay_state,
         peer_manager: &shared.peer_manager,
@@ -835,7 +831,6 @@ fn handle_peer(
         peer_registered_addr: &peer_addr,
         peer_writers: &shared.peer_outboxes,
         tx_pool: &shared.tx_pool,
-        da_relay: &shared.da_relay,
     };
 
     {
@@ -897,6 +892,8 @@ fn handle_peer(
                 let outcome = session.collect_live_responses(msg, &mut engine, Some(&relay_ctx));
                 let pending_cleanup = session.take_pending_tx_pool_cleanup();
                 drop(engine);
+                session.advance_da_orphan_ttl_for_accepted_blocks(&shared.da_relay);
+                session.drain_pending_da_relay_stages(&shared.da_relay);
                 finalize_live_message_outcome(&shared, outcome, pending_cleanup)?
             };
             log_tx_pool_cleanup_requeue_failure(&maybe_apply_tx_pool_cleanup(
