@@ -580,9 +580,9 @@ pub fn announce_block(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayTxOutcome {
     /// Tx was parsed, admitted to relay pool, and re-announced.
-    Relayed,
+    Relayed { txid: [u8; 32] },
     /// Tx was already seen — silently ignored.
-    DuplicateSeen,
+    DuplicateSeen { txid: [u8; 32] },
     /// Relay-metadata derivation failed (fee/policy); marked seen so peers
     /// don't churn INV/GETDATA, but peer session is not penalized.
     MetadataRejected,
@@ -640,7 +640,7 @@ pub fn handle_received_tx(
 
     // Mark seen BEFORE pool admission (matches Go).
     if !relay_state.tx_seen.add(txid) {
-        return Ok(RelayTxOutcome::DuplicateSeen);
+        return Ok(RelayTxOutcome::DuplicateSeen { txid });
     }
 
     let relay_cfg = crate::txpool::TxPoolConfig {
@@ -679,7 +679,7 @@ pub fn handle_received_tx(
         local_addr,
         peer_writers,
     );
-    Ok(RelayTxOutcome::Relayed)
+    Ok(RelayTxOutcome::Relayed { txid })
 }
 
 /// Extract the canonical txid from raw tx bytes using consensus parsing.

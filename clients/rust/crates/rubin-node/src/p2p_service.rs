@@ -888,20 +888,24 @@ fn handle_peer(
             // Lock scope minimized: engine lock held only during
             // collect_live_responses.  Payload size check above ensures
             // no unbounded deserialization under lock.
-            let (responses, tx_pool_cleanup) = {
+            let (responses, tx_pool_cleanup, pending_da_relay_staging) = {
                 let mut engine = shared
                     .sync_engine
                     .lock()
                     .map_err(|_| "sync engine unavailable".to_string())?;
                 let outcome = session.collect_live_responses(msg, &mut engine, Some(&relay_ctx));
                 let pending_cleanup = session.take_pending_tx_pool_cleanup();
+                let pending_da_relay_staging = session.take_pending_da_relay_staging();
                 drop(engine);
-                finalize_live_message_outcome(&shared, outcome, pending_cleanup)?
+                let (responses, tx_pool_cleanup) =
+                    finalize_live_message_outcome(&shared, outcome, pending_cleanup)?;
+                (responses, tx_pool_cleanup, pending_da_relay_staging)
             };
             log_tx_pool_cleanup_requeue_failure(&maybe_apply_tx_pool_cleanup(
                 &shared,
                 tx_pool_cleanup,
             )?);
+            session.apply_pending_da_relay_staging(&shared.da_relay, pending_da_relay_staging);
             responses
         };
         for outbound in outbound_messages {
