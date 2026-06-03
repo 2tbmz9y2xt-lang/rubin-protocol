@@ -711,76 +711,101 @@ impl PeerSession {
             MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
-                    if let Err(err) =
-                        crate::da_relay::DaRelayState::validate_relay_da_tx_for_admission(
-                            &msg.payload,
-                        )
+                    let (outcome, relay_txid) = if msg.payload.len() > MAX_RELAY_MSG_BYTES as usize
                     {
-                        let reason = format!("DA relay tx admission validation failed: {err:?}");
-                        self.bump_ban(10, &reason);
-                        if self.peer.ban_score >= self.cfg.ban_threshold {
-                            return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
+                        (crate::tx_relay::RelayTxOutcome::Oversized, None)
+                    } else {
+                        let validated_da_txid =
+                            match crate::da_relay::DaRelayState::validate_relay_da_tx_for_admission(
+                                &msg.payload,
+                            ) {
+                                Ok(txid) => txid,
+                                Err(err) => {
+                                    let reason =
+                                        format!("DA relay tx admission validation failed: {err:?}");
+                                    self.bump_ban(10, &reason);
+                                    if self.peer.ban_score >= self.cfg.ban_threshold {
+                                        return Err(io::Error::new(
+                                            io::ErrorKind::InvalidData,
+                                            reason,
+                                        ));
+                                    }
+                                    return Ok(LiveMessageOutcome {
+                                        responses: Vec::new(),
+                                        tx_pool_cleanup: TxPoolCleanupPlan::default(),
+                                    });
+                                }
+                            };
+                        let txid = match validated_da_txid {
+                            Some(txid) => Ok(txid),
+                            None => crate::tx_relay::canonical_txid(&msg.payload),
+                        };
+                        match txid {
+                            Ok(txid) => (
+                                crate::tx_relay::handle_received_tx_with_canonical_txid(
+                                    &msg.payload,
+                                    txid,
+                                    sync_engine,
+                                    ctx.relay_state,
+                                    ctx.peer_manager,
+                                    ctx.peer_registered_addr,
+                                    ctx.local_addr,
+                                    ctx.peer_writers,
+                                )?,
+                                Some(txid),
+                            ),
+                            Err(reason) => (
+                                crate::tx_relay::RelayTxOutcome::MalformedParse(reason),
+                                None,
+                            ),
                         }
-                        return Ok(LiveMessageOutcome {
-                            responses: Vec::new(),
-                            tx_pool_cleanup: TxPoolCleanupPlan::default(),
-                        });
-                    }
-                    let outcome = crate::tx_relay::handle_received_tx(
-                        &msg.payload,
-                        sync_engine,
-                        ctx.relay_state,
-                        ctx.peer_manager,
-                        ctx.peer_registered_addr,
-                        ctx.local_addr,
-                        ctx.peer_writers,
-                    )?;
+                    };
                     if matches!(
                         outcome,
                         crate::tx_relay::RelayTxOutcome::Relayed
                             | crate::tx_relay::RelayTxOutcome::DuplicateSeen
                     ) {
-                        let mut admitted_da_bytes = None;
-                        match ctx.tx_pool.lock() {
-                            Ok(mut pool) => {
-                                if matches!(outcome, crate::tx_relay::RelayTxOutcome::Relayed)
-                                    && pool
-                                        .add_tx_with_source(
-                                            &msg.payload,
-                                            &sync_engine.chain_state,
-                                            sync_engine.block_store.as_ref(),
-                                            sync_engine.cfg.chain_id,
-                                            crate::txpool::TxSource::Remote,
-                                        )
-                                        .is_ok()
-                                {
-                                    admitted_da_bytes = Some(msg.payload.clone());
-                                }
-                                if admitted_da_bytes.is_none() {
-                                    if let Ok((_tx, txid, _wtxid, consumed)) =
-                                        parse_tx(&msg.payload)
+                        if let Some(txid) = relay_txid {
+                            let mut admitted_da_bytes = None;
+                            match ctx.tx_pool.lock() {
+                                Ok(mut pool) => {
+                                    if matches!(outcome, crate::tx_relay::RelayTxOutcome::Relayed)
+                                        && pool
+                                            .add_tx_with_source(
+                                                &msg.payload,
+                                                &sync_engine.chain_state,
+                                                sync_engine.block_store.as_ref(),
+                                                sync_engine.cfg.chain_id,
+                                                crate::txpool::TxSource::Remote,
+                                            )
+                                            .is_ok()
                                     {
-                                        if consumed == msg.payload.len() {
-                                            admitted_da_bytes = pool.tx_by_id(&txid);
-                                        }
+                                        admitted_da_bytes = Some(msg.payload.clone());
+                                    }
+                                    if admitted_da_bytes.is_none() {
+                                        admitted_da_bytes = pool.tx_by_id(&txid);
                                     }
                                 }
+                                Err(_) => {
+                                    self.peer.last_error =
+                                        "canonical tx_pool poisoned; peer-tx admission skipped"
+                                            .to_string();
+                                }
                             }
-                            Err(_) => {
-                                self.peer.last_error =
-                                    "canonical tx_pool poisoned; peer-tx admission skipped"
-                                        .to_string();
-                            }
-                        }
-                        if let Some(admitted_da_bytes) = admitted_da_bytes {
-                            if let Ok(mut da_relay) = ctx.da_relay.lock() {
-                                let _ = da_relay.stage_relay_da_tx_bytes(
-                                    ctx.peer_registered_addr,
-                                    &admitted_da_bytes,
-                                );
-                            } else {
-                                self.peer.last_error =
-                                    "da relay state poisoned; peer-tx staging skipped".to_string();
+                            if let Some(admitted_da_bytes) = admitted_da_bytes {
+                                if let Ok(mut da_relay) = ctx.da_relay.lock() {
+                                    if let Err(err) = da_relay.stage_relay_da_tx_bytes(
+                                        ctx.peer_registered_addr,
+                                        &admitted_da_bytes,
+                                    ) {
+                                        self.peer.last_error =
+                                            format!("DA relay tx staging failed: {err:?}");
+                                    }
+                                } else {
+                                    self.peer.last_error =
+                                        "da relay state poisoned; peer-tx staging skipped"
+                                            .to_string();
+                                }
                             }
                         }
                     }
@@ -6086,6 +6111,14 @@ mod tests {
             assert_eq!(
                 da_relay_state.lock().unwrap().test_record_summary(da_id),
                 Some((false, 1, tx_bytes.len() as u64))
+            );
+            session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: tx_bytes.clone() }, &mut engine, Some(&relay_ctx)).expect("duplicate DA staging diagnostics should stay peer-neutral");
+            assert!(
+                session
+                    .state()
+                    .last_error
+                    .contains("DA relay tx staging failed: DuplicateChunk"),
+                "duplicate DA staging must be observable on peer.last_error"
             );
             for preseen in [false, true] {
                 let dup_relay_state = crate::tx_relay::TxRelayState::new();

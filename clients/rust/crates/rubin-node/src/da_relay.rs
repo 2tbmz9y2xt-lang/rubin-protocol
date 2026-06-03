@@ -398,12 +398,13 @@ impl DaRelayState {
     }
 
     #[rustfmt::skip]
-    pub(crate) fn validate_relay_da_tx_for_admission(tx_bytes: &[u8]) -> DaRelayResult {
-        if relay_da_tx_kind_prefix(tx_bytes) != Some(0x02) { return Ok(()); }
-        let Ok((tx, _txid, _wtxid, consumed)) = parse_tx(tx_bytes) else { return Ok(()); };
-        if consumed != tx_bytes.len() { return Ok(()); }
+    pub(crate) fn validate_relay_da_tx_for_admission(tx_bytes: &[u8]) -> DaRelayResult<Option<[u8; 32]>> {
+        if relay_da_tx_kind_prefix(tx_bytes) != Some(0x02) { return Ok(None); }
+        let Ok((tx, txid, _wtxid, consumed)) = parse_tx(tx_bytes) else { return Ok(None); };
+        if consumed != tx_bytes.len() { return Ok(None); }
         let wire_bytes = u64::try_from(tx_bytes.len()).map_err(|_| DaRelayError::AccountingOverflow)?;
-        validate_relay_da_chunk_for_admission(&tx, wire_bytes)
+        validate_relay_da_chunk_for_admission(&tx, wire_bytes)?;
+        Ok(Some(txid))
     }
 
     pub(crate) fn stage_relay_da_tx_bytes(
@@ -869,11 +870,11 @@ mod tests {
     fn validate_relay_da_tx_for_admission_fast_paths_non_chunk_prefixes() {
         let non_da = relay_test_tx(0x00, Vec::new(), None, None, &[]);
         assert_eq!(relay_da_tx_kind_prefix(&non_da), Some(0x00));
-        DaRelayState::validate_relay_da_tx_for_admission(&non_da).unwrap();
+        assert_eq!(DaRelayState::validate_relay_da_tx_for_admission(&non_da).unwrap(), None);
 
         let commit = relay_test_tx(0x01, vec![da_commit_output([2u8; 32])], Some(relay_commit_core([3u8; 32], 1)), None, &[]);
         assert_eq!(relay_da_tx_kind_prefix(&commit), Some(0x01));
-        DaRelayState::validate_relay_da_tx_for_admission(&commit).unwrap();
+        assert_eq!(DaRelayState::validate_relay_da_tx_for_admission(&commit).unwrap(), None);
 
         assert_eq!(relay_da_tx_kind_prefix(&[0u8; 4]), None);
         assert_eq!(relay_da_tx_kind_prefix(&[0xff, 0, 0, 0, 0x02]), None);

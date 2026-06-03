@@ -638,6 +638,33 @@ pub fn handle_received_tx(
         Err(reason) => return Ok(RelayTxOutcome::MalformedParse(reason)),
     };
 
+    handle_received_tx_with_canonical_txid(
+        tx_bytes,
+        txid,
+        sync_engine,
+        relay_state,
+        peer_manager,
+        skip_addr,
+        local_addr,
+        peer_writers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_received_tx_with_canonical_txid(
+    tx_bytes: &[u8],
+    txid: [u8; 32],
+    sync_engine: &crate::sync::SyncEngine,
+    relay_state: &TxRelayState,
+    peer_manager: &PeerManager,
+    skip_addr: &str,
+    local_addr: &str,
+    peer_writers: &Mutex<HashMap<String, PeerOutbox>>,
+) -> io::Result<RelayTxOutcome> {
+    if tx_bytes.len() > rubin_consensus::constants::MAX_RELAY_MSG_BYTES as usize {
+        return Ok(RelayTxOutcome::Oversized);
+    }
+
     // Mark seen BEFORE pool admission (matches Go).
     if !relay_state.tx_seen.add(txid) {
         return Ok(RelayTxOutcome::DuplicateSeen);
@@ -683,7 +710,7 @@ pub fn handle_received_tx(
 }
 
 /// Extract the canonical txid from raw tx bytes using consensus parsing.
-fn canonical_txid(tx_bytes: &[u8]) -> Result<[u8; 32], String> {
+pub(crate) fn canonical_txid(tx_bytes: &[u8]) -> Result<[u8; 32], String> {
     let (_tx, txid, _wtxid, consumed) =
         rubin_consensus::parse_tx(tx_bytes).map_err(|e| e.to_string())?;
     if consumed != tx_bytes.len() {
