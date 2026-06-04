@@ -671,13 +671,15 @@ mod tests {
         (tx, utxos)
     }
 
-    fn provider_shape_tx(tx_kind: u8, nonce: u64) -> Tx {
+    fn provider_shape_tx(tx_kind: u8, seed: &[u8]) -> Tx {
+        let digest: [u8; 32] = Sha3_256::digest(seed).into();
+        let tx_nonce = u64::from_le_bytes(digest[..8].try_into().expect("digest prefix"));
         Tx {
             version: TX_WIRE_VERSION,
             tx_kind,
-            tx_nonce: nonce,
+            tx_nonce,
             inputs: vec![TxInput {
-                prev_txid: [nonce as u8; 32],
+                prev_txid: digest,
                 prev_vout: 0,
                 script_sig: Vec::new(),
                 sequence: 0,
@@ -697,7 +699,7 @@ mod tests {
         for (index, payload) in payloads.iter().enumerate() {
             hasher.update(payload);
             let index = u16::try_from(index).expect("test chunk index");
-            let mut tx = provider_shape_tx(0x02, 0x20 + u64::from(index));
+            let mut tx = provider_shape_tx(0x02, payload);
             tx.da_payload = payload.to_vec();
             tx.da_chunk_core = Some(DaChunkCore {
                 da_id,
@@ -710,7 +712,7 @@ mod tests {
             });
         }
         let commitment: [u8; 32] = hasher.finalize().into();
-        let mut commit = provider_shape_tx(0x01, 0x10);
+        let mut commit = provider_shape_tx(0x01, &commitment);
         commit.outputs.push(TxOutput {
             value: 0,
             covenant_type: COV_TYPE_DA_COMMIT,
