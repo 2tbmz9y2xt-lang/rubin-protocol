@@ -54,7 +54,7 @@ pub struct DevnetRPCState {
     now_unix: fn() -> u64,
     announce_tx: Option<AnnounceTxFn>,
     announce_block: Option<AnnounceBlockFn>,
-    pub accepted_block: Option<AcceptedBlockFn>,
+    accepted_block: Option<AcceptedBlockFn>,
     /// Serializes mutating devnet RPC (submit_tx + mine_next).
     rpc_op_lock: Arc<Mutex<()>>,
     /// When set, POST `/mine_next` mines one block using this config (devnet + loopback RPC only).
@@ -538,6 +538,12 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         // `GET /ready` cannot report 200 before the node is actually
         // serving requests.
         readiness: Arc::new(ReadinessGate::default()),
+    }
+}
+
+impl DevnetRPCState {
+    pub fn set_accepted_block_hook(&mut self, accepted_block: AcceptedBlockFn) {
+        self.accepted_block = Some(accepted_block);
     }
 }
 
@@ -3371,7 +3377,7 @@ mod tests {
         let hook_lock_order = Arc::new(Mutex::new((false, false)));
         let announced_clone = Arc::clone(&announced);
         let accepted_order = Arc::clone(&hook_lock_order); let accepted_lock = Arc::clone(&state.rpc_op_lock);
-        state.accepted_block = Some(Arc::new(move |_| { accepted_order.lock().expect("order lock").0 = accepted_lock.try_lock().is_err(); Err("accepted hook test error".to_string()) }));
+        state.set_accepted_block_hook(Arc::new(move |_| { accepted_order.lock().expect("order lock").0 = accepted_lock.try_lock().is_err(); Err("accepted hook test error".to_string()) }));
         let announce_order = Arc::clone(&hook_lock_order); let announce_lock = Arc::clone(&state.rpc_op_lock);
         state.announce_block = Some(Arc::new(move |block_bytes: &[u8]| { *announced_clone.lock().expect("announce lock") = Some(block_bytes.to_vec()); announce_order.lock().expect("order lock").1 = announce_lock.try_lock().is_ok(); Ok(()) }));
 

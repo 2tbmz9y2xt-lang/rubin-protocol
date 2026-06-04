@@ -5516,16 +5516,7 @@ mod tests {
                     .expect("invalid orphan must not persist before parent"),
                 "invalid orphan should remain memory-only until parent arrives"
             );
-            let err = session
-                .collect_live_responses(
-                    WireMessage {
-                        command: MESSAGE_BLOCK.to_string(),
-                        payload: block1.clone(),
-                    },
-                    &mut engine,
-                    Some(&relay_ctx),
-                )
-                .expect_err("invalid orphan should surface after parent arrives");
+            let err = session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block1.clone() }, &mut engine, Some(&relay_ctx)).expect_err("invalid orphan should surface after parent arrives");
             let pending_cleanup = session.take_pending_tx_pool_cleanup();
 
             assert_eq!(session.orphans.len(), 0, "invalid orphan should be dropped");
@@ -5549,10 +5540,8 @@ mod tests {
                 session.take_pending_tx_pool_cleanup().is_empty(),
                 "pending cleanup should drain once observed"
             );
-            let block3 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, genesis.header.timestamp + 3); let block3_hash = block_hash(&block3[..BLOCK_HEADER_BYTES]).expect("block3 hash"); let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1)); let block4 = coinbase_only_block_with_gen(3, subsidy1 + subsidy2, block3_hash, genesis.header.timestamp + 4);
-            for block in [block3, block4] {
-                session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block }, &mut engine, Some(&relay_ctx)).expect("accepted descendant dispatch");
-            }
+            session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block1.clone() }, &mut engine, Some(&relay_ctx)).expect("duplicate parent dispatch");
+            let block3 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, genesis.header.timestamp + 3); let block3_hash = block_hash(&block3[..BLOCK_HEADER_BYTES]).expect("block3 hash"); session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block3 }, &mut engine, Some(&relay_ctx)).expect("accepted descendant dispatch"); assert!(da_relay.lock().unwrap().test_record_summary(da_id).is_some(), "duplicate parent must not consume DA orphan TTL"); let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1)); let block4 = coinbase_only_block_with_gen(3, subsidy1 + subsidy2, block3_hash, genesis.header.timestamp + 4); session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block4 }, &mut engine, Some(&relay_ctx)).expect("accepted descendant dispatch");
             assert_eq!(da_relay.lock().unwrap().test_record_summary(da_id), None, "accepted parent must advance DA TTL even when later orphan resolution errors");
             assert_eq!(
                 session.state().ban_score,
@@ -5570,24 +5559,6 @@ mod tests {
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
         reset_orphan_pool_metrics_for_test();
-    }
-
-    #[test]
-    #[rustfmt::skip]
-    fn collect_live_responses_message_block_advances_da_ttl_once_per_new_block() {
-        let (mut session, _client) = test_peer_session(); let mut engine = test_sync_engine_with_genesis(); let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis"); let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
-        let block1 = height_one_coinbase_only_block(genesis_hash, genesis.header.timestamp + 1); let block1_hash = block_hash(&block1[..BLOCK_HEADER_BYTES]).expect("block1 hash"); let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
-        let block2 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, genesis.header.timestamp + 2); let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash"); let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1));
-        let block3 = coinbase_only_block_with_gen(3, subsidy1 + subsidy2, block2_hash, genesis.header.timestamp + 3);
-        let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 8)); let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); let canonical_tx_pool = Mutex::new(TxPool::new()); let da_relay = Mutex::new(crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default()).expect("valid DA relay caps"));
-        let da_id = [0x61; 32]; let chunk_tx = relay_da_chunk_tx(da_id, b"peer-block-ttl"); let chunk_len = chunk_tx.len() as u64; da_relay.lock().unwrap().stage_relay_da_tx_bytes("peer:8333", chunk_tx).expect("stage DA orphan");
-        let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "peer:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay };
-        for block in [&block1, &block2, &block2] {
-            session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: (*block).clone() }, &mut engine, Some(&relay_ctx)).expect("accepted block dispatch");
-        }
-        assert_eq!(da_relay.lock().unwrap().test_record_summary(da_id), Some((false, 1, chunk_len)), "duplicate block must not consume DA orphan TTL");
-        session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block3 }, &mut engine, Some(&relay_ctx)).expect("third accepted block dispatch");
-        assert_eq!(da_relay.lock().unwrap().test_record_summary(da_id), None);
     }
 
     #[test]

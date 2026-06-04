@@ -521,7 +521,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         announce_block,
         live_mining_cfg,
     );
-    state.accepted_block = Some(Arc::new(move |hash| {
+    state.set_accepted_block_hook(Arc::new(move |hash| {
         advance_da_ttl_for_block(hash, &da_ttl_relay, &da_ttl_seen)
     }));
     let state =
