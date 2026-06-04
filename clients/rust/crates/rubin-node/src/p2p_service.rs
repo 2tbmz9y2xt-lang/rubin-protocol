@@ -249,6 +249,18 @@ pub fn stage_local_da_relay_tx_bytes(da_relay: &Arc<Mutex<DaRelayState>>, tx_byt
     let _ = da_relay.stage_relay_da_tx_bytes("", tx_bytes.to_vec());
 }
 
+pub fn advance_da_orphan_ttl_for_accepted_block(
+    da_relay: &Arc<Mutex<DaRelayState>>,
+) -> Result<(), String> {
+    let mut da_relay = da_relay
+        .lock()
+        .map_err(|_| "DA relay lock poisoned during accepted-block TTL advance".to_string())?;
+    da_relay
+        .advance_orphan_ttl()
+        .map(|_| ())
+        .map_err(|err| format!("DA relay TTL advance failed: {err:?}"))
+}
+
 fn run_accept_loop(listener: TcpListener, shared: SharedServiceState) {
     let mut error_backoff = ACCEPT_ERROR_BACKOFF_INIT;
     while !shared.stop.load(Ordering::SeqCst) {

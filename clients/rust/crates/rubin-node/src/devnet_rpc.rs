@@ -42,6 +42,7 @@ pub const RPC_READINESS_TRANSITION_FAILED: &str =
 pub type AnnounceTxFn =
     Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
 pub type AnnounceBlockFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
+pub type AcceptedBlockFn = Arc<dyn Fn([u8; 32]) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct DevnetRPCState {
@@ -53,6 +54,7 @@ pub struct DevnetRPCState {
     now_unix: fn() -> u64,
     announce_tx: Option<AnnounceTxFn>,
     announce_block: Option<AnnounceBlockFn>,
+    accepted_block: Option<AcceptedBlockFn>,
     /// Serializes mutating devnet RPC (submit_tx + mine_next).
     rpc_op_lock: Arc<Mutex<()>>,
     /// When set, POST `/mine_next` mines one block using this config (devnet + loopback RPC only).
@@ -527,14 +529,21 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         now_unix: current_unix,
         announce_tx,
         announce_block,
+        accepted_block: None,
         rpc_op_lock: Arc::new(Mutex::new(())),
         live_mining_cfg,
         // RUB-10 / GitHub #1151: gate starts in `NotReady`. The
         // `try_mark_ready_on_startup` transition runs inside
         // `start_devnet_rpc_server` after the listener is bound, so
-        // `/ready` cannot report 200 before the node is actually
+        // `GET /ready` cannot report 200 before the node is actually
         // serving requests.
         readiness: Arc::new(ReadinessGate::default()),
+    }
+}
+
+impl DevnetRPCState {
+    pub fn set_accepted_block_hook(&mut self, accepted_block: AcceptedBlockFn) {
+        self.accepted_block = Some(accepted_block);
     }
 }
 
@@ -1581,9 +1590,15 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             )
         }
     };
+    let mined_hash = mined.hash;
     drop(miner);
     drop(pool);
     drop(sync_engine);
+    if let Some(ref accepted) = state.accepted_block {
+        if let Err(err) = accepted(mined_hash) {
+            eprintln!("rpc: accepted-block: {err}");
+        }
+    }
     drop(_rpc_op);
     let block_bytes = match block_store {
         Some(store) => match store.get_block_by_hash(mined.hash) {
@@ -3104,6 +3119,7 @@ mod tests {
             now_unix: super::current_unix,
             announce_tx: None,
             announce_block: None,
+            accepted_block: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
             // RUB-10 / GitHub #1151: this helper bypasses the public
@@ -3358,9 +3374,28 @@ mod tests {
     fn mine_next_announces_mined_block_on_success() {
         let (mut state, dir) = build_state_with_live_mining(true);
         let announced = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let hook_lock_order = Arc::new(Mutex::new((false, false, false, false)));
         let announced_clone = Arc::clone(&announced);
+        let accepted_order = Arc::clone(&hook_lock_order);
+        let accepted_lock = Arc::clone(&state.rpc_op_lock);
+        let accepted_engine = Arc::clone(&state.sync_engine);
+        let accepted_pool = Arc::clone(&state.tx_pool);
+        state.set_accepted_block_hook(Arc::new(move |_| {
+            let rpc_op_held = accepted_lock.try_lock().is_err();
+            let engine_free = accepted_engine.try_lock().is_ok();
+            let pool_free = accepted_pool.try_lock().is_ok();
+            // Proof assertion: capture accepted-hook lock state before announce runs.
+            let mut order = accepted_order.lock().expect("order lock");
+            order.0 = rpc_op_held;
+            order.2 = engine_free;
+            order.3 = pool_free;
+            Err("accepted hook test error".to_string())
+        }));
+        let announce_order = Arc::clone(&hook_lock_order);
+        let announce_lock = Arc::clone(&state.rpc_op_lock);
         state.announce_block = Some(Arc::new(move |block_bytes: &[u8]| {
             *announced_clone.lock().expect("announce lock") = Some(block_bytes.to_vec());
+            announce_order.lock().expect("order lock").1 = announce_lock.try_lock().is_ok();
             Ok(())
         }));
 
@@ -3385,6 +3420,9 @@ mod tests {
         let parsed = parse_block_bytes(&block_bytes).expect("parse announced block");
         let announced_hash = block_hash(&parsed.header_bytes).expect("announced block hash");
         assert_eq!(hex::encode(announced_hash), expected_hash);
+        // Proof assertion: accepted hook sees RPC held; announce hook sees it released.
+        let observed_order = *hook_lock_order.lock().expect("order lock");
+        assert_eq!(observed_order, (true, true, true, true));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -4956,6 +4994,7 @@ mod tests {
             now_unix: || 0,
             announce_tx: None,
             announce_block: None,
+            accepted_block: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
             // RUB-10 / GitHub #1151: render_prometheus_metrics test does

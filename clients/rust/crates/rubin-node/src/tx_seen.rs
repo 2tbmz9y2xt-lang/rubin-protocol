@@ -28,6 +28,12 @@ struct BoundedHashSetInner {
 }
 
 impl BoundedHashSet {
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, BoundedHashSetInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     pub fn new(capacity: usize) -> Self {
         let cap = if capacity == 0 {
             DEFAULT_TX_SEEN_CAPACITY
@@ -48,9 +54,7 @@ impl BoundedHashSet {
     /// `false` if it was already present. Evicts the oldest entry (FIFO) when
     /// the set is at capacity.
     pub fn add(&self, hash: [u8; 32]) -> bool {
-        let Ok(mut inner) = self.inner.lock() else {
-            return false;
-        };
+        let mut inner = self.lock_inner();
         if inner.items.contains_key(&hash) {
             return false;
         }
@@ -74,17 +78,13 @@ impl BoundedHashSet {
 
     /// Returns `true` if hash is in the set.
     pub fn has(&self, hash: &[u8; 32]) -> bool {
-        let Ok(inner) = self.inner.lock() else {
-            return false;
-        };
+        let inner = self.lock_inner();
         inner.items.contains_key(hash)
     }
 
     /// Returns the current number of entries in the set.
     pub fn len(&self) -> usize {
-        let Ok(inner) = self.inner.lock() else {
-            return 0;
-        };
+        let inner = self.lock_inner();
         inner.items.len()
     }
 
@@ -177,6 +177,15 @@ mod tests {
         assert!(set.is_empty());
         set.add([1u8; 32]);
         assert!(!set.is_empty());
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = set.inner.lock().expect("lock");
+            panic!("poison set lock");
+        }));
+        let hash = [9u8; 32];
+        assert!(set.add(hash));
+        assert!(set.has(&hash));
+        assert_eq!(set.len(), 2);
     }
 
     #[test]
