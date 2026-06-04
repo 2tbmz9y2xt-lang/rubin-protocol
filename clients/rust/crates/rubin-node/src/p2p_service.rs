@@ -1106,6 +1106,7 @@ impl Drop for PeerGuard {
 #[derive(Default)]
 struct PeerQuotaLockEntry {
     refs: usize,
+    closing: bool,
     lock: Arc<Mutex<()>>,
 }
 
@@ -1118,16 +1119,26 @@ struct PeerQuotaLockHandle {
 impl PeerQuotaLockHandle {
     fn acquire(peer_quota_locks: &PeerQuotaLocks, addr: &str) -> Self {
         let quota_key = PeerQuotaKey::from_peer_addr(addr);
-        let lock = {
-            let mut locks = lock_peer_quota_locks(peer_quota_locks);
-            let entry = locks.entry(quota_key.clone()).or_default();
-            entry.refs += 1;
-            Arc::clone(&entry.lock)
-        };
-        Self {
-            peer_quota_locks: Arc::clone(peer_quota_locks),
-            quota_key,
-            lock,
+        loop {
+            let wait_lock = {
+                let mut locks = lock_peer_quota_locks(peer_quota_locks);
+                let entry = locks.entry(quota_key.clone()).or_default();
+                if !entry.closing {
+                    entry.refs += 1;
+                    let lock = Arc::clone(&entry.lock);
+                    return Self {
+                        peer_quota_locks: Arc::clone(peer_quota_locks),
+                        quota_key,
+                        lock,
+                    };
+                }
+                Arc::clone(&entry.lock)
+            };
+            drop(
+                wait_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
         }
     }
 
@@ -1244,16 +1255,23 @@ fn release_da_quota_if_inactive_and_unqueued(
     peer_manager: &PeerManager,
     da_relay: &Mutex<DaRelayState>,
 ) {
-    // Hold the lock-map mutex through the no-queued check and DA cleanup so a
-    // new same-key registration cannot publish a ref between them.
-    let locks = lock_peer_quota_locks(&peer_quota_lock.peer_quota_locks);
-    if locks
-        .get(&peer_quota_lock.quota_key)
-        .is_none_or(|entry| !Arc::ptr_eq(&entry.lock, &peer_quota_lock.lock) || entry.refs > 1)
     {
-        return;
+        let mut locks = lock_peer_quota_locks(&peer_quota_lock.peer_quota_locks);
+        let Some(entry) = locks.get_mut(&peer_quota_lock.quota_key) else {
+            return;
+        };
+        if !Arc::ptr_eq(&entry.lock, &peer_quota_lock.lock) || entry.refs > 1 {
+            return;
+        }
+        entry.closing = true;
     }
     release_da_quota_if_inactive(peer_manager, da_relay, &peer_quota_lock.quota_key);
+    let mut locks = lock_peer_quota_locks(&peer_quota_lock.peer_quota_locks);
+    if let Some(entry) = locks.get_mut(&peer_quota_lock.quota_key) {
+        if Arc::ptr_eq(&entry.lock, &peer_quota_lock.lock) {
+            entry.closing = false;
+        }
+    }
 }
 
 struct PeerOutboxGuard {
@@ -1621,6 +1639,12 @@ mod tests {
         let quota_key = crate::da_relay::PeerQuotaKey::from_peer_addr(addr);
         let locks = super::lock_peer_quota_locks(&shared.peer_quota_locks);
         locks.get(&quota_key).map_or(0, |entry| entry.refs)
+    }
+
+    fn peer_quota_entry_closing(shared: &SharedServiceState, addr: &str) -> bool {
+        let quota_key = crate::da_relay::PeerQuotaKey::from_peer_addr(addr);
+        let locks = super::lock_peer_quota_locks(&shared.peer_quota_locks);
+        locks.get(&quota_key).is_some_and(|entry| entry.closing)
     }
 
     /// Under LLVM coverage (tarpaulin), the first TCP handshake attempt on Darwin
@@ -2898,7 +2922,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_guard_drop_blocks_same_key_ref_acquire_until_da_release_decision_finishes() {
+    fn peer_guard_drop_blocks_same_key_ref_but_not_unrelated_keys_during_da_release() {
         let (sync_engine, dir) = test_engine("rubin-node-p2p-da-ref-release-atomic");
         let shared = test_shared_state(
             default_peer_runtime_config("devnet", 8),
@@ -2926,11 +2950,23 @@ mod tests {
                 .any(|state| state.addr == peer_a)
         });
         wait_until(Instant::now() + Duration::from_secs(2), || {
-            matches!(
-                shared.peer_quota_locks.try_lock(),
-                Err(std::sync::TryLockError::WouldBlock)
-            )
+            peer_quota_entry_closing(&shared, peer_a)
         });
+
+        let (unrelated_ready_tx, unrelated_ready_rx) = std::sync::mpsc::channel();
+        let unrelated_shared = shared.clone();
+        let unrelated_handle = thread::spawn(move || {
+            let unrelated_lock =
+                PeerQuotaLockHandle::acquire(&unrelated_shared.peer_quota_locks, "10.9.99.1:19111");
+            unrelated_ready_tx
+                .send(())
+                .expect("signal unrelated quota ref");
+            let _unrelated_guard = unrelated_lock.lock();
+        });
+        unrelated_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("unrelated quota key must not wait for DA release");
+        unrelated_handle.join().expect("unrelated quota ref");
 
         let (pending_ready_tx, pending_ready_rx) = std::sync::mpsc::channel();
         let pending_shared = shared.clone();
@@ -2952,7 +2988,7 @@ mod tests {
         drop_handle.join().expect("drop old peer");
         pending_ready_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("pending ref after cleanup releases map lock");
+            .expect("pending ref after cleanup releases same-key closing state");
         pending_handle.join().expect("pending quota ref");
         {
             let da_relay = shared.da_relay.lock().unwrap();
