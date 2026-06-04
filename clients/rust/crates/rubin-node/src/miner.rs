@@ -1,17 +1,20 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rubin_consensus::constants::{
-    MAX_BLOCK_WEIGHT, MAX_DA_BYTES_PER_BLOCK, MAX_FUTURE_DRIFT, POW_LIMIT,
+    COV_TYPE_DA_COMMIT, MAX_BLOCK_WEIGHT, MAX_DA_BYTES_PER_BLOCK, MAX_DA_CHUNK_COUNT,
+    MAX_FUTURE_DRIFT, POW_LIMIT,
 };
 use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
 use rubin_consensus::{
     encode_compact_size, merkle_root_txids, parse_tx, pow_check, tx_weight_and_stats_public,
     CoreExtDeploymentProfiles, Tx,
 };
+use sha3::{Digest, Sha3_256};
 
 use crate::coinbase::{
     build_coinbase_tx, default_mine_address, normalize_mine_address, parse_mine_address,
 };
+use crate::da_relay::CompleteDaSetCandidate;
 use crate::sync::SyncEngine;
 use crate::txpool::{
     apply_policy, TxPool, TxPoolConfig, DEFAULT_MEMPOOL_MIN_FEE_RATE, DEFAULT_MIN_DA_FEE_RATE,
@@ -71,6 +74,14 @@ struct MinedCandidate {
     txid: [u8; 32],
     wtxid: [u8; 32],
     weight: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+struct CompleteDaSetMiningCandidate {
+    da_id: [u8; 32],
+    txs: Vec<MinedCandidate>,
+    da_bytes: u64,
 }
 
 pub struct Miner<'a> {
@@ -318,6 +329,84 @@ fn parse_mining_candidate(raw: &[u8]) -> Result<MinedCandidate, String> {
     })
 }
 
+#[allow(dead_code)]
+fn parse_complete_da_set_candidate(
+    set: &CompleteDaSetCandidate,
+) -> Result<Option<CompleteDaSetMiningCandidate>, String> {
+    let commit = parse_mining_candidate(&set.commit_tx)?;
+    let Some(core) = commit.tx.da_commit_core.as_ref() else {
+        return Ok(None);
+    };
+    if core.da_id != set.da_id
+        || core.chunk_count == 0
+        || u64::from(core.chunk_count) > MAX_DA_CHUNK_COUNT
+        || set.chunks.len() != usize::from(core.chunk_count)
+        || commit.tx.inputs.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let mut group = CompleteDaSetMiningCandidate {
+        da_id: set.da_id,
+        da_bytes: commit.tx.da_payload.len() as u64,
+        txs: vec![commit],
+    };
+    let mut payload_hasher = Sha3_256::new();
+    for (index, chunk) in set.chunks.iter().enumerate() {
+        let want_index = u16::try_from(index).map_err(|_| "DA chunk index overflow".to_string())?;
+        if chunk.index != want_index {
+            return Ok(None);
+        }
+        let candidate = parse_mining_candidate(&chunk.tx)?;
+        let Some(chunk_core) = candidate.tx.da_chunk_core.as_ref() else {
+            return Ok(None);
+        };
+        let chunk_hash: [u8; 32] = Sha3_256::digest(&candidate.tx.da_payload).into();
+        if chunk_core.da_id != set.da_id
+            || chunk_core.chunk_index != want_index
+            || candidate.tx.inputs.is_empty()
+            || chunk_hash != chunk_core.chunk_hash
+        {
+            return Ok(None);
+        }
+        let Some(next_da_bytes) = group
+            .da_bytes
+            .checked_add(candidate.tx.da_payload.len() as u64)
+        else {
+            return Ok(None);
+        };
+        group.da_bytes = next_da_bytes;
+        payload_hasher.update(&candidate.tx.da_payload);
+        group.txs.push(candidate);
+    }
+    let payload_commitment: [u8; 32] = payload_hasher.finalize().into();
+    let Some(commit_candidate) = group.txs.first() else {
+        return Ok(None);
+    };
+    if !complete_da_commitment_matches(&commit_candidate.tx, &payload_commitment) {
+        return Ok(None);
+    }
+    Ok(Some(group))
+}
+
+#[allow(dead_code)]
+fn complete_da_commitment_matches(tx: &Tx, commitment: &[u8; 32]) -> bool {
+    let mut count = 0usize;
+    for output in &tx.outputs {
+        if output.covenant_type != COV_TYPE_DA_COMMIT {
+            continue;
+        }
+        if count != 0
+            || output.covenant_data.len() != 32
+            || output.covenant_data.as_slice() != commitment
+        {
+            return false;
+        }
+        count += 1;
+    }
+    count == 1
+}
+
 fn canonical_tx_weight(raw: &[u8], msg: &str) -> Result<u64, String> {
     let (tx, _, _, consumed) = parse_tx(raw).map_err(|e| e.to_string())?;
     if consumed != raw.len() {
@@ -436,26 +525,31 @@ mod tests {
     use std::path::PathBuf;
 
     use rubin_consensus::constants::{
-        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_P2PK, MAX_BLOCK_WEIGHT, TX_WIRE_VERSION,
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK, MAX_BLOCK_WEIGHT,
+        TX_WIRE_VERSION,
     };
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
-        encode_compact_size, p2pk_covenant_data_for_pubkey, tx_weight_and_stats_public,
-        CoreExtDeploymentProfiles, DaCommitCore, Outpoint, Tx, TxInput, TxOutput, UtxoEntry,
+        encode_compact_size, marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx,
+        tx_weight_and_stats_public, CoreExtDeploymentProfiles, DaChunkCore, DaCommitCore, Outpoint,
+        Tx, TxInput, TxOutput, UtxoEntry,
     };
+    use sha3::{Digest, Sha3_256};
 
+    use crate::da_relay::{CompleteDaSetCandidate, CompleteDaSetChunkCandidate};
     use crate::txpool::TxSource;
     use crate::{
         block_store_path, chain_state_path, default_sync_config, devnet_genesis_chain_id,
         test_helpers::signed_conflicting_p2pk_state_and_txs, BlockStore, ChainState, SyncEngine,
         TxPool,
     };
+    type ProviderSet = CompleteDaSetCandidate;
 
     use super::{
         assemble_block_bytes, build_witness_commitment, canonical_tx_weight,
         choose_valid_timestamp, default_mine_address, make_header_prefix, mtp_median,
-        parse_mine_address_arg, parse_mining_candidate, updated_policy_da_bytes, Miner,
-        MinerConfig,
+        parse_complete_da_set_candidate, parse_mine_address_arg, parse_mining_candidate,
+        updated_policy_da_bytes, Miner, MinerConfig,
     };
 
     fn test_sync(prefix: &str) -> (PathBuf, BlockStore, SyncEngine) {
@@ -575,6 +669,140 @@ mod tests {
         };
         tx_weight_and_stats_public(&tx).expect("DA policy tx weight");
         (tx, utxos)
+    }
+
+    fn provider_shape_tx(tx_kind: u8, nonce: u64) -> Tx {
+        Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind,
+            tx_nonce: nonce,
+            inputs: vec![TxInput {
+                prev_txid: [nonce as u8; 32],
+                prev_vout: 0,
+                script_sig: Vec::new(),
+                sequence: 0,
+            }],
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        }
+    }
+
+    fn miner_da_provider_shape_set(da_id: [u8; 32], payloads: &[&[u8]]) -> ProviderSet {
+        let mut hasher = Sha3_256::new();
+        let mut chunks = Vec::with_capacity(payloads.len());
+        for (index, payload) in payloads.iter().enumerate() {
+            hasher.update(payload);
+            let index = u16::try_from(index).expect("test chunk index");
+            let mut tx = provider_shape_tx(0x02, 0x20 + u64::from(index));
+            tx.da_payload = payload.to_vec();
+            tx.da_chunk_core = Some(DaChunkCore {
+                da_id,
+                chunk_index: index,
+                chunk_hash: Sha3_256::digest(payload).into(),
+            });
+            chunks.push(CompleteDaSetChunkCandidate {
+                index,
+                tx: marshal_tx(&tx).expect("marshal provider tx"),
+            });
+        }
+        let commitment: [u8; 32] = hasher.finalize().into();
+        let mut commit = provider_shape_tx(0x01, 0x10);
+        commit.outputs.push(TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_DA_COMMIT,
+            covenant_data: commitment.to_vec(),
+        });
+        commit.da_commit_core = Some(DaCommitCore {
+            da_id,
+            chunk_count: payloads.len() as u16,
+            retl_domain_id: [0x10; 32],
+            batch_number: 1,
+            tx_data_root: [0x11; 32],
+            state_root: [0x12; 32],
+            withdrawals_root: [0x13; 32],
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        commit.da_payload = vec![0xa1];
+        CompleteDaSetCandidate {
+            da_id,
+            payload_bytes: payloads.iter().map(|payload| payload.len() as u64).sum(),
+            commit_tx: marshal_tx(&commit).expect("marshal provider tx"),
+            chunks,
+        }
+    }
+
+    fn mutate_provider_tx(raw: &[u8], mutate: impl FnOnce(&mut Tx)) -> Vec<u8> {
+        let (mut tx, _, _, consumed) = parse_tx(raw).expect("parse provider tx");
+        assert_eq!(consumed, raw.len());
+        mutate(&mut tx);
+        marshal_tx(&tx).expect("marshal provider tx")
+    }
+
+    fn mutate_set(base: &ProviderSet, mutate: impl FnOnce(&mut ProviderSet)) -> ProviderSet {
+        let mut set = base.clone();
+        mutate(&mut set);
+        set
+    }
+
+    fn expect_bad(set: ProviderSet) {
+        assert!(matches!(parse_complete_da_set_candidate(&set), Ok(None)));
+    }
+
+    #[test]
+    fn miner_da_provider_shape_matrix() {
+        let da_id = [0x71; 32];
+        let base = miner_da_provider_shape_set(da_id, &[b"chunk-0", b"chunk-1"]);
+        assert!(parse_complete_da_set_candidate(&base)
+            .expect("valid provider shape parses")
+            .is_some());
+
+        expect_bad(mutate_set(&base, |set| {
+            set.chunks.pop();
+        }));
+        expect_bad(mutate_set(&base, |set| {
+            set.chunks.swap(0, 1);
+        }));
+        expect_bad(mutate_set(&base, |set| {
+            set.chunks[0].tx = mutate_provider_tx(&set.chunks[0].tx, |tx| {
+                tx.da_chunk_core.as_mut().expect("chunk core").chunk_hash = [0xe1; 32];
+            });
+        }));
+        expect_bad(mutate_set(&base, |set| {
+            set.commit_tx = mutate_provider_tx(&set.commit_tx, |tx| {
+                tx.outputs[0].covenant_data[0] ^= 1;
+            });
+        }));
+        expect_bad(mutate_set(&base, |set| {
+            set.commit_tx = mutate_provider_tx(&set.commit_tx, |tx| {
+                tx.da_commit_core.as_mut().expect("commit core").da_id = [0x72; 32];
+            });
+        }));
+        expect_bad(mutate_set(&base, |set| {
+            set.chunks[1].tx = mutate_provider_tx(&set.chunks[1].tx, |tx| {
+                tx.da_chunk_core.as_mut().expect("chunk core").da_id = [0x73; 32];
+            });
+        }));
+        expect_bad(mutate_set(&base, |set| {
+            set.commit_tx = mutate_provider_tx(&set.commit_tx, |tx| tx.inputs.clear());
+        }));
+        expect_bad(mutate_set(&base, |set| {
+            set.chunks[0].tx = mutate_provider_tx(&set.chunks[0].tx, |tx| tx.inputs.clear());
+        }));
+    }
+
+    #[test]
+    fn miner_da_provider_shape_malformed_raw_errors() {
+        let mut malformed_commit = miner_da_provider_shape_set([0x81; 32], &[b"chunk-0"]);
+        malformed_commit.commit_tx.push(0);
+        assert_eq!(
+            parse_complete_da_set_candidate(&malformed_commit).unwrap_err(),
+            "non-canonical tx bytes in miner input"
+        );
     }
 
     #[test]
