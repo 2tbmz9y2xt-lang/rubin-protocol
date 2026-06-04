@@ -305,10 +305,28 @@ impl DaRelaySetRecord {
             return Ok((self.clone(), false));
         }
         let mut updated = self.clone();
-        let mut changed = updated.drop_commit_for_peer_quota_key(key);
-        if updated.drop_chunks_for_peer_quota_key(key) {
+        let mut changed = false;
+        if updated
+            .commit
+            .as_ref()
+            .is_some_and(|commit| commit.wire_bytes != 0 && &commit.peer_quota_key == key)
+        {
+            updated.commit = None;
+            updated.replaceable_chunks.clear();
             changed = true;
         }
+        let indexes = updated
+            .chunks
+            .iter()
+            .filter_map(|(index, chunk)| {
+                (chunk.wire_bytes != 0 && &chunk.peer_quota_key == key).then_some(*index)
+            })
+            .collect::<Vec<_>>();
+        for index in &indexes {
+            updated.chunks.remove(index);
+            updated.replaceable_chunks.remove(index);
+        }
+        changed |= !indexes.is_empty();
         if !changed {
             return Ok((self.clone(), false));
         }
@@ -324,31 +342,6 @@ impl DaRelaySetRecord {
         }
         updated.recompute_wire_bytes()?;
         Ok((updated, true))
-    }
-    fn drop_commit_for_peer_quota_key(&mut self, key: &PeerQuotaKey) -> bool {
-        let Some(commit) = &self.commit else {
-            return false;
-        };
-        if commit.wire_bytes == 0 || &commit.peer_quota_key != key {
-            return false;
-        }
-        self.commit = None;
-        self.replaceable_chunks.clear();
-        true
-    }
-    fn drop_chunks_for_peer_quota_key(&mut self, key: &PeerQuotaKey) -> bool {
-        let indexes = self
-            .chunks
-            .iter()
-            .filter_map(|(index, chunk)| {
-                (chunk.wire_bytes != 0 && &chunk.peer_quota_key == key).then_some(*index)
-            })
-            .collect::<Vec<_>>();
-        for index in &indexes {
-            self.chunks.remove(index);
-            self.replaceable_chunks.remove(index);
-        }
-        !indexes.is_empty()
     }
     fn empty_incomplete(&self) -> bool {
         self.state != DaRelaySetState::CompleteSet
@@ -603,20 +596,13 @@ impl DaRelayState {
     }
 
     pub(crate) fn release_peer_quota_key(&mut self, key: &PeerQuotaKey) -> DaRelayResult {
-        if self
-            .orphan_bytes_by_peer_quota_key
-            .get(key)
-            .copied()
-            .unwrap_or(0)
-            == 0
-        {
+        if matches!(
+            self.orphan_bytes_by_peer_quota_key.get(key),
+            None | Some(&0)
+        ) {
             return Ok(());
         }
-        let da_ids = self
-            .orphan_bytes_by_da_id
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
+        let da_ids: Vec<_> = self.orphan_bytes_by_da_id.keys().copied().collect();
         for da_id in da_ids {
             let (updated, changed) = {
                 let Some(record) = self.sets_by_da_id.get(&da_id) else {
@@ -1457,6 +1443,12 @@ mod tests {
         state
             .stage_incomplete_da_chunk(peer_a, chunk([84; 32], 0, b"complete", 8))
             .unwrap();
+        state
+            .stage_incomplete_da_commit(peer_b, commit([85; 32], &[b"stay", b"drop"], 11))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_a, chunk([85; 32], 1, b"drop", 13))
+            .unwrap();
         let complete_before = state.sets_by_da_id[&[84; 32]].clone();
         let peer_b_before = state.orphan_bytes_by_peer_quota_key[&key_b];
 
@@ -1475,6 +1467,18 @@ mod tests {
             key_b
         );
         assert_eq!(state.sets_by_da_id[&[84; 32]], complete_before);
+        let reverse_mixed = &state.sets_by_da_id[&[85; 32]];
+        assert_eq!(reverse_mixed.state, DaRelaySetState::StagedCommit);
+        assert_eq!(
+            reverse_mixed
+                .commit
+                .as_ref()
+                .map(|commit| &commit.peer_quota_key),
+            Some(&key_b)
+        );
+        assert!(reverse_mixed.chunks.is_empty());
+        assert_eq!(reverse_mixed.peer_bytes.len(), 1);
+        assert_eq!(reverse_mixed.peer_bytes[&key_b], 11);
         assert!(!state.orphan_bytes_by_da_id.contains_key(&[84; 32]));
         assert!(!state.orphan_bytes_by_peer_quota_key.contains_key(&key_a));
         assert_eq!(state.orphan_bytes_by_peer_quota_key[&key_b], peer_b_before);
@@ -1482,6 +1486,7 @@ mod tests {
             state.orphan_bytes,
             state.sets_by_da_id[&[82; 32]].orphan_wire_bytes().unwrap()
                 + state.sets_by_da_id[&[83; 32]].orphan_wire_bytes().unwrap()
+                + state.sets_by_da_id[&[85; 32]].orphan_wire_bytes().unwrap()
         );
         let after = state.clone();
         state.release_peer_quota_key(&key_a).unwrap();
