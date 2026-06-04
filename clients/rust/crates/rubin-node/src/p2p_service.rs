@@ -1108,7 +1108,9 @@ fn release_da_quota_if_inactive(
     let mut da_relay = da_relay
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _ = da_relay.release_peer_quota_key(&quota_key);
+    if let Err(err) = da_relay.release_peer_quota_key(&quota_key) {
+        eprintln!("p2p: DA peer quota release failed for {quota_key:?}: {err:?}");
+    }
 }
 
 struct PeerOutboxGuard {
