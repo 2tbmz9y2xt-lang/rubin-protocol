@@ -787,14 +787,6 @@ fn handle_peer(
     )
     .map_err(|err| format!("handshake: {err}"))?;
 
-    // Clear in-flight marker after handshake completes (outbound only).
-    // Marker was kept through TCP connect + handshake to prevent duplicate dials.
-    // Now that handshake succeeded, active_sessions takes over slot accounting.
-    if let Some(ref addr) = outbound_addr {
-        let mut guard = lock_in_flight_dials(&shared);
-        guard.remove(addr);
-    }
-
     // Acquire session slot AFTER handshake succeeds for BOTH inbound and outbound.
     // No pre-handshake reservation — prevents unauthenticated/malicious peers
     // from holding slots during slow handshakes.
@@ -820,8 +812,13 @@ fn handle_peer(
         peer_state.addr = addr.clone();
     }
     let peer_addr = peer_state.addr.clone();
-    let peer_quota_lock = PeerQuotaLockHandle::acquire(&shared.peer_quota_locks, &peer_addr);
-    let peer_quota_guard = peer_quota_lock.lock();
+    let mut peer_registration = PendingPeerRegistration::new(
+        &shared.peer_quota_locks,
+        Arc::clone(&shared.peer_manager),
+        Arc::clone(&shared.da_relay),
+        &peer_addr,
+    );
+    let peer_quota_guard = peer_registration.lock()?;
 
     // Register before peer visibility so local block announce cannot snapshot
     // a connected peer without an outbox. Declaration order makes it drop last.
@@ -835,6 +832,10 @@ fn handle_peer(
             .map_err(|err| format!("peer register: {err}"))?;
     }
     drop(peer_quota_guard);
+    if let Some(ref addr) = outbound_addr {
+        let mut guard = lock_in_flight_dials(&shared);
+        guard.remove(addr);
+    }
     // Declaration order is critical: Rust drops locals in REVERSE
     // declaration order, so guards declared earlier outlive guards
     // declared later. We need the alias to stay registered until AFTER
@@ -858,6 +859,7 @@ fn handle_peer(
         da_relay: Arc::clone(&shared.da_relay),
         addr: peer_addr.clone(),
     };
+    peer_registration.finish();
 
     // Build relay context for message loop. RUB-178 / GitHub #1438
     // introduced the lifecycle plumbing; `tx_pool` threads the existing
@@ -1092,7 +1094,11 @@ impl Drop for PeerGuard {
             self.peer_manager.remove_peer(&self.addr)
         };
         if removed {
-            release_da_quota_if_inactive(&self.peer_manager, &self.da_relay, &self.addr);
+            release_da_quota_if_inactive_and_unqueued(
+                &peer_quota_lock,
+                &self.peer_manager,
+                &self.da_relay,
+            );
         }
     }
 }
@@ -1132,6 +1138,57 @@ impl PeerQuotaLockHandle {
     }
 }
 
+struct PendingPeerRegistration {
+    peer_quota_locks: PeerQuotaLocks,
+    peer_manager: Arc<PeerManager>,
+    da_relay: Arc<Mutex<DaRelayState>>,
+    addr: String,
+    peer_quota_lock: Option<PeerQuotaLockHandle>,
+}
+
+impl PendingPeerRegistration {
+    fn new(
+        peer_quota_locks: &PeerQuotaLocks,
+        peer_manager: Arc<PeerManager>,
+        da_relay: Arc<Mutex<DaRelayState>>,
+        addr: &str,
+    ) -> Self {
+        Self {
+            peer_quota_locks: Arc::clone(peer_quota_locks),
+            peer_manager,
+            da_relay,
+            addr: addr.to_string(),
+            peer_quota_lock: Some(PeerQuotaLockHandle::acquire(peer_quota_locks, addr)),
+        }
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        let Some(peer_quota_lock) = self.peer_quota_lock.as_ref() else {
+            return Err("peer quota registration handle missing".to_string());
+        };
+        Ok(peer_quota_lock.lock())
+    }
+
+    fn finish(&mut self) {
+        self.peer_quota_lock.take();
+    }
+}
+
+impl Drop for PendingPeerRegistration {
+    fn drop(&mut self) {
+        if let Some(peer_quota_lock) = self.peer_quota_lock.take() {
+            drop(peer_quota_lock);
+            let cleanup_lock = PeerQuotaLockHandle::acquire(&self.peer_quota_locks, &self.addr);
+            let _cleanup_guard = cleanup_lock.lock();
+            release_da_quota_if_inactive_and_unqueued(
+                &cleanup_lock,
+                &self.peer_manager,
+                &self.da_relay,
+            );
+        }
+    }
+}
+
 impl Drop for PeerQuotaLockHandle {
     fn drop(&mut self) {
         let mut locks = lock_peer_quota_locks(&self.peer_quota_locks);
@@ -1165,22 +1222,38 @@ fn lock_peer_quota_locks(
 fn release_da_quota_if_inactive(
     peer_manager: &PeerManager,
     da_relay: &Mutex<DaRelayState>,
-    addr: &str,
+    quota_key: &PeerQuotaKey,
 ) {
-    let quota_key = PeerQuotaKey::from_peer_addr(addr);
     let active_same_key = peer_manager
         .snapshot()
         .iter()
-        .any(|peer| PeerQuotaKey::from_peer_addr(&peer.addr) == quota_key);
+        .any(|peer| PeerQuotaKey::from_peer_addr(&peer.addr) == *quota_key);
     if active_same_key {
         return;
     }
     let mut da_relay = da_relay
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Err(err) = da_relay.release_peer_quota_key(&quota_key) {
+    if let Err(err) = da_relay.release_peer_quota_key(quota_key) {
         eprintln!("p2p: DA peer quota release failed for {quota_key:?}: {err:?}");
     }
+}
+
+fn release_da_quota_if_inactive_and_unqueued(
+    peer_quota_lock: &PeerQuotaLockHandle,
+    peer_manager: &PeerManager,
+    da_relay: &Mutex<DaRelayState>,
+) {
+    // Hold the lock-map mutex through the no-queued check and DA cleanup so a
+    // new same-key registration cannot publish a ref between them.
+    let locks = lock_peer_quota_locks(&peer_quota_lock.peer_quota_locks);
+    if locks
+        .get(&peer_quota_lock.quota_key)
+        .is_none_or(|entry| !Arc::ptr_eq(&entry.lock, &peer_quota_lock.lock) || entry.refs > 1)
+    {
+        return;
+    }
+    release_da_quota_if_inactive(peer_manager, da_relay, &peer_quota_lock.quota_key);
 }
 
 struct PeerOutboxGuard {
@@ -1271,7 +1344,7 @@ mod tests {
         maybe_apply_tx_pool_cleanup, outbound_connect_timeout, reconnect_missing_bootstrap_peers,
         register_peer_alias, register_peer_outbox, should_skip_outbound_dial,
         start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig, PeerAliasGuard,
-        PeerGuard, PeerQuotaLockHandle, SharedServiceState,
+        PeerGuard, PeerQuotaLockHandle, PendingPeerRegistration, SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
@@ -1361,14 +1434,18 @@ mod tests {
     }
 
     fn register_test_peer(shared: &SharedServiceState, addr: &str) -> PeerGuard {
-        let _peer_lifecycle_guard = super::lock_peer_lifecycle(&shared.peer_lifecycle);
-        shared
-            .peer_manager
-            .add_peer(crate::p2p_runtime::PeerState {
-                addr: addr.to_string(),
-                ..Default::default()
-            })
-            .expect("register test peer");
+        {
+            let peer_quota_lock = PeerQuotaLockHandle::acquire(&shared.peer_quota_locks, addr);
+            let _peer_quota_guard = peer_quota_lock.lock();
+            let _peer_lifecycle_guard = super::lock_peer_lifecycle(&shared.peer_lifecycle);
+            shared
+                .peer_manager
+                .add_peer(crate::p2p_runtime::PeerState {
+                    addr: addr.to_string(),
+                    ..Default::default()
+                })
+                .expect("register test peer");
+        }
         PeerGuard {
             peer_lifecycle: Arc::clone(&shared.peer_lifecycle),
             peer_quota_locks: Arc::clone(&shared.peer_quota_locks),
@@ -1538,6 +1615,12 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         panic!("condition not reached before deadline");
+    }
+
+    fn peer_quota_ref_count(shared: &SharedServiceState, addr: &str) -> usize {
+        let quota_key = crate::da_relay::PeerQuotaKey::from_peer_addr(addr);
+        let locks = super::lock_peer_quota_locks(&shared.peer_quota_locks);
+        locks.get(&quota_key).map_or(0, |entry| entry.refs)
     }
 
     /// Under LLVM coverage (tarpaulin), the first TCP handshake attempt on Darwin
@@ -2675,15 +2758,205 @@ mod tests {
         }
 
         let guard_a = register_test_peer(&shared, peer_a);
-        let quota_lock = PeerQuotaLockHandle::acquire(&shared.peer_quota_locks, "10.9.0.2:29111");
-        let quota_guard = quota_lock.lock();
-        let drop_handle = thread::spawn(move || drop(guard_a));
+        let pending_quota_ref =
+            PeerQuotaLockHandle::acquire(&shared.peer_quota_locks, "10.9.0.2:29111");
+        drop(guard_a);
         let _guard_b = register_test_peer(&shared, "10.9.0.2:29111");
-        drop(quota_guard);
-        drop_handle.join().expect("drop old same-key peer");
         {
             let da_relay = shared.da_relay.lock().unwrap();
             assert_eq!(da_relay.test_record_summary([82; 32]), Some((false, 1, 13)));
+        }
+        drop(pending_quota_ref);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_guard_drop_treats_waiting_same_key_quota_ref_as_active() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-waiting-peer-release");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            vec![],
+            sync_engine,
+        );
+        let peer_a = "10.9.0.5:19111";
+        let peer_a_same_key = "10.9.0.5:29111";
+
+        {
+            let mut da_relay = shared.da_relay.lock().unwrap();
+            da_relay
+                .test_stage_incomplete_da_chunk(peer_a, [85; 32], 0, b"waiting-owned", 19)
+                .unwrap();
+        }
+
+        let guard_a = register_test_peer(&shared, peer_a);
+        let lifecycle_guard = super::lock_peer_lifecycle(&shared.peer_lifecycle);
+        let drop_handle = thread::spawn(move || drop(guard_a));
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            peer_quota_ref_count(&shared, peer_a) >= 1
+        });
+
+        let (pending_ready_tx, pending_ready_rx) = std::sync::mpsc::channel();
+        let (pending_release_tx, pending_release_rx) = std::sync::mpsc::channel();
+        let pending_shared = shared.clone();
+        let pending_addr = peer_a_same_key.to_string();
+        let pending_handle = thread::spawn(move || {
+            let pending_lock =
+                PeerQuotaLockHandle::acquire(&pending_shared.peer_quota_locks, &pending_addr);
+            pending_ready_tx.send(()).expect("signal pending quota ref");
+            let _pending_guard = pending_lock.lock();
+            pending_release_rx
+                .recv()
+                .expect("release pending quota ref");
+        });
+        pending_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("pending same-key registration acquired quota ref");
+        assert!(
+            peer_quota_ref_count(&shared, peer_a) >= 2,
+            "pending same-key quota ref must be visible before cleanup release"
+        );
+
+        drop(lifecycle_guard);
+        drop_handle.join().expect("drop old same-key peer");
+        {
+            let da_relay = shared.da_relay.lock().unwrap();
+            assert_eq!(da_relay.test_record_summary([85; 32]), Some((false, 1, 19)));
+        }
+
+        pending_release_tx
+            .send(())
+            .expect("release pending quota ref");
+        pending_handle.join().expect("pending quota thread");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn pending_same_key_registration_failure_releases_deferred_da_quota() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-pending-fail-release");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            vec![],
+            sync_engine,
+        );
+        let peer_a = "10.9.0.6:19111";
+
+        {
+            let mut da_relay = shared.da_relay.lock().unwrap();
+            da_relay
+                .test_stage_incomplete_da_chunk(peer_a, [86; 32], 0, b"pending-fail", 23)
+                .unwrap();
+        }
+
+        let _old_outbox_guard =
+            register_peer_outbox(&shared.peer_outboxes, peer_a).expect("old outbox");
+        let guard_a = register_test_peer(&shared, peer_a);
+        let lifecycle_guard = super::lock_peer_lifecycle(&shared.peer_lifecycle);
+        let drop_handle = thread::spawn(move || drop(guard_a));
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            peer_quota_ref_count(&shared, peer_a) >= 1
+        });
+
+        let (pending_ready_tx, pending_ready_rx) = std::sync::mpsc::channel();
+        let pending_shared = shared.clone();
+        let pending_addr = peer_a.to_string();
+        let pending_handle = thread::spawn(move || {
+            let pending_registration = PendingPeerRegistration::new(
+                &pending_shared.peer_quota_locks,
+                Arc::clone(&pending_shared.peer_manager),
+                Arc::clone(&pending_shared.da_relay),
+                &pending_addr,
+            );
+            pending_ready_tx
+                .send(())
+                .expect("signal pending registration ref");
+            let _pending_guard = pending_registration
+                .lock()
+                .expect("pending registration lock");
+            assert!(
+                register_peer_outbox(&pending_shared.peer_outboxes, &pending_addr).is_err(),
+                "duplicate outbox must make pending registration fail before PeerGuard"
+            );
+        });
+        pending_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("pending same-key registration acquired quota ref");
+        assert!(
+            peer_quota_ref_count(&shared, peer_a) >= 2,
+            "old cleanup plus pending registration refs must overlap"
+        );
+
+        drop(lifecycle_guard);
+        drop_handle.join().expect("drop old same-key peer");
+        pending_handle
+            .join()
+            .expect("pending registration failure cleanup");
+        {
+            let da_relay = shared.da_relay.lock().unwrap();
+            assert_eq!(da_relay.test_record_summary([86; 32]), None);
+        }
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_guard_drop_blocks_same_key_ref_acquire_until_da_release_decision_finishes() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-ref-release-atomic");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            vec![],
+            sync_engine,
+        );
+        let peer_a = "10.9.0.7:19111";
+        let peer_a_same_key = "10.9.0.7:29111";
+
+        {
+            let mut da_relay = shared.da_relay.lock().unwrap();
+            da_relay
+                .test_stage_incomplete_da_chunk(peer_a, [87; 32], 0, b"atomic-release", 29)
+                .unwrap();
+        }
+
+        let guard_a = register_test_peer(&shared, peer_a);
+        let da_relay_guard = shared.da_relay.lock().unwrap();
+        let drop_handle = thread::spawn(move || drop(guard_a));
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            !shared
+                .peer_manager
+                .snapshot()
+                .iter()
+                .any(|state| state.addr == peer_a)
+        });
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            matches!(
+                shared.peer_quota_locks.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            )
+        });
+
+        let (pending_ready_tx, pending_ready_rx) = std::sync::mpsc::channel();
+        let pending_shared = shared.clone();
+        let pending_addr = peer_a_same_key.to_string();
+        let pending_handle = thread::spawn(move || {
+            let pending_lock =
+                PeerQuotaLockHandle::acquire(&pending_shared.peer_quota_locks, &pending_addr);
+            pending_ready_tx.send(()).expect("signal pending ref");
+            let _pending_guard = pending_lock.lock();
+        });
+        assert!(
+            pending_ready_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "new same-key ref must not publish between no-queued check and DA release"
+        );
+
+        drop(da_relay_guard);
+        drop_handle.join().expect("drop old peer");
+        pending_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("pending ref after cleanup releases map lock");
+        pending_handle.join().expect("pending quota ref");
+        {
+            let da_relay = shared.da_relay.lock().unwrap();
+            assert_eq!(da_relay.test_record_summary([87; 32]), None);
         }
         fs::remove_dir_all(dir).expect("cleanup");
     }
@@ -3003,6 +3276,68 @@ mod tests {
 
         barrier.wait();
         super::join_all_service_workers(&shared);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn outbound_in_flight_marker_survives_quota_lock_wait_until_registration() {
+        let (sync_engine, dir) = test_engine("rubin-node-inflight-quota-wait");
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(1);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), vec![], sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let dial_addr = listener.local_addr().expect("listener addr").to_string();
+
+        lock_in_flight_dials(&shared).insert(dial_addr.clone());
+        let blocking_lock = PeerQuotaLockHandle::acquire(&shared.peer_quota_locks, &dial_addr);
+        let blocking_guard = blocking_lock.lock();
+        let handler_shared = shared.clone();
+        let handler_addr = dial_addr.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            super::handle_peer(stream, Some(handler_addr), handler_shared)
+        });
+
+        let stream = TcpStream::connect(&dial_addr).expect("connect service");
+        let local = local_version(0).expect("local version");
+        let chain_id = local.chain_id;
+        let genesis_hash = local.genesis_hash;
+        let client_session =
+            perform_version_handshake(stream, runtime_cfg, local, chain_id, genesis_hash)
+                .expect("client handshake");
+
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            peer_quota_ref_count(&shared, &dial_addr) >= 2
+        });
+        assert!(
+            lock_in_flight_dials(&shared).contains(&dial_addr),
+            "outbound marker must remain while registration is queued on quota lock"
+        );
+        assert!(
+            !shared
+                .peer_manager
+                .snapshot()
+                .iter()
+                .any(|peer| peer.addr == dial_addr),
+            "peer must not be visible before quota-locked registration completes"
+        );
+
+        drop(blocking_guard);
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            shared
+                .peer_manager
+                .snapshot()
+                .iter()
+                .any(|peer| peer.addr == dial_addr)
+        });
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            !lock_in_flight_dials(&shared).contains(&dial_addr)
+        });
+
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(client_session);
+        let _ = handler.join().expect("handler thread");
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
