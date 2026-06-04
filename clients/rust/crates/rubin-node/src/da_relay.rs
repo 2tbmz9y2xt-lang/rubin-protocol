@@ -102,6 +102,25 @@ struct DaRelayTtlExpiryProjection {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PeerQuotaKey(String);
 
+/// Caller-owned snapshot of one relay-complete DA set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompleteDaSetCandidate {
+    pub da_id: [u8; 32],
+    pub payload_bytes: u64,
+    pub commit_tx: Vec<u8>,
+    pub chunks: Vec<CompleteDaSetChunkCandidate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompleteDaSetChunkCandidate {
+    pub index: u16,
+    pub tx: Vec<u8>,
+}
+
+pub trait CompleteDaSetProvider {
+    fn complete_da_set_candidates(&self, max_payload_bytes: u64) -> Vec<CompleteDaSetCandidate>;
+}
+
 /// Foundation container; future mutation paths need exclusive access or owner-side synchronization.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaRelayState {
@@ -377,6 +396,33 @@ impl DaRelaySetRecord {
             received_time: self.received_time,
         })
     }
+
+    fn complete_da_set_candidate(&self) -> Option<CompleteDaSetCandidate> {
+        if self.state != DaRelaySetState::CompleteSet {
+            return None;
+        }
+        let commit = self.commit.as_ref()?;
+        if commit.chunk_count == 0 || commit.tx_bytes.is_empty() {
+            return None;
+        }
+        let mut chunks = Vec::with_capacity(usize::from(commit.chunk_count));
+        for index in 0..commit.chunk_count {
+            let chunk = self.chunks.get(&index)?;
+            if chunk.tx_bytes.is_empty() {
+                return None;
+            }
+            chunks.push(CompleteDaSetChunkCandidate {
+                index,
+                tx: chunk.tx_bytes.as_ref().to_vec(),
+            });
+        }
+        Some(CompleteDaSetCandidate {
+            da_id: self.da_id,
+            payload_bytes: self.payload_bytes,
+            commit_tx: commit.tx_bytes.as_ref().to_vec(),
+            chunks,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -562,6 +608,34 @@ impl DaRelayState {
                 payload_bytes += candidate.payload_bytes;
                 Some(candidate)
             })
+    }
+
+    pub fn complete_da_set_candidates(
+        &self,
+        max_payload_bytes: u64,
+    ) -> Vec<CompleteDaSetCandidate> {
+        if max_payload_bytes == 0 {
+            return Vec::new();
+        }
+        let mut candidates = Vec::new();
+        let mut payload_bytes = 0u64;
+        for record in self.sets_by_da_id.values() {
+            if record.state != DaRelaySetState::CompleteSet {
+                continue;
+            }
+            let Some(next_payload_bytes) = payload_bytes.checked_add(record.payload_bytes) else {
+                continue;
+            };
+            if next_payload_bytes > max_payload_bytes {
+                continue;
+            }
+            let Some(candidate) = record.complete_da_set_candidate() else {
+                continue;
+            };
+            candidates.push(candidate);
+            payload_bytes = next_payload_bytes;
+        }
+        candidates
     }
 
     pub(crate) fn advance_orphan_ttl(&mut self) -> DaRelayResult<Vec<[u8; 32]>> {
@@ -955,6 +1029,13 @@ impl DaRelayState {
         }
     }
 }
+
+impl CompleteDaSetProvider for DaRelayState {
+    fn complete_da_set_candidates(&self, max_payload_bytes: u64) -> Vec<CompleteDaSetCandidate> {
+        DaRelayState::complete_da_set_candidates(self, max_payload_bytes)
+    }
+}
+
 fn validate_da_chunk(chunk: &DaRelayChunk) -> DaRelayResult {
     if u64::from(chunk.chunk_index) >= MAX_DA_CHUNK_COUNT {
         return Err(DaRelayError::ChunkIndexOutOfRange);
@@ -1522,6 +1603,104 @@ mod tests {
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([22; 32], 0, b"bad", 3)).unwrap(); assert_eq!(state.stage_incomplete_da_commit(peer, commit([22; 32], &[b"good"], 1)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[22; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert!(record.chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([22; 32], 0, b"good", 4)).unwrap(); assert_eq!(state.sets_by_da_id[&[22; 32]].state, DaRelaySetState::CompleteSet);
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_commit(peer, commit([23; 32], &[b"aa", b"bb"], 1)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([23; 32], 0, b"aa", 2)).unwrap(); assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([23; 32], 1, b"xx", 2)), Err(PayloadCommitmentMismatch)); let record = &state.sets_by_da_id[&[23; 32]]; assert_eq!(record.state, DaRelaySetState::StagedCommit); assert!(record.chunks.contains_key(&0) && !record.chunks.contains_key(&1)); assert!(record.replaceable_chunks.is_empty()); assert_eq!(state.pinned_payload_bytes, 0); state.stage_incomplete_da_chunk(peer, chunk([23; 32], 1, b"bb", 2)).unwrap(); assert_eq!(state.sets_by_da_id[&[23; 32]].state, DaRelaySetState::CompleteSet);
         let caps = DaRelayCaps { pinned_payload_bytes: 1, ..DaRelayCaps::default() }; let mut state = DaRelayState::new(caps).unwrap(); state.stage_incomplete_da_commit(peer, commit([24; 32], &[b"aa"], 1)).unwrap(); let before = state.clone(); assert_eq!(state.stage_incomplete_da_chunk(peer, chunk([24; 32], 0, b"aa", 2)), Err(AccountingCapExceeded)); assert_eq!(state, before);
+    }
+
+    #[test]
+    fn complete_da_set_provider_returns_complete_owned_ordered_snapshots() {
+        let peer = "peer-a:8333";
+        let pk = || PeerQuotaKey::from_peer_addr(peer);
+        let commit = |da_id, payloads: &[&[u8]], tx_bytes: &[u8]| DaRelayCommit {
+            da_id,
+            payload_commitment: payload_commitment(payloads),
+            peer_quota_key: pk(),
+            chunk_count: payloads.len() as u16,
+            wire_bytes: tx_bytes.len().max(1) as u64,
+            tx_bytes: Arc::from(tx_bytes),
+        };
+        let chunk = |da_id, index, payload: &[u8], tx_bytes: &[u8]| DaRelayChunk {
+            da_id,
+            chunk_hash: sha3_256(payload),
+            peer_quota_key: pk(),
+            chunk_index: index,
+            payload: Arc::from(payload),
+            wire_bytes: payload.len() as u64,
+            tx_bytes: Arc::from(tx_bytes),
+        };
+        let early_payload_0: &[u8] = b"early-0";
+        let early_payload_1: &[u8] = b"early-1";
+        let late_payload: &[u8] = b"late";
+        let early_id = [30; 32];
+        let staged_id = [32; 32];
+        let late_id = [33; 32];
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+
+        let empty = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        assert!(empty.complete_da_set_candidates(1).is_empty());
+        state
+            .stage_incomplete_da_chunk(peer, chunk([29; 32], 0, b"orphan", b"orphan-chunk-tx"))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(peer, commit(staged_id, &[b"staged"], b"staged-commit"))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(peer, commit(late_id, &[late_payload], b"commit-late"))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer, chunk(late_id, 0, late_payload, b"chunk-late"))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(
+                peer,
+                commit(
+                    early_id,
+                    &[early_payload_0, early_payload_1],
+                    b"commit-early",
+                ),
+            )
+            .unwrap();
+        for (index, payload, tx) in [
+            (1, early_payload_1, b"chunk-early-1".as_slice()),
+            (0, early_payload_0, b"chunk-early-0".as_slice()),
+        ] {
+            state
+                .stage_incomplete_da_chunk(peer, chunk(early_id, index, payload, tx))
+                .unwrap();
+        }
+
+        let mut candidates = CompleteDaSetProvider::complete_da_set_candidates(&state, u64::MAX);
+        assert_eq!(
+            candidates.iter().map(|c| c.da_id).collect::<Vec<_>>(),
+            vec![early_id, late_id]
+        );
+        assert_eq!(
+            candidates[0].payload_bytes,
+            (early_payload_0.len() + early_payload_1.len()) as u64
+        );
+        assert_eq!(candidates[0].commit_tx, b"commit-early");
+        assert_eq!(candidates[0].chunks[0].index, 0);
+        assert_eq!(candidates[0].chunks[0].tx, b"chunk-early-0");
+        assert_eq!(candidates[0].chunks[1].index, 1);
+        assert_eq!(candidates[0].chunks[1].tx, b"chunk-early-1");
+
+        candidates[0].commit_tx[0] = b'X';
+        candidates[0].chunks[0].tx[0] = b'Y';
+        let again = state.complete_da_set_candidates(u64::MAX);
+        assert_eq!(again[0].commit_tx, b"commit-early");
+        assert_eq!(again[0].chunks[0].tx, b"chunk-early-0");
+
+        let ids_for = |budget| {
+            state
+                .complete_da_set_candidates(budget)
+                .into_iter()
+                .map(|candidate| candidate.da_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids_for((early_payload_0.len() + early_payload_1.len()) as u64),
+            vec![early_id]
+        );
+        assert_eq!(ids_for(late_payload.len() as u64), vec![late_id]);
+        assert!(state.complete_da_set_candidates(0).is_empty());
     }
 
     #[test]
