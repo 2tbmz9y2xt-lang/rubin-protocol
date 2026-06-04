@@ -1,12 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-
-use std::collections::HashMap;
 
 use crate::da_relay::{DaRelayCaps, DaRelayState, PeerQuotaKey};
 use crate::p2p_runtime::{
@@ -17,6 +15,8 @@ use crate::sync_reorg::TxPoolCleanupPlan;
 use crate::tx_relay::{PeerOutbox, TxRelayState};
 use crate::{SyncEngine, TxPool};
 
+type PeerQuotaLockMap = BTreeMap<PeerQuotaKey, Arc<PeerQuotaLockEntry>>;
+type PeerQuotaLocks = Arc<Mutex<PeerQuotaLockMap>>;
 const ACCEPT_LOOP_SLEEP: Duration = Duration::from_millis(100);
 const RECONNECT_LOOP_SLEEP: Duration = Duration::from_millis(250);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
@@ -63,6 +63,7 @@ struct SharedServiceState {
     worker_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     peer_manager: Arc<PeerManager>,
     peer_lifecycle: Arc<Mutex<()>>,
+    peer_quota_locks: PeerQuotaLocks,
     sync_engine: Arc<Mutex<SyncEngine>>,
     tx_pool: Arc<Mutex<TxPool>>,
     da_relay: Arc<Mutex<DaRelayState>>,
@@ -167,6 +168,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         worker_handles: Arc::new(Mutex::new(Vec::new())),
         peer_manager: cfg.peer_manager,
         peer_lifecycle: Arc::new(Mutex::new(())),
+        peer_quota_locks: Arc::new(Mutex::new(BTreeMap::new())),
         sync_engine: cfg.sync_engine,
         tx_pool: cfg.tx_pool,
         da_relay,
@@ -818,6 +820,8 @@ fn handle_peer(
         peer_state.addr = addr.clone();
     }
     let peer_addr = peer_state.addr.clone();
+    let peer_quota_lock = PeerQuotaLockHandle::acquire(&shared.peer_quota_locks, &peer_addr);
+    let peer_quota_guard = peer_quota_lock.lock();
 
     // Register before peer visibility so local block announce cannot snapshot
     // a connected peer without an outbox. Declaration order makes it drop last.
@@ -830,7 +834,7 @@ fn handle_peer(
             .add_peer(peer_state)
             .map_err(|err| format!("peer register: {err}"))?;
     }
-
+    drop(peer_quota_guard);
     // Declaration order is critical: Rust drops locals in REVERSE
     // declaration order, so guards declared earlier outlive guards
     // declared later. We need the alias to stay registered until AFTER
@@ -849,6 +853,7 @@ fn handle_peer(
 
     let _peer_guard = PeerGuard {
         peer_lifecycle: Arc::clone(&shared.peer_lifecycle),
+        peer_quota_locks: Arc::clone(&shared.peer_quota_locks),
         peer_manager: Arc::clone(&shared.peer_manager),
         da_relay: Arc::clone(&shared.da_relay),
         addr: peer_addr.clone(),
@@ -1072,6 +1077,7 @@ fn service_local_version(
 
 struct PeerGuard {
     peer_lifecycle: Arc<Mutex<()>>,
+    peer_quota_locks: PeerQuotaLocks,
     peer_manager: Arc<PeerManager>,
     da_relay: Arc<Mutex<DaRelayState>>,
     addr: String,
@@ -1079,15 +1085,81 @@ struct PeerGuard {
 
 impl Drop for PeerGuard {
     fn drop(&mut self) {
-        let _peer_lifecycle_guard = lock_peer_lifecycle(&self.peer_lifecycle);
-        if self.peer_manager.remove_peer(&self.addr) {
+        let peer_quota_lock = PeerQuotaLockHandle::acquire(&self.peer_quota_locks, &self.addr);
+        let _peer_quota_guard = peer_quota_lock.lock();
+        let removed = {
+            let _peer_lifecycle_guard = lock_peer_lifecycle(&self.peer_lifecycle);
+            self.peer_manager.remove_peer(&self.addr)
+        };
+        if removed {
             release_da_quota_if_inactive(&self.peer_manager, &self.da_relay, &self.addr);
+        }
+    }
+}
+
+#[derive(Default)]
+struct PeerQuotaLockEntry {
+    refs: AtomicUsize,
+    lock: Mutex<()>,
+}
+
+struct PeerQuotaLockHandle {
+    peer_quota_locks: PeerQuotaLocks,
+    quota_key: PeerQuotaKey,
+    entry: Arc<PeerQuotaLockEntry>,
+}
+
+impl PeerQuotaLockHandle {
+    fn acquire(peer_quota_locks: &PeerQuotaLocks, addr: &str) -> Self {
+        let quota_key = PeerQuotaKey::from_peer_addr(addr);
+        let entry = {
+            let mut locks = lock_peer_quota_locks(peer_quota_locks);
+            Arc::clone(
+                locks
+                    .entry(quota_key.clone())
+                    .or_insert_with(|| Arc::new(PeerQuotaLockEntry::default())),
+            )
+        };
+        entry.refs.fetch_add(1, Ordering::AcqRel);
+        Self {
+            peer_quota_locks: Arc::clone(peer_quota_locks),
+            quota_key,
+            entry,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.entry
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Drop for PeerQuotaLockHandle {
+    fn drop(&mut self) {
+        if self.entry.refs.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let mut locks = lock_peer_quota_locks(&self.peer_quota_locks);
+            if locks
+                .get(&self.quota_key)
+                .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry))
+            {
+                locks.remove(&self.quota_key);
+            }
         }
     }
 }
 
 fn lock_peer_lifecycle(peer_lifecycle: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
     peer_lifecycle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_peer_quota_locks(
+    peer_quota_locks: &Mutex<PeerQuotaLockMap>,
+) -> std::sync::MutexGuard<'_, PeerQuotaLockMap> {
+    peer_quota_locks
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -1201,7 +1273,7 @@ mod tests {
         maybe_apply_tx_pool_cleanup, outbound_connect_timeout, reconnect_missing_bootstrap_peers,
         register_peer_alias, register_peer_outbox, should_skip_outbound_dial,
         start_node_p2p_service, wait_for_service_shutdown, NodeP2PServiceConfig, PeerAliasGuard,
-        PeerGuard, SharedServiceState,
+        PeerGuard, PeerQuotaLockHandle, SharedServiceState,
     };
     use crate::genesis::{devnet_genesis_block_bytes, devnet_genesis_chain_id};
     use crate::interop::local_version;
@@ -1271,6 +1343,7 @@ mod tests {
             worker_handles: Arc::new(Mutex::new(Vec::new())),
             peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
             peer_lifecycle: Arc::new(Mutex::new(())),
+            peer_quota_locks: Arc::new(Mutex::new(Default::default())),
             sync_engine,
             tx_pool: Arc::new(Mutex::new(TxPool::new())),
             da_relay: Arc::new(Mutex::new(
@@ -1300,6 +1373,7 @@ mod tests {
             .expect("register test peer");
         PeerGuard {
             peer_lifecycle: Arc::clone(&shared.peer_lifecycle),
+            peer_quota_locks: Arc::clone(&shared.peer_quota_locks),
             peer_manager: Arc::clone(&shared.peer_manager),
             da_relay: Arc::clone(&shared.da_relay),
             addr: addr.to_string(),
@@ -2582,6 +2656,74 @@ mod tests {
             let da_relay = shared.da_relay.lock().unwrap();
             assert_eq!(da_relay.test_record_summary([81; 32]), None);
         }
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_guard_drop_preserves_da_quota_for_pending_same_key_registration() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-pending-peer-release");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            vec![],
+            sync_engine,
+        );
+        let peer_a = "10.9.0.2:19111";
+
+        {
+            let mut da_relay = shared.da_relay.lock().unwrap();
+            da_relay
+                .test_stage_incomplete_da_chunk(peer_a, [82; 32], 0, b"pending-owned", 13)
+                .unwrap();
+        }
+
+        let guard_a = register_test_peer(&shared, peer_a);
+        let quota_lock = PeerQuotaLockHandle::acquire(&shared.peer_quota_locks, "10.9.0.2:29111");
+        let quota_guard = quota_lock.lock();
+        let drop_handle = thread::spawn(move || drop(guard_a));
+        let _guard_b = register_test_peer(&shared, "10.9.0.2:29111");
+        drop(quota_guard);
+        drop_handle.join().expect("drop old same-key peer");
+        {
+            let da_relay = shared.da_relay.lock().unwrap();
+            assert_eq!(da_relay.test_record_summary([82; 32]), Some((false, 1, 13)));
+        }
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_guard_drop_does_not_hold_lifecycle_while_releasing_da_quota() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-release-outside-lifecycle");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            vec![],
+            sync_engine,
+        );
+        let peer = "10.9.0.4:19111";
+
+        {
+            let mut da_relay = shared.da_relay.lock().unwrap();
+            da_relay
+                .test_stage_incomplete_da_chunk(peer, [84; 32], 0, b"blocked-cleanup", 17)
+                .unwrap();
+        }
+        let peer_guard = register_test_peer(&shared, peer);
+        let da_relay_guard = shared.da_relay.lock().unwrap();
+        let drop_handle = thread::spawn(move || drop(peer_guard));
+
+        wait_until(Instant::now() + Duration::from_secs(2), || {
+            !shared
+                .peer_manager
+                .snapshot()
+                .iter()
+                .any(|state| state.addr == peer)
+        });
+        assert!(
+            shared.peer_lifecycle.try_lock().is_ok(),
+            "DA quota cleanup must not block peer lifecycle registration/removal"
+        );
+
+        drop(da_relay_guard);
+        drop_handle.join().expect("drop peer guard");
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
