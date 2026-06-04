@@ -3371,16 +3371,33 @@ mod tests {
     }
 
     #[test]
-    #[rustfmt::skip]
     fn mine_next_announces_mined_block_on_success() {
         let (mut state, dir) = build_state_with_live_mining(true);
         let announced = Arc::new(Mutex::new(None::<Vec<u8>>));
         let hook_lock_order = Arc::new(Mutex::new((false, false, false, false)));
         let announced_clone = Arc::clone(&announced);
-        let accepted_order = Arc::clone(&hook_lock_order); let accepted_lock = Arc::clone(&state.rpc_op_lock); let accepted_engine = Arc::clone(&state.sync_engine); let accepted_pool = Arc::clone(&state.tx_pool);
-        state.set_accepted_block_hook(Arc::new(move |_| { let rpc_op_held = accepted_lock.try_lock().is_err(); let engine_free = accepted_engine.try_lock().is_ok(); let pool_free = accepted_pool.try_lock().is_ok(); *accepted_order.lock().expect("order lock") = (rpc_op_held, false, engine_free, pool_free); Err("accepted hook test error".to_string()) }));
-        let announce_order = Arc::clone(&hook_lock_order); let announce_lock = Arc::clone(&state.rpc_op_lock);
-        state.announce_block = Some(Arc::new(move |block_bytes: &[u8]| { *announced_clone.lock().expect("announce lock") = Some(block_bytes.to_vec()); announce_order.lock().expect("order lock").1 = announce_lock.try_lock().is_ok(); Ok(()) }));
+        let accepted_order = Arc::clone(&hook_lock_order);
+        let accepted_lock = Arc::clone(&state.rpc_op_lock);
+        let accepted_engine = Arc::clone(&state.sync_engine);
+        let accepted_pool = Arc::clone(&state.tx_pool);
+        state.set_accepted_block_hook(Arc::new(move |_| {
+            let rpc_op_held = accepted_lock.try_lock().is_err();
+            let engine_free = accepted_engine.try_lock().is_ok();
+            let pool_free = accepted_pool.try_lock().is_ok();
+            // Proof assertion: capture accepted-hook lock state before announce runs.
+            let mut order = accepted_order.lock().expect("order lock");
+            order.0 = rpc_op_held;
+            order.2 = engine_free;
+            order.3 = pool_free;
+            Err("accepted hook test error".to_string())
+        }));
+        let announce_order = Arc::clone(&hook_lock_order);
+        let announce_lock = Arc::clone(&state.rpc_op_lock);
+        state.announce_block = Some(Arc::new(move |block_bytes: &[u8]| {
+            *announced_clone.lock().expect("announce lock") = Some(block_bytes.to_vec());
+            announce_order.lock().expect("order lock").1 = announce_lock.try_lock().is_ok();
+            Ok(())
+        }));
 
         let response = post_mine_next(&state);
 
@@ -3403,7 +3420,9 @@ mod tests {
         let parsed = parse_block_bytes(&block_bytes).expect("parse announced block");
         let announced_hash = block_hash(&parsed.header_bytes).expect("announced block hash");
         assert_eq!(hex::encode(announced_hash), expected_hash);
-        assert_eq!(*hook_lock_order.lock().expect("order lock"), (true, true, true, true));
+        // Proof assertion: accepted hook sees RPC held; announce hook sees it released.
+        let observed_order = *hook_lock_order.lock().expect("order lock");
+        assert_eq!(observed_order, (true, true, true, true));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

@@ -1420,11 +1420,33 @@ mod tests {
         local_da_test_context_with_peers(&[])
     }
 
-    #[rustfmt::skip]
     fn local_da_test_context_with_peers(addrs: &[&str]) -> LocalDaTestContext {
-        let peers = rubin_node::PeerManager::new(rubin_node::default_peer_runtime_config("devnet", 8)); let outboxes = Mutex::new(HashMap::new());
-        for addr in addrs { peers.add_peer(rubin_node::p2p_runtime::PeerState { addr: (*addr).to_string(), ..Default::default() }).expect("add peer"); outboxes.lock().unwrap().insert((*addr).to_string(), PeerOutbox::default()); }
-        LocalDaTestContext { relay: TxRelayState::new(), peers, outboxes, da_relay: Arc::new(Mutex::new(DaRelayState::new(DaRelayCaps::default()).expect("valid DA relay caps"))), ttl_seen: rubin_node::tx_seen::BoundedHashSet::new(rubin_node::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY) }
+        let peers =
+            rubin_node::PeerManager::new(rubin_node::default_peer_runtime_config("devnet", 8));
+        let outboxes = Mutex::new(HashMap::new());
+        for addr in addrs {
+            peers
+                .add_peer(rubin_node::p2p_runtime::PeerState {
+                    addr: (*addr).to_string(),
+                    ..Default::default()
+                })
+                .expect("add peer");
+            outboxes
+                .lock()
+                .unwrap()
+                .insert((*addr).to_string(), PeerOutbox::default());
+        }
+        LocalDaTestContext {
+            relay: TxRelayState::new(),
+            peers,
+            outboxes,
+            da_relay: Arc::new(Mutex::new(
+                DaRelayState::new(DaRelayCaps::default()).expect("valid DA relay caps"),
+            )),
+            ttl_seen: rubin_node::tx_seen::BoundedHashSet::new(
+                rubin_node::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY,
+            ),
+        }
     }
 
     #[test]
@@ -1461,13 +1483,69 @@ mod tests {
     }
 
     #[test]
-    #[rustfmt::skip]
     fn local_accepted_block_advances_da_ttl_without_broadcast_coupling() {
-        let da_id = [0x51; 32]; let chunk_tx = local_da_chunk_tx(da_id, b"local-block-ttl");
-        let ctx = local_da_test_context_with_peers(&["peer:8333"]); ctx.announce(&chunk_tx).expect("stage local DA orphan");
-        advance_da_ttl_for_block([1; 32], &ctx.da_relay, &ctx.ttl_seen).expect("local block accepted"); advance_da_ttl_for_block([1; 32], &ctx.da_relay, &ctx.ttl_seen).expect("duplicate accepted block"); advance_da_ttl_for_block([2; 32], &ctx.da_relay, &ctx.ttl_seen).expect("second accepted block"); assert!(!ctx.da_relay.lock().unwrap().is_empty()); advance_da_ttl_for_block([3; 32], &ctx.da_relay, &ctx.ttl_seen).expect("third accepted block"); assert!(ctx.da_relay.lock().unwrap().is_empty());
-        let ctx = local_da_test_context_with_peers(&["healthy:8333"]); ctx.announce(&chunk_tx).expect("stage failed-announce DA orphan"); ctx.peers.add_peer(rubin_node::p2p_runtime::PeerState { addr: "missing:8333".to_string(), ..Default::default() }).expect("add missing peer"); let failed = rubin_node::devnet_genesis_block_bytes(); let failed_hash = rubin_consensus::block_hash(&rubin_consensus::parse_block_bytes(&failed).unwrap().header_bytes).unwrap();
-        advance_da_ttl_for_block(failed_hash, &ctx.da_relay, &ctx.ttl_seen).expect("failed announce block accepted"); assert!(rubin_node::tx_relay::announce_block(&failed, &ctx.relay, &ctx.peers, "local:8333", &ctx.outboxes).is_err()); assert!(rubin_node::tx_relay::announce_block(&failed, &ctx.relay, &ctx.peers, "local:8333", &ctx.outboxes).is_err()); assert!(!ctx.relay.block_seen.has(&failed_hash)); assert!(!ctx.da_relay.lock().unwrap().is_empty()); advance_da_ttl_for_block([21; 32], &ctx.da_relay, &ctx.ttl_seen).expect("second failed block accepted"); assert!(!ctx.da_relay.lock().unwrap().is_empty()); advance_da_ttl_for_block([22; 32], &ctx.da_relay, &ctx.ttl_seen).expect("third failed block accepted"); assert!(ctx.da_relay.lock().unwrap().is_empty());
+        let da_id = [0x51; 32];
+        let chunk_tx = local_da_chunk_tx(da_id, b"local-block-ttl");
+
+        let ctx = local_da_test_context_with_peers(&["peer:8333"]);
+        ctx.announce(&chunk_tx).expect("stage local DA orphan");
+        for (hash, label) in [
+            ([1; 32], "local block accepted"),
+            ([1; 32], "duplicate accepted block"),
+            ([2; 32], "second accepted block"),
+        ] {
+            advance_da_ttl_for_block(hash, &ctx.da_relay, &ctx.ttl_seen).expect(label);
+        }
+        assert!(!ctx.da_relay.lock().unwrap().is_empty());
+        advance_da_ttl_for_block([3; 32], &ctx.da_relay, &ctx.ttl_seen)
+            .expect("third accepted block");
+        assert!(ctx.da_relay.lock().unwrap().is_empty());
+
+        let ctx = local_da_test_context_with_peers(&["healthy:8333"]);
+        ctx.announce(&chunk_tx)
+            .expect("stage failed-announce DA orphan");
+        ctx.peers
+            .add_peer(rubin_node::p2p_runtime::PeerState {
+                addr: "missing:8333".to_string(),
+                ..Default::default()
+            })
+            .expect("add missing peer");
+        let failed = rubin_node::devnet_genesis_block_bytes();
+        let failed_hash = rubin_consensus::block_hash(
+            &rubin_consensus::parse_block_bytes(&failed)
+                .unwrap()
+                .header_bytes,
+        )
+        .unwrap();
+
+        advance_da_ttl_for_block(failed_hash, &ctx.da_relay, &ctx.ttl_seen)
+            .expect("failed announce block accepted");
+        assert!(rubin_node::tx_relay::announce_block(
+            &failed,
+            &ctx.relay,
+            &ctx.peers,
+            "local:8333",
+            &ctx.outboxes
+        )
+        .is_err());
+        assert!(rubin_node::tx_relay::announce_block(
+            &failed,
+            &ctx.relay,
+            &ctx.peers,
+            "local:8333",
+            &ctx.outboxes
+        )
+        .is_err());
+        assert!(!ctx.relay.block_seen.has(&failed_hash));
+        assert!(!ctx.da_relay.lock().unwrap().is_empty());
+        for (hash, label, remains) in [
+            ([21; 32], "second failed block accepted", true),
+            ([22; 32], "third failed block accepted", false),
+        ] {
+            advance_da_ttl_for_block(hash, &ctx.da_relay, &ctx.ttl_seen).expect(label);
+            assert_eq!(!ctx.da_relay.lock().unwrap().is_empty(), remains);
+        }
+        assert!(ctx.da_relay.lock().unwrap().is_empty());
     }
 
     /// RUB-13 / GitHub #1157: stdout helper for tests that parse the

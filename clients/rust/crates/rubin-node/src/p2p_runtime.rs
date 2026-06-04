@@ -3496,9 +3496,40 @@ mod tests {
         let admitted_da_id = [0xD1; 32]; let conflicting_da_id = [0xD2; 32]; let bad_da_id = [0xD3; 32]; let admitted = build(7, admitted_da_id, b"admitted da chunk", true); let conflicting = build(8, conflicting_da_id, b"conflicting da chunk", true); let bad = build(9, bad_da_id, b"bad da chunk", false); (state, admitted, conflicting, bad, admitted_da_id, conflicting_da_id, bad_da_id)
     }
 
-    #[rustfmt::skip]
     fn relay_da_chunk_tx(da_id: [u8; 32], payload: &[u8]) -> Vec<u8> {
-        rubin_consensus::marshal_tx(&rubin_consensus::Tx { version: rubin_consensus::constants::TX_WIRE_VERSION, tx_kind: 0x02, tx_nonce: 11, inputs: Vec::new(), outputs: Vec::new(), locktime: 0, da_commit_core: None, da_chunk_core: Some(rubin_consensus::DaChunkCore { da_id, chunk_index: 0, chunk_hash: Sha3_256::digest(payload).into() }), witness: Vec::new(), da_payload: payload.to_vec() }).expect("marshal DA chunk tx")
+        let tx = rubin_consensus::Tx {
+            version: rubin_consensus::constants::TX_WIRE_VERSION,
+            tx_kind: 0x02,
+            tx_nonce: 11,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: Some(rubin_consensus::DaChunkCore {
+                da_id,
+                chunk_index: 0,
+                chunk_hash: Sha3_256::digest(payload).into(),
+            }),
+            witness: Vec::new(),
+            da_payload: payload.to_vec(),
+        };
+        rubin_consensus::marshal_tx(&tx).expect("marshal DA chunk tx")
+    }
+
+    fn collect_block_message(
+        session: &mut PeerSession,
+        engine: &mut SyncEngine,
+        relay_ctx: &PeerRelayContext<'_>,
+        payload: Vec<u8>,
+    ) -> io::Result<LiveMessageOutcome> {
+        session.collect_live_responses(
+            WireMessage {
+                command: MESSAGE_BLOCK.to_string(),
+                payload,
+            },
+            engine,
+            Some(relay_ctx),
+        )
     }
 
     #[derive(Deserialize)]
@@ -5466,7 +5497,6 @@ mod tests {
     }
 
     #[test]
-    #[rustfmt::skip]
     fn handle_block_surfaces_invalid_orphan_after_parent_arrives() {
         let _guard = orphan_pool_metrics_test_guard();
         reset_orphan_pool_metrics_for_test();
@@ -5492,9 +5522,31 @@ mod tests {
             );
             block2[36] ^= 0xff; // corrupt merkle root while keeping the block parseable
             let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
-            let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 8)); let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); let canonical_tx_pool = Mutex::new(TxPool::new()); let da_relay = Mutex::new(crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default()).expect("valid DA relay caps"));
-            let da_id = [0x62; 32]; da_relay.lock().unwrap().stage_relay_da_tx_bytes("peer:8333", relay_da_chunk_tx(da_id, b"peer-partial-error-ttl")).expect("stage DA orphan");
-            let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "peer:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay };
+            let relay_state = crate::tx_relay::TxRelayState::new();
+            let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 8));
+            let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> =
+                Mutex::new(HashMap::new());
+            let canonical_tx_pool = Mutex::new(TxPool::new());
+            let da_relay = Mutex::new(
+                crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
+                    .expect("valid DA relay caps"),
+            );
+            let da_id = [0x62; 32];
+            let da_tx = relay_da_chunk_tx(da_id, b"peer-partial-error-ttl");
+            da_relay
+                .lock()
+                .unwrap()
+                .stage_relay_da_tx_bytes("peer:8333", da_tx)
+                .expect("stage DA orphan");
+            let relay_ctx = PeerRelayContext {
+                relay_state: &relay_state,
+                peer_manager: &peer_manager,
+                local_addr: "local:8333",
+                peer_registered_addr: "peer:8333",
+                peer_writers: &peer_outboxes,
+                tx_pool: &canonical_tx_pool,
+                da_relay: &da_relay,
+            };
 
             session
                 .handle_block(&block2, &mut engine)
@@ -5513,7 +5565,8 @@ mod tests {
                     .expect("invalid orphan must not persist before parent"),
                 "invalid orphan should remain memory-only until parent arrives"
             );
-            let err = session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block1.clone() }, &mut engine, Some(&relay_ctx)).expect_err("invalid orphan should surface after parent arrives");
+            let err = collect_block_message(&mut session, &mut engine, &relay_ctx, block1.clone())
+                .expect_err("invalid orphan should surface after parent arrives");
             let pending_cleanup = session.take_pending_tx_pool_cleanup();
 
             assert_eq!(session.orphans.len(), 0, "invalid orphan should be dropped");
@@ -5537,9 +5590,40 @@ mod tests {
                 session.take_pending_tx_pool_cleanup().is_empty(),
                 "pending cleanup should drain once observed"
             );
-            session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block1.clone() }, &mut engine, Some(&relay_ctx)).expect("duplicate parent dispatch");
-            let block3 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, genesis.header.timestamp + 3); let block3_hash = block_hash(&block3[..BLOCK_HEADER_BYTES]).expect("block3 hash"); session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block3 }, &mut engine, Some(&relay_ctx)).expect("accepted descendant dispatch"); assert!(da_relay.lock().unwrap().test_record_summary(da_id).is_some(), "duplicate parent must not consume DA orphan TTL"); let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1)); let block4 = coinbase_only_block_with_gen(3, subsidy1 + subsidy2, block3_hash, genesis.header.timestamp + 4); session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block4 }, &mut engine, Some(&relay_ctx)).expect("accepted descendant dispatch");
-            assert_eq!(da_relay.lock().unwrap().test_record_summary(da_id), None, "accepted parent must advance DA TTL even when later orphan resolution errors");
+            collect_block_message(&mut session, &mut engine, &relay_ctx, block1.clone())
+                .expect("duplicate parent dispatch");
+            let block3 = coinbase_only_block_with_gen(
+                2,
+                subsidy1,
+                block1_hash,
+                genesis.header.timestamp + 3,
+            );
+            let block3_hash = block_hash(&block3[..BLOCK_HEADER_BYTES]).expect("block3 hash");
+            collect_block_message(&mut session, &mut engine, &relay_ctx, block3)
+                .expect("accepted descendant dispatch");
+            assert!(
+                da_relay
+                    .lock()
+                    .unwrap()
+                    .test_record_summary(da_id)
+                    .is_some(),
+                "duplicate parent must not consume DA orphan TTL"
+            );
+
+            let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1));
+            let block4 = coinbase_only_block_with_gen(
+                3,
+                subsidy1 + subsidy2,
+                block3_hash,
+                genesis.header.timestamp + 4,
+            );
+            collect_block_message(&mut session, &mut engine, &relay_ctx, block4)
+                .expect("accepted descendant dispatch");
+            assert_eq!(
+                da_relay.lock().unwrap().test_record_summary(da_id),
+                None,
+                "accepted parent must advance DA TTL even when later orphan resolution errors"
+            );
             assert_eq!(
                 session.state().ban_score,
                 0,
