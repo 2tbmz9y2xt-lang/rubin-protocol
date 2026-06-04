@@ -673,11 +673,10 @@ mod tests {
 
     fn provider_shape_tx(tx_kind: u8, seed: &[u8]) -> Tx {
         let digest: [u8; 32] = Sha3_256::digest(seed).into();
-        let tx_nonce = u64::from_le_bytes(digest[..8].try_into().expect("digest prefix"));
         Tx {
             version: TX_WIRE_VERSION,
             tx_kind,
-            tx_nonce,
+            tx_nonce: u64::from_le_bytes(digest[..8].try_into().expect("digest prefix")),
             inputs: vec![TxInput {
                 prev_txid: digest,
                 prev_vout: 0,
@@ -766,9 +765,7 @@ mod tests {
         expect_bad(mutate_set(&base, |set| {
             set.chunks.pop();
         }));
-        expect_bad(mutate_set(&base, |set| {
-            set.chunks.swap(0, 1);
-        }));
+        expect_bad(mutate_set(&base, |set| set.chunks.swap(0, 1)));
         expect_bad(mutate_set(&base, |set| {
             set.chunks[0].tx = mutate_provider_tx(&set.chunks[0].tx, |tx| {
                 tx.da_chunk_core.as_mut().expect("chunk core").chunk_hash = [0xe1; 32];
