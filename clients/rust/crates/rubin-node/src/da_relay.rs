@@ -304,31 +304,28 @@ impl DaRelaySetRecord {
         if self.state == DaRelaySetState::CompleteSet || self.wire_bytes == 0 {
             return Ok((self.clone(), false));
         }
-        let mut updated = self.clone();
-        let mut changed = false;
-        if updated
+        let drop_commit = self
             .commit
             .as_ref()
-            .is_some_and(|commit| commit.wire_bytes != 0 && &commit.peer_quota_key == key)
-        {
-            updated.commit = None;
-            updated.replaceable_chunks.clear();
-            changed = true;
-        }
-        let indexes = updated
+            .is_some_and(|commit| commit.wire_bytes != 0 && &commit.peer_quota_key == key);
+        let indexes = self
             .chunks
             .iter()
             .filter_map(|(index, chunk)| {
                 (chunk.wire_bytes != 0 && &chunk.peer_quota_key == key).then_some(*index)
             })
             .collect::<Vec<_>>();
+        if !drop_commit && indexes.is_empty() {
+            return Ok((self.clone(), false));
+        }
+        let mut updated = self.clone();
+        if drop_commit {
+            updated.commit = None;
+            updated.replaceable_chunks.clear();
+        }
         for index in &indexes {
             updated.chunks.remove(index);
             updated.replaceable_chunks.remove(index);
-        }
-        changed |= !indexes.is_empty();
-        if !changed {
-            return Ok((self.clone(), false));
         }
         updated.payload_bytes = 0;
         if updated.commit.is_none() {
