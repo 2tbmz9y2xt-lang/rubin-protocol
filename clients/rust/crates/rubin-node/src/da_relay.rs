@@ -496,7 +496,7 @@ impl DaRelayState {
             })
     }
 
-    pub(crate) fn advance_orphan_ttl(&mut self) -> DaRelayResult<Vec<[u8; 32]>> {
+    pub fn advance_orphan_ttl(&mut self) -> DaRelayResult<Vec<[u8; 32]>> {
         let mut decrementing_da_ids = Vec::new();
         let mut expiring_records = Vec::new();
         for da_id in self.orphan_bytes_by_da_id.keys().copied() {

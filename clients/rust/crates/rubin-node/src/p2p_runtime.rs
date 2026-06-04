@@ -251,6 +251,12 @@ pub struct LiveMessageOutcome {
     pub tx_pool_cleanup: TxPoolCleanupPlan,
 }
 
+#[derive(Debug, Default)]
+struct RelayedBlockOutcome {
+    tx_pool_cleanup: TxPoolCleanupPlan,
+    accepted_blocks: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct CompactModeSnapshot {
     mode: u8,
@@ -743,18 +749,20 @@ impl PeerSession {
                 }
             }
             MESSAGE_BLOCK => {
-                let tx_pool_cleanup = self.handle_block(&msg.payload, sync_engine)?;
+                let block =
+                    self.handle_block_with_acceptance(&msg.payload, sync_engine, relay_ctx)?;
+                self.advance_da_orphan_ttl_for_accepted_blocks(relay_ctx, block.accepted_blocks);
                 Ok(LiveMessageOutcome {
                     responses: self
                         .prepare_block_request_if_behind(sync_engine)?
                         .into_iter()
                         .collect(),
-                    tx_pool_cleanup,
+                    tx_pool_cleanup: block.tx_pool_cleanup,
                 })
             }
             "cmpctblock" => self.handle_cmpctblock(&msg.payload, sync_engine, relay_ctx),
             MESSAGE_GETBLOCKTXN => self.handle_getblocktxn(&msg.payload, sync_engine),
-            MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine),
+            MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine, relay_ctx),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
                     let hash_checked = !skip_da(&msg.payload, ctx.relay_state, ctx.tx_pool);
@@ -978,6 +986,7 @@ impl PeerSession {
                 &result.transactions,
                 sync_engine,
                 !block.short_ids.is_empty(),
+                relay_ctx,
             );
         }
         self.request_missing_compact_transactions(block, block_hash, result)
@@ -1080,6 +1089,7 @@ impl PeerSession {
         &mut self,
         payload: &[u8],
         sync_engine: &mut SyncEngine,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
     ) -> io::Result<LiveMessageOutcome> {
         if !self.cfg.enable_compact_receive {
             return Ok(LiveMessageOutcome::default());
@@ -1151,7 +1161,14 @@ impl PeerSession {
                 return Err(err);
             }
         };
-        self.process_compact_transactions(req.block_hash, req.header, &txs, sync_engine, true)
+        self.process_compact_transactions(
+            req.block_hash,
+            req.header,
+            &txs,
+            sync_engine,
+            true,
+            relay_ctx,
+        )
     }
     fn process_compact_transactions(
         &mut self,
@@ -1160,6 +1177,7 @@ impl PeerSession {
         txs: &[Vec<u8>],
         sync_engine: &mut SyncEngine,
         fallback_on_apply_error: bool,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
     ) -> io::Result<LiveMessageOutcome> {
         let block_bytes = match compact_block_bytes(header, txs) {
             Ok(block_bytes) => block_bytes,
@@ -1167,15 +1185,16 @@ impl PeerSession {
                 return self.request_compact_full_block_fallback(expected_hash);
             }
         };
-        match self.handle_block(&block_bytes, sync_engine) {
-            Ok(tx_pool_cleanup) => {
+        match self.handle_block_with_acceptance(&block_bytes, sync_engine, relay_ctx) {
+            Ok(block) => {
+                self.advance_da_orphan_ttl_for_accepted_blocks(relay_ctx, block.accepted_blocks);
                 self.clear_compact_outstanding_request_for_block(expected_hash);
                 Ok(LiveMessageOutcome {
                     responses: self
                         .prepare_block_request_if_behind(sync_engine)?
                         .into_iter()
                         .collect(),
-                    tx_pool_cleanup,
+                    tx_pool_cleanup: block.tx_pool_cleanup,
                 })
             }
             Err(err) => {
@@ -1329,6 +1348,17 @@ impl PeerSession {
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
     ) -> io::Result<TxPoolCleanupPlan> {
+        Ok(self
+            .handle_block_with_acceptance(block_bytes, sync_engine, None)?
+            .tx_pool_cleanup)
+    }
+
+    fn handle_block_with_acceptance(
+        &mut self,
+        block_bytes: &[u8],
+        sync_engine: &mut SyncEngine,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
+    ) -> io::Result<RelayedBlockOutcome> {
         let parsed = parse_block_bytes(block_bytes).map_err(io::Error::other)?;
         let block_hash_bytes = block_hash(&parsed.header_bytes).map_err(io::Error::other)?;
         self.clear_compact_outstanding_request_for_block(block_hash_bytes);
@@ -1336,7 +1366,7 @@ impl PeerSession {
             .has_block(block_hash_bytes)
             .map_err(io::Error::other)?
         {
-            return Ok(TxPoolCleanupPlan::default());
+            return Ok(RelayedBlockOutcome::default());
         }
         if parsed.header.prev_block_hash != [0u8; 32]
             && !sync_engine
@@ -1348,19 +1378,28 @@ impl PeerSession {
                 parsed.header.prev_block_hash,
                 block_bytes,
                 sync_engine,
+                relay_ctx,
             );
         }
         match sync_engine.apply_block_with_reorg(block_bytes, None) {
             Ok(outcome) => {
                 sync_engine.record_best_known_height(outcome.summary.block_height);
                 let mut tx_pool_cleanup = outcome.tx_pool_cleanup;
-                if let Err(err) =
-                    self.resolve_orphans(block_hash_bytes, sync_engine, &mut tx_pool_cleanup)
-                {
+                let mut accepted_blocks = 1;
+                if let Err(err) = self.resolve_orphans(
+                    block_hash_bytes,
+                    sync_engine,
+                    &mut tx_pool_cleanup,
+                    &mut accepted_blocks,
+                ) {
                     self.stash_pending_tx_pool_cleanup(tx_pool_cleanup);
+                    self.advance_da_orphan_ttl_for_accepted_blocks(relay_ctx, accepted_blocks);
                     return Err(err);
                 }
-                Ok(tx_pool_cleanup)
+                Ok(RelayedBlockOutcome {
+                    tx_pool_cleanup,
+                    accepted_blocks,
+                })
             }
             Err(err) if is_parent_not_found_err(&err) => Err(io::Error::other(format!(
                 "unexpected missing-parent after precheck: {err}"
@@ -1375,7 +1414,8 @@ impl PeerSession {
         parent_hash: [u8; 32],
         block_bytes: &[u8],
         sync_engine: &mut SyncEngine,
-    ) -> io::Result<TxPoolCleanupPlan> {
+        relay_ctx: Option<&PeerRelayContext<'_>>,
+    ) -> io::Result<RelayedBlockOutcome> {
         self.orphans.add(
             block_hash,
             parent_hash,
@@ -1387,13 +1427,23 @@ impl PeerSession {
             .map_err(io::Error::other)?
         {
             let mut tx_pool_cleanup = TxPoolCleanupPlan::default();
-            if let Err(err) = self.resolve_orphans(parent_hash, sync_engine, &mut tx_pool_cleanup) {
+            let mut accepted_blocks = 0;
+            if let Err(err) = self.resolve_orphans(
+                parent_hash,
+                sync_engine,
+                &mut tx_pool_cleanup,
+                &mut accepted_blocks,
+            ) {
                 self.stash_pending_tx_pool_cleanup(tx_pool_cleanup);
+                self.advance_da_orphan_ttl_for_accepted_blocks(relay_ctx, accepted_blocks);
                 return Err(err);
             }
-            return Ok(tx_pool_cleanup);
+            return Ok(RelayedBlockOutcome {
+                tx_pool_cleanup,
+                accepted_blocks,
+            });
         }
-        Ok(TxPoolCleanupPlan::default())
+        Ok(RelayedBlockOutcome::default())
     }
 
     fn resolve_orphans(
@@ -1401,6 +1451,7 @@ impl PeerSession {
         parent_hash: [u8; 32],
         sync_engine: &mut SyncEngine,
         tx_pool_cleanup: &mut TxPoolCleanupPlan,
+        accepted_blocks: &mut usize,
     ) -> io::Result<()> {
         let mut ready = self.orphans.take_children(parent_hash);
         while let Some(child) = ready.pop() {
@@ -1409,6 +1460,7 @@ impl PeerSession {
                     sync_engine.record_best_known_height(outcome.summary.block_height);
                     *tx_pool_cleanup =
                         std::mem::take(tx_pool_cleanup).merge(outcome.tx_pool_cleanup);
+                    *accepted_blocks = accepted_blocks.saturating_add(1);
                     ready.extend(self.orphans.take_children(child.block_hash));
                 }
                 Err(err) if is_parent_not_found_err(&err) => {
@@ -1426,6 +1478,27 @@ impl PeerSession {
             }
         }
         Ok(())
+    }
+
+    fn advance_da_orphan_ttl_for_accepted_blocks(
+        &mut self,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
+        accepted_blocks: usize,
+    ) {
+        let (Some(ctx), true) = (relay_ctx, accepted_blocks > 0) else {
+            return;
+        };
+        let Ok(mut da_relay) = ctx.da_relay.lock() else {
+            self.peer.last_error =
+                "DA relay lock poisoned during accepted-block TTL advance".into();
+            return;
+        };
+        for _ in 0..accepted_blocks {
+            if let Err(err) = da_relay.advance_orphan_ttl() {
+                self.peer.last_error = format!("DA relay TTL advance failed: {err:?}");
+                break;
+            }
+        }
     }
 
     // Historically used by the inline run_block_sync_loop match; preserved
@@ -3426,6 +3499,11 @@ mod tests {
         let admitted_da_id = [0xD1; 32]; let conflicting_da_id = [0xD2; 32]; let bad_da_id = [0xD3; 32]; let admitted = build(7, admitted_da_id, b"admitted da chunk", true); let conflicting = build(8, conflicting_da_id, b"conflicting da chunk", true); let bad = build(9, bad_da_id, b"bad da chunk", false); (state, admitted, conflicting, bad, admitted_da_id, conflicting_da_id, bad_da_id)
     }
 
+    #[rustfmt::skip]
+    fn relay_da_chunk_tx(da_id: [u8; 32], payload: &[u8]) -> Vec<u8> {
+        rubin_consensus::marshal_tx(&rubin_consensus::Tx { version: rubin_consensus::constants::TX_WIRE_VERSION, tx_kind: 0x02, tx_nonce: 11, inputs: Vec::new(), outputs: Vec::new(), locktime: 0, da_commit_core: None, da_chunk_core: Some(rubin_consensus::DaChunkCore { da_id, chunk_index: 0, chunk_hash: Sha3_256::digest(payload).into() }), witness: Vec::new(), da_payload: payload.to_vec() }).expect("marshal DA chunk tx")
+    }
+
     #[derive(Deserialize)]
     struct SharedRuntimeVectors {
         version_payload_v1: SharedVersionPayloadV1,
@@ -4623,7 +4701,7 @@ mod tests {
         assert_eq!(session.peer.ban_score, 0);
         assert_eq!(session.peer.last_error, "ignored late blocktxn response");
         session
-            .handle_blocktxn(&block_hash, &mut test_sync_engine_with_genesis())
+            .handle_blocktxn(&block_hash, &mut test_sync_engine_with_genesis(), None)
             .expect("duplicate hash-only blocktxn");
 
         let stale_hash = [0xe2; 32];
@@ -5391,6 +5469,7 @@ mod tests {
     }
 
     #[test]
+    #[rustfmt::skip]
     fn handle_block_surfaces_invalid_orphan_after_parent_arrives() {
         let _guard = orphan_pool_metrics_test_guard();
         reset_orphan_pool_metrics_for_test();
@@ -5416,6 +5495,9 @@ mod tests {
             );
             block2[36] ^= 0xff; // corrupt merkle root while keeping the block parseable
             let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
+            let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 8)); let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); let canonical_tx_pool = Mutex::new(TxPool::new()); let da_relay = Mutex::new(crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default()).expect("valid DA relay caps"));
+            let da_id = [0x62; 32]; da_relay.lock().unwrap().stage_relay_da_tx_bytes("peer:8333", relay_da_chunk_tx(da_id, b"peer-partial-error-ttl")).expect("stage DA orphan");
+            let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "peer:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay };
 
             session
                 .handle_block(&block2, &mut engine)
@@ -5435,7 +5517,14 @@ mod tests {
                 "invalid orphan should remain memory-only until parent arrives"
             );
             let err = session
-                .handle_block(&block1, &mut engine)
+                .collect_live_responses(
+                    WireMessage {
+                        command: MESSAGE_BLOCK.to_string(),
+                        payload: block1.clone(),
+                    },
+                    &mut engine,
+                    Some(&relay_ctx),
+                )
                 .expect_err("invalid orphan should surface after parent arrives");
             let pending_cleanup = session.take_pending_tx_pool_cleanup();
 
@@ -5460,6 +5549,11 @@ mod tests {
                 session.take_pending_tx_pool_cleanup().is_empty(),
                 "pending cleanup should drain once observed"
             );
+            let block3 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, genesis.header.timestamp + 3); let block3_hash = block_hash(&block3[..BLOCK_HEADER_BYTES]).expect("block3 hash"); let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1)); let block4 = coinbase_only_block_with_gen(3, subsidy1 + subsidy2, block3_hash, genesis.header.timestamp + 4);
+            for block in [block3, block4] {
+                session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block }, &mut engine, Some(&relay_ctx)).expect("accepted descendant dispatch");
+            }
+            assert_eq!(da_relay.lock().unwrap().test_record_summary(da_id), None, "accepted parent must advance DA TTL even when later orphan resolution errors");
             assert_eq!(
                 session.state().ban_score,
                 0,
@@ -5476,6 +5570,24 @@ mod tests {
         let _client = TcpStream::connect(addr).expect("connect");
         server.join().expect("server join");
         reset_orphan_pool_metrics_for_test();
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn collect_live_responses_message_block_advances_da_ttl_once_per_new_block() {
+        let (mut session, _client) = test_peer_session(); let mut engine = test_sync_engine_with_genesis(); let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis"); let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+        let block1 = height_one_coinbase_only_block(genesis_hash, genesis.header.timestamp + 1); let block1_hash = block_hash(&block1[..BLOCK_HEADER_BYTES]).expect("block1 hash"); let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, genesis.header.timestamp + 2); let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash"); let subsidy2 = rubin_consensus::subsidy::block_subsidy(2, u128::from(subsidy1));
+        let block3 = coinbase_only_block_with_gen(3, subsidy1 + subsidy2, block2_hash, genesis.header.timestamp + 3);
+        let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 8)); let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); let canonical_tx_pool = Mutex::new(TxPool::new()); let da_relay = Mutex::new(crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default()).expect("valid DA relay caps"));
+        let da_id = [0x61; 32]; let chunk_tx = relay_da_chunk_tx(da_id, b"peer-block-ttl"); let chunk_len = chunk_tx.len() as u64; da_relay.lock().unwrap().stage_relay_da_tx_bytes("peer:8333", chunk_tx).expect("stage DA orphan");
+        let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "peer:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay };
+        for block in [&block1, &block2, &block2] {
+            session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: (*block).clone() }, &mut engine, Some(&relay_ctx)).expect("accepted block dispatch");
+        }
+        assert_eq!(da_relay.lock().unwrap().test_record_summary(da_id), Some((false, 1, chunk_len)), "duplicate block must not consume DA orphan TTL");
+        session.collect_live_responses(WireMessage { command: MESSAGE_BLOCK.to_string(), payload: block3 }, &mut engine, Some(&relay_ctx)).expect("third accepted block dispatch");
+        assert_eq!(da_relay.lock().unwrap().test_record_summary(da_id), None);
     }
 
     #[test]
