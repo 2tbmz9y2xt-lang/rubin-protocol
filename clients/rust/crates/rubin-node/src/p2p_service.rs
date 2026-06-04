@@ -15,7 +15,7 @@ use crate::sync_reorg::TxPoolCleanupPlan;
 use crate::tx_relay::{PeerOutbox, TxRelayState};
 use crate::{SyncEngine, TxPool};
 
-type PeerQuotaLockMap = BTreeMap<PeerQuotaKey, Arc<PeerQuotaLockEntry>>;
+type PeerQuotaLockMap = BTreeMap<PeerQuotaKey, PeerQuotaLockEntry>;
 type PeerQuotaLocks = Arc<Mutex<PeerQuotaLockMap>>;
 const ACCEPT_LOOP_SLEEP: Duration = Duration::from_millis(100);
 const RECONNECT_LOOP_SLEEP: Duration = Duration::from_millis(250);
@@ -1099,38 +1099,34 @@ impl Drop for PeerGuard {
 
 #[derive(Default)]
 struct PeerQuotaLockEntry {
-    refs: AtomicUsize,
-    lock: Mutex<()>,
+    refs: usize,
+    lock: Arc<Mutex<()>>,
 }
 
 struct PeerQuotaLockHandle {
     peer_quota_locks: PeerQuotaLocks,
     quota_key: PeerQuotaKey,
-    entry: Arc<PeerQuotaLockEntry>,
+    lock: Arc<Mutex<()>>,
 }
 
 impl PeerQuotaLockHandle {
     fn acquire(peer_quota_locks: &PeerQuotaLocks, addr: &str) -> Self {
         let quota_key = PeerQuotaKey::from_peer_addr(addr);
-        let entry = {
+        let lock = {
             let mut locks = lock_peer_quota_locks(peer_quota_locks);
-            Arc::clone(
-                locks
-                    .entry(quota_key.clone())
-                    .or_insert_with(|| Arc::new(PeerQuotaLockEntry::default())),
-            )
+            let entry = locks.entry(quota_key.clone()).or_default();
+            entry.refs += 1;
+            Arc::clone(&entry.lock)
         };
-        entry.refs.fetch_add(1, Ordering::AcqRel);
         Self {
             peer_quota_locks: Arc::clone(peer_quota_locks),
             quota_key,
-            entry,
+            lock,
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.entry
-            .lock
+        self.lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -1138,14 +1134,16 @@ impl PeerQuotaLockHandle {
 
 impl Drop for PeerQuotaLockHandle {
     fn drop(&mut self) {
-        if self.entry.refs.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let mut locks = lock_peer_quota_locks(&self.peer_quota_locks);
-            if locks
-                .get(&self.quota_key)
-                .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry))
-            {
-                locks.remove(&self.quota_key);
+        let mut locks = lock_peer_quota_locks(&self.peer_quota_locks);
+        let should_remove = locks.get_mut(&self.quota_key).is_some_and(|entry| {
+            if !Arc::ptr_eq(&entry.lock, &self.lock) || entry.refs == 0 {
+                return false;
             }
+            entry.refs -= 1;
+            entry.refs == 0
+        });
+        if should_remove {
+            locks.remove(&self.quota_key);
         }
     }
 }
@@ -2688,6 +2686,40 @@ mod tests {
             assert_eq!(da_relay.test_record_summary([82; 32]), Some((false, 1, 13)));
         }
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_quota_lock_refcounts_stay_with_map_entry() {
+        let locks = Arc::new(Mutex::new(Default::default()));
+        let quota_key = crate::da_relay::PeerQuotaKey::from_peer_addr("10.9.0.3:19111");
+
+        let first = PeerQuotaLockHandle::acquire(&locks, "10.9.0.3:19111");
+        {
+            let guard = locks.lock().unwrap();
+            let entry = guard.get(&quota_key).expect("quota lock entry");
+            assert_eq!(entry.refs, 1);
+            assert!(Arc::ptr_eq(&entry.lock, &first.lock));
+        }
+
+        let second = PeerQuotaLockHandle::acquire(&locks, "10.9.0.3:29111");
+        {
+            let guard = locks.lock().unwrap();
+            let entry = guard.get(&quota_key).expect("quota lock entry");
+            assert_eq!(entry.refs, 2);
+            assert!(Arc::ptr_eq(&entry.lock, &first.lock));
+            assert!(Arc::ptr_eq(&entry.lock, &second.lock));
+        }
+
+        drop(first);
+        {
+            let guard = locks.lock().unwrap();
+            let entry = guard.get(&quota_key).expect("quota lock entry");
+            assert_eq!(entry.refs, 1);
+            assert!(Arc::ptr_eq(&entry.lock, &second.lock));
+        }
+
+        drop(second);
+        assert!(!locks.lock().unwrap().contains_key(&quota_key));
     }
 
     #[test]
