@@ -300,9 +300,9 @@ impl DaRelaySetRecord {
     fn orphan_peer_bytes(&self) -> Option<&BTreeMap<PeerQuotaKey, u64>> {
         (self.state != DaRelaySetState::CompleteSet).then_some(&self.peer_bytes)
     }
-    fn without_peer_quota_key(&self, key: &PeerQuotaKey) -> DaRelayResult<(Self, bool)> {
+    fn without_peer_quota_key(&self, key: &PeerQuotaKey) -> DaRelayResult<Option<Self>> {
         if self.state == DaRelaySetState::CompleteSet || self.wire_bytes == 0 {
-            return Ok((self.clone(), false));
+            return Ok(None);
         }
         let drop_commit = self
             .commit
@@ -316,7 +316,7 @@ impl DaRelaySetRecord {
             })
             .collect::<Vec<_>>();
         if !drop_commit && indexes.is_empty() {
-            return Ok((self.clone(), false));
+            return Ok(None);
         }
         let mut updated = self.clone();
         if drop_commit {
@@ -335,10 +335,10 @@ impl DaRelaySetRecord {
         if updated.empty_incomplete() {
             updated.wire_bytes = 0;
             updated.peer_bytes.clear();
-            return Ok((updated, true));
+            return Ok(Some(updated));
         }
         updated.recompute_wire_bytes()?;
-        Ok((updated, true))
+        Ok(Some(updated))
     }
     fn empty_incomplete(&self) -> bool {
         self.state != DaRelaySetState::CompleteSet
@@ -601,18 +601,18 @@ impl DaRelayState {
         }
         let da_ids: Vec<_> = self.orphan_bytes_by_da_id.keys().copied().collect();
         for da_id in da_ids {
-            let (updated, changed) = {
+            let updated = {
                 let Some(record) = self.sets_by_da_id.get(&da_id) else {
                     continue;
                 };
                 if record.state == DaRelaySetState::CompleteSet {
                     continue;
                 }
-                record.without_peer_quota_key(key)?
+                let Some(updated) = record.without_peer_quota_key(key)? else {
+                    continue;
+                };
+                updated
             };
-            if !changed {
-                continue;
-            }
             if updated.empty_incomplete() {
                 let old = self
                     .sets_by_da_id
