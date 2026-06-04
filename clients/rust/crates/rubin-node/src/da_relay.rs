@@ -518,6 +518,29 @@ impl DaRelayState {
     #[rustfmt::skip]
     pub(crate) fn test_record_summary(&self, da_id: [u8; 32]) -> Option<(bool, usize, u64)> { let record = self.sets_by_da_id.get(&da_id)?; Some((record.commit.is_some(), record.chunks.len(), record.wire_bytes)) }
 
+    #[cfg(test)]
+    pub(crate) fn test_stage_incomplete_da_chunk(
+        &mut self,
+        peer_addr: &str,
+        da_id: [u8; 32],
+        chunk_index: u16,
+        payload: &[u8],
+        wire_bytes: u64,
+    ) -> DaRelayResult {
+        self.stage_incomplete_da_chunk(
+            peer_addr,
+            DaRelayChunk {
+                da_id,
+                chunk_hash: sha3_256(payload),
+                peer_quota_key: PeerQuotaKey::from_peer_addr(peer_addr),
+                chunk_index,
+                payload: Arc::from(payload),
+                wire_bytes,
+                tx_bytes: Arc::from([]),
+            },
+        )
+    }
+
     pub(crate) fn complete_set_eviction_candidates(
         &self,
         max_payload_bytes: u64,

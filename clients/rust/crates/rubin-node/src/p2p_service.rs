@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
 
-use crate::da_relay::{DaRelayCaps, DaRelayState};
+use crate::da_relay::{DaRelayCaps, DaRelayState, PeerQuotaKey};
 use crate::p2p_runtime::{
     perform_version_handshake, LiveMessageOutcome, PeerManager, PeerRelayContext,
     PeerRuntimeConfig, VersionPayloadV1, WireMessage,
@@ -62,6 +62,7 @@ struct SharedServiceState {
     active_sessions: Arc<AtomicUsize>,
     worker_handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     peer_manager: Arc<PeerManager>,
+    peer_lifecycle: Arc<Mutex<()>>,
     sync_engine: Arc<Mutex<SyncEngine>>,
     tx_pool: Arc<Mutex<TxPool>>,
     da_relay: Arc<Mutex<DaRelayState>>,
@@ -165,6 +166,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         active_sessions: Arc::new(AtomicUsize::new(0)),
         worker_handles: Arc::new(Mutex::new(Vec::new())),
         peer_manager: cfg.peer_manager,
+        peer_lifecycle: Arc::new(Mutex::new(())),
         sync_engine: cfg.sync_engine,
         tx_pool: cfg.tx_pool,
         da_relay,
@@ -821,10 +823,13 @@ fn handle_peer(
     // a connected peer without an outbox. Declaration order makes it drop last.
     let _outbox_guard = register_peer_outbox(&shared.peer_outboxes, &peer_addr)?;
 
-    shared
-        .peer_manager
-        .add_peer(peer_state)
-        .map_err(|err| format!("peer register: {err}"))?;
+    {
+        let _peer_lifecycle_guard = lock_peer_lifecycle(&shared.peer_lifecycle);
+        shared
+            .peer_manager
+            .add_peer(peer_state)
+            .map_err(|err| format!("peer register: {err}"))?;
+    }
 
     // Declaration order is critical: Rust drops locals in REVERSE
     // declaration order, so guards declared earlier outlive guards
@@ -843,7 +848,9 @@ fn handle_peer(
     let _alias_guard = register_peer_alias(&shared, &remote_raw_addr, &peer_addr);
 
     let _peer_guard = PeerGuard {
+        peer_lifecycle: Arc::clone(&shared.peer_lifecycle),
         peer_manager: Arc::clone(&shared.peer_manager),
+        da_relay: Arc::clone(&shared.da_relay),
         addr: peer_addr.clone(),
     };
 
@@ -1064,14 +1071,44 @@ fn service_local_version(
 }
 
 struct PeerGuard {
+    peer_lifecycle: Arc<Mutex<()>>,
     peer_manager: Arc<PeerManager>,
+    da_relay: Arc<Mutex<DaRelayState>>,
     addr: String,
 }
 
 impl Drop for PeerGuard {
     fn drop(&mut self) {
-        self.peer_manager.remove_peer(&self.addr);
+        let _peer_lifecycle_guard = lock_peer_lifecycle(&self.peer_lifecycle);
+        if self.peer_manager.remove_peer(&self.addr) {
+            release_da_quota_if_inactive(&self.peer_manager, &self.da_relay, &self.addr);
+        }
     }
+}
+
+fn lock_peer_lifecycle(peer_lifecycle: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    peer_lifecycle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn release_da_quota_if_inactive(
+    peer_manager: &PeerManager,
+    da_relay: &Mutex<DaRelayState>,
+    addr: &str,
+) {
+    let quota_key = PeerQuotaKey::from_peer_addr(addr);
+    let active_same_key = peer_manager
+        .snapshot()
+        .iter()
+        .any(|peer| PeerQuotaKey::from_peer_addr(&peer.addr) == quota_key);
+    if active_same_key {
+        return;
+    }
+    let mut da_relay = da_relay
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = da_relay.release_peer_quota_key(&quota_key);
 }
 
 struct PeerOutboxGuard {
@@ -1231,6 +1268,7 @@ mod tests {
             active_sessions: Arc::new(AtomicUsize::new(0)),
             worker_handles: Arc::new(Mutex::new(Vec::new())),
             peer_manager: Arc::new(PeerManager::new(runtime_cfg)),
+            peer_lifecycle: Arc::new(Mutex::new(())),
             sync_engine,
             tx_pool: Arc::new(Mutex::new(TxPool::new())),
             da_relay: Arc::new(Mutex::new(
@@ -1246,6 +1284,23 @@ mod tests {
             peer_outboxes: Arc::new(Mutex::new(HashMap::new())),
             peer_aliases: Arc::new(Mutex::new(HashMap::new())),
             local_addr: "127.0.0.1:0".to_string(),
+        }
+    }
+
+    fn register_test_peer(shared: &SharedServiceState, addr: &str) -> PeerGuard {
+        let _peer_lifecycle_guard = super::lock_peer_lifecycle(&shared.peer_lifecycle);
+        shared
+            .peer_manager
+            .add_peer(crate::p2p_runtime::PeerState {
+                addr: addr.to_string(),
+                ..Default::default()
+            })
+            .expect("register test peer");
+        PeerGuard {
+            peer_lifecycle: Arc::clone(&shared.peer_lifecycle),
+            peer_manager: Arc::clone(&shared.peer_manager),
+            da_relay: Arc::clone(&shared.da_relay),
+            addr: addr.to_string(),
         }
     }
 
@@ -2469,18 +2524,8 @@ mod tests {
 
         let outbox_guard =
             register_peer_outbox(&shared.peer_outboxes, &primary).expect("register outbox");
-        shared
-            .peer_manager
-            .add_peer(crate::p2p_runtime::PeerState {
-                addr: primary.clone(),
-                ..Default::default()
-            })
-            .expect("register primary");
+        let peer_guard = register_test_peer(&shared, &primary);
         let alias_guard = register_peer_alias(&shared, alias, &primary).expect("register alias");
-        let peer_guard = PeerGuard {
-            peer_manager: Arc::clone(&shared.peer_manager),
-            addr: primary.clone(),
-        };
 
         assert!(is_connected_with_alias(&shared, &primary));
         assert!(is_connected_with_alias(&shared, alias));
@@ -2503,6 +2548,69 @@ mod tests {
 
         drop(outbox_guard);
         assert!(!shared.peer_outboxes.lock().unwrap().contains_key(&primary));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_guard_drop_releases_da_quota_only_after_final_same_key_peer() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-final-peer-release");
+        let runtime_cfg = default_peer_runtime_config("devnet", 8);
+        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
+        let peer_a = "10.9.0.1:19111";
+        let peer_a_same_key = "10.9.0.1:29111";
+
+        {
+            let mut da_relay = shared.da_relay.lock().unwrap();
+            da_relay
+                .test_stage_incomplete_da_chunk(peer_a, [81; 32], 0, b"owned-chunk", 11)
+                .unwrap();
+        }
+
+        let guard_a = register_test_peer(&shared, peer_a);
+        let guard_a_same_key = register_test_peer(&shared, peer_a_same_key);
+
+        drop(guard_a);
+        {
+            let da_relay = shared.da_relay.lock().unwrap();
+            assert_eq!(da_relay.test_record_summary([81; 32]), Some((false, 1, 11)));
+        }
+
+        drop(guard_a_same_key);
+        {
+            let da_relay = shared.da_relay.lock().unwrap();
+            assert_eq!(da_relay.test_record_summary([81; 32]), None);
+        }
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn peer_guard_drop_recovers_poisoned_da_relay_lock_without_peer_leak() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-poison-release");
+        let runtime_cfg = default_peer_runtime_config("devnet", 8);
+        let shared = test_shared_state(runtime_cfg, vec![], sync_engine);
+        let peer = "10.9.0.3:19111";
+        let peer_guard = register_test_peer(&shared, peer);
+
+        let da_relay = Arc::clone(&shared.da_relay);
+        let poison = std::panic::catch_unwind(move || {
+            let _guard = da_relay.lock().unwrap();
+            panic!("poison DA relay lock");
+        });
+        assert!(poison.is_err());
+        assert!(shared.da_relay.lock().is_err());
+
+        let drop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(peer_guard);
+        }));
+        assert!(drop_result.is_ok());
+        assert!(
+            !shared
+                .peer_manager
+                .snapshot()
+                .iter()
+                .any(|state| state.addr == peer),
+            "peer manager cleanup must not be skipped when DA relay lock is poisoned",
+        );
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

@@ -397,11 +397,11 @@ impl PeerManager {
         Ok(())
     }
 
-    pub fn remove_peer(&self, addr: &str) {
+    pub fn remove_peer(&self, addr: &str) -> bool {
         let Ok(mut peers) = self.peers.write() else {
-            return;
+            return false;
         };
-        peers.remove(addr);
+        peers.remove(addr).is_some()
     }
 
     pub fn snapshot(&self) -> Vec<PeerState> {
