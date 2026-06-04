@@ -300,6 +300,61 @@ impl DaRelaySetRecord {
     fn orphan_peer_bytes(&self) -> Option<&BTreeMap<PeerQuotaKey, u64>> {
         (self.state != DaRelaySetState::CompleteSet).then_some(&self.peer_bytes)
     }
+    fn without_peer_quota_key(&self, key: &PeerQuotaKey) -> DaRelayResult<(Self, bool)> {
+        if self.state == DaRelaySetState::CompleteSet || self.wire_bytes == 0 {
+            return Ok((self.clone(), false));
+        }
+        let mut updated = self.clone();
+        let mut changed = updated.drop_commit_for_peer_quota_key(key);
+        if updated.drop_chunks_for_peer_quota_key(key) {
+            changed = true;
+        }
+        if !changed {
+            return Ok((self.clone(), false));
+        }
+        updated.payload_bytes = 0;
+        if updated.commit.is_none() {
+            updated.state = DaRelaySetState::OrphanChunks;
+            updated.replaceable_chunks.clear();
+        }
+        if updated.empty_incomplete() {
+            updated.wire_bytes = 0;
+            updated.peer_bytes.clear();
+            return Ok((updated, true));
+        }
+        updated.recompute_wire_bytes()?;
+        Ok((updated, true))
+    }
+    fn drop_commit_for_peer_quota_key(&mut self, key: &PeerQuotaKey) -> bool {
+        let Some(commit) = &self.commit else {
+            return false;
+        };
+        if commit.wire_bytes == 0 || &commit.peer_quota_key != key {
+            return false;
+        }
+        self.commit = None;
+        self.replaceable_chunks.clear();
+        true
+    }
+    fn drop_chunks_for_peer_quota_key(&mut self, key: &PeerQuotaKey) -> bool {
+        let indexes = self
+            .chunks
+            .iter()
+            .filter_map(|(index, chunk)| {
+                (chunk.wire_bytes != 0 && &chunk.peer_quota_key == key).then_some(*index)
+            })
+            .collect::<Vec<_>>();
+        for index in &indexes {
+            self.chunks.remove(index);
+            self.replaceable_chunks.remove(index);
+        }
+        !indexes.is_empty()
+    }
+    fn empty_incomplete(&self) -> bool {
+        self.state != DaRelaySetState::CompleteSet
+            && self.commit.is_none()
+            && self.chunks.is_empty()
+    }
     fn pinned_payload_accounting_bytes(&self) -> DaRelayResult<u64> {
         if self.state != DaRelaySetState::CompleteSet || self.payload_bytes == 0 {
             return Ok(0);
@@ -545,6 +600,49 @@ impl DaRelayState {
         };
         self.apply_ttl_expiry_projection(projection, expiring_records);
         Ok(expired)
+    }
+
+    pub(crate) fn release_peer_quota_key(&mut self, key: &PeerQuotaKey) -> DaRelayResult {
+        if self
+            .orphan_bytes_by_peer_quota_key
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+            == 0
+        {
+            return Ok(());
+        }
+        let da_ids = self
+            .orphan_bytes_by_da_id
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for da_id in da_ids {
+            let (updated, changed) = {
+                let Some(record) = self.sets_by_da_id.get(&da_id) else {
+                    continue;
+                };
+                if record.state == DaRelaySetState::CompleteSet {
+                    continue;
+                }
+                record.without_peer_quota_key(key)?
+            };
+            if !changed {
+                continue;
+            }
+            if updated.empty_incomplete() {
+                let old = self
+                    .sets_by_da_id
+                    .get(&da_id)
+                    .cloned()
+                    .ok_or(DaRelayError::AccountingUnderflow)?;
+                let projection = self.project_ttl_expiry(std::slice::from_ref(&old))?;
+                self.apply_ttl_expiry_projection(projection, vec![old]);
+            } else {
+                self.apply_record(updated)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn stage_incomplete_da_commit(
@@ -1311,6 +1409,83 @@ mod tests {
         assert_eq!(state.advance_orphan_ttl(), Err(AccountingUnderflow)); assert_eq!(state, before);
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([4; 32], 0, b"early", 5)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([5; 32], 0, b"late", 7)).unwrap(); state.sets_by_da_id.get_mut(&[4; 32]).unwrap().ttl_blocks_remaining = 1; state.sets_by_da_id.get_mut(&[5; 32]).unwrap().ttl_blocks_remaining = 1; state.orphan_bytes_by_da_id.insert([5; 32], 0); let before = state.clone();
         assert_eq!(state.advance_orphan_ttl(), Err(AccountingUnderflow)); assert_eq!(state, before);
+    }
+
+    #[test]
+    fn da_relay_peer_quota_release_helper_releases_peer_owned_incomplete_records_only() {
+        let peer_a = "peer-a:8333";
+        let peer_b = "peer-b:8333";
+        let key_a = PeerQuotaKey::from_peer_addr(peer_a);
+        let key_b = PeerQuotaKey::from_peer_addr(peer_b);
+        let commit = |da_id, payloads: &[&[u8]], wire_bytes| DaRelayCommit {
+            da_id,
+            payload_commitment: payload_commitment(payloads),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_count: payloads.len() as u16,
+            wire_bytes,
+            tx_bytes: Arc::from([]),
+        };
+        let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk {
+            da_id,
+            chunk_hash: sha3_256(payload),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_index: index,
+            payload: Arc::from(payload),
+            wire_bytes,
+            tx_bytes: Arc::from([]),
+        };
+
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state
+            .stage_incomplete_da_commit(peer_a, commit([80; 32], &[b"owned"], 5))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_a, chunk([81; 32], 0, b"owned", 5))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(peer_a, commit([82; 32], &[b"keep", b"tail"], 6))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_b, chunk([82; 32], 0, b"keep", 7))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_b, chunk([83; 32], 0, b"unrelated", 9))
+            .unwrap();
+        state
+            .stage_incomplete_da_commit(peer_a, commit([84; 32], &[b"complete"], 8))
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(peer_a, chunk([84; 32], 0, b"complete", 8))
+            .unwrap();
+        let complete_before = state.sets_by_da_id[&[84; 32]].clone();
+        let peer_b_before = state.orphan_bytes_by_peer_quota_key[&key_b];
+
+        state.release_peer_quota_key(&key_a).unwrap();
+
+        assert!(!state.sets_by_da_id.contains_key(&[80; 32]));
+        assert!(!state.sets_by_da_id.contains_key(&[81; 32]));
+        let mixed = &state.sets_by_da_id[&[82; 32]];
+        assert_eq!(mixed.state, DaRelaySetState::OrphanChunks);
+        assert!(mixed.commit.is_none());
+        assert_eq!(mixed.chunks[&0].peer_quota_key, key_b);
+        assert_eq!(mixed.peer_bytes.len(), 1);
+        assert_eq!(mixed.peer_bytes[&key_b], 7);
+        assert_eq!(
+            state.sets_by_da_id[&[83; 32]].chunks[&0].peer_quota_key,
+            key_b
+        );
+        assert_eq!(state.sets_by_da_id[&[84; 32]], complete_before);
+        assert!(!state.orphan_bytes_by_da_id.contains_key(&[84; 32]));
+        assert!(!state.orphan_bytes_by_peer_quota_key.contains_key(&key_a));
+        assert_eq!(state.orphan_bytes_by_peer_quota_key[&key_b], peer_b_before);
+        assert_eq!(
+            state.orphan_bytes,
+            state.sets_by_da_id[&[82; 32]].orphan_wire_bytes().unwrap()
+                + state.sets_by_da_id[&[83; 32]].orphan_wire_bytes().unwrap()
+        );
+        let after = state.clone();
+        state.release_peer_quota_key(&key_a).unwrap();
+        assert_eq!(state, after);
     }
 
     #[test]
