@@ -1291,13 +1291,7 @@ fn advance_da_ttl_for_block(
     if !ttl_seen.add(hash) {
         return Ok(());
     }
-    let mut da_relay = da_relay
-        .lock()
-        .map_err(|_| "DA relay lock poisoned during local block TTL advance".to_string())?;
-    da_relay
-        .advance_orphan_ttl()
-        .map(|_| ())
-        .map_err(|err| format!("DA relay TTL advance failed: {err:?}"))
+    rubin_node::p2p_service::advance_da_orphan_ttl_for_accepted_block(da_relay)
 }
 
 #[cfg(test)]

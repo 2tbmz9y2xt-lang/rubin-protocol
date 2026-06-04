@@ -1493,11 +1493,8 @@ impl PeerSession {
                 "DA relay lock poisoned during accepted-block TTL advance".into();
             return;
         };
-        for _ in 0..accepted_blocks {
-            if let Err(err) = da_relay.advance_orphan_ttl() {
-                self.peer.last_error = format!("DA relay TTL advance failed: {err:?}");
-                break;
-            }
+        if let Err(err) = da_relay.advance_orphan_ttl_by(accepted_blocks) {
+            self.peer.last_error = format!("DA relay TTL advance failed: {err:?}");
         }
     }
 

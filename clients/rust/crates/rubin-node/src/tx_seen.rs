@@ -172,13 +172,20 @@ mod tests {
     }
 
     #[test]
-    #[rustfmt::skip]
     fn is_empty_works() {
         let set = BoundedHashSet::new(10);
         assert!(set.is_empty());
         set.add([1u8; 32]);
         assert!(!set.is_empty());
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let _guard = set.inner.lock().expect("lock"); panic!("poison set lock"); })); let hash = [9u8; 32]; assert!(set.add(hash)); assert!(set.has(&hash)); assert_eq!(set.len(), 2);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = set.inner.lock().expect("lock");
+            panic!("poison set lock");
+        }));
+        let hash = [9u8; 32];
+        assert!(set.add(hash));
+        assert!(set.has(&hash));
+        assert_eq!(set.len(), 2);
     }
 
     #[test]

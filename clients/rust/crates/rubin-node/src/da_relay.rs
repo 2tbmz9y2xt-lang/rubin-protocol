@@ -496,7 +496,15 @@ impl DaRelayState {
             })
     }
 
-    pub fn advance_orphan_ttl(&mut self) -> DaRelayResult<Vec<[u8; 32]>> {
+    pub(crate) fn advance_orphan_ttl(&mut self) -> DaRelayResult<Vec<[u8; 32]>> {
+        self.advance_orphan_ttl_by(1)
+    }
+
+    pub(crate) fn advance_orphan_ttl_by(&mut self, blocks: usize) -> DaRelayResult<Vec<[u8; 32]>> {
+        if blocks == 0 {
+            return Ok(Vec::new());
+        }
+        let blocks = blocks as u64;
         let mut decrementing_da_ids = Vec::new();
         let mut expiring_records = Vec::new();
         for da_id in self.orphan_bytes_by_da_id.keys().copied() {
@@ -506,34 +514,35 @@ impl DaRelayState {
             if record.state == DaRelaySetState::CompleteSet {
                 continue;
             }
-            if record.ttl_blocks_remaining > 1 {
+            if record.ttl_blocks_remaining > blocks {
                 decrementing_da_ids.push(da_id);
             } else {
                 expiring_records.push(record.clone());
             }
         }
 
-        if expiring_records.is_empty() {
-            for da_id in decrementing_da_ids {
-                self.sets_by_da_id
-                    .get_mut(&da_id)
-                    .ok_or(DaRelayError::AccountingUnderflow)?
-                    .ttl_blocks_remaining -= 1;
-            }
-            return Ok(Vec::new());
-        }
-
-        let projection = self.project_ttl_expiry(&expiring_records)?;
+        let projection = if expiring_records.is_empty() {
+            None
+        } else {
+            Some(self.project_ttl_expiry(&expiring_records)?)
+        };
         let expired = expiring_records
             .iter()
             .map(|record| record.da_id)
             .collect::<Vec<_>>();
         for da_id in decrementing_da_ids {
-            self.sets_by_da_id
+            let record = self
+                .sets_by_da_id
                 .get_mut(&da_id)
-                .ok_or(DaRelayError::AccountingUnderflow)?
-                .ttl_blocks_remaining -= 1;
+                .ok_or(DaRelayError::AccountingUnderflow)?;
+            record.ttl_blocks_remaining = record
+                .ttl_blocks_remaining
+                .checked_sub(blocks)
+                .ok_or(DaRelayError::AccountingUnderflow)?;
         }
+        let Some(projection) = projection else {
+            return Ok(Vec::new());
+        };
         self.apply_ttl_expiry_projection(projection, expiring_records);
         Ok(expired)
     }
@@ -1294,6 +1303,7 @@ mod tests {
         let chunk = |da_id, index, payload: &[u8], wire_bytes| DaRelayChunk { da_id, chunk_hash: sha3_256(payload), peer_quota_key: pk.clone(), chunk_index: index, payload: Arc::from(payload), wire_bytes, tx_bytes: Arc::from([]) };
         let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([3; 32], 0, b"orphan", 6)).unwrap(); state.stage_incomplete_da_commit(peer, commit([2; 32], &[b"staged"], 7)).unwrap(); state.stage_incomplete_da_commit(peer, commit([1; 32], &[b"complete"], 8)).unwrap(); state.stage_incomplete_da_chunk(peer, chunk([1; 32], 0, b"complete", 8)).unwrap();
         let complete_before = state.sets_by_da_id[&[1; 32]].clone(); let orphan_before = state.orphan_bytes; assert!(state.advance_orphan_ttl().unwrap().is_empty()); assert_eq!(state.sets_by_da_id[&[3; 32]].ttl_blocks_remaining, 2); assert_eq!(state.sets_by_da_id[&[2; 32]].ttl_blocks_remaining, 2); assert_eq!(state.sets_by_da_id[&[1; 32]], complete_before); assert_eq!(state.orphan_bytes, orphan_before);
+        let mut batch = DaRelayState::new(DaRelayCaps::default()).unwrap(); batch.stage_incomplete_da_chunk(peer, chunk([6; 32], 0, b"batch", 5)).unwrap(); assert!(batch.advance_orphan_ttl_by(0).unwrap().is_empty()); assert_eq!(batch.sets_by_da_id[&[6; 32]].ttl_blocks_remaining, 3); assert!(batch.advance_orphan_ttl_by(2).unwrap().is_empty()); assert_eq!(batch.sets_by_da_id[&[6; 32]].ttl_blocks_remaining, 1); assert_eq!(batch.advance_orphan_ttl_by(2).unwrap(), vec![[6; 32]]); assert!(batch.is_empty());
         state.sets_by_da_id.get_mut(&[3; 32]).unwrap().ttl_blocks_remaining = 1; state.sets_by_da_id.get_mut(&[2; 32]).unwrap().ttl_blocks_remaining = 0; let expired = state.advance_orphan_ttl().unwrap();
         assert_eq!(expired, vec![[2; 32], [3; 32]]);
         assert_eq!(state.sets_by_da_id.get(&[1; 32]), Some(&complete_before)); assert!(!state.sets_by_da_id.contains_key(&[2; 32])); assert!(!state.sets_by_da_id.contains_key(&[3; 32])); assert_eq!(state.orphan_bytes, 0); assert!(state.orphan_bytes_by_da_id.is_empty()); assert!(state.orphan_bytes_by_peer_quota_key.is_empty()); assert_eq!(state.orphan_commit_overhead_bytes, 0); assert_eq!(state.pinned_payload_bytes, complete_before.pinned_payload_accounting_bytes().unwrap()); let before_noop = state.clone(); assert!(state.advance_orphan_ttl().unwrap().is_empty()); assert_eq!(state, before_noop);
