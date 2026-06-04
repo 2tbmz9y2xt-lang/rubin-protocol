@@ -499,39 +499,33 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             )
         }))
     };
+    let da_ttl_relay = p2p_service.da_relay_state();
+    let da_ttl_seen = Arc::new(rubin_node::tx_seen::BoundedHashSet::new(
+        rubin_node::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY,
+    ));
     let announce_block: Option<rubin_node::devnet_rpc::AnnounceBlockFn> = {
         let relay_state = p2p_service.relay_state();
-        let da_relay = p2p_service.da_relay_state();
-        let ttl_seen = Arc::new(rubin_node::tx_seen::BoundedHashSet::new(
-            rubin_node::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY,
-        ));
         let pm = Arc::clone(&peer_manager);
         let pw = p2p_service.peer_outboxes();
         let local = p2p_service.addr().to_string();
         Some(Arc::new(move |block_bytes: &[u8]| {
-            announce_block_after_local_acceptance(
-                block_bytes,
-                &relay_state,
-                &pm,
-                &local,
-                &pw,
-                &da_relay,
-                &ttl_seen,
-            )
+            rubin_node::tx_relay::announce_block(block_bytes, &relay_state, &pm, &local, &pw)
         }))
     };
-    let state = attach_shutdown_signal_to_devnet_rpc_state(
-        new_devnet_rpc_state_with_tx_pool(
-            Arc::clone(&sync_engine),
-            Some(block_store),
-            Arc::clone(&tx_pool),
-            Arc::clone(&peer_manager),
-            announce_tx,
-            announce_block,
-            live_mining_cfg,
-        ),
-        stop_signal.shutdown_requested_flag(),
+    let mut state = new_devnet_rpc_state_with_tx_pool(
+        Arc::clone(&sync_engine),
+        Some(block_store),
+        Arc::clone(&tx_pool),
+        Arc::clone(&peer_manager),
+        announce_tx,
+        announce_block,
+        live_mining_cfg,
     );
+    state.accepted_block = Some(Arc::new(move |hash| {
+        advance_da_ttl_for_block(hash, &da_ttl_relay, &da_ttl_seen)
+    }));
+    let state =
+        attach_shutdown_signal_to_devnet_rpc_state(state, stop_signal.shutdown_requested_flag());
     if !cfg.rpc_bind_addr.trim().is_empty() {
         server = match start_devnet_rpc_server(&cfg.rpc_bind_addr, state) {
             Ok(server) => Some(server),
@@ -1289,38 +1283,21 @@ fn announce_tx_after_local_admission(
     )
 }
 
-fn announce_block_after_local_acceptance(
-    block_bytes: &[u8],
-    relay_state: &rubin_node::tx_relay::TxRelayState,
-    peer_manager: &rubin_node::p2p_runtime::PeerManager,
-    local_addr: &str,
-    peer_writers: &Mutex<std::collections::HashMap<String, rubin_node::tx_relay::PeerOutbox>>,
+fn advance_da_ttl_for_block(
+    hash: [u8; 32],
     da_relay: &Arc<Mutex<rubin_node::da_relay::DaRelayState>>,
     ttl_seen: &rubin_node::tx_seen::BoundedHashSet,
 ) -> Result<(), String> {
-    let parsed = rubin_consensus::parse_block_bytes(block_bytes).map_err(|err| err.to_string())?;
-    let hash = rubin_consensus::block_hash(&parsed.header_bytes).map_err(|err| err.to_string())?;
-    let announce_result = rubin_node::tx_relay::announce_block(
-        block_bytes,
-        relay_state,
-        peer_manager,
-        local_addr,
-        peer_writers,
-    );
-    let ttl_result = if ttl_seen.add(hash) {
-        da_relay
-            .lock()
-            .map_err(|_| "DA relay lock poisoned during local block TTL advance".to_string())
-            .and_then(|mut da_relay| {
-                da_relay
-                    .advance_orphan_ttl()
-                    .map(|_| ())
-                    .map_err(|err| format!("DA relay TTL advance failed: {err:?}"))
-            })
-    } else {
-        Ok(())
-    };
-    announce_result.and(ttl_result)
+    if !ttl_seen.add(hash) {
+        return Ok(());
+    }
+    let mut da_relay = da_relay
+        .lock()
+        .map_err(|_| "DA relay lock poisoned during local block TTL advance".to_string())?;
+    da_relay
+        .advance_orphan_ttl()
+        .map(|_| ())
+        .map_err(|err| format!("DA relay TTL advance failed: {err:?}"))
 }
 
 #[cfg(test)]
@@ -1333,8 +1310,8 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use super::{
-        announce_block_after_local_acceptance, announce_tx_after_local_admission,
-        format_peer_slots_banner, handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
+        advance_da_ttl_for_block, announce_tx_after_local_admission, format_peer_slots_banner,
+        handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
         maybe_shutdown_if_requested, parse_args, run, runtime_genesis_hash, stop_signal_pair,
         validate_config, wait_for_stop_and_shutdown, LegacyExposureReport,
         PRODUCTION_STOP_SIGNAL_SET, RPC_READINESS_TRANSITION_FAILED,
@@ -1420,12 +1397,6 @@ mod tests {
         marshal_tx(&Tx { version: TX_WIRE_VERSION, tx_kind: 0x00, tx_nonce: 3, inputs: Vec::new(), outputs: Vec::new(), locktime: 0, da_commit_core: None, da_chunk_core: None, witness: Vec::new(), da_payload: Vec::new() }).expect("marshal local non-DA tx")
     }
 
-    fn local_block_variant(nonce: u64) -> Vec<u8> {
-        let mut block = rubin_node::devnet_genesis_block_bytes();
-        block[108..116].copy_from_slice(&nonce.to_le_bytes());
-        block
-    }
-
     struct LocalDaTestContext {
         relay: TxRelayState,
         peers: rubin_node::PeerManager,
@@ -1447,18 +1418,6 @@ mod tests {
                 "local:8333",
                 &self.outboxes,
                 &self.da_relay,
-            )
-        }
-
-        fn announce_block(&self, block_bytes: &[u8]) -> Result<(), String> {
-            announce_block_after_local_acceptance(
-                block_bytes,
-                &self.relay,
-                &self.peers,
-                "local:8333",
-                &self.outboxes,
-                &self.da_relay,
-                &self.ttl_seen,
             )
         }
     }
@@ -1509,13 +1468,12 @@ mod tests {
 
     #[test]
     #[rustfmt::skip]
-    fn local_block_announce_advances_da_ttl_after_success_only() {
+    fn local_accepted_block_advances_da_ttl_without_broadcast_coupling() {
         let da_id = [0x51; 32]; let chunk_tx = local_da_chunk_tx(da_id, b"local-block-ttl");
         let ctx = local_da_test_context_with_peers(&["peer:8333"]); ctx.announce(&chunk_tx).expect("stage local DA orphan");
-        ctx.announce_block(&local_block_variant(1)).expect("local block announce"); ctx.announce_block(&local_block_variant(1)).expect("duplicate block announce"); ctx.announce_block(&local_block_variant(2)).expect("second local block announce"); assert!(!ctx.da_relay.lock().unwrap().is_empty()); ctx.announce_block(&local_block_variant(3)).expect("third local block announce"); assert!(ctx.da_relay.lock().unwrap().is_empty());
-        let ctx = local_da_test_context(); ctx.announce(&chunk_tx).expect("stage no-peer DA orphan"); ctx.announce_block(&local_block_variant(10)).expect("no-peer local block"); ctx.announce_block(&local_block_variant(10)).expect("duplicate no-peer local block"); ctx.announce_block(&local_block_variant(11)).expect("second no-peer local block"); assert!(!ctx.da_relay.lock().unwrap().is_empty()); ctx.announce_block(&local_block_variant(12)).expect("third no-peer local block"); assert!(ctx.da_relay.lock().unwrap().is_empty());
-        let ctx = local_da_test_context_with_peers(&["healthy:8333"]); ctx.announce(&chunk_tx).expect("stage failed-announce DA orphan"); ctx.peers.add_peer(rubin_node::p2p_runtime::PeerState { addr: "missing:8333".to_string(), ..Default::default() }).expect("add missing peer"); let failed = local_block_variant(20); let failed_hash = rubin_consensus::block_hash(&rubin_consensus::parse_block_bytes(&failed).unwrap().header_bytes).unwrap();
-        assert!(ctx.announce_block(&failed).is_err()); assert!(ctx.announce_block(&failed).is_err()); assert!(!ctx.relay.block_seen.has(&failed_hash)); assert!(!ctx.da_relay.lock().unwrap().is_empty()); assert!(ctx.announce_block(&local_block_variant(21)).is_err()); assert!(!ctx.da_relay.lock().unwrap().is_empty()); assert!(ctx.announce_block(&local_block_variant(22)).is_err()); assert!(ctx.da_relay.lock().unwrap().is_empty());
+        advance_da_ttl_for_block([1; 32], &ctx.da_relay, &ctx.ttl_seen).expect("local block accepted"); advance_da_ttl_for_block([1; 32], &ctx.da_relay, &ctx.ttl_seen).expect("duplicate accepted block"); advance_da_ttl_for_block([2; 32], &ctx.da_relay, &ctx.ttl_seen).expect("second accepted block"); assert!(!ctx.da_relay.lock().unwrap().is_empty()); advance_da_ttl_for_block([3; 32], &ctx.da_relay, &ctx.ttl_seen).expect("third accepted block"); assert!(ctx.da_relay.lock().unwrap().is_empty());
+        let ctx = local_da_test_context_with_peers(&["healthy:8333"]); ctx.announce(&chunk_tx).expect("stage failed-announce DA orphan"); ctx.peers.add_peer(rubin_node::p2p_runtime::PeerState { addr: "missing:8333".to_string(), ..Default::default() }).expect("add missing peer"); let failed = rubin_node::devnet_genesis_block_bytes(); let failed_hash = rubin_consensus::block_hash(&rubin_consensus::parse_block_bytes(&failed).unwrap().header_bytes).unwrap();
+        advance_da_ttl_for_block(failed_hash, &ctx.da_relay, &ctx.ttl_seen).expect("failed announce block accepted"); assert!(rubin_node::tx_relay::announce_block(&failed, &ctx.relay, &ctx.peers, "local:8333", &ctx.outboxes).is_err()); assert!(rubin_node::tx_relay::announce_block(&failed, &ctx.relay, &ctx.peers, "local:8333", &ctx.outboxes).is_err()); assert!(!ctx.relay.block_seen.has(&failed_hash)); assert!(!ctx.da_relay.lock().unwrap().is_empty()); advance_da_ttl_for_block([21; 32], &ctx.da_relay, &ctx.ttl_seen).expect("second failed block accepted"); assert!(!ctx.da_relay.lock().unwrap().is_empty()); advance_da_ttl_for_block([22; 32], &ctx.da_relay, &ctx.ttl_seen).expect("third failed block accepted"); assert!(ctx.da_relay.lock().unwrap().is_empty());
     }
 
     /// RUB-13 / GitHub #1157: stdout helper for tests that parse the

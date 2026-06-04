@@ -42,6 +42,7 @@ pub const RPC_READINESS_TRANSITION_FAILED: &str =
 pub type AnnounceTxFn =
     Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
 pub type AnnounceBlockFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
+pub type AcceptedBlockFn = Arc<dyn Fn([u8; 32]) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct DevnetRPCState {
@@ -53,6 +54,7 @@ pub struct DevnetRPCState {
     now_unix: fn() -> u64,
     announce_tx: Option<AnnounceTxFn>,
     announce_block: Option<AnnounceBlockFn>,
+    pub accepted_block: Option<AcceptedBlockFn>,
     /// Serializes mutating devnet RPC (submit_tx + mine_next).
     rpc_op_lock: Arc<Mutex<()>>,
     /// When set, POST `/mine_next` mines one block using this config (devnet + loopback RPC only).
@@ -527,12 +529,13 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         now_unix: current_unix,
         announce_tx,
         announce_block,
+        accepted_block: None,
         rpc_op_lock: Arc::new(Mutex::new(())),
         live_mining_cfg,
         // RUB-10 / GitHub #1151: gate starts in `NotReady`. The
         // `try_mark_ready_on_startup` transition runs inside
         // `start_devnet_rpc_server` after the listener is bound, so
-        // `/ready` cannot report 200 before the node is actually
+        // `GET /ready` cannot report 200 before the node is actually
         // serving requests.
         readiness: Arc::new(ReadinessGate::default()),
     }
@@ -1581,6 +1584,11 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             )
         }
     };
+    if let Some(ref accepted) = state.accepted_block {
+        if let Err(err) = accepted(mined.hash) {
+            eprintln!("rpc: accepted-block: {err}");
+        }
+    }
     drop(miner);
     drop(pool);
     drop(sync_engine);
@@ -3104,6 +3112,7 @@ mod tests {
             now_unix: super::current_unix,
             announce_tx: None,
             announce_block: None,
+            accepted_block: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
             // RUB-10 / GitHub #1151: this helper bypasses the public
@@ -3355,14 +3364,16 @@ mod tests {
     }
 
     #[test]
+    #[rustfmt::skip]
     fn mine_next_announces_mined_block_on_success() {
         let (mut state, dir) = build_state_with_live_mining(true);
         let announced = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let hook_lock_order = Arc::new(Mutex::new((false, false)));
         let announced_clone = Arc::clone(&announced);
-        state.announce_block = Some(Arc::new(move |block_bytes: &[u8]| {
-            *announced_clone.lock().expect("announce lock") = Some(block_bytes.to_vec());
-            Ok(())
-        }));
+        let accepted_order = Arc::clone(&hook_lock_order); let accepted_lock = Arc::clone(&state.rpc_op_lock);
+        state.accepted_block = Some(Arc::new(move |_| { accepted_order.lock().expect("order lock").0 = accepted_lock.try_lock().is_err(); Err("accepted hook test error".to_string()) }));
+        let announce_order = Arc::clone(&hook_lock_order); let announce_lock = Arc::clone(&state.rpc_op_lock);
+        state.announce_block = Some(Arc::new(move |block_bytes: &[u8]| { *announced_clone.lock().expect("announce lock") = Some(block_bytes.to_vec()); announce_order.lock().expect("order lock").1 = announce_lock.try_lock().is_ok(); Ok(()) }));
 
         let response = post_mine_next(&state);
 
@@ -3385,6 +3396,7 @@ mod tests {
         let parsed = parse_block_bytes(&block_bytes).expect("parse announced block");
         let announced_hash = block_hash(&parsed.header_bytes).expect("announced block hash");
         assert_eq!(hex::encode(announced_hash), expected_hash);
+        assert_eq!(*hook_lock_order.lock().expect("order lock"), (true, true));
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -4956,6 +4968,7 @@ mod tests {
             now_unix: || 0,
             announce_tx: None,
             announce_block: None,
+            accepted_block: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
             // RUB-10 / GitHub #1151: render_prometheus_metrics test does
