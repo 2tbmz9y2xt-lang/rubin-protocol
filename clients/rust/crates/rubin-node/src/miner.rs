@@ -77,7 +77,7 @@ struct MinedCandidate {
 }
 
 #[derive(Clone, Debug)]
-pub struct CompleteDaSetMiningCandidate {
+pub(crate) struct CompleteDaSetMiningCandidate {
     txs: Vec<MinedCandidate>,
     da_bytes: u64,
 }
@@ -327,7 +327,13 @@ fn parse_mining_candidate(raw: &[u8]) -> Result<MinedCandidate, String> {
     })
 }
 
-pub fn parse_complete_da_set_candidate(
+pub fn validate_complete_da_set_candidate_shape(
+    set: &CompleteDaSetCandidate,
+) -> Result<bool, String> {
+    parse_complete_da_set_candidate(set).map(|candidate| candidate.is_some())
+}
+
+pub(crate) fn parse_complete_da_set_candidate(
     set: &CompleteDaSetCandidate,
 ) -> Result<Option<CompleteDaSetMiningCandidate>, String> {
     let commit = parse_mining_candidate(&set.commit_tx)?;
@@ -544,7 +550,7 @@ mod tests {
         assemble_block_bytes, build_witness_commitment, canonical_tx_weight,
         choose_valid_timestamp, default_mine_address, make_header_prefix, mtp_median,
         parse_complete_da_set_candidate, parse_mine_address_arg, parse_mining_candidate,
-        updated_policy_da_bytes, Miner, MinerConfig,
+        updated_policy_da_bytes, validate_complete_da_set_candidate_shape, Miner, MinerConfig,
     };
 
     fn test_sync(prefix: &str) -> (PathBuf, BlockStore, SyncEngine) {
@@ -746,16 +752,14 @@ mod tests {
     }
 
     fn expect_bad(set: ProviderSet) {
-        assert!(matches!(parse_complete_da_set_candidate(&set), Ok(None)));
+        assert!(!validate_complete_da_set_candidate_shape(&set).expect("shape validation"));
     }
 
     #[test]
     fn miner_da_provider_shape_matrix() {
         let da_id = [0x71; 32];
         let base = miner_da_provider_shape_set(da_id, &[b"chunk-0", b"chunk-1"]);
-        assert!(parse_complete_da_set_candidate(&base)
-            .expect("valid provider shape parses")
-            .is_some());
+        assert!(validate_complete_da_set_candidate_shape(&base).expect("valid provider shape"));
 
         expect_bad(mutate_set(&base, |set| {
             set.chunks.pop();
