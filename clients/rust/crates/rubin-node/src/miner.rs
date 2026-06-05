@@ -232,6 +232,10 @@ impl<'a> Miner<'a> {
             return txs.iter().take(max_selected).cloned().collect();
         }
         match self.tx_pool.as_deref() {
+            Some(pool) if self.complete_da_set_provider.is_some() => pool
+                .select_transactions_with_filter(max_selected, MAX_BLOCK_WEIGHT as usize, |raw| {
+                    !is_mining_da_tx_raw(raw)
+                }),
             Some(pool) => pool.select_transactions(max_selected, MAX_BLOCK_WEIGHT as usize),
             None => Vec::new(),
         }
@@ -276,15 +280,11 @@ impl<'a> Miner<'a> {
         let mut policy_da_included = 0u64;
         let mut selected_nonces = HashSet::new();
         let mut selected_inputs = HashSet::new();
-        let provider_mode = self.complete_da_set_provider.is_some();
         for raw in candidate_txs {
             if parsed.len() >= max_selected {
                 break;
             }
             let candidate = parse_mining_candidate(&raw)?;
-            if provider_mode && is_mining_da_tx(&candidate.tx) {
-                continue;
-            }
             let (reject, next_da_included) =
                 self.reject_candidate(&candidate.tx, next_height, policy_da_included)?;
             if reject {
@@ -335,8 +335,9 @@ impl<'a> Miner<'a> {
             if group_len > max_selected - parsed.len() {
                 continue;
             }
-            let Some(group) = parse_complete_da_set_candidate(&set)? else {
-                continue;
+            let group = match parse_complete_da_set_candidate(&set)? {
+                Some(group) => group,
+                None => continue,
             };
             if selected_da_ids.contains(&group.da_id) {
                 continue;
@@ -1061,19 +1062,16 @@ mod tests {
         utxos: HashMap<Outpoint, UtxoEntry>,
         cfg: MinerConfig,
         remaining_weight: u64,
-    ) -> Vec<super::MinedCandidate> {
+    ) -> Result<Vec<super::MinedCandidate>, String> {
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-da-provider-selection");
         sync.chain_state.utxos = utxos;
         let provider = MinerTestCompleteDaSetProvider(sets);
         let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
         miner.set_complete_da_set_provider(&provider);
-        let selected = miner
-            .select_candidate_transactions(Vec::new(), 1, remaining_weight, 0)
-            .expect("select provider candidates");
+        let selected = miner.select_candidate_transactions(Vec::new(), 1, remaining_weight, 0);
         let _ = fs::remove_dir_all(&dir);
         selected
     }
-
     fn expect_bad(set: ProviderSet) {
         assert!(!validate_complete_da_set_candidate_shape(&set).expect("shape validation"));
     }
@@ -1114,16 +1112,6 @@ mod tests {
         expect_bad(mutate_set(&base, |set| {
             set.chunks[0].tx = mutate_provider_tx(&set.chunks[0].tx, |tx| tx.inputs.clear());
         }));
-    }
-
-    #[test]
-    fn miner_da_provider_shape_malformed_raw_errors() {
-        let mut malformed_commit = miner_da_provider_shape_set([0x81; 32], &[b"chunk-0"]);
-        malformed_commit.commit_tx.push(0);
-        assert_eq!(
-            parse_complete_da_set_candidate(&malformed_commit).unwrap_err(),
-            "non-canonical tx bytes in miner input"
-        );
     }
 
     #[test]
@@ -1236,38 +1224,34 @@ mod tests {
             ..MinerConfig::default()
         };
         let cfg = provider_cfg(group_len * 2 + 1);
-        let select = |sets: Vec<ProviderSet>, cfg: MinerConfig, weight: u64| {
+        let max = MAX_BLOCK_WEIGHT;
+        let selected_len = |sets: Vec<ProviderSet>, cfg: MinerConfig, weight| {
             sel(sets, utxos.clone(), cfg, weight)
+                .expect("select provider candidates")
+                .len()
         };
-        assert_eq!(
-            select(vec![set.clone()], cfg.clone(), MAX_BLOCK_WEIGHT).len(),
-            group_len
-        );
-        let slot_cfg = provider_cfg(group_len);
-        assert!(select(vec![set.clone()], slot_cfg, MAX_BLOCK_WEIGHT).is_empty());
-        assert!(select(vec![set.clone()], cfg.clone(), group_weight - 1).is_empty());
+        assert_eq!(selected_len(vec![set.clone()], cfg.clone(), max), group_len);
+        assert!(selected_len(vec![set.clone()], provider_cfg(group_len), max) == 0);
+        assert!(selected_len(vec![set.clone()], cfg.clone(), group_weight - 1) == 0);
         let mut da_cfg = cfg.clone();
         da_cfg.policy_max_da_bytes_per_block = group.da_bytes - 1;
-        assert!(select(vec![set.clone()], da_cfg, MAX_BLOCK_WEIGHT).is_empty());
-        assert_eq!(
-            select(vec![set.clone(), set], cfg, MAX_BLOCK_WEIGHT).len(),
-            group_len
-        );
+        assert!(selected_len(vec![set.clone()], da_cfg, max) == 0);
+        let err = |set: ProviderSet| sel(vec![set], utxos.clone(), cfg.clone(), max).unwrap_err();
+        assert!(err(mutate_set(&set, |set| set.commit_tx.push(0)))
+            .contains("non-canonical tx bytes in miner input"));
+        assert!(err(mutate_set(&set, |set| set.chunks[0].tx.push(0)))
+            .contains("non-canonical tx bytes in miner input"));
+        assert_eq!(selected_len(vec![set.clone(), set], cfg, max), group_len);
         let mut capped_sets = Vec::new();
         let mut capped_utxos = HashMap::new();
         let cap_end = MAX_DA_BATCHES_PER_BLOCK as usize;
         for marker in 0..=MAX_DA_BATCHES_PER_BLOCK as u8 {
-            let payload = [marker];
-            let (set, set_utxos) = signed_miner_da_provider_set([marker; 32], &[&payload]);
+            let (set, set_utxos) = signed_miner_da_provider_set([marker; 32], &[&[marker]]);
             capped_sets.push(set);
             capped_utxos.extend(set_utxos);
         }
-        let selected = sel(
-            capped_sets,
-            capped_utxos,
-            provider_cfg(group_len * (cap_end + 1) + 1),
-            MAX_BLOCK_WEIGHT,
-        );
+        let cap_cfg = provider_cfg(group_len * (cap_end + 1) + 1);
+        let selected = sel(capped_sets, capped_utxos, cap_cfg, max).expect("select capped");
         assert_eq!(selected.len(), cap_end * group_len);
     }
     #[test]
@@ -1429,37 +1413,23 @@ mod tests {
             max_tx_per_block: 2,
             ..MinerConfig::default()
         };
-        let mut miner = Miner::new(&mut sync, None, cfg.clone()).expect("miner");
-        let selected = miner.candidate_transactions(&[vec![1], vec![2], vec![3]]);
-        assert_eq!(selected, vec![vec![1]]);
         let provider = MinerTestCompleteDaSetProvider(Vec::new());
         let da_set = miner_da_provider_shape_set([0xd1; 32], &[b"chunk"]);
-        miner.set_complete_da_set_provider(&provider);
-        let selected = miner.candidate_transactions(&[da_set.commit_tx.clone(), vec![2], vec![3]]);
-        assert_eq!(selected, vec![vec![2]]);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn provider_selection_skips_pool_da_flat_before_provider_group() {
-        let (set, utxos) = signed_miner_da_provider_set([0xd4; 32], &[b"chunk"]);
-        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-pool-provider-da");
-        sync.chain_state.utxos = utxos;
+        {
+            let mut miner = Miner::new(&mut sync, None, cfg.clone()).expect("miner");
+            miner.set_complete_da_set_provider(&provider);
+            let raw = [da_set.commit_tx.clone(), vec![2], vec![3]];
+            assert_eq!(miner.candidate_transactions(&raw), vec![vec![2]]);
+        }
         let mut pool = TxPool::new();
-        pool.inject_test_entry([0xd4; 32], set.commit_tx.clone());
-        let provider = MinerTestCompleteDaSetProvider(vec![set]);
-        let cfg = MinerConfig {
-            max_tx_per_block: 3,
-            ..MinerConfig::default()
-        };
+        let (_state, non_da) = signed_p2pk_state_and_tx(7700, 10);
+        let da_raw = da_set.commit_tx;
+        pool.inject_test_entry([0x01; 32], da_raw.clone());
+        pool.inject_test_entry([0x02; 32], non_da.clone());
+        assert_eq!(pool.select_transactions(1, usize::MAX), vec![da_raw]);
         let mut miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
         miner.set_complete_da_set_provider(&provider);
-        let candidates = miner.candidate_transactions(&[]);
-        let selected = miner
-            .select_candidate_transactions(candidates, 1, MAX_BLOCK_WEIGHT, 0)
-            .expect("select");
-        assert_eq!(selected.len(), 2);
-        assert_eq!(selected[1].tx.tx_kind, 0x02);
+        assert_eq!(miner.candidate_transactions(&[]), vec![non_da]);
         let _ = fs::remove_dir_all(&dir);
     }
 
