@@ -667,9 +667,9 @@ mod tests {
     };
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
-        encode_compact_size, marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx,
-        tx_weight_and_stats_public, CoreExtDeploymentProfiles, DaChunkCore, DaCommitCore, Outpoint,
-        Tx, TxInput, TxOutput, UtxoEntry,
+        encode_compact_size, marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction,
+        tx_weight_and_stats_public, CoreExtDeploymentProfiles, DaChunkCore, DaCommitCore,
+        Mldsa87Keypair, Outpoint, Tx, TxInput, TxOutput, UtxoEntry,
     };
     use sha3::{Digest, Sha3_256};
 
@@ -941,21 +941,50 @@ mod tests {
 
     #[test]
     fn miner_da_provider_group_projection_matrix() {
-        let provider_group =
-            parse_complete_da_set_candidate(&miner_da_provider_shape_set([0x91; 32], &[b"chunk"]))
-                .expect("parse provider group")
-                .expect("provider group");
-        let (state, raw) = signed_p2pk_state_and_tx(7_700, 10);
-        let candidate = parse_mining_candidate(&raw).expect("candidate");
+        let (provider_group, provider_utxos) = {
+            let mut set = miner_da_provider_shape_set([0x91; 32], &[b"chunk"]);
+            let keypair = Mldsa87Keypair::generate().expect("provider keypair");
+            let mut utxos = HashMap::new();
+            let mut sign_raw = |raw: &mut Vec<u8>| {
+                let (mut tx, _, _, _) = parse_tx(raw).expect("parse provider tx");
+                let outpoint = Outpoint {
+                    txid: tx.inputs[0].prev_txid,
+                    vout: tx.inputs[0].prev_vout,
+                };
+                utxos.insert(
+                    outpoint,
+                    UtxoEntry {
+                        value: 1_000_000,
+                        covenant_type: COV_TYPE_P2PK,
+                        covenant_data: p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes()),
+                        creation_height: 0,
+                        created_by_coinbase: false,
+                    },
+                );
+                sign_transaction(&mut tx, &utxos, devnet_genesis_chain_id(), &keypair)
+                    .expect("sign provider tx");
+                *raw = marshal_tx(&tx).expect("marshal provider tx");
+            };
+            sign_raw(&mut set.commit_tx);
+            for chunk in &mut set.chunks {
+                sign_raw(&mut chunk.tx);
+            }
+            (
+                parse_complete_da_set_candidate(&set)
+                    .expect("parse provider group")
+                    .expect("provider group"),
+                utxos,
+            )
+        };
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-da-provider-group");
-        sync.chain_state = state;
+        sync.chain_state.utxos = provider_utxos;
         let cfg = MinerConfig {
             policy_max_da_bytes_per_block: 10_000,
             policy_current_mempool_min_fee_rate: 0,
             policy_min_da_fee_rate: 0,
             ..MinerConfig::default()
         };
-        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+        let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
         fn projection_context<'a>(
             selected_nonces: &'a HashSet<u64>,
             selected_inputs: &'a HashSet<Outpoint>,
@@ -970,53 +999,45 @@ mod tests {
                 policy_da_included: 0,
             }
         }
+        macro_rules! expect_no_projection {
+            ($group:expr, $projection:expr) => {
+                assert!(miner
+                    .project_complete_da_set_group($group, $projection)
+                    .expect("project")
+                    .is_none());
+            };
+        }
         let empty_nonces = HashSet::new();
         let empty_inputs = HashSet::new();
-        assert!(miner
-            .project_complete_da_set_group(&[], projection_context(&empty_nonces, &empty_inputs))
-            .expect("project")
-            .is_none());
-
+        expect_no_projection!(&[], projection_context(&empty_nonces, &empty_inputs));
         let duplicate_nonce = HashSet::from([provider_group.txs[0].tx.tx_nonce]);
-        assert!(miner
-            .project_complete_da_set_group(
-                &provider_group.txs,
-                projection_context(&duplicate_nonce, &empty_inputs),
-            )
-            .expect("project")
-            .is_none());
+        expect_no_projection!(
+            &provider_group.txs,
+            projection_context(&duplicate_nonce, &empty_inputs)
+        );
         let duplicate_input = HashSet::from([Outpoint {
             txid: provider_group.txs[0].tx.inputs[0].prev_txid,
             vout: provider_group.txs[0].tx.inputs[0].prev_vout,
         }]);
-        assert!(miner
-            .project_complete_da_set_group(
-                &provider_group.txs,
-                projection_context(&empty_nonces, &duplicate_input),
-            )
-            .expect("project")
-            .is_none());
-        assert!(miner
-            .project_complete_da_set_group(
-                &[candidate.clone(), candidate.clone()],
-                projection_context(&empty_nonces, &empty_inputs),
-            )
-            .expect("project")
-            .is_none());
-        let mut exhausted_weight = projection_context(&empty_nonces, &empty_inputs);
-        exhausted_weight.selected_weight = 1;
-        exhausted_weight.remaining_weight = 0;
-        assert!(miner
-            .project_complete_da_set_group(std::slice::from_ref(&candidate), exhausted_weight)
-            .expect("project")
-            .is_none());
+        expect_no_projection!(
+            &provider_group.txs,
+            projection_context(&empty_nonces, &duplicate_input)
+        );
+        expect_no_projection!(
+            &[provider_group.txs[0].clone(), provider_group.txs[0].clone()],
+            projection_context(&empty_nonces, &empty_inputs)
+        );
+        let original_da_cap = miner.cfg.policy_max_da_bytes_per_block;
+        miner.cfg.policy_max_da_bytes_per_block = provider_group.da_bytes - 1;
+        expect_no_projection!(
+            &provider_group.txs,
+            projection_context(&empty_nonces, &empty_inputs)
+        );
+        miner.cfg.policy_max_da_bytes_per_block = original_da_cap;
         let mut overweight_candidate = projection_context(&empty_nonces, &empty_inputs);
-        overweight_candidate.remaining_weight = candidate.weight - 1;
-        assert!(miner
-            .project_complete_da_set_group(std::slice::from_ref(&candidate), overweight_candidate)
-            .expect("project")
-            .is_none());
-        let mut zero_nonce_candidate = candidate.clone();
+        overweight_candidate.remaining_weight = provider_group.txs[0].weight - 1;
+        expect_no_projection!(&provider_group.txs, overweight_candidate);
+        let mut zero_nonce_candidate = provider_group.txs[0].clone();
         zero_nonce_candidate.tx.tx_nonce = 0;
         assert!(super::collect_complete_da_set_group_inputs(
             std::slice::from_ref(&zero_nonce_candidate),
@@ -1026,33 +1047,26 @@ mod tests {
         .is_none());
         let original_utxos = miner.sync.chain_state.utxos.clone();
         let candidate_input = Outpoint {
-            txid: candidate.tx.inputs[0].prev_txid,
-            vout: candidate.tx.inputs[0].prev_vout,
+            txid: provider_group.txs[0].tx.inputs[0].prev_txid,
+            vout: provider_group.txs[0].tx.inputs[0].prev_vout,
         };
         miner.sync.chain_state.utxos.remove(&candidate_input);
-        assert!(miner
-            .project_complete_da_set_group(
-                std::slice::from_ref(&candidate),
-                projection_context(&empty_nonces, &empty_inputs),
-            )
-            .expect("project")
-            .is_none());
+        expect_no_projection!(
+            &provider_group.txs,
+            projection_context(&empty_nonces, &empty_inputs)
+        );
         miner.sync.chain_state.utxos = original_utxos;
         let before_utxos = miner.sync.chain_state.utxos.clone();
-        let selected_nonces = HashSet::new();
-        let selected_inputs = HashSet::new();
-
+        let group_weight = provider_group.txs[0].weight + provider_group.txs[1].weight;
         let projection = miner
             .project_complete_da_set_group(
-                std::slice::from_ref(&candidate),
-                projection_context(&selected_nonces, &selected_inputs),
+                &provider_group.txs,
+                projection_context(&empty_nonces, &empty_inputs),
             )
             .expect("project")
             .expect("valid group");
 
-        assert_eq!(projection, (candidate.weight, 0));
-        assert!(selected_nonces.is_empty());
-        assert!(selected_inputs.is_empty());
+        assert_eq!(projection, (group_weight, provider_group.da_bytes));
         assert_eq!(miner.sync.chain_state.utxos, before_utxos);
         let _ = fs::remove_dir_all(&dir);
     }
