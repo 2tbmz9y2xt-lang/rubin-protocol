@@ -1935,9 +1935,9 @@ fn compare_entries_for_mining(
         },
     }
 }
-
 fn is_mining_da_raw_for_selection(raw: &[u8]) -> bool {
-    matches!(parse_tx(raw), Ok((tx, _, _, consumed)) if consumed == raw.len() && (tx.tx_kind == 0x01 || tx.tx_kind == 0x02))
+    raw.starts_with(&rubin_consensus::constants::TX_WIRE_VERSION.to_le_bytes())
+        && matches!(raw.get(4).copied(), Some(0x01 | 0x02))
 }
 
 #[cfg(test)]
