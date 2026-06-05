@@ -7,7 +7,7 @@ use rubin_consensus::constants::{
 };
 use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context as apply_basic_non_coinbase_update,
     encode_compact_size, merkle_root_txids, parse_tx, pow_check, tx_weight_and_stats_public,
     CoreExtDeploymentProfiles, Outpoint, Tx, UtxoEntry,
 };
@@ -86,13 +86,13 @@ pub(crate) struct CompleteDaSetMiningCandidate {
 
 #[allow(dead_code)]
 pub(crate) struct CompleteDaSetGroupProjection<'a> {
-    selected_nonces: &'a HashSet<u64>,
-    selected_inputs: &'a HashSet<Outpoint>,
-    next_height: u64,
-    block_mtp: u64,
-    selected_weight: u64,
-    remaining_weight: u64,
-    policy_da_included: u64,
+    pub(crate) selected_nonces: &'a HashSet<u64>,
+    pub(crate) selected_inputs: &'a HashSet<Outpoint>,
+    pub(crate) next_height: u64,
+    pub(crate) block_mtp: u64,
+    pub(crate) selected_weight: u64,
+    pub(crate) remaining_weight: u64,
+    pub(crate) policy_da_included: u64,
 }
 
 pub struct Miner<'a> {
@@ -324,8 +324,6 @@ impl<'a> Miner<'a> {
         Ok((false, policy_da_included))
     }
 
-    // RUB-406 keeps this production-compiled projection boundary unwired; the
-    // provider selection loop is a later slice.
     #[allow(dead_code)]
     pub(crate) fn project_complete_da_set_group(
         &self,
@@ -380,28 +378,25 @@ impl<'a> Miner<'a> {
         next_height: u64,
         block_mtp: u64,
     ) -> Result<bool, String> {
-        let active_profiles = self
-            .sync
-            .cfg
-            .core_ext_deployments
+        let deployments = &self.sync.cfg.core_ext_deployments;
+        let active_profiles = deployments
             .active_profiles_at_height(next_height)
             .map_err(|err| err.to_string())?;
         let (rotation, registry) = self.sync.suite_context();
         let mut work_utxos = copy_selected_utxo_set(&self.sync.chain_state.utxos, group_inputs);
         for candidate in group {
-            let next =
-                apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                    &candidate.tx,
-                    candidate.txid,
-                    &work_utxos,
-                    next_height,
-                    block_mtp,
-                    block_mtp,
-                    self.sync.cfg.chain_id,
-                    &active_profiles,
-                    rotation,
-                    registry,
-                );
+            let next = apply_basic_non_coinbase_update(
+                &candidate.tx,
+                candidate.txid,
+                &work_utxos,
+                next_height,
+                block_mtp,
+                block_mtp,
+                self.sync.cfg.chain_id,
+                &active_profiles,
+                rotation,
+                registry,
+            );
             let Ok((next_utxos, _summary)) = next else {
                 return Ok(false);
             };
@@ -977,6 +972,10 @@ mod tests {
         }
         let empty_nonces = HashSet::new();
         let empty_inputs = HashSet::new();
+        assert!(miner
+            .project_complete_da_set_group(&[], projection_context(&empty_nonces, &empty_inputs))
+            .expect("project")
+            .is_none());
 
         let duplicate_nonce = HashSet::from([provider_group.txs[0].tx.tx_nonce]);
         assert!(miner
@@ -1004,6 +1003,27 @@ mod tests {
             )
             .expect("project")
             .is_none());
+        let mut exhausted_weight = projection_context(&empty_nonces, &empty_inputs);
+        exhausted_weight.selected_weight = 1;
+        exhausted_weight.remaining_weight = 0;
+        assert!(miner
+            .project_complete_da_set_group(std::slice::from_ref(&candidate), exhausted_weight)
+            .expect("project")
+            .is_none());
+        let mut overweight_candidate = projection_context(&empty_nonces, &empty_inputs);
+        overweight_candidate.remaining_weight = candidate.weight - 1;
+        assert!(miner
+            .project_complete_da_set_group(std::slice::from_ref(&candidate), overweight_candidate)
+            .expect("project")
+            .is_none());
+        let mut zero_nonce_candidate = candidate.clone();
+        zero_nonce_candidate.tx.tx_nonce = 0;
+        assert!(super::collect_complete_da_set_group_inputs(
+            std::slice::from_ref(&zero_nonce_candidate),
+            &empty_nonces,
+            &empty_inputs,
+        )
+        .is_none());
         let original_utxos = miner.sync.chain_state.utxos.clone();
         let candidate_input = Outpoint {
             txid: candidate.tx.inputs[0].prev_txid,
