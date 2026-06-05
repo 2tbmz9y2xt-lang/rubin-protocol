@@ -76,10 +76,8 @@ struct MinedCandidate {
     weight: u64,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
-struct CompleteDaSetMiningCandidate {
-    da_id: [u8; 32],
+pub struct CompleteDaSetMiningCandidate {
     txs: Vec<MinedCandidate>,
     da_bytes: u64,
 }
@@ -329,8 +327,7 @@ fn parse_mining_candidate(raw: &[u8]) -> Result<MinedCandidate, String> {
     })
 }
 
-#[allow(dead_code)]
-fn parse_complete_da_set_candidate(
+pub fn parse_complete_da_set_candidate(
     set: &CompleteDaSetCandidate,
 ) -> Result<Option<CompleteDaSetMiningCandidate>, String> {
     let commit = parse_mining_candidate(&set.commit_tx)?;
@@ -347,7 +344,6 @@ fn parse_complete_da_set_candidate(
     }
 
     let mut group = CompleteDaSetMiningCandidate {
-        da_id: set.da_id,
         da_bytes: commit.tx.da_payload.len() as u64,
         txs: vec![commit],
     };
@@ -389,7 +385,6 @@ fn parse_complete_da_set_candidate(
     Ok(Some(group))
 }
 
-#[allow(dead_code)]
 fn complete_da_commitment_matches(tx: &Tx, commitment: &[u8; 32]) -> bool {
     let mut count = 0usize;
     for output in &tx.outputs {
