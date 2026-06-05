@@ -487,15 +487,6 @@ impl TxPool {
     }
 
     pub fn select_transactions(&self, max_count: usize, max_bytes: usize) -> Vec<Vec<u8>> {
-        self.select_transactions_with_filter(max_count, max_bytes, |_| true)
-    }
-
-    pub(crate) fn select_transactions_with_filter(
-        &self,
-        max_count: usize,
-        max_bytes: usize,
-        mut include: impl FnMut(&[u8]) -> bool,
-    ) -> Vec<Vec<u8>> {
         if max_count == 0 || max_bytes == 0 {
             return Vec::new();
         }
@@ -508,9 +499,6 @@ impl TxPool {
         for entry in entries {
             if selected.len() >= max_count {
                 break;
-            }
-            if !include(&entry.1.raw) {
-                continue;
             }
             if entry.1.size > max_bytes.saturating_sub(used_bytes) {
                 continue;
