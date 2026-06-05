@@ -487,6 +487,23 @@ impl TxPool {
     }
 
     pub fn select_transactions(&self, max_count: usize, max_bytes: usize) -> Vec<Vec<u8>> {
+        self.select_transactions_with(max_count, max_bytes, true)
+    }
+
+    pub(crate) fn select_non_da_transactions(
+        &self,
+        max_count: usize,
+        max_bytes: usize,
+    ) -> Vec<Vec<u8>> {
+        self.select_transactions_with(max_count, max_bytes, false)
+    }
+
+    fn select_transactions_with(
+        &self,
+        max_count: usize,
+        max_bytes: usize,
+        include_da: bool,
+    ) -> Vec<Vec<u8>> {
         if max_count == 0 || max_bytes == 0 {
             return Vec::new();
         }
@@ -497,6 +514,9 @@ impl TxPool {
         let mut selected = Vec::with_capacity(entries.len().min(max_count));
         let mut used_bytes = 0usize;
         for entry in entries {
+            if !include_da && is_mining_da_raw_for_selection(&entry.1.raw) {
+                continue;
+            }
             if selected.len() >= max_count {
                 break;
             }
@@ -1925,6 +1945,10 @@ fn compare_entries_for_mining(
             other => other,
         },
     }
+}
+
+fn is_mining_da_raw_for_selection(raw: &[u8]) -> bool {
+    matches!(parse_tx(raw), Ok((tx, _, _, consumed)) if consumed == raw.len() && (tx.tx_kind == 0x01 || tx.tx_kind == 0x02))
 }
 
 #[cfg(test)]

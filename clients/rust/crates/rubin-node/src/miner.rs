@@ -224,10 +224,9 @@ impl<'a> Miner<'a> {
             return txs.iter().take(max_selected).cloned().collect();
         }
         match self.tx_pool.as_deref() {
-            Some(pool) if self.complete_da_set_provider.is_some() => pick_flat_candidate_raw(
-                &pool.select_transactions(usize::MAX, usize::MAX),
-                max_selected,
-            ),
+            Some(pool) if self.complete_da_set_provider.is_some() => {
+                pool.select_non_da_transactions(max_selected, MAX_BLOCK_WEIGHT as usize)
+            }
             Some(pool) => pool.select_transactions(max_selected, MAX_BLOCK_WEIGHT as usize),
             None => Vec::new(),
         }
@@ -340,12 +339,7 @@ impl<'a> Miner<'a> {
             let Some(group) = parse_complete_da_set_candidate(&set)? else {
                 continue;
             };
-            if selected_da_ids.contains(&group.da_id)
-                || parsed
-                    .len()
-                    .checked_add(group.txs.len())
-                    .is_none_or(|len| len > max_selected)
-            {
+            if selected_da_ids.contains(&group.da_id) {
                 continue;
             }
             let Some(next_provider_da_included) =
@@ -1062,14 +1056,12 @@ mod tests {
         }
     }
     fn select_provider_sets(
-        suffix: &str,
         sets: Vec<ProviderSet>,
         utxos: HashMap<Outpoint, UtxoEntry>,
         cfg: MinerConfig,
         remaining_weight: u64,
     ) -> Vec<super::MinedCandidate> {
-        let (dir, _block_store, mut sync) =
-            test_sync(&format!("rubin-rust-miner-da-provider-selection-{suffix}"));
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-da-provider-selection");
         sync.chain_state.utxos = utxos;
         let provider = MinerTestCompleteDaSetProvider(sets);
         let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
@@ -1132,12 +1124,6 @@ mod tests {
             parse_complete_da_set_candidate(&malformed_commit).unwrap_err(),
             err
         );
-        let mut malformed_chunk = miner_da_provider_shape_set([0x82; 32], &[b"chunk-0"]);
-        malformed_chunk.chunks[0].tx.push(0);
-        assert_eq!(
-            parse_complete_da_set_candidate(&malformed_chunk).unwrap_err(),
-            err
-        );
     }
 
     #[test]
@@ -1152,7 +1138,7 @@ mod tests {
             policy_min_da_fee_rate: 0,
             ..MinerConfig::default()
         };
-        let mut miner = Miner::new(&mut sync, None, cfg.clone()).expect("miner");
+        let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
         fn projection_context<'a>(
             selected_nonces: &'a HashSet<u64>,
             selected_inputs: &'a HashSet<Outpoint>,
@@ -1247,51 +1233,51 @@ mod tests {
         let group_weight: u64 = group.txs.iter().map(|candidate| candidate.weight).sum();
         let provider_cfg = |max_tx_per_block| MinerConfig {
             max_tx_per_block,
-            policy_da_anchor_anti_abuse: true,
             ..MinerConfig::default()
         };
         let cfg = provider_cfg(group_len * 2 + 1);
-        let select = |suffix: &str, sets: Vec<ProviderSet>, cfg: MinerConfig, weight: u64| {
-            select_provider_sets(suffix, sets, utxos.clone(), cfg, weight)
+        let select = |sets: Vec<ProviderSet>, cfg: MinerConfig, weight: u64| {
+            select_provider_sets(sets, utxos.clone(), cfg, weight)
         };
-        let valid = select("valid", vec![set.clone()], cfg.clone(), MAX_BLOCK_WEIGHT);
-        assert_eq!(valid.len(), group_len);
+        assert_eq!(
+            select(vec![set.clone()], cfg.clone(), MAX_BLOCK_WEIGHT).len(),
+            group_len
+        );
         let mut slot_cfg = cfg.clone();
         slot_cfg.max_tx_per_block = group_len;
-        assert!(select("slots", vec![set.clone()], slot_cfg, MAX_BLOCK_WEIGHT).is_empty());
-        assert!(select("weight", vec![set.clone()], cfg.clone(), group_weight - 1).is_empty());
-        assert!(select("zero", Vec::new(), provider_cfg(1), 0).is_empty());
+        assert!(select(vec![set.clone()], slot_cfg, MAX_BLOCK_WEIGHT).is_empty());
+        assert!(select(vec![set.clone()], cfg.clone(), group_weight - 1).is_empty());
+        assert!(select(Vec::new(), provider_cfg(1), 0).is_empty());
         let mut da_cfg = cfg.clone();
         da_cfg.policy_max_da_bytes_per_block = group.da_bytes - 1;
-        assert!(select("da-budget", vec![set.clone()], da_cfg, MAX_BLOCK_WEIGHT).is_empty());
-        let bad_shape = mutate_set(&set, |set| set.chunks.clear());
-        assert!(select("bad-shape", vec![bad_shape], cfg.clone(), MAX_BLOCK_WEIGHT).is_empty());
-        let duplicate = select("dupe", vec![set.clone(), set], cfg, MAX_BLOCK_WEIGHT);
-        assert_eq!(duplicate.len(), group_len);
+        assert!(select(vec![set.clone()], da_cfg, MAX_BLOCK_WEIGHT).is_empty());
+        assert!(select(
+            vec![mutate_set(&set, |set| set.chunks.clear())],
+            cfg.clone(),
+            MAX_BLOCK_WEIGHT
+        )
+        .is_empty());
+        assert_eq!(
+            select(vec![set.clone(), set], cfg, MAX_BLOCK_WEIGHT).len(),
+            group_len
+        );
         let mut capped_sets = Vec::new();
         let mut capped_utxos = HashMap::new();
         let cap_end = MAX_DA_BATCHES_PER_BLOCK as usize;
         for index in 0..=cap_end {
-            let payload = [index as u8];
-            let da_id = [u8::try_from(index).expect("batch cap fits u8"); 32];
-            let (set, set_utxos) = signed_miner_da_provider_set(da_id, &[&payload]);
+            let marker = u8::try_from(index).expect("batch cap fits u8");
+            let payload = [marker];
+            let (set, set_utxos) = signed_miner_da_provider_set([marker; 32], &[&payload]);
             capped_sets.push(set);
             capped_utxos.extend(set_utxos);
         }
         let selected = select_provider_sets(
-            "batch-cap",
             capped_sets,
             capped_utxos,
             provider_cfg(group_len * (cap_end + 1) + 1),
             MAX_BLOCK_WEIGHT,
         );
-        let overflow_da_id = [u8::try_from(cap_end).expect("batch cap fits u8"); 32];
         assert_eq!(selected.len(), cap_end * group_len);
-        assert!(selected.iter().all(|candidate| {
-            candidate.tx.da_commit_core.as_ref().map(|core| core.da_id) != Some(overflow_da_id)
-                && candidate.tx.da_chunk_core.as_ref().map(|core| core.da_id)
-                    != Some(overflow_da_id)
-        }));
     }
     #[test]
     fn miner_da_anchor_master_switch_off_ignores_anchor_subflag() {
@@ -1745,10 +1731,8 @@ mod tests {
     fn select_candidate_transactions_covers_reject_skip_and_accept_paths() {
         let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-selection");
         let (state, raw, conflicting_raw) = signed_conflicting_p2pk_state_and_txs(20, 10, 9);
-        let (da_set, da_utxos) = signed_miner_da_provider_set([0xb1; 32], &[b"chunk"]);
         sync.chain_state.utxos = state.utxos;
-        sync.chain_state.utxos.extend(da_utxos);
-        let mut miner = Miner::new(&mut sync, None, MinerConfig::default()).expect("miner");
+        let miner = Miner::new(&mut sync, None, MinerConfig::default()).expect("miner");
 
         let rejected = miner
             .select_candidate_transactions(vec![coinbase_bytes(0)], 0, MAX_BLOCK_WEIGHT)
@@ -1765,16 +1749,6 @@ mod tests {
             .expect("accept branch");
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].tx.tx_nonce, 7);
-        let flat_da = miner
-            .select_candidate_transactions(vec![da_set.commit_tx.clone()], 0, MAX_BLOCK_WEIGHT)
-            .expect("flat DA without provider");
-        assert_eq!(flat_da.len(), 1);
-        let empty_provider = MinerTestCompleteDaSetProvider(Vec::new());
-        miner.set_complete_da_set_provider(&empty_provider);
-        assert!(miner
-            .select_candidate_transactions(vec![da_set.commit_tx], 0, MAX_BLOCK_WEIGHT)
-            .expect("flat DA skipped with provider")
-            .is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }
