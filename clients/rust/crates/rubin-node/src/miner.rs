@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rubin_consensus::constants::{
@@ -6,8 +7,9 @@ use rubin_consensus::constants::{
 };
 use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
 use rubin_consensus::{
+    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context as apply_basic_non_coinbase_update,
     encode_compact_size, merkle_root_txids, parse_tx, pow_check, tx_weight_and_stats_public,
-    CoreExtDeploymentProfiles, Tx,
+    CoreExtDeploymentProfiles, Outpoint, Tx, UtxoEntry,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -68,7 +70,7 @@ pub struct MinedBlock {
 }
 
 #[derive(Clone, Debug)]
-struct MinedCandidate {
+pub(crate) struct MinedCandidate {
     raw: Vec<u8>,
     tx: Tx,
     txid: [u8; 32],
@@ -80,6 +82,17 @@ struct MinedCandidate {
 pub(crate) struct CompleteDaSetMiningCandidate {
     txs: Vec<MinedCandidate>,
     da_bytes: u64,
+}
+
+#[allow(dead_code)]
+pub(crate) struct CompleteDaSetGroupProjection<'a> {
+    pub(crate) selected_nonces: &'a HashSet<u64>,
+    pub(crate) selected_inputs: &'a HashSet<Outpoint>,
+    pub(crate) next_height: u64,
+    pub(crate) block_mtp: u64,
+    pub(crate) selected_weight: u64,
+    pub(crate) remaining_weight: u64,
+    pub(crate) policy_da_included: u64,
 }
 
 pub struct Miner<'a> {
@@ -310,6 +323,129 @@ impl<'a> Miner<'a> {
         }
         Ok((false, policy_da_included))
     }
+
+    #[allow(dead_code)]
+    pub(crate) fn project_complete_da_set_group(
+        &self,
+        group: &[MinedCandidate],
+        projection: CompleteDaSetGroupProjection<'_>,
+    ) -> Result<Option<(u64, u64)>, String> {
+        if group.is_empty() || projection.selected_weight > projection.remaining_weight {
+            return Ok(None);
+        }
+        let Some(group_inputs) = collect_complete_da_set_group_inputs(
+            group,
+            projection.selected_nonces,
+            projection.selected_inputs,
+        ) else {
+            return Ok(None);
+        };
+        if !self.validate_complete_da_set_group_consensus(
+            group,
+            &group_inputs,
+            projection.next_height,
+            projection.block_mtp,
+        )? {
+            return Ok(None);
+        }
+
+        let available_weight = projection.remaining_weight - projection.selected_weight;
+        let mut group_weight = 0u64;
+        let mut next_da_included = projection.policy_da_included;
+        for candidate in group {
+            let Ok((reject, updated_da_included)) =
+                self.reject_candidate(&candidate.tx, projection.next_height, next_da_included)
+            else {
+                return Ok(None);
+            };
+            let Some(next_group_weight) = group_weight.checked_add(candidate.weight) else {
+                return Ok(None);
+            };
+            if reject || next_group_weight > available_weight {
+                return Ok(None);
+            }
+            group_weight = next_group_weight;
+            next_da_included = updated_da_included;
+        }
+        Ok(Some((group_weight, next_da_included)))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn validate_complete_da_set_group_consensus(
+        &self,
+        group: &[MinedCandidate],
+        group_inputs: &[Outpoint],
+        next_height: u64,
+        block_mtp: u64,
+    ) -> Result<bool, String> {
+        let deployments = &self.sync.cfg.core_ext_deployments;
+        let active_profiles = deployments
+            .active_profiles_at_height(next_height)
+            .map_err(|err| err.to_string())?;
+        let (rotation, registry) = self.sync.suite_context();
+        let mut work_utxos = copy_selected_utxo_set(&self.sync.chain_state.utxos, group_inputs);
+        for candidate in group {
+            let next = apply_basic_non_coinbase_update(
+                &candidate.tx,
+                candidate.txid,
+                &work_utxos,
+                next_height,
+                block_mtp,
+                block_mtp,
+                self.sync.cfg.chain_id,
+                &active_profiles,
+                rotation,
+                registry,
+            );
+            let Ok((next_utxos, _summary)) = next else {
+                return Ok(false);
+            };
+            work_utxos = next_utxos;
+        }
+        Ok(true)
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn collect_complete_da_set_group_inputs(
+    group: &[MinedCandidate],
+    selected_nonces: &HashSet<u64>,
+    selected_inputs: &HashSet<Outpoint>,
+) -> Option<Vec<Outpoint>> {
+    let mut group_nonces = HashSet::new();
+    let mut group_inputs = HashSet::new();
+    let mut ordered_inputs = Vec::new();
+    for candidate in group {
+        let nonce = candidate.tx.tx_nonce;
+        if nonce == 0 || selected_nonces.contains(&nonce) || !group_nonces.insert(nonce) {
+            return None;
+        }
+        for input in &candidate.tx.inputs {
+            let outpoint = Outpoint {
+                txid: input.prev_txid,
+                vout: input.prev_vout,
+            };
+            if selected_inputs.contains(&outpoint) || !group_inputs.insert(outpoint.clone()) {
+                return None;
+            }
+            ordered_inputs.push(outpoint);
+        }
+    }
+    Some(ordered_inputs)
+}
+
+#[allow(dead_code)]
+pub(crate) fn copy_selected_utxo_set(
+    utxos: &HashMap<Outpoint, UtxoEntry>,
+    inputs: &[Outpoint],
+) -> HashMap<Outpoint, UtxoEntry> {
+    let mut selected = HashMap::new();
+    for input in inputs {
+        if let Some(entry) = utxos.get(input) {
+            selected.insert(input.clone(), entry.clone());
+        }
+    }
+    selected
 }
 
 fn parse_mining_candidate(raw: &[u8]) -> Result<MinedCandidate, String> {
@@ -521,7 +657,7 @@ pub fn parse_mine_address_arg(value: &str) -> Result<Option<Vec<u8>>, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
 
@@ -801,6 +937,124 @@ mod tests {
             parse_complete_da_set_candidate(&malformed_commit).unwrap_err(),
             "non-canonical tx bytes in miner input"
         );
+    }
+
+    #[test]
+    fn miner_da_provider_group_projection_matrix() {
+        let provider_group =
+            parse_complete_da_set_candidate(&miner_da_provider_shape_set([0x91; 32], &[b"chunk"]))
+                .expect("parse provider group")
+                .expect("provider group");
+        let (state, raw) = signed_p2pk_state_and_tx(7_700, 10);
+        let candidate = parse_mining_candidate(&raw).expect("candidate");
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-da-provider-group");
+        sync.chain_state = state;
+        let cfg = MinerConfig {
+            policy_max_da_bytes_per_block: 10_000,
+            policy_current_mempool_min_fee_rate: 0,
+            policy_min_da_fee_rate: 0,
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+        fn projection_context<'a>(
+            selected_nonces: &'a HashSet<u64>,
+            selected_inputs: &'a HashSet<Outpoint>,
+        ) -> super::CompleteDaSetGroupProjection<'a> {
+            super::CompleteDaSetGroupProjection {
+                selected_nonces,
+                selected_inputs,
+                next_height: 1,
+                block_mtp: 1,
+                selected_weight: 0,
+                remaining_weight: MAX_BLOCK_WEIGHT,
+                policy_da_included: 0,
+            }
+        }
+        let empty_nonces = HashSet::new();
+        let empty_inputs = HashSet::new();
+        assert!(miner
+            .project_complete_da_set_group(&[], projection_context(&empty_nonces, &empty_inputs))
+            .expect("project")
+            .is_none());
+
+        let duplicate_nonce = HashSet::from([provider_group.txs[0].tx.tx_nonce]);
+        assert!(miner
+            .project_complete_da_set_group(
+                &provider_group.txs,
+                projection_context(&duplicate_nonce, &empty_inputs),
+            )
+            .expect("project")
+            .is_none());
+        let duplicate_input = HashSet::from([Outpoint {
+            txid: provider_group.txs[0].tx.inputs[0].prev_txid,
+            vout: provider_group.txs[0].tx.inputs[0].prev_vout,
+        }]);
+        assert!(miner
+            .project_complete_da_set_group(
+                &provider_group.txs,
+                projection_context(&empty_nonces, &duplicate_input),
+            )
+            .expect("project")
+            .is_none());
+        assert!(miner
+            .project_complete_da_set_group(
+                &[candidate.clone(), candidate.clone()],
+                projection_context(&empty_nonces, &empty_inputs),
+            )
+            .expect("project")
+            .is_none());
+        let mut exhausted_weight = projection_context(&empty_nonces, &empty_inputs);
+        exhausted_weight.selected_weight = 1;
+        exhausted_weight.remaining_weight = 0;
+        assert!(miner
+            .project_complete_da_set_group(std::slice::from_ref(&candidate), exhausted_weight)
+            .expect("project")
+            .is_none());
+        let mut overweight_candidate = projection_context(&empty_nonces, &empty_inputs);
+        overweight_candidate.remaining_weight = candidate.weight - 1;
+        assert!(miner
+            .project_complete_da_set_group(std::slice::from_ref(&candidate), overweight_candidate)
+            .expect("project")
+            .is_none());
+        let mut zero_nonce_candidate = candidate.clone();
+        zero_nonce_candidate.tx.tx_nonce = 0;
+        assert!(super::collect_complete_da_set_group_inputs(
+            std::slice::from_ref(&zero_nonce_candidate),
+            &empty_nonces,
+            &empty_inputs,
+        )
+        .is_none());
+        let original_utxos = miner.sync.chain_state.utxos.clone();
+        let candidate_input = Outpoint {
+            txid: candidate.tx.inputs[0].prev_txid,
+            vout: candidate.tx.inputs[0].prev_vout,
+        };
+        miner.sync.chain_state.utxos.remove(&candidate_input);
+        assert!(miner
+            .project_complete_da_set_group(
+                std::slice::from_ref(&candidate),
+                projection_context(&empty_nonces, &empty_inputs),
+            )
+            .expect("project")
+            .is_none());
+        miner.sync.chain_state.utxos = original_utxos;
+        let before_utxos = miner.sync.chain_state.utxos.clone();
+        let selected_nonces = HashSet::new();
+        let selected_inputs = HashSet::new();
+
+        let projection = miner
+            .project_complete_da_set_group(
+                std::slice::from_ref(&candidate),
+                projection_context(&selected_nonces, &selected_inputs),
+            )
+            .expect("project")
+            .expect("valid group");
+
+        assert_eq!(projection, (candidate.weight, 0));
+        assert!(selected_nonces.is_empty());
+        assert!(selected_inputs.is_empty());
+        assert_eq!(miner.sync.chain_state.utxos, before_utxos);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
