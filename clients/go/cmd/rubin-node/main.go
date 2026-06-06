@@ -533,6 +533,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// helper to keep production-wiring and regression-wiring paths
 	// identical.
 	rpcState := newDevnetRPCStateWithLifecycle(syncEngine, blockStore, mempool, peerManager, p2pService.AnnounceTx, p2pService.AnnounceBlock, stderr, liveMiner, ctx)
+	rpcState.SetAcceptedBlockDASetConsumer(p2pService.ConsumeAcceptedBlockDASets)
 	// Late-bind the startup-wired chain identity so the read-only
 	// /chain_identity handler echoes the values that already flowed
 	// through genesis parsing + network canonicalization, rather than
