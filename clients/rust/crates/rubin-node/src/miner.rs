@@ -360,9 +360,9 @@ impl<'a> Miner<'a> {
                 Some(group) => group,
                 None => continue,
             };
-            let budgeted_da =
-                updated_policy_da_bytes(provider_da_included, group.da_bytes, provider_budget);
-            let Some(next_provider_da_included) = budgeted_da else {
+            let Some(next_provider_da_included) =
+                updated_policy_da_bytes(provider_da_included, group.da_bytes, provider_budget)
+            else {
                 continue;
             };
             let projection = CompleteDaSetGroupProjection {
@@ -1415,16 +1415,28 @@ mod tests {
         let (da_tx, _) = da_budget_policy_tx(0x65);
         let da_raw = marshal_tx(&da_tx).expect("marshal DA tx");
         let non_da = vec![0xee; da_raw.len() + 1];
+        let tail = vec![0xdd; da_raw.len() + 2];
         pool.inject_test_entry([0x01; 32], da_raw);
         pool.inject_test_entry([0x02; 32], non_da.clone());
+        pool.inject_test_entry([0x03; 32], tail);
         let cfg = MinerConfig {
             max_tx_per_block: 2,
             ..MinerConfig::default()
         };
         let sets = Vec::new();
-        let mut miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
-        miner.set_complete_da_set_provider(&sets);
-        assert_eq!(miner.candidate_transactions(&[]), vec![non_da]);
+        {
+            let mut miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
+            miner.set_complete_da_set_provider(&sets);
+            assert_eq!(miner.candidate_transactions(&[]), vec![non_da]);
+        }
+
+        let mut byte_pool = TxPool::new();
+        let small = vec![0xab; 4];
+        byte_pool.inject_test_entry([0x01; 32], small.clone());
+        byte_pool.inject_test_entry([0x02; 32], vec![0xcd; MAX_BLOCK_WEIGHT as usize + 1]);
+        let miner = Miner::new(&mut sync, Some(&mut byte_pool), MinerConfig::default())
+            .expect("byte miner");
+        assert_eq!(miner.candidate_transactions(&[]), vec![small]);
         let _ = fs::remove_dir_all(&dir);
     }
 
