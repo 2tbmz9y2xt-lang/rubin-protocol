@@ -396,10 +396,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         }
     }
 
-    let live_mining_cfg = if cfg.network == "devnet"
-        && !cfg.rpc_bind_addr.trim().is_empty()
-        && rpc_bind_host_is_loopback(&cfg.rpc_bind_addr)
-    {
+    let live_mining_cfg = if live_devnet_loopback_mining_allowed(&cfg) {
         let mut miner_cfg = MinerConfig {
             core_ext_deployments: genesis_cfg.core_ext_deployments.clone(),
             ..MinerConfig::default()
@@ -512,6 +509,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
             rubin_node::tx_relay::announce_block(block_bytes, &relay_state, &pm, &local, &pw)
         }))
     };
+    let live_mining_enabled = live_mining_cfg.is_some();
     let mut state = new_devnet_rpc_state_with_tx_pool(
         Arc::clone(&sync_engine),
         Some(block_store),
@@ -521,6 +519,9 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         announce_block,
         live_mining_cfg,
     );
+    if live_mining_enabled {
+        state.set_complete_da_set_provider(p2p_service.complete_da_set_provider());
+    }
     state.set_accepted_block_hook(Arc::new(move |hash| {
         advance_da_ttl_for_block(hash, &da_ttl_relay, &da_ttl_seen)
     }));
@@ -1149,6 +1150,10 @@ fn validate_config(cfg: &mut CliConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn live_devnet_loopback_mining_allowed(cfg: &CliConfig) -> bool {
+    cfg.network == "devnet" && rpc_bind_host_is_loopback(&cfg.rpc_bind_addr)
+}
+
 fn validate_addr(label: &str, addr: &str) -> Result<(), String> {
     validate_addr_inner(label, addr, false)
 }
@@ -1306,9 +1311,9 @@ mod tests {
     use super::{
         advance_da_ttl_for_block, announce_tx_after_local_admission, format_peer_slots_banner,
         handle_rpc_start_error_after_maybe_stop, legacy_exposure_hooks,
-        maybe_shutdown_if_requested, parse_args, run, runtime_genesis_hash, stop_signal_pair,
-        validate_config, wait_for_stop_and_shutdown, LegacyExposureReport,
-        PRODUCTION_STOP_SIGNAL_SET, RPC_READINESS_TRANSITION_FAILED,
+        live_devnet_loopback_mining_allowed, maybe_shutdown_if_requested, parse_args, run,
+        runtime_genesis_hash, stop_signal_pair, validate_config, wait_for_stop_and_shutdown,
+        LegacyExposureReport, PRODUCTION_STOP_SIGNAL_SET, RPC_READINESS_TRANSITION_FAILED,
     };
     use rubin_consensus::constants::{
         COV_TYPE_DA_COMMIT, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SUITE_ID_ML_DSA_87,
@@ -2168,6 +2173,34 @@ mod tests {
             parse_args(&["--network".to_string(), "  devnet  ".to_string()]).expect("parse args");
         validate_config(&mut cfg).expect("trimmed devnet should pass");
         assert_eq!(cfg.network, "devnet");
+    }
+
+    #[test]
+    fn live_devnet_loopback_mining_provider_gate_matches_runtime_scope() {
+        let mut loopback = parse_args(&["--rpc-bind".to_string(), "127.0.0.1:19112".to_string()])
+            .expect("parse args");
+        validate_config(&mut loopback).expect("loopback devnet config");
+        assert!(live_devnet_loopback_mining_allowed(&loopback));
+
+        let mut no_rpc = parse_args(&[]).expect("parse args");
+        validate_config(&mut no_rpc).expect("default devnet config");
+        assert!(!live_devnet_loopback_mining_allowed(&no_rpc));
+
+        let mut non_loopback = parse_args(&["--rpc-bind".to_string(), "0.0.0.0:19112".to_string()])
+            .expect("parse args");
+        validate_config(&mut non_loopback).expect("non-loopback devnet config");
+        assert!(!live_devnet_loopback_mining_allowed(&non_loopback));
+
+        let mut non_devnet = parse_args(&[
+            "--network".to_string(),
+            "mainnet".to_string(),
+            "--rpc-bind".to_string(),
+            "127.0.0.1:19112".to_string(),
+        ])
+        .expect("parse args");
+        non_devnet.genesis_file = Some(PathBuf::from("genesis.json"));
+        validate_config(&mut non_devnet).expect("non-devnet config with genesis path");
+        assert!(!live_devnet_loopback_mining_allowed(&non_devnet));
     }
 
     #[test]
