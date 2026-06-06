@@ -31,9 +31,14 @@ type devnetRPCState struct {
 	// devnet evidence must still prove peer adoption instead of treating
 	// /mine_next success as network success.
 	announceBlock func([]byte) error
-	stderr        io.Writer
-	nowUnix       func() uint64
-	metrics       *rpcMetrics
+	// acceptedBlockDASetConsumer is the fail-closed DA relay cleanup hook
+	// for locally mined blocks. Unlike announceBlock, this is part of the
+	// local /mine_next state transition and must succeed before the RPC
+	// reports success.
+	acceptedBlockDASetConsumer func([]byte) error
+	stderr                     io.Writer
+	nowUnix                    func() uint64
+	metrics                    *rpcMetrics
 	// rpcMut serializes mutating devnet RPC work (mempool admits + live mining)
 	// so concurrent HTTP handlers cannot interleave chain/mempool updates.
 	rpcMut sync.Mutex
@@ -509,6 +514,13 @@ func newDevnetRPCStateWithLifecycle(
 	return state
 }
 
+func (s *devnetRPCState) SetAcceptedBlockDASetConsumer(fn func([]byte) error) {
+	if s == nil {
+		return
+	}
+	s.acceptedBlockDASetConsumer = fn
+}
+
 // rpcBindHostIsLoopback reports whether the host part of host:port is suitable
 // for devnet-only live mining RPC (loopback only). Non-loopback binds disable
 // live mining even when network=devnet.
@@ -980,11 +992,34 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
+	var blockBytes []byte
+	blockBytesLoaded := false
+	if state.acceptedBlockDASetConsumer != nil {
+		blockBytes, err = minedBlockBytes(state, mb.Hash)
+		if err != nil {
+			state.rpcMut.Unlock()
+			writeJSONResponse(state, route, w, http.StatusInternalServerError, mineNextResponse{
+				Mined: false,
+				Error: fmt.Sprintf("load mined block for DA consume: %v", err),
+			})
+			return
+		}
+		blockBytesLoaded = true
+		if err := state.acceptedBlockDASetConsumer(blockBytes); err != nil {
+			state.rpcMut.Unlock()
+			writeJSONResponse(state, route, w, http.StatusInternalServerError, mineNextResponse{
+				Mined: false,
+				Error: fmt.Sprintf("consume accepted DA sets: %v", err),
+			})
+			return
+		}
+	}
 	state.rpcMut.Unlock()
 	if state.announceBlock != nil {
-		if state.blockStore == nil {
-			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: block store unavailable for %x\n", mb.Hash)
-		} else if blockBytes, err := state.blockStore.GetBlockByHash(mb.Hash); err != nil {
+		if !blockBytesLoaded {
+			blockBytes, err = minedBlockBytes(state, mb.Hash)
+		}
+		if err != nil {
 			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: get mined block %x: %v\n", mb.Hash, err)
 		} else if err := state.announceBlock(blockBytes); err != nil {
 			_, _ = fmt.Fprintf(state.stderr, "rpc: announce-block: %v\n", err)
@@ -1003,6 +1038,13 @@ func handleMineNext(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		Nonce:     &nonce,
 		TxCount:   &txCount,
 	})
+}
+
+func minedBlockBytes(state *devnetRPCState, hash [32]byte) ([]byte, error) {
+	if state == nil || state.blockStore == nil {
+		return nil, errors.New("block store unavailable")
+	}
+	return state.blockStore.GetBlockByHash(hash)
 }
 
 // parseTxIDQuery decodes a 64-hex-char "txid" query parameter into a [32]byte.

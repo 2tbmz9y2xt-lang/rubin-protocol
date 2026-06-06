@@ -2109,6 +2109,11 @@ func TestDevnetRPCMineNextMineOneError(t *testing.T) {
 	}
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, nil, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
+	var consumeCalls int
+	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
+		consumeCalls++
+		return nil
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -2127,6 +2132,9 @@ func TestDevnetRPCMineNextMineOneError(t *testing.T) {
 	}
 	if !strings.Contains(got.Error, context.Canceled.Error()) {
 		t.Fatalf("error=%q want context canceled", got.Error)
+	}
+	if consumeCalls != 0 {
+		t.Fatalf("consume calls after MineOne error=%d, want 0", consumeCalls)
 	}
 }
 
@@ -2186,11 +2194,20 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 		t.Fatalf("NewMiner: %v", err)
 	}
 	var announcedBlock []byte
+	var events []string
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, func(block []byte) error {
+		events = append(events, "announce")
 		announcedBlock = append([]byte(nil), block...)
 		return nil
 	}, io.Discard, miner)
 	state.nowUnix = func() uint64 { return 0 }
+	state.SetAcceptedBlockDASetConsumer(func(block []byte) error {
+		if _, err := consensus.ParseBlockBytes(block); err != nil {
+			t.Fatalf("ParseBlockBytes(consumer): %v", err)
+		}
+		events = append(events, "consume")
+		return nil
+	})
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	t.Cleanup(server.Close)
 	resp, err := http.Post(server.URL+"/mine_next", "application/json", bytes.NewReader([]byte("{}")))
@@ -2213,6 +2230,9 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	}
 	if len(announcedBlock) == 0 {
 		t.Fatal("expected /mine_next to announce the mined full block")
+	}
+	if got := strings.Join(events, ","); got != "consume,announce" {
+		t.Fatalf("events=%s, want consume before announce", got)
 	}
 	parsedBlock, err := consensus.ParseBlockBytes(announcedBlock)
 	if err != nil {
@@ -2251,6 +2271,70 @@ func TestDevnetRPCMineNextMinesAfterGenesis(t *testing.T) {
 	}
 	if anchorOutputs != 1 {
 		t.Fatalf("coinbase CORE_ANCHOR outputs=%d, want 1", anchorOutputs)
+	}
+}
+
+func mustRPCMineNextState(t *testing.T) *devnetRPCState {
+	t.Helper()
+	dir := t.TempDir()
+	chainStatePath := node.ChainStatePath(dir)
+	chainState := node.NewChainState()
+	if err := chainState.Save(chainStatePath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	blockStore, err := node.OpenBlockStore(node.BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	syncCfg := node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), chainStatePath)
+	syncEngine, err := node.NewSyncEngine(chainState, blockStore, syncCfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	mempool, err := node.NewMempool(chainState, blockStore, node.DevnetGenesisChainID())
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	syncEngine.SetMempool(mempool)
+	peerManager := node.NewPeerManager(node.DefaultPeerRuntimeConfig("devnet", 8))
+	miner, err := node.NewMiner(chainState, blockStore, syncEngine, node.DefaultMinerConfig())
+	if err != nil {
+		t.Fatalf("NewMiner: %v", err)
+	}
+	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, nil, io.Discard, miner)
+	state.nowUnix = func() uint64 { return 0 }
+	return state
+}
+
+func TestDevnetRPCMineNextFailsClosedOnDAConsumeError(t *testing.T) {
+	state := mustRPCMineNextState(t)
+	var announced bool
+	state.announceBlock = func([]byte) error {
+		announced = true
+		return nil
+	}
+	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
+		return errors.New("consume failed")
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mine_next", nil)
+	handleMineNext(state, rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500 body=%s", rec.Code, rec.Body.String())
+	}
+	var got mineNextResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.Mined || !strings.Contains(got.Error, "consume accepted DA sets: consume failed") {
+		t.Fatalf("unexpected response: %+v", got)
+	}
+	if announced {
+		t.Fatal("announceBlock called after consume failure")
 	}
 }
 
@@ -3491,5 +3575,34 @@ func TestDevnetRPCPeersExposesAllBoundedFields(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("peer entry mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+func TestSetAcceptedBlockDASetConsumerNilReceiver(t *testing.T) {
+	var state *devnetRPCState
+	called := false
+	state.SetAcceptedBlockDASetConsumer(func([]byte) error {
+		called = true
+		return nil
+	})
+	if called {
+		t.Fatal("nil receiver invoked consumer")
+	}
+}
+
+func TestMinedBlockBytesNilState(t *testing.T) {
+	var hash [32]byte
+	_, err := minedBlockBytes(nil, hash)
+	if err == nil {
+		t.Fatal("nil state returned nil error")
+	}
+}
+
+func TestMinedBlockBytesNilBlockStore(t *testing.T) {
+	state := &devnetRPCState{blockStore: nil}
+	var hash [32]byte
+	_, err := minedBlockBytes(state, hash)
+	if err == nil {
+		t.Fatal("nil blockStore returned nil error")
 	}
 }
