@@ -831,6 +831,120 @@ func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testin
 	}
 }
 
+func TestDARelayConsumeCompleteSetRemovesRecordAndPinnedAccounting(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	consumeID := daRelayTestID(99)
+	keepID := daRelayTestID(100)
+	consumePayload := []byte("consume-payload")
+	missingPayload := []byte("missing")
+	keepPayload := []byte("keep-payload")
+
+	mustAddDACommit(t, state, "peer-a", daRelayTestCommitForPayloads(consumeID, 2, consumePayload, missingPayload))
+	plans, diagnostic := state.planDAPrefetch(state.sets[consumeID], []string{"peer-prefetch"}, time.Unix(1, 0))
+	if diagnostic != "" || len(plans) != 1 {
+		t.Fatalf("prefetch setup plans=%+v diagnostic=%q, want one plan", plans, diagnostic)
+	}
+	if got, _ := state.prefetch.bytesInFlight(); got == 0 {
+		t.Fatal("prefetch setup did not reserve bytes")
+	}
+	mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(consumeID, 0, uint64(len(consumePayload)), consumePayload))
+	consumeRecord := mustAddDAChunk(t, state, "peer-b", daRelayTestChunkPayload(consumeID, 1, uint64(len(missingPayload)), missingPayload))
+	consumePinned := mustPinnedPayloadAccounting(t, consumeRecord)
+	mustAddDACommit(t, state, "peer-c", daRelayTestCommitForPayloads(keepID, 3, keepPayload))
+	keepRecord := mustAddDAChunk(t, state, "peer-d", daRelayTestChunkPayload(keepID, 0, uint64(len(keepPayload)), keepPayload))
+	keepPinned := mustPinnedPayloadAccounting(t, keepRecord)
+	if state.pinnedPayloadBytes != consumePinned+keepPinned {
+		t.Fatalf("setup pinned=%d, want %d", state.pinnedPayloadBytes, consumePinned+keepPinned)
+	}
+
+	consumed, err := state.consumeCompleteSet(consumeID)
+	if err != nil || !consumed {
+		t.Fatalf("consume complete set consumed=%v err=%v, want true nil", consumed, err)
+	}
+	if _, ok := state.sets[consumeID]; ok {
+		t.Fatalf("consumed complete set retained da_id")
+	}
+	if got := state.sets[keepID]; got.state != daRelayStateCompleteSet {
+		t.Fatalf("unrelated complete set state=%v, want complete", got.state)
+	}
+	if state.pinnedPayloadBytes != keepPinned {
+		t.Fatalf("pinned after consume=%d, want %d", state.pinnedPayloadBytes, keepPinned)
+	}
+	if _, ok := state.prefetch.indexes[consumeID]; ok {
+		t.Fatal("consume retained da_id prefetch indexes")
+	}
+	if _, ok := state.prefetch.expires[consumeID]; ok {
+		t.Fatal("consume retained da_id prefetch expiry")
+	}
+	if got, _ := state.prefetch.bytesInFlight(); got != 0 {
+		t.Fatalf("prefetch bytes in flight after consume=%d, want 0", got)
+	}
+
+	consumed, err = state.consumeCompleteSet(consumeID)
+	if err != nil || consumed {
+		t.Fatalf("second consume consumed=%v err=%v, want false nil", consumed, err)
+	}
+	if state.pinnedPayloadBytes != keepPinned {
+		t.Fatalf("pinned after second consume=%d, want %d", state.pinnedPayloadBytes, keepPinned)
+	}
+}
+
+func TestDARelayConsumeCompleteSetLeavesIncompleteRecords(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	orphanID := daRelayTestID(101)
+	stagedID := daRelayTestID(102)
+
+	mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(orphanID, 0, 1))
+	mustAddDACommit(t, state, "peer-b", daRelayTestCommit(stagedID, 1, 1))
+	wantOrphanBytes := state.orphanBytes
+	wantCommitBytes := state.orphanCommitOverheadBytes
+
+	for _, daID := range [][32]byte{orphanID, stagedID} {
+		consumed, err := state.consumeCompleteSet(daID)
+		if err != nil || consumed {
+			t.Fatalf("consume incomplete %x consumed=%v err=%v, want false nil", daID, consumed, err)
+		}
+	}
+	if got := state.sets[orphanID]; got.state != daRelayStateOrphanChunks {
+		t.Fatalf("orphan state=%v, want orphan chunks", got.state)
+	}
+	if got := state.sets[stagedID]; got.state != daRelayStateStagedCommit {
+		t.Fatalf("staged state=%v, want staged commit", got.state)
+	}
+	if state.orphanBytes != wantOrphanBytes || state.orphanCommitOverheadBytes != wantCommitBytes || state.pinnedPayloadBytes != 0 {
+		t.Fatalf("incomplete consume mutated accounting orphan=%d/%d commit=%d/%d pinned=%d", state.orphanBytes, wantOrphanBytes, state.orphanCommitOverheadBytes, wantCommitBytes, state.pinnedPayloadBytes)
+	}
+}
+
+func TestDARelayConsumeCompleteSetReturnsProjectionErrorWithoutMutation(t *testing.T) {
+	state := newDARelayStateForTest(t, defaultDARelayCaps())
+	daID := daRelayTestID(103)
+	record := daRelaySetRecord{
+		daID:         daID,
+		state:        daRelayStateCompleteSet,
+		payloadBytes: 1,
+		wireBytes:    ^uint64(0),
+	}
+	state.sets[daID] = record
+	state.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {0: "peer-prefetch"}}
+	state.prefetch.expires = map[[32]byte]time.Time{daID: time.Unix(1, 0)}
+
+	consumed, err := state.consumeCompleteSet(daID)
+	if consumed {
+		t.Fatal("corrupt complete set reported consumed")
+	}
+	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	if _, ok := state.sets[daID]; !ok {
+		t.Fatal("failed consume deleted corrupt complete record")
+	}
+	if _, ok := state.prefetch.indexes[daID]; !ok {
+		t.Fatal("failed consume released prefetch indexes")
+	}
+	if _, ok := state.prefetch.expires[daID]; !ok {
+		t.Fatal("failed consume released prefetch expiry")
+	}
+}
+
 func TestDARelayRemoveSetRecordReturnsPinnedProjectionErrorWithoutMutation(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	daID := daRelayTestID(99)
