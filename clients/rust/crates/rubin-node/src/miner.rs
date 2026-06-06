@@ -734,7 +734,6 @@ fn is_mining_da_tx_raw(raw: &[u8]) -> bool {
     };
     consumed == raw.len() && matches!(tx.tx_kind, 0x01 | 0x02)
 }
-
 fn choose_valid_timestamp(next_height: u64, prev_timestamps: &[u64], now: u64) -> u64 {
     if next_height == 0 || prev_timestamps.is_empty() {
         return if now == 0 { 1 } else { now };
@@ -1429,20 +1428,18 @@ mod tests {
         let (da_tx, _) = da_budget_policy_tx(0x65);
         let da_raw = marshal_tx(&da_tx).expect("marshal DA tx");
         let non_da = vec![0xee; da_raw.len() + 1];
-        let tail = vec![0xdd; da_raw.len() + 2];
-        pool.inject_test_entry([0x01; 32], da_raw);
+        pool.inject_test_entry([0x01; 32], da_raw.clone());
         pool.inject_test_entry([0x02; 32], non_da.clone());
-        pool.inject_test_entry([0x03; 32], tail);
         let cfg = MinerConfig {
             max_tx_per_block: 2,
             ..MinerConfig::default()
         };
         let sets = Vec::new();
-        {
-            let mut miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
-            miner.set_complete_da_set_provider(&sets);
-            assert_eq!(miner.candidate_transactions(&[]), vec![non_da]);
-        }
+        let mut miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
+        miner.set_complete_da_set_provider(&sets);
+        assert_eq!(miner.candidate_transactions(&[]), vec![non_da.clone()]);
+        let explicit = miner.candidate_transactions(&[da_raw, non_da.clone(), vec![0xdd]]);
+        assert_eq!(explicit, vec![non_da]);
     }
 
     #[test]
@@ -1707,6 +1704,7 @@ mod tests {
             max_tx_per_block: 2,
             ..MinerConfig::default()
         };
+        let sets = Vec::new();
         let mut miner = Miner::new(&mut sync, None, cfg).expect("miner");
 
         let rejected = miner
@@ -1719,15 +1717,16 @@ mod tests {
             .expect("weight skip");
         assert!(overweight.is_empty());
 
+        miner.set_complete_da_set_provider(&sets);
+        let da_raw = marshal_tx(&da_budget_policy_tx(0x66).0).expect("marshal DA tx");
         let accepted = miner
             .select_candidate_transactions(
-                vec![raw.clone(), conflicting_raw.clone()],
+                vec![da_raw, raw.clone(), conflicting_raw.clone()],
                 0,
                 MAX_BLOCK_WEIGHT,
                 0,
             )
             .expect("accept branch");
-        assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].raw, raw);
         miner.cfg.max_tx_per_block = 3;
         let conflict_skipped = miner
