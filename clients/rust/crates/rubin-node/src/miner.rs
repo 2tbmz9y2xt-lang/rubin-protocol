@@ -131,12 +131,10 @@ impl<'a> Miner<'a> {
         if cfg.max_tx_per_block == 0 {
             cfg.max_tx_per_block = 1024;
         }
-        Ok(Self {
-            sync,
-            tx_pool,
-            complete_da_set_provider: None,
-            cfg,
-        })
+        let complete_da_set_provider = None;
+        #[rustfmt::skip]
+        let miner = Self { sync, tx_pool, complete_da_set_provider, cfg };
+        Ok(miner)
     }
 
     pub fn set_complete_da_set_provider(&mut self, provider: &'a dyn CompleteDaSetProvider) {
@@ -167,7 +165,7 @@ impl<'a> Miner<'a> {
             [0u8; 32]
         };
         let remaining_weight = self.remaining_weight_budget(next_height)?;
-        let candidate_txs = self.candidate_transactions(txs);
+        let candidates = self.candidate_transactions(txs);
         let prev_timestamps = self.sync.prev_timestamps_for_next_block()?;
         let timestamp = choose_valid_timestamp(
             next_height,
@@ -178,12 +176,8 @@ impl<'a> Miner<'a> {
             .as_deref()
             .filter(|timestamps| !timestamps.is_empty())
             .map_or(timestamp, |timestamps| mtp_median(next_height, timestamps));
-        let parsed = self.select_candidate_transactions(
-            candidate_txs,
-            next_height,
-            remaining_weight,
-            block_mtp,
-        )?;
+        #[rustfmt::skip]
+        let parsed = self.select_candidate_transactions(candidates, next_height, remaining_weight, block_mtp)?;
         let witness_commitment = build_witness_commitment(&parsed)?;
         let coinbase = build_coinbase_tx(
             next_height,
@@ -318,13 +312,8 @@ impl<'a> Miner<'a> {
                 continue;
             }
             let candidate_slice = std::slice::from_ref(&candidate);
-            let Some(candidate_inputs) = collect_complete_da_set_group_inputs(
-                candidate_slice,
-                &selected_nonces,
-                &selected_inputs,
-            ) else {
-                continue;
-            };
+            #[rustfmt::skip]
+            let Some(candidate_inputs) = collect_complete_da_set_group_inputs(candidate_slice, &selected_nonces, &selected_inputs) else { continue; };
             if candidate.weight > remaining_weight.saturating_sub(selected_weight) {
                 continue;
             }
@@ -362,27 +351,18 @@ impl<'a> Miner<'a> {
             if group_len > max_selected - parsed.len() {
                 continue;
             }
-            let Some(group) = parse_complete_da_set_candidate(&set)? else {
-                continue;
-            };
-            let Some(next_provider_da_included) =
-                updated_policy_da_bytes(provider_da_included, group.da_bytes, provider_budget)
-            else {
-                continue;
-            };
-            let projection = CompleteDaSetGroupProjection {
-                selected_nonces: &selected_nonces,
-                selected_inputs: &selected_inputs,
-                next_height,
-                block_mtp,
-                selected_weight,
-                remaining_weight,
-                policy_da_included,
-            };
+            let group = parse_complete_da_set_candidate(&set)?;
+            #[rustfmt::skip]
+            let Some(group) = group else { continue; };
+            #[rustfmt::skip]
+            let next_da = updated_policy_da_bytes(provider_da_included, group.da_bytes, provider_budget);
+            #[rustfmt::skip]
+            let Some(next_provider_da_included) = next_da else { continue; };
+            #[rustfmt::skip]
+            let projection = CompleteDaSetGroupProjection { selected_nonces: &selected_nonces, selected_inputs: &selected_inputs, next_height, block_mtp, selected_weight, remaining_weight, policy_da_included };
             let projected = self.project_complete_da_set_group(&group.txs, projection)?;
-            let Some((group_weight, next_da_included)) = projected else {
-                continue;
-            };
+            #[rustfmt::skip]
+            let Some((group_weight, next_da_included)) = projected else { continue; };
             selected_weight = selected_weight
                 .checked_add(group_weight)
                 .ok_or_else(|| "selected transaction weight overflow".to_string())?;
@@ -502,9 +482,8 @@ impl<'a> Miner<'a> {
                         next_da_included,
                     )
                     .unwrap_or((true, next_da_included));
-                let Some(next_group_weight) = group_weight.checked_add(candidate.weight) else {
-                    return Ok(false);
-                };
+                #[rustfmt::skip]
+                let Some(next_group_weight) = group_weight.checked_add(candidate.weight) else { return Ok(false); };
                 if reject || next_group_weight > available_weight {
                     return Ok(false);
                 };
@@ -728,7 +707,7 @@ fn updated_policy_da_bytes(current: u64, da_bytes: u64, max_per_block: u64) -> O
 }
 
 fn is_mining_da_tx_raw(raw: &[u8]) -> bool {
-    matches!(raw.get(4).copied(), Some(0x01 | 0x02))
+    matches!(raw.get(4).copied(), Some(0x01) | Some(0x02))
         && parse_tx(raw).is_ok_and(|(tx, _, _, consumed)| {
             consumed == raw.len() && matches!(tx.tx_kind, 0x01 | 0x02)
         })
