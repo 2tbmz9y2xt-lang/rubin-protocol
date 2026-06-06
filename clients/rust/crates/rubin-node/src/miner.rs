@@ -362,9 +362,8 @@ impl<'a> Miner<'a> {
             if group_len > max_selected - parsed.len() {
                 continue;
             }
-            let group = match parse_complete_da_set_candidate(&set)? {
-                Some(group) => group,
-                None => continue,
+            let Some(group) = parse_complete_da_set_candidate(&set)? else {
+                continue;
             };
             let Some(next_provider_da_included) =
                 updated_policy_da_bytes(provider_da_included, group.da_bytes, provider_budget)
@@ -1425,11 +1424,12 @@ mod tests {
     fn candidate_transactions_filters_provider_da_before_pool_cap() {
         let (_dir, _block_store, mut sync) = test_sync("rubin-rust-miner-pool-provider-da");
         let mut pool = TxPool::new();
-        let (da_tx, _) = da_budget_policy_tx(0x65);
-        let da_raw = marshal_tx(&da_tx).expect("marshal DA tx");
+        let da_raw = miner_da_provider_shape_set([0x65; 32], &[b"chunk"]).commit_tx;
         let non_da = vec![0xee; da_raw.len() + 1];
+        let oversized = vec![0xaa; MAX_BLOCK_WEIGHT as usize + 1];
         pool.inject_test_entry([0x01; 32], da_raw.clone());
-        pool.inject_test_entry([0x02; 32], non_da.clone());
+        pool.inject_test_entry([0x02; 32], oversized);
+        pool.inject_test_entry([0x03; 32], non_da.clone());
         let cfg = MinerConfig {
             max_tx_per_block: 2,
             ..MinerConfig::default()
@@ -1718,7 +1718,7 @@ mod tests {
         assert!(overweight.is_empty());
 
         miner.set_complete_da_set_provider(&sets);
-        let da_raw = marshal_tx(&da_budget_policy_tx(0x66).0).expect("marshal DA tx");
+        let da_raw = miner_da_provider_shape_set([0x66; 32], &[b"chunk"]).commit_tx;
         let accepted = miner
             .select_candidate_transactions(
                 vec![da_raw, raw.clone(), conflicting_raw.clone()],
