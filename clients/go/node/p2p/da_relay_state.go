@@ -284,6 +284,20 @@ func (s *daRelayState) orphanBytesForDAID(daID [32]byte) uint64 {
 	return s.orphanBytesByDAID[daID]
 }
 
+func (s *daRelayState) consumeCompleteSet(daID [32]byte) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record, ok := s.sets[daID]
+	if !ok || record.state != daRelayStateCompleteSet {
+		return false, nil
+	}
+	if err := s.removeDASetRecordLocked(record); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *daRelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -679,6 +693,7 @@ func (s *daRelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
 	s.orphanCommitOverheadBytes = commitBytes
 	s.pinnedPayloadBytes = pinnedBytes
+	s.prefetch.releaseSet(record.daID)
 	return nil
 }
 
