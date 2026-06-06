@@ -224,18 +224,24 @@ impl<'a> Miner<'a> {
         if max_selected == 0 {
             return Vec::new();
         }
+        let skip_mining_da = self.complete_da_set_provider.is_some();
         let (candidates, max_bytes) = if txs.is_empty() {
             let Some(pool) = self.tx_pool.as_deref() else {
                 return Vec::new();
             };
+            if !skip_mining_da {
+                return pool.select_transactions(max_selected, MAX_BLOCK_WEIGHT as usize);
+            }
             (
                 pool.select_transactions(pool.len(), usize::MAX),
                 Some(MAX_BLOCK_WEIGHT as usize),
             )
         } else {
+            if !skip_mining_da {
+                return txs.iter().take(max_selected).cloned().collect();
+            }
             (txs.to_vec(), None)
         };
-        let skip_mining_da = self.complete_da_set_provider.is_some();
         let mut selected = Vec::new();
         let mut used_bytes = 0usize;
         for raw in candidates {
@@ -1434,8 +1440,9 @@ mod tests {
         let small = vec![0xab; 4];
         byte_pool.inject_test_entry([0x01; 32], small.clone());
         byte_pool.inject_test_entry([0x02; 32], vec![0xcd; MAX_BLOCK_WEIGHT as usize + 1]);
-        let miner = Miner::new(&mut sync, Some(&mut byte_pool), MinerConfig::default())
+        let mut miner = Miner::new(&mut sync, Some(&mut byte_pool), MinerConfig::default())
             .expect("byte miner");
+        miner.set_complete_da_set_provider(&sets);
         assert_eq!(miner.candidate_transactions(&[]), vec![small]);
         let _ = fs::remove_dir_all(&dir);
     }
