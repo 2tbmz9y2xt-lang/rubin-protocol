@@ -729,10 +729,10 @@ fn updated_policy_da_bytes(current: u64, da_bytes: u64, max_per_block: u64) -> O
 }
 
 fn is_mining_da_tx_raw(raw: &[u8]) -> bool {
-    let Ok((tx, _, _, consumed)) = parse_tx(raw) else {
-        return false;
-    };
-    consumed == raw.len() && matches!(tx.tx_kind, 0x01 | 0x02)
+    matches!(raw.get(4).copied(), Some(0x01 | 0x02))
+        && parse_tx(raw).is_ok_and(|(tx, _, _, consumed)| {
+            consumed == raw.len() && matches!(tx.tx_kind, 0x01 | 0x02)
+        })
 }
 fn choose_valid_timestamp(next_height: u64, prev_timestamps: &[u64], now: u64) -> u64 {
     if next_height == 0 || prev_timestamps.is_empty() {
