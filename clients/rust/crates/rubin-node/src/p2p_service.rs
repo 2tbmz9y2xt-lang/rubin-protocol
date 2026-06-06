@@ -63,11 +63,14 @@ struct ServiceCompleteDaSetProvider {
 
 impl CompleteDaSetProvider for ServiceCompleteDaSetProvider {
     fn complete_da_set_candidates(&self, max_payload_bytes: u64) -> Vec<CompleteDaSetCandidate> {
-        let relay = match self.da_relay.lock() {
-            Ok(relay) => relay,
-            Err(poisoned) => poisoned.into_inner(),
+        if max_payload_bytes == 0 {
+            return Vec::new();
+        }
+        let relay_snapshot = match self.da_relay.lock() {
+            Ok(relay) => relay.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
         };
-        relay.complete_da_set_candidates(max_payload_bytes)
+        relay_snapshot.complete_da_set_candidates(max_payload_bytes)
     }
 }
 
