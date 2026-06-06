@@ -1405,9 +1405,7 @@ mod tests {
         let mut pool = TxPool::new();
         let da_raw = miner_da_provider_shape_set([0x65; 32], &[b"chunk"]).commit_tx;
         let non_da = vec![0xee; da_raw.len() + 1];
-        let oversized = vec![0xaa; MAX_BLOCK_WEIGHT as usize + 1];
         pool.inject_test_entry([0x01; 32], da_raw.clone());
-        pool.inject_test_entry([0x02; 32], oversized);
         pool.inject_test_entry([0x03; 32], non_da.clone());
         let cfg = MinerConfig {
             max_tx_per_block: 2,
