@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::da_relay::CompleteDaSetProvider;
 use crate::miner::{Miner, MinerConfig};
 use crate::p2p_runtime::{orphan_pool_metrics_snapshot, PeerManager};
 use crate::txpool::TxSource;
@@ -59,6 +60,7 @@ pub struct DevnetRPCState {
     rpc_op_lock: Arc<Mutex<()>>,
     /// When set, POST `/mine_next` mines one block using this config (devnet + loopback RPC only).
     live_mining_cfg: Option<MinerConfig>,
+    live_complete_da_set_provider: Option<Arc<dyn CompleteDaSetProvider + Send + Sync>>,
     /// RUB-10 / GitHub #1151: readiness gate driving `/ready` semantics.
     /// Mirrors Go's `clients/go/cmd/rubin-node/http_rpc.go::readinessGate`
     /// (type at line 125; methods 143-219). Three-state machine:
@@ -532,6 +534,7 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         accepted_block: None,
         rpc_op_lock: Arc::new(Mutex::new(())),
         live_mining_cfg,
+        live_complete_da_set_provider: None,
         // RUB-10 / GitHub #1151: gate starts in `NotReady`. The
         // `try_mark_ready_on_startup` transition runs inside
         // `start_devnet_rpc_server` after the listener is bound, so
@@ -544,6 +547,13 @@ pub fn new_devnet_rpc_state_with_tx_pool(
 impl DevnetRPCState {
     pub fn set_accepted_block_hook(&mut self, accepted_block: AcceptedBlockFn) {
         self.accepted_block = Some(accepted_block);
+    }
+
+    pub fn set_complete_da_set_provider(
+        &mut self,
+        provider: Arc<dyn CompleteDaSetProvider + Send + Sync>,
+    ) {
+        self.live_complete_da_set_provider = Some(provider);
     }
 }
 
@@ -1571,6 +1581,9 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             );
         }
     };
+    if let Some(provider) = state.live_complete_da_set_provider.as_ref() {
+        miner.set_complete_da_set_provider(provider.as_ref());
+    }
     let mined = match miner.mine_one(&[]) {
         Ok(b) => b,
         Err(err) => {
@@ -2819,6 +2832,16 @@ mod tests {
         route_request, split_target, start_devnet_rpc_server, status_text, HttpRequest, ReadyState,
     };
 
+    impl crate::da_relay::CompleteDaSetProvider for AtomicUsize {
+        fn complete_da_set_candidates(
+            &self,
+            _max_payload_bytes: u64,
+        ) -> Vec<crate::da_relay::CompleteDaSetCandidate> {
+            self.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        }
+    }
+
     fn build_state(with_genesis: bool) -> (super::DevnetRPCState, PathBuf) {
         let dir = unique_temp_path("rubin-devnet-rpc");
         fs::create_dir_all(&dir).expect("mkdir");
@@ -3122,6 +3145,7 @@ mod tests {
             accepted_block: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
+            live_complete_da_set_provider: None,
             // RUB-10 / GitHub #1151: this helper bypasses the public
             // constructor (`new_devnet_rpc_state*`) so it does not
             // benefit from the default-NotReady wiring there. Keep
@@ -3320,6 +3344,19 @@ mod tests {
             response_json(&response)["error"].as_str(),
             Some("live mining unavailable")
         );
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_passes_live_complete_da_provider_to_miner() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        let calls = Arc::new(AtomicUsize::new(0));
+        state.set_complete_da_set_provider(calls.clone());
+
+        let response = post_mine_next(&state);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -4997,6 +5034,7 @@ mod tests {
             accepted_block: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
+            live_complete_da_set_provider: None,
             // RUB-10 / GitHub #1151: render_prometheus_metrics test does
             // not exercise `/ready`; default `NotReady` is fine.
             readiness: Arc::new(super::ReadinessGate::default()),

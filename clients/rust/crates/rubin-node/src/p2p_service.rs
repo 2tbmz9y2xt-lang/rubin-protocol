@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::da_relay::{DaRelayCaps, DaRelayState, PeerQuotaKey};
+use crate::da_relay::{
+    CompleteDaSetCandidate, CompleteDaSetProvider, DaRelayCaps, DaRelayState, PeerQuotaKey,
+};
 use crate::p2p_runtime::{
     perform_version_handshake, LiveMessageOutcome, PeerManager, PeerRelayContext,
     PeerRuntimeConfig, VersionPayloadV1, WireMessage,
@@ -53,6 +55,23 @@ pub struct RunningNodeP2PService {
     shared: SharedServiceState,
     accept_join: Option<JoinHandle<()>>,
     reconnect_join: Option<JoinHandle<()>>,
+}
+
+struct ServiceCompleteDaSetProvider {
+    da_relay: Arc<Mutex<DaRelayState>>,
+}
+
+impl CompleteDaSetProvider for ServiceCompleteDaSetProvider {
+    fn complete_da_set_candidates(&self, max_payload_bytes: u64) -> Vec<CompleteDaSetCandidate> {
+        if max_payload_bytes == 0 {
+            return Vec::new();
+        }
+        let relay_snapshot = match self.da_relay.lock() {
+            Ok(relay) => relay.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        relay_snapshot.complete_da_set_candidates(max_payload_bytes)
+    }
 }
 
 #[derive(Clone)]
@@ -215,6 +234,12 @@ impl RunningNodeP2PService {
 
     pub fn da_relay_state(&self) -> Arc<Mutex<DaRelayState>> {
         Arc::clone(&self.shared.da_relay)
+    }
+
+    pub fn complete_da_set_provider(&self) -> Arc<dyn CompleteDaSetProvider + Send + Sync> {
+        Arc::new(ServiceCompleteDaSetProvider {
+            da_relay: Arc::clone(&self.shared.da_relay),
+        })
     }
 
     pub fn close(&mut self) {
@@ -1354,7 +1379,12 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use rubin_consensus::{block_hash, constants::POW_LIMIT, parse_tx, BLOCK_HEADER_BYTES};
+    use rubin_consensus::{
+        block_hash,
+        constants::{COV_TYPE_DA_COMMIT, POW_LIMIT, TX_WIRE_VERSION},
+        marshal_tx, parse_tx, DaChunkCore, DaCommitCore, Tx, TxOutput, BLOCK_HEADER_BYTES,
+    };
+    use sha3::Digest;
 
     use super::{
         apply_tx_pool_cleanup, connect_with_timeout, finalize_live_message_outcome,
@@ -1418,6 +1448,61 @@ mod tests {
     fn test_genesis_hash() -> [u8; 32] {
         let genesis = devnet_genesis_block_bytes();
         block_hash(&genesis[..BLOCK_HEADER_BYTES]).expect("genesis hash")
+    }
+
+    fn relay_test_id(seed: &[u8]) -> [u8; 32] {
+        sha3::Sha3_256::digest(seed).into()
+    }
+
+    fn relay_test_nonce(seed: &[u8]) -> u64 {
+        u64::from_le_bytes(relay_test_id(seed)[..8].try_into().expect("hash prefix"))
+    }
+
+    fn relay_da_base_tx(tx_kind: u8, tx_nonce: u64) -> Tx {
+        Tx {
+            version: TX_WIRE_VERSION,
+            tx_kind,
+            tx_nonce,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            locktime: 0,
+            da_commit_core: None,
+            da_chunk_core: None,
+            witness: Vec::new(),
+            da_payload: Vec::new(),
+        }
+    }
+
+    fn relay_da_commit_tx(da_id: [u8; 32], commitment: [u8; 32]) -> Vec<u8> {
+        let mut tx = relay_da_base_tx(0x01, relay_test_nonce(b"rub389-commit-nonce"));
+        tx.outputs.push(TxOutput {
+            value: 0,
+            covenant_type: COV_TYPE_DA_COMMIT,
+            covenant_data: commitment.to_vec(),
+        });
+        tx.da_commit_core = Some(DaCommitCore {
+            da_id,
+            chunk_count: 1,
+            retl_domain_id: relay_test_id(b"rub389-retl-domain"),
+            batch_number: 1,
+            tx_data_root: relay_test_id(b"rub389-tx-data-root"),
+            state_root: relay_test_id(b"rub389-state-root"),
+            withdrawals_root: relay_test_id(b"rub389-withdrawals-root"),
+            batch_sig_suite: 0,
+            batch_sig: Vec::new(),
+        });
+        marshal_tx(&tx).expect("marshal DA commit tx")
+    }
+
+    fn relay_da_chunk_tx(da_id: [u8; 32], payload: &[u8]) -> Vec<u8> {
+        let mut tx = relay_da_base_tx(0x02, relay_test_nonce(b"rub389-chunk-nonce"));
+        tx.da_chunk_core = Some(DaChunkCore {
+            da_id,
+            chunk_index: 0,
+            chunk_hash: sha3::Sha3_256::digest(payload).into(),
+        });
+        tx.da_payload = payload.to_vec();
+        marshal_tx(&tx).expect("marshal DA chunk tx")
     }
 
     fn test_shared_state(
@@ -1518,6 +1603,55 @@ mod tests {
         tx_bytes.push(0x01);
         super::stage_local_da_relay_tx_bytes(&da_relay, &tx_bytes);
         service.close();
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn service_complete_da_set_provider_enforces_snapshot_payload_budget() {
+        let (sync_engine, dir) = test_engine("rubin-node-p2p-da-provider");
+        let shared = test_shared_state(
+            default_peer_runtime_config("devnet", 8),
+            Vec::new(),
+            sync_engine,
+        );
+        let service = super::RunningNodeP2PService {
+            addr: "127.0.0.1:0".to_string(),
+            stop: Arc::clone(&shared.stop),
+            shared: shared.clone(),
+            accept_join: None,
+            reconnect_join: None,
+        };
+        let provider = service.complete_da_set_provider();
+
+        let da_id = relay_test_id(b"rub389-service-provider-da-id");
+        let payload: &[u8] = b"service-owned-complete-set";
+        let payload_commitment: [u8; 32] = sha3::Sha3_256::digest(payload).into();
+        let commit_tx = relay_da_commit_tx(da_id, payload_commitment);
+        let chunk_tx = relay_da_chunk_tx(da_id, payload);
+        {
+            let da_relay = service.da_relay_state();
+            let mut da_relay = da_relay.lock().expect("lock DA relay");
+            da_relay
+                .stage_relay_da_tx_bytes("peer-a:8333", commit_tx)
+                .expect("stage complete-set commit tx");
+            da_relay
+                .stage_relay_da_tx_bytes("peer-a:8333", chunk_tx)
+                .expect("stage complete-set chunk tx");
+        }
+        let under_budget = provider.complete_da_set_candidates((payload.len() - 1) as u64);
+        assert!(under_budget.is_empty());
+        let candidates = provider.complete_da_set_candidates(payload.len() as u64);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].da_id, da_id);
+        assert_eq!(candidates[0].payload_bytes, payload.len() as u64);
+
+        let poison_target = service.da_relay_state();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_target.lock().expect("lock DA relay");
+            panic!("poison DA provider lock");
+        });
+        assert_eq!(provider.complete_da_set_candidates(u64::MAX).len(), 1);
+
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
