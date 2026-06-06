@@ -344,7 +344,7 @@ impl<'a> Miner<'a> {
         {
             provider_budget = self.cfg.policy_max_da_bytes_per_block;
         }
-        let mut provider_da_included = seed_provider_da_bytes(&parsed, provider_budget)?;
+        let mut provider_da_included = 0u64;
         for set in provider.complete_da_set_candidates(provider_budget) {
             if parsed.len() >= max_selected || selected_da_batches >= MAX_DA_BATCHES_PER_BLOCK {
                 break;
@@ -403,12 +403,8 @@ impl<'a> Miner<'a> {
         next_height: u64,
         policy_da_included: u64,
     ) -> Result<(bool, u64), String> {
-        self.reject_candidate_with_utxos(
-            tx,
-            &self.sync.chain_state.utxos,
-            next_height,
-            policy_da_included,
-        )
+        let utxos = &self.sync.chain_state.utxos;
+        self.reject_candidate_with_utxos(tx, utxos, next_height, policy_da_included)
     }
 
     fn reject_candidate_with_utxos(
@@ -724,22 +720,6 @@ fn updated_policy_da_bytes(current: u64, da_bytes: u64, max_per_block: u64) -> O
     }
     let next = current.checked_add(da_bytes)?;
     (next <= max_per_block).then_some(next)
-}
-
-fn seed_provider_da_bytes(parsed: &[MinedCandidate], provider_budget: u64) -> Result<u64, String> {
-    let mut included = 0u64;
-    for candidate in parsed {
-        if candidate.tx.tx_kind == 0x00 {
-            continue;
-        }
-        included = updated_policy_da_bytes(
-            included,
-            candidate.tx.da_payload.len() as u64,
-            provider_budget,
-        )
-        .ok_or_else(|| "selected DA bytes exceed provider budget".to_string())?;
-    }
-    Ok(included)
 }
 
 fn is_mining_da_tx_raw(raw: &[u8]) -> bool {
