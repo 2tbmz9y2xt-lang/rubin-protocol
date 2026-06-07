@@ -78,7 +78,7 @@ func (s *ChainState) ConnectBlockWithCoreExtProfilesAndSuiteContext(
 	if err := s.applyConnectedBlockLocked(blockHeight, blockHash, &workState); err != nil {
 		return nil, err
 	}
-	return chainStateConnectSummary(blockHeight, blockHash, summary), nil
+	return chainStateConnectSummary(blockHeight, blockHash, blockBytes, summary), nil
 }
 
 // ConnectBlockParallelSigs connects a block using parallel signature
@@ -153,7 +153,7 @@ func (s *ChainState) ConnectBlockParallelSigsWithSuiteContext(
 	if err := s.applyConnectedBlockLocked(blockHeight, blockHash, &workState); err != nil {
 		return nil, err
 	}
-	out := chainStateConnectSummary(blockHeight, blockHash, summary)
+	out := chainStateConnectSummary(blockHeight, blockHash, blockBytes, summary)
 	out.SigTaskCount = summary.SigTaskCount
 	out.WorkerPanics = summary.WorkerPanics
 	return out, nil
@@ -199,7 +199,12 @@ func (s *ChainState) applyConnectedBlockLocked(blockHeight uint64, blockHash [32
 	return nil
 }
 
-func chainStateConnectSummary(blockHeight uint64, blockHash [32]byte, summary *consensus.ConnectBlockBasicSummary) *ChainStateConnectSummary {
+// chainStateConnectSummary builds the connect summary for a block that has just
+// been applied to the canonical tip. A successful ConnectBlock* call always
+// advances the canonical chain by exactly this block, so the summary reports it
+// as the single canonical-applied block (RUB-431). Reorg accumulation across a
+// branch is layered on top in applyPreferredBranch.
+func chainStateConnectSummary(blockHeight uint64, blockHash [32]byte, blockBytes []byte, summary *consensus.ConnectBlockBasicSummary) *ChainStateConnectSummary {
 	return &ChainStateConnectSummary{
 		BlockHeight:        blockHeight,
 		BlockHash:          blockHash,
@@ -207,6 +212,10 @@ func chainStateConnectSummary(blockHeight uint64, blockHash [32]byte, summary *c
 		AlreadyGenerated:   summary.AlreadyGenerated,
 		AlreadyGeneratedN1: summary.AlreadyGeneratedN1,
 		UtxoCount:          summary.UtxoCount,
-		PostStateDigest:    summary.PostStateDigest,
+		CanonicalAppliedBlocks: []CanonicalAppliedBlock{{
+			Hash:       blockHash,
+			BlockBytes: append([]byte(nil), blockBytes...),
+		}},
+		PostStateDigest: summary.PostStateDigest,
 	}
 }
