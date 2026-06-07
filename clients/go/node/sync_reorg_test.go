@@ -1746,3 +1746,135 @@ func testParentTipTimestamp(store *BlockStore, tipHeight uint64, prevBlockHash [
 	}
 	return parentHeader.Timestamp, nil
 }
+
+func TestCanonicalAppliedBlocksOnDirectApply(t *testing.T) {
+	engine, _, target := newReorgTestEngine(t)
+
+	subsidy := consensus.BlockSubsidy(1, 0)
+	blockBytes := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+
+	summary, err := engine.ApplyBlock(blockBytes, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlock: %v", err)
+	}
+	if summary.BlockHeight != 1 {
+		t.Fatalf("height=%d, want 1", summary.BlockHeight)
+	}
+
+	blocks := summary.CanonicalAppliedBlocks
+	if len(blocks) != 1 {
+		t.Fatalf("CanonicalAppliedBlocks len=%d, want 1", len(blocks))
+	}
+	if blocks[0].Hash != summary.BlockHash {
+		t.Fatalf("CanonicalAppliedBlocks[0].Hash=%x, want BlockHash=%x", blocks[0].Hash, summary.BlockHash)
+	}
+	if !bytes.Equal(blocks[0].BlockBytes, blockBytes) {
+		t.Fatal("CanonicalAppliedBlocks[0].BlockBytes does not match original block bytes")
+	}
+}
+
+func TestCanonicalAppliedBlocksOnSideBranch(t *testing.T) {
+	engine, _, target := newReorgTestEngine(t)
+
+	subsidy := consensus.BlockSubsidy(1, 0)
+	blockA := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+	if _, err := engine.ApplyBlock(blockA, nil); err != nil {
+		t.Fatalf("ApplyBlock(A): %v", err)
+	}
+
+	blockB := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+	summary, err := engine.ApplyBlockWithReorg(blockB, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B): %v", err)
+	}
+
+	if summary.CanonicalAppliedBlocks != nil {
+		t.Fatalf("CanonicalAppliedBlocks len=%d, want nil (side branch, no canonical blocks)", len(summary.CanonicalAppliedBlocks))
+	}
+	// Side block B must NOT switch the canonical tip: A stays canonical at
+	// height 1. Assert unconditionally against A's hash so a wrong switch to B
+	// fails the test instead of being masked by a guard on B's own hash.
+	aHash, err := consensus.BlockHash(blockHeaderBytes(t, blockA))
+	if err != nil {
+		t.Fatalf("BlockHash(A): %v", err)
+	}
+	if engine.chainState.Height != 1 {
+		t.Fatalf("canonical height=%d after side branch B, want 1", engine.chainState.Height)
+	}
+	if engine.chainState.TipHash != aHash {
+		t.Fatalf("canonical tip=%x after side branch B, want A=%x", engine.chainState.TipHash, aHash)
+	}
+}
+
+func TestCanonicalAppliedBlocksOnReorg(t *testing.T) {
+	target := consensus.POW_LIMIT
+	// Build a 2-block chain B that will outwork the 1-block canonical chain A.
+	subsidy1 := consensus.BlockSubsidy(1, 0)
+	blockA1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+	blockB1 := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(2), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy1))
+
+	b1Hash, err := consensus.BlockHash(blockHeaderBytes(t, blockB1))
+	if err != nil {
+		t.Fatalf("BlockHash(B1): %v", err)
+	}
+
+	subsidy2 := consensus.BlockSubsidy(2, subsidy1)
+	blockB2 := buildSingleTxBlock(t, b1Hash, target, reorgTestTimestamp(3), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 2, subsidy2))
+	engine, store, _ := newReorgTestEngine(t)
+
+	// Apply A1 as canonical (1-block chain)
+	if _, err := engine.ApplyBlock(blockA1, nil); err != nil {
+		t.Fatalf("ApplyBlock(A1): %v", err)
+	}
+
+	// Store B1 in blockstore so branch collection can find it
+	if err := store.StoreBlock(b1Hash, blockHeaderBytes(t, blockB1), blockB1); err != nil {
+		t.Fatalf("StoreBlock(B1): %v", err)
+	}
+
+	// Apply B2 as reorg trigger — B1->B2 is a 2-block branch with more total work
+	summary, err := engine.ApplyBlockWithReorg(blockB2, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
+	}
+
+	canonBlocks := summary.CanonicalAppliedBlocks
+	if len(canonBlocks) != 2 {
+		t.Fatalf("CanonicalAppliedBlocks len=%d, want 2 (B1 + B2 reorg)", len(canonBlocks))
+	}
+	// B1 comes first in canonical order (height 1)
+	if canonBlocks[0].Hash != b1Hash {
+		t.Fatalf("CanonicalAppliedBlocks[0].Hash=%x, want B1=%x", canonBlocks[0].Hash, b1Hash)
+	}
+	if !bytes.Equal(canonBlocks[0].BlockBytes, blockB1) {
+		t.Fatal("CanonicalAppliedBlocks[0].BlockBytes does not match B1 block bytes")
+	}
+	// B2 is second (height 2)
+	if canonBlocks[1].Hash != summary.BlockHash {
+		t.Fatalf("CanonicalAppliedBlocks[1].Hash=%x, want B2=%x", canonBlocks[1].Hash, summary.BlockHash)
+	}
+	if !bytes.Equal(canonBlocks[1].BlockBytes, blockB2) {
+		t.Fatal("CanonicalAppliedBlocks[1].BlockBytes does not match B2 block bytes")
+	}
+}
+
+func TestCanonicalAppliedBlocksOnDirectApplyWithReorg(t *testing.T) {
+	engine, _, target := newReorgTestEngine(t)
+
+	subsidy := consensus.BlockSubsidy(1, 0)
+	blockBytes := buildSingleTxBlock(t, devnetGenesisBlockHash, target, reorgTestTimestamp(1), coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, subsidy))
+
+	// ApplyBlockWithReorg for a direct tip child also goes through applyCanonicalParsedBlock
+	summary, err := engine.ApplyBlockWithReorg(blockBytes, nil)
+	if err != nil {
+		t.Fatalf("ApplyBlockWithReorg(direct): %v", err)
+	}
+
+	blocks := summary.CanonicalAppliedBlocks
+	if len(blocks) != 1 {
+		t.Fatalf("CanonicalAppliedBlocks len=%d, want 1 (direct apply via ApplyBlockWithReorg)", len(blocks))
+	}
+	if blocks[0].Hash != summary.BlockHash {
+		t.Fatalf("CanonicalAppliedBlocks[0].Hash=%x, want BlockHash=%x", blocks[0].Hash, summary.BlockHash)
+	}
+}

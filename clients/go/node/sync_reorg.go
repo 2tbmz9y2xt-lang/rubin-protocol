@@ -189,6 +189,7 @@ func (s *SyncEngine) applyPreferredBranch(
 
 	var summary *ChainStateConnectSummary
 	var pendingAccepted uint64
+	var canonicalBlocks []CanonicalAppliedBlock
 	for i, item := range branch {
 		// Derive fresh timestamps from the (updated) canonical index for
 		// each block in the branch.  The stale caller prevTimestamps was
@@ -207,10 +208,16 @@ func (s *SyncEngine) applyPreferredBranch(
 		if outcome == blockApplyMetricAccepted {
 			pendingAccepted++
 		}
+		if summary != nil && len(summary.CanonicalAppliedBlocks) > 0 {
+			canonicalBlocks = append(canonicalBlocks, summary.CanonicalAppliedBlocks[0])
+		}
 	}
 	s.requeueDisconnectedTransactions(disconnectedBlocks)
 	s.noteBlockApplyAcceptedN(pendingAccepted)
 	s.noteReorg(reorgDepth)
+	if summary != nil {
+		summary.CanonicalAppliedBlocks = canonicalBlocks
+	}
 	return summary, nil
 }
 

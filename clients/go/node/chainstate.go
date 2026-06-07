@@ -59,16 +59,22 @@ type ChainState struct {
 	Registry         *consensus.SuiteRegistry
 }
 
+type CanonicalAppliedBlock struct {
+	Hash       [32]byte
+	BlockBytes []byte
+}
+
 type ChainStateConnectSummary struct {
-	BlockHeight        uint64
-	BlockHash          [32]byte
-	SumFees            uint64
-	AlreadyGenerated   uint64
-	AlreadyGeneratedN1 uint64
-	UtxoCount          uint64
-	PostStateDigest    [32]byte
-	SigTaskCount       uint64 // parallel path only; 0 for sequential
-	WorkerPanics       uint64 // parallel path only; 0 for sequential
+	BlockHeight            uint64
+	BlockHash              [32]byte
+	SumFees                uint64
+	AlreadyGenerated       uint64
+	AlreadyGeneratedN1     uint64
+	UtxoCount              uint64
+	CanonicalAppliedBlocks []CanonicalAppliedBlock
+	PostStateDigest        [32]byte
+	SigTaskCount           uint64 // parallel path only; 0 for sequential
+	WorkerPanics           uint64 // parallel path only; 0 for sequential
 }
 
 type chainStateDisk struct {
