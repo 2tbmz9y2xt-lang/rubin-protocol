@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use rubin_consensus::constants::{CHUNK_BYTES, MAX_DA_CHUNK_COUNT};
 use rubin_consensus::constants::{COV_TYPE_DA_COMMIT, TX_WIRE_VERSION};
-use rubin_consensus::{parse_tx, Tx};
+use rubin_consensus::{parse_block_bytes, parse_tx, Tx, TxError};
 use sha3::{Digest, Sha3_256};
 
 pub const DA_ORPHAN_POOL_BYTES: u64 = 64 << 20;
@@ -1149,6 +1149,76 @@ fn sha3_256(input: &[u8]) -> [u8; 32] {
     Sha3_256::digest(input).into()
 }
 
+/// Deterministically extract the `da_id` of every COMPLETE DA set carried by an
+/// already-accepted block, in ascending `da_id` order. A set is complete when
+/// the block contains exactly one DA commit for the `da_id` whose `chunk_count`
+/// is in `(0, MAX_DA_CHUNK_COUNT]`, plus a DA chunk tx for every index
+/// `0..chunk_count`. Read-only: it parses block bytes and never mutates relay
+/// state. Mirrors merged Go `extractAcceptedBlockDAIDs` (RUB-429).
+// Crate-internal helper; its runtime caller is the Rust P2P accepted-DA consume
+// hook tracked in RUB-437.
+#[allow(dead_code)]
+pub(crate) fn extract_accepted_block_da_ids(block_bytes: &[u8]) -> Result<Vec<[u8; 32]>, TxError> {
+    let parsed = parse_block_bytes(block_bytes)?;
+    let mut sets: BTreeMap<[u8; 32], AcceptedBlockDaSet> = BTreeMap::new();
+    for tx in &parsed.txs {
+        record_accepted_block_da_tx(&mut sets, tx);
+    }
+    // BTreeMap iterates by ascending key, so the surviving da_ids are returned
+    // sorted and unique (one entry per da_id) without an explicit sort.
+    Ok(sets
+        .into_iter()
+        .filter(|(_, set)| set.complete())
+        .map(|(da_id, _)| da_id)
+        .collect())
+}
+
+#[allow(dead_code)]
+fn record_accepted_block_da_tx(sets: &mut BTreeMap<[u8; 32], AcceptedBlockDaSet>, tx: &Tx) {
+    match tx.tx_kind {
+        0x01 => {
+            if let Some(commit) = &tx.da_commit_core {
+                let set = sets.entry(commit.da_id).or_default();
+                set.commit_count += 1;
+                set.chunk_count = commit.chunk_count;
+            }
+        }
+        0x02 => {
+            if let Some(chunk) = &tx.da_chunk_core {
+                sets.entry(chunk.da_id)
+                    .or_default()
+                    .chunks
+                    .insert(chunk.chunk_index);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Default)]
+#[allow(dead_code)]
+struct AcceptedBlockDaSet {
+    commit_count: u32,
+    chunk_count: u16,
+    chunks: BTreeSet<u16>,
+}
+
+impl AcceptedBlockDaSet {
+    #[allow(dead_code)]
+    fn complete(&self) -> bool {
+        if self.commit_count != 1
+            || self.chunk_count == 0
+            || u64::from(self.chunk_count) > MAX_DA_CHUNK_COUNT
+        {
+            return false;
+        }
+        if self.chunks.len() != usize::from(self.chunk_count) {
+            return false;
+        }
+        (0..self.chunk_count).all(|index| self.chunks.contains(&index))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DaRelayError::*, *};
@@ -1731,6 +1801,81 @@ mod tests {
         );
         assert_eq!(ids_for(late_payload.len() as u64), vec![late_id]);
         assert!(state.complete_da_set_candidates(0).is_empty());
+    }
+
+    #[test]
+    fn extract_accepted_block_da_ids_matrix() {
+        use crate::test_helpers::block_with_txs;
+        let prev = [0u8; 32];
+        let payload = b"da-payload".to_vec();
+        let commit_for = |da_id, chunk_count| {
+            relay_test_tx(
+                0x01,
+                vec![da_commit_output([2u8; 32])],
+                Some(relay_commit_core(da_id, chunk_count)),
+                None,
+                Vec::new(),
+            )
+        };
+        let chunk_for = |da_id, index| {
+            relay_test_tx(
+                0x02,
+                Vec::new(),
+                None,
+                Some(relay_chunk_core(da_id, index, &payload)),
+                payload.clone(),
+            )
+        };
+
+        // Coinbase-only block carries no DA txs.
+        let empty_block = block_with_txs(1, 0, prev, 1_000, &[]);
+        assert!(extract_accepted_block_da_ids(&empty_block)
+            .unwrap()
+            .is_empty());
+
+        // One complete DA set for a single da_id.
+        let one_id = [5u8; 32];
+        let one_block = block_with_txs(
+            1,
+            0,
+            prev,
+            1_001,
+            &[commit_for(one_id, 1), chunk_for(one_id, 0)],
+        );
+        assert_eq!(
+            extract_accepted_block_da_ids(&one_block).unwrap(),
+            vec![one_id]
+        );
+
+        // Two complete sets; the higher da_id is staged first in the block.
+        let lo = [3u8; 32];
+        let hi = [9u8; 32];
+        let multi_block = block_with_txs(
+            1,
+            0,
+            prev,
+            1_002,
+            &[
+                commit_for(hi, 1),
+                chunk_for(hi, 0),
+                commit_for(lo, 1),
+                chunk_for(lo, 0),
+            ],
+        );
+        assert_eq!(
+            extract_accepted_block_da_ids(&multi_block).unwrap(),
+            vec![lo, hi]
+        );
+
+        // Commit declares 2 chunks but only chunk index 0 is present.
+        let inc = [7u8; 32];
+        let inc_block = block_with_txs(1, 0, prev, 1_003, &[commit_for(inc, 2), chunk_for(inc, 0)]);
+        assert!(extract_accepted_block_da_ids(&inc_block)
+            .unwrap()
+            .is_empty());
+
+        // Unparseable block bytes.
+        assert!(extract_accepted_block_da_ids(&[0x01, 0x02]).is_err());
     }
 
     #[test]
