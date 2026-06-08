@@ -38,11 +38,15 @@ pub struct DaRelayPrefetchState {
 
 impl DaRelayPrefetchState {
     /// Plan prefetch requests for the currently-missing chunks of `da_id` across
-    /// `peer_keys` (mirror of Go `planDAPrefetch`). `missing` is the
-    /// currently-missing chunk indexes in any order (sorted and de-duplicated
-    /// internally so planning is deterministic regardless of caller input); an
-    /// empty slice releases the set. Returns per-peer plans and a diagnostic
-    /// (empty unless a cap blocked planning).
+    /// `peer_keys` (mirror of Go `planDAPrefetch`). `peer_keys` are the per-peer
+    /// quota keys the per-peer byte cap is accounted against; the runtime caller
+    /// MUST supply host-only keys (as Go derives via peerQuotaKey(addr) in
+    /// allDAPrefetchPeersLocked) so the cap cannot be bypassed by reconnecting on
+    /// a different source port. `missing` is the currently-missing chunk indexes
+    /// in any order (sorted and de-duplicated internally so planning is
+    /// deterministic regardless of caller input); an empty slice releases the
+    /// set. Returns per-peer plans and a diagnostic (empty unless a cap blocked
+    /// planning).
     pub fn plan_da_prefetch(
         &mut self,
         da_id: [u8; 32],
