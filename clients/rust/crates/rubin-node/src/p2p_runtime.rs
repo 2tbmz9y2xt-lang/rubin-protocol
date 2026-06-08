@@ -40,6 +40,7 @@ const MESSAGE_ADDR: &str = "addr";
 const MESSAGE_SENDCMPCT: &str = "sendcmpct";
 const MESSAGE_GETBLOCKTXN: &str = "getblocktxn";
 const MESSAGE_BLOCKTXN: &str = "blocktxn";
+const MESSAGE_GETDACHUNK: &str = "getdachunk";
 const BLOCKTXN_HASH_PAYLOAD_BYTES: usize = 32;
 const COMPACT_RELAY_VERSION: u64 = 1;
 const DA_CHUNK_REQUEST_VERSION: u64 = 1;
@@ -56,6 +57,10 @@ const COMPACT_ANNOUNCED_BLOCK_LIMIT: usize = 16;
 const MAX_GETBLOCKTXN_PAYLOAD_BYTES: u64 = 32
     + MAX_COMPACT_SIZE_BYTES as u64
     + MAX_COMPACT_RELAY_ENTRIES as u64 * COMPACT_RELAY_INDEX_BYTES as u64;
+// Mirror of Go getDAChunkPayloadCap: 40-byte prefix + compact-size count + 2
+// bytes per u16 index, bounded by MAX_DA_CHUNK_COUNT.
+const MAX_GETDACHUNK_PAYLOAD_BYTES: u64 =
+    GETDACHUNK_PAYLOAD_PREFIX_BYTES as u64 + MAX_COMPACT_SIZE_BYTES as u64 + MAX_DA_CHUNK_COUNT * 2;
 type CompactShortId = [u8; COMPACT_SHORT_ID_BYTES];
 type CompactLocalIndex = HashMap<CompactShortId, Option<Vec<u8>>>;
 pub const MSG_BLOCK: u8 = 0x01;
@@ -553,6 +558,8 @@ impl PeerSession {
             MESSAGE_GETBLOCKTXN => 0,
             MESSAGE_BLOCKTXN if compact_receive => MAX_RELAY_MSG_BYTES,
             MESSAGE_BLOCKTXN => 0,
+            MESSAGE_GETDACHUNK if compact_receive => MAX_GETDACHUNK_PAYLOAD_BYTES,
+            MESSAGE_GETDACHUNK => 0,
             _ => runtime_payload_cap(command),
         };
         // NOTE on tx-oversize ban policy (parity gap with Go's
@@ -762,6 +769,7 @@ impl PeerSession {
             }
             "cmpctblock" => self.handle_cmpctblock(&msg.payload, sync_engine, relay_ctx),
             MESSAGE_GETBLOCKTXN => self.handle_getblocktxn(&msg.payload, sync_engine),
+            MESSAGE_GETDACHUNK => self.handle_getdachunk(&msg.payload),
             MESSAGE_BLOCKTXN => self.handle_blocktxn(&msg.payload, sync_engine, relay_ctx),
             MESSAGE_TX => {
                 if let Some(ctx) = relay_ctx {
@@ -1250,6 +1258,18 @@ impl PeerSession {
         self.cfg.enable_compact_receive
             && self.remote_compact_mode.version == COMPACT_RELAY_VERSION
             && self.remote_compact_mode.mode != 0
+    }
+
+    /// Inbound `getdachunk` handler (mirror of Go `handleGetDAChunk`): reject
+    /// unless compact-receive is negotiated, then decode-and-validate only. Go
+    /// serves no chunks and sends no response, so this reads/mutates no DA relay
+    /// state and exposes no provider/miner state.
+    fn handle_getdachunk(&mut self, payload: &[u8]) -> io::Result<LiveMessageOutcome> {
+        if !self.compact_receive_active() {
+            return Err(unknown_command_err(MESSAGE_GETDACHUNK));
+        }
+        decode_getdachunk_payload(payload)?;
+        Ok(LiveMessageOutcome::default())
     }
     fn mark_compact_block_announced(&mut self, block_hash: [u8; 32]) {
         self.compact_announced.push(block_hash);
@@ -2275,6 +2295,80 @@ pub fn decode_getdachunk_payload(payload: &[u8]) -> io::Result<GetDAChunkPayload
         da_id,
         indexes,
     })
+}
+
+// The reservation-release/retry decision and the plan sender below have no
+// production caller until the prefetch runtime-wiring follow-up slice threads
+// the scheduler through the staging path; they are exercised by tests here.
+/// Followup after a DA tx stage completes (mirror of Go `finishDAPrefetch`): a
+/// successful stage re-schedules prefetch for the record, a payload-commitment
+/// mismatch re-schedules from a fresh snapshot, and any other error does nothing.
+#[allow(dead_code)]
+pub(crate) enum DaPrefetchFollowup {
+    Schedule([u8; 32]),
+    ScheduleSnapshot([u8; 32]),
+    None,
+}
+
+#[allow(dead_code)]
+pub(crate) fn finish_da_prefetch(
+    da_id: [u8; 32],
+    staging: Result<(), crate::da_relay::DaRelayError>,
+) -> DaPrefetchFollowup {
+    match staging {
+        Ok(()) => DaPrefetchFollowup::Schedule(da_id),
+        Err(crate::da_relay::DaRelayError::PayloadCommitmentMismatch) => {
+            DaPrefetchFollowup::ScheduleSnapshot(da_id)
+        }
+        Err(_) => DaPrefetchFollowup::None,
+    }
+}
+
+/// Send a reserved prefetch plan to its peer as a `getdachunk` request (mirror of
+/// Go `sendDAPrefetchPlan`): resolve the plan's host-only quota key to a peer
+/// addr and enqueue the encoded request. If the peer is gone or the send fails,
+/// the reservation is released so it can be re-planned later. Returns the send
+/// error so the caller can record it as the peer's last error.
+#[allow(dead_code)]
+pub(crate) fn send_da_prefetch_plan(
+    prefetch: &mut crate::da_prefetch::DaRelayPrefetchState,
+    plan: crate::da_prefetch::DaRelayPrefetchPlan,
+    network: &str,
+    quota_key_to_addr: &std::collections::BTreeMap<String, String>,
+    peer_writers: &std::sync::Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
+) -> Result<(), String> {
+    let Some(addr) = quota_key_to_addr.get(&plan.peer_key) else {
+        prefetch.release_da_prefetch_plan(&plan);
+        return Ok(());
+    };
+    let framed = encode_getdachunk_payload(GetDAChunkPayload {
+        version: DA_CHUNK_REQUEST_VERSION,
+        da_id: plan.da_id,
+        indexes: plan.indexes.clone(),
+    })
+    .and_then(|payload| {
+        let header = build_envelope_header(network_magic(network), MESSAGE_GETDACHUNK, &payload)?;
+        let mut frame = header.to_vec();
+        frame.extend_from_slice(&payload);
+        Ok(frame)
+    });
+    let frame = match framed {
+        Ok(frame) => frame,
+        Err(err) => {
+            prefetch.release_da_prefetch_plan(&plan);
+            return Err(format!("da prefetch send failed: {err}"));
+        }
+    };
+    let sent = peer_writers
+        .lock()
+        .ok()
+        .and_then(|mut writers| writers.get_mut(addr).map(|outbox| outbox.push_frame(frame)))
+        .unwrap_or(false);
+    if !sent {
+        prefetch.release_da_prefetch_plan(&plan);
+        return Err("da prefetch send failed: peer outbox unavailable".to_string());
+    }
+    Ok(())
 }
 
 pub fn encode_blocktxn_payload(payload: BlockTxnPayload) -> io::Result<Vec<u8>> {
@@ -3877,6 +3971,144 @@ mod tests {
             let err = decode_getdachunk_payload(&raw).expect_err("decode must reject");
             assert!(err.to_string().contains(want), "{err}");
         }
+    }
+
+    #[test]
+    fn getdachunk_inbound_is_compact_gated_validate_only() {
+        let (mut session, _client) = test_peer_session();
+        let req = getdachunk_indexed_payload(&[0, 1, 2]);
+        // Active compact-receive: a valid request is accepted, serves no chunk or
+        // response (no provider/miner exposure), and does not ban.
+        let out = session
+            .handle_getdachunk(&req)
+            .expect("active getdachunk accepted");
+        assert!(
+            out.responses.is_empty(),
+            "inbound getdachunk serves nothing"
+        );
+        assert_eq!(session.state().ban_score, 0);
+        // Compact-receive not negotiated: rejected as an unknown command, no ban.
+        session.remote_compact_mode = CompactModeSnapshot {
+            mode: 0,
+            version: COMPACT_RELAY_VERSION,
+        };
+        let err = session
+            .handle_getdachunk(&req)
+            .expect_err("gated-off rejects getdachunk");
+        assert!(err.to_string().contains("getdachunk"), "{err}");
+        assert_eq!(session.state().ban_score, 0);
+    }
+
+    #[test]
+    fn getdachunk_inbound_rejects_malformed_without_ban() {
+        let (mut session, _client) = test_peer_session();
+        // 40-byte prefix + index count 5 but no index bytes -> truncated -> error.
+        let malformed = getdachunk_payload_with_tail(DA_CHUNK_REQUEST_VERSION, &[0x05]);
+        let err = session
+            .handle_getdachunk(&malformed)
+            .expect_err("malformed getdachunk rejected");
+        assert!(!err.to_string().is_empty());
+        assert_eq!(session.state().ban_score, 0, "decode failure must not ban");
+    }
+
+    #[test]
+    fn send_da_prefetch_plan_enqueues_request_and_retains_reservation() {
+        use crate::da_prefetch::DaRelayPrefetchState;
+        use crate::tx_relay::PeerOutbox;
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+        let da_id = [0x42u8; 32];
+        let quota = "1.2.3.4".to_string();
+        let addr = "1.2.3.4:8333".to_string();
+        let mut prefetch = DaRelayPrefetchState::default();
+        let (mut plans, diag) =
+            prefetch.plan_da_prefetch(da_id, &[0, 1, 2], std::slice::from_ref(&quota), 1_000);
+        assert!(diag.is_empty() && plans.len() == 1);
+        let map = BTreeMap::from([(quota.clone(), addr.clone())]);
+        let writers = Mutex::new(HashMap::from([(addr.clone(), PeerOutbox::default())]));
+        send_da_prefetch_plan(&mut prefetch, plans.remove(0), "devnet", &map, &writers)
+            .expect("send succeeds");
+        let frames = writers
+            .lock()
+            .unwrap()
+            .get_mut(&addr)
+            .unwrap()
+            .take_frames();
+        assert_eq!(frames.len(), 1, "one getdachunk frame enqueued");
+        let decoded = decode_getdachunk_payload(&frames[0][WIRE_HEADER_SIZE..])
+            .expect("sent frame is a getdachunk request");
+        assert_eq!(
+            (decoded.version, decoded.da_id, decoded.indexes),
+            (DA_CHUNK_REQUEST_VERSION, da_id, vec![0, 1, 2]),
+            "request carries exactly the reserved indexes"
+        );
+        // Reservation retained on success: a re-plan within TTL re-requests nothing.
+        let (retry, _) =
+            prefetch.plan_da_prefetch(da_id, &[0, 1, 2], std::slice::from_ref(&quota), 1_000);
+        assert!(
+            retry.is_empty(),
+            "successful send keeps the reservation in-flight"
+        );
+    }
+
+    #[test]
+    fn send_da_prefetch_plan_releases_on_missing_or_failed_send() {
+        use crate::da_prefetch::DaRelayPrefetchState;
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+        let da_id = [0x55u8; 32];
+        let quota = "5.6.7.8".to_string();
+        let addr = "5.6.7.8:8333".to_string();
+        // (a) peer absent from the addr map -> released, not an error (Go current==nil).
+        let mut prefetch = DaRelayPrefetchState::default();
+        let (mut plans, _) =
+            prefetch.plan_da_prefetch(da_id, &[0], std::slice::from_ref(&quota), 1_000);
+        send_da_prefetch_plan(
+            &mut prefetch,
+            plans.remove(0),
+            "devnet",
+            &BTreeMap::new(),
+            &Mutex::new(HashMap::new()),
+        )
+        .expect("absent peer is not an error");
+        let (after, _) =
+            prefetch.plan_da_prefetch(da_id, &[0], std::slice::from_ref(&quota), 1_000);
+        assert_eq!(after.len(), 1, "absent peer releases the reservation");
+        // (b) addr resolves but the peer has no outbox -> send fails and releases.
+        let mut prefetch = DaRelayPrefetchState::default();
+        let (mut plans, _) =
+            prefetch.plan_da_prefetch(da_id, &[0], std::slice::from_ref(&quota), 1_000);
+        let map = BTreeMap::from([(quota.clone(), addr.clone())]);
+        let err = send_da_prefetch_plan(
+            &mut prefetch,
+            plans.remove(0),
+            "devnet",
+            &map,
+            &Mutex::new(HashMap::new()),
+        )
+        .expect_err("send fails when the peer outbox is gone");
+        assert!(err.contains("da prefetch send failed"));
+        let (after, _) =
+            prefetch.plan_da_prefetch(da_id, &[0], std::slice::from_ref(&quota), 1_000);
+        assert_eq!(after.len(), 1, "failed send releases the reservation");
+    }
+
+    #[test]
+    fn finish_da_prefetch_maps_staging_to_followup() {
+        use crate::da_relay::DaRelayError;
+        let da_id = [7u8; 32];
+        assert!(matches!(
+            finish_da_prefetch(da_id, Ok(())),
+            DaPrefetchFollowup::Schedule(d) if d == da_id
+        ));
+        assert!(matches!(
+            finish_da_prefetch(da_id, Err(DaRelayError::PayloadCommitmentMismatch)),
+            DaPrefetchFollowup::ScheduleSnapshot(d) if d == da_id
+        ));
+        assert!(matches!(
+            finish_da_prefetch(da_id, Err(DaRelayError::ChunkHashMismatch)),
+            DaPrefetchFollowup::None
+        ));
     }
 
     #[test]
