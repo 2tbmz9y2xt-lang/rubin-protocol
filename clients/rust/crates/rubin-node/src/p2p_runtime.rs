@@ -1384,6 +1384,12 @@ impl PeerSession {
         match sync_engine.apply_block_with_reorg(block_bytes, None) {
             Ok(outcome) => {
                 sync_engine.record_best_known_height(outcome.summary.block_height);
+                // Consume the complete DA sets reported canonical-applied by this
+                // apply (RUB-437); a side branch reports none.
+                self.consume_canonical_applied_da_sets(
+                    relay_ctx,
+                    &outcome.summary.canonical_applied_blocks,
+                );
                 let mut tx_pool_cleanup = outcome.tx_pool_cleanup;
                 let mut accepted_blocks = 1;
                 if let Err(err) = self.resolve_orphans(
@@ -1495,6 +1501,22 @@ impl PeerSession {
         };
         if let Err(err) = da_relay.advance_orphan_ttl_by(accepted_blocks) {
             self.peer.last_error = format!("DA relay TTL advance failed: {err:?}");
+        }
+    }
+
+    fn consume_canonical_applied_da_sets(
+        &mut self,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
+        canonical_applied_blocks: &[crate::chainstate::CanonicalAppliedBlock],
+    ) {
+        let (Some(ctx), false) = (relay_ctx, canonical_applied_blocks.is_empty()) else {
+            return;
+        };
+        if let Err(err) = crate::da_relay::consume_canonical_applied_da_sets(
+            ctx.da_relay,
+            canonical_applied_blocks,
+        ) {
+            self.peer.last_error = format!("DA relay accepted-block consume failed: {err}");
         }
     }
 
