@@ -51,14 +51,14 @@ impl DaRelayPrefetchState {
         peer_keys: &[String],
         now_nanos: u64,
     ) -> (Vec<DaRelayPrefetchPlan>, String) {
-        // Normalize missing (sorted-unique) and peers (non-empty, order-preserving
-        // unique) so planning is deterministic and never duplicates a per-peer plan.
+        // Normalize missing (sorted-unique) and peers (non-empty, deduped, ordered).
         let mut missing: Vec<u16> = missing.to_vec();
         missing.sort_unstable();
         missing.dedup();
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
         let mut peers: Vec<String> = Vec::new();
         for key in peer_keys {
-            if !key.is_empty() && !peers.contains(key) {
+            if !key.is_empty() && seen.insert(key.as_str()) {
                 peers.push(key.clone());
             }
         }
@@ -172,8 +172,8 @@ impl DaRelayPrefetchState {
         now_nanos: u64,
     ) {
         if !plans_by_peer.is_empty() {
-            self.expires
-                .insert(da_id, now_nanos + DA_PREFETCH_REQUEST_TTL_NANOS);
+            let at = now_nanos.saturating_add(DA_PREFETCH_REQUEST_TTL_NANOS);
+            self.expires.insert(da_id, at);
         }
     }
 
