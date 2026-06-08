@@ -38,9 +38,11 @@ pub struct DaRelayPrefetchState {
 
 impl DaRelayPrefetchState {
     /// Plan prefetch requests for the currently-missing chunks of `da_id` across
-    /// `peer_keys` (mirror of Go `planDAPrefetch`). `missing` must be the sorted,
-    /// unique, currently-missing indexes; an empty slice releases the set.
-    /// Returns per-peer plans and a diagnostic (empty unless a cap blocked it).
+    /// `peer_keys` (mirror of Go `planDAPrefetch`). `missing` is the
+    /// currently-missing chunk indexes in any order (sorted and de-duplicated
+    /// internally so planning is deterministic regardless of caller input); an
+    /// empty slice releases the set. Returns per-peer plans and a diagnostic
+    /// (empty unless a cap blocked planning).
     pub fn plan_da_prefetch(
         &mut self,
         da_id: [u8; 32],
@@ -48,12 +50,17 @@ impl DaRelayPrefetchState {
         peer_keys: &[String],
         now_nanos: u64,
     ) -> (Vec<DaRelayPrefetchPlan>, String) {
+        // Normalize to sorted-unique so planning is deterministic regardless of
+        // caller input order, matching Go's sorted missingChunkIndexes() input.
+        let mut missing: Vec<u16> = missing.to_vec();
+        missing.sort_unstable();
+        missing.dedup();
         self.release_expired(now_nanos);
         if missing.is_empty() {
             self.release_set(da_id);
             return (Vec::new(), String::new());
         }
-        self.release_fulfilled(da_id, missing);
+        self.release_fulfilled(da_id, &missing);
         if peer_keys.is_empty() {
             return (Vec::new(), String::new());
         }
@@ -67,7 +74,7 @@ impl DaRelayPrefetchState {
             );
         }
         let (plans_by_peer, diagnostic) =
-            self.reserve_missing(da_id, missing, peer_keys, now_nanos);
+            self.reserve_missing(da_id, &missing, peer_keys, now_nanos);
         (
             build_da_prefetch_plans(da_id, peer_keys, &plans_by_peer),
             diagnostic,
@@ -323,9 +330,11 @@ mod tests {
     #[test]
     fn deterministic_peer_rotation_round_robins() {
         let mut s = DaRelayPrefetchState::default();
+        // Unordered + duplicate input is normalized to sorted-unique [0,1,2], so
+        // rotation is deterministic regardless of caller order.
         let (plans, diag) = s.plan_da_prefetch(
             DA,
-            &[0, 1, 2],
+            &[2, 0, 2, 1],
             &keys(&["peer-a", "peer-b", "peer-c"]),
             1_000,
         );
