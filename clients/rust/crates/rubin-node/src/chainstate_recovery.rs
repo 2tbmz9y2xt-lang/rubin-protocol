@@ -942,6 +942,7 @@ mod tests {
                     already_generated: 0,
                     already_generated_n1: 0,
                     utxo_count: 0,
+                    canonical_applied_blocks: Vec::new(),
                 }),
             ),
             "tipless state must persist to seed first snapshot"
@@ -977,6 +978,7 @@ mod tests {
                     already_generated: 0,
                     already_generated_n1: 0,
                     utxo_count: small.utxos.len() as u64,
+                    canonical_applied_blocks: Vec::new(),
                 }),
             ),
             "small utxo set must persist every block"
@@ -1014,6 +1016,7 @@ mod tests {
                     already_generated: 0,
                     already_generated_n1: 0,
                     utxo_count: large.utxos.len() as u64,
+                    canonical_applied_blocks: Vec::new(),
                 }),
             ),
             "large utxo set must skip non-interval snapshots"
@@ -1029,6 +1032,7 @@ mod tests {
                     already_generated: 0,
                     already_generated_n1: 0,
                     utxo_count: large.utxos.len() as u64,
+                    canonical_applied_blocks: Vec::new(),
                 }),
             ),
             "large utxo set must persist on interval boundary"
@@ -1044,6 +1048,7 @@ mod tests {
                     already_generated: 0,
                     already_generated_n1: 0,
                     utxo_count: large.utxos.len() as u64,
+                    canonical_applied_blocks: Vec::new(),
                 }),
             ),
             "height zero summary must persist"

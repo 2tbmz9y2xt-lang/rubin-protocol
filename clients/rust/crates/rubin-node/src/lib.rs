@@ -25,8 +25,8 @@ mod test_helpers;
 
 pub use blockstore::{block_store_path, BlockStore, BLOCK_STORE_DIR_NAME};
 pub use chainstate::{
-    chain_state_path, load_chain_state, ChainState, ChainStateConnectSummary,
-    CHAIN_STATE_FILE_NAME, UTXO_SET_HASH_DST,
+    chain_state_path, load_chain_state, CanonicalAppliedBlock, ChainState,
+    ChainStateConnectSummary, CHAIN_STATE_FILE_NAME, UTXO_SET_HASH_DST,
 };
 pub use chainstate_recovery::reconcile_chain_state_with_block_store;
 pub use coinbase::{

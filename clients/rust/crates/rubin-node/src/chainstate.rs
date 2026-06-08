@@ -29,6 +29,12 @@ pub struct ChainState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalAppliedBlock {
+    pub hash: [u8; 32],
+    pub block_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainStateConnectSummary {
     pub block_height: u64,
     pub block_hash: [u8; 32],
@@ -36,6 +42,7 @@ pub struct ChainStateConnectSummary {
     pub already_generated: u64,
     pub already_generated_n1: u64,
     pub utxo_count: u64,
+    pub canonical_applied_blocks: Vec<CanonicalAppliedBlock>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +196,10 @@ impl ChainState {
             already_generated_n1: u64::try_from(connect_summary.already_generated_n1)
                 .map_err(|_| "already_generated_n1 overflow".to_string())?,
             utxo_count: connect_summary.utxo_count,
+            canonical_applied_blocks: vec![CanonicalAppliedBlock {
+                hash: tip_hash,
+                block_bytes: block_bytes.to_vec(),
+            }],
         })
     }
 

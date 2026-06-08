@@ -5,7 +5,7 @@ use rubin_consensus::{
 use std::ops::Deref;
 
 use crate::blockstore::BlockStore;
-use crate::chainstate::ChainStateConnectSummary;
+use crate::chainstate::{CanonicalAppliedBlock, ChainStateConnectSummary};
 use crate::sync::SyncEngine;
 use crate::txpool::{TxPool, TxPoolAdmitError, TxPoolAdmitErrorKind, TxSource};
 
@@ -458,9 +458,18 @@ impl SyncEngine {
         // fresh timestamps from the (updated) canonical index for each block,
         // instead of reusing the stale caller value (B.9 fix, issue #1166).
         let mut last_summary = None;
+        let mut canonical_applied_blocks: Vec<CanonicalAppliedBlock> = Vec::new();
         for item in &branch {
             match self.apply_block(&item.block_bytes, None) {
-                Ok(summary) => last_summary = Some(summary),
+                Ok(mut summary) => {
+                    // branch is in ascending canonical (height) order, so this
+                    // accumulates every newly-canonical block in canonical order.
+                    // Move (not clone) the per-block entries: this throwaway
+                    // summary's vec is never read again — the returned summary's
+                    // vec is overwritten below.
+                    canonical_applied_blocks.append(&mut summary.canonical_applied_blocks);
+                    last_summary = Some(summary);
+                }
                 Err(err) => {
                     return Err(Self::err_with_rollback(
                         err,
@@ -485,7 +494,10 @@ impl SyncEngine {
             requeue_block_hashes: collect_disconnected_block_hashes(&disconnected_blocks),
         };
 
-        let summary = last_summary.ok_or_else(|| "reorg branch was empty".to_string())?;
+        let mut summary = last_summary.ok_or_else(|| "reorg branch was empty".to_string())?;
+        // Report every block that became canonical in this reorg (the returned
+        // summary's scalar fields otherwise reflect only the new tip).
+        summary.canonical_applied_blocks = canonical_applied_blocks;
         self.note_reorg(reorg_depth);
         Ok(ApplyBlockWithReorgOutcome {
             summary,
@@ -597,6 +609,8 @@ impl SyncEngine {
             already_generated: self.chain_state.already_generated,
             already_generated_n1: self.chain_state.already_generated,
             utxo_count: self.chain_state.utxos.len() as u64,
+            // Side branch stored but not switched: no block became canonical.
+            canonical_applied_blocks: Vec::new(),
         }
     }
 }
@@ -1107,6 +1121,111 @@ mod tests {
         assert_eq!(engine.chain_state.tip_hash, block2_hash);
         assert_eq!(engine.reorg_count(), 0);
         assert_eq!(engine.last_reorg_depth(), 0);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_reports_single_canonical_applied_block_on_direct_apply() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-canon-direct");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let block1_hash = block_header_hash(&block1);
+        let summary = engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 direct apply");
+
+        assert_eq!(summary.canonical_applied_blocks.len(), 1);
+        assert_eq!(summary.canonical_applied_blocks[0].hash, block1_hash);
+        assert_eq!(summary.canonical_applied_blocks[0].hash, summary.block_hash);
+        assert_eq!(summary.canonical_applied_blocks[0].block_bytes, block1);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_reports_no_canonical_applied_blocks_on_side_branch() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-canon-side");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        let block1 = height_one_coinbase_only_block(genesis_hash, gen_ts + 1);
+        let block1_hash = block_header_hash(&block1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2 = coinbase_only_block_with_gen(2, subsidy1, block1_hash, gen_ts + 2);
+        let block2_hash = block_header_hash(&block2);
+        engine
+            .apply_block_with_reorg(&block2, None)
+            .expect("block2 canonical");
+
+        // Lower-work side block at height 1: stored, does not switch the tip.
+        let side = height_one_coinbase_only_block(genesis_hash, gen_ts + 3);
+        let summary = engine
+            .apply_block_with_reorg(&side, None)
+            .expect("side branch stored");
+
+        assert!(
+            summary.canonical_applied_blocks.is_empty(),
+            "stored-but-not-switched side branch must report zero canonical-applied blocks"
+        );
+        assert_eq!(engine.chain_state.tip_hash, block2_hash);
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn apply_block_with_reorg_reports_all_canonical_applied_blocks_in_order_on_reorg() {
+        let (mut engine, dir) = engine_with_store("rubin-reorg-canon-reorg");
+        let (genesis, genesis_hash, gen_ts) = genesis_info();
+        engine
+            .apply_block_with_reorg(&genesis, None)
+            .expect("genesis");
+
+        // Canonical: genesis -> block1 (1-block chain, work = 1).
+        let block1 = coinbase_only_block(1, genesis_hash, gen_ts + 1);
+        engine
+            .apply_block_with_reorg(&block1, None)
+            .expect("block1 canonical");
+
+        // Heavier branch: genesis -> block1_alt -> block2_alt (work = 2).
+        let block1_alt = coinbase_only_block(1, genesis_hash, gen_ts + 2);
+        let block1_alt_hash = block_header_hash(&block1_alt);
+        engine
+            .block_store
+            .as_ref()
+            .unwrap()
+            .store_block(
+                block1_alt_hash,
+                &block1_alt[..rubin_consensus::BLOCK_HEADER_BYTES],
+                &block1_alt,
+            )
+            .expect("store block1_alt as side");
+
+        let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+        let block2_alt = coinbase_only_block_with_gen(2, subsidy1, block1_alt_hash, gen_ts + 3);
+        let block2_alt_hash = block_header_hash(&block2_alt);
+
+        let summary = engine
+            .apply_block_with_reorg(&block2_alt, None)
+            .expect("reorg to heavier branch");
+
+        assert_eq!(engine.chain_state.tip_hash, block2_alt_hash);
+        assert_eq!(engine.reorg_count(), 1);
+        // Every block that became canonical, in ascending canonical order.
+        assert_eq!(summary.canonical_applied_blocks.len(), 2);
+        assert_eq!(summary.canonical_applied_blocks[0].hash, block1_alt_hash);
+        assert_eq!(summary.canonical_applied_blocks[0].block_bytes, block1_alt);
+        assert_eq!(summary.canonical_applied_blocks[1].hash, block2_alt_hash);
+        assert_eq!(summary.canonical_applied_blocks[1].block_bytes, block2_alt);
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
