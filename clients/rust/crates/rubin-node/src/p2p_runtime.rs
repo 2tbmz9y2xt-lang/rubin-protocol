@@ -1397,6 +1397,7 @@ impl PeerSession {
                     sync_engine,
                     &mut tx_pool_cleanup,
                     &mut accepted_blocks,
+                    relay_ctx,
                 ) {
                     self.stash_pending_tx_pool_cleanup(tx_pool_cleanup);
                     self.advance_da_orphan_ttl_for_accepted_blocks(relay_ctx, accepted_blocks);
@@ -1439,6 +1440,7 @@ impl PeerSession {
                 sync_engine,
                 &mut tx_pool_cleanup,
                 &mut accepted_blocks,
+                relay_ctx,
             ) {
                 self.stash_pending_tx_pool_cleanup(tx_pool_cleanup);
                 self.advance_da_orphan_ttl_for_accepted_blocks(relay_ctx, accepted_blocks);
@@ -1458,12 +1460,20 @@ impl PeerSession {
         sync_engine: &mut SyncEngine,
         tx_pool_cleanup: &mut TxPoolCleanupPlan,
         accepted_blocks: &mut usize,
+        relay_ctx: Option<&PeerRelayContext<'_>>,
     ) -> io::Result<()> {
         let mut ready = self.orphans.take_children(parent_hash);
         while let Some(child) = ready.pop() {
             match sync_engine.apply_block_with_reorg(&child.block_bytes, None) {
                 Ok(outcome) => {
                     sync_engine.record_best_known_height(outcome.summary.block_height);
+                    // Consume the complete DA sets reported canonical-applied by
+                    // this orphan-resolved apply (RUB-437); a non-canonical apply
+                    // reports none.
+                    self.consume_canonical_applied_da_sets(
+                        relay_ctx,
+                        &outcome.summary.canonical_applied_blocks,
+                    );
                     *tx_pool_cleanup =
                         std::mem::take(tx_pool_cleanup).merge(outcome.tx_pool_cleanup);
                     *accepted_blocks = accepted_blocks.saturating_add(1);
@@ -5511,6 +5521,81 @@ mod tests {
             assert!(engine.has_block(block1_hash).expect("block1 applied"));
             assert!(engine.has_block(block2_hash).expect("block2 resolved"));
             assert_eq!(engine.chain_state.height, 2);
+        });
+
+        let _client = TcpStream::connect(addr).expect("connect");
+        server.join().expect("server join");
+        reset_orphan_pool_metrics_for_test();
+    }
+
+    #[test]
+    fn resolve_orphans_runs_da_consume_hook_under_relay_context() {
+        // Orphan resolution must run the accepted-block DA consume hook with the
+        // live peer relay context (RUB-437); a coinbase-only child carries no DA
+        // set, so the hook is a no-op, but this drives resolve_orphans' apply
+        // success arm under Some(relay_ctx) end-to-end without error.
+        let _guard = orphan_pool_metrics_test_guard();
+        reset_orphan_pool_metrics_for_test();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut session = PeerSession::new(stream, default_peer_runtime_config("devnet", 8))
+                .expect("session");
+            let mut engine = test_sync_engine_with_genesis();
+            let genesis = parse_block_bytes(&devnet_genesis_block_bytes()).expect("parse genesis");
+            let genesis_hash = block_hash(&genesis.header_bytes).expect("genesis hash");
+            let block1 = height_one_coinbase_only_block(genesis_hash, genesis.header.timestamp + 1);
+            let block1_hash = block_hash(&block1[..BLOCK_HEADER_BYTES]).expect("block1 hash");
+            let subsidy1 = rubin_consensus::subsidy::block_subsidy(1, 0);
+            let block2 = coinbase_only_block_with_gen(
+                2,
+                subsidy1,
+                block1_hash,
+                genesis.header.timestamp + 2,
+            );
+            let block2_hash = block_hash(&block2[..BLOCK_HEADER_BYTES]).expect("block2 hash");
+
+            let relay_state = crate::tx_relay::TxRelayState::new();
+            let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 8));
+            let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> =
+                Mutex::new(HashMap::new());
+            let canonical_tx_pool = Mutex::new(TxPool::new());
+            let da_relay = Mutex::new(
+                crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
+                    .expect("valid DA relay caps"),
+            );
+            let relay_ctx = PeerRelayContext {
+                relay_state: &relay_state,
+                peer_manager: &peer_manager,
+                local_addr: "local:8333",
+                peer_registered_addr: "peer:8333",
+                peer_writers: &peer_outboxes,
+                tx_pool: &canonical_tx_pool,
+                da_relay: &da_relay,
+            };
+
+            // block2 arrives before its parent: retained as an orphan.
+            collect_block_message(&mut session, &mut engine, &relay_ctx, block2.clone())
+                .expect("orphan retained until parent arrives");
+            assert_eq!(engine.chain_state.height, 0, "orphan must not advance tip");
+
+            // Parent arrives under the live relay context: resolve_orphans applies
+            // block2 and runs the consume hook on its canonical-applied summary.
+            collect_block_message(&mut session, &mut engine, &relay_ctx, block1)
+                .expect("parent connects and resolves orphan");
+
+            assert_eq!(session.orphans.len(), 0, "orphan pool drains");
+            assert!(engine.has_block(block1_hash).expect("block1 applied"));
+            assert!(engine.has_block(block2_hash).expect("block2 resolved"));
+            assert_eq!(engine.chain_state.height, 2, "resolved orphan advances tip");
+            assert!(
+                session.state().last_error.is_empty(),
+                "orphan-resolution consume must not surface an error: {}",
+                session.state().last_error
+            );
         });
 
         let _client = TcpStream::connect(addr).expect("connect");

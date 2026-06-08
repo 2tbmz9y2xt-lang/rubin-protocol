@@ -1238,17 +1238,27 @@ pub fn consume_accepted_block_da_sets(
 /// canonical-applied by the sync engine (RUB-436): a direct apply reports the
 /// single connected block, a reorg reports every newly-canonical branch block,
 /// and a stored-but-not-switched side branch reports none (so nothing is
-/// consumed). Aborts on the first error (fail-closed). Used by the Rust P2P
+/// consumed). Best-effort across blocks — every block is attempted and the
+/// first error is returned — so one block's accounting failure cannot skip DA
+/// cleanup for the remaining canonical blocks. Used by the Rust P2P
 /// accepted-block consume hook (RUB-437) — the mirror of Go
 /// `consumeCanonicalAppliedDASets`.
 pub fn consume_canonical_applied_da_sets(
     da_relay: &Mutex<DaRelayState>,
     canonical_applied_blocks: &[crate::chainstate::CanonicalAppliedBlock],
 ) -> Result<(), String> {
+    let mut first_err: Option<String> = None;
     for block in canonical_applied_blocks {
-        consume_accepted_block_da_sets(da_relay, &block.block_bytes)?;
+        if let Err(err) = consume_accepted_block_da_sets(da_relay, &block.block_bytes) {
+            first_err.get_or_insert_with(|| {
+                format!(
+                    "consume canonical-applied DA sets for block {}: {err}",
+                    hex::encode(block.hash)
+                )
+            });
+        }
     }
-    Ok(())
+    first_err.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -2081,6 +2091,54 @@ mod tests {
             block_bytes: vec![0x01, 0x02],
         }];
         assert!(consume_canonical_applied_da_sets(&relay2, &bad).is_err());
+
+        // Best-effort: a malformed block between two valid canonical blocks does
+        // not skip the others; the first error (naming that block) is surfaced.
+        let id_c = [83u8; 32];
+        let id_d = [84u8; 32];
+        let mut state3 = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        for (id, c, k) in [
+            (id_c, "commit-c:8333", "chunk-c:8333"),
+            (id_d, "commit-d:8333", "chunk-d:8333"),
+        ] {
+            state3
+                .stage_incomplete_da_commit(c, commit(id, &[payload], payload_wire, commit_tx))
+                .unwrap();
+            state3
+                .stage_incomplete_da_chunk(k, chunk(id, 0, payload, payload_wire, chunk_tx))
+                .unwrap();
+        }
+        let relay3 = Mutex::new(state3);
+        let mixed = vec![
+            CanonicalAppliedBlock {
+                hash: [0xc0; 32],
+                block_bytes: block_for(id_c, 1_002),
+            },
+            CanonicalAppliedBlock {
+                hash: [0xee; 32],
+                block_bytes: vec![0x01, 0x02],
+            },
+            CanonicalAppliedBlock {
+                hash: [0xd0; 32],
+                block_bytes: block_for(id_d, 1_003),
+            },
+        ];
+        let err = consume_canonical_applied_da_sets(&relay3, &mixed)
+            .expect_err("malformed middle block surfaces an error");
+        assert!(
+            err.contains(&hex::encode([0xee; 32])),
+            "first error names the malformed block: {err}"
+        );
+        let guard3 = relay3.lock().unwrap();
+        assert!(
+            !guard3.sets_by_da_id.contains_key(&id_c),
+            "block before the malformed one is consumed"
+        );
+        assert!(
+            !guard3.sets_by_da_id.contains_key(&id_d),
+            "block after the malformed one is still consumed (best-effort)"
+        );
+        assert_eq!(guard3.pinned_payload_bytes, 0);
     }
 
     #[test]
