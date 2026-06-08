@@ -497,6 +497,7 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
         }))
     };
     let da_ttl_relay = p2p_service.da_relay_state();
+    let da_consume_relay = p2p_service.da_relay_state();
     let da_ttl_seen = Arc::new(rubin_node::tx_seen::BoundedHashSet::new(
         rubin_node::tx_seen::DEFAULT_BLOCK_SEEN_CAPACITY,
     ));
@@ -521,6 +522,11 @@ fn run(args: &[String], stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
     );
     if live_mining_enabled {
         state.set_complete_da_set_provider(p2p_service.complete_da_set_provider());
+        // RUB-435: fail-closed consume of a mined block's complete DA sets once
+        // /mine_next applies it (mirror of the Go SetAcceptedBlockDASetConsumer binding).
+        state.set_accepted_block_da_consumer(Arc::new(move |block_bytes| {
+            rubin_node::da_relay::consume_accepted_block_da_sets(&da_consume_relay, block_bytes)
+        }));
     }
     state.set_accepted_block_hook(Arc::new(move |hash| {
         advance_da_ttl_for_block(hash, &da_ttl_relay, &da_ttl_seen)

@@ -44,6 +44,9 @@ pub type AnnounceTxFn =
     Arc<dyn Fn(&[u8], crate::txpool::RelayTxMetadata) -> Result<(), String> + Send + Sync>;
 pub type AnnounceBlockFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
 pub type AcceptedBlockFn = Arc<dyn Fn([u8; 32]) -> Result<(), String> + Send + Sync>;
+/// Fail-closed DA-relay cleanup hook for the just-mined block bytes. Mirrors the
+/// Go `acceptedBlockDASetConsumer` consumer hook.
+pub type AcceptedBlockDaConsumerFn = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct DevnetRPCState {
@@ -56,6 +59,9 @@ pub struct DevnetRPCState {
     announce_tx: Option<AnnounceTxFn>,
     announce_block: Option<AnnounceBlockFn>,
     accepted_block: Option<AcceptedBlockFn>,
+    /// When set, POST `/mine_next` fail-closed consumes the mined block's
+    /// complete DA sets after a successful mine+apply (RUB-435).
+    accepted_block_da_consumer: Option<AcceptedBlockDaConsumerFn>,
     /// Serializes mutating devnet RPC (submit_tx + mine_next).
     rpc_op_lock: Arc<Mutex<()>>,
     /// When set, POST `/mine_next` mines one block using this config (devnet + loopback RPC only).
@@ -532,6 +538,7 @@ pub fn new_devnet_rpc_state_with_tx_pool(
         announce_tx,
         announce_block,
         accepted_block: None,
+        accepted_block_da_consumer: None,
         rpc_op_lock: Arc::new(Mutex::new(())),
         live_mining_cfg,
         live_complete_da_set_provider: None,
@@ -547,6 +554,10 @@ pub fn new_devnet_rpc_state_with_tx_pool(
 impl DevnetRPCState {
     pub fn set_accepted_block_hook(&mut self, accepted_block: AcceptedBlockFn) {
         self.accepted_block = Some(accepted_block);
+    }
+
+    pub fn set_accepted_block_da_consumer(&mut self, consumer: AcceptedBlockDaConsumerFn) {
+        self.accepted_block_da_consumer = Some(consumer);
     }
 
     pub fn set_complete_da_set_provider(
@@ -1612,7 +1623,8 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             eprintln!("rpc: accepted-block: {err}");
         }
     }
-    drop(_rpc_op);
+    // Load the mined block bytes once for the fail-closed DA consume and the
+    // best-effort announce.
     let block_bytes = match block_store {
         Some(store) => match store.get_block_by_hash(mined.hash) {
             Ok(bytes) => Some(bytes),
@@ -1632,6 +1644,21 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             None
         }
     };
+    // Consume the just-mined block's complete DA sets while rpc_op_lock is still
+    // held, before announce. Only the mine+apply success branch reaches here.
+    if let Some(consumer) = state.accepted_block_da_consumer.as_ref() {
+        let Some(bytes) = block_bytes.as_ref() else {
+            return mine_next_consume_error(state, ROUTE, "load mined block for DA consume");
+        };
+        if let Err(err) = consumer(bytes) {
+            return mine_next_consume_error(
+                state,
+                ROUTE,
+                &format!("consume accepted DA sets: {err}"),
+            );
+        }
+    }
+    drop(_rpc_op);
     if let (Some(announce), Some(bytes)) = (state.announce_block.as_ref(), block_bytes.as_ref()) {
         if let Err(err) = announce(bytes) {
             eprintln!("rpc: announce-block: {err}");
@@ -1649,6 +1676,24 @@ fn handle_mine_next(state: &DevnetRPCState, method: &str, _body: &[u8]) -> HttpR
             nonce: Some(mined.nonce),
             tx_count: Some(mined.tx_count),
             error: None,
+        },
+    )
+}
+
+/// Builds a `/mine_next` HTTP 500 JSON response with `mined: false` and `msg`.
+fn mine_next_consume_error(state: &DevnetRPCState, route: &str, msg: &str) -> HttpResponse {
+    json_response(
+        state,
+        route,
+        500,
+        &MineNextResponse {
+            mined: false,
+            height: None,
+            block_hash: None,
+            timestamp: None,
+            nonce: None,
+            tx_count: None,
+            error: Some(msg.to_string()),
         },
     )
 }
@@ -3143,6 +3188,7 @@ mod tests {
             announce_tx: None,
             announce_block: None,
             accepted_block: None,
+            accepted_block_da_consumer: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
             live_complete_da_set_provider: None,
@@ -3369,6 +3415,68 @@ mod tests {
                 body: b"{}".to_vec(),
             },
         )
+    }
+
+    #[test]
+    fn mine_next_consumes_accepted_da_sets_on_success() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        state.set_accepted_block_da_consumer(Arc::new(move |_block_bytes| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        let response = post_mine_next(&state);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response_json(&response)["mined"].as_bool(), Some(true));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_fail_closed_when_da_consume_fails() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        state.set_accepted_block_da_consumer(Arc::new(|_block_bytes| {
+            Err("boom da consume".to_string())
+        }));
+
+        let response = post_mine_next(&state);
+
+        assert_eq!(response.status, 500);
+        let json = response_json(&response);
+        assert_eq!(json["mined"].as_bool(), Some(false));
+        assert!(json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("boom da consume"));
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn mine_next_does_not_consume_when_mine_fails() {
+        let (mut state, dir) = build_state_with_live_mining(true);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        state.set_accepted_block_da_consumer(Arc::new(move |_block_bytes| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }));
+        // Poison the sync engine so mine+apply cannot complete; the consumer
+        // sits after the success branch and must never run.
+        let sync_engine = Arc::clone(&state.sync_engine);
+        let _ = std::thread::spawn(move || {
+            let _guard = sync_engine.lock().expect("lock");
+            panic!("poison sync engine");
+        })
+        .join();
+
+        let response = post_mine_next(&state);
+
+        assert_ne!(response.status, 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]
@@ -5032,6 +5140,7 @@ mod tests {
             announce_tx: None,
             announce_block: None,
             accepted_block: None,
+            accepted_block_da_consumer: None,
             rpc_op_lock: Arc::new(Mutex::new(())),
             live_mining_cfg: None,
             live_complete_da_set_provider: None,
