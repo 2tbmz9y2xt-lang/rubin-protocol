@@ -2,6 +2,7 @@ pub mod blockstore;
 pub mod chainstate;
 mod chainstate_recovery;
 pub mod coinbase;
+pub mod da_prefetch;
 pub mod da_relay;
 pub mod devnet_rpc;
 pub mod genesis;
