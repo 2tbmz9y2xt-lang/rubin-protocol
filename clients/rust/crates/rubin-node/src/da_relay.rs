@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv6Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rubin_consensus::constants::{CHUNK_BYTES, MAX_DA_CHUNK_COUNT};
 use rubin_consensus::constants::{COV_TYPE_DA_COMMIT, TX_WIRE_VERSION};
@@ -1155,9 +1155,6 @@ fn sha3_256(input: &[u8]) -> [u8; 32] {
 /// is in `(0, MAX_DA_CHUNK_COUNT]`, plus a DA chunk tx for every index
 /// `0..chunk_count`. Read-only: it parses block bytes and never mutates relay
 /// state. Mirrors merged Go `extractAcceptedBlockDAIDs` (RUB-429).
-// Crate-internal helper; its runtime caller is the Rust P2P accepted-DA consume
-// hook tracked in RUB-437.
-#[allow(dead_code)]
 pub(crate) fn extract_accepted_block_da_ids(block_bytes: &[u8]) -> Result<Vec<[u8; 32]>, TxError> {
     let parsed = parse_block_bytes(block_bytes)?;
     let mut sets: BTreeMap<[u8; 32], AcceptedBlockDaSet> = BTreeMap::new();
@@ -1173,7 +1170,6 @@ pub(crate) fn extract_accepted_block_da_ids(block_bytes: &[u8]) -> Result<Vec<[u
         .collect())
 }
 
-#[allow(dead_code)]
 fn record_accepted_block_da_tx(sets: &mut BTreeMap<[u8; 32], AcceptedBlockDaSet>, tx: &Tx) {
     match tx.tx_kind {
         0x01 => {
@@ -1196,7 +1192,6 @@ fn record_accepted_block_da_tx(sets: &mut BTreeMap<[u8; 32], AcceptedBlockDaSet>
 }
 
 #[derive(Default)]
-#[allow(dead_code)]
 struct AcceptedBlockDaSet {
     commit_count: u32,
     chunk_count: u16,
@@ -1204,7 +1199,6 @@ struct AcceptedBlockDaSet {
 }
 
 impl AcceptedBlockDaSet {
-    #[allow(dead_code)]
     fn complete(&self) -> bool {
         if self.commit_count != 1
             || self.chunk_count == 0
@@ -1217,6 +1211,27 @@ impl AcceptedBlockDaSet {
         }
         (0..self.chunk_count).all(|index| self.chunks.contains(&index))
     }
+}
+
+/// Consume every COMPLETE DA set included in an already-applied block: extract
+/// the block's complete DA ids (RUB-434) and consume each from the locked relay
+/// (RUB-433), aborting on the first error (fail-closed). Used by the Rust
+/// /mine_next consume wiring (RUB-435) — the mirror of Go
+/// `ConsumeAcceptedBlockDASets`.
+pub fn consume_accepted_block_da_sets(
+    da_relay: &Arc<Mutex<DaRelayState>>,
+    block_bytes: &[u8],
+) -> Result<(), String> {
+    let da_ids = extract_accepted_block_da_ids(block_bytes).map_err(|err| err.to_string())?;
+    let mut relay = da_relay
+        .lock()
+        .map_err(|_| "DA relay lock poisoned during accepted-block DA consume".to_string())?;
+    for da_id in da_ids {
+        relay
+            .consume_complete_set(da_id)
+            .map_err(|err| format!("consume accepted DA set: {err:?}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1876,6 +1891,82 @@ mod tests {
 
         // Unparseable block bytes.
         assert!(extract_accepted_block_da_ids(&[0x01, 0x02]).is_err());
+    }
+
+    #[test]
+    fn consume_accepted_block_da_sets_consumes_included_complete_sets() {
+        use crate::test_helpers::block_with_txs;
+        let payload: &[u8] = b"mine-next-payload";
+        let payload_wire = payload.len() as u64;
+        let commit_tx = b"canonical-commit-tx";
+        let chunk_tx = b"canonical-chunk-tx";
+        let commit = |da_id, payloads: &[&[u8]], wire_bytes, tx_bytes: &[u8]| DaRelayCommit {
+            da_id,
+            payload_commitment: payload_commitment(payloads),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_count: payloads.len() as u16,
+            wire_bytes,
+            tx_bytes: Arc::from(tx_bytes),
+        };
+        let chunk = |da_id, index, payload: &[u8], wire_bytes, tx_bytes: &[u8]| DaRelayChunk {
+            da_id,
+            chunk_hash: sha3_256(payload),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_index: index,
+            payload: Arc::from(payload),
+            wire_bytes,
+            tx_bytes: Arc::from(tx_bytes),
+        };
+
+        let da_id = [80u8; 32];
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state
+            .stage_incomplete_da_commit(
+                "commit-peer:8333",
+                commit(da_id, &[payload], payload_wire, commit_tx),
+            )
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(
+                "chunk-peer:8333",
+                chunk(da_id, 0, payload, payload_wire, chunk_tx),
+            )
+            .unwrap();
+        assert_eq!(
+            state.sets_by_da_id[&da_id].state,
+            DaRelaySetState::CompleteSet
+        );
+        assert!(state.pinned_payload_bytes > 0);
+
+        // A block whose DA txs reference the same da_id (one commit + chunk 0).
+        let block = block_with_txs(
+            1,
+            0,
+            [0u8; 32],
+            1_000,
+            &[
+                relay_test_tx(
+                    0x01,
+                    vec![da_commit_output([2u8; 32])],
+                    Some(relay_commit_core(da_id, 1)),
+                    None,
+                    Vec::new(),
+                ),
+                relay_test_tx(
+                    0x02,
+                    Vec::new(),
+                    None,
+                    Some(relay_chunk_core(da_id, 0, payload)),
+                    payload.to_vec(),
+                ),
+            ],
+        );
+
+        let relay = Arc::new(Mutex::new(state));
+        consume_accepted_block_da_sets(&relay, &block).expect("consume");
+        let relay = relay.lock().unwrap();
+        assert!(!relay.sets_by_da_id.contains_key(&da_id));
+        assert_eq!(relay.pinned_payload_bytes, 0);
     }
 
     #[test]
