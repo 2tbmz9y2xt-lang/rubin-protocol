@@ -145,12 +145,17 @@ func (p *peer) acceptedRelayedBlock(blockHash [32]byte, summary *node.ChainState
 }
 
 func (s *Service) noteAcceptedBlock(skip *peer, blockHash [32]byte, summary *node.ChainStateConnectSummary) error {
+	var consumeErr error
 	if summary != nil {
 		s.cfg.SyncEngine.RecordBestKnownHeight(summary.BlockHeight)
+		// Consume complete DA sets only for blocks the SyncEngine reported as
+		// canonical-applied. Side branches report none, so storing a side block
+		// never consumes; reorgs report every newly-canonical block.
+		consumeErr = s.consumeCanonicalAppliedDASets(summary.CanonicalAppliedBlocks)
 	}
 	s.blockSeen.Add(blockHash)
 	_ = s.broadcastAcceptedBlock(skip, blockHash)
-	return s.advanceDAOrphanTTL()
+	return errors.Join(consumeErr, s.advanceDAOrphanTTL())
 }
 
 func (s *Service) broadcastAcceptedBlock(skip *peer, blockHash [32]byte) error {

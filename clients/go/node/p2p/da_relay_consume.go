@@ -3,10 +3,36 @@ package p2p
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
+
+// consumeCanonicalAppliedDASets consumes the complete DA sets carried by every
+// block the SyncEngine reported as canonical-applied through
+// ChainStateConnectSummary.CanonicalAppliedBlocks: a direct apply reports the
+// single connected block, a reorg reports every newly-canonical branch block in
+// canonical order, and a stored-but-not-switched side branch reports none (nil
+// slice) so nothing is consumed. DA consume is therefore driven strictly by
+// canonical application, never by mere block storage. It no-ops when DA relay is
+// disabled (nil relay), mirroring advanceDAOrphanTTL. It is best-effort across
+// blocks — each block is attempted and the first error is returned — so one
+// block's accounting failure cannot silently skip DA cleanup for the remaining
+// canonical blocks of a reorg.
+func (s *Service) consumeCanonicalAppliedDASets(blocks []node.CanonicalAppliedBlock) error {
+	if s == nil || s.daRelay == nil {
+		return nil
+	}
+	var firstErr error
+	for i := range blocks {
+		if err := s.ConsumeAcceptedBlockDASets(blocks[i].BlockBytes); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("consume canonical-applied DA sets for block %x: %w", blocks[i].Hash, err)
+		}
+	}
+	return firstErr
+}
 
 func (s *Service) ConsumeAcceptedBlockDASets(blockBytes []byte) error {
 	if s == nil {
