@@ -725,6 +725,36 @@ impl DaRelayState {
         Ok(())
     }
 
+    /// Consume (remove) the COMPLETE_SET record matching `da_id` exactly once,
+    /// releasing its pinned payload accounting. Returns `Ok(true)` when a
+    /// complete set was removed, `Ok(false)` when no record exists or it is not
+    /// in `CompleteSet` state. Idempotent: a second consume of the same `da_id`
+    /// is an `Ok(false)` no-op and cannot underflow accounting. Mirrors merged
+    /// Go `daRelayState.consumeCompleteSet` (RUB-428): a complete set contributes
+    /// only pinned payload bytes (its orphan/peer/commit accounting was released
+    /// on completion), and the release is projected before any mutation so a
+    /// projection error leaves the state unchanged.
+    pub(crate) fn consume_complete_set(&mut self, da_id: [u8; 32]) -> DaRelayResult<bool> {
+        let Some(record) = self.sets_by_da_id.get(&da_id) else {
+            return Ok(false);
+        };
+        if record.state != DaRelaySetState::CompleteSet {
+            return Ok(false);
+        }
+        let pinned = record.pinned_payload_accounting_bytes()?;
+        // project_counter returns Err on underflow/overflow/cap; the counter and
+        // the record below are written only after it succeeds.
+        let pinned_payload_bytes = Self::project_counter(
+            self.pinned_payload_bytes,
+            pinned,
+            0,
+            self.caps.pinned_payload_bytes,
+        )?;
+        self.pinned_payload_bytes = pinned_payload_bytes;
+        self.sets_by_da_id.remove(&da_id);
+        Ok(true)
+    }
+
     pub(crate) fn stage_incomplete_da_commit(
         &mut self,
         peer_addr: &str,
@@ -1701,6 +1731,99 @@ mod tests {
         );
         assert_eq!(ids_for(late_payload.len() as u64), vec![late_id]);
         assert!(state.complete_da_set_candidates(0).is_empty());
+    }
+
+    #[test]
+    fn da_relay_consume_complete_set_matrix() {
+        let peer_commit = "commit-peer:8333";
+        let peer_chunk = "chunk-peer:8333";
+        let payload: &[u8] = b"consume-payload";
+        let payload_wire = payload.len() as u64;
+        let commit_tx = b"canonical-commit-tx";
+        let chunk_tx = b"canonical-chunk-tx";
+        let commit = |da_id, payloads: &[&[u8]], wire_bytes, tx_bytes: &[u8]| DaRelayCommit {
+            da_id,
+            payload_commitment: payload_commitment(payloads),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_count: payloads.len() as u16,
+            wire_bytes,
+            tx_bytes: Arc::from(tx_bytes),
+        };
+        let chunk = |da_id, index, payload: &[u8], wire_bytes, tx_bytes: &[u8]| DaRelayChunk {
+            da_id,
+            chunk_hash: sha3_256(payload),
+            peer_quota_key: PeerQuotaKey::from_peer_addr("forged:8333"),
+            chunk_index: index,
+            payload: Arc::from(payload),
+            wire_bytes,
+            tx_bytes: Arc::from(tx_bytes),
+        };
+
+        let mut state = DaRelayState::new(DaRelayCaps::default()).unwrap();
+        state
+            .stage_incomplete_da_commit(
+                peer_commit,
+                commit([71; 32], &[payload], payload_wire, commit_tx),
+            )
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(
+                peer_chunk,
+                chunk([71; 32], 0, payload, payload_wire, chunk_tx),
+            )
+            .unwrap();
+        assert_eq!(
+            state.sets_by_da_id[&[71; 32]].state,
+            DaRelaySetState::CompleteSet
+        );
+        let pinned_one = state.pinned_payload_bytes;
+        assert!(pinned_one > 0);
+
+        // Second, unrelated complete set with identical pinned footprint.
+        state
+            .stage_incomplete_da_commit(
+                peer_commit,
+                commit([73; 32], &[payload], payload_wire, commit_tx),
+            )
+            .unwrap();
+        state
+            .stage_incomplete_da_chunk(
+                peer_chunk,
+                chunk([73; 32], 0, payload, payload_wire, chunk_tx),
+            )
+            .unwrap();
+        assert_eq!(state.pinned_payload_bytes, pinned_one * 2);
+
+        // Mirror of Go RUB-428: consume removes the matching COMPLETE_SET and
+        // releases its pinned payload bytes; the unrelated set is untouched.
+        assert_eq!(state.consume_complete_set([71; 32]), Ok(true));
+        assert!(!state.sets_by_da_id.contains_key(&[71; 32]));
+        assert_eq!(
+            state.sets_by_da_id[&[73; 32]].state,
+            DaRelaySetState::CompleteSet
+        );
+        assert_eq!(state.pinned_payload_bytes, pinned_one);
+
+        // Second consume cannot underflow: no-op false, accounting unchanged.
+        assert_eq!(state.consume_complete_set([71; 32]), Ok(false));
+        assert_eq!(state.pinned_payload_bytes, pinned_one);
+
+        // Incomplete set (chunk only, no commit) is not consumed.
+        state
+            .stage_incomplete_da_chunk(
+                peer_chunk,
+                chunk([72; 32], 0, payload, payload_wire, chunk_tx),
+            )
+            .unwrap();
+        assert_ne!(
+            state.sets_by_da_id[&[72; 32]].state,
+            DaRelaySetState::CompleteSet
+        );
+        assert_eq!(state.consume_complete_set([72; 32]), Ok(false));
+        assert!(state.sets_by_da_id.contains_key(&[72; 32]));
+
+        // Absent da_id is a no-op.
+        assert_eq!(state.consume_complete_set([99; 32]), Ok(false));
     }
 
     #[test]
