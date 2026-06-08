@@ -37,16 +37,13 @@ pub struct DaRelayPrefetchState {
 }
 
 impl DaRelayPrefetchState {
-    /// Plan prefetch requests for the currently-missing chunks of `da_id` across
-    /// `peer_keys` (mirror of Go `planDAPrefetch`). `peer_keys` are the per-peer
-    /// quota keys the per-peer byte cap is accounted against; the runtime caller
-    /// MUST supply host-only keys (as Go derives via peerQuotaKey(addr) in
-    /// allDAPrefetchPeersLocked) so the cap cannot be bypassed by reconnecting on
-    /// a different source port. `missing` is the currently-missing chunk indexes
-    /// in any order (sorted and de-duplicated internally so planning is
-    /// deterministic regardless of caller input); an empty slice releases the
-    /// set. Returns per-peer plans and a diagnostic (empty unless a cap blocked
-    /// planning).
+    /// Plan prefetch for the currently-missing chunks of `da_id` across
+    /// `peer_keys` (mirror of Go `planDAPrefetch`). The runtime caller must
+    /// supply host-only per-peer quota keys (as Go's allDAPrefetchPeersLocked
+    /// does via peerQuotaKey) so the byte cap is not bypassed by source port.
+    /// `missing` (sorted+deduped) and `peer_keys` (empty-filtered + deduped,
+    /// order preserved) are normalized internally, so planning is deterministic
+    /// and emits no duplicate per-peer plan. An empty `missing` releases the set.
     pub fn plan_da_prefetch(
         &mut self,
         da_id: [u8; 32],
@@ -54,18 +51,24 @@ impl DaRelayPrefetchState {
         peer_keys: &[String],
         now_nanos: u64,
     ) -> (Vec<DaRelayPrefetchPlan>, String) {
-        // Normalize to sorted-unique so planning is deterministic regardless of
-        // caller input order, matching Go's sorted missingChunkIndexes() input.
+        // Normalize missing (sorted-unique) and peers (non-empty, order-preserving
+        // unique) so planning is deterministic and never duplicates a per-peer plan.
         let mut missing: Vec<u16> = missing.to_vec();
         missing.sort_unstable();
         missing.dedup();
+        let mut peers: Vec<String> = Vec::new();
+        for key in peer_keys {
+            if !key.is_empty() && !peers.contains(key) {
+                peers.push(key.clone());
+            }
+        }
         self.release_expired(now_nanos);
         if missing.is_empty() {
             self.release_set(da_id);
             return (Vec::new(), String::new());
         }
         self.release_fulfilled(da_id, &missing);
-        if peer_keys.is_empty() {
+        if peers.is_empty() {
             return (Vec::new(), String::new());
         }
         // Concurrent-set cap: only a brand-new set counts against it.
@@ -77,10 +80,9 @@ impl DaRelayPrefetchState {
                 "da prefetch global set cap exceeded".to_string(),
             );
         }
-        let (plans_by_peer, diagnostic) =
-            self.reserve_missing(da_id, &missing, peer_keys, now_nanos);
+        let (plans_by_peer, diagnostic) = self.reserve_missing(da_id, &missing, &peers, now_nanos);
         (
-            build_da_prefetch_plans(da_id, peer_keys, &plans_by_peer),
+            build_da_prefetch_plans(da_id, &peers, &plans_by_peer),
             diagnostic,
         )
     }
@@ -334,15 +336,17 @@ mod tests {
     #[test]
     fn deterministic_peer_rotation_round_robins() {
         let mut s = DaRelayPrefetchState::default();
-        // Unordered + duplicate input is normalized to sorted-unique [0,1,2], so
-        // rotation is deterministic regardless of caller order.
+        // Unordered+duplicate missing and empty/duplicate peer keys are normalized
+        // (missing -> [0,1,2]; peers -> unique [peer-a,peer-b,peer-c]), so rotation
+        // is deterministic and no peer gets a duplicate plan.
         let (plans, diag) = s.plan_da_prefetch(
             DA,
             &[2, 0, 2, 1],
-            &keys(&["peer-a", "peer-b", "peer-c"]),
+            &keys(&["peer-a", "", "peer-b", "peer-a", "peer-c"]),
             1_000,
         );
         assert!(diag.is_empty());
+        assert_eq!(plans.len(), 3, "one plan per unique peer, no duplicates");
         let by_peer: BTreeMap<&str, &Vec<u16>> = plans
             .iter()
             .map(|p| (p.peer_key.as_str(), &p.indexes))
