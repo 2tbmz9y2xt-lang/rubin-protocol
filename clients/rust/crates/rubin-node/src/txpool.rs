@@ -509,6 +509,39 @@ impl TxPool {
         selected
     }
 
+    /// Like `select_transactions`, but drops any raw for which `filter` returns true
+    /// before the count/byte caps (mirror of Go `pickMinerCandidateEntries`, where the
+    /// `isMiningDATxRaw` skip precedes both caps). Used by the miner to exclude
+    /// individual DA txs from flat candidate selection.
+    pub fn select_transactions_with_filter(
+        &self,
+        max_count: usize,
+        max_bytes: usize,
+        filter: impl Fn(&[u8]) -> bool,
+    ) -> Vec<Vec<u8>> {
+        if max_count == 0 || max_bytes == 0 {
+            return Vec::new();
+        }
+        let mut entries: Vec<(&[u8; 32], &TxPoolEntry)> = self.txs.iter().collect();
+        entries.sort_by(compare_entries_for_mining);
+        let mut selected = Vec::with_capacity(entries.len().min(max_count));
+        let mut used_bytes = 0usize;
+        for entry in entries {
+            if filter(&entry.1.raw) {
+                continue;
+            }
+            if selected.len() >= max_count {
+                break;
+            }
+            if entry.1.size > max_bytes.saturating_sub(used_bytes) {
+                continue;
+            }
+            selected.push(entry.1.raw.clone());
+            used_bytes += entry.1.size;
+        }
+        selected
+    }
+
     /// Backward-compatible admission entry that defaults the caller-
     /// declared source to `TxSource::Local`. New producer wiring should
     /// call `add_tx_with_source` directly with the appropriate variant

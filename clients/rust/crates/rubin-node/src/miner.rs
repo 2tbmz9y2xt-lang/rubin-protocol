@@ -213,47 +213,24 @@ impl<'a> Miner<'a> {
         })
     }
 
+    /// Flat candidate selection, mirroring Go `candidateTransactions`: individual DA
+    /// commit/chunk txs (tx_kind 0x01/0x02) are skipped unconditionally from both the
+    /// explicit `txs` and the txpool snapshot — DA enters a block only through the
+    /// complete-set provider group, never as a flat candidate.
     fn candidate_transactions(&self, txs: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let max_selected = self.cfg.max_tx_per_block.saturating_sub(1);
         if max_selected == 0 {
             return Vec::new();
         }
-        let skip_mining_da = self.complete_da_set_provider.is_some();
-        let (candidates, max_bytes) = if txs.is_empty() {
-            let Some(pool) = self.tx_pool.as_deref() else {
-                return Vec::new();
-            };
-            if !skip_mining_da {
-                return pool.select_transactions(max_selected, MAX_BLOCK_WEIGHT as usize);
-            }
-            (
-                pool.select_transactions(pool.len(), usize::MAX),
-                Some(MAX_BLOCK_WEIGHT as usize),
-            )
-        } else {
-            if !skip_mining_da {
-                return txs.iter().take(max_selected).cloned().collect();
-            }
-            (txs.to_vec(), None)
-        };
-        let mut selected = Vec::new();
-        let mut used_bytes = 0usize;
-        for raw in candidates {
-            if skip_mining_da && is_mining_da_tx_raw(&raw) {
-                continue;
-            }
-            if selected.len() >= max_selected {
-                break;
-            }
-            if let Some(max_bytes) = max_bytes {
-                if raw.len() > max_bytes.saturating_sub(used_bytes) {
-                    continue;
-                }
-                used_bytes += raw.len();
-            }
-            selected.push(raw);
+        if !txs.is_empty() {
+            return pick_flat_candidate_raw(txs, max_selected);
         }
-        selected
+        let Some(pool) = self.tx_pool.as_deref() else {
+            return Vec::new();
+        };
+        pool.select_transactions_with_filter(max_selected, MAX_BLOCK_WEIGHT as usize, |raw| {
+            is_mining_da_tx_raw(raw)
+        })
     }
 
     fn evict_confirmed_from_pool(&mut self, parsed: &[MinedCandidate]) {
@@ -711,6 +688,27 @@ fn is_mining_da_tx_raw(raw: &[u8]) -> bool {
         && parse_tx(raw).is_ok_and(|(tx, _, _, consumed)| {
             consumed == raw.len() && matches!(tx.tx_kind, 0x01 | 0x02)
         })
+}
+
+/// Select flat candidate raw txs, skipping individual DA commit/chunk txs before
+/// the count cap is reached (mirror of Go `pickFlatCandidateRaw`): DA txs may only
+/// enter a block through the complete-set provider group, never as flat candidates.
+/// Count-only, no byte cap (matches Go).
+fn pick_flat_candidate_raw(txs: &[Vec<u8>], max_count: usize) -> Vec<Vec<u8>> {
+    if max_count == 0 {
+        return Vec::new();
+    }
+    let mut selected = Vec::with_capacity(txs.len().min(max_count));
+    for raw in txs {
+        if is_mining_da_tx_raw(raw) {
+            continue;
+        }
+        selected.push(raw.clone());
+        if selected.len() >= max_count {
+            break;
+        }
+    }
+    selected
 }
 fn choose_valid_timestamp(next_height: u64, prev_timestamps: &[u64], now: u64) -> u64 {
     if next_height == 0 || prev_timestamps.is_empty() {
@@ -1417,6 +1415,61 @@ mod tests {
         assert_eq!(miner.candidate_transactions(&[]), vec![non_da.clone()]);
         let explicit = miner.candidate_transactions(&[da_raw, non_da.clone(), vec![0xdd]]);
         assert_eq!(explicit, vec![non_da]);
+    }
+
+    #[test]
+    fn candidate_transactions_skips_explicit_da_before_count_cap() {
+        // No provider wired: the flat filter is unconditional (mirror Go
+        // pickFlatCandidateRaw), so individual DA commit/chunk txs are skipped before
+        // the count cap; a trailing-byte commit is not canonical DA, so it is kept.
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-flat-da-explicit");
+        let set = miner_da_provider_shape_set([0x65; 32], &[b"chunk"]);
+        let commit = set.commit_tx;
+        let chunk = set.chunks[0].tx.clone();
+        let ordinary = vec![0xee; commit.len() + 1];
+        let mut trailing = commit.clone();
+        trailing.push(0);
+        let cfg = MinerConfig {
+            max_tx_per_block: 2,
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+        assert_eq!(
+            miner.candidate_transactions(&[commit.clone(), chunk.clone(), ordinary.clone()]),
+            vec![ordinary.clone()],
+            "both DA txs skipped before the count cap of 1"
+        );
+        assert_eq!(
+            miner.candidate_transactions(&[commit, chunk, trailing.clone(), ordinary]),
+            vec![trailing],
+            "trailing-byte commit is not classified as DA and fills the slot"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn candidate_transactions_skips_pool_da_before_count_cap() {
+        // Same shape as the provider test but with NO provider wired: the txpool DA
+        // filter is unconditional (mirror Go pickMinerCandidateEntries), so pool DA
+        // commit and chunk are skipped before the count/byte caps; the ordinary mines.
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-flat-da-pool");
+        let mut pool = TxPool::new();
+        let set = miner_da_provider_shape_set([0x66; 32], &[b"chunk"]);
+        let non_da = vec![0xee; set.commit_tx.len() + 1];
+        pool.inject_test_entry([0x01; 32], set.commit_tx.clone());
+        pool.inject_test_entry([0x02; 32], set.chunks[0].tx.clone());
+        pool.inject_test_entry([0x03; 32], non_da.clone());
+        let cfg = MinerConfig {
+            max_tx_per_block: 2,
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, Some(&mut pool), cfg).expect("miner");
+        assert_eq!(
+            miner.candidate_transactions(&[]),
+            vec![non_da],
+            "pool DA commit and chunk skipped; only the ordinary tx selected"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
