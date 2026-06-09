@@ -11,8 +11,8 @@ use crate::da_relay::{
     CompleteDaSetCandidate, CompleteDaSetProvider, DaRelayCaps, DaRelayState, PeerQuotaKey,
 };
 use crate::p2p_runtime::{
-    perform_version_handshake, LiveMessageOutcome, PeerManager, PeerRelayContext,
-    PeerRuntimeConfig, VersionPayloadV1, WireMessage,
+    perform_version_handshake, sendcmpct_advertisement_message, LiveMessageOutcome, PeerManager,
+    PeerRelayContext, PeerRuntimeConfig, VersionPayloadV1, WireMessage,
 };
 use crate::sync_reorg::TxPoolCleanupPlan;
 use crate::tx_relay::{PeerOutbox, TxRelayState};
@@ -908,6 +908,14 @@ fn handle_peer(
         da_relay: &shared.da_relay,
         prefetch: &shared.prefetch_state,
     };
+
+    // Advertise local compact-relay capability immediately after handshake,
+    // mirroring Go `advertiseLocalCompactMode` (service_peer_lifecycle.go). The
+    // peer records our mode via `handle_sendcmpct`; mode 0 keeps block
+    // announcement on the full-block path and changes no relay behavior.
+    session
+        .write_message(&sendcmpct_advertisement_message())
+        .map_err(|err| format!("advertise compact mode: {err}"))?;
 
     {
         let mut engine = shared
@@ -2185,9 +2193,10 @@ mod tests {
             if msg.command == "inv" {
                 break msg;
             }
-            assert_eq!(
-                msg.command, "getblocks",
-                "unexpected pre-relay message before queued frame flush"
+            assert!(
+                matches!(msg.command.as_str(), "getblocks" | "sendcmpct"),
+                "unexpected pre-relay message before queued frame flush: got {}",
+                msg.command
             );
             assert!(
                 Instant::now() < deadline,
@@ -2294,9 +2303,10 @@ mod tests {
                 );
                 break;
             }
-            assert_eq!(
-                msg.command, "getblocks",
-                "unexpected pre-pong message while validating live-loop immediate reads"
+            assert!(
+                matches!(msg.command.as_str(), "getblocks" | "sendcmpct"),
+                "unexpected pre-pong message while validating live-loop immediate reads: got {}",
+                msg.command
             );
         }
 
@@ -2366,9 +2376,10 @@ mod tests {
                 );
                 break;
             }
-            assert_eq!(
-                msg.command, "getblocks",
-                "unexpected pre-getdata message while validating fragmented live reads"
+            assert!(
+                matches!(msg.command.as_str(), "getblocks" | "sendcmpct"),
+                "unexpected pre-getdata message while validating fragmented live reads: got {}",
+                msg.command
             );
             assert!(
                 Instant::now() < deadline,
@@ -2450,9 +2461,10 @@ mod tests {
                 assert_eq!(msg.payload, payload);
                 break;
             }
-            assert_eq!(
-                msg.command, "getblocks",
-                "unexpected pre-relay message before queued frame flush"
+            assert!(
+                matches!(msg.command.as_str(), "getblocks" | "sendcmpct"),
+                "unexpected pre-relay message before queued frame flush: got {}",
+                msg.command
             );
             assert!(
                 Instant::now() < deadline,

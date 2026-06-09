@@ -3538,6 +3538,22 @@ fn runtime_payload_cap(command: &str) -> u64 {
     }
 }
 
+/// Build the local compact-relay capability advertisement (`sendcmpct`,
+/// mode=0, version=`COMPACT_RELAY_VERSION`), mirroring Go
+/// `peer.advertiseLocalCompactMode` (clients/go/node/p2p/compact_runtime.go).
+/// Mode 0 advertises support for the compact relay protocol version without
+/// requesting compact-block announcements, so block relay stays on the
+/// full-block path; the peer records this via `handle_sendcmpct`.
+pub(crate) fn sendcmpct_advertisement_message() -> WireMessage {
+    let mut payload = Vec::with_capacity(SENDCMPCT_PAYLOAD_BYTES as usize);
+    payload.push(0u8); // mode 0
+    payload.extend_from_slice(&COMPACT_RELAY_VERSION.to_le_bytes());
+    WireMessage {
+        command: MESSAGE_SENDCMPCT.to_string(),
+        payload,
+    }
+}
+
 fn parse_sendcmpct_runtime_payload(payload: &[u8]) -> io::Result<CompactModeSnapshot> {
     if payload.len() != SENDCMPCT_PAYLOAD_BYTES as usize {
         return Err(io::Error::new(
@@ -3940,6 +3956,24 @@ mod tests {
         payload[0] = mode;
         payload[1..].copy_from_slice(&version.to_le_bytes());
         payload
+    }
+
+    #[test]
+    fn sendcmpct_advertisement_message_advertises_mode0_and_round_trips() {
+        let msg = super::sendcmpct_advertisement_message();
+        assert_eq!(msg.command, MESSAGE_SENDCMPCT);
+        assert_eq!(msg.payload.len(), SENDCMPCT_PAYLOAD_BYTES as usize);
+        assert_eq!(msg.payload[0], 0, "compact advertisement must use mode 0");
+        // The peer's own receive handler must accept what we advertise.
+        let parsed = super::parse_sendcmpct_runtime_payload(&msg.payload)
+            .expect("self-advertisement parses");
+        assert_eq!(
+            parsed,
+            CompactModeSnapshot {
+                mode: 0,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
     }
 
     fn test_peer_session() -> (PeerSession, TcpStream) {
