@@ -558,6 +558,7 @@ impl PeerSession {
         };
         let missing = {
             let Ok(relay) = da_relay.lock() else {
+                self.peer.last_error = "da relay state poisoned; prefetch skipped".to_string();
                 return;
             };
             relay.missing_chunk_indexes(da_id)
@@ -568,11 +569,12 @@ impl PeerSession {
             trigger_peer_addr,
         );
         let Ok(mut prefetch) = prefetch.lock() else {
+            self.peer.last_error = "da prefetch state poisoned; prefetch skipped".to_string();
             return;
         };
-        // Always plan (even for empty missing / no peers): plan_da_prefetch runs the
-        // release_expired + release-on-empty-missing + release-fulfilled cleanup that
-        // Go planDAPrefetch does before reserving; an empty peer set reserves nothing.
+        // Always call plan_da_prefetch (Go scheduleDAPrefetch does too): it expires +
+        // releases fulfilled reservations, releases the set only when missing is empty,
+        // and reserves nothing when there are no peers.
         let (plans, diagnostic) = prefetch.plan_da_prefetch(da_id, &missing, &keys, now_nanos());
         // Surface the planner diagnostic to the trigger peer (mirror Go
         // reportDAPrefetchDiagnostic; its keys[0] is the trigger after prefer).
@@ -2401,12 +2403,15 @@ pub fn decode_getdachunk_payload(payload: &[u8]) -> io::Result<GetDAChunkPayload
     })
 }
 
-/// Wall-clock nanoseconds for prefetch reservation TTLs.
+/// Monotonic nanoseconds for prefetch reservation TTLs (the planner does only
+/// relative `now >= expires` comparisons), immune to wall-clock jumps.
 fn now_nanos() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos() as u64
 }
 
 /// The DA id of a staged DA relay tx that should drive prefetch, or None for a
