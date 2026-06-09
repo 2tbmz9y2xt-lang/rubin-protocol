@@ -985,7 +985,7 @@ fn handle_peer(
         // PeerManager so non-session code observes the live mode (RUB-439).
         shared
             .peer_manager
-            .set_compact_mode(&peer_addr, session.state().remote_compact_mode);
+            .set_compact_mode(&peer_addr, session.negotiated_compact_mode());
         flush_peer_outbox(&shared, &peer_addr, |frame| session.write_raw(frame))?;
     }
     Ok(())

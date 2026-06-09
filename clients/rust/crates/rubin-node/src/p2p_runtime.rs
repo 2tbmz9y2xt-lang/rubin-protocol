@@ -480,6 +480,13 @@ impl PeerSession {
         state
     }
 
+    /// The peer's negotiated remote compact mode — a cheap `Copy` read that
+    /// avoids cloning the full `PeerState` (used by the message loop to refresh
+    /// `PeerManager` after a sendcmpct).
+    pub fn negotiated_compact_mode(&self) -> CompactModeSnapshot {
+        self.remote_compact_mode
+    }
+
     pub fn take_pending_tx_pool_cleanup(&mut self) -> TxPoolCleanupPlan {
         std::mem::take(&mut self.pending_tx_pool_cleanup)
     }
