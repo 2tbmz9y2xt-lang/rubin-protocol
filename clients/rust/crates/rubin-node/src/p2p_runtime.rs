@@ -530,8 +530,12 @@ impl PeerSession {
         let (da_id, staging) =
             da_relay.stage_relay_da_tx_bytes_checked(&peer_addr, tx_bytes, chunk_hash_prevalidated);
         drop(da_relay);
+        // A payload-commitment mismatch is the recoverable snapshot-reschedule case
+        // (Go does not surface it as a peer error); only genuine failures record it.
         if let Err(ref err) = staging {
-            self.peer.last_error = format!("DA relay tx staging failed: {err:?}");
+            if !matches!(err, crate::da_relay::DaRelayError::PayloadCommitmentMismatch) {
+                self.peer.last_error = format!("DA relay tx staging failed: {err:?}");
+            }
         }
         match da_id {
             Some(id) => finish_da_prefetch(id, staging),
