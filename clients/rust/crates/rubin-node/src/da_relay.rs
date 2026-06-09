@@ -175,6 +175,12 @@ impl PeerQuotaKey {
         }
         Self(normalize_peer_host(split_peer_host(addr)))
     }
+
+    /// The host-only quota key string (used by DA prefetch peer enumeration to
+    /// build the quota-key -> addr map).
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 fn split_peer_host(addr: &str) -> &str {
@@ -285,6 +291,23 @@ impl DaRelaySetRecord {
             payload_commitment_expected: commit.payload_commitment,
             chunks,
         })
+    }
+    /// The still-missing chunk indexes of this set (mirror of Go
+    /// `daRelaySetRecord.missingChunkIndexes`): empty if there is no commit, the
+    /// commit declares no chunks, or the set is already complete; otherwise every
+    /// index not yet retained, plus any marked replaceable.
+    fn missing_chunk_indexes(&self) -> Vec<u16> {
+        let Some(commit) = self.commit.as_ref() else {
+            return Vec::new();
+        };
+        if commit.chunk_count == 0 || self.state == DaRelaySetState::CompleteSet {
+            return Vec::new();
+        }
+        (0..commit.chunk_count)
+            .filter(|index| {
+                !self.chunks.contains_key(index) || self.replaceable_chunks.contains(index)
+            })
+            .collect()
     }
     fn mark_complete(&mut self, payload_bytes: u64) {
         self.payload_bytes = payload_bytes;
@@ -508,6 +531,16 @@ impl DaRelayState {
         validate_relay_da_chunk_for_admission(&tx, wire_bytes)
     }
 
+    /// Still-missing chunk indexes for a DA set, read live by da_id (empty if the
+    /// set is absent or complete) — the DA prefetch planner input. Mirror of Go
+    /// reading sets[daID].missingChunkIndexes().
+    pub(crate) fn missing_chunk_indexes(&self, da_id: [u8; 32]) -> Vec<u16> {
+        self.sets_by_da_id
+            .get(&da_id)
+            .map(DaRelaySetRecord::missing_chunk_indexes)
+            .unwrap_or_default()
+    }
+
     #[rustfmt::skip]
     pub(crate) fn stage_relay_da_tx_bytes(&mut self, peer_addr: &str, tx_bytes: Vec<u8>) -> DaRelayResult { self.stage_relay_da_tx_bytes_checked(peer_addr, tx_bytes, false) }
 
@@ -563,6 +596,27 @@ impl DaRelayState {
     #[cfg(test)]
     #[rustfmt::skip]
     pub(crate) fn test_record_summary(&self, da_id: [u8; 32]) -> Option<(bool, usize, u64)> { let record = self.sets_by_da_id.get(&da_id)?; Some((record.commit.is_some(), record.chunks.len(), record.wire_bytes)) }
+
+    #[cfg(test)]
+    pub(crate) fn test_stage_incomplete_da_commit(
+        &mut self,
+        peer_addr: &str,
+        da_id: [u8; 32],
+        chunk_count: u16,
+        wire_bytes: u64,
+    ) -> DaRelayResult {
+        self.stage_incomplete_da_commit(
+            peer_addr,
+            DaRelayCommit {
+                da_id,
+                payload_commitment: [0u8; 32],
+                peer_quota_key: PeerQuotaKey::from_peer_addr(peer_addr),
+                chunk_count,
+                wire_bytes,
+                tx_bytes: Arc::from([]),
+            },
+        )
+    }
 
     #[cfg(test)]
     pub(crate) fn test_stage_incomplete_da_chunk(
@@ -1110,7 +1164,7 @@ fn validate_relay_da_chunk_for_admission(tx: &Tx, wire_bytes: u64) -> DaRelayRes
     Ok(())
 }
 
-fn relay_da_commit_payload_commitment(tx: &Tx) -> Option<[u8; 32]> {
+pub(crate) fn relay_da_commit_payload_commitment(tx: &Tx) -> Option<[u8; 32]> {
     let mut outputs = tx
         .outputs
         .iter()
