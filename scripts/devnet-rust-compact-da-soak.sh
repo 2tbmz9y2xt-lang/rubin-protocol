@@ -38,7 +38,9 @@ ARTIFACT_ROOT="$(mktemp -d "${artifact_parent%/}/rust-compact-da-soak.XXXXXX")"
 REPORT_JSON="${ARTIFACT_ROOT}/rust-compact-da-soak-report.json"
 COMPACT_LOG="${ARTIFACT_ROOT}/compact-relay.log"
 DA_LOG="${ARTIFACT_ROOT}/da-relay.log"
-cleanup() { [[ "${KEEP_TMP}" == "1" ]] || rm -rf -- "${ARTIFACT_ROOT}"; }
+# Preserve artifacts when KEEP_TMP=1 or on any non-zero (fail-closed) exit, so the
+# combined report and child logs survive for debugging (matches the Go soak).
+cleanup() { local status=$?; [[ "${KEEP_TMP}" == "1" || "${status}" -ne 0 ]] || rm -rf -- "${ARTIFACT_ROOT}"; }
 trap cleanup EXIT
 
 extract_report_path() {
