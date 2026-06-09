@@ -570,8 +570,9 @@ impl PeerSession {
         let Ok(mut prefetch) = prefetch.lock() else {
             return;
         };
-        // Always plan (even for empty missing / no peers): plan_da_prefetch expires
-        // stale sets and releases the reservation, as Go planDAPrefetch does.
+        // Always plan (even for empty missing / no peers): plan_da_prefetch runs the
+        // release_expired + release-on-empty-missing + release-fulfilled cleanup that
+        // Go planDAPrefetch does before reserving; an empty peer set reserves nothing.
         let (plans, diagnostic) = prefetch.plan_da_prefetch(da_id, &missing, &keys, now_nanos());
         // Surface the planner diagnostic to the trigger peer (mirror Go
         // reportDAPrefetchDiagnostic; its keys[0] is the trigger after prefer).
@@ -1018,8 +1019,8 @@ impl PeerSession {
         let outcome = self.collect_live_responses(msg, sync_engine, relay_ctx)?;
         let pending_da_relay_staging = self.take_pending_da_relay_staging();
         if let Some(ctx) = relay_ctx {
-            // Live inbound prefetch is driven from p2p_service::handle_peer; the only
-            // caller here (block-sync) passes relay_ctx=None, so this stages only.
+            // Block-sync, the only caller, passes relay_ctx=None, so this block is
+            // skipped; live inbound prefetch is driven from p2p_service::handle_peer.
             let _ = self.apply_pending_da_relay_staging(ctx.da_relay, pending_da_relay_staging);
         }
         for response in outcome.responses {
