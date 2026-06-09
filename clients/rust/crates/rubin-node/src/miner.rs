@@ -328,6 +328,12 @@ impl<'a> Miner<'a> {
             if group_len > max_selected - parsed.len() {
                 continue;
             }
+            // RUB-423 decision: a parse error here ABORTS template construction
+            // (mirror of Go miner.go selectCandidateTransactions returning the error),
+            // it is not skipped — the complete-DA-set provider is the node's own
+            // trusted source, so a non-canonical candidate is an internal invariant
+            // violation handled fail-closed, not a provider-induced template DoS. An
+            // invalid *shape* with no parse error (Ok(None)) is still skipped below.
             let group = parse_complete_da_set_candidate(&set)?;
             #[rustfmt::skip]
             let Some(group) = group else { continue; };
@@ -1142,6 +1148,20 @@ mod tests {
         assert_eq!(
             parse_complete_da_set_candidate(&malformed_commit).unwrap_err(),
             "non-canonical tx bytes in miner input"
+        );
+    }
+
+    #[test]
+    fn miner_provider_parse_error_aborts_selection() {
+        // RUB-423 decision: a provider COMPLETE_SET parse error ABORTS the whole
+        // mining selection (mirror of Go selectCandidateTransactions returning the
+        // error), it is not skipped — provider raw is trusted internal input, so a
+        // non-canonical candidate is fail-closed, not a provider-induced template DoS.
+        let mut malformed = miner_da_provider_shape_set([0x82; 32], &[b"chunk-0"]);
+        malformed.commit_tx.push(0); // trailing byte -> non-canonical parse error
+        assert_eq!(
+            s(vec![malformed], HashMap::new(), MinerConfig::default()).unwrap_err(),
+            "non-canonical tx bytes in miner input",
         );
     }
 
