@@ -51,7 +51,7 @@ PY
 }
 emit_no_data() { emit_report NO_DATA "$1"; exit 1; }
 
-for tool in python3 perl lsof; do
+for tool in python3 perl; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is required for Rust DA relay devnet evidence" >&2; exit 1; }
 done
 [[ -x "${DEV_ENV}" ]] || { echo "dev-env wrapper missing or non-executable: ${DEV_ENV}" >&2; exit 1; }
@@ -109,8 +109,8 @@ PY
   return 1
 }
 echo "Building Rust rubin-node"
-build_node
-mkdir -p "${A_DIR}" "${B_DIR}"
+build_node || emit_no_data node_build_failed
+mkdir -p "${A_DIR}" "${B_DIR}" || emit_no_data artifact_setup_failed
 if ! start_node node-b node-b.log "${B_DIR}"; then
   B_PID="${STARTED_PID:-}"; B_RPC="${STARTED_RPC:-}"; B_P2P="${STARTED_P2P:-}"
   emit_no_data node_b_start_failed
