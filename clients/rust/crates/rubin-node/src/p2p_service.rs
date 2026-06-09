@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::da_prefetch::DaRelayPrefetchState;
 use crate::da_relay::{
     CompleteDaSetCandidate, CompleteDaSetProvider, DaRelayCaps, DaRelayState, PeerQuotaKey,
 };
@@ -86,6 +87,7 @@ struct SharedServiceState {
     sync_engine: Arc<Mutex<SyncEngine>>,
     tx_pool: Arc<Mutex<TxPool>>,
     da_relay: Arc<Mutex<DaRelayState>>,
+    prefetch_state: Arc<Mutex<DaRelayPrefetchState>>,
     bootstrap_peers: Arc<Vec<String>>,
     bootstrap_rotate_idx: Arc<AtomicUsize>,
     in_flight_dials: Arc<Mutex<HashSet<String>>>,
@@ -191,6 +193,7 @@ pub fn start_node_p2p_service(cfg: NodeP2PServiceConfig) -> Result<RunningNodeP2
         sync_engine: cfg.sync_engine,
         tx_pool: cfg.tx_pool,
         da_relay,
+        prefetch_state: Arc::new(Mutex::new(DaRelayPrefetchState::default())),
         bootstrap_peers: Arc::new(cfg.bootstrap_peers),
         bootstrap_rotate_idx: Arc::new(AtomicUsize::new(0)),
         in_flight_dials: Arc::new(Mutex::new(HashSet::new())),
@@ -903,6 +906,7 @@ fn handle_peer(
         peer_writers: &shared.peer_outboxes,
         tx_pool: &shared.tx_pool,
         da_relay: &shared.da_relay,
+        prefetch: &shared.prefetch_state,
     };
 
     {
@@ -973,7 +977,20 @@ fn handle_peer(
                 &shared,
                 tx_pool_cleanup,
             )?);
-            session.apply_pending_da_relay_staging(&shared.da_relay, pending_da_relay_staging);
+            // Stage the peer DA tx, then drive prefetch from the followup (mirror of
+            // Go handleTx -> stageRelayDATx -> finishDAPrefetch -> scheduleDAPrefetch).
+            // Engine lock is already dropped; schedule's lock order holds since
+            // apply_pending releases the da_relay lock before returning.
+            let followup = session
+                .apply_pending_da_relay_staging(relay_ctx.da_relay, pending_da_relay_staging);
+            session.schedule_da_prefetch(
+                followup,
+                relay_ctx.da_relay,
+                relay_ctx.prefetch,
+                relay_ctx.peer_manager,
+                relay_ctx.peer_writers,
+                relay_ctx.peer_registered_addr,
+            );
             responses
         };
         for outbound in outbound_messages {
@@ -1528,6 +1545,9 @@ mod tests {
             da_relay: Arc::new(Mutex::new(
                 crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
                     .expect("valid DA relay caps"),
+            )),
+            prefetch_state: Arc::new(Mutex::new(
+                crate::da_prefetch::DaRelayPrefetchState::default(),
             )),
             bootstrap_peers: Arc::new(bootstrap_peers),
             bootstrap_rotate_idx: Arc::new(AtomicUsize::new(0)),

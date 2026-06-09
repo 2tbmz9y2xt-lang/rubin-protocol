@@ -246,6 +246,8 @@ pub struct PeerRelayContext<'a> {
     /// statement (line 53) is `p.mempool.AddRemoteTx(raw)`.
     pub tx_pool: &'a std::sync::Mutex<crate::txpool::TxPool>,
     pub da_relay: &'a std::sync::Mutex<crate::da_relay::DaRelayState>,
+    /// DA prefetch reservation state, scheduled after a DA tx stages (RUB-440).
+    pub prefetch: &'a std::sync::Mutex<crate::da_prefetch::DaRelayPrefetchState>,
 }
 
 pub(crate) type PendingDaRelayStaging = (String, Vec<u8>, bool);
@@ -515,16 +517,85 @@ impl PeerSession {
         &mut self,
         da_relay: &std::sync::Mutex<crate::da_relay::DaRelayState>,
         pending: Option<PendingDaRelayStaging>,
-    ) {
+    ) -> DaPrefetchFollowup {
         let Some((peer_addr, tx_bytes, chunk_hash_prevalidated)) = pending else {
-            return;
+            return DaPrefetchFollowup::None;
         };
         let Ok(mut da_relay) = da_relay.lock() else {
             self.peer.last_error = "da relay state poisoned; peer-tx staging skipped".to_string();
+            return DaPrefetchFollowup::None;
+        };
+        // Single parse: the staging call returns the schedulable da_id (commit-
+        // commitment gated) so we feed finish_da_prefetch without re-parsing.
+        let (da_id, staging) =
+            da_relay.stage_relay_da_tx_bytes_checked(&peer_addr, tx_bytes, chunk_hash_prevalidated);
+        drop(da_relay);
+        // A payload-commitment mismatch is the recoverable snapshot-reschedule case
+        // (Go does not surface it as a peer error); only genuine failures record it.
+        if let Err(ref err) = staging {
+            if !matches!(err, crate::da_relay::DaRelayError::PayloadCommitmentMismatch) {
+                self.peer.last_error = format!("DA relay tx staging failed: {err:?}");
+            }
+        }
+        match da_id {
+            Some(id) => finish_da_prefetch(id, staging),
+            None => DaPrefetchFollowup::None,
+        }
+    }
+
+    /// Schedule DA prefetch after a DA tx stages (mirror of Go scheduleDAPrefetch
+    /// from finishDAPrefetch): re-read still-missing chunks, enumerate
+    /// compact-receiving peers (trigger-preferred), reserve a bounded plan, and
+    /// send each as getdachunk. Lock order da_relay -> drop -> peer_manager ->
+    /// prefetch -> peer_writers; only entered after the staging da_relay lock drops.
+    pub(crate) fn schedule_da_prefetch(
+        &mut self,
+        followup: DaPrefetchFollowup,
+        da_relay: &Mutex<crate::da_relay::DaRelayState>,
+        prefetch: &Mutex<crate::da_prefetch::DaRelayPrefetchState>,
+        peer_manager: &PeerManager,
+        peer_writers: &Mutex<HashMap<String, crate::tx_relay::PeerOutbox>>,
+        trigger_peer_addr: &str,
+    ) {
+        let da_id = match followup {
+            DaPrefetchFollowup::Schedule(id) | DaPrefetchFollowup::ScheduleSnapshot(id) => id,
+            DaPrefetchFollowup::None => return,
+        };
+        let missing = {
+            let Ok(relay) = da_relay.lock() else {
+                self.peer.last_error = "da relay state poisoned; prefetch skipped".to_string();
+                return;
+            };
+            relay.missing_chunk_indexes(da_id)
+        };
+        let (quota_key_to_addr, keys) = da_prefetch_peers(
+            &peer_manager.snapshot(),
+            self.cfg.enable_compact_receive,
+            trigger_peer_addr,
+        );
+        let Ok(mut prefetch) = prefetch.lock() else {
+            self.peer.last_error = "da prefetch state poisoned; prefetch skipped".to_string();
             return;
         };
-        if let Err(err) = da_relay.stage_relay_da_tx_bytes_checked(&peer_addr, tx_bytes, chunk_hash_prevalidated) {
-            self.peer.last_error = format!("DA relay tx staging failed: {err:?}");
+        // Always call plan_da_prefetch (Go scheduleDAPrefetch does too): it expires +
+        // releases fulfilled reservations, releases the set only when missing is empty,
+        // and reserves nothing when there are no peers.
+        let (plans, diagnostic) = prefetch.plan_da_prefetch(da_id, &missing, &keys, now_nanos());
+        // Surface the planner diagnostic to the trigger peer (mirror Go
+        // reportDAPrefetchDiagnostic; its keys[0] is the trigger after prefer).
+        if !diagnostic.is_empty() {
+            self.peer.last_error = diagnostic;
+        }
+        for plan in plans {
+            if let Err(err) = send_da_prefetch_plan(
+                &mut prefetch,
+                plan,
+                &self.cfg.network,
+                &quota_key_to_addr,
+                peer_writers,
+            ) {
+                self.peer.last_error = err;
+            }
         }
     }
 
@@ -955,7 +1026,9 @@ impl PeerSession {
         let outcome = self.collect_live_responses(msg, sync_engine, relay_ctx)?;
         let pending_da_relay_staging = self.take_pending_da_relay_staging();
         if let Some(ctx) = relay_ctx {
-            self.apply_pending_da_relay_staging(ctx.da_relay, pending_da_relay_staging);
+            // Block-sync, the only caller, passes relay_ctx=None, so this block is
+            // skipped; live inbound prefetch is driven from p2p_service::handle_peer.
+            let _ = self.apply_pending_da_relay_staging(ctx.da_relay, pending_da_relay_staging);
         }
         for response in outcome.responses {
             self.write_message(&response)?;
@@ -2335,20 +2408,71 @@ pub fn decode_getdachunk_payload(payload: &[u8]) -> io::Result<GetDAChunkPayload
     })
 }
 
-// The reservation-release/retry decision and the plan sender below have no
-// production caller until the prefetch runtime-wiring follow-up slice threads
-// the scheduler through the staging path; they are exercised by tests here.
+/// Monotonic nanoseconds for prefetch reservation TTLs (the planner does only
+/// relative `now >= expires` comparisons), immune to wall-clock jumps.
+fn now_nanos() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos() as u64
+}
+
+/// Enumerate DA prefetch peers from a PeerManager snapshot (mirror of Go
+/// allDAPrefetchPeersLocked + preferDAPrefetchPeer): keep peers usable under the
+/// local gate, key by host-only quota key (last-writer-wins on a shared host),
+/// sort, then move the trigger peer's key first. Returns (quota_key -> addr, keys).
+pub(crate) fn da_prefetch_peers(
+    peers: &[PeerState],
+    enable_compact_receive: bool,
+    trigger_peer_addr: &str,
+) -> (std::collections::BTreeMap<String, String>, Vec<String>) {
+    let accepts = |peer: &PeerState| enable_compact_receive && peer.accepts_compact_blocks();
+    let mut quota_key_to_addr = std::collections::BTreeMap::new();
+    for peer in peers {
+        if !accepts(peer) {
+            continue;
+        }
+        let key = crate::da_relay::PeerQuotaKey::from_peer_addr(&peer.addr);
+        if !key.as_str().is_empty() {
+            quota_key_to_addr.insert(key.as_str().to_string(), peer.addr.clone());
+        }
+    }
+    let preferred = peers
+        .iter()
+        .find(|peer| peer.addr == trigger_peer_addr && accepts(peer))
+        .map(|peer| {
+            crate::da_relay::PeerQuotaKey::from_peer_addr(&peer.addr)
+                .as_str()
+                .to_string()
+        })
+        .unwrap_or_default();
+    let keys: Vec<String> = quota_key_to_addr.keys().cloned().collect();
+    (quota_key_to_addr, prefer_da_prefetch_peer(keys, &preferred))
+}
+
+/// Move `preferred` to the front of `keys` if present (mirror of Go
+/// preferDAPrefetchPeer); otherwise return the sorted keys unchanged.
+fn prefer_da_prefetch_peer(keys: Vec<String>, preferred: &str) -> Vec<String> {
+    if preferred.is_empty() || keys.len() < 2 || !keys.iter().any(|key| key == preferred) {
+        return keys;
+    }
+    let mut ordered = Vec::with_capacity(keys.len());
+    ordered.push(preferred.to_string());
+    ordered.extend(keys.into_iter().filter(|key| key != preferred));
+    ordered
+}
+
 /// Followup after a DA tx stage completes (mirror of Go `finishDAPrefetch`): a
 /// successful stage re-schedules prefetch for the record, a payload-commitment
 /// mismatch re-schedules from a fresh snapshot, and any other error does nothing.
-#[allow(dead_code)]
 pub(crate) enum DaPrefetchFollowup {
     Schedule([u8; 32]),
     ScheduleSnapshot([u8; 32]),
     None,
 }
 
-#[allow(dead_code)]
 pub(crate) fn finish_da_prefetch(
     da_id: [u8; 32],
     staging: Result<(), crate::da_relay::DaRelayError>,
@@ -2367,7 +2491,6 @@ pub(crate) fn finish_da_prefetch(
 /// addr and enqueue the encoded request. If the peer is gone or the send fails,
 /// the reservation is released so it can be re-planned later. Returns the send
 /// error so the caller can record it as the peer's last error.
-#[allow(dead_code)]
 pub(crate) fn send_da_prefetch_plan(
     prefetch: &mut crate::da_prefetch::DaRelayPrefetchState,
     plan: crate::da_prefetch::DaRelayPrefetchPlan,
@@ -4153,6 +4276,169 @@ mod tests {
         ));
     }
 
+    fn compact_peer(addr: &str) -> PeerState {
+        PeerState {
+            addr: addr.to_string(),
+            remote_compact_mode: CompactModeSnapshot {
+                mode: 1,
+                version: COMPACT_RELAY_VERSION,
+            },
+            ..PeerState::default()
+        }
+    }
+
+    fn da_relay_with_commit(
+        da_id: [u8; 32],
+        chunk_count: u16,
+    ) -> std::sync::Mutex<crate::da_relay::DaRelayState> {
+        let relay = std::sync::Mutex::new(
+            crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
+                .expect("caps"),
+        );
+        relay
+            .lock()
+            .unwrap()
+            .test_stage_incomplete_da_commit("host-a:1111", da_id, chunk_count, 100)
+            .expect("stage commit");
+        relay
+    }
+
+    /// Run `schedule_da_prefetch` against one compact-receiving peer (host-a:1111),
+    /// returning the sorted union of requested chunk indexes and the last_error.
+    fn run_schedule(
+        da_relay: &std::sync::Mutex<crate::da_relay::DaRelayState>,
+        followup: DaPrefetchFollowup,
+    ) -> (Vec<u16>, String) {
+        use crate::da_prefetch::DaRelayPrefetchState;
+        use crate::tx_relay::PeerOutbox;
+        use std::sync::Mutex;
+        let (mut session, _client) = test_peer_session();
+        let prefetch = Mutex::new(DaRelayPrefetchState::default());
+        let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64));
+        peer_manager
+            .add_peer(compact_peer("host-a:1111"))
+            .expect("add peer");
+        let writers = Mutex::new(HashMap::from([(
+            "host-a:1111".to_string(),
+            PeerOutbox::default(),
+        )]));
+        session.schedule_da_prefetch(
+            followup,
+            da_relay,
+            &prefetch,
+            &peer_manager,
+            &writers,
+            "host-a:1111",
+        );
+        let frames = writers
+            .lock()
+            .unwrap()
+            .get_mut("host-a:1111")
+            .unwrap()
+            .take_frames();
+        let mut requested: Vec<u16> = frames
+            .iter()
+            .flat_map(|frame| {
+                decode_getdachunk_payload(&frame[WIRE_HEADER_SIZE..])
+                    .expect("scheduled frame is a getdachunk request")
+                    .indexes
+            })
+            .collect();
+        requested.sort_unstable();
+        (requested, session.state().last_error)
+    }
+
+    #[test]
+    fn schedule_da_prefetch_requests_live_missing_chunks() {
+        // Schedule: commit declares 3 chunks, only chunk 0 retained -> request {1, 2}.
+        let da_id = [0x77u8; 32];
+        let da_relay = da_relay_with_commit(da_id, 3);
+        da_relay
+            .lock()
+            .unwrap()
+            .test_stage_incomplete_da_chunk("host-a:1111", da_id, 0, b"chunk0", 50)
+            .expect("stage chunk 0");
+        let (requested, last_error) = run_schedule(&da_relay, DaPrefetchFollowup::Schedule(da_id));
+        assert_eq!(
+            requested,
+            vec![1, 2],
+            "schedule requests the still-missing chunks"
+        );
+        assert!(
+            last_error.is_empty(),
+            "a successful schedule records no error"
+        );
+        // ScheduleSnapshot (payload-commitment mismatch) must also re-plan from the
+        // live missing set (mirror of Go finishDAPrefetch's re-schedule on mismatch).
+        let snap_id = [0x88u8; 32];
+        let snap_relay = da_relay_with_commit(snap_id, 2);
+        let (snap_requested, _) =
+            run_schedule(&snap_relay, DaPrefetchFollowup::ScheduleSnapshot(snap_id));
+        assert_eq!(
+            snap_requested,
+            vec![0, 1],
+            "snapshot followup schedules all missing"
+        );
+    }
+
+    #[test]
+    fn da_prefetch_peers_collapses_host_and_prefers_trigger() {
+        // Two ports on one host collapse to a single host-only key (last-writer-
+        // wins), non-compact peers drop, trigger key first (mirror of Go
+        // allDAPrefetchPeersLocked + preferDAPrefetchPeer).
+        let mut host_c = compact_peer("host-c:4444");
+        host_c.remote_compact_mode.mode = 0; // not compact-receiving -> dropped
+        let peers = vec![
+            compact_peer("host-a:1111"),
+            compact_peer("host-a:2222"),
+            compact_peer("host-b:3333"),
+            host_c,
+        ];
+        let (map, keys) = da_prefetch_peers(&peers, true, "host-b:3333");
+        assert_eq!(
+            keys,
+            vec!["host-b".to_string(), "host-a".to_string()],
+            "trigger host first, non-compact peer dropped"
+        );
+        assert_eq!(map.len(), 2, "host-a's two ports collapse to one key");
+        assert_eq!(
+            map.get("host-a"),
+            Some(&"host-a:2222".to_string()),
+            "host-only key keeps the last writer on the shared host"
+        );
+    }
+
+    #[test]
+    fn schedule_da_prefetch_is_noop_without_da_or_gate() {
+        // (a) A None followup short-circuits before any enumeration or send.
+        let da_relay = da_relay_with_commit([0x99u8; 32], 2);
+        let (requested, last_error) = run_schedule(&da_relay, DaPrefetchFollowup::None);
+        assert!(requested.is_empty(), "a None followup schedules nothing");
+        assert!(last_error.is_empty());
+        // (b) The disabled local compact-receive gate enumerates no peers even when
+        // compact-accepting peers are present.
+        let (map_off, keys_off) =
+            da_prefetch_peers(&[compact_peer("host-a:1111")], false, "host-a:1111");
+        assert!(
+            map_off.is_empty() && keys_off.is_empty(),
+            "the disabled local gate yields no prefetch peers"
+        );
+        // The non-DA / malformed-commit -> no-schedulable-da_id path (so apply_pending
+        // never schedules) is covered by da_relay::stage_returns_schedulable_da_id.
+    }
+
+    #[test]
+    fn schedule_da_prefetch_surfaces_planner_diagnostic() {
+        // 9 missing chunks but the single peer's per-peer byte cap is 7: the planner
+        // diagnostic surfaces on the trigger peer's last_error and the request is
+        // bounded (mirror Go reportDAPrefetchDiagnostic + per-peer cap).
+        let da_id = [0xAAu8; 32];
+        let da_relay = da_relay_with_commit(da_id, 9);
+        let (requested, last_error) = run_schedule(&da_relay, DaPrefetchFollowup::Schedule(da_id));
+        assert_eq!(requested.len(), 7, "per-peer cap bounds the request");
+        assert_eq!(last_error, "da prefetch per-peer byte cap exceeded");
+    }
+
     #[test]
     fn getblocktxn_serves_announced_block_in_request_order() {
         let (mut session, _client) = test_peer_session();
@@ -5841,6 +6127,7 @@ mod tests {
                 crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
                     .expect("valid DA relay caps"),
             );
+            let prefetch = Mutex::new(crate::da_prefetch::DaRelayPrefetchState::default());
             let relay_ctx = PeerRelayContext {
                 relay_state: &relay_state,
                 peer_manager: &peer_manager,
@@ -5849,6 +6136,7 @@ mod tests {
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
                 da_relay: &da_relay,
+                prefetch: &prefetch,
             };
 
             // block2 arrives before its parent: retained as an orphan.
@@ -5912,6 +6200,7 @@ mod tests {
                 crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
                     .expect("valid DA relay caps"),
             );
+            let prefetch = Mutex::new(crate::da_prefetch::DaRelayPrefetchState::default());
             let da_id = [0x62; 32];
             let da_tx = relay_da_chunk_tx(da_id, b"peer-partial-error-ttl");
             da_relay
@@ -5927,6 +6216,7 @@ mod tests {
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
                 da_relay: &da_relay,
+                prefetch: &prefetch,
             };
 
             session
@@ -6660,6 +6950,7 @@ mod tests {
                 crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
                     .expect("valid DA relay caps"),
             );
+            let prefetch = Mutex::new(crate::da_prefetch::DaRelayPrefetchState::default());
 
             let relay_ctx = PeerRelayContext {
                 relay_state: &relay_state,
@@ -6669,6 +6960,7 @@ mod tests {
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
                 da_relay: &da_relay_state,
+                prefetch: &prefetch,
             };
 
             let msg = WireMessage {
@@ -6747,7 +7039,8 @@ mod tests {
             let mut sync_cfg = crate::sync::default_sync_config(None, crate::genesis::devnet_genesis_chain_id(), None);
             sync_cfg.core_ext_deployments = rubin_consensus::CoreExtDeploymentProfiles::empty();
             let mut engine = crate::sync::SyncEngine::new(chain_state, None, sync_cfg).expect("sync engine"); let relay_state = crate::tx_relay::TxRelayState::new(); let peer_manager = PeerManager::new(default_peer_runtime_config("devnet", 64)); let peer_outboxes: Mutex<HashMap<String, crate::tx_relay::PeerOutbox>> = Mutex::new(HashMap::new()); let canonical_tx_pool = Mutex::new(TxPool::new()); let da_relay = Mutex::new(crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default()).expect("valid DA relay caps"));
-            let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay };
+            let prefetch = Mutex::new(crate::da_prefetch::DaRelayPrefetchState::default());
+            let relay_ctx = PeerRelayContext { relay_state: &relay_state, peer_manager: &peer_manager, local_addr: "local:8333", peer_registered_addr: "sender:8333", peer_writers: &peer_outboxes, tx_pool: &canonical_tx_pool, da_relay: &da_relay, prefetch: &prefetch };
             let (_, bad_txid, _, _) = parse_tx(&bad_tx).expect("parse bad DA tx");
             session.collect_live_responses(WireMessage { command: MESSAGE_TX.to_string(), payload: bad_tx }, &mut engine, Some(&relay_ctx)).expect("sub-threshold malformed DA tx is peer-neutral"); assert_eq!(session.state().ban_score, 10); assert!(!relay_state.tx_seen.has(&bad_txid)); assert!(session.take_pending_da_relay_staging().is_none()); assert_eq!(da_relay.lock().unwrap().test_record_summary(bad_da_id), None);
             let (_, txid, _, _) = parse_tx(&admitted_tx).expect("parse admitted DA tx");
@@ -6895,6 +7188,7 @@ mod tests {
                 crate::da_relay::DaRelayState::new(crate::da_relay::DaRelayCaps::default())
                     .expect("valid DA relay caps"),
             );
+            let prefetch = Mutex::new(crate::da_prefetch::DaRelayPrefetchState::default());
 
             let relay_ctx = PeerRelayContext {
                 relay_state: &relay_state,
@@ -6904,6 +7198,7 @@ mod tests {
                 peer_writers: &peer_outboxes,
                 tx_pool: &canonical_tx_pool,
                 da_relay: &da_relay_state,
+                prefetch: &prefetch,
             };
 
             let msg = WireMessage {
