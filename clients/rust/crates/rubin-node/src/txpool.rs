@@ -487,16 +487,31 @@ impl TxPool {
     }
 
     pub fn select_transactions(&self, max_count: usize, max_bytes: usize) -> Vec<Vec<u8>> {
+        self.select_transactions_with_filter(max_count, max_bytes, |_| false)
+    }
+
+    /// Sorted mining selection that drops any raw for which `filter` returns true
+    /// before the count/byte caps (mirror of Go `pickMinerCandidateEntries`, where the
+    /// `isMiningDATxRaw` skip precedes both caps). `select_transactions` is the
+    /// unfiltered case; the miner passes `is_mining_da_tx_raw` to exclude individual
+    /// DA txs from flat candidate selection.
+    pub fn select_transactions_with_filter(
+        &self,
+        max_count: usize,
+        max_bytes: usize,
+        filter: impl Fn(&[u8]) -> bool,
+    ) -> Vec<Vec<u8>> {
         if max_count == 0 || max_bytes == 0 {
             return Vec::new();
         }
-
         let mut entries: Vec<(&[u8; 32], &TxPoolEntry)> = self.txs.iter().collect();
         entries.sort_by(compare_entries_for_mining);
-
         let mut selected = Vec::with_capacity(entries.len().min(max_count));
         let mut used_bytes = 0usize;
         for entry in entries {
+            if filter(&entry.1.raw) {
+                continue;
+            }
             if selected.len() >= max_count {
                 break;
             }
