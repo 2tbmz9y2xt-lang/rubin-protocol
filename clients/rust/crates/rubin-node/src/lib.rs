@@ -4,6 +4,7 @@ mod chainstate_recovery;
 pub mod coinbase;
 pub mod da_prefetch;
 pub mod da_relay;
+pub mod da_txgen;
 pub mod devnet_rpc;
 pub mod genesis;
 pub mod interop;
@@ -33,6 +34,10 @@ pub use chainstate_recovery::reconcile_chain_state_with_block_store;
 pub use coinbase::{
     build_coinbase_tx, default_mine_address, normalize_mine_address, parse_mine_address,
     validate_mine_address,
+};
+pub use da_txgen::{
+    build_signed_da_set, mine_and_generate, select_mature_p2pk_coinbases, SignedDaSet, SignedDaTx,
+    DA_RELAY_BASE_HEIGHT,
 };
 pub use devnet_rpc::{
     new_devnet_rpc_state, new_devnet_rpc_state_with_tx_pool, new_shared_runtime_tx_pool,
