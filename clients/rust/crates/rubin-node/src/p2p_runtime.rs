@@ -432,7 +432,9 @@ impl PeerManager {
             return;
         };
         if let Some(state) = peers.get_mut(addr) {
-            state.remote_compact_mode = mode;
+            if state.remote_compact_mode != mode {
+                state.remote_compact_mode = mode;
+            }
         }
     }
 
