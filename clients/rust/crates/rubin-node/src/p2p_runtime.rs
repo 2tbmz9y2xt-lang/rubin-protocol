@@ -2359,10 +2359,14 @@ pub(crate) fn send_da_prefetch_plan(
             return Err(format!("da prefetch send failed: {err}"));
         }
     };
+    // Recover a poisoned lock (matches tx_relay broadcast) so poisoning does not
+    // masquerade as an unavailable outbox; a genuinely absent outbox or a full
+    // outbox (push_frame == false) still releases the reservation below.
     let sent = peer_writers
         .lock()
-        .ok()
-        .and_then(|mut writers| writers.get_mut(addr).map(|outbox| outbox.push_frame(frame)))
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_mut(addr)
+        .map(|outbox| outbox.push_frame(frame))
         .unwrap_or(false);
     if !sent {
         prefetch.release_da_prefetch_plan(&plan);
