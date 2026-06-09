@@ -194,6 +194,21 @@ pub struct PeerState {
     pub handshake_complete: bool,
     pub version_received: bool,
     pub verack_received: bool,
+    /// The peer's negotiated remote compact-receive mode, surfaced so non-session
+    /// code (e.g. DA prefetch peer enumeration) can filter compact-receiving
+    /// peers without holding the live session. Mirror of Go remoteCompactMode().
+    pub remote_compact_mode: CompactModeSnapshot,
+}
+
+impl PeerState {
+    /// Whether the peer advertised a usable compact-receive mode (the peer side
+    /// of Go acceptsCompactBlocks: version == compact-relay version and a
+    /// non-zero mode). The local `enable_compact_receive` gate is applied by the
+    /// caller.
+    pub fn accepts_compact_blocks(&self) -> bool {
+        self.remote_compact_mode.version == COMPACT_RELAY_VERSION
+            && self.remote_compact_mode.mode != 0
+    }
 }
 
 /// Context for TX relay operations, passed through the message loop.
@@ -263,9 +278,9 @@ struct RelayedBlockOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct CompactModeSnapshot {
-    mode: u8,
-    version: u64,
+pub struct CompactModeSnapshot {
+    pub mode: u8,
+    pub version: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,6 +424,20 @@ impl PeerManager {
         peers.remove(addr).is_some()
     }
 
+    /// Update the stored per-peer negotiated compact-receive mode (idempotent;
+    /// no-op when the peer is unknown). Keeps snapshot() current after a
+    /// sendcmpct so non-session code observes the live compact mode.
+    pub fn set_compact_mode(&self, addr: &str, mode: CompactModeSnapshot) {
+        let Ok(mut peers) = self.peers.write() else {
+            return;
+        };
+        if let Some(state) = peers.get_mut(addr) {
+            if state.remote_compact_mode != mode {
+                state.remote_compact_mode = mode;
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> Vec<PeerState> {
         let Ok(peers) = self.peers.read() else {
             return Vec::new();
@@ -448,7 +477,16 @@ impl PeerSession {
     }
 
     pub fn state(&self) -> PeerState {
-        self.peer.clone()
+        let mut state = self.peer.clone();
+        state.remote_compact_mode = self.remote_compact_mode;
+        state
+    }
+
+    /// The peer's negotiated remote compact mode — a cheap `Copy` read that
+    /// avoids cloning the full `PeerState` (used by the message loop to refresh
+    /// `PeerManager` after a sendcmpct).
+    pub fn negotiated_compact_mode(&self) -> CompactModeSnapshot {
+        self.remote_compact_mode
     }
 
     pub fn take_pending_tx_pool_cleanup(&mut self) -> TxPoolCleanupPlan {
@@ -6273,6 +6311,73 @@ mod tests {
         );
         drop(second_client);
         drop(client);
+    }
+
+    #[test]
+    fn peer_state_accepts_compact_blocks_and_manager_set_mode() {
+        let active = CompactModeSnapshot {
+            mode: 1,
+            version: COMPACT_RELAY_VERSION,
+        };
+        let with_mode = |mode| PeerState {
+            addr: "p:8333".to_string(),
+            remote_compact_mode: mode,
+            ..PeerState::default()
+        };
+        assert!(with_mode(active).accepts_compact_blocks());
+        assert!(
+            !with_mode(CompactModeSnapshot {
+                mode: 0,
+                version: COMPACT_RELAY_VERSION
+            })
+            .accepts_compact_blocks(),
+            "mode 0 is not accepted"
+        );
+        assert!(
+            !with_mode(CompactModeSnapshot {
+                mode: 1,
+                version: COMPACT_RELAY_VERSION + 1
+            })
+            .accepts_compact_blocks(),
+            "wrong compact-relay version is not accepted"
+        );
+        // PeerManager.set_compact_mode surfaces the mode in snapshot(); an unknown
+        // peer is a no-op.
+        let pm = PeerManager::new(default_peer_runtime_config("devnet", 8));
+        pm.add_peer(PeerState {
+            addr: "p:8333".to_string(),
+            ..PeerState::default()
+        })
+        .expect("add peer");
+        assert!(
+            !pm.snapshot()[0].accepts_compact_blocks(),
+            "default (un-negotiated) mode is not accepted"
+        );
+        pm.set_compact_mode("p:8333", active);
+        assert_eq!(pm.snapshot()[0].remote_compact_mode, active);
+        assert!(pm.snapshot()[0].accepts_compact_blocks());
+        pm.set_compact_mode("unknown:8333", active);
+        assert_eq!(pm.snapshot().len(), 1, "unknown peer set is a no-op");
+    }
+
+    #[test]
+    fn session_state_surfaces_negotiated_compact_mode() {
+        let (mut session, _client) = test_peer_session();
+        // test_peer_session negotiates mode 1 at the current compact-relay version.
+        assert_eq!(
+            session.state().remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 1,
+                version: COMPACT_RELAY_VERSION
+            }
+        );
+        assert!(session.state().accepts_compact_blocks());
+        // A cleared/renegotiated mode is surfaced through state() too.
+        session.remote_compact_mode = CompactModeSnapshot {
+            mode: 0,
+            version: COMPACT_RELAY_VERSION,
+        };
+        assert!(!session.state().accepts_compact_blocks());
     }
 
     #[test]
