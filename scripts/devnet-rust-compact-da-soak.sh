@@ -34,14 +34,31 @@ artifact_parent="${RUBIN_PROCESS_ARTIFACT_PARENT:-${TMPDIR:-/tmp}}"
 case "${artifact_parent}" in /*) ;; *) echo "unsafe artifact parent: ${artifact_parent:-<empty>}" >&2; exit 1 ;; esac
 case "/${artifact_parent}/" in *"/../"*) echo "unsafe artifact parent contains '..': ${artifact_parent}" >&2; exit 1 ;; esac
 mkdir -p "${artifact_parent}"
+ARTIFACT_PARENT_REAL="$(cd "${artifact_parent}" && pwd -P)"
 ARTIFACT_ROOT="$(mktemp -d "${artifact_parent%/}/rust-compact-da-soak.XXXXXX")"
+ARTIFACT_ROOT_REAL="$(cd "${ARTIFACT_ROOT}" && pwd -P)"
 REPORT_JSON="${ARTIFACT_ROOT}/rust-compact-da-soak-report.json"
 COMPACT_LOG="${ARTIFACT_ROOT}/compact-relay.log"
 DA_LOG="${ARTIFACT_ROOT}/da-relay.log"
-# Preserve artifacts when KEEP_TMP=1 or on any non-zero (fail-closed) exit, so the
-# combined report and child logs survive for debugging (matches the Go soak).
-cleanup() { local status=$?; [[ "${KEEP_TMP}" == "1" || "${status}" -ne 0 ]] || rm -rf -- "${ARTIFACT_ROOT}"; }
-trap cleanup EXIT
+# Preserve artifacts on any non-zero (fail-closed) exit or KEEP_TMP=1, keep the real
+# exit status independent of cleanup, and refuse to delete anything outside the
+# artifact parent (realpath prefix guard) — mirror of the Go soak cleanup.
+cleanup_artifact_root() {
+  local status=$? cleanup_status=0
+  if [[ "${status}" == "0" && "${KEEP_TMP}" != "1" ]]; then
+    if [[ -z "${ARTIFACT_ROOT_REAL}" || "${ARTIFACT_ROOT_REAL}" == "/" ]]; then
+      echo "refusing cleanup without initialized artifact root" >&2; cleanup_status=1
+    else
+      case "${ARTIFACT_ROOT_REAL}" in
+        "${ARTIFACT_PARENT_REAL}"/rust-compact-da-soak.*) rm -rf -- "${ARTIFACT_ROOT_REAL}" || cleanup_status=$? ;;
+        *) echo "refusing cleanup outside artifact parent: ${ARTIFACT_ROOT_REAL}" >&2; cleanup_status=1 ;;
+      esac
+    fi
+  fi
+  [[ "${status}" != "0" ]] && exit "${status}"
+  exit "${cleanup_status}"
+}
+trap cleanup_artifact_root EXIT
 
 extract_report_path() {
   python3 - "$1" "${ARTIFACT_ROOT}" <<'PY'
