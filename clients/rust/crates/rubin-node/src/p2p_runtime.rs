@@ -521,12 +521,13 @@ impl PeerSession {
         let Some((peer_addr, tx_bytes, chunk_hash_prevalidated)) = pending else {
             return DaPrefetchFollowup::None;
         };
-        let da_id = pending_da_tx_da_id(&tx_bytes);
         let Ok(mut da_relay) = da_relay.lock() else {
             self.peer.last_error = "da relay state poisoned; peer-tx staging skipped".to_string();
             return DaPrefetchFollowup::None;
         };
-        let staging =
+        // Single parse: the staging call returns the schedulable da_id (commit-
+        // commitment gated) so we feed finish_da_prefetch without re-parsing.
+        let (da_id, staging) =
             da_relay.stage_relay_da_tx_bytes_checked(&peer_addr, tx_bytes, chunk_hash_prevalidated);
         drop(da_relay);
         if let Err(ref err) = staging {
@@ -2412,17 +2413,6 @@ fn now_nanos() -> u64 {
         .get_or_init(std::time::Instant::now)
         .elapsed()
         .as_nanos() as u64
-}
-
-/// The DA id of a staged DA relay tx that should drive prefetch, or None for a
-/// non-DA tx. A commit only counts with a well-formed DA_COMMIT covenant (mirror
-/// of Go stageRelayDACommitTx returning before finishDAPrefetch when not ok).
-fn pending_da_tx_da_id(tx_bytes: &[u8]) -> Option<[u8; 32]> {
-    let (tx, ..) = parse_tx(tx_bytes).ok()?;
-    if let Some(da_id) = tx.da_commit_core.as_ref().map(|core| core.da_id) {
-        return crate::da_relay::relay_da_commit_payload_commitment(&tx).map(|_| da_id);
-    }
-    tx.da_chunk_core.map(|core| core.da_id)
 }
 
 /// Enumerate DA prefetch peers from a PeerManager snapshot (mirror of Go
@@ -4429,16 +4419,8 @@ mod tests {
             map_off.is_empty() && keys_off.is_empty(),
             "the disabled local gate yields no prefetch peers"
         );
-        // (c) A non-DA tx carries no DA id, so the apply_pending hook yields None
-        // and never schedules (the DA-tx -> Some path is covered by every schedule
-        // test above, which routes a staged chunk through to a getdachunk request).
-        let (mut plain, ..) =
-            parse_tx(&relay_da_chunk_tx([9u8; 32], b"x")).expect("parse DA chunk tx");
-        plain.tx_kind = 0x00;
-        plain.da_chunk_core = None;
-        plain.da_payload = Vec::new();
-        let plain_bytes = rubin_consensus::marshal_tx(&plain).expect("marshal non-DA tx");
-        assert_eq!(pending_da_tx_da_id(&plain_bytes), None);
+        // The non-DA / malformed-commit -> no-schedulable-da_id path (so apply_pending
+        // never schedules) is covered by da_relay::stage_returns_schedulable_da_id.
     }
 
     #[test]
