@@ -825,7 +825,8 @@ mod tests {
         assemble_block_bytes, build_witness_commitment, canonical_tx_weight,
         choose_valid_timestamp, default_mine_address, make_header_prefix, mtp_median,
         parse_complete_da_set_candidate, parse_mine_address_arg, parse_mining_candidate,
-        updated_policy_da_bytes, validate_complete_da_set_candidate_shape, Miner, MinerConfig,
+        pick_flat_candidate_raw, updated_policy_da_bytes, validate_complete_da_set_candidate_shape,
+        Miner, MinerConfig,
     };
 
     fn test_sync(prefix: &str) -> (PathBuf, BlockStore, SyncEngine) {
@@ -1469,6 +1470,37 @@ mod tests {
             vec![non_da],
             "pool DA commit and chunk skipped; only the ordinary tx selected"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flat_candidate_selection_handles_zero_and_empty_guards() {
+        // Defensive guards: zero caps and an empty/absent candidate source.
+        assert!(pick_flat_candidate_raw(&[vec![0x00]], 0).is_empty());
+        let pool = TxPool::new();
+        assert!(pool
+            .select_transactions_with_filter(0, 100, |_| false)
+            .is_empty());
+        assert!(pool
+            .select_transactions_with_filter(1, 0, |_| false)
+            .is_empty());
+        let (dir, _block_store, mut sync) = test_sync("rubin-rust-miner-flat-da-guards");
+        // max_tx_per_block == 1 -> max_selected == 0 -> no candidates.
+        {
+            let cfg = MinerConfig {
+                max_tx_per_block: 1,
+                ..MinerConfig::default()
+            };
+            let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+            assert!(miner.candidate_transactions(&[vec![0x00]]).is_empty());
+        }
+        // No txpool wired and no explicit txs -> no candidates.
+        let cfg = MinerConfig {
+            max_tx_per_block: 2,
+            ..MinerConfig::default()
+        };
+        let miner = Miner::new(&mut sync, None, cfg).expect("miner");
+        assert!(miner.candidate_transactions(&[]).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
