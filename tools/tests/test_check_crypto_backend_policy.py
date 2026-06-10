@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -518,6 +519,132 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
                 Path("clients/go/consensus/verify_sig_openssl.go"),
                 go_fixture(text),
             ),
+            [],
+        )
+
+
+class RustModuleResolutionTests(unittest.TestCase):
+    """The Rust verify path is a split module (a `verify_sig_openssl.rs` facade
+    plus a sibling `verify_sig_openssl/` directory of submodules). The binding
+    policy must look across the whole module so a required snippet living in a
+    submodule file (the RUB-263/264 split) is found, without weakening the
+    check: a genuinely-removed snippet must still fail."""
+
+    # A split layout that distributes every RUST_VERIFY_REQUIRED_SNIPPET across
+    # the facade + two submodule files, mirroring the real module shape.
+    FACADE = "pub fn verify_sig() {}\npub mod alg;\npub mod bootstrap;\npub mod digest;\n"
+    ALG = 'fn suite_id() { SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87"), }\n'
+    BOOTSTRAP = (
+        "fn parse_openssl_fips_mode() {}\n"
+        "fn ensure_openssl_bootstrap() {}\n"
+        "OPENSSL_init_crypto();\nOSSL_PROVIDER_load();\nEVP_set_default_properties();\n"
+    )
+    DIGEST = (
+        "fn openssl_verify_sig_digest_oneshot() {\n"
+        "    EVP_DigestVerifyInit_ex();\n    core::ptr::null();\n    EVP_DigestVerify();\n}\n"
+    )
+
+    def _write_split_module(self, root: Path, *, bootstrap: str | None = None) -> Path:
+        src = root / "src"
+        module_dir = src / "verify_sig_openssl"
+        module_dir.mkdir(parents=True)
+        facade = src / "verify_sig_openssl.rs"
+        facade.write_text(self.FACADE, encoding="utf-8")
+        (module_dir / "alg.rs").write_text(self.ALG, encoding="utf-8")
+        (module_dir / "bootstrap.rs").write_text(
+            self.BOOTSTRAP if bootstrap is None else bootstrap, encoding="utf-8"
+        )
+        (module_dir / "digest.rs").write_text(self.DIGEST, encoding="utf-8")
+        return facade
+
+    def _module_text(self, facade: Path) -> str:
+        return "\n".join(m.read_text(p) for p in m.rust_module_sources(facade))
+
+    def test_single_file_module_resolves_to_just_the_facade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = Path(tmp) / "verify_sig_openssl.rs"
+            facade.write_text(self.FACADE, encoding="utf-8")
+            self.assertEqual(m.rust_module_sources(facade), [facade])
+
+    def test_missing_module_resolves_to_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = Path(tmp) / "verify_sig_openssl.rs"
+            self.assertEqual(m.rust_module_sources(facade), [])
+
+    def test_split_module_resolves_facade_first_then_sorted_submodules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = self._write_split_module(Path(tmp))
+            module_dir = facade.with_suffix("")
+            self.assertEqual(
+                m.rust_module_sources(facade),
+                [
+                    facade,
+                    module_dir / "alg.rs",
+                    module_dir / "bootstrap.rs",
+                    module_dir / "digest.rs",
+                ],
+            )
+
+    def test_dir_only_module_resolves_to_sorted_submodules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = self._write_split_module(Path(tmp))
+            facade.unlink()  # facade absent: a `mod.rs`-style module with no sibling file
+            module_dir = facade.with_suffix("")
+            self.assertEqual(
+                m.rust_module_sources(facade),
+                [
+                    module_dir / "alg.rs",
+                    module_dir / "bootstrap.rs",
+                    module_dir / "digest.rs",
+                ],
+            )
+
+    def test_required_snippets_found_across_split_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = self._write_split_module(Path(tmp))
+            self.assertEqual(
+                m.check_required_snippets(
+                    facade, self._module_text(facade), m.RUST_VERIFY_REQUIRED_SNIPPETS
+                ),
+                [],
+            )
+
+    def test_removed_snippet_in_split_module_still_fails(self):
+        # Drop `fn ensure_openssl_bootstrap()` from the submodule entirely: the
+        # union-of-module check must still report it missing (no weakening).
+        bootstrap_without_snippet = self.BOOTSTRAP.replace(
+            "fn ensure_openssl_bootstrap() {}\n", ""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = self._write_split_module(
+                Path(tmp), bootstrap=bootstrap_without_snippet
+            )
+            errors = m.check_required_snippets(
+                facade, self._module_text(facade), m.RUST_VERIFY_REQUIRED_SNIPPETS
+            )
+            self.assertTrue(
+                any("fn ensure_openssl_bootstrap()" in err for err in errors),
+                errors,
+            )
+
+    def test_repo_rust_verify_module_satisfies_required_snippets(self):
+        # Guard against future drift: the real in-tree module must satisfy every
+        # required snippet through the union resolution.
+        repo_root = TOOLS_DIR.parent
+        facade = (
+            repo_root
+            / "clients"
+            / "rust"
+            / "crates"
+            / "rubin-consensus"
+            / "src"
+            / "verify_sig_openssl.rs"
+        )
+        sources = m.rust_module_sources(facade)
+        self.assertTrue(sources, f"no Rust verify module sources found at {facade}")
+        text = "\n".join(m.read_text(p) for p in sources)
+        self.assertEqual(
+            m.check_required_snippets(facade, text, m.RUST_VERIFY_REQUIRED_SNIPPETS),
             [],
         )
 

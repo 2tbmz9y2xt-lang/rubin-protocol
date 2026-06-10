@@ -145,6 +145,30 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="strict")
 
 
+def rust_module_sources(entry_file: Path) -> list[Path]:
+    """Return every Rust source that makes up a (possibly split) module.
+
+    A Rust module may be a single `foo.rs` file or a `foo.rs` facade plus a
+    sibling `foo/` directory of submodule files (the standard module layout).
+    Both shapes are the same logical module, so a required-snippet check must
+    consider the union of their sources -- otherwise moving a snippet from the
+    facade into a submodule file (e.g. the RUB-263/264 `verify_sig_openssl`
+    split) spuriously fails the check even though the snippet still exists.
+
+    The returned list is deterministic: the facade file first (when present),
+    then the submodule files sorted by path. This mirrors the pre-split
+    single-file semantics -- it neither strengthens nor weakens the check; it
+    just follows the snippets to their new files.
+    """
+    sources: list[Path] = []
+    if entry_file.exists():
+        sources.append(entry_file)
+    module_dir = entry_file.with_suffix("")
+    if module_dir.is_dir():
+        sources.extend(sorted(module_dir.rglob("*.rs")))
+    return sources
+
+
 def should_ignore_claim_line(line: str) -> bool:
     lowered = line.lower()
     return (
@@ -599,16 +623,22 @@ def main() -> int:
             / "verify_sig_openssl.rs"
         )
 
+        # The Rust verify path is a split module: a `verify_sig_openssl.rs`
+        # facade plus a sibling `verify_sig_openssl/` directory of submodules.
+        # Required snippets may live in any of those files (RUB-263/264 moved
+        # several into the submodules), so check the union of the module sources.
+        rust_sources = rust_module_sources(rust_verify)
+
         if not go_verify.exists():
             errors.append(f"binding-policy: missing file: {go_verify}")
-        if not rust_verify.exists():
+        if not rust_sources:
             errors.append(f"binding-policy: missing file: {rust_verify}")
 
         if go_verify.exists():
             go_text = read_text(go_verify)
             errors.extend(check_go_verify_required_snippets(go_verify, go_text))
-        if rust_verify.exists():
-            rust_text = read_text(rust_verify)
+        if rust_sources:
+            rust_text = "\n".join(read_text(path) for path in rust_sources)
             errors.extend(
                 check_required_snippets(rust_verify, rust_text, RUST_VERIFY_REQUIRED_SNIPPETS)
             )
