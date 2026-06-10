@@ -145,6 +145,135 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="strict")
 
 
+RUST_MOD_DECL_RE = re.compile(
+    r"[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;"
+)
+RUST_CFG_TEST_ATTR_RE = re.compile(r"#\[[ \t]*cfg[ \t]*\([ \t]*test[ \t]*\)[ \t]*\]")
+
+
+def declared_child_modules(text: str) -> list[str]:
+    """Names of non-test child modules declared via `mod NAME;` in `text`.
+
+    Only external module declarations (`mod NAME;`) are returned -- inline
+    modules (`mod NAME { ... }`) keep their bodies in `text` itself, so they are
+    already covered by reading `text`. A `mod` declaration carrying a
+    `#[cfg(test)]` attribute is treated as test-only and excluded, so test
+    scaffolding never counts toward the production policy.
+
+    Blank lines, line/doc comments (`//`, `///`, `//!`) and block comments
+    (`/* ... */`) are trivia: in Rust they may appear between a `#[cfg(test)]`
+    attribute and the `mod tests;` it applies to without detaching it, so they
+    do not clear the pending attribute. Only a real item/code line does.
+    """
+    names: list[str] = []
+    pending_cfg_test = False
+    in_block_comment = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if in_block_comment:
+            if "*/" in stripped:
+                in_block_comment = False
+            continue  # inside a block comment: trivia, keep pending
+        if not stripped:
+            continue  # blank line: trivia, keep pending
+        if stripped.startswith("//"):
+            continue  # line or doc comment: trivia, keep pending
+        if stripped.startswith("/*"):
+            if "*/" not in stripped:
+                in_block_comment = True
+            continue  # block comment: trivia, keep pending
+        if stripped.startswith("#["):
+            if RUST_CFG_TEST_ATTR_RE.search(stripped):
+                pending_cfg_test = True
+            continue  # attribute: accumulate, keep pending
+        match = RUST_MOD_DECL_RE.match(line)
+        if match:
+            if not pending_cfg_test:
+                names.append(match.group(1))
+            pending_cfg_test = False
+            continue
+        pending_cfg_test = False  # a real item/code line detaches the attribute
+    return names
+
+
+def resolve_declared_module_sources(
+    entry_text: str, module_dir: Path, seen: set[Path]
+) -> list[Path]:
+    """Recursively resolve the files of the child modules declared in
+    `entry_text`, looking under `module_dir` for each declared `NAME` as either
+    `NAME.rs` (file form) or `NAME/mod.rs` (directory form). Files that do not
+    exist on disk are skipped; `seen` guards against cycles and double-counting.
+    Returns sources in declaration order."""
+    out: list[Path] = []
+    for name in declared_child_modules(entry_text):
+        file_form = module_dir / f"{name}.rs"
+        dir_form = module_dir / name / "mod.rs"
+        if file_form.exists() and file_form not in seen:
+            seen.add(file_form)
+            out.append(file_form)
+            out.extend(
+                resolve_declared_module_sources(
+                    read_text(file_form), module_dir / name, seen
+                )
+            )
+        elif dir_form.exists() and dir_form not in seen:
+            seen.add(dir_form)
+            out.append(dir_form)
+            out.extend(
+                resolve_declared_module_sources(
+                    read_text(dir_form), module_dir / name, seen
+                )
+            )
+    return out
+
+
+def rust_module_sources(entry_file: Path) -> list[Path]:
+    """Return every production Rust source that makes up a (possibly split)
+    module, in declaration order.
+
+    A Rust module may be a single `foo.rs` file or a `foo.rs` facade plus a
+    sibling `foo/` directory of submodule files (the standard module layout).
+    Both shapes are the same logical module, so a required-snippet check must
+    consider the union of their sources -- otherwise moving a snippet from the
+    facade into a submodule file (e.g. the RUB-263/264 `verify_sig_openssl`
+    split) spuriously fails the check even though the snippet still exists.
+
+    Submodules are resolved from the module entry's `mod NAME;` declarations
+    (recursively), not by scanning the directory: only files that are actually
+    part of the compiled module tree count. That means an unreferenced or stray
+    `.rs` file in the directory can never satisfy the policy, results do not
+    depend on untracked files in the working tree, and a `#[cfg(test)]` module
+    is excluded as test-only. Directory scanning is used only as a last-resort
+    fallback when there is no parseable module entry file (so the check fails
+    loud rather than silently treating the module as empty).
+    """
+    module_dir = entry_file.with_suffix("")
+    # Facade form: `verify_sig_openssl.rs` + sibling `verify_sig_openssl/`.
+    if entry_file.exists():
+        seen: set[Path] = {entry_file}
+        return [
+            entry_file,
+            *resolve_declared_module_sources(read_text(entry_file), module_dir, seen),
+        ]
+    # Directory-only form: `verify_sig_openssl/mod.rs` is the module entry.
+    mod_rs = module_dir / "mod.rs"
+    if mod_rs.exists():
+        seen = {mod_rs}
+        return [
+            mod_rs,
+            *resolve_declared_module_sources(read_text(mod_rs), module_dir, seen),
+        ]
+    # Last-resort fallback: a directory with no parseable entry file. Scan it,
+    # excluding the cfg(test)-only `tests/` subtree.
+    if module_dir.is_dir():
+        return [
+            path
+            for path in sorted(module_dir.rglob("*.rs"))
+            if "tests" not in path.relative_to(module_dir).parts
+        ]
+    return []
+
+
 def should_ignore_claim_line(line: str) -> bool:
     lowered = line.lower()
     return (
@@ -599,6 +728,13 @@ def main() -> int:
             / "verify_sig_openssl.rs"
         )
 
+        # The Rust verify path is a split module: a `verify_sig_openssl.rs`
+        # facade plus a sibling `verify_sig_openssl/` directory of submodules.
+        # Required snippets may live in any of those production files (RUB-263/264
+        # moved several into the submodules), so check the union of the module
+        # sources. The canonical facade entrypoint is still required to exist.
+        rust_sources = rust_module_sources(rust_verify)
+
         if not go_verify.exists():
             errors.append(f"binding-policy: missing file: {go_verify}")
         if not rust_verify.exists():
@@ -607,8 +743,8 @@ def main() -> int:
         if go_verify.exists():
             go_text = read_text(go_verify)
             errors.extend(check_go_verify_required_snippets(go_verify, go_text))
-        if rust_verify.exists():
-            rust_text = read_text(rust_verify)
+        if rust_sources:
+            rust_text = "\n".join(read_text(path) for path in rust_sources)
             errors.extend(
                 check_required_snippets(rust_verify, rust_text, RUST_VERIFY_REQUIRED_SNIPPETS)
             )
