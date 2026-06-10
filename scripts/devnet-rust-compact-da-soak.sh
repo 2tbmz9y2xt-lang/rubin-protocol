@@ -6,29 +6,153 @@ DEV_ENV="${REPO_ROOT}/scripts/dev-env.sh"
 COMPACT_SCRIPT="${REPO_ROOT}/scripts/devnet-rust-compact-relay.sh"
 DA_SCRIPT="${REPO_ROOT}/scripts/devnet-rust-da-relay.sh"
 ENV_BIN="/usr/bin/env"
+SCRIPT_PATH="scripts/devnet-rust-compact-da-soak.sh"
 : "${KEEP_TMP:=1}"
 export KEEP_TMP
-usage() { echo "usage: $0" >&2; }
+SELF_TEST=0
+usage() { echo "usage: $0 [--self-test]" >&2; }
 while (($#)); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
+    --self-test) SELF_TEST=1; shift ;;
     *) usage; exit 2 ;;
   esac
 done
-# Combined Rust compact+DA process soak: orchestrate the merged compact (RUB-408)
-# and DA (RUB-409) relay process smokes as children, capture each source-bound child
-# report, verify the child node pids exited (anti-stale), and aggregate into a
-# fail-closed combined report. Combined PASS requires both children PASS; today both
-# fail-close to NO_DATA (compact advertisement + DA signed-tx-generator runtime gaps),
-# so the combined verdict is NO_DATA carrying both child reasons. This harness adds no
-# runtime/parser/provider/miner behavior — it only reuses already-merged children.
+# Combined Rust compact+DA process soak: orchestrate the merged compact (RUB-441)
+# and DA (RUB-443) relay process smokes as children, capture each source-bound
+# child report, verify the child node pids exited (anti-stale), and aggregate
+# into a fail-closed combined report. Combined PASS requires both children PASS;
+# both now reach PASS, so the combined soak produces verdict=PASS with both child
+# verdicts and artifact paths bound to the repo/branch/commit. This harness adds
+# no runtime/parser/provider/miner behavior — it only reuses already-merged
+# children. `--self-test` exercises the fail-closed aggregation with synthetic
+# child reports (compact!=PASS and da!=PASS both yield combined NO_DATA) without
+# spawning nodes.
 
-for tool in python3 perl ps; do
+# Aggregate two child reports into the combined report. Reads COMPACT_REPORT,
+# DA_REPORT, COMPACT_CLEANUP, DA_CLEANUP, REPORT_JSON, ARTIFACT_ROOT and the
+# SOURCE_* binding from the environment; writes the combined report and returns
+# 0 only when both children are PASS (fail-closed).
+aggregate_and_write() {
+  python3 - <<'PY'
+import json, os, sys
+def load(path, label):
+    with open(path, encoding="utf-8") as fh:
+        try:
+            return json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"malformed {label}: {exc}") from None
+def node_binary(report):
+    for p in report.get("participants") or []:
+        if isinstance(p, dict) and isinstance(p.get("binary"), str) and p["binary"].strip():
+            return p["binary"]
+    return None
+e = os.environ
+compact = load(e["COMPACT_REPORT"], "compact report")
+da = load(e["DA_REPORT"], "DA report")
+cv, dv = compact.get("verdict"), da.get("verdict")
+combined = "PASS" if cv == "PASS" and dv == "PASS" else "NO_DATA"
+report = {
+    "scenario": "rust_compact_da_combined_soak",
+    "verdict": combined,
+    "combined_verdict": combined,
+    "compact_verdict": cv,
+    "da_verdict": dv,
+    "source": {
+        "repo": e["SOURCE_REMOTE"],
+        "branch": e["SOURCE_BRANCH"],
+        "commit_sha": e["SOURCE_COMMIT"],
+        "script": e["SCRIPT_PATH"],
+        "artifact_root": e["ARTIFACT_ROOT"],
+        "node_version": {
+            "compact_binary": node_binary(compact),
+            "da_binary": node_binary(da),
+            "source_commit": e["SOURCE_COMMIT"],
+        },
+    },
+    "artifact_paths": {
+        "compact_report": e["COMPACT_REPORT"],
+        "da_report": e["DA_REPORT"],
+        "combined_report": e["REPORT_JSON"],
+    },
+    "prerequisites": {
+        "compact_smoke": "RUB-441 devnet-rust-compact-relay.sh (PASS)",
+        "da_smoke": "RUB-443 devnet-rust-da-relay.sh (PASS)",
+    },
+    "compact": {"verdict": cv, "failure_reason": compact.get("failure_reason"), "report": e["COMPACT_REPORT"], "cleanup": json.loads(e["COMPACT_CLEANUP"])},
+    "da": {"verdict": dv, "failure_reason": da.get("failure_reason"), "report": e["DA_REPORT"], "cleanup": json.loads(e["DA_CLEANUP"])},
+    "source_of_truth_summary": [
+        "Compact relay is relay-only; DA txs enter a block only through the complete-set provider group, never as flat candidates.",
+        "Combined PASS requires both child smokes PASS; this harness adds no runtime/parser/provider/miner behavior.",
+    ],
+    "out_of_scope": ["production_runtime_change", "new_p2p_handler_behavior", "new_miner_behavior", "go", "mixed_client", "final_devnet_readiness"],
+}
+if combined != "PASS":
+    report["failure_reason"] = "child_smokes_not_pass"
+with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
+    json.dump(report, f, indent=2, sort_keys=True)
+    f.write("\n")
+print(f"{combined}: compact={cv} da={dv}; report={e['REPORT_JSON']}", file=sys.stderr)
+raise SystemExit(0 if combined == "PASS" else 1)
+PY
+}
+
+# Fail-closed aggregation self-test: synthesize child reports with controlled
+# verdicts and assert the combined verdict + exit status without spawning nodes.
+run_self_test() {
+  command -v python3 >/dev/null 2>&1 || { echo "python3 is required for --self-test" >&2; return 1; }
+  local td; td="$(mktemp -d "${TMPDIR:-/tmp}/rust-compact-da-soak-selftest.XXXXXX")"
+  # shellcheck disable=SC2317
+  trap 'rm -rf -- "${td}"' RETURN
+  local synth_cleanup='{"cleanup_verified": true, "label": "x", "participant_pids": [1]}'
+  _synth_report() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+path, verdict = sys.argv[1:3]
+data = {"scenario": "x", "verdict": verdict, "participants": [{"name": "node-a", "pid": 1, "binary": "/tmp/rubin-node-rust"}]}
+if verdict != "PASS":
+    data["failure_reason"] = "synthetic"
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f)
+PY
+  }
+  local rc combined fail=0 cv dv want_combined want_rc scenario
+  for scenario in "PASS:PASS:PASS:0" "NO_DATA:PASS:NO_DATA:1" "PASS:FAIL:NO_DATA:1" "FAIL:FAIL:NO_DATA:1"; do
+    IFS=':' read -r cv dv want_combined want_rc <<<"${scenario}"
+    _synth_report "${td}/compact.json" "${cv}"
+    _synth_report "${td}/da.json" "${dv}"
+    rc=0
+    COMPACT_REPORT="${td}/compact.json" DA_REPORT="${td}/da.json" \
+      COMPACT_CLEANUP="${synth_cleanup}" DA_CLEANUP="${synth_cleanup}" \
+      REPORT_JSON="${td}/combined.json" ARTIFACT_ROOT="${td}" \
+      SOURCE_REMOTE="self-test" SOURCE_BRANCH="self-test" SOURCE_COMMIT="0" SCRIPT_PATH="${SCRIPT_PATH}" \
+      aggregate_and_write >/dev/null 2>&1 || rc=$?
+    combined="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["combined_verdict"])' "${td}/combined.json")"
+    if [[ "${combined}" != "${want_combined}" || "${rc}" != "${want_rc}" ]]; then
+      echo "self-test FAIL: compact=${cv} da=${dv} -> combined=${combined}/rc=${rc}, want ${want_combined}/${want_rc}" >&2
+      fail=1
+    fi
+  done
+  [[ "${fail}" == "0" ]] || return 1
+  echo "PASS: compact+DA soak fail-closed aggregation self-test (combined NO_DATA when either child != PASS)"
+}
+
+if [[ "${SELF_TEST}" == "1" ]]; then
+  run_self_test
+  exit $?
+fi
+
+for tool in python3 perl ps git; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "${tool} is required for Rust compact+DA soak evidence" >&2; exit 1; }
 done
 for path in "${DEV_ENV}" "${COMPACT_SCRIPT}" "${DA_SCRIPT}" "${ENV_BIN}"; do
   [[ -x "${path}" ]] || { echo "missing or non-executable: ${path}" >&2; exit 1; }
 done
+
+SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+SOURCE_BRANCH="$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD)"
+SOURCE_REMOTE="$(git -C "${REPO_ROOT}" remote get-url origin 2>/dev/null || echo rubin-protocol)"
+export SOURCE_COMMIT SOURCE_BRANCH SOURCE_REMOTE SCRIPT_PATH
 
 artifact_parent="${RUBIN_PROCESS_ARTIFACT_PARENT:-${TMPDIR:-/tmp}}"
 case "${artifact_parent}" in /*) ;; *) echo "unsafe artifact parent: ${artifact_parent:-<empty>}" >&2; exit 1 ;; esac
@@ -40,6 +164,11 @@ ARTIFACT_ROOT_REAL="$(cd "${ARTIFACT_ROOT}" && pwd -P)"
 REPORT_JSON="${ARTIFACT_ROOT}/rust-compact-da-soak-report.json"
 COMPACT_LOG="${ARTIFACT_ROOT}/compact-relay.log"
 DA_LOG="${ARTIFACT_ROOT}/da-relay.log"
+# Export the child-result holders up front (empty) so a fail-closed exit before
+# both children complete can still emit the consistent source-bound schema with
+# null child fields.
+export ARTIFACT_ROOT REPORT_JSON
+export COMPACT_REPORT="" DA_REPORT="" COMPACT_CLEANUP="" DA_CLEANUP=""
 # Preserve artifacts on any non-zero (fail-closed) exit or KEEP_TMP=1, keep the real
 # exit status independent of cleanup, and refuse to delete anything outside the
 # artifact parent (realpath prefix guard) — mirror of the Go soak cleanup.
@@ -80,9 +209,10 @@ print(path)
 PY
 }
 
-# Rust child smokes fail-close to NO_DATA (exit 1) until their runtime gap closes;
-# capture the source-bound report regardless of exit code and let the aggregation
-# read the verdict. A child that emits no report at all is a hard harness failure.
+# Children emit a source-bound PASS report (RUB-441/RUB-443) and exit 0 on PASS;
+# capture the report path regardless of exit code so a non-PASS child still
+# aggregates into a fail-closed combined verdict. A child that emits no report at
+# all is a hard harness failure.
 run_child_soak() {
   local label="$1" script="$2" log="$3"
   echo "Running ${label} soak" >&2
@@ -120,13 +250,52 @@ print(json.dumps({"label": label, "participant_pids": [pid for pid, _ in checks]
 PY
 }
 
+# Fail-closed combined report for an early exit (child missing report / stale
+# pids). Emits the SAME source-bound schema as the aggregated path so downstream
+# evidence consumers always see source + artifact_paths + the *_verdict fields;
+# unavailable child fields are null.
 emit_combined_unavailable() {
   local reason="$1"
-  python3 - "${REPORT_JSON}" "${reason}" "${ARTIFACT_ROOT}" <<'PY'
-import json, sys
-path, reason, root = sys.argv[1:4]
-with open(path, "w", encoding="utf-8") as f:
-    json.dump({"scenario": "rust_compact_da_combined_soak", "verdict": "NO_DATA", "failure_reason": reason, "artifact_root": root}, f, indent=2, sort_keys=True); f.write("\n")
+  COMBINED_FAIL_REASON="${reason}" python3 - <<'PY'
+import json, os
+e = os.environ
+def opt(key):
+    val = e.get(key, "")
+    return val or None
+def child_verdict(key):
+    # Derive the child verdict from its report when the path is available and
+    # readable; null only when the child produced no readable report.
+    path = e.get(key, "")
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh).get("verdict")
+    except (OSError, json.JSONDecodeError):
+        return None
+report = {
+    "scenario": "rust_compact_da_combined_soak",
+    "verdict": "NO_DATA",
+    "combined_verdict": "NO_DATA",
+    "compact_verdict": child_verdict("COMPACT_REPORT"),
+    "da_verdict": child_verdict("DA_REPORT"),
+    "failure_reason": e["COMBINED_FAIL_REASON"],
+    "source": {
+        "repo": e.get("SOURCE_REMOTE"),
+        "branch": e.get("SOURCE_BRANCH"),
+        "commit_sha": e.get("SOURCE_COMMIT"),
+        "script": e.get("SCRIPT_PATH"),
+        "artifact_root": e.get("ARTIFACT_ROOT"),
+        "node_version": {"compact_binary": None, "da_binary": None, "source_commit": e.get("SOURCE_COMMIT")},
+    },
+    "artifact_paths": {
+        "compact_report": opt("COMPACT_REPORT"),
+        "da_report": opt("DA_REPORT"),
+        "combined_report": e["REPORT_JSON"],
+    },
+}
+with open(e["REPORT_JSON"], "w", encoding="utf-8") as f:
+    json.dump(report, f, indent=2, sort_keys=True); f.write("\n")
 PY
   echo "NO_DATA: reason=${reason}; report=${REPORT_JSON}" >&2
   exit 1
@@ -137,36 +306,5 @@ COMPACT_CLEANUP="$(assert_participant_pids_exited compact "${COMPACT_REPORT}")" 
 DA_REPORT="$(run_child_soak da "${DA_SCRIPT}" "${DA_LOG}")" || emit_combined_unavailable da_child_no_report
 DA_CLEANUP="$(assert_participant_pids_exited da "${DA_REPORT}")" || emit_combined_unavailable da_child_stale_pids
 
-export REPORT_JSON ARTIFACT_ROOT COMPACT_REPORT DA_REPORT COMPACT_CLEANUP DA_CLEANUP
-python3 - <<'PY'
-import json, os, sys
-def load(path, label):
-    with open(path, encoding="utf-8") as fh:
-        try: return json.load(fh)
-        except json.JSONDecodeError as exc: raise SystemExit(f"malformed {label}: {exc}") from None
-compact = load(os.environ["COMPACT_REPORT"], "compact report")
-da = load(os.environ["DA_REPORT"], "DA report")
-cv, dv = compact.get("verdict"), da.get("verdict")
-combined = "PASS" if cv == "PASS" and dv == "PASS" else "NO_DATA"
-report = {
-    "scenario": "rust_compact_da_combined_soak",
-    "verdict": combined,
-    "artifact_root": os.environ["ARTIFACT_ROOT"],
-    "prerequisites": {
-        "compact_smoke": "RUB-408 devnet-rust-compact-relay.sh (Done)",
-        "da_smoke": "RUB-409 devnet-rust-da-relay.sh (Done)",
-    },
-    "compact": {"verdict": cv, "failure_reason": compact.get("failure_reason"), "report": os.environ["COMPACT_REPORT"], "cleanup": json.loads(os.environ["COMPACT_CLEANUP"])},
-    "da": {"verdict": dv, "failure_reason": da.get("failure_reason"), "report": os.environ["DA_REPORT"], "cleanup": json.loads(os.environ["DA_CLEANUP"])},
-    "source_of_truth_summary": [
-        "Compact relay is relay-only; DA txs enter a block only through the complete-set provider group, never as flat candidates.",
-        "Combined PASS requires both child smokes PASS; this harness adds no runtime/parser/provider/miner behavior.",
-    ],
-}
-if combined != "PASS":
-    report["failure_reason"] = "child_smokes_not_pass"
-with open(os.environ["REPORT_JSON"], "w", encoding="utf-8") as f:
-    json.dump(report, f, indent=2, sort_keys=True); f.write("\n")
-print(f"{combined}: compact={cv} da={dv}; report={os.environ['REPORT_JSON']}", file=sys.stderr)
-raise SystemExit(0 if combined == "PASS" else 1)
-PY
+export COMPACT_REPORT DA_REPORT COMPACT_CLEANUP DA_CLEANUP
+aggregate_and_write
