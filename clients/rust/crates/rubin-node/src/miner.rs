@@ -835,8 +835,44 @@ mod tests {
         Miner, MinerConfig,
     };
 
-    fn test_sync(prefix: &str) -> (PathBuf, BlockStore, SyncEngine) {
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Per-call sequence so two test_sync() dirs never collide. Keying only on
+    // pid let tests sharing a `prefix` (the `s` helper is called many times by
+    // miner_da_provider_selection_bounds_matrix, plus any parallel test on the
+    // same prefix) reuse one `{prefix}-{pid}` directory under `cargo test`; one
+    // call's start-of-setup `remove_dir_all` then raced another call's
+    // chainstate save, flaking with
+    // `rename ... chainstate.json: No such file or directory`.
+    static TEST_SYNC_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// RAII scratch directory: removes its tree on drop so the per-call unique
+    /// `test_sync` directories cannot accumulate in TMPDIR, even for callers
+    /// that bind it as `_dir`. Derefs/`AsRef`s to `Path` so existing `&dir`
+    /// uses (and the explicit end-of-test `remove_dir_all(&dir)` calls) keep
+    /// working; drop is best-effort and ignores errors.
+    struct TempDirGuard(PathBuf);
+    impl std::ops::Deref for TempDirGuard {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl AsRef<Path> for TempDirGuard {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_sync(prefix: &str) -> (TempDirGuard, BlockStore, SyncEngine) {
+        let seq = TEST_SYNC_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{seq}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("mkdir");
         let chain_state_file = chain_state_path(&dir);
@@ -849,7 +885,7 @@ mod tests {
             default_sync_config(None, devnet_genesis_chain_id(), Some(chain_state_file)),
         )
         .expect("sync");
-        (dir, block_store, sync)
+        (TempDirGuard(dir), block_store, sync)
     }
 
     fn coinbase_bytes(height: u64) -> Vec<u8> {
