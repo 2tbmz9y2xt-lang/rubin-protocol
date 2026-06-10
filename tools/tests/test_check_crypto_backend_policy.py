@@ -526,12 +526,14 @@ func opensslVerifySigOneShot(alg string, pubkey []byte, signature []byte, msg []
 class RustModuleResolutionTests(unittest.TestCase):
     """The Rust verify path is a split module (a `verify_sig_openssl.rs` facade
     plus a sibling `verify_sig_openssl/` directory of submodules). The binding
-    policy must look across the whole module so a required snippet living in a
-    submodule file (the RUB-263/264 split) is found, without weakening the
-    check: a genuinely-removed snippet must still fail."""
+    policy resolves the module from its `mod NAME;` declarations so a required
+    snippet living in a referenced submodule (the RUB-263/264 split) is found,
+    without weakening the check: a removed snippet, a snippet only in an
+    undeclared/stray file, and a snippet only in a `#[cfg(test)]` module must
+    all still fail."""
 
     # A split layout that distributes every RUST_VERIFY_REQUIRED_SNIPPET across
-    # the facade + two submodule files, mirroring the real module shape.
+    # the facade + declared submodule files, mirroring the real module shape.
     FACADE = "pub fn verify_sig() {}\npub mod alg;\npub mod bootstrap;\npub mod digest;\n"
     ALG = 'fn suite_id() { SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87"), }\n'
     BOOTSTRAP = (
@@ -544,18 +546,20 @@ class RustModuleResolutionTests(unittest.TestCase):
         "    EVP_DigestVerifyInit_ex();\n    core::ptr::null();\n    EVP_DigestVerify();\n}\n"
     )
 
-    def _write_split_module(self, root: Path, *, bootstrap: str | None = None) -> Path:
+    def _write_split_module(
+        self, root: Path, *, bootstrap: str | None = None, facade: str | None = None
+    ) -> Path:
         src = root / "src"
         module_dir = src / "verify_sig_openssl"
         module_dir.mkdir(parents=True)
-        facade = src / "verify_sig_openssl.rs"
-        facade.write_text(self.FACADE, encoding="utf-8")
+        facade_path = src / "verify_sig_openssl.rs"
+        facade_path.write_text(self.FACADE if facade is None else facade, encoding="utf-8")
         (module_dir / "alg.rs").write_text(self.ALG, encoding="utf-8")
         (module_dir / "bootstrap.rs").write_text(
             self.BOOTSTRAP if bootstrap is None else bootstrap, encoding="utf-8"
         )
         (module_dir / "digest.rs").write_text(self.DIGEST, encoding="utf-8")
-        return facade
+        return facade_path
 
     def _module_text(self, facade: Path) -> str:
         return "\n".join(m.read_text(p) for p in m.rust_module_sources(facade))
@@ -571,7 +575,9 @@ class RustModuleResolutionTests(unittest.TestCase):
             facade = Path(tmp) / "verify_sig_openssl.rs"
             self.assertEqual(m.rust_module_sources(facade), [])
 
-    def test_split_module_resolves_facade_first_then_sorted_submodules(self):
+    def test_split_module_resolves_facade_first_then_declared_submodules(self):
+        # Sources are the facade followed by its `mod NAME;` declarations in
+        # declaration order (alg, bootstrap, digest), resolved to files on disk.
         with tempfile.TemporaryDirectory() as tmp:
             facade = self._write_split_module(Path(tmp))
             module_dir = facade.with_suffix("")
@@ -585,10 +591,14 @@ class RustModuleResolutionTests(unittest.TestCase):
                 ],
             )
 
-    def test_dir_only_module_resolves_to_sorted_submodules(self):
+    def test_dir_only_fallback_scans_directory_when_no_entry_file(self):
+        # Directory-only fallback: neither a `verify_sig_openssl.rs` facade nor a
+        # `verify_sig_openssl/mod.rs` entry exists, so there are no `mod`
+        # declarations to resolve -- the directory is scanned (tests/ excluded)
+        # rather than treating the module as empty.
         with tempfile.TemporaryDirectory() as tmp:
             facade = self._write_split_module(Path(tmp))
-            facade.unlink()  # facade absent: a `mod.rs`-style module with no sibling file
+            facade.unlink()
             module_dir = facade.with_suffix("")
             self.assertEqual(
                 m.rust_module_sources(facade),
@@ -598,6 +608,82 @@ class RustModuleResolutionTests(unittest.TestCase):
                     module_dir / "digest.rs",
                 ],
             )
+
+    def test_dir_only_mod_rs_entry_resolves_from_declarations(self):
+        # A directory-only module whose entry is `verify_sig_openssl/mod.rs`
+        # resolves submodules from that file's `mod NAME;` declarations, and an
+        # undeclared sibling file is NOT included.
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = self._write_split_module(Path(tmp))
+            facade.unlink()
+            module_dir = facade.with_suffix("")
+            (module_dir / "mod.rs").write_text(
+                "pub mod alg;\npub mod bootstrap;\npub mod digest;\n", encoding="utf-8"
+            )
+            undeclared = module_dir / "orphan.rs"
+            undeclared.write_text("// not referenced by any mod\n", encoding="utf-8")
+            sources = m.rust_module_sources(facade)
+            self.assertEqual(
+                sources,
+                [
+                    module_dir / "mod.rs",
+                    module_dir / "alg.rs",
+                    module_dir / "bootstrap.rs",
+                    module_dir / "digest.rs",
+                ],
+            )
+            self.assertNotIn(undeclared, sources)
+
+    def test_undeclared_submodule_file_is_excluded(self):
+        # A required snippet moved into a `.rs` file that no `mod NAME;`
+        # declaration references is NOT part of the compiled verify path, so it
+        # must not satisfy the policy: the snippet must still be reported missing.
+        alg_without_snippet = self.ALG.replace(
+            'SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87")', "suite_other()"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = self._write_split_module(Path(tmp))
+            module_dir = facade.with_suffix("")
+            (module_dir / "alg.rs").write_text(alg_without_snippet, encoding="utf-8")
+            orphan = module_dir / "orphan.rs"  # present on disk, declared by nothing
+            orphan.write_text(
+                'fn o() { SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87"); }\n', encoding="utf-8"
+            )
+            sources = m.rust_module_sources(facade)
+            self.assertNotIn(orphan, sources)
+            errors = m.check_required_snippets(
+                facade, self._module_text(facade), m.RUST_VERIFY_REQUIRED_SNIPPETS
+            )
+            joined = "\n".join(errors)
+            self.assertIn("missing required snippet", joined)
+            self.assertIn('SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87")', joined)
+
+    def test_declared_child_modules_excludes_cfg_test_and_inline(self):
+        text = (
+            "pub mod alg;\n"
+            "pub(crate) mod binding;\n"
+            "#[cfg(test)]\nmod tests;\n"
+            "#[cfg(test)]\npub mod test_helpers;\n"
+            "mod inline { fn f() {} }\n"
+        )
+        self.assertEqual(m.declared_child_modules(text), ["alg", "binding"])
+
+    def test_declared_child_modules_keeps_cfg_test_across_intervening_comments(self):
+        # In Rust, comments/doc comments between `#[cfg(test)]` and `mod tests;`
+        # are trivia and do not detach the attribute, so the module is still
+        # test-only and must be excluded. Covers line, doc, and block comments.
+        text = (
+            "pub mod alg;\n"
+            "#[cfg(test)]\n"
+            "/// doc comment between attribute and item\n"
+            "// another line comment\n"
+            "mod tests;\n"
+            "#[cfg(test)]\n"
+            "/* block comment\n   spanning two lines */\n"
+            "mod more_tests;\n"
+            "pub mod binding;\n"
+        )
+        self.assertEqual(m.declared_child_modules(text), ["alg", "binding"])
 
     def test_required_snippets_found_across_split_module(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -626,6 +712,37 @@ class RustModuleResolutionTests(unittest.TestCase):
                 any("fn ensure_openssl_bootstrap()" in err for err in errors),
                 errors,
             )
+
+    def test_cfg_test_module_sources_are_excluded(self):
+        # A `#[cfg(test)] mod tests;` declaration is test-only and not the
+        # production verify path: a required snippet living ONLY in that module
+        # must not satisfy the binding policy, and resolution must drop it.
+        facade_with_tests = self.FACADE + "#[cfg(test)]\nmod tests;\n"
+        alg_without_snippet = self.ALG.replace(
+            'SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87")', "suite_other()"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            facade = self._write_split_module(Path(tmp), facade=facade_with_tests)
+            module_dir = facade.with_suffix("")
+            # remove the snippet from the production submodule ...
+            (module_dir / "alg.rs").write_text(alg_without_snippet, encoding="utf-8")
+            # ... and (spuriously) place it only in the cfg(test) module.
+            tests_dir = module_dir / "tests"
+            tests_dir.mkdir()
+            test_file = tests_dir / "mod.rs"
+            test_file.write_text(
+                'fn t() { SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87"); }\n', encoding="utf-8"
+            )
+            sources = m.rust_module_sources(facade)
+            self.assertNotIn(test_file, sources)
+            errors = m.check_required_snippets(
+                facade, self._module_text(facade), m.RUST_VERIFY_REQUIRED_SNIPPETS
+            )
+            # Pin the owning diagnostic: the snippet that exists only in the
+            # cfg(test) module must be reported missing by name.
+            joined = "\n".join(errors)
+            self.assertIn("missing required snippet", joined)
+            self.assertIn('SUITE_ID_ML_DSA_87 => Ok(c"ML-DSA-87")', joined)
 
     def test_repo_rust_verify_module_satisfies_required_snippets(self):
         # Guard against future drift: the real in-tree module must satisfy every
