@@ -76,11 +76,7 @@ def main() -> int:
     args = parser.parse_args()
     data = corpus_bytes()
     if args.check:
-        try:
-            got = OUT.read_bytes()
-        except OSError as exc:
-            print(f"ERROR: read committed corpus: {exc}", file=sys.stderr)
-            return 1
+        got = OUT.read_bytes()
         if got != data:
             print(f"ERROR: {OUT.relative_to(ROOT)} is stale; rerun this generator", file=sys.stderr)
             return 1

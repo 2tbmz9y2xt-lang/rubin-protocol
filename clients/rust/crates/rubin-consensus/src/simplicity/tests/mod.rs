@@ -54,13 +54,16 @@ fn decode_vectors_match_go_reference() {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SharedCorpus {
     contract_version: u32,
     fixture_kind: String,
+    description: String,
     cases: Vec<SharedCase>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SharedCase {
     id: String,
     program_hex: String,
@@ -80,6 +83,7 @@ fn shared_encoding_corpus_matches_go_reference() {
     let corpus: SharedCorpus = serde_json::from_str(&raw).expect("parse shared corpus");
     assert_eq!(corpus.contract_version, 1);
     assert_eq!(corpus.fixture_kind, "simplicity_program_encoding_cmr_v1");
+    assert!(!corpus.description.is_empty());
     assert!(!corpus.cases.is_empty());
     for case in corpus.cases {
         let got = decode(

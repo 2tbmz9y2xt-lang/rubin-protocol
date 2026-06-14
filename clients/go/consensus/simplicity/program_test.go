@@ -74,6 +74,7 @@ func TestSharedEncodingCorpus(t *testing.T) {
 	var corpus struct {
 		ContractVersion int    `json:"contract_version"`
 		FixtureKind     string `json:"fixture_kind"`
+		Description     string `json:"description"`
 		Cases           []struct {
 			ID               string `json:"id"`
 			ProgramHex       string `json:"program_hex"`
@@ -88,8 +89,13 @@ func TestSharedEncodingCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read shared corpus: %v", err)
 	}
-	if err := json.Unmarshal(raw, &corpus); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&corpus); err != nil {
 		t.Fatalf("parse shared corpus: %v", err)
+	}
+	if decoder.InputOffset() != int64(len(bytes.TrimSpace(raw))) {
+		t.Fatal("parse shared corpus: trailing data")
 	}
 	if corpus.ContractVersion != 1 || corpus.FixtureKind != "simplicity_program_encoding_cmr_v1" || len(corpus.Cases) == 0 {
 		t.Fatalf("bad shared corpus header: version=%d kind=%q cases=%d", corpus.ContractVersion, corpus.FixtureKind, len(corpus.Cases))
