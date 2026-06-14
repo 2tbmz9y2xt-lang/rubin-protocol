@@ -1,4 +1,6 @@
 use super::*;
+use serde::Deserialize;
+use std::{fs, path::PathBuf};
 
 const C1: &str = "c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7";
 const C2: &str = "afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434";
@@ -48,6 +50,81 @@ fn decode_vectors_match_go_reference() {
                 assert_eq!(got.jet.map(|j| (j.id, j.sub_op, j.name, j.selector_bit_len, j.selector_padded, j.cmr)), match *program { "60" => Some((0x0001, 0x00, "sha3_256", 2, &[0x00][..], hex32(C5).unwrap())), "70" => Some((0x0002, 0x00, "mldsa87_verify", 4, &[0x80][..], hex32(C6).unwrap())), _ => None });
             }
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedCorpus {
+    contract_version: u32,
+    fixture_kind: String,
+    description: String,
+    cases: Vec<SharedCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedCase {
+    id: String,
+    program_hex: String,
+    witness_hex: String,
+    semantics_version: u32,
+    #[serde(default)]
+    covenant_cmr_hex: String,
+    #[serde(default)]
+    expected_cmr_hex: String,
+    #[serde(default)]
+    expected_error: String,
+}
+
+#[test]
+fn shared_encoding_corpus_matches_go_reference() {
+    let raw = fs::read_to_string(corpus_path()).expect("read shared corpus");
+    let corpus: SharedCorpus = serde_json::from_str(&raw).expect("parse shared corpus");
+    assert_eq!(corpus.contract_version, 1);
+    assert_eq!(corpus.fixture_kind, "simplicity_program_encoding_cmr_v1");
+    assert!(!corpus.description.is_empty());
+    assert!(!corpus.cases.is_empty());
+    for case in corpus.cases {
+        let got = decode(
+            &hx(&case.program_hex),
+            &hx(&case.witness_hex),
+            opts(case.semantics_version, &case.covenant_cmr_hex),
+        );
+        if !case.expected_error.is_empty() {
+            let want = error_code(&case.expected_error).unwrap_or_else(|| {
+                panic!(
+                    "{}: unknown expected error {}",
+                    case.id, case.expected_error
+                )
+            });
+            match got {
+                Ok(decoded) => panic!(
+                    "{}: expected error {}, decoded cmr={}",
+                    case.id,
+                    case.expected_error,
+                    hex::encode(decoded.cmr)
+                ),
+                Err(err) => assert_eq!(err.code, want, "{}", case.id),
+            }
+            continue;
+        }
+        let decoded = match got {
+            Ok(decoded) => decoded,
+            Err(err) => panic!(
+                "{}: expected cmr {}, got error {}",
+                case.id,
+                case.expected_cmr_hex,
+                err.code.as_str()
+            ),
+        };
+        let want_cmr = hex32(&case.expected_cmr_hex).unwrap_or_else(|_| {
+            panic!(
+                "{}: invalid expected cmr {}",
+                case.id, case.expected_cmr_hex
+            )
+        });
+        assert_eq!(decoded.cmr, want_cmr, "{}", case.id);
     }
 }
 
@@ -104,4 +181,23 @@ fn opts(version: u32, covenant: &str) -> DecodeOptions { DecodeOptions { semanti
 
 fn optional_cmr(s: &str) -> Option<[u8; 32]> {
     (!s.is_empty()).then(|| hex32(s).unwrap())
+}
+
+fn corpus_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push(
+        "../../../../conformance/fixtures/protocol/simplicity_program_encoding_corpus_v1.json",
+    );
+    path
+}
+
+fn error_code(s: &str) -> Option<ErrorCode> {
+    [
+        ErrorCode::Decode,
+        ErrorCode::ProgramTooLarge,
+        ErrorCode::CmrMismatch,
+        ErrorCode::JetDisallowed,
+    ]
+    .into_iter()
+    .find(|code| code.as_str() == s)
 }
