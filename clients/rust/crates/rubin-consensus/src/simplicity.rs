@@ -1,4 +1,5 @@
 use core::fmt;
+use std::sync::OnceLock;
 
 use sha2::{compress256, digest::generic_array::GenericArray};
 
@@ -14,7 +15,7 @@ pub const PROGRAM_ENCODING_HASH: [u8; 32] = [
 pub enum ErrorCode { Decode, ProgramTooLarge, CmrMismatch, JetDisallowed }
 
 #[rustfmt::skip]
-impl ErrorCode { pub fn as_str(self) -> &'static str { match self { Self::Decode => "TX_ERR_SIMPLICITY_DECODE", Self::ProgramTooLarge => "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE", Self::CmrMismatch => "TX_ERR_SIMPLICITY_CMR_MISMATCH", Self::JetDisallowed => "TX_ERR_SIMPLICITY_JET_DISALLOWED" } } }
+impl ErrorCode { pub fn as_str(self) -> &'static str { ["TX_ERR_SIMPLICITY_DECODE", "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE", "TX_ERR_SIMPLICITY_CMR_MISMATCH", "TX_ERR_SIMPLICITY_JET_DISALLOWED"][self as usize] } }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
@@ -58,7 +59,8 @@ pub fn decode(program: &[u8], witness: &[u8], opts: DecodeOptions) -> Result<Pro
 
 #[rustfmt::skip]
 pub fn lookup_jet(id: u16, sub_op: u8) -> Option<Jet> {
-    JET_ROWS.iter().find(|row| (row.id, row.sub_op) == (id, sub_op)).and_then(jet)
+    static JETS: OnceLock<Vec<Jet>> = OnceLock::new();
+    JETS.get_or_init(|| JET_ROWS.iter().filter_map(jet).collect()).iter().copied().find(|jet| (jet.id, jet.sub_op) == (id, sub_op))
 }
 
 #[rustfmt::skip]

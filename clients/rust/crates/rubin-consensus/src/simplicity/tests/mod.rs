@@ -12,11 +12,15 @@ const DE: Option<ErrorCode> = Some(ErrorCode::Decode);
 const CM: Option<ErrorCode> = Some(ErrorCode::CmrMismatch);
 const JD: Option<ErrorCode> = Some(ErrorCode::JetDisallowed);
 
-const DECODE_CASES: &[(&str, &str, u32, &str, Option<&str>, Option<ErrorCode>)] = &[
+#[rustfmt::skip]
+type DecodeCase = (&'static str, &'static str, u32, &'static str, Option<&'static str>, Option<ErrorCode>);
+
+const DECODE_CASES: &[DecodeCase] = &[
     ("24", "", SEMANTICS_VERSION, "", Some(C1), None),
     ("c1220f0100", "", SEMANTICS_VERSION, "", Some(C2), None),
     ("8900", "", SEMANTICS_VERSION, "", Some(C3), None),
     ("c1d21014", "00", SEMANTICS_VERSION, C4, Some(C4), None),
+    ("c1d21014", "80", SEMANTICS_VERSION, C4, Some(C4), None),
     ("60", "", SEMANTICS_VERSION, "", Some(C5), None),
     ("70", "", SEMANTICS_VERSION, "", Some(C6), None),
     ("24", "", 2, "", None, DE),
