@@ -166,8 +166,105 @@ fn rubin_jet_cmr_examples_match_go_reference() {
     );
 }
 
+#[test]
+#[rustfmt::skip]
+fn evaluate_charges_decoded_program_steps() {
+    for (program, witness, cost) in [("24", "", 1), ("8900", "", 2), ("c1220f0100", "", 4), ("c1d21014", "00", 4)] {
+        assert_eq!(decoded(program, witness).evaluate(EvalOptions::default()).unwrap(), EvalResult { accepted: true, cost: cost * STEP_COST });
+    }
+}
+
+#[test]
+fn evaluate_jet_requires_cost_hook() {
+    let err = decoded("60", "")
+        .evaluate(EvalOptions::default())
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::JetDisallowed);
+    assert_eq!(err.result, EvalResult::default());
+}
+
+#[test]
+#[rustfmt::skip]
+fn evaluate_ignores_public_jet_without_decoded_key() {
+    let hook = |_: Jet| Ok(ok(1));
+    let program = Program { jet: Some(lookup_jet(0x0001, 0x00).unwrap()), ..internal_program(0, false, None) };
+    assert_eq!(program.evaluate(with_jet_hook(&hook)).unwrap_err().code, ErrorCode::Decode);
+}
+
+#[test]
+#[rustfmt::skip]
+fn evaluate_uses_decoded_jet_identity() {
+    let mut program = decoded("60", "");
+    let original = program.jet.unwrap();
+    program.jet = Some(Jet { name: "forged", ..original });
+    let hook = |jet: Jet| {
+        assert_eq!((jet.id, jet.sub_op, jet.name), (0x0001, 0x00, "sha3_256"));
+        Ok(ok(1))
+    };
+    assert_eq!(program.evaluate(with_jet_hook(&hook)).unwrap(), ok(1));
+}
+
+#[test]
+#[rustfmt::skip]
+fn evaluate_jet_cost_hook_cap_boundary() {
+    let program = decoded("60", "");
+    for cost in [0, MAX_EXEC_COST - 1, MAX_EXEC_COST] {
+        let hook = |_: Jet| Ok(ok(cost));
+        assert_eq!(program.evaluate(with_jet_hook(&hook)).unwrap(), ok(cost));
+    }
+    let hook = |_: Jet| Ok(ok(MAX_EXEC_COST + 1));
+    let err = program.evaluate(with_jet_hook(&hook)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BudgetExceeded);
+    assert_eq!(err.result, ok(MAX_EXEC_COST));
+}
+
+#[test]
+#[rustfmt::skip]
+fn evaluate_jet_rejects_failed_hook_result() {
+    let program = decoded("60", "");
+    let hook = |_: Jet| Ok(rejected(3));
+    let err = program.evaluate(with_jet_hook(&hook)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Rejected);
+    assert_eq!(err.result, rejected(3));
+}
+
+#[test]
+#[rustfmt::skip]
+fn evaluate_internal_fail_closed_paths() {
+    assert_eq!(internal_program(0, false, None).evaluate(EvalOptions::default()).unwrap_err().code, ErrorCode::Decode);
+    let hook = |_: Jet| Ok(ok(0));
+    assert_eq!(internal_program(0, true, Some((0xffff, 0x00))).evaluate(with_jet_hook(&hook)).unwrap_err().code, ErrorCode::Decode);
+    let hook_error = |_: Jet| Err(EvalError { code: ErrorCode::Decode, result: ok(9) });
+    let err = decoded("60", "").evaluate(with_jet_hook(&hook_error)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Decode);
+    assert_eq!(err.result, EvalResult::default());
+    let err = internal_program(MAX_EXEC_COST / STEP_COST + 1, false, None)
+        .evaluate(EvalOptions::default())
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BudgetExceeded);
+    assert_eq!(err.result, ok(MAX_EXEC_COST));
+}
+
 fn hx(s: &str) -> Vec<u8> {
     hex::decode(s).unwrap()
+}
+
+fn decoded(program: &str, witness: &str) -> Program {
+    decode(&hx(program), &hx(witness), opts(SEMANTICS_VERSION, "")).unwrap()
+}
+
+#[rustfmt::skip]
+fn ok(cost: u64) -> EvalResult { EvalResult { accepted: true, cost } }
+
+#[rustfmt::skip]
+fn rejected(cost: u64) -> EvalResult { EvalResult { accepted: false, cost } }
+
+#[rustfmt::skip]
+fn with_jet_hook<'a>(hook: &'a dyn Fn(Jet) -> Result<EvalResult, EvalError>) -> EvalOptions<'a> { EvalOptions { jet_evaluator: Some(hook) } }
+
+#[rustfmt::skip]
+fn internal_program(eval_steps: u64, has_jet: bool, jet_key: Option<JetKey>) -> Program {
+    Program { cmr: [0; 32], jet: None, needs_witness: false, max_witness_len: 0, witness_kind: WitnessKind::None, eval_steps, has_jet, jet_key }
 }
 
 fn decode_err(program: &[u8], witness: &[u8]) -> ErrorCode {
@@ -197,6 +294,8 @@ fn error_code(s: &str) -> Option<ErrorCode> {
         ErrorCode::ProgramTooLarge,
         ErrorCode::CmrMismatch,
         ErrorCode::JetDisallowed,
+        ErrorCode::BudgetExceeded,
+        ErrorCode::Rejected,
     ]
     .into_iter()
     .find(|code| code.as_str() == s)

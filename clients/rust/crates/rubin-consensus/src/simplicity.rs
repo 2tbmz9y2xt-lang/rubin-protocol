@@ -5,6 +5,8 @@ use sha2::{compress256, digest::generic_array::GenericArray};
 
 pub const SEMANTICS_VERSION: u32 = 1;
 pub const MAX_PROGRAM_BYTES: usize = 16_384;
+pub const MAX_EXEC_COST: u64 = 400_000;
+pub const STEP_COST: u64 = 1;
 #[rustfmt::skip]
 pub const PROGRAM_ENCODING_HASH: [u8; 32] = [
     0x27, 0xe5, 0xad, 0x52, 0x1e, 0xfd, 0xf9, 0xd1, 0x85, 0xc1, 0xc9, 0x2a, 0x3a, 0x1a, 0x4a, 0xac, 0xc9, 0x27, 0x6c, 0x2a, 0x5b, 0x1b, 0x85, 0x18, 0xce, 0x25, 0xc8, 0xc9, 0x73, 0xa3, 0x8a, 0xdc,
@@ -12,10 +14,10 @@ pub const PROGRAM_ENCODING_HASH: [u8; 32] = [
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
-pub enum ErrorCode { Decode, ProgramTooLarge, CmrMismatch, JetDisallowed }
+pub enum ErrorCode { Decode, ProgramTooLarge, CmrMismatch, JetDisallowed, BudgetExceeded, Rejected }
 
 #[rustfmt::skip]
-impl ErrorCode { pub fn as_str(self) -> &'static str { match self { Self::Decode => "TX_ERR_SIMPLICITY_DECODE", Self::ProgramTooLarge => "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE", Self::CmrMismatch => "TX_ERR_SIMPLICITY_CMR_MISMATCH", Self::JetDisallowed => "TX_ERR_SIMPLICITY_JET_DISALLOWED" } } }
+impl ErrorCode { pub fn as_str(self) -> &'static str { match self { Self::Decode => "TX_ERR_SIMPLICITY_DECODE", Self::ProgramTooLarge => "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE", Self::CmrMismatch => "TX_ERR_SIMPLICITY_CMR_MISMATCH", Self::JetDisallowed => "TX_ERR_SIMPLICITY_JET_DISALLOWED", Self::BudgetExceeded => "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", Self::Rejected => "TX_ERR_SIMPLICITY_REJECTED" } } }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
@@ -35,11 +37,37 @@ pub struct DecodeOptions { pub semantics_version: u32, pub covenant_program_cmr:
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
-pub struct Program { pub cmr: [u8; 32], pub jet: Option<Jet>, pub needs_witness: bool, max_witness_len: usize, witness_kind: WitnessKind }
+pub struct Program { pub cmr: [u8; 32], pub jet: Option<Jet>, pub needs_witness: bool, max_witness_len: usize, witness_kind: WitnessKind, eval_steps: u64, has_jet: bool, jet_key: Option<JetKey> }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
 pub struct Jet { pub id: u16, pub sub_op: u8, pub name: &'static str, pub selector_bit_len: usize, pub selector_padded: &'static [u8], pub cmr: [u8; 32] }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct EvalResult { pub accepted: bool, pub cost: u64 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct EvalError { pub code: ErrorCode, pub result: EvalResult }
+
+#[rustfmt::skip]
+impl EvalError {
+    fn new(code: ErrorCode) -> Self { Self { code, result: EvalResult::default() } }
+    fn with_result(code: ErrorCode, result: EvalResult) -> Self { Self { code, result } }
+}
+
+impl fmt::Display for EvalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.code.as_str())
+    }
+}
+
+impl std::error::Error for EvalError {}
+
+#[derive(Default)]
+#[rustfmt::skip]
+pub struct EvalOptions<'a> { pub jet_evaluator: Option<&'a dyn Fn(Jet) -> Result<EvalResult, EvalError>> }
 
 #[rustfmt::skip]
 struct JetRow { id: u16, sub_op: u8, name: &'static str, selector_bit_len: usize, selector_padded: &'static [u8], cmr: &'static str }
@@ -47,6 +75,8 @@ struct JetRow { id: u16, sub_op: u8, name: &'static str, selector_bit_len: usize
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
 enum WitnessKind { None, Bool }
+
+type JetKey = (u16, u8);
 
 #[rustfmt::skip]
 pub fn decode(program: &[u8], witness: &[u8], opts: DecodeOptions) -> Result<Program, Error> {
@@ -64,6 +94,43 @@ pub fn lookup_jet(id: u16, sub_op: u8) -> Option<Jet> {
 }
 
 #[rustfmt::skip]
+impl Program {
+    pub fn evaluate(&self, opts: EvalOptions<'_>) -> Result<EvalResult, EvalError> {
+        if self.has_jet { return self.evaluate_jet(opts); }
+        if self.eval_steps == 0 { return Err(EvalError::new(ErrorCode::Decode)); }
+        evaluate_steps(self.eval_steps)
+    }
+
+    fn evaluate_jet(&self, opts: EvalOptions<'_>) -> Result<EvalResult, EvalError> {
+        let evaluator = opts.jet_evaluator.ok_or_else(|| EvalError::new(ErrorCode::JetDisallowed))?;
+        let jet = decoded_jet(self.jet_key)?;
+        metered_jet_result(evaluator(jet).map_err(|err| EvalError::new(err.code))?)
+    }
+}
+
+#[rustfmt::skip]
+fn evaluate_steps(steps: u64) -> Result<EvalResult, EvalError> {
+    let max_steps = MAX_EXEC_COST.checked_div(STEP_COST).unwrap_or(u64::MAX);
+    if steps > max_steps { return Err(EvalError::with_result(ErrorCode::BudgetExceeded, EvalResult { accepted: true, cost: MAX_EXEC_COST })); }
+    Ok(EvalResult { accepted: true, cost: steps * STEP_COST })
+}
+
+#[rustfmt::skip]
+fn decoded_jet(key: Option<JetKey>) -> Result<Jet, EvalError> {
+    let (id, sub_op) = key.ok_or_else(|| EvalError::new(ErrorCode::Decode))?;
+    lookup_jet(id, sub_op).ok_or_else(|| EvalError::new(ErrorCode::Decode))
+}
+
+#[rustfmt::skip]
+fn metered_jet_result(mut result: EvalResult) -> Result<EvalResult, EvalError> {
+    if result.cost > MAX_EXEC_COST {
+        result.cost = MAX_EXEC_COST;
+        return Err(EvalError::with_result(ErrorCode::BudgetExceeded, result));
+    }
+    if result.accepted { Ok(result) } else { Err(EvalError::with_result(ErrorCode::Rejected, result)) }
+}
+
+#[rustfmt::skip]
 pub fn rubin_jet_cmr(identity_hash: [u8; 32], jet_weight: u64) -> [u8; 32] {
     let mut state = [0x9532ee28, 0xcdca69de, 0xc8a0a218, 0xb79be362, 0xf740ceaf, 0x647f15b3, 0x8aed9168, 0x163f921b];
     let mut block = [0u8; 64];
@@ -78,10 +145,10 @@ pub fn rubin_jet_cmr(identity_hash: [u8; 32], jet_weight: u64) -> [u8; 32] {
 #[rustfmt::skip]
 fn decode_program(program: &[u8]) -> Result<Program, Error> {
     match program {
-        [0x24] => program_entry("c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7", None, WitnessKind::None),
-        [0xc1, 0x22, 0x0f, 0x01, 0x00] => program_entry("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434", None, WitnessKind::None),
-        [0x89, 0x00] => program_entry("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726", None, WitnessKind::None),
-        [0xc1, 0xd2, 0x10, 0x14] => program_entry("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83", None, WitnessKind::Bool),
+        [0x24] => program_entry("c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7", None, WitnessKind::None, 1),
+        [0xc1, 0x22, 0x0f, 0x01, 0x00] => program_entry("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434", None, WitnessKind::None, 4),
+        [0x89, 0x00] => program_entry("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726", None, WitnessKind::None, 2),
+        [0xc1, 0xd2, 0x10, 0x14] => program_entry("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83", None, WitnessKind::Bool, 4),
         [0x60] => lookup_jet(0x0001, 0x00).map(jet_entry).ok_or(Error { code: ErrorCode::Decode }),
         [0x70] => lookup_jet(0x0002, 0x00).map(jet_entry).ok_or(Error { code: ErrorCode::Decode }),
         [0x7c, 0x06, 0x80] => Err(Error { code: ErrorCode::JetDisallowed }),
@@ -90,14 +157,15 @@ fn decode_program(program: &[u8]) -> Result<Program, Error> {
 }
 
 #[rustfmt::skip]
-fn program_entry(cmr: &str, jet: Option<Jet>, witness_kind: WitnessKind) -> Result<Program, Error> {
+fn program_entry(cmr: &str, jet: Option<Jet>, witness_kind: WitnessKind, eval_steps: u64) -> Result<Program, Error> {
     let needs_witness = witness_kind == WitnessKind::Bool;
-    Ok(Program { cmr: hex32(cmr)?, jet, needs_witness, max_witness_len: usize::from(needs_witness), witness_kind })
+    let jet_key = jet.map(|j| (j.id, j.sub_op));
+    Ok(Program { cmr: hex32(cmr)?, jet, needs_witness, max_witness_len: usize::from(needs_witness), witness_kind, eval_steps, has_jet: jet_key.is_some(), jet_key })
 }
 
 #[rustfmt::skip]
 fn jet_entry(jet: Jet) -> Program {
-    Program { cmr: jet.cmr, jet: Some(jet), needs_witness: false, max_witness_len: 0, witness_kind: WitnessKind::None }
+    Program { cmr: jet.cmr, jet: Some(jet), needs_witness: false, max_witness_len: 0, witness_kind: WitnessKind::None, eval_steps: 0, has_jet: true, jet_key: Some((jet.id, jet.sub_op)) }
 }
 
 #[rustfmt::skip]
