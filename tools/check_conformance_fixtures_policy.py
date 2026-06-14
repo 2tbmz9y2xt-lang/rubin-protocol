@@ -33,21 +33,23 @@ def git_ref_exists(ref: str) -> bool:
     return p.returncode == 0
 
 
-def changed_files() -> list[str]:
+def select_diff_ref() -> str:
     base_ref = os.getenv("GITHUB_BASE_REF", "").strip()
     if base_ref and is_safe_git_ref(base_ref):
         run(["git", "fetch", "--depth=1", "origin", base_ref], check=False)
-        diff_ref = f"origin/{base_ref}...HEAD"
+        return f"origin/{base_ref}...HEAD"
     elif base_ref:
         print(f"WARN: ignoring unsafe GITHUB_BASE_REF={base_ref!r}", file=sys.stderr)
-        diff_ref = "origin/main...HEAD" if git_ref_exists("origin/main") else "HEAD~1..HEAD"
+        return "origin/main...HEAD" if git_ref_exists("origin/main") else "HEAD~1..HEAD"
     elif git_ref_exists("origin/main"):
-        diff_ref = "origin/main...HEAD"
+        return "origin/main...HEAD"
     elif git_ref_exists("main"):
-        diff_ref = "main...HEAD"
-    else:
-        diff_ref = "HEAD~1..HEAD"
+        return "main...HEAD"
+    return "HEAD~1..HEAD"
 
+
+def changed_files() -> list[str]:
+    diff_ref = select_diff_ref()
     p = run(["git", "diff", "--name-only", "--diff-filter=ACMRT", diff_ref], check=False)
     if p.returncode != 0:
         p = run(["git", "diff", "--name-only", "--diff-filter=ACMRT", "HEAD~1..HEAD"], check=False)
@@ -86,6 +88,23 @@ def changed_files() -> list[str]:
     return sorted(files)
 
 
+def changelog_added_text() -> str:
+    added: list[str] = []
+    commands = [
+        ["git", "diff", "--unified=0", select_diff_ref(), "--", CHANGELOG.as_posix()],
+        ["git", "diff", "--unified=0", "--", CHANGELOG.as_posix()],
+        ["git", "diff", "--cached", "--unified=0", "--", CHANGELOG.as_posix()],
+    ]
+    for cmd in commands:
+        p = run(cmd, check=False)
+        if p.returncode != 0:
+            continue
+        for line in p.stdout.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                added.append(line[1:])
+    return "\n".join(added)
+
+
 def check_generator_not_in_ci(errors: list[str]) -> None:
     if not WORKFLOWS_DIR.exists():
         errors.append("missing .github/workflows")
@@ -117,16 +136,15 @@ def check_fixture_changelog_guard(changed: list[str], errors: list[str]) -> None
         )
         return
 
-    try:
-        changelog_text = (ROOT / CHANGELOG).read_text(encoding="utf-8", errors="strict")
-    except FileNotFoundError:
+    if not (ROOT / CHANGELOG).exists():
         errors.append("missing conformance/fixtures/CHANGELOG.md")
         return
+    changelog_text = changelog_added_text()
 
     for fixture_path in fixtures_changed:
         name = Path(fixture_path).name
         if name not in changelog_text:
-            errors.append(f"CHANGELOG.md missing reference for changed fixture {name}")
+            errors.append(f"CHANGELOG.md missing fresh entry for changed fixture {name}")
 
 
 def main() -> int:

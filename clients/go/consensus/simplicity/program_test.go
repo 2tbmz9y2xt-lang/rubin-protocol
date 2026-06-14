@@ -86,7 +86,7 @@ func TestSharedEncodingCorpus(t *testing.T) {
 			ExpectedError    string `json:"expected_error"`
 		} `json:"cases"`
 	}
-	raw, err := os.ReadFile(repoPath("conformance", "fixtures", "protocol", "simplicity_program_encoding_corpus_v1.json"))
+	raw, err := os.ReadFile(repoPath(t, "conformance", "fixtures", "protocol", "simplicity_program_encoding_corpus_v1.json"))
 	if err != nil {
 		t.Fatalf("read shared corpus: %v", err)
 	}
@@ -335,10 +335,11 @@ func hx(s string) []byte {
 	return raw
 }
 
-func repoPath(parts ...string) string {
+func repoPath(t *testing.T, parts ...string) string {
+	t.Helper()
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
-		return ""
+		t.Fatal("runtime.Caller(0) failed")
 	}
 	segments := append([]string{filepath.Dir(currentFile), "..", "..", "..", ".."}, parts...)
 	return filepath.Clean(filepath.Join(segments...))
