@@ -1,5 +1,6 @@
-// Package simplicity implements the standalone RUB-482 Go Program Encoding v1
-// and RUB-485 evaluation/metering library for the closed RUB-561 artifact subset.
+// Package simplicity implements the standalone RUB-482 Program Encoding v1
+// library and RUB-485 evaluation/metering library for the closed RUB-561
+// artifact subset.
 //
 // This package is deliberately not wired into consensus dispatch. Do not call it
 // from validation paths until the matching Rust parity and shared conformance
