@@ -8,6 +8,7 @@
 package simplicity
 
 import (
+	"crypto/sha3"
 	"encoding/binary"
 	"encoding/hex"
 	"math/bits"
@@ -18,6 +19,14 @@ const (
 	MaxProgramBytes         = 16_384
 	MaxExecCost      uint64 = 400_000
 	StepCost         uint64 = 1
+
+	CostModelSemanticsVersion uint32 = 2
+	IntrinsicReadCost         uint64 = 1
+	IntrinsicMissCost         uint64 = 1
+	DescriptorHashBaseCost    uint64 = 64
+	DescriptorHashByteCost    uint64 = 1
+	MaxFrameBytes             uint64 = 65_536
+	MaxLiveMemoryBytes        uint64 = 1_048_576
 )
 
 type ErrorCode string
@@ -43,15 +52,16 @@ type DecodeOptions struct {
 }
 
 type Program struct {
-	CMR           [32]byte
-	Jet           *Jet
-	NeedsWitness  bool
-	maxWitnessLen int
-	witnesses     map[witnessKey]struct{}
-	evalSteps     uint64
-	decoded       bool
-	hasJet        bool
-	jetKey        jetKey
+	CMR            [32]byte
+	Jet            *Jet
+	NeedsWitness   bool
+	maxWitnessLen  int
+	witnesses      map[witnessKey]struct{}
+	evalSteps      uint64
+	decoded        bool
+	hasJet         bool
+	jetKey         jetKey
+	frameBitWidths []uint64
 }
 
 type Jet struct {
@@ -102,10 +112,19 @@ func (p Program) Evaluate(opts EvalOptions) (EvalResult, error) {
 		return EvalResult{}, &Error{Code: ErrDecode}
 	}
 	if p.hasJet {
+		if _, ok := jetRows[p.jetKey]; !ok {
+			return EvalResult{}, &Error{Code: ErrDecode}
+		}
+		if err := checkMemoryBounds(p.frameBitWidths); err != nil {
+			return EvalResult{}, err
+		}
 		return p.evaluateJet(opts)
 	}
 	if p.evalSteps == 0 {
 		return EvalResult{}, &Error{Code: ErrDecode}
+	}
+	if err := checkMemoryBounds(p.frameBitWidths); err != nil {
+		return EvalResult{}, err
 	}
 	return evaluateSteps(p.evalSteps)
 }
@@ -170,6 +189,10 @@ func RubinJetCMR(identityHash [32]byte, jetWeight uint64) [32]byte {
 	return out
 }
 
+func CostModelHash() [32]byte {
+	return sha3.Sum256(costModelBytes())
+}
+
 func decodeProgram(program []byte) (Program, error) {
 	entry, ok := programs[string(program)]
 	if !ok {
@@ -214,6 +237,20 @@ type jetKey struct {
 	subOp uint8
 }
 
+type costFormulaID uint8
+
+const (
+	costConstant costFormulaID = iota
+	costBasePlusLen
+	costOnePlusCeilLen32
+)
+
+type costModelRow struct {
+	jet     jetKey
+	formula costFormulaID
+	param   uint64
+}
+
 type witnessKey struct {
 	version uint32
 	bytes   string
@@ -252,12 +289,61 @@ func (m *meter) charge(cost uint64) error {
 	return nil
 }
 
+func checkMemoryBounds(frameBitWidths []uint64) error {
+	var live uint64
+	for _, bits := range frameBitWidths {
+		frame := frameBytes(bits)
+		if frame > MaxFrameBytes || live > MaxLiveMemoryBytes-frame {
+			return &Error{Code: ErrBudgetExceeded}
+		}
+		live += frame
+	}
+	return nil
+}
+
+func frameBytes(bitWidth uint64) uint64 {
+	bytes := bitWidth / 8
+	if bitWidth%8 != 0 {
+		bytes++
+	}
+	return bytes
+}
+
+func costModelBytes() []byte {
+	out := []byte("RUBIN-SIMPLICITY-COST-v1")
+	out = binary.LittleEndian.AppendUint32(out, CostModelSemanticsVersion)
+	for _, v := range []uint64{StepCost, IntrinsicReadCost, IntrinsicMissCost, DescriptorHashBaseCost, DescriptorHashByteCost, MaxFrameBytes, MaxLiveMemoryBytes} {
+		out = binary.LittleEndian.AppendUint64(out, v)
+	}
+	out = append(out, byte(len(costModelRows)))
+	for _, row := range costModelRows {
+		out = binary.LittleEndian.AppendUint16(out, row.jet.id)
+		out = append(out, row.jet.subOp, byte(row.formula))
+		out = binary.LittleEndian.AppendUint64(out, row.param)
+	}
+	return out
+}
+
 var (
 	noWitness     = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: ""}: {}}
 	boolWitness   = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: string([]byte{0x00})}: {}, {version: SemanticsVersion, bytes: string([]byte{0x80})}: {}}
 	sha3JetRow    = jetRows[jetKey{id: 0x0001, subOp: 0x00}]
 	mldsa87JetRow = jetRows[jetKey{id: 0x0002, subOp: 0x00}]
-	programs      = map[string]programEntry{
+	costModelRows = []costModelRow{
+		{jet: jetKey{id: 0x0001, subOp: 0x00}, formula: costBasePlusLen, param: 64},
+		{jet: jetKey{id: 0x0002, subOp: 0x00}, formula: costConstant, param: 50_000},
+		{jet: jetKey{id: 0x0010, subOp: 0x00}, formula: costConstant, param: 1},
+		{jet: jetKey{id: 0x0010, subOp: 0x01}, formula: costConstant, param: 1},
+		{jet: jetKey{id: 0x0010, subOp: 0x02}, formula: costConstant, param: 1},
+		{jet: jetKey{id: 0x0010, subOp: 0x03}, formula: costConstant, param: 1},
+		{jet: jetKey{id: 0x0011, subOp: 0x00}, formula: costConstant, param: 1},
+		{jet: jetKey{id: 0x0011, subOp: 0x01}, formula: costConstant, param: 1},
+		{jet: jetKey{id: 0x0011, subOp: 0x03}, formula: costConstant, param: 1},
+		{jet: jetKey{id: 0x0020, subOp: 0x00}, formula: costOnePlusCeilLen32},
+		{jet: jetKey{id: 0x0020, subOp: 0x01}, formula: costOnePlusCeilLen32},
+		{jet: jetKey{id: 0x0021, subOp: 0x00}, formula: costOnePlusCeilLen32},
+	}
+	programs = map[string]programEntry{
 		string([]byte{0x24}):                         {program: Program{CMR: hex32("c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7"), witnesses: noWitness, evalSteps: 1}},
 		string([]byte{0xc1, 0x22, 0x0f, 0x01, 0x00}): {program: Program{CMR: hex32("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434"), witnesses: noWitness, evalSteps: 4}},
 		string([]byte{0x89, 0x00}):                   {program: Program{CMR: hex32("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726"), witnesses: noWitness, evalSteps: 2}},

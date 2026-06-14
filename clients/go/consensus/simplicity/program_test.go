@@ -228,6 +228,38 @@ func TestEvaluateChargesDecodedProgramSteps(t *testing.T) {
 	}
 }
 
+func TestCostModelHashMatchesSpecArtifact(t *testing.T) {
+	preimage := costModelBytes()
+	wantPreimage := "" +
+		"525542494e2d53494d504c49434954592d434f53542d76310200000001000000000000000100000000000000010000000000000040000000000000000100000000000000000001000000000000001000000000000c" +
+		"0100000140000000000000000200000050c3000000000000100000000100000000000000100001000100000000000000100002000100000000000000100003000100000000000000110000000100000000000000110001000100000000000000110003000100000000000000200000020000000000000000200001020000000000000000210000020000000000000000"
+	if got := hex.EncodeToString(preimage); got != wantPreimage {
+		t.Fatalf("cost preimage=%s want %s", got, wantPreimage)
+	}
+	if got := CostModelHash(); got != hex32("accb55570168bd7b1fedadff2135c99e32508680ff7a315cf4f33f97744aabc9") {
+		t.Fatalf("cost_model_hash=%x", got)
+	}
+}
+
+func TestCostModelRowsMatchJetTable(t *testing.T) {
+	if len(costModelRows) != len(jetRows) || len(costModelRows) >= 253 {
+		t.Fatalf("cost rows=%d jet rows=%d", len(costModelRows), len(jetRows))
+	}
+	var prev jetKey
+	for i, row := range costModelRows {
+		if _, ok := jetRows[row.jet]; !ok {
+			t.Fatalf("cost row %d missing jet %#04x/%#02x", i, row.jet.id, row.jet.subOp)
+		}
+		if i > 0 && (prev.id > row.jet.id || (prev.id == row.jet.id && prev.subOp >= row.jet.subOp)) {
+			t.Fatalf("cost rows not sorted at %d", i)
+		}
+		if row.formula > costOnePlusCeilLen32 || (row.formula == costOnePlusCeilLen32 && row.param != 0) {
+			t.Fatalf("bad cost formula at %d", i)
+		}
+		prev = row.jet
+	}
+}
+
 func TestEvaluateJetRequiresCostHook(t *testing.T) {
 	program := decodeSHA3Jet(t)
 	_, err := program.Evaluate(EvalOptions{})
@@ -279,6 +311,60 @@ func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
 	if !got.Accepted || got.Cost != MaxExecCost {
 		t.Fatalf("evaluation=%+v want accepted saturated cost=%d", got, MaxExecCost)
 	}
+}
+
+func TestEvaluateMemoryBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		frames []uint64
+		want   ErrorCode
+	}{
+		{name: "frame at cap", frames: []uint64{MaxFrameBytes * 8}},
+		{name: "total live at cap", frames: repeated(MaxFrameBytes*8, int(MaxLiveMemoryBytes/MaxFrameBytes))},
+		{name: "frame over cap", frames: []uint64{MaxFrameBytes*8 + 1}, want: ErrBudgetExceeded},
+		{name: "total live over cap", frames: append(repeated(MaxFrameBytes*8, int(MaxLiveMemoryBytes/MaxFrameBytes)), 8), want: ErrBudgetExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Program{decoded: true, evalSteps: 1, frameBitWidths: tt.frames}.Evaluate(EvalOptions{})
+			if tt.want != "" {
+				assertErrorCode(t, err, tt.want)
+				return
+			}
+			if err != nil || !got.Accepted || got.Cost != StepCost {
+				t.Fatalf("evaluation=%+v err=%v want accepted cost=%d", got, err, StepCost)
+			}
+		})
+	}
+
+	calls := 0
+	program := decodeSHA3Jet(t)
+	program.frameBitWidths = []uint64{MaxFrameBytes*8 + 1}
+	_, err := program.Evaluate(EvalOptions{
+		JetEvaluator: func(Jet) (EvalResult, error) {
+			calls++
+			return EvalResult{Accepted: true, Cost: 1}, nil
+		},
+	})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+	if calls != 0 {
+		t.Fatalf("JetEvaluator calls=%d want 0 before memory reject", calls)
+	}
+}
+
+func TestEvaluateMemoryErrorClassPriority(t *testing.T) {
+	overFrame := []uint64{MaxFrameBytes*8 + 1}
+	_, err := Program{frameBitWidths: overFrame}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrDecode)
+
+	_, err = Program{decoded: true, frameBitWidths: overFrame}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrDecode)
+
+	_, err = Program{decoded: true, hasJet: true, jetKey: jetKey{id: 0xffff}, frameBitWidths: overFrame}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrDecode)
+
+	_, err = Program{decoded: true, evalSteps: 1, frameBitWidths: overFrame}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrBudgetExceeded)
 }
 
 func TestEvaluateJetRejectsFailedHookResult(t *testing.T) {
@@ -378,6 +464,14 @@ func evaluateSHA3JetWithResult(t *testing.T, program Program, result EvalResult)
 		t.Fatalf("JetEvaluator calls=%d want 1", calls)
 	}
 	return got, err
+}
+
+func repeated(value uint64, count int) []uint64 {
+	out := make([]uint64, count)
+	for i := range out {
+		out[i] = value
+	}
+	return out
 }
 
 func assertErrorCode(t *testing.T, err error, want ErrorCode) {
