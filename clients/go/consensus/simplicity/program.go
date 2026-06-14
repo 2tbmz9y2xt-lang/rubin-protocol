@@ -133,13 +133,14 @@ func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
 }
 
 func evaluateSteps(steps uint64) (EvalResult, error) {
-	var meter meter
-	for i := uint64(0); i < steps; i++ {
-		if err := meter.charge(StepCost); err != nil {
-			return EvalResult{Cost: meter.cost}, err
-		}
+	if StepCost == 0 {
+		return EvalResult{Accepted: true}, nil
 	}
-	return EvalResult{Accepted: true, Cost: meter.cost}, nil
+	maxSteps := MaxExecCost / StepCost
+	if steps > maxSteps {
+		return EvalResult{Cost: maxSteps * StepCost}, &Error{Code: ErrBudgetExceeded}
+	}
+	return EvalResult{Accepted: true, Cost: steps * StepCost}, nil
 }
 
 func RubinJetCMR(identityHash [32]byte, jetWeight uint64) [32]byte {

@@ -246,8 +246,11 @@ func TestEvaluateInternalFailClosedPaths(t *testing.T) {
 		t.Fatalf("error=%v want sentinel", err)
 	}
 
-	_, err = Program{decoded: true, evalSteps: MaxExecCost + 1}.Evaluate(EvalOptions{})
+	got, err := Program{decoded: true, evalSteps: MaxExecCost + 1}.Evaluate(EvalOptions{})
 	assertErrorCode(t, err, ErrBudgetExceeded)
+	if got.Cost != MaxExecCost {
+		t.Fatalf("over-cap cost=%d want %d", got.Cost, MaxExecCost)
+	}
 }
 
 func TestRubinJetCMRHelperExamples(t *testing.T) {
