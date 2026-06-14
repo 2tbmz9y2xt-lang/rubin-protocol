@@ -1,0 +1,179 @@
+package simplicity
+
+import (
+	"bytes"
+	"encoding/hex"
+	"errors"
+	"testing"
+)
+
+var errSink error
+
+func TestDecodeVectors(t *testing.T) {
+	tests := []struct {
+		id        string
+		program   []byte
+		witness   []byte
+		alternate []byte
+		version   uint32
+		covenant  string
+		wantCMR   string
+		wantError ErrorCode
+	}{
+		{id: "VEC-PE-001", program: hx("24"), version: 1, wantCMR: "c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7"},
+		{id: "VEC-PE-002", program: hx("c1220f0100"), version: 1, wantCMR: "afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434"},
+		{id: "VEC-PE-003", program: hx("8900"), version: 1, wantCMR: "d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726"},
+		{id: "VEC-PE-004", program: hx("c1d21014"), witness: hx("00"), alternate: hx("80"), version: 1, covenant: "d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83", wantCMR: "d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83"},
+		{id: "VEC-PE-005", program: hx("60"), version: 1, wantCMR: "3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637"},
+		{id: "VEC-PE-006", program: hx("70"), version: 1, wantCMR: "f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941"},
+		{id: "VEC-PE-007", program: hx("24"), version: 2, wantError: ErrDecode},
+		{id: "VEC-PE-008", program: hx("25"), version: 1, wantError: ErrDecode},
+		{id: "VEC-PE-009", program: append([]byte{0x24}, make([]byte, MaxProgramBytes)...), version: 1, wantError: ErrProgramTooLarge},
+		{id: "VEC-PE-010", program: hx("24"), version: 1, covenant: "0000000000000000000000000000000000000000000000000000000000000000", wantError: ErrCMRMismatch},
+		{id: "VEC-PE-011", program: append([]byte{0x28}, make([]byte, 64)...), version: 1, wantError: ErrDecode},
+		{id: "VEC-PE-012", program: hx("8958"), version: 1, wantError: ErrDecode},
+		{id: "VEC-PE-013", program: hx("7c0680"), version: 1, wantError: ErrJetDisallowed},
+		{id: "VEC-PE-014", program: hx("c1d21014"), version: 1, wantError: ErrDecode},
+		{id: "VEC-PE-015", program: hx("c1d21014"), witness: hx("01"), version: 1, wantError: ErrDecode},
+		{id: "VEC-PE-016", program: hx("c1d21014"), witness: hx("0000"), version: 1, wantError: ErrDecode},
+		{id: "VEC-PE-017", program: hx("2400"), version: 1, wantError: ErrDecode},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			got, err := Decode(tt.program, tt.witness, DecodeOptions{
+				SemanticsVersion:   tt.version,
+				CovenantProgramCMR: optionalCMR(tt.covenant),
+			})
+			if tt.wantError != "" {
+				assertErrorCode(t, err, tt.wantError)
+				return
+			}
+			if err != nil {
+				t.Fatalf("Decode returned error: %v", err)
+			}
+			wantCMR := hex32(tt.wantCMR)
+			if got.CMR != wantCMR {
+				t.Fatalf("cmr=%x want %s", got.CMR, tt.wantCMR)
+			}
+			if tt.alternate != nil {
+				got, err = Decode(tt.program, tt.alternate, DecodeOptions{SemanticsVersion: tt.version})
+				if err != nil || got.CMR != wantCMR {
+					t.Fatalf("alternate witness cmr=%x err=%v want %x", got.CMR, err, wantCMR)
+				}
+			}
+		})
+	}
+}
+
+func TestProgramSizeBoundary(t *testing.T) {
+	atCap := make([]byte, MaxProgramBytes)
+	atCap[0] = 0x24
+	_, err := Decode(atCap, nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+	assertErrorCode(t, err, ErrDecode)
+
+	tooLarge := append([]byte{0x24}, make([]byte, MaxProgramBytes)...)
+	_, err = Decode(tooLarge, nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+	assertErrorCode(t, err, ErrProgramTooLarge)
+}
+
+func TestDecodeRejectsOversizedWitnessBeforeCopy(t *testing.T) {
+	program := hx("24")
+	witness := bytes.Repeat([]byte{0x01}, MaxProgramBytes*4)
+	allocs := testing.AllocsPerRun(100, func() {
+		_, errSink = Decode(program, witness, DecodeOptions{SemanticsVersion: SemanticsVersion})
+	})
+	if allocs > 1 {
+		t.Fatalf("Decode allocated %.0f times on oversized witness reject", allocs)
+	}
+	assertErrorCode(t, errSink, ErrDecode)
+}
+
+func TestJetRows(t *testing.T) {
+	keys := [][2]uint16{{0x0001, 0}, {0x0002, 0}, {0x0010, 0}, {0x0010, 1}, {0x0010, 2}, {0x0010, 3}, {0x0011, 0}, {0x0011, 1}, {0x0011, 3}, {0x0020, 0}, {0x0020, 1}, {0x0021, 0}}
+	for _, key := range keys {
+		if _, ok := LookupJet(key[0], uint8(key[1])); !ok {
+			t.Fatalf("missing jet row (%#04x,%#02x)", key[0], key[1])
+		}
+	}
+	sha3Row, ok := LookupJet(0x0001, 0x00)
+	if !ok {
+		t.Fatal("missing sha3_256 row")
+	}
+	if sha3Row.Name != "sha3_256" || sha3Row.SelectorBitLen != 2 || !bytes.Equal(sha3Row.SelectorPadded, hx("00")) {
+		t.Fatalf("bad sha3 row: %+v", sha3Row)
+	}
+	if _, ok := LookupJet(0x0011, 0x02); ok {
+		t.Fatal("unexpected u128_checked_mul row")
+	}
+	sha3Row.SelectorPadded[0] = 0xff
+	again, _ := LookupJet(0x0001, 0x00)
+	if !bytes.Equal(again.SelectorPadded, hx("00")) {
+		t.Fatal("LookupJet returned mutable internal selector storage")
+	}
+}
+
+func TestDecodeJetMetadataIsImmutable(t *testing.T) {
+	tests := []struct {
+		program []byte
+		name    string
+		cmr     string
+	}{
+		{program: hx("60"), name: "sha3_256", cmr: "3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637"},
+		{program: hx("70"), name: "mldsa87_verify", cmr: "f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941"},
+	}
+	for _, tt := range tests {
+		first, err := Decode(tt.program, nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+		if err != nil || first.Jet == nil {
+			t.Fatalf("Decode(%x) jet=%v err=%v", tt.program, first.Jet, err)
+		}
+		first.Jet.Name = "corrupted"
+		first.Jet.CMR = [32]byte{}
+		first.Jet.SelectorPadded[0] = 0xff
+
+		again, err := Decode(tt.program, nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+		if err != nil || again.Jet == nil {
+			t.Fatalf("second Decode(%x) jet=%v err=%v", tt.program, again.Jet, err)
+		}
+		if again.Jet.Name != tt.name || again.Jet.CMR != hex32(tt.cmr) || again.Jet.SelectorPadded[0] == 0xff {
+			t.Fatalf("Decode returned mutable jet metadata: %+v", again.Jet)
+		}
+	}
+}
+
+func TestRubinJetCMRHelperExamples(t *testing.T) {
+	zero := [32]byte{}
+	if got := RubinJetCMR(zero, 1); got != hex32("f2a8d5366d7ca4a4960440c95e3c465ea3df2a5a14c0d58198c65d8aa1e796de") {
+		t.Fatalf("zero helper cmr=%x", got)
+	}
+	var ones [32]byte
+	copy(ones[:], "\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11")
+	got := RubinJetCMR(ones, 4_294_967_296)
+	if got != hex32("2e4a23492db398e98317272348128f39da97983f5cbab825d5389c2c8b908e11") {
+		t.Fatalf("ones helper cmr=%x", got)
+	}
+}
+
+func hx(s string) []byte {
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func optionalCMR(s string) *[32]byte {
+	if s == "" {
+		return nil
+	}
+	out := hex32(s)
+	return &out
+}
+
+func assertErrorCode(t *testing.T, err error, want ErrorCode) {
+	t.Helper()
+	var got *Error
+	if !errors.As(err, &got) || got.Code != want {
+		t.Fatalf("error=%v want code %q", err, want)
+	}
+}
