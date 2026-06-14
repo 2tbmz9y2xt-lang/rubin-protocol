@@ -1,3 +1,5 @@
+use core::fmt;
+
 use sha2::{compress256, digest::generic_array::GenericArray};
 
 pub const SEMANTICS_VERSION: u32 = 1;
@@ -17,6 +19,14 @@ impl ErrorCode { pub fn as_str(self) -> &'static str { match self { Self::Decode
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
 pub struct Error { pub code: ErrorCode }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.code.as_str())
+    }
+}
+
+impl std::error::Error for Error {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
@@ -39,10 +49,10 @@ enum WitnessKind { None, Bool }
 
 #[rustfmt::skip]
 pub fn decode(program: &[u8], witness: &[u8], opts: DecodeOptions) -> Result<Program, Error> {
-    if program.len() > MAX_PROGRAM_BYTES { return Err(err(ErrorCode::ProgramTooLarge)); }
+    if program.len() > MAX_PROGRAM_BYTES { return Err(Error { code: ErrorCode::ProgramTooLarge }); }
     let decoded = decode_program(program)?;
-    if opts.covenant_program_cmr.is_some_and(|want| decoded.cmr != want) { return Err(err(ErrorCode::CmrMismatch)); }
-    if witness.len() > decoded.max_witness_len || !witness_allowed(decoded.witness_kind, opts.semantics_version, witness) { return Err(err(ErrorCode::Decode)); }
+    if opts.covenant_program_cmr.is_some_and(|want| decoded.cmr != want) { return Err(Error { code: ErrorCode::CmrMismatch }); }
+    if witness.len() > decoded.max_witness_len || !witness_allowed(decoded.witness_kind, opts.semantics_version, witness) { return Err(Error { code: ErrorCode::Decode }); }
     Ok(decoded)
 }
 
@@ -75,8 +85,8 @@ fn decode_program(program: &[u8]) -> Result<Program, Error> {
         [0xc1, 0xd2, 0x10, 0x14] => program_entry("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83", None, WitnessKind::Bool),
         [0x60] => program_entry("3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637", lookup_jet(0x0001, 0x00), WitnessKind::None),
         [0x70] => program_entry("f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941", lookup_jet(0x0002, 0x00), WitnessKind::None),
-        [0x7c, 0x06, 0x80] => Err(err(ErrorCode::JetDisallowed)),
-        _ => Err(err(ErrorCode::Decode)),
+        [0x7c, 0x06, 0x80] => Err(Error { code: ErrorCode::JetDisallowed }),
+        _ => Err(Error { code: ErrorCode::Decode }),
     }
 }
 
@@ -115,12 +125,9 @@ fn jet(row: &JetRow) -> Option<Jet> {
 #[rustfmt::skip]
 fn hex32(s: &str) -> Result<[u8; 32], Error> {
     let mut out = [0u8; 32];
-    hex::decode_to_slice(s, &mut out).map_err(|_| err(ErrorCode::Decode))?;
+    hex::decode_to_slice(s, &mut out).map_err(|_| Error { code: ErrorCode::Decode })?;
     Ok(out)
 }
-
-#[rustfmt::skip]
-fn err(code: ErrorCode) -> Error { Error { code } }
 
 #[cfg(test)]
 mod tests;
