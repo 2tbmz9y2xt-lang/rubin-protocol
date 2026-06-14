@@ -2,11 +2,19 @@ use core::fmt;
 use std::sync::OnceLock;
 
 use sha2::{compress256, digest::generic_array::GenericArray};
+use sha3::{Digest, Sha3_256};
 
 pub const SEMANTICS_VERSION: u32 = 1;
 pub const MAX_PROGRAM_BYTES: usize = 16_384;
 pub const MAX_EXEC_COST: u64 = 400_000;
 pub const STEP_COST: u64 = 1;
+pub const COST_MODEL_SEMANTICS_VERSION: u32 = 2;
+pub const INTRINSIC_READ_COST: u64 = 1;
+pub const INTRINSIC_MISS_COST: u64 = 1;
+pub const DESCRIPTOR_HASH_BASE_COST: u64 = 64;
+pub const DESCRIPTOR_HASH_BYTE_COST: u64 = 1;
+pub const MAX_FRAME_BYTES: u64 = 65_536;
+pub const MAX_LIVE_MEMORY_BYTES: u64 = 1_048_576;
 #[rustfmt::skip]
 pub const PROGRAM_ENCODING_HASH: [u8; 32] = [
     0x27, 0xe5, 0xad, 0x52, 0x1e, 0xfd, 0xf9, 0xd1, 0x85, 0xc1, 0xc9, 0x2a, 0x3a, 0x1a, 0x4a, 0xac, 0xc9, 0x27, 0x6c, 0x2a, 0x5b, 0x1b, 0x85, 0x18, 0xce, 0x25, 0xc8, 0xc9, 0x73, 0xa3, 0x8a, 0xdc,
@@ -37,7 +45,7 @@ pub struct DecodeOptions { pub semantics_version: u32, pub covenant_program_cmr:
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
-pub struct Program { pub cmr: [u8; 32], pub jet: Option<Jet>, pub needs_witness: bool, max_witness_len: usize, witness_kind: WitnessKind, eval_steps: u64, has_jet: bool, jet_key: Option<JetKey> }
+pub struct Program { pub cmr: [u8; 32], pub jet: Option<Jet>, pub needs_witness: bool, max_witness_len: usize, witness_kind: WitnessKind, eval_steps: u64, decoded: bool, has_jet: bool, jet_key: Option<JetKey>, frame_bit_widths: Vec<u64> }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
@@ -72,6 +80,15 @@ pub struct EvalOptions<'a> { pub jet_evaluator: Option<&'a dyn Fn(Jet) -> Result
 #[rustfmt::skip]
 struct JetRow { id: u16, sub_op: u8, name: &'static str, selector_bit_len: usize, selector_padded: &'static [u8], cmr: &'static str }
 
+#[derive(Clone, Copy)]
+#[rustfmt::skip]
+struct CostModelRow { jet: JetKey, formula: CostFormula, param: u64 }
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+#[rustfmt::skip]
+enum CostFormula { Constant, BasePlusLen, OnePlusCeilLen32 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
 enum WitnessKind { None, Bool }
@@ -81,9 +98,10 @@ type JetKey = (u16, u8);
 #[rustfmt::skip]
 pub fn decode(program: &[u8], witness: &[u8], opts: DecodeOptions) -> Result<Program, Error> {
     if program.len() > MAX_PROGRAM_BYTES { return Err(Error { code: ErrorCode::ProgramTooLarge }); }
-    let decoded = decode_program(program)?;
+    let mut decoded = decode_program(program)?;
     if opts.covenant_program_cmr.is_some_and(|want| decoded.cmr != want) { return Err(Error { code: ErrorCode::CmrMismatch }); }
     if witness.len() > decoded.max_witness_len || !witness_allowed(decoded.witness_kind, opts.semantics_version, witness) { return Err(Error { code: ErrorCode::Decode }); }
+    decoded.decoded = true;
     Ok(decoded)
 }
 
@@ -96,14 +114,17 @@ pub fn lookup_jet(id: u16, sub_op: u8) -> Option<Jet> {
 #[rustfmt::skip]
 impl Program {
     pub fn evaluate(&self, opts: EvalOptions<'_>) -> Result<EvalResult, EvalError> {
+        if !self.decoded { return Err(EvalError::new(ErrorCode::Decode)); }
         if self.has_jet { return self.evaluate_jet(opts); }
         if self.eval_steps == 0 { return Err(EvalError::new(ErrorCode::Decode)); }
+        check_memory_bounds(&self.frame_bit_widths)?;
         evaluate_steps(self.eval_steps)
     }
 
     fn evaluate_jet(&self, opts: EvalOptions<'_>) -> Result<EvalResult, EvalError> {
-        let evaluator = opts.jet_evaluator.ok_or_else(|| EvalError::new(ErrorCode::JetDisallowed))?;
         let jet = decoded_jet(self.jet_key)?;
+        check_memory_bounds(&self.frame_bit_widths)?;
+        let evaluator = opts.jet_evaluator.ok_or_else(|| EvalError::new(ErrorCode::JetDisallowed))?;
         metered_jet_result(evaluator(jet).map_err(|err| EvalError::new(err.code))?)
     }
 }
@@ -128,6 +149,11 @@ fn metered_jet_result(mut result: EvalResult) -> Result<EvalResult, EvalError> {
         return Err(EvalError::with_result(ErrorCode::BudgetExceeded, result));
     }
     if result.accepted { Ok(result) } else { Err(EvalError::with_result(ErrorCode::Rejected, result)) }
+}
+
+#[rustfmt::skip]
+pub fn cost_model_hash() -> [u8; 32] {
+    Sha3_256::digest(cost_model_bytes()).into()
 }
 
 #[rustfmt::skip]
@@ -158,14 +184,50 @@ fn decode_program(program: &[u8]) -> Result<Program, Error> {
 
 #[rustfmt::skip]
 fn program_entry(cmr: &str, jet: Option<Jet>, witness_kind: WitnessKind, eval_steps: u64) -> Result<Program, Error> {
+    let frames = if witness_kind == WitnessKind::Bool { BOOL_FRAMES } else { UNIT_FRAMES };
     let needs_witness = witness_kind == WitnessKind::Bool;
     let jet_key = jet.map(|j| (j.id, j.sub_op));
-    Ok(Program { cmr: hex32(cmr)?, jet, needs_witness, max_witness_len: usize::from(needs_witness), witness_kind, eval_steps, has_jet: jet_key.is_some(), jet_key })
+    Ok(Program { cmr: hex32(cmr)?, jet, needs_witness, max_witness_len: usize::from(needs_witness), witness_kind, eval_steps, decoded: false, has_jet: jet_key.is_some(), jet_key, frame_bit_widths: frames.to_vec() })
 }
 
 #[rustfmt::skip]
 fn jet_entry(jet: Jet) -> Program {
-    Program { cmr: jet.cmr, jet: Some(jet), needs_witness: false, max_witness_len: 0, witness_kind: WitnessKind::None, eval_steps: 0, has_jet: true, jet_key: Some((jet.id, jet.sub_op)) }
+    let frames = match (jet.id, jet.sub_op) { (0x0001, 0x00) => SHA3_FRAMES, (0x0002, 0x00) => MLDSA87_FRAMES, _ => &[] };
+    Program { cmr: jet.cmr, jet: Some(jet), needs_witness: false, max_witness_len: 0, witness_kind: WitnessKind::None, eval_steps: 0, decoded: false, has_jet: true, jet_key: Some((jet.id, jet.sub_op)), frame_bit_widths: frames.to_vec() }
+}
+
+#[rustfmt::skip]
+fn check_memory_bounds(frame_bit_widths: &[u64]) -> Result<(), EvalError> {
+    let mut live = 0u64;
+    for bits in frame_bit_widths {
+        let frame = frame_bytes(*bits);
+        if frame > MAX_FRAME_BYTES || live > MAX_LIVE_MEMORY_BYTES - frame { return Err(EvalError::new(ErrorCode::BudgetExceeded)); }
+        live += frame;
+    }
+    Ok(())
+}
+
+#[rustfmt::skip]
+fn frame_bytes(bits: u64) -> u64 { bits / 8 + u64::from(!bits.is_multiple_of(8)) }
+
+#[rustfmt::skip]
+fn cost_model_bytes() -> Vec<u8> {
+    let mut out = b"RUBIN-SIMPLICITY-COST-v1".to_vec();
+    out.extend_from_slice(&COST_MODEL_SEMANTICS_VERSION.to_le_bytes());
+    for value in [STEP_COST, INTRINSIC_READ_COST, INTRINSIC_MISS_COST, DESCRIPTOR_HASH_BASE_COST, DESCRIPTOR_HASH_BYTE_COST, MAX_FRAME_BYTES, MAX_LIVE_MEMORY_BYTES] { out.extend_from_slice(&value.to_le_bytes()); }
+    out.push(cost_model_row_count_byte(COST_MODEL_ROWS.len()));
+    for row in COST_MODEL_ROWS {
+        out.extend_from_slice(&row.jet.0.to_le_bytes());
+        out.extend_from_slice(&[row.jet.1, row.formula as u8]);
+        out.extend_from_slice(&row.param.to_le_bytes());
+    }
+    out
+}
+
+#[rustfmt::skip]
+fn cost_model_row_count_byte(rows: usize) -> u8 {
+    assert!(rows < 253, "cost model row count exceeds one-byte CompactSize encoding");
+    rows as u8
 }
 
 #[rustfmt::skip]
@@ -187,6 +249,27 @@ const JET_ROWS: &[JetRow] = &[
     JetRow { id: 0x0020, sub_op: 0x00, name: "bytes_eq",         selector_bit_len: 13, selector_padded: &[0xe2, 0x00],       cmr: "33f82e38417283760f1d9deba367aeaa0feb4c703b69aa37dc8c2aefe7c32d4a" },
     JetRow { id: 0x0020, sub_op: 0x01, name: "bytes_cmp",        selector_bit_len: 15, selector_padded: &[0xe2, 0x08],       cmr: "bd237f53ad86be9b3c8bd3dcb2a36642782c07885d5afc44903b5dc6d017960a" },
     JetRow { id: 0x0021, sub_op: 0x00, name: "bytes_slice",      selector_bit_len: 13, selector_padded: &[0xe2, 0x10],       cmr: "9c28e72f9da964de2c90d92c5c772211537ed2e07d20f6790c988284a87c0ce2" },
+];
+
+const UNIT_FRAMES: &[u64] = &[0, 0];
+const BOOL_FRAMES: &[u64] = &[1, 1];
+const SHA3_FRAMES: &[u64] = &[512, 256];
+const MLDSA87_FRAMES: &[u64] = &[(2_592 + 4_627 + 32) * 8, 1];
+
+#[rustfmt::skip]
+const COST_MODEL_ROWS: &[CostModelRow] = &[
+    CostModelRow { jet: (0x0001, 0x00), formula: CostFormula::BasePlusLen, param: 64 },
+    CostModelRow { jet: (0x0002, 0x00), formula: CostFormula::Constant, param: 50_000 },
+    CostModelRow { jet: (0x0010, 0x00), formula: CostFormula::Constant, param: 1 },
+    CostModelRow { jet: (0x0010, 0x01), formula: CostFormula::Constant, param: 1 },
+    CostModelRow { jet: (0x0010, 0x02), formula: CostFormula::Constant, param: 1 },
+    CostModelRow { jet: (0x0010, 0x03), formula: CostFormula::Constant, param: 1 },
+    CostModelRow { jet: (0x0011, 0x00), formula: CostFormula::Constant, param: 1 },
+    CostModelRow { jet: (0x0011, 0x01), formula: CostFormula::Constant, param: 1 },
+    CostModelRow { jet: (0x0011, 0x03), formula: CostFormula::Constant, param: 1 },
+    CostModelRow { jet: (0x0020, 0x00), formula: CostFormula::OnePlusCeilLen32, param: 0 },
+    CostModelRow { jet: (0x0020, 0x01), formula: CostFormula::OnePlusCeilLen32, param: 0 },
+    CostModelRow { jet: (0x0021, 0x00), formula: CostFormula::OnePlusCeilLen32, param: 0 },
 ];
 
 #[rustfmt::skip]
