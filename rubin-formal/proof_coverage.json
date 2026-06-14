@@ -4,7 +4,7 @@
   "claim_level": "refined",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "ffef2c8fcecc12a0cc4e95bb7063bca9217af204b1c33e2c41e3213d1ec4fb48",
+  "spec_section_hashes_sha3_256": "f7862a144ae9a62bbe0cf6ca721a3768c65c4a3ee34f6530e4919d063b14a70f",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "coverage": [
