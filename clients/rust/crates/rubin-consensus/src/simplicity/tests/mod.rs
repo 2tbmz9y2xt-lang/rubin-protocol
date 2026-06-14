@@ -36,12 +36,17 @@ const DECODE_CASES: &[DecodeCase] = &[
 ];
 
 #[test]
+#[rustfmt::skip]
 fn decode_vectors_match_go_reference() {
     for (program, witness, version, covenant, want_cmr, want_err) in DECODE_CASES {
         let got = decode(&hx(program), &hx(witness), opts(*version, covenant));
         match want_err {
             Some(code) => assert_eq!(got.unwrap_err().code, *code),
-            None => assert_eq!(got.unwrap().cmr, hex32(want_cmr.unwrap()).unwrap()),
+            None => {
+                let got = got.unwrap();
+                assert_eq!(got.cmr, hex32(want_cmr.unwrap()).unwrap());
+                assert_eq!(got.jet.map(|j| (j.id, j.sub_op, j.name, j.selector_bit_len, j.selector_padded, j.cmr)), match *program { "60" => Some((0x0001, 0x00, "sha3_256", 2, &[0x00][..], hex32(C5).unwrap())), "70" => Some((0x0002, 0x00, "mldsa87_verify", 4, &[0x80][..], hex32(C6).unwrap())), _ => None });
+            }
         }
     }
 }
@@ -59,16 +64,12 @@ fn program_size_boundary_matches_go_reference() {
 }
 
 #[test]
+#[rustfmt::skip]
 fn jet_rows_and_hashes_match_go_reference() {
     assert_eq!(JET_ROWS.len(), 12);
     for row in JET_ROWS {
-        assert!(lookup_jet(row.id, row.sub_op).is_some(), "missing jet row");
+        assert_eq!(lookup_jet(row.id, row.sub_op).unwrap(), Jet { id: row.id, sub_op: row.sub_op, name: row.name, selector_bit_len: row.selector_bit_len, selector_padded: row.selector_padded, cmr: hex32(row.cmr).unwrap() });
     }
-    let sha3 = lookup_jet(0x0001, 0).unwrap();
-    assert_eq!(
-        (sha3.name, sha3.selector_bit_len, sha3.selector_padded),
-        ("sha3_256", 2, [0x00].as_slice())
-    );
     assert!(lookup_jet(0x0011, 0x02).is_none());
     assert_eq!(
         PROGRAM_ENCODING_HASH,
@@ -98,12 +99,8 @@ fn decode_err(program: &[u8], witness: &[u8]) -> ErrorCode {
         .code
 }
 
-fn opts(version: u32, covenant: &str) -> DecodeOptions {
-    DecodeOptions {
-        semantics_version: version,
-        covenant_program_cmr: optional_cmr(covenant),
-    }
-}
+#[rustfmt::skip]
+fn opts(version: u32, covenant: &str) -> DecodeOptions { DecodeOptions { semantics_version: version, covenant_program_cmr: optional_cmr(covenant) } }
 
 fn optional_cmr(s: &str) -> Option<[u8; 32]> {
     (!s.is_empty()).then(|| hex32(s).unwrap())

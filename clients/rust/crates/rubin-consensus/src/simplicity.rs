@@ -71,11 +71,8 @@ pub fn rubin_jet_cmr(identity_hash: [u8; 32], jet_weight: u64) -> [u8; 32] {
     block[32..64].copy_from_slice(&identity_hash);
     let block = GenericArray::clone_from_slice(&block);
     compress256(&mut state, core::slice::from_ref(&block));
-    let mut out = [0u8; 32];
-    for (i, word) in state.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    out
+    let words = state.map(u32::to_be_bytes);
+    [words[0][0], words[0][1], words[0][2], words[0][3], words[1][0], words[1][1], words[1][2], words[1][3], words[2][0], words[2][1], words[2][2], words[2][3], words[3][0], words[3][1], words[3][2], words[3][3], words[4][0], words[4][1], words[4][2], words[4][3], words[5][0], words[5][1], words[5][2], words[5][3], words[6][0], words[6][1], words[6][2], words[6][3], words[7][0], words[7][1], words[7][2], words[7][3]]
 }
 
 #[rustfmt::skip]
@@ -85,8 +82,8 @@ fn decode_program(program: &[u8]) -> Result<Program, Error> {
         [0xc1, 0x22, 0x0f, 0x01, 0x00] => program_entry("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434", None, WitnessKind::None),
         [0x89, 0x00] => program_entry("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726", None, WitnessKind::None),
         [0xc1, 0xd2, 0x10, 0x14] => program_entry("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83", None, WitnessKind::Bool),
-        [0x60] => program_entry("3999889bdf18d07c6c38b7aacb89f6c2bdd3c6a5c3c93ce79d1902a567b1e637", lookup_jet(0x0001, 0x00), WitnessKind::None),
-        [0x70] => program_entry("f5f90bf76aea628b4f2d75267cb5c13b49cd444b0690c3411fa01856342d4941", lookup_jet(0x0002, 0x00), WitnessKind::None),
+        [0x60] => lookup_jet(0x0001, 0x00).map(jet_entry).ok_or(Error { code: ErrorCode::Decode }),
+        [0x70] => lookup_jet(0x0002, 0x00).map(jet_entry).ok_or(Error { code: ErrorCode::Decode }),
         [0x7c, 0x06, 0x80] => Err(Error { code: ErrorCode::JetDisallowed }),
         _ => Err(Error { code: ErrorCode::Decode }),
     }
@@ -96,6 +93,11 @@ fn decode_program(program: &[u8]) -> Result<Program, Error> {
 fn program_entry(cmr: &str, jet: Option<Jet>, witness_kind: WitnessKind) -> Result<Program, Error> {
     let needs_witness = witness_kind == WitnessKind::Bool;
     Ok(Program { cmr: hex32(cmr)?, jet, needs_witness, max_witness_len: usize::from(needs_witness), witness_kind })
+}
+
+#[rustfmt::skip]
+fn jet_entry(jet: Jet) -> Program {
+    Program { cmr: jet.cmr, jet: Some(jet), needs_witness: false, max_witness_len: 0, witness_kind: WitnessKind::None }
 }
 
 #[rustfmt::skip]
