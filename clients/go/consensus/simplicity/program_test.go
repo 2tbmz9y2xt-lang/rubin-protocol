@@ -260,6 +260,16 @@ func TestCostModelRowsMatchJetTable(t *testing.T) {
 	}
 }
 
+func TestCostModelRowCountRejectsMultiByteCompactSize(t *testing.T) {
+	defer func() {
+		if got := recover(); got == nil {
+			t.Fatal("cost model row count requiring multi-byte CompactSize did not panic")
+		}
+	}()
+
+	_ = costModelRowCountByte(make([]costModelRow, 253))
+}
+
 func TestEvaluateJetRequiresCostHook(t *testing.T) {
 	program := decodeSHA3Jet(t)
 	_, err := program.Evaluate(EvalOptions{})

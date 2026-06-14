@@ -315,13 +315,20 @@ func costModelBytes() []byte {
 	for _, v := range []uint64{StepCost, IntrinsicReadCost, IntrinsicMissCost, DescriptorHashBaseCost, DescriptorHashByteCost, MaxFrameBytes, MaxLiveMemoryBytes} {
 		out = binary.LittleEndian.AppendUint64(out, v)
 	}
-	out = append(out, byte(len(costModelRows)))
+	out = append(out, costModelRowCountByte(costModelRows))
 	for _, row := range costModelRows {
 		out = binary.LittleEndian.AppendUint16(out, row.jet.id)
 		out = append(out, row.jet.subOp, byte(row.formula))
 		out = binary.LittleEndian.AppendUint64(out, row.param)
 	}
 	return out
+}
+
+func costModelRowCountByte(rows []costModelRow) byte {
+	if len(rows) >= 253 {
+		panic("cost model row count exceeds one-byte CompactSize encoding")
+	}
+	return byte(len(rows))
 }
 
 var (
