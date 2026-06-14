@@ -314,27 +314,15 @@ func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
 }
 
 func TestEvaluateMemoryBounds(t *testing.T) {
-	tests := []struct {
-		name   string
-		frames []uint64
-		want   ErrorCode
-	}{
-		{name: "frame at cap", frames: []uint64{MaxFrameBytes * 8}},
-		{name: "total live at cap", frames: repeated(MaxFrameBytes*8, int(MaxLiveMemoryBytes/MaxFrameBytes))},
-		{name: "frame over cap", frames: []uint64{MaxFrameBytes*8 + 1}, want: ErrBudgetExceeded},
-		{name: "total live over cap", frames: append(repeated(MaxFrameBytes*8, int(MaxLiveMemoryBytes/MaxFrameBytes)), 8), want: ErrBudgetExceeded},
+	for _, frames := range [][]uint64{{MaxFrameBytes * 8}, repeated(MaxFrameBytes*8, int(MaxLiveMemoryBytes/MaxFrameBytes))} {
+		got, err := Program{decoded: true, evalSteps: 1, frameBitWidths: frames}.Evaluate(EvalOptions{})
+		if err != nil || !got.Accepted || got.Cost != StepCost {
+			t.Fatalf("evaluation=%+v err=%v want accepted cost=%d", got, err, StepCost)
+		}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := Program{decoded: true, evalSteps: 1, frameBitWidths: tt.frames}.Evaluate(EvalOptions{})
-			if tt.want != "" {
-				assertErrorCode(t, err, tt.want)
-				return
-			}
-			if err != nil || !got.Accepted || got.Cost != StepCost {
-				t.Fatalf("evaluation=%+v err=%v want accepted cost=%d", got, err, StepCost)
-			}
-		})
+	for _, frames := range [][]uint64{{MaxFrameBytes*8 + 1}, append(repeated(MaxFrameBytes*8, int(MaxLiveMemoryBytes/MaxFrameBytes)), 8)} {
+		_, err := Program{decoded: true, evalSteps: 1, frameBitWidths: frames}.Evaluate(EvalOptions{})
+		assertErrorCode(t, err, ErrBudgetExceeded)
 	}
 
 	calls := 0
@@ -349,6 +337,33 @@ func TestEvaluateMemoryBounds(t *testing.T) {
 	assertErrorCode(t, err, ErrBudgetExceeded)
 	if calls != 0 {
 		t.Fatalf("JetEvaluator calls=%d want 0 before memory reject", calls)
+	}
+}
+
+func TestDecodePopulatesMemorySchedule(t *testing.T) {
+	for _, tt := range []struct{ program, witness string }{
+		{"24", ""},
+		{"c1d21014", "00"},
+		{"60", ""},
+		{"70", ""},
+	} {
+		program, err := Decode(hx(tt.program), hx(tt.witness), DecodeOptions{SemanticsVersion: SemanticsVersion})
+		if err != nil {
+			t.Fatalf("Decode(%s): %v", tt.program, err)
+		}
+		if len(program.frameBitWidths) == 0 {
+			t.Fatalf("Decode(%s) returned no frame schedule", tt.program)
+		}
+		if err := checkMemoryBounds(program.frameBitWidths); err != nil {
+			t.Fatalf("Decode(%s) frame schedule exceeds bounds: %v", tt.program, err)
+		}
+	}
+
+	first := decodeSHA3Jet(t)
+	first.frameBitWidths[0] = MaxFrameBytes*8 + 1
+
+	if err := checkMemoryBounds(decodeSHA3Jet(t).frameBitWidths); err != nil {
+		t.Fatalf("Decode returned mutable frame schedule: %v", err)
 	}
 }
 
