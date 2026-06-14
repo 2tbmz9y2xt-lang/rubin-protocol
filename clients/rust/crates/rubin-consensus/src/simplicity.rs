@@ -208,7 +208,7 @@ fn check_memory_bounds(frame_bit_widths: &[u64]) -> Result<(), EvalError> {
 }
 
 #[rustfmt::skip]
-fn frame_bytes(bits: u64) -> u64 { bits / 8 + u64::from(bits % 8 != 0) }
+fn frame_bytes(bits: u64) -> u64 { bits / 8 + u64::from(!bits.is_multiple_of(8)) }
 
 #[rustfmt::skip]
 fn cost_model_bytes() -> Vec<u8> {
