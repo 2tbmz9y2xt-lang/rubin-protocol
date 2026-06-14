@@ -20,6 +20,7 @@ pub mod precompute;
 mod sig_cache;
 mod sig_queue;
 pub mod sighash;
+pub mod simplicity;
 mod spend_verify;
 mod stealth;
 pub mod subsidy;

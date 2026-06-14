@@ -306,11 +306,13 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 name = "rubin-consensus"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "num-bigint",
  "num-traits",
  "openssl-sys",
  "serde",
  "serde_json",
+ "sha2",
  "sha3",
 ]
 
@@ -381,6 +383,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]
