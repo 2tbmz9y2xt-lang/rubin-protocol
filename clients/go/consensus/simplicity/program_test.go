@@ -218,8 +218,8 @@ func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
 
 	got, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: MaxExecCost + 1})
 	assertErrorCode(t, err, ErrBudgetExceeded)
-	if got.Cost != MaxExecCost {
-		t.Fatalf("evaluation cost=%d want saturated cost=%d", got.Cost, MaxExecCost)
+	if !got.Accepted || got.Cost != MaxExecCost {
+		t.Fatalf("evaluation=%+v want accepted saturated cost=%d", got, MaxExecCost)
 	}
 }
 
@@ -249,7 +249,7 @@ func TestEvaluateInternalFailClosedPaths(t *testing.T) {
 		t.Fatalf("error=%v want sentinel", err)
 	}
 
-	got, err := Program{decoded: true, evalSteps: MaxExecCost + 1}.Evaluate(EvalOptions{})
+	got, err := Program{decoded: true, evalSteps: MaxExecCost/StepCost + 1}.Evaluate(EvalOptions{})
 	assertErrorCode(t, err, ErrBudgetExceeded)
 	if got.Cost != MaxExecCost {
 		t.Fatalf("over-cap cost=%d want %d", got.Cost, MaxExecCost)
