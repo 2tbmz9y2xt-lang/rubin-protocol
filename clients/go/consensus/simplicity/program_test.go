@@ -216,8 +216,11 @@ func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
 		})
 	}
 
-	_, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: MaxExecCost + 1})
+	got, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: MaxExecCost + 1})
 	assertErrorCode(t, err, ErrBudgetExceeded)
+	if got.Cost != MaxExecCost {
+		t.Fatalf("evaluation cost=%d want saturated cost=%d", got.Cost, MaxExecCost)
+	}
 }
 
 func TestEvaluateJetRejectsFailedHookResult(t *testing.T) {

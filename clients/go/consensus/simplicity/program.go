@@ -241,7 +241,8 @@ type meter struct {
 }
 
 func (m *meter) charge(cost uint64) error {
-	if cost > MaxExecCost-m.cost {
+	if m.cost > MaxExecCost || cost > MaxExecCost-m.cost {
+		m.cost = MaxExecCost
 		return &Error{Code: ErrBudgetExceeded}
 	}
 	m.cost += cost
