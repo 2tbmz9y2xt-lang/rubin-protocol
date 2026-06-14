@@ -138,7 +138,7 @@ func evaluateSteps(steps uint64) (EvalResult, error) {
 	}
 	maxSteps := MaxExecCost / StepCost
 	if steps > maxSteps {
-		return EvalResult{Cost: maxSteps * StepCost}, &Error{Code: ErrBudgetExceeded}
+		return EvalResult{Accepted: true, Cost: maxSteps * StepCost}, &Error{Code: ErrBudgetExceeded}
 	}
 	return EvalResult{Accepted: true, Cost: steps * StepCost}, nil
 }
