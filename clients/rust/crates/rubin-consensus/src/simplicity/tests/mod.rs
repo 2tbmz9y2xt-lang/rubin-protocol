@@ -192,15 +192,12 @@ fn corpus_path() -> PathBuf {
 }
 
 fn error_code(s: &str) -> Option<ErrorCode> {
-    for code in [
+    [
         ErrorCode::Decode,
         ErrorCode::ProgramTooLarge,
         ErrorCode::CmrMismatch,
         ErrorCode::JetDisallowed,
-    ] {
-        if code.as_str() == s {
-            return Some(code);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|code| code.as_str() == s)
 }
