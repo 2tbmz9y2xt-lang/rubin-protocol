@@ -1,3 +1,9 @@
+// Package simplicity implements the standalone RUB-482 Go Program Encoding v1
+// library for the closed RUB-561 artifact subset.
+//
+// This package is deliberately not wired into consensus dispatch. Do not call it
+// from validation paths until the matching Rust parity and shared conformance
+// slices land.
 package simplicity
 
 import (
@@ -117,13 +123,13 @@ func decodeProgram(program []byte) (Program, error) {
 	return decoded, nil
 }
 
-func jetProgram(id uint16, subOp uint8) Program {
-	jet, _ := LookupJet(id, subOp)
-	return Program{CMR: jet.CMR, Jet: &jet, witnesses: noWitness}
-}
-
+// hex32 decodes checked-in 32-byte hex constants and panics during invariant
+// setup if a committed constant is malformed.
 func hex32(s string) [32]byte {
-	raw, _ := hex.DecodeString(s)
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		panic("invalid embedded bytes32 hex: " + err.Error())
+	}
 	if len(raw) != 32 {
 		panic("invalid embedded bytes32")
 	}
@@ -163,15 +169,17 @@ type programEntry struct {
 }
 
 var (
-	noWitness   = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: ""}: {}}
-	boolWitness = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: string([]byte{0x00})}: {}, {version: SemanticsVersion, bytes: string([]byte{0x80})}: {}}
-	programs    = map[string]programEntry{
+	noWitness     = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: ""}: {}}
+	boolWitness   = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: string([]byte{0x00})}: {}, {version: SemanticsVersion, bytes: string([]byte{0x80})}: {}}
+	sha3JetRow    = jetRows[jetKey{id: 0x0001, subOp: 0x00}]
+	mldsa87JetRow = jetRows[jetKey{id: 0x0002, subOp: 0x00}]
+	programs      = map[string]programEntry{
 		string([]byte{0x24}):                         {program: Program{CMR: hex32("c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7"), witnesses: noWitness}},
 		string([]byte{0xc1, 0x22, 0x0f, 0x01, 0x00}): {program: Program{CMR: hex32("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434"), witnesses: noWitness}},
 		string([]byte{0x89, 0x00}):                   {program: Program{CMR: hex32("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726"), witnesses: noWitness}},
 		string([]byte{0xc1, 0xd2, 0x10, 0x14}):       {program: Program{CMR: hex32("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83"), NeedsWitness: true, maxWitnessLen: 1, witnesses: boolWitness}},
-		string([]byte{0x60}):                         {program: jetProgram(0x0001, 0x00)},
-		string([]byte{0x70}):                         {program: jetProgram(0x0002, 0x00)},
+		string([]byte{0x60}):                         {program: Program{CMR: sha3JetRow.CMR, Jet: &sha3JetRow, witnesses: noWitness}},
+		string([]byte{0x70}):                         {program: Program{CMR: mldsa87JetRow.CMR, Jet: &mldsa87JetRow, witnesses: noWitness}},
 		string([]byte{0x7c, 0x06, 0x80}):             {err: ErrJetDisallowed},
 	}
 )
