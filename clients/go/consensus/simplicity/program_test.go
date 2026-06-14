@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -97,7 +98,7 @@ func TestSharedEncodingCorpus(t *testing.T) {
 	var extra json.RawMessage
 	if err := decoder.Decode(&extra); err == nil {
 		t.Fatal("parse shared corpus: trailing data")
-	} else if err.Error() != "EOF" {
+	} else if !errors.Is(err, io.EOF) {
 		t.Fatalf("parse shared corpus: trailing data: %v", err)
 	}
 	if corpus.ContractVersion != 1 || corpus.FixtureKind != "simplicity_program_encoding_cmr_v1" || len(corpus.Cases) == 0 {
