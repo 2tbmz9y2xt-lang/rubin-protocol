@@ -94,8 +94,11 @@ func TestSharedEncodingCorpus(t *testing.T) {
 	if err := decoder.Decode(&corpus); err != nil {
 		t.Fatalf("parse shared corpus: %v", err)
 	}
-	if decoder.InputOffset() != int64(len(bytes.TrimSpace(raw))) {
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err == nil {
 		t.Fatal("parse shared corpus: trailing data")
+	} else if err.Error() != "EOF" {
+		t.Fatalf("parse shared corpus: trailing data: %v", err)
 	}
 	if corpus.ContractVersion != 1 || corpus.FixtureKind != "simplicity_program_encoding_cmr_v1" || len(corpus.Cases) == 0 {
 		t.Fatalf("bad shared corpus header: version=%d kind=%q cases=%d", corpus.ContractVersion, corpus.FixtureKind, len(corpus.Cases))
