@@ -167,11 +167,136 @@ fn rubin_jet_cmr_examples_match_go_reference() {
 }
 
 #[test]
+fn cost_model_hash_matches_go_reference() {
+    let want_preimage = concat!(
+        "525542494e2d53494d504c49434954592d434f53542d76310200000001000000000000000100000000000000010000000000000040000000000000000100000000000000000001000000000000001000000000000c",
+        "0100000140000000000000000200000050c3000000000000100000000100000000000000100001000100000000000000100002000100000000000000100003000100000000000000110000000100000000000000110001000100000000000000110003000100000000000000200000020000000000000000200001020000000000000000210000020000000000000000",
+    );
+    assert_eq!(hex::encode(cost_model_bytes()), want_preimage);
+    assert_eq!(
+        cost_model_hash(),
+        hex32("accb55570168bd7b1fedadff2135c99e32508680ff7a315cf4f33f97744aabc9").unwrap()
+    );
+}
+
+#[test]
+fn cost_model_rows_match_jet_table() {
+    assert_eq!(COST_MODEL_ROWS.len(), JET_ROWS.len());
+    assert!(COST_MODEL_ROWS.len() < 253);
+    let mut prev = (0, 0);
+    for (i, row) in COST_MODEL_ROWS.iter().enumerate() {
+        assert!(
+            lookup_jet(row.jet.0, row.jet.1).is_some(),
+            "missing jet row {i}"
+        );
+        assert!(i == 0 || prev < row.jet, "cost rows not sorted at {i}");
+        assert!(row.formula <= CostFormula::OnePlusCeilLen32);
+        assert!(row.formula != CostFormula::OnePlusCeilLen32 || row.param == 0);
+        prev = row.jet;
+    }
+}
+
+#[test]
+#[should_panic(expected = "cost model row count exceeds one-byte CompactSize encoding")]
+fn cost_model_row_count_rejects_multi_byte_compact_size() {
+    let _ = cost_model_row_count_byte(253);
+}
+
+#[test]
 #[rustfmt::skip]
 fn evaluate_charges_decoded_program_steps() {
     for (program, witness, cost) in [("24", "", 1), ("8900", "", 2), ("c1220f0100", "", 4), ("c1d21014", "00", 4)] {
         assert_eq!(decoded(program, witness).evaluate(EvalOptions::default()).unwrap(), EvalResult { accepted: true, cost: cost * STEP_COST });
     }
+}
+
+#[test]
+fn evaluate_memory_bounds_match_go_reference() {
+    for frames in [
+        vec![MAX_FRAME_BYTES * 8],
+        repeated(
+            MAX_FRAME_BYTES * 8,
+            (MAX_LIVE_MEMORY_BYTES / MAX_FRAME_BYTES) as usize,
+        ),
+    ] {
+        let got = internal_program(1, false, None, frames)
+            .evaluate(EvalOptions::default())
+            .unwrap();
+        assert_eq!(got, ok(STEP_COST));
+    }
+    for frames in [
+        vec![MAX_FRAME_BYTES * 8 + 1],
+        [
+            repeated(
+                MAX_FRAME_BYTES * 8,
+                (MAX_LIVE_MEMORY_BYTES / MAX_FRAME_BYTES) as usize,
+            ),
+            vec![8],
+        ]
+        .concat(),
+    ] {
+        assert_eq!(
+            internal_program(1, false, None, frames)
+                .evaluate(EvalOptions::default())
+                .unwrap_err()
+                .code,
+            ErrorCode::BudgetExceeded
+        );
+    }
+
+    let calls = std::cell::Cell::new(0);
+    let mut program = decoded("60", "");
+    program.frame_bit_widths = vec![MAX_FRAME_BYTES * 8 + 1];
+    let hook = |_: Jet| {
+        calls.set(calls.get() + 1);
+        Ok(ok(1))
+    };
+    assert_eq!(
+        program.evaluate(with_jet_hook(&hook)).unwrap_err().code,
+        ErrorCode::BudgetExceeded
+    );
+    assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn decode_populates_memory_schedule() {
+    for (program, witness) in [("24", ""), ("c1d21014", "00"), ("60", ""), ("70", "")] {
+        let program = decoded(program, witness);
+        assert!(!program.frame_bit_widths.is_empty());
+        check_memory_bounds(&program.frame_bit_widths).unwrap();
+    }
+}
+
+#[test]
+fn evaluate_memory_error_class_priority() {
+    let over_frame = vec![MAX_FRAME_BYTES * 8 + 1];
+    let mut undecoded = internal_program(1, false, None, over_frame.clone());
+    undecoded.decoded = false;
+    assert_eq!(
+        undecoded.evaluate(EvalOptions::default()).unwrap_err().code,
+        ErrorCode::Decode
+    );
+    assert_eq!(
+        internal_program(0, false, None, over_frame.clone())
+            .evaluate(EvalOptions::default())
+            .unwrap_err()
+            .code,
+        ErrorCode::Decode
+    );
+    assert_eq!(
+        internal_program(0, true, Some((0xffff, 0x00)), over_frame.clone())
+            .evaluate(EvalOptions::default())
+            .unwrap_err()
+            .code,
+        ErrorCode::Decode
+    );
+    assert_eq!(
+        internal_program(1, false, None, over_frame)
+            .evaluate(EvalOptions::default())
+            .unwrap_err()
+            .code,
+        ErrorCode::BudgetExceeded
+    );
 }
 
 #[test]
@@ -187,7 +312,7 @@ fn evaluate_jet_requires_cost_hook() {
 #[rustfmt::skip]
 fn evaluate_ignores_public_jet_without_decoded_key() {
     let hook = |_: Jet| Ok(ok(1));
-    let program = Program { jet: Some(lookup_jet(0x0001, 0x00).unwrap()), ..internal_program(0, false, None) };
+    let program = Program { jet: Some(lookup_jet(0x0001, 0x00).unwrap()), ..internal_program(0, false, None, vec![]) };
     assert_eq!(program.evaluate(with_jet_hook(&hook)).unwrap_err().code, ErrorCode::Decode);
 }
 
@@ -231,14 +356,14 @@ fn evaluate_jet_rejects_failed_hook_result() {
 #[test]
 #[rustfmt::skip]
 fn evaluate_internal_fail_closed_paths() {
-    assert_eq!(internal_program(0, false, None).evaluate(EvalOptions::default()).unwrap_err().code, ErrorCode::Decode);
+    assert_eq!(internal_program(0, false, None, vec![]).evaluate(EvalOptions::default()).unwrap_err().code, ErrorCode::Decode);
     let hook = |_: Jet| Ok(ok(0));
-    assert_eq!(internal_program(0, true, Some((0xffff, 0x00))).evaluate(with_jet_hook(&hook)).unwrap_err().code, ErrorCode::Decode);
+    assert_eq!(internal_program(0, true, Some((0xffff, 0x00)), vec![]).evaluate(with_jet_hook(&hook)).unwrap_err().code, ErrorCode::Decode);
     let hook_error = |_: Jet| Err(EvalError { code: ErrorCode::Decode, result: ok(9) });
     let err = decoded("60", "").evaluate(with_jet_hook(&hook_error)).unwrap_err();
     assert_eq!(err.code, ErrorCode::Decode);
     assert_eq!(err.result, EvalResult::default());
-    let err = internal_program(MAX_EXEC_COST / STEP_COST + 1, false, None)
+    let err = internal_program(MAX_EXEC_COST / STEP_COST + 1, false, None, vec![])
         .evaluate(EvalOptions::default())
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::BudgetExceeded);
@@ -263,8 +388,12 @@ fn rejected(cost: u64) -> EvalResult { EvalResult { accepted: false, cost } }
 fn with_jet_hook<'a>(hook: &'a dyn Fn(Jet) -> Result<EvalResult, EvalError>) -> EvalOptions<'a> { EvalOptions { jet_evaluator: Some(hook) } }
 
 #[rustfmt::skip]
-fn internal_program(eval_steps: u64, has_jet: bool, jet_key: Option<JetKey>) -> Program {
-    Program { cmr: [0; 32], jet: None, needs_witness: false, max_witness_len: 0, witness_kind: WitnessKind::None, eval_steps, has_jet, jet_key }
+fn internal_program(eval_steps: u64, has_jet: bool, jet_key: Option<JetKey>, frame_bit_widths: Vec<u64>) -> Program {
+    Program { cmr: [0; 32], jet: None, needs_witness: false, max_witness_len: 0, witness_kind: WitnessKind::None, eval_steps, decoded: true, has_jet, jet_key, frame_bit_widths }
+}
+
+fn repeated(value: u64, count: usize) -> Vec<u64> {
+    vec![value; count]
 }
 
 fn decode_err(program: &[u8], witness: &[u8]) -> ErrorCode {
