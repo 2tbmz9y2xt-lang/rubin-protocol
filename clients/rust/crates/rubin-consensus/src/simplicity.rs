@@ -15,7 +15,7 @@ pub const PROGRAM_ENCODING_HASH: [u8; 32] = [
 pub enum ErrorCode { Decode, ProgramTooLarge, CmrMismatch, JetDisallowed }
 
 #[rustfmt::skip]
-impl ErrorCode { pub fn as_str(self) -> &'static str { ["TX_ERR_SIMPLICITY_DECODE", "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE", "TX_ERR_SIMPLICITY_CMR_MISMATCH", "TX_ERR_SIMPLICITY_JET_DISALLOWED"][self as usize] } }
+impl ErrorCode { pub fn as_str(self) -> &'static str { match self { Self::Decode => "TX_ERR_SIMPLICITY_DECODE", Self::ProgramTooLarge => "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE", Self::CmrMismatch => "TX_ERR_SIMPLICITY_CMR_MISMATCH", Self::JetDisallowed => "TX_ERR_SIMPLICITY_JET_DISALLOWED" } } }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
@@ -60,7 +60,7 @@ pub fn decode(program: &[u8], witness: &[u8], opts: DecodeOptions) -> Result<Pro
 #[rustfmt::skip]
 pub fn lookup_jet(id: u16, sub_op: u8) -> Option<Jet> {
     static JETS: OnceLock<Vec<Jet>> = OnceLock::new();
-    JETS.get_or_init(|| JET_ROWS.iter().filter_map(jet).collect()).iter().copied().find(|jet| (jet.id, jet.sub_op) == (id, sub_op))
+    JETS.get_or_init(|| JET_ROWS.iter().map(|row| { let cmr = hex32(row.cmr).expect("valid checked-in Rubin jet CMR hex"); Jet { id: row.id, sub_op: row.sub_op, name: row.name, selector_bit_len: row.selector_bit_len, selector_padded: row.selector_padded, cmr } }).collect()).iter().copied().find(|jet| (jet.id, jet.sub_op) == (id, sub_op))
 }
 
 #[rustfmt::skip]
@@ -118,11 +118,6 @@ const JET_ROWS: &[JetRow] = &[
     JetRow { id: 0x0020, sub_op: 0x01, name: "bytes_cmp",        selector_bit_len: 15, selector_padded: &[0xe2, 0x08],       cmr: "bd237f53ad86be9b3c8bd3dcb2a36642782c07885d5afc44903b5dc6d017960a" },
     JetRow { id: 0x0021, sub_op: 0x00, name: "bytes_slice",      selector_bit_len: 13, selector_padded: &[0xe2, 0x10],       cmr: "9c28e72f9da964de2c90d92c5c772211537ed2e07d20f6790c988284a87c0ce2" },
 ];
-
-#[rustfmt::skip]
-fn jet(row: &JetRow) -> Option<Jet> {
-    hex32(row.cmr).ok().map(|cmr| Jet { id: row.id, sub_op: row.sub_op, name: row.name, selector_bit_len: row.selector_bit_len, selector_padded: row.selector_padded, cmr })
-}
 
 #[rustfmt::skip]
 fn hex32(s: &str) -> Result<[u8; 32], Error> {
