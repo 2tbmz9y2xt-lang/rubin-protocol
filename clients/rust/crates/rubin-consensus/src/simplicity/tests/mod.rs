@@ -173,11 +173,15 @@ fn corpus_path() -> PathBuf {
 }
 
 fn error_code(s: &str) -> ErrorCode {
-    match s {
-        "TX_ERR_SIMPLICITY_DECODE" => ErrorCode::Decode,
-        "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE" => ErrorCode::ProgramTooLarge,
-        "TX_ERR_SIMPLICITY_CMR_MISMATCH" => ErrorCode::CmrMismatch,
-        "TX_ERR_SIMPLICITY_JET_DISALLOWED" => ErrorCode::JetDisallowed,
-        other => panic!("unknown shared corpus error code {other}"),
+    for code in [
+        ErrorCode::Decode,
+        ErrorCode::ProgramTooLarge,
+        ErrorCode::CmrMismatch,
+        ErrorCode::JetDisallowed,
+    ] {
+        if code.as_str() == s {
+            return code;
+        }
     }
+    panic!("unknown shared corpus error code {s}")
 }
