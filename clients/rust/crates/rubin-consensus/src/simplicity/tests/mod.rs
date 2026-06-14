@@ -92,20 +92,39 @@ fn shared_encoding_corpus_matches_go_reference() {
             opts(case.semantics_version, &case.covenant_cmr_hex),
         );
         if !case.expected_error.is_empty() {
-            assert_eq!(
-                got.unwrap_err().code,
-                error_code(&case.expected_error),
-                "{}",
-                case.id
-            );
+            let want = error_code(&case.expected_error).unwrap_or_else(|| {
+                panic!(
+                    "{}: unknown expected error {}",
+                    case.id, case.expected_error
+                )
+            });
+            match got {
+                Ok(decoded) => panic!(
+                    "{}: expected error {}, decoded cmr={}",
+                    case.id,
+                    case.expected_error,
+                    hex::encode(decoded.cmr)
+                ),
+                Err(err) => assert_eq!(err.code, want, "{}", case.id),
+            }
             continue;
         }
-        assert_eq!(
-            got.unwrap().cmr,
-            hex32(&case.expected_cmr_hex).unwrap(),
-            "{}",
-            case.id
-        );
+        let decoded = match got {
+            Ok(decoded) => decoded,
+            Err(err) => panic!(
+                "{}: expected cmr {}, got error {}",
+                case.id,
+                case.expected_cmr_hex,
+                err.code.as_str()
+            ),
+        };
+        let want_cmr = hex32(&case.expected_cmr_hex).unwrap_or_else(|_| {
+            panic!(
+                "{}: invalid expected cmr {}",
+                case.id, case.expected_cmr_hex
+            )
+        });
+        assert_eq!(decoded.cmr, want_cmr, "{}", case.id);
     }
 }
 
@@ -172,7 +191,7 @@ fn corpus_path() -> PathBuf {
     path
 }
 
-fn error_code(s: &str) -> ErrorCode {
+fn error_code(s: &str) -> Option<ErrorCode> {
     for code in [
         ErrorCode::Decode,
         ErrorCode::ProgramTooLarge,
@@ -180,8 +199,8 @@ fn error_code(s: &str) -> ErrorCode {
         ErrorCode::JetDisallowed,
     ] {
         if code.as_str() == s {
-            return code;
+            return Some(code);
         }
     }
-    panic!("unknown shared corpus error code {s}")
+    None
 }
