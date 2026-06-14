@@ -110,7 +110,7 @@ impl Program {
 
 #[rustfmt::skip]
 fn evaluate_steps(steps: u64) -> Result<EvalResult, EvalError> {
-    let max_steps = MAX_EXEC_COST / STEP_COST;
+    let max_steps = MAX_EXEC_COST.checked_div(STEP_COST).unwrap_or(u64::MAX);
     if steps > max_steps { return Err(EvalError::with_result(ErrorCode::BudgetExceeded, EvalResult { accepted: true, cost: MAX_EXEC_COST })); }
     Ok(EvalResult { accepted: true, cost: steps * STEP_COST })
 }
