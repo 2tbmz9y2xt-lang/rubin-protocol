@@ -555,11 +555,13 @@ name = "rubin-consensus"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "hex",
  "num-bigint",
  "num-traits",
  "openssl-sys",
  "serde",
  "serde_json",
+ "sha2",
  "sha3",
 ]
 
