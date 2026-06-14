@@ -1,5 +1,6 @@
-// Package simplicity implements the standalone RUB-482 Go Program Encoding v1
-// library for the closed RUB-561 artifact subset.
+// Package simplicity implements the standalone RUB-482 Program Encoding v1
+// library and RUB-485 evaluation/metering library for the closed RUB-561
+// artifact subset.
 //
 // This package is deliberately not wired into consensus dispatch. Do not call it
 // from validation paths until the matching Rust parity and shared conformance
@@ -15,6 +16,8 @@ import (
 const (
 	SemanticsVersion uint32 = 1
 	MaxProgramBytes         = 16_384
+	MaxExecCost      uint64 = 400_000
+	StepCost         uint64 = 1
 )
 
 type ErrorCode string
@@ -24,6 +27,8 @@ const (
 	ErrProgramTooLarge ErrorCode = "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE"
 	ErrCMRMismatch     ErrorCode = "TX_ERR_SIMPLICITY_CMR_MISMATCH"
 	ErrJetDisallowed   ErrorCode = "TX_ERR_SIMPLICITY_JET_DISALLOWED"
+	ErrBudgetExceeded  ErrorCode = "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED"
+	ErrRejected        ErrorCode = "TX_ERR_SIMPLICITY_REJECTED"
 )
 
 type Error struct{ Code ErrorCode }
@@ -43,6 +48,10 @@ type Program struct {
 	NeedsWitness  bool
 	maxWitnessLen int
 	witnesses     map[witnessKey]struct{}
+	evalSteps     uint64
+	decoded       bool
+	hasJet        bool
+	jetKey        jetKey
 }
 
 type Jet struct {
@@ -52,6 +61,15 @@ type Jet struct {
 	SelectorBitLen int
 	SelectorPadded []byte
 	CMR            [32]byte
+}
+
+type EvalOptions struct {
+	JetEvaluator func(Jet) (EvalResult, error)
+}
+
+type EvalResult struct {
+	Accepted bool
+	Cost     uint64
 }
 
 func Decode(program, witness []byte, opts DecodeOptions) (Program, error) {
@@ -76,8 +94,54 @@ func Decode(program, witness []byte, opts DecodeOptions) (Program, error) {
 
 func LookupJet(id uint16, subOp uint8) (Jet, bool) {
 	row, ok := jetRows[jetKey{id: id, subOp: subOp}]
-	row.SelectorPadded = append([]byte(nil), row.SelectorPadded...)
-	return row, ok
+	return copyJet(row), ok
+}
+
+func (p Program) Evaluate(opts EvalOptions) (EvalResult, error) {
+	if !p.decoded {
+		return EvalResult{}, &Error{Code: ErrDecode}
+	}
+	if p.hasJet {
+		return p.evaluateJet(opts)
+	}
+	if p.evalSteps == 0 {
+		return EvalResult{}, &Error{Code: ErrDecode}
+	}
+	return evaluateSteps(p.evalSteps)
+}
+
+func (p Program) evaluateJet(opts EvalOptions) (EvalResult, error) {
+	if opts.JetEvaluator == nil {
+		return EvalResult{}, &Error{Code: ErrJetDisallowed}
+	}
+	jet, ok := LookupJet(p.jetKey.id, p.jetKey.subOp)
+	if !ok {
+		return EvalResult{}, &Error{Code: ErrDecode}
+	}
+	result, err := opts.JetEvaluator(jet)
+	if err != nil {
+		return EvalResult{}, err
+	}
+	var meter meter
+	if err := meter.charge(result.Cost); err != nil {
+		return EvalResult{Accepted: result.Accepted, Cost: meter.cost}, err
+	}
+	result.Cost = meter.cost
+	if !result.Accepted {
+		return result, &Error{Code: ErrRejected}
+	}
+	return result, nil
+}
+
+func evaluateSteps(steps uint64) (EvalResult, error) {
+	if StepCost == 0 {
+		return EvalResult{Accepted: true}, nil
+	}
+	maxSteps := MaxExecCost / StepCost
+	if steps > maxSteps {
+		return EvalResult{Accepted: true, Cost: MaxExecCost}, &Error{Code: ErrBudgetExceeded}
+	}
+	return EvalResult{Accepted: true, Cost: steps * StepCost}, nil
 }
 
 func RubinJetCMR(identityHash [32]byte, jetWeight uint64) [32]byte {
@@ -115,12 +179,19 @@ func decodeProgram(program []byte) (Program, error) {
 		return Program{}, &Error{Code: entry.err}
 	}
 	decoded := entry.program
+	decoded.decoded = true
 	if decoded.Jet != nil {
-		jet := *decoded.Jet
-		jet.SelectorPadded = append([]byte(nil), jet.SelectorPadded...)
+		jet := copyJet(*decoded.Jet)
 		decoded.Jet = &jet
+		decoded.hasJet = true
+		decoded.jetKey = jetKey{id: jet.ID, subOp: jet.SubOp}
 	}
 	return decoded, nil
+}
+
+func copyJet(row Jet) Jet {
+	row.SelectorPadded = append([]byte(nil), row.SelectorPadded...)
+	return row
 }
 
 // hex32 decodes checked-in 32-byte hex constants and panics during invariant
@@ -168,16 +239,29 @@ type programEntry struct {
 	err     ErrorCode
 }
 
+type meter struct {
+	cost uint64
+}
+
+func (m *meter) charge(cost uint64) error {
+	if m.cost > MaxExecCost || cost > MaxExecCost-m.cost {
+		m.cost = MaxExecCost
+		return &Error{Code: ErrBudgetExceeded}
+	}
+	m.cost += cost
+	return nil
+}
+
 var (
 	noWitness     = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: ""}: {}}
 	boolWitness   = map[witnessKey]struct{}{{version: SemanticsVersion, bytes: string([]byte{0x00})}: {}, {version: SemanticsVersion, bytes: string([]byte{0x80})}: {}}
 	sha3JetRow    = jetRows[jetKey{id: 0x0001, subOp: 0x00}]
 	mldsa87JetRow = jetRows[jetKey{id: 0x0002, subOp: 0x00}]
 	programs      = map[string]programEntry{
-		string([]byte{0x24}):                         {program: Program{CMR: hex32("c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7"), witnesses: noWitness}},
-		string([]byte{0xc1, 0x22, 0x0f, 0x01, 0x00}): {program: Program{CMR: hex32("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434"), witnesses: noWitness}},
-		string([]byte{0x89, 0x00}):                   {program: Program{CMR: hex32("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726"), witnesses: noWitness}},
-		string([]byte{0xc1, 0xd2, 0x10, 0x14}):       {program: Program{CMR: hex32("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83"), NeedsWitness: true, maxWitnessLen: 1, witnesses: boolWitness}},
+		string([]byte{0x24}):                         {program: Program{CMR: hex32("c40a10263f7436b4160acbef1c36fba4be4d95df181a968afeab5eac247adff7"), witnesses: noWitness, evalSteps: 1}},
+		string([]byte{0xc1, 0x22, 0x0f, 0x01, 0x00}): {program: Program{CMR: hex32("afeae8c18903b9e0aae2c125f31f7b8e09de916e461f221936b633d587c1b434"), witnesses: noWitness, evalSteps: 4}},
+		string([]byte{0x89, 0x00}):                   {program: Program{CMR: hex32("d296a48e538af38908242ab30244036fdb66e9056d5f812a5b328fae2b6a2726"), witnesses: noWitness, evalSteps: 2}},
+		string([]byte{0xc1, 0xd2, 0x10, 0x14}):       {program: Program{CMR: hex32("d3ae07ae97378595ef49c6677fd92a1761f8fe7fd8dde86197efb49a49448b83"), NeedsWitness: true, maxWitnessLen: 1, witnesses: boolWitness, evalSteps: 4}},
 		string([]byte{0x60}):                         {program: Program{CMR: sha3JetRow.CMR, Jet: &sha3JetRow, witnesses: noWitness}},
 		string([]byte{0x70}):                         {program: Program{CMR: mldsa87JetRow.CMR, Jet: &mldsa87JetRow, witnesses: noWitness}},
 		string([]byte{0x7c, 0x06, 0x80}):             {err: ErrJetDisallowed},
