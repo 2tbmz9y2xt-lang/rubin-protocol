@@ -141,6 +141,115 @@ func TestDecodeJetMetadataIsImmutable(t *testing.T) {
 	}
 }
 
+func TestEvaluateChargesDecodedProgramSteps(t *testing.T) {
+	tests := []struct {
+		name    string
+		program []byte
+		witness []byte
+		cost    uint64
+	}{
+		{name: "unit", program: hx("24"), cost: 1},
+		{name: "comp unit unit", program: hx("8900"), cost: 2},
+		{name: "drop wrapper", program: hx("c1220f0100"), cost: 4},
+		{name: "witness case", program: hx("c1d21014"), witness: hx("00"), cost: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			program, err := Decode(tt.program, tt.witness, DecodeOptions{SemanticsVersion: SemanticsVersion})
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			got, err := program.Evaluate(EvalOptions{})
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if !got.Accepted || got.Cost != tt.cost*StepCost {
+				t.Fatalf("evaluation=%+v want accepted cost=%d", got, tt.cost*StepCost)
+			}
+		})
+	}
+}
+
+func TestEvaluateJetRequiresCostHook(t *testing.T) {
+	program := decodeSHA3Jet(t)
+	_, err := program.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrJetDisallowed)
+}
+
+func TestEvaluateRejectsUndecodedProgram(t *testing.T) {
+	program := Program{Jet: &Jet{Name: "sha3_256"}}
+	_, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: 1})
+	assertErrorCode(t, err, ErrDecode)
+}
+
+func TestEvaluateUsesDecodedJetIdentity(t *testing.T) {
+	program := decodeSHA3Jet(t)
+	program.Jet = &Jet{Name: "forged"}
+	got, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: 1})
+	if err != nil {
+		t.Fatalf("Evaluate jet: %v", err)
+	}
+	if !got.Accepted || got.Cost != 1 {
+		t.Fatalf("evaluation=%+v want accepted cost=1", got)
+	}
+}
+
+func TestEvaluateJetCostHookCapBoundary(t *testing.T) {
+	program := decodeSHA3Jet(t)
+	tests := []struct {
+		name     string
+		jetCost  uint64
+		wantCost uint64
+	}{
+		{name: "under cap", jetCost: MaxExecCost - 1, wantCost: MaxExecCost - 1},
+		{name: "equal cap", jetCost: MaxExecCost, wantCost: MaxExecCost},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: tt.jetCost})
+			if err != nil {
+				t.Fatalf("Evaluate jet: %v", err)
+			}
+			if !got.Accepted || got.Cost != tt.wantCost {
+				t.Fatalf("evaluation=%+v want accepted cost=%d", got, tt.wantCost)
+			}
+		})
+	}
+
+	_, err := evaluateSHA3JetWithResult(t, program, EvalResult{Accepted: true, Cost: MaxExecCost + 1})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+}
+
+func TestEvaluateJetRejectsFailedHookResult(t *testing.T) {
+	program := decodeSHA3Jet(t)
+	got, err := evaluateSHA3JetWithResult(t, program, EvalResult{Cost: 3})
+	assertErrorCode(t, err, ErrRejected)
+	if got.Accepted || got.Cost != 3 {
+		t.Fatalf("evaluation=%+v want rejected cost=3", got)
+	}
+}
+
+func TestEvaluateInternalFailClosedPaths(t *testing.T) {
+	_, err := Program{decoded: true}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrDecode)
+
+	_, err = Program{decoded: true, hasJet: true, jetKey: jetKey{id: 0xffff}}.Evaluate(EvalOptions{
+		JetEvaluator: func(Jet) (EvalResult, error) { return EvalResult{Accepted: true}, nil },
+	})
+	assertErrorCode(t, err, ErrDecode)
+
+	sentinel := errors.New("jet hook failed")
+	_, err = decodeSHA3Jet(t).Evaluate(EvalOptions{
+		JetEvaluator: func(Jet) (EvalResult, error) { return EvalResult{}, sentinel },
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error=%v want sentinel", err)
+	}
+
+	_, err = Program{decoded: true, evalSteps: MaxExecCost + 1}.Evaluate(EvalOptions{})
+	assertErrorCode(t, err, ErrBudgetExceeded)
+}
+
 func TestRubinJetCMRHelperExamples(t *testing.T) {
 	zero := [32]byte{}
 	if got := RubinJetCMR(zero, 1); got != hex32("f2a8d5366d7ca4a4960440c95e3c465ea3df2a5a14c0d58198c65d8aa1e796de") {
@@ -170,10 +279,41 @@ func optionalCMR(s string) *[32]byte {
 	return &out
 }
 
+func decodeSHA3Jet(t *testing.T) Program {
+	t.Helper()
+	program, err := Decode(hx("60"), nil, DecodeOptions{SemanticsVersion: SemanticsVersion})
+	if err != nil {
+		t.Fatalf("Decode sha3 jet: %v", err)
+	}
+	return program
+}
+
+func evaluateSHA3JetWithResult(t *testing.T, program Program, result EvalResult) (EvalResult, error) {
+	t.Helper()
+	calls := 0
+	got, err := program.Evaluate(EvalOptions{
+		JetEvaluator: func(j Jet) (EvalResult, error) {
+			calls++
+			if j.Name != "sha3_256" {
+				t.Fatalf("jet=%s want sha3_256", j.Name)
+			}
+			return result, nil
+		},
+	})
+	if calls != 1 && !hasErrorCode(err, ErrDecode) {
+		t.Fatalf("JetEvaluator calls=%d want 1", calls)
+	}
+	return got, err
+}
+
 func assertErrorCode(t *testing.T, err error, want ErrorCode) {
 	t.Helper()
-	var got *Error
-	if !errors.As(err, &got) || got.Code != want {
+	if !hasErrorCode(err, want) {
 		t.Fatalf("error=%v want code %q", err, want)
 	}
+}
+
+func hasErrorCode(err error, want ErrorCode) bool {
+	var got *Error
+	return errors.As(err, &got) && got.Code == want
 }
