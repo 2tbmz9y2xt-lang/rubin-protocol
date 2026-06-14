@@ -11,6 +11,12 @@ Policy:
 
 ---
 
+## 2026-06-14 — Simplicity program encoding parity corpus (RUB-484)
+Причина: добавить generator-owned shared protocol artifact для Go/Rust Simplicity program encoding, CMR и first-error-class parity.
+Инструменты: `python3 tools/gen_simplicity_encoding_corpus.py`; `python3 tools/gen_conformance_matrix.py`.
+Изменённые fixtures: `protocol/simplicity_program_encoding_corpus_v1.json`.
+Не затронуто: production Go/Rust semantics, `CV-*.json` vectors, consensus validation rules.
+
 ## 2026-05-18 — HTLC refund selector first-error ordering vector (RUB-295)
 
 Причина:

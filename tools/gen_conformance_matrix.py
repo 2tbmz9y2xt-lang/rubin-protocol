@@ -20,6 +20,7 @@ EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
         "legacy_exposure_report_v1_example.json",
         "live_binding_policy_v1.json",
         "production_rotation_schedule_v1.json",
+        "simplicity_program_encoding_corpus_v1.json",
     }
 )
 EXPECTED_GATES = frozenset(
@@ -110,6 +111,10 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
     "production_rotation_schedule_v1.json": (
         "Canonical production rotation schedule artifact",
         "Go node / Rust node embedded schedule loaders and production activation checks",
+    ),
+    "simplicity_program_encoding_corpus_v1.json": (
+        "Canonical Simplicity program encoding parity corpus",
+        "Go/Rust Simplicity encoding, CMR, and first-error-class parity tests",
     ),
 }
 

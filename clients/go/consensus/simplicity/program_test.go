@@ -3,7 +3,11 @@ package simplicity
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -61,6 +65,50 @@ func TestDecodeVectors(t *testing.T) {
 				if err != nil || got.CMR != wantCMR {
 					t.Fatalf("alternate witness cmr=%x err=%v want %x", got.CMR, err, wantCMR)
 				}
+			}
+		})
+	}
+}
+
+func TestSharedEncodingCorpus(t *testing.T) {
+	var corpus struct {
+		ContractVersion int    `json:"contract_version"`
+		FixtureKind     string `json:"fixture_kind"`
+		Cases           []struct {
+			ID               string `json:"id"`
+			ProgramHex       string `json:"program_hex"`
+			WitnessHex       string `json:"witness_hex"`
+			SemanticsVersion uint32 `json:"semantics_version"`
+			CovenantCMRHex   string `json:"covenant_cmr_hex"`
+			ExpectedCMRHex   string `json:"expected_cmr_hex"`
+			ExpectedError    string `json:"expected_error"`
+		} `json:"cases"`
+	}
+	raw, err := os.ReadFile(repoPath("conformance", "fixtures", "protocol", "simplicity_program_encoding_corpus_v1.json"))
+	if err != nil {
+		t.Fatalf("read shared corpus: %v", err)
+	}
+	if err := json.Unmarshal(raw, &corpus); err != nil {
+		t.Fatalf("parse shared corpus: %v", err)
+	}
+	if corpus.ContractVersion != 1 || corpus.FixtureKind != "simplicity_program_encoding_cmr_v1" || len(corpus.Cases) == 0 {
+		t.Fatalf("bad shared corpus header: version=%d kind=%q cases=%d", corpus.ContractVersion, corpus.FixtureKind, len(corpus.Cases))
+	}
+	for _, tc := range corpus.Cases {
+		t.Run(tc.ID, func(t *testing.T) {
+			got, err := Decode(hx(tc.ProgramHex), hx(tc.WitnessHex), DecodeOptions{
+				SemanticsVersion:   tc.SemanticsVersion,
+				CovenantProgramCMR: optionalCMR(tc.CovenantCMRHex),
+			})
+			if tc.ExpectedError != "" {
+				assertErrorCode(t, err, ErrorCode(tc.ExpectedError))
+				return
+			}
+			if err != nil {
+				t.Fatalf("Decode returned error: %v", err)
+			}
+			if got.CMR != hex32(tc.ExpectedCMRHex) {
+				t.Fatalf("cmr=%x want %s", got.CMR, tc.ExpectedCMRHex)
 			}
 		})
 	}
@@ -275,6 +323,15 @@ func hx(s string) []byte {
 		panic(err)
 	}
 	return raw
+}
+
+func repoPath(parts ...string) string {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	segments := append([]string{filepath.Dir(currentFile), "..", "..", "..", ".."}, parts...)
+	return filepath.Clean(filepath.Join(segments...))
 }
 
 func optionalCMR(s string) *[32]byte {

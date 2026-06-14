@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
+# Safe subprocess use in this tool is limited to fixed git argv lists.
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 
@@ -12,13 +13,15 @@ ROOT = Path(".")
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 CHANGELOG = Path("conformance/fixtures/CHANGELOG.md")
 FIXTURE_RE = re.compile(r"^conformance/fixtures/CV-[A-Z0-9-]+\.json$")
+PROTOCOL_FIXTURE_RE = re.compile(r"^conformance/fixtures/protocol/[A-Za-z0-9._-]+\.json$")
 GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$")
 
 
 def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     if not cmd or any("\x00" in part for part in cmd):
         raise ValueError("invalid subprocess command")
-    return subprocess.run(cmd, text=True, capture_output=True, check=check)
+    # shell=False with argv lists; git refs are validated before caller use.
+    return subprocess.run(cmd, text=True, capture_output=True, check=check)  # nosec B603
 
 
 def is_safe_git_ref(ref: str) -> bool:
@@ -104,7 +107,7 @@ def check_generator_not_in_ci(errors: list[str]) -> None:
 
 
 def check_fixture_changelog_guard(changed: list[str], errors: list[str]) -> None:
-    fixtures_changed = [p for p in changed if FIXTURE_RE.match(p)]
+    fixtures_changed = [p for p in changed if FIXTURE_RE.match(p) or PROTOCOL_FIXTURE_RE.match(p)]
     if not fixtures_changed:
         return
 
