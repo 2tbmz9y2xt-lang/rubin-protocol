@@ -159,6 +159,41 @@ struct SharedExecCase {
     expected_final_counter: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedCryptoJetsCorpus {
+    contract_version: u32,
+    fixture_kind: String,
+    description: String,
+    cases: Vec<SharedCryptoJetCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedCryptoJetCase {
+    id: String,
+    jet: String,
+    #[serde(default)]
+    message_hex: String,
+    #[serde(default)]
+    expected_digest_hex: String,
+    #[serde(default)]
+    digest_hex: String,
+    #[serde(default)]
+    pubkey_len: usize,
+    #[serde(default)]
+    signature_len: usize,
+    #[serde(default)]
+    verifier_result: bool,
+    #[serde(default)]
+    expected_verified: bool,
+    expected_cost: u64,
+    #[serde(default)]
+    expect_verifier_called: bool,
+    #[serde(default)]
+    expected_error: String,
+}
+
 #[test]
 fn shared_exec_corpus_requires_outcome_fields() {
     for (name, raw, needle) in [
@@ -210,6 +245,71 @@ fn shared_exec_corpus_matches_go_reference() {
                 assert_eq!(err.result.accepted, case.expected_accepted, "{}", case.id);
                 assert_eq!(err.result.cost, case.expected_final_counter, "{}", case.id);
             }
+        }
+    }
+}
+
+#[test]
+fn shared_crypto_jets_corpus_matches_go_reference() {
+    let raw =
+        fs::read_to_string(crypto_jets_corpus_path()).expect("read shared crypto jets corpus");
+    let corpus: SharedCryptoJetsCorpus =
+        serde_json::from_str(&raw).expect("parse shared crypto jets corpus");
+    assert_eq!(corpus.contract_version, 1);
+    assert_eq!(corpus.fixture_kind, "simplicity_crypto_jets_corpus_v1");
+    assert!(!corpus.description.is_empty() && !corpus.cases.is_empty());
+    for case in corpus.cases {
+        match case.jet.as_str() {
+            "sha3_256" => {
+                let got = evaluate_sha3_256_jet(&hx(&case.message_hex));
+                assert_eq!(
+                    got.digest,
+                    hex32(&case.expected_digest_hex)
+                        .unwrap_or_else(|_| panic!("{}: bad digest", case.id)),
+                    "{}",
+                    case.id
+                );
+                assert_eq!(got.cost, case.expected_cost, "{}", case.id);
+            }
+            "mldsa87_verify" => {
+                let digest =
+                    hex32(&case.digest_hex).unwrap_or_else(|_| panic!("{}: bad digest", case.id));
+                let called = std::cell::Cell::new(false);
+                let verifier = |pubkey: &[u8], signature: &[u8], got_digest: [u8; 32]| {
+                    called.set(true);
+                    assert_eq!(pubkey.len(), case.pubkey_len, "{}", case.id);
+                    assert_eq!(signature.len(), case.signature_len, "{}", case.id);
+                    assert_eq!(got_digest, digest, "{}", case.id);
+                    if !case.expected_error.is_empty() {
+                        return Err(EvalError::new(error_code(&case.expected_error).unwrap()));
+                    }
+                    Ok(case.verifier_result)
+                };
+                let got = match evaluate_mldsa87_verify_jet(
+                    &vec![0x11; case.pubkey_len],
+                    &vec![0x22; case.signature_len],
+                    digest,
+                    Some(&verifier),
+                ) {
+                    Ok(got) => got,
+                    Err(err) => {
+                        assert_eq!(
+                            err.code,
+                            error_code(&case.expected_error).unwrap(),
+                            "{}",
+                            case.id
+                        );
+                        assert_eq!(err.result.cost, case.expected_cost, "{}", case.id);
+                        assert_eq!(called.get(), case.expect_verifier_called, "{}", case.id);
+                        continue;
+                    }
+                };
+                assert!(case.expected_error.is_empty(), "{}", case.id);
+                assert_eq!(got.verified, case.expected_verified, "{}", case.id);
+                assert_eq!(got.cost, case.expected_cost, "{}", case.id);
+                assert_eq!(called.get(), case.expect_verifier_called, "{}", case.id);
+            }
+            _ => panic!("{}: unknown jet {}", case.id, case.jet),
         }
     }
 }
@@ -587,6 +687,12 @@ fn corpus_path() -> PathBuf {
 fn exec_corpus_path() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("../../../../conformance/fixtures/protocol/simplicity_exec_corpus_v1.json");
+    path
+}
+
+fn crypto_jets_corpus_path() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("../../../../conformance/fixtures/protocol/simplicity_crypto_jets_corpus_v1.json");
     path
 }
 

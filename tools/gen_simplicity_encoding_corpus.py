@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENCODING_OUT = ROOT / "conformance/fixtures/protocol/simplicity_program_encoding_corpus_v1.json"
 EXEC_OUT = ROOT / "conformance/fixtures/protocol/simplicity_exec_corpus_v1.json"
+CRYPTO_JETS_OUT = ROOT / "conformance/fixtures/protocol/simplicity_crypto_jets_corpus_v1.json"
 
 
 def vector(
@@ -63,6 +65,8 @@ CASES = [
 
 MAX_EXEC_COST = 400_000
 MAX_FRAME_BITS = 65_536 * 8
+MLDSA87_PUBKEY_BYTES = 2_592
+MLDSA87_SIG_BYTES = 4_627
 
 
 EXEC_CASES = [
@@ -82,6 +86,55 @@ EXEC_CASES = [
 ]
 
 
+def sha3_case(vector_id: str, message: bytes) -> dict[str, object]:
+    return {
+        "id": vector_id,
+        "jet": "sha3_256",
+        "message_hex": message.hex(),
+        "expected_digest_hex": hashlib.sha3_256(message).hexdigest(),
+        "expected_cost": 64 + len(message),
+    }
+
+
+def mldsa87_case(
+    vector_id: str,
+    digest: bytes | str,
+    pubkey_len: int,
+    signature_len: int,
+    verifier_result: bool,
+    expected_verified: bool,
+    expect_verifier_called: bool,
+    *,
+    expected_error: str = "",
+) -> dict[str, object]:
+    item: dict[str, object] = {
+        "id": vector_id,
+        "jet": "mldsa87_verify",
+        "digest_hex": digest if isinstance(digest, str) else hashlib.sha3_256(digest).hexdigest(),
+        "pubkey_len": pubkey_len,
+        "signature_len": signature_len,
+        "verifier_result": verifier_result,
+        "expected_verified": expected_verified,
+        "expected_cost": 50_000,
+        "expect_verifier_called": expect_verifier_called,
+    }
+    if expected_error:
+        item["expected_error"] = expected_error
+    return item
+
+
+CRYPTO_JET_CASES = [
+    sha3_case("VEC-SCJ-001", b""),
+    sha3_case("VEC-SCJ-002", b"abc"),
+    sha3_case("VEC-SCJ-003", bytes([0xA5]) * 65),
+    mldsa87_case("VEC-SCJ-100", b"simplicity mldsa87_verify", MLDSA87_PUBKEY_BYTES, MLDSA87_SIG_BYTES, True, True, True),
+    mldsa87_case("VEC-SCJ-101", b"simplicity wrong digest", MLDSA87_PUBKEY_BYTES, MLDSA87_SIG_BYTES, False, False, True),
+    mldsa87_case("VEC-SCJ-102", "00" * 32, MLDSA87_PUBKEY_BYTES - 1, MLDSA87_SIG_BYTES, True, False, False),
+    mldsa87_case("VEC-SCJ-103", "11" * 32, MLDSA87_PUBKEY_BYTES, MLDSA87_SIG_BYTES + 1, True, False, False),
+    mldsa87_case("VEC-SCJ-104", "22" * 32, MLDSA87_PUBKEY_BYTES, MLDSA87_SIG_BYTES, False, False, True, expected_error="TX_ERR_SIMPLICITY_DECODE"),
+]
+
+
 def corpus_bytes(fixture_kind: str, description: str, cases: list[dict[str, object]]) -> bytes:
     payload = {
         "contract_version": 1,
@@ -95,6 +148,7 @@ def corpus_bytes(fixture_kind: str, description: str, cases: list[dict[str, obje
 ARTIFACTS = (
     (ENCODING_OUT, "simplicity_program_encoding_cmr_v1", "Generator-owned shared corpus for RUB-484 Go/Rust Simplicity encoding and CMR parity tests.", CASES),
     (EXEC_OUT, "simplicity_exec_corpus_v1", "Generator-owned shared corpus for RUB-488 Go/Rust Simplicity execution parity tests.", EXEC_CASES),
+    (CRYPTO_JETS_OUT, "simplicity_crypto_jets_corpus_v1", "Generator-owned shared corpus for RUB-552 Go/Rust Simplicity crypto jet output, error, verifier-call, and cost parity tests.", CRYPTO_JET_CASES),
 )
 
 
