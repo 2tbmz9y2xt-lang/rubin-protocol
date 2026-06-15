@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -161,6 +162,9 @@ func TestSharedExecCorpus(t *testing.T) {
 	} else if !errors.Is(err, io.EOF) {
 		t.Fatalf("parse shared exec corpus: trailing data: %v", err)
 	}
+	if err := requireSharedExecOutcomeFields(corpus.Cases, raw); err != nil {
+		t.Fatalf("validate shared exec corpus schema: %v", err)
+	}
 	if corpus.ContractVersion != 1 || corpus.FixtureKind != "simplicity_exec_corpus_v1" || len(corpus.Cases) == 0 {
 		t.Fatalf("bad shared exec corpus header: version=%d kind=%q cases=%d", corpus.ContractVersion, corpus.FixtureKind, len(corpus.Cases))
 	}
@@ -177,6 +181,61 @@ func TestSharedExecCorpus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSharedExecCorpusRequiresOutcomeFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		raw   string
+		cases []sharedExecCase
+		want  string
+	}{
+		{
+			name:  "missing accepted",
+			raw:   `{"cases":[{"expected_final_counter":0}]}`,
+			cases: []sharedExecCase{{ID: "VEC-SE-MISSING-ACCEPTED"}},
+			want:  "shared exec corpus case VEC-SE-MISSING-ACCEPTED missing expected_accepted",
+		},
+		{
+			name:  "missing final counter",
+			raw:   `{"cases":[{"expected_accepted":false}]}`,
+			cases: []sharedExecCase{{ID: "VEC-SE-MISSING-COUNTER"}},
+			want:  "shared exec corpus case VEC-SE-MISSING-COUNTER missing expected_final_counter",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := requireSharedExecOutcomeFields(tt.cases, []byte(tt.raw))
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("error=%v want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func requireSharedExecOutcomeFields(cases []sharedExecCase, raw []byte) error {
+	var rawCorpus struct {
+		Cases []map[string]json.RawMessage `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &rawCorpus); err != nil {
+		return err
+	}
+	if len(rawCorpus.Cases) != len(cases) {
+		return fmt.Errorf("shared exec corpus raw cases=%d decoded cases=%d", len(rawCorpus.Cases), len(cases))
+	}
+	for i, fields := range rawCorpus.Cases {
+		id := cases[i].ID
+		if id == "" {
+			id = fmt.Sprintf("index %d", i)
+		}
+		if _, ok := fields["expected_accepted"]; !ok {
+			return fmt.Errorf("shared exec corpus case %s missing expected_accepted", id)
+		}
+		if _, ok := fields["expected_final_counter"]; !ok {
+			return fmt.Errorf("shared exec corpus case %s missing expected_final_counter", id)
+		}
+	}
+	return nil
 }
 
 func TestProgramSizeBoundary(t *testing.T) {

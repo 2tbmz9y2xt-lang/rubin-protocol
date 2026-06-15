@@ -153,12 +153,35 @@ struct SharedExecCase {
     jet_accepted: bool,
     #[serde(default)]
     jet_cost: u64,
-    #[serde(default)]
     expected_accepted: bool,
     #[serde(default)]
     expected_error: String,
-    #[serde(default)]
     expected_final_counter: u64,
+}
+
+#[test]
+fn shared_exec_corpus_requires_outcome_fields() {
+    for (name, raw, needle) in [
+        (
+            "missing accepted",
+            r#"{"contract_version":1,"fixture_kind":"simplicity_exec_corpus_v1","description":"x","cases":[{"id":"VEC-SE-MISSING-ACCEPTED","expected_final_counter":0}]}"#,
+            "missing field `expected_accepted`",
+        ),
+        (
+            "missing final counter",
+            r#"{"contract_version":1,"fixture_kind":"simplicity_exec_corpus_v1","description":"x","cases":[{"id":"VEC-SE-MISSING-COUNTER","expected_accepted":false}]}"#,
+            "missing field `expected_final_counter`",
+        ),
+    ] {
+        let err = match serde_json::from_str::<SharedExecCorpus>(raw) {
+            Ok(_) => panic!("{name}: malformed corpus parsed successfully"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains(needle),
+            "{name}: error={err} want {needle}"
+        );
+    }
 }
 
 #[test]
