@@ -468,6 +468,56 @@ fn mldsa87_verify_jet_propagates_verifier_error_code_with_flat_cost() {
 
 #[test]
 #[rustfmt::skip]
+fn data_jets_match_go_reference() {
+    for (name, got, want, accepted) in [
+        ("add", evaluate_u64_checked_add_jet(2, 3), 5, true),
+        ("add-overflow", evaluate_u64_checked_add_jet(u64::MAX, 1), 0, false),
+        ("sub", evaluate_u64_checked_sub_jet(5, 3), 2, true),
+        ("sub-underflow", evaluate_u64_checked_sub_jet(3, 5), 0, false),
+        ("mul", evaluate_u64_checked_mul_jet(7, 6), 42, true),
+        ("mul-overflow", evaluate_u64_checked_mul_jet(1 << 63, 2), 0, false),
+    ] {
+        assert_eq!(got, U64JetResult { value: want, accepted, cost: 1 }, "{name}");
+    }
+
+    assert_eq!(evaluate_u64_cmp_jet(1, 2), OrderingJetResult { ordering: core::cmp::Ordering::Less, cost: 1 });
+    assert_eq!(evaluate_u64_cmp_jet(2, 2), OrderingJetResult { ordering: core::cmp::Ordering::Equal, cost: 1 });
+    assert_eq!(evaluate_u64_cmp_jet(3, 2), OrderingJetResult { ordering: core::cmp::Ordering::Greater, cost: 1 });
+
+    for (name, got, want, accepted) in [
+        ("add-carry", evaluate_u128_checked_add_jet(Uint128 { lo: u64::MAX, hi: 0 }, Uint128 { lo: 1, hi: 0 }), Uint128 { lo: 0, hi: 1 }, true),
+        ("add-overflow", evaluate_u128_checked_add_jet(Uint128 { lo: u64::MAX, hi: u64::MAX }, Uint128 { lo: 1, hi: 0 }), Uint128 { lo: 0, hi: 0 }, false),
+        ("sub-borrow", evaluate_u128_checked_sub_jet(Uint128 { lo: 0, hi: 1 }, Uint128 { lo: 1, hi: 0 }), Uint128 { lo: u64::MAX, hi: 0 }, true),
+        ("sub-underflow", evaluate_u128_checked_sub_jet(Uint128 { lo: 0, hi: 0 }, Uint128 { lo: 1, hi: 0 }), Uint128 { lo: 0, hi: 0 }, false),
+    ] {
+        assert_eq!(got, U128JetResult { value: want, accepted, cost: 1 }, "{name}");
+    }
+
+    assert_eq!(evaluate_u128_cmp_jet(Uint128 { lo: 0, hi: 1 }, Uint128 { lo: 0, hi: 2 }), OrderingJetResult { ordering: core::cmp::Ordering::Less, cost: 1 });
+    assert_eq!(evaluate_u128_cmp_jet(Uint128 { lo: 3, hi: 2 }, Uint128 { lo: 3, hi: 2 }), OrderingJetResult { ordering: core::cmp::Ordering::Equal, cost: 1 });
+    assert_eq!(evaluate_u128_cmp_jet(Uint128 { lo: 4, hi: 2 }, Uint128 { lo: 3, hi: 2 }), OrderingJetResult { ordering: core::cmp::Ordering::Greater, cost: 1 });
+
+    assert_eq!(evaluate_bytes_eq_jet(&[], &[]), BoolJetResult { value: true, cost: 1 });
+    assert_eq!(evaluate_bytes_eq_jet(&[0x11; 33], &[0x11; 32]), BoolJetResult { value: false, cost: 3 });
+    assert_eq!(evaluate_bytes_cmp_jet(&[0xff], &[0x01]), OrderingJetResult { ordering: core::cmp::Ordering::Greater, cost: 2 });
+    assert_eq!(evaluate_bytes_cmp_jet(b"ab", b"abc"), OrderingJetResult { ordering: core::cmp::Ordering::Less, cost: 2 });
+    assert_eq!(evaluate_bytes_cmp_jet(b"abc", b"ab"), OrderingJetResult { ordering: core::cmp::Ordering::Greater, cost: 2 });
+    assert_eq!(evaluate_bytes_cmp_jet(b"abc", b"abc"), OrderingJetResult { ordering: core::cmp::Ordering::Equal, cost: 2 });
+
+    let mut src = b"abcdef".to_vec();
+    let got = evaluate_bytes_slice_jet(&src, 2, 3);
+    assert_eq!(got, BytesJetResult { bytes: b"cde".to_vec(), accepted: true, cost: 2 });
+    src[2] = b'X';
+    assert_eq!(got.bytes, b"cde");
+    assert_eq!(evaluate_bytes_slice_jet(&src, src.len() as u64, 0), BytesJetResult { bytes: Vec::new(), accepted: true, cost: 1 });
+    assert_eq!(evaluate_bytes_slice_jet(&src, 5, 2), BytesJetResult { bytes: Vec::new(), accepted: false, cost: 2 });
+    assert_eq!(evaluate_bytes_slice_jet(&src, u64::MAX, 1), BytesJetResult { bytes: Vec::new(), accepted: false, cost: 2 });
+    let max_len = evaluate_bytes_slice_jet(&[], 0, u64::MAX);
+    assert_eq!((max_len.accepted, max_len.cost), (false, 1 + u64::MAX.div_ceil(32)));
+}
+
+#[test]
+#[rustfmt::skip]
 fn evaluate_charges_decoded_program_steps() {
     for (program, witness, cost) in [("24", "", 1), ("8900", "", 2), ("c1220f0100", "", 4), ("c1d21014", "00", 4)] {
         assert_eq!(decoded(program, witness).evaluate(EvalOptions::default()).unwrap(), EvalResult { accepted: true, cost: cost * STEP_COST });
