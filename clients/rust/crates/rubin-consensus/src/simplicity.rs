@@ -1,6 +1,7 @@
 use core::fmt;
 use std::sync::OnceLock;
 
+use crate::constants::{ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES};
 use sha2::{compress256, digest::generic_array::GenericArray};
 use sha3::{Digest, Sha3_256};
 
@@ -15,6 +16,10 @@ pub const DESCRIPTOR_HASH_BASE_COST: u64 = 64;
 pub const DESCRIPTOR_HASH_BYTE_COST: u64 = 1;
 pub const MAX_FRAME_BYTES: u64 = 65_536;
 pub const MAX_LIVE_MEMORY_BYTES: u64 = 1_048_576;
+pub const SHA3_256_JET_BASE_COST: u64 = 64;
+pub const MLDSA87_VERIFY_JET_COST: u64 = 50_000;
+pub const MLDSA87_JET_PUBKEY_BYTES: usize = ML_DSA_87_PUBKEY_BYTES as usize;
+pub const MLDSA87_JET_SIG_BYTES: usize = ML_DSA_87_SIG_BYTES as usize;
 #[rustfmt::skip]
 pub const PROGRAM_ENCODING_HASH: [u8; 32] = [
     0x27, 0xe5, 0xad, 0x52, 0x1e, 0xfd, 0xf9, 0xd1, 0x85, 0xc1, 0xc9, 0x2a, 0x3a, 0x1a, 0x4a, 0xac, 0xc9, 0x27, 0x6c, 0x2a, 0x5b, 0x1b, 0x85, 0x18, 0xce, 0x25, 0xc8, 0xc9, 0x73, 0xa3, 0x8a, 0xdc,
@@ -77,6 +82,17 @@ impl std::error::Error for EvalError {}
 #[rustfmt::skip]
 pub struct EvalOptions<'a> { pub jet_evaluator: Option<&'a dyn Fn(Jet) -> Result<EvalResult, EvalError>> }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct Sha3DigestJetResult { pub digest: [u8; 32], pub cost: u64 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct Mldsa87VerifyJetResult { pub verified: bool, pub cost: u64 }
+
+#[rustfmt::skip]
+pub type Mldsa87Digest32Verifier<'a> = dyn Fn(&[u8], &[u8], [u8; 32]) -> Result<bool, EvalError> + 'a;
+
 #[rustfmt::skip]
 struct JetRow { id: u16, sub_op: u8, name: &'static str, selector_bit_len: usize, selector_padded: &'static [u8], cmr: &'static str }
 
@@ -109,6 +125,27 @@ pub fn decode(program: &[u8], witness: &[u8], opts: DecodeOptions) -> Result<Pro
 pub fn lookup_jet(id: u16, sub_op: u8) -> Option<Jet> {
     static JETS: OnceLock<Vec<Jet>> = OnceLock::new();
     JETS.get_or_init(|| JET_ROWS.iter().map(|row| { let cmr = hex32(row.cmr).expect("valid checked-in Rubin jet CMR hex"); Jet { id: row.id, sub_op: row.sub_op, name: row.name, selector_bit_len: row.selector_bit_len, selector_padded: row.selector_padded, cmr } }).collect()).iter().copied().find(|jet| (jet.id, jet.sub_op) == (id, sub_op))
+}
+
+#[rustfmt::skip]
+pub fn evaluate_sha3_256_jet(message: &[u8]) -> Sha3DigestJetResult {
+    let message_len = u64::try_from(message.len()).unwrap_or(u64::MAX);
+    let cost = SHA3_256_JET_BASE_COST.saturating_add(message_len);
+    Sha3DigestJetResult { digest: crate::hash::sha3_256(message), cost }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_mldsa87_verify_jet(pubkey: &[u8], signature: &[u8], digest32: [u8; 32], verifier: Option<&Mldsa87Digest32Verifier<'_>>) -> Result<Mldsa87VerifyJetResult, EvalError> {
+    let result = Mldsa87VerifyJetResult { verified: false, cost: MLDSA87_VERIFY_JET_COST };
+    if pubkey.len() != MLDSA87_JET_PUBKEY_BYTES || signature.len() != MLDSA87_JET_SIG_BYTES { return Ok(result); }
+    let verifier = verifier.ok_or_else(|| EvalError::with_result(ErrorCode::JetDisallowed, result.into_eval_result()))?;
+    let verified = verifier(pubkey, signature, digest32).map_err(|err| EvalError::with_result(err.code, result.into_eval_result()))?;
+    Ok(Mldsa87VerifyJetResult { verified, ..result })
+}
+
+#[rustfmt::skip]
+impl Mldsa87VerifyJetResult {
+    fn into_eval_result(self) -> EvalResult { EvalResult { accepted: self.verified, cost: self.cost } }
 }
 
 #[rustfmt::skip]
@@ -258,8 +295,8 @@ const MLDSA87_FRAMES: &[u64] = &[(2_592 + 4_627 + 32) * 8, 1];
 
 #[rustfmt::skip]
 const COST_MODEL_ROWS: &[CostModelRow] = &[
-    CostModelRow { jet: (0x0001, 0x00), formula: CostFormula::BasePlusLen, param: 64 },
-    CostModelRow { jet: (0x0002, 0x00), formula: CostFormula::Constant, param: 50_000 },
+    CostModelRow { jet: (0x0001, 0x00), formula: CostFormula::BasePlusLen, param: SHA3_256_JET_BASE_COST },
+    CostModelRow { jet: (0x0002, 0x00), formula: CostFormula::Constant, param: MLDSA87_VERIFY_JET_COST },
     CostModelRow { jet: (0x0010, 0x00), formula: CostFormula::Constant, param: 1 },
     CostModelRow { jet: (0x0010, 0x01), formula: CostFormula::Constant, param: 1 },
     CostModelRow { jet: (0x0010, 0x02), formula: CostFormula::Constant, param: 1 },
