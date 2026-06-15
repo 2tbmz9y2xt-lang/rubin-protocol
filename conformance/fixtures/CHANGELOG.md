@@ -11,6 +11,9 @@ Policy:
 
 ---
 
+## 2026-06-15 — Simplicity crypto jets parity corpus (RUB-552)
+Причина/инструменты/fixtures/non-goals: добавить generator-owned artifact для Go/Rust Simplicity crypto jet output, error-class, verifier-call и cost parity; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_crypto_jets_corpus_v1.json`; production jet semantics, native backend implementation, `CV-*.json` и consensus validation rules не затронуты.
+
 ## 2026-06-15 — Simplicity execution parity corpus (RUB-488)
 Причина/инструменты/fixtures/non-goals: добавить generator-owned artifact для Go/Rust Simplicity result, error-class и final-counter parity; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_exec_corpus_v1.json`; production interpreter semantics, `CV-*.json` и consensus validation rules не затронуты.
 

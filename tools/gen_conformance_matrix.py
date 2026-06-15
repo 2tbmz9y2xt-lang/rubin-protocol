@@ -20,6 +20,7 @@ EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
         "legacy_exposure_report_v1_example.json",
         "live_binding_policy_v1.json",
         "production_rotation_schedule_v1.json",
+        "simplicity_crypto_jets_corpus_v1.json",
         "simplicity_exec_corpus_v1.json",
         "simplicity_program_encoding_corpus_v1.json",
     }
@@ -120,6 +121,10 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
     "simplicity_exec_corpus_v1.json": (
         "Canonical Simplicity execution parity corpus",
         "Go/Rust Simplicity result, error-class, and final-counter parity tests",
+    ),
+    "simplicity_crypto_jets_corpus_v1.json": (
+        "Canonical Simplicity crypto jets parity corpus",
+        "Go/Rust Simplicity crypto jet output, error-class, verifier-call, and cost parity tests",
     ),
 }
 
