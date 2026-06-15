@@ -14,6 +14,9 @@ Policy:
 ## 2026-06-15 — Simplicity execution parity corpus (RUB-488)
 Причина/инструменты/fixtures/non-goals: добавить generator-owned artifact для Go/Rust Simplicity result, error-class и final-counter parity; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_exec_corpus_v1.json`; production interpreter semantics, `CV-*.json` и consensus validation rules не затронуты.
 
+Follow-up correction:
+- `protocol/simplicity_exec_corpus_v1.json` now emits `expected_accepted` and `expected_final_counter` explicitly for every execution case; vector semantics unchanged.
+
 ## 2026-06-14 — Simplicity program encoding parity corpus (RUB-484)
 Причина/инструменты/fixtures/non-goals: добавить generator-owned artifact для Go/Rust Simplicity encoding, CMR и first-error-class parity; регенерация `python3 tools/gen_simplicity_encoding_corpus.py` и `python3 tools/gen_conformance_matrix.py`; изменён `protocol/simplicity_program_encoding_corpus_v1.json`; production semantics, `CV-*.json` и consensus validation rules не затронуты.
 ## 2026-05-18 — HTLC refund selector first-error ordering vector (RUB-295)

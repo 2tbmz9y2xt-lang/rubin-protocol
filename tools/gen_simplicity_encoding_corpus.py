@@ -73,10 +73,10 @@ EXEC_CASES = [
     {"id": "VEC-SE-005", "program_hex": "c1d21014", "witness_hex": "80", "expected_accepted": True, "expected_final_counter": 4},
     {"id": "VEC-SE-010", "program_hex": "60", "jet_accepted": True, "jet_cost": MAX_EXEC_COST, "expected_accepted": True, "expected_final_counter": MAX_EXEC_COST},
     {"id": "VEC-SE-011", "program_hex": "60", "jet_accepted": True, "jet_cost": MAX_EXEC_COST + 1, "expected_accepted": True, "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "expected_final_counter": MAX_EXEC_COST},
-    {"id": "VEC-SE-012", "program_hex": "60", "jet_cost": 3, "expected_error": "TX_ERR_SIMPLICITY_REJECTED", "expected_final_counter": 3},
+    {"id": "VEC-SE-012", "program_hex": "60", "jet_cost": 3, "expected_accepted": False, "expected_error": "TX_ERR_SIMPLICITY_REJECTED", "expected_final_counter": 3},
     {"id": "VEC-SE-020", "eval_steps": 1, "frame_bit_widths": [MAX_FRAME_BITS], "expected_accepted": True, "expected_final_counter": 1},
-    {"id": "VEC-SE-021", "eval_steps": 1, "frame_bit_widths": [MAX_FRAME_BITS + 1], "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED"},
-    {"id": "VEC-SE-022", "eval_steps": 1, "frame_bit_widths": ([MAX_FRAME_BITS] * 16) + [8], "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED"},
+    {"id": "VEC-SE-021", "eval_steps": 1, "frame_bit_widths": [MAX_FRAME_BITS + 1], "expected_accepted": False, "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "expected_final_counter": 0},
+    {"id": "VEC-SE-022", "eval_steps": 1, "frame_bit_widths": ([MAX_FRAME_BITS] * 16) + [8], "expected_accepted": False, "expected_error": "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "expected_final_counter": 0},
     {"id": "VEC-SE-030A", "program_hex": "24", "expected_accepted": True, "expected_final_counter": 1},
     {"id": "VEC-SE-030B", "program_hex": "24", "expected_accepted": True, "expected_final_counter": 1},
 ]
