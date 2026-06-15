@@ -20,6 +20,9 @@ pub const SHA3_256_JET_BASE_COST: u64 = 64;
 pub const MLDSA87_VERIFY_JET_COST: u64 = 50_000;
 pub const MLDSA87_JET_PUBKEY_BYTES: usize = ML_DSA_87_PUBKEY_BYTES as usize;
 pub const MLDSA87_JET_SIG_BYTES: usize = ML_DSA_87_SIG_BYTES as usize;
+const DATA_JET_FLAT_COST: u64 = 1;
+const BYTES_JET_CHUNK_LEN: u64 = 32;
+pub use crate::txcontext::Uint128;
 #[rustfmt::skip]
 pub const PROGRAM_ENCODING_HASH: [u8; 32] = [
     0x27, 0xe5, 0xad, 0x52, 0x1e, 0xfd, 0xf9, 0xd1, 0x85, 0xc1, 0xc9, 0x2a, 0x3a, 0x1a, 0x4a, 0xac, 0xc9, 0x27, 0x6c, 0x2a, 0x5b, 0x1b, 0x85, 0x18, 0xce, 0x25, 0xc8, 0xc9, 0x73, 0xa3, 0x8a, 0xdc,
@@ -90,6 +93,26 @@ pub struct Sha3DigestJetResult { pub digest: [u8; 32], pub cost: u64 }
 #[rustfmt::skip]
 pub struct Mldsa87VerifyJetResult { pub verified: bool, pub cost: u64 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct U64JetResult { pub value: u64, pub accepted: bool, pub cost: u64 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct U128JetResult { pub value: Uint128, pub accepted: bool, pub cost: u64 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct OrderingJetResult { pub ordering: core::cmp::Ordering, pub cost: u64 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct BoolJetResult { pub value: bool, pub cost: u64 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub struct BytesJetResult { pub bytes: Vec<u8>, pub accepted: bool, pub cost: u64 }
+
 #[rustfmt::skip]
 pub type Mldsa87Digest32Verifier<'a> = dyn Fn(&[u8], &[u8], [u8; 32]) -> Result<bool, EvalError> + 'a;
 
@@ -141,6 +164,83 @@ pub fn evaluate_mldsa87_verify_jet(pubkey: &[u8], signature: &[u8], digest32: [u
     let verifier = verifier.ok_or_else(|| EvalError::with_result(ErrorCode::JetDisallowed, result.into_eval_result()))?;
     let verified = verifier(pubkey, signature, digest32).map_err(|err| EvalError::with_result(err.code, result.into_eval_result()))?;
     Ok(Mldsa87VerifyJetResult { verified, ..result })
+}
+
+#[rustfmt::skip]
+pub fn evaluate_u64_checked_add_jet(a: u64, b: u64) -> U64JetResult {
+    match a.checked_add(b) {
+        Some(value) => U64JetResult { value, accepted: true, cost: DATA_JET_FLAT_COST },
+        None => U64JetResult { value: 0, accepted: false, cost: DATA_JET_FLAT_COST },
+    }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_u64_checked_sub_jet(a: u64, b: u64) -> U64JetResult {
+    match a.checked_sub(b) {
+        Some(value) => U64JetResult { value, accepted: true, cost: DATA_JET_FLAT_COST },
+        None => U64JetResult { value: 0, accepted: false, cost: DATA_JET_FLAT_COST },
+    }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_u64_checked_mul_jet(a: u64, b: u64) -> U64JetResult {
+    match a.checked_mul(b) {
+        Some(value) => U64JetResult { value, accepted: true, cost: DATA_JET_FLAT_COST },
+        None => U64JetResult { value: 0, accepted: false, cost: DATA_JET_FLAT_COST },
+    }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_u64_cmp_jet(a: u64, b: u64) -> OrderingJetResult {
+    OrderingJetResult { ordering: a.cmp(&b), cost: DATA_JET_FLAT_COST }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_u128_checked_add_jet(a: Uint128, b: Uint128) -> U128JetResult {
+    match a.to_native().checked_add(b.to_native()).map(Uint128::from_native) {
+        Some(value) => U128JetResult { value, accepted: true, cost: DATA_JET_FLAT_COST },
+        None => U128JetResult { value: Uint128 { lo: 0, hi: 0 }, accepted: false, cost: DATA_JET_FLAT_COST },
+    }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_u128_checked_sub_jet(a: Uint128, b: Uint128) -> U128JetResult {
+    match a.to_native().checked_sub(b.to_native()).map(Uint128::from_native) {
+        Some(value) => U128JetResult { value, accepted: true, cost: DATA_JET_FLAT_COST },
+        None => U128JetResult { value: Uint128 { lo: 0, hi: 0 }, accepted: false, cost: DATA_JET_FLAT_COST },
+    }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_u128_cmp_jet(a: Uint128, b: Uint128) -> OrderingJetResult {
+    OrderingJetResult { ordering: (a.hi, a.lo).cmp(&(b.hi, b.lo)), cost: DATA_JET_FLAT_COST }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_bytes_eq_jet(a: &[u8], b: &[u8]) -> BoolJetResult {
+    BoolJetResult { value: a == b, cost: bytes_jet_cost(u64::try_from(a.len().max(b.len())).unwrap_or(u64::MAX)) }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_bytes_cmp_jet(a: &[u8], b: &[u8]) -> OrderingJetResult {
+    OrderingJetResult { ordering: a.cmp(b), cost: bytes_jet_cost(u64::try_from(a.len().max(b.len())).unwrap_or(u64::MAX)) }
+}
+
+#[rustfmt::skip]
+pub fn evaluate_bytes_slice_jet(src: &[u8], start: u64, length: u64) -> BytesJetResult {
+    let cost = bytes_jet_cost(length);
+    let Some(end) = start.checked_add(length) else {
+        return BytesJetResult { bytes: Vec::new(), accepted: false, cost };
+    };
+    if end > u64::try_from(src.len()).unwrap_or(u64::MAX) {
+        return BytesJetResult { bytes: Vec::new(), accepted: false, cost };
+    }
+    BytesJetResult { bytes: src[start as usize..end as usize].to_vec(), accepted: true, cost }
+}
+
+#[rustfmt::skip]
+fn bytes_jet_cost(length: u64) -> u64 {
+    DATA_JET_FLAT_COST + length / BYTES_JET_CHUNK_LEN + u64::from(!length.is_multiple_of(BYTES_JET_CHUNK_LEN))
 }
 
 #[rustfmt::skip]
