@@ -290,6 +290,84 @@ fn cost_model_row_count_rejects_multi_byte_compact_size() {
 
 #[test]
 #[rustfmt::skip]
+fn sha3_256_jet_uses_native_sha3_and_charges_by_message_len() {
+    for msg in [&[][..], b"abc", &[0xa5; 65][..]] {
+        let got = evaluate_sha3_256_jet(msg);
+        assert_eq!(got.digest, crate::hash::sha3_256(msg));
+        assert_eq!(got.cost, SHA3_256_JET_BASE_COST + u64::try_from(msg.len()).unwrap());
+    }
+}
+
+#[test]
+#[rustfmt::skip]
+fn mldsa87_verify_jet_length_mismatch_is_program_false() {
+    let digest = crate::hash::sha3_256(b"");
+    let called = std::cell::Cell::new(false);
+    let verifier = |_: &[u8], _: &[u8], _: [u8; 32]| { called.set(true); Ok(true) };
+    for (pubkey_len, sig_len) in [
+        (MLDSA87_JET_PUBKEY_BYTES - 1, MLDSA87_JET_SIG_BYTES),
+        (MLDSA87_JET_PUBKEY_BYTES, MLDSA87_JET_SIG_BYTES - 1),
+        (MLDSA87_JET_PUBKEY_BYTES, MLDSA87_JET_SIG_BYTES + 1),
+    ] {
+        called.set(false);
+        let got = evaluate_mldsa87_verify_jet(&vec![0; pubkey_len], &vec![0; sig_len], digest, Some(&verifier)).unwrap();
+        assert!(!called.get());
+        assert_eq!(got, mldsa_result(false));
+    }
+}
+
+#[test]
+#[rustfmt::skip]
+fn mldsa87_verify_jet_calls_verifier_for_valid_lengths() {
+    let pubkey = vec![0x11; MLDSA87_JET_PUBKEY_BYTES];
+    let signature = vec![0x22; MLDSA87_JET_SIG_BYTES];
+    let digest = [0x33; 32];
+    let verifier = |got_pubkey: &[u8], got_signature: &[u8], got_digest: [u8; 32]| {
+        assert_eq!(got_pubkey, pubkey);
+        assert_eq!(got_signature, signature);
+        assert_eq!(got_digest, digest);
+        Ok(true)
+    };
+    let got = evaluate_mldsa87_verify_jet(&pubkey, &signature, digest, Some(&verifier)).unwrap();
+    assert_eq!(got, mldsa_result(true));
+}
+
+#[test]
+#[rustfmt::skip]
+fn mldsa87_verify_jet_uses_native_backend_and_flat_cost() {
+    let keypair = match crate::Mldsa87Keypair::generate() {
+        Ok(value) => value,
+        Err(err) if err.code == crate::error::ErrorCode::TxErrParse && err.msg.contains("EVP_PKEY_CTX_new_from_name") => return,
+        Err(err) => panic!("unexpected ML-DSA-87 keypair failure: {err}"),
+    };
+    let mut digest = crate::hash::sha3_256(b"simplicity mldsa87_verify");
+    let signature = keypair.sign_digest32(digest).expect("sign digest");
+    let pubkey = keypair.pubkey_bytes();
+    let verifier = |pk: &[u8], sig: &[u8], d: [u8; 32]| crate::verify_sig(crate::constants::SUITE_ID_ML_DSA_87, pk, sig, &d).map_err(|_| EvalError::new(ErrorCode::JetDisallowed));
+    assert_eq!(evaluate_mldsa87_verify_jet(&pubkey, &signature, digest, Some(&verifier)).unwrap(), mldsa_result(true));
+    digest[0] ^= 0xff;
+    assert_eq!(evaluate_mldsa87_verify_jet(&pubkey, &signature, digest, Some(&verifier)).unwrap(), mldsa_result(false));
+}
+
+#[test]
+#[rustfmt::skip]
+fn mldsa87_verify_jet_requires_verifier_for_valid_lengths() {
+    let err = evaluate_mldsa87_verify_jet(&vec![0; MLDSA87_JET_PUBKEY_BYTES], &vec![0; MLDSA87_JET_SIG_BYTES], [0; 32], None).unwrap_err();
+    assert_eq!(err.code, ErrorCode::JetDisallowed);
+    assert_eq!(err.result, rejected(MLDSA87_VERIFY_JET_COST));
+}
+
+#[test]
+#[rustfmt::skip]
+fn mldsa87_verify_jet_propagates_verifier_error_code_with_flat_cost() {
+    let verifier = |_: &[u8], _: &[u8], _: [u8; 32]| Err(EvalError { code: ErrorCode::Decode, result: ok(9) });
+    let err = evaluate_mldsa87_verify_jet(&vec![0; MLDSA87_JET_PUBKEY_BYTES], &vec![0; MLDSA87_JET_SIG_BYTES], [0; 32], Some(&verifier)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Decode);
+    assert_eq!(err.result, rejected(MLDSA87_VERIFY_JET_COST));
+}
+
+#[test]
+#[rustfmt::skip]
 fn evaluate_charges_decoded_program_steps() {
     for (program, witness, cost) in [("24", "", 1), ("8900", "", 2), ("c1220f0100", "", 4), ("c1d21014", "00", 4)] {
         assert_eq!(decoded(program, witness).evaluate(EvalOptions::default()).unwrap(), EvalResult { accepted: true, cost: cost * STEP_COST });
@@ -469,6 +547,9 @@ fn ok(cost: u64) -> EvalResult { EvalResult { accepted: true, cost } }
 
 #[rustfmt::skip]
 fn rejected(cost: u64) -> EvalResult { EvalResult { accepted: false, cost } }
+
+#[rustfmt::skip]
+fn mldsa_result(verified: bool) -> Mldsa87VerifyJetResult { Mldsa87VerifyJetResult { verified, cost: MLDSA87_VERIFY_JET_COST } }
 
 #[rustfmt::skip]
 fn with_jet_hook<'a>(hook: &'a dyn Fn(Jet) -> Result<EvalResult, EvalError>) -> EvalOptions<'a> { EvalOptions { jet_evaluator: Some(hook) } }
