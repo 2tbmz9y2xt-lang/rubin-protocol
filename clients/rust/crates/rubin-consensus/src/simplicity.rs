@@ -84,7 +84,7 @@ pub struct EvalOptions<'a> { pub jet_evaluator: Option<&'a dyn Fn(Jet) -> Result
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
-pub struct Sha3256JetResult { pub digest: [u8; 32], pub cost: u64 }
+pub struct Sha3DigestJetResult { pub digest: [u8; 32], pub cost: u64 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[rustfmt::skip]
@@ -128,8 +128,10 @@ pub fn lookup_jet(id: u16, sub_op: u8) -> Option<Jet> {
 }
 
 #[rustfmt::skip]
-pub fn evaluate_sha3_256_jet(message: &[u8]) -> Sha3256JetResult {
-    Sha3256JetResult { digest: crate::hash::sha3_256(message), cost: SHA3_256_JET_BASE_COST + message.len() as u64 }
+pub fn evaluate_sha3_256_jet(message: &[u8]) -> Sha3DigestJetResult {
+    let message_len = u64::try_from(message.len()).unwrap_or(u64::MAX);
+    let cost = SHA3_256_JET_BASE_COST.saturating_add(message_len);
+    Sha3DigestJetResult { digest: crate::hash::sha3_256(message), cost }
 }
 
 #[rustfmt::skip]
