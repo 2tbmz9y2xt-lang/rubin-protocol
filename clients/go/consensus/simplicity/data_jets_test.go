@@ -82,8 +82,13 @@ func TestBytesDataJets(t *testing.T) {
 	if got := EvaluateBytesSliceJet(src, ^uint64(0), 1); got.Accepted || got.Cost != 2 {
 		t.Fatalf("bytes_slice overflow = %+v, want rejected cost=2", got)
 	}
-	if got := EvaluateBytesSliceJet(nil, 0, ^uint64(0)); got.Accepted || got.Cost != 576460752303423489 {
-		t.Fatalf("bytes_slice max len = %+v, want rejected cost=576460752303423489", got)
+	maxLength := ^uint64(0)
+	expectedMaxCost := dataJetFlatCost + maxLength/bytesJetChunkLen
+	if maxLength%bytesJetChunkLen != 0 {
+		expectedMaxCost++
+	}
+	if got := EvaluateBytesSliceJet(nil, 0, maxLength); got.Accepted || got.Cost != expectedMaxCost {
+		t.Fatalf("bytes_slice max len = %+v, want rejected cost=%d", got, expectedMaxCost)
 	}
 }
 
