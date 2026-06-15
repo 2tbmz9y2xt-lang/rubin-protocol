@@ -407,6 +407,23 @@ func verifySig(suiteID uint8, pubkey []byte, signature []byte, digest32 [32]byte
 	}
 }
 
+// VerifyMLDSA87Digest32 verifies a raw ML-DSA-87 signature over an already-built
+// 32-byte digest using the live ML-DSA-87 backend. It does not append, strip,
+// interpret sighash bytes, or dispatch on a suite_id operand.
+func VerifyMLDSA87Digest32(pubkey []byte, signature []byte, digest32 [32]byte) (bool, error) {
+	if len(pubkey) != ML_DSA_87_PUBKEY_BYTES || len(signature) != ML_DSA_87_SIG_BYTES {
+		return false, nil
+	}
+	if err := ensureOpenSSLConsensusInit(); err != nil {
+		return false, err
+	}
+	binding, err := resolveSuiteVerifierBinding("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	if err != nil {
+		return false, err
+	}
+	return verifySigWithBinding(binding, pubkey, signature, digest32)
+}
+
 type suiteVerifierBindingKind uint8
 
 const (

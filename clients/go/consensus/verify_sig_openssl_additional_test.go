@@ -60,6 +60,42 @@ func TestOpenSSL_MLDSA87_VerifyWrongMessageReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestVerifyMLDSA87Digest32UsesNativeBackend(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+
+	var digest [32]byte
+	digest[0] = 0x5a
+	sig, err := kp.SignDigest32(digest)
+	if err != nil {
+		t.Fatalf("SignDigest32: %v", err)
+	}
+
+	ok, err := VerifyMLDSA87Digest32(kp.PubkeyBytes(), sig, digest)
+	if err != nil {
+		t.Fatalf("VerifyMLDSA87Digest32 valid: %v", err)
+	}
+	if !ok {
+		t.Fatal("VerifyMLDSA87Digest32=false for valid signature")
+	}
+
+	digest[0] ^= 0xff
+	ok, err = VerifyMLDSA87Digest32(kp.PubkeyBytes(), sig, digest)
+	if err != nil {
+		t.Fatalf("VerifyMLDSA87Digest32 wrong digest: %v", err)
+	}
+	if ok {
+		t.Fatal("VerifyMLDSA87Digest32=true for wrong digest")
+	}
+
+	ok, err = VerifyMLDSA87Digest32(make([]byte, ML_DSA_87_PUBKEY_BYTES-1), make([]byte, ML_DSA_87_SIG_BYTES), digest)
+	if err != nil {
+		t.Fatalf("VerifyMLDSA87Digest32 length mismatch: %v", err)
+	}
+	if ok {
+		t.Fatal("VerifyMLDSA87Digest32=true for length mismatch")
+	}
+}
+
 func TestOpenSSLVerifySig_UnknownAlgErrors(t *testing.T) {
 	var d [32]byte
 	ok, err := opensslVerifySigOneShot("NO_SUCH_ALG", []byte{0x01}, []byte{0x02}, d[:])
