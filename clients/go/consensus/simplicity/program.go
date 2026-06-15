@@ -341,8 +341,8 @@ var (
 	sha3Frames    = []uint64{512, 256}
 	mldsa87Frames = []uint64{(2_592 + 4_627 + 32) * 8, 1}
 	costModelRows = []costModelRow{
-		{jet: jetKey{id: 0x0001, subOp: 0x00}, formula: costBasePlusLen, param: 64},
-		{jet: jetKey{id: 0x0002, subOp: 0x00}, formula: costConstant, param: 50_000},
+		{jet: jetKey{id: 0x0001, subOp: 0x00}, formula: costBasePlusLen, param: sha3256JetBaseCost},
+		{jet: jetKey{id: 0x0002, subOp: 0x00}, formula: costConstant, param: mldsa87VerifyJetCost},
 		{jet: jetKey{id: 0x0010, subOp: 0x00}, formula: costConstant, param: 1},
 		{jet: jetKey{id: 0x0010, subOp: 0x01}, formula: costConstant, param: 1},
 		{jet: jetKey{id: 0x0010, subOp: 0x02}, formula: costConstant, param: 1},
